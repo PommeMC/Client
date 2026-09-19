@@ -2,12 +2,26 @@ use azalea_protocol::packets::game::ServerboundGamePacket;
 use tokio::sync::mpsc;
 
 /// An outbound game packet: either an azalea-serialized packet or bytes
-/// pre-encoded by `net::wire` (varint packet id + body).
+/// pre-encoded by `net::wire` (varint packet id + body), or chat work the
+/// network loop signs and tracks. Chat shares the queue so it applies in
+/// game-thread order, like vanilla's single-threaded `ClientPacketListener`.
 pub enum Outbound {
     Packet(Box<ServerboundGamePacket>),
     Raw(Vec<u8>),
-    ChatProcessed { signature: [u8; 256], shown: bool },
-    ChatDeleted { signature: [u8; 256] },
+    /// Typed chat, or a command with its leading `/`.
+    ChatInput(String),
+    /// Vanilla `handleLogin`'s chat reset.
+    ChatLogin {
+        online_mode: bool,
+    },
+    ChatMark(Box<ChatMark>),
+}
+
+/// A `LastSeenMessagesTracker` update, recorded by the chat UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatMark {
+    Processed { signature: [u8; 256], shown: bool },
+    Deleted { signature: [u8; 256] },
 }
 
 pub struct PacketSender {
@@ -27,12 +41,16 @@ impl PacketSender {
         self.queue(Outbound::Raw(bytes));
     }
 
-    pub fn mark_chat_processed(&self, signature: [u8; 256], shown: bool) {
-        self.queue(Outbound::ChatProcessed { signature, shown });
+    pub fn send_chat(&self, input: String) {
+        self.queue(Outbound::ChatInput(input));
     }
 
-    pub fn ignore_chat_signature(&self, signature: [u8; 256]) {
-        self.queue(Outbound::ChatDeleted { signature });
+    pub fn chat_login(&self, online_mode: bool) {
+        self.queue(Outbound::ChatLogin { online_mode });
+    }
+
+    pub fn mark_chat(&self, mark: ChatMark) {
+        self.queue(Outbound::ChatMark(Box::new(mark)));
     }
 
     fn queue(&self, out: Outbound) {

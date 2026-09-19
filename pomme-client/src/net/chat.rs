@@ -2,7 +2,6 @@
 //! version translation and before azalea's typed decode, whose 26.2 component
 //! decoder drops hover events.
 
-use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::io::Cursor;
 
@@ -11,26 +10,22 @@ use pomme_protocol::wire::{game_serverbound_id, read_varint, write_varint};
 use pomme_protocol::{Direction, PacketTable, Phase};
 use serde_json::Value;
 use simdnbt::owned::{NbtCompound, NbtTag};
+use uuid::Uuid;
 
 use super::NetworkEvent;
-use crate::chat_component::{Argument, Component, HoverEvent, Style};
+use crate::chat_component::{Argument, Component, HoverEvent, Style, nbt_to_value};
+use crate::net::chat_security::{LastSeenUpdate, SignedChatBody};
 use crate::ui::chat::{ChatMessageSource, ChatMessageTag};
 use crate::ui::text::format_component_spans;
 
-#[derive(Clone, Debug)]
+const BAD_CHAT_INDEX: &str = "multiplayer.disconnect.bad_chat_index";
+const INVALID_PACKET: &str = "multiplayer.disconnect.invalid_packet";
+const SIGNATURE_CACHE_SIZE: usize = 128;
+
+#[derive(Clone, Debug, Default)]
 pub struct ChatTypeRegistry {
     /// Chat decorations by protocol id, parsed once per registry sync.
     decorations: Vec<Result<ChatDecoration, String>>,
-    signature_cache: RefCell<Vec<Option<[u8; 256]>>>,
-}
-
-impl Default for ChatTypeRegistry {
-    fn default() -> Self {
-        Self {
-            decorations: Vec::new(),
-            signature_cache: RefCell::new(vec![None; 128]),
-        }
-    }
 }
 
 impl ChatTypeRegistry {
@@ -41,7 +36,6 @@ impl ChatTypeRegistry {
                 .enumerate()
                 .map(|(id, nbt)| registry_decoration(id as u32, nbt))
                 .collect(),
-            ..Self::default()
         }
     }
 
@@ -51,29 +45,67 @@ impl ChatTypeRegistry {
             .ok_or_else(|| format!("unknown chat_type registry id {protocol_id}"))?
             .clone()
     }
+}
 
-    fn unpack_signature(&self, id: usize) -> Option<[u8; 256]> {
-        self.signature_cache.borrow().get(id).copied().flatten()
+/// The inbound chat state vanilla `handleLogin` resets: the global message
+/// index and the `MessageSignatureCache`.
+pub struct InboundChat {
+    signature_cache: Vec<Option<[u8; 256]>>,
+    next_global_index: u32,
+    /// 1.21.5 (770) added `globalIndex`; older layouts translate it as zero.
+    validate_global_index: bool,
+}
+
+impl InboundChat {
+    pub fn new(validate_global_index: bool) -> Self {
+        Self {
+            signature_cache: vec![None; SIGNATURE_CACHE_SIZE],
+            next_global_index: 0,
+            validate_global_index,
+        }
     }
 
-    fn push_signatures(&self, last_seen: Vec<[u8; 256]>, signature: Option<[u8; 256]>) {
-        let mut queue: VecDeque<[u8; 256]> = last_seen.into_iter().collect();
-        if let Some(signature) = signature {
-            queue.push_back(signature);
+    pub fn reset(&mut self) {
+        *self = Self::new(self.validate_global_index);
+    }
+
+    fn unpack(&self, packed: PackedSignature) -> Option<[u8; 256]> {
+        match packed {
+            PackedSignature::Full(signature) => Some(*signature),
+            PackedSignature::Id(id) => self.signature_cache.get(id).copied().flatten(),
         }
+    }
+
+    /// Vanilla `MessageSignatureCache.push`.
+    fn push(&mut self, last_seen: &[[u8; 256]], signature: Option<[u8; 256]>) {
+        let mut queue: VecDeque<[u8; 256]> = last_seen.iter().copied().collect();
+        queue.extend(signature);
         let new_entries: HashSet<[u8; 256]> = queue.iter().copied().collect();
-        let mut cache = self.signature_cache.borrow_mut();
-        for slot in cache.iter_mut() {
+        for slot in &mut self.signature_cache {
             let Some(next) = queue.pop_back() else {
                 break;
             };
-            let previous = slot.replace(next);
-            if let Some(previous) = previous
+            if let Some(previous) = slot.replace(next)
                 && !new_entries.contains(&previous)
             {
                 queue.push_front(previous);
             }
         }
+    }
+}
+
+/// Why a chat packet was refused.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ChatPacketError {
+    /// The frame didn't decode, and is skipped like any malformed packet.
+    Malformed(String),
+    /// Vanilla disconnects with this translation key.
+    Disconnect(&'static str),
+}
+
+impl From<String> for ChatPacketError {
+    fn from(error: String) -> Self {
+        Self::Malformed(error)
     }
 }
 
@@ -105,26 +137,35 @@ enum FilterMask {
     Partial(Vec<u64>),
 }
 
-pub fn encode_outbound_unsigned_message(
+/// Vanilla `MessageSignature.Packed`: a cache id or a full signature.
+#[derive(Clone, Debug)]
+enum PackedSignature {
+    Id(usize),
+    Full(Box<[u8; 256]>),
+}
+
+/// `ServerboundChatPacket`, with or without a signature.
+pub fn encode_outbound_message(
     message: &str,
     timestamp_millis: u64,
     salt: i64,
-    update: &crate::net::chat_security::LastSeenUpdate,
-) -> Result<Vec<u8>, String> {
-    if java_utf16_len(message) > 256 {
-        return Err("chat message exceeds 256 UTF-16 code units".into());
-    }
-    let id = PacketTable::native()
-        .id(Phase::Game, Direction::Serverbound, "chat")
-        .ok_or_else(|| "native protocol has no serverbound chat packet".to_owned())?;
-    let mut out = Vec::with_capacity(message.len() + 32);
-    write_varint(&mut out, id);
+    signature: Option<&[u8; 256]>,
+    update: &LastSeenUpdate,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(message.len() + 300);
+    write_varint(&mut out, game_serverbound_id("chat"));
     write_wire_string(&mut out, message);
     out.extend_from_slice(&timestamp_millis.to_be_bytes());
     out.extend_from_slice(&salt.to_be_bytes());
-    out.push(0); // no signature
+    match signature {
+        Some(signature) => {
+            out.push(1);
+            out.extend_from_slice(signature);
+        }
+        None => out.push(0),
+    }
     write_last_seen_update(&mut out, update);
-    Ok(out)
+    out
 }
 
 pub fn encode_outbound_command(command: &str) -> Vec<u8> {
@@ -134,44 +175,15 @@ pub fn encode_outbound_command(command: &str) -> Vec<u8> {
     out
 }
 
-pub fn encode_outbound_signed_message(
-    message: &str,
-    timestamp_millis: u64,
-    salt: i64,
-    signature: [u8; 256],
-    update: &crate::net::chat_security::LastSeenUpdate,
-) -> Result<Vec<u8>, String> {
-    if java_utf16_len(message) > 256 {
-        return Err("chat message exceeds 256 UTF-16 code units".into());
-    }
-    let id = PacketTable::native()
-        .id(Phase::Game, Direction::Serverbound, "chat")
-        .ok_or_else(|| "native protocol has no serverbound chat packet".to_owned())?;
-    let mut out = Vec::with_capacity(message.len() + 300);
-    write_varint(&mut out, id);
-    write_wire_string(&mut out, message);
-    out.extend_from_slice(&timestamp_millis.to_be_bytes());
-    out.extend_from_slice(&salt.to_be_bytes());
-    out.push(1);
-    out.extend_from_slice(&signature);
-    write_last_seen_update(&mut out, update);
-    Ok(out)
-}
-
 pub fn encode_outbound_signed_command(
     command: &str,
     timestamp_millis: u64,
     salt: i64,
     signatures: &[(String, [u8; 256])],
-    update: &crate::net::chat_security::LastSeenUpdate,
-) -> Result<Vec<u8>, String> {
-    let id = PacketTable::native()
-        .id(Phase::Game, Direction::Serverbound, "chat_command_signed")
-        .ok_or_else(|| {
-            "native protocol has no serverbound chat_command_signed packet".to_owned()
-        })?;
+    update: &LastSeenUpdate,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(command.len() + signatures.len() * 280 + 32);
-    write_varint(&mut out, id);
+    write_varint(&mut out, game_serverbound_id("chat_command_signed"));
     write_wire_string(&mut out, command);
     out.extend_from_slice(&timestamp_millis.to_be_bytes());
     out.extend_from_slice(&salt.to_be_bytes());
@@ -181,38 +193,34 @@ pub fn encode_outbound_signed_command(
         out.extend_from_slice(signature);
     }
     write_last_seen_update(&mut out, update);
-    Ok(out)
+    out
 }
 
 pub fn encode_chat_session_update(
-    session: &crate::net::chat_security::LocalChatSession,
-) -> Result<Vec<u8>, String> {
-    let id = PacketTable::native()
-        .id(Phase::Game, Direction::Serverbound, "chat_session_update")
-        .ok_or_else(|| "native protocol has no chat_session_update packet".to_owned())?;
-    let mut out =
-        Vec::with_capacity(session.public_key_der.len() + session.key_signature.len() + 40);
-    write_varint(&mut out, id);
-    out.extend_from_slice(session.session_id.as_bytes());
-    out.extend_from_slice(&session.expires_at_ms.to_be_bytes());
-    write_varint(&mut out, session.public_key_der.len() as u32);
-    out.extend_from_slice(&session.public_key_der);
-    write_varint(&mut out, session.key_signature.len() as u32);
-    out.extend_from_slice(&session.key_signature);
-    Ok(out)
+    session_id: Uuid,
+    expires_at_ms: u64,
+    public_key: &[u8],
+    key_signature: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(public_key.len() + key_signature.len() + 40);
+    write_varint(&mut out, game_serverbound_id("chat_session_update"));
+    out.extend_from_slice(session_id.as_bytes());
+    out.extend_from_slice(&expires_at_ms.to_be_bytes());
+    write_varint(&mut out, public_key.len() as u32);
+    out.extend_from_slice(public_key);
+    write_varint(&mut out, key_signature.len() as u32);
+    out.extend_from_slice(key_signature);
+    out
 }
 
-pub fn encode_chat_ack(offset: u32) -> Result<Vec<u8>, String> {
-    let id = PacketTable::native()
-        .id(Phase::Game, Direction::Serverbound, "chat_ack")
-        .ok_or_else(|| "native protocol has no chat_ack packet".to_owned())?;
+pub fn encode_chat_ack(offset: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(6);
-    write_varint(&mut out, id);
+    write_varint(&mut out, game_serverbound_id("chat_ack"));
     write_varint(&mut out, offset);
-    Ok(out)
+    out
 }
 
-fn write_last_seen_update(out: &mut Vec<u8>, update: &crate::net::chat_security::LastSeenUpdate) {
+fn write_last_seen_update(out: &mut Vec<u8>, update: &LastSeenUpdate) {
     write_varint(out, update.offset);
     out.extend_from_slice(&update.acknowledged);
     out.push(update.checksum);
@@ -245,14 +253,14 @@ pub fn encode_outbound_custom_click_action(
 }
 
 /// Returns `None` when this is not a chat packet. Chat packets are always
-/// consumed, including malformed ones (reported through the `Err`) so a bad
-/// payload never falls through to Azalea's lossy component decoder.
+/// consumed, malformed ones included, so a bad payload never falls through to
+/// azalea's lossy component decoder.
 pub fn handle_raw_chat_packet(
     raw: &[u8],
     event_tx: &Sender<NetworkEvent>,
     chat_types: &ChatTypeRegistry,
-    expected_global_index: Option<&mut u32>,
-) -> Option<Result<(), String>> {
+    inbound: &mut InboundChat,
+) -> Option<Result<(), ChatPacketError>> {
     let mut pos = 0usize;
     let packet_id = read_varint(raw, &mut pos)?;
     let name = PacketTable::native().name_of(Phase::Game, Direction::Clientbound, packet_id)?;
@@ -261,10 +269,8 @@ pub fn handle_raw_chat_packet(
         "system_chat" => parse_system_chat(raw, &mut pos, event_tx),
         "set_action_bar_text" => parse_action_bar(raw, &mut pos, event_tx),
         "disguised_chat" => parse_disguised_chat(raw, &mut pos, event_tx, chat_types),
-        "player_chat" => {
-            parse_player_chat(raw, &mut pos, event_tx, chat_types, expected_global_index)
-        }
-        "delete_chat" => parse_delete_chat(raw, &mut pos, event_tx, chat_types),
+        "player_chat" => parse_player_chat(raw, &mut pos, event_tx, chat_types, inbound),
+        "delete_chat" => parse_delete_chat(raw, &mut pos, event_tx, inbound),
         "command_suggestions" => parse_command_suggestions(raw, &mut pos, event_tx),
         _ => return None,
     };
@@ -275,7 +281,7 @@ fn parse_system_chat(
     raw: &[u8],
     pos: &mut usize,
     event_tx: &Sender<NetworkEvent>,
-) -> Result<(), String> {
+) -> Result<(), ChatPacketError> {
     let component = read_component(raw, pos)?;
     let overlay = read_bool(raw, pos)?;
     ensure_end(raw, *pos, "system_chat")?;
@@ -303,7 +309,7 @@ fn parse_action_bar(
     raw: &[u8],
     pos: &mut usize,
     event_tx: &Sender<NetworkEvent>,
-) -> Result<(), String> {
+) -> Result<(), ChatPacketError> {
     let component = read_component(raw, pos)?;
     ensure_end(raw, *pos, "set_action_bar_text")?;
     send_action_bar(event_tx, &component);
@@ -315,11 +321,11 @@ fn parse_disguised_chat(
     pos: &mut usize,
     event_tx: &Sender<NetworkEvent>,
     chat_types: &ChatTypeRegistry,
-) -> Result<(), String> {
+) -> Result<(), ChatPacketError> {
     let content = read_component(raw, pos)?;
     let bound = read_bound_chat_type(raw, pos, chat_types)?;
     ensure_end(raw, *pos, "disguised_chat")?;
-    let decorated = decorate(content, bound);
+    let decorated = decorate(content, &bound);
     send_chat(
         event_tx,
         ChatDelivery {
@@ -336,23 +342,22 @@ fn parse_disguised_chat(
     Ok(())
 }
 
+/// Decodes the whole packet, then runs vanilla `handlePlayerChat`'s index
+/// check before unpacking the last-seen signatures from the cache.
 fn parse_player_chat(
     raw: &[u8],
     pos: &mut usize,
     event_tx: &Sender<NetworkEvent>,
     chat_types: &ChatTypeRegistry,
-    expected_global_index: Option<&mut u32>,
-) -> Result<(), String> {
-    // globalIndex, sender UUID, message index
+    inbound: &mut InboundChat,
+) -> Result<(), ChatPacketError> {
     let global_index = read_varint_req(raw, pos, "player_chat.global_index")?;
-    let sender_uuid = uuid::Uuid::from_bytes(
+    let sender_uuid = Uuid::from_bytes(
         take(raw, pos, 16, "player_chat.sender")?
             .try_into()
             .unwrap(),
     );
     let message_index = read_varint_req(raw, pos, "player_chat.index")? as i32;
-
-    // Nullable 256-byte message signature.
     let signature = if read_bool(raw, pos)? {
         Some(read_full_signature(raw, pos, "player_chat.signature")?)
     } else {
@@ -360,21 +365,17 @@ fn parse_player_chat(
     };
 
     let signed_content = read_string(raw, pos, 256, "player_chat.body.content")?;
-    let timestamp_bytes = take(raw, pos, 8, "player_chat.timestamp")?;
-    let timestamp_ms = i64::from_be_bytes(timestamp_bytes.try_into().unwrap());
-    let salt = i64::from_be_bytes(take(raw, pos, 8, "player_chat.salt")?.try_into().unwrap());
-
-    // LastSeenMessages.Packed: max 20 packed signatures. Packed id 0 carries
-    // the full 256-byte signature; positive values are cache index + 1.
+    let timestamp_ms = read_i64(raw, pos, "player_chat.timestamp")?;
+    let salt = read_i64(raw, pos, "player_chat.salt")?;
     let last_seen_count = read_varint_req(raw, pos, "player_chat.last_seen.count")? as usize;
     if last_seen_count > 20 {
-        return Err(format!(
+        return Err(ChatPacketError::Malformed(format!(
             "player_chat has {last_seen_count} last-seen signatures (max 20)"
-        ));
+        )));
     }
-    let mut last_seen = Vec::with_capacity(last_seen_count);
+    let mut packed_last_seen = Vec::with_capacity(last_seen_count);
     for _ in 0..last_seen_count {
-        last_seen.push(read_packed_signature(raw, pos, chat_types)?);
+        packed_last_seen.push(read_packed_signature(raw, pos)?);
     }
 
     let unsigned = if read_bool(raw, pos)? {
@@ -386,55 +387,65 @@ fn parse_player_chat(
     let bound = read_bound_chat_type(raw, pos, chat_types)?;
     ensure_end(raw, *pos, "player_chat")?;
 
-    if let Some(expected) = expected_global_index {
-        if global_index != *expected {
-            return Err(format!(
-                "out-of-order player chat: expected global index {}, got {global_index}",
-                *expected
-            ));
+    if inbound.validate_global_index {
+        let expected = inbound.next_global_index;
+        inbound.next_global_index = expected.wrapping_add(1);
+        if global_index != expected {
+            tracing::error!(
+                "Missing or out-of-order chat message from server, expected index {expected} but got {global_index}"
+            );
+            return Err(ChatPacketError::Disconnect(BAD_CHAT_INDEX));
         }
-        *expected = expected.wrapping_add(1);
     }
+    let last_seen = packed_last_seen
+        .into_iter()
+        .map(|packed| inbound.unpack(packed))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            tracing::error!(
+                "Message from player with ID {sender_uuid} referenced unrecognized signature id"
+            );
+            ChatPacketError::Disconnect(INVALID_PACKET)
+        })?;
+    inbound.push(&last_seen, signature);
 
     let mut validation_error = Component::translate("chat.validation_error", Vec::new());
     validation_error.style.color = Some(0xff5555);
     validation_error.style.italic = Some(true);
-    let missing_profile = decorate(validation_error, bound.clone());
+    let missing_profile = decorate(validation_error, &bound);
 
-    let trust_content = unsigned
-        .clone()
-        .unwrap_or_else(|| Component::text(signed_content.clone()));
-    let decorated_for_trust = decorate(trust_content.clone(), bound.clone());
-    let unsigned_modified_style = unsigned
+    // Vanilla `ChatTrustLevel.isModified`, against the message as displayed
+    // with and without its unsigned content.
+    let decorated = decorate(
+        unsigned
+            .clone()
+            .unwrap_or_else(|| Component::text(signed_content.clone())),
+        &bound,
+    );
+    let decorated_signed = decorate(Component::text(signed_content.clone()), &bound);
+    let modified_style = unsigned
         .as_ref()
         .is_some_and(component_has_non_default_font);
     let modified =
-        !decorated_for_trust.plain_text().contains(&signed_content) || unsigned_modified_style;
-    let fully_filtered = matches!(filter, FilterMask::FullyFiltered);
-    let signed_body = crate::net::chat_security::SignedChatBody {
+        |decorated: &Component| !decorated.plain_text().contains(&signed_content) || modified_style;
+    let signed_body = SignedChatBody {
+        modified: modified(&decorated),
+        modified_when_unsigned_hidden: modified(&decorated_signed),
+        fully_filtered: matches!(filter, FilterMask::FullyFiltered),
         content: signed_content.clone(),
         timestamp_ms,
         salt,
-        last_seen: last_seen.clone(),
+        last_seen,
         message_index,
-        modified,
-        modified_when_unsigned_hidden: unsigned_modified_style,
-        fully_filtered,
     };
 
-    let content = match &filter {
-        FilterMask::FullyFiltered | FilterMask::PassThrough => trust_content,
-        FilterMask::Partial(bits) => filtered_component(&signed_content, bits),
-    };
-    let secure_content = match &filter {
-        FilterMask::FullyFiltered | FilterMask::PassThrough => {
-            Component::text(signed_content.clone())
+    let (decorated, secure_decorated) = match &filter {
+        FilterMask::FullyFiltered | FilterMask::PassThrough => (decorated, decorated_signed),
+        FilterMask::Partial(bits) => {
+            let filtered = decorate(filtered_component(&signed_content, bits), &bound);
+            (filtered.clone(), filtered)
         }
-        FilterMask::Partial(bits) => filtered_component(&signed_content, bits),
     };
-    let secure_decorated = decorate(secure_content, bound.clone());
-    let decorated = decorate(content, bound);
-    chat_types.push_signatures(last_seen, signature);
     send_chat(
         event_tx,
         ChatDelivery {
@@ -455,10 +466,13 @@ fn parse_delete_chat(
     raw: &[u8],
     pos: &mut usize,
     event_tx: &Sender<NetworkEvent>,
-    chat_types: &ChatTypeRegistry,
-) -> Result<(), String> {
-    let signature = read_packed_signature(raw, pos, chat_types)?;
+    inbound: &InboundChat,
+) -> Result<(), ChatPacketError> {
+    let packed = read_packed_signature(raw, pos)?;
     ensure_end(raw, *pos, "delete_chat")?;
+    let signature = inbound
+        .unpack(packed)
+        .ok_or(ChatPacketError::Disconnect(INVALID_PACKET))?;
     let _ = event_tx.try_send(NetworkEvent::DeleteChatMessage { signature });
     Ok(())
 }
@@ -467,17 +481,13 @@ fn parse_command_suggestions(
     raw: &[u8],
     pos: &mut usize,
     event_tx: &Sender<NetworkEvent>,
-) -> Result<(), String> {
+) -> Result<(), ChatPacketError> {
     let id = read_varint_req(raw, pos, "command_suggestions.id")?;
     let start = read_varint_req(raw, pos, "command_suggestions.start")? as usize;
+    // Requests carry the whole input, so the range always runs to its end.
     let _length = read_varint_req(raw, pos, "command_suggestions.length")?;
     let count = read_varint_req(raw, pos, "command_suggestions.count")? as usize;
-    if count > 10_000 {
-        return Err(format!(
-            "command_suggestions has unreasonable count {count}"
-        ));
-    }
-    let mut options = Vec::with_capacity(count);
+    let mut options = Vec::new();
     for _ in 0..count {
         let text = read_string(raw, pos, 32_767, "command_suggestions.text")?;
         let tooltip = if read_bool(raw, pos)? {
@@ -497,8 +507,8 @@ struct ChatDelivery<'a> {
     secure_component: Option<&'a Component>,
     missing_profile_component: Option<&'a Component>,
     signature: Option<[u8; 256]>,
-    sender_uuid: Option<uuid::Uuid>,
-    signed_body: Option<crate::net::chat_security::SignedChatBody>,
+    sender_uuid: Option<Uuid>,
+    signed_body: Option<SignedChatBody>,
     source: ChatMessageSource,
     tag: Option<ChatMessageTag>,
 }
@@ -530,7 +540,7 @@ fn send_action_bar(event_tx: &Sender<NetworkEvent>, component: &Component) {
     let _ = event_tx.try_send(NetworkEvent::ActionBar { spans });
 }
 
-fn decorate(content: Component, bound: BoundChatType) -> Component {
+fn decorate(content: Component, bound: &BoundChatType) -> Component {
     let mut args = Vec::with_capacity(bound.decoration.parameters.len());
     for parameter in &bound.decoration.parameters {
         let selected = match parameter {
@@ -543,8 +553,8 @@ fn decorate(content: Component, bound: BoundChatType) -> Component {
         };
         args.push(Argument::Component(Box::new(selected)));
     }
-    let mut result = Component::translate(bound.decoration.translation_key, args);
-    result.style = bound.decoration.style;
+    let mut result = Component::translate(bound.decoration.translation_key.clone(), args);
+    result.style = bound.decoration.style.clone();
     result
 }
 
@@ -586,13 +596,8 @@ fn read_direct_decoration(raw: &[u8], pos: &mut usize) -> Result<ChatDecoration,
             _ => DecorationParameter::Sender,
         });
     }
-    let style_value = read_nbt_value(raw, pos)?;
-    let style = if style_value.is_null() {
-        Style::default()
-    } else {
-        Style::from_value(&style_value)
-            .map_err(|e| format!("invalid chat decoration style: {e}"))?
-    };
+    let style = Style::from_nbt_tag(&read_nbt_tag(raw, pos)?)
+        .map_err(|e| format!("invalid chat decoration style: {e}"))?;
     Ok(ChatDecoration {
         translation_key,
         parameters,
@@ -602,12 +607,10 @@ fn read_direct_decoration(raw: &[u8], pos: &mut usize) -> Result<ChatDecoration,
 
 fn registry_decoration(protocol_id: u32, nbt: &NbtCompound) -> Result<ChatDecoration, String> {
     let missing = |field: &str| format!("chat_type registry id {protocol_id} has no {field}");
-    let root = serde_json::to_value(NbtTag::Compound(nbt.clone()))
-        .map_err(|e| format!("could not inspect chat_type registry value: {e}"))?;
-    let chat = root
-        .get("chat")
-        .and_then(Value::as_object)
+    let chat_tag = nbt
+        .compound("chat")
         .ok_or_else(|| missing("chat decoration"))?;
+    let chat = nbt_to_value(&NbtTag::Compound(chat_tag.clone()));
     let translation_key = chat
         .get("translation_key")
         .and_then(Value::as_str)
@@ -626,8 +629,8 @@ fn registry_decoration(protocol_id: u32, nbt: &NbtCompound) -> Result<ChatDecora
             other => return Err(format!("unknown chat decoration parameter {other:?}")),
         });
     }
-    let style = match chat.get("style") {
-        Some(value) => Style::from_value(value)
+    let style = match chat_tag.get("style") {
+        Some(tag) => Style::from_nbt_tag(tag)
             .map_err(|e| format!("invalid chat_type registry style: {e}"))?,
         None => Style::default(),
     };
@@ -643,14 +646,10 @@ fn read_filter_mask(raw: &[u8], pos: &mut usize) -> Result<FilterMask, String> {
         0 => Ok(FilterMask::PassThrough),
         1 => Ok(FilterMask::FullyFiltered),
         2 => {
-            let count = read_varint_req(raw, pos, "player_chat.filter_mask.longs")? as usize;
-            if count > 64 {
-                return Err(format!("player_chat filter mask contains {count} longs"));
-            }
-            let mut longs = Vec::with_capacity(count);
+            let count = read_varint_req(raw, pos, "player_chat.filter_mask.longs")?;
+            let mut longs = Vec::new();
             for _ in 0..count {
-                let bytes = take(raw, pos, 8, "player_chat.filter_mask.long")?;
-                longs.push(u64::from_be_bytes(bytes.try_into().unwrap()));
+                longs.push(read_i64(raw, pos, "player_chat.filter_mask.long")? as u64);
             }
             Ok(FilterMask::Partial(longs))
         }
@@ -696,37 +695,25 @@ fn read_full_signature(raw: &[u8], pos: &mut usize, field: &str) -> Result<[u8; 
     Ok(bytes.try_into().unwrap())
 }
 
-fn read_packed_signature(
-    raw: &[u8],
-    pos: &mut usize,
-    chat_types: &ChatTypeRegistry,
-) -> Result<[u8; 256], String> {
-    let encoded = read_varint_req(raw, pos, "packed_message_signature.id")?;
-    if encoded == 0 {
-        read_full_signature(raw, pos, "packed_message_signature.full")
-    } else {
-        let id = encoded as usize - 1;
-        chat_types
-            .unpack_signature(id)
-            .ok_or_else(|| format!("unknown packed message signature cache id {id}"))
+fn read_packed_signature(raw: &[u8], pos: &mut usize) -> Result<PackedSignature, String> {
+    match read_varint_req(raw, pos, "packed_message_signature.id")? {
+        0 => read_full_signature(raw, pos, "packed_message_signature.full")
+            .map(|signature| PackedSignature::Full(Box::new(signature))),
+        id => Ok(PackedSignature::Id(id as usize - 1)),
     }
 }
 
+/// Vanilla `ChatTrustLevel.isModifiedStyle`: any font but the default,
+/// object runs included (they render through their own font description).
 fn component_has_non_default_font(component: &Component) -> bool {
     let mut modified = false;
     component.visit_text(
         &crate::chat_component::ResolvedStyle::default(),
         &mut |_, style| {
-            let non_default = style.font.as_ref().is_some_and(|font| match font {
-                Value::String(id) => id != "minecraft:default" && id != "default",
-                Value::Object(map) => map
-                    .get("id")
-                    .or_else(|| map.get("font"))
-                    .and_then(Value::as_str)
-                    .is_none_or(|id| id != "minecraft:default" && id != "default"),
-                _ => true,
-            });
-            modified |= non_default;
+            modified |= style.inline_object.is_some()
+                || style.font.as_ref().is_some_and(|font| {
+                    !matches!(font, Value::String(id) if id == "minecraft:default" || id == "default")
+                });
         },
     );
     modified
@@ -746,11 +733,6 @@ fn read_nbt_tag(raw: &[u8], pos: &mut usize) -> Result<NbtTag, String> {
         simdnbt::owned::read_tag(&mut cursor).map_err(|e| format!("invalid network NBT: {e:?}"))?;
     *pos += cursor.position() as usize;
     Ok(tag)
-}
-
-fn read_nbt_value(raw: &[u8], pos: &mut usize) -> Result<Value, String> {
-    let tag = read_nbt_tag(raw, pos)?;
-    serde_json::to_value(tag).map_err(|e| format!("could not inspect network NBT: {e}"))
 }
 
 fn write_wire_string(out: &mut Vec<u8>, value: &str) {
@@ -782,11 +764,13 @@ fn read_string(
 }
 
 fn read_bool(raw: &[u8], pos: &mut usize) -> Result<bool, String> {
-    match *take(raw, pos, 1, "boolean")?.first().unwrap() {
-        0 => Ok(false),
-        1 => Ok(true),
-        value => Err(format!("invalid boolean byte {value}")),
-    }
+    Ok(take(raw, pos, 1, "boolean")?[0] != 0)
+}
+
+fn read_i64(raw: &[u8], pos: &mut usize, field: &str) -> Result<i64, String> {
+    Ok(i64::from_be_bytes(
+        take(raw, pos, 8, field)?.try_into().unwrap(),
+    ))
 }
 
 fn read_varint_req(raw: &[u8], pos: &mut usize, field: &str) -> Result<u32, String> {
@@ -900,9 +884,9 @@ mod tests {
 
     fn decode(raw: &[u8], chat_types: &ChatTypeRegistry) -> NetworkEvent {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        handle_raw_chat_packet(raw, &tx, chat_types, None)
+        handle_raw_chat_packet(raw, &tx, chat_types, &mut InboundChat::new(false))
             .expect("not a chat packet")
-            .unwrap_or_else(|e| panic!("chat decode failed: {e}"));
+            .unwrap_or_else(|e| panic!("chat decode failed: {e:?}"));
         rx.recv().unwrap()
     }
 
@@ -914,14 +898,14 @@ mod tests {
     }
 
     /// An unsigned chat message with an empty last-seen update.
-    fn unsigned(message: &str, timestamp: u64) -> Result<Vec<u8>, String> {
+    fn unsigned(message: &str, timestamp: u64) -> Vec<u8> {
         let update = LastSeenUpdate {
             offset: 0,
             acknowledged: [0; 3],
             checksum: 0,
             last_seen: Vec::new(),
         };
-        encode_outbound_unsigned_message(message, timestamp, 0, &update)
+        encode_outbound_message(message, timestamp, 0, None, &update)
     }
 
     fn plain(spans: &[TextSpan]) -> String {
@@ -943,7 +927,7 @@ mod tests {
         expected.extend_from_slice(&1234u64.to_be_bytes());
         // Salt, no signature, last-seen offset, 20 acknowledged bits, checksum.
         expected.extend_from_slice(&[0; 8 + 1 + 1 + 3 + 1]);
-        assert_eq!(unsigned("hello", 1234).unwrap(), expected);
+        assert_eq!(unsigned("hello", 1234), expected);
     }
 
     #[test]
@@ -954,17 +938,9 @@ mod tests {
     }
 
     #[test]
-    fn outbound_message_rejects_vanilla_utf16_length_overflow() {
-        assert!(unsigned(&"x".repeat(256), 0).is_ok());
-        assert!(unsigned(&"x".repeat(257), 0).is_err());
-        assert!(unsigned(&"😀".repeat(128), 0).is_ok());
-        assert!(unsigned(&"😀".repeat(129), 0).is_err());
-    }
-
-    #[test]
     fn outbound_message_translates_every_supported_protocol() {
         for protocol in joinable_protocols() {
-            let native = unsigned("cross-version", 99).unwrap();
+            let native = unsigned("cross-version", 99);
             let frames = if protocol == NATIVE.protocol {
                 vec![native]
             } else {
@@ -1199,6 +1175,11 @@ mod tests {
     }
 
     fn player_chat_packet(global_index: u32) -> Vec<u8> {
+        player_chat_packet_seen(global_index, &[])
+    }
+
+    /// A player chat whose last-seen list holds these packed cache ids.
+    fn player_chat_packet_seen(global_index: u32, cache_ids: &[u32]) -> Vec<u8> {
         let id = native_id("player_chat");
         let mut raw = Vec::new();
         write_varint(&mut raw, id);
@@ -1209,7 +1190,10 @@ mod tests {
         write_wire_string(&mut raw, "hello");
         raw.extend_from_slice(&0u64.to_be_bytes());
         raw.extend_from_slice(&0u64.to_be_bytes());
-        write_varint(&mut raw, 0); // last seen
+        write_varint(&mut raw, cache_ids.len() as u32);
+        for &id in cache_ids {
+            write_varint(&mut raw, id + 1);
+        }
         raw.push(0); // no unsigned content
         write_varint(&mut raw, 0); // pass-through filter
         write_bound_chat_type(&mut raw, "Alice");
@@ -1225,7 +1209,7 @@ mod tests {
             last_seen: vec![[9; 256]],
         };
         let signature = [0x5a; 256];
-        let raw = encode_outbound_signed_message("signed", 1234, -55, signature, &update).unwrap();
+        let raw = encode_outbound_message("signed", 1234, -55, Some(&signature), &update);
         let mut pos = 0;
         assert_eq!(
             read_varint(&raw, &mut pos),
@@ -1262,7 +1246,7 @@ mod tests {
             checksum: 77,
             last_seen: vec![[1; 256]],
         };
-        let native = encode_outbound_signed_message("old signed", 9, 3, [4; 256], &update).unwrap();
+        let native = encode_outbound_message("old signed", 9, 3, Some(&[4; 256]), &update);
         for protocol in [763, 765, 766, 769] {
             let frame = super::super::translate::Translation::for_protocol(protocol)
                 .unwrap()
@@ -1311,8 +1295,7 @@ mod tests {
             -8,
             &[("message".into(), [0xa5; 256])],
             &update,
-        )
-        .unwrap();
+        );
 
         for protocol in [763, 765, 766, 769, 770, 776] {
             let frames = if protocol == pomme_protocol::version::NATIVE.protocol {
@@ -1369,63 +1352,76 @@ mod tests {
         }
     }
 
-    #[test]
-    fn player_chat_sequence_advances_only_after_complete_decode() {
-        let registries = test_chat_registries("<%s> %s");
+    fn handle(raw: &[u8], inbound: &mut InboundChat) -> Result<(), ChatPacketError> {
         let (tx, _rx) = crossbeam_channel::bounded(8);
-        let mut expected = 0u32;
+        handle_raw_chat_packet(raw, &tx, &test_chat_registries("<%s> %s"), inbound).unwrap()
+    }
 
-        handle_raw_chat_packet(
-            &player_chat_packet(0),
-            &tx,
-            &registries,
-            Some(&mut expected),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(expected, 1);
+    #[test]
+    fn player_chat_index_matches_vanilla_handle_player_chat() {
+        let mut inbound = InboundChat::new(true);
+        handle(&player_chat_packet(0), &mut inbound).unwrap();
 
         let mut malformed = player_chat_packet(1);
         malformed.pop();
-        assert!(
-            handle_raw_chat_packet(&malformed, &tx, &registries, Some(&mut expected))
-                .unwrap()
-                .is_err()
+        assert!(matches!(
+            handle(&malformed, &mut inbound),
+            Err(ChatPacketError::Malformed(_))
+        ));
+        handle(&player_chat_packet(1), &mut inbound).unwrap();
+
+        assert_eq!(
+            handle(&player_chat_packet(3), &mut inbound),
+            Err(ChatPacketError::Disconnect(BAD_CHAT_INDEX))
         );
-        assert_eq!(expected, 1, "malformed chat must not consume the index");
 
-        handle_raw_chat_packet(
-            &player_chat_packet(1),
-            &tx,
-            &registries,
-            Some(&mut expected),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(expected, 2);
+        inbound.reset();
+        handle(&player_chat_packet(0), &mut inbound).unwrap();
+        inbound.next_global_index = u32::MAX;
+        handle(&player_chat_packet(u32::MAX), &mut inbound).unwrap();
+        assert_eq!(inbound.next_global_index, 0, "Java int sequence wraps");
+    }
 
-        assert!(
-            handle_raw_chat_packet(
-                &player_chat_packet(3),
-                &tx,
-                &registries,
-                Some(&mut expected),
-            )
-            .unwrap()
-            .is_err()
+    #[test]
+    fn unknown_signature_cache_ids_disconnect_after_the_index_check() {
+        let unknown_id = player_chat_packet_seen(0, &[4]);
+
+        let mut inbound = InboundChat::new(true);
+        inbound.next_global_index = 1;
+        assert_eq!(
+            handle(&unknown_id, &mut inbound),
+            Err(ChatPacketError::Disconnect(BAD_CHAT_INDEX))
         );
-        assert_eq!(expected, 2, "out-of-order chat must not advance state");
+        let mut inbound = InboundChat::new(true);
+        assert_eq!(
+            handle(&unknown_id, &mut inbound),
+            Err(ChatPacketError::Disconnect(INVALID_PACKET))
+        );
 
-        expected = u32::MAX;
-        handle_raw_chat_packet(
-            &player_chat_packet(u32::MAX),
-            &tx,
-            &registries,
-            Some(&mut expected),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(expected, 0, "Java int sequence wraps at 32 bits");
+        let mut delete = Vec::new();
+        write_varint(&mut delete, native_id("delete_chat"));
+        write_varint(&mut delete, 1);
+        assert_eq!(
+            handle(&delete, &mut inbound),
+            Err(ChatPacketError::Disconnect(INVALID_PACKET))
+        );
+    }
+
+    #[test]
+    fn session_update_and_ack_layouts() {
+        let session = Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
+        let mut expected = vec![game_serverbound_id("chat_session_update") as u8];
+        expected.extend_from_slice(session.as_bytes());
+        expected.extend_from_slice(&0x1234u64.to_be_bytes());
+        expected.extend_from_slice(&[2, 0xaa, 0xbb, 1, 0xcc]);
+        assert_eq!(
+            encode_chat_session_update(session, 0x1234, &[0xaa, 0xbb], &[0xcc]),
+            expected
+        );
+        assert_eq!(
+            encode_chat_ack(300),
+            [game_serverbound_id("chat_ack") as u8, 0xac, 0x02]
+        );
     }
 
     #[test]
@@ -1444,9 +1440,14 @@ mod tests {
         write_component(&mut raw, tooltip);
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        handle_raw_chat_packet(&raw, &tx, &ChatTypeRegistry::default(), None)
-            .unwrap()
-            .unwrap();
+        handle_raw_chat_packet(
+            &raw,
+            &tx,
+            &ChatTypeRegistry::default(),
+            &mut InboundChat::new(false),
+        )
+        .unwrap()
+        .unwrap();
         let NetworkEvent::CommandSuggestions { id, start, options } = rx.recv().unwrap() else {
             panic!("expected command suggestions event");
         };
@@ -1462,7 +1463,7 @@ mod tests {
     #[test]
     fn player_chat_carries_sender_and_missing_profile_fallback() {
         let id = native_id("player_chat");
-        let sender = uuid::Uuid::from_u128(0x12345678_90ab_cdef_1122_334455667788);
+        let sender = Uuid::from_u128(0x12345678_90ab_cdef_1122_334455667788);
         let mut raw = Vec::new();
         write_varint(&mut raw, id);
         write_varint(&mut raw, 0); // global index
@@ -1479,7 +1480,7 @@ mod tests {
 
         let registries = test_chat_registries("<%s> %s");
         let (tx, rx) = crossbeam_channel::bounded(1);
-        handle_raw_chat_packet(&raw, &tx, &registries, None)
+        handle_raw_chat_packet(&raw, &tx, &registries, &mut InboundChat::new(false))
             .unwrap()
             .unwrap();
         let NetworkEvent::ChatMessage {

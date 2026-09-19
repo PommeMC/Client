@@ -10,6 +10,7 @@ use azalea_registry::builtin::ItemKind;
 use super::common;
 use crate::chat_component::{Argument, ClickEvent, Component, HoverEvent, ResolvedStyle};
 use crate::net::commands::{CommandPresentation, CommandTokenKind, CommandTree};
+use crate::net::sender::ChatMark;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 use crate::ui::text::{TextSpan, format_component_spans};
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
@@ -85,6 +86,8 @@ pub struct ChatOptions {
     pub save_drafts: bool,
 }
 
+// TODO: connections send these defaults until the chat settings are
+// configurable.
 impl Default for ChatOptions {
     fn default() -> Self {
         Self {
@@ -366,7 +369,8 @@ pub struct ChatState {
     command_buttons: Option<([f32; 4], [f32; 4])>,
     delayed_deletions: Vec<([u8; 256], Instant)>,
     delayed_messages: VecDeque<PendingChatLine>,
-    processed_signatures: Vec<([u8; 256], bool)>,
+    /// Last-seen updates in the order they happened, for the network loop.
+    chat_marks: Vec<ChatMark>,
     previous_message_time: Option<Instant>,
     latest_draft: Option<String>,
     is_restored_draft: bool,
@@ -404,7 +408,7 @@ impl ChatState {
             command_buttons: None,
             delayed_deletions: Vec::new(),
             delayed_messages: VecDeque::new(),
-            processed_signatures: Vec::new(),
+            chat_marks: Vec::new(),
             previous_message_time: None,
             latest_draft: None,
             is_restored_draft: false,
@@ -556,16 +560,8 @@ impl ChatState {
     }
 
     fn accept_pending_message(&mut self, pending: PendingChatLine, now: Instant) -> bool {
-        if !self.source_visible(pending.source, pending.tag.as_ref()) {
-            if let Some(signature) = pending.ack_signature {
-                self.processed_signatures.push((signature, false));
-            }
-            return false;
-        }
-        if pending.suppress_display {
-            if let Some(signature) = pending.ack_signature {
-                self.processed_signatures.push((signature, false));
-            }
+        if pending.suppress_display || !self.source_visible(pending.source, pending.tag.as_ref()) {
+            self.mark_processed(pending.ack_signature, false);
             return false;
         }
         let source = pending.source;
@@ -589,18 +585,28 @@ impl ChatState {
             self.new_message_since_scroll = true;
             self.scroll_pos += 1;
         }
-        if let Some(signature) = ack_signature {
-            self.processed_signatures
-                .push((signature, !force_hidden_ack));
-        }
+        self.mark_processed(ack_signature, !force_hidden_ack);
         if source == ChatMessageSource::Player {
             self.previous_message_time = Some(now);
         }
         true
     }
 
-    pub fn take_processed_signatures(&mut self) -> Vec<([u8; 256], bool)> {
-        std::mem::take(&mut self.processed_signatures)
+    /// Vanilla `markMessageAsProcessed`.
+    fn mark_processed(&mut self, signature: Option<[u8; 256]>, shown: bool) {
+        if let Some(signature) = signature {
+            self.chat_marks
+                .push(ChatMark::Processed { signature, shown });
+        }
+    }
+
+    /// Vanilla `LastSeenMessagesTracker.ignorePending` on a deletion.
+    pub fn ignore_pending(&mut self, signature: [u8; 256]) {
+        self.chat_marks.push(ChatMark::Deleted { signature });
+    }
+
+    pub fn take_chat_marks(&mut self) -> Vec<ChatMark> {
+        std::mem::take(&mut self.chat_marks)
     }
 
     pub fn inline_objects(&self) -> Vec<crate::ui::text::InlineObject> {
@@ -662,23 +668,21 @@ impl ChatState {
             self.delayed_messages.remove(index);
             return;
         }
-        let now = Instant::now();
-        if !self.delete_message_if_old_enough(signature, now) {
-            self.delayed_deletions
-                .push((signature, now + std::time::Duration::from_secs(3)));
+        if let Some(deletable_after) = self.delete_message_or_delay(signature, Instant::now()) {
+            self.delayed_deletions.push((signature, deletable_after));
         }
     }
 
-    fn delete_message_if_old_enough(&mut self, signature: [u8; 256], now: Instant) -> bool {
-        let Some(line) = self
+    /// Vanilla `deleteMessageOrDelay`: when the message is too new to delete,
+    /// the time it becomes deletable (60 ticks after it was added).
+    fn delete_message_or_delay(&mut self, signature: [u8; 256], now: Instant) -> Option<Instant> {
+        let line = self
             .messages
             .iter_mut()
-            .find(|line| line.signature.as_ref() == Some(&signature))
-        else {
-            return true;
-        };
-        if now.duration_since(line.received) < std::time::Duration::from_secs(3) {
-            return false;
+            .find(|line| line.signature.as_ref() == Some(&signature))?;
+        let deletable_after = line.received + std::time::Duration::from_secs(3);
+        if now < deletable_after {
+            return Some(deletable_after);
         }
         let mut marker = TextSpan::new(
             crate::lang::translate("chat.deleted_marker")
@@ -692,27 +696,17 @@ impl ChatState {
         line.source = ChatMessageSource::SystemServer;
         line.tag = Some(ChatMessageTag::System);
         line.wrapped = OnceCell::new();
-        true
+        None
     }
 
     pub fn tick(&mut self) {
         let now = Instant::now();
-        self.process_delayed_deletions(now);
+        let mut queue = std::mem::take(&mut self.delayed_deletions);
+        queue.retain(|&(signature, deletable_after)| {
+            now < deletable_after || self.delete_message_or_delay(signature, now).is_some()
+        });
+        self.delayed_deletions = queue;
         self.process_delayed_messages(now);
-    }
-
-    fn process_delayed_deletions(&mut self, now: Instant) {
-        let ready: Vec<[u8; 256]> = self
-            .delayed_deletions
-            .iter()
-            .filter(|(_, deadline)| now >= *deadline)
-            .map(|(signature, _)| *signature)
-            .collect();
-        for signature in ready {
-            self.delete_message_if_old_enough(signature, now);
-        }
-        self.delayed_deletions
-            .retain(|(_, deadline)| now < *deadline);
     }
 
     /// F3+D; vanilla `clearMessages(false)` keeps the sent-message history.
@@ -1533,9 +1527,7 @@ impl ChatState {
             });
             let queue_component = Component::translate(
                 "chat.queue",
-                vec![Argument::Number(serde_json::Number::from(
-                    queue_count as u64,
-                ))],
+                vec![Argument::Number(queue_count.to_string())],
             );
             let mut queue_spans = format_component_spans(&queue_component, common::WHITE);
             let queue_alpha = 0.5 * self.options.effective_text_opacity();
@@ -2245,8 +2237,8 @@ fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> Vec<TooltipL
                 let component = Component::translate(
                     "item.durability",
                     vec![
-                        Argument::Number(serde_json::Number::from(remaining)),
-                        Argument::Number(serde_json::Number::from(max_damage)),
+                        Argument::Number(remaining.to_string()),
+                        Argument::Number(max_damage.to_string()),
                     ],
                 );
                 lines.extend(component_tooltip_lines(&component));
@@ -2263,9 +2255,7 @@ fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> Vec<TooltipL
             if crate::lang::translate("item.components").is_some() {
                 let component = Component::translate(
                     "item.components",
-                    vec![Argument::Number(serde_json::Number::from(
-                        component_count as u64,
-                    ))],
+                    vec![Argument::Number(component_count.to_string())],
                 );
                 let mut tooltip = component_tooltip_lines(&component);
                 for line in &mut tooltip {
@@ -2417,7 +2407,21 @@ fn sort_suggestions_with_partial_first(
 /// A leading `/` is preserved so commands still route correctly downstream.
 fn normalize_chat_message(s: &str) -> String {
     let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed.chars().take(MAX_MESSAGE_LEN).collect()
+    let mut units = 0;
+    let mut out = String::with_capacity(collapsed.len());
+    for c in collapsed.chars() {
+        units += c.len_utf16();
+        if units > MAX_MESSAGE_LEN {
+            // Java's `substring` keeps a split pair's high surrogate, which
+            // encodes as `?`.
+            if units == MAX_MESSAGE_LEN + 1 && c.len_utf16() == 2 {
+                out.push('?');
+            }
+            break;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Time-based fade for a closed-chat line. Matches vanilla
@@ -2780,6 +2784,11 @@ mod tests {
         assert_eq!(
             normalize_chat_message(&long).chars().count(),
             MAX_MESSAGE_LEN
+        );
+        let emoji = format!("a{}", "😀".repeat(200));
+        assert_eq!(
+            normalize_chat_message(&emoji),
+            format!("a{}?", "😀".repeat(127))
         );
     }
 
@@ -3176,12 +3185,18 @@ mod tests {
             Some(signature),
         );
         assert_eq!(chat.delayed_messages.len(), 1);
-        assert!(chat.take_processed_signatures().is_empty());
+        assert!(chat.take_chat_marks().is_empty());
 
         chat.accept_next_delayed_message();
         assert_eq!(chat.messages.len(), 1);
         assert!(chat.messages.back().unwrap().signature.is_none());
-        assert_eq!(chat.take_processed_signatures(), vec![(signature, false)]);
+        assert_eq!(
+            chat.take_chat_marks(),
+            vec![ChatMark::Processed {
+                signature,
+                shown: false
+            }]
+        );
     }
 
     #[test]
@@ -3202,7 +3217,13 @@ mod tests {
         chat.accept_next_delayed_message();
         assert!(chat.messages.is_empty());
         assert_eq!(chat.previous_message_time, Some(previous));
-        assert_eq!(chat.take_processed_signatures(), vec![(signature, false)]);
+        assert_eq!(
+            chat.take_chat_marks(),
+            vec![ChatMark::Processed {
+                signature,
+                shown: false
+            }]
+        );
     }
 
     #[test]

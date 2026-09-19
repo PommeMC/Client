@@ -44,7 +44,8 @@ pub struct TabListPlayer {
     pub list_order: i32,
     pub chat_session: Option<ValidatedChatSession>,
     chat_chain_valid: bool,
-    last_chat_index: Option<i32>,
+    /// The last accepted message's index and signature.
+    last_chat: Option<(i32, [u8; 256])>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,26 +70,26 @@ impl TabListPlayer {
                 PlayerChatValidation::Unsigned
             };
         };
-        let Some(signature) = signature else {
-            self.chat_chain_valid = false;
-            return PlayerChatValidation::Invalid;
-        };
-        if !self.chat_chain_valid || session.expired_with_grace(now_ms) {
-            self.chat_chain_valid = false;
-            return PlayerChatValidation::Invalid;
+        // Vanilla `SignedMessageValidator.KeyBased`: expiry, then the
+        // signature, then the chain, which accepts a repeat of the last
+        // message (a signature covers the index and body).
+        let valid = self.chat_chain_valid
+            && !session.expired_with_grace(now_ms)
+            && signature.is_some_and(|signature| {
+                verify_player_message(session, self.uuid, body, signature)
+                    && self.last_chat.is_none_or(|(index, last)| {
+                        (index, last) == (body.message_index, *signature)
+                            || body.message_index > index
+                    })
+            });
+        self.chat_chain_valid = valid;
+        match signature.filter(|_| valid) {
+            Some(signature) => {
+                self.last_chat = Some((body.message_index, *signature));
+                PlayerChatValidation::Signed
+            }
+            None => PlayerChatValidation::Invalid,
         }
-        if let Some(previous) = self.last_chat_index
-            && body.message_index <= previous
-        {
-            self.chat_chain_valid = false;
-            return PlayerChatValidation::Invalid;
-        }
-        if !verify_player_message(session, self.uuid, body, signature) {
-            self.chat_chain_valid = false;
-            return PlayerChatValidation::Invalid;
-        }
-        self.last_chat_index = Some(body.message_index);
-        PlayerChatValidation::Signed
     }
 }
 
@@ -126,7 +127,7 @@ impl TabList {
                         list_order: e.list_order,
                         chat_session: e.chat_session.clone(),
                         chat_chain_valid: true,
-                        last_chat_index: None,
+                        last_chat: None,
                     },
                 );
             } else if let Some(p) = self.players.get_mut(&e.uuid) {
@@ -136,7 +137,7 @@ impl TabList {
                 if actions.initialize_chat {
                     p.chat_session = e.chat_session.clone();
                     p.chat_chain_valid = true;
-                    p.last_chat_index = None;
+                    p.last_chat = None;
                 }
                 if actions.update_game_mode {
                     p.game_mode = e.game_mode;

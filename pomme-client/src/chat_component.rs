@@ -5,6 +5,8 @@ use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 
 /// A vanilla text component, decoded by pomme because azalea's decoder drops
 /// hover events.
+/// TODO: decode straight from NBT instead of through JSON, which loses tag
+/// types the preserve pass then has to restore.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Component {
     pub content: Content,
@@ -41,7 +43,8 @@ pub enum Content {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Argument {
     Bool(bool),
-    Number(serde_json::Number),
+    /// Formatted as Java's `toString` of the decoded number.
+    Number(String),
     String(String),
     Component(Box<Component>),
 }
@@ -132,9 +135,7 @@ impl Component {
     }
 
     pub fn from_nbt_tag(tag: &NbtTag) -> Result<Self, ComponentError> {
-        let value = serde_json::to_value(tag)
-            .map_err(|e| ComponentError(format!("component NBT is not serializable: {e}")))?;
-        let mut component = Self::from_value(&value)?;
+        let mut component = Self::from_value(&nbt_to_value(tag))?;
         preserve_nbt_interactions(&mut component, tag);
         Ok(component)
     }
@@ -251,16 +252,28 @@ impl Component {
         parent: &ResolvedStyle,
         visitor: &mut impl FnMut(&str, &ResolvedStyle),
     ) {
-        let style = parent.merged(&self.style);
-        self.visit_content(&style, visitor);
-        for sibling in &self.siblings {
-            sibling.visit_text(&style, visitor);
-        }
+        self.visit(parent, false, visitor);
     }
 
-    fn visit_content(&self, style: &ResolvedStyle, visitor: &mut impl FnMut(&str, &ResolvedStyle)) {
+    /// Vanilla `getString`: like the styled visit, but an object contributes
+    /// its description instead of a placeholder.
+    pub fn plain_text(&self) -> String {
+        let mut out = String::new();
+        self.visit(&ResolvedStyle::default(), true, &mut |text, _| {
+            out.push_str(text)
+        });
+        out
+    }
+
+    fn visit(
+        &self,
+        parent: &ResolvedStyle,
+        plain: bool,
+        visitor: &mut impl FnMut(&str, &ResolvedStyle),
+    ) {
+        let style = parent.merged(&self.style);
         match &self.content {
-            Content::Text(text) => emit(text, style, visitor),
+            Content::Text(text) => emit(text, &style, visitor),
             Content::Translate {
                 key,
                 fallback,
@@ -269,75 +282,54 @@ impl Component {
                 let template = crate::lang::translate(key)
                     .or(fallback.as_deref())
                     .unwrap_or(key.as_str());
-                visit_translation(template, args, style, visitor);
+                visit_translation(template, args, &style, plain, visitor);
             }
-            Content::Keybind(key) => {
-                let text = keybind_display_name(key);
-                emit(&text, style, visitor);
-            }
+            Content::Keybind(key) => emit(&keybind_display_name(key), &style, visitor),
             // Unresolved score/NBT contents render nothing; an unresolved
             // selector renders its source, as in vanilla.
             Content::Score { .. } | Content::Nbt(_) => {}
-            Content::Selector { pattern, .. } => emit(pattern, style, visitor),
+            Content::Selector { pattern, .. } => emit(pattern, &style, visitor),
+            Content::Object { fallback, .. } if plain => match fallback {
+                Some(fallback) => fallback.visit(&style, plain, visitor),
+                None => emit(&default_object_fallback(&self.content), &style, visitor),
+            },
             Content::Object { value, .. } => {
                 let mut object_style = style.clone();
                 object_style.inline_object = Some(value.clone());
                 emit("\u{fffc}", &object_style, visitor);
             }
         }
-    }
-
-    pub fn plain_text(&self) -> String {
-        let mut out = String::new();
-        self.append_plain_text(&mut out);
-        out
-    }
-
-    fn append_plain_text(&self, out: &mut String) {
-        match &self.content {
-            Content::Text(text) => out.push_str(text),
-            Content::Translate {
-                key,
-                fallback,
-                args,
-            } => {
-                let template = crate::lang::translate(key)
-                    .or(fallback.as_deref())
-                    .unwrap_or(key.as_str());
-                append_plain_translation(template, args, out);
-            }
-            Content::Keybind(key) => out.push_str(&keybind_display_name(key)),
-            Content::Score { .. } | Content::Nbt(_) => {}
-            Content::Selector { pattern, .. } => out.push_str(pattern),
-            Content::Object { value, fallback } => {
-                if let Some(fallback) = fallback {
-                    fallback.append_plain_text(out);
-                } else {
-                    out.push_str(&default_object_fallback(value));
-                }
-            }
-        }
         for sibling in &self.siblings {
-            sibling.append_plain_text(out);
+            sibling.visit(&style, plain, visitor);
         }
     }
 }
 
 impl Style {
-    pub(crate) fn from_value(value: &Value) -> Result<Self, ComponentError> {
-        let map = value
+    pub(crate) fn from_nbt_tag(tag: &NbtTag) -> Result<Self, ComponentError> {
+        let map = nbt_to_value(tag);
+        let map = map
             .as_object()
             .ok_or_else(|| ComponentError("style must be an object".into()))?;
-        Self::from_object(map)
+        let mut style = Self::from_object(map)?;
+        if let NbtTag::Compound(compound) = tag {
+            preserve_style_interactions(&mut style, compound);
+        }
+        Ok(style)
     }
 
     fn from_object(map: &Map<String, Value>) -> Result<Self, ComponentError> {
-        let click_event = if let Some(value) = map.get("click_event") {
-            Some(parse_click_event(value, false)?)
-        } else if let Some(value) = map.get("clickEvent") {
-            Some(parse_click_event(value, true)?)
-        } else {
-            None
+        // Before 1.21.5 events were `clickEvent`/`hoverEvent`, with a click's
+        // payload in `value`, checked only when clicked.
+        let click_event = match (map.get("click_event"), map.get("clickEvent")) {
+            (Some(value), _) => parse_click_event(value, false)?,
+            (None, Some(value)) => parse_click_event(value, true)?,
+            (None, None) => None,
+        };
+        let hover_event = match (map.get("hover_event"), map.get("hoverEvent")) {
+            (Some(value), _) => Some(parse_hover_event(value, false)?),
+            (None, Some(value)) => Some(parse_hover_event(value, true)?),
+            (None, None) => None,
         };
         Ok(Self {
             color: map.get("color").and_then(parse_color),
@@ -348,9 +340,7 @@ impl Style {
             strikethrough: bool_field(map, "strikethrough")?,
             obfuscated: bool_field(map, "obfuscated")?,
             click_event,
-            hover_event: either(map, "hover_event", "hoverEvent")
-                .map(parse_hover_event)
-                .transpose()?,
+            hover_event,
             insertion: map
                 .get("insertion")
                 .and_then(Value::as_str)
@@ -385,6 +375,78 @@ impl ResolvedStyle {
     }
 }
 
+/// NBT in the JSON shape the component codecs read. JSON has no NaN, so a
+/// non-finite float becomes Java's text for it.
+pub(crate) fn nbt_to_value(tag: &NbtTag) -> Value {
+    match tag {
+        NbtTag::Byte(v) => (*v).into(),
+        NbtTag::Short(v) => (*v).into(),
+        NbtTag::Int(v) => (*v).into(),
+        NbtTag::Long(v) => (*v).into(),
+        NbtTag::Float(v) => serde_json::Number::from_f64(f64::from(*v))
+            .map_or_else(|| java_decimal(format!("{v:e}")).into(), Value::Number),
+        NbtTag::Double(v) => serde_json::Number::from_f64(*v)
+            .map_or_else(|| java_decimal(format!("{v:e}")).into(), Value::Number),
+        NbtTag::ByteArray(v) => v.iter().map(|&b| Value::from(b as i8)).collect(),
+        NbtTag::String(v) => v.to_str().into_owned().into(),
+        NbtTag::List(list) => list.as_nbt_tags().iter().map(nbt_to_value).collect(),
+        NbtTag::Compound(compound) => Value::Object(
+            compound
+                .iter()
+                .map(|(key, value)| (key.to_str().into_owned(), nbt_to_value(value)))
+                .collect(),
+        ),
+        NbtTag::IntArray(v) => v.iter().copied().map(Value::from).collect(),
+        NbtTag::LongArray(v) => v.iter().copied().map(Value::from).collect(),
+    }
+}
+
+/// Java's `toString` of a boxed NBT number (vanilla `JavaOps`), or `None` for
+/// a non-numeric tag.
+fn java_number_text(tag: &NbtTag) -> Option<String> {
+    Some(match tag {
+        NbtTag::Byte(v) => v.to_string(),
+        NbtTag::Short(v) => v.to_string(),
+        NbtTag::Int(v) => v.to_string(),
+        NbtTag::Long(v) => v.to_string(),
+        NbtTag::Float(v) => java_decimal(format!("{v:e}")),
+        NbtTag::Double(v) => java_decimal(format!("{v:e}")),
+        _ => return None,
+    })
+}
+
+/// `Float.toString`/`Double.toString` from Rust's shortest round-trip digits
+/// in `{:e}` form: plain between 10^-3 and 10^7, else `d.dddE<n>`.
+fn java_decimal(scientific: String) -> String {
+    let (sign, unsigned) = match scientific.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", scientific.as_str()),
+    };
+    let Some((mantissa, exponent)) = unsigned.split_once('e') else {
+        return match unsigned {
+            "inf" => format!("{sign}Infinity"),
+            _ => "NaN".to_owned(),
+        };
+    };
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let digits = mantissa.replace('.', "");
+    if !(-3..7).contains(&exponent) {
+        let fraction = if digits.len() > 1 { &digits[1..] } else { "0" };
+        return format!("{sign}{}.{fraction}E{exponent}", &digits[..1]);
+    }
+    let (integer, fraction) = if exponent >= 0 {
+        let split = exponent as usize + 1;
+        let padded = format!("{digits:0<split$}");
+        let (integer, fraction) = padded.split_at(split);
+        (integer.to_owned(), fraction.to_owned())
+    } else {
+        let zeros = "0".repeat((-exponent - 1) as usize);
+        ("0".to_owned(), format!("{zeros}{digits}"))
+    };
+    let fraction = if fraction.is_empty() { "0" } else { &fraction };
+    format!("{sign}{integer}.{fraction}")
+}
+
 fn parse_argument(value: &Value) -> Result<Argument, ComponentError> {
     if let Value::Object(map) = value
         && map.len() == 1
@@ -406,7 +468,7 @@ fn parse_argument(value: &Value) -> Result<Argument, ComponentError> {
 fn parse_primitive_argument(value: &Value) -> Result<Argument, ComponentError> {
     Ok(match value {
         Value::Bool(v) => Argument::Bool(*v),
-        Value::Number(v) => Argument::Number(v.clone()),
+        Value::Number(v) => Argument::Number(v.to_string()),
         Value::String(v) => Argument::String(v.clone()),
         Value::Null => {
             return Err(ComponentError("translation argument cannot be null".into()));
@@ -436,9 +498,7 @@ fn parse_translation_template(
 
     while cursor < bytes.len() {
         let Some(relative) = template[cursor..].find('%') else {
-            if cursor < template.len() {
-                tokens.push(TranslationToken::Text(&template[cursor..]));
-            }
+            tokens.push(TranslationToken::Text(&template[cursor..]));
             break;
         };
         let percent = cursor + relative;
@@ -483,42 +543,24 @@ fn parse_translation_template(
     Ok(tokens)
 }
 
-fn append_plain_translation(template: &str, args: &[Argument], out: &mut String) {
-    let Ok(tokens) = parse_translation_template(template, args.len()) else {
-        out.push_str(template);
-        return;
+/// Vanilla `AtlasSprite`/`PlayerSprite.description`, for an object with no
+/// fallback.
+fn default_object_fallback(content: &Content) -> String {
+    let Content::Object { value, .. } = content else {
+        return String::new();
     };
-    for token in tokens {
-        match token {
-            TranslationToken::Text(text) => out.push_str(text),
-            TranslationToken::Percent => out.push('%'),
-            TranslationToken::Argument(index) => match &args[index] {
-                Argument::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
-                Argument::Number(value) => out.push_str(&value.to_string()),
-                Argument::String(value) => out.push_str(value),
-                Argument::Component(value) => value.append_plain_text(out),
-            },
-        }
-    }
-}
-
-fn default_object_fallback(value: &Value) -> String {
-    let Some(map) = value.as_object() else {
-        return "[object]".to_owned();
-    };
-    if let Some(sprite) = map.get("sprite").and_then(Value::as_str) {
-        let short = sprite.strip_prefix("minecraft:").unwrap_or(sprite);
-        let atlas = map
+    if let Some(sprite) = value.get("sprite").and_then(Value::as_str) {
+        let atlas = value
             .get("atlas")
             .and_then(Value::as_str)
-            .unwrap_or("minecraft:blocks");
-        if atlas == "minecraft:blocks" {
-            return format!("[{short}]");
-        }
-        let atlas = atlas.strip_prefix("minecraft:").unwrap_or(atlas);
-        return format!("[{short}@{atlas}]");
+            .map_or("blocks", short_identifier);
+        return if atlas == "blocks" {
+            format!("[{}]", short_identifier(sprite))
+        } else {
+            format!("[{}@{atlas}]", short_identifier(sprite))
+        };
     }
-    if let Some(player) = map.get("player") {
+    if let Some(player) = value.get("player") {
         let name = player
             .as_str()
             .or_else(|| player.get("name").and_then(Value::as_str));
@@ -529,10 +571,21 @@ fn default_object_fallback(value: &Value) -> String {
     "[object]".to_owned()
 }
 
+/// Vanilla `AtlasSprite.toShortName`: the path alone in the `minecraft`
+/// namespace.
+fn short_identifier(id: &str) -> &str {
+    match id.split_once(':') {
+        Some(("minecraft" | "", path)) => path,
+        Some(_) => id,
+        None => id,
+    }
+}
+
 fn visit_translation(
     template: &str,
     args: &[Argument],
     style: &ResolvedStyle,
+    plain: bool,
     visitor: &mut impl FnMut(&str, &ResolvedStyle),
 ) {
     let Ok(tokens) = parse_translation_template(template, args.len()) else {
@@ -543,21 +596,12 @@ fn visit_translation(
         match token {
             TranslationToken::Text(text) => emit(text, style, visitor),
             TranslationToken::Percent => emit("%", style, visitor),
-            TranslationToken::Argument(index) => visit_argument(&args[index], style, visitor),
+            TranslationToken::Argument(index) => match &args[index] {
+                Argument::Bool(v) => emit(if *v { "true" } else { "false" }, style, visitor),
+                Argument::Number(v) | Argument::String(v) => emit(v, style, visitor),
+                Argument::Component(v) => v.visit(style, plain, visitor),
+            },
         }
-    }
-}
-
-fn visit_argument(
-    arg: &Argument,
-    style: &ResolvedStyle,
-    visitor: &mut impl FnMut(&str, &ResolvedStyle),
-) {
-    match arg {
-        Argument::Bool(v) => emit(if *v { "true" } else { "false" }, style, visitor),
-        Argument::Number(v) => emit(&v.to_string(), style, visitor),
-        Argument::String(v) => emit(v, style, visitor),
-        Argument::Component(v) => v.visit_text(style, visitor),
     }
 }
 
@@ -577,6 +621,8 @@ fn emit(text: &str, style: &ResolvedStyle, visitor: &mut impl FnMut(&str, &Resol
     }
 }
 
+/// Restores what the JSON detour loses: exact custom-click payload tags and
+/// Java's formatting of numeric translation arguments.
 fn preserve_nbt_interactions(component: &mut Component, tag: &NbtTag) {
     match tag {
         NbtTag::Compound(compound) => preserve_compound_interactions(component, compound),
@@ -601,31 +647,26 @@ fn preserve_nbt_interactions(component: &mut Component, tag: &NbtTag) {
 }
 
 fn preserve_compound_interactions(component: &mut Component, compound: &NbtCompound) {
-    let click = compound
-        .compound("click_event")
-        .or_else(|| compound.compound("clickEvent"));
-    if let (Some(ClickEvent::Custom { payload, .. }), Some(click)) =
-        (&mut component.style.click_event, click)
-    {
-        *payload = click.get("payload").cloned();
-    }
-
-    if let Some(HoverEvent::Text(text)) = &mut component.style.hover_event
-        && let Some(hover) = compound
-            .compound("hover_event")
-            .or_else(|| compound.compound("hoverEvent"))
-        && let Some(value) = hover.get("value").or_else(|| hover.get("contents"))
-    {
-        preserve_nbt_interactions(text, value);
-    }
+    preserve_style_interactions(&mut component.style, compound);
 
     match &mut component.content {
         Content::Translate { args, .. } => {
             if let Some(NbtTag::List(with)) = compound.get("with") {
-                let tags = with.as_nbt_tags();
-                for (argument, tag) in args.iter_mut().zip(tags.iter()) {
-                    if let Argument::Component(component) = argument {
-                        preserve_nbt_interactions(component, tag);
+                for (argument, tag) in args.iter_mut().zip(with.as_nbt_tags().iter()) {
+                    let primitive = match tag {
+                        NbtTag::Compound(wrapped) if wrapped.len() == 1 => {
+                            wrapped.get("").unwrap_or(tag)
+                        }
+                        tag => tag,
+                    };
+                    match argument {
+                        Argument::Component(component) => preserve_nbt_interactions(component, tag),
+                        Argument::Number(text) => {
+                            if let Some(java) = java_number_text(primitive) {
+                                *text = java;
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -643,36 +684,109 @@ fn preserve_compound_interactions(component: &mut Component, compound: &NbtCompo
         _ => {}
     }
 
-    if let Some(extra) = compound.get("extra") {
-        let tags = match extra {
-            NbtTag::List(list) => list.as_nbt_tags(),
-            tag => vec![tag.clone()],
-        };
-        for (sibling, sibling_tag) in component.siblings.iter_mut().zip(tags.iter()) {
+    if let Some(NbtTag::List(extra)) = compound.get("extra") {
+        for (sibling, sibling_tag) in component
+            .siblings
+            .iter_mut()
+            .zip(extra.as_nbt_tags().iter())
+        {
             preserve_nbt_interactions(sibling, sibling_tag);
         }
     }
 }
 
-fn component_extra_count(tag: &NbtTag) -> usize {
-    let NbtTag::Compound(compound) = tag else {
-        return 0;
+/// The event keys `Style::from_object` read, in the same precedence.
+fn preserve_style_interactions(style: &mut Style, compound: &NbtCompound) {
+    let event = |key: &str, legacy: &str| {
+        compound
+            .compound(key)
+            .map(|event| (event, false))
+            .or_else(|| compound.compound(legacy).map(|event| (event, true)))
     };
-    match compound.get("extra") {
-        Some(NbtTag::List(list)) => list.as_nbt_tags().len(),
-        Some(_) => 1,
-        None => 0,
+    if let (Some(ClickEvent::Custom { payload, .. }), Some((click, _))) =
+        (&mut style.click_event, event("click_event", "clickEvent"))
+    {
+        *payload = click.get("payload").cloned();
+    }
+    if let (Some(HoverEvent::Text(text)), Some((hover, legacy))) =
+        (&mut style.hover_event, event("hover_event", "hoverEvent"))
+        && let Some(value) = hover
+            .get("value")
+            .or_else(|| legacy.then(|| hover.get("contents")).flatten())
+    {
+        preserve_nbt_interactions(text, value);
     }
 }
 
+/// How many siblings `from_value` gives the component `tag` decodes to.
+fn component_extra_count(tag: &NbtTag) -> usize {
+    match tag {
+        NbtTag::Compound(compound) => match compound.get("extra") {
+            Some(NbtTag::List(list)) => list.as_nbt_tags().len(),
+            _ => 0,
+        },
+        NbtTag::List(list) => {
+            let tags = list.as_nbt_tags();
+            tags.first()
+                .map_or(0, |first| component_extra_count(first) + tags.len() - 1)
+        }
+        _ => 0,
+    }
+}
+
+/// `Util.parseAndValidateUntrustedUri`: `java.net.URI`'s character rules and
+/// an http(s) scheme.
 pub(crate) fn parse_untrusted_url(raw: String) -> Result<String, ComponentError> {
-    let url = reqwest::Url::parse(&raw)
-        .map_err(|e| ComponentError(format!("invalid open_url URI `{raw}`: {e}")))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(ComponentError(format!(
-            "unsupported open_url protocol `{}`",
-            url.scheme()
-        )));
+    let invalid = |why: &str| {
+        Err(ComponentError(format!(
+            "invalid open_url URI `{raw}`: {why}"
+        )))
+    };
+    let Some((scheme, rest)) = raw
+        .split_once(':')
+        .filter(|(scheme, _)| !scheme.contains(['/', '?', '#']))
+    else {
+        return invalid("missing protocol");
+    };
+    let legal_scheme = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    if !legal_scheme {
+        return invalid("illegal scheme");
+    }
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return invalid("unsupported protocol");
+    }
+    if rest.is_empty() {
+        return invalid("expected scheme-specific part");
+    }
+    let (body, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    // Only an authority may hold `[` `]` (an IPv6 host).
+    let authority_len = body
+        .strip_prefix("//")
+        .map_or(0, |after| 2 + after.find(['/', '?']).unwrap_or(after.len()));
+    let (authority, tail) = body.split_at(authority_len);
+    let legal = |text: &str, brackets: bool| {
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            let ok = match c {
+                '%' => {
+                    chars.next().is_some_and(|c| c.is_ascii_hexdigit())
+                        && chars.next().is_some_and(|c| c.is_ascii_hexdigit())
+                }
+                '[' | ']' => brackets,
+                c if c.is_ascii() => c.is_ascii_alphanumeric() || "-_.!~*'();/?:@&=+$,".contains(c),
+                c => !c.is_control() && !c.is_whitespace(),
+            };
+            if !ok {
+                return false;
+            }
+        }
+        true
+    };
+    if !(legal(authority, true) && legal(tail, false) && legal(fragment, false)) {
+        return invalid("illegal character");
     }
     Ok(raw)
 }
@@ -683,30 +797,10 @@ pub(crate) fn json_payload_to_nbt(value: &Value) -> Result<NbtTag, ComponentErro
             "custom click NBT payload cannot be null".into(),
         )),
         Value::Bool(value) => Ok(NbtTag::Byte(i8::from(*value))),
-        Value::Number(value) => {
-            if let Some(integer) = value.as_i64() {
-                if let Ok(integer) = i32::try_from(integer) {
-                    Ok(NbtTag::Int(integer))
-                } else {
-                    Ok(NbtTag::Long(integer))
-                }
-            } else if let Some(unsigned) = value.as_u64() {
-                if let Ok(integer) = i32::try_from(unsigned) {
-                    Ok(NbtTag::Int(integer))
-                } else if let Ok(integer) = i64::try_from(unsigned) {
-                    Ok(NbtTag::Long(integer))
-                } else {
-                    Err(ComponentError(
-                        "custom click NBT integer exceeds i64".into(),
-                    ))
-                }
-            } else {
-                value
-                    .as_f64()
-                    .map(NbtTag::Double)
-                    .ok_or_else(|| ComponentError("invalid custom click NBT number".into()))
-            }
-        }
+        Value::Number(value) => Ok(match value.as_i64() {
+            Some(integer) => i32::try_from(integer).map_or(NbtTag::Long(integer), NbtTag::Int),
+            None => NbtTag::Double(value.as_f64().unwrap_or_default()),
+        }),
         Value::String(value) => Ok(NbtTag::String(value.clone().into())),
         Value::Array(values) => Ok(NbtTag::List(NbtList::from(
             values
@@ -739,14 +833,12 @@ fn event_action<'a>(
     Ok((map, action))
 }
 
-fn parse_click_event(
-    value: &Value,
-    allow_legacy_value: bool,
-) -> Result<ClickEvent, ComponentError> {
+/// `None` for a legacy event whose value fails the checks vanilla only ran
+/// on click.
+fn parse_click_event(value: &Value, legacy: bool) -> Result<Option<ClickEvent>, ComponentError> {
     let (map, action) = event_action(value, "click")?;
     // Legacy `clickEvent`s carry every payload in `value`.
-    let legacy = allow_legacy_value.then(|| map.get("value")).flatten();
-    let field = |modern: &str| map.get(modern).or(legacy);
+    let field = |modern: &str| map.get(if legacy { "value" } else { modern });
     let missing = |modern: &str| ComponentError(format!("{action} click event has no `{modern}`"));
     let string = |modern: &str| {
         field(modern)
@@ -754,40 +846,63 @@ fn parse_click_event(
             .map(str::to_owned)
             .ok_or_else(|| missing(modern))
     };
-    match action {
-        "open_url" => Ok(ClickEvent::OpenUrl(parse_untrusted_url(string("url")?)?)),
-        "run_command" => Ok(ClickEvent::RunCommand(string("command")?)),
-        "suggest_command" => Ok(ClickEvent::SuggestCommand(string("command")?)),
-        "show_dialog" => Ok(ClickEvent::ShowDialog(
-            field("dialog").cloned().ok_or_else(|| missing("dialog"))?,
-        )),
-        "change_page" => {
-            let page = if let Some(value) = map.get("page") {
-                value
-                    .as_i64()
-                    .ok_or_else(|| ComponentError("change_page `page` must be an integer".into()))?
-            } else {
-                legacy
-                    .and_then(Value::as_str)
-                    .and_then(|value| value.parse::<i64>().ok())
-                    .ok_or_else(|| missing("page"))?
-            };
-            if !(1..=i32::MAX as i64).contains(&page) {
-                return Err(ComponentError(
-                    "change_page `page` must be a positive 32-bit integer".into(),
-                ));
-            }
-            Ok(ClickEvent::ChangePage(page as i32))
+    // `ExtraCodecs.CHAT_STRING`.
+    let chat_string = |modern: &str| {
+        let command = string(modern)?;
+        if !legacy
+            && command
+                .chars()
+                .any(|c| c == '§' || c < ' ' || c == '\u{7f}')
+        {
+            return Err(ComponentError(format!(
+                "disallowed chat character in `{command}`"
+            )));
         }
-        "copy_to_clipboard" => Ok(ClickEvent::CopyToClipboard(string("value")?)),
-        "custom" => Ok(ClickEvent::Custom {
-            id: map
+        Ok(command)
+    };
+    let checked = |event: Result<ClickEvent, ComponentError>| match event {
+        Err(_) if legacy => Ok(None),
+        event => event.map(Some),
+    };
+    match action {
+        "open_url" => checked(parse_untrusted_url(string("url")?).map(ClickEvent::OpenUrl)),
+        "run_command" => Ok(Some(ClickEvent::RunCommand(chat_string("command")?))),
+        "suggest_command" => Ok(Some(ClickEvent::SuggestCommand(chat_string("command")?))),
+        "show_dialog" => Ok(Some(ClickEvent::ShowDialog(
+            field("dialog").cloned().ok_or_else(|| missing("dialog"))?,
+        ))),
+        "change_page" => {
+            let page = field("page").ok_or_else(|| missing("page"))?;
+            // `Codec.INT` takes any number's `intValue`; legacy pages were
+            // strings.
+            let page = if legacy {
+                page.as_str().and_then(|page| page.parse().ok())
+            } else {
+                page.as_i64()
+                    .map(|page| page as i32)
+                    .or_else(|| page.as_f64().map(|page| page as i32))
+            };
+            checked(match page {
+                Some(page) if page >= 1 => Ok(ClickEvent::ChangePage(page)),
+                _ => Err(ComponentError(
+                    "change_page `page` must be a positive integer".into(),
+                )),
+            })
+        }
+        "copy_to_clipboard" => Ok(Some(ClickEvent::CopyToClipboard(string("value")?))),
+        "custom" => {
+            let id = map
                 .get("id")
                 .and_then(Value::as_str)
-                .ok_or_else(|| missing("id"))?
-                .to_owned(),
-            payload: map.get("payload").map(json_payload_to_nbt).transpose()?,
-        }),
+                .ok_or_else(|| missing("id"))?;
+            if !valid_identifier(id) {
+                return Err(ComponentError(format!("invalid custom click id `{id}`")));
+            }
+            Ok(Some(ClickEvent::Custom {
+                id: id.to_owned(),
+                payload: map.get("payload").map(json_payload_to_nbt).transpose()?,
+            }))
+        }
         // OPEN_FILE is intentionally rejected by Vanilla's server-safe codec.
         other => Err(ComponentError(format!(
             "unsupported server click event `{other}`"
@@ -795,9 +910,29 @@ fn parse_click_event(
     }
 }
 
-fn parse_hover_event(value: &Value) -> Result<HoverEvent, ComponentError> {
+/// Vanilla `Identifier.parse` validity: `[a-z0-9_.-]` namespace (default
+/// `minecraft`), `[a-z0-9_.-/]` path.
+fn valid_identifier(id: &str) -> bool {
+    let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
+    let allowed = |text: &str, slash: bool| {
+        text.chars().all(|c| {
+            c.is_ascii_lowercase()
+                || c.is_ascii_digit()
+                || matches!(c, '_' | '-' | '.')
+                || slash && c == '/'
+        })
+    };
+    namespace != ".." && allowed(namespace, false) && allowed(path, true)
+}
+
+/// A modern `show_text` holds its component in `value`, and item/entity
+/// fields sit inline; a legacy `hoverEvent` may use `contents`.
+fn parse_hover_event(value: &Value, legacy: bool) -> Result<HoverEvent, ComponentError> {
     let (map, action) = event_action(value, "hover")?;
-    let payload = either(map, "value", "contents").unwrap_or(value);
+    let payload = map
+        .get("value")
+        .or_else(|| legacy.then(|| map.get("contents")).flatten())
+        .unwrap_or(value);
     match action {
         "show_text" => Ok(HoverEvent::Text(Box::new(Component::from_value(payload)?))),
         "show_item" => Ok(HoverEvent::Item(payload.clone())),
@@ -866,7 +1001,7 @@ fn parse_color(value: &Value) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use simdnbt::owned::{NbtCompound, NbtTag};
+    use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 
     use super::*;
 
@@ -899,8 +1034,7 @@ mod tests {
         root.insert("click_event", NbtTag::Compound(click));
         root.insert("hover_event", NbtTag::Compound(hover));
 
-        let value = serde_json::to_value(NbtTag::Compound(root)).unwrap();
-        let component = Component::from_value(&value).unwrap();
+        let component = Component::from_nbt_tag(&NbtTag::Compound(root)).unwrap();
         assert_eq!(component.style.color, Some(0xffaa00));
         assert_eq!(component.style.bold, Some(true));
         assert_eq!(component.style.insertion.as_deref(), Some("Steve"));
@@ -1182,6 +1316,153 @@ mod tests {
         assert_eq!(
             value.get("sprite").and_then(Value::as_str),
             Some("minecraft:block/stone")
+        );
+    }
+
+    fn click(value: Value) -> Result<Option<ClickEvent>, ComponentError> {
+        Component::from_value(&serde_json::json!({"text": "x", "click_event": value}))
+            .map(|c| c.style.click_event)
+    }
+
+    fn legacy_click(action: &str, value: &str) -> Option<ClickEvent> {
+        Component::from_value(&serde_json::json!({
+            "text": "x",
+            "clickEvent": {"action": action, "value": value}
+        }))
+        .unwrap()
+        .style
+        .click_event
+    }
+
+    #[test]
+    fn untrusted_urls_follow_java_uri_rules() {
+        for url in [
+            "https://example.com/a?b=c#d",
+            "HTTPS://[::1]:8080/x",
+            "http://ex%41mple.com",
+            "https://é.example/ü",
+            "http:opaque",
+        ] {
+            assert!(parse_untrusted_url(url.into()).is_ok(), "rejected {url}");
+        }
+        for url in [
+            "example.com",
+            "https://exa mple.com",
+            "https://x/[a]",
+            "https://x/%zz",
+            "https://x/a#b#c",
+            "http:",
+            "https://x/<script>",
+        ] {
+            assert!(parse_untrusted_url(url.into()).is_err(), "accepted {url}");
+        }
+    }
+
+    #[test]
+    fn legacy_click_values_are_checked_only_when_clicked() {
+        assert_eq!(legacy_click("open_url", "file:///etc/passwd"), None);
+        assert_eq!(legacy_click("change_page", "two"), None);
+        assert_eq!(
+            legacy_click("run_command", "/say \u{a7}cred"),
+            Some(ClickEvent::RunCommand("/say \u{a7}cred".into()))
+        );
+        assert!(
+            click(serde_json::json!({"action": "run_command", "command": "/say \u{a7}c"})).is_err()
+        );
+        assert!(
+            click(serde_json::json!({"action": "suggest_command", "command": "a\nb"})).is_err()
+        );
+    }
+
+    #[test]
+    fn modern_click_values_follow_their_codecs() {
+        assert_eq!(
+            click(serde_json::json!({"action": "change_page", "page": 2.7})).unwrap(),
+            Some(ClickEvent::ChangePage(2))
+        );
+        assert!(click(serde_json::json!({"action": "custom", "id": "Bad:Id"})).is_err());
+        assert!(click(serde_json::json!({"action": "custom", "id": "pomme:ok/path"})).is_ok());
+    }
+
+    #[test]
+    fn contents_is_only_a_legacy_hover_field() {
+        let hover = serde_json::json!({"action": "show_text", "contents": {"text": "tip"}});
+        assert!(
+            Component::from_value(&serde_json::json!({"text": "x", "hover_event": hover})).is_err()
+        );
+        assert!(
+            Component::from_value(&serde_json::json!({"text": "x", "hoverEvent": hover})).is_ok()
+        );
+    }
+
+    #[test]
+    fn nbt_number_arguments_format_like_java() {
+        let mut with = Vec::new();
+        for tag in [
+            NbtTag::Int(5),
+            NbtTag::Float(1.0),
+            NbtTag::Double(1e7),
+            NbtTag::Float(f32::NAN),
+            NbtTag::Double(0.00125),
+        ] {
+            let mut wrapped = NbtCompound::new();
+            wrapped.insert("", tag);
+            with.push(wrapped);
+        }
+        let mut root = NbtCompound::new();
+        root.insert("translate", "missing.key");
+        root.insert("fallback", "%s %s %s %s %s");
+        root.insert("with", NbtTag::List(NbtList::from(with)));
+        let component = Component::from_nbt_tag(&NbtTag::Compound(root)).unwrap();
+        assert_eq!(component.plain_text(), "5 1.0 1.0E7 NaN 0.00125");
+    }
+
+    #[test]
+    fn nan_payloads_and_decoration_styles_keep_their_tags() {
+        let mut payload = NbtCompound::new();
+        payload.insert("nan", NbtTag::Float(f32::NAN));
+        let mut click = NbtCompound::new();
+        click.insert("action", "custom");
+        click.insert("id", "pomme:test");
+        click.insert("payload", NbtTag::Compound(payload));
+        let mut style = NbtCompound::new();
+        style.insert("click_event", NbtTag::Compound(click));
+
+        let style = Style::from_nbt_tag(&NbtTag::Compound(style)).unwrap();
+        let Some(ClickEvent::Custom {
+            payload: Some(NbtTag::Compound(payload)),
+            ..
+        }) = style.click_event
+        else {
+            panic!("expected a custom click with its payload");
+        };
+        assert!(matches!(payload.get("nan"), Some(NbtTag::Float(v)) if v.is_nan()));
+    }
+
+    #[test]
+    fn nested_list_siblings_line_up_with_their_tags() {
+        let text = |t: &str| {
+            let mut c = NbtCompound::new();
+            c.insert("text", t);
+            NbtTag::Compound(c)
+        };
+        let mut with_extra = NbtCompound::new();
+        with_extra.insert("text", "a");
+        with_extra.insert("extra", NbtTag::List(NbtList::from(vec![text("b")])));
+        let inner = NbtTag::List(NbtList::from(vec![NbtTag::Compound(with_extra), text("c")]));
+        assert_eq!(component_extra_count(&inner), 2);
+    }
+
+    #[test]
+    fn sprite_descriptions_read_the_atlas_as_an_identifier() {
+        let plain = |value: Value| Component::from_value(&value).unwrap().plain_text();
+        assert_eq!(
+            plain(serde_json::json!({"sprite": "block/stone", "atlas": "blocks"})),
+            "[block/stone]"
+        );
+        assert_eq!(
+            plain(serde_json::json!({"sprite": "pomme:x", "atlas": "minecraft:gui"})),
+            "[pomme:x@gui]"
         );
     }
 }

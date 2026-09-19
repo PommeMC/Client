@@ -10,6 +10,7 @@ use azalea_registry::{Holder, Registry};
 use crossbeam_channel::Sender;
 
 use super::NetworkEvent;
+use super::chat_security::ProfileKeyServices;
 use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::entity::MetaValue;
@@ -106,7 +107,6 @@ pub fn handle_game_packet(
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
     shared_tree: &SharedCommandTree,
-    profile_key_services: Option<&crate::net::chat_security::ProfileKeyServices>,
     batch_size_calculator: &mut ChunkBatchSizeCalculator,
 ) {
     match packet {
@@ -131,9 +131,10 @@ pub fn handle_game_packet(
                 entity_id: p.player_id.0,
                 hardcore: p.hardcore,
                 show_death_screen: p.show_death_screen,
+                online_mode: p.online_mode,
             });
             let _ = event_tx.try_send(NetworkEvent::SecureChatEnforced {
-                enforced: profile_key_services.is_some() && p.enforces_secure_chat,
+                enforced: ProfileKeyServices::get().is_some() && p.enforces_secure_chat,
             });
         }
         ClientboundGamePacket::LevelChunkWithLight(p) => {
@@ -1067,7 +1068,7 @@ pub fn handle_game_packet(
                         .map(|c| crate::ui::text::format_text_spans(c, [1.0, 1.0, 1.0, 1.0])),
                     list_order: e.list_order,
                     chat_session: if p.actions.initialize_chat {
-                        match (profile_key_services, e.chat_session.as_ref()) {
+                        match (ProfileKeyServices::get(), e.chat_session.as_ref()) {
                             (Some(services), Some(session)) => match services
                                 .validate_session(e.profile.uuid, session)
                             {
@@ -1591,7 +1592,6 @@ mod tests {
                 &event_tx,
                 &registries,
                 &command_tree,
-                None,
                 &mut ChunkBatchSizeCalculator::default(),
             );
         };
