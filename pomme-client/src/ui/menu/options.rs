@@ -104,22 +104,6 @@ impl MainMenu {
         }
     }
 
-    fn force_unicode_font_label(&self) -> &'static str {
-        if self.force_unicode_font {
-            "Force Unicode Font: ON"
-        } else {
-            "Force Unicode Font: OFF"
-        }
-    }
-
-    fn japanese_glyph_variants_label(&self) -> &'static str {
-        if self.japanese_glyph_variants {
-            "Japanese Glyph Variants: ON"
-        } else {
-            "Japanese Glyph Variants: OFF"
-        }
-    }
-
     fn show_subtitles_label(&self) -> &'static str {
         if self.show_subtitles {
             "Show Subtitles: ON"
@@ -675,10 +659,17 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
-        let rows: Vec<OptRow> = vec![OptRow::Pair(
-            self.force_unicode_font_label(),
-            self.japanese_glyph_variants_label(),
-        )];
+        let force_unicode_label = if self.force_unicode_font {
+            "Force Unicode Font: ON"
+        } else {
+            "Force Unicode Font: OFF"
+        };
+        let japanese_variants_label = if self.japanese_glyph_variants {
+            "Japanese Glyph Variants: ON"
+        } else {
+            "Japanese Glyph Variants: OFF"
+        };
+        let rows: Vec<OptRow> = vec![OptRow::Pair(force_unicode_label, japanese_variants_label)];
         let tooltips: &[(&str, &str)] = &[(
             "Japanese Glyph Variants:",
             "Uses Japanese variants of CJK characters in the default font.",

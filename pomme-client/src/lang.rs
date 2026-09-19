@@ -62,9 +62,7 @@ pub fn default_locale_is_japanese() -> bool {
     language == LANG_JAPANESE
 }
 
-/// Vanilla `Options.japaneseGlyphVariantsDefault`: whether Java's
-/// `Locale.getDefault()` is Japanese, which on Unix is the `LC_MESSAGES`
-/// locale.
+/// As above; on Unix Java's default locale is the `LC_MESSAGES` locale.
 // TODO: macOS Java reads the preferred language (`AppleLanguages`), not the
 // environment.
 #[cfg(not(windows))]

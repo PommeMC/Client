@@ -681,8 +681,8 @@ impl Renderer {
         }
     }
 
-    /// Vanilla `Minecraft.updateFontOptions`: re-filters the loaded font sets,
-    /// leaving the atlases, block textures and sounds alone.
+    /// Vanilla `Minecraft.updateFontOptions`: re-filters the loaded fonts
+    /// without a resource reload.
     pub fn set_font_options(&mut self, options: FontOptions) {
         if self.font_options != options {
             self.font_options = options;
