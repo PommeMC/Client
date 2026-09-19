@@ -582,7 +582,11 @@ pub fn handle_game_packet(
             let _ = event_tx.send(NetworkEvent::SectionBlocksUpdate { updates });
         }
         ClientboundGamePacket::BlockChangedAck(p) => {
-            let _ = event_tx.try_send(NetworkEvent::BlockChangedAck { seq: p.seq });
+            // This closes the prediction sequence established by the preceding
+            // server-verified block updates. Dropping it can leave rejected
+            // predictions permanently unresolved, so keep the whole sequence
+            // ordered and non-lossy on the application thread.
+            let _ = event_tx.send(NetworkEvent::BlockChangedAck { seq: p.seq });
         }
         ClientboundGamePacket::SetTime(p) => {
             let day_time = p.clock_updates.values().next().map(|c| c.total_ticks);
@@ -1608,8 +1612,10 @@ fn slot_display_first_item(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier, mpsc as std_mpsc};
+    use std::time::Duration;
 
+    use azalea_protocol::packets::game::c_block_changed_ack::ClientboundBlockChangedAck;
     use azalea_protocol::packets::game::c_ping::ClientboundPing;
     use azalea_protocol::packets::game::c_player_rotation::ClientboundPlayerRotation;
     use azalea_protocol::packets::game::c_set_held_slot::ClientboundSetHeldSlot;
@@ -1618,26 +1624,43 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn forced_player_rotation_backpressures_instead_of_being_dropped() {
-        use std::sync::{Barrier, mpsc as std_mpsc};
-        use std::time::Duration;
-
+    fn assert_event_backpressures(
+        queue: impl FnOnce(Sender<NetworkEvent>) + Send,
+        assert_event: impl FnOnce(NetworkEvent),
+    ) {
         let (event_tx, event_rx) = crossbeam_channel::bounded(1);
         event_tx.send(NetworkEvent::Connected).unwrap();
         let barrier = Arc::new(Barrier::new(2));
         let (done_tx, done_rx) = std_mpsc::channel();
 
         std::thread::scope(|scope| {
-            let event_tx = event_tx.clone();
             let worker_barrier = Arc::clone(&barrier);
             scope.spawn(move || {
+                worker_barrier.wait();
+                queue(event_tx);
+                done_tx.send(()).unwrap();
+            });
+
+            barrier.wait();
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+                "authoritative event must wait for queue capacity instead of being dropped"
+            );
+            assert!(matches!(event_rx.recv().unwrap(), NetworkEvent::Connected));
+            done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_event(event_rx.recv().unwrap());
+        });
+    }
+
+    #[test]
+    fn forced_player_rotation_backpressures_instead_of_being_dropped() {
+        assert_event_backpressures(
+            |event_tx| {
                 let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
                 let sender = PacketSender::new(out_tx);
                 let registries = RegistryHolder::default();
                 let command_tree = Arc::new(Mutex::new(None));
                 let mut batch_size_calculator = ChunkBatchSizeCalculator::default();
-                worker_barrier.wait();
                 handle_game_packet(
                     &ClientboundGamePacket::PlayerRotation(ClientboundPlayerRotation {
                         y_rot: 45.0,
@@ -1651,94 +1674,69 @@ mod tests {
                     &command_tree,
                     &mut batch_size_calculator,
                 );
-                done_tx.send(()).unwrap();
-            });
-
-            barrier.wait();
-            assert!(
-                done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
-                "critical correction must wait for queue capacity instead of being dropped"
-            );
-            assert!(matches!(event_rx.recv().unwrap(), NetworkEvent::Connected));
-            done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-            assert!(matches!(
-                event_rx.recv().unwrap(),
-                NetworkEvent::PlayerRotation {
-                    y_rot: 45.0,
-                    x_rot: 20.0,
-                    relative_y: false,
-                    relative_x: false,
-                }
-            ));
-        });
+            },
+            |event| {
+                assert!(matches!(
+                    event,
+                    NetworkEvent::PlayerRotation {
+                        y_rot: 45.0,
+                        x_rot: 20.0,
+                        relative_y: false,
+                        relative_x: false,
+                    }
+                ));
+            },
+        );
     }
 
     #[test]
     fn authoritative_entity_motion_backpressures_instead_of_being_dropped() {
-        use std::sync::{Barrier, mpsc as std_mpsc};
-        use std::time::Duration;
-
-        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
-        event_tx.send(NetworkEvent::Connected).unwrap();
-        let barrier = Arc::new(Barrier::new(2));
-        let (done_tx, done_rx) = std_mpsc::channel();
         let expected = glam::DVec3::new(0.125, 0.75, -0.25);
-
-        std::thread::scope(|scope| {
-            let event_tx = event_tx.clone();
-            let worker_barrier = Arc::clone(&barrier);
-            scope.spawn(move || {
-                worker_barrier.wait();
-                queue_entity_motion(&event_tx, 42, expected);
-                done_tx.send(()).unwrap();
-            });
-
-            barrier.wait();
-            assert!(
-                done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
-                "authoritative entity motion must wait for queue capacity instead of being dropped"
-            );
-            assert!(matches!(event_rx.recv().unwrap(), NetworkEvent::Connected));
-            done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-            assert!(matches!(
-                event_rx.recv().unwrap(),
-                NetworkEvent::EntityMotion { id: 42, velocity } if velocity == expected
-            ));
-        });
+        assert_event_backpressures(
+            move |event_tx| queue_entity_motion(&event_tx, 42, expected),
+            |event| {
+                assert!(matches!(
+                    event,
+                    NetworkEvent::EntityMotion { id: 42, velocity } if velocity == expected
+                ));
+            },
+        );
     }
 
     #[test]
     fn explosion_knockback_backpressures_instead_of_being_dropped() {
-        use std::sync::{Barrier, mpsc as std_mpsc};
-        use std::time::Duration;
-
-        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
-        event_tx.send(NetworkEvent::Connected).unwrap();
-        let barrier = Arc::new(Barrier::new(2));
-        let (done_tx, done_rx) = std_mpsc::channel();
         let expected = glam::DVec3::new(0.25, 0.5, -0.125);
+        assert_event_backpressures(
+            move |event_tx| queue_player_knockback(&event_tx, expected),
+            |event| {
+                assert!(matches!(
+                    event,
+                    NetworkEvent::PlayerKnockback { delta } if delta == expected
+                ));
+            },
+        );
+    }
 
-        std::thread::scope(|scope| {
-            let event_tx = event_tx.clone();
-            let worker_barrier = Arc::clone(&barrier);
-            scope.spawn(move || {
-                worker_barrier.wait();
-                queue_player_knockback(&event_tx, expected);
-                done_tx.send(()).unwrap();
-            });
-
-            barrier.wait();
-            assert!(
-                done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
-                "explosion knockback must wait for queue capacity instead of being dropped"
-            );
-            assert!(matches!(event_rx.recv().unwrap(), NetworkEvent::Connected));
-            done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-            assert!(matches!(
-                event_rx.recv().unwrap(),
-                NetworkEvent::PlayerKnockback { delta } if delta == expected
-            ));
-        });
+    #[test]
+    fn block_change_ack_backpressures_instead_of_being_dropped() {
+        assert_event_backpressures(
+            |event_tx| {
+                let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+                let sender = PacketSender::new(out_tx);
+                let registries = RegistryHolder::default();
+                let command_tree = Arc::new(Mutex::new(None));
+                let mut batch_size_calculator = ChunkBatchSizeCalculator::default();
+                handle_game_packet(
+                    &ClientboundGamePacket::BlockChangedAck(ClientboundBlockChangedAck { seq: 17 }),
+                    &sender,
+                    &event_tx,
+                    &registries,
+                    &command_tree,
+                    &mut batch_size_calculator,
+                );
+            },
+            |event| assert!(matches!(event, NetworkEvent::BlockChangedAck { seq: 17 })),
+        );
     }
 
     #[test]
