@@ -5,6 +5,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::assets::{self, AssetIndex};
+use crate::chat_component::normalize_identifier;
 use crate::resource_pack::ResourcePackManager;
 
 #[derive(Clone, Debug)]
@@ -26,6 +27,81 @@ enum Recipe {
     },
 }
 
+struct AssetLookup<'a> {
+    jar_assets_dir: &'a Path,
+    asset_index: &'a Option<AssetIndex>,
+    packs: &'a ResourcePackManager,
+}
+
+impl AssetLookup<'_> {
+    fn resolve(&self, key: &str) -> PathBuf {
+        assets::resolve_asset_path_with_packs(
+            self.jar_assets_dir,
+            self.asset_index,
+            key,
+            Some(self.packs),
+        )
+    }
+
+    fn texture_exists(&self, resource: &str) -> bool {
+        self.resolve(&texture_asset_key(resource)).exists()
+    }
+
+    fn load_texture(&self, resource: &str) -> Option<(Vec<u8>, u32, u32)> {
+        crate::renderer::util::load_png(&self.resolve(&texture_asset_key(resource)))
+    }
+
+    /// Every copy of the atlas definition, base assets first, so later packs'
+    /// sources apply on top.
+    fn atlas_definition_stack(&self, atlas_key: &str) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let base = assets::resolve_asset_path(self.jar_assets_dir, self.asset_index, atlas_key);
+        if base.exists() {
+            out.push(base);
+        }
+        for pack in self.packs.active_pack_dirs() {
+            let path = pack.join("assets").join(atlas_key);
+            if path.exists() {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    fn load_direct_sprite(&self, resource: &str) -> Option<(Vec<u8>, u32, u32)> {
+        let (rgba, w, h) = self.load_texture(resource)?;
+        let (frame_w, frame_h) = self.animation_frame_size(resource, w, h);
+        crop_rgba(&rgba, w, h, 0, 0, frame_w.min(w), frame_h.min(h))
+    }
+
+    fn animation_frame_size(&self, resource: &str, w: u32, h: u32) -> (u32, u32) {
+        let path = self.resolve(&format!("{}.mcmeta", texture_asset_key(resource)));
+        if let Ok(text) = std::fs::read_to_string(path)
+            && let Ok(value) = serde_json::from_str::<Value>(&text)
+            && let Some(animation) = value.get("animation").and_then(Value::as_object)
+        {
+            let fw = animation
+                .get("width")
+                .and_then(Value::as_u64)
+                .map(|v| v as u32);
+            let fh = animation
+                .get("height")
+                .and_then(Value::as_u64)
+                .map(|v| v as u32);
+            return match (fw, fh) {
+                (Some(fw), Some(fh)) if fw > 0 && fh > 0 => (fw, fh),
+                (Some(fw), None) if fw > 0 => (fw, h),
+                (None, Some(fh)) if fh > 0 => (w, fh),
+                _ => {
+                    let min = w.min(h);
+                    (min, min)
+                }
+            };
+        }
+        (w, h)
+    }
+}
+
 pub fn load_atlas_sprite_8x8(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
@@ -33,11 +109,15 @@ pub fn load_atlas_sprite_8x8(
     atlas: &str,
     sprite: &str,
 ) -> Option<Vec<u8>> {
+    let lookup = AssetLookup {
+        jar_assets_dir,
+        asset_index,
+        packs,
+    };
     let (sprite_ns, sprite_path) = split_id(sprite);
-    let atlas_key = atlas_asset_key(atlas);
     let mut candidate: Option<Recipe> = None;
 
-    for path in atlas_definition_stack(jar_assets_dir, asset_index, packs, &atlas_key) {
+    for path in lookup.atlas_definition_stack(&atlas_asset_key(atlas)) {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -52,22 +132,12 @@ pub fn load_atlas_sprite_8x8(
             continue;
         };
         for source in sources {
-            apply_source(
-                source,
-                sprite_ns,
-                sprite_path,
-                jar_assets_dir,
-                asset_index,
-                packs,
-                &mut candidate,
-            );
+            apply_source(source, sprite_ns, sprite_path, &lookup, &mut candidate);
         }
     }
 
     let image = match candidate? {
-        Recipe::Direct(resource) => {
-            load_direct_sprite(jar_assets_dir, asset_index, packs, &resource)?
-        }
+        Recipe::Direct(resource) => lookup.load_direct_sprite(&resource)?,
         Recipe::Unstitch {
             resource,
             x,
@@ -77,7 +147,7 @@ pub fn load_atlas_sprite_8x8(
             divisor_x,
             divisor_y,
         } => {
-            let (rgba, w, h) = load_texture(jar_assets_dir, asset_index, packs, &resource)?;
+            let (rgba, w, h) = lookup.load_texture(&resource)?;
             crop_unstitch(&rgba, w, h, x, y, width, height, divisor_x, divisor_y)?
         }
         Recipe::Paletted {
@@ -85,9 +155,9 @@ pub fn load_atlas_sprite_8x8(
             palette_key,
             palette_value,
         } => {
-            let (base, w, h) = load_texture(jar_assets_dir, asset_index, packs, &texture)?;
-            let (key, kw, kh) = load_texture(jar_assets_dir, asset_index, packs, &palette_key)?;
-            let (value, vw, vh) = load_texture(jar_assets_dir, asset_index, packs, &palette_value)?;
+            let (base, w, h) = lookup.load_texture(&texture)?;
+            let (key, kw, kh) = lookup.load_texture(&palette_key)?;
+            let (value, vw, vh) = lookup.load_texture(&palette_value)?;
             if kw != vw || kh != vh {
                 tracing::warn!(
                     "Inline-object palette dimensions differ for {palette_key} and {palette_value}"
@@ -117,33 +187,11 @@ pub fn missing_tile_8x8() -> Vec<u8> {
     out
 }
 
-fn atlas_definition_stack(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: &ResourcePackManager,
-    atlas_key: &str,
-) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let base = assets::resolve_asset_path(jar_assets_dir, asset_index, atlas_key);
-    if base.exists() {
-        out.push(base);
-    }
-    for pack in packs.active_pack_dirs() {
-        let path = pack.join("assets").join(atlas_key);
-        if path.exists() {
-            out.push(path);
-        }
-    }
-    out
-}
-
 fn apply_source(
     source: &Value,
     sprite_ns: &str,
     sprite_path: &str,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: &ResourcePackManager,
+    lookup: &AssetLookup<'_>,
     candidate: &mut Option<Recipe>,
 ) {
     let Some(map) = source.as_object() else {
@@ -166,7 +214,7 @@ fn apply_source(
             };
             let path = join_resource_path(source_path, rest);
             let resource = format!("{sprite_ns}:{path}");
-            if texture_exists(jar_assets_dir, asset_index, packs, &resource) {
+            if lookup.texture_exists(&resource) {
                 *candidate = Some(Recipe::Direct(resource));
             }
         }
@@ -178,10 +226,8 @@ fn apply_source(
                 .get("sprite")
                 .and_then(Value::as_str)
                 .unwrap_or(resource);
-            if id_matches(target, sprite_ns, sprite_path)
-                && texture_exists(jar_assets_dir, asset_index, packs, resource)
-            {
-                *candidate = Some(Recipe::Direct(normalize_id(resource)));
+            if id_matches(target, sprite_ns, sprite_path) && lookup.texture_exists(resource) {
+                *candidate = Some(Recipe::Direct(normalize_identifier(resource)));
             }
         }
         Some("filter") => {
@@ -204,7 +250,7 @@ fn apply_source(
             let Some(resource) = map.get("resource").and_then(Value::as_str) else {
                 return;
             };
-            if !texture_exists(jar_assets_dir, asset_index, packs, resource) {
+            if !lookup.texture_exists(resource) {
                 return;
             }
             let divisor_x = map.get("divisor_x").and_then(Value::as_f64).unwrap_or(1.0);
@@ -231,7 +277,7 @@ fn apply_source(
                     continue;
                 };
                 *candidate = Some(Recipe::Unstitch {
-                    resource: normalize_id(resource),
+                    resource: normalize_identifier(resource),
                     x,
                     y,
                     width,
@@ -262,12 +308,12 @@ fn apply_source(
                         continue;
                     };
                     if sprite_path == format!("{texture_path}{separator}{suffix}")
-                        && texture_exists(jar_assets_dir, asset_index, packs, texture)
+                        && lookup.texture_exists(texture)
                     {
                         *candidate = Some(Recipe::Paletted {
-                            texture: normalize_id(texture),
-                            palette_key: normalize_id(palette_key),
-                            palette_value: normalize_id(palette_value),
+                            texture: normalize_identifier(texture),
+                            palette_key: normalize_identifier(palette_key),
+                            palette_value: normalize_identifier(palette_value),
                         });
                     }
                 }
@@ -275,65 +321,6 @@ fn apply_source(
         }
         _ => {}
     }
-}
-fn load_direct_sprite(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: &ResourcePackManager,
-    resource: &str,
-) -> Option<(Vec<u8>, u32, u32)> {
-    let (rgba, w, h) = load_texture(jar_assets_dir, asset_index, packs, resource)?;
-    let (frame_w, frame_h) =
-        animation_frame_size(jar_assets_dir, asset_index, packs, resource, w, h);
-    crop_rgba(&rgba, w, h, 0, 0, frame_w.min(w), frame_h.min(h))
-}
-
-fn load_texture(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: &ResourcePackManager,
-    resource: &str,
-) -> Option<(Vec<u8>, u32, u32)> {
-    let key = texture_asset_key(resource);
-    let path =
-        assets::resolve_asset_path_with_packs(jar_assets_dir, asset_index, &key, Some(packs));
-    crate::renderer::util::load_png(&path)
-}
-
-fn animation_frame_size(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: &ResourcePackManager,
-    resource: &str,
-    w: u32,
-    h: u32,
-) -> (u32, u32) {
-    let key = format!("{}.mcmeta", texture_asset_key(resource));
-    let path =
-        assets::resolve_asset_path_with_packs(jar_assets_dir, asset_index, &key, Some(packs));
-    if let Ok(text) = std::fs::read_to_string(path)
-        && let Ok(value) = serde_json::from_str::<Value>(&text)
-        && let Some(animation) = value.get("animation").and_then(Value::as_object)
-    {
-        let fw = animation
-            .get("width")
-            .and_then(Value::as_u64)
-            .map(|v| v as u32);
-        let fh = animation
-            .get("height")
-            .and_then(Value::as_u64)
-            .map(|v| v as u32);
-        return match (fw, fh) {
-            (Some(fw), Some(fh)) if fw > 0 && fh > 0 => (fw, fh),
-            (Some(fw), None) if fw > 0 => (fw, h),
-            (None, Some(fh)) if fh > 0 => (w, fh),
-            _ => {
-                let min = w.min(h);
-                (min, min)
-            }
-        };
-    }
-    (w, h)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -405,6 +392,7 @@ fn apply_palette(mut base: Vec<u8>, key: &[u8], value: &[u8]) -> Vec<u8> {
     }
     base
 }
+
 fn resample_8x8(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
     let mut out = vec![0u8; 8 * 8 * 4];
     if w == 0 || h == 0 {
@@ -424,16 +412,6 @@ fn resample_8x8(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
     out
 }
 
-fn texture_exists(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: &ResourcePackManager,
-    resource: &str,
-) -> bool {
-    let key = texture_asset_key(resource);
-    assets::resolve_asset_path_with_packs(jar_assets_dir, asset_index, &key, Some(packs)).exists()
-}
-
 fn atlas_asset_key(id: &str) -> String {
     let (namespace, path) = split_id(id);
     format!("{namespace}/atlases/{path}.json")
@@ -448,14 +426,8 @@ fn split_id(id: &str) -> (&str, &str) {
     id.split_once(':').unwrap_or(("minecraft", id))
 }
 
-fn normalize_id(id: &str) -> String {
-    let (namespace, path) = split_id(id);
-    format!("{namespace}:{path}")
-}
-
 fn id_matches(id: &str, namespace: &str, path: &str) -> bool {
-    let (ns, id_path) = split_id(id);
-    ns == namespace && id_path == path
+    split_id(id) == (namespace, path)
 }
 
 fn join_resource_path(prefix: &str, suffix: &str) -> String {

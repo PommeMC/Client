@@ -66,9 +66,7 @@ fn dialog_holder_reference(
             Ok(DialogReference::ProtocolId(dialog.to_u32()))
         }
         azalea_registry::Holder::Direct(nbt) => {
-            let value = serde_json::to_value(simdnbt::owned::NbtTag::Compound((***nbt).clone()))
-                .map_err(|e| format!("dialog NBT is not serializable: {e}"))?;
-            Ok(DialogReference::Value(value))
+            crate::ui::server_dialog::nbt_compound_to_value(nbt).map(DialogReference::Value)
         }
     }
 }

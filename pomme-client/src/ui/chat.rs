@@ -205,9 +205,42 @@ impl ChatOptions {
     }
 }
 
-struct ChatHitRegion {
+pub(crate) struct StyleHitRegion {
     rect: [f32; 4],
     style: Arc<ResolvedStyle>,
+}
+
+/// Records a hit region for each styled span of a line drawn from `x`.
+pub(crate) fn push_hit_regions(
+    regions: &mut Vec<StyleHitRegion>,
+    spans: &[TextSpan],
+    mut x: f32,
+    y: f32,
+    h: f32,
+    span_w: &dyn Fn(&TextSpan) -> f32,
+) {
+    for span in spans {
+        let w = span_w(span);
+        if let Some(style) = &span.component_style
+            && w > 0.0
+        {
+            regions.push(StyleHitRegion {
+                rect: [x, y, w, h],
+                style: style.clone(),
+            });
+        }
+        x += w;
+    }
+}
+
+pub(crate) fn style_at(
+    regions: &[StyleHitRegion],
+    cursor: (f32, f32),
+) -> Option<Arc<ResolvedStyle>> {
+    regions
+        .iter()
+        .find(|region| common::hit_test(cursor, region.rect))
+        .map(|region| region.style.clone())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -522,7 +555,7 @@ pub struct ChatState {
     outgoing_request: Option<(u32, String)>,
     /// Physical rectangles of styled chat spans as last drawn, for hover and
     /// click lookup (vanilla's active-text collector).
-    hit_regions: Vec<ChatHitRegion>,
+    hit_regions: Vec<StyleHitRegion>,
     /// Physical rectangles of the visible command-suggestion rows.
     suggestion_regions: Vec<(usize, [f32; 4])>,
     queue_region: Option<[f32; 4]>,
@@ -794,21 +827,14 @@ impl ChatState {
     }
 
     pub fn inline_objects(&self) -> Vec<crate::ui::text::InlineObject> {
-        let mut objects = std::collections::HashSet::new();
-        for line in &self.messages {
-            for span in &line.spans {
-                if let Some(object) = &span.inline_object {
-                    objects.insert(object.clone());
-                }
-            }
-        }
-        for pending in &self.delayed_messages {
-            for span in &pending.spans {
-                if let Some(object) = &span.inline_object {
-                    objects.insert(object.clone());
-                }
-            }
-        }
+        let objects: std::collections::HashSet<_> = self
+            .messages
+            .iter()
+            .map(|line| &line.spans)
+            .chain(self.delayed_messages.iter().map(|pending| &pending.spans))
+            .flatten()
+            .filter_map(|span| span.inline_object.clone())
+            .collect();
         objects.into_iter().collect()
     }
 
@@ -1495,33 +1521,7 @@ impl ChatState {
     }
 
     fn style_at(&self, cursor: (f32, f32)) -> Option<Arc<ResolvedStyle>> {
-        self.hit_regions
-            .iter()
-            .find(|region| common::hit_test(cursor, region.rect))
-            .map(|region| region.style.clone())
-    }
-
-    /// Records a hit region for each styled span of a line drawn from `x`.
-    fn push_hit_regions(
-        &mut self,
-        spans: &[TextSpan],
-        mut x: f32,
-        y: f32,
-        h: f32,
-        span_w: &dyn Fn(&TextSpan) -> f32,
-    ) {
-        for span in spans {
-            let w = span_w(span);
-            if let Some(style) = &span.component_style
-                && w > 0.0
-            {
-                self.hit_regions.push(ChatHitRegion {
-                    rect: [x, y, w, h],
-                    style: style.clone(),
-                });
-            }
-            x += w;
-        }
+        style_at(&self.hit_regions, cursor)
     }
 
     /// Whether the pointing-hand cursor applies: a hovered button
@@ -1745,7 +1745,14 @@ impl ChatState {
                 }
             }
 
-            self.push_hit_regions(line_spans, origin, entry_top, lh, &span_w);
+            push_hit_regions(
+                &mut self.hit_regions,
+                line_spans,
+                origin,
+                entry_top,
+                lh,
+                &span_w,
+            );
 
             // Vanilla `handleTagIcon`: the background access draws no icon.
             if focused && let Some(tag @ ChatMessageTag::Modified { .. }) = tag {
@@ -1826,7 +1833,14 @@ impl ChatState {
                     &width0,
                 );
             }
-            self.push_hit_regions(&restricted_spans, origin, restricted_y, lh, &span_w);
+            push_hit_regions(
+                &mut self.hit_regions,
+                &restricted_spans,
+                origin,
+                restricted_y,
+                lh,
+                &span_w,
+            );
             elements.push(MenuElement::McText {
                 x: origin,
                 y: restricted_y + (entry_height - text_baseline_offset - 1.0) * unit,
@@ -2426,7 +2440,7 @@ fn wrapped_tooltip_lines(
         .collect()
 }
 
-fn component_tooltip_lines(component: &Component) -> Vec<TooltipLine> {
+pub(crate) fn component_tooltip_lines(component: &Component) -> Vec<TooltipLine> {
     span_tooltip_lines(format_component_spans(component, common::WHITE))
 }
 
@@ -3307,8 +3321,8 @@ mod tests {
         (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0)
     }
 
-    fn hit_region(style: ResolvedStyle) -> ChatHitRegion {
-        ChatHitRegion {
+    fn hit_region(style: ResolvedStyle) -> StyleHitRegion {
+        StyleHitRegion {
             rect: [0.0, 0.0, 10.0, 10.0],
             style: Arc::new(style),
         }

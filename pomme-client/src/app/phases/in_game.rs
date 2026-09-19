@@ -565,6 +565,28 @@ impl GameState {
         self.inv_last_click = None;
     }
 
+    /// Replaces any open server dialog; false (logged) when `reference`
+    /// doesn't resolve to a dialog.
+    pub fn open_server_dialog(
+        &mut self,
+        reference: crate::ui::server_dialog::DialogReference,
+    ) -> bool {
+        match crate::ui::server_dialog::ServerDialogState::open(
+            reference,
+            &self.registries,
+            &self.server_links,
+        ) {
+            Ok(dialog) => {
+                self.server_dialog = Some(dialog);
+                true
+            }
+            Err(error) => {
+                tracing::warn!("Could not open server dialog: {error}");
+                false
+            }
+        }
+    }
+
     /// A focused text field (anvil rename, creative search) is capturing
     /// keyboard input: letter/digit keys must type instead of acting as
     /// hotkeys. The anvil field is editable only while its input slot is
@@ -1388,14 +1410,7 @@ fn handle_chat_ui_action(
         ChatUiAction::ShowDialog(dialog) => {
             game.chat
                 .close(crate::ui::chat::ChatExitReason::Interrupted);
-            handle_server_dialog_action(
-                crate::ui::server_dialog::ServerDialogAction::ShowDialog(
-                    crate::ui::server_dialog::DialogReference::Value(dialog),
-                ),
-                core,
-                connection,
-                game,
-            );
+            game.open_server_dialog(crate::ui::server_dialog::DialogReference::Value(dialog));
         }
     }
 }
@@ -1426,38 +1441,37 @@ fn handle_unattended_command(command: &str, connection: &ConnectionHandle, game:
     }
 }
 
-pub(crate) fn handle_server_dialog_action(
-    action: crate::ui::server_dialog::ServerDialogAction,
+/// Drops the dialog if the input just handled finished it, then carries out
+/// the action it reported.
+pub(crate) fn settle_server_dialog(
+    action: Option<crate::ui::server_dialog::ServerDialogAction>,
     core: &mut AppCore,
     connection: &ConnectionHandle,
     game: &mut GameState,
 ) {
-    use crate::ui::server_dialog::{ServerDialogAction, ServerDialogState};
+    use crate::ui::server_dialog::ServerDialogAction;
 
-    match action {
-        ServerDialogAction::OpenUrl(url) => {
-            if let Some(ChatUiAction::OpenUrl(url)) = game.chat.request_open_url(url) {
-                handle_chat_ui_action(ChatUiAction::OpenUrl(url), core, connection, game);
-            }
-        }
-        ServerDialogAction::RunCommand(command) => {
-            handle_unattended_command(&command, connection, game);
-        }
-        ServerDialogAction::ShowDialog(reference) => {
-            match ServerDialogState::open(reference, &game.registries, &game.server_links) {
-                Ok(dialog) => game.server_dialog = Some(dialog),
-                Err(error) => tracing::warn!("Could not open nested server dialog: {error}"),
-            }
-        }
-        ServerDialogAction::Custom { id, payload } => {
-            match crate::net::chat::encode_outbound_custom_click_action(&id, payload.as_ref()) {
-                Ok(frame) => connection.packet_tx.send_raw(frame),
-                Err(error) => {
-                    tracing::warn!("Could not encode dialog custom click action {id:?}: {error}")
-                }
-            }
-        }
+    if game
+        .server_dialog
+        .as_ref()
+        .is_some_and(|dialog| dialog.is_finished())
+    {
+        game.server_dialog = None;
     }
+    let action = match action {
+        None => return,
+        Some(ServerDialogAction::OpenUrl(url)) => match game.chat.request_open_url(url) {
+            Some(action) => action,
+            None => return,
+        },
+        Some(ServerDialogAction::RunCommand(command)) => ChatUiAction::RunCommand(command),
+        Some(ServerDialogAction::Custom { id, payload }) => ChatUiAction::Custom { id, payload },
+        Some(ServerDialogAction::ShowDialog(reference)) => {
+            game.open_server_dialog(reference);
+            return;
+        }
+    };
+    handle_chat_ui_action(action, core, connection, game);
 }
 
 /// Carry out the button/dismiss action a benchmark result overlay reported,
@@ -2932,28 +2946,20 @@ pub fn update_game(
         });
     }
 
-    if game.server_dialog.is_some() {
-        let (action, finished) = {
-            let dialog = game.server_dialog.as_mut().unwrap();
-            let action = dialog.build(
-                &mut elements,
-                sw,
-                sh,
-                gs,
-                core.input.cursor_pos(),
-                core.input.left_just_pressed() && !game.chat.has_pending_modal_prompt(),
-                core.input.left_held() && !game.chat.has_pending_modal_prompt(),
-                &|t, s| gfx.renderer.menu_text_width(t, s),
-                &|spans, s| gfx.renderer.menu_spans_width(spans, s),
-            );
-            (action, dialog.is_finished())
-        };
-        if finished {
-            game.server_dialog = None;
-        }
-        if let Some(action) = action {
-            handle_server_dialog_action(action, core, connection, game);
-        }
+    let modal_open = game.chat.has_pending_modal_prompt();
+    if let Some(dialog) = game.server_dialog.as_mut() {
+        let action = dialog.build(
+            &mut elements,
+            sw,
+            sh,
+            gs,
+            core.input.cursor_pos(),
+            core.input.left_just_pressed() && !modal_open,
+            core.input.left_held() && !modal_open,
+            &|t, s| gfx.renderer.menu_text_width(t, s),
+            &|spans, s| gfx.renderer.menu_spans_width(spans, s),
+        );
+        settle_server_dialog(action, core, connection, game);
         core.input.clear_just_pressed_actions();
         core.apply_cursor_grab(&gfx.window, Some(game));
     }

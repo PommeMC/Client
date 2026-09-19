@@ -287,24 +287,24 @@ pub struct AppCore {
     game_dynamic_atlas_keys: HashSet<String>,
 }
 
-/// Folds the credits roll's keys into a `CREDITS_KEY_*` mask. Both control
-/// keys count separately in vanilla's `speedupModifiers`, so this can't go
-/// through `InputState::ctrl_held`, which folds them into one winit modifier
-/// bit.
+/// Stable skin-cache key for an inline player object with no UUID or
+/// tab-list match. Local only, never sent to the server.
 fn inline_player_cache_uuid(key: &str) -> uuid::Uuid {
     use sha2::{Digest, Sha256};
 
     let digest = Sha256::digest(key.as_bytes());
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
-    // Mark the synthetic cache key as RFC 4122 variant/version 4. It is never
-    // sent to the server; this only keeps it distinct and stable in Pomme's
-    // existing UUID-keyed skin cache.
+    // RFC 4122 version 4 / variant bits.
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     uuid::Uuid::from_bytes(bytes)
 }
 
+/// Folds the credits roll's keys into a `CREDITS_KEY_*` mask. Both control
+/// keys count separately in vanilla's `speedupModifiers`, so this can't go
+/// through `InputState::ctrl_held`, which folds them into one winit modifier
+/// bit.
 fn credits_key_mask(mut is_set: impl FnMut(KeyCode) -> bool) -> u8 {
     [
         (KeyCode::ArrowUp, CREDITS_KEY_UP),
@@ -582,8 +582,7 @@ impl AppCore {
         self.requested_player_skins.insert(uuid, source.clone());
 
         // Name-derived (v3) UUIDs from offline-mode servers have no Mojang
-        // UUID profile to fetch; keep the default skin unless a different
-        // source (embedded textures or an explicit profile name) was supplied.
+        // profile to fetch; keep the default skin.
         if matches!(source, PlayerSkinSource::Uuid) && uuid.get_version_num() == 3 {
             return;
         }
@@ -644,9 +643,10 @@ impl AppCore {
         }
     }
 
-    /// Synchronize the shared in-game dynamic UI atlas. Spectator faces and
-    /// 26.2 inline chat object glyphs share the same texture binding, so they
-    /// must be packed together whenever either feature is active.
+    /// Rebuilds the face atlas when its wanted contents change. Spectator
+    /// faces and inline chat object glyphs share its texture binding, so both
+    /// are packed together whenever either is in use; the rebuild waits on
+    /// the GPU queue, so it only runs on change.
     pub fn sync_game_dynamic_atlas(
         &mut self,
         game: &GameState,
@@ -1397,16 +1397,8 @@ impl AppCore {
                         .close(crate::ui::chat::ChatExitReason::Interrupted);
                     game.close_menu();
                     game.close_creative_inventory();
-                    match crate::ui::server_dialog::ServerDialogState::open(
-                        dialog,
-                        &game.registries,
-                        &game.server_links,
-                    ) {
-                        Ok(dialog) => {
-                            game.server_dialog = Some(dialog);
-                            self.apply_cursor_grab(window, Some(game));
-                        }
-                        Err(error) => tracing::warn!("Could not open server dialog: {error}"),
+                    if game.open_server_dialog(dialog) {
+                        self.apply_cursor_grab(window, Some(game));
                     }
                 }
                 NetworkEvent::ClearDialog => {
@@ -2944,28 +2936,28 @@ mod tests {
         let body = chat_body();
         let expired_now = 1_000 + 8 * 60 * 1000;
         assert_eq!(
-            accepted_player_chat_tag(true, false, &body, expired_now, false,),
+            accepted_player_chat_tag(true, false, &body, expired_now, false),
             None
         );
         assert_eq!(
-            accepted_player_chat_tag(true, true, &body, expired_now, false,),
+            accepted_player_chat_tag(true, true, &body, expired_now, false),
             None
         );
         assert_eq!(
-            accepted_player_chat_tag(true, true, &body, 1_001, true,),
+            accepted_player_chat_tag(true, true, &body, 1_001, true),
             None
         );
 
         assert_eq!(
-            accepted_player_chat_tag(false, false, &body, 1_001, false,),
+            accepted_player_chat_tag(false, false, &body, 1_001, false),
             Some(ChatMessageTag::NotSecure)
         );
         assert_eq!(
-            accepted_player_chat_tag(false, true, &body, expired_now, false,),
+            accepted_player_chat_tag(false, true, &body, expired_now, false),
             Some(ChatMessageTag::NotSecure)
         );
         assert_eq!(
-            accepted_player_chat_tag(false, true, &body, 1_001, true,),
+            accepted_player_chat_tag(false, true, &body, 1_001, true),
             Some(ChatMessageTag::Modified {
                 original: "hello".to_owned(),
             })

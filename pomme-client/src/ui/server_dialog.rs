@@ -1,11 +1,13 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
-use crate::chat_component::{ClickEvent, Component, ResolvedStyle};
+use crate::chat_component::{ClickEvent, Component};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
+use crate::ui::chat::{
+    StyleHitRegion, component_tooltip_lines, push_hit_regions, style_at, wrap_spans,
+};
 use crate::ui::common;
 use crate::ui::text::{TextSpan, format_component_spans};
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
@@ -15,6 +17,8 @@ const BUTTON_H: f32 = 20.0;
 const GRID_GAP: f32 = 2.0;
 const HEADER_H: f32 = 33.0;
 const FOOTER_H: f32 = 33.0;
+/// Vanilla `WaitingForResponseScreen.BUTTON_ACTIVE_AFTER`, in seconds.
+const BUTTON_ACTIVE_AFTER: f32 = 5.0;
 
 #[derive(Clone, Debug)]
 pub enum DialogReference {
@@ -146,10 +150,7 @@ impl DialogInput {
             }
             Self::SingleOption {
                 entries, selected, ..
-            } => entries
-                .get(*selected)
-                .map(|(id, _)| id.clone())
-                .unwrap_or_default(),
+            } => option_id(entries, *selected),
             Self::NumberRange { .. } => format_float(self.number_value().unwrap_or_default()),
         }
     }
@@ -160,12 +161,7 @@ impl DialogInput {
             Self::Boolean { selected, .. } => Value::Bool(*selected),
             Self::SingleOption {
                 entries, selected, ..
-            } => Value::String(
-                entries
-                    .get(*selected)
-                    .map(|(id, _)| id.clone())
-                    .unwrap_or_default(),
-            ),
+            } => Value::String(option_id(entries, *selected)),
             Self::NumberRange { .. } => {
                 serde_json::Number::from_f64(f64::from(self.number_value().unwrap_or_default()))
                     .map(Value::Number)
@@ -197,6 +193,13 @@ impl DialogInput {
         let max = start.max(*end);
         Some(value.clamp(min, max))
     }
+}
+
+fn option_id(entries: &[(String, Component)], selected: usize) -> String {
+    entries
+        .get(selected)
+        .map(|(id, _)| id.clone())
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Debug)]
@@ -236,12 +239,6 @@ struct DialogData {
     kind: DialogKind,
 }
 
-#[derive(Clone)]
-struct StyledHitRegion {
-    rect: [f32; 4],
-    style: Arc<ResolvedStyle>,
-}
-
 enum DialogMode {
     Dialog(Box<DialogData>),
     Waiting { started: Instant },
@@ -251,8 +248,6 @@ enum DialogMode {
 pub struct ServerDialogState {
     mode: DialogMode,
     focused_text: Option<usize>,
-    button_regions: Vec<(usize, [f32; 4])>,
-    body_hits: Vec<StyledHitRegion>,
     cancel_action: Option<BoundAction>,
     server_links: Vec<ServerLink>,
     dialog_list_labels: Vec<Component>,
@@ -282,8 +277,6 @@ impl ServerDialogState {
         Ok(Self {
             mode: DialogMode::Dialog(Box::new(dialog)),
             focused_text: None,
-            button_regions: Vec::new(),
-            body_hits: Vec::new(),
             cancel_action,
             server_links: server_links.to_vec(),
             dialog_list_labels,
@@ -358,7 +351,7 @@ impl ServerDialogState {
     pub fn handle_escape(&mut self) -> Option<ServerDialogAction> {
         match &self.mode {
             DialogMode::Waiting { started } => {
-                if started.elapsed().as_secs_f32() >= 5.0 {
+                if started.elapsed().as_secs_f32() >= BUTTON_ACTIVE_AFTER {
                     self.mode = DialogMode::Finished;
                 }
                 None
@@ -399,8 +392,9 @@ impl ServerDialogState {
                 centered: true,
             });
             if elapsed >= 1.0 {
-                let seconds = (5.0 - elapsed).ceil().max(0.0) as u32;
-                let label = if elapsed >= 5.0 {
+                let active = elapsed >= BUTTON_ACTIVE_AFTER;
+                let seconds = (BUTTON_ACTIVE_AFTER - elapsed).ceil().max(0.0) as u32;
+                let label = if active {
                     tr("gui.back", "Back")
                 } else {
                     format!(
@@ -412,19 +406,9 @@ impl ServerDialogState {
                 let h = 20.0 * gs;
                 let x = (screen_w - w) / 2.0;
                 let y = screen_h / 2.0 - h / 2.0;
-                let hovered = common::push_button(
-                    elements,
-                    cursor,
-                    x,
-                    y,
-                    w,
-                    h,
-                    gs,
-                    fs,
-                    &label,
-                    elapsed >= 5.0,
-                );
-                if clicked && hovered && elapsed >= 5.0 {
+                let hovered =
+                    common::push_button(elements, cursor, x, y, w, h, gs, fs, &label, active);
+                if clicked && hovered {
                     self.mode = DialogMode::Finished;
                 }
             }
@@ -434,9 +418,6 @@ impl ServerDialogState {
         let DialogMode::Dialog(dialog) = &mut self.mode else {
             return None;
         };
-        self.button_regions.clear();
-        self.body_hits.clear();
-
         common::push_overlay(elements, screen_w, screen_h, 0.5);
         let fs = common::FONT_SIZE * gs;
         let cx = screen_w / 2.0;
@@ -450,8 +431,8 @@ impl ServerDialogState {
             shadow: true,
         });
 
-        // Vanilla's server-dialog warning affordance is always present. Pomme
-        // keeps it informational here; clicking it does not disconnect.
+        // TODO: clicking vanilla's warning button opens `WarningScreen`
+        // (`DialogScreen.createWarningButton`); Pomme's only shows the tooltip.
         let warning_x = (cx + 105.0 * gs).min(screen_w - 22.0 * gs);
         let warning_rect = [warning_x, 8.0 * gs, 20.0 * gs, 20.0 * gs];
         common::push_button(
@@ -485,9 +466,10 @@ impl ServerDialogState {
         let mut y = content_top + 4.0 * gs;
         let max_content_w = (screen_w / gs - 32.0).clamp(120.0, 420.0);
 
+        let mut body_hits = Vec::new();
         for body in &dialog.bodies {
             y += Self::render_body(
-                &mut self.body_hits,
+                &mut body_hits,
                 elements,
                 body,
                 cx,
@@ -498,7 +480,6 @@ impl ServerDialogState {
                 gs,
                 fs,
                 cursor,
-                text_width_fn,
                 spans_width_fn,
             );
             y += BODY_SPACING * gs;
@@ -541,7 +522,7 @@ impl ServerDialogState {
         } else {
             y.min(content_bottom - button_rows as f32 * (BUTTON_H + GRID_GAP) * gs)
         };
-        let mut clicked_button = None;
+        let mut clicked_action = None;
         for (index, button) in buttons.iter().enumerate() {
             let row = index / columns;
             let col = index % columns;
@@ -558,10 +539,9 @@ impl ServerDialogState {
             }
             let by = grid_y + row as f32 * (BUTTON_H + GRID_GAP) * gs;
             let rect = [x, by, button.width * gs, BUTTON_H * gs];
-            self.button_regions.push((index, rect));
-            let hovered =
-                push_component_button(elements, cursor, rect, gs, fs, &button.label, true);
+            let hovered = push_component_button(elements, cursor, rect, gs, fs, &button.label);
             if hovered {
+                // TODO: vanilla `Tooltip.create` wraps at 170 (`wrapped_tooltip_lines`).
                 if let Some(tooltip) = &button.tooltip {
                     common::push_tooltip_lines(
                         elements,
@@ -573,32 +553,26 @@ impl ServerDialogState {
                     );
                 }
                 if clicked {
-                    clicked_button = Some(index);
+                    clicked_action = Some(button.action.clone());
                 }
             }
         }
 
-        if clicked {
-            if let Some(index) = clicked_button {
-                let action = buttons.get(index).and_then(|button| button.action.clone());
-                return self.finish_action(action);
-            }
-            if let Some(style) = self
-                .body_hits
-                .iter()
-                .find(|hit| common::hit_test(cursor, hit.rect))
-                .map(|hit| hit.style.clone())
-                && let Some(click) = style.click_event.clone()
-            {
-                return self.finish_click(click);
-            }
+        if let Some(action) = clicked_action {
+            return self.finish_action(action);
+        }
+        if clicked
+            && let Some(click) =
+                style_at(&body_hits, cursor).and_then(|style| style.click_event.clone())
+        {
+            return self.finish_click(Some(click));
         }
         None
     }
 
     #[allow(clippy::too_many_arguments)]
     fn render_body(
-        body_hits: &mut Vec<StyledHitRegion>,
+        body_hits: &mut Vec<StyleHitRegion>,
         elements: &mut Vec<MenuElement>,
         body: &DialogBody,
         cx: f32,
@@ -609,7 +583,6 @@ impl ServerDialogState {
         gs: f32,
         fs: f32,
         cursor: (f32, f32),
-        text_width_fn: &dyn Fn(&str, f32) -> f32,
         spans_width_fn: &dyn Fn(&[TextSpan], f32) -> f32,
     ) -> f32 {
         match body {
@@ -678,7 +651,6 @@ impl ServerDialogState {
                         spans_width_fn,
                     ));
                 }
-                let _ = text_width_fn;
                 h
             }
         }
@@ -686,7 +658,7 @@ impl ServerDialogState {
 
     #[allow(clippy::too_many_arguments)]
     fn render_component_body(
-        body_hits: &mut Vec<StyledHitRegion>,
+        body_hits: &mut Vec<StyleHitRegion>,
         elements: &mut Vec<MenuElement>,
         component: &Component,
         width: f32,
@@ -697,12 +669,16 @@ impl ServerDialogState {
         spans_width_fn: &dyn Fn(&[TextSpan], f32) -> f32,
     ) -> f32 {
         let spans = format_component_spans(component, common::WHITE);
-        let lines = wrap_spans_styled(&spans, width * gs, &|line| spans_width_fn(line, fs));
+        let lines = wrap_spans(&spans, width, &|line| {
+            spans_width_fn(line, common::FONT_SIZE)
+        });
         let line_h = 10.0 * gs;
         for (line_index, line) in lines.iter().enumerate() {
-            let line_w = spans_width_fn(line, fs);
-            let x = cx - line_w / 2.0;
+            let x = cx - spans_width_fn(line, fs) / 2.0;
             let ly = y + line_index as f32 * line_h;
+            push_hit_regions(body_hits, line, x, ly, line_h, &|span| {
+                spans_width_fn(std::slice::from_ref(span), fs)
+            });
             elements.push(MenuElement::McText {
                 x,
                 y: ly,
@@ -711,43 +687,20 @@ impl ServerDialogState {
                 centered: false,
                 shadow: true,
             });
-            let mut sx = x;
-            for span in line {
-                let w = spans_width_fn(std::slice::from_ref(span), fs);
-                if let Some(style) = &span.component_style
-                    && style.click_event.is_some()
-                {
-                    body_hits.push(StyledHitRegion {
-                        rect: [sx, ly, w, line_h],
-                        style: style.clone(),
-                    });
-                }
-                sx += w;
-            }
         }
-        lines.len().max(1) as f32 * line_h
-    }
-
-    fn finish_click(&mut self, click: ClickEvent) -> Option<ServerDialogAction> {
-        let after = match &self.mode {
-            DialogMode::Dialog(dialog) => dialog.after_action,
-            DialogMode::Waiting { .. } | DialogMode::Finished => AfterAction::Close,
-        };
-        self.apply_after_action(after);
-        click_to_action(click)
+        lines.len() as f32 * line_h
     }
 
     fn finish_action(&mut self, action: Option<BoundAction>) -> Option<ServerDialogAction> {
         let click = action.and_then(|action| self.bind_action(action));
+        self.finish_click(click)
+    }
+
+    fn finish_click(&mut self, click: Option<ClickEvent>) -> Option<ServerDialogAction> {
         let after = match &self.mode {
             DialogMode::Dialog(dialog) => dialog.after_action,
             DialogMode::Waiting { .. } | DialogMode::Finished => AfterAction::Close,
         };
-        self.apply_after_action(after);
-        click.and_then(click_to_action)
-    }
-
-    fn apply_after_action(&mut self, after: AfterAction) {
         match after {
             AfterAction::None => {}
             AfterAction::Close => self.mode = DialogMode::Finished,
@@ -757,6 +710,7 @@ impl ServerDialogState {
                 };
             }
         }
+        click.and_then(click_to_action)
     }
 
     pub fn is_finished(&self) -> bool {
@@ -811,8 +765,8 @@ fn click_to_action(click: ClickEvent) -> Option<ServerDialogAction> {
             common::set_clipboard(&value);
             None
         }
-        // DialogScreen does not override Screen.insertText and books own
-        // change-page. Those two click actions therefore have no dialog effect.
+        // `DialogScreen` keeps `Screen.insertText`'s no-op, and change_page
+        // is book-only.
         ClickEvent::SuggestCommand(_) | ClickEvent::ChangePage(_) => None,
     }
 }
@@ -829,38 +783,34 @@ fn resolve_dialog_reference(
         .extra
         .get(&key)
         .ok_or_else(|| "server sent no minecraft:dialog registry".to_owned())?;
-    match reference {
-        DialogReference::ProtocolId(id) => registry
+    let by_index = |id: u64| {
+        registry
             .map
             .get_index(id as usize)
             .map(|(_, nbt)| nbt)
             .ok_or_else(|| format!("unknown dialog protocol id {id}"))
-            .and_then(nbt_compound_to_value),
+    };
+    let nbt = match reference {
+        DialogReference::ProtocolId(id) => by_index(id.into())?,
         DialogReference::Value(Value::String(id)) => {
             let ident: azalea_registry::identifier::Identifier = id.as_str().into();
             registry
                 .map
                 .get(&ident)
-                .ok_or_else(|| format!("unknown dialog registry key {id}"))
-                .and_then(nbt_compound_to_value)
+                .ok_or_else(|| format!("unknown dialog registry key {id}"))?
         }
-        DialogReference::Value(Value::Number(id)) => {
-            let id = id
-                .as_u64()
-                .ok_or_else(|| "dialog registry id must be unsigned".to_owned())?;
-            registry
-                .map
-                .get_index(id as usize)
-                .map(|(_, nbt)| nbt)
-                .ok_or_else(|| format!("unknown dialog protocol id {id}"))
-                .and_then(nbt_compound_to_value)
+        DialogReference::Value(Value::Number(id)) => by_index(
+            id.as_u64()
+                .ok_or_else(|| "dialog registry id must be unsigned".to_owned())?,
+        )?,
+        DialogReference::Value(value) => {
+            return Err(format!("invalid dialog holder value {value}"));
         }
-        DialogReference::Value(value @ Value::Object(_)) => Ok(value),
-        DialogReference::Value(value) => Err(format!("invalid dialog holder value {value}")),
-    }
+    };
+    nbt_compound_to_value(nbt)
 }
 
-fn nbt_compound_to_value(nbt: &simdnbt::owned::NbtCompound) -> Result<Value, String> {
+pub(crate) fn nbt_compound_to_value(nbt: &simdnbt::owned::NbtCompound) -> Result<Value, String> {
     serde_json::to_value(simdnbt::owned::NbtTag::Compound(nbt.clone()))
         .map_err(|e| format!("dialog NBT is not serializable: {e}"))
 }
@@ -878,7 +828,7 @@ fn parse_dialog(value: &Value) -> Result<DialogData, String> {
         .transpose()
         .map_err(|e| e.to_string())?;
     let can_close_with_escape = bool_or(map, "can_close_with_escape", true);
-    let _pause = bool_or(map, "pause", true);
+    // TODO: `pause` (`DialogScreen.isPauseScreen`) isn't honoured in singleplayer.
     let after_action = match map
         .get("after_action")
         .and_then(Value::as_str)
@@ -1237,66 +1187,59 @@ fn dialog_buttons(
     server_links: &[ServerLink],
     dialog_list_labels: &[Component],
 ) -> Vec<DialogButton> {
-    match kind {
-        DialogKind::Notice { action } => vec![action.clone()],
+    let static_button = |label: Component, width: f32, click: ClickEvent| DialogButton {
+        label,
+        tooltip: None,
+        width,
+        action: Some(BoundAction::Static(click)),
+    };
+    let (mut buttons, exit) = match kind {
+        DialogKind::Notice { action } => return vec![action.clone()],
         DialogKind::Confirmation { yes, no } => {
-            vec![yes.as_ref().clone(), no.as_ref().clone()]
+            return vec![yes.as_ref().clone(), no.as_ref().clone()];
         }
-        DialogKind::MultiAction { actions, exit, .. } => {
-            let mut result = actions.clone();
-            if let Some(exit) = exit {
-                result.push(exit.clone());
-            }
-            result
-        }
+        DialogKind::MultiAction { actions, exit, .. } => (actions.clone(), exit),
         DialogKind::DialogList {
             dialogs,
             exit,
             button_width,
             ..
-        } => {
-            let mut result = dialogs
+        } => (
+            dialogs
                 .iter()
-                .cloned()
                 .enumerate()
-                .map(|(index, reference)| DialogButton {
-                    label: dialog_list_labels
+                .map(|(index, reference)| {
+                    let label = dialog_list_labels
                         .get(index)
                         .cloned()
-                        .unwrap_or_else(|| Component::text(dialog_reference_label(&reference))),
-                    tooltip: None,
-                    width: *button_width,
-                    action: Some(BoundAction::Static(ClickEvent::ShowDialog(
-                        match reference {
-                            DialogReference::Value(value) => value,
-                            DialogReference::ProtocolId(id) => Value::Number(id.into()),
-                        },
-                    ))),
+                        .unwrap_or_else(|| Component::text(dialog_reference_label(reference)));
+                    let dialog = match reference {
+                        DialogReference::Value(value) => value.clone(),
+                        DialogReference::ProtocolId(id) => Value::Number((*id).into()),
+                    };
+                    static_button(label, *button_width, ClickEvent::ShowDialog(dialog))
                 })
-                .collect::<Vec<_>>();
-            if let Some(exit) = exit {
-                result.push(exit.clone());
-            }
-            result
-        }
+                .collect(),
+            exit,
+        ),
         DialogKind::ServerLinks {
             exit, button_width, ..
-        } => {
-            let mut result = server_links
+        } => (
+            server_links
                 .iter()
-                .map(|link| DialogButton {
-                    label: link.label.clone(),
-                    tooltip: None,
-                    width: *button_width,
-                    action: Some(BoundAction::Static(ClickEvent::OpenUrl(link.url.clone()))),
+                .map(|link| {
+                    static_button(
+                        link.label.clone(),
+                        *button_width,
+                        ClickEvent::OpenUrl(link.url.clone()),
+                    )
                 })
-                .collect::<Vec<_>>();
-            if let Some(exit) = exit {
-                result.push(exit.clone());
-            }
-            result
-        }
-    }
+                .collect(),
+            exit,
+        ),
+    };
+    buttons.extend(exit.clone());
+    buttons
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1314,6 +1257,7 @@ fn render_input(
     mouse_held: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> f32 {
+    let number = input.number_value();
     match input {
         DialogInput::Text {
             label,
@@ -1410,25 +1354,11 @@ fn render_input(
             label,
             label_format,
             width,
-            start,
-            end,
-            initial,
-            step,
             slider,
             dragging,
             ..
         } => {
-            let value = {
-                let raw = *start + (*end - *start) * slider.clamp(0.0, 1.0);
-                if let Some(step) = step.filter(|v| *v > 0.0) {
-                    let initial = initial.unwrap_or((*start + *end) / 2.0);
-                    (initial + ((raw - initial) / step).round() * step)
-                        .clamp(start.min(*end), start.max(*end))
-                } else {
-                    raw
-                }
-            };
-            let value = format_float(value);
+            let value = format_float(number.unwrap_or_default());
             let display = crate::lang::translate(label_format)
                 .map(|fmt| {
                     fmt.replace("%s", &label.plain_text())
@@ -1535,103 +1465,30 @@ fn push_component_button(
     gs: f32,
     fs: f32,
     label: &Component,
-    enabled: bool,
 ) -> bool {
-    let hovered = enabled && common::hit_test(cursor, rect);
+    let hovered = common::hit_test(cursor, rect);
     elements.push(MenuElement::NineSlice {
         x: rect[0],
         y: rect[1],
         w: rect[2],
         h: rect[3],
-        sprite: if !enabled {
-            SpriteId::ButtonDisabled
-        } else if hovered {
+        sprite: if hovered {
             SpriteId::ButtonHover
         } else {
             SpriteId::ButtonNormal
         },
-        border: if enabled { 3.0 * gs } else { gs },
+        border: 3.0 * gs,
         tint: common::WHITE,
     });
     elements.push(MenuElement::McText {
         x: rect[0] + rect[2] / 2.0,
         y: rect[1] + (rect[3] - fs) / 2.0,
-        spans: format_component_spans(
-            label,
-            if enabled {
-                common::WHITE
-            } else {
-                common::rgb(0xa0a0a0)
-            },
-        ),
+        spans: format_component_spans(label, common::WHITE),
         scale: fs,
         centered: true,
         shadow: true,
     });
     hovered
-}
-
-fn component_tooltip_lines(component: &Component) -> Vec<TooltipLine> {
-    let spans = format_component_spans(component, common::WHITE);
-    let mut lines = vec![TooltipLine {
-        spans: Vec::new(),
-        right_align: false,
-    }];
-    for span in spans {
-        let mut first = true;
-        for text in span.text.split('\n') {
-            if !first {
-                lines.push(TooltipLine {
-                    spans: Vec::new(),
-                    right_align: false,
-                });
-            }
-            first = false;
-            if !text.is_empty() {
-                let mut piece = span.clone();
-                piece.text = text.to_owned();
-                lines.last_mut().unwrap().spans.push(piece);
-            }
-        }
-    }
-    lines
-}
-
-fn wrap_spans_styled(
-    spans: &[TextSpan],
-    max_w: f32,
-    width: &dyn Fn(&[TextSpan]) -> f32,
-) -> Vec<Vec<TextSpan>> {
-    // Dialog text uses the same greedy word boundaries as Vanilla Font.split;
-    // keep styles attached while measuring the whole candidate line.
-    let mut lines: Vec<Vec<TextSpan>> = Vec::new();
-    let mut current: Vec<TextSpan> = Vec::new();
-    for span in spans {
-        for (word_index, word) in span.text.split(' ').enumerate() {
-            let mut candidate = current.clone();
-            if word_index > 0 || !candidate.is_empty() {
-                let mut space = span.clone();
-                space.text = " ".to_owned();
-                candidate.push(space);
-            }
-            let mut word_span = span.clone();
-            word_span.text = word.to_owned();
-            candidate.push(word_span.clone());
-            if !current.is_empty() && width(&candidate) > max_w {
-                lines.push(std::mem::take(&mut current));
-                current.push(word_span);
-            } else {
-                current = candidate;
-            }
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(Vec::new());
-    }
-    lines
 }
 
 fn instantiate_template(template: &str, values: HashMap<String, String>) -> String {

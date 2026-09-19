@@ -468,21 +468,12 @@ impl ApplicationHandler for App {
                                                 .server_dialog
                                                 .as_mut()
                                                 .and_then(|dialog| dialog.handle_escape());
-                                            let finished = game
-                                                .server_dialog
-                                                .as_ref()
-                                                .is_some_and(|dialog| dialog.is_finished());
-                                            if finished {
-                                                game.server_dialog = None;
-                                            }
-                                            if let Some(action) = action {
-                                                crate::app::phases::in_game::handle_server_dialog_action(
-                                                    action,
-                                                    &mut self.core,
-                                                    &connection,
-                                                    &mut game,
-                                                );
-                                            }
+                                            crate::app::phases::in_game::settle_server_dialog(
+                                                action,
+                                                &mut self.core,
+                                                &connection,
+                                                &mut game,
+                                            );
                                             self.core
                                                 .input
                                                 .clear_action(crate::app::input::Action::OpenMenu);
