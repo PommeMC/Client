@@ -454,7 +454,6 @@ impl Renderer {
             gui_item_atlas.atlas_px(),
             &ctx.allocator,
             &atlas,
-            jar_assets_dir,
         );
 
         warm_item_meshes(
@@ -1570,7 +1569,7 @@ impl Renderer {
         struct BakeJob {
             slot: pipelines::gui_item_atlas::Slot,
             name: String,
-            is_block: bool,
+            display: crate::world::block::model::DisplayTransform,
             needs_clear: bool,
         }
         let mut bake_list: Vec<BakeJob> = Vec::new();
@@ -1582,7 +1581,7 @@ impl Renderer {
                     bake_list.push(BakeJob {
                         slot,
                         name: name.clone(),
-                        is_block: self.registry.get_item_model(name).is_some(),
+                        display: self.registry.get_item_gui_transform(name),
                         needs_clear: matches!(state, pipelines::gui_item_atlas::SlotState::Stale),
                     });
                 }
@@ -1604,7 +1603,7 @@ impl Renderer {
                     sy,
                     self.gui_item_atlas.slot_px(),
                     &job.name,
-                    job.is_block,
+                    job.display,
                 );
             }
             self.gui_item_atlas.end_bake_pass(cmd);
