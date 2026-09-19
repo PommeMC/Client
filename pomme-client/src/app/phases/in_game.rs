@@ -31,7 +31,8 @@ use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::entity_model::triangle_wave;
 use crate::renderer::pipelines::block_entity;
 use crate::renderer::pipelines::entity_renderer::{
-    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, dye_color_tint, jeb_sheep_tint, wool_color_tint,
+    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, dye_color_tint, jeb_sheep_tint,
+    standing_eye_height, wool_color_tint,
 };
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
@@ -41,6 +42,7 @@ use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
 use crate::world::block::model::CardinalLightType;
+use crate::world::block::{bed_direction, sleeping_position};
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
@@ -160,6 +162,8 @@ pub struct GameState {
     /// Server registries, for hashing predicted container clicks.
     pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
     pub chat: ChatState,
+    /// UI actions that request vanilla STOP_SLEEPING on the next update pass.
+    pub stop_sleeping_requested: bool,
     pub command_tree: Option<Arc<crate::net::commands::CommandTree>>,
     pub tab_list: TabList,
     /// Locator bar waypoints tracked by the server.
@@ -383,6 +387,7 @@ impl GameState {
             inv_last_click: None,
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
             chat: ChatState::new(),
+            stop_sleeping_requested: false,
             command_tree: None,
             tab_list: TabList::new(),
             waypoints: crate::world::waypoints::WaypointMap::default(),
@@ -561,6 +566,17 @@ impl GameState {
             Some(c) if c.screen == ContainerScreen::Anvil
                 && c.slots.first().is_some_and(|s| s.is_present())
         )
+    }
+
+    /// Vanilla reconfiguration destroys the current LocalPlayer and screen.
+    /// Pomme keeps GameState alive, so clear bed state that must not cross
+    /// levels.
+    pub(crate) fn reset_sleep_for_level_teardown(&mut self) {
+        self.player.reset_sleep_for_level_teardown();
+        self.stop_sleeping_requested = false;
+        if self.chat.is_in_bed() {
+            self.chat.close();
+        }
     }
 
     /// Closes the death screen and its confirm, and re-arms the respawn send.
@@ -1465,6 +1481,19 @@ fn lightmap_brightness(chunks: &ChunkStore, dimension: &str, x: i32, y: i32, z: 
     curved + (1.0 - curved) * ambient
 }
 
+fn sleeping_head_pitch_deg(is_sleeping: bool, head_x_rot_deg: f32) -> f32 {
+    if is_sleeping { 0.0 } else { head_x_rot_deg }
+}
+
+fn should_render_local_player(
+    benchmark_running: bool,
+    first_person: bool,
+    sleeping: bool,
+    death_animation_finished: bool,
+) -> bool {
+    !benchmark_running && (!first_person || sleeping) && !death_animation_finished
+}
+
 fn eye_lightmap_brightness(game: &GameState) -> f32 {
     let eye = game.player.eye_pos();
     lightmap_brightness(
@@ -1683,13 +1712,26 @@ pub fn update_game(
     if core.input.key_just_pressed(winit::keyboard::KeyCode::F1) && game.input_live() {
         game.hide_gui = !game.hide_gui;
     }
-    // Vanilla leaves bed via InBedChatScreen's ESC / "Leave bed" button; no
-    // bed screen yet, so the jump key wakes. TODO: InBedChatScreen.
-    if game.input_live()
-        && game.player.is_sleeping()
-        && core.input.action_just_pressed(input::Action::Jump)
-    {
+    let stop_sleeping_sent_this_frame = std::mem::take(&mut game.stop_sleeping_requested);
+    if stop_sleeping_sent_this_frame {
         core.send_stop_sleeping(connection);
+    }
+
+    // Vanilla Gui.tick keeps InBedChatScreen coupled to the authoritative
+    // sleeping state rather than a particular packet ordering.
+    if !game.player.is_sleeping() && game.chat.on_player_woke_up() {
+        core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+
+    // Gui.tick opens InBedChatScreen whenever a sleeping player has no other
+    // screen. It is a ChatScreen variant, so normal chat input remains live.
+    if game.player.is_sleeping()
+        && !stop_sleeping_sent_this_frame
+        && !game.options_from_game
+        && game.input_live()
+    {
+        game.chat.open_in_bed();
+        core.apply_cursor_grab(&gfx.window, Some(game));
     }
     // TODO: remaining vanilla keybinds with no backing feature yet:
     // L advancements, P social interactions, O friends overlay (in-game),
@@ -1795,11 +1837,37 @@ pub fn update_game(
     let mut pause_action = PauseAction::None;
     let mut death_action = DeathAction::None;
 
-    gfx.renderer.sync_camera_pos(
+    let sleeping_direction = game
+        .player
+        .sleeping_pos
+        .and_then(|pos| bed_direction(game.chunk_store.get_block_state(pos.x, pos.y, pos.z)));
+    let is_sleeping = game.player.is_sleeping();
+    let camera_pivot = if let Some(pos) = game.player.sleeping_pos {
+        // Camera.tick smooths eye height toward the sleeping pose (0.2), then
+        // first-person Camera.alignWithEntity always adds another 0.15.
+        let eye_height = game
+            .player
+            .prev_eye_height
+            .lerp(game.player.eye_height, partial_tick) as f64;
+        let first_person_lift = if gfx.renderer.is_first_person() {
+            0.15
+        } else {
+            0.0
+        };
+        crate::entity::components::Position::from(
+            sleeping_position(pos) + glam::dvec3(0.0, eye_height + first_person_lift, 0.0),
+        )
+    } else {
         game.player
             .prev_eye_pos()
-            .lerp(game.player.eye_pos(), partial_tick as f64),
-    );
+            .lerp(game.player.eye_pos(), partial_tick as f64)
+    };
+    gfx.renderer.sync_camera_pos(camera_pivot);
+    gfx.renderer.set_sleeping_camera_look(is_sleeping.then(|| {
+        sleeping_direction
+            .map(crate::world::block::BedDirection::camera_yaw_deg)
+            .unwrap_or(0.0)
+    }));
     // Per-frame FOV interpolation; set before the frustum/view-projection reads.
     gfx.renderer.set_render_partial_tick(partial_tick);
     gfx.renderer.set_death_time(if game.dead {
@@ -1821,12 +1889,8 @@ pub fn update_game(
     let bob_amount = game.player.prev_bob.lerp(game.player.bob, partial_tick);
     gfx.renderer
         .set_view_bob(bob_walk, bob_amount, core.menu.view_bobbing);
-    gfx.renderer.update_third_person_distance(
-        game.player
-            .prev_eye_pos()
-            .lerp(game.player.eye_pos(), partial_tick as f64),
-        &game.chunk_store,
-    );
+    gfx.renderer
+        .update_third_person_distance(camera_pivot, &game.chunk_store);
     // Esc cancels a running benchmark: restore the render distance it changed.
     if std::mem::take(&mut game.chunk_load_abort)
         && let Some(bench) = game.chunk_load_bench.take()
@@ -2699,6 +2763,23 @@ pub fn update_game(
             &|t, s| gfx.renderer.menu_text_width(t, s),
             &|spans, s| gfx.renderer.menu_spans_width(spans, s),
         );
+        if game.chat.is_in_bed() {
+            let hovered = common::push_button(
+                &mut elements,
+                core.input.cursor_pos(),
+                sw / 2.0 - 100.0 * gs,
+                sh - 40.0 * gs,
+                200.0 * gs,
+                20.0 * gs,
+                gs,
+                common::FONT_SIZE * gs,
+                crate::lang::translate("multiplayer.stopSleeping").unwrap_or("Leave Bed"),
+                true,
+            );
+            if hovered && core.input.left_just_pressed() {
+                game.stop_sleeping_requested = true;
+            }
+        }
     }
 
     // Subtitles draw above chat and the tab list; toasts stay on top
@@ -2765,15 +2846,22 @@ pub fn update_game(
                         e.head_y_rot_deg,
                         partial_tick,
                     ),
-                    head_x_rot_deg: e
-                        .prev_look_dir
-                        .x_rot_deg()
-                        .lerp(e.look_dir.x_rot_deg(), partial_tick),
+                    head_x_rot_deg: sleeping_head_pitch_deg(
+                        e.sleeping_pos.is_some(),
+                        e.prev_look_dir
+                            .x_rot_deg()
+                            .lerp(e.look_dir.x_rot_deg(), partial_tick),
+                    ),
                     body_y_rot_deg: lerp_angle(
                         e.prev_body_y_rot_deg,
                         e.body_y_rot_deg,
                         partial_tick,
                     ),
+                    is_sleeping: e.sleeping_pos.is_some(),
+                    sleeping_direction: e.sleeping_pos.and_then(|pos| {
+                        bed_direction(game.chunk_store.get_block_state(pos.x, pos.y, pos.z))
+                    }),
+                    sleeping_eye_height: standing_eye_height(e.entity_type, e.is_baby),
                     is_baby: e.is_baby,
                     is_crouching: e.is_crouching,
                     walk_anim_pos: e.walk_pos(partial_tick),
@@ -2827,14 +2915,20 @@ pub fn update_game(
             .collect()
     };
 
-    if !benchmark_running
-        && !gfx.renderer.is_first_person()
-        && !game.player.death_animation_finished()
-    {
-        let interp_pos = game
-            .player
-            .prev_position
-            .lerp(game.player.position, partial_tick as f64);
+    if should_render_local_player(
+        benchmark_running,
+        gfx.renderer.is_first_person(),
+        game.player.is_sleeping(),
+        game.player.death_animation_finished(),
+    ) {
+        let interp_pos = game.player.sleeping_pos.map_or_else(
+            || {
+                game.player
+                    .prev_position
+                    .lerp(game.player.position, partial_tick as f64)
+            },
+            |pos| sleeping_position(pos).into(),
+        );
 
         let interp_y_rot_deg = lerp_angle(
             game.player.prev_look_dir.y_rot_deg(),
@@ -2845,8 +2939,14 @@ pub fn update_game(
         entity_renders.push(EntityRenderInfo {
             position: interp_pos,
             head_y_rot_deg: interp_y_rot_deg,
-            head_x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
+            head_x_rot_deg: sleeping_head_pitch_deg(
+                game.player.is_sleeping(),
+                gfx.renderer.camera_look_dir().x_rot_deg(),
+            ),
             body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
+            is_sleeping: game.player.is_sleeping(),
+            sleeping_direction,
+            sleeping_eye_height: 1.62,
             is_crouching: game.player.crouching && (!game.dead || game.player.death_time > 0),
             walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - partial_tick),
             walk_anim_speed: (game.player_prev_walk_speed
@@ -3000,6 +3100,7 @@ pub fn update_game(
         swing_progress,
         use_anim,
         held_item,
+        !game.player.is_sleeping(),
         destroy_info,
         game.show_chunk_borders,
         sky,
@@ -3244,13 +3345,40 @@ fn transform_item_bounds(
 
 #[cfg(test)]
 mod dropped_item_tests {
-    use super::{item_stack_seed, transform_item_bounds};
+    use azalea_registry::builtin::EntityKind;
+
+    use super::{
+        item_stack_seed, should_render_local_player, sleeping_head_pitch_deg, standing_eye_height,
+        transform_item_bounds,
+    };
 
     #[test]
     fn dropped_item_scatter_seed_includes_damage() {
         assert_eq!(item_stack_seed(42, 0), 42);
         assert_eq!(item_stack_seed(42, 7), 49);
         assert_eq!(item_stack_seed(u32::MAX, 2), 1);
+    }
+
+    #[test]
+    fn sleeping_head_pitch_is_zero_like_vanilla_living_entity_tick() {
+        assert_eq!(sleeping_head_pitch_deg(true, -43.0), 0.0);
+        assert_eq!(sleeping_head_pitch_deg(true, 61.5), 0.0);
+        assert_eq!(sleeping_head_pitch_deg(false, -17.25), -17.25);
+    }
+
+    #[test]
+    fn first_person_sleeping_player_remains_rendered_like_vanilla() {
+        assert!(!should_render_local_player(false, true, false, false));
+        assert!(should_render_local_player(false, true, true, false));
+        assert!(should_render_local_player(false, false, false, false));
+        assert!(!should_render_local_player(true, false, true, false));
+        assert!(!should_render_local_player(false, false, true, true));
+    }
+
+    #[test]
+    fn villager_sleeping_eye_height_uses_explicit_baby_dimensions() {
+        assert_eq!(standing_eye_height(EntityKind::Villager, false), 1.62);
+        assert_eq!(standing_eye_height(EntityKind::Villager, true), 0.63);
     }
 
     #[test]

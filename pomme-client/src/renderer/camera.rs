@@ -107,6 +107,10 @@ impl CloudMode {
 pub struct Camera {
     pub position: Position,
     pub look_dir: LookDirection,
+    /// First-person bed-facing sleeping orientation. Bed-facing yaw is
+    /// render-only; Vanilla's zero sleeping pitch is also applied to
+    /// `look_dir`.
+    sleeping_look_dir: Option<LookDirection>,
     pub mode: CameraMode,
     pub third_person_dist: f32,
     /// When set, render straight down from this many blocks above the pivot,
@@ -137,6 +141,7 @@ impl Camera {
         Self {
             position: Position::default(),
             look_dir: LookDirection::default(),
+            sleeping_look_dir: None,
             mode: CameraMode::FirstPerson,
             third_person_dist: THIRD_PERSON_DISTANCE,
             top_down: None,
@@ -261,6 +266,23 @@ impl Camera {
         self.position = position
     }
 
+    pub fn set_sleeping_look(&mut self, yaw_deg: Option<f32>) {
+        self.sleeping_look_dir = yaw_deg.map(|yaw| {
+            // LivingEntity.tick sets xRot=0 while sleeping. Keep the entity's
+            // yaw free for third person, but do not preserve stale pitch.
+            self.look_dir = LookDirection::new(self.look_dir.y_rot_deg(), 0.0);
+            LookDirection::new(yaw, 0.0)
+        });
+    }
+
+    fn render_look_dir(&self) -> LookDirection {
+        if self.mode == CameraMode::FirstPerson {
+            self.sleeping_look_dir.unwrap_or(self.look_dir)
+        } else {
+            self.look_dir
+        }
+    }
+
     /// Render-space anchor: the camera's block position (vanilla
     /// `CameraBlockPos`). World positions are rebased against it in f64
     /// before narrowing to f32, keeping full precision near the camera even
@@ -361,7 +383,7 @@ impl Camera {
         if let Some(height) = self.top_down {
             return Vec3::new(0.0, height, 0.0);
         }
-        let fwd = self.look_dir.as_vec();
+        let fwd = self.render_look_dir().as_vec();
         match self.mode {
             CameraMode::FirstPerson => Vec3::ZERO,
             CameraMode::ThirdPersonBack => -fwd * self.third_person_dist,
@@ -378,8 +400,9 @@ impl Camera {
             // Looking straight down with north up.
             return (Vec3::X, Vec3::NEG_Z);
         }
-        let (sin_yaw, cos_yaw) = self.look_dir.y_rot_rad().sin_cos();
-        let (sin_pitch, cos_pitch) = self.look_dir.x_rot_rad().sin_cos();
+        let look_dir = self.render_look_dir();
+        let (sin_yaw, cos_yaw) = look_dir.y_rot_rad().sin_cos();
+        let (sin_pitch, cos_pitch) = look_dir.x_rot_rad().sin_cos();
         let right = Vec3::new(-cos_yaw, 0.0, -sin_yaw);
         let up = Vec3::new(-sin_yaw * sin_pitch, cos_pitch, cos_yaw * sin_pitch);
         if self.mode == CameraMode::ThirdPersonFront {
@@ -397,7 +420,7 @@ impl Camera {
             // Looking straight down Y; Y can't be the up hint, so use -Z (north up).
             return (Vec3::NEG_Y, Vec3::NEG_Z);
         }
-        let look_dir = self.look_dir.as_vec();
+        let look_dir = self.render_look_dir().as_vec();
         let forward = if self.mode == CameraMode::ThirdPersonFront {
             -look_dir
         } else {
@@ -463,8 +486,9 @@ impl Camera {
     /// Camera yaw/pitch in degrees as vanilla `Camera.setRotation` sees them:
     /// the mirrored third-person view turns around (yaw + 180, pitch negated).
     pub fn effective_look_deg(&self) -> (f32, f32) {
-        let yaw = self.look_dir.y_rot_deg();
-        let pitch = self.look_dir.x_rot_deg();
+        let look_dir = self.render_look_dir();
+        let yaw = look_dir.y_rot_deg();
+        let pitch = look_dir.x_rot_deg();
         if self.mode == CameraMode::ThirdPersonFront {
             (yaw + 180.0, -pitch)
         } else {
@@ -720,6 +744,21 @@ mod tests {
 
     /// The midpoint is the multiplier pomme hardcoded before the slider
     /// existed.
+    #[test]
+    fn sleeping_bed_yaw_is_render_only_but_pitch_is_authoritative() {
+        let mut camera = Camera::new(16.0 / 9.0);
+        camera.look_dir = LookDirection::new(37.0, -12.0);
+        camera.set_sleeping_look(Some(90.0));
+        assert_eq!(camera.look_dir.y_rot_deg(), 37.0);
+        assert_eq!(camera.look_dir.x_rot_deg(), 0.0);
+        assert_eq!(camera.effective_look_deg(), (90.0, 0.0));
+        camera.mode = CameraMode::ThirdPersonBack;
+        assert_eq!(camera.effective_look_deg(), (37.0, 0.0));
+        camera.mode = CameraMode::FirstPerson;
+        camera.set_sleeping_look(None);
+        assert_eq!(camera.effective_look_deg(), (37.0, 0.0));
+    }
+
     #[test]
     fn mouse_sensitivity_curve_matches_vanilla() {
         for (sensitivity, expected) in [(0.0, 0.0096), (0.5, 0.15), (1.0, 0.6144)] {

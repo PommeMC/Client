@@ -325,6 +325,9 @@ impl InputState {
                     }
 
                     if game.chat.is_open() {
+                        if game.chat.is_in_bed() {
+                            game.stop_sleeping_requested = true;
+                        }
                         game.chat.close();
                         should_apply_cursor_grab = true;
                     }

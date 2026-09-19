@@ -52,6 +52,9 @@ pub struct ChatState {
     messages: VecDeque<ChatLine>,
     input: TextFieldState,
     open: bool,
+    /// Vanilla `InBedChatScreen` mode. Enter submits without closing, and
+    /// waking either closes the screen or preserves non-empty typed input.
+    in_bed: bool,
     /// Sent messages for Up/Down recall (vanilla `recentChat`): consecutive
     /// duplicates collapse, capped at 100.
     sent_history: VecDeque<String>,
@@ -89,6 +92,7 @@ impl ChatState {
             messages: VecDeque::new(),
             input: TextFieldState::new(MAX_MESSAGE_LEN),
             open: false,
+            in_bed: false,
             sent_history: VecDeque::new(),
             history_pos: 0,
             history_buffer: String::new(),
@@ -130,8 +134,13 @@ impl ChatState {
         self.open
     }
 
+    pub fn is_in_bed(&self) -> bool {
+        self.open && self.in_bed
+    }
+
     pub fn open(&mut self) {
         self.open = true;
+        self.in_bed = false;
         self.input.set_value("", f32::MAX, &|_| 0.0);
         self.input.set_focused(true);
         self.clear_suggestions();
@@ -141,6 +150,7 @@ impl ChatState {
 
     pub fn open_with_slash(&mut self) {
         self.open = true;
+        self.in_bed = false;
         self.input.set_value("/", f32::MAX, &|_| 0.0);
         self.input.set_focused(true);
         self.clear_suggestions();
@@ -148,8 +158,39 @@ impl ChatState {
         self.history_buffer.clear();
     }
 
+    pub fn open_in_bed(&mut self) {
+        self.open();
+        self.in_bed = true;
+    }
+
+    /// Vanilla `InBedChatScreen.onPlayerWokeUp`. Returns true when the screen
+    /// closes and the mouse should be recaptured.
+    pub fn on_player_woke_up(&mut self) -> bool {
+        if !self.is_in_bed() {
+            return false;
+        }
+        if self.input.value().is_empty() {
+            self.close();
+            true
+        } else {
+            // Vanilla constructs a fresh `ChatScreen(text, false)`: retain only
+            // the text, with fresh editor/history/suggestion screen state.
+            let text = self.input.value().to_string();
+            self.in_bed = false;
+            self.input.set_value(&text, f32::MAX, &|_| 0.0);
+            self.input.set_focused(true);
+            self.clear_suggestions();
+            self.history_pos = self.sent_history.len();
+            self.history_buffer.clear();
+            self.scroll_pos = 0;
+            self.allow_suggestions = false;
+            false
+        }
+    }
+
     pub fn close(&mut self) {
         self.open = false;
+        self.in_bed = false;
         self.input.set_focused(false);
         self.clear_suggestions();
         // Vanilla resets the chat scroll when the screen closes.
@@ -353,7 +394,13 @@ impl ChatState {
                 Some(normalized)
             };
             self.input.set_value("", inner_w, width_fn);
-            self.close();
+            if self.in_bed {
+                self.clear_suggestions();
+                self.history_pos = self.sent_history.len();
+                self.history_buffer.clear();
+            } else {
+                self.close();
+            }
             return msg;
         }
 
@@ -717,6 +764,49 @@ mod tests {
             .iter()
             .map(|s| s.text.chars().count() as f32 * if s.bold { 20.0 } else { 10.0 })
             .sum()
+    }
+
+    #[test]
+    fn in_bed_submit_stays_open_and_wake_preserves_nonempty_input() {
+        let mut chat = ChatState::new();
+        chat.open_in_bed();
+        set_input(&mut chat, "hello");
+        let msg = chat.handle_key_input(
+            &[],
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            200.0,
+            &|_| 0.0,
+            None,
+        );
+        assert_eq!(msg.as_deref(), Some("hello"));
+        assert!(chat.is_in_bed());
+        assert!(chat.input.value().is_empty());
+
+        set_input(&mut chat, "draft");
+        chat.input.move_cursor_to_start(false, 200.0, &|_| 0.0);
+        chat.history_buffer = "stale".into();
+        chat.scroll_pos = 3;
+        assert!(!chat.on_player_woke_up());
+        assert!(chat.is_open());
+        assert!(!chat.is_in_bed());
+        assert_eq!(chat.input.value(), "draft");
+        assert!(
+            chat.input.cursor_at_end(),
+            "fresh ChatScreen moves the cursor to the end"
+        );
+        assert!(chat.history_buffer.is_empty());
+        assert_eq!(chat.scroll_pos, 0);
+        assert!(!chat.allow_suggestions);
+
+        chat.open_in_bed();
+        assert!(chat.on_player_woke_up());
+        assert!(!chat.is_open());
     }
 
     #[test]

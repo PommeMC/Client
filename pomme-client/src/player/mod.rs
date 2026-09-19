@@ -19,6 +19,7 @@ pub const STANDING_HEIGHT: f64 = 1.8_f32 as f64;
 pub const CROUCH_HEIGHT: f64 = 1.5_f32 as f64;
 pub const STANDING_EYE_HEIGHT: f32 = 1.62;
 pub const CROUCH_EYE_HEIGHT: f32 = 1.27;
+const SLEEPING_EYE_HEIGHT: f32 = 0.2;
 // Entity.checkInsideBlocks passes the float literal through AABB's double API.
 const INSIDE_BLOCK_MARGIN: f64 = 1.0e-5_f32 as f64;
 const DROWN_DAMAGE_THRESHOLD: i32 = -20;
@@ -311,7 +312,9 @@ impl LocalPlayer {
     }
 
     pub fn target_eye_height(&self) -> f32 {
-        if self.crouching {
+        if self.is_sleeping() {
+            SLEEPING_EYE_HEIGHT
+        } else if self.crouching {
             CROUCH_EYE_HEIGHT
         } else {
             STANDING_EYE_HEIGHT
@@ -456,6 +459,33 @@ impl LocalPlayer {
     /// Vanilla LivingEntity.isSleeping: getSleepingPos().isPresent().
     pub fn is_sleeping(&self) -> bool {
         self.sleeping_pos.is_some()
+    }
+
+    /// Apply LivingEntity SLEEPING_POS metadata. Vanilla `startSleepInBed`
+    /// resets `sleepCounter` exactly when a new sleep begins; without this,
+    /// re-entering a bed during the 100..110 wake fade starts nearly black.
+    pub fn set_sleeping_pos(&mut self, pos: Option<azalea_core::position::BlockPos>) {
+        let was_sleeping = self.is_sleeping();
+        self.sleeping_pos = pos;
+        if let Some(pos) = pos {
+            // Vanilla LivingEntity.onSyncedDataUpdated(SLEEPING_POS) calls
+            // setPosToBed on the client. `setPos` changes the current position
+            // but deliberately leaves the previous-tick interpolation endpoint.
+            self.position = crate::world::block::sleeping_position(pos).into();
+        }
+        if !was_sleeping && self.is_sleeping() {
+            self.sleep_counter = 0;
+        }
+    }
+
+    /// Reconfiguration destroys Vanilla's LocalPlayer. Pomme keeps the object,
+    /// so clear sleep-only state that must not survive into the next play
+    /// level.
+    pub fn reset_sleep_for_level_teardown(&mut self) {
+        self.sleeping_pos = None;
+        self.sleep_counter = 0;
+        self.eye_height = STANDING_EYE_HEIGHT;
+        self.prev_eye_height = STANDING_EYE_HEIGHT;
     }
 
     /// Vanilla Player.tick sleep-counter branch: ramps to 100 while sleeping,
@@ -676,6 +706,77 @@ mod tests {
             (player.bob - 0.06).abs() < 1e-6,
             "vanilla dead-player bob decays 40% toward zero per tick"
         );
+    }
+
+    #[test]
+    fn starting_sleep_resets_fade_counter_after_wake() {
+        let mut player = LocalPlayer::new();
+        let bed = azalea_core::position::BlockPos::new(1, 64, 1);
+
+        player.position = Position::new(8.0, 70.0, -3.0);
+        player.prev_position = Position::new(7.0, 70.0, -3.0);
+        player.set_sleeping_pos(Some(bed));
+        assert_eq!(player.sleep_counter, 0);
+        assert_eq!(player.position, Position::new(1.5, 64.6875, 1.5));
+        assert_eq!(
+            player.prev_position,
+            Position::new(7.0, 70.0, -3.0),
+            "vanilla setPosToBed updates current position without rewriting old position"
+        );
+        for _ in 0..40 {
+            player.tick_sleep();
+        }
+        assert_eq!(player.sleep_counter, 40);
+
+        // Repeated synced data while already asleep must not restart the fade.
+        player.set_sleeping_pos(Some(bed));
+        assert_eq!(player.sleep_counter, 40);
+
+        // A changed SLEEPING_POS still has Vanilla's synced-data repositioning
+        // semantics even without an intervening wake.
+        let other_bed = azalea_core::position::BlockPos::new(-4, 72, 9);
+        player.set_sleeping_pos(Some(other_bed));
+        assert_eq!(player.sleep_counter, 40);
+        assert_eq!(player.position, Position::new(-3.5, 72.6875, 9.5));
+
+        player.wake_up();
+        player.tick_sleep();
+        assert_eq!(player.sleep_counter, 101);
+
+        // Vanilla startSleepInBed begins a fresh fade even though the old wake
+        // fade has not yet reached 110.
+        player.set_sleeping_pos(Some(bed));
+        assert_eq!(player.sleep_counter, 0);
+        player.tick_sleep();
+        assert_eq!(player.sleep_counter, 1);
+    }
+
+    #[test]
+    fn sleeping_eye_height_uses_vanilla_camera_smoothing_target() {
+        let mut player = LocalPlayer::new();
+        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(0, 64, 0));
+        player.tick_eye_height();
+        assert_eq!(player.prev_eye_height, STANDING_EYE_HEIGHT);
+        assert!((player.eye_height - 0.91).abs() < 1e-6);
+
+        player.sleeping_pos = None;
+        player.tick_eye_height();
+        assert!((player.prev_eye_height - 0.91).abs() < 1e-6);
+        assert!((player.eye_height - 1.265).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reconfiguration_sleep_reset_restores_fresh_player_eye_state() {
+        let mut player = LocalPlayer::new();
+        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(1, 64, 1));
+        player.sleep_counter = 87;
+        player.eye_height = 0.3;
+        player.prev_eye_height = 0.4;
+        player.reset_sleep_for_level_teardown();
+        assert!(player.sleeping_pos.is_none());
+        assert_eq!(player.sleep_counter, 0);
+        assert_eq!(player.eye_height, STANDING_EYE_HEIGHT);
+        assert_eq!(player.prev_eye_height, STANDING_EYE_HEIGHT);
     }
 
     #[test]

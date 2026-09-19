@@ -1574,13 +1574,14 @@ impl AppCore {
                 NetworkEvent::EntityPose { id, is_crouching } => {
                     game.entity_store.set_crouching(id, is_crouching);
                 }
-                // TODO: remote players' sleeping pose rendering.
                 NetworkEvent::EntitySleepingPos { id, pos } => {
+                    game.entity_store.set_sleeping_pos(id, pos);
                     if id == game.player.entity_id {
-                        game.player.sleeping_pos = pos;
+                        game.player.set_sleeping_pos(pos);
                     }
                 }
                 NetworkEvent::EntityWakeUp { id } => {
+                    game.entity_store.set_sleeping_pos(id, None);
                     if id == game.player.entity_id {
                         game.player.wake_up();
                     }
@@ -1793,6 +1794,7 @@ impl AppCore {
                     game.silent_entities.clear();
                     game.action_bar = None;
                     game.waypoints = crate::world::waypoints::WaypointMap::default();
+                    game.reset_sleep_for_level_teardown();
                     self.clear_server_ui(game, renderer);
                 }
                 NetworkEvent::Disconnected { reason } => {
@@ -2172,7 +2174,14 @@ impl AppCore {
             game.player.jump_riding_scale = 0.0;
         }
 
-        game.player.look_dir = renderer.camera_look_dir();
+        let camera_look = renderer.camera_look_dir();
+        game.player.look_dir = if game.player.is_sleeping() {
+            // LivingEntity.tick forces xRot to 0 while sleeping. Bed-facing yaw
+            // remains a first-person camera concern; the entity keeps its yaw.
+            LookDirection::new(camera_look.y_rot_deg(), 0.0)
+        } else {
+            camera_look
+        };
 
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);

@@ -68,7 +68,7 @@ pub fn tick(
     use_speed_multiplier: f32,
     slow_due_to_using_item: bool,
 ) {
-    let jump_held = input.performing_action(input::Action::Jump);
+    let raw_jump_held = input.performing_action(input::Action::Jump);
 
     // Vanilla `LivingEntity.aiStep`.
     if player.no_jump_delay > 0 {
@@ -81,7 +81,7 @@ pub fn tick(
 
     // Vanilla `LocalPlayer.modifyInput` keeps the entire input pipeline in
     // float: damping, item-use slowdown, sneaking slowdown, then square remap.
-    let (forward, strafe) = movement_input(input, player.crouching, use_speed_multiplier);
+    let (mut forward, mut strafe) = movement_input(input, player.crouching, use_speed_multiplier);
     let forward_pressed = input.key_pressed(KeyCode::KeyW)
         || input
             .get_gamepad_movement_axes()
@@ -105,7 +105,7 @@ pub fn tick(
         if input.performing_action(input::Action::Sneak) {
             input_ya -= 1.0;
         }
-        if jump_held {
+        if raw_jump_held {
             input_ya += 1.0;
         }
         if input_ya != 0.0 {
@@ -113,6 +113,12 @@ pub fn tick(
             player.velocity.y += f64::from(input_ya * player.fly_speed * 3.0);
         }
     }
+
+    // Vanilla `Player.isImmobile` extends LivingEntity's immobility with
+    // `isSleeping()`. The gate zeroes only LivingEntity locomotion/jump input;
+    // existing velocity, gravity, drag, and collision still run through travel.
+    let mut jump_held = raw_jump_held;
+    apply_living_immobility(player, &mut forward, &mut strafe, &mut jump_held);
 
     // Vanilla `LivingEntity.aiStep`: swim upward when submerged past the jump
     // threshold, otherwise a full jump off the ground or the shallow-fluid floor.
@@ -144,7 +150,20 @@ pub fn tick(
     stop_flying_on_ground(player);
 
     player.was_forward_pressed = forward_pressed;
-    player.was_jump_pressed = jump_held;
+    player.was_jump_pressed = raw_jump_held;
+}
+
+fn apply_living_immobility(
+    player: &LocalPlayer,
+    forward: &mut f32,
+    strafe: &mut f32,
+    jumping: &mut bool,
+) {
+    if player.is_sleeping() {
+        *forward = 0.0;
+        *strafe = 0.0;
+        *jumping = false;
+    }
 }
 
 /// Vanilla `LivingEntity.travel`: the water or air routine for this tick.
@@ -879,6 +898,29 @@ mod tests {
         assert_eq!(dz.to_bits(), 0x3fa999996d18578d);
 
         assert_eq!(vanilla_look_y(30.0).to_bits(), 0xbfdfff8be0000000);
+    }
+
+    #[test]
+    fn sleeping_player_is_immobile_without_freezing_travel() {
+        let mut player = LocalPlayer::new();
+        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(0, 64, 0));
+
+        let mut forward = 0.75;
+        let mut strafe = -0.25;
+        let mut jumping = true;
+        apply_living_immobility(&player, &mut forward, &mut strafe, &mut jumping);
+        assert_eq!((forward, strafe, jumping), (0.0, 0.0, false));
+
+        // isImmobile does not freeze the entity: LivingEntity.travel still
+        // processes existing velocity, gravity, drag, and collision.
+        crate::world::block::init("26.2");
+        player.position = dvec3(0.0, 80.0, 0.0).into();
+        player.velocity = crate::entity::components::Velocity::new(0.25, 0.0, -0.1);
+        let chunks = ChunkStore::new(2);
+        tick(&mut player, &InputState::released(), &chunks, 1.0, false);
+        assert!(player.position.x > 0.0);
+        assert!(player.position.z < 0.0);
+        assert!(player.position.y <= 80.0);
     }
 
     #[test]
