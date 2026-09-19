@@ -12,7 +12,9 @@ use winit::keyboard::KeyCode;
 use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Fullscreen, Window};
 
-use crate::app::input::{Action, InputState, STICK_MOVEMENT_THRESHOLD};
+use crate::app::input::{
+    Action, InputState, KEY_BACK, KEY_FORWARD, KEY_LEFT, KEY_RIGHT, STICK_MOVEMENT_THRESHOLD,
+};
 use crate::app::level_load::ReadyInputs;
 use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx};
@@ -221,10 +223,10 @@ fn player_input_state(
     sprinting: bool,
 ) -> PlayerInputState {
     PlayerInputState {
-        forward: input.key_pressed(KeyCode::KeyW) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
-        backward: input.key_pressed(KeyCode::KeyS) || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
-        left: input.key_pressed(KeyCode::KeyA) || analog_move.x > STICK_MOVEMENT_THRESHOLD,
-        right: input.key_pressed(KeyCode::KeyD) || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
+        forward: input.key_pressed(KEY_FORWARD) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
+        backward: input.key_pressed(KEY_BACK) || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
+        left: input.key_pressed(KEY_LEFT) || analog_move.x > STICK_MOVEMENT_THRESHOLD,
+        right: input.key_pressed(KEY_RIGHT) || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
         jump: input.performing_action(Action::Jump),
         shift: input.performing_action(Action::Sneak),
         sprint: sprinting,
@@ -261,6 +263,11 @@ pub struct AppCore {
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
     pub unfocused_since: Option<Instant>,
+    /// Vanilla `MouseHandler.mouseGrabbed`.
+    mouse_grabbed: bool,
+    /// The OS grab may no longer match `mouse_grabbed` (the window manager
+    /// can drop a lock on focus change), so the next apply re-issues it.
+    os_grab_stale: bool,
     player_skin_tx: crossbeam_channel::Sender<PlayerSkinResult>,
     player_skin_rx: crossbeam_channel::Receiver<PlayerSkinResult>,
     requested_player_skins: HashMap<uuid::Uuid, Option<String>>,
@@ -285,6 +292,31 @@ fn credits_key_mask(mut is_set: impl FnMut(KeyCode) -> bool) -> u8 {
     .filter(|&(code, _)| is_set(code))
     .map(|(_, bit)| bit)
     .sum()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorOp {
+    Keep,
+    Grab,
+    Release { center: bool },
+}
+
+/// One `MouseHandler.grabMouse`/`releaseMouse` call as a pure transition over
+/// `(mouse_grabbed, os_grab_stale)`. Grabbing needs an active window and is a
+/// no-op once grabbed; releasing is a no-op once released and only centers on
+/// the grabbed -> released edge. A stale OS grab re-issues either call.
+fn cursor_step(grabbed: bool, stale: bool, want: bool, focused: bool) -> (CursorOp, bool, bool) {
+    if want {
+        if !focused || (grabbed && !stale) {
+            return (CursorOp::Keep, grabbed, stale);
+        }
+        (CursorOp::Grab, true, false)
+    } else {
+        if !grabbed && !stale {
+            return (CursorOp::Keep, grabbed, stale);
+        }
+        (CursorOp::Release { center: grabbed }, false, false)
+    }
 }
 
 impl AppCore {
@@ -336,6 +368,8 @@ impl AppCore {
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
             unfocused_since: None,
+            mouse_grabbed: false,
+            os_grab_stale: false,
             player_skin_tx,
             player_skin_rx,
             requested_player_skins: HashMap::new(),
@@ -378,10 +412,24 @@ impl AppCore {
         }
     }
 
+    pub fn invalidate_cursor_grab_state(&mut self) {
+        self.os_grab_stale = true;
+    }
+
     pub fn apply_cursor_grab(&mut self, window: &Window, game: Option<&mut GameState>) {
         let captured =
             game.is_some_and(|g| g.input_live() && !g.dead && self.input.is_cursor_captured());
         if captured {
+            self.grab_cursor(window);
+        } else {
+            self.release_cursor(window);
+        }
+    }
+
+    /// Vanilla `MouseHandler.grabMouse`.
+    fn grab_cursor(&mut self, window: &Window) {
+        let op = self.step_cursor(true);
+        if op == CursorOp::Grab {
             // Vanilla centers on grab too; warp before locking, which
             // freezes the position on some platforms.
             self.center_cursor(window);
@@ -389,9 +437,19 @@ impl AppCore {
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
             window.set_cursor_visible(false);
-        } else {
-            self.release_cursor(window);
         }
+    }
+
+    fn step_cursor(&mut self, want: bool) -> CursorOp {
+        let (op, grabbed, stale) = cursor_step(
+            self.mouse_grabbed,
+            self.os_grab_stale,
+            want,
+            self.unfocused_since.is_none(),
+        );
+        self.mouse_grabbed = grabbed;
+        self.os_grab_stale = stale;
+        op
     }
 
     /// The chunk radius to ask a server for, from the video settings.
@@ -412,19 +470,26 @@ impl AppCore {
             .load_splash(&self.data_dirs.jar_assets_dir, &self.asset_index);
     }
 
-    /// Releases the cursor and warps it to the window center, like vanilla
-    /// `MouseHandler.releaseMouse` (every screen opens with a centered
-    /// cursor instead of wherever the last one closed).
+    /// Releases the cursor, warping it to the window center only when it was
+    /// grabbed, like vanilla `MouseHandler.releaseMouse` (a screen opened from
+    /// gameplay starts with a centered cursor).
     fn release_cursor(&mut self, window: &Window) {
-        let _ = window.set_cursor_grab(CursorGrabMode::None);
-        window.set_cursor_visible(true);
-        self.center_cursor(window);
+        if let CursorOp::Release { center } = self.step_cursor(false) {
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+            window.set_cursor_visible(true);
+            if center {
+                self.center_cursor(window);
+            }
+        }
     }
 
+    /// Never warps the OS pointer while another window has focus.
     fn center_cursor(&mut self, window: &Window) {
         let size = window.inner_size();
         let (x, y) = (size.width as f32 / 2.0, size.height as f32 / 2.0);
-        let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y));
+        if self.unfocused_since.is_none() {
+            let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y));
+        }
         self.input.on_cursor_moved(x, y);
     }
 
@@ -444,7 +509,8 @@ impl AppCore {
         self.menu.flush_settings();
         game.close_menu();
         game.close_creative_inventory();
-        game.chat.close();
+        game.chat
+            .close(crate::ui::chat::ChatExitReason::Interrupted);
         game.game_mode_switcher = None;
 
         if let Some(message) = message {
@@ -1119,7 +1185,7 @@ impl AppCore {
                                 let signed = validation == PlayerChatValidation::Signed;
                                 let signature = signature.filter(|_| signed);
                                 if body.fully_filtered {
-                                    game.chat.mark_processed(signature, false);
+                                    game.chat.push_fully_filtered(signature);
                                 } else {
                                     let tag = accepted_player_chat_tag(
                                         game.singleplayer && sender_uuid == self.user.uuid,
@@ -1229,7 +1295,8 @@ impl AppCore {
                     game.chat.apply_server_suggestions(
                         id,
                         start,
-                        options.into_iter().map(|option| option.text).collect(),
+                        options,
+                        game.command_tree.as_deref(),
                     );
                 }
                 NetworkEvent::BlockUpdate { pos, state } => {
@@ -2571,8 +2638,8 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeathRoute, death_route, player_input_state, server_view_distance_update,
-        serverbound_player_input,
+        CursorOp, DeathRoute, cursor_step, death_route, player_input_state,
+        server_view_distance_update, serverbound_player_input,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
 
@@ -2599,6 +2666,55 @@ mod tests {
         assert!(forward_right.right);
         assert!(!forward_right.backward);
         assert!(!forward_right.left);
+    }
+
+    #[test]
+    fn cursor_never_grabs_while_unfocused() {
+        assert_eq!(
+            cursor_step(false, false, true, false),
+            (CursorOp::Keep, false, false)
+        );
+        assert_eq!(
+            cursor_step(true, true, true, false),
+            (CursorOp::Keep, true, true)
+        );
+    }
+
+    #[test]
+    fn cursor_calls_are_idempotent() {
+        assert_eq!(
+            cursor_step(false, false, false, true),
+            (CursorOp::Keep, false, false)
+        );
+        assert_eq!(
+            cursor_step(true, false, true, true),
+            (CursorOp::Keep, true, false)
+        );
+    }
+
+    #[test]
+    fn cursor_centers_once_on_grabbed_to_released() {
+        let (op, grabbed, stale) = cursor_step(true, false, false, true);
+        assert_eq!(op, CursorOp::Release { center: true });
+        assert_eq!(
+            cursor_step(grabbed, stale, false, true),
+            (CursorOp::Keep, false, false)
+        );
+    }
+
+    #[test]
+    fn stale_cursor_reissues_without_warping_a_free_cursor() {
+        // Refocus while gameplay holds the grab: the WM may have dropped the
+        // lock, so it is re-locked.
+        assert_eq!(
+            cursor_step(true, true, true, true),
+            (CursorOp::Grab, true, false)
+        );
+        // Refocus on a screen: the release is re-issued without a warp.
+        assert_eq!(
+            cursor_step(false, true, false, true),
+            (CursorOp::Release { center: false }, false, false)
+        );
     }
 
     #[test]

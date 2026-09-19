@@ -1377,6 +1377,7 @@ fn draw_search_box(
         elements,
         &info,
         shown,
+        None,
         x + pad,
         text_y,
         fs,

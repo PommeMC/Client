@@ -732,7 +732,7 @@ fn component_extra_count(tag: &NbtTag) -> usize {
 
 /// `Util.parseAndValidateUntrustedUri`: `java.net.URI`'s character rules and
 /// an http(s) scheme.
-fn parse_untrusted_url(raw: String) -> Result<String, ComponentError> {
+pub(crate) fn parse_untrusted_url(raw: String) -> Result<String, ComponentError> {
     let invalid = |why: &str| {
         Err(ComponentError(format!(
             "invalid open_url URI `{raw}`: {why}"
@@ -906,6 +906,16 @@ fn parse_click_event(value: &Value, legacy: bool) -> Result<Option<ClickEvent>, 
     }
 }
 
+/// Vanilla `Identifier.parse(id).toString()`: a missing or empty namespace
+/// becomes `minecraft`.
+pub fn normalize_identifier(id: &str) -> String {
+    match id.split_once(':') {
+        Some((namespace, _)) if !namespace.is_empty() => id.to_owned(),
+        Some((_, path)) => format!("minecraft:{path}"),
+        None => format!("minecraft:{id}"),
+    }
+}
+
 /// Vanilla `Identifier.parse` validity.
 fn valid_identifier(id: &str) -> bool {
     let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
@@ -1054,6 +1064,14 @@ mod tests {
             "click_event": {"action": "open_url", "url": "https://example.com/path"}
         });
         assert!(Component::from_value(&value).is_ok());
+    }
+
+    #[test]
+    fn normalize_identifier_defaults_the_namespace() {
+        assert_eq!(normalize_identifier("foo"), "minecraft:foo");
+        assert_eq!(normalize_identifier(":foo"), "minecraft:foo");
+        assert_eq!(normalize_identifier("a:b"), "a:b");
+        assert_eq!(normalize_identifier("minecraft:a/b"), "minecraft:a/b");
     }
 
     #[test]

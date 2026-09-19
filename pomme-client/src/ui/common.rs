@@ -255,11 +255,14 @@ pub(crate) const FIELD_SELECTION: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 /// rects span `textY-1 .. textY+lineHeight+1` (one above, two below the 8px
 /// glyph line). `ghost` is chat's inline suggestion suffix, drawn one `bar_w`
 /// left of the caret (vanilla draws it at `cursorX - 1`, under the caret).
+/// `spans` styles the shown text (ChatScreen's Brigadier coloring); `None`
+/// draws it plain white.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_field_text(
     elements: &mut Vec<MenuElement>,
     info: &TextFieldRenderInfo,
     shown: &str,
+    spans: Option<&[crate::ui::text::TextSpan]>,
     text_x: f32,
     text_y: f32,
     fs: f32,
@@ -281,13 +284,23 @@ pub(crate) fn push_field_text(
             color: FIELD_SELECTION,
         });
     }
-    elements.push(MenuElement::Text {
-        x: text_x,
-        y: text_y,
-        text: shown.into(),
-        scale: fs,
-        color: WHITE,
-        centered: false,
+    elements.push(match spans {
+        Some(spans) => MenuElement::McText {
+            x: text_x,
+            y: text_y,
+            spans: spans.to_vec(),
+            scale: fs,
+            centered: false,
+            shadow: false,
+        },
+        None => MenuElement::Text {
+            x: text_x,
+            y: text_y,
+            text: shown.into(),
+            scale: fs,
+            color: WHITE,
+            centered: false,
+        },
     });
     let caret_x = text_x + wf(&shown[..info.caret_byte]);
     if let Some((text, color)) = ghost {

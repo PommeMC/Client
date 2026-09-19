@@ -23,6 +23,7 @@ use crate::renderer::pipelines::menu_overlay::{
     ICON_PAINTBRUSH, ICON_UNIVERSAL_ACCESS, ICON_USER, ICON_USERS, MenuElement, SpriteId,
     TooltipLine,
 };
+use crate::ui::chat::ChatOptions;
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
 #[derive(Serialize, Deserialize)]
@@ -102,6 +103,8 @@ struct Settings {
     display_mode: u8,
     #[serde(default)]
     theme: u8,
+    #[serde(default)]
+    chat: ChatOptions,
 }
 
 fn default_fov() -> u32 {
@@ -196,6 +199,7 @@ impl Default for Settings {
             attack_indicator: 1,
             display_mode: 0,
             theme: 0,
+            chat: ChatOptions::default(),
         }
     }
 }
@@ -536,7 +540,8 @@ pub struct MainMenu {
     links_open: bool,
     theme_open: bool,
     /// Return target for Language/Accessibility, which open from both the
-    /// title-screen icon row and the Options grid.
+    /// title-screen icon row and the Options grid, and for Chat Settings,
+    /// which also open from chat.
     settings_back: Screen,
     theme: PanoramaTheme,
     transition: Option<ThemeTransition>,
@@ -611,6 +616,7 @@ pub struct MainMenu {
     /// `AbstractSliderButton.canChangeValue` for the focused slider: armed
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
     slider_can_change_value: bool,
+    pub chat_options: ChatOptions,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
     /// Set by slider drags, written by `flush_settings`.
@@ -742,6 +748,7 @@ impl MainMenu {
                 settings.attack_indicator,
             ),
             slider_can_change_value: true,
+            chat_options: settings.chat.sanitized(),
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             settings_dirty: false,
@@ -757,6 +764,13 @@ impl MainMenu {
             reload_assets: false,
             pack_search: TextFieldState::new(MAX_SEARCH),
         }
+    }
+
+    /// Chat Settings opened from chat; leaving them leaves the menu, back to
+    /// the chat screen that opened them.
+    pub fn open_chat_settings(&mut self) {
+        self.settings_back = Screen::Main;
+        self.set_screen(Screen::OptionsChatSettings);
     }
 
     fn set_screen(&mut self, screen: Screen) {
@@ -855,6 +869,7 @@ impl MainMenu {
                 attack_indicator: self.attack_indicator.to_u8(),
                 display_mode: self.display_mode.to_u8(),
                 theme: self.theme.to_u8(),
+                chat: self.chat_options,
             },
         )
         .is_err();
@@ -1189,6 +1204,54 @@ mod tests {
                 expected,
                 "stored slider value {stored} should clamp to {expected}"
             );
+        }
+    }
+
+    #[test]
+    fn partial_chat_settings_keep_the_rest() {
+        let mut json = serde_json::to_value(Settings {
+            fov: 90,
+            ..Settings::default()
+        })
+        .unwrap();
+        json["chat"] = serde_json::json!({ "opacity": 0.3 });
+        let loaded: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.fov, 90);
+        assert_eq!(
+            loaded.chat,
+            ChatOptions {
+                opacity: 0.3,
+                ..ChatOptions::default()
+            }
+        );
+    }
+
+    #[test]
+    fn chat_settings_sanitize_like_option_instance_set() {
+        let default = ChatOptions::default();
+        assert_eq!(default.sanitized(), default);
+        let invalid = ChatOptions {
+            opacity: 1.5,
+            scale: -0.1,
+            width: f32::NAN,
+            delay_secs: 7.0,
+            ..default
+        };
+        assert_eq!(invalid.sanitized(), default);
+        for (stored, expected) in [(0.55, 0.5), (6.0, 6.0), (-0.05, 0.0), (-1.0, 0.0)] {
+            let chat = ChatOptions {
+                delay_secs: stored,
+                ..default
+            };
+            assert_eq!(chat.sanitized().delay_secs, expected, "delay {stored}");
+        }
+        for tenths in 0..=60 {
+            let secs = tenths as f32 / 10.0;
+            let chat = ChatOptions {
+                delay_secs: secs,
+                ..default
+            };
+            assert_eq!(chat.sanitized().delay_secs, secs, "delay {secs}");
         }
     }
 
