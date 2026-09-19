@@ -104,6 +104,10 @@ pub fn memory_pipes() -> (MemoryEnd, MemoryEnd) {
 }
 
 impl Conn {
+    pub fn is_encrypted(&self) -> bool {
+        self.writer.enc_cipher.is_some()
+    }
+
     pub fn from_tcp(stream: TcpStream) -> Self {
         let (read, write) = stream.into_split();
         Self::new(NetReader::Tcp(read), NetWriter::Tcp(write))

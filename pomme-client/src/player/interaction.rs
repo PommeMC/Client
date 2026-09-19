@@ -1811,10 +1811,7 @@ mod tests {
             Outbound::Raw(bytes) => {
                 assert_eq!(bytes, wire::encode_pick_item_from_block(-1, 64, 3, true))
             }
-            Outbound::Packet(_) => panic!("pick packet must use raw encoding"),
-            Outbound::ChatProcessed { .. } | Outbound::ChatDeleted { .. } => {
-                panic!("pick packet cannot be a chat acknowledgement")
-            }
+            _ => panic!("pick packet must use raw encoding"),
         }
 
         interaction.target = Some(HitResult::Entity(EntityHitResult {
@@ -1827,10 +1824,7 @@ mod tests {
             Outbound::Raw(bytes) => {
                 assert_eq!(bytes, wire::encode_pick_item_from_entity(300, false));
             }
-            Outbound::Packet(_) => panic!("pick packet must use raw encoding"),
-            Outbound::ChatProcessed { .. } | Outbound::ChatDeleted { .. } => {
-                panic!("pick packet cannot be a chat acknowledgement")
-            }
+            _ => panic!("pick packet must use raw encoding"),
         }
 
         interaction.target = None;

@@ -1692,8 +1692,8 @@ pub fn update_game(
         return GameUpdateResult::Disconnected { reason };
     }
     game.chat.tick();
-    for (signature, shown) in game.chat.take_processed_signatures() {
-        connection.packet_tx.mark_chat_processed(signature, shown);
+    for mark in game.chat.take_chat_marks() {
+        connection.packet_tx.mark_chat(mark);
     }
 
     game.drain_and_upload_meshes(&mut gfx.renderer);

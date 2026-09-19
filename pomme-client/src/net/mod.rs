@@ -489,6 +489,7 @@ pub enum NetworkEvent {
         entity_id: i32,
         hardcore: bool,
         show_death_screen: bool,
+        online_mode: bool,
     },
     SecureChatEnforced {
         enforced: bool,

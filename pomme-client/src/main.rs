@@ -119,6 +119,10 @@ fn main() {
             .build()
             .expect("Failed to create tokio runtime"),
     );
+    {
+        let _runtime = rt.enter();
+        crate::net::chat_security::ProfileKeyServices::prefetch();
+    }
 
     let user = UserData::from_args(args.username, args.uuid, args.access_token);
 
