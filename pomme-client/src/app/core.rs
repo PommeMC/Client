@@ -625,11 +625,7 @@ impl AppCore {
     /// it stands for is covered by the reload we just did.
     fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
         self.menu.active_packs = self.resource_packs.active_pack_info();
-        renderer.reload_assets(
-            &self.data_dirs.game_dir,
-            &self.resource_packs,
-            self.menu.font_options(),
-        );
+        renderer.reload_assets(&self.data_dirs.game_dir, &self.resource_packs);
         self.audio.reload_assets(&self.resource_packs);
         self.menu.reload_assets = false;
     }

@@ -105,10 +105,6 @@ struct Settings {
     theme: u8,
     #[serde(default)]
     chat: ChatOptions,
-    #[serde(default)]
-    force_unicode_font: bool,
-    #[serde(default = "default_japanese_glyph_variants")]
-    japanese_glyph_variants: bool,
 }
 
 fn default_fov() -> u32 {
@@ -151,17 +147,6 @@ fn default_attack_indicator() -> u8 {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_japanese_glyph_variants() -> bool {
-    ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .into_iter()
-        .find_map(|name| std::env::var(name).ok())
-        .is_some_and(|locale| {
-            locale.eq_ignore_ascii_case("ja")
-                || locale.starts_with("ja_")
-                || locale.starts_with("ja-")
-        })
 }
 
 fn default_chunk_detail() -> u32 {
@@ -215,8 +200,6 @@ impl Default for Settings {
             display_mode: 0,
             theme: 0,
             chat: ChatOptions::default(),
-            force_unicode_font: false,
-            japanese_glyph_variants: default_japanese_glyph_variants(),
         }
     }
 }
@@ -633,8 +616,6 @@ pub struct MainMenu {
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
     slider_can_change_value: bool,
     pub chat_options: ChatOptions,
-    pub force_unicode_font: bool,
-    pub japanese_glyph_variants: bool,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
     /// Set by slider drags, written by `flush_settings`.
@@ -767,8 +748,6 @@ impl MainMenu {
             ),
             slider_can_change_value: true,
             chat_options: settings.chat,
-            force_unicode_font: settings.force_unicode_font,
-            japanese_glyph_variants: settings.japanese_glyph_variants,
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             settings_dirty: false,
@@ -814,13 +793,6 @@ impl MainMenu {
     /// `Mth::square`).
     pub fn fov_effect(&self) -> f32 {
         self.fov_effect_scale * self.fov_effect_scale
-    }
-
-    pub(crate) fn font_options(&self) -> crate::ui::font::FontOptions {
-        crate::ui::font::FontOptions {
-            uniform: self.force_unicode_font,
-            japanese_variants: self.japanese_glyph_variants,
-        }
     }
 
     /// Per-category volumes for the audio engine, indexed by `SoundCategory`;
@@ -894,8 +866,6 @@ impl MainMenu {
                 display_mode: self.display_mode.to_u8(),
                 theme: self.theme.to_u8(),
                 chat: self.chat_options,
-                force_unicode_font: self.force_unicode_font,
-                japanese_glyph_variants: self.japanese_glyph_variants,
             },
         )
         .is_err();

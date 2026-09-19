@@ -113,11 +113,8 @@ pub fn update_menu(
 
     if core.menu.reload_assets {
         core.menu.reload_assets = false;
-        gfx.renderer.reload_assets(
-            &core.data_dirs.game_dir,
-            &core.resource_packs,
-            core.menu.font_options(),
-        );
+        gfx.renderer
+            .reload_assets(&core.data_dirs.game_dir, &core.resource_packs);
         core.audio.reload_assets(&core.resource_packs);
     }
 

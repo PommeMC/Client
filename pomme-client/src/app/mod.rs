@@ -233,7 +233,6 @@ impl ApplicationHandler for App {
                         jar_assets_dir: &self.core.data_dirs.jar_assets_dir,
                         asset_index: &self.core.asset_index,
                         packs: &self.core.resource_packs,
-                        options: self.core.menu.font_options(),
                     },
                     &self.core.data_dirs.game_dir,
                     self.core.menu.vsync,
