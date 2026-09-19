@@ -14,6 +14,7 @@ const useLauncherSettings = () => {
     language: "English",
     keepLauncherOpen: true,
     launchWithConsole: false,
+    selectedAccountUuid: null,
   });
 
   useEffect(() => {
@@ -47,7 +48,6 @@ const useLauncherSettings = () => {
       console.error("Error while setting `launchWithConsole`: ", res.error);
     }
   };
-
   return {
     ...launcherSettings,
     setLanguage,

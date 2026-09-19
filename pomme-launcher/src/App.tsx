@@ -85,14 +85,32 @@ function App() {
     [setSkinUrl],
   );
 
-  useEffect(() => {
-    commands.getAllAccounts().then((accs) => {
-      if (accs.length > 0) {
-        setAccounts(accs);
-        setActiveIndex(0);
-        loadSkin(accs[0].uuid);
-      }
+  const persistSelectedAccountUuid = useCallback((uuid: string | null) => {
+    void commands.setSelectedAccountUuid(uuid).then((res) => {
+      if (!res.ok) console.error("Error while setting `selectedAccountUuid`: ", res.error);
     });
+  }, []);
+
+  useEffect(() => {
+    Promise.all([commands.getAllAccounts(), commands.loadLauncherSettings()]).then(
+      ([accs, settings]) => {
+        if (accs.length > 0) {
+          const savedIndex = settings.selectedAccountUuid
+            ? accs.findIndex((acc) => acc.uuid === settings.selectedAccountUuid)
+            : -1;
+          const selectedIndex = savedIndex >= 0 ? savedIndex : 0;
+          const selectedUuid = accs[selectedIndex].uuid;
+          setAccounts(accs);
+          setActiveIndex(selectedIndex);
+          loadSkin(selectedUuid);
+          if ((settings.selectedAccountUuid ?? null) !== selectedUuid) {
+            persistSelectedAccountUuid(selectedUuid);
+          }
+        } else if (settings.selectedAccountUuid) {
+          persistSelectedAccountUuid(null);
+        }
+      },
+    );
     commands.getPatchNotes(6).then((res) => {
       if (res.ok) setNews(res.value);
       else console.error("Failed to fetch news:", res.error);
@@ -101,7 +119,7 @@ function App() {
       if (res.ok) setVersions(res.value);
       else console.error("Failed to fetch versions:", res.error);
     });
-  }, [loadSkin, setAccounts, setActiveIndex, setNews, setVersions]);
+  }, [loadSkin, persistSelectedAccountUuid, setAccounts, setActiveIndex, setNews, setVersions]);
 
   useEffect(() => {
     requestAnimationFrame(() => getCurrentWindow().show());
@@ -137,6 +155,7 @@ function App() {
         return [...filtered, acc];
       });
       setActiveIndex(accounts.filter((a) => a.uuid !== acc.uuid).length);
+      persistSelectedAccountUuid(acc.uuid);
       loadSkin(acc.uuid);
       setStatus(`Signed in as ${acc.username}`);
     } else {
@@ -147,6 +166,7 @@ function App() {
   }, [
     accounts,
     loadSkin,
+    persistSelectedAccountUuid,
     setAccountDropdownOpen,
     setAccounts,
     setActiveIndex,
@@ -160,21 +180,31 @@ function App() {
       setActiveIndex(index);
       setAccountDropdownOpen(false);
       if (accounts[index]) {
+        persistSelectedAccountUuid(accounts[index].uuid);
         loadSkin(accounts[index].uuid);
       }
     },
-    [accounts, loadSkin, setAccountDropdownOpen, setActiveIndex],
+    [accounts, loadSkin, persistSelectedAccountUuid, setAccountDropdownOpen, setActiveIndex],
   );
 
   const removeAccount = useCallback(
     (uuid: string) => {
       commands.removeAccount(uuid).catch((e) => console.error("Failed to remove account:", e));
-      setAccounts((prev) => prev.filter((a) => a.uuid !== uuid));
+      const remainingAccounts = accounts.filter((a) => a.uuid !== uuid);
+      setAccounts(remainingAccounts);
       setActiveIndex(0);
+      persistSelectedAccountUuid(remainingAccounts[0]?.uuid ?? null);
       setAccountDropdownOpen(false);
       setSkinUrl(null);
     },
-    [setAccountDropdownOpen, setAccounts, setActiveIndex, setSkinUrl],
+    [
+      accounts,
+      persistSelectedAccountUuid,
+      setAccountDropdownOpen,
+      setAccounts,
+      setActiveIndex,
+      setSkinUrl,
+    ],
   );
 
   const ensureAssets = useCallback(
