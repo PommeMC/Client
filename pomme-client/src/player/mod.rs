@@ -33,6 +33,12 @@ pub fn is_survival(game_mode: u8) -> bool {
 }
 
 /// Matches vanilla GameType.isCreative(): Creative (1).
+/// `StringUtil.isValidPlayerName`, which `ExtraCodecs.PLAYER_NAME` enforces
+/// before a profile can be looked up by name.
+pub fn valid_player_name(name: &str) -> bool {
+    name.chars().count() <= 16 && name.chars().all(|c| ('!'..='~').contains(&c))
+}
+
 pub fn is_creative(game_mode: u8) -> bool {
     game_mode == 1
 }

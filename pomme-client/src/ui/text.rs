@@ -21,22 +21,36 @@ pub enum InlineObject {
 }
 
 impl InlineObject {
+    /// The glyph's key in the shared atlas. A head carries its whole profile
+    /// identity, the way vanilla keys `PlayerSkinRenderCache` by
+    /// `ResolvableProfile`: two heads with the same id but different textures
+    /// are different glyphs.
     pub fn atlas_key(&self) -> String {
         match self {
             Self::AtlasSprite { atlas, sprite } => format!("object:{atlas}:{sprite}"),
             Self::Player {
-                uuid, name, hat, ..
+                uuid,
+                name,
+                textures,
+                hat,
             } => {
                 let layer = if *hat { "hat" } else { "base" };
-                uuid.map(|uuid| format!("player:{uuid}:{layer}"))
-                    .or_else(|| {
-                        name.as_ref()
-                            .map(|name| format!("player-name:{name}:{layer}"))
-                    })
-                    .unwrap_or_else(|| format!("player:unknown:{layer}"))
+                let id = uuid.map(|uuid| uuid.to_string()).unwrap_or_default();
+                let name = name.as_deref().unwrap_or("");
+                let textures = textures.as_deref().map(short_hash).unwrap_or_default();
+                format!("player:{id}:{name}:{textures}:{layer}")
             }
         }
     }
+}
+
+/// A short, stable digest of a profile's packed textures, so the atlas key
+/// stays small.
+fn short_hash(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(value.as_bytes());
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A styled run of text (color plus formatting flags). The shared span type for
@@ -320,6 +334,37 @@ mod tests {
 
     use super::*;
     use crate::chat_component::{ClickEvent, HoverEvent};
+
+    #[test]
+    fn head_atlas_keys_carry_the_whole_profile() {
+        let uuid = uuid::Uuid::from_u128(1);
+        let head = |textures: Option<&str>, hat: bool| {
+            InlineObject::Player {
+                uuid: Some(uuid),
+                name: Some("Alex".to_owned()),
+                textures: textures.map(str::to_owned),
+                hat,
+            }
+            .atlas_key()
+        };
+        // The same id with different textures is a different glyph, and the
+        // two layers of one profile are different keys.
+        assert_ne!(head(Some("one"), true), head(Some("two"), true));
+        assert_ne!(head(Some("one"), true), head(Some("one"), false));
+        assert_eq!(head(Some("one"), true), head(Some("one"), true));
+        assert_ne!(head(None, true), head(Some("one"), true));
+        // A nameless, idless head still has a key.
+        assert!(
+            InlineObject::Player {
+                uuid: None,
+                name: None,
+                textures: None,
+                hat: true,
+            }
+            .atlas_key()
+            .starts_with("player:")
+        );
+    }
 
     #[test]
     fn native_object_span_keeps_special_glyph_metadata() {

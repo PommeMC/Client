@@ -829,18 +829,6 @@ impl ChatState {
         std::mem::take(&mut self.chat_marks)
     }
 
-    pub fn inline_objects(&self) -> Vec<crate::ui::text::InlineObject> {
-        let objects: std::collections::HashSet<_> = self
-            .messages
-            .iter()
-            .map(|line| &line.spans)
-            .chain(self.delayed_messages.iter().map(|pending| &pending.spans))
-            .flatten()
-            .filter_map(|span| span.inline_object.clone())
-            .collect();
-        objects.into_iter().collect()
-    }
-
     fn flush_delayed_messages(&mut self, now: Instant) {
         while let Some(message) = self.delayed_messages.pop_front() {
             self.accept_pending_message(message, now);

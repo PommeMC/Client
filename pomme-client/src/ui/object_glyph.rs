@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::assets::{self, AssetIndex};
 use crate::chat_component::normalize_identifier;
+use crate::renderer::pipelines::menu_overlay::ATLAS_CELL;
 use crate::resource_pack::ResourcePackManager;
 
 #[derive(Clone, Debug)]
@@ -52,63 +53,226 @@ impl AssetLookup<'_> {
     }
 
     /// Every copy of the atlas definition, base assets first, so later packs'
-    /// sources apply on top.
+    /// sources apply on top. A server-sent atlas id that escapes the assets
+    /// directory resolves to nothing.
     fn atlas_definition_stack(&self, atlas_key: &str) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        let base = assets::resolve_asset_path(self.jar_assets_dir, self.asset_index, atlas_key);
-        if base.exists() {
-            out.push(base);
-        }
-        for pack in self.packs.active_pack_dirs() {
-            let path = pack.join("assets").join(atlas_key);
-            if path.exists() {
-                out.push(path);
-            }
-        }
-        out
+        assets::resource_stack_paths(
+            self.jar_assets_dir,
+            self.asset_index,
+            atlas_key,
+            Some(self.packs),
+        )
     }
 
-    fn load_direct_sprite(&self, resource: &str) -> Option<(Vec<u8>, u32, u32)> {
+    /// The sprite's frames: one for a plain texture, the animation's strip
+    /// otherwise (`SpriteContents`).
+    fn load_direct_sprite(&self, resource: &str) -> Option<SpriteFrames> {
         let (rgba, w, h) = self.load_texture(resource)?;
-        let (frame_w, frame_h) = self.animation_frame_size(resource, w, h);
-        crop_rgba(&rgba, w, h, 0, 0, frame_w.min(w), frame_h.min(h))
+        let animation = self.animation_meta(resource);
+        let (frame_w, frame_h) = match &animation {
+            Some(animation) => animation.frame_size(w, h),
+            None => (w, h),
+        };
+        let columns = (w / frame_w.max(1)).max(1);
+        let rows = (h / frame_h.max(1)).max(1);
+        let frame_count = (columns * rows) as usize;
+        let sequence = match &animation {
+            Some(animation) => animation.sequence(frame_count),
+            None => vec![(0, 1)],
+        };
+        let mut frames = Vec::new();
+        for index in 0..frame_count {
+            let x = (index as u32 % columns) * frame_w;
+            let y = (index as u32 / columns) * frame_h;
+            let (pixels, fw, fh) = crop_rgba(&rgba, w, h, x, y, frame_w, frame_h)?;
+            frames.push((pixels, fw, fh));
+        }
+        SpriteFrames::new(frames, sequence)
     }
 
-    fn animation_frame_size(&self, resource: &str, w: u32, h: u32) -> (u32, u32) {
+    fn animation_meta(&self, resource: &str) -> Option<AnimationMeta> {
         let path = self.resolve(&format!("{}.mcmeta", texture_asset_key(resource)));
-        if let Ok(text) = std::fs::read_to_string(path)
-            && let Ok(value) = serde_json::from_str::<Value>(&text)
-            && let Some(animation) = value.get("animation").and_then(Value::as_object)
-        {
-            let fw = animation
-                .get("width")
-                .and_then(Value::as_u64)
-                .map(|v| v as u32);
-            let fh = animation
-                .get("height")
-                .and_then(Value::as_u64)
-                .map(|v| v as u32);
-            return match (fw, fh) {
-                (Some(fw), Some(fh)) if fw > 0 && fh > 0 => (fw, fh),
-                (Some(fw), None) if fw > 0 => (fw, h),
-                (None, Some(fh)) if fh > 0 => (w, fh),
-                _ => {
-                    let min = w.min(h);
-                    (min, min)
-                }
-            };
-        }
-        (w, h)
+        let text = std::fs::read_to_string(path).ok()?;
+        let value = serde_json::from_str::<Value>(&text).ok()?;
+        AnimationMeta::parse(value.get("animation")?)
     }
 }
 
-pub fn load_atlas_sprite_8x8(
+/// A sprite's animation metadata (vanilla `AnimationMetadataSection`).
+struct AnimationMeta {
+    frame_width: Option<u32>,
+    frame_height: Option<u32>,
+    frame_time: u32,
+    /// The declared frame order, empty when the file lists none.
+    frames: Vec<(usize, Option<u32>)>,
+}
+
+impl AnimationMeta {
+    fn parse(value: &Value) -> Option<Self> {
+        let map = value.as_object()?;
+        let positive = |key: &str| {
+            map.get(key)
+                .and_then(Value::as_u64)
+                .map(|value| value as u32)
+                .filter(|value| *value > 0)
+        };
+        // TODO: `interpolate` blends consecutive frames; Pomme steps them.
+        let frames = map
+            .get("frames")
+            .and_then(Value::as_array)
+            .map(|frames| {
+                frames
+                    .iter()
+                    .filter_map(|frame| match frame {
+                        Value::Number(index) => Some((index.as_u64()? as usize, None)),
+                        Value::Object(frame) => Some((
+                            frame.get("index").and_then(Value::as_u64)? as usize,
+                            frame.get("time").and_then(Value::as_u64).map(|t| t as u32),
+                        )),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Self {
+            frame_width: positive("width"),
+            frame_height: positive("height"),
+            frame_time: positive("frametime").unwrap_or(1),
+            frames,
+        })
+    }
+
+    /// `FrameSize`: the declared size, else the square of the shorter side.
+    fn frame_size(&self, w: u32, h: u32) -> (u32, u32) {
+        match (self.frame_width, self.frame_height) {
+            (Some(fw), Some(fh)) => (fw, fh),
+            (Some(fw), None) => (fw, h),
+            (None, Some(fh)) => (w, fh),
+            (None, None) => {
+                let min = w.min(h);
+                (min, min)
+            }
+        }
+    }
+
+    /// The frames to play, in order, with their durations in ticks.
+    fn sequence(&self, frame_count: usize) -> Vec<(usize, u32)> {
+        let listed: Vec<(usize, u32)> = self
+            .frames
+            .iter()
+            .filter(|(index, _)| *index < frame_count)
+            .map(|(index, time)| (*index, time.unwrap_or(self.frame_time).max(1)))
+            .collect();
+        if listed.is_empty() {
+            (0..frame_count)
+                .map(|index| (index, self.frame_time.max(1)))
+                .collect()
+        } else {
+            listed
+        }
+    }
+}
+
+/// A loaded sprite: square RGBA tiles at their native resolution (capped at
+/// the atlas cell), with the animation that steps them.
+pub struct SpriteFrames {
+    pub size: u32,
+    frames: Vec<Vec<u8>>,
+    sequence: Vec<(usize, u32)>,
+}
+
+impl SpriteFrames {
+    fn new(frames: Vec<(Vec<u8>, u32, u32)>, sequence: Vec<(usize, u32)>) -> Option<Self> {
+        let (_, w, h) = *frames.first()?;
+        // Vanilla maps the sprite's whole UV range onto the 8-unit quad, so a
+        // non-square sprite stretches; the cell caps the resolution.
+        let size = w.max(h).min(ATLAS_CELL);
+        if size == 0 {
+            return None;
+        }
+        let frames = frames
+            .into_iter()
+            .map(|(pixels, w, h)| {
+                if w == size && h == size {
+                    pixels
+                } else {
+                    resample_square(&pixels, w, h, size)
+                }
+            })
+            .collect();
+        Some(Self {
+            size,
+            frames,
+            sequence,
+        })
+    }
+
+    /// A single-frame sprite from ready-made pixels.
+    pub fn still(pixels: Vec<u8>, size: u32) -> Self {
+        Self {
+            size,
+            frames: vec![pixels],
+            sequence: vec![(0, 1)],
+        }
+    }
+
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    pub fn pixels(&self, frame: usize) -> &[u8] {
+        &self.frames[frame.min(self.frames.len() - 1)]
+    }
+
+    /// The frame showing at `tick` (`SpriteContents.Ticker.tickAndUpload`).
+    pub fn frame_at(&self, tick: u64) -> usize {
+        let total: u64 = self.sequence.iter().map(|(_, time)| u64::from(*time)).sum();
+        if total == 0 {
+            return 0;
+        }
+        let mut remaining = tick % total;
+        for (index, time) in &self.sequence {
+            let time = u64::from(*time);
+            if remaining < time {
+                return *index;
+            }
+            remaining -= time;
+        }
+        0
+    }
+
+    pub fn animated(&self) -> bool {
+        self.sequence.len() > 1
+    }
+}
+
+/// `AtlasManager.KNOWN_ATLASES`: any other atlas id has no glyph provider.
+pub fn is_known_atlas(atlas: &str) -> bool {
+    const KNOWN: [&str; 13] = [
+        "minecraft:armor_trims",
+        "minecraft:banner_patterns",
+        "minecraft:blocks",
+        "minecraft:items",
+        "minecraft:chests",
+        "minecraft:decorated_pot",
+        "minecraft:gui",
+        "minecraft:map_decorations",
+        "minecraft:paintings",
+        "minecraft:particles",
+        "minecraft:shield_patterns",
+        "minecraft:shulker_boxes",
+        "minecraft:celestials",
+    ];
+    KNOWN.contains(&normalize_identifier(atlas).as_str())
+}
+
+pub fn load_atlas_sprite(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     packs: &ResourcePackManager,
     atlas: &str,
     sprite: &str,
-) -> Option<Vec<u8>> {
+) -> Option<SpriteFrames> {
     let lookup = AssetLookup {
         jar_assets_dir,
         asset_index,
@@ -137,7 +301,7 @@ pub fn load_atlas_sprite_8x8(
     }
 
     let image = match candidate? {
-        Recipe::Direct(resource) => lookup.load_direct_sprite(&resource)?,
+        Recipe::Direct(resource) => return lookup.load_direct_sprite(&resource),
         Recipe::Unstitch {
             resource,
             x,
@@ -167,16 +331,19 @@ pub fn load_atlas_sprite_8x8(
             (apply_palette(base, &key, &value), w, h)
         }
     };
-    Some(resample_8x8(&image.0, image.1, image.2))
+    SpriteFrames::new(vec![image], vec![(0, 1)])
 }
 
-pub fn missing_tile_8x8() -> Vec<u8> {
-    let mut out = vec![0u8; 8 * 8 * 4];
-    for y in 0..8usize {
-        for x in 0..8usize {
-            let off = (y * 8 + x) * 4;
-            let rgb = if ((x / 4) + (y / 4)) % 2 == 0 {
-                [255, 0, 255]
+/// `MissingTextureAtlasSprite.generateMissingImage`: black except the
+/// top-right and bottom-left quadrants.
+pub fn missing_tile() -> (Vec<u8>, u32) {
+    const SIZE: usize = 16;
+    let mut out = vec![0u8; SIZE * SIZE * 4];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let off = (y * SIZE + x) * 4;
+            let rgb = if (y < SIZE / 2) ^ (x < SIZE / 2) {
+                [0xf8, 0x00, 0xf8]
             } else {
                 [0, 0, 0]
             };
@@ -184,7 +351,7 @@ pub fn missing_tile_8x8() -> Vec<u8> {
             out[off + 3] = 255;
         }
     }
-    out
+    (out, SIZE as u32)
 }
 
 fn apply_source(
@@ -393,17 +560,19 @@ fn apply_palette(mut base: Vec<u8>, key: &[u8], value: &[u8]) -> Vec<u8> {
     base
 }
 
-fn resample_8x8(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
-    let mut out = vec![0u8; 8 * 8 * 4];
+/// Nearest-neighbour resample onto a square tile, which is how a non-square
+/// sprite ends up stretched over the glyph's square quad.
+fn resample_square(rgba: &[u8], w: u32, h: u32, size: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (size * size * 4) as usize];
     if w == 0 || h == 0 {
         return out;
     }
-    for y in 0..8u32 {
-        for x in 0..8u32 {
-            let sx = (x * w / 8).min(w - 1);
-            let sy = (y * h / 8).min(h - 1);
+    for y in 0..size {
+        for x in 0..size {
+            let sx = (x * w / size).min(w - 1);
+            let sy = (y * h / size).min(h - 1);
             let src = ((sy * w + sx) * 4) as usize;
-            let dst = ((y * 8 + x) * 4) as usize;
+            let dst = ((y * size + x) * 4) as usize;
             if let Some(pixel) = rgba.get(src..src + 4) {
                 out[dst..dst + 4].copy_from_slice(pixel);
             }
@@ -451,12 +620,62 @@ mod tests {
         let pixels = vec![
             255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ];
-        let out = resample_8x8(&pixels, 2, 2);
+        let out = resample_square(&pixels, 2, 2, 8);
         assert_eq!(&out[0..4], &[255, 0, 0, 255]);
         assert_eq!(&out[(7 * 4)..(8 * 4)], &[0, 255, 0, 255]);
         let bottom_left = ((7 * 8) * 4) as usize;
         assert_eq!(&out[bottom_left..bottom_left + 4], &[0, 0, 255, 255]);
         assert_eq!(&out[out.len() - 4..], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn only_the_known_atlases_resolve() {
+        assert!(is_known_atlas("blocks"));
+        assert!(is_known_atlas("minecraft:gui"));
+        assert!(is_known_atlas("minecraft:celestials"));
+        assert!(!is_known_atlas("pomme:custom"));
+        assert!(!is_known_atlas("minecraft:mob_effects"));
+    }
+
+    #[test]
+    fn animation_frames_step_with_the_tick() {
+        let meta = AnimationMeta::parse(&serde_json::json!({"frametime": 2})).unwrap();
+        assert_eq!(meta.frame_size(16, 48), (16, 16));
+        let frames = SpriteFrames {
+            size: 16,
+            frames: vec![Vec::new(); 3],
+            sequence: meta.sequence(3),
+        };
+        // Three frames of two ticks each, looping.
+        assert_eq!(frames.frame_at(0), 0);
+        assert_eq!(frames.frame_at(1), 0);
+        assert_eq!(frames.frame_at(2), 1);
+        assert_eq!(frames.frame_at(5), 2);
+        assert_eq!(frames.frame_at(6), 0);
+        assert!(frames.animated());
+
+        // A declared order, with a per-frame time.
+        let meta =
+            AnimationMeta::parse(&serde_json::json!({"frames": [2, {"index": 0, "time": 3}]}))
+                .unwrap();
+        let frames = SpriteFrames {
+            size: 16,
+            frames: vec![Vec::new(); 3],
+            sequence: meta.sequence(3),
+        };
+        assert_eq!(frames.frame_at(0), 2);
+        assert_eq!(frames.frame_at(1), 0);
+        assert_eq!(frames.frame_at(3), 0);
+        assert_eq!(frames.frame_at(4), 2);
+
+        // A still sprite never steps.
+        let frames = SpriteFrames {
+            size: 16,
+            frames: vec![Vec::new()],
+            sequence: vec![(0, 1)],
+        };
+        assert!(!frames.animated());
+        assert_eq!(frames.frame_at(7), 0);
     }
 
     #[test]
@@ -468,10 +687,17 @@ mod tests {
     }
 
     #[test]
-    fn missing_tile_is_magenta_black_checkerboard() {
-        let tile = missing_tile_8x8();
-        assert_eq!(&tile[0..4], &[255, 0, 255, 255]);
-        let x4 = 4 * 4;
-        assert_eq!(&tile[x4..x4 + 4], &[0, 0, 0, 255]);
+    fn missing_tile_matches_missingno() {
+        let (tile, size) = missing_tile();
+        assert_eq!(size, 16);
+        let pixel = |x: usize, y: usize| {
+            let off = (y * 16 + x) * 4;
+            [tile[off], tile[off + 1], tile[off + 2], tile[off + 3]]
+        };
+        // Black top-left and bottom-right, magenta on the other diagonal.
+        assert_eq!(pixel(0, 0), [0, 0, 0, 255]);
+        assert_eq!(pixel(15, 0), [0xf8, 0, 0xf8, 255]);
+        assert_eq!(pixel(0, 15), [0xf8, 0, 0xf8, 255]);
+        assert_eq!(pixel(15, 15), [0, 0, 0, 255]);
     }
 }

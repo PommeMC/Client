@@ -1330,6 +1330,18 @@ impl Renderer {
         self.update_favicon_atlas(faces);
     }
 
+    /// The inline objects the menu text drew since the last call.
+    pub fn drain_drawn_inline_objects(
+        &mut self,
+    ) -> std::collections::hash_map::Drain<'_, String, crate::ui::text::InlineObject> {
+        self.menu_pipeline.drain_drawn_inline_objects()
+    }
+
+    /// Points an animated inline object at the frame showing now.
+    pub fn set_inline_object_frame(&mut self, key: &str, frame_key: &str) {
+        self.menu_pipeline.set_inline_object_frame(key, frame_key);
+    }
+
     pub fn menu_text_width(&self, text: &str, scale: f32) -> f32 {
         self.menu_pipeline.text_width(text, scale)
     }
@@ -2038,8 +2050,18 @@ pub(crate) async fn fetch_skin_texture_by_name(name: &str) -> Result<SkinData, S
         id: String,
     }
 
-    let url = format!("https://api.mojang.com/users/profiles/minecraft/{name}");
-    let response = reqwest::get(&url).await.map_err(error_chain)?;
+    // The name goes in a path segment, so it is checked and encoded rather
+    // than pasted into the URL.
+    if !crate::player::valid_player_name(name) {
+        return Err(format!("invalid player name {name:?}"));
+    }
+    let mut url = reqwest::Url::parse("https://api.mojang.com/users/profiles/minecraft/")
+        .map_err(|e| e.to_string())?;
+    url.path_segments_mut()
+        .map_err(|()| "profile url cannot take a path".to_owned())?
+        .pop_if_empty()
+        .push(name);
+    let response = reqwest::get(url).await.map_err(error_chain)?;
     if matches!(
         response.status(),
         reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::NOT_FOUND
