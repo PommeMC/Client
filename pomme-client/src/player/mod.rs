@@ -312,7 +312,9 @@ impl LocalPlayer {
         let kept_velocity = self.velocity;
         let kept_look = self.look_dir;
         let kept_sprinting = self.sprinting;
+        let kept_swimming = self.swimming;
         let kept_crouching = self.crouching;
+        let kept_swimming_pose = self.swimming_pose;
         let kept_air_supply = self.air_supply;
         let kept_sleeping_pos = self.sleeping_pos;
 
@@ -369,7 +371,9 @@ impl LocalPlayer {
             self.look_dir = kept_look;
             self.prev_look_dir = kept_look;
             self.sprinting = kept_sprinting;
+            self.swimming = kept_swimming;
             self.crouching = kept_crouching;
+            self.swimming_pose = kept_swimming_pose;
             self.air_supply = kept_air_supply;
             self.sleeping_pos = kept_sleeping_pos;
         } else {
@@ -789,6 +793,7 @@ mod tests {
         player.velocity = Velocity::new(0.3, -0.4, 0.2);
         player.sprinting = true;
         player.crouching = true;
+        player.swimming_pose = true;
         player.flying = true;
         player.eye_height = CROUCH_EYE_HEIGHT;
         player.prev_eye_height = CROUCH_EYE_HEIGHT;
@@ -836,6 +841,7 @@ mod tests {
         assert_eq!(player.fluid_height, 0.0);
         assert!(!player.eyes_in_water);
         assert!(!player.swimming);
+        assert!(!player.swimming_pose);
         assert_eq!(player.air_supply, MAX_AIR_SUPPLY);
         assert!(player.sleeping_pos.is_none());
         assert_eq!(player.sleep_counter, 0);
@@ -850,7 +856,9 @@ mod tests {
         player.velocity = Velocity::new(0.3, -0.4, 0.2);
         player.look_dir = LookDirection::new(35.0, -12.0);
         player.sprinting = true;
+        player.swimming = true;
         player.crouching = true;
+        player.swimming_pose = true;
         player.air_supply = 87;
         player.sleeping_pos = Some(azalea_core::position::BlockPos::new(1, 64, 1));
         player.food = 4;
@@ -874,7 +882,9 @@ mod tests {
         assert_eq!(player.velocity, Velocity::new(0.3, -0.4, 0.2));
         assert_eq!(player.look_dir, LookDirection::new(35.0, -12.0));
         assert!(player.sprinting);
+        assert!(player.swimming);
         assert!(player.crouching);
+        assert!(player.swimming_pose);
         assert_eq!(player.air_supply, 87);
         assert_eq!(
             player.sleeping_pos,
