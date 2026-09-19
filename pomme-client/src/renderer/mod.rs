@@ -2109,14 +2109,32 @@ fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String>
         .map_err(error_chain)?;
     let payload: TexturesPayload = serde_json::from_slice(&decoded).map_err(error_chain)?;
 
-    payload
+    let skin = payload
         .textures
         .skin
-        .map(|s| {
-            let slim = s.metadata.as_ref().and_then(|m| m.model.as_deref()) == Some("slim");
-            (s.url, slim)
-        })
-        .ok_or_else(|| "No skin texture".to_string())
+        .ok_or_else(|| "No skin texture".to_string())?;
+    if !is_allowed_texture_url(&skin.url) {
+        return Err(format!("texture url not allowed: {}", skin.url));
+    }
+    let slim = skin.metadata.as_ref().and_then(|m| m.model.as_deref()) == Some("slim");
+    Ok((skin.url, slim))
+}
+
+/// authlib's `TextureUrlChecker.isAllowedTextureDomain`: http(s) on exactly
+/// `textures.minecraft.net`. Scheme and host are checked on the raw text since
+/// `Url` lowercases both and authlib is case-sensitive.
+fn is_allowed_texture_url(url: &str) -> bool {
+    const HOST: &str = "textures.minecraft.net";
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = host_port.split_once(':').map_or(host_port, |(h, _)| h);
+    matches!(scheme, "http" | "https") && host == HOST && parsed.host_str() == Some(HOST)
 }
 
 /// Error message including the source chain (`reqwest` hides the detail there).
@@ -2354,6 +2372,42 @@ mod tests {
                 true
             )
         );
+    }
+
+    #[test]
+    fn texture_urls_follow_authlib_allow_list() {
+        for ok in [
+            "https://textures.minecraft.net/texture/abc",
+            "http://textures.minecraft.net/texture/abc",
+            "https://textures.minecraft.net:443/texture/abc",
+        ] {
+            assert!(is_allowed_texture_url(ok), "{ok}");
+        }
+        for bad in [
+            "https://example.com/texture/abc",
+            "https://textures.minecraft.net.evil.com/abc",
+            "https://evil.com/textures.minecraft.net",
+            "https://textures.minecraft.net@evil.com/abc",
+            "https://evil.com#@textures.minecraft.net",
+            "https://TEXTURES.minecraft.net/texture/abc",
+            "HTTPS://textures.minecraft.net/texture/abc",
+            "ftp://textures.minecraft.net/texture/abc",
+            "file:///etc/passwd",
+            "http://192.168.0.1/skin.png",
+            "not a url",
+            "",
+        ] {
+            assert!(!is_allowed_texture_url(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn rejects_textures_property_with_foreign_url() {
+        use base64::Engine;
+
+        let payload = r#"{"textures":{"SKIN":{"url":"http://192.168.0.1/skin.png"}}}"#;
+        let value = base64::engine::general_purpose::STANDARD.encode(payload);
+        assert!(skin_url_from_texture_property(&value).is_err());
     }
 
     fn set_px(img: &mut [u8], x: u32, y: u32, rgba: [u8; 4]) {
