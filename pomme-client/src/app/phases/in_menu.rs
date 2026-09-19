@@ -20,6 +20,7 @@ fn connect_args(core: &AppCore, transport: Transport, username: String) -> Conne
         uuid: core.user.uuid,
         access_token: core.user.access_token.clone(),
         view_distance: core.view_distance(),
+        chat_options: crate::ui::chat::ChatOptions::default(),
     }
 }
 

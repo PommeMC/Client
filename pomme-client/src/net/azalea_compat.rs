@@ -28,6 +28,87 @@ fn native_matches_azalea() {
     );
 }
 
+/// pomme's serverbound chat encoders, read back by azalea's decoders.
+#[test]
+fn chat_encoders_round_trip_through_azalea() {
+    use crate::net::chat;
+    use crate::net::chat_security::LastSeenUpdate;
+
+    let decode = |frame: Vec<u8>| {
+        azalea_protocol::read::deserialize_packet::<ServerboundGamePacket>(
+            &mut std::io::Cursor::new(&frame[..]),
+        )
+        .unwrap()
+    };
+    let update = LastSeenUpdate {
+        offset: 3,
+        acknowledged: [0b101, 0, 0x08],
+        checksum: 0x42,
+        last_seen: Vec::new(),
+    };
+    let check_update =
+        |last_seen: &azalea_protocol::packets::game::s_chat::LastSeenMessagesUpdate| {
+            assert_eq!(last_seen.offset, 3);
+            assert!(last_seen.acknowledged.index(0) && last_seen.acknowledged.index(2));
+            assert!(last_seen.acknowledged.index(19) && !last_seen.acknowledged.index(1));
+            assert_eq!(last_seen.checksum, 0x42);
+        };
+
+    let ServerboundGamePacket::Chat(message) = decode(chat::encode_outbound_message(
+        "hi",
+        5,
+        -6,
+        Some(&[9; 256]),
+        &update,
+    )) else {
+        panic!("expected chat");
+    };
+    assert_eq!(
+        (
+            message.message.as_str(),
+            message.timestamp,
+            message.salt as i64
+        ),
+        ("hi", 5, -6)
+    );
+    assert_eq!(message.signature.map(|s| s.bytes), Some([9; 256]));
+    check_update(&message.last_seen_messages);
+
+    let ServerboundGamePacket::ChatCommandSigned(command) =
+        decode(chat::encode_outbound_signed_command(
+            "msg a hi",
+            7,
+            8,
+            &[("message".into(), [4; 256])],
+            &update,
+        ))
+    else {
+        panic!("expected chat_command_signed");
+    };
+    assert_eq!(
+        (command.command.as_str(), command.timestamp, command.salt),
+        ("msg a hi", 7, 8)
+    );
+    assert_eq!(command.argument_signatures[0].name, "message");
+    assert_eq!(command.argument_signatures[0].signature.bytes, [4; 256]);
+    check_update(&command.last_seen_messages);
+
+    let ServerboundGamePacket::ChatSessionUpdate(session) = decode(
+        chat::encode_chat_session_update(uuid::Uuid::from_u128(7), 1234, &[1, 2], &[3]),
+    ) else {
+        panic!("expected chat_session_update");
+    };
+    assert_eq!(session.chat_session.session_id, uuid::Uuid::from_u128(7));
+    assert_eq!(session.chat_session.profile_public_key.expires_at, 1234);
+    assert_eq!(session.chat_session.profile_public_key.key, [1, 2]);
+    assert_eq!(session.chat_session.profile_public_key.key_signature, [3]);
+
+    let ServerboundGamePacket::ChatAck(ack) = decode(chat::encode_chat_ack(300)) else {
+        panic!("expected chat_ack");
+    };
+    assert_eq!(ack.messages, 300);
+}
+
 #[test]
 fn packet_ids_match_azalea() {
     use azalea_protocol::packets::game::{s_attack, s_interact};
@@ -169,6 +250,30 @@ fn packet_ids_match_azalea() {
         chat_command.id(),
         table_id(Direction::Serverbound, "chat_command")
     );
+
+    for (name, body) in [
+        ("delete_chat", vec![1]),
+        ("command_suggestions", vec![42, 1, 0, 0]),
+    ] {
+        let mut frame = Vec::new();
+        wire::write_varint(&mut frame, table_id(Direction::Clientbound, name));
+        frame.extend(body);
+        let packet = azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut std::io::Cursor::new(&frame[..]),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                (name, packet),
+                ("delete_chat", ClientboundGamePacket::DeleteChat(_))
+                    | (
+                        "command_suggestions",
+                        ClientboundGamePacket::CommandSuggestions(_)
+                    )
+            ),
+            "{name}"
+        );
+    }
 
     use azalea_protocol::packets::game::{
         c_clear_titles, c_set_subtitle_text, c_set_title_text, c_set_titles_animation,
