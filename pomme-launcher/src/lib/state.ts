@@ -48,21 +48,11 @@ const useLauncherSettings = () => {
       console.error("Error while setting `launchWithConsole`: ", res.error);
     }
   };
-  const setSelectedAccountUuid = async (uuid: string | null) => {
-    let res = await commands.setSelectedAccountUuid(uuid);
-    if (res.ok) {
-      setLauncherSettings((prev) => ({ ...prev, selectedAccountUuid: uuid }));
-    } else {
-      console.error("Error while setting `selectedAccountUuid`: ", res.error);
-    }
-  };
-
   return {
     ...launcherSettings,
     setLanguage,
     setKeepLauncherOpen,
     setLaunchWithConsole,
-    setSelectedAccountUuid,
   };
 };
 

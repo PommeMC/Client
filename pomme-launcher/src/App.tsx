@@ -85,6 +85,12 @@ function App() {
     [setSkinUrl],
   );
 
+  const persistSelectedAccountUuid = useCallback((uuid: string | null) => {
+    void commands.setSelectedAccountUuid(uuid).then((res) => {
+      if (!res.ok) console.error("Error while setting `selectedAccountUuid`: ", res.error);
+    });
+  }, []);
+
   useEffect(() => {
     Promise.all([commands.getAllAccounts(), commands.loadLauncherSettings()]).then(
       ([accs, settings]) => {
@@ -93,9 +99,15 @@ function App() {
             ? accs.findIndex((acc) => acc.uuid === settings.selectedAccountUuid)
             : -1;
           const selectedIndex = savedIndex >= 0 ? savedIndex : 0;
+          const selectedUuid = accs[selectedIndex].uuid;
           setAccounts(accs);
           setActiveIndex(selectedIndex);
-          loadSkin(accs[selectedIndex].uuid);
+          loadSkin(selectedUuid);
+          if ((settings.selectedAccountUuid ?? null) !== selectedUuid) {
+            persistSelectedAccountUuid(selectedUuid);
+          }
+        } else if (settings.selectedAccountUuid) {
+          persistSelectedAccountUuid(null);
         }
       },
     );
@@ -107,7 +119,7 @@ function App() {
       if (res.ok) setVersions(res.value);
       else console.error("Failed to fetch versions:", res.error);
     });
-  }, [loadSkin, setAccounts, setActiveIndex, setNews, setVersions]);
+  }, [loadSkin, persistSelectedAccountUuid, setAccounts, setActiveIndex, setNews, setVersions]);
 
   useEffect(() => {
     requestAnimationFrame(() => getCurrentWindow().show());
@@ -143,7 +155,7 @@ function App() {
         return [...filtered, acc];
       });
       setActiveIndex(accounts.filter((a) => a.uuid !== acc.uuid).length);
-      void launcherSettings.setSelectedAccountUuid(acc.uuid);
+      persistSelectedAccountUuid(acc.uuid);
       loadSkin(acc.uuid);
       setStatus(`Signed in as ${acc.username}`);
     } else {
@@ -153,8 +165,8 @@ function App() {
     setAuthUrl(null);
   }, [
     accounts,
-    launcherSettings,
     loadSkin,
+    persistSelectedAccountUuid,
     setAccountDropdownOpen,
     setAccounts,
     setActiveIndex,
@@ -168,11 +180,11 @@ function App() {
       setActiveIndex(index);
       setAccountDropdownOpen(false);
       if (accounts[index]) {
-        void launcherSettings.setSelectedAccountUuid(accounts[index].uuid);
+        persistSelectedAccountUuid(accounts[index].uuid);
         loadSkin(accounts[index].uuid);
       }
     },
-    [accounts, launcherSettings, loadSkin, setAccountDropdownOpen, setActiveIndex],
+    [accounts, loadSkin, persistSelectedAccountUuid, setAccountDropdownOpen, setActiveIndex],
   );
 
   const removeAccount = useCallback(
@@ -181,11 +193,18 @@ function App() {
       const remainingAccounts = accounts.filter((a) => a.uuid !== uuid);
       setAccounts(remainingAccounts);
       setActiveIndex(0);
-      void launcherSettings.setSelectedAccountUuid(remainingAccounts[0]?.uuid ?? null);
+      persistSelectedAccountUuid(remainingAccounts[0]?.uuid ?? null);
       setAccountDropdownOpen(false);
       setSkinUrl(null);
     },
-    [accounts, launcherSettings, setAccountDropdownOpen, setAccounts, setActiveIndex, setSkinUrl],
+    [
+      accounts,
+      persistSelectedAccountUuid,
+      setAccountDropdownOpen,
+      setAccounts,
+      setActiveIndex,
+      setSkinUrl,
+    ],
   );
 
   const ensureAssets = useCallback(
