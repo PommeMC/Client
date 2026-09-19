@@ -1495,19 +1495,18 @@ impl MenuOverlayPipeline {
                         // selected stack name: it is a second framed tooltip positioned
                         // 15px above the bundle image, not text drawn inside this frame.
                         let name = crate::ui::common::item_display_name(data);
-                        // Font.width() is ceil(stringWidth) in vanilla. Keep that integer
-                        // width through both positioning and background sizing.
-                        let name_gui_w = self.mc_text_width(&name, fs) as i32;
+                        // `mc_text_width` is already in framebuffer pixels at `fs = 8 * gs`.
+                        // Convert it back to Vanilla's integer GUI-pixel Font.width before
+                        // applying GUI-coordinate positioning, then scale exactly once.
+                        let name_gui_w = (self.mc_text_width(&name, fs) / gs).ceil() as i32;
                         let name_w = name_gui_w as f32 * gs;
                         // Vanilla does all of this in integer GUI coordinates:
                         // centerTooltip = x + w / 2 - 12; anchor = centerTooltip - textWidth / 2.
                         // In particular, odd/even name widths are not symmetrically centered.
                         let content_gui_w = (content_w / gs).round() as i32;
-                        let left_gui = (left / gs).round() as i32;
-                        let top_gui = (top / gs).round() as i32;
-                        let center_tooltip = left_gui + content_gui_w / 2 - 12;
-                        let anchor_x = (center_tooltip - name_gui_w / 2) as f32 * gs;
-                        let anchor_y = (top_gui - 15) as f32 * gs;
+                        let center_tooltip = left + (content_gui_w / 2 - 12) as f32 * gs;
+                        let anchor_x = center_tooltip - (name_gui_w / 2) as f32 * gs;
+                        let anchor_y = top - 15.0 * gs;
                         let mut selected_x = anchor_x + 12.0 * gs;
                         let mut selected_y = anchor_y - 12.0 * gs;
                         if selected_x + name_w > *screen_w {
