@@ -1,5 +1,6 @@
 pub mod core;
 pub mod input;
+pub mod level_load;
 pub mod phases;
 pub mod state_slot;
 
@@ -228,8 +229,11 @@ impl ApplicationHandler for App {
 
                 let mut renderer = match Renderer::new(
                     Arc::clone(&window),
-                    &self.core.data_dirs.jar_assets_dir,
-                    &self.core.asset_index,
+                    crate::ui::font::FontSources {
+                        jar_assets_dir: &self.core.data_dirs.jar_assets_dir,
+                        asset_index: &self.core.asset_index,
+                        packs: &self.core.resource_packs,
+                    },
                     &self.core.data_dirs.game_dir,
                     self.core.menu.vsync,
                     &self.core.menu.theme().panorama_dir(&self.core.data_dirs),
@@ -269,6 +273,7 @@ impl ApplicationHandler for App {
                             uuid: self.core.user.uuid,
                             access_token: self.core.user.access_token.clone(),
                             view_distance: self.core.view_distance(),
+                            chat_options: crate::ui::chat::ChatOptions::default(),
                         },
                     );
 

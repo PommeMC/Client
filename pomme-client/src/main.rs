@@ -9,6 +9,7 @@ mod args;
 mod assets;
 mod audio;
 mod benchmark;
+mod chat_component;
 mod dirs;
 mod discord;
 mod entity;
@@ -118,6 +119,10 @@ fn main() {
             .build()
             .expect("Failed to create tokio runtime"),
     );
+    {
+        let _runtime = rt.enter();
+        crate::net::chat_security::ProfileKeyServices::prefetch();
+    }
 
     let user = UserData::from_args(args.username, args.uuid, args.access_token);
 

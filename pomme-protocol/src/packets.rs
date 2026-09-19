@@ -318,6 +318,47 @@ mod tests {
             t.id(Phase::Game, Direction::Serverbound, "teleport_to_entity"),
             Some(0x40)
         );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "chat_command"),
+            Some(7)
+        );
+        assert_eq!(t.id(Phase::Game, Direction::Serverbound, "chat"), Some(9));
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "chat_ack"),
+            Some(6)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "chat_command_signed"),
+            Some(8)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "chat_session_update"),
+            Some(10)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "command_suggestions"),
+            Some(15)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "delete_chat"),
+            Some(31)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "disguised_chat"),
+            Some(33)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "player_chat"),
+            Some(65)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_action_bar_text"),
+            Some(87)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "system_chat"),
+            Some(121)
+        );
         assert_eq!(t.id(Phase::Game, Direction::Serverbound, "no_such"), None);
     }
 

@@ -13,6 +13,7 @@ use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Fullscreen, Window};
 
 use crate::app::input::{Action, InputState, STICK_MOVEMENT_THRESHOLD};
+use crate::app::level_load::ReadyInputs;
 use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx};
 use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
@@ -24,6 +25,7 @@ use crate::net::NetworkEvent;
 use crate::net::connection::ConnectionHandle;
 use crate::physics::movement;
 use crate::player::LocalPlayer;
+use crate::player::tab_list::PlayerChatValidation;
 use crate::renderer::Renderer;
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::menu::{
@@ -562,7 +564,7 @@ impl AppCore {
     }
 
     pub fn send_chat_message(&self, connection: &ConnectionHandle, msg: String) {
-        let _ = connection.chat_tx.try_send(msg);
+        connection.packet_tx.send_chat(msg);
     }
 
     fn queue_player_skin(&mut self, uuid: uuid::Uuid, textures: Option<String>) {
@@ -743,6 +745,11 @@ impl AppCore {
                         tracing::warn!("Unexpected NetworkEvent::Connected, skipping");
                     }
                 }
+                NetworkEvent::LevelChunksLoadStart => {
+                    if let Some(tracker) = &mut game.level_load {
+                        tracker.loading_packets_received();
+                    }
+                }
                 NetworkEvent::BiomeColors { colors } => {
                     tracing::info!("Received {} biome climate entries", colors.len());
                     game.biome_climate = Arc::new(colors);
@@ -764,10 +771,6 @@ impl AppCore {
                     game.light_engine =
                         crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
                     game.position_set = false;
-                    game.player_loaded_sent = false;
-                    game.player_compiled_section = None;
-                    game.client_load_deadline = std::time::Instant::now()
-                        + crate::app::phases::in_game::CLIENT_WAIT_TIMEOUT;
                     // Login/respawn recreate vanilla's LocalPlayer, resetting
                     // the XP display sentinel; waypoints persist.
                     game.xp_display_start_tick = i64::MIN;
@@ -778,6 +781,13 @@ impl AppCore {
                     game.player.reset_hurt_state();
 
                     renderer.clear_chunk_meshes();
+                    // The meshes went with the old level, so their bookkeeping
+                    // has to go too, or the new level's camera section reads as
+                    // already meshed.
+                    game.section_vis.clear();
+                    game.section_vis_epoch.clear();
+                    game.meshed.clear();
+                    game.compiled.clear();
                     game.mesh_dispatcher = renderer.create_mesh_dispatcher(
                         Arc::clone(&game.biome_climate),
                         None,
@@ -816,6 +826,7 @@ impl AppCore {
                     game.block_entity_anim.drop_chunk(pos.x, pos.z);
                     game.content_gen.remove(&pos);
                     game.meshed.remove(&pos);
+                    game.compiled.remove(&pos);
                     game.vis_mask.remove(&pos);
                     game.vis_tiers.remove(&pos);
                     game.section_gen.retain(|(p, _), _| *p != pos);
@@ -863,7 +874,9 @@ impl AppCore {
                                 to_chunk_coord(correction.position.x),
                                 to_chunk_coord(correction.position.z),
                             ));
-                        renderer.reset_camera(correction.position, correction.look_dir);
+                        // The camera is the eye, as `sync_camera_pos` keeps it
+                        // every frame; seeding it at the feet starts too low.
+                        renderer.reset_camera(game.player.eye_pos(), correction.look_dir);
 
                         if !game.position_set {
                             game.position_set = true;
@@ -877,7 +890,8 @@ impl AppCore {
                     }
 
                     // Vanilla mounted players skip applying the correction but
-                    // still acknowledge it and echo their current PosRot.
+                    // still acknowledge it and echo their current PosRot. A
+                    // 26.3 wire folds this pair in the translation layer.
                     connection.packet_tx.send(ServerboundGamePacket::AcceptTeleportation(
                         azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation { id },
                     ));
@@ -912,7 +926,7 @@ impl AppCore {
                     // acknowledging with a Rot packet.
                     game.player.look_dir = new_look_dir;
                     game.player.prev_look_dir = new_look_dir;
-                    renderer.reset_camera(game.player.position, new_look_dir);
+                    renderer.reset_camera(game.player.eye_pos(), new_look_dir);
                     connection.packet_tx.send(ServerboundGamePacket::MovePlayerRot(
                         azalea_protocol::packets::game::s_move_player_rot::ServerboundMovePlayerRot {
                             look_direction: new_look_dir.into(),
@@ -1166,8 +1180,67 @@ impl AppCore {
                     game.container_was_open = None;
                     self.apply_cursor_grab(window, Some(game));
                 }
-                NetworkEvent::ChatMessage { spans } => {
-                    game.chat.push_message(spans);
+                NetworkEvent::ChatMessage {
+                    spans,
+                    secure_spans,
+                    missing_profile_spans,
+                    signature,
+                    sender_uuid,
+                    signed_body,
+                    source,
+                    tag,
+                } => {
+                    let only_secure = game.chat.only_secure();
+                    let spans = if only_secure {
+                        secure_spans.unwrap_or(spans)
+                    } else {
+                        spans
+                    };
+                    if let (Some(sender_uuid), Some(body)) = (sender_uuid, signed_body) {
+                        let now_ms = crate::net::chat_security::now_ms();
+                        let validation =
+                            game.tab_list.players.get_mut(&sender_uuid).map(|player| {
+                                player.validate_chat_message(
+                                    &body,
+                                    signature.as_ref(),
+                                    game.server_enforces_secure_chat,
+                                    now_ms,
+                                )
+                            });
+                        match validation {
+                            None | Some(PlayerChatValidation::Invalid) => {
+                                if let Some(spans) = missing_profile_spans {
+                                    game.chat.push_validation_error(spans, signature);
+                                }
+                            }
+                            Some(validation) => {
+                                // An accepted unsigned message loses its signature
+                                // (vanilla `removeSignature`).
+                                let signed = validation == PlayerChatValidation::Signed;
+                                let signature = signature.filter(|_| signed);
+                                if body.fully_filtered {
+                                    game.chat.mark_processed(signature, false);
+                                } else {
+                                    let tag = accepted_player_chat_tag(
+                                        game.singleplayer && sender_uuid == self.user.uuid,
+                                        signed,
+                                        &body,
+                                        now_ms,
+                                        only_secure,
+                                    );
+                                    game.chat
+                                        .push_message_with_source(spans, signature, source, tag);
+                                }
+                            }
+                        }
+                    } else {
+                        game.chat
+                            .push_message_with_source(spans, signature, source, tag);
+                    }
+                }
+                NetworkEvent::DeleteChatMessage { signature } => {
+                    game.chat.ignore_pending(signature);
+                    game.chat.delete_message(signature);
                 }
                 NetworkEvent::ActionBar { spans } => {
                     game.action_bar = Some((spans, game.tick_count));
@@ -1253,7 +1326,11 @@ impl AppCore {
                     game.command_tree = Some(tree);
                 }
                 NetworkEvent::CommandSuggestions { id, start, options } => {
-                    game.chat.apply_server_suggestions(id, start, options);
+                    game.chat.apply_server_suggestions(
+                        id,
+                        start,
+                        options.into_iter().map(|option| option.text).collect(),
+                    );
                 }
                 NetworkEvent::BlockUpdate { pos, state } => {
                     apply_server_block(game, &mut priority_remesh, pos, state);
@@ -1793,10 +1870,21 @@ impl AppCore {
                     entity_id,
                     hardcore,
                     show_death_screen,
+                    online_mode,
                 } => {
+                    connection.packet_tx.chat_login(online_mode);
                     game.player.entity_id = entity_id;
                     game.hardcore = hardcore;
                     game.show_death_screen = show_death_screen;
+                    // Vanilla `handleLogin` builds a new LocalPlayer on slot 0,
+                    // with the server's SetHeldSlot to follow. Ours lives in the
+                    // app-wide input state, so a reconnect would otherwise
+                    // report the last session's slot.
+                    self.input.set_selected_slot(0);
+                    game.start_level_load();
+                }
+                NetworkEvent::SecureChatEnforced { enforced } => {
+                    game.server_enforces_secure_chat = enforced;
                 }
                 NetworkEvent::PlayerScore { entity_id, score } => {
                     if entity_id == game.player.entity_id {
@@ -1823,6 +1911,7 @@ impl AppCore {
                     // models the max-health base, so it remains unchanged here.
                     let _ = keep_attribute_modifiers;
                     game.dead = false;
+                    game.start_level_load();
                     game.player.reset_for_respawn(keep_entity_data);
                     game.interaction.reset_player_transients_for_respawn();
                     // A fresh LocalPlayer gets a fresh KeyboardInput and packet
@@ -2001,30 +2090,76 @@ impl AppCore {
         disconnect_reason
     }
 
+    /// Vanilla `ClientPacketListener.tick`'s level-load half: advance the
+    /// tracker, and the first tick the level is ready send `player_loaded`
+    /// (`notifyPlayerLoaded`) and drop the tracker. Runs at the start of every
+    /// client tick, in the loading phase as well as in game, so a respawn or a
+    /// dimension change waits and reports again.
+    pub fn tick_level_load(
+        renderer: &Renderer,
+        connection: &ConnectionHandle,
+        game: &mut GameState,
+    ) {
+        // Taken for the tick so the readiness inputs can borrow `game`; put
+        // back below unless the level is ready, which is vanilla clearing
+        // `levelLoadTracker`.
+        let Some(mut tracker) = game.level_load.take() else {
+            return;
+        };
+        let now = Instant::now();
+
+        let min_y = game.chunk_store.min_y();
+        let max_y = min_y + game.chunk_store.height() as i32 - 1;
+        let outside_build_height = |y: i32| y < min_y || y > max_y;
+        // Vanilla reads `gameRenderer.mainCamera().blockPosition()`.
+        let camera_block = renderer.camera_render_position().floor().as_ivec3();
+
+        tracker.tick_client_load(
+            now,
+            &ReadyInputs {
+                // 26.3's `isLevelReady` checks only the camera's height.
+                player_outside_build_height: crate::version::session_protocol() < 777
+                    && outside_build_height(game.player.position.y.floor() as i32),
+                camera_outside_build_height: outside_build_height(camera_block.y),
+                spectator: crate::player::is_spectator(game.player.game_mode),
+                alive: !game.dead,
+                // Until the server's first position the camera sits at the
+                // origin, whose section says nothing about where we spawn.
+                player_section_ready: game.position_set && game.camera_section_ready(camera_block),
+            },
+        );
+
+        if !tracker.is_level_ready(now) {
+            game.level_load = Some(tracker);
+            return;
+        }
+
+        game.client_loaded = true;
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::PlayerLoaded(
+                azalea_protocol::packets::game::s_player_loaded::ServerboundPlayerLoaded,
+            ));
+    }
+
+    /// Marks the end of the client tick (1.21.2+). Must be the last packet of
+    /// the tick: servers and anti-cheat batch our movement between these to
+    /// tick-align it, so omitting it makes them reject/rubber-band movement.
+    /// Vanilla `Minecraft.tick` sends it for every tick a level exists,
+    /// including the ones spent on the loading screen.
+    pub fn send_client_tick_end(connection: &ConnectionHandle) {
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::ClientTickEnd(
+                s_client_tick_end::ServerboundClientTickEnd,
+            ));
+    }
+
     pub fn tick_physics(
         &mut self,
         renderer: &mut Renderer,
         connection: &ConnectionHandle,
         game: &mut GameState,
-    ) {
-        self.tick_physics_with_input(renderer, connection, game, true);
-    }
-
-    pub fn tick_loading_physics(
-        &mut self,
-        renderer: &mut Renderer,
-        connection: &ConnectionHandle,
-        game: &mut GameState,
-    ) {
-        self.tick_physics_with_input(renderer, connection, game, false);
-    }
-
-    fn tick_physics_with_input(
-        &mut self,
-        renderer: &mut Renderer,
-        connection: &ConnectionHandle,
-        game: &mut GameState,
-        allow_live_input: bool,
     ) {
         if game.death_screen_open {
             if game.death_confirm {
@@ -2053,11 +2188,19 @@ impl AppCore {
             game.server_simulation_distance,
         );
 
+        // Vanilla `LocalPlayer.tick` returns immediately until the client has
+        // loaded: no physics, no interaction, and no input, sprint or movement
+        // packets while the level is still coming in.
+        if !game.client_loaded {
+            self.input.clear_click_counts();
+            self.input.clear_just_pressed_actions();
+            return;
+        }
+
         // LocalPlayer.tickDeath removes the client player at tick 20; from then
         // on ClientLevel.tickEntities skips it entirely.
         if game.dead && game.player.death_animation_finished() {
             self.input.clear_click_counts();
-            Self::send_client_tick_end(connection);
             return;
         }
 
@@ -2112,14 +2255,13 @@ impl AppCore {
 
             // Q/F presses queued while dead must not fire on respawn.
             self.input.clear_click_counts();
-            Self::send_client_tick_end(connection);
             return;
         }
 
         // Open menus only release the keys; the simulation keeps ticking. The
         // chunk-load benchmark also freezes the player so every run measures the
         // same fixed origin.
-        let input_live = allow_live_input && game.input_live() && game.chunk_load_bench.is_none();
+        let input_live = game.input_live() && game.chunk_load_bench.is_none();
 
         // Vanilla Minecraft.handleKeybinds: drop and offhand-swap consume the
         // queued key presses each tick; spectators consume without acting.
@@ -2136,7 +2278,7 @@ impl AppCore {
                         .inventory
                         .remove_from_selected(self.input.selected_slot(), whole_stack)
                     {
-                        crate::player::interaction::send_swing(&connection.packet_tx);
+                        crate::player::interaction::send_use_swing(&connection.packet_tx);
                     }
                 }
             }
@@ -2339,19 +2481,6 @@ impl AppCore {
         if input_live {
             self.input.clear_just_pressed_actions();
         }
-
-        // Marks the end of the client tick (1.21.2+). Must be the last packet of
-        // the tick: servers and anti-cheat batch our movement between these to
-        // tick-align it, so omitting it makes them reject/rubber-band movement.
-        Self::send_client_tick_end(connection);
-    }
-
-    fn send_client_tick_end(connection: &ConnectionHandle) {
-        connection
-            .packet_tx
-            .send(ServerboundGamePacket::ClientTickEnd(
-                s_client_tick_end::ServerboundClientTickEnd,
-            ));
     }
 
     // Vanilla onUpdateAbilities: report a locally toggled `flying` to the
@@ -2507,13 +2636,39 @@ pub(crate) fn death_route(show_death_screen: bool) -> DeathRoute {
     }
 }
 
+/// Vanilla `ChatListener.evaluateTrustLevel` and `ChatTrustLevel.createTag`.
+/// Only the integrated server's own player skips evaluation.
+pub(crate) fn accepted_player_chat_tag(
+    local_sender: bool,
+    signed: bool,
+    body: &crate::net::chat_security::SignedChatBody,
+    now_ms: u64,
+    only_secure: bool,
+) -> Option<crate::ui::chat::ChatMessageTag> {
+    if local_sender {
+        return None;
+    }
+    let expired = now_ms > body.timestamp_ms.max(0) as u64 + 7 * 60 * 1000;
+    if !signed || expired {
+        return Some(crate::ui::chat::ChatMessageTag::NotSecure);
+    }
+    let modified = if only_secure {
+        body.modified_when_unsigned_hidden
+    } else {
+        body.modified
+    };
+    modified.then(|| crate::ui::chat::ChatMessageTag::Modified {
+        original: body.content.clone(),
+    })
+}
+
 /// New `server_render_distance` for a server view-distance announcement, or
 /// `None` to keep the current one. Some servers announce min(our request,
 /// server max); an echo of our own request carries no cap information and
 /// would ratchet the render distance slider down, so only a differing value
 /// counts. It can't be an echo above the request: any such value is the
 /// server's actual view distance, including later reductions.
-pub(crate) fn server_view_distance_update(announced: u32, last_request: u32) -> Option<u32> {
+fn server_view_distance_update(announced: u32, last_request: u32) -> Option<u32> {
     let announced = announced.min(crate::world::chunk::MAX_VIEW_DISTANCE);
     (announced != last_request).then_some(announced)
 }

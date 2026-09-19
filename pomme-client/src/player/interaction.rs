@@ -135,9 +135,9 @@ impl InteractionState {
         Self {
             target: None,
             seq: 0,
-            // Vanilla `MultiPlayerGameMode.carriedIndex` starts at 0. The
-            // server also starts the selected hotbar slot at 0, so slot zero
-            // must not generate a gratuitous SetCarriedItem packet on join.
+            // Vanilla `MultiPlayerGameMode.carriedIndex` starts at 0, the slot
+            // a fresh inventory selects, so a join sends nothing until it
+            // changes.
             carried_slot: 0,
             last_teleport_seq: 0,
             pending_predictions: HashMap::new(),
@@ -276,12 +276,23 @@ impl InteractionState {
         self.o_attack_anim + diff * partial_tick
     }
 
-    fn swing(&mut self, sender: &PacketSender) {
+    fn start_swing(&mut self) {
         if !self.swinging || self.swing_time >= SWING_DURATION / 2 || self.swing_time < 0 {
             self.swing_time = -1;
             self.swinging = true;
         }
+    }
+
+    /// An attack or mining swing, always reported to the server.
+    fn swing(&mut self, sender: &PacketSender) {
+        self.start_swing();
         send_swing(sender);
+    }
+
+    /// A swing from using an item or entity; see [`send_use_swing`].
+    fn swing_use(&mut self, sender: &PacketSender) {
+        self.start_swing();
+        send_use_swing(sender);
     }
 
     fn update_swing(&mut self) {
@@ -699,7 +710,7 @@ impl InteractionState {
                 hit.location - hit.entity_pos,
                 sneaking,
             ));
-            self.swing(sender);
+            self.swing_use(sender);
             return true;
         }
 
@@ -728,7 +739,7 @@ impl InteractionState {
                 }
             }
             if place_block.is_some() {
-                self.swing(sender);
+                self.swing_use(sender);
                 self.predict_place(
                     hit,
                     place_block,
@@ -1664,6 +1675,14 @@ fn send_action(
     ));
 }
 
+/// Reports a swing from using an item, block or entity where the wire
+/// version does (`Translation::reports_use_swings`).
+pub(crate) fn send_use_swing(sender: &PacketSender) {
+    if crate::net::translate::active().is_none_or(|t| t.reports_use_swings()) {
+        send_swing(sender);
+    }
+}
+
 pub(crate) fn send_swing(sender: &PacketSender) {
     use azalea_protocol::packets::game::s_swing::ServerboundSwing;
     sender.send(ServerboundGamePacket::Swing(ServerboundSwing {
@@ -1828,7 +1847,7 @@ mod tests {
             Outbound::Raw(bytes) => {
                 assert_eq!(bytes, wire::encode_pick_item_from_block(-1, 64, 3, true))
             }
-            Outbound::Packet(_) => panic!("pick packet must use raw encoding"),
+            _ => panic!("pick packet must use raw encoding"),
         }
 
         interaction.target = Some(HitResult::Entity(EntityHitResult {
@@ -1841,7 +1860,7 @@ mod tests {
             Outbound::Raw(bytes) => {
                 assert_eq!(bytes, wire::encode_pick_item_from_entity(300, false));
             }
-            Outbound::Packet(_) => panic!("pick packet must use raw encoding"),
+            _ => panic!("pick packet must use raw encoding"),
         }
 
         interaction.target = None;
