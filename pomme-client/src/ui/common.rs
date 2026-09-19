@@ -496,8 +496,8 @@ fn durability_color(health: f32) -> [f32; 4] {
         5 => (1.0, p, q),
         _ => unreachable!("durability hue must remain in the vanilla HSV range"),
     };
-    let channel = |value: f32| ((value * 255.0) as i32).clamp(0, 255) as f32 / 255.0;
-    [channel(red), channel(green), channel(blue), 1.0]
+    let channel = |value: f32| ((value * 255.0) as i32).clamp(0, 255) as u32;
+    rgb((channel(red) << 16) | (channel(green) << 8) | channel(blue))
 }
 
 /// Measures rendered text width in framebuffer px at the given font size.
@@ -784,6 +784,14 @@ mod tests {
         assert_eq!(width, 0);
         assert_eq!(color, [1.0, 0.0, 0.0, 1.0]);
 
+        assert!(durability_bar(&damaged_pickaxe(-1)).is_none());
+
+        let over_damaged = damaged_pickaxe(max_damage + 1);
+        let (width, color) =
+            durability_bar(&over_damaged).expect("over-max damage should clamp to max damage");
+        assert_eq!(width, 0);
+        assert_eq!(color, [1.0, 0.0, 0.0, 1.0]);
+
         let unbreakable = ItemStack::new(ItemKind::IronPickaxe, 1)
             .with_component(Damage { amount: 1 })
             .with_component(Unbreakable)
@@ -791,6 +799,20 @@ mod tests {
             .expect("pickaxe stack should be present")
             .clone();
         assert!(durability_bar(&unbreakable).is_none());
+
+        let damage_without_max = ItemStack::new(ItemKind::Stone, 1)
+            .with_component(Damage { amount: 1 })
+            .as_present()
+            .expect("stone stack should be present")
+            .clone();
+        assert!(durability_bar(&damage_without_max).is_none());
+
+        let max_without_damage = ItemStack::new(ItemKind::Stone, 1)
+            .with_component(MaxDamage { amount: 10 })
+            .as_present()
+            .expect("stone stack should be present")
+            .clone();
+        assert!(durability_bar(&max_without_damage).is_none());
     }
 
     #[test]
