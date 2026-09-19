@@ -1,6 +1,7 @@
 use azalea_inventory::components::{Bees, BundleContents, TooltipDisplay};
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::{ItemStack, ItemStackData};
+use num_rational::Ratio;
 
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 
@@ -29,31 +30,37 @@ pub fn next_selection(wheel: i32, selected: i32, shown: usize) -> i32 {
     (selected - wheel).rem_euclid(max)
 }
 
-pub fn fullness(contents: &BundleContents) -> f32 {
+pub fn weight(contents: &BundleContents) -> Ratio<i64> {
     contents
         .items
         .iter()
         .map(|item| match item {
-            ItemStack::Empty => 0.0,
-            ItemStack::Present(data) => item_weight(data) * data.count.max(0) as f32,
+            ItemStack::Empty => Ratio::from_integer(0),
+            ItemStack::Present(data) => item_weight(data) * i64::from(data.count.max(0)),
         })
         .sum()
 }
 
-fn item_weight(data: &ItemStackData) -> f32 {
+pub fn fullness(contents: &BundleContents) -> f32 {
+    let weight = weight(contents);
+    *weight.numer() as f32 / *weight.denom() as f32
+}
+
+pub fn item_weight(data: &ItemStackData) -> Ratio<i64> {
     if let Some(nested) = data.get_component::<BundleContents>() {
-        return fullness(&nested) + 1.0 / 16.0;
+        return weight(&nested) + Ratio::new(1, 16);
     }
     if data
         .get_component::<Bees>()
         .is_some_and(|bees| !bees.occupants.is_empty())
     {
-        return 1.0;
+        return Ratio::from_integer(1);
     }
     let max_stack = data
         .get_component::<azalea_inventory::components::MaxStackSize>()
-        .map_or_else(|| data.kind.max_stack_size(), |size| size.count);
-    1.0 / max_stack.max(1) as f32
+        .map_or_else(|| data.kind.max_stack_size(), |size| size.count)
+        .max(1);
+    Ratio::new(1, i64::from(max_stack))
 }
 
 pub fn item_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
@@ -263,7 +270,7 @@ mod tests {
             .as_present()
             .expect("stone stack should be present")
             .clone();
-        assert_eq!(item_weight(&custom), 0.25);
+        assert_eq!(item_weight(&custom), Ratio::new(1, 4));
     }
 
     #[test]

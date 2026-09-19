@@ -5227,6 +5227,7 @@ dependencies = [
  "libloading 0.9.0",
  "md-5 0.11.0",
  "mimalloc",
+ "num-rational",
  "open",
  "parking_lot",
  "png 0.17.16",

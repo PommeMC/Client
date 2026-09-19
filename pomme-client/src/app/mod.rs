@@ -615,7 +615,7 @@ impl ApplicationHandler for App {
                     // Queued raw: ChatScreen routes it to the completion popup
                     // or the backlog, with Shift's slower multiplier.
                     AppPhase::InGame { game, .. } if game.chat.is_open() => {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(0.0, scroll);
                     }
                     // Vanilla MouseHandler: a spectator's wheel moves the menu
                     // selection (sign-inverted) while it is open, and adjusts

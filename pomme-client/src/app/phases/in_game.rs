@@ -1761,12 +1761,17 @@ fn send_container_clicks(
             },
             other => {
                 let mut cursor = std::mem::take(&mut game.cursor_item);
+                let bundle_selection = game
+                    .bundle_selection
+                    .filter(|(menu, _, _)| *menu == container_id)
+                    .map(|(_, slot, selected)| (slot, selected));
                 let changed = menu_click::apply_click(
                     kind,
                     game.menu_slots(),
                     &mut cursor,
                     other,
                     crate::player::is_creative(game.player.game_mode),
+                    bundle_selection,
                 );
                 game.cursor_item = cursor;
                 for (s, item) in &changed {

@@ -186,6 +186,7 @@ pub fn apply_click(
     cursor: &mut ItemStack,
     op: &ClickOperation,
     creative: bool,
+    bundle_selection: Option<(u16, i32)>,
 ) -> Vec<(u16, ItemStack)> {
     // Crafting-result clicks need recipe logic; leave them to the server.
     if op
@@ -206,7 +207,7 @@ pub fn apply_click(
         return Vec::new();
     }
     let mut menu = kind.build_menu(slots);
-    apply_op(kind, &mut menu, cursor, op, creative);
+    apply_op(kind, &mut menu, cursor, op, creative, bundle_selection);
 
     let mut changed = Vec::new();
     for (i, before) in slots.iter().enumerate() {
@@ -286,14 +287,15 @@ fn apply_op(
     cursor: &mut ItemStack,
     op: &ClickOperation,
     creative: bool,
+    bundle_selection: Option<(u16, i32)>,
 ) {
     match op {
         ClickOperation::Pickup(p) => match p {
             PickupClick::Left { slot: Some(s) } => {
-                pickup_click(kind, menu, cursor, *s as usize, true)
+                pickup_click(kind, menu, cursor, *s as usize, true, bundle_selection)
             }
             PickupClick::Right { slot: Some(s) } => {
-                pickup_click(kind, menu, cursor, *s as usize, false)
+                pickup_click(kind, menu, cursor, *s as usize, false, bundle_selection)
             }
             PickupClick::Left { slot: None } | PickupClick::LeftOutside => {
                 *cursor = ItemStack::Empty; // drop whole
@@ -383,8 +385,12 @@ fn pickup_click(
     cursor: &mut ItemStack,
     s: usize,
     primary: bool,
+    bundle_selection: Option<(u16, i32)>,
 ) {
-    if bundle_click_override(kind, menu, cursor, s, primary) {
+    let selected = bundle_selection
+        .filter(|(slot, _)| usize::from(*slot) == s)
+        .map_or(crate::ui::bundle::NO_SELECTION, |(_, selected)| selected);
+    if bundle_click_override(kind, menu, cursor, s, primary, selected) {
         return;
     }
     let mut slot_item = take_slot(menu, s);
@@ -430,21 +436,6 @@ fn set_bundle_contents(stack: &mut ItemStack, contents: BundleContents) {
     }
 }
 
-fn bundle_capacity(contents: &BundleContents) -> f32 {
-    (1.0 - crate::ui::bundle::fullness(contents)).max(0.0)
-}
-
-fn bundle_item_weight(data: &ItemStackData) -> f32 {
-    let one = BundleContents {
-        items: vec![ItemStack::Present({
-            let mut d = data.clone();
-            d.count = 1;
-            d
-        })],
-    };
-    crate::ui::bundle::fullness(&one)
-}
-
 fn insert_into_bundle(bundle: &mut ItemStack, source: &mut ItemStack) -> i32 {
     let Some(bundle_data) = bundle.as_present() else {
         return 0;
@@ -456,11 +447,15 @@ fn insert_into_bundle(bundle: &mut ItemStack, source: &mut ItemStack) -> i32 {
         return 0;
     };
     let source_snapshot = source_data.clone();
-    let per_item = bundle_item_weight(&source_snapshot);
-    if per_item <= 0.0 {
+    if crate::player::inventory::item_resource_name(source_snapshot.kind).ends_with("shulker_box") {
         return 0;
     }
-    let capacity = (bundle_capacity(&current) / per_item + 1.0e-6).floor() as i32;
+    let per_item = crate::ui::bundle::item_weight(&source_snapshot);
+    let remaining = (num_rational::Ratio::from_integer(1) - crate::ui::bundle::weight(&current))
+        .max(num_rational::Ratio::from_integer(0));
+    let capacity = (remaining / per_item)
+        .to_integer()
+        .clamp(0, i64::from(i32::MAX)) as i32;
     let amount = source_data.count.min(capacity).max(0);
     if amount == 0 {
         return 0;
@@ -484,7 +479,7 @@ fn insert_into_bundle(bundle: &mut ItemStack, source: &mut ItemStack) -> i32 {
     amount
 }
 
-fn remove_from_bundle(bundle: &mut ItemStack) -> ItemStack {
+fn remove_from_bundle(bundle: &mut ItemStack, selected: i32) -> ItemStack {
     let Some(bundle_data) = bundle.as_present() else {
         return ItemStack::Empty;
     };
@@ -495,7 +490,11 @@ fn remove_from_bundle(bundle: &mut ItemStack) -> ItemStack {
     if contents.items.is_empty() {
         return ItemStack::Empty;
     }
-    let removed = contents.items.remove(0);
+    let index = usize::try_from(selected)
+        .ok()
+        .filter(|&i| i < contents.items.len())
+        .unwrap_or(0);
+    let removed = contents.items.remove(index);
     set_bundle_contents(bundle, contents);
     removed
 }
@@ -509,6 +508,7 @@ fn bundle_click_override(
     cursor: &mut ItemStack,
     s: usize,
     primary: bool,
+    selected: i32,
 ) -> bool {
     let mut slot = take_slot(menu, s);
     let mut carried = std::mem::take(cursor);
@@ -523,7 +523,7 @@ fn bundle_click_override(
             insert_into_bundle(&mut carried, &mut slot);
             true
         } else if !primary && slot.is_empty() {
-            let mut removed = remove_from_bundle(&mut carried);
+            let mut removed = remove_from_bundle(&mut carried, selected);
             if !removed.is_empty() && kind.may_place(s, removed.as_present().unwrap()) {
                 std::mem::swap(&mut slot, &mut removed);
                 if !removed.is_empty() {
@@ -541,7 +541,7 @@ fn bundle_click_override(
             insert_into_bundle(&mut slot, &mut carried);
             true
         } else if !primary && carried.is_empty() {
-            carried = remove_from_bundle(&mut slot);
+            carried = remove_from_bundle(&mut slot, selected);
             true
         } else {
             false
@@ -777,5 +777,60 @@ fn with_count(mut data: ItemStackData, count: i32) -> ItemStack {
         ItemStack::Present(data)
     } else {
         ItemStack::Empty
+    }
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+
+    fn bundle(items: Vec<ItemStack>) -> ItemStack {
+        ItemStack::new(ItemKind::Bundle, 1).with_component(BundleContents { items })
+    }
+
+    #[test]
+    fn selected_bundle_entry_is_removed() {
+        let mut stack = bundle(vec![
+            ItemStack::new(ItemKind::Stone, 3),
+            ItemStack::new(ItemKind::Dirt, 2),
+        ]);
+        let removed = remove_from_bundle(&mut stack, 1);
+        assert_eq!(
+            removed.as_present().map(|d| (d.kind, d.count)),
+            Some((ItemKind::Dirt, 2))
+        );
+        let contents = stack
+            .as_present()
+            .and_then(|d| d.get_component::<BundleContents>())
+            .expect("bundle contents");
+        assert_eq!(contents.items.len(), 1);
+        assert_eq!(
+            contents.items[0].as_present().map(|d| d.kind),
+            Some(ItemKind::Stone)
+        );
+    }
+
+    #[test]
+    fn shulker_boxes_cannot_be_inserted_into_bundle() {
+        let mut stack = bundle(Vec::new());
+        let mut source = ItemStack::new(ItemKind::ShulkerBox, 1);
+        assert_eq!(insert_into_bundle(&mut stack, &mut source), 0);
+        assert_eq!(source.count(), 1);
+    }
+
+    #[test]
+    fn insertion_stops_at_exact_bundle_capacity() {
+        let mut stack = bundle(vec![ItemStack::new(ItemKind::Stone, 63)]);
+        let mut source = ItemStack::new(ItemKind::Stone, 2);
+        assert_eq!(insert_into_bundle(&mut stack, &mut source), 1);
+        assert_eq!(source.count(), 1);
+        let contents = stack
+            .as_present()
+            .and_then(|d| d.get_component::<BundleContents>())
+            .expect("bundle contents");
+        assert_eq!(
+            crate::ui::bundle::weight(&contents),
+            num_rational::Ratio::from_integer(1)
+        );
     }
 }
