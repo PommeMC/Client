@@ -9,6 +9,7 @@ use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::ui::text::TextSpan;
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
+/// Vanilla caps messages, wrapped lines and sent history at 100 each.
 const MAX_MESSAGES: usize = 100;
 const CHAT_X: f32 = 4.0;
 const CHAT_WIDTH: f32 = 320.0;
@@ -110,6 +111,8 @@ struct ChatLine {
     spans: Vec<TextSpan>,
     received: Instant,
     signature: Option<[u8; 256]>,
+    // TODO: draw the tag indicator bar and tooltip (vanilla `handleTag`).
+    tag: Option<ChatMessageTag>,
     /// Lazily wrapped display lines (vanilla `trimmedMessages`), kept like
     /// vanilla's, which only re-wraps when a chat option changes.
     wrapped: OnceCell<Vec<Vec<TextSpan>>>,
@@ -118,7 +121,7 @@ struct ChatLine {
 impl ChatLine {
     fn wrapped(&self, width0: &dyn Fn(&[TextSpan]) -> f32) -> &[Vec<TextSpan>] {
         self.wrapped
-            .get_or_init(|| wrap_spans(&self.spans, CHAT_WIDTH, width0))
+            .get_or_init(|| wrap_chat_spans(&self.spans, CHAT_WIDTH, width0))
     }
 }
 
@@ -139,6 +142,9 @@ pub struct ChatState {
     /// Wrapped lines scrolled up from the bottom (vanilla `chatScrollbarPos`);
     /// clamped against the wrapped total in `build`.
     scroll_pos: usize,
+    /// Newest messages added while the chat was open and scrolled, whose
+    /// wrapped lines `build` still has to add to `scroll_pos`.
+    scroll_anchor_pending: usize,
     suggestions: Vec<String>,
     suggest_index: usize,
     suggest_anchor: String,
@@ -172,6 +178,7 @@ impl ChatState {
             history_pos: 0,
             history_buffer: String::new(),
             scroll_pos: 0,
+            scroll_anchor_pending: 0,
             suggestions: Vec::new(),
             suggest_index: 0,
             suggest_anchor: String::new(),
@@ -190,8 +197,14 @@ impl ChatState {
         self.options.only_secure
     }
 
+    /// Vanilla `addClientSystemMessage`.
     pub fn push_message(&mut self, spans: Vec<TextSpan>) {
-        self.push_message_with_source(spans, None, ChatMessageSource::SystemClient, None);
+        self.push_message_with_source(
+            spans,
+            None,
+            ChatMessageSource::SystemClient,
+            Some(ChatMessageTag::SystemSinglePlayer),
+        );
     }
 
     pub fn push_message_with_source(
@@ -218,13 +231,16 @@ impl ChatState {
             spans,
             received: Instant::now(),
             signature,
+            tag,
             wrapped: OnceCell::new(),
         });
         if self.messages.len() > MAX_MESSAGES {
             self.messages.pop_front();
         }
-        if self.scroll_pos > 0 {
-            self.scroll_pos += 1;
+        // Vanilla scrolls one line per wrapped line added while the chat is
+        // open and scrolled; the line count is known once `build` wraps it.
+        if self.open && self.scroll_pos > 0 {
+            self.scroll_anchor_pending += 1;
         }
         self.mark_processed(signature, true);
     }
@@ -286,6 +302,7 @@ impl ChatState {
         marker.italic = true;
         line.spans = vec![marker];
         line.signature = None;
+        line.tag = Some(ChatMessageTag::System);
         line.wrapped = OnceCell::new();
         None
     }
@@ -302,6 +319,7 @@ impl ChatState {
     /// F3+D; vanilla `clearMessages(false)` keeps the sent-message history.
     pub fn clear_messages(&mut self) {
         self.messages.clear();
+        self.scroll_anchor_pending = 0;
     }
 
     pub fn is_open(&self) -> bool {
@@ -332,6 +350,7 @@ impl ChatState {
         self.clear_suggestions();
         // Vanilla resets the chat scroll when the screen closes.
         self.scroll_pos = 0;
+        self.scroll_anchor_pending = 0;
     }
 
     /// Scroll the message backlog by wrapped lines; positive is up (vanilla
@@ -556,6 +575,24 @@ impl ChatState {
         (!suffix.is_empty()).then_some(suffix)
     }
 
+    /// Wrapped lines newest-first, capped at 100 like vanilla
+    /// `trimmedMessages`, each with its message.
+    fn trimmed_lines<'a>(
+        &'a self,
+        width0: &'a dyn Fn(&[TextSpan]) -> f32,
+    ) -> impl Iterator<Item = (&'a ChatLine, &'a Vec<TextSpan>)> {
+        self.messages
+            .iter()
+            .rev()
+            .flat_map(move |msg| {
+                msg.wrapped(width0)
+                    .iter()
+                    .rev()
+                    .map(move |line| (msg, line))
+            })
+            .take(MAX_MESSAGES)
+    }
+
     pub fn build(
         &mut self,
         elements: &mut Vec<MenuElement>,
@@ -577,10 +614,23 @@ impl ChatState {
         // gui scale changes (vanilla wraps in gui-space, then scales).
         let width0 = |spans: &[TextSpan]| spans_width_fn(spans, common::FONT_SIZE);
 
+        // Apply the one-line-per-wrapped-line scrolls queued since last frame.
+        let added: usize = self
+            .messages
+            .iter()
+            .rev()
+            .take(std::mem::take(&mut self.scroll_anchor_pending))
+            .map(|m| m.wrapped(&width0).len())
+            .sum();
+        self.scroll_pos += added;
+
         // Clamp the scroll to the wrapped backlog (vanilla scrollChat clamps
         // against `trimmedMessages`).
+        // TODO: vanilla clamps per added line against the size before that
+        // line and never re-clamps after trimming to 100, so a multi-line
+        // message at the top of a full backlog can overshoot the clamp.
         if self.open && self.scroll_pos > 0 {
-            let total: usize = self.messages.iter().map(|m| m.wrapped(&width0).len()).sum();
+            let total = self.trimmed_lines(&width0).count();
             self.scroll_pos = self.scroll_pos.min(total.saturating_sub(LINES_PER_PAGE));
         }
 
@@ -588,25 +638,18 @@ impl ChatState {
         // bottom-most line, `scroll_pos` lines skipped below it. All wrapped
         // lines of a message share its alpha.
         let mut display: Vec<(Vec<TextSpan>, f32)> = Vec::new();
-        let mut skipped = 0usize;
-        'gather: for msg in self.messages.iter().rev() {
+        for (msg, line) in self
+            .trimmed_lines(&width0)
+            .skip(self.scroll_pos)
+            .take(LINES_PER_PAGE)
+        {
             let alpha = if self.open {
                 1.0
             } else {
                 line_alpha(now.duration_since(msg.received).as_secs_f32())
             };
-            if !self.open && alpha <= 1e-5 {
-                continue;
-            }
-            for line in msg.wrapped(&width0).iter().rev() {
-                if skipped < self.scroll_pos {
-                    skipped += 1;
-                    continue;
-                }
+            if alpha > 1e-5 {
                 display.push((line.clone(), alpha));
-                if display.len() >= LINES_PER_PAGE {
-                    break 'gather;
-                }
             }
         }
 
@@ -793,13 +836,77 @@ struct CharStyle(TextSpan);
 
 type StyledLine = Vec<(char, CharStyle)>;
 
-/// Greedy word-wrap of styled text to `max_w` gui-space units, preserving each
-/// character's color/style and hard-breaking any single word wider than the
-/// line. Returns one `Vec<TextSpan>` per display line. Mirrors vanilla
-/// `Font.split` over a `FormattedText`. `width0` measures styled spans at
-/// gui-scale 1, so fonts, bold and inline objects count like vanilla
-/// `StringSplitter`.
+/// Styled text wrapped to `max_w` gui-space units, one `Vec<TextSpan>` per
+/// display line. Mirrors vanilla `Font.split` over a `FormattedText`.
 pub(crate) fn wrap_spans(
+    spans: &[TextSpan],
+    max_w: f32,
+    width0: &dyn Fn(&[TextSpan]) -> f32,
+) -> Vec<Vec<TextSpan>> {
+    split_lines(spans, max_w, width0)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect()
+}
+
+/// `wrap_spans` with a one-space indent before every width-wrapped line.
+/// Mirrors vanilla `ComponentRenderUtils.wrapComponents`.
+fn wrap_chat_spans(
+    spans: &[TextSpan],
+    max_w: f32,
+    width0: &dyn Fn(&[TextSpan]) -> f32,
+) -> Vec<Vec<TextSpan>> {
+    split_lines(spans, max_w, width0)
+        .into_iter()
+        .map(|(mut line, wrapped)| {
+            if wrapped {
+                line.insert(0, TextSpan::new(" ".into(), common::WHITE));
+            }
+            line
+        })
+        .collect()
+}
+
+/// Vanilla `StringSplitter.splitLines`: each display line with whether it
+/// continues a width wrap rather than starting the text or following a `\n`.
+/// A trailing `\n` leaves a final empty line.
+fn split_lines(
+    spans: &[TextSpan],
+    max_w: f32,
+    width0: &dyn Fn(&[TextSpan]) -> f32,
+) -> Vec<(Vec<TextSpan>, bool)> {
+    let mut paragraphs: Vec<Vec<TextSpan>> = vec![Vec::new()];
+    for s in spans {
+        for (i, part) in s.text.split('\n').enumerate() {
+            if i > 0 {
+                paragraphs.push(Vec::new());
+            }
+            if !part.is_empty() {
+                paragraphs
+                    .last_mut()
+                    .unwrap()
+                    .push(s.with_text(part.into()));
+            }
+        }
+    }
+    paragraphs
+        .iter()
+        .flat_map(|p| {
+            wrap_words(p, max_w, width0)
+                .into_iter()
+                .enumerate()
+                .map(|(i, line)| (line, i > 0))
+        })
+        .collect()
+}
+
+/// Greedy word-wrap of one `\n`-free paragraph, preserving each character's
+/// color/style and hard-breaking any single word wider than the line.
+/// `width0` measures styled spans at gui-scale 1, so fonts, bold and inline
+/// objects count like vanilla `StringSplitter`.
+// TODO: vanilla `LineBreakFinder` keeps whitespace runs and breaks at the
+// last space before the overflowing char; this collapses whitespace.
+fn wrap_words(
     spans: &[TextSpan],
     max_w: f32,
     width0: &dyn Fn(&[TextSpan]) -> f32,
@@ -977,6 +1084,82 @@ mod tests {
         let lines = wrap_spans(&[span("aa", [1.0; 4]), bold], 50.0, &width);
         let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
         assert_eq!(texts, vec!["aa", "bb"]);
+    }
+
+    #[test]
+    fn chat_wrap_indents_width_wraps_only() {
+        let red = [1.0, 0.0, 0.0, 1.0];
+        let lines = wrap_chat_spans(
+            &[span("aaa bbb\nccc", [1.0; 4]), span(" ddd\n", red)],
+            30.0,
+            &width,
+        );
+        let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
+        assert_eq!(texts, vec!["aaa", " bbb", "ccc", " ddd", ""]);
+        assert_eq!(lines[3][1].color, red);
+        // `Font.split` breaks the same way without the indent.
+        let lines = wrap_spans(&[span("aaa bbb\n\nccc", [1.0; 4])], 30.0, &width);
+        let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
+        assert_eq!(texts, vec!["aaa", "bbb", "", "ccc"]);
+    }
+
+    /// Three 30-char words; each fills its own line of a 320-wide chat.
+    fn three_line_message() -> Vec<TextSpan> {
+        let word = "a".repeat(30);
+        vec![span(&format!("{word} {word} {word}"), [1.0; 4])]
+    }
+
+    fn build_chat(chat: &mut ChatState) {
+        chat.build(
+            &mut Vec::new(),
+            800.0,
+            600.0,
+            1.0,
+            &|s, _| s.len() as f32 * 10.0,
+            &|spans, _| width(spans),
+        );
+    }
+
+    #[test]
+    fn backlog_caps_wrapped_lines() {
+        let mut chat = ChatState::new();
+        for _ in 0..MAX_MESSAGES {
+            chat.push_message(three_line_message());
+        }
+        assert_eq!(chat.messages.len(), MAX_MESSAGES);
+        assert_eq!(chat.trimmed_lines(&width).count(), MAX_MESSAGES);
+        chat.open();
+        chat.scroll_chat(1000);
+        build_chat(&mut chat);
+        assert_eq!(chat.scroll_pos, MAX_MESSAGES - LINES_PER_PAGE);
+    }
+
+    #[test]
+    fn scroll_anchors_per_wrapped_line_while_open() {
+        let mut chat = ChatState::new();
+        for _ in 0..20 {
+            chat.push_message(vec![span("a", [1.0; 4])]);
+        }
+        chat.open();
+        chat.scroll_chat(2);
+        chat.push_message(three_line_message());
+        build_chat(&mut chat);
+        assert_eq!(chat.scroll_pos, 5);
+        // Only the open chat anchors.
+        chat.close();
+        chat.scroll_pos = 2;
+        chat.push_message(three_line_message());
+        assert_eq!(chat.scroll_anchor_pending, 0);
+    }
+
+    #[test]
+    fn client_system_message_is_tagged() {
+        let mut chat = ChatState::new();
+        chat.push_message(vec![span("a", [1.0; 4])]);
+        assert_eq!(
+            chat.messages[0].tag,
+            Some(ChatMessageTag::SystemSinglePlayer)
+        );
     }
 
     fn set_input(chat: &mut ChatState, input: &str) {
