@@ -122,7 +122,9 @@ fn draw_server_dialog(
     core.sync_game_dynamic_atlas(game, &mut gfx.renderer, false);
 
     let mut elements = Vec::new();
-    build_server_screens(&mut elements, sw, sh, gs, core, gfx, connection, game);
+    // The connecting screen runs no client ticks, so the dialog's own
+    // timers fall back to wall time.
+    build_server_screens(&mut elements, sw, sh, gs, core, gfx, connection, game, None);
     core.input.clear_just_pressed_actions();
 
     let cursor = core.input.cursor_pos();

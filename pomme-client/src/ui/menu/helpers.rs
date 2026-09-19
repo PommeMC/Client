@@ -1130,8 +1130,9 @@ pub(super) fn nine_slice(
     });
 }
 
-/// `AbstractScrollArea.extractScrollbar`: a 6px track at `track_x` with a
-/// thumb no shorter than `min_thumb` (both in framebuffer pixels).
+/// `AbstractScrollArea.extractScrollbar`: a 6px track at `track_x`, with the
+/// thumb clamped between `min_thumb` and the track less 8px (both in
+/// framebuffer pixels), as `scrollerHeight` does.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_scrollbar(
     elements: &mut Vec<MenuElement>,
@@ -1148,7 +1149,7 @@ pub(crate) fn push_scrollbar(
         return;
     }
     let track_w = 6.0 * gs;
-    let thumb_h = (h * h / total).max(min_thumb);
+    let thumb_h = (h * h / total).clamp(min_thumb, (h - 8.0 * gs).max(min_thumb));
     let thumb_y = top + (scroll / max_scroll) * (h - thumb_h);
     nine_slice(
         elements,

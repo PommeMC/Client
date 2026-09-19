@@ -53,8 +53,9 @@ const CHECKBOX_SPACING: f32 = 4.0;
 const TOOLTIP_WRAP: f32 = 170.0;
 /// `EditBox.DEFAULT_TEXT_COLOR`.
 const EDIT_TEXT: [f32; 4] = common::rgb(0xe0e0e0);
-/// Vanilla `WaitingForResponseScreen.BUTTON_ACTIVE_AFTER`, in seconds.
-const BUTTON_ACTIVE_AFTER: f32 = 5.0;
+/// `WaitingForResponseScreen.BUTTON_ACTIVE_AFTER`, in the client ticks the
+/// screen counts.
+const BUTTON_ACTIVE_AFTER: u32 = 5 * 20;
 
 #[derive(Clone, Debug)]
 pub enum DialogReference {
@@ -245,6 +246,9 @@ struct DialogItem {
     count: i32,
     /// The whole `{id, count, components}` value, for `item_tooltip_lines`.
     template: Value,
+    /// The raw `components` tag, so the tooltip's own components keep what
+    /// the JSON shape loses.
+    components: Option<NbtCompound>,
 }
 
 impl DialogItem {
@@ -259,6 +263,10 @@ impl DialogItem {
 
     fn template(&self) -> &Value {
         &self.template
+    }
+
+    fn components(&self) -> Option<&NbtCompound> {
+        self.components.as_ref()
     }
 }
 
@@ -520,7 +528,15 @@ struct DialogData {
 
 enum DialogMode {
     Dialog(Box<DialogData>),
-    Waiting { started: Instant },
+    /// `WaitingForResponseScreen`, whose button appears and arms on the ticks
+    /// it counts.
+    Waiting {
+        ticks: u32,
+        /// The client tick at the last build, so the count follows the game's
+        /// ticks; `None` outside the game loop, where `started` stands in.
+        last_tick: Option<u64>,
+        started: Instant,
+    },
     Finished,
 }
 
@@ -542,6 +558,9 @@ pub struct ServerDialogState {
     focus_ring: Vec<FocusTarget>,
     /// A widget was pressed this frame (`AbstractButton.playDownSound`).
     click_sound: bool,
+    /// `AbstractSliderButton.canChangeValue`: whether the focused slider takes
+    /// Left/Right. Only one widget holds focus, so one flag covers them all.
+    slider_can_change_value: bool,
     /// The `CycleButton` the cursor was over when the frame was built.
     wheel_target: Option<usize>,
 }
@@ -551,6 +570,9 @@ pub struct ServerDialogState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FocusTarget {
     Warning,
+    /// A body widget: `FocusableTextWidget` or `ItemDisplayWidget`, both of
+    /// which vanilla adds as active widgets.
+    Body(usize),
     Input(usize),
     /// A button of the body's `packControlsIntoColumns` grid.
     ListButton(usize),
@@ -592,6 +614,7 @@ impl ServerDialogState {
             focus: None,
             focus_ring: Vec::new(),
             click_sound: false,
+            slider_can_change_value: false,
             wheel_target: None,
         })
     }
@@ -695,8 +718,9 @@ impl ServerDialogState {
 
     pub fn handle_escape(&mut self) -> Option<ServerDialogAction> {
         match &self.mode {
-            DialogMode::Waiting { started } => {
-                if started.elapsed().as_secs_f32() >= BUTTON_ACTIVE_AFTER {
+            // `shouldCloseOnEsc` is the Back button's `active`.
+            DialogMode::Waiting { ticks, .. } => {
+                if *ticks >= BUTTON_ACTIVE_AFTER {
                     self.mode = DialogMode::Finished;
                 }
                 None
@@ -736,9 +760,24 @@ impl ServerDialogState {
         let mut draw = Draw { gs, elements };
         common::push_overlay(draw.elements, screen_w, screen_h, 0.5);
 
-        if let DialogMode::Waiting { started } = &self.mode {
-            let elapsed = started.elapsed().as_secs_f32();
-            if build_waiting(draw, w, h, cursor, input.clicked, elapsed) {
+        if let DialogMode::Waiting {
+            ticks,
+            last_tick,
+            started,
+        } = &mut self.mode
+        {
+            // `tick()` counts client ticks; the connecting screen runs none of
+            // its own, so wall time stands in there.
+            match (input.tick, *last_tick) {
+                (Some(now), Some(previous)) => {
+                    *ticks = ticks.saturating_add(now.saturating_sub(previous) as u32);
+                }
+                (Some(_), None) => {}
+                (None, _) => *ticks = (started.elapsed().as_secs_f32() * 20.0) as u32,
+            }
+            *last_tick = input.tick;
+            let ticks = *ticks;
+            if build_waiting(draw, w, h, cursor, input.clicked, ticks) {
                 self.click_sound = true;
                 self.mode = DialogMode::Finished;
             }
@@ -824,10 +863,11 @@ impl ServerDialogState {
         });
         let body_live = common::hit_test(cursor, container);
         let mut y = container_y - self.scroll;
-        for child in &children {
+        for (index, child) in children.iter().enumerate() {
             let x = content_x + align_x(content_w, child.w);
             let mut state = BodyState {
                 focused_text: &mut self.focused_text,
+                can_change_value: &mut self.slider_can_change_value,
                 wheel_target: &mut self.wheel_target,
                 click_sound: &mut self.click_sound,
                 tooltip: &mut tooltip,
@@ -835,6 +875,7 @@ impl ServerDialogState {
             if let Some(reported) = draw_child(
                 draw.reborrow(),
                 child,
+                index,
                 [x, y, child.w, child.h],
                 dialog,
                 &grid_buttons,
@@ -945,6 +986,8 @@ impl ServerDialogState {
             Some(AfterAction::Close) => self.mode = DialogMode::Finished,
             Some(AfterAction::WaitForResponse) => {
                 self.mode = DialogMode::Waiting {
+                    ticks: 0,
+                    last_tick: None,
                     started: Instant::now(),
                 };
             }
@@ -1165,7 +1208,7 @@ impl<'a> Node<'a> {
     fn compound(&self) -> Result<NbtCompound, String> {
         match self.tag()? {
             NbtTag::Compound(compound) => Ok(compound),
-            _ => Err("dialog action additions must be a compound".to_owned()),
+            _ => Err("dialog field must be a compound".to_owned()),
         }
     }
 
@@ -1413,13 +1456,18 @@ fn parse_item(node: &Node) -> Result<DialogItem, String> {
     let mut template = serde_json::Map::new();
     template.insert("id".to_owned(), Value::String(id.clone()));
     template.insert("count".to_owned(), Value::Number(count.into()));
+    let mut raw = None;
     if let Some(components) = node.field("components") {
         template.insert("components".to_owned(), components.value.clone());
+        if components.nbt.is_some() {
+            raw = Some(components.compound()?);
+        }
     }
     Ok(DialogItem {
         id,
         count,
         template: Value::Object(template),
+        components: raw,
     })
 }
 
@@ -1666,6 +1714,10 @@ pub struct WidgetInput {
     pub shift: bool,
     /// Enter or Space (`InputWithModifiers.isSelection`).
     pub activate: bool,
+    /// The client tick count, where the phase runs the game's ticks.
+    pub tick: Option<u64>,
+    /// Left/Right this frame, which step a slider that takes the keyboard.
+    pub arrow_steps: i32,
     pub advanced_tooltips: bool,
 }
 
@@ -1750,6 +1802,16 @@ impl Draw<'_> {
     }
 
     /// `AbstractButton`: the nine-sliced button sprite with its label centred.
+    /// `GuiGraphics.outline`: a one-unit frame, which a focused body widget
+    /// draws around itself.
+    fn outline(&mut self, rect: [f32; 4], color: [f32; 4]) {
+        let [x, y, w, h] = rect;
+        self.fill([x, y, w, 1.0], color);
+        self.fill([x, y + h - 1.0, w, 1.0], color);
+        self.fill([x, y + 1.0, 1.0, h - 2.0], color);
+        self.fill([x + w - 1.0, y + 1.0, 1.0, h - 2.0], color);
+    }
+
     fn button(&mut self, rect: [f32; 4], label: &Component, highlighted: bool) {
         let gs = self.gs;
         self.elements.push(MenuElement::NineSlice {
@@ -2028,7 +2090,7 @@ fn build_waiting(
     h: f32,
     cursor: (f32, f32),
     clicked: bool,
-    elapsed: f32,
+    ticks: u32,
 ) -> bool {
     let title = Component::translate("gui.waitingForResponse.title", Vec::new());
     draw.spans(
@@ -2038,7 +2100,7 @@ fn build_waiting(
         true,
     );
     // The button appears after a second and counts down to active.
-    let seconds_visible = (elapsed as i32).min(5);
+    let seconds_visible = (ticks / 20).min(5) as i32;
     if seconds_visible < 1 {
         return false;
     }
@@ -2184,6 +2246,7 @@ fn input_size(input: &DialogInput, m: &Measure) -> (f32, f32) {
 
 /// `DialogScreen.packControlsIntoColumns`: a grid whose columns are as wide as
 /// their widest cell, with a partial last row centred across all of them.
+#[cfg_attr(test, derive(Debug, PartialEq))]
 struct ButtonGrid {
     /// Per button: its index, and its rect relative to the grid's top-left.
     cells: Vec<(usize, [f32; 4])>,
@@ -2192,8 +2255,12 @@ struct ButtonGrid {
 }
 
 fn pack_controls_into_columns(widths: &[f32], columns: usize) -> ButtonGrid {
-    let columns = columns.max(1);
     let count = widths.len();
+    // `columns` is only `POSITIVE_INT` on the wire, and Rust aborts where Java
+    // would throw. Past `count + 1` every button is already in the trailing
+    // spanning row and the divisor shares sum back to that row's width (the
+    // widths are whole units), so the layout is the same for any larger value.
+    let columns = columns.clamp(1, count + 1);
     let last_full_row = count / columns;
     let in_full_rows = last_full_row * columns;
     let mut column_widths = vec![0.0f32; columns];
@@ -2318,6 +2385,7 @@ fn dialog_buttons(
 /// What the body pass writes back into the dialog.
 struct BodyState<'a> {
     focused_text: &'a mut Option<usize>,
+    can_change_value: &'a mut bool,
     /// The `CycleButton` under the cursor, which takes the next wheel event.
     wheel_target: &'a mut Option<usize>,
     click_sound: &'a mut bool,
@@ -2329,6 +2397,7 @@ struct BodyState<'a> {
 fn draw_child(
     mut draw: Draw,
     child: &Child,
+    index: usize,
     rect: [f32; 4],
     dialog: &mut DialogData,
     grid_buttons: &[DialogButton],
@@ -2340,7 +2409,12 @@ fn draw_child(
     match &child.content {
         // `FocusableTextWidget`, centred with its padding.
         ChildContent::Message { lines } => {
+            let hovered = ctx.live && common::hit_test(ctx.cursor, rect);
+            let focused = focus.claim(FocusTarget::Body(index), hovered);
             let hits = draw_message(&mut draw, lines, [x, y, w, h], ctx);
+            if focused {
+                draw.outline(rect, common::WHITE);
+            }
             if ctx.live
                 && ctx.input.clicked
                 && let Some(click) =
@@ -2348,9 +2422,18 @@ fn draw_child(
             {
                 return Some(BoundClick::Style(click));
             }
+            // `keyPressed`: the message's first click event fires.
+            if focus.pressed(false, focused)
+                && let Some(click) = first_click_event(lines)
+            {
+                return Some(BoundClick::Style(click));
+            }
             None
         }
-        ChildContent::Item { index, description } => {
+        ChildContent::Item {
+            index: body,
+            description,
+        } => {
             let DialogBody::Item {
                 item,
                 show_decorations,
@@ -2358,17 +2441,22 @@ fn draw_child(
                 width,
                 height,
                 ..
-            } = &dialog.bodies[*index]
+            } = &dialog.bodies[*body]
             else {
                 return None;
             };
             // The row aligns its children vertically middle.
             let item_y = y + align_y(h, *height);
             let item_rect = [x, item_y, *width, *height];
+            let hovered = ctx.live && common::hit_test(ctx.cursor, item_rect);
+            // `ItemDisplayWidget` is an active widget: it takes focus and
+            // outlines itself, but has no key action.
+            if focus.claim(FocusTarget::Body(index), hovered) {
+                draw.outline(item_rect, common::WHITE);
+            }
             draw.item(item_rect, item, *show_decorations);
             if *show_tooltip
-                && ctx.live
-                && common::hit_test(ctx.cursor, item_rect)
+                && hovered
                 && let Some(lines) = item_tooltip(item, ctx.input.advanced_tooltips)
             {
                 *state.tooltip = Some(lines);
@@ -2416,6 +2504,16 @@ fn draw_child(
     }
 }
 
+/// The first click event in a message's text, which activating its widget
+/// fires (`FocusableTextWidget.keyPressed`).
+fn first_click_event(lines: &[Vec<TextSpan>]) -> Option<ClickEvent> {
+    lines.iter().flatten().find_map(|span| {
+        span.component_style
+            .as_ref()
+            .and_then(|style| style.click_event.clone())
+    })
+}
+
 /// `FocusableTextWidget`: centred lines inside the widget's padding, whose
 /// styles stay clickable.
 fn draw_message(
@@ -2441,7 +2539,7 @@ fn draw_message(
 /// The item tooltip `ItemDisplayWidget` shows, built from the stack the body
 /// carries.
 fn item_tooltip(item: &DialogItem, advanced: bool) -> Option<Vec<TooltipLine>> {
-    let lines = crate::ui::chat::item_tooltip_lines(item.template(), advanced);
+    let lines = crate::ui::chat::item_tooltip_lines(item.template(), item.components(), advanced);
     (!lines.is_empty()).then_some(lines)
 }
 
@@ -2580,7 +2678,16 @@ fn draw_input(
             ..
         } => {
             let hovered = ctx.live && common::hit_test(ctx.cursor, rect);
+            let previous_focus = focus.ctx.focus;
             let focused = focus.claim(FocusTarget::Input(index), hovered);
+            // `setFocused` re-arms editing when focus arrives, and
+            // `keyPressed` toggles it on Enter/Space.
+            if focused && focus.ctx.focus != previous_focus {
+                *state.can_change_value = true;
+            }
+            if focused && ctx.input.activate {
+                *state.can_change_value = !*state.can_change_value;
+            }
             // `NumberRangeInput.computeLabel`.
             // TODO: the slider draws its message as plain text, so the label
             // component's own styling is dropped.
@@ -2593,6 +2700,7 @@ fn draw_input(
             )
             .plain_text();
             let fs = common::FONT_SIZE * gs;
+            let was_dragging = *dragging;
             let result = common::push_slider(
                 draw.elements,
                 ctx.input.cursor,
@@ -2608,7 +2716,7 @@ fn draw_input(
                 *slider,
                 true,
                 focused,
-                false,
+                *state.can_change_value,
                 *dragging,
                 &common::LabelScroll {
                     text_width_fn: ctx.measure.text,
@@ -2620,10 +2728,17 @@ fn draw_input(
             );
             *dragging = result.dragging;
             if let Some(value) = result.new_value {
-                if *slider != value {
-                    *state.click_sound |= ctx.input.clicked;
-                }
                 *slider = value;
+            }
+            // `AbstractSliderButton.keyPressed`: one step is a pixel of the
+            // track.
+            if focused && *state.can_change_value && ctx.input.arrow_steps != 0 {
+                let step = ctx.input.arrow_steps as f32 / (w - 8.0).max(1.0);
+                *slider = (*slider + step).clamp(0.0, 1.0);
+            }
+            // The slider plays no sound on press; `onRelease` plays it.
+            if (was_dragging || result.dragging) && !ctx.input.held {
+                *state.click_sound = true;
             }
         }
     }
@@ -3182,6 +3297,20 @@ mod tests {
         let grid = pack_controls_into_columns(&[150.0], 2);
         assert_eq!(grid.cells[0].1, [0.0, 0.0, 150.0, 20.0]);
         assert_eq!(grid.h, 20.0);
+    }
+
+    #[test]
+    fn more_columns_than_buttons_lay_out_the_same() {
+        // `columns` is only `POSITIVE_INT` on the wire, so a huge value must
+        // not allocate; past `count + 1` the layout no longer changes.
+        let widths = [100.0, 150.0, 80.0];
+        let capped = pack_controls_into_columns(&widths, widths.len() + 1);
+        let huge = pack_controls_into_columns(&widths, usize::MAX);
+        assert_eq!(capped.cells, huge.cells);
+        assert_eq!((capped.w, capped.h), (huge.w, huge.h));
+        // Every button sits in the one trailing row.
+        assert_eq!(capped.h, BUTTON_H);
+        assert_eq!(capped.w, 100.0 + 150.0 + 80.0 + 2.0 * GRID_GAP);
     }
 
     #[test]

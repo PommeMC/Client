@@ -630,6 +630,7 @@ impl AppCore {
         game.chat
             .close(crate::ui::chat::ChatExitReason::Interrupted);
         game.game_mode_switcher = None;
+        game.server_dialog = None;
 
         if let Some(message) = message {
             game.death_message = message;

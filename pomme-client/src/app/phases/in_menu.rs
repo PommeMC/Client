@@ -77,6 +77,11 @@ pub fn update_menu(
         }
     }
 
+    // TODO: menu screens (a server MOTD, say) draw object glyphs as their
+    // fallback sprite; dropping what they drew keeps those keys out of the
+    // next session's atlas.
+    gfx.renderer.drain_drawn_inline_objects();
+
     if let Err(e) = gfx.renderer.render_menu(
         &gfx.window,
         panorama.scroll(),

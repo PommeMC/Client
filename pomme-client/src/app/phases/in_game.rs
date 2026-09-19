@@ -1517,6 +1517,8 @@ pub(crate) fn build_server_screens(
     gfx: &Gfx,
     connection: &ConnectionHandle,
     game: &mut GameState,
+    // The client tick count, or `None` where the phase runs no game ticks.
+    tick: Option<u64>,
 ) {
     let modal_open = game.chat.has_pending_modal_prompt();
     if let Some(dialog) = game.server_dialog.as_mut() {
@@ -1537,6 +1539,14 @@ pub(crate) fn build_server_screens(
                 activate: !modal_open
                     && (core.input.enter_pressed()
                         || core.input.key_just_pressed(winit::keyboard::KeyCode::Space)),
+                arrow_steps: i32::from(
+                    core.input
+                        .key_just_pressed(winit::keyboard::KeyCode::ArrowRight),
+                ) - i32::from(
+                    core.input
+                        .key_just_pressed(winit::keyboard::KeyCode::ArrowLeft),
+                ),
+                tick,
                 advanced_tooltips: game.advanced_item_tooltips,
             },
             &|t, s| gfx.renderer.menu_text_width(t, s),
@@ -3092,7 +3102,17 @@ pub fn update_game(
         });
     }
 
-    build_server_screens(&mut elements, sw, sh, gs, core, gfx, connection, game);
+    build_server_screens(
+        &mut elements,
+        sw,
+        sh,
+        gs,
+        core,
+        gfx,
+        connection,
+        game,
+        Some(game.tick_count),
+    );
 
     if game.chat.is_open() && !dialog_open && core.input.cursor_moved_this_frame() {
         let icon = if game

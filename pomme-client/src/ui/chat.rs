@@ -7,6 +7,7 @@ use std::time::Instant;
 use azalea_inventory::components::{MaxDamage, Rarity};
 use azalea_inventory::default_components::get_default_component;
 use azalea_registry::builtin::ItemKind;
+use simdnbt::owned::{NbtCompound, NbtTag};
 
 use super::common;
 use crate::chat_component::{
@@ -2393,7 +2394,10 @@ fn push_hover_tooltip(
             let max_width = ((screen_w / gs).ceil() / 2.0).floor().max(200.0);
             wrapped_tooltip_lines(component, max_width, width0)
         }
-        HoverEvent::Item(value) => item_tooltip_lines(value, advanced_item_tooltips),
+        // TODO: a `show_item` hover keeps only its JSON shape
+        // (`HoverEvent::Item`), so its components lose payload types and Java
+        // number text; the dialog's item body passes its raw tag.
+        HoverEvent::Item(value) => item_tooltip_lines(value, None, advanced_item_tooltips),
         HoverEvent::Entity(value) if advanced_item_tooltips => entity_tooltip_lines(value),
         HoverEvent::Entity(_) => Vec::new(),
     };
@@ -2497,7 +2501,14 @@ fn entity_tooltip_lines(value: &serde_json::Value) -> Vec<TooltipLine> {
     lines
 }
 
-pub(crate) fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> Vec<TooltipLine> {
+/// The stack's tooltip. `raw_components` is the item's `components` tag where
+/// the stack came as NBT, so its components keep the payloads and Java number
+/// text the JSON shape loses.
+pub(crate) fn item_tooltip_lines(
+    value: &serde_json::Value,
+    raw_components: Option<&NbtCompound>,
+    advanced: bool,
+) -> Vec<TooltipLine> {
     let Some(map) = value.as_object() else {
         return vec![TooltipLine::new(value.to_string(), common::WHITE)];
     };
@@ -2544,10 +2555,8 @@ pub(crate) fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> V
         .map(str::to_owned)
         .unwrap_or_else(|| crate::lang::title_case_snake(path));
 
-    let custom_name = component_value(components, "custom_name")
-        .and_then(|value| Component::from_value(value).ok());
-    let item_name = component_value(components, "item_name")
-        .and_then(|value| Component::from_value(value).ok());
+    let custom_name = item_component(components, raw_components, "custom_name");
+    let item_name = item_component(components, raw_components, "item_name");
     let mut lines = if let Some(name) = custom_name.as_ref().or(item_name.as_ref()) {
         // `ItemStack.getStyledHoverName` wraps the name in a parent carrying
         // the rarity color (and italic for a custom name), so the name's own
@@ -2585,13 +2594,25 @@ pub(crate) fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> V
         }
     }
 
-    if tooltip_component_visible(tooltip_display, "lore")
-        && let Some(lore) =
-            component_value(components, "lore").and_then(serde_json::Value::as_array)
-    {
-        for line in lore {
-            if let Ok(component) = Component::from_value(line) {
-                lines.extend(component_tooltip_lines(&component));
+    if tooltip_component_visible(tooltip_display, "lore") {
+        match raw_component(raw_components, "lore") {
+            Some(NbtTag::List(lore)) => {
+                for line in lore.as_nbt_tags() {
+                    if let Ok(component) = Component::from_nbt_tag(&line) {
+                        lines.extend(component_tooltip_lines(&component));
+                    }
+                }
+            }
+            _ => {
+                if let Some(lore) =
+                    component_value(components, "lore").and_then(serde_json::Value::as_array)
+                {
+                    for line in lore {
+                        if let Ok(component) = Component::from_value(line) {
+                            lines.extend(component_tooltip_lines(&component));
+                        }
+                    }
+                }
             }
         }
     }
@@ -2662,6 +2683,28 @@ pub(crate) fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> V
     }
 
     lines
+}
+
+/// A component of the stack that is itself a text component, read from the
+/// raw tag where there is one.
+fn item_component(
+    components: Option<&serde_json::Map<String, serde_json::Value>>,
+    raw_components: Option<&NbtCompound>,
+    name: &str,
+) -> Option<Component> {
+    if let Some(tag) = raw_component(raw_components, name) {
+        return Component::from_nbt_tag(tag).ok();
+    }
+    component_value(components, name).and_then(|value| Component::from_value(value).ok())
+}
+
+/// A component of the raw `components` tag, under either spelling of its id.
+fn raw_component<'a>(raw_components: Option<&'a NbtCompound>, name: &str) -> Option<&'a NbtTag> {
+    raw_components.and_then(|components| {
+        components
+            .get(name)
+            .or_else(|| components.get(&format!("minecraft:{name}")))
+    })
 }
 
 fn component_value<'a>(
@@ -3768,12 +3811,13 @@ mod tests {
         };
         let explicit = item_tooltip_lines(
             &item(serde_json::json!({"text":"Sword","italic":false,"color":"white"})),
+            None,
             false,
         );
         assert!(!explicit[0].spans[0].italic);
         assert_eq!(explicit[0].spans[0].color, common::WHITE);
 
-        let bare = item_tooltip_lines(&item(serde_json::json!({"text":"Sword"})), false);
+        let bare = item_tooltip_lines(&item(serde_json::json!({"text":"Sword"})), None, false);
         assert!(bare[0].spans[0].italic);
         assert_eq!(bare[0].spans[0].color, common::rgb(0xff55ff));
     }
@@ -4625,7 +4669,7 @@ mod tests {
                 }
             }
         });
-        assert!(item_tooltip_lines(&value, false).is_empty());
+        assert!(item_tooltip_lines(&value, None, false).is_empty());
     }
 
     #[test]
@@ -4642,7 +4686,7 @@ mod tests {
                 "minecraft:max_damage": 1561
             }
         });
-        let lines = item_tooltip_lines(&value, true);
+        let lines = item_tooltip_lines(&value, None, true);
         let text = lines
             .iter()
             .map(|line| line_text(&line.spans))
@@ -4653,6 +4697,40 @@ mod tests {
         assert!(text.iter().any(|line| line.contains("Unbreakable")));
         assert!(text.iter().any(|line| line.contains("1551")));
         assert!(text.iter().any(|line| line == "minecraft:diamond_sword"));
+    }
+
+    /// The dialog's item body hands over its raw components, so a lore line's
+    /// numbers keep Java's text instead of the JSON detour's widened float.
+    #[test]
+    fn raw_components_keep_lore_number_formatting() {
+        let mut lore_line = NbtCompound::new();
+        lore_line.insert("translate", "pomme.unknown");
+        lore_line.insert("fallback", "%s");
+        lore_line.insert(
+            "with",
+            NbtTag::List(simdnbt::owned::NbtList::from(vec![NbtTag::Float(0.1)])),
+        );
+        let mut components = NbtCompound::new();
+        components.insert(
+            "minecraft:lore",
+            NbtTag::List(simdnbt::owned::NbtList::from(vec![NbtTag::Compound(
+                lore_line,
+            )])),
+        );
+        let mut stack = NbtCompound::new();
+        stack.insert("id", "minecraft:stone");
+        stack.insert("components", NbtTag::Compound(components.clone()));
+        let value = crate::chat_component::nbt_to_value(&NbtTag::Compound(stack));
+
+        let text = |raw| {
+            item_tooltip_lines(&value, raw, false)
+                .iter()
+                .map(|line| line_text(&line.spans))
+                .collect::<Vec<_>>()
+        };
+        // The JSON shape widens the float to a double.
+        assert!(text(None).iter().any(|line| line.contains("0.1000000")));
+        assert!(text(Some(&components)).iter().any(|line| line == "0.1"));
     }
 
     #[test]
