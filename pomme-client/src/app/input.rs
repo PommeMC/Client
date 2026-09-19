@@ -369,10 +369,9 @@ impl InputState {
                         should_apply_cursor_grab = true;
                     }
 
+                    // Same order as Escape: modal, then suggestions, then chat.
                     if game.chat.is_open() {
-                        game.chat
-                            .close(crate::ui::chat::ChatExitReason::Intentional);
-                        should_apply_cursor_grab = true;
+                        should_apply_cursor_grab |= game.chat.handle_escape();
                     }
 
                     self.recent_actions.remove(&Action::Close);

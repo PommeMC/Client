@@ -12,7 +12,9 @@ use super::common;
 use crate::chat_component::{
     Argument, ClickEvent, Component, HoverEvent, ResolvedStyle, normalize_identifier,
 };
-use crate::net::commands::{CommandPresentation, CommandTokenKind, CommandTree};
+use crate::net::commands::{
+    CommandParse, CommandTokenKind, CommandTokenRange, CommandTree, SyntaxError, UsageLine,
+};
 use crate::net::sender::ChatMark;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 use crate::ui::text::{
@@ -290,24 +292,6 @@ enum PendingSuggestions {
     },
 }
 
-impl From<String> for ChatSuggestion {
-    fn from(text: String) -> Self {
-        Self::plain(text)
-    }
-}
-
-impl From<&str> for ChatSuggestion {
-    fn from(text: &str) -> Self {
-        Self::plain(text.to_owned())
-    }
-}
-
-impl PartialEq<&str> for ChatSuggestion {
-    fn eq(&self, other: &&str) -> bool {
-        self.text == *other
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChatUiAction {
     OpenUrl(String),
@@ -503,6 +487,14 @@ pub struct ChatState {
     pending_suggestions: Option<PendingSuggestions>,
     /// Vanilla `ClientSuggestionProvider.pendingSuggestionsId`.
     pending_suggestions_id: i32,
+    /// Vanilla `CommandSuggestions.currentParse`, kept until the input
+    /// changes.
+    current_parse: Option<CommandParse>,
+    /// Vanilla `commandUsage`: built on edits and when completions finish,
+    /// not per frame.
+    command_usage: Vec<Vec<TextSpan>>,
+    /// The input byte the usage box is drawn from; `None` pins it to x = 0.
+    command_usage_start: Option<usize>,
     /// Request produced by the last recompute, drained once per frame by the
     /// game loop and sent as `ServerboundCommandSuggestion`.
     outgoing_request: Option<(u32, String)>,
@@ -552,6 +544,9 @@ impl ChatState {
             allow_suggestions: false,
             pending_suggestions: None,
             pending_suggestions_id: -1,
+            current_parse: None,
+            command_usage: Vec::new(),
+            command_usage_start: None,
             outgoing_request: None,
             hit_regions: Vec::new(),
             suggestion_regions: Vec::new(),
@@ -1101,9 +1096,13 @@ impl ChatState {
         self.tab_cycles = false;
     }
 
+    /// A fresh `CommandSuggestions`, as each `ChatScreen.init` builds.
     fn clear_suggestions(&mut self) {
         self.hide_suggestions();
         self.pending_suggestions = None;
+        self.current_parse = None;
+        self.command_usage.clear();
+        self.command_usage_start = None;
     }
 
     /// Vanilla `CommandSuggestions.updateCommandInfo`: completes the input up
@@ -1111,23 +1110,36 @@ impl ChatState {
     /// follow. Whether the result shows by itself is `update_usage_info`'s
     /// call.
     fn update_command_info(&mut self, tree: Option<&CommandTree>) {
+        let value = self.input.value().to_owned();
+        let command = value.strip_prefix('/');
+        if self
+            .current_parse
+            .as_ref()
+            .is_some_and(|parse| Some(parse.input()) != command)
+        {
+            self.current_parse = None;
+        }
         if !self.keep_suggestions {
             self.hide_suggestions();
         }
-        let value = self.input.value();
+        self.command_usage.clear();
+        self.command_usage_start = None;
         let cursor = self.input.cursor();
-        if value.starts_with('/') {
-            if cursor < 1 || (!self.suggestions.is_empty() && self.keep_suggestions) {
-                return;
-            }
+        if let Some(command) = command {
             let Some(tree) = tree else {
                 self.pending_suggestions = None;
                 return;
             };
-            let local = tree.suggestions(&value[1..cursor]);
+            let parse = self
+                .current_parse
+                .get_or_insert_with(|| tree.parse_command(command));
+            if cursor < 1 || (!self.suggestions.is_empty() && self.keep_suggestions) {
+                return;
+            }
+            let local = tree.completions(parse, cursor - 1);
             let needs_server = local.needs_server;
             let local = SuggestionSet {
-                range: cursor - local.partial_len..cursor,
+                range: local.start + 1..cursor,
                 list: local
                     .options
                     .into_iter()
@@ -1142,17 +1154,56 @@ impl ChatState {
                 self.pending_suggestions = Some(PendingSuggestions::Awaiting { request, local });
             } else {
                 self.pending_suggestions = Some(PendingSuggestions::Done(local));
-                self.update_usage_info();
+                self.update_usage_info(Some(tree));
             }
-        } else {
+        } else if !java_is_blank(&value) {
             // TODO: vanilla completes non-blank messages from the server's
             // `ClientboundCustomChatCompletions` entries, which Pomme ignores.
+            self.pending_suggestions = None;
+            if !self.messages_allowed() {
+                self.command_usage
+                    .push(restricted_line("chat_screen.messages_not_allowed"));
+            }
+        } else {
             self.pending_suggestions = None;
         }
     }
 
-    /// The tail of vanilla `updateUsageInfo`, run once completions finish.
-    fn update_usage_info(&mut self) {
+    /// Vanilla `updateUsageInfo`, run once completions finish: the parse's
+    /// errors or usage at the caret, then any restriction lines.
+    fn update_usage_info(&mut self, tree: Option<&CommandTree>) {
+        if let Some(tree) = tree
+            && let Some(parse) = &self.current_parse
+            && let Some(PendingSuggestions::Done(set)) = &self.pending_suggestions
+        {
+            let value = self.input.value();
+            let usage = tree.usage(
+                parse,
+                self.input.cursor().saturating_sub(1),
+                set.list.is_empty(),
+            );
+            self.command_usage = usage
+                .lines
+                .iter()
+                .map(|line| match line {
+                    UsageLine::Usage(text) => {
+                        vec![TextSpan::new(text.clone(), common::rgb(0xaaaaaa))]
+                    }
+                    UsageLine::Error(error) => {
+                        format_component_spans(&syntax_error_component(value, error), common::WHITE)
+                    }
+                })
+                .collect();
+            if !self.commands_allowed() {
+                self.command_usage
+                    .push(restricted_line("chat_screen.commands_not_allowed"));
+            }
+            if parse.is_message() && !self.messages_allowed() {
+                self.command_usage
+                    .push(restricted_line("chat_screen.messages_not_allowed"));
+            }
+            self.command_usage_start = Some(usage.start + 1);
+        }
         self.hide_suggestions();
         if self.allow_suggestions && self.options.auto_suggestions {
             self.show_suggestions();
@@ -1237,6 +1288,7 @@ impl ChatState {
         id: u32,
         start: usize,
         options: Vec<ChatSuggestion>,
+        tree: Option<&CommandTree>,
     ) {
         if id as i32 != self.pending_suggestions_id {
             return;
@@ -1258,22 +1310,22 @@ impl ChatState {
             }
         };
         self.pending_suggestions = Some(PendingSuggestions::Done(set));
-        self.update_usage_info();
+        self.update_usage_info(tree);
     }
 
     /// Vanilla `CommandSuggestions.hasAllowedInput`: what Enter may send under
     /// the chat visibility's restrictions.
-    fn has_allowed_input(&self, tree: Option<&CommandTree>) -> bool {
+    fn has_allowed_input(&self) -> bool {
         let value = self.input.value();
-        let (is_command, is_message) = match value.strip_prefix('/') {
-            Some(command) => (
+        let (is_command, is_message) = if value.starts_with('/') {
+            (
                 true,
-                tree.is_some_and(|tree| {
-                    tree.presentation(command, self.input.cursor().saturating_sub(1))
-                        .is_message
-                }),
-            ),
-            None => (false, !java_is_blank(value)),
+                self.current_parse
+                    .as_ref()
+                    .is_some_and(CommandParse::is_message),
+            )
+        } else {
+            (false, !java_is_blank(value))
         };
         !(is_message && !self.messages_allowed()) && (!is_command || self.commands_allowed())
     }
@@ -1362,7 +1414,7 @@ impl ChatState {
         }
 
         if enter {
-            if !self.has_allowed_input(tree) {
+            if !self.has_allowed_input() {
                 return None;
             }
             let normalized = normalize_chat_message(self.input.value());
@@ -1882,18 +1934,15 @@ impl ChatState {
             // EditBox formatters, first match wins: ChatScreen's restored
             // draft (grey italic), then CommandSuggestions' Brigadier colours;
             // ordinary messages stay unformatted.
-            let presentation = self.input.value().strip_prefix('/').and_then(|command| {
-                command_tree
-                    .map(|tree| tree.presentation(command, self.input.cursor().saturating_sub(1)))
-            });
             let all_spans = if self.is_restored_draft {
                 let mut draft = TextSpan::new(self.input.value().to_owned(), common::rgb(0xaaaaaa));
                 draft.italic = true;
                 Some(vec![draft])
             } else {
-                presentation
+                self.current_parse
                     .as_ref()
-                    .map(|presentation| command_input_spans(self.input.value(), presentation))
+                    .filter(|parse| Some(parse.input()) == self.input.value().strip_prefix('/'))
+                    .map(|parse| command_input_spans(self.input.value(), parse.tokens()))
             };
             let visible_spans =
                 all_spans.map(|spans| slice_spans(&spans, info.display_start, info.display_end));
@@ -1917,15 +1966,9 @@ impl ChatState {
             if !self.suggestions.is_empty() {
                 self.push_suggestion_list(elements, cursor, screen_w, screen_h, gs, &gui_w);
             } else {
-                self.push_usage(
-                    elements,
-                    presentation.as_ref(),
-                    screen_w,
-                    screen_h,
-                    gs,
-                    &gui_w,
-                    &|spans| spans_width_fn(spans, ui_fs) / gs,
-                );
+                self.push_usage(elements, screen_w, screen_h, gs, &gui_w, &|spans| {
+                    spans_width_fn(spans, ui_fs) / gs
+                });
             }
 
             if let Some(style) = self.style_at(cursor)
@@ -2058,75 +2101,29 @@ impl ChatState {
     }
 
     /// Vanilla `CommandSuggestions.extractUsage` over the lines
-    /// `updateCommandInfo`/`updateUsageInfo` collect.
-    #[allow(clippy::too_many_arguments)]
+    /// `updateCommandInfo`/`updateUsageInfo` collected.
     fn push_usage(
         &self,
         elements: &mut Vec<MenuElement>,
-        presentation: Option<&CommandPresentation>,
         screen_w: f32,
         screen_h: f32,
         gs: f32,
         gui_w: &dyn Fn(&str) -> f32,
         spans_w: &dyn Fn(&[TextSpan]) -> f32,
     ) {
-        let value = self.input.value();
-        let restricted = |key: &str| {
-            let mut component = Component::translate(key, Vec::new());
-            component.style.color = Some(0xff5555);
-            format_component_spans(&component, common::WHITE)
-        };
-        let mut lines: Vec<Vec<TextSpan>> = Vec::new();
-        // Where the suggestion context starts; plain messages pin the box to
-        // x = 0 instead.
-        let mut anchor = None;
-        if value.starts_with('/') {
-            // updateUsageInfo only runs once the caret is past the `/`.
-            if self.input.cursor() > 0
-                && let Some(presentation) = presentation
-            {
-                anchor = Some(presentation.usage_start + 1);
-                lines.extend(
-                    presentation
-                        .usage
-                        .iter()
-                        .map(|line| vec![TextSpan::new(line.clone(), common::rgb(0xaaaaaa))]),
-                );
-                if let Some(error_at) = presentation.error_at
-                    && lines.is_empty()
-                    && self.input.cursor_at_end()
-                {
-                    let key = if presentation.unknown_command {
-                        "command.unknown.command"
-                    } else {
-                        "command.unknown.argument"
-                    };
-                    let error = parse_error_component(value, error_at + 1, key);
-                    lines.push(format_component_spans(&error, common::WHITE));
-                }
-                if !self.commands_allowed() {
-                    lines.push(restricted("chat_screen.commands_not_allowed"));
-                }
-                if presentation.is_message && !self.messages_allowed() {
-                    lines.push(restricted("chat_screen.messages_not_allowed"));
-                }
-            }
-        } else if !java_is_blank(value) && !self.messages_allowed() {
-            lines.push(restricted("chat_screen.messages_not_allowed"));
-        }
+        let lines = &self.command_usage;
         if lines.is_empty() {
             return;
         }
-
         let width = lines
             .iter()
             .map(|line| spans_w(line))
             .fold(0.0_f32, f32::max);
-        let x = anchor.map_or(0.0, |start| {
-            let screen_x = INPUT_X + value.get(..start).map_or(0.0, gui_w);
+        let x = self.command_usage_start.map_or(0.0, |start| {
+            let screen_x = INPUT_X + self.input.value().get(..start).map_or(0.0, gui_w);
             screen_x.max(0.0).min(screen_w / gs - width)
         });
-        for (index, spans) in lines.into_iter().enumerate() {
+        for (index, spans) in lines.iter().enumerate() {
             let y = screen_h / gs - 27.0 - SUGGEST_ROW_H * index as f32;
             elements.push(MenuElement::Rect {
                 x: (x - 1.0) * gs,
@@ -2139,7 +2136,7 @@ impl ChatState {
             elements.push(MenuElement::McText {
                 x: x * gs,
                 y: (y + 2.0) * gs,
-                spans,
+                spans: spans.clone(),
                 scale: common::FONT_SIZE * gs,
                 centered: false,
                 shadow: true,
@@ -2797,10 +2794,29 @@ fn last_word_index(text: &str) -> usize {
         .map_or(0, |i| i + 1)
 }
 
-/// Vanilla `CommandSuggestions.getExceptionMessage` for a dispatcher
-/// exception at byte `cursor` of `input`: `command.context.parse_error` with
-/// Brigadier's `CommandSyntaxException.getContext`.
-fn parse_error_component(input: &str, cursor: usize, key: &str) -> Component {
+/// ChatScreen's red commands/messages-not-allowed usage line.
+fn restricted_line(key: &str) -> Vec<TextSpan> {
+    let mut component = Component::translate(key, Vec::new());
+    component.style.color = Some(0xff5555);
+    format_component_spans(&component, common::WHITE)
+}
+
+/// Vanilla `CommandSuggestions.getExceptionMessage` for a parse of the
+/// command in `input` (which keeps its `/`).
+fn syntax_error_component(input: &str, error: &SyntaxError) -> Component {
+    let message = Component::translate(
+        error.key,
+        error.args.iter().cloned().map(Argument::String).collect(),
+    );
+    match error.cursor {
+        Some(cursor) => parse_error_component(input, cursor + 1, message),
+        None => message,
+    }
+}
+
+/// `command.context.parse_error` around `message` for an exception at byte
+/// `cursor` of `input`, with Brigadier's `CommandSyntaxException.getContext`.
+fn parse_error_component(input: &str, cursor: usize, message: Component) -> Component {
     const CONTEXT_AMOUNT: usize = 10;
     let before = input.get(..cursor).unwrap_or(input);
     let position: usize = before.chars().map(char::len_utf16).sum();
@@ -2817,7 +2833,7 @@ fn parse_error_component(input: &str, cursor: usize, key: &str) -> Component {
     Component::translate(
         "command.context.parse_error",
         vec![
-            Argument::Component(Box::new(Component::translate(key, Vec::new()))),
+            Argument::Component(Box::new(message)),
             Argument::Number(position.to_string()),
             Argument::String(format!("{ellipsis}{}<--[HERE]", &before[tail..])),
         ],
@@ -2918,7 +2934,7 @@ struct CharStyle(TextSpan);
 
 type StyledLine = Vec<(char, CharStyle)>;
 
-fn command_input_spans(input: &str, presentation: &CommandPresentation) -> Vec<TextSpan> {
+fn command_input_spans(input: &str, tokens: &[CommandTokenRange]) -> Vec<TextSpan> {
     const ARGUMENT_COLORS: [[f32; 4]; 5] = [
         [0x55 as f32 / 255.0, 1.0, 1.0, 1.0],
         [1.0, 1.0, 0x55 as f32 / 255.0, 1.0],
@@ -2930,7 +2946,7 @@ fn command_input_spans(input: &str, presentation: &CommandPresentation) -> Vec<T
     let unparsed = common::rgb(0xff5555);
     let mut out = Vec::new();
     let mut cursor = 0usize;
-    for token in &presentation.tokens {
+    for token in tokens {
         let start = token.range.start.saturating_add(1).min(input.len());
         let end = token.range.end.saturating_add(1).min(input.len());
         if cursor < start {
@@ -3785,6 +3801,17 @@ mod tests {
         chat.input.set_value(input, f32::MAX, &|_| 0.0);
     }
 
+    fn plain(texts: &[&str]) -> Vec<ChatSuggestion> {
+        texts
+            .iter()
+            .map(|text| ChatSuggestion::plain((*text).to_owned()))
+            .collect()
+    }
+
+    fn texts(suggestions: &[ChatSuggestion]) -> Vec<&str> {
+        suggestions.iter().map(|s| s.text.as_str()).collect()
+    }
+
     /// An open chat whose latest request, id 0, was for `input`.
     fn awaiting_chat(input: &str) -> ChatState {
         let mut chat = ChatState::new();
@@ -3805,8 +3832,8 @@ mod tests {
     #[test]
     fn server_suggestions_replace_and_select_first() {
         let mut chat = awaiting_chat("/gamemode c");
-        chat.apply_server_suggestions(0, 10, vec!["creative".into()]);
-        assert_eq!(chat.suggestions, vec!["creative"]);
+        chat.apply_server_suggestions(0, 10, plain(&["creative"]), None);
+        assert_eq!(texts(&chat.suggestions), vec!["creative"]);
         assert_eq!(chat.suggest_range, 10..11);
         assert_eq!(chat.suggest_index, 0);
         assert!(!chat.tab_cycles);
@@ -3817,14 +3844,14 @@ mod tests {
     fn server_suggestions_stale_dropped() {
         // Not the latest request's id.
         let mut chat = awaiting_chat("/gamemode c");
-        chat.apply_server_suggestions(1, 10, vec!["creative".into()]);
+        chat.apply_server_suggestions(1, 10, plain(&["creative"]), None);
         assert!(chat.suggestions.is_empty());
         assert_eq!(chat.pending_suggestions_id, 0);
 
         // The input moved on to something that needed no request.
         let mut chat = awaiting_chat("/gamemode c");
         chat.pending_suggestions = None;
-        chat.apply_server_suggestions(0, 10, vec!["creative".into()]);
+        chat.apply_server_suggestions(0, 10, plain(&["creative"]), None);
         assert!(chat.suggestions.is_empty());
         assert_eq!(chat.pending_suggestions_id, -1);
     }
@@ -3836,22 +3863,26 @@ mod tests {
             request: "/time set d".to_owned(),
             local: SuggestionSet {
                 range: 10..11,
-                list: vec!["day".into()],
+                list: plain(&["day"]),
             },
         });
-        chat.apply_server_suggestions(0, 10, Vec::new());
-        assert_eq!(chat.suggestions, vec!["day"]);
+        chat.apply_server_suggestions(0, 10, Vec::new(), None);
+        assert_eq!(texts(&chat.suggestions), vec!["day"]);
         assert_eq!(chat.suggest_range, 10..11);
     }
 
     #[test]
     fn server_suggestions_reset_offset() {
         let mut chat = awaiting_chat("/give @p ");
-        chat.suggestions = (0..15).map(|i| format!("old{i}").into()).collect();
+        chat.suggestions = (0..15)
+            .map(|i| ChatSuggestion::plain(format!("old{i}")))
+            .collect();
         chat.suggest_offset = 5;
         chat.suggest_index = 12;
-        let options = (0..15).map(|i| format!("item{i}").into()).collect();
-        chat.apply_server_suggestions(0, 9, options);
+        let options = (0..15)
+            .map(|i| ChatSuggestion::plain(format!("item{i}")))
+            .collect();
+        chat.apply_server_suggestions(0, 9, options, None);
         assert_eq!(chat.suggestions.len(), 15);
         assert_eq!(chat.suggest_offset, 0);
         assert_eq!(chat.suggest_index, 0);
@@ -3863,7 +3894,7 @@ mod tests {
         set_input(&mut chat, "/gam");
         chat.suggest_original = "/gam".to_owned();
         chat.suggest_range = 1..4;
-        chat.suggestions = vec!["gamemode".into(), "gamerule".into()];
+        chat.suggestions = plain(&["gamemode", "gamerule"]);
         assert_eq!(chat.ghost_suffix().as_deref(), Some("emode"));
         chat.suggest_index = 1;
         assert_eq!(chat.ghost_suffix().as_deref(), Some("erule"));
@@ -3878,23 +3909,23 @@ mod tests {
     #[test]
     fn sort_floats_partial_matches() {
         let sorted = sort_suggestions_with_partial_first(
-            vec!["apple".into(), "creative".into(), "minecraft:cow".into()],
+            plain(&["apple", "creative", "minecraft:cow"]),
             "c",
         );
-        assert_eq!(sorted, vec!["creative", "minecraft:cow", "apple"]);
+        assert_eq!(texts(&sorted), vec!["creative", "minecraft:cow", "apple"]);
     }
 
     #[test]
     fn server_suggestions_non_ascii_start() {
         // "/msg héllo " is 11 UTF-16 units but 12 bytes ('é' is 2 bytes).
         let mut chat = awaiting_chat("/msg héllo w");
-        chat.apply_server_suggestions(0, 11, vec!["world".into()]);
+        chat.apply_server_suggestions(0, 11, plain(&["world"]), None);
         assert_eq!(chat.suggest_range, 12..13);
-        assert_eq!(chat.suggestions, vec!["world"]);
+        assert_eq!(texts(&chat.suggestions), vec!["world"]);
 
         // Out-of-range start is dropped.
         let mut chat = awaiting_chat("/msg héllo w");
-        chat.apply_server_suggestions(0, 99, vec!["world".into()]);
+        chat.apply_server_suggestions(0, 99, plain(&["world"]), None);
         assert!(chat.suggestions.is_empty());
     }
 
@@ -4178,7 +4209,7 @@ mod tests {
         press(&mut chat, TAB, &tree);
         assert_eq!(chat.input.value(), "/");
         assert_eq!(
-            chat.suggestions,
+            texts(&chat.suggestions),
             vec!["gamemode", "gamerule", "msg", "time"]
         );
     }
@@ -4190,7 +4221,7 @@ mod tests {
         chat.sent_history.push_back("hello".to_owned());
         chat.open(ChatMethod::Message, Some(&tree));
         type_text(&mut chat, "/ti", &tree);
-        assert_eq!(chat.suggestions, vec!["time"]);
+        assert_eq!(texts(&chat.suggestions), vec!["time"]);
         assert!(!chat.handle_escape());
         assert!(chat.suggestions.is_empty());
 
@@ -4208,7 +4239,7 @@ mod tests {
         press(&mut chat, down, &tree);
         assert_eq!(chat.input.value(), "/ti");
         assert!(chat.allow_suggestions);
-        assert_eq!(chat.suggestions, vec!["time"]);
+        assert_eq!(texts(&chat.suggestions), vec!["time"]);
     }
 
     #[test]
@@ -4217,7 +4248,7 @@ mod tests {
         let mut chat = ChatState::new();
         chat.open(ChatMethod::Command, Some(&tree));
         type_text(&mut chat, "g", &tree);
-        assert_eq!(chat.suggestions, vec!["gamemode", "gamerule"]);
+        assert_eq!(texts(&chat.suggestions), vec!["gamemode", "gamerule"]);
         press(&mut chat, TAB, &tree);
         assert_eq!(chat.input.value(), "/gamemode");
         assert_eq!(chat.suggestions.len(), 2);
@@ -4255,7 +4286,7 @@ mod tests {
         chat.input.move_cursor_to(3, false, f32::MAX, &wf);
         chat.allow_suggestions = true;
         chat.update_command_info(Some(&tree));
-        assert_eq!(chat.suggestions, vec!["time"]);
+        assert_eq!(texts(&chat.suggestions), vec!["time"]);
         assert_eq!(chat.suggest_range, 1..3);
         press(&mut chat, TAB, &tree);
         assert_eq!(chat.input.value(), "/time day");
@@ -4286,10 +4317,70 @@ mod tests {
         assert_eq!(chat.take_suggestion_request().map(|r| r.0), Some(0));
         type_text(&mut chat, "t", &tree);
         assert_eq!(chat.take_suggestion_request().map(|r| r.0), Some(1));
-        chat.apply_server_suggestions(1, 10, vec!["true".into()]);
-        assert_eq!(chat.suggestions, vec!["true"]);
+        chat.apply_server_suggestions(1, 10, plain(&["true"]), None);
+        assert_eq!(texts(&chat.suggestions), vec!["true"]);
         type_text(&mut chat, "r", &tree);
         assert_eq!(chat.take_suggestion_request().map(|r| r.0), Some(0));
+    }
+
+    fn usage_texts(chat: &ChatState) -> Vec<String> {
+        chat.command_usage.iter().map(|l| line_text(l)).collect()
+    }
+
+    #[test]
+    fn usage_waits_for_completions_and_ignores_the_caret() {
+        let tree = test_tree();
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Command, Some(&tree));
+        type_text(&mut chat, "gamemode ", &tree);
+        // A server completion is pending: nothing shows yet.
+        assert!(chat.command_usage.is_empty());
+        chat.apply_server_suggestions(0, 10, Vec::new(), Some(&tree));
+        assert_eq!(usage_texts(&chat), vec!["<gamemode>"]);
+        assert_eq!(chat.command_usage_start, Some(10));
+
+        // Moving the caret isn't an edit, so the lines stay.
+        let left = Keys {
+            events: vec![TextInputEvent::Key {
+                code: winit::keyboard::KeyCode::ArrowLeft,
+                mods: crate::ui::text_edit::KeyMods {
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                    super_key: false,
+                },
+            }],
+            ..Default::default()
+        };
+        press(&mut chat, left, &tree);
+        assert_eq!(chat.input.cursor(), 9);
+        assert_eq!(usage_texts(&chat), vec!["<gamemode>"]);
+    }
+
+    #[test]
+    fn usage_lists_parse_errors_when_nothing_completes() {
+        let tree = test_tree();
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Command, Some(&tree));
+        type_text(&mut chat, "gamemode x", &tree);
+        let (id, _) = chat.take_suggestion_request().unwrap();
+        chat.apply_server_suggestions(id, 10, Vec::new(), Some(&tree));
+        let error = SyntaxError {
+            key: "parsing.bool.invalid",
+            args: vec!["x".to_owned()],
+            cursor: Some(9),
+        };
+        let expected = syntax_error_component("/gamemode x", &error);
+        assert_eq!(
+            chat.command_usage,
+            vec![format_component_spans(&expected, common::WHITE)]
+        );
+
+        // With a completion on offer, the usage shows instead.
+        type_text(&mut chat, "y", &tree);
+        let (id, _) = chat.take_suggestion_request().unwrap();
+        chat.apply_server_suggestions(id, 10, plain(&["xyz"]), Some(&tree));
+        assert_eq!(usage_texts(&chat), vec!["<gamemode>"]);
     }
 
     #[test]
@@ -4337,7 +4428,7 @@ mod tests {
         let mut chat = ChatState::new();
         chat.suggest_original = "/give @p ".to_owned();
         chat.suggest_range = 9..9;
-        chat.suggestions = vec!["apple".into(), "stick".into()];
+        chat.suggestions = plain(&["apple", "stick"]);
         let gui_w = |s: &str| s.chars().count() as f32 * 6.0;
         // getScreenX(9) = 4 + 54, shifted one left; width 30 + 1; two rows
         // ending 15 above the bottom.
@@ -4348,7 +4439,9 @@ mod tests {
         // Clamped so the widest entry stays on screen.
         assert_eq!(chat.suggestion_rect(80.0, 240.0, &gui_w)[0], 49.0);
         // The width counts every entry, not just the visible rows.
-        chat.suggestions = (0..11).map(|i| "a".repeat(i + 1).into()).collect();
+        chat.suggestions = (0..11)
+            .map(|i| ChatSuggestion::plain("a".repeat(i + 1)))
+            .collect();
         let rect = chat.suggestion_rect(320.0, 240.0, &gui_w);
         assert_eq!(rect[2], 67.0);
         assert_eq!(rect[3], 120.0);
@@ -4367,18 +4460,46 @@ mod tests {
             )
         };
         assert_eq!(
-            parse_error_component("/foo", 1, "command.unknown.command"),
+            parse_error_component(
+                "/foo",
+                1,
+                Component::translate("command.unknown.command", Vec::new())
+            ),
             expected("command.unknown.command", "1", "/<--[HERE]")
         );
         // Past ten characters the context keeps the last ten behind "...".
         assert_eq!(
-            parse_error_component("/time set abcdefg", 17, "command.unknown.argument"),
+            parse_error_component(
+                "/time set abcdefg",
+                17,
+                Component::translate("command.unknown.argument", Vec::new())
+            ),
             expected("command.unknown.argument", "17", "...et abcdefg<--[HERE]")
         );
         // Positions count UTF-16 units.
         assert_eq!(
-            parse_error_component("/é", 3, "command.unknown.argument"),
+            parse_error_component(
+                "/é",
+                3,
+                Component::translate("command.unknown.argument", Vec::new())
+            ),
             expected("command.unknown.argument", "2", "/é<--[HERE]")
+        );
+        // A context-free `create()` is the bare message.
+        let too_long = SyntaxError {
+            key: "argument.message.too_long",
+            args: vec!["257".to_owned(), "256".to_owned()],
+            cursor: None,
+        };
+        assert_eq!(
+            syntax_error_component("/say x", &too_long),
+            Component::translate(
+                "argument.message.too_long",
+                vec![
+                    Argument::String("257".to_owned()),
+                    Argument::String("256".to_owned()),
+                ],
+            )
         );
     }
 
@@ -4622,6 +4743,7 @@ mod tests {
                 text: "value".to_owned(),
                 tooltip: Some(tooltip.clone()),
             }],
+            None,
         );
         assert_eq!(chat.suggestions.len(), 1);
         assert_eq!(chat.suggestions[0].text, "value");

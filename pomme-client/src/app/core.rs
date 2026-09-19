@@ -1294,7 +1294,12 @@ impl AppCore {
                     game.command_tree = Some(tree);
                 }
                 NetworkEvent::CommandSuggestions { id, start, options } => {
-                    game.chat.apply_server_suggestions(id, start, options);
+                    game.chat.apply_server_suggestions(
+                        id,
+                        start,
+                        options,
+                        game.command_tree.as_deref(),
+                    );
                 }
                 NetworkEvent::BlockUpdate { pos, state } => {
                     apply_server_block(game, &mut priority_remesh, pos, state);
