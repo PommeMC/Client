@@ -112,7 +112,7 @@ fn draw_server_dialog(
         && let Some(dialog) = game.server_dialog.as_mut()
     {
         let fs = common::FONT_SIZE * gs;
-        dialog.handle_text_input(&core.input.drain_text_events(), sw - 16.0 * gs, &|s| {
+        dialog.handle_text_input(&core.input.drain_text_events(), gs, &|s| {
             gfx.renderer.menu_text_width(s, fs)
         });
     }

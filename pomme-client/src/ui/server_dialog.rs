@@ -495,10 +495,12 @@ impl ServerDialogState {
         !matches!(self.mode, DialogMode::Finished) && self.focused_text.is_some()
     }
 
+    /// Types into the focused input, which scrolls on its own width
+    /// (`EditBox.getInnerWidth`), not the screen's.
     pub fn handle_text_input(
         &mut self,
         events: &[TextInputEvent],
-        inner_w: f32,
+        gs: f32,
         width_fn: &dyn Fn(&str) -> f32,
     ) {
         let DialogMode::Dialog(dialog) = &mut self.mode else {
@@ -508,12 +510,16 @@ impl ServerDialogState {
             return;
         };
         let Some(DialogInput::Text {
-            field, multiline, ..
+            field,
+            multiline,
+            width,
+            ..
         }) = dialog.inputs.get_mut(index)
         else {
             self.focused_text = None;
             return;
         };
+        let inner_w = (*width - 8.0) * gs;
         // `MultiLineEditBox.setLineLimit`.
         let max_lines = multiline
             .and_then(|multiline| multiline.max_lines)
@@ -530,6 +536,11 @@ impl ServerDialogState {
             }
         }
     }
+
+    /// Wheel input over the dialog.
+    // TODO: vanilla scrolls the body's `ScrollableLayout`, and a `CycleButton`
+    // under the cursor takes the wheel itself; neither scrolls yet.
+    pub fn handle_scroll(&mut self, _cursor: (f32, f32), _delta: f32) {}
 
     pub fn handle_tab(&mut self, reverse: bool) {
         let DialogMode::Dialog(dialog) = &self.mode else {
@@ -954,6 +965,12 @@ impl ServerDialogState {
 
     pub fn is_finished(&self) -> bool {
         matches!(self.mode, DialogMode::Finished)
+    }
+
+    /// Whether the dialog itself is showing: `clearDialog` closes that, but
+    /// leaves a `WaitingForResponseScreen` up.
+    pub fn is_dialog(&self) -> bool {
+        matches!(self.mode, DialogMode::Dialog(_))
     }
 
     fn bind_action(&self, action: &BoundAction) -> Option<ClickEvent> {
@@ -2388,6 +2405,27 @@ mod tests {
         ));
         state.activate();
         assert!(state.is_finished());
+    }
+
+    #[test]
+    fn clear_dialog_leaves_a_waiting_screen_up() {
+        // `clearDialog` closes a `DialogScreen`; the
+        // `WaitingForResponseScreen` a click swapped in stays.
+        let mut state = open_nbt(compound(vec![
+            ("type", text("minecraft:notice")),
+            ("title", text("Title")),
+        ]));
+        assert!(state.is_dialog());
+        let action = state.finish_click(
+            Some(ClickEvent::Custom {
+                id: "pomme:test".to_owned(),
+                payload: None,
+            }),
+            AfterAction::WaitForResponse,
+        );
+        assert!(matches!(action, Some(ServerDialogAction::Custom { .. })));
+        state.activate();
+        assert!(!state.is_dialog() && !state.is_finished());
     }
 
     #[test]

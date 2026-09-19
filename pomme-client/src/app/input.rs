@@ -301,7 +301,9 @@ impl InputState {
                 ..
             } = &mut app
             {
-                if self.action_just_pressed(Action::ToggleInventory) {
+                // A dialog (or the confirm screen over it) is a screen, and
+                // vanilla runs no key mapping while one is up.
+                if self.action_just_pressed(Action::ToggleInventory) && !game.dialog_open() {
                     if game.creative_inventory_open {
                         game.close_creative_inventory();
                         should_apply_cursor_grab = true;
@@ -325,7 +327,7 @@ impl InputState {
 
                     self.recent_actions.remove(&Action::ToggleInventory);
                 }
-                if self.action_just_pressed(Action::OpenMenu) {
+                if self.action_just_pressed(Action::OpenMenu) && !game.dialog_open() {
                     if game.chat.is_open() {
                         // ChatScreen consumes Escape before the game-level
                         // pause action: link confirmation, then suggestions,
@@ -364,7 +366,7 @@ impl InputState {
 
                     self.recent_actions.remove(&Action::OpenMenu);
                 }
-                if self.action_just_pressed(Action::Close) {
+                if self.action_just_pressed(Action::Close) && !game.dialog_open() {
                     if !game.dead
                         && !game.death_screen_open
                         && (game.inventory_open || game.open_container.is_some())

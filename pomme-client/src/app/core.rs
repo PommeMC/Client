@@ -1396,17 +1396,24 @@ impl AppCore {
                     game.server_links = links;
                 }
                 NetworkEvent::ShowDialog { dialog } => {
-                    game.chat
-                        .close(crate::ui::chat::ChatExitReason::Interrupted);
-                    game.close_menu();
-                    game.close_creative_inventory();
+                    // The screen under the dialog is vanilla's `previousScreen`:
+                    // it keeps its state (an open container included) and comes
+                    // back when the dialog closes.
                     if game.open_server_dialog(dialog) {
                         self.apply_cursor_grab(window, Some(game));
                     }
                 }
+                // `clearDialog` closes a dialog screen only; a
+                // `WaitingForResponseScreen` stays up for its own Back button.
                 NetworkEvent::ClearDialog => {
-                    game.server_dialog = None;
-                    self.apply_cursor_grab(window, Some(game));
+                    if game
+                        .server_dialog
+                        .as_ref()
+                        .is_some_and(|dialog| dialog.is_dialog())
+                    {
+                        game.server_dialog = None;
+                        self.apply_cursor_grab(window, Some(game));
+                    }
                 }
                 NetworkEvent::BossBarUpdate { id, op } => {
                     game.boss_bars.apply(id, op);

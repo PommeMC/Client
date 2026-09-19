@@ -486,6 +486,13 @@ impl GameState {
             .map(|e| (e.health, e.max_health))
     }
 
+    /// A server dialog, or the confirm screen one raised, is the top screen.
+    /// Vanilla runs no key mapping while a screen is up, and the screens under
+    /// it neither draw nor take input.
+    pub fn dialog_open(&self) -> bool {
+        self.server_dialog.is_some() || self.chat.has_pending_modal_prompt()
+    }
+
     pub fn gui_open(&self) -> bool {
         self.inventory_open
             || self.creative_inventory_open
@@ -1408,9 +1415,8 @@ fn handle_chat_ui_action(
                 .send_raw(crate::net::chat::encode_outbound_command(&command));
         }
         ChatUiAction::Custom { id, payload } => connection.packet_tx.send_custom_click(id, payload),
+        // The chat screen stays as the dialog's `previousScreen`.
         ChatUiAction::ShowDialog(dialog) => {
-            game.chat
-                .close(crate::ui::chat::ChatExitReason::Interrupted);
             game.open_server_dialog(crate::ui::server_dialog::DialogReference::Holder(dialog));
         }
     }
@@ -1514,6 +1520,10 @@ pub(crate) fn build_server_screens(
 ) {
     let modal_open = game.chat.has_pending_modal_prompt();
     if let Some(dialog) = game.server_dialog.as_mut() {
+        let scroll = core.input.consume_menu_scroll();
+        if scroll != 0.0 && !modal_open {
+            dialog.handle_scroll(core.input.cursor_pos(), scroll);
+        }
         let action = dialog.build(
             elements,
             sw,
@@ -1551,8 +1561,9 @@ pub(crate) fn build_server_screens(
     }
 }
 
-/// A key press while a server dialog is open: Escape cancels it, Tab cycles
-/// its text fields, and anything else types.
+/// A key press while a server dialog is the top screen: Escape cancels it,
+/// Tab cycles its text fields, and anything else types. A confirm screen the
+/// dialog raised sits above it and answers Escape first.
 pub(crate) fn server_dialog_key(
     code: winit::keyboard::KeyCode,
     event: &winit::event::KeyEvent,
@@ -1563,6 +1574,18 @@ pub(crate) fn server_dialog_key(
 ) {
     use winit::keyboard::KeyCode;
 
+    if game.chat.has_pending_modal_prompt() {
+        // `ConfirmScreen` answers Escape with `accept(false)`, which returns
+        // to the screen under it.
+        if code == KeyCode::Escape {
+            game.chat.handle_escape();
+            core.input.clear_action(input::Action::OpenMenu);
+            core.apply_cursor_grab(window, Some(game));
+        } else {
+            core.input.on_menu_key_event(event);
+        }
+        return;
+    }
     match code {
         KeyCode::Escape => {
             let action = game
@@ -2045,7 +2068,7 @@ pub fn update_game(
     if game.chat.has_pending_modal_prompt() {
         // The ConfirmScreen replaces ChatScreen and takes its input.
     } else if let Some(dialog) = game.server_dialog.as_mut() {
-        dialog.handle_text_input(&text_events, text_sw - 16.0 * text_gs, &|s| {
+        dialog.handle_text_input(&text_events, text_gs, &|s| {
             gfx.renderer.menu_text_width(s, text_fs)
         });
     } else if let Some(msg) = game.chat.handle_key_input(
@@ -2696,7 +2719,11 @@ pub fn update_game(
         apply_result_action(action, ResultKind::ChunkLoad, status, json, core, gfx, game);
     }
 
-    if game.options_from_game {
+    // A dialog is the top screen: the screens under it keep their state
+    // (vanilla's `previousScreen`) but neither draw nor take input. The Hud
+    // still draws, so chat keeps its unfocused backlog.
+    let dialog_open = game.dialog_open();
+    if game.options_from_game && !dialog_open {
         core.menu.server_render_distance = game.server_render_distance;
         let mut menu_input = core.build_menu_input(dt);
         // Chat consumed the enter/tab latches earlier this frame; hand them on.
@@ -2709,7 +2736,7 @@ pub fn update_game(
         elements.extend(result.elements);
         core.input.clear_just_pressed_actions();
         core.sync_display_mode(&gfx.window);
-    } else if game.death_screen_open {
+    } else if game.death_screen_open && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed() && !game.respawn_sent;
         death_action = if game.death_confirm {
@@ -2741,7 +2768,7 @@ pub fn update_game(
             )
         };
         core.input.clear_just_pressed_actions();
-    } else if game.paused && !matches!(game.pause_screen, PauseScreen::Hidden) {
+    } else if game.paused && !matches!(game.pause_screen, PauseScreen::Hidden) && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
         pause_action = pause::build_pause_menu(
@@ -2760,7 +2787,7 @@ pub fn update_game(
 
     let mut player_preview = None;
     let mut book_preview = None;
-    if game.inventory_open || game.open_container.is_some() {
+    if (game.inventory_open || game.open_container.is_some()) && !dialog_open {
         // Key shortcuts stay quiet while a text field (anvil rename) types.
         let keys_live = !game.wants_text_input();
         let input = crate::ui::container::ContainerInput {
@@ -2931,7 +2958,7 @@ pub fn update_game(
         core.input.clear_just_pressed_actions();
     }
 
-    if game.creative_inventory_open {
+    if game.creative_inventory_open && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
         let middle_clicked = core.input.middle_just_pressed();
@@ -3008,6 +3035,7 @@ pub fn update_game(
                 screen_h: sh,
                 gui_scale: gs,
                 cursor: core.input.cursor_pos(),
+                covered: dialog_open,
                 clicked: core.input.left_just_pressed(),
                 shift: core.input.shift_held(),
                 command_tree: command_tree.as_deref(),
@@ -3056,7 +3084,7 @@ pub fn update_game(
 
     build_server_screens(&mut elements, sw, sh, gs, core, gfx, connection, game);
 
-    if game.chat.is_open() && core.input.cursor_moved_this_frame() {
+    if game.chat.is_open() && !dialog_open && core.input.cursor_moved_this_frame() {
         let icon = if game
             .chat
             .hovering_clickable(core.input.cursor_pos(), core.input.shift_held())

@@ -359,6 +359,9 @@ pub struct ChatBuildContext<'a> {
     pub cursor: (f32, f32),
     pub clicked: bool,
     pub shift: bool,
+    /// A screen (a server dialog) covers the chat: it draws as the Hud's
+    /// unfocused backlog and takes no input.
+    pub covered: bool,
     pub command_tree: Option<&'a CommandTree>,
     pub advanced_item_tooltips: bool,
     pub text_width_fn: &'a dyn Fn(&str, f32) -> f32,
@@ -1624,6 +1627,7 @@ impl ChatState {
             cursor,
             clicked,
             shift,
+            covered,
             command_tree,
             advanced_item_tooltips,
             text_width_fn,
@@ -1633,8 +1637,9 @@ impl ChatState {
         self.hit_regions.clear();
         self.suggestion_regions.clear();
         self.queue_region = None;
-        // Under a modal the chat draws as Hud's unfocused background layer.
-        let focused = self.is_focused();
+        // Under a modal (or a dialog) the chat draws as Hud's unfocused
+        // background layer.
+        let focused = self.is_focused() && !covered;
         let chat_scale = self.options.scale.clamp(0.0, 1.0);
         // Vanilla `pose.scale(0, 0)` collapses every message, tag, queue and
         // restricted-prompt draw (and their click targets) at Chat Text
@@ -3630,6 +3635,7 @@ mod tests {
                 cursor: (0.0, 0.0),
                 clicked: false,
                 shift: false,
+                covered: false,
                 command_tree: None,
                 advanced_item_tooltips: false,
                 text_width_fn: &text_width,
