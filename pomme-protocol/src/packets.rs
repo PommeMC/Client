@@ -324,6 +324,26 @@ mod tests {
         );
         assert_eq!(t.id(Phase::Game, Direction::Serverbound, "chat"), Some(9));
         assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "chat_ack"),
+            Some(6)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "chat_command_signed"),
+            Some(8)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "chat_session_update"),
+            Some(10)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "command_suggestions"),
+            Some(15)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "delete_chat"),
+            Some(31)
+        );
+        assert_eq!(
             t.id(Phase::Game, Direction::Clientbound, "disguised_chat"),
             Some(33)
         );
