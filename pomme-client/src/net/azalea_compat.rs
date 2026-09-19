@@ -188,6 +188,17 @@ fn packet_ids_match_azalea() {
         table_id(Direction::Clientbound, "boss_event")
     );
 
+    let team = ClientboundGamePacket::SetPlayerTeam(
+        azalea_protocol::packets::game::c_set_player_team::ClientboundSetPlayerTeam {
+            name: String::new(),
+            method: azalea_protocol::packets::game::c_set_player_team::Method::Remove,
+        },
+    );
+    assert_eq!(
+        team.id(),
+        table_id(Direction::Clientbound, "set_player_team")
+    );
+
     let advancements = ClientboundGamePacket::UpdateAdvancements(
         azalea_protocol::packets::game::c_update_advancements::ClientboundUpdateAdvancements {
             reset: false,
@@ -2612,8 +2623,7 @@ fn translate_set_player_team_764() {
     let (tx, rx) = crossbeam_channel::bounded(1);
     assert!(crate::net::handler::handle_raw_game_packet(
         &translated,
-        &tx,
-        &crate::net::chat::ChatTypeRegistry::default(),
+        &tx
     ));
     match rx.recv().unwrap() {
         crate::net::NetworkEvent::ScoreboardTeam {

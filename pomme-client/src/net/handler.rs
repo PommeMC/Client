@@ -1627,11 +1627,7 @@ mod tests {
         "Player".to_string().azalea_write(&mut raw).unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(
-            &raw,
-            &tx,
-            &crate::net::chat::ChatTypeRegistry::default(),
-        ));
+        assert!(handle_raw_game_packet(&raw, &tx));
         match rx.recv().unwrap() {
             NetworkEvent::ScoreboardTeam {
                 name,
@@ -1664,11 +1660,7 @@ mod tests {
         0_u8.azalea_write(&mut raw).unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(
-            &raw,
-            &tx,
-            &crate::net::chat::ChatTypeRegistry::default(),
-        ));
+        assert!(handle_raw_game_packet(&raw, &tx));
         match rx.recv().unwrap() {
             NetworkEvent::ScoreboardTeam {
                 color, fill_color, ..

@@ -176,7 +176,11 @@ impl TintPaletteArena {
         if self.buffers[frame] != vk::Buffer::null() {
             device.destroy_buffer(self.buffers[frame], None);
             if let Some(allocation) = self.allocations[frame].take() {
-                allocator.lock().unwrap().free(allocation).ok();
+                allocator
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .free(allocation)
+                    .ok();
             }
         }
         let (buffer, allocation) = util::create_host_buffer(
@@ -228,7 +232,10 @@ impl TintPaletteArena {
             .expect("tint buffer allocated");
         let bytes = bytemuck::cast_slice(colors);
         let offset = base * size_of::<u32>();
-        allocation.mapped_slice_mut().unwrap()[offset..offset + bytes.len()].copy_from_slice(bytes);
+        allocation
+            .mapped_slice_mut()
+            .expect("tint palette allocation is host-visible")[offset..offset + bytes.len()]
+            .copy_from_slice(bytes);
         self.cursors[frame] = end;
         ItemTintRange {
             base: base as u32,
@@ -246,7 +253,11 @@ impl TintPaletteArena {
                 device.destroy_buffer(self.buffers[frame], None);
             }
             if let Some(allocation) = self.allocations[frame].take() {
-                allocator.lock().unwrap().free(allocation).ok();
+                allocator
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .free(allocation)
+                    .ok();
             }
         }
     }

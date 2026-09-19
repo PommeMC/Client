@@ -1699,4 +1699,28 @@ mod team_color_tests {
         );
         assert_eq!(scoreboard.member_team_color("Player"), None);
     }
+
+    #[test]
+    fn member_team_color_tracks_membership_and_team_lifecycle() {
+        let mut scoreboard = Scoreboard::default();
+        scoreboard.set_team(
+            "red".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            [1.0; 4],
+            Some(crate::ui::common::rgb(0xFF5555)),
+            Some(vec!["Player".into()]),
+        );
+        assert_eq!(scoreboard.member_team_color("Player"), Some(0xFF5555));
+
+        scoreboard.update_team_members("red", vec!["Player".into()], false);
+        assert_eq!(scoreboard.member_team_color("Player"), None);
+
+        scoreboard.update_team_members("red", vec!["Player".into()], true);
+        assert_eq!(scoreboard.member_team_color("Player"), Some(0xFF5555));
+
+        scoreboard.remove_team("red");
+        assert_eq!(scoreboard.member_team_color("Player"), None);
+    }
 }
