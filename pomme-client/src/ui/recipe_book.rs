@@ -4,14 +4,14 @@ use std::time::Instant;
 use azalea_inventory::ItemStack;
 use azalea_registry::Registry;
 
-use super::common::{FONT_SIZE, WHITE, hit_test};
+use super::common::{FONT_SIZE, WHITE, hit_test, push_tooltip, push_tooltip_lines};
 use super::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 use crate::net::sender::PacketSender;
 use crate::recipe::{
     Ingredient, ItemTags, RecipeBookEntry, RecipeBookState, RecipeBookType, RecipeDisplay,
     RecipeDisplayId, SlotDisplay,
 };
-use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
+use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 
 const BOOK_W: f32 = 147.0;
 const BOOK_H: f32 = 166.0;
@@ -32,6 +32,7 @@ pub struct RecipeBookScreenSpec {
     pub grid_width: usize,
     pub grid_height: usize,
     pub result_slot: usize,
+    pub big_result_slot: bool,
     pub toggle_x: f32,
     pub toggle_y: f32,
     pub panel_h: f32,
@@ -48,6 +49,7 @@ impl RecipeBookScreenSpec {
             grid_width: 2,
             grid_height: 2,
             result_slot: 0,
+            big_result_slot: false,
             toggle_x: 104.0,
             toggle_y: 61.0,
             panel_h: 166.0,
@@ -62,6 +64,7 @@ impl RecipeBookScreenSpec {
             grid_width: 3,
             grid_height: 3,
             result_slot: 0,
+            big_result_slot: true,
             toggle_x: 5.0,
             toggle_y: 34.0,
             panel_h: 166.0,
@@ -76,6 +79,7 @@ impl RecipeBookScreenSpec {
             grid_width: 1,
             grid_height: 1,
             result_slot: 2,
+            big_result_slot: true,
             toggle_x: 20.0,
             toggle_y: 34.0,
             panel_h: 166.0,
@@ -441,7 +445,16 @@ pub fn handle_input(
                     state.last_clicked_collection = Some(overlay.ids.clone());
                     book.ghost_recipe = None;
                 }
-                state.overlay = None;
+                if narrow {
+                    let mut settings = book.settings.get(spec.kind);
+                    settings.open = false;
+                    book.settings.set(spec.kind, settings);
+                    let _ =
+                        sender.recipe_book_change_settings(spec.kind, false, settings.filtering);
+                    state.overlay = None;
+                    frame.visible = false;
+                    frame.main_x_offset = 0.0;
+                }
                 frame.consumed_left_click = true;
             } else {
                 state.overlay = None;
@@ -698,18 +711,19 @@ pub fn render(
                     );
                 }
                 if hit_test(cursor, [x, y, 25.0 * scale, 25.0 * scale]) && state.overlay.is_none() {
-                    let mut name = item_name(item);
+                    let name = item_name(item);
                     if multiple {
-                        name.push_str("\nRight Click for More");
+                        push_tooltip_lines(
+                            elements,
+                            cursor,
+                            screen_w,
+                            screen_h,
+                            scale,
+                            recipe_tooltip_lines(name),
+                        );
+                    } else {
+                        push_tooltip(elements, cursor, screen_w, screen_h, scale, &name);
                     }
-                    elements.push(MenuElement::Tooltip {
-                        x: cursor.0,
-                        y: cursor.1,
-                        text: name,
-                        scale: FONT_SIZE * scale,
-                        screen_w,
-                        screen_h,
-                    });
                 }
             }
         }
@@ -938,8 +952,7 @@ fn collections(
     // Vanilla categorizes recipes first, preserving recipe-id iteration order
     // within each category/group, then search tabs concatenate categories in
     // their declared order (not numeric registry order).
-    let mut entries = book.known.values().cloned().collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.id);
+    let entries = book.known_in_vanilla_order();
 
     let mut grouped = Vec::<((u32, Option<u32>), Vec<RecipeBookEntry>)>::new();
     let mut grouped_index = HashMap::<(u32, u32), usize>::new();
@@ -950,14 +963,14 @@ fn collections(
         if let Some(group) = entry.group {
             let key = (entry.category, group);
             if let Some(&index) = grouped_index.get(&key) {
-                grouped[index].1.push(entry);
+                grouped[index].1.push(entry.clone());
             } else {
                 let index = grouped.len();
                 grouped_index.insert(key, index);
-                grouped.push(((entry.category, Some(group)), vec![entry]));
+                grouped.push(((entry.category, Some(group)), vec![entry.clone()]));
             }
         } else {
-            grouped.push(((entry.category, None), vec![entry]));
+            grouped.push(((entry.category, None), vec![entry.clone()]));
         }
     }
 
@@ -1241,7 +1254,7 @@ fn render_ghost_recipe(
                 main.0 + result_x * scale,
                 main.1 + result_y * scale,
                 scale,
-                true,
+                spec.big_result_slot,
                 cursor,
                 screen_w,
                 screen_h,
@@ -1287,7 +1300,7 @@ fn render_ghost_recipe(
                 main.0 + result_x * scale,
                 main.1 + result_y * scale,
                 scale,
-                true,
+                spec.big_result_slot,
                 cursor,
                 screen_w,
                 screen_h,
@@ -1331,7 +1344,7 @@ fn render_ghost_recipe(
                 main.0 + 116.0 * scale,
                 main.1 + 35.0 * scale,
                 scale,
-                true,
+                spec.big_result_slot,
                 cursor,
                 screen_w,
                 screen_h,
@@ -1425,6 +1438,14 @@ fn centered_shaped_slots(
     out
 }
 
+fn ghost_highlight_rect(x: f32, y: f32, scale: f32, big_result: bool) -> [f32; 4] {
+    if big_result {
+        [x - 4.0 * scale, y - 4.0 * scale, 24.0 * scale, 24.0 * scale]
+    } else {
+        [x, y, 16.0 * scale, 16.0 * scale]
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_ghost_slot(
     elements: &mut Vec<MenuElement>,
@@ -1434,7 +1455,7 @@ fn render_ghost_slot(
     x: f32,
     y: f32,
     scale: f32,
-    result: bool,
+    big_result: bool,
     cursor: (f32, f32),
     screen_w: f32,
     screen_h: f32,
@@ -1446,11 +1467,7 @@ fn render_ghost_slot(
     items.sort_unstable();
     items.dedup();
     let item = items[cycle % items.len()];
-    let red = if result {
-        [x - 4.0 * scale, y - 4.0 * scale, 24.0 * scale, 24.0 * scale]
-    } else {
-        [x, y, 16.0 * scale, 16.0 * scale]
-    };
+    let red = ghost_highlight_rect(x, y, scale, big_result);
     elements.push(MenuElement::Rect {
         x: red[0],
         y: red[1],
@@ -1469,14 +1486,14 @@ fn render_ghost_slot(
         color: [1.0, 1.0, 1.0, 0.19],
     });
     if hit_test(cursor, [x, y, 16.0 * scale, 16.0 * scale]) {
-        elements.push(MenuElement::Tooltip {
-            x: cursor.0,
-            y: cursor.1,
-            text: item_name(item),
-            scale: FONT_SIZE * scale,
+        push_tooltip(
+            elements,
+            cursor,
             screen_w,
             screen_h,
-        });
+            scale,
+            &item_name(item),
+        );
     }
 }
 
@@ -1607,6 +1624,13 @@ fn item_name(id: u32) -> String {
         .unwrap_or_else(|| format!("Item #{id}"))
 }
 
+fn recipe_tooltip_lines(name: String) -> Vec<TooltipLine> {
+    vec![
+        TooltipLine::new(name, WHITE),
+        TooltipLine::new("Right Click for More".into(), WHITE),
+    ]
+}
+
 fn item_resource(id: u32) -> Option<String> {
     azalea_registry::builtin::ItemKind::from_u32(id)
         .map(crate::player::inventory::item_resource_name)
@@ -1733,14 +1757,7 @@ fn render_filter(
         } else {
             "Showing All"
         };
-        elements.push(MenuElement::Tooltip {
-            x: cursor.0,
-            y: cursor.1,
-            text: text.into(),
-            scale: FONT_SIZE * scale,
-            screen_w,
-            screen_h,
-        });
+        push_tooltip(elements, cursor, screen_w, screen_h, scale, text);
     }
 }
 
@@ -2206,5 +2223,110 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["stick"]);
         assert!(!names.contains(&"diamond"));
+    }
+
+    #[test]
+    fn grouped_recipe_tooltip_uses_two_explicit_lines() {
+        let lines = recipe_tooltip_lines("Oak Planks".into());
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[0].text, "Oak Planks");
+        assert_eq!(lines[1].spans[0].text, "Right Click for More");
+    }
+
+    #[test]
+    fn player_result_ghost_stays_inside_normal_slot_bounds() {
+        let player = RecipeBookScreenSpec::player(0);
+        let crafting = RecipeBookScreenSpec::crafting_table(1);
+        assert!(!player.big_result_slot);
+        assert!(crafting.big_result_slot);
+        assert_eq!(
+            ghost_highlight_rect(10.0, 20.0, 1.0, false),
+            [10.0, 20.0, 16.0, 16.0]
+        );
+        assert_eq!(
+            ghost_highlight_rect(10.0, 20.0, 1.0, true),
+            [6.0, 16.0, 24.0, 24.0]
+        );
+    }
+
+    #[test]
+    fn selecting_overlay_recipe_keeps_popup_open_on_wide_screen() {
+        let spec = RecipeBookScreenSpec::crafting_table(1);
+        let mut state = RecipeBookUiState::new();
+        state.ensure_screen(spec);
+        state.overlay = Some(RecipeOverlay {
+            ids: vec![1],
+            craftable_count: 0,
+            button_index: 0,
+        });
+
+        let mut book = RecipeBookState::default();
+        book.settings.crafting.open = true;
+        book.apply_add(vec![recipe(1, 0, vec![Ingredient::Items(vec![1])])], false);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let (bx, by, scale) = book_origin(400.0, 300.0, 1.0, false);
+        let overlay = state.overlay.clone().unwrap();
+        let rect = overlay_rect_for(&overlay, bx, by, scale);
+        let frame = handle_input(
+            &mut state,
+            &mut book,
+            &sender,
+            spec,
+            400.0,
+            300.0,
+            1.0,
+            (rect[0] + 5.0, rect[1] + 6.0),
+            true,
+            false,
+            false,
+            false,
+            &[],
+            &[ItemStack::Empty],
+            &|text, _| text.len() as f32,
+        );
+        assert!(frame.visible);
+        assert!(state.overlay.is_some());
+    }
+
+    #[test]
+    fn selecting_overlay_recipe_closes_book_on_narrow_screen() {
+        let spec = RecipeBookScreenSpec::crafting_table(1);
+        let mut state = RecipeBookUiState::new();
+        state.ensure_screen(spec);
+        state.overlay = Some(RecipeOverlay {
+            ids: vec![1],
+            craftable_count: 0,
+            button_index: 0,
+        });
+
+        let mut book = RecipeBookState::default();
+        book.settings.crafting.open = true;
+        book.apply_add(vec![recipe(1, 0, vec![Ingredient::Items(vec![1])])], false);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let (bx, by, scale) = book_origin(300.0, 300.0, 1.0, true);
+        let overlay = state.overlay.clone().unwrap();
+        let rect = overlay_rect_for(&overlay, bx, by, scale);
+        let frame = handle_input(
+            &mut state,
+            &mut book,
+            &sender,
+            spec,
+            300.0,
+            300.0,
+            1.0,
+            (rect[0] + 5.0, rect[1] + 6.0),
+            true,
+            false,
+            false,
+            false,
+            &[],
+            &[ItemStack::Empty],
+            &|text, _| text.len() as f32,
+        );
+        assert!(!frame.visible);
+        assert!(state.overlay.is_none());
+        assert!(!book.settings.crafting.open);
     }
 }

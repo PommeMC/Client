@@ -229,6 +229,11 @@ impl ItemTags {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RecipeBookState {
     pub known: HashMap<RecipeDisplayId, RecipeBookEntry>,
+    /// Insertion order of keys in `known`. Vanilla stores recipes in a Java
+    /// `HashMap`; its iteration order is bucket order, with insertion order
+    /// preserved within each bucket. We keep key insertion order so the UI can
+    /// reproduce that iteration exactly when rebuilding collections.
+    known_insertion_order: Vec<RecipeDisplayId>,
     pub highlight: HashSet<RecipeDisplayId>,
     pub settings: RecipeBookSettings,
     pub data: RecipeData,
@@ -240,10 +245,14 @@ impl RecipeBookState {
     pub fn apply_add(&mut self, entries: Vec<RecipeBookAddEntry>, replace: bool) {
         if replace {
             self.known.clear();
+            self.known_insertion_order.clear();
             self.highlight.clear();
         }
         for entry in entries {
             let id = entry.contents.id;
+            if !self.known.contains_key(&id) {
+                self.known_insertion_order.push(id);
+            }
             self.known.insert(id, entry.contents);
             if entry.highlight {
                 self.highlight.insert(id);
@@ -255,7 +264,33 @@ impl RecipeBookState {
         for id in ids {
             self.known.remove(&id);
             self.highlight.remove(&id);
+            self.known_insertion_order.retain(|known| *known != id);
         }
+    }
+
+    /// Entries in the order vanilla's `HashMap<RecipeDisplayId, ...>.values()`
+    /// iterates them. Java's `HashMap` walks buckets from low to high and keeps
+    /// insertion order within each bucket. `RecipeDisplayId` hashes as its
+    /// integer id, then `HashMap` applies `h ^ (h >>> 16)`.
+    pub fn known_in_vanilla_order(&self) -> Vec<&RecipeBookEntry> {
+        if self.known.is_empty() {
+            return Vec::new();
+        }
+
+        let mut capacity = 16usize;
+        while self.known.len() > capacity * 3 / 4 {
+            capacity *= 2;
+        }
+        let mask = (capacity - 1) as u32;
+        let mut buckets = vec![Vec::new(); capacity];
+        for id in &self.known_insertion_order {
+            let Some(entry) = self.known.get(id) else {
+                continue;
+            };
+            let hash = *id ^ (*id >> 16);
+            buckets[(hash & mask) as usize].push(entry);
+        }
+        buckets.into_iter().flatten().collect()
     }
 
     #[allow(dead_code)]
@@ -309,6 +344,31 @@ mod tests {
         state.mark_seen(7);
         assert!(state.known.contains_key(&7));
         assert!(!state.highlight.contains(&7));
+    }
+
+    #[test]
+    fn known_order_matches_java_hash_map_bucket_iteration() {
+        let mut state = RecipeBookState::default();
+        state.apply_add(vec![entry(17), entry(1), entry(16), entry(2)], false);
+        assert_eq!(
+            state
+                .known_in_vanilla_order()
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![16, 17, 1, 2]
+        );
+
+        state.remove([17]);
+        state.apply_add(vec![entry(17)], false);
+        assert_eq!(
+            state
+                .known_in_vanilla_order()
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![16, 1, 17, 2]
+        );
     }
 
     #[test]
