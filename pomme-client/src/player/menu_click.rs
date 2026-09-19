@@ -4,13 +4,13 @@
 //! reconciles, so a wrong prediction only causes a self-correcting glitch,
 //! never item dup/loss.
 
-use azalea_inventory::components::{EquipmentSlot, Equippable};
+use azalea_inventory::components::{BundleContents, DataComponentUnion, EquipmentSlot, Equippable};
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::operations::{
     ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
 };
 use azalea_inventory::{ItemStack, ItemStackData, Menu, Player, SlotList};
-use azalea_registry::builtin::ItemKind;
+use azalea_registry::builtin::{DataComponentKind, ItemKind};
 
 /// Which container menu a click applies to. `Furnace` covers the furnace,
 /// blast furnace, and smoker menus, which share the same slot structure;
@@ -384,6 +384,9 @@ fn pickup_click(
     s: usize,
     primary: bool,
 ) {
+    if bundle_click_override(kind, menu, cursor, s, primary) {
+        return;
+    }
     let mut slot_item = take_slot(menu, s);
     let mut carried = std::mem::take(cursor);
     if slot_item.is_empty() {
@@ -413,6 +416,142 @@ fn pickup_click(
     }
     put_slot(menu, s, slot_item);
     *cursor = carried;
+}
+
+fn set_bundle_contents(stack: &mut ItemStack, contents: BundleContents) {
+    let ItemStack::Present(data) = stack else {
+        return;
+    };
+    let component = DataComponentUnion::from(contents);
+    // SAFETY: the union was constructed from BundleContents.
+    unsafe {
+        data.component_patch
+            .unchecked_insert_component(DataComponentKind::BundleContents, Some(component));
+    }
+}
+
+fn bundle_capacity(contents: &BundleContents) -> f32 {
+    (1.0 - crate::ui::bundle::fullness(contents)).max(0.0)
+}
+
+fn bundle_item_weight(data: &ItemStackData) -> f32 {
+    let one = BundleContents {
+        items: vec![ItemStack::Present({
+            let mut d = data.clone();
+            d.count = 1;
+            d
+        })],
+    };
+    crate::ui::bundle::fullness(&one)
+}
+
+fn insert_into_bundle(bundle: &mut ItemStack, source: &mut ItemStack) -> i32 {
+    let Some(bundle_data) = bundle.as_present() else {
+        return 0;
+    };
+    let Some(current) = bundle_data.get_component::<BundleContents>() else {
+        return 0;
+    };
+    let ItemStack::Present(source_data) = source else {
+        return 0;
+    };
+    let source_snapshot = source_data.clone();
+    let per_item = bundle_item_weight(&source_snapshot);
+    if per_item <= 0.0 {
+        return 0;
+    }
+    let capacity = (bundle_capacity(&current) / per_item + 1.0e-6).floor() as i32;
+    let amount = source_data.count.min(capacity).max(0);
+    if amount == 0 {
+        return 0;
+    }
+    let mut contents = current.into_owned();
+    if let Some(existing) = contents
+        .items
+        .iter_mut()
+        .find(|item| matches!(item, ItemStack::Present(data) if data.is_same_item_and_components(&source_snapshot)))
+    {
+        if let ItemStack::Present(data) = existing {
+            data.count += amount;
+        }
+    } else {
+        let mut inserted = source_snapshot;
+        inserted.count = amount;
+        contents.items.insert(0, ItemStack::Present(inserted));
+    }
+    shrink(source, amount);
+    set_bundle_contents(bundle, contents);
+    amount
+}
+
+fn remove_from_bundle(bundle: &mut ItemStack) -> ItemStack {
+    let Some(bundle_data) = bundle.as_present() else {
+        return ItemStack::Empty;
+    };
+    let Some(current) = bundle_data.get_component::<BundleContents>() else {
+        return ItemStack::Empty;
+    };
+    let mut contents = current.into_owned();
+    if contents.items.is_empty() {
+        return ItemStack::Empty;
+    }
+    let removed = contents.items.remove(0);
+    set_bundle_contents(bundle, contents);
+    removed
+}
+
+/// Vanilla `tryItemClickBehaviourOverride` for bundles. This runs before the
+/// generic PICKUP path so local prediction matches BundleItem's insertion and
+/// extraction semantics while the server remains authoritative.
+fn bundle_click_override(
+    kind: ContainerKind,
+    menu: &mut Menu,
+    cursor: &mut ItemStack,
+    s: usize,
+    primary: bool,
+) -> bool {
+    let mut slot = take_slot(menu, s);
+    let mut carried = std::mem::take(cursor);
+    let carried_bundle = carried
+        .as_present()
+        .is_some_and(|d| d.get_component::<BundleContents>().is_some());
+    let slot_bundle = slot
+        .as_present()
+        .is_some_and(|d| d.get_component::<BundleContents>().is_some());
+    let handled = if carried_bundle {
+        if primary && !slot.is_empty() {
+            insert_into_bundle(&mut carried, &mut slot);
+            true
+        } else if !primary && slot.is_empty() {
+            let mut removed = remove_from_bundle(&mut carried);
+            if !removed.is_empty() && kind.may_place(s, removed.as_present().unwrap()) {
+                std::mem::swap(&mut slot, &mut removed);
+                if !removed.is_empty() {
+                    insert_into_bundle(&mut carried, &mut removed);
+                }
+            } else if !removed.is_empty() {
+                insert_into_bundle(&mut carried, &mut removed);
+            }
+            true
+        } else {
+            false
+        }
+    } else if slot_bundle {
+        if primary && !carried.is_empty() {
+            insert_into_bundle(&mut slot, &mut carried);
+            true
+        } else if !primary && carried.is_empty() {
+            carried = remove_from_bundle(&mut slot);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    put_slot(menu, s, slot);
+    *cursor = carried;
+    handled
 }
 
 /// Move up to `amount` of `carried` into `slot` (empty or same item), capped to

@@ -1435,6 +1435,10 @@ impl Translation {
                 if let ItemStack::Present(data) = &mut p.item_stack {
                     strip_untranslatable_components(self.from_native, data);
                 }
+                // Native 26.2 BundleContents uses ItemStackTemplate order,
+                // unlike pinned Azalea's ItemStack encoder. Do this after
+                // registry remapping so the wire-facing stack is final.
+                crate::net::bundle_codec::encode_26_2_templates(&mut p.item_stack);
             }
             _ => {}
         }

@@ -120,7 +120,6 @@ pub fn push_selected_icon(
         elements
             .iter()
             .enumerate()
-            .rev()
             .find_map(|(index, element)| match element {
                 MenuElement::ItemIcon {
                     x,

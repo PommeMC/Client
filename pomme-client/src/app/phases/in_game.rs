@@ -3037,7 +3037,7 @@ pub fn update_game(
             let wheel = game.bundle_scroll_accum.trunc() as i32;
             game.bundle_scroll_accum -= wheel as f32;
             let next = crate::ui::bundle::next_selection(
-                wheel,
+                wheel.signum(),
                 current,
                 crate::ui::bundle::shown_count(contents),
             );

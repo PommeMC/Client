@@ -1279,7 +1279,7 @@ impl MenuOverlayPipeline {
                 screen_w,
                 screen_h,
             } = elem
-                && let Some(ref gm) = self.mc_glyph_map
+                && let Some(ref _gm) = self.mc_glyph_map
             {
                 let gs = *item_scale;
                 let fs = *font_scale;
@@ -1342,26 +1342,30 @@ impl MenuOverlayPipeline {
                 }
                 // Tooltip text/components render after the background/frame. Drawing the
                 // title before the nine-slice darkened it through the translucent background.
-                push_mc_text(
+                self.push_text(
                     &mut vertices,
-                    gm,
-                    left,
-                    top,
                     &[TextSpan::new(title.clone(), white)],
-                    fs,
-                    true,
+                    McTextDraw {
+                        x: left,
+                        y: top,
+                        scale: fs,
+                        drop_shadow: true,
+                    },
+                    &mut obfuscation_rng,
                 );
                 let top = top + title_h;
                 if items.is_empty() {
                     for (line_no, text) in empty_lines.iter().enumerate() {
-                        push_mc_text(
+                        self.push_text(
                             &mut vertices,
-                            gm,
-                            left,
-                            top + line_no as f32 * 9.0 * gs,
                             &[TextSpan::new(text.clone(), [0.6667, 0.6667, 0.6667, 1.0])],
-                            fs,
-                            true,
+                            McTextDraw {
+                                x: left,
+                                y: top + line_no as f32 * 9.0 * gs,
+                                scale: fs,
+                                drop_shadow: true,
+                            },
+                            &mut obfuscation_rng,
                         );
                     }
                 } else {
@@ -1381,14 +1385,16 @@ impl MenuOverlayPipeline {
                                     .sum();
                                 let hidden_text = format!("+{hidden}");
                                 let hidden_w = self.mc_text_width(&hidden_text, fs);
-                                push_mc_text(
+                                self.push_text(
                                     &mut vertices,
-                                    gm,
-                                    draw_x + 12.0 * gs - hidden_w / 2.0,
-                                    draw_y + 10.0 * gs,
                                     &[TextSpan::new(hidden_text, white)],
-                                    fs,
-                                    true,
+                                    McTextDraw {
+                                        x: draw_x + 12.0 * gs - hidden_w / 2.0,
+                                        y: draw_y + 10.0 * gs,
+                                        scale: fs,
+                                        drop_shadow: true,
+                                    },
+                                    &mut obfuscation_rng,
                                 );
                                 continue;
                             }
@@ -1442,14 +1448,16 @@ impl MenuOverlayPipeline {
                                 if data.count > 1 {
                                     let count_text = data.count.to_string();
                                     let count_w = self.mc_text_width(&count_text, fs);
-                                    push_mc_text(
+                                    self.push_text(
                                         &mut vertices,
-                                        gm,
-                                        draw_x + 21.0 * gs - count_w,
-                                        draw_y + 13.0 * gs,
                                         &[TextSpan::new(count_text, white)],
-                                        fs,
-                                        true,
+                                        McTextDraw {
+                                            x: draw_x + 21.0 * gs - count_w,
+                                            y: draw_y + 13.0 * gs,
+                                            scale: fs,
+                                            drop_shadow: true,
+                                        },
+                                        &mut obfuscation_rng,
                                     );
                                 }
                             }
@@ -1537,14 +1545,16 @@ impl MenuOverlayPipeline {
                                 white,
                             );
                         }
-                        push_mc_text(
+                        self.push_text(
                             &mut vertices,
-                            gm,
-                            selected_x,
-                            selected_y,
                             &[TextSpan::new(name, white)],
-                            fs,
-                            true,
+                            McTextDraw {
+                                x: selected_x,
+                                y: selected_y,
+                                scale: fs,
+                                drop_shadow: true,
+                            },
+                            &mut obfuscation_rng,
                         );
                     }
                 }
@@ -1600,14 +1610,16 @@ impl MenuOverlayPipeline {
                 };
                 if let Some(label) = label {
                     let label_w = self.mc_text_width(label, fs);
-                    push_mc_text(
+                    self.push_text(
                         &mut vertices,
-                        gm,
-                        left + 48.0 * gs - label_w / 2.0,
-                        bar_y + 3.0 * gs,
                         &[TextSpan::new(label.to_string(), white)],
-                        fs,
-                        true,
+                        McTextDraw {
+                            x: left + 48.0 * gs - label_w / 2.0,
+                            y: bar_y + 3.0 * gs,
+                            scale: fs,
+                            drop_shadow: true,
+                        },
+                        &mut obfuscation_rng,
                     );
                 }
             }

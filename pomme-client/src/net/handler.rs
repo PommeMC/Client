@@ -244,6 +244,16 @@ pub fn handle_game_packet(
                 state_id: p.state_id,
             });
         }
+        ClientboundGamePacket::SetPlayerInventory(p) => {
+            let mut item = p.contents.clone();
+            super::bundle_codec::normalize_26_2_templates(&mut item);
+            let _ = event_tx.try_send(NetworkEvent::ContainerSlot {
+                container_id: -2,
+                index: p.slot as u16,
+                item,
+                state_id: 0,
+            });
+        }
         ClientboundGamePacket::SetHeldSlot(p) if (0..9).contains(&p.slot) => {
             let _ = event_tx.try_send(NetworkEvent::HeldSlot { slot: p.slot as u8 });
         }
