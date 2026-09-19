@@ -1447,6 +1447,22 @@ fn apply_element_rotation(
     let cos = angle_rad.cos();
     let sin = angle_rad.sin();
 
+    // Vanilla `CuboidRotation.computeRescale` uses the reciprocal of each
+    // transformed basis vector's largest absolute component. For a single-axis
+    // rotation, that leaves the rotation axis unchanged and gives both
+    // perpendicular axes the same compensating scale.
+    let scale = if rot.rescale {
+        1.0 / cos.abs().max(sin.abs())
+    } else {
+        1.0
+    };
+    let [sx, sy, sz] = match rot.axis.as_str() {
+        "x" => [1.0, scale, scale],
+        "y" => [scale, 1.0, scale],
+        "z" => [scale, scale, 1.0],
+        _ => [1.0; 3],
+    };
+
     for pos in &mut positions {
         let dx = pos[0] - origin[0];
         let dy = pos[1] - origin[1];
@@ -1459,17 +1475,6 @@ fn apply_element_rotation(
             _ => (dx, dy, dz),
         };
 
-        let scale = if rot.rescale {
-            1.0 / cos.abs().max(sin.abs())
-        } else {
-            1.0
-        };
-        let [sx, sy, sz] = match rot.axis.as_str() {
-            "x" => [1.0, scale, scale],
-            "y" => [scale, 1.0, scale],
-            "z" => [scale, scale, 1.0],
-            _ => [1.0; 3],
-        };
         pos[0] = origin[0] + nx * sx;
         pos[1] = origin[1] + ny * sy;
         pos[2] = origin[2] + nz * sz;
@@ -1751,11 +1756,9 @@ mod tests {
             });
             let rotated = apply_element_rotation(positions, &rotation);
             for (before, after) in positions.iter().zip(rotated) {
-                assert!(
-                    (before[axis_index] - after[axis_index]).abs() < 1.0e-6,
-                    "{axis}-axis rescale changed the rotation-axis coordinate from {} to {}",
-                    before[axis_index],
-                    after[axis_index]
+                assert_eq!(
+                    before[axis_index], after[axis_index],
+                    "{axis}-axis rescale changed the rotation-axis coordinate"
                 );
             }
         }
@@ -1768,6 +1771,18 @@ mod tests {
         });
         let rotated = apply_element_rotation([[0.75, 0.5, 0.5]; 4], &quarter_turn);
         assert!((rotated[0][0] - 0.5).abs() < 1.0e-6);
+        assert!((rotated[0][1] - 0.5).abs() < 1.0e-6);
+        assert!((rotated[0][2] - 0.25).abs() < 1.0e-6);
+
+        let steep_turn = Some(ElementRotation {
+            origin: [8.0, 8.0, 8.0],
+            axis: "y".to_string(),
+            angle: 67.5,
+            rescale: true,
+        });
+        let rotated = apply_element_rotation([[0.75, 0.5, 0.5]; 4], &steep_turn);
+        let expected_x = 0.5 + 0.25 * 67.5_f32.to_radians().tan().recip();
+        assert!((rotated[0][0] - expected_x).abs() < 1.0e-6);
         assert!((rotated[0][1] - 0.5).abs() < 1.0e-6);
         assert!((rotated[0][2] - 0.25).abs() < 1.0e-6);
     }
