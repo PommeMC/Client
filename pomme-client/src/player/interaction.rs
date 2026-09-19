@@ -18,7 +18,7 @@ use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedIte
 use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
 use azalea_registry::builtin::{Attribute, BlockKind, EntityKind, ItemKind};
-use glam::{DVec3, Vec3, dvec3};
+use glam::{DVec3, Vec3};
 use pomme_protocol::wire;
 
 use crate::app::input::{self, InputState};
@@ -1520,7 +1520,8 @@ pub fn raycast(
                 z: bz,
             };
             let outline = block_shape::outline_shape(state);
-            if let Some((hit_point, face)) = clip_shape(origin, reach_end, block_pos, outline) {
+            let shape_offset = crate::world::block::outline_shape_position(state, bx, by, bz);
+            if let Some((hit_point, face)) = clip_shape(origin, reach_end, shape_offset, outline) {
                 return Some(BlockHitResult {
                     block_pos,
                     face,
@@ -1609,13 +1610,12 @@ const INSIDE_PROBE_FRACTION: f64 = 0.001;
 fn clip_shape(
     from: DVec3,
     to: DVec3,
-    block_pos: BlockPos,
+    offset: DVec3,
     boxes: &[LocalBox],
 ) -> Option<(DVec3, Direction)> {
     if boxes.is_empty() {
         return None;
     }
-    let offset = dvec3(block_pos.x as f64, block_pos.y as f64, block_pos.z as f64);
     let ray = to - from;
     let probe = from + ray * INSIDE_PROBE_FRACTION;
 
@@ -1700,6 +1700,7 @@ pub(crate) fn send_swap_offhand(sender: &PacketSender) {
 mod tests {
     use azalea_registry::HolderSet;
     use azalea_registry::identifier::Identifier;
+    use glam::dvec3;
 
     use super::*;
 
@@ -1843,11 +1844,22 @@ mod tests {
         let origin = dvec3(-1.0, 1.5, 0.5);
 
         let over_the_slab = origin + dvec3(4.0, -1.4, 0.0);
-        let slab_hit = clip_shape(origin, over_the_slab, block, &bottom_slab);
+        let slab_hit = clip_shape(
+            origin,
+            over_the_slab,
+            dvec3(block.x as f64, block.y as f64, block.z as f64),
+            &bottom_slab,
+        );
         assert!(slab_hit.is_none());
 
         let onto_the_slab = origin + dvec3(3.0, -2.75, 0.0);
-        let (hit_point, face) = clip_shape(origin, onto_the_slab, block, &bottom_slab).unwrap();
+        let (hit_point, face) = clip_shape(
+            origin,
+            onto_the_slab,
+            dvec3(block.x as f64, block.y as f64, block.z as f64),
+            &bottom_slab,
+        )
+        .unwrap();
         let tolerance = 1e-9;
         let is_on_slab_surface = (hit_point.y - slab_height).abs() < tolerance;
         assert!(is_on_slab_surface, "hit {hit_point:?}");
@@ -1863,8 +1875,13 @@ mod tests {
         let inside_the_slab = dvec3(0.5, 0.25, 0.5);
         let ray = dvec3(0.0, -4.0, 0.0);
 
-        let (hit_point, face) =
-            clip_shape(inside_the_slab, inside_the_slab + ray, block, &bottom_slab).unwrap();
+        let (hit_point, face) = clip_shape(
+            inside_the_slab,
+            inside_the_slab + ray,
+            dvec3(block.x as f64, block.y as f64, block.z as f64),
+            &bottom_slab,
+        )
+        .unwrap();
         assert_eq!(hit_point, inside_the_slab + ray * INSIDE_PROBE_FRACTION);
         assert_eq!(face, Direction::Up);
     }
@@ -1875,7 +1892,15 @@ mod tests {
     fn ray_passes_through_an_empty_shape() {
         let block = BlockPos::new(0, 0, 0);
         let from = dvec3(0.5, 2.0, 0.5);
-        assert!(clip_shape(from, from + dvec3(0.0, -4.0, 0.0), block, &[]).is_none());
+        assert!(
+            clip_shape(
+                from,
+                from + dvec3(0.0, -4.0, 0.0),
+                dvec3(block.x as f64, block.y as f64, block.z as f64),
+                &[]
+            )
+            .is_none()
+        );
     }
 
     fn rule(blocks: Vec<BlockKind>, speed: Option<f32>, correct: Option<bool>) -> ToolRule {

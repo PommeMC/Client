@@ -25,7 +25,8 @@ pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb>
                 }
                 match block_shape::partial_shape(state) {
                     Some(boxes) => {
-                        let offset = dvec3(bx as f64, by as f64, bz as f64);
+                        let offset =
+                            crate::world::block::collision_shape_position(state, bx, by, bz);
                         aabbs.extend(boxes.iter().map(|&b| Aabb::from_local(b, offset)));
                     }
                     None => aabbs.push(Aabb::block(bx, by, bz)),

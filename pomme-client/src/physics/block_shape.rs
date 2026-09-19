@@ -3,10 +3,11 @@
 //! in the state table. The native computations below remain as a compatibility
 //! fallback for older embedded protocol tables that have not been regenerated.
 //!
-//! Boxes are block-local; callers offset them to the block position. Dynamic
-//! `CollisionContext` cases (for example powder snow/scaffolding) are layered
-//! separately because a block state alone cannot encode their player-specific
-//! collision behavior.
+//! Boxes are block-local; callers translate them through the generated shape
+//! offset helpers. The generated collision shapes use
+//! `CollisionContext.empty()`. TODO: model entity-sensitive branches in
+//! `PowderSnowBlock`, `ScaffoldingBlock`, and `LiquidBlock` once Pomme has the
+//! required collision-context state.
 
 use azalea_block::BlockState;
 
