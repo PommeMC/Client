@@ -93,6 +93,7 @@ pub fn update_menu(
     core.sync_display_mode(&gfx.window);
 
     gfx.renderer.set_vsync(core.menu.vsync);
+    gfx.renderer.set_font_options(core.menu.font_options());
 
     if core.menu.rescan_packs {
         core.menu.rescan_packs = false;

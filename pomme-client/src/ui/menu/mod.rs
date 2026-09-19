@@ -102,6 +102,10 @@ struct Settings {
     display_mode: u8,
     #[serde(default)]
     theme: u8,
+    #[serde(default)]
+    force_unicode_font: bool,
+    #[serde(default = "crate::lang::default_locale_is_japanese")]
+    japanese_glyph_variants: bool,
 }
 
 fn default_fov() -> u32 {
@@ -196,6 +200,8 @@ impl Default for Settings {
             attack_indicator: 1,
             display_mode: 0,
             theme: 0,
+            force_unicode_font: false,
+            japanese_glyph_variants: crate::lang::default_locale_is_japanese(),
         }
     }
 }
@@ -443,6 +449,7 @@ enum Screen {
     OptionsControls,
     OptionsKeybinds,
     OptionsLanguage,
+    OptionsFont,
     OptionsChatSettings,
     OptionsResourcePacks,
     OptionsAccessibility,
@@ -464,6 +471,7 @@ impl Screen {
             Self::OptionsControls => Self::OptionsControls,
             Self::OptionsKeybinds => Self::OptionsKeybinds,
             Self::OptionsLanguage => Self::OptionsLanguage,
+            Self::OptionsFont => Self::OptionsFont,
             Self::OptionsChatSettings => Self::OptionsChatSettings,
             Self::OptionsResourcePacks => Self::OptionsResourcePacks,
             Self::OptionsAccessibility => Self::OptionsAccessibility,
@@ -608,6 +616,8 @@ pub struct MainMenu {
     pub display_mode: DisplayMode,
     pub cloud_mode: CloudMode,
     pub attack_indicator: crate::ui::hud::AttackIndicatorMode,
+    force_unicode_font: bool,
+    japanese_glyph_variants: bool,
     /// `AbstractSliderButton.canChangeValue` for the focused slider: armed
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
     slider_can_change_value: bool,
@@ -741,6 +751,8 @@ impl MainMenu {
             attack_indicator: crate::ui::hud::AttackIndicatorMode::from_u8(
                 settings.attack_indicator,
             ),
+            force_unicode_font: settings.force_unicode_font,
+            japanese_glyph_variants: settings.japanese_glyph_variants,
             slider_can_change_value: true,
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
@@ -776,6 +788,24 @@ impl MainMenu {
         self.favicon_dirty_since = None;
         self.last_face_count = usize::MAX;
         self.face_dirty_since = None;
+    }
+
+    /// Vanilla `Minecraft.resizeGui`: the GUI scale for this framebuffer.
+    pub fn gui_scale(&self, screen_w: f32, screen_h: f32) -> f32 {
+        crate::ui::hud::gui_scale(
+            screen_w,
+            screen_h,
+            self.gui_scale_setting,
+            self.force_unicode_font,
+        )
+    }
+
+    /// Vanilla `FontManager.getFontOptions`.
+    pub(crate) fn font_options(&self) -> crate::ui::font::FontOptions {
+        crate::ui::font::FontOptions {
+            uniform: self.force_unicode_font,
+            japanese_variants: self.japanese_glyph_variants,
+        }
     }
 
     /// FOV-effect scale used by the camera: the stored slider fraction squared
@@ -855,6 +885,8 @@ impl MainMenu {
                 attack_indicator: self.attack_indicator.to_u8(),
                 display_mode: self.display_mode.to_u8(),
                 theme: self.theme.to_u8(),
+                force_unicode_font: self.force_unicode_font,
+                japanese_glyph_variants: self.japanese_glyph_variants,
             },
         )
         .is_err();
@@ -897,6 +929,7 @@ impl MainMenu {
                 | Screen::OptionsControls
                 | Screen::OptionsKeybinds
                 | Screen::OptionsLanguage
+                | Screen::OptionsFont
                 | Screen::OptionsChatSettings
                 | Screen::OptionsResourcePacks
                 | Screen::OptionsAccessibility
@@ -1130,9 +1163,9 @@ impl MainMenu {
                 "Keybinds",
                 Screen::OptionsControls,
             ),
-            Screen::OptionsLanguage => {
-                let back = self.settings_back.clone_screen();
-                self.build_options_stub(screen_w, screen_h, input, "Language", back)
+            Screen::OptionsLanguage => self.build_options_language(screen_w, screen_h, input),
+            Screen::OptionsFont => {
+                self.build_options_font(screen_w, screen_h, input, &text_width_fn)
             }
             Screen::OptionsChatSettings => {
                 self.build_options_chat(screen_w, screen_h, input, &text_width_fn)
@@ -1190,6 +1223,33 @@ mod tests {
                 "stored slider value {stored} should clamp to {expected}"
             );
         }
+    }
+
+    #[test]
+    fn font_settings_default_when_missing_and_round_trip() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("force_unicode_font");
+        object.remove("japanese_glyph_variants");
+        let legacy: Settings = serde_json::from_value(legacy).unwrap();
+        assert!(!legacy.force_unicode_font);
+        assert_eq!(
+            legacy.japanese_glyph_variants,
+            crate::lang::default_locale_is_japanese()
+        );
+
+        let stored = Settings {
+            force_unicode_font: true,
+            japanese_glyph_variants: !crate::lang::default_locale_is_japanese(),
+            ..Settings::default()
+        };
+        let loaded: Settings =
+            serde_json::from_value(serde_json::to_value(&stored).unwrap()).unwrap();
+        assert!(loaded.force_unicode_font);
+        assert_eq!(
+            loaded.japanese_glyph_variants,
+            stored.japanese_glyph_variants
+        );
     }
 
     #[test]

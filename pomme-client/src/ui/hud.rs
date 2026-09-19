@@ -356,21 +356,29 @@ const ICON_STRIDE: f32 = 8.0;
 const XP_BAR_W: f32 = 182.0;
 const XP_BAR_H: f32 = 5.0;
 
-pub fn max_gui_scale(screen_w: f32, screen_h: f32) -> u32 {
+/// Vanilla `Window.calculateScale`: the largest scale up to `setting` (0 for
+/// Auto) that keeps the GUI at least 320x240, rounded up to even when the
+/// Unicode font is forced.
+fn calculate_gui_scale(screen_w: f32, screen_h: f32, setting: u32, enforce_unicode: bool) -> u32 {
     let mut scale = 1;
-    while (screen_w / (scale + 1) as f32) >= 320.0 && (screen_h / (scale + 1) as f32) >= 240.0 {
+    while scale != setting
+        && (screen_w / (scale + 1) as f32) >= 320.0
+        && (screen_h / (scale + 1) as f32) >= 240.0
+    {
+        scale += 1;
+    }
+    if enforce_unicode && scale % 2 != 0 {
         scale += 1;
     }
     scale
 }
 
-pub fn gui_scale(screen_w: f32, screen_h: f32, setting: u32) -> f32 {
-    let max = max_gui_scale(screen_w, screen_h);
-    if setting == 0 {
-        max as f32
-    } else {
-        setting.min(max) as f32
-    }
+pub fn max_gui_scale(screen_w: f32, screen_h: f32, enforce_unicode: bool) -> u32 {
+    calculate_gui_scale(screen_w, screen_h, 0, enforce_unicode)
+}
+
+pub fn gui_scale(screen_w: f32, screen_h: f32, setting: u32, enforce_unicode: bool) -> f32 {
+    calculate_gui_scale(screen_w, screen_h, setting, enforce_unicode) as f32
 }
 
 /// Vanilla `ScreenEffectRenderer.submitWater`: underwater.png tiled 4x and
@@ -491,11 +499,10 @@ pub fn build_hud(
     boss_bars: &BossBarState,
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
-    gui_scale_setting: u32,
+    gs: f32,
     attack: &AttackIndicatorState,
     text_width_fn: TextWidthFn,
 ) {
-    let gs = gui_scale(screen_w, screen_h, gui_scale_setting);
     let cx = screen_w / 2.0;
     let cy = screen_h / 2.0;
 
@@ -1647,5 +1654,32 @@ fn facing_name(y_rot_deg: f32) -> &'static str {
         135..=224 => "North (-Z)",
         225..=314 => "East (+X)",
         _ => "South (+Z)",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gui_scale_follows_window_calculate_scale() {
+        // 1920x1080 fits 4x (480x270) but not 5x (384x216).
+        assert_eq!(max_gui_scale(1920.0, 1080.0, false), 4);
+        assert_eq!(gui_scale(1920.0, 1080.0, 0, false), 4.0);
+        assert_eq!(gui_scale(1920.0, 1080.0, 2, false), 2.0);
+        assert_eq!(gui_scale(1920.0, 1080.0, 9, false), 4.0);
+        assert_eq!(gui_scale(100.0, 100.0, 0, false), 1.0);
+    }
+
+    #[test]
+    fn forced_unicode_rounds_gui_scale_up_to_even() {
+        // 1280x720 fits 3x (426x240) but not 4x.
+        assert_eq!(max_gui_scale(1280.0, 720.0, false), 3);
+        assert_eq!(max_gui_scale(1280.0, 720.0, true), 4);
+        assert_eq!(gui_scale(1280.0, 720.0, 0, true), 4.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 1, true), 2.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 2, true), 2.0);
+        assert_eq!(gui_scale(1920.0, 1080.0, 3, true), 4.0);
+        assert_eq!(gui_scale(1920.0, 1080.0, 0, true), 4.0);
     }
 }

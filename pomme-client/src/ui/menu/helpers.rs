@@ -798,10 +798,23 @@ pub(super) fn push_screen_chrome(
     gs: f32,
     title: &str,
 ) -> ChromeLayout {
+    push_screen_chrome_with_footer(elements, sw, sh, gs, title, HEADER_FOOTER_H)
+}
+
+/// `push_screen_chrome` with a `HeaderAndFooterLayout.setFooterHeight`
+/// override, in GUI units.
+pub(super) fn push_screen_chrome_with_footer(
+    elements: &mut Vec<MenuElement>,
+    sw: f32,
+    sh: f32,
+    gs: f32,
+    title: &str,
+    footer_h: f32,
+) -> ChromeLayout {
     let fs = common::FONT_SIZE * gs;
     let cx = sw / 2.0;
     let header_h = HEADER_FOOTER_H * gs;
-    let footer_h = HEADER_FOOTER_H * gs;
+    let footer_h = footer_h * gs;
     let sep_h = 2.0 * gs;
     let content_top = header_h + sep_h;
     let content_bottom = sh - footer_h - sep_h;
@@ -1188,7 +1201,7 @@ impl MainMenu {
             return (empty_result(2.0), Some(false));
         }
 
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
         let btn_w = CONFIRM_BTN_W * gs;

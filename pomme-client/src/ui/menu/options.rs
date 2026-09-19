@@ -79,7 +79,7 @@ impl MainMenu {
         let sliders: &[(&str, f32)] = &[("FOV:", fov_frac)];
         // Nav rows are disabled only where the target is a `build_options_stub`
         // page; screens with real (if inert) controls stay reachable.
-        let disabled = &["Language...", "Telemetry Data..."];
+        let disabled = &["Telemetry Data..."];
         self.build_options_grid(
             sw,
             sh,
@@ -101,6 +101,22 @@ impl MainMenu {
             "View Bobbing: ON"
         } else {
             "View Bobbing: OFF"
+        }
+    }
+
+    fn force_unicode_font_label(&self) -> &'static str {
+        if self.force_unicode_font {
+            "Force Unicode Font: ON"
+        } else {
+            "Force Unicode Font: OFF"
+        }
+    }
+
+    fn japanese_glyph_variants_label(&self) -> &'static str {
+        if self.japanese_glyph_variants {
+            "Japanese Glyph Variants: ON"
+        } else {
+            "Japanese Glyph Variants: OFF"
         }
     }
 
@@ -651,6 +667,38 @@ impl MainMenu {
         )
     }
 
+    /// Vanilla `FontOptionsScreen`, reached from the Language screen.
+    pub(super) fn build_options_font(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+    ) -> MainMenuResult {
+        let rows: Vec<OptRow> = vec![OptRow::Pair(
+            self.force_unicode_font_label(),
+            self.japanese_glyph_variants_label(),
+        )];
+        let tooltips: &[(&str, &str)] = &[(
+            "Japanese Glyph Variants:",
+            "Uses Japanese variants of CJK characters in the default font.",
+        )];
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            "Font Settings",
+            Screen::OptionsLanguage,
+            &rows,
+            &[],
+            &[],
+            &[],
+            true,
+            tooltips,
+            text_width_fn,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_options_grid(
         &mut self,
@@ -672,7 +720,7 @@ impl MainMenu {
             return empty_result(2.0);
         }
 
-        let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
+        let gs = self.gui_scale(sw, sh);
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
         let big_w = 310.0 * gs;
@@ -929,7 +977,7 @@ impl MainMenu {
                         }
                     }
                     if label.starts_with("GUI Scale:") {
-                        let max = crate::ui::hud::max_gui_scale(sw, sh);
+                        let max = crate::ui::hud::max_gui_scale(sw, sh, self.force_unicode_font);
                         self.gui_scale_setting = (self.gui_scale_setting + 1) % (max + 1);
                         self.save_settings();
                     }
@@ -958,6 +1006,14 @@ impl MainMenu {
                     }
                     if label.starts_with("Show Subtitles:") {
                         self.show_subtitles = !self.show_subtitles;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Force Unicode Font:") {
+                        self.force_unicode_font = !self.force_unicode_font;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Japanese Glyph Variants:") {
+                        self.japanese_glyph_variants = !self.japanese_glyph_variants;
                         self.save_settings();
                     }
                     if label.starts_with("Vignette:") {
@@ -1128,7 +1184,7 @@ impl MainMenu {
 
         self.cycle_fields(input, 1);
 
-        let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
+        let gs = self.gui_scale(sw, sh);
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
         let gap = BTN_GAP * gs;
@@ -1422,23 +1478,14 @@ impl MainMenu {
             return empty_result(2.0);
         }
 
-        let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
+        let gs = self.gui_scale(sw, sh);
         let cx = sw / 2.0;
 
         let mut elements = Vec::new();
         let mut any_hovered = false;
 
         let chrome = push_screen_chrome(&mut elements, sw, sh, gs, title);
-
-        let body_fs = 10.0 * gs;
-        elements.push(MenuElement::Text {
-            x: cx,
-            y: (chrome.content_top + chrome.content_bottom) / 2.0 - body_fs / 2.0,
-            text: "Coming soon".into(),
-            scale: body_fs,
-            color: COL_DIM,
-            centered: true,
-        });
+        push_coming_soon(&mut elements, &chrome, cx, gs);
 
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
@@ -1463,6 +1510,111 @@ impl MainMenu {
             clicked_button: ctx.fired,
         }
     }
+
+    /// Vanilla `LanguageSelectScreen`, down to its footer: the accuracy
+    /// warning over a Font Settings... / Done row.
+    // TODO: the search box and language list; Pomme only ships en_us.
+    pub(super) fn build_options_language(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+    ) -> MainMenuResult {
+        let back = self.settings_back.clone_screen();
+        if input.escape {
+            self.set_screen(back);
+            return empty_result(2.0);
+        }
+
+        let gs = self.gui_scale(sw, sh);
+        let cx = sw / 2.0;
+        let btn_w = 150.0 * gs;
+        let btn_h = common::BTN_H * gs;
+        let spacing = 8.0 * gs;
+        let line_h = 9.0 * gs;
+
+        let mut elements = Vec::new();
+        let mut any_hovered = false;
+
+        let chrome = push_screen_chrome_with_footer(
+            &mut elements,
+            sw,
+            sh,
+            gs,
+            "Language",
+            LANGUAGE_FOOTER_H,
+        );
+        push_coming_soon(&mut elements, &chrome, cx, gs);
+
+        let footer_h = LANGUAGE_FOOTER_H * gs;
+        let warning_y = sh - footer_h + (footer_h - (line_h + spacing + btn_h)) / 2.0;
+        elements.push(MenuElement::Text {
+            x: cx,
+            y: warning_y,
+            text: "(Language translations may not be 100% accurate)".into(),
+            scale: common::FONT_SIZE * gs,
+            color: common::rgb(0xBABABA),
+            centered: true,
+        });
+
+        let row_y = warning_y + line_h + spacing;
+        self.focus_advance(input);
+        let mut ctx = self.make_focus_ctx(input);
+        let mut target = None;
+        for (label, x, screen) in [
+            (
+                "Font Settings...",
+                cx - btn_w - spacing / 2.0,
+                Screen::OptionsFont,
+            ),
+            ("Done", cx + spacing / 2.0, back),
+        ] {
+            if push_button_f(
+                &mut elements,
+                &mut ctx,
+                &mut any_hovered,
+                input.cursor,
+                input.clicked,
+                x,
+                row_y,
+                btn_w,
+                btn_h,
+                gs,
+                label,
+                true,
+            ) {
+                target = Some(screen);
+            }
+        }
+        self.finish_focus(&ctx);
+        if let Some(screen) = target {
+            self.set_screen(screen);
+        }
+
+        MainMenuResult {
+            elements,
+            action: MenuAction::None,
+            cursor_pointer: any_hovered,
+            blur: 2.0,
+            clicked_button: (input.clicked && any_hovered) || ctx.fired,
+        }
+    }
+}
+
+/// Vanilla `LanguageSelectScreen.FOOTER_HEIGHT`.
+const LANGUAGE_FOOTER_H: f32 = 53.0;
+
+/// Placeholder body for a screen whose contents aren't ported yet.
+fn push_coming_soon(elements: &mut Vec<MenuElement>, chrome: &ChromeLayout, cx: f32, gs: f32) {
+    let body_fs = 10.0 * gs;
+    elements.push(MenuElement::Text {
+        x: cx,
+        y: (chrome.content_top + chrome.content_bottom) / 2.0 - body_fs / 2.0,
+        text: "Coming soon".into(),
+        scale: body_fs,
+        color: COL_DIM,
+        centered: true,
+    });
 }
 
 #[cfg(test)]

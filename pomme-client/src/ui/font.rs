@@ -31,6 +31,7 @@ pub(crate) struct FontSources<'a> {
     pub jar_assets_dir: &'a Path,
     pub asset_index: &'a Option<AssetIndex>,
     pub packs: &'a ResourcePackManager,
+    pub options: FontOptions,
 }
 
 impl FontSources<'_> {
@@ -457,6 +458,9 @@ pub struct GlyphAtlasPixels {
 }
 
 pub struct GlyphMap {
+    /// Every font's resolved providers in priority order, before the option
+    /// filters; `set_options` rebuilds `font_sets` from them.
+    providers: HashMap<String, Vec<ResolvedProvider>>,
     /// Font sets keyed by normalized id (`namespace:path`). Unknown ids render
     /// only MISSING, like vanilla `FontManager.getFontSetRaw`.
     font_sets: HashMap<String, FontSetData>,
@@ -472,8 +476,6 @@ impl GlyphMap {
         sources: FontSources<'_>,
         device_layer_limit: u32,
     ) -> Result<(Self, GlyphAtlasPixels), String> {
-        // TODO: the Force Unicode Font and Japanese Glyph Variants options.
-        let options = FontOptions::default();
         let mut atlases = Atlases::new(device_layer_limit);
         let missing_position = atlases.gray.place(5, 8)?;
         let missing_glyph = Arc::new(append_missing_glyph(
@@ -493,7 +495,7 @@ impl GlyphMap {
             .collect();
 
         let mut resolved_cache = HashMap::new();
-        let mut font_sets = HashMap::new();
+        let mut providers = HashMap::new();
         for id in font_ids {
             let mut resolved = match resolve_font_providers(
                 &id,
@@ -508,12 +510,16 @@ impl GlyphMap {
                 }
             };
             resolved.reverse();
-            resolved.retain(|provider| provider.filter.active(options));
-            if !resolved.is_empty() {
-                font_sets.insert(id, build_font_set(&resolved));
-            }
+            providers.insert(id, resolved);
         }
-        if !font_sets.contains_key(DEFAULT_FONT) {
+        let mut map = Self {
+            providers,
+            font_sets: HashMap::new(),
+            missing_glyph,
+            cell_h: 8,
+        };
+        map.set_options(sources.options);
+        if !map.font_sets.contains_key(DEFAULT_FONT) {
             return Err("Default font failed to load".into());
         }
 
@@ -526,15 +532,28 @@ impl GlyphMap {
         tracing::debug!(
             atlas_layers = pixels.gray_layers,
             colored_atlas_layers = pixels.color_layers,
-            font_sets = font_sets.len(),
+            font_sets = map.font_sets.len(),
             "loaded Minecraft font atlas"
         );
-        let map = Self {
-            font_sets,
-            missing_glyph,
-            cell_h: 8,
-        };
         Ok((map, pixels))
+    }
+
+    /// Vanilla `FontManager.updateOptions`: re-filters every font's providers
+    /// for `options` (`FontSet.reload`). The atlases hold every provider's
+    /// glyphs whatever the filters, so nothing is re-baked.
+    pub(crate) fn set_options(&mut self, options: FontOptions) {
+        self.font_sets = self
+            .providers
+            .iter()
+            .filter_map(|(id, providers)| {
+                let active: Vec<ResolvedProvider> = providers
+                    .iter()
+                    .filter(|provider| provider.filter.active(options))
+                    .cloned()
+                    .collect();
+                (!active.is_empty()).then(|| (id.clone(), build_font_set(&active)))
+            })
+            .collect();
     }
 
     /// The glyph for `ch` in `font`; unknown fonts render MISSING rather than
@@ -1651,6 +1670,7 @@ mod tests {
                     jar_assets_dir: &self.jar(),
                     asset_index: &None,
                     packs: &self.packs,
+                    options: FontOptions::default(),
                 },
                 u32::MAX,
             )
@@ -1662,6 +1682,7 @@ mod tests {
                     jar_assets_dir: self.root.as_path(),
                     asset_index: &None,
                     packs: &self.packs,
+                    options: FontOptions::default(),
                 },
                 missing: Arc::new(space_glyph(6.0)),
             }
@@ -2035,6 +2056,7 @@ mod tests {
                 jar_assets_dir: &fixture.jar(),
                 asset_index: &None,
                 packs: &packs,
+                options: FontOptions::default(),
             },
             u32::MAX,
         )
@@ -2084,6 +2106,7 @@ mod tests {
                     jar_assets_dir: &fixture.jar(),
                     asset_index: &None,
                     packs,
+                    options: FontOptions::default(),
                 },
                 u32::MAX,
             )
@@ -2109,6 +2132,33 @@ mod tests {
     }
 
     #[test]
+    fn set_options_refilters_providers_without_reloading() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "jar_assets/minecraft/font/default.json",
+            r#"{"providers":[
+                {"type":"space","advances":{"A":9.0},"filter":{"uniform":true}},
+                {"type":"space","advances":{"A":5.0,"B":4.0},"filter":{"jp":false}}
+            ]}"#,
+        );
+        let (mut map, _) = fixture.load().unwrap();
+        assert_eq!(map.glyph('A', None).advance, 5.0);
+
+        map.set_options(FontOptions {
+            uniform: true,
+            japanese_variants: false,
+        });
+        assert_eq!(map.glyph('A', None).advance, 9.0);
+
+        map.set_options(FontOptions {
+            uniform: false,
+            japanese_variants: true,
+        });
+        assert!(!map.font_sets.contains_key(DEFAULT_FONT));
+        assert_eq!(map.glyph('B', None).advance, map.missing_glyph.advance);
+    }
+
+    #[test]
     fn alt_font_missing_codepoint_uses_special_missing_box() {
         let mut pixels = vec![0u8; (GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE) as usize];
         let missing = Arc::new(append_missing_glyph(&mut pixels, (0, 0, 0)));
@@ -2125,6 +2175,7 @@ mod tests {
                 (DEFAULT_FONT.to_owned(), set(vec![('1', 5.0)])),
                 ("minecraft:alt".to_owned(), set(vec![(' ', 4.0)])),
             ]),
+            providers: HashMap::new(),
             missing_glyph: missing,
             cell_h: 8,
         };
@@ -2156,6 +2207,7 @@ mod tests {
 
         let map = GlyphMap {
             font_sets: HashMap::from([(DEFAULT_FONT.to_owned(), set)]),
+            providers: HashMap::new(),
             missing_glyph: glyph(123.0),
             cell_h: 8,
         };

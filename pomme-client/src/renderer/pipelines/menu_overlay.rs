@@ -9,7 +9,9 @@ use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::{packing, shader, util};
-use crate::ui::font::{FontSources, GLYPH_ATLAS_SIZE, GlyphAtlasPixels, GlyphInfo, GlyphMap};
+use crate::ui::font::{
+    FontOptions, FontSources, GLYPH_ATLAS_SIZE, GlyphAtlasPixels, GlyphInfo, GlyphMap,
+};
 use crate::ui::text::TextSpan;
 
 const FONT_BYTES: &[u8] = include_bytes!("../fonts/Montserrat-Medium.ttf");
@@ -668,6 +670,12 @@ impl MenuOverlayPipeline {
         );
         self.mc_glyph_map = Some(glyph_map);
         Ok(())
+    }
+
+    pub fn set_font_options(&mut self, options: FontOptions) {
+        if let Some(glyph_map) = &mut self.mc_glyph_map {
+            glyph_map.set_options(options);
+        }
     }
 
     pub fn draw(

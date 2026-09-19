@@ -52,7 +52,7 @@ use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
-use crate::ui::font::FontSources;
+use crate::ui::font::{FontOptions, FontSources};
 use crate::world::block::registry::BlockRegistry;
 
 #[derive(Error, Debug)]
@@ -149,6 +149,7 @@ pub struct Renderer {
     registry: BlockRegistry,
     jar_assets_dir: PathBuf,
     asset_index: Option<AssetIndex>,
+    font_options: FontOptions,
 
     chunk_pipeline: ChunkPipeline,
     hand_pipeline: HandPipeline,
@@ -192,6 +193,7 @@ impl Renderer {
         let FontSources {
             jar_assets_dir,
             asset_index,
+            options: font_options,
             ..
         } = font_sources;
         let size = window.inner_size();
@@ -437,8 +439,9 @@ impl Renderer {
 
         splash(&mut menu_pipeline, 0.95, "Caching item meshes...");
 
-        let initial_slot_px =
-            pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(sw, sh, 0));
+        let initial_slot_px = pipelines::gui_item_atlas::slot_px_for_gui_scale(
+            crate::ui::hud::gui_scale(sw, sh, 0, font_options.uniform),
+        );
         let gui_item_atlas = build_gui_item_atlas(
             &ctx.device,
             &ctx.allocator,
@@ -472,6 +475,7 @@ impl Renderer {
             registry,
             jar_assets_dir: jar_assets_dir.to_path_buf(),
             asset_index: asset_index.clone(),
+            font_options,
             atlas,
             chunk_pipeline,
             hand_pipeline,
@@ -674,6 +678,15 @@ impl Renderer {
         if self.vsync != vsync {
             self.vsync = vsync;
             self.swapchain_dirty = true;
+        }
+    }
+
+    /// Vanilla `Minecraft.updateFontOptions`: re-filters the loaded font sets,
+    /// leaving the atlases, block textures and sounds alone.
+    pub fn set_font_options(&mut self, options: FontOptions) {
+        if self.font_options != options {
+            self.font_options = options;
+            self.menu_pipeline.set_font_options(options);
         }
     }
 
@@ -1223,6 +1236,7 @@ impl Renderer {
                 jar_assets_dir: &self.jar_assets_dir,
                 asset_index: &self.asset_index,
                 packs,
+                options: self.font_options,
             },
         ) {
             tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
@@ -1530,6 +1544,7 @@ impl Renderer {
                 self.swapchain.extent.width as f32,
                 self.swapchain.extent.height as f32,
                 0,
+                self.font_options.uniform,
             ));
         if target_slot_px != self.gui_item_atlas.slot_px() {
             // Mid-cmd-recording wait_idle: this cmd buffer is unsubmitted so

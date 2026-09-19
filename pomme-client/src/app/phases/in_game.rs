@@ -1560,6 +1560,7 @@ pub fn update_game(
     core.audio.set_subtitles_enabled(core.menu.show_subtitles);
 
     gfx.renderer.set_vsync(core.menu.vsync);
+    gfx.renderer.set_font_options(core.menu.font_options());
 
     // Vanilla pauseIfInactive: losing OS focus for more than half a second
     // with no screen open pauses the game, which also releases the cursor
@@ -1755,11 +1756,9 @@ pub fn update_game(
         Vec::new()
     };
     let text_sw = gfx.renderer.screen_width() as f32;
-    let text_gs = hud::gui_scale(
-        text_sw,
-        gfx.renderer.screen_height() as f32,
-        core.menu.gui_scale_setting,
-    );
+    let text_gs = core
+        .menu
+        .gui_scale(text_sw, gfx.renderer.screen_height() as f32);
     let text_fs = common::FONT_SIZE * text_gs;
     if let Some(msg) = game.chat.handle_key_input(
         &text_events,
@@ -1855,7 +1854,7 @@ pub fn update_game(
 
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
-    let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
+    let gs = core.menu.gui_scale(sw, sh);
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
@@ -2125,7 +2124,7 @@ pub fn update_game(
             &game.boss_bars,
             gfx.renderer.is_first_person(),
             debug.as_ref(),
-            core.menu.gui_scale_setting,
+            gs,
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
