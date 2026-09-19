@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Add;
 use std::sync::Arc;
 use std::time::Instant;
@@ -12,7 +12,9 @@ use winit::keyboard::KeyCode;
 use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Fullscreen, Window};
 
-use crate::app::input::{Action, InputState, STICK_MOVEMENT_THRESHOLD};
+use crate::app::input::{
+    Action, InputState, KEY_BACK, KEY_FORWARD, KEY_LEFT, KEY_RIGHT, STICK_MOVEMENT_THRESHOLD,
+};
 use crate::app::level_load::ReadyInputs;
 use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx};
@@ -43,9 +45,16 @@ pub struct PendingPackDownload {
 
 pub type PackDownloadResult = Result<std::path::PathBuf, crate::resource_pack::PackError>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PlayerSkinSource {
+    Uuid,
+    Textures(String),
+    Name(String),
+}
+
 struct PlayerSkinResult {
     uuid: uuid::Uuid,
-    textures: Option<String>,
+    source: PlayerSkinSource,
     result: Result<crate::renderer::SkinData, String>,
 }
 
@@ -221,10 +230,10 @@ fn player_input_state(
     sprinting: bool,
 ) -> PlayerInputState {
     PlayerInputState {
-        forward: input.key_pressed(KeyCode::KeyW) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
-        backward: input.key_pressed(KeyCode::KeyS) || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
-        left: input.key_pressed(KeyCode::KeyA) || analog_move.x > STICK_MOVEMENT_THRESHOLD,
-        right: input.key_pressed(KeyCode::KeyD) || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
+        forward: input.key_pressed(KEY_FORWARD) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
+        backward: input.key_pressed(KEY_BACK) || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
+        left: input.key_pressed(KEY_LEFT) || analog_move.x > STICK_MOVEMENT_THRESHOLD,
+        right: input.key_pressed(KEY_RIGHT) || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
         jump: input.performing_action(Action::Jump),
         shift: input.performing_action(Action::Sneak),
         sprint: sprinting,
@@ -261,13 +270,35 @@ pub struct AppCore {
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
     pub unfocused_since: Option<Instant>,
+    /// Vanilla `MouseHandler.mouseGrabbed`.
+    mouse_grabbed: bool,
+    /// The OS grab may no longer match `mouse_grabbed` (the window manager
+    /// can drop a lock on focus change), so the next apply re-issues it.
+    os_grab_stale: bool,
     player_skin_tx: crossbeam_channel::Sender<PlayerSkinResult>,
     player_skin_rx: crossbeam_channel::Receiver<PlayerSkinResult>,
-    requested_player_skins: HashMap<uuid::Uuid, Option<String>>,
+    requested_player_skins: HashMap<uuid::Uuid, PlayerSkinSource>,
     /// 8x8 RGBA faces of fetched player skins, for the spectator menu's
     /// face atlas (the GPU-side skins keep no CPU pixels).
     player_faces: HashMap<uuid::Uuid, Vec<u8>>,
+    player_faces_no_hat: HashMap<uuid::Uuid, Vec<u8>>,
     player_faces_dirty: bool,
+    inline_object_sprites: HashMap<String, Vec<u8>>,
+    game_dynamic_atlas_keys: HashSet<String>,
+}
+
+/// Stable skin-cache key for an inline player object with no UUID or
+/// tab-list match. Local only, never sent to the server.
+fn inline_player_cache_uuid(key: &str) -> uuid::Uuid {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(key.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // RFC 4122 version 4 / variant bits.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
 }
 
 /// Folds the credits roll's keys into a `CREDITS_KEY_*` mask. Both control
@@ -285,6 +316,31 @@ fn credits_key_mask(mut is_set: impl FnMut(KeyCode) -> bool) -> u8 {
     .filter(|&(code, _)| is_set(code))
     .map(|(_, bit)| bit)
     .sum()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorOp {
+    Keep,
+    Grab,
+    Release { center: bool },
+}
+
+/// One `MouseHandler.grabMouse`/`releaseMouse` call as a pure transition over
+/// `(mouse_grabbed, os_grab_stale)`. Grabbing needs an active window and is a
+/// no-op once grabbed; releasing is a no-op once released and only centers on
+/// the grabbed -> released edge. A stale OS grab re-issues either call.
+fn cursor_step(grabbed: bool, stale: bool, want: bool, focused: bool) -> (CursorOp, bool, bool) {
+    if want {
+        if !focused || (grabbed && !stale) {
+            return (CursorOp::Keep, grabbed, stale);
+        }
+        (CursorOp::Grab, true, false)
+    } else {
+        if !grabbed && !stale {
+            return (CursorOp::Keep, grabbed, stale);
+        }
+        (CursorOp::Release { center: grabbed }, false, false)
+    }
 }
 
 impl AppCore {
@@ -336,11 +392,16 @@ impl AppCore {
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
             unfocused_since: None,
+            mouse_grabbed: false,
+            os_grab_stale: false,
             player_skin_tx,
             player_skin_rx,
             requested_player_skins: HashMap::new(),
             player_faces: HashMap::new(),
+            player_faces_no_hat: HashMap::new(),
             player_faces_dirty: false,
+            inline_object_sprites: HashMap::new(),
+            game_dynamic_atlas_keys: HashSet::new(),
         }
     }
 
@@ -378,10 +439,24 @@ impl AppCore {
         }
     }
 
+    pub fn invalidate_cursor_grab_state(&mut self) {
+        self.os_grab_stale = true;
+    }
+
     pub fn apply_cursor_grab(&mut self, window: &Window, game: Option<&mut GameState>) {
         let captured =
             game.is_some_and(|g| g.input_live() && !g.dead && self.input.is_cursor_captured());
         if captured {
+            self.grab_cursor(window);
+        } else {
+            self.release_cursor(window);
+        }
+    }
+
+    /// Vanilla `MouseHandler.grabMouse`.
+    fn grab_cursor(&mut self, window: &Window) {
+        let op = self.step_cursor(true);
+        if op == CursorOp::Grab {
             // Vanilla centers on grab too; warp before locking, which
             // freezes the position on some platforms.
             self.center_cursor(window);
@@ -389,9 +464,19 @@ impl AppCore {
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
             window.set_cursor_visible(false);
-        } else {
-            self.release_cursor(window);
         }
+    }
+
+    fn step_cursor(&mut self, want: bool) -> CursorOp {
+        let (op, grabbed, stale) = cursor_step(
+            self.mouse_grabbed,
+            self.os_grab_stale,
+            want,
+            self.unfocused_since.is_none(),
+        );
+        self.mouse_grabbed = grabbed;
+        self.os_grab_stale = stale;
+        op
     }
 
     /// The chunk radius to ask a server for, from the video settings.
@@ -412,19 +497,26 @@ impl AppCore {
             .load_splash(&self.data_dirs.jar_assets_dir, &self.asset_index);
     }
 
-    /// Releases the cursor and warps it to the window center, like vanilla
-    /// `MouseHandler.releaseMouse` (every screen opens with a centered
-    /// cursor instead of wherever the last one closed).
+    /// Releases the cursor, warping it to the window center only when it was
+    /// grabbed, like vanilla `MouseHandler.releaseMouse` (a screen opened from
+    /// gameplay starts with a centered cursor).
     fn release_cursor(&mut self, window: &Window) {
-        let _ = window.set_cursor_grab(CursorGrabMode::None);
-        window.set_cursor_visible(true);
-        self.center_cursor(window);
+        if let CursorOp::Release { center } = self.step_cursor(false) {
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+            window.set_cursor_visible(true);
+            if center {
+                self.center_cursor(window);
+            }
+        }
     }
 
+    /// Never warps the OS pointer while another window has focus.
     fn center_cursor(&mut self, window: &Window) {
         let size = window.inner_size();
         let (x, y) = (size.width as f32 / 2.0, size.height as f32 / 2.0);
-        let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y));
+        if self.unfocused_since.is_none() {
+            let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y));
+        }
         self.input.on_cursor_moved(x, y);
     }
 
@@ -444,7 +536,8 @@ impl AppCore {
         self.menu.flush_settings();
         game.close_menu();
         game.close_creative_inventory();
-        game.chat.close();
+        game.chat
+            .close(crate::ui::chat::ChatExitReason::Interrupted);
         game.game_mode_switcher = None;
 
         if let Some(message) = message {
@@ -476,29 +569,41 @@ impl AppCore {
     }
 
     fn queue_player_skin(&mut self, uuid: uuid::Uuid, textures: Option<String>) {
-        if self.requested_player_skins.get(&uuid) == Some(&textures) {
+        let source = textures
+            .map(PlayerSkinSource::Textures)
+            .unwrap_or(PlayerSkinSource::Uuid);
+        self.queue_player_skin_source(uuid, source);
+    }
+
+    fn queue_player_skin_source(&mut self, uuid: uuid::Uuid, source: PlayerSkinSource) {
+        if self.requested_player_skins.get(&uuid) == Some(&source) {
             return;
         }
-        self.requested_player_skins.insert(uuid, textures.clone());
+        self.requested_player_skins.insert(uuid, source.clone());
 
         // Name-derived (v3) UUIDs from offline-mode servers have no Mojang
         // profile to fetch; keep the default skin.
-        if textures.is_none() && uuid.get_version_num() == 3 {
+        if matches!(source, PlayerSkinSource::Uuid) && uuid.get_version_num() == 3 {
             return;
         }
 
         let tx = self.player_skin_tx.clone();
-        let requested_textures = textures.clone();
         self.tokio_rt.spawn(async move {
-            let result = if let Some(textures) = textures {
-                crate::renderer::fetch_skin_texture_from_profile_property(&textures).await
-            } else {
-                let uuid_str = uuid.to_string().replace('-', "");
-                crate::renderer::fetch_skin_texture(&uuid_str).await
+            let result = match &source {
+                PlayerSkinSource::Textures(textures) => {
+                    crate::renderer::fetch_skin_texture_from_profile_property(textures).await
+                }
+                PlayerSkinSource::Name(name) => {
+                    crate::renderer::fetch_skin_texture_by_name(name).await
+                }
+                PlayerSkinSource::Uuid => {
+                    let uuid_str = uuid.to_string().replace('-', "");
+                    crate::renderer::fetch_skin_texture(&uuid_str).await
+                }
             };
             let _ = tx.send(PlayerSkinResult {
                 uuid,
-                textures: requested_textures,
+                source,
                 result,
             });
         });
@@ -506,7 +611,7 @@ impl AppCore {
 
     fn drain_player_skin_results(&mut self, renderer: &mut Renderer) {
         while let Ok(skin) = self.player_skin_rx.try_recv() {
-            if self.requested_player_skins.get(&skin.uuid) != Some(&skin.textures) {
+            if self.requested_player_skins.get(&skin.uuid) != Some(&skin.source) {
                 continue;
             }
             match skin.result {
@@ -517,6 +622,16 @@ impl AppCore {
                         data.height,
                     ) {
                         self.player_faces.insert(skin.uuid, face);
+                        if let Some(base) =
+                            crate::renderer::pipelines::menu_overlay::extract_face_8x8_with_hat(
+                                &data.pixels,
+                                data.width,
+                                data.height,
+                                false,
+                            )
+                        {
+                            self.player_faces_no_hat.insert(skin.uuid, base);
+                        }
                         self.player_faces_dirty = true;
                     }
                     renderer.update_player_entity_skin(&skin.uuid, &data);
@@ -528,25 +643,149 @@ impl AppCore {
         }
     }
 
-    /// Flush cached faces into the shared face/favicon atlas. Called only
-    /// while the spectator menu is open: the rebuild waits on the GPU queue,
-    /// so it must stay off the common frame path.
-    pub fn ensure_player_face_atlas(&mut self, renderer: &mut Renderer) {
-        if !self.player_faces_dirty || self.player_faces.is_empty() {
+    /// Rebuilds the face atlas when its wanted contents change. Spectator
+    /// faces and inline chat object glyphs share its texture binding, so both
+    /// are packed together whenever either is in use; the rebuild waits on
+    /// the GPU queue, so it only runs on change.
+    pub fn sync_game_dynamic_atlas(
+        &mut self,
+        game: &GameState,
+        renderer: &mut Renderer,
+        spectator_active: bool,
+    ) {
+        use crate::ui::text::InlineObject;
+
+        let objects = game.chat.inline_objects();
+        if objects.is_empty() && !spectator_active {
             return;
         }
-        self.player_faces_dirty = false;
-        let faces: Vec<(String, Vec<u8>, u32)> = self
-            .player_faces
-            .iter()
-            .map(|(uuid, face)| (uuid.to_string(), face.clone(), 8))
-            .collect();
-        renderer.update_face_atlas(&faces);
+
+        #[derive(Clone)]
+        struct PlayerAlias {
+            key: String,
+            cache_uuid: uuid::Uuid,
+            hat: bool,
+        }
+
+        let mut desired_keys = HashSet::new();
+        let mut player_aliases = Vec::new();
+
+        if spectator_active {
+            for uuid in self.player_faces.keys() {
+                desired_keys.insert(uuid.to_string());
+            }
+        }
+
+        for object in objects {
+            match object {
+                InlineObject::AtlasSprite {
+                    ref atlas,
+                    ref sprite,
+                } => {
+                    let key = object.atlas_key();
+                    desired_keys.insert(key.clone());
+                    if !self.inline_object_sprites.contains_key(&key) {
+                        let pixels = crate::ui::object_glyph::load_atlas_sprite_8x8(
+                            &self.data_dirs.jar_assets_dir,
+                            &self.asset_index,
+                            &self.resource_packs,
+                            atlas,
+                            sprite,
+                        )
+                        .unwrap_or_else(crate::ui::object_glyph::missing_tile_8x8);
+                        self.inline_object_sprites.insert(key, pixels);
+                    }
+                }
+                InlineObject::Player {
+                    uuid,
+                    ref name,
+                    ref textures,
+                    hat,
+                } => {
+                    let key = object.atlas_key();
+                    desired_keys.insert(key.clone());
+
+                    let tab_match = name.as_ref().and_then(|name| {
+                        game.tab_list
+                            .players
+                            .values()
+                            .find(|player| player.name == *name)
+                    });
+                    let cache_uuid = uuid
+                        .or_else(|| tab_match.map(|player| player.uuid))
+                        .unwrap_or_else(|| inline_player_cache_uuid(&key));
+
+                    if !self.player_faces.contains_key(&cache_uuid) {
+                        let source = if let Some(textures) = textures.clone() {
+                            Some(PlayerSkinSource::Textures(textures))
+                        } else if let Some(player) = tab_match {
+                            player
+                                .textures
+                                .clone()
+                                .map(PlayerSkinSource::Textures)
+                                .or(Some(PlayerSkinSource::Uuid))
+                        } else if uuid.is_some() {
+                            Some(PlayerSkinSource::Uuid)
+                        } else {
+                            name.clone().map(PlayerSkinSource::Name)
+                        };
+                        if let Some(source) = source {
+                            self.queue_player_skin_source(cache_uuid, source);
+                        }
+                    }
+
+                    player_aliases.push(PlayerAlias {
+                        key,
+                        cache_uuid,
+                        hat,
+                    });
+                }
+            }
+        }
+
+        let needs_rebuild = self.player_faces_dirty || desired_keys != self.game_dynamic_atlas_keys;
+        if !needs_rebuild {
+            return;
+        }
+
+        let mut entries = Vec::<(String, Vec<u8>, u32)>::new();
+        if spectator_active {
+            entries.extend(
+                self.player_faces
+                    .iter()
+                    .map(|(uuid, face)| (uuid.to_string(), face.clone(), 8)),
+            );
+        }
+        for key in &desired_keys {
+            if let Some(sprite) = self.inline_object_sprites.get(key) {
+                entries.push((key.clone(), sprite.clone(), 8));
+            }
+        }
+        for alias in player_aliases {
+            let face = if alias.hat {
+                self.player_faces.get(&alias.cache_uuid)
+            } else {
+                self.player_faces_no_hat.get(&alias.cache_uuid)
+            };
+            if let Some(face) = face {
+                entries.push((alias.key, face.clone(), 8));
+            }
+        }
+
+        if !entries.is_empty() {
+            renderer.update_face_atlas(&entries);
+            self.game_dynamic_atlas_keys = desired_keys;
+            self.player_faces_dirty = false;
+        }
     }
 
     fn remove_player_skin(&mut self, renderer: &mut Renderer, uuid: &uuid::Uuid) {
         self.requested_player_skins.remove(uuid);
-        self.player_faces.remove(uuid);
+        let removed = self.player_faces.remove(uuid).is_some();
+        self.player_faces_no_hat.remove(uuid);
+        if removed {
+            self.player_faces_dirty = true;
+        }
         renderer.remove_player_entity_skin(uuid);
     }
 
@@ -593,7 +832,10 @@ impl AppCore {
         game.subtitles.clear();
         self.requested_player_skins.clear();
         self.player_faces.clear();
+        self.player_faces_no_hat.clear();
         self.player_faces_dirty = false;
+        self.inline_object_sprites.clear();
+        self.game_dynamic_atlas_keys.clear();
         renderer.clear_player_entity_skins();
     }
 
@@ -612,6 +854,8 @@ impl AppCore {
         self.menu.active_packs = self.resource_packs.active_pack_info();
         renderer.reload_assets(&self.data_dirs.game_dir, &self.resource_packs);
         self.audio.reload_assets(&self.resource_packs);
+        self.inline_object_sprites.clear();
+        self.game_dynamic_atlas_keys.clear();
         self.menu.reload_assets = false;
     }
 
@@ -1119,7 +1363,7 @@ impl AppCore {
                                 let signed = validation == PlayerChatValidation::Signed;
                                 let signature = signature.filter(|_| signed);
                                 if body.fully_filtered {
-                                    game.chat.mark_processed(signature, false);
+                                    game.chat.push_fully_filtered(signature);
                                 } else {
                                     let tag = accepted_player_chat_tag(
                                         game.singleplayer && sender_uuid == self.user.uuid,
@@ -1144,6 +1388,22 @@ impl AppCore {
                 }
                 NetworkEvent::ActionBar { spans } => {
                     game.action_bar = Some((spans, game.tick_count));
+                }
+                NetworkEvent::ServerLinks { links } => {
+                    game.server_links = links;
+                }
+                NetworkEvent::ShowDialog { dialog } => {
+                    game.chat
+                        .close(crate::ui::chat::ChatExitReason::Interrupted);
+                    game.close_menu();
+                    game.close_creative_inventory();
+                    if game.open_server_dialog(dialog) {
+                        self.apply_cursor_grab(window, Some(game));
+                    }
+                }
+                NetworkEvent::ClearDialog => {
+                    game.server_dialog = None;
+                    self.apply_cursor_grab(window, Some(game));
                 }
                 NetworkEvent::BossBarUpdate { id, op } => {
                     game.boss_bars.apply(id, op);
@@ -1229,7 +1489,8 @@ impl AppCore {
                     game.chat.apply_server_suggestions(
                         id,
                         start,
-                        options.into_iter().map(|option| option.text).collect(),
+                        options,
+                        game.command_tree.as_deref(),
                     );
                 }
                 NetworkEvent::BlockUpdate { pos, state } => {
@@ -2570,10 +2831,12 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeathRoute, death_route, player_input_state, server_view_distance_update,
-        serverbound_player_input,
+        CursorOp, DeathRoute, accepted_player_chat_tag, cursor_step, death_route,
+        player_input_state, server_view_distance_update, serverbound_player_input,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
+    use crate::net::chat_security::SignedChatBody;
+    use crate::ui::chat::ChatMessageTag;
 
     #[test]
     fn controller_packet_directions_match_physical_stick_direction() {
@@ -2601,9 +2864,104 @@ mod tests {
     }
 
     #[test]
+    fn cursor_never_grabs_while_unfocused() {
+        assert_eq!(
+            cursor_step(false, false, true, false),
+            (CursorOp::Keep, false, false)
+        );
+        assert_eq!(
+            cursor_step(true, true, true, false),
+            (CursorOp::Keep, true, true)
+        );
+    }
+
+    #[test]
+    fn cursor_calls_are_idempotent() {
+        assert_eq!(
+            cursor_step(false, false, false, true),
+            (CursorOp::Keep, false, false)
+        );
+        assert_eq!(
+            cursor_step(true, false, true, true),
+            (CursorOp::Keep, true, false)
+        );
+    }
+
+    #[test]
+    fn cursor_centers_once_on_grabbed_to_released() {
+        let (op, grabbed, stale) = cursor_step(true, false, false, true);
+        assert_eq!(op, CursorOp::Release { center: true });
+        assert_eq!(
+            cursor_step(grabbed, stale, false, true),
+            (CursorOp::Keep, false, false)
+        );
+    }
+
+    #[test]
+    fn stale_cursor_reissues_without_warping_a_free_cursor() {
+        // Refocus while gameplay holds the grab: the WM may have dropped the
+        // lock, so it is re-locked.
+        assert_eq!(
+            cursor_step(true, true, true, true),
+            (CursorOp::Grab, true, false)
+        );
+        // Refocus on a screen: the release is re-issued without a warp.
+        assert_eq!(
+            cursor_step(false, true, false, true),
+            (CursorOp::Release { center: false }, false, false)
+        );
+    }
+
+    #[test]
     fn death_route_follows_show_death_screen() {
         assert_eq!(death_route(true), DeathRoute::ShowDeathScreen);
         assert_eq!(death_route(false), DeathRoute::Respawn);
+    }
+
+    fn chat_body() -> SignedChatBody {
+        SignedChatBody {
+            content: "hello".to_owned(),
+            timestamp_ms: 1_000,
+            salt: 0,
+            last_seen: Vec::new(),
+            message_index: 0,
+            modified: true,
+            modified_when_unsigned_hidden: true,
+            fully_filtered: false,
+        }
+    }
+
+    #[test]
+    fn integrated_server_own_chat_is_always_secure() {
+        let body = chat_body();
+        let expired_now = 1_000 + 8 * 60 * 1000;
+        assert_eq!(
+            accepted_player_chat_tag(true, false, &body, expired_now, false),
+            None
+        );
+        assert_eq!(
+            accepted_player_chat_tag(true, true, &body, expired_now, false),
+            None
+        );
+        assert_eq!(
+            accepted_player_chat_tag(true, true, &body, 1_001, true),
+            None
+        );
+
+        assert_eq!(
+            accepted_player_chat_tag(false, false, &body, 1_001, false),
+            Some(ChatMessageTag::NotSecure)
+        );
+        assert_eq!(
+            accepted_player_chat_tag(false, true, &body, expired_now, false),
+            Some(ChatMessageTag::NotSecure)
+        );
+        assert_eq!(
+            accepted_player_chat_tag(false, true, &body, 1_001, true),
+            Some(ChatMessageTag::Modified {
+                original: "hello".to_owned(),
+            })
+        );
     }
 
     #[test]
