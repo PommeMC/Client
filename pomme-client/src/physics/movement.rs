@@ -332,6 +332,9 @@ fn on_climbable_state(
     player: &LocalPlayer,
     chunk_store: &ChunkStore,
 ) -> Option<azalea_block::BlockState> {
+    // Vanilla `LivingEntity.onClimbable` also rejects fall-flying entities in
+    // `BlockTags.CAN_GLIDE_THROUGH`. TODO: add that branch when fall-flying
+    // state is modeled by local movement.
     if player.flying || is_spectator(player.game_mode) {
         return None;
     }
