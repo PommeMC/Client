@@ -1478,7 +1478,7 @@ impl MenuOverlayPipeline {
                                     region.u1,
                                     region.v1,
                                     white,
-                                    4.0,
+                                    2.0,
                                     [0.0, 0.0],
                                     0.0,
                                 );

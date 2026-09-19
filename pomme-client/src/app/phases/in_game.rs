@@ -2845,7 +2845,7 @@ pub fn update_game(
             swap_offhand: keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyF),
             throw: keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyQ),
             throw_all: core.input.ctrl_held(),
-            scroll: core.input.consume_menu_scroll(),
+            scroll: core.input.consume_menu_scroll_xy().1,
         };
         // The anvil rename field consumes this frame's typing; a changed
         // accepted name goes to the server (vanilla `onNameChanged`).

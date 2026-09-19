@@ -594,13 +594,14 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                let scroll = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                let (scroll_x, scroll_y) = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x, y),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
                 };
+                let scroll = scroll_y;
                 match self.phase.get_mut() {
                     AppPhase::InMenu { .. } | AppPhase::Connecting { .. } => {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(scroll_x, scroll_y);
                     }
                     AppPhase::InGame { game, .. }
                         if game.dialog_open()
@@ -609,7 +610,7 @@ impl ApplicationHandler for App {
                             || game.inventory_open
                             || game.open_container.is_some() =>
                     {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(scroll_x, scroll_y);
                     }
                     // Queued raw: ChatScreen routes it to the completion popup
                     // or the backlog, with Shift's slower multiplier.
