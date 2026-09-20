@@ -1539,6 +1539,22 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_text_component_decodes_off_the_wire() {
+        // The shape that logged "invalid text component: component object has
+        // no recognized contents" for every message from a server whose chat
+        // goes through `NbtOps`.
+        let mut wrapper = NbtCompound::new();
+        wrapper.insert("", NbtTag::String("[C02 COLORS] ".into()));
+        let mut raw = Vec::new();
+        write_component(&mut raw, wrapper);
+
+        let mut pos = 0usize;
+        let component = read_component(&raw, &mut pos).expect("wrapped component decodes");
+        assert_eq!(component.plain_text(), "[C02 COLORS] ");
+        assert_eq!(pos, raw.len());
+    }
+
+    #[test]
     fn custom_click_packet_preserves_exact_nbt_tag_types() {
         let mut compound = NbtCompound::new();
         compound.insert("byte", NbtTag::Byte(-5));
