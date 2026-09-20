@@ -383,8 +383,6 @@ impl AppCore {
     pub fn build_menu_input(&mut self, dt: f32) -> MenuInput {
         let credits_keys_down = credits_key_mask(|code| self.input.key_pressed(code));
         let credits_keys_pressed = credits_key_mask(|code| self.input.key_just_pressed(code));
-        // Gamepad DPad mirrors ArrowLeft/ArrowRight so focused sliders move
-        // on controller.
         let dpad_dir = i32::from(self.input.gamepad_button_down(gilrs::Button::DPadRight))
             - i32::from(self.input.gamepad_button_down(gilrs::Button::DPadLeft));
         let gamepad_steps = self.menu_dpad.step(dpad_dir, dt);
@@ -2440,14 +2438,10 @@ mod tests {
 
     #[test]
     fn dpad_press_steps_once_then_waits_for_the_repeat_delay() {
-        let mut stepper = RepeatStepper::default();
-        assert_eq!(stepper.step(1, 1.0 / 60.0), 1);
-        // Nothing more until the delay elapses.
-        let mut elapsed = 0.0;
-        while elapsed < MENU_REPEAT_DELAY - MENU_REPEAT_INTERVAL {
-            assert_eq!(stepper.step(1, 1.0 / 60.0), 0);
-            elapsed += 1.0 / 60.0;
-        }
+        let dt = 1.0 / 60.0;
+        // Only the press itself until the delay is up, then repeats.
+        assert_eq!(held_steps(1, MENU_REPEAT_DELAY - dt, dt), 1);
+        assert!(held_steps(1, MENU_REPEAT_DELAY + MENU_REPEAT_INTERVAL * 2.0, dt) > 1);
     }
 
     /// The regression this guards: reading the DPad as level state stepped
@@ -2469,13 +2463,14 @@ mod tests {
 
     #[test]
     fn releasing_re_arms_the_delay_and_a_flip_steps_immediately() {
+        let dt = 1.0 / 60.0;
         let mut stepper = RepeatStepper::default();
-        assert_eq!(stepper.step(1, 1.0 / 60.0), 1);
-        assert_eq!(stepper.step(0, 1.0 / 60.0), 0);
-        assert_eq!(stepper.step(1, 1.0 / 60.0), 1);
+        assert_eq!(stepper.step(1, dt), 1);
+        assert_eq!(stepper.step(0, dt), 0);
+        assert_eq!(stepper.step(1, dt), 1);
         // Right to Left with no neutral frame between.
-        assert_eq!(stepper.step(-1, 1.0 / 60.0), -1);
-        assert_eq!(stepper.step(-1, 1.0 / 60.0), 0);
+        assert_eq!(stepper.step(-1, dt), -1);
+        assert_eq!(stepper.step(-1, dt), 0);
     }
 
     #[test]
