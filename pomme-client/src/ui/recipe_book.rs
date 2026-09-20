@@ -114,6 +114,7 @@ pub struct RecipeBookUiState {
     last_clicked_recipe: Option<RecipeDisplayId>,
     recipe_animation_started: HashMap<RecipeDisplayId, Instant>,
     tab_animation_started: HashMap<i32, Instant>,
+    tab_animation_highlights: HashMap<i32, HashSet<RecipeDisplayId>>,
     narrow: bool,
     ignore_next_typed_char: bool,
     cycle_time: Duration,
@@ -133,6 +134,7 @@ impl RecipeBookUiState {
             last_clicked_recipe: None,
             recipe_animation_started: HashMap::new(),
             tab_animation_started: HashMap::new(),
+            tab_animation_highlights: HashMap::new(),
             narrow: false,
             ignore_next_typed_char: false,
             cycle_time: Duration::ZERO,
@@ -155,6 +157,7 @@ impl RecipeBookUiState {
         self.last_clicked_recipe = None;
         self.recipe_animation_started.clear();
         self.tab_animation_started.clear();
+        self.tab_animation_highlights.clear();
         self.narrow = false;
         self.ignore_next_typed_char = false;
         self.cycle_time = Duration::ZERO;
@@ -215,6 +218,7 @@ impl RecipeBookUiState {
             self.last_clicked_recipe = None;
             self.recipe_animation_started.clear();
             self.tab_animation_started.clear();
+            self.tab_animation_highlights.clear();
             self.search.clear();
             self.search_focused = false;
             self.cycle_time = Duration::ZERO;
@@ -255,6 +259,35 @@ fn animation_squeeze(started: Instant, now: Instant) -> Option<f32> {
     }
     let t = elapsed.as_secs_f32() / HIGHLIGHT_ANIMATION.as_secs_f32();
     Some(1.0 + 0.1 * (std::f32::consts::PI * t).sin())
+}
+
+fn tab_animation_squeeze(
+    state: &mut RecipeBookUiState,
+    key: i32,
+    highlights: HashSet<RecipeDisplayId>,
+    now: Instant,
+) -> f32 {
+    let changed = state.tab_animation_highlights.get(&key) != Some(&highlights);
+    if changed {
+        if highlights.is_empty() {
+            state.tab_animation_highlights.remove(&key);
+            state.tab_animation_started.remove(&key);
+        } else {
+            state.tab_animation_highlights.insert(key, highlights);
+            state.tab_animation_started.insert(key, now);
+        }
+    }
+
+    let squeeze = state
+        .tab_animation_started
+        .get(&key)
+        .and_then(|started| animation_squeeze(*started, now));
+    if squeeze.is_none() {
+        // Keep the highlight set latched after the pulse ends so the same
+        // unseen recipe cannot re-arm the animation on the next render.
+        state.tab_animation_started.remove(&key);
+    }
+    squeeze.unwrap_or(1.0)
 }
 
 fn scale_rect_about(rect: [f32; 4], pivot: (f32, f32), scale: (f32, f32)) -> [f32; 4] {
@@ -2143,34 +2176,26 @@ fn render_tabs(
     let mut y = by + 3.0 * scale;
     for (index, tab) in tabs.iter().enumerate() {
         let selected = index == state.selected_tab;
-        let has_highlight = collections.iter().any(|collection| {
-            let category_matches = tab.category.is_none_or(|category| {
-                collection
-                    .entries
-                    .first()
-                    .is_some_and(|entry| entry.category == category)
-            });
-            category_matches
-                && collection.entries.iter().any(|entry| {
-                    book.highlight.contains(&entry.id)
-                        && (!filtering || collection.craftable.contains(&entry.id))
+        let highlighted = collections
+            .iter()
+            .filter(|collection| {
+                tab.category.is_none_or(|category| {
+                    collection
+                        .entries
+                        .first()
+                        .is_some_and(|entry| entry.category == category)
                 })
-        });
+            })
+            .flat_map(|collection| {
+                collection.entries.iter().filter_map(|entry| {
+                    (book.highlight.contains(&entry.id)
+                        && (!filtering || collection.craftable.contains(&entry.id)))
+                    .then_some(entry.id)
+                })
+            })
+            .collect::<HashSet<_>>();
         let animation_key = tab.category.map_or(-1, |category| category as i32);
-        if has_highlight {
-            state
-                .tab_animation_started
-                .entry(animation_key)
-                .or_insert(now);
-        }
-        let squeeze = state
-            .tab_animation_started
-            .get(&animation_key)
-            .and_then(|started| animation_squeeze(*started, now));
-        if squeeze.is_none() {
-            state.tab_animation_started.remove(&animation_key);
-        }
-        let squeeze = squeeze.unwrap_or(1.0);
+        let squeeze = tab_animation_squeeze(state, animation_key, highlighted, now);
 
         let base_x = bx - 30.0 * scale;
         let x = base_x - if selected { 2.0 * scale } else { 0.0 };
@@ -2943,6 +2968,7 @@ mod tests {
         assert!(state.overlay.is_none());
         assert!(state.recipe_animation_started.is_empty());
         assert!(state.tab_animation_started.is_empty());
+        assert!(state.tab_animation_highlights.is_empty());
         assert!(book.ghost_recipe.is_none());
     }
 
@@ -3085,6 +3111,43 @@ mod tests {
         assert_eq!(
             animation_squeeze(started, started + HIGHLIGHT_ANIMATION),
             None
+        );
+    }
+
+    #[test]
+    fn tab_highlight_does_not_rearm_until_highlight_set_changes() {
+        let mut state = RecipeBookUiState::new();
+        let started = Instant::now();
+        let highlights = HashSet::from([7]);
+
+        assert_eq!(
+            tab_animation_squeeze(&mut state, 2, highlights.clone(), started),
+            1.0
+        );
+        assert!(state.tab_animation_started.contains_key(&2));
+
+        let expired = started + HIGHLIGHT_ANIMATION;
+        assert_eq!(
+            tab_animation_squeeze(&mut state, 2, highlights.clone(), expired),
+            1.0
+        );
+        assert!(!state.tab_animation_started.contains_key(&2));
+        assert_eq!(state.tab_animation_highlights.get(&2), Some(&highlights));
+
+        let later = expired + Duration::from_secs(1);
+        assert_eq!(tab_animation_squeeze(&mut state, 2, highlights, later), 1.0);
+        assert!(!state.tab_animation_started.contains_key(&2));
+
+        let changed = HashSet::from([7, 8]);
+        assert_eq!(tab_animation_squeeze(&mut state, 2, changed, later), 1.0);
+        assert_eq!(state.tab_animation_started.get(&2), Some(&later));
+        assert!(
+            tab_animation_squeeze(
+                &mut state,
+                2,
+                HashSet::from([7, 8]),
+                later + Duration::from_millis(375)
+            ) > 1.0
         );
     }
 }

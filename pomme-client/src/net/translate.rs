@@ -5235,7 +5235,7 @@ fn translate_recipe_book_add_777(
         copy_bytes(&mut cur, &mut out, 1)?; // flags
     }
     copy_bytes(&mut cur, &mut out, 1)?; // replace
-    Some(out)
+    (cur.position() as usize == payload.len()).then_some(out)
 }
 
 /// Rewrites `place_ghost_recipe` from 26.3: container id, then a display.
@@ -5250,7 +5250,7 @@ fn translate_place_ghost_recipe_777(
     wire::write_varint(&mut out, id);
     copy_varint(&mut cur, &mut out)?;
     copy_recipe_display_777(&mut cur, &mut out, v.wire_registries, remaps)?;
-    Some(out)
+    (cur.position() as usize == payload.len()).then_some(out)
 }
 
 /// Rewrites `update_recipes` from 26.3: the property sets copy through, and
@@ -5276,7 +5276,7 @@ fn translate_update_recipes_777(
         translate_item_holder_set(&mut cur, &mut out, remaps)?;
         copy_slot_display_777(&mut cur, &mut out, v.wire_registries, remaps)?;
     }
-    Some(out)
+    (cur.position() as usize == payload.len()).then_some(out)
 }
 
 /// The byte range of one varint, advancing past it.
@@ -5523,6 +5523,15 @@ mod recipe_translation_tests {
         add.push(0); // flags
         add.push(0); // replace
 
+        let mut malformed_add = add.clone();
+        malformed_add.push(0x7f);
+        assert!(
+            translation
+                .translate_game_frame(malformed_add.into_boxed_slice())
+                .is_none(),
+            "26.3 recipe_book_add must reject trailing source bytes"
+        );
+
         let translated = translation
             .translate_game_frame(add.into_boxed_slice())
             .expect("translated 26.3 recipe add");
@@ -5573,6 +5582,15 @@ mod recipe_translation_tests {
         wire::write_varint(&mut update, wire_slot_item);
         wire::write_varint(&mut update, wire_item);
 
+        let mut malformed_update = update.clone();
+        malformed_update.push(0x7f);
+        assert!(
+            translation
+                .translate_game_frame(malformed_update.into_boxed_slice())
+                .is_none(),
+            "26.3 update_recipes must reject trailing source bytes"
+        );
+
         let translated = translation
             .translate_game_frame(update.into_boxed_slice())
             .expect("translated 26.3 update recipes");
@@ -5589,5 +5607,32 @@ mod recipe_translation_tests {
         wire::write_varint(&mut expected, native_slot_item);
         wire::write_varint(&mut expected, native_item);
         assert_eq!(&*translated, &expected);
+
+        let wire_ghost = required_id(
+            wire_packets,
+            Phase::Game,
+            Direction::Clientbound,
+            "place_ghost_recipe",
+        );
+        let mut ghost = Vec::new();
+        wire::write_varint(&mut ghost, wire_ghost);
+        wire::write_varint(&mut ghost, 3); // container id
+        wire::write_varint(&mut ghost, wire_shapeless);
+        wire::write_varint(&mut ghost, 0); // no ingredient displays
+        wire::write_varint(&mut ghost, wire_slot_empty); // result
+        wire::write_varint(&mut ghost, wire_slot_empty); // station
+        let mut malformed_ghost = ghost.clone();
+        malformed_ghost.push(0x7f);
+        assert!(
+            translation
+                .translate_game_frame(malformed_ghost.into_boxed_slice())
+                .is_none(),
+            "26.3 place_ghost_recipe must reject trailing source bytes"
+        );
+        assert!(
+            translation
+                .translate_game_frame(ghost.into_boxed_slice())
+                .is_some()
+        );
     }
 }
