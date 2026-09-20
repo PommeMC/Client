@@ -137,7 +137,9 @@ fn default_block_gui_transform() -> DisplayTransform {
     }
 }
 
-fn chest_gui_transform() -> DisplayTransform {
+/// What `item/template_chest` ships; the baker resolves it from the assets.
+#[cfg(test)]
+fn vanilla_chest_gui_transform() -> DisplayTransform {
     DisplayTransform {
         rotation: Vec3::new(30.0, 45.0, 0.0),
         translation: Vec3::ZERO,
@@ -669,9 +671,21 @@ pub fn bake_item_models(
         }
     }
 
-    item_models.insert("chest".to_string(), bake_chest_item_model());
-    gui_transforms.insert("chest".to_string(), chest_gui_transform());
-    ground_transforms.insert("chest".to_string(), default_block_ground_transform());
+    // The mesh comes from the special renderer, but the chest's display
+    // transforms live in `item/template_chest` like any other item's.
+    let chest = resolve_model(
+        "item/template_chest",
+        jar_assets_dir,
+        asset_index,
+        &mut model_cache,
+        packs,
+    );
+    item_models.insert(
+        "chest".to_string(),
+        bake_chest_item_model(chest.gui_transform, chest.gui_light),
+    );
+    gui_transforms.insert("chest".to_string(), chest.gui_transform);
+    ground_transforms.insert("chest".to_string(), chest.ground_transform);
     flat_keys.remove("chest");
 
     tracing::info!(
@@ -689,10 +703,10 @@ pub fn bake_item_models(
     }
 }
 
-pub fn bake_chest_item_model() -> BakedModel {
+fn bake_chest_item_model(gui: DisplayTransform, gui_light: GuiLight) -> BakedModel {
     let tex = "entity/chest/normal";
     let mut quads = Vec::new();
-    let shades = vanilla_gui_face_shades(chest_gui_transform(), GuiLight::Side);
+    let shades = vanilla_gui_face_shades(gui, gui_light);
     add_chest_cube(
         &mut quads,
         1.0 / 16.0,
@@ -810,6 +824,10 @@ fn vanilla_gui_face_shades(display: DisplayTransform, gui_light: GuiLight) -> [f
     shades
 }
 
+/// TODO: `held_item.rs` draws this same mesh through `item_entity.vert`, so
+/// the first-person hand picks up the GUI pose's lambert too. Vanilla lights
+/// the hand with `Lighting.Entry.LEVEL` (it draws inside `renderLevel`, before
+/// `GameRenderer` switches to `ITEMS_3D` for the GUI).
 fn apply_gui_lambert(quads: &mut [BakedQuad], display: DisplayTransform, gui_light: GuiLight) {
     let (l0, l1) = gui_lights(gui_light);
     for quad in quads {
@@ -817,6 +835,9 @@ fn apply_gui_lambert(quads: &mut [BakedQuad], display: DisplayTransform, gui_lig
         // normal matrix. It does not apply BlockModelLighter's cardinal face
         // brightness in GUI rendering, so this replaces (rather than
         // multiplies) the terrain-oriented shade byte from bake_resolved_model.
+        //
+        // Not `quad.shade_face`: that is `None` for `shade: false` elements,
+        // and `putBakedQuad` takes `direction()` regardless of `shade()`.
         let direction = direction_from_positions(&quad.positions).unwrap_or(Direction::Up);
         let n_mesh = direction.offset().map(|component| component as f32);
         let n_gui = transform_gui_normal(n_mesh, display);
@@ -1289,7 +1310,15 @@ fn load_model<'a>(
     let file_path = resolve_model_path(jar_assets_dir, asset_index, &asset_key, packs)?;
 
     let contents = std::fs::read_to_string(&file_path).ok()?;
-    let model: ModelFile = serde_json::from_str(&contents).ok()?;
+    let model: ModelFile = match serde_json::from_str(&contents) {
+        Ok(model) => model,
+        Err(error) => {
+            // Vanilla rejects the model too (an unknown `gui_light` throws in
+            // `GuiLight.getByName`), but it says so rather than going quiet.
+            tracing::warn!("{model_id}: model JSON is invalid ({error}); skipping");
+            return None;
+        }
+    };
     cache.insert(model_id.to_string(), model);
     cache.get(model_id)
 }
@@ -1815,7 +1844,7 @@ mod tests {
     #[test]
     fn gui_face_shades_include_vanilla_atlas_y_flip() {
         let block = vanilla_gui_face_shades(default_block_gui_transform(), GuiLight::Side);
-        let chest = vanilla_gui_face_shades(chest_gui_transform(), GuiLight::Side);
+        let chest = vanilla_gui_face_shades(vanilla_chest_gui_transform(), GuiLight::Side);
         let expected_block = [1.0, 0.4, 0.4, 1.0, 0.49398834, 0.6505372];
         let expected_chest = [1.0, 0.4, 1.0, 0.4, 0.6505372, 0.49398834];
         for (actual, expected) in block.into_iter().zip(expected_block) {
@@ -1872,7 +1901,7 @@ mod tests {
 
     #[test]
     fn chest_body_faces_match_vanilla_modelpart_cube() {
-        let model = bake_chest_item_model();
+        let model = bake_chest_item_model(vanilla_chest_gui_transform(), GuiLight::Side);
         assert_eq!(model.quads.len(), 18);
 
         let x0 = 1.0 / 16.0;
