@@ -7,6 +7,7 @@ use azalea_core::position::ChunkPos;
 use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
 
+use crate::attribute::AttributeMap;
 use crate::entity::components::{LookDirection, Position};
 use crate::entity::villager::{VillagerKind, VillagerProfession};
 use crate::physics::aabb::Aabb;
@@ -170,6 +171,10 @@ pub struct LivingEntity {
     pub health: f32,
     /// `max_health` attribute (`UpdateAttributes`); sizes the mount heart row.
     pub max_health: f32,
+    /// Server-synced attribute snapshots retained for client gameplay/render
+    /// consumers. Remote entity suppliers are not fully modeled yet, so this
+    /// map learns attributes from packets as they arrive.
+    pub attributes: AttributeMap,
     pub interested_angle: f32,
     pub prev_interested_angle: f32,
     pub shake_anim: f32,
@@ -319,6 +324,7 @@ impl LivingEntity {
             // reads it before the metadata arrives.
             health: default_health,
             max_health: default_health,
+            attributes: AttributeMap::default(),
             interested_angle: 0.0,
             prev_interested_angle: 0.0,
             shake_anim: 0.0,
