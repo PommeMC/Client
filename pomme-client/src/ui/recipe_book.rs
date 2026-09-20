@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use azalea_inventory::components::{CustomName, Damage, Enchantments, Lore, TooltipDisplay};
+use azalea_inventory::components::{CustomName, Damage, Enchantments};
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::Registry;
-use azalea_registry::builtin::{DataComponentKind, ItemKind};
+use azalea_registry::builtin::ItemKind;
 
 use super::common::{FONT_SIZE, WHITE, hit_test, push_tooltip, push_tooltip_lines};
 use super::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
@@ -1121,19 +1121,18 @@ fn entry_matches_search(entry: &RecipeBookEntry, book: &RecipeBookState, needle:
 }
 
 fn normal_tooltip_search_lines(stack: &ItemStackData) -> Vec<String> {
-    let display = stack.get_component::<TooltipDisplay>();
-    if display.as_ref().is_some_and(|display| display.hide_tooltip) {
-        return Vec::new();
-    }
-
-    let mut lines = vec![super::common::item_display_name(stack)];
-    let lore_visible = display
-        .as_ref()
-        .is_none_or(|display| !display.hidden_components.contains(&DataComponentKind::Lore));
-    if lore_visible && let Some(lore) = stack.get_component::<Lore>() {
-        lines.extend(lore.lines.iter().map(ToString::to_string));
-    }
-    lines
+    let Ok(value) = serde_json::to_value(stack) else {
+        return vec![super::common::item_display_name(stack)];
+    };
+    crate::ui::chat::item_tooltip_lines(&value, None, false)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.text)
+                .collect::<String>()
+        })
+        .collect()
 }
 
 fn kind_accepts_category(kind: RecipeBookType, category: u32) -> bool {
@@ -1876,7 +1875,7 @@ fn render_search(
         });
     } else {
         super::common::push_field_text(
-            elements, &info, shown, text_x, text_y, fs, scale, scale, WHITE, None, &wf,
+            elements, &info, shown, None, text_x, text_y, fs, scale, scale, WHITE, None, &wf,
         );
     }
 }
