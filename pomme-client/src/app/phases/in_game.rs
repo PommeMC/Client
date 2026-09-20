@@ -3117,6 +3117,7 @@ pub fn update_game(
                 gs,
                 cursor,
                 slots,
+                core.input.ctrl_held(),
                 &|t, s| gfx.renderer.menu_text_width(t, s),
             );
             if frame.visible {

@@ -84,39 +84,58 @@ pub fn handle_raw_recipe_packet(
     cur: &mut Cursor<&[u8]>,
     event_tx: &Sender<NetworkEvent>,
 ) -> Option<Result<(), String>> {
+    enum Parsed {
+        Add(Vec<RecipeBookAddEntry>, bool),
+        Remove(Vec<u32>),
+        Settings(RecipeBookSettings),
+        Update(RecipeData),
+        Ghost(Box<GhostRecipe>),
+    }
+
     let ids = packet_ids();
-    let result = if packet_id == ids.add {
-        parse_add(cur).map(|(entries, replace)| {
-            let toasts = entries
-                .iter()
-                .filter(|entry| entry.notification)
-                .map(|entry| toast_entry(&entry.contents.display))
-                .collect::<Vec<_>>();
-            if !toasts.is_empty() {
-                let _ = event_tx.try_send(NetworkEvent::RecipeToastAdd { entries: toasts });
-            }
-            let _ = event_tx.try_send(NetworkEvent::RecipeBookAdd { entries, replace });
-        })
+    let parsed = if packet_id == ids.add {
+        parse_add(cur).map(|(entries, replace)| Parsed::Add(entries, replace))
     } else if packet_id == ids.remove {
-        parse_remove(cur).map(|ids| {
-            let _ = event_tx.try_send(NetworkEvent::RecipeBookRemove { ids });
-        })
+        parse_remove(cur).map(Parsed::Remove)
     } else if packet_id == ids.settings {
-        parse_settings(cur).map(|settings| {
-            let _ = event_tx.try_send(NetworkEvent::RecipeBookSettings(settings));
-        })
+        parse_settings(cur).map(Parsed::Settings)
     } else if packet_id == ids.update {
-        parse_update(cur).map(|data| {
-            let _ = event_tx.try_send(NetworkEvent::RecipeData(data));
-        })
+        parse_update(cur).map(Parsed::Update)
     } else if packet_id == ids.ghost {
-        parse_ghost(cur).map(|ghost| {
-            let _ = event_tx.try_send(NetworkEvent::GhostRecipe(Box::new(ghost)));
-        })
+        parse_ghost(cur).map(|ghost| Parsed::Ghost(Box::new(ghost)))
     } else {
         return None;
     };
-    Some(result.and_then(|()| ensure_eof(cur)))
+
+    Some(parsed.and_then(|parsed| {
+        ensure_eof(cur)?;
+        match parsed {
+            Parsed::Add(entries, replace) => {
+                let toasts = entries
+                    .iter()
+                    .filter(|entry| entry.notification)
+                    .map(|entry| toast_entry(&entry.contents.display))
+                    .collect::<Vec<_>>();
+                if !toasts.is_empty() {
+                    let _ = event_tx.try_send(NetworkEvent::RecipeToastAdd { entries: toasts });
+                }
+                let _ = event_tx.try_send(NetworkEvent::RecipeBookAdd { entries, replace });
+            }
+            Parsed::Remove(ids) => {
+                let _ = event_tx.try_send(NetworkEvent::RecipeBookRemove { ids });
+            }
+            Parsed::Settings(settings) => {
+                let _ = event_tx.try_send(NetworkEvent::RecipeBookSettings(settings));
+            }
+            Parsed::Update(data) => {
+                let _ = event_tx.try_send(NetworkEvent::RecipeData(data));
+            }
+            Parsed::Ghost(ghost) => {
+                let _ = event_tx.try_send(NetworkEvent::GhostRecipe(ghost));
+            }
+        }
+        Ok(())
+    }))
 }
 
 fn parse_add(cur: &mut Cursor<&[u8]>) -> Result<(Vec<RecipeBookAddEntry>, bool), String> {
@@ -474,5 +493,18 @@ mod tests {
         assert!(entries[0].notification);
         assert!(entries[0].highlight);
         assert_eq!(cur.position() as usize, bytes.len());
+    }
+
+    #[test]
+    fn trailing_bytes_do_not_emit_recipe_events() {
+        let mut bytes = vec![0; 8]; // four open/filter setting pairs
+        bytes.push(0x7f); // malformed trailing data
+        let mut cur = Cursor::new(bytes.as_slice());
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        let result = handle_raw_recipe_packet(packet_ids().settings, &mut cur, &tx)
+            .expect("settings is a handled recipe packet");
+        assert!(result.is_err());
+        assert!(rx.try_recv().is_err());
     }
 }

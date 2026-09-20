@@ -1,18 +1,22 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use azalea_inventory::components::{CustomName, Damage, Enchantments};
+use azalea_inventory::components::{
+    CustomName, Damage, DataComponentTrait, Dye, DyeColor, DyedColor, Enchantments,
+    EncodableDataComponent, PotionContents, ProvidesTrimMaterial, Trim,
+};
+use azalea_inventory::default_components::get_default_component;
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::{ItemStack, ItemStackData};
-use azalea_registry::Registry;
-use azalea_registry::builtin::ItemKind;
+use azalea_registry::builtin::{DataComponentKind, ItemKind, Potion};
+use azalea_registry::{DataRegistry, Holder, Registry};
 
 use super::common::{FONT_SIZE, WHITE, hit_test, push_tooltip, push_tooltip_lines};
 use super::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 use crate::net::sender::PacketSender;
 use crate::recipe::{
     Ingredient, ItemTags, RecipeBookEntry, RecipeBookState, RecipeBookType, RecipeDisplay,
-    RecipeDisplayId, SlotDisplay,
+    RecipeDisplayId, SlotDisplay, TrimPatternHolder,
 };
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 
@@ -107,12 +111,13 @@ pub struct RecipeBookUiState {
     page: usize,
     overlay: Option<RecipeOverlay>,
     last_placed: Option<RecipeDisplayId>,
-    last_clicked_collection: Option<Vec<RecipeDisplayId>>,
+    last_clicked_recipe: Option<RecipeDisplayId>,
     recipe_animation_started: HashMap<RecipeDisplayId, Instant>,
     tab_animation_started: HashMap<i32, Instant>,
     narrow: bool,
     ignore_next_typed_char: bool,
-    started: Instant,
+    cycle_time: Duration,
+    cycle_last_update: Instant,
 }
 
 impl RecipeBookUiState {
@@ -125,12 +130,13 @@ impl RecipeBookUiState {
             page: 0,
             overlay: None,
             last_placed: None,
-            last_clicked_collection: None,
+            last_clicked_recipe: None,
             recipe_animation_started: HashMap::new(),
             tab_animation_started: HashMap::new(),
             narrow: false,
             ignore_next_typed_char: false,
-            started: Instant::now(),
+            cycle_time: Duration::ZERO,
+            cycle_last_update: Instant::now(),
         }
     }
 
@@ -146,11 +152,13 @@ impl RecipeBookUiState {
         self.page = 0;
         self.overlay = None;
         self.last_placed = None;
-        self.last_clicked_collection = None;
+        self.last_clicked_recipe = None;
         self.recipe_animation_started.clear();
         self.tab_animation_started.clear();
         self.narrow = false;
         self.ignore_next_typed_char = false;
+        self.cycle_time = Duration::ZERO;
+        self.cycle_last_update = Instant::now();
         book.ghost_recipe = None;
     }
 
@@ -165,7 +173,7 @@ impl RecipeBookUiState {
         let Some((kind, _)) = self.screen else {
             return false;
         };
-        if !book.settings.get(kind).open {
+        if !book.settings.get(kind).open || self.search_focused {
             return false;
         }
         self.search_focused = true;
@@ -204,22 +212,39 @@ impl RecipeBookUiState {
             self.page = 0;
             self.overlay = None;
             self.last_placed = None;
-            self.last_clicked_collection = None;
+            self.last_clicked_recipe = None;
             self.recipe_animation_started.clear();
             self.tab_animation_started.clear();
             self.search.clear();
             self.search_focused = false;
+            self.cycle_time = Duration::ZERO;
+            self.cycle_last_update = Instant::now();
+        }
+    }
+
+    fn update_cycle_time(&mut self, ctrl_held: bool) {
+        let now = Instant::now();
+        let delta = now.saturating_duration_since(self.cycle_last_update);
+        self.cycle_last_update = now;
+        if !ctrl_held {
+            self.cycle_time += delta;
         }
     }
 
     fn cycle_index(&self) -> usize {
-        (self.started.elapsed().as_millis() / 1_500) as usize
+        (self.cycle_time.as_millis() / 1_500) as usize
     }
 }
 
 impl Default for RecipeBookUiState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn reset_page_if_out_of_range(page: &mut usize, pages: usize) {
+    if *page >= pages {
+        *page = 0;
     }
 }
 
@@ -457,7 +482,7 @@ pub fn handle_input(
         book,
     );
     let pages = filtered.len().div_ceil(ITEMS_PER_PAGE).max(1);
-    state.page = state.page.min(pages - 1);
+    reset_page_if_out_of_range(&mut state.page, pages);
 
     let back_rect = [
         bx + 38.0 * scale,
@@ -492,7 +517,7 @@ pub fn handle_input(
                 {
                     let _ = sender.place_recipe(spec.container_id, id, use_max);
                     state.last_placed = Some(id);
-                    state.last_clicked_collection = Some(overlay.ids.clone());
+                    state.last_clicked_recipe = Some(id);
                     book.ghost_recipe = None;
                 }
                 if narrow {
@@ -538,8 +563,7 @@ pub fn handle_input(
             if craftable || state.last_placed != Some(current.id) {
                 let _ = sender.place_recipe(spec.container_id, current.id, shift);
                 state.last_placed = Some(current.id);
-                state.last_clicked_collection =
-                    Some(selected.iter().map(|entry| entry.id).collect());
+                state.last_clicked_recipe = Some(current.id);
                 book.ghost_recipe = None;
             }
             if narrow {
@@ -577,10 +601,7 @@ pub fn handle_input(
         }
     }
 
-    if selection_key
-        && let Some(ids) = state.last_clicked_collection.clone()
-        && let Some(id) = ids.get(cycle % ids.len()).copied()
-    {
+    if selection_key && let Some(id) = state.last_clicked_recipe {
         let craftable = book
             .known
             .get(&id)
@@ -608,8 +629,10 @@ pub fn render(
     gs: f32,
     cursor: (f32, f32),
     slots: &[ItemStack],
+    ctrl_held: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) {
+    state.update_cycle_time(ctrl_held || !frame.visible);
     let main = main_panel_rect(screen_w, screen_h, gs, spec.panel_h, frame.main_x_offset);
     let toggle = [
         main.0 + spec.toggle_x * main.4,
@@ -784,19 +807,11 @@ pub fn render(
                     push_animated_stack(elements, 4.0, 4.0, &item);
                 }
                 if hit_test(cursor, [x, y, 25.0 * scale, 25.0 * scale]) && state.overlay.is_none() {
-                    let name = super::common::item_display_name(&item);
+                    let mut lines = stack_tooltip_lines(&item);
                     if multiple {
-                        push_tooltip_lines(
-                            elements,
-                            cursor,
-                            screen_w,
-                            screen_h,
-                            scale,
-                            recipe_tooltip_lines(name),
-                        );
-                    } else {
-                        push_tooltip(elements, cursor, screen_w, screen_h, scale, &name);
+                        lines.push(TooltipLine::new("Right Click for More".into(), WHITE));
                     }
+                    push_tooltip_lines(elements, cursor, screen_w, screen_h, scale, lines);
                 }
             }
         }
@@ -1127,11 +1142,18 @@ fn entry_matches_search(entry: &RecipeBookEntry, book: &RecipeBookState, needle:
     })
 }
 
-fn normal_tooltip_search_lines(stack: &ItemStackData) -> Vec<String> {
+fn stack_tooltip_lines(stack: &ItemStackData) -> Vec<TooltipLine> {
     let Ok(value) = serde_json::to_value(stack) else {
-        return vec![super::common::item_display_name(stack)];
+        return vec![TooltipLine::new(
+            super::common::item_display_name(stack),
+            WHITE,
+        )];
     };
     crate::ui::chat::item_tooltip_lines(&value, None, false)
+}
+
+fn normal_tooltip_search_lines(stack: &ItemStackData) -> Vec<String> {
+    stack_tooltip_lines(stack)
         .into_iter()
         .map(|line| {
             line.spans
@@ -1296,29 +1318,6 @@ fn ingredient_items<'a>(
     }
 }
 
-fn slot_item_ids(slot: &SlotDisplay, tags: &ItemTags) -> Vec<u32> {
-    match slot {
-        SlotDisplay::Empty | SlotDisplay::AnyFuel => Vec::new(),
-        SlotDisplay::Item(id) => vec![*id],
-        SlotDisplay::ItemStack(stack) => vec![stack.item],
-        SlotDisplay::Tag(tag) => tags
-            .ordered(tag)
-            .map(|items| items.to_vec())
-            .unwrap_or_default(),
-        SlotDisplay::WithAnyPotion(inner)
-        | SlotDisplay::OnlyWithComponent {
-            contents: inner, ..
-        } => slot_item_ids(inner, tags),
-        SlotDisplay::Dyed { target, .. } => slot_item_ids(target, tags),
-        SlotDisplay::SmithingTrim { base, .. } => slot_item_ids(base, tags),
-        SlotDisplay::WithRemainder { input, .. } => slot_item_ids(input, tags),
-        SlotDisplay::Composite(parts) => parts
-            .iter()
-            .flat_map(|part| slot_item_ids(part, tags))
-            .collect(),
-    }
-}
-
 fn display_result_stacks(display: &RecipeDisplay, book: &RecipeBookState) -> Vec<ItemStackData> {
     let result = match display {
         RecipeDisplay::Shapeless { result, .. }
@@ -1328,6 +1327,166 @@ fn display_result_stacks(display: &RecipeDisplay, book: &RecipeBookState) -> Vec
         | RecipeDisplay::Smithing { result, .. } => result,
     };
     slot_stacks(result, book)
+}
+
+fn with_component<T>(stack: ItemStackData, component: T) -> ItemStackData
+where
+    T: DataComponentTrait + EncodableDataComponent,
+{
+    match ItemStack::Present(stack).with_component(component) {
+        ItemStack::Present(stack) => stack,
+        ItemStack::Empty => unreachable!("a positive recipe-display stack cannot become empty"),
+    }
+}
+
+fn stack_has_component_kind(stack: &ItemStackData, kind: DataComponentKind) -> bool {
+    if let Some((_, value)) = stack
+        .component_patch
+        .iter()
+        .find(|(patched_kind, _)| *patched_kind == kind)
+    {
+        // An explicit removal overrides an item default, while an explicit
+        // value always satisfies OnlyWithComponent.
+        return value.is_some();
+    }
+
+    // Vanilla 26.2 currently constructs OnlyWithComponent only for DYE in
+    // DyeRecipe. Keep the dynamic explicit-patch fallback above for custom
+    // displays, while matching the native default-component lookup exactly.
+    kind == DataComponentKind::Dye && get_default_component::<Dye>(stack.kind).is_some()
+}
+
+fn dye_texture_rgb(color: DyeColor) -> i32 {
+    match color {
+        DyeColor::White => 0xF9FFFE,
+        DyeColor::Orange => 16_351_261,
+        DyeColor::Magenta => 13_061_821,
+        DyeColor::LightBlue => 3_847_130,
+        DyeColor::Yellow => 16_701_501,
+        DyeColor::Lime => 8_439_583,
+        DyeColor::Pink => 15_961_002,
+        DyeColor::Gray => 4_673_362,
+        DyeColor::LightGray => 0x9D9D97,
+        DyeColor::Cyan => 1_481_884,
+        DyeColor::Purple => 8_991_416,
+        DyeColor::Blue => 3_949_738,
+        DyeColor::Brown => 8_606_770,
+        DyeColor::Green => 6_192_150,
+        DyeColor::Red => 11_546_150,
+        DyeColor::Black => 0x1D1D21,
+    }
+}
+
+fn rgb_channels(rgb: i32) -> (i32, i32, i32) {
+    ((rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff)
+}
+
+fn apply_dye(mut target: ItemStackData, dye: DyeColor) -> ItemStackData {
+    let mut red_total = 0;
+    let mut green_total = 0;
+    let mut blue_total = 0;
+    let mut intensity_total = 0;
+    let mut color_count = 0;
+
+    if let Some(existing) = target.get_component::<DyedColor>() {
+        let (red, green, blue) = rgb_channels(existing.rgb);
+        intensity_total += red.max(green).max(blue);
+        red_total += red;
+        green_total += green;
+        blue_total += blue;
+        color_count += 1;
+    }
+
+    let (red, green, blue) = rgb_channels(dye_texture_rgb(dye));
+    intensity_total += red.max(green).max(blue);
+    red_total += red;
+    green_total += green;
+    blue_total += blue;
+    color_count += 1;
+
+    let mut red = red_total / color_count;
+    let mut green = green_total / color_count;
+    let mut blue = blue_total / color_count;
+    let average_intensity = intensity_total as f32 / color_count as f32;
+    let result_intensity = red.max(green).max(blue) as f32;
+    if result_intensity > 0.0 {
+        red = (red as f32 * average_intensity / result_intensity) as i32;
+        green = (green as f32 * average_intensity / result_intensity) as i32;
+        blue = (blue as f32 * average_intensity / result_intensity) as i32;
+    }
+
+    target.count = 1;
+    with_component(
+        target,
+        DyedColor {
+            rgb: (red << 16) | (green << 8) | blue,
+        },
+    )
+}
+
+fn apply_trim(
+    mut base: ItemStackData,
+    material: &ItemStackData,
+    pattern: &TrimPatternHolder,
+) -> Option<ItemStackData> {
+    let material = material.get_component::<ProvidesTrimMaterial>()?;
+    let Holder::Reference(material) = material.value else {
+        // Azalea's current Trim component stores registry references only. A
+        // direct material holder cannot be represented faithfully in the leaf
+        // component model, so do not silently display an untrimmed base.
+        return None;
+    };
+    let pattern = match pattern {
+        TrimPatternHolder::Reference(id) => azalea_registry::data::TrimPattern::new_raw(*id),
+        TrimPatternHolder::Direct { .. } => {
+            // Same leaf-model limitation as direct materials above.
+            return None;
+        }
+    };
+    let trim = Trim { material, pattern };
+    if base.get_component::<Trim>().as_deref() == Some(&trim) {
+        return None;
+    }
+    base.count = 1;
+    Some(with_component(base, trim))
+}
+
+#[derive(Clone, Copy)]
+struct VanillaDemoRandom {
+    seed: u64,
+}
+
+impl VanillaDemoRandom {
+    fn from_identity(identity: usize) -> Self {
+        let identity = identity as u32 as i32 as i64 as u64;
+        Self {
+            seed: (identity ^ 0x5DEE_CE66D) & 0xFFFF_FFFF_FFFF,
+        }
+    }
+
+    fn next_bits(&mut self, bits: u32) -> u32 {
+        self.seed = self.seed.wrapping_mul(25_214_903_917).wrapping_add(11) & 0xFFFF_FFFF_FFFF;
+        (self.seed >> (48 - bits)) as u32
+    }
+
+    fn next_int(&mut self, bound: usize) -> usize {
+        debug_assert!(bound > 0);
+        let bound = bound as i32;
+        if bound & (bound - 1) == 0 {
+            return (((bound as i64) * (self.next_bits(31) as i64)) >> 31) as usize;
+        }
+        loop {
+            let sample = self.next_bits(31) as i32;
+            let modulo = sample % bound;
+            if sample
+                .wrapping_sub(modulo)
+                .wrapping_add(bound.wrapping_sub(1))
+                >= 0
+            {
+                return modulo as usize;
+            }
+        }
+    }
 }
 
 fn slot_stacks(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<ItemStackData> {
@@ -1360,16 +1519,77 @@ fn slot_stacks(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<ItemStackData>
             .flat_map(|part| slot_stacks(part, book))
             .collect(),
         SlotDisplay::WithRemainder { input, .. } => slot_stacks(input, book),
-        // These displays transform or filter resolved stacks using registry or
-        // component context. Preserve the underlying item choices here; Pomme
-        // does not yet expose the full Vanilla SlotDisplayContext transform
-        // pipeline to the menu renderer.
-        SlotDisplay::WithAnyPotion(inner)
-        | SlotDisplay::OnlyWithComponent {
-            contents: inner, ..
-        } => slot_stacks(inner, book),
-        SlotDisplay::Dyed { target, .. } => slot_stacks(target, book),
-        SlotDisplay::SmithingTrim { base, .. } => slot_stacks(base, book),
+        SlotDisplay::WithAnyPotion(inner) => {
+            let base = slot_stacks(inner, book);
+            let mut out = Vec::new();
+            let mut id = 0;
+            while let Some(potion) = Potion::from_u32(id) {
+                for stack in &base {
+                    out.push(with_component(
+                        stack.clone(),
+                        PotionContents {
+                            potion: Some(potion),
+                            ..PotionContents::default()
+                        },
+                    ));
+                }
+                id += 1;
+            }
+            out
+        }
+        SlotDisplay::OnlyWithComponent {
+            contents,
+            component,
+        } => {
+            let Some(kind) = DataComponentKind::from_u32(*component) else {
+                return Vec::new();
+            };
+            slot_stacks(contents, book)
+                .into_iter()
+                .filter(|stack| stack_has_component_kind(stack, kind))
+                .collect()
+        }
+        SlotDisplay::Dyed { dye, target } => {
+            let targets = slot_stacks(target, book);
+            let dyes = slot_stacks(dye, book);
+            let mut out = Vec::new();
+            for index in 0..targets.len().saturating_mul(dyes.len()) {
+                if out.len() == 16 {
+                    break;
+                }
+                let target = targets[index % targets.len()].clone();
+                let dye = &dyes[index / targets.len()];
+                let dye = dye
+                    .get_component::<Dye>()
+                    .map_or(DyeColor::White, |component| component.color);
+                out.push(apply_dye(target, dye));
+            }
+            out
+        }
+        SlotDisplay::SmithingTrim {
+            base,
+            material,
+            trim_pattern,
+        } => {
+            let bases = slot_stacks(base, book);
+            let materials = slot_stacks(material, book);
+            if bases.is_empty() || materials.is_empty() {
+                return Vec::new();
+            }
+            let mut random = VanillaDemoRandom::from_identity(slot as *const SlotDisplay as usize);
+            let mut out = Vec::new();
+            for _ in 0..256 {
+                if out.len() == 16 {
+                    break;
+                }
+                let base = &bases[random.next_int(bases.len())];
+                let material = &materials[random.next_int(materials.len())];
+                if let Some(trimmed) = apply_trim(base.clone(), material, trim_pattern) {
+                    out.push(trimmed);
+                }
+            }
+            out
+        }
     }
 }
 
@@ -1621,11 +1841,11 @@ fn render_ghost_slot(
     screen_w: f32,
     screen_h: f32,
 ) {
-    let items = ghost_slot_items(slot, book);
+    let items = slot_stacks(slot, book);
     if items.is_empty() {
         return;
     }
-    let item = items[cycle % items.len()];
+    let item = &items[cycle % items.len()];
     let red = ghost_highlight_rect(x, y, scale, big_result);
     elements.push(MenuElement::Rect {
         x: red[0],
@@ -1635,7 +1855,7 @@ fn render_ghost_slot(
         corner_radius: 0.0,
         color: [1.0, 0.0, 0.0, 0.19],
     });
-    push_book_item(elements, x, y, 16.0 * scale, item);
+    push_book_stack(elements, x, y, 16.0 * scale, item);
     elements.push(MenuElement::Rect {
         x,
         y,
@@ -1645,22 +1865,15 @@ fn render_ghost_slot(
         color: [1.0, 1.0, 1.0, 0.19],
     });
     if hit_test(cursor, [x, y, 16.0 * scale, 16.0 * scale]) {
-        push_tooltip(
+        push_tooltip_lines(
             elements,
             cursor,
             screen_w,
             screen_h,
             scale,
-            &item_name(item),
+            stack_tooltip_lines(item),
         );
     }
-}
-
-fn ghost_slot_items(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<u32> {
-    if matches!(slot, SlotDisplay::AnyFuel) {
-        return vanilla_fuel_items(&book.item_tags);
-    }
-    slot_item_ids(slot, &book.item_tags)
 }
 
 fn vanilla_fuel_items(tags: &ItemTags) -> Vec<u32> {
@@ -1779,37 +1992,6 @@ fn all_recipes_have_same_result(entries: &[&RecipeBookEntry], book: &RecipeBookS
         return true;
     };
     items.all(|item| first.is_same_item_and_components(&item))
-}
-
-fn item_name(id: u32) -> String {
-    azalea_registry::builtin::ItemKind::from_u32(id)
-        .map(crate::lang::item_display_name)
-        .unwrap_or_else(|| format!("Item #{id}"))
-}
-
-fn recipe_tooltip_lines(name: String) -> Vec<TooltipLine> {
-    vec![
-        TooltipLine::new(name, WHITE),
-        TooltipLine::new("Right Click for More".into(), WHITE),
-    ]
-}
-
-fn item_resource(id: u32) -> Option<String> {
-    azalea_registry::builtin::ItemKind::from_u32(id)
-        .map(crate::player::inventory::item_resource_name)
-}
-
-fn push_book_item(elements: &mut Vec<MenuElement>, x: f32, y: f32, size: f32, id: u32) {
-    if let Some(item_name) = item_resource(id) {
-        elements.push(MenuElement::ItemIcon {
-            x,
-            y,
-            w: size,
-            h: size,
-            item_name,
-            tint: WHITE,
-        });
-    }
 }
 
 fn push_book_stack(
@@ -2166,14 +2348,14 @@ fn render_overlay_ingredients(
     cycle: usize,
 ) {
     let mut draw = |grid_x: usize, grid_y: usize, slot: &SlotDisplay| {
-        let items = ghost_slot_items(slot, book);
+        let items = slot_stacks(slot, book);
         if items.is_empty() {
             return;
         }
-        let item = items[cycle % items.len()];
+        let item = &items[cycle % items.len()];
         // Vanilla scales a normal 16px item by 0.375 around the ingredient
         // grid position. This resolves to a 6px icon at button + 2 + 7*grid.
-        push_book_item(
+        push_book_stack(
             elements,
             x + (2.0 + grid_x as f32 * 7.0) * scale,
             y + (2.0 + grid_y as f32 * 7.0) * scale,
@@ -2498,11 +2680,15 @@ mod tests {
     }
 
     #[test]
-    fn grouped_recipe_tooltip_uses_two_explicit_lines() {
-        let lines = recipe_tooltip_lines("Oak Planks".into());
-        assert_eq!(lines.len(), 2);
+    fn grouped_recipe_tooltip_appends_explicit_more_line_to_full_stack_tooltip() {
+        use azalea_registry::builtin::ItemKind;
+
+        let stack = ItemStackData::new(ItemKind::OakPlanks, 1);
+        let mut lines = stack_tooltip_lines(&stack);
+        lines.push(TooltipLine::new("Right Click for More".into(), WHITE));
+        assert!(lines.len() >= 2);
         assert_eq!(lines[0].spans[0].text, "Oak Planks");
-        assert_eq!(lines[1].spans[0].text, "Right Click for More");
+        assert_eq!(lines.last().unwrap().spans[0].text, "Right Click for More");
     }
 
     #[test]
@@ -2664,6 +2850,72 @@ mod tests {
     }
 
     #[test]
+    fn focused_recipe_search_does_not_consume_chat_key_again() {
+        let spec = RecipeBookScreenSpec::player(0);
+        let mut state = RecipeBookUiState::new();
+        state.ensure_screen(spec);
+        let mut book = RecipeBookState::default();
+        book.settings.crafting.open = true;
+
+        assert!(state.focus_search_from_chat_key(&book, true));
+        state.ignore_next_typed_char = false; // first focus-triggering `t` was consumed
+        assert!(!state.focus_search_from_chat_key(&book, true));
+        assert!(state.search_focused);
+        assert!(!state.ignore_next_typed_char);
+    }
+
+    #[test]
+    fn repeat_selection_stays_pinned_to_exact_clicked_recipe_across_cycle_change() {
+        use crate::net::sender::Outbound;
+
+        let spec = RecipeBookScreenSpec::player(0);
+        let mut state = RecipeBookUiState::new();
+        state.ensure_screen(spec);
+        state.last_clicked_recipe = Some(11);
+        state.last_placed = None;
+        state.cycle_time = Duration::from_millis(4_500); // visually cycle elsewhere
+
+        let mut book = RecipeBookState::default();
+        book.settings.crafting.open = true;
+        book.apply_add(
+            vec![
+                recipe(11, 0, vec![Ingredient::Items(vec![1])]),
+                recipe(22, 0, vec![Ingredient::Items(vec![1])]),
+            ],
+            false,
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        handle_input(
+            &mut state,
+            &mut book,
+            &sender,
+            spec,
+            400.0,
+            300.0,
+            1.0,
+            (0.0, 0.0),
+            false,
+            false,
+            false,
+            true,
+            &[],
+            &vec![ItemStack::Empty; 46],
+            &|text, _| text.len() as f32,
+        );
+
+        match rx.try_recv().expect("repeat place packet") {
+            Outbound::Raw(bytes) => assert_eq!(
+                bytes,
+                pomme_protocol::wire::encode_place_recipe(0, 11, false)
+            ),
+            _ => panic!("repeat placement must use native raw recipe encoding"),
+        }
+        assert_eq!(state.last_clicked_recipe, Some(11));
+    }
+
+    #[test]
     fn closing_recipe_screen_resets_transient_ui_and_ghost_state() {
         let spec = RecipeBookScreenSpec::crafting_table(3);
         let mut state = RecipeBookUiState::new();
@@ -2702,7 +2954,127 @@ mod tests {
             SlotDisplay::Item(1),
             SlotDisplay::Item(3),
         ]);
-        assert_eq!(ghost_slot_items(&slot, &book), vec![3, 1, 3]);
+        let ids = slot_stacks(&slot, &book)
+            .into_iter()
+            .map(|stack| stack.kind.to_u32())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![3, 1, 3]);
+    }
+
+    #[test]
+    fn with_any_potion_resolves_component_bearing_stacks() {
+        use azalea_registry::builtin::ItemKind;
+
+        let book = RecipeBookState::default();
+        let slot =
+            SlotDisplay::WithAnyPotion(Box::new(SlotDisplay::Item(ItemKind::Potion.to_u32())));
+        let stacks = slot_stacks(&slot, &book);
+        assert!(stacks.len() > 1);
+        assert!(stacks.iter().all(|stack| {
+            stack.kind == ItemKind::Potion
+                && stack
+                    .get_component::<PotionContents>()
+                    .is_some_and(|contents| contents.potion.is_some())
+        }));
+    }
+
+    #[test]
+    fn only_with_component_uses_effective_dye_defaults() {
+        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+
+        let book = RecipeBookState::default();
+        let slot = SlotDisplay::OnlyWithComponent {
+            contents: Box::new(SlotDisplay::Composite(vec![
+                SlotDisplay::Item(ItemKind::WhiteDye.to_u32()),
+                SlotDisplay::Item(ItemKind::Diamond.to_u32()),
+            ])),
+            component: DataComponentKind::Dye.to_u32(),
+        };
+        let stacks = slot_stacks(&slot, &book);
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].kind, ItemKind::WhiteDye);
+        assert!(stacks[0].get_component::<Dye>().is_some());
+    }
+
+    #[test]
+    fn dyed_demo_writes_vanilla_dyed_color_component() {
+        use azalea_registry::builtin::ItemKind;
+
+        let book = RecipeBookState::default();
+        let slot = SlotDisplay::Dyed {
+            dye: Box::new(SlotDisplay::Item(ItemKind::RedDye.to_u32())),
+            target: Box::new(SlotDisplay::Item(ItemKind::LeatherChestplate.to_u32())),
+        };
+        let stacks = slot_stacks(&slot, &book);
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].kind, ItemKind::LeatherChestplate);
+        assert_eq!(stacks[0].count, 1);
+        assert_eq!(
+            stacks[0].get_component::<DyedColor>().unwrap().rgb,
+            0xB02E26
+        );
+    }
+
+    #[test]
+    fn smithing_trim_demo_writes_trim_component() {
+        use azalea_registry::builtin::ItemKind;
+
+        let book = RecipeBookState::default();
+        let slot = SlotDisplay::SmithingTrim {
+            base: Box::new(SlotDisplay::Item(ItemKind::IronChestplate.to_u32())),
+            material: Box::new(SlotDisplay::Item(ItemKind::Diamond.to_u32())),
+            trim_pattern: TrimPatternHolder::Reference(0),
+        };
+        let stacks = slot_stacks(&slot, &book);
+        assert_eq!(stacks.len(), 16);
+        assert!(stacks.iter().all(|stack| {
+            stack.kind == ItemKind::IronChestplate
+                && stack.count == 1
+                && stack.get_component::<Trim>().is_some()
+        }));
+    }
+
+    #[test]
+    fn direct_trim_pattern_is_not_silently_rendered_as_untrimmed_base() {
+        use azalea_chat::FormattedText;
+        use azalea_registry::builtin::ItemKind;
+
+        let book = RecipeBookState::default();
+        let slot = SlotDisplay::SmithingTrim {
+            base: Box::new(SlotDisplay::Item(ItemKind::IronChestplate.to_u32())),
+            material: Box::new(SlotDisplay::Item(ItemKind::Diamond.to_u32())),
+            trim_pattern: TrimPatternHolder::Direct {
+                asset_id: "minecraft:test".into(),
+                description: FormattedText::from("Test Trim"),
+                decal: false,
+            },
+        };
+        assert!(slot_stacks(&slot, &book).is_empty());
+    }
+
+    #[test]
+    fn page_shrink_resets_to_first_page() {
+        let mut page = 3;
+        reset_page_if_out_of_range(&mut page, 2);
+        assert_eq!(page, 0);
+        let mut page = 1;
+        reset_page_if_out_of_range(&mut page, 2);
+        assert_eq!(page, 1);
+    }
+
+    #[test]
+    fn ctrl_freezes_recipe_cycle_clock() {
+        let mut state = RecipeBookUiState::new();
+        state.cycle_time = Duration::from_millis(1_490);
+        state.cycle_last_update = Instant::now() - Duration::from_millis(30);
+        state.update_cycle_time(true);
+        assert_eq!(state.cycle_time, Duration::from_millis(1_490));
+        assert_eq!(state.cycle_index(), 0);
+
+        state.cycle_last_update = Instant::now() - Duration::from_millis(30);
+        state.update_cycle_time(false);
+        assert!(state.cycle_time >= Duration::from_millis(1_520));
+        assert_eq!(state.cycle_index(), 1);
     }
 
     #[test]
