@@ -581,6 +581,20 @@ impl GameState {
         self.cursor_item = azalea_inventory::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
+        self.recipe_book_ui
+            .reset_for_closed_screen(&mut self.recipe_book);
+    }
+
+    pub fn recipe_book_screen_active(&self) -> bool {
+        self.inventory_open
+            || matches!(
+                self.open_container.as_ref(),
+                Some(container)
+                    if matches!(
+                        container.screen,
+                        ContainerScreen::CraftingTable | ContainerScreen::Furnace(_)
+                    )
+            )
     }
 
     /// Replaces any open server dialog; false (logged) when `reference`
@@ -620,7 +634,7 @@ impl GameState {
         if self.creative_inventory_open {
             return self.creative_state.tab.captures_typing();
         }
-        if self.recipe_book_ui.captures_typing() {
+        if self.recipe_book_screen_active() && self.recipe_book_ui.captures_typing() {
             return true;
         }
         matches!(

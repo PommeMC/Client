@@ -154,7 +154,14 @@ impl RecipeBookUiState {
         book.ghost_recipe = None;
     }
 
-    pub fn focus_search_from_chat_key(&mut self, book: &RecipeBookState) -> bool {
+    pub fn focus_search_from_chat_key(
+        &mut self,
+        book: &RecipeBookState,
+        screen_active: bool,
+    ) -> bool {
+        if !screen_active {
+            return false;
+        }
         let Some((kind, _)) = self.screen else {
             return false;
         };
@@ -2639,6 +2646,21 @@ mod tests {
         assert!(!entry_matches_search(&entry, &book, "diamond"));
         assert!(!entry_matches_search(&entry, &book, " fancy"));
         assert!(entry_matches_search(&entry, &book, " minecraft : diamond "));
+    }
+
+    #[test]
+    fn stale_recipe_screen_does_not_capture_chat_key() {
+        let spec = RecipeBookScreenSpec::player(0);
+        let mut state = RecipeBookUiState::new();
+        state.ensure_screen(spec);
+        let mut book = RecipeBookState::default();
+        book.settings.crafting.open = true;
+
+        assert!(!state.focus_search_from_chat_key(&book, false));
+        assert!(!state.captures_typing());
+
+        assert!(state.focus_search_from_chat_key(&book, true));
+        assert!(state.captures_typing());
     }
 
     #[test]

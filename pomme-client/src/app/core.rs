@@ -1536,6 +1536,10 @@ impl AppCore {
                         // Vanilla setScreen replaces whatever screen is up,
                         // including the pause menu.
                         game.paused = false;
+                        if game.inventory_open || game.recipe_book_ui.captures_typing() {
+                            game.recipe_book_ui
+                                .reset_for_closed_screen(&mut game.recipe_book);
+                        }
                         game.inventory_open = false;
                         game.close_creative_inventory();
                         game.inv_drag = None;
@@ -1903,6 +1907,10 @@ impl AppCore {
                         }
                     }
                     if game.inventory_open || game.creative_inventory_open {
+                        if game.inventory_open && matches!(game_mode, 1 | 3) {
+                            game.recipe_book_ui
+                                .reset_for_closed_screen(&mut game.recipe_book);
+                        }
                         match game_mode {
                             1 => {
                                 game.inventory_open = false;

@@ -307,7 +307,7 @@ impl InputState {
                     if game.creative_inventory_open {
                         game.close_creative_inventory();
                         should_apply_cursor_grab = true;
-                    } else if game.open_container.is_some() {
+                    } else if game.open_container.is_some() || game.inventory_open {
                         game.close_menu();
                         should_apply_cursor_grab = true;
                     } else if !game.paused
@@ -395,10 +395,10 @@ impl InputState {
                     self.recent_actions.remove(&Action::ChangePerspective);
                 }
                 if self.action_just_pressed(Action::OpenChat) {
-                    if game
-                        .recipe_book_ui
-                        .focus_search_from_chat_key(&game.recipe_book)
-                    {
+                    if game.recipe_book_ui.focus_search_from_chat_key(
+                        &game.recipe_book,
+                        game.recipe_book_screen_active(),
+                    ) {
                         // Vanilla routes the chat binding to recipe search while
                         // an open recipe book owns the container screen. Ignore
                         // the `t` character emitted by the same key press.
