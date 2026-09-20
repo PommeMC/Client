@@ -10,16 +10,28 @@ use azalea_registry::{Holder, Registry};
 use crossbeam_channel::Sender;
 
 use super::NetworkEvent;
+use super::chat_security::ProfileKeyServices;
 use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::entity::MetaValue;
 use crate::entity::components::Position;
+use crate::net::chunk_batch::ChunkBatchSizeCalculator;
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
+use crate::ui::server_dialog::DialogReference;
 use crate::ui::text::format_text_spans;
 use crate::world::block::model::CardinalLightType;
+
+fn dialog_holder_reference(
+    holder: &azalea_registry::Holder<azalea_registry::data::Dialog, simdnbt::owned::Nbt>,
+) -> DialogReference {
+    match holder {
+        azalea_registry::Holder::Reference(dialog) => DialogReference::ProtocolId(dialog.to_u32()),
+        azalea_registry::Holder::Direct(nbt) => DialogReference::inline(nbt),
+    }
+}
 
 /// Dimension info from a login/respawn registry entry. Fields that Azalea does
 /// not model directly live in its flattened extras. Missing `has_skylight`
@@ -55,6 +67,7 @@ pub fn handle_game_packet(
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
     shared_tree: &SharedCommandTree,
+    batch_size_calculator: &mut ChunkBatchSizeCalculator,
 ) {
     match packet {
         ClientboundGamePacket::Login(p) => {
@@ -78,6 +91,10 @@ pub fn handle_game_packet(
                 entity_id: p.player_id.0,
                 hardcore: p.hardcore,
                 show_death_screen: p.show_death_screen,
+                online_mode: p.online_mode,
+            });
+            let _ = event_tx.try_send(NetworkEvent::SecureChatEnforced {
+                enforced: ProfileKeyServices::get().is_some() && p.enforces_secure_chat,
             });
         }
         ClientboundGamePacket::LevelChunkWithLight(p) => {
@@ -173,12 +190,8 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::ChunkCacheCenter { x: p.x, z: p.z });
         }
         ClientboundGamePacket::PlayerPosition(p) => {
-            sender.send(ServerboundGamePacket::AcceptTeleportation(
-                azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation {
-                    id: p.id,
-                },
-            ));
             let _ = event_tx.try_send(NetworkEvent::PlayerPosition {
+                id: p.id,
                 change: p.change.clone(),
                 relative: p.relative.clone(),
             });
@@ -188,15 +201,17 @@ pub fn handle_game_packet(
                 azalea_protocol::packets::game::s_keep_alive::ServerboundKeepAlive { id: p.id },
             ));
         }
+        ClientboundGamePacket::ChunkBatchStart(_) => {
+            batch_size_calculator.on_batch_start();
+        }
         ClientboundGamePacket::ChunkBatchFinished(p) => {
-            let desired = (p.batch_size as f32).max(25.0);
-            tracing::trace!(
-                "ChunkBatchFinished: batch_size={}, responding with desired={desired}",
-                p.batch_size
-            );
+            // Answered on the network thread: vanilla's
+            // `handleChunkBatchFinished` is one of the few handlers it doesn't
+            // defer to the main thread.
+            batch_size_calculator.on_batch_finished(p.batch_size);
             sender.send(ServerboundGamePacket::ChunkBatchReceived(
                 azalea_protocol::packets::game::s_chunk_batch_received::ServerboundChunkBatchReceived {
-                    desired_chunks_per_tick: desired,
+                    desired_chunks_per_tick: batch_size_calculator.desired_chunks_per_tick(),
                 },
             ));
         }
@@ -318,16 +333,6 @@ pub fn handle_game_packet(
                 flying_speed: p.flying_speed,
                 walking_speed: p.walking_speed,
             });
-        }
-        ClientboundGamePacket::SystemChat(p) => {
-            if p.overlay {
-                send_action_bar(event_tx, &p.content);
-            } else {
-                send_chat(event_tx, &p.content);
-            }
-        }
-        ClientboundGamePacket::SetActionBarText(p) => {
-            send_action_bar(event_tx, &p.text);
         }
         ClientboundGamePacket::BossEvent(p) => {
             use azalea_protocol::packets::game::c_boss_event::Operation;
@@ -532,12 +537,6 @@ pub fn handle_game_packet(
                 }
             }
         }
-        ClientboundGamePacket::PlayerChat(p) => {
-            send_chat(event_tx, &p.message());
-        }
-        ClientboundGamePacket::DisguisedChat(p) => {
-            send_chat(event_tx, &p.message);
-        }
         ClientboundGamePacket::BlockUpdate(p) => {
             let _ = event_tx.try_send(NetworkEvent::BlockUpdate {
                 pos: p.pos,
@@ -585,6 +584,9 @@ pub fn handle_game_packet(
                         game_mode: p.param as u8,
                         previous: None,
                     });
+                }
+                EventType::WaitForLevelChunks => {
+                    let _ = event_tx.try_send(NetworkEvent::LevelChunksLoadStart);
                 }
                 EventType::StartRaining
                 | EventType::StopRaining
@@ -998,6 +1000,7 @@ pub fn handle_game_packet(
             use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry};
             let actions = PlayerInfoActions {
                 add_player: p.actions.add_player,
+                initialize_chat: p.actions.initialize_chat,
                 update_game_mode: p.actions.update_game_mode,
                 update_listed: p.actions.update_listed,
                 update_latency: p.actions.update_latency,
@@ -1024,6 +1027,32 @@ pub fn handle_game_packet(
                         .as_ref()
                         .map(|c| crate::ui::text::format_text_spans(c, [1.0, 1.0, 1.0, 1.0])),
                     list_order: e.list_order,
+                    chat_session: if p.actions.initialize_chat {
+                        match (ProfileKeyServices::get(), e.chat_session.as_ref()) {
+                            (Some(services), Some(session)) => match services
+                                .validate_session(e.profile.uuid, session)
+                            {
+                                Ok(session) => Some(session),
+                                Err(error) => {
+                                    tracing::error!(
+                                        player = %e.profile.name,
+                                        "Failed to validate profile key: {error}"
+                                    );
+                                    None
+                                }
+                            },
+                            (None, Some(_)) => {
+                                tracing::warn!(
+                                    player = %e.profile.name,
+                                    "Ignoring chat session due to missing Mojang Services public key"
+                                );
+                                None
+                            }
+                            (_, None) => None,
+                        }
+                    } else {
+                        None
+                    },
                 })
                 .collect();
             let _ = event_tx.try_send(NetworkEvent::PlayerInfoUpdate { actions, entries });
@@ -1049,12 +1078,13 @@ pub fn handle_game_packet(
             *shared_tree.lock() = Some(tree.clone());
             let _ = event_tx.try_send(NetworkEvent::CommandTree { tree });
         }
-        ClientboundGamePacket::CommandSuggestions(p) => {
-            let _ = event_tx.try_send(NetworkEvent::CommandSuggestions {
-                id: p.id,
-                start: p.suggestions.range().start(),
-                options: p.suggestions.list().iter().map(|s| s.text()).collect(),
+        ClientboundGamePacket::ShowDialog(p) => {
+            let _ = event_tx.try_send(NetworkEvent::ShowDialog {
+                dialog: dialog_holder_reference(&p.dialog),
             });
+        }
+        ClientboundGamePacket::ClearDialog(_) => {
+            let _ = event_tx.try_send(NetworkEvent::ClearDialog);
         }
         ClientboundGamePacket::CustomChatCompletions(p) => {
             tracing::debug!(
@@ -1065,18 +1095,6 @@ pub fn handle_game_packet(
         }
         _other => {}
     }
-}
-
-fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
-    let spans = format_text_spans(message, [1.0; 4]);
-    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
-    tracing::info!("Chat: {text}");
-    let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });
-}
-
-fn send_action_bar(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
-    let spans = format_text_spans(message, [1.0; 4]);
-    let _ = event_tx.try_send(NetworkEvent::ActionBar { spans });
 }
 
 fn send_scoreboard_team(
@@ -1180,9 +1198,9 @@ fn variant_index(registry_holder: &RegistryHolder, kind: EntityKind, protocol_id
     };
     let order_pos = |name: &str| order.iter().position(|p| *p == name).map(|i| i as u32);
     let fallback = order_pos(default).unwrap_or(0);
-    // Position == protocol id only holds because pomme answers
-    // SelectKnownPacks with an empty list (connection.rs), forcing the server
-    // to send NBT for every entry (azalea shift_removes NBT-less ones).
+    // Position == protocol id only holds while every entry carries NBT
+    // (azalea shift_removes NBT-less ones). Entries the server skips for a
+    // pack pomme claimed are filled in first (`net::known_packs`).
     let Some((ident, nbt)) = registry_holder
         .extra
         .get(&azalea_registry::identifier::Identifier::new(registry))
@@ -1519,6 +1537,7 @@ mod tests {
                 &event_tx,
                 &registries,
                 &command_tree,
+                &mut ChunkBatchSizeCalculator::default(),
             );
         };
 

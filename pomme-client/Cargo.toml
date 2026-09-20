@@ -9,6 +9,9 @@ default = ["singleplayer"]
 # Embeds SteelMC as the integrated server. Off, the world screens still list and
 # edit saves but nothing can open one.
 singleplayer = ["dep:pomme-singleplayer"]
+# Loads `ttf` font providers from resource packs through the system FreeType
+# (pkg-config). Off, those providers are skipped.
+ttf-fonts = ["dep:freetype-rs"]
 
 [build-dependencies]
 shaderc = "0.10"
@@ -21,6 +24,12 @@ directories = { workspace = true }
 sha1_smol = { workspace = true }
 open = { workspace = true }
 base64 = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+rsa = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+regex = { workspace = true }
 zip = { workspace = true }
 tokio = { workspace = true, features = ["tracing", "net", "time"] }
 reqwest = { workspace = true, features = ["blocking"] }
@@ -63,6 +72,7 @@ crossbeam-channel = "0.5"
 png = "0.17"
 image = "0.25"
 fontdue = "0.9.3"
+freetype-rs = { version = "0.38", optional = true }
 simdnbt = "0.10"
 discord-rich-presence = "1.1"
 arboard = { version = "3", features = ["wayland-data-control"] }

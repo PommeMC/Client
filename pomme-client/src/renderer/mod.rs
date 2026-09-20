@@ -52,6 +52,7 @@ use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
+use crate::ui::font::FontSources;
 use crate::world::block::registry::BlockRegistry;
 
 #[derive(Error, Debug)]
@@ -61,6 +62,9 @@ pub enum RendererError {
 
     #[error("vulkan error: {0}")]
     Vulkan(#[from] vk::Error),
+
+    #[error("failed to initialize Minecraft fonts: {0}")]
+    Font(String),
 }
 
 #[derive(Clone, Copy)]
@@ -180,12 +184,16 @@ pub struct Renderer {
 impl Renderer {
     pub fn new(
         window: Arc<Window>,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        font_sources: FontSources<'_>,
         game_dir: &Path,
         vsync: bool,
         panorama_dir: &Path,
     ) -> Result<Self, RendererError> {
+        let FontSources {
+            jar_assets_dir,
+            asset_index,
+            ..
+        } = font_sources;
         let size = window.inner_size();
 
         let registry_handle = {
@@ -209,6 +217,11 @@ impl Renderer {
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
+        let font_layer_limit = ctx
+            .physical_device
+            .get_properties()
+            .limits
+            .max_image_array_layers;
 
         let mut menu_pipeline = MenuOverlayPipeline::new(
             &ctx.device,
@@ -216,9 +229,10 @@ impl Renderer {
             ctx.command_pool,
             swapchain_state.render_pass,
             &ctx.allocator,
-            jar_assets_dir,
-            asset_index,
-        );
+            font_sources,
+            font_layer_limit,
+        )
+        .map_err(RendererError::Font)?;
 
         let sw = size.width.max(1) as f32;
         let sh = size.height.max(1) as f32;
@@ -1200,6 +1214,19 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
+        if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            FontSources {
+                jar_assets_dir: &self.jar_assets_dir,
+                asset_index: &self.asset_index,
+                packs,
+            },
+        ) {
+            tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
+        }
 
         warm_item_meshes(
             &self.ctx.device,
@@ -1301,6 +1328,18 @@ impl Renderer {
     /// screen as server favicons, so they share one string-keyed RGBA atlas.
     pub fn update_face_atlas(&mut self, faces: &[(String, Vec<u8>, u32)]) {
         self.update_favicon_atlas(faces);
+    }
+
+    /// The inline objects the menu text drew since the last call.
+    pub fn drain_drawn_inline_objects(
+        &mut self,
+    ) -> std::collections::hash_map::Drain<'_, String, crate::ui::text::InlineObject> {
+        self.menu_pipeline.drain_drawn_inline_objects()
+    }
+
+    /// Points an animated inline object at the frame showing now.
+    pub fn set_inline_object_frame(&mut self, key: &str, frame_key: &str) {
+        self.menu_pipeline.set_inline_object_frame(key, frame_key);
     }
 
     pub fn menu_text_width(&self, text: &str, scale: f32) -> f32 {
@@ -2003,6 +2042,39 @@ pub(crate) struct SkinData {
     pub width: u32,
     pub height: u32,
     pub slim: bool,
+}
+
+pub(crate) async fn fetch_skin_texture_by_name(name: &str) -> Result<SkinData, String> {
+    #[derive(serde::Deserialize)]
+    struct NamedProfile {
+        id: String,
+    }
+
+    // The name goes in a path segment, so it is checked and encoded rather
+    // than pasted into the URL.
+    if !crate::player::valid_player_name(name) {
+        return Err(format!("invalid player name {name:?}"));
+    }
+    let mut url = reqwest::Url::parse("https://api.mojang.com/users/profiles/minecraft/")
+        .map_err(|e| e.to_string())?;
+    url.path_segments_mut()
+        .map_err(|()| "profile url cannot take a path".to_owned())?
+        .pop_if_empty()
+        .push(name);
+    let response = reqwest::get(url).await.map_err(error_chain)?;
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::NOT_FOUND
+    ) {
+        return Err(format!("no profile for {name}"));
+    }
+    let profile: NamedProfile = response
+        .error_for_status()
+        .map_err(error_chain)?
+        .json()
+        .await
+        .map_err(error_chain)?;
+    fetch_skin_texture(&profile.id).await
 }
 
 pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<SkinData, String> {

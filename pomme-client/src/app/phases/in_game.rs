@@ -10,6 +10,7 @@ use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::FloatExt as _;
 
 use crate::app::core::{AppCore, PlayerInputState};
+use crate::app::level_load::LevelLoadTracker;
 use crate::app::phases::Gfx;
 use crate::app::{TICK_RATE, input};
 use crate::audio::{CATEGORY_AMBIENT, CATEGORY_PLAYERS, SoundRef};
@@ -35,7 +36,7 @@ use crate::renderer::pipelines::entity_renderer::{
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
-use crate::ui::chat::ChatState;
+use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
@@ -113,7 +114,12 @@ pub struct GameState {
     /// Entity ids whose shared `DATA_SILENT` flag is currently true.
     pub silent_entities: HashSet<i32>,
     pub position_set: bool,
-    pub player_loaded_sent: bool,
+    /// Vanilla `ClientPacketListener.levelLoadTracker`: present from login or
+    /// respawn until the level is ready and `player_loaded` has been sent.
+    pub level_load: Option<LevelLoadTracker>,
+    /// Vanilla `ClientPacketListener.clientLoaded`. While false, the local
+    /// player doesn't tick and sends no movement.
+    pub client_loaded: bool,
     pub player: LocalPlayer,
     /// Bubble index the pop sound last played for, so each pop fires once.
     pub last_bubble_pop_sound_played: i32,
@@ -154,8 +160,15 @@ pub struct GameState {
     /// Server registries, for hashing predicted container clicks.
     pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
     pub chat: ChatState,
+    pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
+    pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
+    pub dialog_registry: Arc<crate::ui::server_dialog::DialogRegistry>,
+    /// The connection is in the configuration phase (the join, or a
+    /// reconfiguration), where dialogs can't run commands.
+    pub configuring: bool,
     pub command_tree: Option<Arc<crate::net::commands::CommandTree>>,
     pub tab_list: TabList,
+    pub server_enforces_secure_chat: bool,
     /// Locator bar waypoints tracked by the server.
     pub waypoints: crate::world::waypoints::WaypointMap,
     /// Vanilla `Hud.toolHighlightTimer` / `lastToolHighlight` (see
@@ -222,6 +235,8 @@ pub struct GameState {
     pub position_send_counter: u32,
     pub options_from_game: bool,
     pub last_render_distance: u32,
+    pub last_chat_visibility: crate::ui::chat::ChatVisibilitySetting,
+    pub last_chat_colors: bool,
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
@@ -268,6 +283,10 @@ pub struct GameState {
     /// Per-section cave-cull visibility (vanilla `VisibilitySet`), keyed like
     /// `section_gen`. Fed by mesh results; consumed by the occlusion walk.
     pub section_vis: HashMap<(ChunkPos, i32), VisibilitySet>,
+    /// Per-column bitmask of sections whose mesh is finished and, if it had
+    /// any geometry, uploaded — vanilla's "not `UNCOMPILED`", where an empty
+    /// mesh counts too. The level load gate waits on the camera's bit.
+    pub compiled: HashMap<ChunkPos, u32>,
     /// Highest upload epoch each `section_vis` entry was set from; mirrors the
     /// buffer's per-section geometry gate so a stale bulk can't re-stale an
     /// edited section's visibility.
@@ -304,6 +323,7 @@ impl GameState {
         resource_packs: &ResourcePackManager,
         render_distance: u32,
         singleplayer: bool,
+        chat_options: crate::ui::chat::ChatOptions,
     ) -> Self {
         let biome_climate = Arc::new(HashMap::new());
         // The dimension's shade table arrives with `DimensionInfo`, which
@@ -327,9 +347,12 @@ impl GameState {
             entity_positions: HashMap::new(),
             silent_entities: HashSet::new(),
             position_set: false,
-            player_loaded_sent: false,
+            level_load: None,
+            client_loaded: false,
             options_from_game: false,
             last_render_distance: render_distance,
+            last_chat_visibility: chat_options.visibility,
+            last_chat_colors: chat_options.colors,
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
@@ -371,9 +394,18 @@ impl GameState {
             inv_drag: None,
             inv_last_click: None,
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
-            chat: ChatState::new(),
+            chat: {
+                let mut chat = ChatState::new();
+                chat.set_options(chat_options);
+                chat
+            },
+            server_dialog: None,
+            server_links: Vec::new(),
+            dialog_registry: Arc::default(),
+            configuring: true,
             command_tree: None,
             tab_list: TabList::new(),
+            server_enforces_secure_chat: false,
             waypoints: crate::world::waypoints::WaypointMap::default(),
             tool_highlight_timer: 0,
             last_tool_highlight: azalea_inventory::ItemStack::Empty,
@@ -426,6 +458,7 @@ impl GameState {
             section_gen: HashMap::new(),
             next_section_gen: 0,
             section_vis: HashMap::new(),
+            compiled: HashMap::new(),
             section_vis_epoch: HashMap::new(),
             vis_tiers: HashMap::new(),
             vis_valid: false,
@@ -453,10 +486,18 @@ impl GameState {
             .map(|e| (e.health, e.max_health))
     }
 
+    /// A server dialog, or the confirm screen one raised, is the top screen.
+    /// Vanilla runs no key mapping while a screen is up, and the screens under
+    /// it neither draw nor take input.
+    pub fn dialog_open(&self) -> bool {
+        self.server_dialog.is_some() || self.chat.has_pending_modal_prompt()
+    }
+
     pub fn gui_open(&self) -> bool {
         self.inventory_open
             || self.creative_inventory_open
             || self.open_container.is_some()
+            || self.dialog_open()
             || self.game_mode_switcher.is_some()
     }
 
@@ -536,11 +577,40 @@ impl GameState {
         self.inv_last_click = None;
     }
 
+    /// Replaces any open server dialog; false (logged) when `reference`
+    /// doesn't resolve to a dialog.
+    pub fn open_server_dialog(
+        &mut self,
+        reference: crate::ui::server_dialog::DialogReference,
+    ) -> bool {
+        match crate::ui::server_dialog::ServerDialogState::open(
+            reference,
+            &self.dialog_registry,
+            &self.server_links,
+        ) {
+            Ok(dialog) => {
+                self.server_dialog = Some(dialog);
+                true
+            }
+            Err(error) => {
+                tracing::warn!("Could not open server dialog: {error}");
+                false
+            }
+        }
+    }
+
     /// A focused text field (anvil rename, creative search) is capturing
     /// keyboard input: letter/digit keys must type instead of acting as
     /// hotkeys. The anvil field is editable only while its input slot is
     /// filled, matching vanilla.
     pub fn wants_text_input(&self) -> bool {
+        if self
+            .server_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.wants_text_input())
+        {
+            return true;
+        }
         if self.creative_inventory_open {
             return self.creative_state.tab.captures_typing();
         }
@@ -767,15 +837,43 @@ impl GameState {
         ]);
     }
 
-    pub fn sync_render_distance(&mut self, connection: &ConnectionHandle, render_distance: u32) {
+    /// Whether the chat options `ClientInformation` carries differ from the
+    /// last ones sent.
+    fn chat_information_changed(&self, chat_options: crate::ui::chat::ChatOptions) -> bool {
+        self.last_chat_visibility != chat_options.visibility
+            || self.last_chat_colors != chat_options.colors
+    }
+
+    pub fn sync_client_information(
+        &mut self,
+        connection: &ConnectionHandle,
+        render_distance: u32,
+        chat_options: crate::ui::chat::ChatOptions,
+    ) {
+        let render_changed = self.last_render_distance != render_distance;
+        let chat_changed = self.chat_information_changed(chat_options);
         self.last_render_distance = render_distance;
-        tracing::info!("Render distance changed to {render_distance}");
+        self.last_chat_visibility = chat_options.visibility;
+        self.last_chat_colors = chat_options.colors;
+        if render_changed {
+            tracing::info!("Render distance changed to {render_distance}");
+        }
+        if chat_changed {
+            tracing::info!(
+                visibility = ?chat_options.visibility,
+                colors = chat_options.colors,
+                "Chat client information changed"
+            );
+        }
 
         connection
             .packet_tx
             .send(ServerboundGamePacket::ClientInformation(
                 ServerboundClientInformation {
-                    client_information: crate::net::client_information(render_distance as u8),
+                    client_information: crate::net::client_information(
+                        render_distance as u8,
+                        chat_options,
+                    ),
                 },
             ));
     }
@@ -888,9 +986,109 @@ impl GameState {
         self.next_section_gen
     }
 
-    /// Adopt a mesh's per-section visibility sets, epoch-guarded so a stale
-    /// result can't overwrite a newer edit's visibility.
-    fn apply_mesh_visibility(&mut self, mesh: &mut ChunkMeshData) {
+    /// Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
+    /// upload them in one coalesced GPU transfer (one fence wait, not one per
+    /// mesh) to avoid the streaming stutter from per-mesh `queue.wait_idle`.
+    /// Shared with the loading phase, which streams the spawn chunks in before
+    /// the game phase takes over.
+    pub fn drain_and_upload_meshes(&mut self, renderer: &mut Renderer) {
+        let drain_start = std::time::Instant::now();
+        let results: Vec<_> = self.mesh_dispatcher.drain_results().collect();
+        let mut batch = Vec::with_capacity(results.len());
+        for mut mesh in results {
+            // Stale meshes count too: worker time spent is worker time spent.
+            if let Some(bench) = &mut self.chunk_load_bench {
+                bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
+            }
+            // Drop a mesh built from an out-of-date snapshot. A mesh for a chunk
+            // that has since unloaded is always stale (uploading it would resurrect
+            // a column nothing cleans up). Edits (priority lane, single section)
+            // are keyed per section so editing one section never drops a sibling's
+            // in-flight result; bulk loads keep the column key.
+            let stale = self.chunk_store.get_chunk(&mesh.pos).is_none()
+                || if mesh.timing.is_some() {
+                    mesh.replaced.clone().any(|si| {
+                        self.section_gen.get(&(mesh.pos, si)).copied() != Some(mesh.content_gen)
+                    })
+                } else {
+                    mesh.content_gen < self.content_gen.get(&mesh.pos).copied().unwrap_or(0)
+                };
+            if stale {
+                self.mesh_dispatcher.recycle(mesh);
+                continue;
+            }
+            if let Some(t) = &mesh.timing {
+                let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
+                tracing::debug!(
+                    "edit remesh [{}, {}]: queue {:.1}ms + mesh {:.1}ms + drain {:.1}ms = {:.1}ms",
+                    mesh.pos.x,
+                    mesh.pos.z,
+                    ms(t.started_at - t.enqueued_at),
+                    ms(t.meshed_at - t.started_at),
+                    ms(t.meshed_at.elapsed()),
+                    ms(t.enqueued_at.elapsed()),
+                );
+            }
+            // Taken before the upload so the mesh can move into the batch; the
+            // upload reports back what it had to drop.
+            self.apply_mesh_bookkeeping(&mut mesh);
+            batch.push(mesh);
+        }
+        self.last_update_phases.mesh_drain_ms = drain_start.elapsed().as_secs_f32() * 1000.0;
+        let upload_start = std::time::Instant::now();
+        let dropped = renderer.upload_chunk_meshes(&batch);
+        self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
+        self.clear_dropped_meshed(dropped);
+        // Return the uploaded meshes' buffers to the worker pool for reuse.
+        for mesh in batch {
+            self.mesh_dispatcher.recycle(mesh);
+        }
+    }
+
+    /// Vanilla `SectionUpdateTracker.hasAllNeighbors` plus
+    /// `LevelRenderer.isSectionCompiledAndVisible`: the section holding
+    /// `camera_block` may only have compiled once its column's whole 3x3
+    /// neighbourhood was loaded and lit, and it must have a mesh — an empty one
+    /// counts, as vanilla's empty `CompiledSectionMesh` does.
+    pub fn camera_section_ready(&self, camera_block: glam::IVec3) -> bool {
+        let column = ChunkPos::new(camera_block.x >> 4, camera_block.z >> 4);
+        let neighbourhood_lit = crate::world::chunk::column_neighborhood(column).all(|p| {
+            self.chunk_store.get_chunk(&p).is_some()
+                && self.light_engine.light_on_in_column((p.x, p.z))
+        });
+        let section = (camera_block.y - self.chunk_store.min_y()) >> 4;
+        let compiled = self
+            .compiled
+            .get(&column)
+            .is_some_and(|mask| mask & section_bit(section) != 0);
+        neighbourhood_lit && compiled
+    }
+
+    /// Vanilla `ClientPacketListener.handleLogin`/`handleRespawn`: clear the
+    /// loaded flag and start waiting for the new level.
+    pub fn start_level_load(&mut self) {
+        self.client_loaded = false;
+        // TODO: vanilla gives a newly created singleplayer world a 500ms close
+        // delay (`Minecraft.doWorldLoad`); Pomme can't tell a fresh world from
+        // an opened one yet.
+        let mut tracker = LevelLoadTracker::start_client_load(
+            std::time::Duration::ZERO,
+            std::time::Instant::now(),
+        );
+        // 1.20.1 and 1.20.2 have no LEVEL_CHUNKS_LOAD_START game event (1.20.4
+        // added it), so nothing would ever move the tracker on; those clients
+        // had the level from the login packet.
+        if crate::version::session_protocol() < 765 {
+            tracker.loading_packets_received();
+        }
+        self.level_load = Some(tracker);
+    }
+
+    /// Adopt a finished mesh's CPU-side state: its per-section visibility sets,
+    /// epoch-guarded so a stale result can't overwrite a newer edit's
+    /// visibility, and the sections it compiled. The upload can still drop a
+    /// section afterwards, which `clear_dropped_meshed` takes back out.
+    fn apply_mesh_bookkeeping(&mut self, mesh: &mut ChunkMeshData) {
         let pos = mesh.pos;
         for (si, vis) in std::mem::take(&mut mesh.visibility) {
             let e = self.section_vis_epoch.entry((pos, si)).or_insert(0);
@@ -899,16 +1097,20 @@ impl GameState {
                 self.section_vis.insert((pos, si), vis);
             }
         }
+        *self.compiled.entry(pos).or_default() |= section_bits(mesh.replaced.clone());
     }
 
     /// Sections dropped on pool exhaustion were retired from the buffer; clear
-    /// their meshed bit so the next rescan re-enqueues them.
+    /// their meshed bit so the next rescan re-enqueues them, and their compiled
+    /// bit, since nothing of them reached the GPU.
     fn clear_dropped_meshed(&mut self, dropped: Vec<(ChunkPos, Vec<i32>)>) {
         for (pos, sections) in dropped {
+            let retired = section_bits(sections);
             if let Some(m) = self.meshed.get_mut(&pos) {
-                for si in sections {
-                    m.mask &= !(1u32 << si);
-                }
+                m.mask &= !retired;
+            }
+            if let Some(mask) = self.compiled.get_mut(&pos) {
+                *mask &= !retired;
             }
         }
     }
@@ -916,7 +1118,7 @@ impl GameState {
     /// Upload a finished mesh and apply its bookkeeping. The sync edit path;
     /// the frame drain batches uploads instead.
     fn apply_mesh_upload(&mut self, renderer: &mut Renderer, mut mesh: ChunkMeshData) {
-        self.apply_mesh_visibility(&mut mesh);
+        self.apply_mesh_bookkeeping(&mut mesh);
         let dropped = renderer.upload_chunk_meshes(std::slice::from_ref(&mesh));
         self.clear_dropped_meshed(dropped);
         self.mesh_dispatcher.recycle(mesh);
@@ -1055,6 +1257,11 @@ impl GameState {
             // Mesh the whole column once, then nothing until a lod/content change.
             // Occlusion gates drawing, not meshing, so off-screen and hidden
             // sections still mesh (the queue orders the backlog nearest-first).
+            // TODO: vanilla won't schedule a section's first compile until its
+            // 3x3 column neighbourhood is loaded and lit
+            // (`LevelExtractor.java:155` / `SectionUpdateTracker.hasAllNeighbors`);
+            // we mesh against missing neighbours as air and repair the borders
+            // when their light bumps `content_gen`.
             let to_mesh = match self.meshed.get(&pos) {
                 Some(m) if m.lod == lod && m.content_gen == content_gen => full & !m.mask,
                 _ => full,
@@ -1114,6 +1321,19 @@ fn column_frustum_tier(
     }
 }
 
+/// Bit for one section index, 0 outside a column's 32 addressable sections (a
+/// camera outside build height resolves to such an index).
+fn section_bit(si: i32) -> u32 {
+    if (0..32).contains(&si) { 1u32 << si } else { 0 }
+}
+
+/// The bits for several section indices.
+fn section_bits(indices: impl IntoIterator<Item = i32>) -> u32 {
+    indices
+        .into_iter()
+        .fold(0u32, |mask, si| mask | section_bit(si))
+}
+
 /// Full mask for an `n`-section column (bits `0..n` set).
 fn section_mask(n: i32) -> u32 {
     if n >= 32 { u32::MAX } else { (1u32 << n) - 1 }
@@ -1162,6 +1382,253 @@ pub enum GameUpdateResult {
 enum ResultKind {
     Fps,
     ChunkLoad,
+}
+
+fn handle_chat_ui_action(
+    action: ChatUiAction,
+    core: &mut AppCore,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    match action {
+        ChatUiAction::OpenUrl(url) => {
+            let Ok(url) = crate::chat_component::parse_untrusted_url(url) else {
+                return;
+            };
+            if let Err(e) = open::that(&url) {
+                tracing::warn!("Could not open chat link {url:?}: {e}");
+            }
+        }
+        ChatUiAction::OpenChatSettings => {
+            game.chat.close_for_settings();
+            core.menu.open_chat_settings();
+            game.options_from_game = true;
+            game.paused = true;
+        }
+        ChatUiAction::RunCommand(command) => {
+            handle_unattended_command(&command, connection, game);
+        }
+        ChatUiAction::RunCommandUnsigned(command) => {
+            connection
+                .packet_tx
+                .send_raw(crate::net::chat::encode_outbound_command(&command));
+        }
+        ChatUiAction::Custom { id, payload } => connection.packet_tx.send_custom_click(id, payload),
+        // The chat screen stays as the dialog's `previousScreen`.
+        ChatUiAction::ShowDialog(dialog) => {
+            game.open_server_dialog(crate::ui::server_dialog::DialogReference::Holder(dialog));
+        }
+    }
+}
+
+fn handle_unattended_command(command: &str, connection: &ConnectionHandle, game: &mut GameState) {
+    use crate::net::commands::UnattendedCommandCheck;
+    use crate::ui::chat::CommandConfirmationKind;
+
+    let command = command.strip_prefix('/').unwrap_or(command);
+    let check = game
+        .command_tree
+        .as_ref()
+        .map_or(UnattendedCommandCheck::ParseErrors, |tree| {
+            tree.verify_unattended(command)
+        });
+    match CommandConfirmationKind::for_check(check) {
+        Some(kind) => game
+            .chat
+            .request_command_confirmation(command.to_owned(), kind),
+        None => {
+            connection
+                .packet_tx
+                .send_raw(crate::net::chat::encode_outbound_command(command));
+            // `setScreen(screenAfterCommand)` re-adds ChatScreen, whose
+            // `removed` resets the scroll.
+            game.chat.reset_chat_scroll();
+        }
+    }
+}
+
+/// Drops the dialog if the input just handled finished it, then carries out
+/// the action it reported.
+pub(crate) fn settle_server_dialog(
+    action: Option<crate::ui::server_dialog::ServerDialogAction>,
+    core: &mut AppCore,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    use crate::ui::server_dialog::ServerDialogAction;
+
+    // Vanilla swaps in the after-action screen only where the click event
+    // reaches `setScreen` (`DialogScreen.runAction`).
+    let (activate, follow_up) = match action {
+        None => (false, None),
+        // `Screen.clickUrlAction`: the confirm screen replaces the dialog,
+        // while opening the link straight away (or chat links being off)
+        // leaves the screen alone.
+        Some(ServerDialogAction::OpenUrl(url)) => match game.chat.request_open_url(url) {
+            Some(action) => (false, Some(action)),
+            None => (game.chat.has_pending_modal_prompt(), None),
+        },
+        // `ClientConfigurationPacketListenerImpl.createDialogAccess`.
+        Some(ServerDialogAction::RunCommand(command)) if game.configuring => {
+            tracing::warn!(
+                "Commands are not supported in configuration phase, trying to run '{command}'"
+            );
+            (false, None)
+        }
+        Some(ServerDialogAction::RunCommand(command)) => {
+            (true, Some(ChatUiAction::RunCommand(command)))
+        }
+        Some(ServerDialogAction::Custom { id, payload }) => {
+            (true, Some(ChatUiAction::Custom { id, payload }))
+        }
+        // `showDialog` only warns when the dialog doesn't resolve, leaving the
+        // current one up.
+        Some(ServerDialogAction::ShowDialog(reference)) => {
+            game.open_server_dialog(reference);
+            (false, None)
+        }
+    };
+    if activate && let Some(dialog) = game.server_dialog.as_mut() {
+        dialog.activate();
+    }
+    if game
+        .server_dialog
+        .as_ref()
+        .is_some_and(|dialog| dialog.is_finished())
+    {
+        game.server_dialog = None;
+    }
+    if let Some(action) = follow_up {
+        handle_chat_ui_action(action, core, connection, game);
+    }
+}
+
+/// The server dialog and the confirm screen a chat or dialog link opens over
+/// it, with their clicks settled. The connecting screen shares it for
+/// configuration-phase dialogs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_server_screens(
+    elements: &mut Vec<MenuElement>,
+    sw: f32,
+    sh: f32,
+    gs: f32,
+    core: &mut AppCore,
+    gfx: &Gfx,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+    // The client tick count, or `None` where the phase runs no game ticks.
+    tick: Option<u64>,
+    text_events: &[crate::ui::text_edit::TextInputEvent],
+) {
+    let modal_open = game.chat.has_pending_modal_prompt();
+    if let Some(dialog) = game.server_dialog.as_mut() {
+        // The dialog types while it is the top screen; a confirm screen over
+        // it takes the keyboard instead.
+        if !modal_open {
+            let fs = common::FONT_SIZE * gs;
+            dialog.handle_text_input(text_events, gs, &|s| gfx.renderer.menu_text_width(s, fs));
+        }
+        let scroll = core.input.consume_menu_scroll();
+        if scroll != 0.0 && !modal_open {
+            dialog.handle_scroll(scroll);
+        }
+        let action = dialog.build(
+            elements,
+            sw,
+            sh,
+            gs,
+            crate::ui::server_dialog::WidgetInput {
+                cursor: core.input.cursor_pos(),
+                clicked: core.input.left_just_pressed() && !modal_open,
+                held: core.input.left_held() && !modal_open,
+                shift: core.input.shift_held(),
+                activate: !modal_open
+                    && (core.input.enter_pressed()
+                        || core.input.key_just_pressed(winit::keyboard::KeyCode::Space)),
+                arrow_steps: i32::from(
+                    core.input
+                        .key_just_pressed(winit::keyboard::KeyCode::ArrowRight),
+                ) - i32::from(
+                    core.input
+                        .key_just_pressed(winit::keyboard::KeyCode::ArrowLeft),
+                ),
+                tick,
+                advanced_tooltips: game.advanced_item_tooltips,
+            },
+            &|t, s| gfx.renderer.menu_text_width(t, s),
+            &|spans, s| gfx.renderer.menu_spans_width(spans, s),
+        );
+        if dialog.take_click_sound() {
+            core.audio.play_ui_click();
+        }
+        settle_server_dialog(action, core, connection, game);
+        core.input.clear_just_pressed_actions();
+        core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+
+    if game.chat.has_pending_modal_prompt() {
+        let cursor = core.input.cursor_pos();
+        let clicked = core.input.left_just_pressed();
+        // `AbstractButton.onClick` plays the click; this is the same
+        // last-frame hit test the modal presses with.
+        if clicked && game.chat.hovering_clickable(cursor, false) {
+            core.audio.play_ui_click();
+        }
+        if let Some(action) =
+            game.chat
+                .build_modal_prompt(elements, sw, sh, gs, cursor, clicked, &|spans, s| {
+                    gfx.renderer.menu_spans_width(spans, s)
+                })
+        {
+            handle_chat_ui_action(action, core, connection, game);
+        }
+        core.input.clear_just_pressed_actions();
+        core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+}
+
+/// A key press while a server dialog is the top screen: Escape cancels it,
+/// Tab cycles its text fields, and anything else types. A confirm screen the
+/// dialog raised sits above it and answers Escape first.
+pub(crate) fn server_dialog_key(
+    code: winit::keyboard::KeyCode,
+    event: &winit::event::KeyEvent,
+    core: &mut AppCore,
+    window: &winit::window::Window,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    use winit::keyboard::KeyCode;
+
+    if game.chat.has_pending_modal_prompt() {
+        // `ConfirmScreen` answers Escape with `accept(false)`, which returns
+        // to the screen under it.
+        if code == KeyCode::Escape {
+            game.chat.handle_escape();
+            core.input.clear_action(input::Action::OpenMenu);
+            core.apply_cursor_grab(window, Some(game));
+        } else {
+            core.input.on_menu_key_event(event);
+        }
+        return;
+    }
+    match code {
+        KeyCode::Escape => {
+            let action = game
+                .server_dialog
+                .as_mut()
+                .and_then(|dialog| dialog.handle_escape());
+            settle_server_dialog(action, core, connection, game);
+            core.input.clear_action(input::Action::OpenMenu);
+            core.apply_cursor_grab(window, Some(game));
+        }
+        KeyCode::Tab => {
+            if let Some(dialog) = game.server_dialog.as_mut() {
+                dialog.handle_tab(core.input.shift_held());
+            }
+        }
+        _ => core.input.on_menu_key_event(event),
+    }
 }
 
 /// Carry out the button/dismiss action a benchmark result overlay reported,
@@ -1215,7 +1682,7 @@ fn apply_render_distance(
     rd: u32,
 ) {
     core.menu.render_distance = rd;
-    game.sync_render_distance(connection, rd);
+    game.sync_client_information(connection, rd, core.menu.chat_options);
 }
 
 /// Predict each container click locally (instant UI + drag preview), then send
@@ -1421,6 +1888,7 @@ pub fn update_game(
     core.audio.set_subtitles_enabled(core.menu.show_subtitles);
 
     gfx.renderer.set_vsync(core.menu.vsync);
+    game.chat.set_options(core.menu.chat_options);
 
     // Vanilla pauseIfInactive: losing OS focus for more than half a second
     // with no screen open pauses the game, which also releases the cursor
@@ -1443,60 +1911,12 @@ pub fn update_game(
         return GameUpdateResult::Disconnected { reason };
     }
 
-    // Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
-    // upload them in one coalesced GPU transfer (one fence wait, not one per
-    // mesh) to avoid the streaming stutter from per-mesh `queue.wait_idle`.
-    let drain_start = std::time::Instant::now();
-    let results: Vec<_> = game.mesh_dispatcher.drain_results().collect();
-    let mut batch = Vec::with_capacity(results.len());
-    for mut mesh in results {
-        // Stale meshes count too: worker time spent is worker time spent.
-        if let Some(bench) = &mut game.chunk_load_bench {
-            bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
-        }
-        // Drop a mesh built from an out-of-date snapshot. A mesh for a chunk
-        // that has since unloaded is always stale (uploading it would resurrect
-        // a column nothing cleans up). Edits (priority lane, single section)
-        // are keyed per section so editing one section never drops a sibling's
-        // in-flight result; bulk loads keep the column key.
-        let stale = game.chunk_store.get_chunk(&mesh.pos).is_none()
-            || if mesh.timing.is_some() {
-                mesh.replaced.clone().any(|si| {
-                    game.section_gen.get(&(mesh.pos, si)).copied() != Some(mesh.content_gen)
-                })
-            } else {
-                mesh.content_gen < game.content_gen.get(&mesh.pos).copied().unwrap_or(0)
-            };
-        if stale {
-            game.mesh_dispatcher.recycle(mesh);
-            continue;
-        }
-        if let Some(t) = &mesh.timing {
-            let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
-            tracing::debug!(
-                "edit remesh [{}, {}]: queue {:.1}ms + mesh {:.1}ms + drain {:.1}ms = {:.1}ms",
-                mesh.pos.x,
-                mesh.pos.z,
-                ms(t.started_at - t.enqueued_at),
-                ms(t.meshed_at - t.started_at),
-                ms(t.meshed_at.elapsed()),
-                ms(t.enqueued_at.elapsed()),
-            );
-        }
-        // Visibility updates are independent of the GPU upload; apply them now so
-        // the mesh can move into the upload batch.
-        game.apply_mesh_visibility(&mut mesh);
-        batch.push(mesh);
+    game.chat.tick();
+    for mark in game.chat.take_chat_marks() {
+        connection.packet_tx.mark_chat(mark);
     }
-    game.last_update_phases.mesh_drain_ms = drain_start.elapsed().as_secs_f32() * 1000.0;
-    let upload_start = std::time::Instant::now();
-    let dropped = gfx.renderer.upload_chunk_meshes(&batch);
-    game.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
-    game.clear_dropped_meshed(dropped);
-    // Return the uploaded meshes' buffers to the worker pool for reuse.
-    for mesh in batch {
-        game.mesh_dispatcher.recycle(mesh);
-    }
+
+    game.drain_and_upload_meshes(&mut gfx.renderer);
 
     game.mesh_dispatcher
         .set_camera_position(*game.player.position);
@@ -1519,6 +1939,10 @@ pub fn update_game(
     core.tick_accumulator += dt;
     while core.tick_accumulator >= TICK_RATE {
         game.tick_count = game.tick_count.wrapping_add(1);
+        // Vanilla `Minecraft.tick` order: `gameMode.tick` drives the connection
+        // tick (and so the level load tracker) before the level's entities,
+        // i.e. before the local player moves or sends anything.
+        AppCore::tick_level_load(&gfx.renderer, connection, game);
         // Vanilla Gui.tick falls back from dead health alone when no screen is
         // open, so death UI/auto-respawn must not depend on PlayerCombatKill.
         let has_screen = game.death_screen_open
@@ -1536,7 +1960,9 @@ pub fn update_game(
         }
         let local_player_was_removed = game.dead && game.player.death_animation_finished();
         core.tick_physics(&mut gfx.renderer, connection, game);
-        if !local_player_was_removed {
+        // `LocalPlayer.tick` returns before `super.tick()` until the client has
+        // loaded, so the player's own baseTick state waits with it.
+        if game.client_loaded && !local_player_was_removed {
             // LivingEntity.baseTick hurt/effects and Player.tick sleep state still
             // run on the tick-20 removal tick, then stop with future entity ticks.
             game.player.tick_hurt();
@@ -1584,6 +2010,7 @@ pub fn update_game(
             // prioritized while the screen is open.
             game.xp_display_start_tick = game.tick_count as i64;
         }
+        AppCore::send_client_tick_end(connection);
         core.tick_accumulator -= TICK_RATE;
     }
 
@@ -1663,7 +2090,11 @@ pub fn update_game(
         core.menu.gui_scale_setting,
     );
     let text_fs = common::FONT_SIZE * text_gs;
-    if let Some(msg) = game.chat.handle_key_input(
+    let chat_was_open = game.chat.is_open();
+    if game.dialog_open() {
+        // The dialog, or the ConfirmScreen over it, replaces ChatScreen and
+        // takes its input; `build_server_screens` hands the typing on.
+    } else if let Some(msg) = game.chat.handle_key_input(
         &text_events,
         enter,
         tab,
@@ -1672,12 +2103,22 @@ pub fn update_game(
         down,
         page_up,
         page_down,
-        text_sw - 12.0 * text_gs,
+        text_sw - 4.0 * text_gs,
         &|s| gfx.renderer.menu_text_width(s, text_fs),
         game.command_tree.as_deref(),
     ) {
         core.send_chat_message(connection, msg);
+    }
+    // Enter closes chat even when there was nothing to send.
+    if chat_was_open && !game.chat.is_open() {
         core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+    if game.server_dialog.is_none() && game.chat.is_open() {
+        let scroll = core.input.consume_menu_scroll();
+        if scroll != 0.0 {
+            game.chat
+                .handle_scroll(core.input.cursor_pos(), scroll, shift);
+        }
     }
     if let Some((id, command)) = game.chat.take_suggestion_request() {
         connection
@@ -1692,9 +2133,11 @@ pub fn update_game(
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
     core.input.menu_capture = game.gui_open() || game.death_screen_open;
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
-    if core.input.spectator && game.spectator.is_menu_active() {
-        core.ensure_player_face_atlas(&mut gfx.renderer);
-    }
+    core.sync_game_dynamic_atlas(
+        game,
+        &mut gfx.renderer,
+        core.input.spectator && game.spectator.is_menu_active(),
+    );
 
     // The F3+F4 switcher shows the mouse cursor while open.
     let switcher_open = game.game_mode_switcher.is_some();
@@ -2299,7 +2742,11 @@ pub fn update_game(
         apply_result_action(action, ResultKind::ChunkLoad, status, json, core, gfx, game);
     }
 
-    if game.options_from_game {
+    // A dialog is the top screen: the screens under it keep their state
+    // (vanilla's `previousScreen`) but neither draw nor take input. The Hud
+    // still draws, so chat keeps its unfocused backlog.
+    let dialog_open = game.dialog_open();
+    if game.options_from_game && !dialog_open {
         core.menu.server_render_distance = game.server_render_distance;
         let mut menu_input = core.build_menu_input(dt);
         // Chat consumed the enter/tab latches earlier this frame; hand them on.
@@ -2312,7 +2759,7 @@ pub fn update_game(
         elements.extend(result.elements);
         core.input.clear_just_pressed_actions();
         core.sync_display_mode(&gfx.window);
-    } else if game.death_screen_open {
+    } else if game.death_screen_open && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed() && !game.respawn_sent;
         death_action = if game.death_confirm {
@@ -2344,7 +2791,7 @@ pub fn update_game(
             )
         };
         core.input.clear_just_pressed_actions();
-    } else if game.paused && !matches!(game.pause_screen, PauseScreen::Hidden) {
+    } else if game.paused && !matches!(game.pause_screen, PauseScreen::Hidden) && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
         pause_action = pause::build_pause_menu(
@@ -2363,7 +2810,7 @@ pub fn update_game(
 
     let mut player_preview = None;
     let mut book_preview = None;
-    if game.inventory_open || game.open_container.is_some() {
+    if (game.inventory_open || game.open_container.is_some()) && !dialog_open {
         // Key shortcuts stay quiet while a text field (anvil rename) types.
         let keys_live = !game.wants_text_input();
         let input = crate::ui::container::ContainerInput {
@@ -2534,7 +2981,7 @@ pub fn update_game(
         core.input.clear_just_pressed_actions();
     }
 
-    if game.creative_inventory_open {
+    if game.creative_inventory_open && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
         let middle_clicked = core.input.middle_just_pressed();
@@ -2602,10 +3049,27 @@ pub fn update_game(
 
     // F1 hides the closed-chat overlay; an open chat is a screen and renders
     // regardless (vanilla Hud.extractChat vs ChatScreen).
-    if !game.hide_gui || game.chat.is_open() {
-        game.chat.build(&mut elements, sw, sh, gs, &|t, s| {
-            gfx.renderer.menu_text_width(t, s)
-        });
+    if !game.hide_gui || game.chat.is_focused() {
+        let command_tree = game.command_tree.clone();
+        let chat_action = game.chat.build(
+            &mut elements,
+            crate::ui::chat::ChatBuildContext {
+                screen_w: sw,
+                screen_h: sh,
+                gui_scale: gs,
+                cursor: core.input.cursor_pos(),
+                covered: dialog_open,
+                clicked: core.input.left_just_pressed(),
+                shift: core.input.shift_held(),
+                command_tree: command_tree.as_deref(),
+                advanced_item_tooltips: game.advanced_item_tooltips,
+                text_width_fn: &|t, s| gfx.renderer.menu_text_width(t, s),
+                spans_width_fn: &|spans, s| gfx.renderer.menu_spans_width(spans, s),
+            },
+        );
+        if let Some(action) = chat_action {
+            handle_chat_ui_action(action, core, connection, game);
+        }
     }
 
     // Subtitles draw above chat and the tab list; toasts stay on top
@@ -2636,9 +3100,34 @@ pub fn update_game(
         core.audio.play_ui_sound(event, 1.0, 1.0);
     }
     if !benchmark_running && !game.hide_gui {
-        game.toasts.build(&mut elements, sw, gs, &|t, s| {
-            gfx.renderer.menu_text_width(t, s)
+        game.toasts.build(&mut elements, sw, gs, &|spans, s| {
+            gfx.renderer.menu_spans_width(spans, s)
         });
+    }
+
+    build_server_screens(
+        &mut elements,
+        sw,
+        sh,
+        gs,
+        core,
+        gfx,
+        connection,
+        game,
+        Some(game.tick_count),
+        &text_events,
+    );
+
+    if game.chat.is_open() && !dialog_open && core.input.cursor_moved_this_frame() {
+        let icon = if game
+            .chat
+            .hovering_clickable(core.input.cursor_pos(), core.input.shift_held())
+        {
+            winit::window::CursorIcon::Pointer
+        } else {
+            winit::window::CursorIcon::Default
+        };
+        gfx.window.set_cursor(icon);
     }
 
     // Chat consumes keys, not clicks; nothing else clears them while only chat
@@ -3033,12 +3522,19 @@ pub fn update_game(
     }
 
     if game.options_from_game {
-        if core.menu.render_distance != game.last_render_distance {
-            game.sync_render_distance(connection, core.menu.render_distance);
+        if core.menu.render_distance != game.last_render_distance
+            || game.chat_information_changed(core.menu.chat_options)
+        {
+            game.sync_client_information(
+                connection,
+                core.menu.render_distance,
+                core.menu.chat_options,
+            );
         }
         if !core.menu.is_options_screen() {
             game.options_from_game = false;
-            game.paused = true;
+            // Chat Settings opened from chat return to it, unpaused.
+            game.paused = !game.chat.return_from_settings(game.command_tree.as_deref());
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
     }
@@ -3814,7 +4310,19 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::has_red_overlay;
+    use super::{has_red_overlay, section_bit, section_bits};
+
+    #[test]
+    fn section_bits_cover_the_indices_and_ignore_the_rest() {
+        assert_eq!(section_bits(0..3), 0b111);
+        assert_eq!(section_bits(0..0), 0);
+        assert_eq!(section_bits([2, 5]), 0b100100);
+        // A camera outside build height resolves to a section index no column
+        // has; it must read as "not compiled", not shift out of range.
+        assert_eq!(section_bit(-1), 0);
+        assert_eq!(section_bit(32), 0);
+        assert_eq!(section_bits(-3..-2), 0);
+    }
 
     #[test]
     fn red_overlay_matches_vanilla_hurt_and_death_timers() {

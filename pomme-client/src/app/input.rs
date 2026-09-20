@@ -41,6 +41,116 @@ pub enum Action {
     SpectatorHotbar,
 }
 
+pub const KEY_FORWARD: KeyCode = KeyCode::KeyW;
+pub const KEY_LEFT: KeyCode = KeyCode::KeyA;
+pub const KEY_BACK: KeyCode = KeyCode::KeyS;
+pub const KEY_RIGHT: KeyCode = KeyCode::KeyD;
+
+impl Action {
+    pub const fn default_key(self) -> Option<KeyCode> {
+        match self {
+            Self::Jump => Some(KeyCode::Space),
+            Self::Sneak => Some(KeyCode::ShiftLeft),
+            Self::Sprint => Some(KeyCode::ControlLeft),
+            Self::ToggleInventory => Some(KeyCode::KeyE),
+            Self::OpenMenu => Some(KeyCode::Escape),
+            Self::ViewPlayerList => Some(KeyCode::Tab),
+            Self::ChangePerspective => Some(KeyCode::F5),
+            Self::OpenChat => Some(KeyCode::KeyT),
+            Self::OpenCommands => Some(KeyCode::Slash),
+            Self::DropItem => Some(KeyCode::KeyQ),
+            Self::SwapOffhand => Some(KeyCode::KeyF),
+            Self::Destroy | Self::Use | Self::Close | Self::SpectatorHotbar => None,
+        }
+    }
+}
+
+/// Label of key mapping `key`: Pomme's binding for the actions it has, else
+/// vanilla's default (`Options` key mappings). A lang key and its en_us
+/// fallback.
+pub fn keybind_label(key: &str) -> Option<(&'static str, &'static str)> {
+    Some(match key {
+        "key.forward" => ("key.keyboard.w", "W"),
+        "key.left" => ("key.keyboard.a", "A"),
+        "key.back" => ("key.keyboard.s", "S"),
+        "key.right" => ("key.keyboard.d", "D"),
+        "key.jump" => action_label(Action::Jump)?,
+        "key.sneak" => action_label(Action::Sneak)?,
+        "key.sprint" => action_label(Action::Sprint)?,
+        "key.inventory" => action_label(Action::ToggleInventory)?,
+        "key.swapOffhand" => action_label(Action::SwapOffhand)?,
+        "key.drop" => action_label(Action::DropItem)?,
+        "key.use" => ("key.mouse.right", "Right Button"),
+        "key.attack" => ("key.mouse.left", "Left Button"),
+        "key.pickItem" | "key.spectatorHotbar" => ("key.mouse.middle", "Middle Button"),
+        "key.chat" => action_label(Action::OpenChat)?,
+        "key.playerlist" => action_label(Action::ViewPlayerList)?,
+        "key.command" => action_label(Action::OpenCommands)?,
+        "key.togglePerspective" => action_label(Action::ChangePerspective)?,
+        "key.friends" => ("key.keyboard.o", "O"),
+        "key.socialInteractions" => ("key.keyboard.p", "P"),
+        "key.screenshot" => ("key.keyboard.f2", "F2"),
+        "key.smoothCamera" | "key.spectatorOutlines" => ("key.keyboard.unknown", "Not Bound"),
+        "key.fullscreen" => ("key.keyboard.f11", "F11"),
+        "key.advancements" => ("key.keyboard.l", "L"),
+        "key.quickActions" => ("key.keyboard.g", "G"),
+        "key.toggleGui" => ("key.keyboard.f1", "F1"),
+        "key.toggleSpectatorShaderEffects" => ("key.keyboard.f4", "F4"),
+        "key.saveToolbarActivator" => ("key.keyboard.c", "C"),
+        "key.loadToolbarActivator" => ("key.keyboard.x", "X"),
+        "key.hotbar.1" => ("key.keyboard.1", "1"),
+        "key.hotbar.2" => ("key.keyboard.2", "2"),
+        "key.hotbar.3" => ("key.keyboard.3", "3"),
+        "key.hotbar.4" => ("key.keyboard.4", "4"),
+        "key.hotbar.5" => ("key.keyboard.5", "5"),
+        "key.hotbar.6" => ("key.keyboard.6", "6"),
+        "key.hotbar.7" => ("key.keyboard.7", "7"),
+        "key.hotbar.8" => ("key.keyboard.8", "8"),
+        "key.hotbar.9" => ("key.keyboard.9", "9"),
+        "key.debug.overlay" | "key.debug.modifier" => ("key.keyboard.f3", "F3"),
+        "key.debug.crash" | "key.debug.copyLocation" => ("key.keyboard.c", "C"),
+        "key.debug.reloadChunk" => ("key.keyboard.a", "A"),
+        "key.debug.showHitboxes" => ("key.keyboard.b", "B"),
+        "key.debug.clearChat" => ("key.keyboard.d", "D"),
+        "key.debug.showChunkBorders" => ("key.keyboard.g", "G"),
+        "key.debug.showAdvancedTooltips" => ("key.keyboard.h", "H"),
+        "key.debug.copyRecreateCommand" => ("key.keyboard.i", "I"),
+        "key.debug.spectate" => ("key.keyboard.n", "N"),
+        "key.debug.switchGameMode" => ("key.keyboard.f4", "F4"),
+        "key.debug.debugOptions" => ("key.keyboard.f6", "F6"),
+        "key.debug.focusPause" => ("key.keyboard.p", "P"),
+        "key.debug.dumpDynamicTextures" => ("key.keyboard.s", "S"),
+        "key.debug.reloadResourcePacks" => ("key.keyboard.t", "T"),
+        "key.debug.profiling" => ("key.keyboard.l", "L"),
+        "key.debug.dumpVersion" => ("key.keyboard.v", "V"),
+        "key.debug.profilingChart" => ("key.keyboard.1", "1"),
+        "key.debug.fpsCharts" => ("key.keyboard.2", "2"),
+        "key.debug.networkCharts" => ("key.keyboard.3", "3"),
+        "key.debug.lightmapTexture" => ("key.keyboard.4", "4"),
+        _ => return None,
+    })
+}
+
+fn action_label(action: Action) -> Option<(&'static str, &'static str)> {
+    keycode_translation(action.default_key()?)
+}
+
+fn keycode_translation(key: KeyCode) -> Option<(&'static str, &'static str)> {
+    match key {
+        KeyCode::Space => Some(("key.keyboard.space", "Space")),
+        KeyCode::ShiftLeft => Some(("key.keyboard.left.shift", "Left Shift")),
+        KeyCode::ControlLeft => Some(("key.keyboard.left.control", "Left Control")),
+        KeyCode::KeyE => Some(("key.keyboard.e", "E")),
+        KeyCode::KeyF => Some(("key.keyboard.f", "F")),
+        KeyCode::KeyQ => Some(("key.keyboard.q", "Q")),
+        KeyCode::KeyT => Some(("key.keyboard.t", "T")),
+        KeyCode::Tab => Some(("key.keyboard.tab", "Tab")),
+        KeyCode::Slash => Some(("key.keyboard.slash", "/")),
+        KeyCode::F5 => Some(("key.keyboard.f5", "F5")),
+        _ => None,
+    }
+}
+
 pub struct InputState {
     pressed: HashSet<KeyCode>,
     modifiers: Modifiers,
@@ -191,7 +301,9 @@ impl InputState {
                 ..
             } = &mut app
             {
-                if self.action_just_pressed(Action::ToggleInventory) {
+                // A dialog (or the confirm screen over it) is a screen, and
+                // vanilla runs no key mapping while one is up.
+                if self.action_just_pressed(Action::ToggleInventory) && !game.dialog_open() {
                     if game.creative_inventory_open {
                         game.close_creative_inventory();
                         should_apply_cursor_grab = true;
@@ -215,8 +327,13 @@ impl InputState {
 
                     self.recent_actions.remove(&Action::ToggleInventory);
                 }
-                if self.action_just_pressed(Action::OpenMenu) {
-                    if game.game_mode_switcher.is_some() {
+                if self.action_just_pressed(Action::OpenMenu) && !game.dialog_open() {
+                    if game.chat.is_open() {
+                        // ChatScreen consumes Escape before the game-level
+                        // pause action: link confirmation, then suggestions,
+                        // then the chat screen itself.
+                        should_apply_cursor_grab = game.chat.handle_escape();
+                    } else if game.game_mode_switcher.is_some() {
                         // Esc cancels the F3+F4 switcher without applying.
                         game.game_mode_switcher = None;
                         should_apply_cursor_grab = true;
@@ -249,7 +366,7 @@ impl InputState {
 
                     self.recent_actions.remove(&Action::OpenMenu);
                 }
-                if self.action_just_pressed(Action::Close) {
+                if self.action_just_pressed(Action::Close) && !game.dialog_open() {
                     if !game.dead
                         && !game.death_screen_open
                         && (game.inventory_open || game.open_container.is_some())
@@ -258,9 +375,9 @@ impl InputState {
                         should_apply_cursor_grab = true;
                     }
 
+                    // Same order as Escape: modal, then suggestions, then chat.
                     if game.chat.is_open() {
-                        game.chat.close();
-                        should_apply_cursor_grab = true;
+                        should_apply_cursor_grab |= game.chat.handle_escape();
                     }
 
                     self.recent_actions.remove(&Action::Close);
@@ -278,7 +395,10 @@ impl InputState {
                         && !game.gui_open()
                         && !game.chat.is_open()
                     {
-                        game.chat.open();
+                        game.chat.open(
+                            crate::ui::chat::ChatMethod::Message,
+                            game.command_tree.as_deref(),
+                        );
                         // The frame flag is written at end of update; set it now
                         // so keys later in this same event batch already type.
                         self.text_capture = true;
@@ -293,7 +413,10 @@ impl InputState {
                         && !game.gui_open()
                         && !game.chat.is_open()
                     {
-                        game.chat.open_with_slash();
+                        game.chat.open(
+                            crate::ui::chat::ChatMethod::Command,
+                            game.command_tree.as_deref(),
+                        );
                         self.text_capture = true;
                         should_apply_cursor_grab = true;
                     }
@@ -401,13 +524,13 @@ impl InputState {
     pub fn performing_action(&self, action: Action) -> bool {
         match action {
             Action::Jump => {
-                self.key_pressed(KeyCode::Space) || self.gamepad_button_down(Button::South)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::South)
             }
             Action::Sneak => {
-                self.key_pressed(KeyCode::ShiftLeft) || self.gamepad_button_down(Button::LeftThumb)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::LeftThumb)
             }
             Action::Sprint => {
-                self.key_pressed(KeyCode::ControlLeft) || self.gamepad_button_down(Button::West)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::West)
             }
             Action::Destroy => self.left_held() || self.gamepad_button_down(Button::RightTrigger2),
             Action::Use => self.right_held() || self.gamepad_button_down(Button::LeftTrigger2),
@@ -416,26 +539,31 @@ impl InputState {
                     || self.gamepad_button_down(Button::North)
             }
             Action::OpenMenu => {
-                self.key_pressed(KeyCode::Escape) || self.gamepad_button_down(Button::Start)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::Start)
             }
             Action::ViewPlayerList => {
-                self.key_pressed(KeyCode::Tab) || self.gamepad_button_down(Button::Select)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::Select)
             }
             Action::ChangePerspective => {
-                self.key_pressed(KeyCode::F5) || self.gamepad_button_down(Button::DPadUp)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::DPadUp)
             }
             Action::OpenChat => {
-                self.key_pressed(KeyCode::KeyT) || self.gamepad_button_down(Button::DPadRight)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::DPadRight)
             }
-            Action::OpenCommands => self.key_pressed(KeyCode::Slash),
+            Action::OpenCommands => self.default_key_pressed(action),
             // Controller-only; keyboard Escape closes via OpenMenu and the chat path.
             Action::Close => self.gamepad_button_down(Button::East),
             // Click-count driven (`consume_click`); held state only.
-            Action::DropItem => self.key_pressed(KeyCode::KeyQ),
-            Action::SwapOffhand => self.key_pressed(KeyCode::KeyF),
+            Action::DropItem | Action::SwapOffhand => self.default_key_pressed(action),
             // Vanilla `key.spectatorHotbar` default: middle mouse.
             Action::SpectatorHotbar => self.middle_click.held,
         }
+    }
+
+    fn default_key_pressed(&self, action: Action) -> bool {
+        action
+            .default_key()
+            .is_some_and(|key| self.key_pressed(key))
     }
 
     pub fn action_just_pressed(&self, action: Action) -> bool {

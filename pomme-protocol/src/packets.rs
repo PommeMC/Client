@@ -278,6 +278,28 @@ mod tests {
             t.id(Phase::Game, Direction::Clientbound, "update_advancements"),
             Some(130)
         );
+        // Dialogs, pinned in both phases (`ConfigurationProtocols.java`).
+        for (phase, links, clear, show, click) in [
+            (Phase::Configuration, 16, 17, 18, 8),
+            (Phase::Game, 137, 139, 140, 68),
+        ] {
+            assert_eq!(
+                t.id(phase, Direction::Clientbound, "server_links"),
+                Some(links)
+            );
+            assert_eq!(
+                t.id(phase, Direction::Clientbound, "clear_dialog"),
+                Some(clear)
+            );
+            assert_eq!(
+                t.id(phase, Direction::Clientbound, "show_dialog"),
+                Some(show)
+            );
+            assert_eq!(
+                t.id(phase, Direction::Serverbound, "custom_click_action"),
+                Some(click)
+            );
+        }
         assert_eq!(
             t.name_of(Phase::Game, Direction::Clientbound, 0),
             Some("bundle_delimiter")
@@ -317,6 +339,47 @@ mod tests {
         assert_eq!(
             t.id(Phase::Game, Direction::Serverbound, "teleport_to_entity"),
             Some(0x40)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "chat_command"),
+            Some(7)
+        );
+        assert_eq!(t.id(Phase::Game, Direction::Serverbound, "chat"), Some(9));
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "chat_ack"),
+            Some(6)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "chat_command_signed"),
+            Some(8)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "chat_session_update"),
+            Some(10)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "command_suggestions"),
+            Some(15)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "delete_chat"),
+            Some(31)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "disguised_chat"),
+            Some(33)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "player_chat"),
+            Some(65)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_action_bar_text"),
+            Some(87)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "system_chat"),
+            Some(121)
         );
         assert_eq!(t.id(Phase::Game, Direction::Serverbound, "no_such"), None);
     }

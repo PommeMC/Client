@@ -22,7 +22,7 @@ alternative to the official Java client.
 
 - **Vulkan rendering**: chunk meshing, GPU frustum and cave-occlusion culling, smooth lighting, water/lava, entities and mobs with skins, block entities, dropped items, particles, weather, clouds, sky, block overlays, hand animation
 - **Vanilla-exact physics**: movement, collision, swimming, and drowning matched line by line against the decompiled source
-- **Multi-version protocol support**: connects to vanilla servers from 1.20 through 26.2, with per-version packet-id and registry tables generated from the decompiled reference; older versions are translated to the native 26.2 wire layout
+- **Multi-version protocol support**: connects to vanilla servers from 1.20 through 26.3, with per-version packet-id and registry tables generated from the decompiled reference; other versions are translated to the native 26.2 wire layout
 - **Singleplayer**: worlds run on [SteelMC](https://github.com/Steel-Foundation/SteelMC), a Rust server embedded in the client and joined over an in-memory pipe; create, edit, and delete worlds from the menu
 - **Audio**: vanilla sound events, music, and subtitles through OpenAL Soft
 - **Resource packs**: local packs plus server-sent packs, applied live with a remesh
@@ -108,25 +108,25 @@ Running the standalone client requires minecraft assets, for which you have 2 op
    just client-dev -- --username Steve
    ```
 
-2. If you're on linux, extract the vanilla 26.2 assets from `.minecraft/` to `reference/`:
+2. If you're on linux, extract the vanilla 26.3 assets from `.minecraft/` to `reference/`:
 
    ```bash
    mkdir -p reference/assets/indexes
    mkdir -p reference/assets/objects
-   mkdir -p reference/versions/26.2/extracted
+   mkdir -p reference/versions/26.3/extracted
    mkdir -p reference/game-dir
 
-   # 32 is the asset index id for 26.2
-   cp ~/.minecraft/assets/indexes/32.json reference/assets/indexes/26.2.json
+   # 34 is the asset index id for 26.3
+   cp ~/.minecraft/assets/indexes/34.json reference/assets/indexes/26.3.json
    cp -r ~/.minecraft/assets/objects/. reference/assets/objects/
-   cp ~/.minecraft/versions/26.2/26.2.jar reference/versions/26.2/
-   unzip reference/versions/26.2/26.2.jar 'assets/*' -d reference/versions/26.2/extracted/
+   cp ~/.minecraft/versions/26.3/26.3.jar reference/versions/26.3/
+   unzip reference/versions/26.3/26.3.jar 'assets/*' -d reference/versions/26.3/extracted/
    ```
 
    Then you can run the client with:
 
    ```bash
-   just client-dev -- --version 26.2 \
+   just client-dev -- --version 26.3 \
      --assets-dir $PWD/reference/assets \
      --versions-dir $PWD/reference/versions \
      --game-dir $PWD/reference/game-dir
@@ -139,7 +139,7 @@ Run `just` with no arguments to list every recipe. The common ones:
 - `just client-dev` / `just client-build` / `just client-release`: run, build, or benchmark the client; flags forward after `--`, e.g. `just client-dev -- --username Steve`
 - `just launcher-dev` / `just launcher-build`: run or bundle the launcher
 - `just client-pre-pr` / `just launcher-pre-pr`: the fmt, clippy, and test checks CI enforces
-- `just protogen` / `just registrygen` / `just blockgen` / `just stategen`: regenerate a version's packet-id, registry, block-state, and per-state property tables from `reference/<version>/`; `stategen` runs vanilla's own code and needs JDK 25 (`just jdk=<bin dir> stategen`, Windows only)
+- `just protogen` / `just registrygen` / `just knownpackgen` / `just blockgen` / `just stategen`: regenerate a version's packet-id, registry, known-pack, block-state, and per-state property tables from `reference/<version>/`; `stategen` runs vanilla's own code and needs JDK 25 (`just jdk=<bin dir> stategen`, Windows only)
 
 ## Contributing
 
