@@ -5,7 +5,6 @@ use crate::app::input::InputState;
 use crate::entity::HURT_DURATION;
 use crate::entity::components::{LookDirection, Position};
 
-const UP: Vec3 = Vec3::Y;
 pub const DEFAULT_FOV_DEGREES: f32 = 70.0;
 #[allow(dead_code)]
 pub const MIN_FOV_DEGREES: f32 = 30.0;
@@ -231,8 +230,9 @@ impl Camera {
     pub fn update_look(&mut self, input: &mut InputState, dt: f32, sensitivity: f32) {
         if let Some(look_vec) = input.get_gamepad_right_analog() {
             let step = CONTROLLER_SENSITIVITY * dt;
-            let y_rot_deg =
-                ((self.look_dir.y_rot_deg() + look_vec.x * step) + 180.0).rem_euclid(360.0) - 180.0;
+            // Vanilla `Entity.turn` accumulates yaw without normalizing it.
+            // Wrapping at ±180° creates a fake ~360° network rotation delta.
+            let y_rot_deg = self.look_dir.y_rot_deg() + look_vec.x * step;
             let x_rot_deg = self.look_dir.x_rot_deg() - look_vec.y * step; //TODO: Add preference for inverting the Y axis
             self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
         }
@@ -240,9 +240,7 @@ impl Camera {
         if input.is_cursor_captured() {
             let (dx, dy) = input.consume_mouse_delta();
             let mouse_sensitivity = mouse_sensitivity_multiplier(sensitivity);
-            let y_rot_deg = ((self.look_dir.y_rot_deg() + dx as f32 * mouse_sensitivity) + 180.0)
-                .rem_euclid(360.0)
-                - 180.0;
+            let y_rot_deg = self.look_dir.y_rot_deg() + dx as f32 * mouse_sensitivity;
             let x_rot_deg = self.look_dir.x_rot_deg() + dy as f32 * mouse_sensitivity;
             self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
         }
@@ -403,7 +401,12 @@ impl Camera {
         } else {
             look_dir
         };
-        (forward, UP)
+        // Use the same analytical roll-free up axis as vanilla's camera
+        // quaternion / particle billboards. A fixed world-up vector becomes
+        // collinear with `forward` at exactly ±90° pitch and makes the view
+        // basis singular, which caused the screen to flip 180° at the limits.
+        let (_, up) = self.billboard_axes();
+        (forward, up)
     }
 
     pub fn top_down(&self) -> Option<f32> {
@@ -624,6 +627,20 @@ mod tests {
             Mat4::IDENTITY,
             "expired hurt timing must not rotate the camera",
         );
+    }
+
+    #[test]
+    fn view_basis_stays_finite_and_upright_at_pitch_limits() {
+        let mut camera = Camera::new(16.0 / 9.0);
+        for pitch in [-90.0, 90.0] {
+            camera.look_dir = LookDirection::new(37.0, pitch);
+            let (forward, up) = camera.view_basis();
+            assert!(forward.is_finite() && up.is_finite());
+            assert!((forward.length() - 1.0).abs() < 1e-6);
+            assert!((up.length() - 1.0).abs() < 1e-6);
+            assert!(forward.dot(up).abs() < 1e-6);
+            assert!(camera.view_projection().is_finite());
+        }
     }
 
     #[test]

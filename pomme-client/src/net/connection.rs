@@ -610,6 +610,13 @@ async fn config_sequence(
                 )
                 .await?;
             }
+            ClientboundConfigPacket::Ping(p) => {
+                write_config_packet(
+                    conn,
+                    ServerboundConfigPacket::Pong(s_pong::ServerboundPong { id: p.id }),
+                )
+                .await?;
+            }
             ClientboundConfigPacket::FinishConfiguration(_) => {
                 write_config_packet(
                     conn,

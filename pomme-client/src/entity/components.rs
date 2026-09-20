@@ -185,7 +185,7 @@ impl LookDirection {
     pub fn new(y_rot_deg: f32, x_rot_deg: f32) -> Self {
         Self {
             y_rot_deg,
-            x_rot_deg: x_rot_deg.clamp(-89.999, 89.999),
+            x_rot_deg: (x_rot_deg % 360.0).clamp(-90.0, 90.0),
         }
     }
 
@@ -217,5 +217,24 @@ impl LookDirection {
 impl From<LookDirection> for azalea_entity::LookDirection {
     fn from(value: LookDirection) -> Self {
         Self::new(value.y_rot_deg, value.x_rot_deg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn look_direction_preserves_unbounded_yaw_and_exact_pitch_limits() {
+        let positive = LookDirection::new(541.0, 120.0);
+        assert_eq!(positive.y_rot_deg(), 541.0);
+        assert_eq!(positive.x_rot_deg(), 90.0);
+
+        let negative = LookDirection::new(-541.0, -120.0);
+        assert_eq!(negative.y_rot_deg(), -541.0);
+        assert_eq!(negative.x_rot_deg(), -90.0);
+
+        assert_eq!(LookDirection::new(0.0, 360.0).x_rot_deg(), 0.0);
+        assert_eq!(LookDirection::new(0.0, 450.0).x_rot_deg(), 90.0);
     }
 }

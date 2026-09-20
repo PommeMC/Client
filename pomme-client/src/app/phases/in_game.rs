@@ -2028,7 +2028,7 @@ pub fn update_game(
         && game.player.is_sleeping()
         && core.input.action_just_pressed(input::Action::Jump)
     {
-        core.send_stop_sleeping(connection);
+        core.send_stop_sleeping(connection, game.player.entity_id);
     }
     // TODO: remaining vanilla keybinds with no backing feature yet:
     // L advancements, P social interactions, O friends overlay (in-game),

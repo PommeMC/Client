@@ -92,11 +92,20 @@ pub enum NetworkEvent {
         x: i32,
         z: i32,
     },
+    Ping {
+        id: u32,
+    },
     PlayerPosition {
         /// Teleport id to acknowledge.
         id: u32,
         change: azalea_protocol::common::movements::PositionMoveRotation,
         relative: azalea_protocol::common::movements::RelativeMovements,
+    },
+    PlayerRotation {
+        y_rot: f32,
+        relative_y: bool,
+        x_rot: f32,
+        relative_x: bool,
     },
     PlayerHealth {
         health: f32,
@@ -368,6 +377,9 @@ pub enum NetworkEvent {
     EntityMotion {
         id: i32,
         velocity: DVec3,
+    },
+    PlayerKnockback {
+        delta: DVec3,
     },
     EntityTeleported {
         id: i32,
