@@ -17,7 +17,7 @@ layout(push_constant) uniform Push {
 
 // Per-instance cloud face. in_cell = relative cell offset (rcx, rcz);
 // in_dir_flags.x = face direction (0=down, 1=up, 2=N, 3=S, 4=W, 5=E),
-// in_dir_flags.y bit0 = use the top (brightest) shade, bit1 = inside face.
+// in_dir_flags.y bit4 = inside face, bit5 = use the top (brightest) shade.
 layout(location = 0) in ivec2 in_cell;
 layout(location = 1) in uvec2 in_dir_flags;
 
@@ -52,8 +52,8 @@ const int QUAD[6] = int[](0, 1, 2, 0, 2, 3);
 
 void main() {
     int dir = int(in_dir_flags.x);
-    bool use_top = (in_dir_flags.y & 1u) != 0u;
-    bool inside = (in_dir_flags.y & 2u) != 0u;
+    bool inside = (in_dir_flags.y & 16u) != 0u;
+    bool use_top = (in_dir_flags.y & 32u) != 0u;
 
     int quad_corner = QUAD[gl_VertexIndex];
     vec3 corner = CORNERS[dir * 4 + (inside ? 3 - quad_corner : quad_corner)];

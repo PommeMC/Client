@@ -49,9 +49,9 @@ const DIR_WEST: u8 = 4;
 const DIR_EAST: u8 = 5;
 
 /// Face flag bit: reverse winding so the face is visible from inside the cell.
-const FLAG_INSIDE_FACE: u8 = 1 << 1;
+const FLAG_INSIDE_FACE: u8 = 1 << 4;
 /// Face flag bit: use the top (brightest) shade regardless of direction.
-const FLAG_USE_TOP_COLOR: u8 = 1;
+const FLAG_USE_TOP_COLOR: u8 = 1 << 5;
 
 /// One cloud face, drawn as a single instance; the vertex shader expands it
 /// into a quad. Layout must match the attributes in `clouds.vert`.
@@ -162,8 +162,8 @@ impl CloudPipeline {
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create cloud pipeline layout");
 
-        let fancy_pipeline = create_pipeline(device, render_pass, pipeline_layout, true);
-        let flat_pipeline = create_pipeline(device, render_pass, pipeline_layout, false);
+        let (fancy_pipeline, flat_pipeline) =
+            create_pipelines(device, render_pass, pipeline_layout);
 
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::UniformBuffer,
@@ -420,8 +420,8 @@ impl CloudPipeline {
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.fancy_pipeline, None);
         device.destroy_pipeline(self.flat_pipeline, None);
-        self.fancy_pipeline = create_pipeline(device, render_pass, self.pipeline_layout, true);
-        self.flat_pipeline = create_pipeline(device, render_pass, self.pipeline_layout, false);
+        (self.fancy_pipeline, self.flat_pipeline) =
+            create_pipelines(device, render_pass, self.pipeline_layout);
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -540,11 +540,22 @@ fn load_cloud_grid(jar_assets_dir: &Path, asset_index: &Option<AssetIndex>) -> O
     })
 }
 
+fn create_pipelines(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+) -> (vk::Pipeline, vk::Pipeline) {
+    (
+        create_pipeline(device, render_pass, layout, vk::CullModeFlags::Back),
+        create_pipeline(device, render_pass, layout, vk::CullModeFlags::None),
+    )
+}
+
 fn create_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
-    fancy: bool,
+    cull_mode: vk::CullModeFlags,
 ) -> vk::Pipeline {
     let vert_spv = shader::include_spirv!("clouds.vert.spv");
     let frag_spv = shader::include_spirv!("clouds.frag.spv");
@@ -605,11 +616,7 @@ fn create_pipeline(
     };
     let rasterizer = vk::PipelineRasterizationStateCreateInfo {
         polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: if fancy {
-            vk::CullModeFlags::Back
-        } else {
-            vk::CullModeFlags::None
-        },
+        cull_mode,
         front_face: vk::FrontFace::CounterClockwise,
         line_width: 1.0,
         ..Default::default()
@@ -684,12 +691,13 @@ mod tests {
     #[test]
     fn interior_fancy_cell_keeps_exterior_faces_and_adds_reversed_inside_faces() {
         let cell = CloudCell {
-            present: true,
+            south_empty: true,
+            west_empty: true,
             ..Default::default()
         };
         let mut faces = Vec::new();
 
-        build_extruded_cell(&mut faces, 0, 0, &cell, RelativePos::Inside);
+        build_extruded_cell(&mut faces, 1, -1, &cell, RelativePos::Inside);
 
         let exterior: Vec<_> = faces
             .iter()
@@ -702,7 +710,7 @@ mod tests {
             .map(|face| face.dir)
             .collect();
 
-        assert_eq!(exterior, vec![DIR_UP, DIR_DOWN]);
+        assert_eq!(exterior, vec![DIR_UP, DIR_DOWN, DIR_SOUTH, DIR_WEST]);
         assert_eq!(
             inside,
             vec![DIR_DOWN, DIR_UP, DIR_NORTH, DIR_SOUTH, DIR_WEST, DIR_EAST]
@@ -712,7 +720,6 @@ mod tests {
     #[test]
     fn non_interior_fancy_cell_only_emits_visible_exterior_faces() {
         let cell = CloudCell {
-            present: true,
             west_empty: true,
             ..Default::default()
         };
