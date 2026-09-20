@@ -52,7 +52,7 @@ use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
-use crate::ui::font::FontSources;
+use crate::ui::font::{FontOptions, FontSources};
 use crate::world::block::registry::BlockRegistry;
 
 #[derive(Error, Debug)]
@@ -1166,6 +1166,7 @@ impl Renderer {
         &mut self,
         game_dir: &Path,
         packs: &crate::resource_pack::ResourcePackManager,
+        font_options: FontOptions,
     ) {
         self.ctx.device.wait_idle().unwrap();
 
@@ -1223,6 +1224,7 @@ impl Renderer {
                 jar_assets_dir: &self.jar_assets_dir,
                 asset_index: &self.asset_index,
                 packs,
+                options: font_options,
             },
         ) {
             tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");

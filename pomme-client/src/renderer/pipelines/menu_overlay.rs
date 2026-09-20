@@ -3556,7 +3556,7 @@ fn load_single_texture(
     (image, view, allocation)
 }
 
-const MC_FONT_COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8Srgb;
+const MC_FONT_COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8Unorm;
 
 struct FontTextureUpload<'a> {
     pixels: &'a [u8],
@@ -4818,6 +4818,11 @@ mod tests {
         let mut rng = ObfuscationRng::new(0);
         let got: Vec<usize> = (0..10).map(|_| rng.next_int(16)).collect();
         assert_eq!(got, [11, 13, 3, 9, 10, 4, 8, 1, 9, 12]);
+    }
+
+    #[test]
+    fn colored_minecraft_fonts_use_linear_unorm_texture() {
+        assert_eq!(MC_FONT_COLOR_FORMAT, vk::Format::R8G8B8A8Unorm);
     }
 
     #[test]

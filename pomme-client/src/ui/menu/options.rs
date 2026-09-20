@@ -470,12 +470,23 @@ impl MainMenu {
                 (self.damage_tilt_strength * 100.0).round()
             )
         };
+        let force_unicode = if self.force_unicode_font {
+            "Force Unicode Font: ON"
+        } else {
+            "Force Unicode Font: OFF"
+        };
+        let japanese_variants = if self.japanese_glyph_variants {
+            "Japanese Glyph Variants: ON"
+        } else {
+            "Japanese Glyph Variants: OFF"
+        };
         let o = self.chat_options;
         let bg_opacity = percent_label(TEXT_BACKGROUND_OPACITY, o.text_background_opacity.into());
         let chat_opacity = chat_opacity_label(o.opacity);
         let spacing = percent_label(CHAT_LINE_SPACING, o.line_spacing.into());
         let delay = chat_delay_label(o.delay_secs);
         let rows: Vec<OptRow> = vec![
+            OptRow::Pair(force_unicode, japanese_variants),
             OptRow::Pair("Narrator: OFF", self.show_subtitles_label()),
             OptRow::Pair("High Contrast: OFF", "Menu Background Blur: 50%"),
             OptRow::Pair(&bg_opacity, "Background for Chat Only: OFF"),
@@ -1048,6 +1059,16 @@ impl MainMenu {
                     }
                     if label.starts_with("Show Subtitles:") {
                         self.show_subtitles = !self.show_subtitles;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Force Unicode Font:") {
+                        self.force_unicode_font = !self.force_unicode_font;
+                        self.reload_assets = true;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Japanese Glyph Variants:") {
+                        self.japanese_glyph_variants = !self.japanese_glyph_variants;
+                        self.reload_assets = true;
                         self.save_settings();
                     }
                     if label.starts_with("Vignette:") {
