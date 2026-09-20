@@ -1,5 +1,5 @@
 use glam::camera::rh::{proj, view};
-use glam::{DVec3, FloatExt, Mat4, Vec3};
+use glam::{DVec3, FloatExt, Mat4, Vec2, Vec3};
 
 use crate::app::input::InputState;
 use crate::entity::HURT_DURATION;
@@ -230,22 +230,35 @@ impl Camera {
 
     pub fn update_look(&mut self, input: &mut InputState, dt: f32, sensitivity: f32) {
         if let Some(look_vec) = input.get_gamepad_right_analog() {
-            let step = CONTROLLER_SENSITIVITY * dt;
-            let y_rot_deg =
-                ((self.look_dir.y_rot_deg() + look_vec.x * step) + 180.0).rem_euclid(360.0) - 180.0;
-            let x_rot_deg = self.look_dir.x_rot_deg() - look_vec.y * step; //TODO: Add preference for inverting the Y axis
-            self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
+            self.update_gamepad_look(look_vec, dt, false);
         }
 
         if input.is_cursor_captured() {
             let (dx, dy) = input.consume_mouse_delta();
             let mouse_sensitivity = mouse_sensitivity_multiplier(sensitivity);
-            let y_rot_deg = ((self.look_dir.y_rot_deg() + dx as f32 * mouse_sensitivity) + 180.0)
-                .rem_euclid(360.0)
-                - 180.0;
-            let x_rot_deg = self.look_dir.x_rot_deg() + dy as f32 * mouse_sensitivity;
-            self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
+            self.turn(dx as f32 * mouse_sensitivity, dy as f32 * mouse_sensitivity);
         }
+    }
+
+    /// gilrs reports stick-up as `+y` and `x_rot` is positive downwards, so
+    /// the un-inverted case negates.
+    ///
+    /// TODO: nothing passes `invert_y: true` yet — there is no invert
+    /// preference.
+    fn update_gamepad_look(&mut self, look_vec: Vec2, dt: f32, invert_y: bool) {
+        let step = CONTROLLER_SENSITIVITY * dt;
+        let pitch_sign = if invert_y { 1.0 } else { -1.0 };
+        self.turn(look_vec.x * step, look_vec.y * pitch_sign * step);
+    }
+
+    /// Vanilla `Entity.turn`: add the already-scaled deltas, clamping pitch
+    /// (in `LookDirection::new`). Pomme additionally wraps yaw into
+    /// (-180, 180].
+    fn turn(&mut self, y_rot_delta: f32, x_rot_delta: f32) {
+        let y_rot_deg =
+            ((self.look_dir.y_rot_deg() + y_rot_delta) + 180.0).rem_euclid(360.0) - 180.0;
+        let x_rot_deg = self.look_dir.x_rot_deg() + x_rot_delta;
+        self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
     }
 
     pub fn set_aspect_ratio(&mut self, aspect: f32) {
@@ -724,6 +737,26 @@ mod tests {
     fn mouse_sensitivity_curve_matches_vanilla() {
         for (sensitivity, expected) in [(0.0, 0.0096), (0.5, 0.15), (1.0, 0.6144)] {
             assert!((mouse_sensitivity_multiplier(sensitivity) - expected).abs() < 1e-6);
+        }
+    }
+
+    /// Vanilla `MouseHandler.turnPlayer` applies the invert option as a sign
+    /// flip on the look delta, and only on the axis it names.
+    #[test]
+    fn gamepad_invert_y_flips_pitch_without_touching_yaw() {
+        for (invert_y, expected_pitch) in [(false, -15.0), (true, 15.0)] {
+            let mut camera = Camera::new(16.0 / 9.0);
+            camera.update_gamepad_look(Vec2::new(0.2, 0.1), 1.0, invert_y);
+            assert!(
+                (camera.look_dir.x_rot_deg() - expected_pitch).abs() < 1e-5,
+                "invert_y={invert_y} gave pitch {}, expected {expected_pitch}",
+                camera.look_dir.x_rot_deg()
+            );
+            assert!(
+                (camera.look_dir.y_rot_deg() - 30.0).abs() < 1e-5,
+                "invert_y={invert_y} changed yaw to {}",
+                camera.look_dir.y_rot_deg()
+            );
         }
     }
 }
