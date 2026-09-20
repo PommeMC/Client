@@ -32,6 +32,7 @@ pub fn build_crafting_table(
     last_click: &mut Option<(u16, Instant)>,
     gs: f32,
     x_offset: f32,
+    deferred_cursor: Option<&mut ItemStack>,
 ) -> ContainerResult {
     let panel = push_panel_offset(
         elements,
@@ -76,7 +77,11 @@ pub fn build_crafting_table(
 
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
 
-    push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
+    if let Some(out) = deferred_cursor {
+        *out = shown_cursor;
+    } else {
+        push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
+    }
 
     let (ops, clicked_outside) = resolve_gesture(
         input,

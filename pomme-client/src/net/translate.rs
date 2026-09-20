@@ -5083,21 +5083,31 @@ fn write_substitute_parser(out: &mut Vec<u8>, parser: &str) -> Option<()> {
     Some(())
 }
 
-/// Copies one item `HolderSet` (`ByteBufCodecs.holderSet`: 0 then a tag
-/// id, or count + 1 then that many item ids).
-fn copy_holder_set(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
-    match copy_varint(cur, out)? {
-        0 => copy_utf(cur, out),
-        n => (1..n).try_for_each(|_| copy_varint(cur, out).map(drop)),
+/// Normalizes one item `HolderSet` (`ByteBufCodecs.holderSet`: 0 then a tag
+/// id, or count + 1 then that many concrete item ids) into native item-id
+/// space. Named tags keep their resource id; direct holders must be remapped.
+fn translate_item_holder_set(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    let encoded = u32::azalea_read_var(cur).ok()?;
+    wire::write_varint(out, encoded);
+    if encoded == 0 {
+        return copy_utf(cur, out);
     }
+    for _ in 1..encoded {
+        let item = u32::azalea_read_var(cur).ok()?;
+        wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
+    }
+    Some(())
 }
 
 /// Copies one 26.3 `SlotDisplay`, recursively. Only `tag` changed: 26.3
 /// sends a `HolderSet` where 26.2 sent the tag id, and 26.3's
 /// `Ingredient.display()` routes direct item lists through it too, which
-/// 26.2 sent as a `composite` of `item` displays. The other types' layouts
-/// are unchanged (`SlotDisplay`); item ids stay in wire space.
-/// TODO: remap recipe-display item ids once `remap_inbound` covers recipes.
+/// 26.2 sent as a `composite` of `item` displays. Concrete item ids are
+/// normalized into native 26.2 registry space while named tags keep their id.
 fn copy_slot_display_777(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
@@ -5116,7 +5126,8 @@ fn copy_slot_display_777(
             wire::write_varint(out, set - 1);
             for _ in 1..set {
                 wire::write_varint(out, item);
-                copy_varint(cur, out)?;
+                let source_item = u32::azalea_read_var(cur).ok()?;
+                wire::write_varint(out, remaps.remap(ClientRegistry::Item, source_item)?);
             }
             return Some(());
         }
@@ -5136,10 +5147,12 @@ fn copy_slot_display_777(
         "empty" | "any_fuel" | "with_any_potion" | "dyed" | "with_remainder" | "composite" => {}
         "tag" => copy_utf(cur, out)?,
         "item" => {
-            copy_varint(cur, out)?;
+            let source_item = u32::azalea_read_var(cur).ok()?;
+            wire::write_varint(out, remaps.remap(ClientRegistry::Item, source_item)?);
         }
         "item_stack" => {
-            copy_varint(cur, out)?; // item
+            let source_item = u32::azalea_read_var(cur).ok()?;
+            wire::write_varint(out, remaps.remap(ClientRegistry::Item, source_item)?);
             copy_varint(cur, out)?; // count
             copy_component_patch(cur, out, remaps)?;
         }
@@ -5216,7 +5229,8 @@ fn translate_recipe_book_add_777(
         copy_varint(&mut cur, &mut out)?; // group (optional varint)
         copy_varint(&mut cur, &mut out)?; // category
         copy_optional(&mut cur, &mut out, |cur, out| {
-            (0..copy_varint(cur, out)?).try_for_each(|_| copy_holder_set(cur, out))
+            (0..copy_varint(cur, out)?)
+                .try_for_each(|_| translate_item_holder_set(cur, out, remaps))
         })?;
         copy_bytes(&mut cur, &mut out, 1)?; // flags
     }
@@ -5254,11 +5268,12 @@ fn translate_update_recipes_777(
     for _ in 0..copy_varint(&mut cur, &mut out)? {
         copy_utf(&mut cur, &mut out)?; // property set key
         for _ in 0..copy_varint(&mut cur, &mut out)? {
-            copy_varint(&mut cur, &mut out)?; // item
+            let source_item = u32::azalea_read_var(&mut cur).ok()?;
+            wire::write_varint(&mut out, remaps.remap(ClientRegistry::Item, source_item)?);
         }
     }
     for _ in 0..copy_varint(&mut cur, &mut out)? {
-        copy_holder_set(&mut cur, &mut out)?;
+        translate_item_holder_set(&mut cur, &mut out, remaps)?;
         copy_slot_display_777(&mut cur, &mut out, v.wire_registries, remaps)?;
     }
     Some(out)
@@ -5436,5 +5451,143 @@ mod recipe_translation_tests {
         assert_eq!(wire::read_varint(&translated, &mut pos), Some(id));
         assert_eq!(translated[pos + 5], 53); // first remapped dripstone_block
         assert_eq!(translated[pos + 7], 53); // result dripstone_block
+    }
+
+    #[test]
+    fn recipe_packets_remap_26_3_concrete_item_ids() {
+        let translation = Translation::for_protocol(777).expect("26.3 translation");
+        let wire_packets = PacketTable::for_protocol(777).expect("26.3 packets");
+        let wire_registries = RegistryTable::for_protocol(777).expect("26.3 registries");
+        let native_packets = PacketTable::native();
+        let native_registries = RegistryTable::native();
+
+        let wire_item = wire_registries
+            .id_of(ClientRegistry::Item, "diamond")
+            .expect("26.3 diamond");
+        let native_item = native_registries
+            .id_of(ClientRegistry::Item, "diamond")
+            .expect("native diamond");
+        assert_ne!(
+            wire_item, native_item,
+            "fixture must exercise a moved item id"
+        );
+
+        let wire_shapeless = wire_registries
+            .id_of(ClientRegistry::RecipeDisplay, "crafting_shapeless")
+            .unwrap();
+        let native_shapeless = native_registries
+            .id_of(ClientRegistry::RecipeDisplay, "crafting_shapeless")
+            .unwrap();
+        let wire_slot_item = wire_registries
+            .id_of(ClientRegistry::SlotDisplay, "item")
+            .unwrap();
+        let native_slot_item = native_registries
+            .id_of(ClientRegistry::SlotDisplay, "item")
+            .unwrap();
+        let wire_slot_empty = wire_registries
+            .id_of(ClientRegistry::SlotDisplay, "empty")
+            .unwrap();
+        let native_slot_empty = native_registries
+            .id_of(ClientRegistry::SlotDisplay, "empty")
+            .unwrap();
+
+        let wire_add = required_id(
+            wire_packets,
+            Phase::Game,
+            Direction::Clientbound,
+            "recipe_book_add",
+        );
+        let native_add = required_id(
+            native_packets,
+            Phase::Game,
+            Direction::Clientbound,
+            "recipe_book_add",
+        );
+        let mut add = Vec::new();
+        wire::write_varint(&mut add, wire_add);
+        wire::write_varint(&mut add, 1); // entries
+        wire::write_varint(&mut add, 7); // display id
+        wire::write_varint(&mut add, wire_shapeless);
+        wire::write_varint(&mut add, 1); // display ingredients
+        wire::write_varint(&mut add, wire_slot_item);
+        wire::write_varint(&mut add, wire_item);
+        wire::write_varint(&mut add, wire_slot_item); // result
+        wire::write_varint(&mut add, wire_item);
+        wire::write_varint(&mut add, wire_slot_empty); // station
+        wire::write_varint(&mut add, 0); // no group
+        wire::write_varint(&mut add, 0); // category
+        add.push(1); // crafting requirements present
+        wire::write_varint(&mut add, 1); // one requirement
+        wire::write_varint(&mut add, 2); // one direct holder (+ 1)
+        wire::write_varint(&mut add, wire_item);
+        add.push(0); // flags
+        add.push(0); // replace
+
+        let translated = translation
+            .translate_game_frame(add.into_boxed_slice())
+            .expect("translated 26.3 recipe add");
+        let mut expected = Vec::new();
+        wire::write_varint(&mut expected, native_add);
+        wire::write_varint(&mut expected, 1);
+        wire::write_varint(&mut expected, 7);
+        wire::write_varint(&mut expected, native_shapeless);
+        wire::write_varint(&mut expected, 1);
+        wire::write_varint(&mut expected, native_slot_item);
+        wire::write_varint(&mut expected, native_item);
+        wire::write_varint(&mut expected, native_slot_item);
+        wire::write_varint(&mut expected, native_item);
+        wire::write_varint(&mut expected, native_slot_empty);
+        wire::write_varint(&mut expected, 0);
+        wire::write_varint(&mut expected, 0);
+        expected.push(1);
+        wire::write_varint(&mut expected, 1);
+        wire::write_varint(&mut expected, 2);
+        wire::write_varint(&mut expected, native_item);
+        expected.push(0);
+        expected.push(0);
+        assert_eq!(&*translated, &expected);
+
+        let wire_update = required_id(
+            wire_packets,
+            Phase::Game,
+            Direction::Clientbound,
+            "update_recipes",
+        );
+        let native_update = required_id(
+            native_packets,
+            Phase::Game,
+            Direction::Clientbound,
+            "update_recipes",
+        );
+        let mut update = Vec::new();
+        wire::write_varint(&mut update, wire_update);
+        wire::write_varint(&mut update, 1); // property sets
+        let key = b"minecraft:test";
+        wire::write_varint(&mut update, key.len() as u32);
+        update.extend_from_slice(key);
+        wire::write_varint(&mut update, 1); // property set items
+        wire::write_varint(&mut update, wire_item);
+        wire::write_varint(&mut update, 1); // stonecutter entries
+        wire::write_varint(&mut update, 2); // one direct ingredient holder
+        wire::write_varint(&mut update, wire_item);
+        wire::write_varint(&mut update, wire_slot_item);
+        wire::write_varint(&mut update, wire_item);
+
+        let translated = translation
+            .translate_game_frame(update.into_boxed_slice())
+            .expect("translated 26.3 update recipes");
+        let mut expected = Vec::new();
+        wire::write_varint(&mut expected, native_update);
+        wire::write_varint(&mut expected, 1);
+        wire::write_varint(&mut expected, key.len() as u32);
+        expected.extend_from_slice(key);
+        wire::write_varint(&mut expected, 1);
+        wire::write_varint(&mut expected, native_item);
+        wire::write_varint(&mut expected, 1);
+        wire::write_varint(&mut expected, 2);
+        wire::write_varint(&mut expected, native_item);
+        wire::write_varint(&mut expected, native_slot_item);
+        wire::write_varint(&mut expected, native_item);
+        assert_eq!(&*translated, &expected);
     }
 }

@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use azalea_inventory::ItemStack;
+use azalea_inventory::components::{CustomName, Damage, Enchantments, Lore, TooltipDisplay};
+use azalea_inventory::item::MaxStackSizeExt;
+use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::Registry;
+use azalea_registry::builtin::{DataComponentKind, ItemKind};
 
 use super::common::{FONT_SIZE, WHITE, hit_test, push_tooltip, push_tooltip_lines};
 use super::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
@@ -16,6 +19,7 @@ use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLin
 const BOOK_W: f32 = 147.0;
 const BOOK_H: f32 = 166.0;
 const ITEMS_PER_PAGE: usize = 20;
+const HIGHLIGHT_ANIMATION: Duration = Duration::from_millis(750);
 const SEARCH_X: f32 = 25.0;
 const SEARCH_Y: f32 = 13.0;
 const SEARCH_W: f32 = 81.0;
@@ -25,14 +29,21 @@ const FILTER_Y: f32 = 12.0;
 const FILTER_W: f32 = 26.0;
 const FILTER_H: f32 = 16.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CraftabilitySource {
+    PlayerInventory,
+    CraftingTable,
+    Furnace,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct RecipeBookScreenSpec {
     pub kind: RecipeBookType,
     pub container_id: i32,
     pub grid_width: usize,
     pub grid_height: usize,
-    pub result_slot: usize,
     pub big_result_slot: bool,
+    craftability_source: CraftabilitySource,
     pub toggle_x: f32,
     pub toggle_y: f32,
     pub panel_h: f32,
@@ -48,8 +59,8 @@ impl RecipeBookScreenSpec {
             container_id,
             grid_width: 2,
             grid_height: 2,
-            result_slot: 0,
             big_result_slot: false,
+            craftability_source: CraftabilitySource::PlayerInventory,
             toggle_x: 104.0,
             toggle_y: 61.0,
             panel_h: 166.0,
@@ -63,8 +74,8 @@ impl RecipeBookScreenSpec {
             container_id,
             grid_width: 3,
             grid_height: 3,
-            result_slot: 0,
             big_result_slot: true,
+            craftability_source: CraftabilitySource::CraftingTable,
             toggle_x: 5.0,
             toggle_y: 34.0,
             panel_h: 166.0,
@@ -78,8 +89,8 @@ impl RecipeBookScreenSpec {
             container_id,
             grid_width: 1,
             grid_height: 1,
-            result_slot: 2,
             big_result_slot: true,
+            craftability_source: CraftabilitySource::Furnace,
             toggle_x: 20.0,
             toggle_y: 34.0,
             panel_h: 166.0,
@@ -97,6 +108,8 @@ pub struct RecipeBookUiState {
     overlay: Option<RecipeOverlay>,
     last_placed: Option<RecipeDisplayId>,
     last_clicked_collection: Option<Vec<RecipeDisplayId>>,
+    recipe_animation_started: HashMap<RecipeDisplayId, Instant>,
+    tab_animation_started: HashMap<i32, Instant>,
     narrow: bool,
     ignore_next_typed_char: bool,
     started: Instant,
@@ -113,6 +126,8 @@ impl RecipeBookUiState {
             overlay: None,
             last_placed: None,
             last_clicked_collection: None,
+            recipe_animation_started: HashMap::new(),
+            tab_animation_started: HashMap::new(),
             narrow: false,
             ignore_next_typed_char: false,
             started: Instant::now(),
@@ -123,12 +138,20 @@ impl RecipeBookUiState {
         self.search_focused
     }
 
-    pub fn reset_for_closed_screen(&mut self) {
+    pub fn reset_for_closed_screen(&mut self, book: &mut RecipeBookState) {
+        self.search.clear();
         self.search_focused = false;
+        self.screen = None;
+        self.selected_tab = 0;
+        self.page = 0;
         self.overlay = None;
         self.last_placed = None;
+        self.last_clicked_collection = None;
+        self.recipe_animation_started.clear();
+        self.tab_animation_started.clear();
         self.narrow = false;
         self.ignore_next_typed_char = false;
+        book.ghost_recipe = None;
     }
 
     pub fn focus_search_from_chat_key(&mut self, book: &RecipeBookState) -> bool {
@@ -175,6 +198,8 @@ impl RecipeBookUiState {
             self.overlay = None;
             self.last_placed = None;
             self.last_clicked_collection = None;
+            self.recipe_animation_started.clear();
+            self.tab_animation_started.clear();
             self.search.clear();
             self.search_focused = false;
         }
@@ -189,6 +214,24 @@ impl Default for RecipeBookUiState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn animation_squeeze(started: Instant, now: Instant) -> Option<f32> {
+    let elapsed = now.saturating_duration_since(started);
+    if elapsed >= HIGHLIGHT_ANIMATION {
+        return None;
+    }
+    let t = elapsed.as_secs_f32() / HIGHLIGHT_ANIMATION.as_secs_f32();
+    Some(1.0 + 0.1 * (std::f32::consts::PI * t).sin())
+}
+
+fn scale_rect_about(rect: [f32; 4], pivot: (f32, f32), scale: (f32, f32)) -> [f32; 4] {
+    [
+        pivot.0 + (rect[0] - pivot.0) * scale.0,
+        pivot.1 + (rect[1] - pivot.1) * scale.1,
+        rect[2] * scale.0,
+        rect[3] * scale.1,
+    ]
 }
 
 #[derive(Clone, Debug)]
@@ -368,7 +411,7 @@ pub fn handle_input(
         frame.consumed_left_click = true;
     }
 
-    let available = available_items(slots, spec.result_slot);
+    let available = available_items(slots, spec);
     let tabs = tabs_for(spec.kind);
     let all_collections = collections(book, spec, &available);
     let visible_tabs = visible_tabs(
@@ -548,7 +591,7 @@ pub fn handle_input(
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     elements: &mut Vec<MenuElement>,
-    state: &RecipeBookUiState,
+    state: &mut RecipeBookUiState,
     book: &mut RecipeBookState,
     sender: &PacketSender,
     spec: RecipeBookScreenSpec,
@@ -613,7 +656,7 @@ pub fn render(
             elements, book, spec.kind, bx, by, scale, cursor, screen_w, screen_h,
         );
 
-        let available = available_items(slots, spec.result_slot);
+        let available = available_items(slots, spec);
         let tabs = tabs_for(spec.kind);
         let all_collections = collections(book, spec, &available);
         let visible_tabs = visible_tabs(
@@ -652,6 +695,7 @@ pub fn render(
             .skip(start)
             .take(ITEMS_PER_PAGE)
             .collect::<Vec<_>>();
+        let now = Instant::now();
         let mut shown_highlights = Vec::new();
         for (index, collection) in page.iter().enumerate() {
             let x = bx + (11.0 + 25.0 * (index % 5) as f32) * scale;
@@ -663,8 +707,31 @@ pub fn render(
             for entry in &selected {
                 if book.highlight.contains(&entry.id) {
                     shown_highlights.push(entry.id);
+                    state
+                        .recipe_animation_started
+                        .entry(entry.id)
+                        .or_insert(now);
                 }
             }
+            let mut squeeze = None;
+            for entry in &selected {
+                if let Some(started) = state.recipe_animation_started.get(&entry.id).copied() {
+                    if let Some(value) = animation_squeeze(started, now) {
+                        squeeze = Some(value);
+                        break;
+                    }
+                    state.recipe_animation_started.remove(&entry.id);
+                }
+            }
+            let squeeze = squeeze.unwrap_or(1.0);
+            let pivot_x = x + 8.0 * scale;
+            let pivot_y = y + 12.0 * scale;
+            let button_rect = scale_rect_about(
+                [x, y, 25.0 * scale, 25.0 * scale],
+                (pivot_x, pivot_y),
+                (squeeze, squeeze),
+            );
+
             let entry_count = selected.len();
             let current = selected[cycle % entry_count];
             let result_cycle = cycle / entry_count;
@@ -678,40 +745,39 @@ pub fn render(
                 (false, true) => SpriteId::RecipeBookSlotManyUncraftable,
             };
             elements.push(MenuElement::Image {
-                x,
-                y,
-                w: 25.0 * scale,
-                h: 25.0 * scale,
+                x: button_rect[0],
+                y: button_rect[1],
+                w: button_rect[2],
+                h: button_rect[3],
                 sprite,
                 tint: WHITE,
             });
             if let Some(item) = display_item(&current.display, book, result_cycle) {
+                let push_animated_stack =
+                    |elements: &mut Vec<MenuElement>,
+                     offset_x: f32,
+                     offset_y: f32,
+                     item: &ItemStackData| {
+                        let rect = scale_rect_about(
+                            [
+                                x + offset_x * scale,
+                                y + offset_y * scale,
+                                16.0 * scale,
+                                16.0 * scale,
+                            ],
+                            (pivot_x, pivot_y),
+                            (squeeze, squeeze),
+                        );
+                        push_book_stack(elements, rect[0], rect[1], rect[2], item);
+                    };
                 if same_result {
-                    push_book_item(
-                        elements,
-                        x + 5.0 * scale,
-                        y + 5.0 * scale,
-                        16.0 * scale,
-                        item,
-                    );
-                    push_book_item(
-                        elements,
-                        x + 3.0 * scale,
-                        y + 3.0 * scale,
-                        16.0 * scale,
-                        item,
-                    );
+                    push_animated_stack(elements, 5.0, 5.0, &item);
+                    push_animated_stack(elements, 3.0, 3.0, &item);
                 } else {
-                    push_book_item(
-                        elements,
-                        x + 4.0 * scale,
-                        y + 4.0 * scale,
-                        16.0 * scale,
-                        item,
-                    );
+                    push_animated_stack(elements, 4.0, 4.0, &item);
                 }
                 if hit_test(cursor, [x, y, 25.0 * scale, 25.0 * scale]) && state.overlay.is_none() {
-                    let name = item_name(item);
+                    let name = super::common::item_display_name(&item);
                     if multiple {
                         push_tooltip_lines(
                             elements,
@@ -1009,7 +1075,7 @@ fn filtered_collections<'a>(
     search: &str,
     book: &RecipeBookState,
 ) -> Vec<&'a Collection> {
-    let needle = search.trim().to_lowercase();
+    let needle = search.to_lowercase();
     collections
         .iter()
         .filter(|collection| {
@@ -1032,12 +1098,42 @@ fn filtered_collections<'a>(
 }
 
 fn entry_matches_search(entry: &RecipeBookEntry, book: &RecipeBookState, needle: &str) -> bool {
-    display_item_ids(&entry.display, book)
-        .into_iter()
-        .any(|id| {
-            item_name(id).to_lowercase().contains(needle)
-                || item_resource(id).is_some_and(|name| name.to_lowercase().contains(needle))
-        })
+    let results = display_result_stacks(&entry.display, book);
+    if let Some((namespace, path)) = needle.split_once(':') {
+        let namespace = namespace.trim();
+        let path = path.trim();
+        return results.iter().any(|stack| {
+            let namespace_matches = "minecraft".contains(namespace);
+            let resource_path_matches = crate::player::inventory::item_resource_name(stack.kind)
+                .to_lowercase()
+                .contains(path);
+            let tooltip_matches = normal_tooltip_search_lines(stack)
+                .iter()
+                .any(|line| line.to_lowercase().contains(path));
+            namespace_matches && (resource_path_matches || tooltip_matches)
+        });
+    }
+    results.iter().any(|stack| {
+        normal_tooltip_search_lines(stack)
+            .iter()
+            .any(|line| line.to_lowercase().contains(needle))
+    })
+}
+
+fn normal_tooltip_search_lines(stack: &ItemStackData) -> Vec<String> {
+    let display = stack.get_component::<TooltipDisplay>();
+    if display.as_ref().is_some_and(|display| display.hide_tooltip) {
+        return Vec::new();
+    }
+
+    let mut lines = vec![super::common::item_display_name(stack)];
+    let lore_visible = display
+        .as_ref()
+        .is_none_or(|display| !display.hidden_components.contains(&DataComponentKind::Lore));
+    if lore_visible && let Some(lore) = stack.get_component::<Lore>() {
+        lines.extend(lore.lines.iter().map(ToString::to_string));
+    }
+    lines
 }
 
 fn kind_accepts_category(kind: RecipeBookType, category: u32) -> bool {
@@ -1065,17 +1161,71 @@ fn can_display(spec: RecipeBookScreenSpec, display: &RecipeDisplay) -> bool {
     }
 }
 
-fn available_items(slots: &[ItemStack], result_slot: usize) -> HashMap<u32, u32> {
+fn available_items(slots: &[ItemStack], spec: RecipeBookScreenSpec) -> HashMap<u32, u32> {
     let mut counts = HashMap::new();
-    for (index, stack) in slots.iter().enumerate() {
-        if index == result_slot {
-            continue;
+    match spec.craftability_source {
+        CraftabilitySource::PlayerInventory => {
+            // InventoryMenu: 2x2 crafting inputs plus the player's 36 inventory
+            // items. Armor, offhand, and the crafting result are excluded.
+            for index in (1..5).chain(9..45) {
+                account_simple_stack(slots.get(index), &mut counts);
+            }
         }
-        if let ItemStack::Present(data) = stack {
-            *counts.entry(data.kind.to_u32()).or_default() += data.count as u32;
+        CraftabilitySource::CraftingTable => {
+            // CraftingMenu: 3x3 crafting inputs 1..9 and player inventory 10..45.
+            for index in 1..46 {
+                account_simple_stack(slots.get(index), &mut counts);
+            }
+        }
+        CraftabilitySource::Furnace => {
+            // AbstractFurnaceMenu delegates its three-slot SimpleContainer to
+            // accountStack (components do not disqualify these), then adds the
+            // player's inventory with accountSimpleStack.
+            for index in 0..3 {
+                account_stack(slots.get(index), &mut counts);
+            }
+            for index in 3..39 {
+                account_simple_stack(slots.get(index), &mut counts);
+            }
         }
     }
     counts
+}
+
+fn account_simple_stack(stack: Option<&ItemStack>, counts: &mut HashMap<u32, u32>) {
+    let Some(ItemStack::Present(data)) = stack else {
+        return;
+    };
+    if !is_usable_for_crafting(data) {
+        return;
+    }
+    account_stack_data(data, counts);
+}
+
+fn account_stack(stack: Option<&ItemStack>, counts: &mut HashMap<u32, u32>) {
+    let Some(ItemStack::Present(data)) = stack else {
+        return;
+    };
+    account_stack_data(data, counts);
+}
+
+fn account_stack_data(data: &ItemStackData, counts: &mut HashMap<u32, u32>) {
+    if data.count <= 0 {
+        return;
+    }
+    let count = data.count.min(data.kind.max_stack_size()) as u32;
+    *counts.entry(data.kind.to_u32()).or_default() += count;
+}
+
+fn is_usable_for_crafting(data: &ItemStackData) -> bool {
+    let damaged = data
+        .get_component::<Damage>()
+        .is_some_and(|damage| damage.amount > 0);
+    let enchanted = data
+        .get_component::<Enchantments>()
+        .is_some_and(|enchantments| !enchantments.levels.is_empty());
+    let named = data.get_component::<CustomName>().is_some();
+    !damaged && !enchanted && !named
 }
 
 fn can_craft_entry(
@@ -1087,10 +1237,9 @@ fn can_craft_entry(
 }
 
 fn can_craft(entry: &RecipeBookEntry, available: &HashMap<u32, u32>, tags: &ItemTags) -> bool {
-    let requirements = entry
-        .crafting_requirements
-        .clone()
-        .unwrap_or_else(|| display_requirements(&entry.display, tags));
+    let Some(requirements) = entry.crafting_requirements.as_ref() else {
+        return false;
+    };
     if requirements.is_empty() {
         return false;
     }
@@ -1125,43 +1274,6 @@ fn can_assign(options: &[Vec<u32>], index: usize, remaining: &mut HashMap<u32, u
         *remaining.get_mut(item).expect("same item remains in map") += 1;
     }
     false
-}
-
-fn display_requirements(display: &RecipeDisplay, tags: &ItemTags) -> Vec<Ingredient> {
-    let slots: &[SlotDisplay] = match display {
-        RecipeDisplay::Shapeless { ingredients, .. }
-        | RecipeDisplay::Shaped { ingredients, .. } => ingredients,
-        RecipeDisplay::Furnace { ingredient, .. } => {
-            return slot_to_ingredient(ingredient, tags).into_iter().collect();
-        }
-        _ => return Vec::new(),
-    };
-    slots
-        .iter()
-        .filter_map(|slot| slot_to_ingredient(slot, tags))
-        .collect()
-}
-
-fn slot_to_ingredient(slot: &SlotDisplay, tags: &ItemTags) -> Option<Ingredient> {
-    match slot {
-        SlotDisplay::Item(id) => Some(Ingredient::Items(vec![*id])),
-        SlotDisplay::ItemStack(stack) => Some(Ingredient::Items(vec![stack.item])),
-        SlotDisplay::Tag(tag) => Some(Ingredient::Items(tags.get(tag)?.iter().copied().collect())),
-        SlotDisplay::Composite(parts) => Some(Ingredient::Items(
-            parts
-                .iter()
-                .flat_map(|part| slot_item_ids(part, tags))
-                .collect(),
-        )),
-        SlotDisplay::WithAnyPotion(inner)
-        | SlotDisplay::OnlyWithComponent {
-            contents: inner, ..
-        } => slot_to_ingredient(inner, tags),
-        SlotDisplay::Dyed { target, .. } => slot_to_ingredient(target, tags),
-        SlotDisplay::SmithingTrim { base, .. } => slot_to_ingredient(base, tags),
-        SlotDisplay::WithRemainder { input, .. } => slot_to_ingredient(input, tags),
-        SlotDisplay::Empty | SlotDisplay::AnyFuel => None,
-    }
 }
 
 fn ingredient_items<'a>(
@@ -1201,7 +1313,7 @@ fn slot_item_ids(slot: &SlotDisplay, tags: &ItemTags) -> Vec<u32> {
     }
 }
 
-fn display_item_ids(display: &RecipeDisplay, book: &RecipeBookState) -> Vec<u32> {
+fn display_result_stacks(display: &RecipeDisplay, book: &RecipeBookState) -> Vec<ItemStackData> {
     let result = match display {
         RecipeDisplay::Shapeless { result, .. }
         | RecipeDisplay::Shaped { result, .. }
@@ -1209,7 +1321,50 @@ fn display_item_ids(display: &RecipeDisplay, book: &RecipeBookState) -> Vec<u32>
         | RecipeDisplay::Stonecutter { result, .. }
         | RecipeDisplay::Smithing { result, .. } => result,
     };
-    slot_item_ids(result, &book.item_tags)
+    slot_stacks(result, book)
+}
+
+fn slot_stacks(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<ItemStackData> {
+    let basic = |id: u32| ItemKind::from_u32(id).map(|kind| ItemStackData::new(kind, 1));
+    match slot {
+        SlotDisplay::Empty => Vec::new(),
+        SlotDisplay::AnyFuel => vanilla_fuel_items(&book.item_tags)
+            .into_iter()
+            .filter_map(basic)
+            .collect(),
+        SlotDisplay::Item(id) => basic(*id).into_iter().collect(),
+        SlotDisplay::ItemStack(template) => ItemKind::from_u32(template.item)
+            .map(|kind| ItemStackData {
+                kind,
+                count: template.count,
+                component_patch: template.components.clone(),
+            })
+            .into_iter()
+            .collect(),
+        SlotDisplay::Tag(tag) => book
+            .item_tags
+            .ordered(tag)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter_map(basic)
+            .collect(),
+        SlotDisplay::Composite(parts) => parts
+            .iter()
+            .flat_map(|part| slot_stacks(part, book))
+            .collect(),
+        SlotDisplay::WithRemainder { input, .. } => slot_stacks(input, book),
+        // These displays transform or filter resolved stacks using registry or
+        // component context. Preserve the underlying item choices here; Pomme
+        // does not yet expose the full Vanilla SlotDisplayContext transform
+        // pipeline to the menu renderer.
+        SlotDisplay::WithAnyPotion(inner)
+        | SlotDisplay::OnlyWithComponent {
+            contents: inner, ..
+        } => slot_stacks(inner, book),
+        SlotDisplay::Dyed { target, .. } => slot_stacks(target, book),
+        SlotDisplay::SmithingTrim { base, .. } => slot_stacks(base, book),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1460,12 +1615,10 @@ fn render_ghost_slot(
     screen_w: f32,
     screen_h: f32,
 ) {
-    let mut items = ghost_slot_items(slot, book);
+    let items = ghost_slot_items(slot, book);
     if items.is_empty() {
         return;
     }
-    items.sort_unstable();
-    items.dedup();
     let item = items[cycle % items.len()];
     let red = ghost_highlight_rect(x, y, scale, big_result);
     elements.push(MenuElement::Rect {
@@ -1603,19 +1756,23 @@ fn vanilla_fuel_items(tags: &ItemTags) -> Vec<u32> {
     out
 }
 
-fn display_item(display: &RecipeDisplay, book: &RecipeBookState, cycle: usize) -> Option<u32> {
-    let items = display_item_ids(display, book);
-    (!items.is_empty()).then(|| items[cycle % items.len()])
+fn display_item(
+    display: &RecipeDisplay,
+    book: &RecipeBookState,
+    cycle: usize,
+) -> Option<ItemStackData> {
+    let items = display_result_stacks(display, book);
+    (!items.is_empty()).then(|| items[cycle % items.len()].clone())
 }
 
 fn all_recipes_have_same_result(entries: &[&RecipeBookEntry], book: &RecipeBookState) -> bool {
     let mut items = entries
         .iter()
-        .flat_map(|entry| display_item_ids(&entry.display, book));
+        .flat_map(|entry| display_result_stacks(&entry.display, book));
     let Some(first) = items.next() else {
         return true;
     };
-    items.all(|item| item == first)
+    items.all(|item| first.is_same_item_and_components(&item))
 }
 
 fn item_name(id: u32) -> String {
@@ -1647,6 +1804,23 @@ fn push_book_item(elements: &mut Vec<MenuElement>, x: f32, y: f32, size: f32, id
             tint: WHITE,
         });
     }
+}
+
+fn push_book_stack(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    size: f32,
+    stack: &ItemStackData,
+) {
+    elements.push(MenuElement::ItemIcon {
+        x,
+        y,
+        w: size,
+        h: size,
+        item_name: crate::player::inventory::item_resource_name(stack.kind),
+        tint: WHITE,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1764,7 +1938,7 @@ fn render_filter(
 #[allow(clippy::too_many_arguments)]
 fn render_tabs(
     elements: &mut Vec<MenuElement>,
-    state: &RecipeBookUiState,
+    state: &mut RecipeBookUiState,
     book: &RecipeBookState,
     tabs: &[TabInfo],
     collections: &[Collection],
@@ -1777,15 +1951,53 @@ fn render_tabs(
         .screen
         .map(|(kind, _)| book.settings.get(kind).filtering)
         .unwrap_or(false);
+    let now = Instant::now();
     let mut y = by + 3.0 * scale;
     for (index, tab) in tabs.iter().enumerate() {
         let selected = index == state.selected_tab;
-        let x = bx - (if selected { 32.0 } else { 30.0 }) * scale;
+        let has_highlight = collections.iter().any(|collection| {
+            let category_matches = tab.category.is_none_or(|category| {
+                collection
+                    .entries
+                    .first()
+                    .is_some_and(|entry| entry.category == category)
+            });
+            category_matches
+                && collection.entries.iter().any(|entry| {
+                    book.highlight.contains(&entry.id)
+                        && (!filtering || collection.craftable.contains(&entry.id))
+                })
+        });
+        let animation_key = tab.category.map_or(-1, |category| category as i32);
+        if has_highlight {
+            state
+                .tab_animation_started
+                .entry(animation_key)
+                .or_insert(now);
+        }
+        let squeeze = state
+            .tab_animation_started
+            .get(&animation_key)
+            .and_then(|started| animation_squeeze(*started, now));
+        if squeeze.is_none() {
+            state.tab_animation_started.remove(&animation_key);
+        }
+        let squeeze = squeeze.unwrap_or(1.0);
+
+        let base_x = bx - 30.0 * scale;
+        let x = base_x - if selected { 2.0 * scale } else { 0.0 };
+        let pivot_x = base_x + 8.0 * scale;
+        let pivot_y = y + 12.0 * scale;
+        let tab_rect = scale_rect_about(
+            [x, y, 35.0 * scale, 27.0 * scale],
+            (pivot_x, pivot_y),
+            (1.0, squeeze),
+        );
         elements.push(MenuElement::Image {
-            x,
-            y,
-            w: 35.0 * scale,
-            h: 27.0 * scale,
+            x: tab_rect[0],
+            y: tab_rect[1],
+            w: tab_rect[2],
+            h: tab_rect[3],
             sprite: if selected {
                 SpriteId::RecipeBookTabSelected
             } else {
@@ -1794,12 +2006,14 @@ fn render_tabs(
             tint: WHITE,
         });
         let icon_offset = if selected { -2.0 } else { 0.0 };
+        let icon_y = pivot_y + (y + 5.0 * scale - pivot_y) * squeeze;
+        let icon_h = 16.0 * scale * squeeze;
         if let Some(icon_b) = tab.icon_b {
             elements.push(MenuElement::ItemIcon {
                 x: bx + (-27.0 + icon_offset) * scale,
-                y: y + 5.0 * scale,
+                y: icon_y,
                 w: 16.0 * scale,
-                h: 16.0 * scale,
+                h: icon_h,
                 item_name: tab
                     .icon_a
                     .strip_prefix("minecraft:")
@@ -1809,18 +2023,18 @@ fn render_tabs(
             });
             elements.push(MenuElement::ItemIcon {
                 x: bx + (-16.0 + icon_offset) * scale,
-                y: y + 5.0 * scale,
+                y: icon_y,
                 w: 16.0 * scale,
-                h: 16.0 * scale,
+                h: icon_h,
                 item_name: icon_b.strip_prefix("minecraft:").unwrap_or(icon_b).into(),
                 tint: WHITE,
             });
         } else {
             elements.push(MenuElement::ItemIcon {
                 x: bx + (-21.0 + icon_offset) * scale,
-                y: y + 5.0 * scale,
+                y: icon_y,
                 w: 16.0 * scale,
-                h: 16.0 * scale,
+                h: icon_h,
                 item_name: tab
                     .icon_a
                     .strip_prefix("minecraft:")
@@ -1829,15 +2043,6 @@ fn render_tabs(
                 tint: WHITE,
             });
         }
-        let _has_highlight = tab.category.is_some_and(|cat| {
-            collections.iter().any(|collection| {
-                collection.entries.iter().any(|entry| {
-                    entry.category == cat
-                        && book.highlight.contains(&entry.id)
-                        && (!filtering || collection.craftable.contains(&entry.id))
-                })
-            })
-        });
         y += 27.0 * scale;
     }
 }
@@ -2066,6 +2271,67 @@ mod tests {
             &HashMap::from([(5, 1), (6, 1)]),
             &ItemTags::default()
         ));
+    }
+
+    #[test]
+    fn missing_crafting_requirements_are_never_craftable() {
+        let mut entry = recipe(1, 0, vec![Ingredient::Items(vec![5])]).contents;
+        entry.crafting_requirements = None;
+        assert!(!can_craft(
+            &entry,
+            &HashMap::from([(5, 64)]),
+            &ItemTags::default()
+        ));
+    }
+
+    #[test]
+    fn player_craftability_excludes_armor_offhand_and_damaged_stacks() {
+        use azalea_inventory::DataComponentPatch;
+        use azalea_inventory::components::{Damage, DataComponentUnion};
+        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+
+        let diamond = ItemKind::Diamond.to_u32();
+        let mut slots = vec![ItemStack::Empty; 46];
+        slots[5] = ItemStack::Present(ItemStackData::new(ItemKind::Diamond, 2));
+        slots[45] = ItemStack::Present(ItemStackData::new(ItemKind::Diamond, 3));
+        assert!(!available_items(&slots, RecipeBookScreenSpec::player(0)).contains_key(&diamond));
+
+        let mut patch = DataComponentPatch::default();
+        unsafe {
+            patch.unchecked_insert_component(
+                DataComponentKind::Damage,
+                Some(DataComponentUnion::from(Damage { amount: 1 })),
+            );
+        }
+        slots[9] = ItemStack::Present(ItemStackData {
+            kind: ItemKind::Diamond,
+            count: 4,
+            component_patch: patch,
+        });
+        assert!(!available_items(&slots, RecipeBookScreenSpec::player(0)).contains_key(&diamond));
+
+        slots[9] = ItemStack::Present(ItemStackData::new(ItemKind::Diamond, 4));
+        assert_eq!(
+            available_items(&slots, RecipeBookScreenSpec::player(0)).get(&diamond),
+            Some(&4)
+        );
+    }
+
+    #[test]
+    fn furnace_craftability_counts_output_container_stack() {
+        use azalea_registry::builtin::ItemKind;
+
+        let diamond = ItemKind::Diamond.to_u32();
+        let mut slots = vec![ItemStack::Empty; 39];
+        slots[2] = ItemStack::Present(ItemStackData::new(ItemKind::Diamond, 7));
+        assert_eq!(
+            available_items(
+                &slots,
+                RecipeBookScreenSpec::furnace(1, RecipeBookType::Furnace)
+            )
+            .get(&diamond),
+            Some(&7)
+        );
     }
 
     #[test]
@@ -2328,5 +2594,104 @@ mod tests {
         assert!(!frame.visible);
         assert!(state.overlay.is_none());
         assert!(!book.settings.crafting.open);
+    }
+
+    #[test]
+    fn search_matches_vanilla_plain_and_identifier_modes_with_components() {
+        use azalea_chat::FormattedText;
+        use azalea_inventory::DataComponentPatch;
+        use azalea_inventory::components::{CustomName, DataComponentUnion, Lore};
+        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+
+        let mut patch = DataComponentPatch::default();
+        unsafe {
+            patch.unchecked_insert_component(
+                DataComponentKind::CustomName,
+                Some(DataComponentUnion::from(CustomName {
+                    name: FormattedText::from("Fancy Gem"),
+                })),
+            );
+            patch.unchecked_insert_component(
+                DataComponentKind::Lore,
+                Some(DataComponentUnion::from(Lore {
+                    lines: vec![FormattedText::from("Secret Recipe")],
+                })),
+            );
+        }
+        let entry = RecipeBookEntry {
+            id: 9,
+            display: RecipeDisplay::Shapeless {
+                ingredients: Vec::new(),
+                result: SlotDisplay::ItemStack(crate::recipe::ItemStackTemplate {
+                    item: ItemKind::Diamond.to_u32(),
+                    count: 1,
+                    components: patch,
+                }),
+                crafting_station: SlotDisplay::Empty,
+            },
+            group: None,
+            category: 0,
+            crafting_requirements: None,
+        };
+        let book = RecipeBookState::default();
+
+        assert!(entry_matches_search(&entry, &book, "fancy"));
+        assert!(entry_matches_search(&entry, &book, "secret"));
+        assert!(!entry_matches_search(&entry, &book, "diamond"));
+        assert!(!entry_matches_search(&entry, &book, " fancy"));
+        assert!(entry_matches_search(&entry, &book, " minecraft : diamond "));
+    }
+
+    #[test]
+    fn closing_recipe_screen_resets_transient_ui_and_ghost_state() {
+        let spec = RecipeBookScreenSpec::crafting_table(3);
+        let mut state = RecipeBookUiState::new();
+        state.ensure_screen(spec);
+        state.selected_tab = 2;
+        state.page = 3;
+        state.overlay = Some(RecipeOverlay {
+            ids: vec![1],
+            craftable_count: 0,
+            button_index: 0,
+        });
+        state.recipe_animation_started.insert(1, Instant::now());
+        state.tab_animation_started.insert(0, Instant::now());
+
+        let mut book = RecipeBookState::default();
+        book.ghost_recipe = Some(crate::recipe::GhostRecipe {
+            container_id: 3,
+            recipe: recipe(1, 0, Vec::new()).contents.display,
+        });
+        state.reset_for_closed_screen(&mut book);
+
+        assert!(state.screen.is_none());
+        assert_eq!(state.selected_tab, 0);
+        assert_eq!(state.page, 0);
+        assert!(state.overlay.is_none());
+        assert!(state.recipe_animation_started.is_empty());
+        assert!(state.tab_animation_started.is_empty());
+        assert!(book.ghost_recipe.is_none());
+    }
+
+    #[test]
+    fn ghost_alternatives_preserve_slot_display_order_and_duplicates() {
+        let book = RecipeBookState::default();
+        let slot = SlotDisplay::Composite(vec![
+            SlotDisplay::Item(3),
+            SlotDisplay::Item(1),
+            SlotDisplay::Item(3),
+        ]);
+        assert_eq!(ghost_slot_items(&slot, &book), vec![3, 1, 3]);
+    }
+
+    #[test]
+    fn highlight_animation_lasts_exactly_fifteen_ticks() {
+        let started = Instant::now();
+        assert_eq!(animation_squeeze(started, started), Some(1.0));
+        assert!(animation_squeeze(started, started + Duration::from_millis(375)).unwrap() > 1.0);
+        assert_eq!(
+            animation_squeeze(started, started + HIGHLIGHT_ANIMATION),
+            None
+        );
     }
 }

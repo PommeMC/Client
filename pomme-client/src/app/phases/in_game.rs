@@ -2848,7 +2848,8 @@ pub fn update_game(
                 })
         };
         if recipe_context.is_none() {
-            game.recipe_book_ui.reset_for_closed_screen();
+            game.recipe_book_ui
+                .reset_for_closed_screen(&mut game.recipe_book);
         }
         let recipe_selection_key = !game.recipe_book_ui.captures_typing()
             && (core.input.key_just_pressed(winit::keyboard::KeyCode::Space)
@@ -2924,7 +2925,9 @@ pub fn update_game(
                 }));
         }
         let main_x_offset = recipe_frame.map_or(0.0, |frame| frame.main_x_offset);
+        let recipe_book_visible = recipe_frame.is_some_and(|frame| frame.visible);
         let hide_main_for_book = recipe_frame.is_some_and(|frame| frame.visible && frame.narrow);
+        let mut deferred_recipe_cursor = azalea_inventory::ItemStack::Empty;
         let (clicked_outside, ops) = if let Some(container) = &game.open_container {
             let result = if hide_main_for_book {
                 crate::ui::container::ContainerResult {
@@ -2948,6 +2951,7 @@ pub fn update_game(
                             &mut game.inv_last_click,
                             gs,
                             main_x_offset,
+                            recipe_book_visible.then_some(&mut deferred_recipe_cursor),
                         )
                     }
                     ContainerScreen::Furnace(variant) => crate::ui::furnace::build_furnace(
@@ -2965,6 +2969,7 @@ pub fn update_game(
                         &mut game.inv_last_click,
                         gs,
                         main_x_offset,
+                        recipe_book_visible.then_some(&mut deferred_recipe_cursor),
                         &|t, s| gfx.renderer.menu_text_width(t, s),
                     ),
                     ContainerScreen::Chest { rows } => crate::ui::chest::build_chest(
@@ -3069,6 +3074,7 @@ pub fn update_game(
                 &mut game.inv_last_click,
                 gs,
                 main_x_offset,
+                recipe_book_visible.then_some(&mut deferred_recipe_cursor),
             );
             player_preview = Some(result.player_preview);
             (result.clicked_outside, result.ops)
@@ -3087,7 +3093,7 @@ pub fn update_game(
         if let (Some((spec, slots)), Some(frame)) = (recipe_context.as_ref(), recipe_frame) {
             crate::ui::recipe_book::render(
                 &mut elements,
-                &game.recipe_book_ui,
+                &mut game.recipe_book_ui,
                 &mut game.recipe_book,
                 &connection.packet_tx,
                 *spec,
@@ -3099,13 +3105,18 @@ pub fn update_game(
                 slots,
                 &|t, s| gfx.renderer.menu_text_width(t, s),
             );
-            if hide_main_for_book {
+            if frame.visible {
                 let cursor_scale = gs.min(sw / 176.0).min(sh / 166.0);
+                let shown_cursor = if hide_main_for_book {
+                    &game.cursor_item
+                } else {
+                    &deferred_recipe_cursor
+                };
                 crate::ui::container::push_cursor_stack(
                     &mut elements,
                     cursor,
                     cursor_scale,
-                    &game.cursor_item,
+                    shown_cursor,
                 );
             }
         }

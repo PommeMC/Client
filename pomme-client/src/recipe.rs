@@ -234,6 +234,10 @@ pub struct RecipeBookState {
     /// preserved within each bucket. We keep key insertion order so the UI can
     /// reproduce that iteration exactly when rebuilding collections.
     known_insertion_order: Vec<RecipeDisplayId>,
+    /// Emulated backing-table capacity of Vanilla's Java `HashMap`.
+    /// Java grows this at 0.75 load and never shrinks on remove/clear, which
+    /// affects `values()` bucket iteration after a grow-then-reduce history.
+    known_table_capacity: usize,
     pub highlight: HashSet<RecipeDisplayId>,
     pub settings: RecipeBookSettings,
     pub data: RecipeData,
@@ -251,9 +255,17 @@ impl RecipeBookState {
         for entry in entries {
             let id = entry.contents.id;
             if !self.known.contains_key(&id) {
+                if self.known_table_capacity == 0 {
+                    self.known_table_capacity = 16;
+                }
                 self.known_insertion_order.push(id);
+                self.known.insert(id, entry.contents);
+                while self.known.len() > self.known_table_capacity * 3 / 4 {
+                    self.known_table_capacity *= 2;
+                }
+            } else {
+                self.known.insert(id, entry.contents);
             }
-            self.known.insert(id, entry.contents);
             if entry.highlight {
                 self.highlight.insert(id);
             }
@@ -277,10 +289,7 @@ impl RecipeBookState {
             return Vec::new();
         }
 
-        let mut capacity = 16usize;
-        while self.known.len() > capacity * 3 / 4 {
-            capacity *= 2;
-        }
+        let capacity = self.known_table_capacity.max(16);
         let mask = (capacity - 1) as u32;
         let mut buckets = vec![Vec::new(); capacity];
         for id in &self.known_insertion_order {
@@ -368,6 +377,43 @@ mod tests {
                 .map(|entry| entry.id)
                 .collect::<Vec<_>>(),
             vec![16, 1, 17, 2]
+        );
+    }
+
+    #[test]
+    fn java_hash_map_capacity_history_survives_remove_and_replace() {
+        let mut state = RecipeBookState::default();
+        let mut entries = (0..13).map(entry).collect::<Vec<_>>();
+        entries[0] = entry(17);
+        entries[1] = entry(1);
+        state.apply_add(entries, false);
+        assert_eq!(state.known_table_capacity, 32);
+
+        let remove = state
+            .known
+            .keys()
+            .copied()
+            .filter(|id| *id != 17 && *id != 1)
+            .collect::<Vec<_>>();
+        state.remove(remove);
+        assert_eq!(
+            state
+                .known_in_vanilla_order()
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![1, 17]
+        );
+
+        state.apply_add(vec![entry(17), entry(1)], true);
+        assert_eq!(state.known_table_capacity, 32);
+        assert_eq!(
+            state
+                .known_in_vanilla_order()
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![1, 17]
         );
     }
 

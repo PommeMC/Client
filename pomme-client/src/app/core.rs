@@ -1686,7 +1686,22 @@ impl AppCore {
                     game.recipe_book.data = data;
                 }
                 NetworkEvent::GhostRecipe(ghost) => {
-                    game.recipe_book.ghost_recipe = Some(*ghost);
+                    use crate::app::phases::in_game::ContainerScreen;
+
+                    let active_recipe_container = if game.inventory_open {
+                        Some(0)
+                    } else {
+                        game.open_container.as_ref().and_then(|container| {
+                            matches!(
+                                container.screen,
+                                ContainerScreen::CraftingTable | ContainerScreen::Furnace(_)
+                            )
+                            .then_some(container.id)
+                        })
+                    };
+                    if active_recipe_container == Some(ghost.container_id) {
+                        game.recipe_book.ghost_recipe = Some(*ghost);
+                    }
                 }
                 NetworkEvent::RecipeToastAdd { entries } => {
                     game.toasts.add_recipes(entries);
