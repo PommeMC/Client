@@ -471,11 +471,7 @@ pub fn handle_input(
     let available = available_items(slots, spec);
     let tabs = tabs_for(spec.kind);
     let all_collections = collections(book, spec, &available);
-    let visible_tabs = visible_tabs(
-        tabs,
-        &all_collections,
-        book.settings.get(spec.kind).filtering,
-    );
+    let visible_tabs = visible_tabs(tabs, &all_collections);
     if state.selected_tab >= visible_tabs.len() {
         state.selected_tab = 0;
         state.page = 0;
@@ -714,11 +710,7 @@ pub fn render(
         let available = available_items(slots, spec);
         let tabs = tabs_for(spec.kind);
         let all_collections = collections(book, spec, &available);
-        let visible_tabs = visible_tabs(
-            tabs,
-            &all_collections,
-            book.settings.get(spec.kind).filtering,
-        );
+        let visible_tabs = visible_tabs(tabs, &all_collections);
         render_tabs(
             elements,
             state,
@@ -1041,18 +1033,18 @@ fn tabs_for(kind: RecipeBookType) -> &'static [TabInfo] {
     }
 }
 
-fn visible_tabs(tabs: &[TabInfo], collections: &[Collection], _filtering: bool) -> Vec<TabInfo> {
+fn visible_tabs(tabs: &[TabInfo], collections: &[Collection]) -> Vec<TabInfo> {
     tabs.iter()
         .copied()
         .filter(|tab| {
-            tab.category.is_none()
-                || collections.iter().any(|collection| {
+            tab.category.is_none_or(|category| {
+                collections.iter().any(|collection| {
                     collection
                         .entries
                         .first()
-                        .is_some_and(|entry| entry.category == tab.category.unwrap())
-                        && !collection.entries.is_empty()
+                        .is_some_and(|entry| entry.category == category)
                 })
+            })
         })
         .collect()
 }

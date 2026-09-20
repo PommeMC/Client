@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use azalea_buf::{AzBuf, AzBufVar};
 use azalea_protocol::common::tags::TagMap;
 use azalea_registry::Registry;
+use azalea_registry::builtin::{DataComponentKind, ItemKind};
 use azalea_registry::identifier::Identifier;
 use crossbeam_channel::Sender;
 use pomme_protocol::{Direction, PacketTable, Phase};
@@ -201,7 +202,7 @@ fn parse_update(cur: &mut Cursor<&[u8]>) -> Result<RecipeData, String> {
         let item_count = read_len(cur)?;
         let mut items = Vec::with_capacity(item_count);
         for _ in 0..item_count {
-            items.push(read_var_u32(cur)?);
+            items.push(read_item_id(cur)?);
         }
         item_sets.insert(name, items);
     }
@@ -279,9 +280,9 @@ fn parse_slot_display(cur: &mut Cursor<&[u8]>) -> Result<SlotDisplay, String> {
         )?))),
         3 => Ok(SlotDisplay::OnlyWithComponent {
             contents: Box::new(parse_slot_display(cur)?),
-            component: read_var_u32(cur)?,
+            component: read_component_id(cur)?,
         }),
-        4 => Ok(SlotDisplay::Item(read_var_u32(cur)?)),
+        4 => Ok(SlotDisplay::Item(read_item_id(cur)?)),
         5 => Ok(SlotDisplay::ItemStack(parse_item_stack_template(cur)?)),
         6 => Ok(SlotDisplay::Tag(read_identifier(cur)?)),
         7 => Ok(SlotDisplay::Dyed {
@@ -303,9 +304,12 @@ fn parse_slot_display(cur: &mut Cursor<&[u8]>) -> Result<SlotDisplay, String> {
 }
 
 fn parse_item_stack_template(cur: &mut Cursor<&[u8]>) -> Result<ItemStackTemplate, String> {
-    let item = read_var_u32(cur)?;
+    let item = read_item_id(cur)?;
     let count = read_var_i32(cur)?;
     let components = azalea_inventory::DataComponentPatch::azalea_read(cur).map_err(buf_err)?;
+    if count == 0 || item == ItemKind::Air.to_u32() {
+        return Err("item stack template must be non-empty".to_owned());
+    }
     Ok(ItemStackTemplate {
         item,
         count,
@@ -338,7 +342,7 @@ fn parse_ingredient(cur: &mut Cursor<&[u8]>) -> Result<Ingredient, String> {
     }
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
-        items.push(read_var_u32(cur)?);
+        items.push(read_item_id(cur)?);
     }
     Ok(Ingredient::Items(items))
 }
@@ -406,6 +410,20 @@ fn read_var_u32(cur: &mut Cursor<&[u8]>) -> Result<u32, String> {
     u32::azalea_read_var(cur).map_err(buf_err)
 }
 
+fn read_item_id(cur: &mut Cursor<&[u8]>) -> Result<u32, String> {
+    let id = read_var_u32(cur)?;
+    ItemKind::from_u32(id)
+        .map(|_| id)
+        .ok_or_else(|| format!("unknown item registry id {id}"))
+}
+
+fn read_component_id(cur: &mut Cursor<&[u8]>) -> Result<u32, String> {
+    let id = read_var_u32(cur)?;
+    DataComponentKind::from_u32(id)
+        .map(|_| id)
+        .ok_or_else(|| format!("unknown data component registry id {id}"))
+}
+
 fn read_var_i32(cur: &mut Cursor<&[u8]>) -> Result<i32, String> {
     i32::azalea_read_var(cur).map_err(buf_err)
 }
@@ -458,6 +476,43 @@ mod tests {
         assert_eq!(template.item, 53);
         assert_eq!(template.count, 3);
         assert_eq!(cur.position() as usize, bytes.len());
+    }
+
+    #[test]
+    fn item_stack_template_rejects_empty_templates() {
+        for (item, count) in [(ItemKind::Air.to_u32(), 1), (ItemKind::Diamond.to_u32(), 0)] {
+            let mut bytes = Vec::new();
+            wire::write_varint(&mut bytes, item);
+            wire::write_varint(&mut bytes, count);
+            bytes.extend_from_slice(&[0, 0]);
+            let mut cur = Cursor::new(bytes.as_slice());
+            assert_eq!(
+                parse_item_stack_template(&mut cur).unwrap_err(),
+                "item stack template must be non-empty"
+            );
+        }
+    }
+
+    #[test]
+    fn recipe_registry_ids_are_validated_at_decode_boundary() {
+        let mut ingredient = Vec::new();
+        wire::write_varint(&mut ingredient, 2); // one direct holder + sentinel
+        wire::write_varint(&mut ingredient, u32::MAX);
+        let mut cur = Cursor::new(ingredient.as_slice());
+        assert_eq!(
+            parse_ingredient(&mut cur).unwrap_err(),
+            format!("unknown item registry id {}", u32::MAX)
+        );
+
+        let mut component = Vec::new();
+        wire::write_varint(&mut component, 3); // only_with_component
+        wire::write_varint(&mut component, 0); // empty nested display
+        wire::write_varint(&mut component, u32::MAX);
+        let mut cur = Cursor::new(component.as_slice());
+        assert_eq!(
+            parse_slot_display(&mut cur).unwrap_err(),
+            format!("unknown data component registry id {}", u32::MAX)
+        );
     }
 
     #[test]
