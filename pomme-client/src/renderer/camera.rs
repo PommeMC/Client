@@ -1,5 +1,5 @@
 use glam::camera::rh::{proj, view};
-use glam::{DVec3, FloatExt, Mat4, Vec3};
+use glam::{DVec3, FloatExt, Mat4, Vec2, Vec3};
 
 use crate::app::input::InputState;
 use crate::entity::HURT_DURATION;
@@ -244,12 +244,19 @@ impl Camera {
         }
     }
 
-    fn update_gamepad_look(&mut self, look_vec: glam::Vec2, dt: f32, invert_y: bool) {
+    /// gilrs reports stick-up as `+y` and `LookDirection`'s `x_rot` is
+    /// positive downwards, so the un-inverted case negates. Vanilla
+    /// `MouseHandler.turnPlayer` applies its invert options the same way, as a
+    /// sign flip on the delta.
+    ///
+    /// TODO: nothing passes `invert_y: true` yet — there is no invert
+    /// preference, and `invertMouseX` has no equivalent here at all.
+    fn update_gamepad_look(&mut self, look_vec: Vec2, dt: f32, invert_y: bool) {
         let step = CONTROLLER_SENSITIVITY * dt;
         let y_rot_deg =
             ((self.look_dir.y_rot_deg() + look_vec.x * step) + 180.0).rem_euclid(360.0) - 180.0;
-        let y = if invert_y { look_vec.y } else { -look_vec.y };
-        let x_rot_deg = self.look_dir.x_rot_deg() + y * step;
+        let pitch_sign = if invert_y { 1.0 } else { -1.0 };
+        let x_rot_deg = self.look_dir.x_rot_deg() + look_vec.y * pitch_sign * step;
         self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
     }
 
@@ -729,6 +736,26 @@ mod tests {
     fn mouse_sensitivity_curve_matches_vanilla() {
         for (sensitivity, expected) in [(0.0, 0.0096), (0.5, 0.15), (1.0, 0.6144)] {
             assert!((mouse_sensitivity_multiplier(sensitivity) - expected).abs() < 1e-6);
+        }
+    }
+
+    /// Vanilla `MouseHandler.turnPlayer` applies the invert option as a sign
+    /// flip on the look delta, and only on the axis it names.
+    #[test]
+    fn gamepad_invert_y_flips_pitch_without_touching_yaw() {
+        for (invert_y, expected_pitch) in [(false, -15.0), (true, 15.0)] {
+            let mut camera = Camera::new(16.0 / 9.0);
+            camera.update_gamepad_look(Vec2::new(0.2, 0.1), 1.0, invert_y);
+            assert!(
+                (camera.look_dir.x_rot_deg() - expected_pitch).abs() < 1e-5,
+                "invert_y={invert_y} gave pitch {}, expected {expected_pitch}",
+                camera.look_dir.x_rot_deg()
+            );
+            assert!(
+                (camera.look_dir.y_rot_deg() - 30.0).abs() < 1e-5,
+                "invert_y={invert_y} changed yaw to {}",
+                camera.look_dir.y_rot_deg()
+            );
         }
     }
 }
