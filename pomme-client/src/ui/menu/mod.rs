@@ -320,8 +320,8 @@ pub struct MenuInput {
     pub escape: bool,
     pub tab: bool,
     pub f5: bool,
-    /// Net gamepad DPad Right minus Left this frame; feeds `arrow_steps`
-    /// so sliders work on controller (`AbstractSliderButton.keyPressed`).
+    /// Net DPad Right minus Left this frame: one step on the press edge, then
+    /// auto-repeat. Folded into `arrow_steps`.
     pub gamepad_steps: i32,
     pub scroll_delta: f32,
     /// Seconds since the last frame, clamped against stalls by the app loop.
@@ -378,7 +378,8 @@ impl MenuInput {
             })
     }
 
-    /// Net Right minus Left presses this frame, key repeats included
+    /// Net Right minus Left this frame: arrow-key presses with their OS
+    /// repeats, plus the DPad's edge-and-repeat steps
     /// (`AbstractSliderButton.keyPressed`).
     pub fn arrow_steps(&self) -> i32 {
         let keys: i32 = self

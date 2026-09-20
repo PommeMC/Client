@@ -241,6 +241,42 @@ fn serverbound_player_input(state: &PlayerInputState) -> ServerboundPlayerInput 
     }
 }
 
+// GLFW's key-repeat shape, so a held DPad steps like a held arrow key
+// instead of once per rendered frame.
+const MENU_REPEAT_DELAY: f32 = 0.4;
+const MENU_REPEAT_INTERVAL: f32 = 1.0 / 30.0;
+
+/// Edge-plus-repeat stepping for a held direction. The gamepad exposes level
+/// state only, which would step once per frame and tie the rate to the
+/// framerate.
+#[derive(Default)]
+struct RepeatStepper {
+    dir: i32,
+    countdown: f32,
+}
+
+impl RepeatStepper {
+    fn step(&mut self, dir: i32, dt: f32) -> i32 {
+        if dir != self.dir {
+            self.dir = dir;
+            self.countdown = MENU_REPEAT_DELAY;
+            // The press edge steps immediately; a release returns 0.
+            return dir;
+        }
+        if dir == 0 {
+            return 0;
+        }
+        self.countdown -= dt;
+        let mut steps = 0;
+        // `dt` is clamped against stalls by the app loop, so this is bounded.
+        while self.countdown <= 0.0 {
+            self.countdown += MENU_REPEAT_INTERVAL;
+            steps += 1;
+        }
+        steps * dir
+    }
+}
+
 pub struct AppCore {
     pub user: UserData,
     pub presence: Option<DiscordPresence>,
@@ -256,6 +292,7 @@ pub struct AppCore {
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
     pub time_tick_accumulator: f32,
+    menu_dpad: RepeatStepper,
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
     pub unfocused_since: Option<Instant>,
@@ -333,6 +370,7 @@ impl AppCore {
             audio,
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
+            menu_dpad: RepeatStepper::default(),
             unfocused_since: None,
             player_skin_tx,
             player_skin_rx,
@@ -346,9 +384,10 @@ impl AppCore {
         let credits_keys_down = credits_key_mask(|code| self.input.key_pressed(code));
         let credits_keys_pressed = credits_key_mask(|code| self.input.key_just_pressed(code));
         // Gamepad DPad mirrors ArrowLeft/ArrowRight so focused sliders move
-        // on controller; held state steps once per frame while focused.
-        let gamepad_steps = (self.input.gamepad_button_down(gilrs::Button::DPadRight) as i32)
-            - (self.input.gamepad_button_down(gilrs::Button::DPadLeft) as i32);
+        // on controller.
+        let dpad_dir = i32::from(self.input.gamepad_button_down(gilrs::Button::DPadRight))
+            - i32::from(self.input.gamepad_button_down(gilrs::Button::DPadLeft));
+        let gamepad_steps = self.menu_dpad.step(dpad_dir, dt);
         MenuInput {
             cursor: self.input.cursor_pos(),
             clicked: self.input.left_just_pressed(),
@@ -2382,10 +2421,62 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeathRoute, death_route, player_input_state, server_view_distance_update,
-        serverbound_player_input,
+        DeathRoute, MENU_REPEAT_DELAY, MENU_REPEAT_INTERVAL, RepeatStepper, death_route,
+        player_input_state, server_view_distance_update, serverbound_player_input,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
+
+    /// Total steps from holding `dir` for `seconds` at a fixed frame time.
+    fn held_steps(dir: i32, seconds: f32, dt: f32) -> i32 {
+        let mut stepper = RepeatStepper::default();
+        let mut total = 0;
+        let mut elapsed = 0.0;
+        while elapsed < seconds {
+            total += stepper.step(dir, dt);
+            elapsed += dt;
+        }
+        total
+    }
+
+    #[test]
+    fn dpad_press_steps_once_then_waits_for_the_repeat_delay() {
+        let mut stepper = RepeatStepper::default();
+        assert_eq!(stepper.step(1, 1.0 / 60.0), 1);
+        // Nothing more until the delay elapses.
+        let mut elapsed = 0.0;
+        while elapsed < MENU_REPEAT_DELAY - MENU_REPEAT_INTERVAL {
+            assert_eq!(stepper.step(1, 1.0 / 60.0), 0);
+            elapsed += 1.0 / 60.0;
+        }
+    }
+
+    /// The regression this guards: reading the DPad as level state stepped
+    /// once per rendered frame, so a second of holding gave 60 steps at 60fps
+    /// and 300 at 300fps. Sampling a fixed repeat at different frame times
+    /// still lands a step either side of a boundary, hence the tolerance.
+    #[test]
+    fn dpad_repeat_rate_does_not_depend_on_the_framerate() {
+        // One press plus a second minus the delay, repeating at the interval.
+        let expected = 1 + ((1.0 - MENU_REPEAT_DELAY) / MENU_REPEAT_INTERVAL) as i32;
+        for dt in [1.0 / 30.0, 1.0 / 60.0, 1.0 / 144.0, 1.0 / 300.0] {
+            let steps = held_steps(1, 1.0, dt);
+            assert!(
+                (steps - expected).abs() <= 1,
+                "{steps} steps in a second at dt {dt}, expected about {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn releasing_re_arms_the_delay_and_a_flip_steps_immediately() {
+        let mut stepper = RepeatStepper::default();
+        assert_eq!(stepper.step(1, 1.0 / 60.0), 1);
+        assert_eq!(stepper.step(0, 1.0 / 60.0), 0);
+        assert_eq!(stepper.step(1, 1.0 / 60.0), 1);
+        // Right to Left with no neutral frame between.
+        assert_eq!(stepper.step(-1, 1.0 / 60.0), -1);
+        assert_eq!(stepper.step(-1, 1.0 / 60.0), 0);
+    }
 
     #[test]
     fn controller_packet_directions_match_physical_stick_direction() {
