@@ -236,27 +236,28 @@ impl Camera {
         if input.is_cursor_captured() {
             let (dx, dy) = input.consume_mouse_delta();
             let mouse_sensitivity = mouse_sensitivity_multiplier(sensitivity);
-            let y_rot_deg = ((self.look_dir.y_rot_deg() + dx as f32 * mouse_sensitivity) + 180.0)
-                .rem_euclid(360.0)
-                - 180.0;
-            let x_rot_deg = self.look_dir.x_rot_deg() + dy as f32 * mouse_sensitivity;
-            self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
+            self.turn(dx as f32 * mouse_sensitivity, dy as f32 * mouse_sensitivity);
         }
     }
 
-    /// gilrs reports stick-up as `+y` and `LookDirection`'s `x_rot` is
-    /// positive downwards, so the un-inverted case negates. Vanilla
-    /// `MouseHandler.turnPlayer` applies its invert options the same way, as a
-    /// sign flip on the delta.
+    /// gilrs reports stick-up as `+y` and `x_rot` is positive downwards, so
+    /// the un-inverted case negates.
     ///
     /// TODO: nothing passes `invert_y: true` yet — there is no invert
-    /// preference, and `invertMouseX` has no equivalent here at all.
+    /// preference.
     fn update_gamepad_look(&mut self, look_vec: Vec2, dt: f32, invert_y: bool) {
         let step = CONTROLLER_SENSITIVITY * dt;
-        let y_rot_deg =
-            ((self.look_dir.y_rot_deg() + look_vec.x * step) + 180.0).rem_euclid(360.0) - 180.0;
         let pitch_sign = if invert_y { 1.0 } else { -1.0 };
-        let x_rot_deg = self.look_dir.x_rot_deg() + look_vec.y * pitch_sign * step;
+        self.turn(look_vec.x * step, look_vec.y * pitch_sign * step);
+    }
+
+    /// Vanilla `Entity.turn`: add the already-scaled deltas, clamping pitch
+    /// (in `LookDirection::new`). Pomme additionally wraps yaw into
+    /// (-180, 180].
+    fn turn(&mut self, y_rot_delta: f32, x_rot_delta: f32) {
+        let y_rot_deg =
+            ((self.look_dir.y_rot_deg() + y_rot_delta) + 180.0).rem_euclid(360.0) - 180.0;
+        let x_rot_deg = self.look_dir.x_rot_deg() + x_rot_delta;
         self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
     }
 
