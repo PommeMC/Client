@@ -230,6 +230,18 @@ impl Scoreboard {
             .map_or("", |(name, _)| name)
     }
 
+    /// Vanilla `TeamColor`: a real team chat color if the member belongs to a
+    /// team whose formatting carries one, otherwise no owner-derived color.
+    pub fn member_team_color(&self, member: &str) -> Option<u32> {
+        let color = self
+            .teams
+            .values()
+            .find(|team| team.members.contains(member))?
+            .fill_color?;
+        let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+        Some((channel(color[0]) << 16) | (channel(color[1]) << 8) | channel(color[2]))
+    }
+
     fn line(&self, owner: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
         let team = self
             .teams
@@ -552,6 +564,9 @@ pub fn build_hud(
                     w: item_size,
                     h: item_size,
                     item_name: item_resource_name(data.kind),
+                    item_stack: Some(data.clone()),
+                    use_player_team: true,
+                    item_tints: Vec::new(),
                     tint: WHITE,
                 });
                 if data.count > 1 {
@@ -1647,5 +1662,65 @@ fn facing_name(y_rot_deg: f32) -> &'static str {
         135..=224 => "North (-Z)",
         225..=314 => "East (+X)",
         _ => "South (+Z)",
+    }
+}
+
+#[cfg(test)]
+mod team_color_tests {
+    use super::*;
+
+    #[test]
+    fn member_team_color_matches_scoreboard_team_chat_color() {
+        let mut scoreboard = Scoreboard::default();
+        scoreboard.set_team(
+            "red".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            [1.0, 0.0, 0.0, 1.0],
+            Some([170.0 / 255.0, 0.0, 0.0, 1.0]),
+            Some(vec!["Player".into()]),
+        );
+        assert_eq!(scoreboard.member_team_color("Player"), Some(0xAA0000));
+        assert_eq!(scoreboard.member_team_color("Other"), None);
+    }
+
+    #[test]
+    fn member_team_color_is_none_for_reset_or_non_color_formatting() {
+        let mut scoreboard = Scoreboard::default();
+        scoreboard.set_team(
+            "reset".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            [1.0; 4],
+            None,
+            Some(vec!["Player".into()]),
+        );
+        assert_eq!(scoreboard.member_team_color("Player"), None);
+    }
+
+    #[test]
+    fn member_team_color_tracks_membership_and_team_lifecycle() {
+        let mut scoreboard = Scoreboard::default();
+        scoreboard.set_team(
+            "red".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            [1.0; 4],
+            Some(crate::ui::common::rgb(0xFF5555)),
+            Some(vec!["Player".into()]),
+        );
+        assert_eq!(scoreboard.member_team_color("Player"), Some(0xFF5555));
+
+        scoreboard.update_team_members("red", vec!["Player".into()], false);
+        assert_eq!(scoreboard.member_team_color("Player"), None);
+
+        scoreboard.update_team_members("red", vec!["Player".into()], true);
+        assert_eq!(scoreboard.member_team_color("Player"), Some(0xFF5555));
+
+        scoreboard.remove_team("red");
+        assert_eq!(scoreboard.member_team_color("Player"), None);
     }
 }

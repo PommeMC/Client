@@ -333,8 +333,6 @@
 //! so fixing azalea — or replacing it with pomme's own codec — breaks the older
 //! versions unless the matching rewrite lands at the same time. Each site
 //! carries a `TODO` pointing here.
-//! - inbound `set_player_team` copies the color through as a plain
-//!   `ChatFormatting` ordinal, where 26.2 writes an `Optional<TeamColor>`
 //! - outbound `set_creative_mode_slot` leaves component values undelimited,
 //!   which is 1.21.4's layout rather than 26.2's
 //! - inbound `cooldown` carries an item registry id, where 26.2 names a
@@ -4238,13 +4236,15 @@ fn translate_team(id: u32, payload: &[u8], string_scopes: bool) -> Option<Vec<u8
         out.push(visibility);
         out.push(collision);
         // Vanilla 26.2 changed color from a ChatFormatting ordinal to
-        // Optional<TeamColor>, but azalea still decodes the plain ordinal,
-        // and these frames feed azalea — copy it through unchanged (all
-        // ordinals fit one varint byte). See the team tests in
-        // azalea_compat.
-        // TODO: write the Optional<TeamColor> form once pomme owns the
-        // decoder (see the azalea-divergence list).
-        out.push(color as u8);
+        // Optional<TeamColor>. Pomme owns the native team decoder, so emit
+        // the actual 26.2 optional form. The sixteen color ordinals map
+        // one-to-one to TeamColor; formatting/reset ordinals become None.
+        if color < 16 {
+            out.push(1);
+            wire::write_varint(&mut out, color);
+        } else {
+            out.push(0);
+        }
         out.push(options);
     }
 

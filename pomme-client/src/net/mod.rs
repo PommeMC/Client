@@ -407,6 +407,7 @@ pub enum NetworkEvent {
         item_id: u32,
         damage: i32,
         count: i32,
+        stack: azalea_inventory::ItemStackData,
     },
     EntityHeadRotation {
         id: i32,

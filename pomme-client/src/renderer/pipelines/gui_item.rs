@@ -10,7 +10,9 @@ use pyronyx::vk;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::pipelines::item_display::{DisplayResolver, DisplayTransform};
-use crate::renderer::pipelines::item_entity::{self, ItemEntityPipeline, push_model_light};
+use crate::renderer::pipelines::item_entity::{
+    self, ItemEntityPipeline, TintPaletteArena, push_model_light,
+};
 use crate::renderer::util;
 
 pub struct GuiItemPipeline {
@@ -18,11 +20,13 @@ pub struct GuiItemPipeline {
     pipeline_layout: vk::PipelineLayout,
     camera_layout: vk::DescriptorSetLayout,
     atlas_layout: vk::DescriptorSetLayout,
+    tint_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
     camera_set: vk::DescriptorSet,
     atlas_set: vk::DescriptorSet,
     camera_buffer: vk::Buffer,
     camera_alloc: Option<Allocation>,
+    tint_arena: TintPaletteArena,
     sampler: vk::Sampler,
     atlas_px: u32,
     display: DisplayResolver,
@@ -47,13 +51,19 @@ impl GuiItemPipeline {
             vk::DescriptorType::CombinedImageSampler,
             vk::ShaderStageFlags::Fragment,
         );
+        let tint_layout = util::create_descriptor_set_layout(
+            device,
+            vk::DescriptorType::StorageBuffer,
+            vk::ShaderStageFlags::Vertex,
+        );
 
         let push_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
             offset: 0,
-            size: 68,
+            // 64-byte model + fragment light + tint palette base/count.
+            size: 80,
         };
-        let layouts = [camera_layout, atlas_layout];
+        let layouts = [camera_layout, atlas_layout, tint_layout];
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: layouts.len() as u32,
             set_layouts: layouts.as_ptr(),
@@ -81,9 +91,13 @@ impl GuiItemPipeline {
                 ty: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 1,
             },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::StorageBuffer,
+                descriptor_count: crate::renderer::MAX_FRAMES_IN_FLIGHT as u32,
+            },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: 2,
+            max_sets: (crate::renderer::MAX_FRAMES_IN_FLIGHT + 2) as u32,
             pool_size_count: pool_sizes.len() as u32,
             pool_sizes: pool_sizes.as_ptr(),
             ..Default::default()
@@ -163,17 +177,21 @@ impl GuiItemPipeline {
             ..Default::default()
         };
         device.update_descriptor_sets(&[cam_write, atlas_write], &[]);
+        let tint_arena =
+            TintPaletteArena::new(device, allocator, descriptor_pool, tint_layout, "gui_item");
 
         let mut this = Self {
             pipeline,
             pipeline_layout,
             camera_layout,
             atlas_layout,
+            tint_layout,
             descriptor_pool,
             camera_set,
             atlas_set,
             camera_buffer,
             camera_alloc: Some(camera_alloc),
+            tint_arena,
             sampler,
             atlas_px,
             display: DisplayResolver::new(jar_assets_dir, "gui"),
@@ -226,13 +244,22 @@ impl GuiItemPipeline {
         device.update_descriptor_sets(&[write], &[]);
     }
 
-    pub fn bind_for_bake_pass(&self, cmd: vk::CommandBuffer) {
+    pub fn bind_for_bake_pass(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        required_colors: usize,
+    ) {
+        self.tint_arena
+            .begin_frame(device, allocator, frame, required_colors);
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
         cmd.bind_descriptor_sets(
             vk::PipelineBindPoint::Graphics,
             self.pipeline_layout,
             0,
-            &[self.camera_set, self.atlas_set],
+            &[self.camera_set, self.atlas_set, self.tint_arena.set(frame)],
             &[],
         );
         let viewport = vk::Viewport {
@@ -248,14 +275,16 @@ impl GuiItemPipeline {
 
     #[allow(clippy::too_many_arguments)]
     pub fn bake_to_slot(
-        &self,
+        &mut self,
         cmd: vk::CommandBuffer,
+        frame: usize,
         item_entity: &ItemEntityPipeline,
         slot_x_px: u32,
         slot_y_px: u32,
         slot_size_px: u32,
         item_name: &str,
         is_block: bool,
+        item_tints: &[u32],
     ) {
         let Some((buffer, vertex_count)) = item_entity.mesh_handle(item_name) else {
             return;
@@ -270,17 +299,20 @@ impl GuiItemPipeline {
             display,
         );
 
+        let tint_range = self.tint_arena.push(frame, item_tints);
         cmd.bind_vertex_buffers(0, &[buffer], &[0]);
-        push_model_light(cmd, self.pipeline_layout, &model, 1.0);
+        push_model_light(cmd, self.pipeline_layout, &model, 1.0, tint_range);
         cmd.draw(vertex_count, 1, 0, 0);
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         device.destroy_pipeline(self.pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
+        self.tint_arena.destroy(device, allocator);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);
         device.destroy_descriptor_set_layout(self.atlas_layout, None);
+        device.destroy_descriptor_set_layout(self.tint_layout, None);
         device.destroy_sampler(self.sampler, None);
         device.destroy_buffer(self.camera_buffer, None);
         if let Some(a) = self.camera_alloc.take() {

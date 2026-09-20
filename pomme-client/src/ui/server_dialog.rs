@@ -1867,6 +1867,9 @@ impl Draw<'_> {
             w: common::SLOT_SIZE * gs,
             h: common::SLOT_SIZE * gs,
             item_name: item.icon_name().to_owned(),
+            item_stack: None,
+            use_player_team: false,
+            item_tints: Vec::new(),
             tint: common::WHITE,
         });
         // TODO: vanilla also draws the durability bar and the cooldown

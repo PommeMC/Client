@@ -589,6 +589,20 @@ pub fn redstone_wire_rgb(state: BlockState) -> [f32; 3] {
     COLORS[power.min(15)]
 }
 
+/// Vanilla `StemBlock` tint: `ARGB.color(age * 32, 255 - age * 8, age * 4)`.
+pub fn stem_rgb(state: BlockState) -> [f32; 3] {
+    let age: u32 = block_properties(state)
+        .get("age")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+        .min(7);
+    [
+        (age * 32) as f32 / 255.0,
+        (255 - age * 8) as f32 / 255.0,
+        (age * 4) as f32 / 255.0,
+    ]
+}
+
 /// Vanilla `isAir`: includes cave and void air.
 pub fn is_air(state: BlockState) -> bool {
     block_data(state).is_air

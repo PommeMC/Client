@@ -16,7 +16,7 @@ use crate::renderer::ParticleQuad;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::renderer::chunk::mesher::{
     BiomeClimate, Colormap, blend_color, dry_foliage_color, foliage_color, grass_color,
-    world_brightness,
+    tint_sample_y, world_brightness,
 };
 use crate::renderer::pipelines::particle::MAX_PARTICLE_QUADS as MAX_PARTICLES;
 use crate::world::block::registry::{BlockRegistry, Tint};
@@ -340,10 +340,11 @@ impl ParticleStore {
             && faces.tint != Tint::None
             && block_id != "grass_block"
         {
-            let tint = if faces.tint == Tint::Redstone {
-                crate::world::block::redstone_wire_rgb(state)
-            } else {
-                self.blend_tint(faces.tint, pos, chunks, biome_climate)
+            let tint = match faces.tint {
+                Tint::Redstone => crate::world::block::redstone_wire_rgb(state),
+                Tint::Stem => crate::world::block::stem_rgb(state),
+                Tint::Constant(color) => crate::renderer::chunk::mesher::int_to_rgb(color as i32),
+                _ => self.blend_tint(faces.tint, state, pos, chunks, biome_climate),
             };
             for (c, t) in color.iter_mut().zip(tint) {
                 *c *= t;
@@ -492,25 +493,30 @@ impl ParticleStore {
         }
     }
 
-    /// The block's biome tint averaged over the vanilla 5x5 biome blend.
+    /// The block's biome tint using vanilla's default blend radius.
     fn blend_tint(
         &self,
         tint: Tint,
+        state: BlockState,
         pos: BlockPos,
         chunks: &ChunkStore,
         biome_climate: &HashMap<u32, BiomeClimate>,
     ) -> [f32; 3] {
+        let sample_y = tint_sample_y(tint, state, pos.y);
         blend_color(pos.x, pos.z, |x, z| {
             let climate = biome_climate
-                .get(&chunks.biome_id(x, pos.y, z))
+                .get(&chunks.biome_id(x, sample_y, z))
                 .copied()
                 .unwrap_or_default();
             match tint {
-                Tint::Grass => grass_color(&climate, &self.grass_colormap, x, z),
+                Tint::Grass | Tint::DoubleGrass => {
+                    grass_color(&climate, &self.grass_colormap, x, z)
+                }
                 Tint::Foliage => foliage_color(&climate, &self.foliage_colormap),
                 Tint::DryFoliage => dry_foliage_color(&climate, &self.dry_foliage_colormap),
-                // Redstone is state-derived, resolved by the caller.
-                Tint::None | Tint::Redstone => [1.0; 3],
+                Tint::Water => climate.water_color,
+                // State/fixed colors are resolved by the caller.
+                Tint::None | Tint::Constant(_) | Tint::Redstone | Tint::Stem => [1.0; 3],
             }
         })
     }
