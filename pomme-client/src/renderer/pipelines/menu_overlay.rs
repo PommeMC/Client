@@ -1357,7 +1357,8 @@ impl MenuOverlayPipeline {
                 }
                 // Tooltip text/components render after the background/frame. Drawing the
                 // title before the nine-slice darkened it through the translucent background.
-                self.push_text(
+                self.push_text_into(
+                    &mut drawn_objects,
                     &mut vertices,
                     &[TextSpan::new(title.clone(), white)],
                     McTextDraw {
@@ -1371,7 +1372,8 @@ impl MenuOverlayPipeline {
                 let image_top = top + image_y_offset;
                 if items.is_empty() {
                     for (line_no, text) in empty_lines.iter().enumerate() {
-                        self.push_text(
+                        self.push_text_into(
+                            &mut drawn_objects,
                             &mut vertices,
                             &[TextSpan::new(text.clone(), [0.6667, 0.6667, 0.6667, 1.0])],
                             McTextDraw {
@@ -1400,7 +1402,8 @@ impl MenuOverlayPipeline {
                                     .sum();
                                 let hidden_text = format!("+{hidden}");
                                 let hidden_w = self.mc_text_width(&hidden_text, fs);
-                                self.push_text(
+                                self.push_text_into(
+                                    &mut drawn_objects,
                                     &mut vertices,
                                     &[TextSpan::new(hidden_text, white)],
                                     McTextDraw {
@@ -1463,7 +1466,8 @@ impl MenuOverlayPipeline {
                                 if data.count > 1 {
                                     let count_text = data.count.to_string();
                                     let count_w = self.mc_text_width(&count_text, fs);
-                                    self.push_text(
+                                    self.push_text_into(
+                                        &mut drawn_objects,
                                         &mut vertices,
                                         &[TextSpan::new(count_text, white)],
                                         McTextDraw {
@@ -1572,7 +1576,8 @@ impl MenuOverlayPipeline {
                                 white,
                             );
                         }
-                        self.push_text(
+                        self.push_text_into(
+                            &mut drawn_objects,
                             &mut vertices,
                             &[TextSpan::new(name, white)],
                             McTextDraw {
@@ -1637,7 +1642,8 @@ impl MenuOverlayPipeline {
                 };
                 if let Some(label) = label {
                     let label_w = self.mc_text_width(label, fs);
-                    self.push_text(
+                    self.push_text_into(
+                        &mut drawn_objects,
                         &mut vertices,
                         &[TextSpan::new(label.to_string(), white)],
                         McTextDraw {
