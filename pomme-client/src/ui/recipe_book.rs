@@ -116,7 +116,6 @@ pub struct RecipeBookUiState {
     tab_animation_started: HashMap<i32, Instant>,
     tab_animation_highlights: HashMap<i32, HashSet<RecipeDisplayId>>,
     narrow: bool,
-    ignore_next_typed_char: bool,
     cycle_time: Duration,
     cycle_last_update: Instant,
 }
@@ -136,7 +135,6 @@ impl RecipeBookUiState {
             tab_animation_started: HashMap::new(),
             tab_animation_highlights: HashMap::new(),
             narrow: false,
-            ignore_next_typed_char: false,
             cycle_time: Duration::ZERO,
             cycle_last_update: Instant::now(),
         }
@@ -159,7 +157,6 @@ impl RecipeBookUiState {
         self.tab_animation_started.clear();
         self.tab_animation_highlights.clear();
         self.narrow = false;
-        self.ignore_next_typed_char = false;
         self.cycle_time = Duration::ZERO;
         self.cycle_last_update = Instant::now();
         book.ghost_recipe = None;
@@ -181,7 +178,6 @@ impl RecipeBookUiState {
         }
         self.search_focused = true;
         self.search.set_focused(true);
-        self.ignore_next_typed_char = true;
         true
     }
 
@@ -452,10 +448,6 @@ pub fn handle_input(
         let wf = |s: &str| text_width_fn(s, fs);
         let mut clipboard = SystemClipboard;
         for event in text_events {
-            if state.ignore_next_typed_char && matches!(event, TextInputEvent::Char(_)) {
-                state.ignore_next_typed_char = false;
-                continue;
-            }
             state
                 .search
                 .handle(event, &mut clipboard, (SEARCH_W - 8.0) * scale, &wf);
@@ -3320,10 +3312,40 @@ mod tests {
         book.settings.crafting.open = true;
 
         assert!(state.focus_search_from_chat_key(&book, true));
-        state.ignore_next_typed_char = false; // first focus-triggering `t` was consumed
         assert!(!state.focus_search_from_chat_key(&book, true));
         assert!(state.search_focused);
-        assert!(!state.ignore_next_typed_char);
+    }
+
+    #[test]
+    fn first_character_after_chat_key_focus_is_not_dropped() {
+        let spec = RecipeBookScreenSpec::player(0);
+        let mut state = RecipeBookUiState::new();
+        state.ensure_screen(spec);
+        let mut book = RecipeBookState::default();
+        book.settings.crafting.open = true;
+        assert!(state.focus_search_from_chat_key(&book, true));
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        handle_input(
+            &mut state,
+            &mut book,
+            &sender,
+            spec,
+            400.0,
+            300.0,
+            1.0,
+            (0.0, 0.0),
+            false,
+            false,
+            false,
+            false,
+            &[TextInputEvent::Char('s')],
+            &vec![ItemStack::Empty; 46],
+            &|text, _| text.len() as f32,
+        );
+
+        assert_eq!(state.search.value(), "s");
     }
 
     #[test]
