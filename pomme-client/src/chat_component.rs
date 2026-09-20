@@ -89,10 +89,18 @@ pub enum ClickEvent {
     OpenUrl(String),
     RunCommand(String),
     SuggestCommand(String),
-    ShowDialog(Value),
+    ShowDialog(DialogHolder),
     ChangePage(i32),
     CopyToClipboard(String),
     Custom { id: String, payload: Option<NbtTag> },
+}
+
+/// A `show_dialog` click's `Holder<Dialog>`: the exact NBT when it was sent as
+/// NBT, since the JSON shape loses payload tag types and Java number text.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DialogHolder {
+    Json(Value),
+    Nbt(NbtTag),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -406,6 +414,11 @@ fn float_value(v: f64) -> Value {
         .map_or_else(|| java_decimal(format!("{v:e}")).into(), Value::Number)
 }
 
+/// `Float.toString`.
+pub(crate) fn java_float_text(value: f32) -> String {
+    java_decimal(format!("{value:e}"))
+}
+
 /// Java's `toString` of a boxed NBT number (vanilla `JavaOps`), or `None` for
 /// a non-numeric tag.
 fn java_number_text(tag: &NbtTag) -> Option<String> {
@@ -414,7 +427,7 @@ fn java_number_text(tag: &NbtTag) -> Option<String> {
         NbtTag::Short(v) => v.to_string(),
         NbtTag::Int(v) => v.to_string(),
         NbtTag::Long(v) => v.to_string(),
-        NbtTag::Float(v) => java_decimal(format!("{v:e}")),
+        NbtTag::Float(v) => java_float_text(*v),
         NbtTag::Double(v) => java_decimal(format!("{v:e}")),
         _ => return None,
     })
@@ -699,10 +712,10 @@ fn preserve_style_interactions(style: &mut Style, compound: &NbtCompound) {
             .map(|event| (event, false))
             .or_else(|| compound.compound(legacy).map(|event| (event, true)))
     };
-    if let (Some(ClickEvent::Custom { payload, .. }), Some((click, _))) =
+    if let (Some(click_event), Some((click, _))) =
         (&mut style.click_event, event("click_event", "clickEvent"))
     {
-        *payload = click.get("payload").cloned();
+        preserve_click_event(click_event, click);
     }
     if let (Some(HoverEvent::Text(text)), Some((hover, legacy))) =
         (&mut style.hover_event, event("hover_event", "hoverEvent"))
@@ -732,7 +745,7 @@ fn component_extra_count(tag: &NbtTag) -> usize {
 
 /// `Util.parseAndValidateUntrustedUri`: `java.net.URI`'s character rules and
 /// an http(s) scheme.
-fn parse_untrusted_url(raw: String) -> Result<String, ComponentError> {
+pub(crate) fn parse_untrusted_url(raw: String) -> Result<String, ComponentError> {
     let invalid = |why: &str| {
         Err(ComponentError(format!(
             "invalid open_url URI `{raw}`: {why}"
@@ -787,7 +800,7 @@ fn parse_untrusted_url(raw: String) -> Result<String, ComponentError> {
     Ok(raw)
 }
 
-fn json_payload_to_nbt(value: &Value) -> Result<NbtTag, ComponentError> {
+pub(crate) fn json_payload_to_nbt(value: &Value) -> Result<NbtTag, ComponentError> {
     match value {
         Value::Null => Err(ComponentError(
             "custom click NBT payload cannot be null".into(),
@@ -833,6 +846,37 @@ fn event_action<'a>(
 /// on click.
 fn parse_click_event(value: &Value, legacy: bool) -> Result<Option<ClickEvent>, ComponentError> {
     let (map, action) = event_action(value, "click")?;
+    parse_click_fields(map, action, legacy)
+}
+
+/// `ClickEvent.Action.valueCodec`, which a dialog's static action carries
+/// under its own `type` key.
+pub(crate) fn click_event_value(
+    action: &str,
+    map: &Map<String, Value>,
+) -> Result<ClickEvent, ComponentError> {
+    parse_click_fields(map, action, false)?
+        .ok_or_else(|| ComponentError(format!("unusable {action} click event")))
+}
+
+/// Restores the payload tags the JSON shape of a click event loses.
+pub(crate) fn preserve_click_event(event: &mut ClickEvent, fields: &NbtCompound) {
+    match event {
+        ClickEvent::Custom { payload, .. } => *payload = fields.get("payload").cloned(),
+        ClickEvent::ShowDialog(dialog) => {
+            if let Some(tag) = fields.get("dialog") {
+                *dialog = DialogHolder::Nbt(tag.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_click_fields(
+    map: &Map<String, Value>,
+    action: &str,
+    legacy: bool,
+) -> Result<Option<ClickEvent>, ComponentError> {
     // Legacy `clickEvent`s carry every payload in `value`.
     let field = |modern: &str| map.get(if legacy { "value" } else { modern });
     let missing = |modern: &str| ComponentError(format!("{action} click event has no `{modern}`"));
@@ -864,9 +908,9 @@ fn parse_click_event(value: &Value, legacy: bool) -> Result<Option<ClickEvent>, 
         "open_url" => checked(parse_untrusted_url(string("url")?).map(ClickEvent::OpenUrl)),
         "run_command" => Ok(Some(ClickEvent::RunCommand(chat_string("command")?))),
         "suggest_command" => Ok(Some(ClickEvent::SuggestCommand(chat_string("command")?))),
-        "show_dialog" => Ok(Some(ClickEvent::ShowDialog(
+        "show_dialog" => Ok(Some(ClickEvent::ShowDialog(DialogHolder::Json(
             field("dialog").cloned().ok_or_else(|| missing("dialog"))?,
-        ))),
+        )))),
         "change_page" => {
             let page = field("page").ok_or_else(|| missing("page"))?;
             // `Codec.INT` takes any number's `intValue`; legacy pages were
@@ -906,8 +950,18 @@ fn parse_click_event(value: &Value, legacy: bool) -> Result<Option<ClickEvent>, 
     }
 }
 
+/// Vanilla `Identifier.parse(id).toString()`: a missing or empty namespace
+/// becomes `minecraft`.
+pub fn normalize_identifier(id: &str) -> String {
+    match id.split_once(':') {
+        Some((namespace, _)) if !namespace.is_empty() => id.to_owned(),
+        Some((_, path)) => format!("minecraft:{path}"),
+        None => format!("minecraft:{id}"),
+    }
+}
+
 /// Vanilla `Identifier.parse` validity.
-fn valid_identifier(id: &str) -> bool {
+pub(crate) fn valid_identifier(id: &str) -> bool {
     let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
     namespace != ".." && identifier_chars(namespace, false) && identifier_chars(path, true)
 }
@@ -1057,6 +1111,14 @@ mod tests {
     }
 
     #[test]
+    fn normalize_identifier_defaults_the_namespace() {
+        assert_eq!(normalize_identifier("foo"), "minecraft:foo");
+        assert_eq!(normalize_identifier(":foo"), "minecraft:foo");
+        assert_eq!(normalize_identifier("a:b"), "a:b");
+        assert_eq!(normalize_identifier("minecraft:a/b"), "minecraft:a/b");
+    }
+
+    #[test]
     fn custom_click_preserves_exact_nbt_payload_types() {
         let mut payload = NbtCompound::new();
         payload.insert("byte", NbtTag::Byte(-7));
@@ -1203,7 +1265,10 @@ mod tests {
             "hover_event":{"action":"show_item","id":"minecraft:diamond","count":2}
         }))
         .unwrap();
-        assert_eq!(c.style.click_event, Some(ClickEvent::ShowDialog(dialog)));
+        assert_eq!(
+            c.style.click_event,
+            Some(ClickEvent::ShowDialog(DialogHolder::Json(dialog)))
+        );
         assert_eq!(
             c.style.hover_event,
             Some(HoverEvent::Item(serde_json::json!({

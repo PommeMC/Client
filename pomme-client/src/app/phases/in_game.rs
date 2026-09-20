@@ -36,7 +36,7 @@ use crate::renderer::pipelines::entity_renderer::{
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
-use crate::ui::chat::ChatState;
+use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
@@ -160,6 +160,12 @@ pub struct GameState {
     /// Server registries, for hashing predicted container clicks.
     pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
     pub chat: ChatState,
+    pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
+    pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
+    pub dialog_registry: Arc<crate::ui::server_dialog::DialogRegistry>,
+    /// The connection is in the configuration phase (the join, or a
+    /// reconfiguration), where dialogs can't run commands.
+    pub configuring: bool,
     pub command_tree: Option<Arc<crate::net::commands::CommandTree>>,
     pub tab_list: TabList,
     pub server_enforces_secure_chat: bool,
@@ -229,6 +235,8 @@ pub struct GameState {
     pub position_send_counter: u32,
     pub options_from_game: bool,
     pub last_render_distance: u32,
+    pub last_chat_visibility: crate::ui::chat::ChatVisibilitySetting,
+    pub last_chat_colors: bool,
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
@@ -315,6 +323,7 @@ impl GameState {
         resource_packs: &ResourcePackManager,
         render_distance: u32,
         singleplayer: bool,
+        chat_options: crate::ui::chat::ChatOptions,
     ) -> Self {
         let biome_climate = Arc::new(HashMap::new());
         // The dimension's shade table arrives with `DimensionInfo`, which
@@ -342,6 +351,8 @@ impl GameState {
             client_loaded: false,
             options_from_game: false,
             last_render_distance: render_distance,
+            last_chat_visibility: chat_options.visibility,
+            last_chat_colors: chat_options.colors,
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
@@ -383,7 +394,15 @@ impl GameState {
             inv_drag: None,
             inv_last_click: None,
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
-            chat: ChatState::new(),
+            chat: {
+                let mut chat = ChatState::new();
+                chat.set_options(chat_options);
+                chat
+            },
+            server_dialog: None,
+            server_links: Vec::new(),
+            dialog_registry: Arc::default(),
+            configuring: true,
             command_tree: None,
             tab_list: TabList::new(),
             server_enforces_secure_chat: false,
@@ -467,10 +486,18 @@ impl GameState {
             .map(|e| (e.health, e.max_health))
     }
 
+    /// A server dialog, or the confirm screen one raised, is the top screen.
+    /// Vanilla runs no key mapping while a screen is up, and the screens under
+    /// it neither draw nor take input.
+    pub fn dialog_open(&self) -> bool {
+        self.server_dialog.is_some() || self.chat.has_pending_modal_prompt()
+    }
+
     pub fn gui_open(&self) -> bool {
         self.inventory_open
             || self.creative_inventory_open
             || self.open_container.is_some()
+            || self.dialog_open()
             || self.game_mode_switcher.is_some()
     }
 
@@ -550,11 +577,40 @@ impl GameState {
         self.inv_last_click = None;
     }
 
+    /// Replaces any open server dialog; false (logged) when `reference`
+    /// doesn't resolve to a dialog.
+    pub fn open_server_dialog(
+        &mut self,
+        reference: crate::ui::server_dialog::DialogReference,
+    ) -> bool {
+        match crate::ui::server_dialog::ServerDialogState::open(
+            reference,
+            &self.dialog_registry,
+            &self.server_links,
+        ) {
+            Ok(dialog) => {
+                self.server_dialog = Some(dialog);
+                true
+            }
+            Err(error) => {
+                tracing::warn!("Could not open server dialog: {error}");
+                false
+            }
+        }
+    }
+
     /// A focused text field (anvil rename, creative search) is capturing
     /// keyboard input: letter/digit keys must type instead of acting as
     /// hotkeys. The anvil field is editable only while its input slot is
     /// filled, matching vanilla.
     pub fn wants_text_input(&self) -> bool {
+        if self
+            .server_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.wants_text_input())
+        {
+            return true;
+        }
         if self.creative_inventory_open {
             return self.creative_state.tab.captures_typing();
         }
@@ -781,9 +837,34 @@ impl GameState {
         ]);
     }
 
-    pub fn sync_render_distance(&mut self, connection: &ConnectionHandle, render_distance: u32) {
+    /// Whether the chat options `ClientInformation` carries differ from the
+    /// last ones sent.
+    fn chat_information_changed(&self, chat_options: crate::ui::chat::ChatOptions) -> bool {
+        self.last_chat_visibility != chat_options.visibility
+            || self.last_chat_colors != chat_options.colors
+    }
+
+    pub fn sync_client_information(
+        &mut self,
+        connection: &ConnectionHandle,
+        render_distance: u32,
+        chat_options: crate::ui::chat::ChatOptions,
+    ) {
+        let render_changed = self.last_render_distance != render_distance;
+        let chat_changed = self.chat_information_changed(chat_options);
         self.last_render_distance = render_distance;
-        tracing::info!("Render distance changed to {render_distance}");
+        self.last_chat_visibility = chat_options.visibility;
+        self.last_chat_colors = chat_options.colors;
+        if render_changed {
+            tracing::info!("Render distance changed to {render_distance}");
+        }
+        if chat_changed {
+            tracing::info!(
+                visibility = ?chat_options.visibility,
+                colors = chat_options.colors,
+                "Chat client information changed"
+            );
+        }
 
         connection
             .packet_tx
@@ -791,7 +872,7 @@ impl GameState {
                 ServerboundClientInformation {
                     client_information: crate::net::client_information(
                         render_distance as u8,
-                        crate::ui::chat::ChatOptions::default(),
+                        chat_options,
                     ),
                 },
             ));
@@ -1303,6 +1384,253 @@ enum ResultKind {
     ChunkLoad,
 }
 
+fn handle_chat_ui_action(
+    action: ChatUiAction,
+    core: &mut AppCore,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    match action {
+        ChatUiAction::OpenUrl(url) => {
+            let Ok(url) = crate::chat_component::parse_untrusted_url(url) else {
+                return;
+            };
+            if let Err(e) = open::that(&url) {
+                tracing::warn!("Could not open chat link {url:?}: {e}");
+            }
+        }
+        ChatUiAction::OpenChatSettings => {
+            game.chat.close_for_settings();
+            core.menu.open_chat_settings();
+            game.options_from_game = true;
+            game.paused = true;
+        }
+        ChatUiAction::RunCommand(command) => {
+            handle_unattended_command(&command, connection, game);
+        }
+        ChatUiAction::RunCommandUnsigned(command) => {
+            connection
+                .packet_tx
+                .send_raw(crate::net::chat::encode_outbound_command(&command));
+        }
+        ChatUiAction::Custom { id, payload } => connection.packet_tx.send_custom_click(id, payload),
+        // The chat screen stays as the dialog's `previousScreen`.
+        ChatUiAction::ShowDialog(dialog) => {
+            game.open_server_dialog(crate::ui::server_dialog::DialogReference::Holder(dialog));
+        }
+    }
+}
+
+fn handle_unattended_command(command: &str, connection: &ConnectionHandle, game: &mut GameState) {
+    use crate::net::commands::UnattendedCommandCheck;
+    use crate::ui::chat::CommandConfirmationKind;
+
+    let command = command.strip_prefix('/').unwrap_or(command);
+    let check = game
+        .command_tree
+        .as_ref()
+        .map_or(UnattendedCommandCheck::ParseErrors, |tree| {
+            tree.verify_unattended(command)
+        });
+    match CommandConfirmationKind::for_check(check) {
+        Some(kind) => game
+            .chat
+            .request_command_confirmation(command.to_owned(), kind),
+        None => {
+            connection
+                .packet_tx
+                .send_raw(crate::net::chat::encode_outbound_command(command));
+            // `setScreen(screenAfterCommand)` re-adds ChatScreen, whose
+            // `removed` resets the scroll.
+            game.chat.reset_chat_scroll();
+        }
+    }
+}
+
+/// Drops the dialog if the input just handled finished it, then carries out
+/// the action it reported.
+pub(crate) fn settle_server_dialog(
+    action: Option<crate::ui::server_dialog::ServerDialogAction>,
+    core: &mut AppCore,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    use crate::ui::server_dialog::ServerDialogAction;
+
+    // Vanilla swaps in the after-action screen only where the click event
+    // reaches `setScreen` (`DialogScreen.runAction`).
+    let (activate, follow_up) = match action {
+        None => (false, None),
+        // `Screen.clickUrlAction`: the confirm screen replaces the dialog,
+        // while opening the link straight away (or chat links being off)
+        // leaves the screen alone.
+        Some(ServerDialogAction::OpenUrl(url)) => match game.chat.request_open_url(url) {
+            Some(action) => (false, Some(action)),
+            None => (game.chat.has_pending_modal_prompt(), None),
+        },
+        // `ClientConfigurationPacketListenerImpl.createDialogAccess`.
+        Some(ServerDialogAction::RunCommand(command)) if game.configuring => {
+            tracing::warn!(
+                "Commands are not supported in configuration phase, trying to run '{command}'"
+            );
+            (false, None)
+        }
+        Some(ServerDialogAction::RunCommand(command)) => {
+            (true, Some(ChatUiAction::RunCommand(command)))
+        }
+        Some(ServerDialogAction::Custom { id, payload }) => {
+            (true, Some(ChatUiAction::Custom { id, payload }))
+        }
+        // `showDialog` only warns when the dialog doesn't resolve, leaving the
+        // current one up.
+        Some(ServerDialogAction::ShowDialog(reference)) => {
+            game.open_server_dialog(reference);
+            (false, None)
+        }
+    };
+    if activate && let Some(dialog) = game.server_dialog.as_mut() {
+        dialog.activate();
+    }
+    if game
+        .server_dialog
+        .as_ref()
+        .is_some_and(|dialog| dialog.is_finished())
+    {
+        game.server_dialog = None;
+    }
+    if let Some(action) = follow_up {
+        handle_chat_ui_action(action, core, connection, game);
+    }
+}
+
+/// The server dialog and the confirm screen a chat or dialog link opens over
+/// it, with their clicks settled. The connecting screen shares it for
+/// configuration-phase dialogs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_server_screens(
+    elements: &mut Vec<MenuElement>,
+    sw: f32,
+    sh: f32,
+    gs: f32,
+    core: &mut AppCore,
+    gfx: &Gfx,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+    // The client tick count, or `None` where the phase runs no game ticks.
+    tick: Option<u64>,
+    text_events: &[crate::ui::text_edit::TextInputEvent],
+) {
+    let modal_open = game.chat.has_pending_modal_prompt();
+    if let Some(dialog) = game.server_dialog.as_mut() {
+        // The dialog types while it is the top screen; a confirm screen over
+        // it takes the keyboard instead.
+        if !modal_open {
+            let fs = common::FONT_SIZE * gs;
+            dialog.handle_text_input(text_events, gs, &|s| gfx.renderer.menu_text_width(s, fs));
+        }
+        let scroll = core.input.consume_menu_scroll();
+        if scroll != 0.0 && !modal_open {
+            dialog.handle_scroll(scroll);
+        }
+        let action = dialog.build(
+            elements,
+            sw,
+            sh,
+            gs,
+            crate::ui::server_dialog::WidgetInput {
+                cursor: core.input.cursor_pos(),
+                clicked: core.input.left_just_pressed() && !modal_open,
+                held: core.input.left_held() && !modal_open,
+                shift: core.input.shift_held(),
+                activate: !modal_open
+                    && (core.input.enter_pressed()
+                        || core.input.key_just_pressed(winit::keyboard::KeyCode::Space)),
+                arrow_steps: i32::from(
+                    core.input
+                        .key_just_pressed(winit::keyboard::KeyCode::ArrowRight),
+                ) - i32::from(
+                    core.input
+                        .key_just_pressed(winit::keyboard::KeyCode::ArrowLeft),
+                ),
+                tick,
+                advanced_tooltips: game.advanced_item_tooltips,
+            },
+            &|t, s| gfx.renderer.menu_text_width(t, s),
+            &|spans, s| gfx.renderer.menu_spans_width(spans, s),
+        );
+        if dialog.take_click_sound() {
+            core.audio.play_ui_click();
+        }
+        settle_server_dialog(action, core, connection, game);
+        core.input.clear_just_pressed_actions();
+        core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+
+    if game.chat.has_pending_modal_prompt() {
+        let cursor = core.input.cursor_pos();
+        let clicked = core.input.left_just_pressed();
+        // `AbstractButton.onClick` plays the click; this is the same
+        // last-frame hit test the modal presses with.
+        if clicked && game.chat.hovering_clickable(cursor, false) {
+            core.audio.play_ui_click();
+        }
+        if let Some(action) =
+            game.chat
+                .build_modal_prompt(elements, sw, sh, gs, cursor, clicked, &|spans, s| {
+                    gfx.renderer.menu_spans_width(spans, s)
+                })
+        {
+            handle_chat_ui_action(action, core, connection, game);
+        }
+        core.input.clear_just_pressed_actions();
+        core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+}
+
+/// A key press while a server dialog is the top screen: Escape cancels it,
+/// Tab cycles its text fields, and anything else types. A confirm screen the
+/// dialog raised sits above it and answers Escape first.
+pub(crate) fn server_dialog_key(
+    code: winit::keyboard::KeyCode,
+    event: &winit::event::KeyEvent,
+    core: &mut AppCore,
+    window: &winit::window::Window,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    use winit::keyboard::KeyCode;
+
+    if game.chat.has_pending_modal_prompt() {
+        // `ConfirmScreen` answers Escape with `accept(false)`, which returns
+        // to the screen under it.
+        if code == KeyCode::Escape {
+            game.chat.handle_escape();
+            core.input.clear_action(input::Action::OpenMenu);
+            core.apply_cursor_grab(window, Some(game));
+        } else {
+            core.input.on_menu_key_event(event);
+        }
+        return;
+    }
+    match code {
+        KeyCode::Escape => {
+            let action = game
+                .server_dialog
+                .as_mut()
+                .and_then(|dialog| dialog.handle_escape());
+            settle_server_dialog(action, core, connection, game);
+            core.input.clear_action(input::Action::OpenMenu);
+            core.apply_cursor_grab(window, Some(game));
+        }
+        KeyCode::Tab => {
+            if let Some(dialog) = game.server_dialog.as_mut() {
+                dialog.handle_tab(core.input.shift_held());
+            }
+        }
+        _ => core.input.on_menu_key_event(event),
+    }
+}
+
 /// Carry out the button/dismiss action a benchmark result overlay reported,
 /// targeting the matching benchmark's result/upload fields.
 fn apply_result_action(
@@ -1354,7 +1682,7 @@ fn apply_render_distance(
     rd: u32,
 ) {
     core.menu.render_distance = rd;
-    game.sync_render_distance(connection, rd);
+    game.sync_client_information(connection, rd, core.menu.chat_options);
 }
 
 /// Predict each container click locally (instant UI + drag preview), then send
@@ -1560,6 +1888,7 @@ pub fn update_game(
     core.audio.set_subtitles_enabled(core.menu.show_subtitles);
 
     gfx.renderer.set_vsync(core.menu.vsync);
+    game.chat.set_options(core.menu.chat_options);
 
     // Vanilla pauseIfInactive: losing OS focus for more than half a second
     // with no screen open pauses the game, which also releases the cursor
@@ -1761,7 +2090,11 @@ pub fn update_game(
         core.menu.gui_scale_setting,
     );
     let text_fs = common::FONT_SIZE * text_gs;
-    if let Some(msg) = game.chat.handle_key_input(
+    let chat_was_open = game.chat.is_open();
+    if game.dialog_open() {
+        // The dialog, or the ConfirmScreen over it, replaces ChatScreen and
+        // takes its input; `build_server_screens` hands the typing on.
+    } else if let Some(msg) = game.chat.handle_key_input(
         &text_events,
         enter,
         tab,
@@ -1770,12 +2103,22 @@ pub fn update_game(
         down,
         page_up,
         page_down,
-        text_sw - 12.0 * text_gs,
+        text_sw - 4.0 * text_gs,
         &|s| gfx.renderer.menu_text_width(s, text_fs),
         game.command_tree.as_deref(),
     ) {
         core.send_chat_message(connection, msg);
+    }
+    // Enter closes chat even when there was nothing to send.
+    if chat_was_open && !game.chat.is_open() {
         core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+    if game.server_dialog.is_none() && game.chat.is_open() {
+        let scroll = core.input.consume_menu_scroll();
+        if scroll != 0.0 {
+            game.chat
+                .handle_scroll(core.input.cursor_pos(), scroll, shift);
+        }
     }
     if let Some((id, command)) = game.chat.take_suggestion_request() {
         connection
@@ -1790,9 +2133,11 @@ pub fn update_game(
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
     core.input.menu_capture = game.gui_open() || game.death_screen_open;
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
-    if core.input.spectator && game.spectator.is_menu_active() {
-        core.ensure_player_face_atlas(&mut gfx.renderer);
-    }
+    core.sync_game_dynamic_atlas(
+        game,
+        &mut gfx.renderer,
+        core.input.spectator && game.spectator.is_menu_active(),
+    );
 
     // The F3+F4 switcher shows the mouse cursor while open.
     let switcher_open = game.game_mode_switcher.is_some();
@@ -2397,7 +2742,11 @@ pub fn update_game(
         apply_result_action(action, ResultKind::ChunkLoad, status, json, core, gfx, game);
     }
 
-    if game.options_from_game {
+    // A dialog is the top screen: the screens under it keep their state
+    // (vanilla's `previousScreen`) but neither draw nor take input. The Hud
+    // still draws, so chat keeps its unfocused backlog.
+    let dialog_open = game.dialog_open();
+    if game.options_from_game && !dialog_open {
         core.menu.server_render_distance = game.server_render_distance;
         let mut menu_input = core.build_menu_input(dt);
         // Chat consumed the enter/tab latches earlier this frame; hand them on.
@@ -2410,7 +2759,7 @@ pub fn update_game(
         elements.extend(result.elements);
         core.input.clear_just_pressed_actions();
         core.sync_display_mode(&gfx.window);
-    } else if game.death_screen_open {
+    } else if game.death_screen_open && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed() && !game.respawn_sent;
         death_action = if game.death_confirm {
@@ -2442,7 +2791,7 @@ pub fn update_game(
             )
         };
         core.input.clear_just_pressed_actions();
-    } else if game.paused && !matches!(game.pause_screen, PauseScreen::Hidden) {
+    } else if game.paused && !matches!(game.pause_screen, PauseScreen::Hidden) && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
         pause_action = pause::build_pause_menu(
@@ -2461,7 +2810,7 @@ pub fn update_game(
 
     let mut player_preview = None;
     let mut book_preview = None;
-    if game.inventory_open || game.open_container.is_some() {
+    if (game.inventory_open || game.open_container.is_some()) && !dialog_open {
         // Key shortcuts stay quiet while a text field (anvil rename) types.
         let keys_live = !game.wants_text_input();
         let input = crate::ui::container::ContainerInput {
@@ -2632,7 +2981,7 @@ pub fn update_game(
         core.input.clear_just_pressed_actions();
     }
 
-    if game.creative_inventory_open {
+    if game.creative_inventory_open && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
         let middle_clicked = core.input.middle_just_pressed();
@@ -2700,15 +3049,27 @@ pub fn update_game(
 
     // F1 hides the closed-chat overlay; an open chat is a screen and renders
     // regardless (vanilla Hud.extractChat vs ChatScreen).
-    if !game.hide_gui || game.chat.is_open() {
-        game.chat.build(
+    if !game.hide_gui || game.chat.is_focused() {
+        let command_tree = game.command_tree.clone();
+        let chat_action = game.chat.build(
             &mut elements,
-            sw,
-            sh,
-            gs,
-            &|t, s| gfx.renderer.menu_text_width(t, s),
-            &|spans, s| gfx.renderer.menu_spans_width(spans, s),
+            crate::ui::chat::ChatBuildContext {
+                screen_w: sw,
+                screen_h: sh,
+                gui_scale: gs,
+                cursor: core.input.cursor_pos(),
+                covered: dialog_open,
+                clicked: core.input.left_just_pressed(),
+                shift: core.input.shift_held(),
+                command_tree: command_tree.as_deref(),
+                advanced_item_tooltips: game.advanced_item_tooltips,
+                text_width_fn: &|t, s| gfx.renderer.menu_text_width(t, s),
+                spans_width_fn: &|spans, s| gfx.renderer.menu_spans_width(spans, s),
+            },
         );
+        if let Some(action) = chat_action {
+            handle_chat_ui_action(action, core, connection, game);
+        }
     }
 
     // Subtitles draw above chat and the tab list; toasts stay on top
@@ -2742,6 +3103,31 @@ pub fn update_game(
         game.toasts.build(&mut elements, sw, gs, &|spans, s| {
             gfx.renderer.menu_spans_width(spans, s)
         });
+    }
+
+    build_server_screens(
+        &mut elements,
+        sw,
+        sh,
+        gs,
+        core,
+        gfx,
+        connection,
+        game,
+        Some(game.tick_count),
+        &text_events,
+    );
+
+    if game.chat.is_open() && !dialog_open && core.input.cursor_moved_this_frame() {
+        let icon = if game
+            .chat
+            .hovering_clickable(core.input.cursor_pos(), core.input.shift_held())
+        {
+            winit::window::CursorIcon::Pointer
+        } else {
+            winit::window::CursorIcon::Default
+        };
+        gfx.window.set_cursor(icon);
     }
 
     // Chat consumes keys, not clicks; nothing else clears them while only chat
@@ -3136,12 +3522,19 @@ pub fn update_game(
     }
 
     if game.options_from_game {
-        if core.menu.render_distance != game.last_render_distance {
-            game.sync_render_distance(connection, core.menu.render_distance);
+        if core.menu.render_distance != game.last_render_distance
+            || game.chat_information_changed(core.menu.chat_options)
+        {
+            game.sync_client_information(
+                connection,
+                core.menu.render_distance,
+                core.menu.chat_options,
+            );
         }
         if !core.menu.is_options_screen() {
             game.options_from_game = false;
-            game.paused = true;
+            // Chat Settings opened from chat return to it, unpaused.
+            game.paused = !game.chat.return_from_settings(game.command_tree.as_deref());
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
     }

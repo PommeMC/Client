@@ -33,6 +33,67 @@ fn compat_label(compat: PackCompat) -> (&'static str, [f32; 4]) {
     }
 }
 
+// Chat option label prefixes, shared by the labels and their handlers.
+const CHAT_VISIBILITY: &str = "Chat:";
+const CHAT_COLORS: &str = "Colors:";
+const CHAT_LINKS: &str = "Web Links:";
+const CHAT_LINKS_PROMPT: &str = "Prompt on Links:";
+const CHAT_OPACITY: &str = "Chat Text Opacity:";
+const TEXT_BACKGROUND_OPACITY: &str = "Text Background Opacity:";
+const CHAT_SCALE: &str = "Chat Text Size:";
+const CHAT_LINE_SPACING: &str = "Line Spacing:";
+const CHAT_DELAY: &str = "Chat Delay:";
+const CHAT_WIDTH: &str = "Width:";
+const CHAT_HEIGHT_FOCUSED: &str = "Focused Height:";
+const CHAT_HEIGHT_UNFOCUSED: &str = "Unfocused Height:";
+const AUTO_SUGGESTIONS: &str = "Command Suggestions:";
+const HIDE_MATCHED_NAMES: &str = "Hide Matched Names:";
+const ONLY_SHOW_SECURE_CHAT: &str = "Only Show Secure Chat:";
+const SAVE_CHAT_DRAFTS: &str = "Save Unsent Chats:";
+
+/// The `chatDelay` slider's `IntRange(0, 60)`, in tenths of a second.
+const CHAT_DELAY_MAX_TENTHS: i32 = 60;
+
+/// Vanilla `Options.percentValueLabel`, which truncates.
+fn percent_label(prefix: &str, value: f64) -> String {
+    format!("{prefix} {}%", (value * 100.0) as i32)
+}
+
+fn chat_opacity_label(opacity: f32) -> String {
+    percent_label(CHAT_OPACITY, f64::from(opacity) * 0.9 + 0.1)
+}
+
+fn chat_scale_label(scale: f32) -> String {
+    if scale == 0.0 {
+        format!("{CHAT_SCALE} OFF")
+    } else {
+        percent_label(CHAT_SCALE, scale.into())
+    }
+}
+
+fn chat_delay_label(secs: f32) -> String {
+    if secs <= 0.0 {
+        format!("{CHAT_DELAY} None")
+    } else {
+        format!("{CHAT_DELAY} {secs:.1} second(s)")
+    }
+}
+
+/// `IntRangeBase.toSliderValue` on the delay's tenths.
+fn chat_delay_slider(secs: f32) -> f32 {
+    match (secs * 10.0) as i32 {
+        0 => 0.0,
+        CHAT_DELAY_MAX_TENTHS => 1.0,
+        n => (n as f32 + 0.5) / (CHAT_DELAY_MAX_TENTHS + 1) as f32,
+    }
+}
+
+/// `IntRangeBase.fromSliderValue`, back to seconds.
+fn chat_delay_from_slider(slider: f32) -> f32 {
+    let slider = if slider >= 1.0 { 0.99999 } else { slider };
+    (slider * (CHAT_DELAY_MAX_TENTHS + 1) as f32).floor() / 10.0
+}
+
 impl MainMenu {
     pub(super) fn build_options(
         &mut self,
@@ -41,7 +102,8 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
-        // Sub-screens reached from here (Language/Accessibility) return to Options.
+        // Sub-screens reached from here (Language/Accessibility/Chat) return
+        // to Options.
         self.settings_back = Screen::Options;
         let fov_label = if self.fov == 70 {
             "FOV: Normal".to_string()
@@ -122,6 +184,7 @@ impl MainMenu {
             "Simulation Distance:" => 27.0,
             "Max Framerate:" => 25.0,
             "FOV:" => 80.0,
+            CHAT_DELAY => CHAT_DELAY_MAX_TENTHS as f32,
             _ => return None,
         })
     }
@@ -315,49 +378,74 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
+        let o = self.chat_options;
+        let on_off = |v: bool| if v { "ON" } else { "OFF" };
+        let chat = format!("{CHAT_VISIBILITY} {}", o.visibility.label());
+        let colors = format!("{CHAT_COLORS} {}", on_off(o.colors));
+        let links = format!("{CHAT_LINKS} {}", on_off(o.links));
+        let prompt = format!("{CHAT_LINKS_PROMPT} {}", on_off(o.links_prompt));
+        let opacity = chat_opacity_label(o.opacity);
+        let bg_opacity = percent_label(TEXT_BACKGROUND_OPACITY, o.text_background_opacity.into());
+        let scale = chat_scale_label(o.scale);
+        let spacing = percent_label(CHAT_LINE_SPACING, o.line_spacing.into());
+        let delay = chat_delay_label(o.delay_secs);
+        let width = format!("{CHAT_WIDTH} {}px", o.width_px() as i32);
+        let focused = format!("{CHAT_HEIGHT_FOCUSED} {}px", o.height_px(true) as i32);
+        let unfocused = format!("{CHAT_HEIGHT_UNFOCUSED} {}px", o.height_px(false) as i32);
+        let suggestions = format!("{AUTO_SUGGESTIONS} {}", on_off(o.auto_suggestions));
+        let hide_matched = format!("{HIDE_MATCHED_NAMES} ON");
+        let secure = format!("{ONLY_SHOW_SECURE_CHAT} {}", on_off(o.only_secure));
+        let drafts = format!("{SAVE_CHAT_DRAFTS} {}", on_off(o.save_drafts));
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair("Chat: Shown", "Chat Colors: ON"),
-            OptRow::Pair("Web Links: ON", "Prompt on Links: ON"),
-            OptRow::Pair("Chat Text Opacity: 100%", "Text Background Opacity: 50%"),
-            OptRow::Pair("Chat Text Size: 100%", "Line Spacing: 0%"),
-            OptRow::Pair("Chat Delay: None", "Chat Width: 100%"),
-            OptRow::Pair("Focused Height: 100%", "Unfocused Height: 100%"),
-            OptRow::Pair("Narrator: OFF", "Command Suggestions: ON"),
-            OptRow::Pair("Hide Matched Names: ON", "Reduced Debug Info: OFF"),
-            OptRow::Pair("Only Show Secure Chat: OFF", "Save Chat Drafts: OFF"),
+            OptRow::Pair(&chat, &colors),
+            OptRow::Pair(&links, &prompt),
+            OptRow::Pair(&opacity, &bg_opacity),
+            OptRow::Pair(&scale, &spacing),
+            OptRow::Pair(&delay, &width),
+            OptRow::Pair(&focused, &unfocused),
+            OptRow::Pair("Narrator: OFF", &suggestions),
+            OptRow::Pair(&hide_matched, "Reduced Debug Info: OFF"),
+            OptRow::Pair(&secure, &drafts),
         ];
-        let disabled = &[
-            "Chat:",
-            "Chat Colors:",
-            "Web Links:",
-            "Prompt on Links:",
-            "Chat Text Opacity:",
-            "Text Background Opacity:",
-            "Chat Text Size:",
-            "Line Spacing:",
-            "Chat Delay:",
-            "Chat Width:",
-            "Focused Height:",
-            "Unfocused Height:",
-            "Narrator:",
-            "Command Suggestions:",
-            "Hide Matched Names:",
-            "Reduced Debug Info:",
-            "Only Show Secure Chat:",
-            "Save Chat Drafts:",
+        let sliders: &[(&str, f32)] = &[
+            (CHAT_OPACITY, o.opacity),
+            (TEXT_BACKGROUND_OPACITY, o.text_background_opacity),
+            (CHAT_SCALE, o.scale),
+            (CHAT_LINE_SPACING, o.line_spacing),
+            (CHAT_DELAY, chat_delay_slider(o.delay_secs)),
+            (CHAT_WIDTH, o.width),
+            (CHAT_HEIGHT_FOCUSED, o.height_focused),
+            (CHAT_HEIGHT_UNFOCUSED, o.height_unfocused),
         ];
+        // TODO: the menu tooltip wraps at 40% of the screen width and drops
+        // `\n`; vanilla `Tooltip.create` splits lines and wraps at 170px.
+        let tooltips: &[(&str, &str)] = &[
+            (
+                HIDE_MATCHED_NAMES,
+                "3rd-party Servers may send chat messages in non-standard formats.\nWith this option on, hidden players will be matched based on chat sender names.",
+            ),
+            (
+                ONLY_SHOW_SECURE_CHAT,
+                "Only display messages from other players that can be verified to have been sent by that player, and have not been modified.",
+            ),
+            (
+                SAVE_CHAT_DRAFTS,
+                "Unsent messages will be saved and can be sent the next time chat is opened.",
+            ),
+        ];
+        let disabled = &["Narrator:", HIDE_MATCHED_NAMES, "Reduced Debug Info:"];
         self.build_options_grid(
             sw,
             sh,
             input,
             "Chat Settings",
-            Screen::Options,
+            self.settings_back.clone_screen(),
             &rows,
             &[],
-            &[],
+            sliders,
             disabled,
             true,
-            &[],
+            tooltips,
             text_width_fn,
         )
     }
@@ -382,15 +470,17 @@ impl MainMenu {
                 (self.damage_tilt_strength * 100.0).round()
             )
         };
+        let o = self.chat_options;
+        let bg_opacity = percent_label(TEXT_BACKGROUND_OPACITY, o.text_background_opacity.into());
+        let chat_opacity = chat_opacity_label(o.opacity);
+        let spacing = percent_label(CHAT_LINE_SPACING, o.line_spacing.into());
+        let delay = chat_delay_label(o.delay_secs);
         let rows: Vec<OptRow> = vec![
             OptRow::Pair("Narrator: OFF", self.show_subtitles_label()),
             OptRow::Pair("High Contrast: OFF", "Menu Background Blur: 50%"),
-            OptRow::Pair(
-                "Text Background Opacity: 50%",
-                "Background for Chat Only: OFF",
-            ),
-            OptRow::Pair("Chat Text Opacity: 100%", "Line Spacing: 0%"),
-            OptRow::Pair("Chat Delay: None", "Notification Time: 10.0s"),
+            OptRow::Pair(&bg_opacity, "Background for Chat Only: OFF"),
+            OptRow::Pair(&chat_opacity, &spacing),
+            OptRow::Pair(&delay, "Notification Time: 10.0s"),
             OptRow::Pair(self.view_bobbing_label(), "Distortion Effects: 100%"),
             OptRow::Pair(&fov_effect_label, "Darkness Pulsing: 100%"),
             OptRow::Pair(&damage_tilt_label, "Glint Speed: 100%"),
@@ -401,6 +491,10 @@ impl MainMenu {
         ];
         let back = self.settings_back.clone_screen();
         let sliders: &[(&str, f32)] = &[
+            (TEXT_BACKGROUND_OPACITY, o.text_background_opacity),
+            (CHAT_OPACITY, o.opacity),
+            (CHAT_LINE_SPACING, o.line_spacing),
+            (CHAT_DELAY, chat_delay_slider(o.delay_secs)),
             ("FOV Effects:", self.fov_effect_scale),
             ("Damage Tilt:", self.damage_tilt_strength),
         ];
@@ -408,11 +502,7 @@ impl MainMenu {
             "Narrator:",
             "High Contrast:",
             "Menu Background Blur:",
-            "Text Background Opacity:",
             "Background for Chat Only:",
-            "Chat Text Opacity:",
-            "Line Spacing:",
-            "Chat Delay:",
             "Notification Time:",
             "Distortion Effects:",
             "Darkness Pulsing:",
@@ -972,6 +1062,34 @@ impl MainMenu {
                         self.show_current_server = !self.show_current_server;
                         self.save_settings();
                     }
+                    if label.starts_with(CHAT_VISIBILITY) {
+                        self.chat_options.visibility = self.chat_options.visibility.cycle();
+                        self.save_settings();
+                    }
+                    if label.starts_with(CHAT_COLORS) {
+                        self.chat_options.colors = !self.chat_options.colors;
+                        self.save_settings();
+                    }
+                    if label.starts_with(CHAT_LINKS) {
+                        self.chat_options.links = !self.chat_options.links;
+                        self.save_settings();
+                    }
+                    if label.starts_with(CHAT_LINKS_PROMPT) {
+                        self.chat_options.links_prompt = !self.chat_options.links_prompt;
+                        self.save_settings();
+                    }
+                    if label.starts_with(AUTO_SUGGESTIONS) {
+                        self.chat_options.auto_suggestions = !self.chat_options.auto_suggestions;
+                        self.save_settings();
+                    }
+                    if label.starts_with(ONLY_SHOW_SECURE_CHAT) {
+                        self.chat_options.only_secure = !self.chat_options.only_secure;
+                        self.save_settings();
+                    }
+                    if label.starts_with(SAVE_CHAT_DRAFTS) {
+                        self.chat_options.save_drafts = !self.chat_options.save_drafts;
+                        self.save_settings();
+                    }
                     if label.starts_with("Cape:") {
                         self.skin_cape = !self.skin_cape;
                         self.save_settings();
@@ -1034,6 +1152,14 @@ impl MainMenu {
                 "Ambient/Environment:" => self.ambient_volume = v,
                 "Voice/Speech:" => self.voice_volume = v,
                 "UI:" => self.ui_volume = v,
+                CHAT_OPACITY => self.chat_options.opacity = v,
+                TEXT_BACKGROUND_OPACITY => self.chat_options.text_background_opacity = v,
+                CHAT_SCALE => self.chat_options.scale = v,
+                CHAT_LINE_SPACING => self.chat_options.line_spacing = v,
+                CHAT_DELAY => self.chat_options.delay_secs = chat_delay_from_slider(v),
+                CHAT_WIDTH => self.chat_options.width = v,
+                CHAT_HEIGHT_FOCUSED => self.chat_options.height_focused = v,
+                CHAT_HEIGHT_UNFOCUSED => self.chat_options.height_unfocused = v,
                 _ => continue,
             }
             self.settings_dirty = true;
@@ -1478,6 +1604,37 @@ mod tests {
         assert!(!option_enabled("Graphics: Fancy", disabled));
         assert!(option_enabled("Render Distance: 12 chunks", disabled));
         assert!(option_enabled("Graphics Backend: Default", disabled));
+    }
+
+    #[test]
+    fn chat_option_labels_match_vanilla() {
+        let o = crate::ui::chat::ChatOptions::default();
+        assert_eq!(chat_opacity_label(o.opacity), "Chat Text Opacity: 100%");
+        assert_eq!(chat_opacity_label(0.0), "Chat Text Opacity: 10%");
+        assert_eq!(
+            percent_label(TEXT_BACKGROUND_OPACITY, 0.29_f32.into()),
+            "Text Background Opacity: 28%"
+        );
+        assert_eq!(chat_scale_label(o.scale), "Chat Text Size: 100%");
+        assert_eq!(chat_scale_label(0.0), "Chat Text Size: OFF");
+        assert_eq!(chat_delay_label(o.delay_secs), "Chat Delay: None");
+        assert_eq!(chat_delay_label(0.5), "Chat Delay: 0.5 second(s)");
+        assert_eq!(chat_delay_label(6.0), "Chat Delay: 6.0 second(s)");
+    }
+
+    #[test]
+    fn chat_delay_slider_round_trips_and_steps() {
+        let step = 1.0 / CHAT_DELAY_MAX_TENTHS as f32;
+        for tenths in 0..=CHAT_DELAY_MAX_TENTHS {
+            let secs = tenths as f32 / 10.0;
+            let slider = chat_delay_slider(secs);
+            assert_eq!(chat_delay_from_slider(slider), secs, "{tenths}");
+            let next = chat_delay_from_slider((slider + step).clamp(0.0, 1.0));
+            let prev = chat_delay_from_slider((slider - step).clamp(0.0, 1.0));
+            let tenths_of = |s: f32| (s * 10.0).round() as i32;
+            assert_eq!(tenths_of(next), (tenths + 1).min(CHAT_DELAY_MAX_TENTHS));
+            assert_eq!(tenths_of(prev), (tenths - 1).max(0));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

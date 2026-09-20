@@ -21,22 +21,70 @@ pub enum InlineObject {
 }
 
 impl InlineObject {
+    /// The glyph's key in the shared atlas. A head carries its whole profile
+    /// identity, the way vanilla keys `PlayerSkinRenderCache` by
+    /// `ResolvableProfile`: two heads with the same id but different textures
+    /// are different glyphs.
     pub fn atlas_key(&self) -> String {
         match self {
             Self::AtlasSprite { atlas, sprite } => format!("object:{atlas}:{sprite}"),
             Self::Player {
-                uuid, name, hat, ..
+                uuid,
+                name,
+                textures,
+                hat,
             } => {
                 let layer = if *hat { "hat" } else { "base" };
-                uuid.map(|uuid| format!("player:{uuid}:{layer}"))
-                    .or_else(|| {
-                        name.as_ref()
-                            .map(|name| format!("player-name:{name}:{layer}"))
-                    })
-                    .unwrap_or_else(|| format!("player:unknown:{layer}"))
+                let id = uuid.map(|uuid| uuid.to_string()).unwrap_or_default();
+                let name = name.as_deref().unwrap_or("");
+                let textures = textures.as_deref().map(short_hash).unwrap_or_default();
+                format!("player:{id}:{name}:{textures}:{layer}")
             }
         }
     }
+}
+
+/// A short, stable digest of a profile's packed textures, so the atlas key
+/// stays small.
+fn short_hash(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(value.as_bytes());
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `StringSplitter.splitLines`' walk: where the line that starts the run
+/// breaks. `chars` yields each item's index, character and width in order;
+/// `None` means the rest fits on one line. The pair is the line's end and
+/// where the next one starts, so the newline (or the space the line broke on)
+/// belongs to neither.
+pub(crate) fn find_line_break(
+    chars: impl Iterator<Item = (usize, char, f32)>,
+    max_w: f32,
+) -> Option<(usize, usize)> {
+    let mut width = 0.0f32;
+    let mut had_non_zero = false;
+    let mut last_space = None;
+    for (index, ch, char_width) in chars {
+        if ch == '\n' {
+            return Some((index, index + 1));
+        }
+        if ch == ' ' {
+            last_space = Some(index);
+        }
+        width += char_width;
+        if had_non_zero && width > max_w {
+            return Some(match last_space {
+                // `FlatComponents.splitAt(lineBreak, 1, ...)`: the chosen
+                // delimiter space is omitted from both display lines.
+                Some(space) => (space, space + 1),
+                // A word longer than the line breaks mid-word.
+                None => (index, index),
+            });
+        }
+        had_non_zero |= char_width != 0.0;
+    }
+    None
 }
 
 /// A styled run of text (color plus formatting flags). The shared span type for
@@ -102,8 +150,19 @@ pub fn with_alpha(spans: &[TextSpan], alpha: f32) -> Vec<TextSpan> {
 /// Flatten a native component into styled spans, keeping each run's resolved
 /// style.
 pub fn format_component_spans(component: &Component, base_color: [f32; 4]) -> Vec<TextSpan> {
+    format_component_spans_with_parent(component, &ResolvedStyle::default(), base_color)
+}
+
+/// [`format_component_spans`] under an inherited parent style, which the
+/// component's own explicit style overrides (vanilla appending it to a styled
+/// parent).
+pub fn format_component_spans_with_parent(
+    component: &Component,
+    parent: &ResolvedStyle,
+    base_color: [f32; 4],
+) -> Vec<TextSpan> {
     let mut spans = Vec::new();
-    component.visit_text(&ResolvedStyle::default(), &mut |text, style| {
+    component.visit_text(parent, &mut |text, style| {
         let color = style.color.map(rgb24).unwrap_or(base_color);
         spans.push(TextSpan {
             text: text.to_owned(),
@@ -231,7 +290,8 @@ fn parse_player_profile(
     (uuid, name, textures)
 }
 
-fn parse_uuid_value(value: &serde_json::Value) -> Option<uuid::Uuid> {
+/// Vanilla `UUIDUtil.LENIENT_CODEC`: a four-int array or a UUID string.
+pub(crate) fn parse_uuid_value(value: &serde_json::Value) -> Option<uuid::Uuid> {
     if let Some(value) = value.as_str() {
         return uuid::Uuid::parse_str(value).ok();
     }
@@ -308,6 +368,37 @@ mod tests {
 
     use super::*;
     use crate::chat_component::{ClickEvent, HoverEvent};
+
+    #[test]
+    fn head_atlas_keys_carry_the_whole_profile() {
+        let uuid = uuid::Uuid::from_u128(1);
+        let head = |textures: Option<&str>, hat: bool| {
+            InlineObject::Player {
+                uuid: Some(uuid),
+                name: Some("Alex".to_owned()),
+                textures: textures.map(str::to_owned),
+                hat,
+            }
+            .atlas_key()
+        };
+        // The same id with different textures is a different glyph, and the
+        // two layers of one profile are different keys.
+        assert_ne!(head(Some("one"), true), head(Some("two"), true));
+        assert_ne!(head(Some("one"), true), head(Some("one"), false));
+        assert_eq!(head(Some("one"), true), head(Some("one"), true));
+        assert_ne!(head(None, true), head(Some("one"), true));
+        // A nameless, idless head still has a key.
+        assert!(
+            InlineObject::Player {
+                uuid: None,
+                name: None,
+                textures: None,
+                hat: true,
+            }
+            .atlas_key()
+            .starts_with("player:")
+        );
+    }
 
     #[test]
     fn native_object_span_keeps_special_glyph_metadata() {

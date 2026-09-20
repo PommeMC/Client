@@ -10,7 +10,7 @@ use pyronyx::vk;
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::{packing, shader, util};
 use crate::ui::font::{FontSources, GLYPH_ATLAS_SIZE, GlyphAtlasPixels, GlyphInfo, GlyphMap};
-use crate::ui::text::TextSpan;
+use crate::ui::text::{InlineObject, TextSpan};
 
 const FONT_BYTES: &[u8] = include_bytes!("../fonts/Montserrat-Medium.ttf");
 const ICON_FONT_BYTES: &[u8] = include_bytes!("../fonts/fa-solid-900.ttf");
@@ -243,6 +243,9 @@ pub struct MenuOverlayPipeline {
     favicon_sampler: vk::Sampler,
     favicon_allocation: Option<Allocation>,
     favicon_regions: std::collections::HashMap<String, [f32; 4]>,
+    /// Inline objects drawn since the app last drained them, so the next
+    /// frame's atlas holds what the text actually asked for.
+    drawn_inline_objects: std::collections::HashMap<String, InlineObject>,
     favicon_atlas_size: u32,
     overlay_image: vk::Image,
     overlay_view: vk::ImageView,
@@ -615,6 +618,7 @@ impl MenuOverlayPipeline {
             favicon_sampler,
             favicon_allocation: Some(favicon_alloc),
             favicon_regions: std::collections::HashMap::new(),
+            drawn_inline_objects: std::collections::HashMap::new(),
             favicon_atlas_size: 1,
             overlay_image,
             overlay_view,
@@ -703,6 +707,9 @@ impl MenuOverlayPipeline {
             .copy_from_slice(bytemuck::cast_slice(&globals));
 
         let mut vertices: Vec<Vertex> = Vec::with_capacity(elements.len() * 24);
+        // Moved out so the element loop can record into it while `self` is
+        // borrowed for the glyph and atlas sources; it keeps its allocation.
+        let mut drawn_objects = std::mem::take(&mut self.drawn_inline_objects);
         let mut deferred_tooltips: Vec<&MenuElement> = Vec::new();
         let mut draw_ops: Vec<DrawOp> = Vec::new();
         let mut scissor_stack: Vec<[f32; 4]> = Vec::new();
@@ -785,7 +792,8 @@ impl MenuOverlayPipeline {
                         *x
                     };
                     let span = TextSpan::new(text.clone(), *color);
-                    self.push_text(
+                    self.push_text_into(
+                        &mut drawn_objects,
                         &mut vertices,
                         &[span],
                         McTextDraw {
@@ -805,7 +813,8 @@ impl MenuOverlayPipeline {
                     color,
                 } => {
                     let span = TextSpan::new(text.clone(), *color);
-                    self.push_text(
+                    self.push_text_into(
+                        &mut drawn_objects,
                         &mut vertices,
                         &[span],
                         McTextDraw {
@@ -829,7 +838,8 @@ impl MenuOverlayPipeline {
                     } else {
                         *x
                     };
-                    self.push_text(
+                    self.push_text_into(
+                        &mut drawn_objects,
                         &mut vertices,
                         spans,
                         McTextDraw {
@@ -965,7 +975,8 @@ impl MenuOverlayPipeline {
                     } else {
                         *x
                     };
-                    self.push_text(
+                    self.push_text_into(
+                        &mut drawn_objects,
                         &mut vertices,
                         spans,
                         McTextDraw {
@@ -987,7 +998,8 @@ impl MenuOverlayPipeline {
                     shadow,
                 } => {
                     let start = vertices.len();
-                    self.push_text(
+                    self.push_text_into(
+                        &mut drawn_objects,
                         &mut vertices,
                         spans,
                         McTextDraw {
@@ -1239,7 +1251,8 @@ impl MenuOverlayPipeline {
                 for (i, line) in lines.iter().enumerate() {
                     let span = TextSpan::new(line.clone(), white);
                     let line_y = text_y + i as f32 * line_h;
-                    self.push_text(
+                    self.push_text_into(
+                        &mut drawn_objects,
                         &mut vertices,
                         &[span],
                         McTextDraw {
@@ -1314,7 +1327,8 @@ impl MenuOverlayPipeline {
                         text_x
                     };
                     let line_y = text_y + i as f32 * line_h;
-                    self.push_text(
+                    self.push_text_into(
+                        &mut drawn_objects,
                         &mut vertices,
                         &line.spans,
                         McTextDraw {
@@ -1330,6 +1344,7 @@ impl MenuOverlayPipeline {
         }
 
         self.obfuscation_rng = obfuscation_rng;
+        self.drawn_inline_objects = drawn_objects;
 
         flush_draw_op(
             &mut draw_ops,
@@ -1588,8 +1603,10 @@ impl MenuOverlayPipeline {
     }
 
     /// Pushes Minecraft-font text; nothing when no fonts loaded.
-    fn push_text(
+    #[allow(clippy::too_many_arguments)]
+    fn push_text_into(
         &self,
+        drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
         vertices: &mut Vec<Vertex>,
         spans: &[TextSpan],
         draw: McTextDraw,
@@ -1601,7 +1618,30 @@ impl MenuOverlayPipeline {
                 dynamic_regions: &self.favicon_regions,
                 sprite_atlas: &self.sprite_atlas,
             };
-            push_mc_text(vertices, sources, spans, draw, obfuscation_rng);
+            push_mc_text(
+                vertices,
+                sources,
+                spans,
+                draw,
+                obfuscation_rng,
+                drawn_objects,
+            );
+        }
+    }
+
+    /// The inline objects drawn since the last call, which the app loads into
+    /// the atlas for the next frame.
+    pub fn drain_drawn_inline_objects(
+        &mut self,
+    ) -> std::collections::hash_map::Drain<'_, String, InlineObject> {
+        self.drawn_inline_objects.drain()
+    }
+
+    /// Points an inline object's key at one of its animation frames, which
+    /// were packed under their own keys.
+    pub fn set_inline_object_frame(&mut self, key: &str, frame_key: &str) {
+        if let Some(region) = self.favicon_regions.get(frame_key).copied() {
+            self.favicon_regions.insert(key.to_owned(), region);
         }
     }
 
@@ -2052,6 +2092,12 @@ pub enum SpriteId {
     TooltipFrame,
     Scroller,
     ScrollerBackground,
+    WarningButton,
+    WarningButtonHighlighted,
+    Checkbox,
+    CheckboxHighlighted,
+    CheckboxSelected,
+    CheckboxSelectedHighlighted,
     Ping1,
     Ping2,
     Ping3,
@@ -2671,6 +2717,38 @@ fn build_sprite_atlas(
             SpriteId::ScrollerBackground,
             "minecraft/textures/gui/sprites/widget/scroller_background.png",
             1.0,
+        ),
+        // `DialogScreen.WARNING_BUTTON_SPRITES` and `Checkbox`, all plain
+        // 20x20 blits.
+        (
+            SpriteId::WarningButton,
+            "minecraft/textures/gui/sprites/dialog/warning_button.png",
+            0.0,
+        ),
+        (
+            SpriteId::WarningButtonHighlighted,
+            "minecraft/textures/gui/sprites/dialog/warning_button_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::Checkbox,
+            "minecraft/textures/gui/sprites/widget/checkbox.png",
+            0.0,
+        ),
+        (
+            SpriteId::CheckboxHighlighted,
+            "minecraft/textures/gui/sprites/widget/checkbox_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::CheckboxSelected,
+            "minecraft/textures/gui/sprites/widget/checkbox_selected.png",
+            0.0,
+        ),
+        (
+            SpriteId::CheckboxSelectedHighlighted,
+            "minecraft/textures/gui/sprites/widget/checkbox_selected_highlighted.png",
+            0.0,
         ),
         (
             SpriteId::FriendsBackground,
@@ -4057,6 +4135,19 @@ struct McTextSources<'a> {
     sprite_atlas: &'a SpriteAtlas,
 }
 
+/// The side of the atlas cell an inline object's tile is packed into.
+pub const ATLAS_CELL: u32 = 64;
+
+/// Whether the object has a glyph at all: a player head always does, an atlas
+/// sprite only in one of the atlases the client stitches
+/// (`AtlasManager.KNOWN_ATLASES`).
+fn object_has_glyph(object: &InlineObject) -> bool {
+    match object {
+        InlineObject::Player { .. } => true,
+        InlineObject::AtlasSprite { atlas, .. } => crate::ui::object_glyph::is_known_atlas(atlas),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct McTextDraw {
     x: f32,
@@ -4127,6 +4218,7 @@ fn push_mc_text(
     spans: &[TextSpan],
     draw: McTextDraw,
     obfuscation_rng: &mut ObfuscationRng,
+    drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
 ) {
     let McTextDraw {
         x,
@@ -4189,14 +4281,15 @@ fn push_mc_text(
             span_position = span_position.wrapping_add(1);
             let advance = if ch == '\u{fffc}'
                 && let Some(object) = span.inline_object.as_ref()
+                && object_has_glyph(object)
             {
                 let glyph_w = 8.0 * px_scale;
                 let sx = cx.round();
                 let sy = (cy - px_scale).round();
                 let key = object.atlas_key();
                 let fallback = match object {
-                    crate::ui::text::InlineObject::Player { .. } => SpriteId::SteveHead,
-                    crate::ui::text::InlineObject::AtlasSprite { .. } => SpriteId::UnknownServer,
+                    InlineObject::Player { .. } => SpriteId::SteveHead,
+                    InlineObject::AtlasSprite { .. } => SpriteId::UnknownServer,
                 };
                 let mut draw_object = |dx: f32, color: [f32; 4]| {
                     push_atlas_image(
@@ -4215,9 +4308,14 @@ fn push_mc_text(
                     draw_object(px_scale, shadow_color);
                 }
                 draw_object(0.0, span.color);
+                drawn_objects.entry(key).or_insert_with(|| object.clone());
                 inline_object_advance(span.bold) * px_scale
             } else {
-                let gi = if span.obfuscated && ch != ' ' {
+                let gi = if ch == '\u{fffc}' && span.inline_object.is_some() {
+                    // `FontManager.getSpriteFont`: an atlas with no provider
+                    // renders the missing-font glyph.
+                    gm.missing()
+                } else if span.obfuscated && ch != ' ' {
                     let width = gm.glyph(ch, font).advance.ceil() as i32;
                     gm.random_glyph(width, font, |len| obfuscation_rng.next_int(len))
                 } else {

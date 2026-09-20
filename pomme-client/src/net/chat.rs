@@ -13,7 +13,9 @@ use simdnbt::owned::{NbtCompound, NbtTag};
 use uuid::Uuid;
 
 use super::NetworkEvent;
-use crate::chat_component::{Argument, Component, HoverEvent, Style, nbt_to_value};
+use crate::chat_component::{
+    Argument, Component, HoverEvent, Style, nbt_to_value, normalize_identifier,
+};
 use crate::net::chat_security::{LastSeenUpdate, SignedChatBody};
 use crate::ui::chat::{ChatMessageSource, ChatMessageTag};
 use crate::ui::text::format_component_spans;
@@ -224,6 +226,40 @@ fn write_last_seen_update(out: &mut Vec<u8>, update: &LastSeenUpdate) {
     write_varint(out, update.offset);
     out.extend_from_slice(&update.acknowledged);
     out.push(update.checksum);
+}
+
+/// `ServerboundCustomClickActionPacket`, a common packet sent in whichever
+/// phase the connection is in.
+pub fn encode_outbound_custom_click_action(
+    phase: Phase,
+    identifier: &str,
+    payload: Option<&NbtTag>,
+) -> Result<Vec<u8>, String> {
+    // The id is an `Identifier`, written as its `toString`.
+    let identifier = normalize_identifier(identifier);
+    if identifier.len() > 32_767 {
+        return Err("custom click identifier is too long".into());
+    }
+    let packet_id = PacketTable::native()
+        .id(phase, Direction::Serverbound, "custom_click_action")
+        .expect("custom_click_action in packet table");
+    let mut out = Vec::new();
+    write_varint(&mut out, packet_id);
+    write_wire_string(&mut out, &identifier);
+
+    // Vanilla wraps Optional<Tag> in a length-prefixed sub-buffer. None is the
+    // normal network-NBT end tag (single 0 byte); Some carries an unnamed tag.
+    let mut tag_bytes = Vec::new();
+    match payload {
+        Some(tag) => tag.write(&mut tag_bytes),
+        None => tag_bytes.push(0),
+    }
+    if tag_bytes.len() > 65_536 {
+        return Err("custom click payload exceeds Vanilla's 65536-byte limit".into());
+    }
+    write_varint(&mut out, tag_bytes.len() as u32);
+    out.extend_from_slice(&tag_bytes);
+    Ok(out)
 }
 
 /// Returns `None` when this is not a chat packet. Chat packets are always
@@ -684,12 +720,12 @@ fn component_has_non_default_font(component: &Component) -> bool {
     modified
 }
 
-fn read_component(raw: &[u8], pos: &mut usize) -> Result<Component, String> {
+pub(super) fn read_component(raw: &[u8], pos: &mut usize) -> Result<Component, String> {
     let tag = read_nbt_tag(raw, pos)?;
     Component::from_nbt_tag(&tag).map_err(|e| format!("invalid text component: {e}"))
 }
 
-fn read_nbt_tag(raw: &[u8], pos: &mut usize) -> Result<NbtTag, String> {
+pub(super) fn read_nbt_tag(raw: &[u8], pos: &mut usize) -> Result<NbtTag, String> {
     let slice = raw
         .get(*pos..)
         .ok_or_else(|| "NBT begins past end of packet".to_owned())?;
@@ -705,7 +741,7 @@ fn write_wire_string(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(value.as_bytes());
 }
 
-fn read_string(
+pub(super) fn read_string(
     raw: &[u8],
     pos: &mut usize,
     max_chars: usize,
@@ -724,7 +760,7 @@ fn read_string(
     Ok(value.to_owned())
 }
 
-fn read_bool(raw: &[u8], pos: &mut usize) -> Result<bool, String> {
+pub(super) fn read_bool(raw: &[u8], pos: &mut usize) -> Result<bool, String> {
     Ok(take(raw, pos, 1, "boolean")?[0] != 0)
 }
 
@@ -747,7 +783,7 @@ fn read_i64(raw: &[u8], pos: &mut usize, field: &str) -> Result<i64, String> {
     ))
 }
 
-fn read_varint_req(raw: &[u8], pos: &mut usize, field: &str) -> Result<u32, String> {
+pub(super) fn read_varint_req(raw: &[u8], pos: &mut usize, field: &str) -> Result<u32, String> {
     read_varint(raw, pos).ok_or_else(|| format!("truncated/invalid varint for {field}"))
 }
 
@@ -767,7 +803,7 @@ fn take<'a>(raw: &'a [u8], pos: &mut usize, len: usize, field: &str) -> Result<&
     Ok(value)
 }
 
-fn ensure_end(raw: &[u8], pos: usize, packet: &str) -> Result<(), String> {
+pub(super) fn ensure_end(raw: &[u8], pos: usize, packet: &str) -> Result<(), String> {
     if pos == raw.len() {
         Ok(())
     } else {
@@ -1478,5 +1514,60 @@ mod tests {
         let style = error.component_style.as_ref().unwrap();
         assert_eq!(style.color, Some(0xff5555));
         assert!(style.italic);
+    }
+
+    #[test]
+    fn custom_click_packet_writes_the_normalized_identifier() {
+        let mut expected = vec![68, 13];
+        expected.extend_from_slice(b"minecraft:foo");
+        // Optional<Tag> sub-buffer: length 1, end tag.
+        expected.extend_from_slice(&[1, 0]);
+        assert_eq!(
+            encode_outbound_custom_click_action(Phase::Game, "foo", None).unwrap(),
+            expected
+        );
+
+        let frame = encode_outbound_custom_click_action(Phase::Game, "a:b", None).unwrap();
+        assert_eq!(frame, [68, 3, b'a', b':', b'b', 1, 0]);
+    }
+
+    /// The configuration phase registers the packet under its own id.
+    #[test]
+    fn custom_click_packet_uses_the_configuration_id() {
+        let frame = encode_outbound_custom_click_action(Phase::Configuration, "a:b", None).unwrap();
+        assert_eq!(frame, [8, 3, b'a', b':', b'b', 1, 0]);
+    }
+
+    #[test]
+    fn custom_click_packet_preserves_exact_nbt_tag_types() {
+        let mut compound = NbtCompound::new();
+        compound.insert("byte", NbtTag::Byte(-5));
+        compound.insert("short", NbtTag::Short(300));
+        compound.insert("long", NbtTag::Long(9_000_000_000));
+        compound.insert("float", NbtTag::Float(1.5));
+        compound.insert("bytes", NbtTag::ByteArray(vec![0, 128, 255]));
+        compound.insert("ints", NbtTag::IntArray(vec![-1, 2, 3]));
+        compound.insert("longs", NbtTag::LongArray(vec![-4, 5, 6]));
+        let payload = NbtTag::Compound(compound);
+
+        let frame =
+            encode_outbound_custom_click_action(Phase::Game, "minecraft:test", Some(&payload))
+                .unwrap();
+        let mut pos = 0usize;
+        let packet_id = read_varint(&frame, &mut pos).unwrap();
+        assert_eq!(
+            PacketTable::native().name_of(Phase::Game, Direction::Serverbound, packet_id),
+            Some("custom_click_action")
+        );
+        assert_eq!(
+            read_string(&frame, &mut pos, 32_767, "id").unwrap(),
+            "minecraft:test"
+        );
+        let payload_len = read_varint_req(&frame, &mut pos, "payload length").unwrap() as usize;
+        let bytes = take(&frame, &mut pos, payload_len, "payload").unwrap();
+        let mut cursor = Cursor::new(bytes);
+        let decoded = simdnbt::owned::read_tag(&mut cursor).unwrap();
+        assert_eq!(decoded, payload);
+        assert_eq!(pos, frame.len());
     }
 }
