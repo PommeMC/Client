@@ -67,6 +67,7 @@ fn main() {
         ("panorama.frag", shaderc::ShaderKind::Fragment),
         ("hand.vert", shaderc::ShaderKind::Vertex),
         ("hand.frag", shaderc::ShaderKind::Fragment),
+        ("preview.frag", shaderc::ShaderKind::Fragment),
         ("menu_overlay.vert", shaderc::ShaderKind::Vertex),
         ("menu_overlay.frag", shaderc::ShaderKind::Fragment),
         ("block_overlay.vert", shaderc::ShaderKind::Vertex),

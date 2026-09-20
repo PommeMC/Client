@@ -20,9 +20,11 @@ use super::creative_tab_data::{
 };
 use crate::lang::item_display_name;
 use crate::player::inventory::{Inventory, item_resource_name};
+use crate::renderer::PlayerPreview;
 use crate::renderer::pipelines::menu_overlay::{
     CREATIVE_TAB_SPRITES, MenuElement, SpriteId, TooltipLine,
 };
+use crate::ui::inventory::player_preview_armor;
 
 const TEX_W: f32 = 195.0;
 const TEX_H: f32 = 136.0;
@@ -321,6 +323,37 @@ pub enum CreativeAction {
     SetSlot(u16, ItemStack),
     /// Set several slots at once (drag distribution).
     SetSlots(Vec<(u16, ItemStack)>),
+}
+
+pub fn player_preview(
+    state: &CreativeState,
+    screen_w: f32,
+    screen_h: f32,
+    cursor: (f32, f32),
+    inventory: &Inventory,
+    gs: f32,
+) -> Option<PlayerPreview> {
+    if !state.tab.is_inventory_tab() {
+        return None;
+    }
+
+    let scale = gs.min(screen_w / TEX_W).min(screen_h / TEX_H);
+    let ox = (screen_w - TEX_W * scale) / 2.0;
+    let oy = (screen_h - TEX_H * scale) / 2.0;
+    Some(PlayerPreview {
+        // Vanilla CreativeModeInventoryScreen inventory-tab bounds:
+        // left+73, top+6 through left+105, top+49, with entity size 20.
+        rect: [
+            ox + 73.0 * scale,
+            oy + 6.0 * scale,
+            32.0 * scale,
+            43.0 * scale,
+        ],
+        gui_scale: scale,
+        model_scale: 20.0,
+        cursor,
+        armor: player_preview_armor(inventory),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1488,4 +1521,34 @@ fn search_items_cached() -> &'static [ItemKind] {
         }
         out
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn survival_inventory_tab_requests_vanilla_player_preview() {
+        let mut state = CreativeState::new();
+        state.tab = CreativeTab::SurvivalInventory;
+        let mut inventory = Inventory::new();
+        inventory.set_slot(5, ItemStack::new(ItemKind::DiamondHelmet, 1));
+
+        let preview = player_preview(&state, 390.0, 272.0, (200.0, 100.0), &inventory, 2.0)
+            .expect("survival inventory tab must render the player");
+
+        assert_eq!(preview.rect, [146.0, 12.0, 64.0, 86.0]);
+        assert_eq!(preview.gui_scale, 2.0);
+        assert_eq!(preview.model_scale, 20.0);
+        assert_eq!(preview.cursor, (200.0, 100.0));
+        assert!(preview.armor[0].is_some());
+    }
+
+    #[test]
+    fn ordinary_creative_tabs_do_not_request_player_preview() {
+        let state = CreativeState::new();
+        assert!(
+            player_preview(&state, 390.0, 272.0, (200.0, 100.0), &Inventory::new(), 2.0,).is_none()
+        );
+    }
 }

@@ -1376,9 +1376,11 @@ impl AppCore {
                         }
                     }
                 }
-                NetworkEvent::EntitySaddle { entity_id, saddled } => {
+                NetworkEvent::EntityEquipment { entity_id, slots } => {
                     if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
-                        e.saddled = saddled;
+                        for (slot, item) in slots {
+                            e.set_equipment(slot, item);
+                        }
                     }
                 }
                 NetworkEvent::PlayerExperience { progress, level } => {

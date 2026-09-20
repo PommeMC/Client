@@ -4,6 +4,8 @@ pub mod villager;
 use std::collections::HashMap;
 
 use azalea_core::position::ChunkPos;
+use azalea_inventory::ItemStack;
+use azalea_inventory::components::EquipmentSlot;
 use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
 
@@ -195,6 +197,8 @@ pub struct LivingEntity {
     pub mouth_anim: f32,
     pub prev_mouth_anim: f32,
     pub has_chest: bool,
+    /// Latest server equipment by slot (`SetEquipment`).
+    pub equipment: HashMap<EquipmentSlot, ItemStack>,
     /// Saddle equipment slot occupied (`SetEquipment`); gates the jump bar.
     pub saddled: bool,
     /// Packet-driven velocity (vanilla remote entities never integrate their
@@ -342,6 +346,7 @@ impl LivingEntity {
             mouth_anim: 0.0,
             prev_mouth_anim: 0.0,
             has_chest: false,
+            equipment: HashMap::new(),
             saddled: false,
             velocity: DVec3::ZERO,
             is_in_water: false,
@@ -389,6 +394,21 @@ impl LivingEntity {
             interp_head_y_rot_deg: head_y_rot_deg,
             interp_head_y_rot_steps: 0,
         }
+    }
+
+    pub fn set_equipment(&mut self, slot: EquipmentSlot, item: ItemStack) {
+        if slot == EquipmentSlot::Saddle {
+            self.saddled = item.is_present();
+        }
+        if item.is_present() {
+            self.equipment.insert(slot, item);
+        } else {
+            self.equipment.remove(&slot);
+        }
+    }
+
+    pub fn equipment(&self, slot: EquipmentSlot) -> Option<&ItemStack> {
+        self.equipment.get(&slot)
     }
 
     fn interpolate_to_pos(&mut self, pos: Position) {
@@ -1485,7 +1505,36 @@ fn probes_water(kind: &EntityKind) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use azalea_registry::builtin::ItemKind;
+
     use super::*;
+
+    #[test]
+    fn equipment_state_replaces_and_clears_slots_without_losing_saddle_state() {
+        let mut entity = LivingEntity::new(
+            EntityKind::Player,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            0.0,
+            None,
+        );
+        let helmet = ItemStack::new(ItemKind::DiamondHelmet, 1);
+        entity.set_equipment(EquipmentSlot::Head, helmet.clone());
+        assert_eq!(entity.equipment(EquipmentSlot::Head), Some(&helmet));
+        assert!(!entity.saddled);
+
+        let saddle = ItemStack::new(ItemKind::Saddle, 1);
+        entity.set_equipment(EquipmentSlot::Saddle, saddle.clone());
+        assert_eq!(entity.equipment(EquipmentSlot::Saddle), Some(&saddle));
+        assert!(entity.saddled);
+
+        entity.set_equipment(EquipmentSlot::Head, ItemStack::Empty);
+        entity.set_equipment(EquipmentSlot::Saddle, ItemStack::Empty);
+        assert_eq!(entity.equipment(EquipmentSlot::Head), None);
+        assert_eq!(entity.equipment(EquipmentSlot::Saddle), None);
+        assert!(!entity.saddled);
+    }
 
     #[test]
     fn tick_living_advances_remote_interpolation_state() {

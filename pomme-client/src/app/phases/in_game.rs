@@ -31,7 +31,8 @@ use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::entity_model::triangle_wave;
 use crate::renderer::pipelines::block_entity;
 use crate::renderer::pipelines::entity_renderer::{
-    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, dye_color_tint, jeb_sheep_tint, wool_color_tint,
+    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, armor_render_info, dye_color_tint, jeb_sheep_tint,
+    wool_color_tint,
 };
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
@@ -3010,6 +3011,14 @@ pub fn update_game(
             core.input.right_held(),
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
+        player_preview = crate::ui::creative_inventory::player_preview(
+            &game.creative_state,
+            sw,
+            sh,
+            cursor,
+            &game.player.inventory,
+            gs,
+        );
         use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
         let mut set_creative_slot = |slot_num: u16, item: azalea_inventory::ItemStack| {
             if crate::player::is_creative(game.player.game_mode) {
@@ -3176,6 +3185,24 @@ pub fn update_game(
                     walk_anim_speed: e.walk_speed(partial_tick),
                     entity_kind: e.entity_type,
                     player_uuid: e.player_uuid,
+                    armor: [
+                        armor_render_info(
+                            e.equipment(azalea_inventory::components::EquipmentSlot::Head),
+                            azalea_inventory::components::EquipmentSlot::Head,
+                        ),
+                        armor_render_info(
+                            e.equipment(azalea_inventory::components::EquipmentSlot::Chest),
+                            azalea_inventory::components::EquipmentSlot::Chest,
+                        ),
+                        armor_render_info(
+                            e.equipment(azalea_inventory::components::EquipmentSlot::Legs),
+                            azalea_inventory::components::EquipmentSlot::Legs,
+                        ),
+                        armor_render_info(
+                            e.equipment(azalea_inventory::components::EquipmentSlot::Feet),
+                            azalea_inventory::components::EquipmentSlot::Feet,
+                        ),
+                    ],
                     variant_index: extras.variant_index,
                     overlay_tints: extras.overlay_tints,
                     overlay_variants: extras.overlay_variants,
@@ -3250,6 +3277,27 @@ pub fn update_game(
                 .min(1.0),
             entity_kind: EntityKind::Player,
             player_uuid: Some(core.user.uuid),
+            armor: {
+                let armor = game.player.inventory.armor_slots();
+                [
+                    armor_render_info(
+                        armor.first(),
+                        azalea_inventory::components::EquipmentSlot::Head,
+                    ),
+                    armor_render_info(
+                        armor.get(1),
+                        azalea_inventory::components::EquipmentSlot::Chest,
+                    ),
+                    armor_render_info(
+                        armor.get(2),
+                        azalea_inventory::components::EquipmentSlot::Legs,
+                    ),
+                    armor_render_info(
+                        armor.get(3),
+                        azalea_inventory::components::EquipmentSlot::Feet,
+                    ),
+                ]
+            },
             has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),
             death_time: render_death_time(game.player.death_time, partial_tick),
             skip_cull: true,

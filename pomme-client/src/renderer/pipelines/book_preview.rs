@@ -12,7 +12,10 @@ use glam::{Mat4, Vec3, Vec4};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
-use super::skin_preview::{Uniform, Vertex, create_pipeline, write_uniform};
+use super::skin_preview::{
+    PREVIEW_ALPHA_CUTOFF, Uniform, Vertex, WHITE_TINT, create_pipeline,
+    preview_push_constant_range, push_preview_style, write_uniform,
+};
 use crate::assets::{AssetIndex, load_image, resolve_asset_path};
 use crate::renderer::{BookPreview, MAX_FRAMES_IN_FLIGHT, util};
 
@@ -65,9 +68,12 @@ impl BookPreviewPipeline {
         );
 
         let layouts = [mvp_layout, tex_layout];
+        let push_range = preview_push_constant_range();
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: layouts.len() as u32,
             set_layouts: layouts.as_ptr(),
+            push_constant_range_count: 1,
+            push_constant_ranges: &push_range,
             ..Default::default()
         };
         let pipeline_layout = device
@@ -301,6 +307,7 @@ impl BookPreviewPipeline {
         }
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+        push_preview_style(cmd, self.pipeline_layout, WHITE_TINT, PREVIEW_ALPHA_CUTOFF);
         cmd.bind_descriptor_sets(
             vk::PipelineBindPoint::Graphics,
             self.pipeline_layout,
