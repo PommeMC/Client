@@ -128,20 +128,12 @@ pub(crate) fn parse_display_transform(json: &serde_json::Value) -> Option<Displa
     })
 }
 
+/// The shape vanilla's `display.gui` entries share, which differ only in yaw:
+/// `block/block` is 225, `item/template_chest` 45.
 #[cfg(test)]
-fn default_block_gui_transform() -> DisplayTransform {
+fn gui_transform(y_rot_deg: f32) -> DisplayTransform {
     DisplayTransform {
-        rotation: Vec3::new(30.0, 225.0, 0.0),
-        translation: Vec3::ZERO,
-        scale: Vec3::splat(0.625),
-    }
-}
-
-/// What `item/template_chest` ships; the baker resolves it from the assets.
-#[cfg(test)]
-fn vanilla_chest_gui_transform() -> DisplayTransform {
-    DisplayTransform {
-        rotation: Vec3::new(30.0, 45.0, 0.0),
+        rotation: Vec3::new(30.0, y_rot_deg, 0.0),
         translation: Vec3::ZERO,
         scale: Vec3::splat(0.625),
     }
@@ -1313,8 +1305,7 @@ fn load_model<'a>(
     let model: ModelFile = match serde_json::from_str(&contents) {
         Ok(model) => model,
         Err(error) => {
-            // Vanilla rejects the model too (an unknown `gui_light` throws in
-            // `GuiLight.getByName`), but it says so rather than going quiet.
+            // Vanilla rejects the model too, but it says so rather than going quiet.
             tracing::warn!("{model_id}: model JSON is invalid ({error}); skipping");
             return None;
         }
@@ -1843,8 +1834,8 @@ mod tests {
 
     #[test]
     fn gui_face_shades_include_vanilla_atlas_y_flip() {
-        let block = vanilla_gui_face_shades(default_block_gui_transform(), GuiLight::Side);
-        let chest = vanilla_gui_face_shades(vanilla_chest_gui_transform(), GuiLight::Side);
+        let block = vanilla_gui_face_shades(gui_transform(225.0), GuiLight::Side);
+        let chest = vanilla_gui_face_shades(gui_transform(45.0), GuiLight::Side);
         let expected_block = [1.0, 0.4, 0.4, 1.0, 0.49398834, 0.6505372];
         let expected_chest = [1.0, 0.4, 1.0, 0.4, 0.6505372, 0.49398834];
         for (actual, expected) in block.into_iter().zip(expected_block) {
@@ -1863,14 +1854,7 @@ mod tests {
 
     #[test]
     fn gui_face_shades_follow_model_display_transform() {
-        let fence = vanilla_gui_face_shades(
-            DisplayTransform {
-                rotation: Vec3::new(30.0, 135.0, 0.0),
-                translation: Vec3::ZERO,
-                scale: Vec3::splat(0.625),
-            },
-            GuiLight::Side,
-        );
+        let fence = vanilla_gui_face_shades(gui_transform(135.0), GuiLight::Side);
         let expected = [1.0, 0.4, 0.65053713, 0.49398836, 0.4, 1.0];
         for (actual, expected) in fence.into_iter().zip(expected) {
             assert!(
@@ -1893,7 +1877,7 @@ mod tests {
         };
         apply_gui_lambert(
             std::slice::from_mut(&mut quad),
-            default_block_gui_transform(),
+            gui_transform(225.0),
             GuiLight::Side,
         );
         assert!((quad.shade_light - 1.0).abs() < 1.0e-6);
@@ -1901,7 +1885,7 @@ mod tests {
 
     #[test]
     fn chest_body_faces_match_vanilla_modelpart_cube() {
-        let model = bake_chest_item_model(vanilla_chest_gui_transform(), GuiLight::Side);
+        let model = bake_chest_item_model(gui_transform(45.0), GuiLight::Side);
         assert_eq!(model.quads.len(), 18);
 
         let x0 = 1.0 / 16.0;
@@ -2128,14 +2112,7 @@ mod tests {
 
         let mut cache = HashMap::new();
         let resolved = resolve_model("block/child", &root, &None, &mut cache, None);
-        assert_eq!(
-            resolved.gui_transform,
-            DisplayTransform {
-                rotation: Vec3::new(30.0, 135.0, 0.0),
-                translation: Vec3::ZERO,
-                scale: Vec3::splat(0.625),
-            }
-        );
+        assert_eq!(resolved.gui_transform, gui_transform(135.0));
         assert_eq!(resolved.gui_light, GuiLight::Front);
 
         std::fs::remove_dir_all(root).unwrap();
