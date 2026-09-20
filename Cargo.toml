@@ -30,6 +30,7 @@ glam = "0.33"
 
 # client
 pyronyx = "=0.4.0"
+regex = "1"
 # Secure chat. rsa, sha1 and sha2 match the versions azalea-crypto pins.
 chrono = { version = "0.4.44", features = ["serde"] }
 rand = "0.9.4"

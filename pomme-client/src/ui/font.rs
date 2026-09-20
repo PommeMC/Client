@@ -537,6 +537,11 @@ impl GlyphMap {
         Ok((map, pixels))
     }
 
+    /// `SpecialGlyphs.MISSING`, which vanilla's missing font set renders.
+    pub(crate) fn missing(&self) -> &GlyphInfo {
+        &self.missing_glyph
+    }
+
     /// The glyph for `ch` in `font`; unknown fonts render MISSING rather than
     /// falling back to the default, like vanilla `FontManager.getFontSetRaw`.
     pub(crate) fn glyph(&self, ch: char, font: Option<&str>) -> &GlyphInfo {

@@ -257,7 +257,7 @@ impl MainMenu {
         }
 
         elements.push(MenuElement::ScissorPop);
-        push_scrollbar(
+        push_list_scrollbar(
             &mut elements,
             screen_w,
             list_top,
