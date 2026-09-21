@@ -89,6 +89,16 @@ pub fn armor_render_info(item: Option<&ItemStack>, slot: EquipmentSlot) -> Optio
     })
 }
 
+pub fn armor_render_infos(items: [Option<&ItemStack>; 4]) -> [Option<ArmorRenderInfo>; 4] {
+    const SLOTS: [EquipmentSlot; 4] = [
+        EquipmentSlot::Head,
+        EquipmentSlot::Chest,
+        EquipmentSlot::Legs,
+        EquipmentSlot::Feet,
+    ];
+    std::array::from_fn(|i| armor_render_info(items[i], SLOTS[i]))
+}
+
 pub struct EntityRenderInfo {
     pub position: Position,
     pub head_x_rot_deg: f32,
@@ -122,9 +132,7 @@ pub struct EntityRenderInfo {
     pub is_creepy: bool,
     /// Zombie-family conversion — shakes the whole body.
     pub is_converting: bool,
-    /// Witch drinking. Driven by the using-item metadata flag rather than
-    /// vanilla's `isHoldingItem` (main-hand item check) — pomme tracks no
-    /// mob equipment; the two only diverge for command-equipped witches.
+    /// Witch main-hand occupancy; swings the nose down toward the held item.
     pub is_holding_item: bool,
     /// Witch per-entity nose-wobble rate, resolved from the entity id.
     pub nose_wobble_speed: f32,

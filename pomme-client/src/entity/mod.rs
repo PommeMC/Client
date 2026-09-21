@@ -157,8 +157,6 @@ pub struct LivingEntity {
     pub is_creepy: bool,
     /// Zombie-family conversion (drowning / villager cure) — body-yaw shake.
     pub is_converting: bool,
-    /// Witch drinking flag — swings the nose down toward the potion.
-    pub witch_drinking: bool,
     /// Tamable (wolf/cat) state from the flags byte.
     pub is_sitting: bool,
     pub is_tame: bool,
@@ -199,8 +197,6 @@ pub struct LivingEntity {
     pub has_chest: bool,
     /// Latest server equipment by slot (`SetEquipment`).
     pub equipment: HashMap<EquipmentSlot, ItemStack>,
-    /// Saddle equipment slot occupied (`SetEquipment`); gates the jump bar.
-    pub saddled: bool,
     /// Packet-driven velocity (vanilla remote entities never integrate their
     /// own); feeds the squid body-rotation sim.
     pub velocity: DVec3,
@@ -312,7 +308,6 @@ impl LivingEntity {
             slime_size: 1,
             is_creepy: false,
             is_converting: false,
-            witch_drinking: false,
             is_sitting: false,
             is_tame: false,
             is_sprinting: false,
@@ -347,7 +342,6 @@ impl LivingEntity {
             prev_mouth_anim: 0.0,
             has_chest: false,
             equipment: HashMap::new(),
-            saddled: false,
             velocity: DVec3::ZERO,
             is_in_water: false,
             x_body_rot: 0.0,
@@ -397,9 +391,6 @@ impl LivingEntity {
     }
 
     pub fn set_equipment(&mut self, slot: EquipmentSlot, item: ItemStack) {
-        if slot == EquipmentSlot::Saddle {
-            self.saddled = item.is_present();
-        }
         if item.is_present() {
             self.equipment.insert(slot, item);
         } else {
@@ -1116,7 +1107,6 @@ impl EntityStore {
             }
             (EntityKind::Creeper, 17, Bool(b)) => entity.powered = b,
             (EntityKind::Enderman, 17, Bool(b)) => entity.is_creepy = b,
-            (EntityKind::Witch, 17, Bool(b)) => entity.witch_drinking = b,
             // Zombie-family underwater conversion / zombie villager curing.
             (EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned, 18, Bool(b))
             | (EntityKind::ZombieVillager, 19, Bool(b)) => entity.is_converting = b,
@@ -1510,7 +1500,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn equipment_state_replaces_and_clears_slots_without_losing_saddle_state() {
+    fn equipment_state_replaces_and_clears_slots() {
         let mut entity = LivingEntity::new(
             EntityKind::Player,
             Position::default(),
@@ -1522,18 +1512,15 @@ mod tests {
         let helmet = ItemStack::new(ItemKind::DiamondHelmet, 1);
         entity.set_equipment(EquipmentSlot::Head, helmet.clone());
         assert_eq!(entity.equipment(EquipmentSlot::Head), Some(&helmet));
-        assert!(!entity.saddled);
 
         let saddle = ItemStack::new(ItemKind::Saddle, 1);
         entity.set_equipment(EquipmentSlot::Saddle, saddle.clone());
         assert_eq!(entity.equipment(EquipmentSlot::Saddle), Some(&saddle));
-        assert!(entity.saddled);
 
         entity.set_equipment(EquipmentSlot::Head, ItemStack::Empty);
         entity.set_equipment(EquipmentSlot::Saddle, ItemStack::Empty);
         assert_eq!(entity.equipment(EquipmentSlot::Head), None);
         assert_eq!(entity.equipment(EquipmentSlot::Saddle), None);
-        assert!(!entity.saddled);
     }
 
     #[test]

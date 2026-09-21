@@ -1,7 +1,6 @@
 use std::time::Instant;
 
 use azalea_inventory::ItemStack;
-use azalea_inventory::components::EquipmentSlot;
 use azalea_inventory::operations::ClickOperation;
 
 use super::common::SLOT_STRIDE;
@@ -12,7 +11,7 @@ use super::container::{
 use crate::player::inventory::{self, Inventory};
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::PlayerPreview;
-use crate::renderer::pipelines::entity_renderer::{ArmorRenderInfo, armor_render_info};
+use crate::renderer::pipelines::entity_renderer::{ArmorRenderInfo, armor_render_infos};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
 // Vanilla player-menu slot indices, as u16 for click ops.
@@ -25,12 +24,7 @@ const SLOT_OFFHAND: u16 = inventory::OFFHAND as u16;
 
 pub(crate) fn player_preview_armor(inventory: &Inventory) -> [Option<ArmorRenderInfo>; 4] {
     let armor = inventory.armor_slots();
-    [
-        armor_render_info(armor.first(), EquipmentSlot::Head),
-        armor_render_info(armor.get(1), EquipmentSlot::Chest),
-        armor_render_info(armor.get(2), EquipmentSlot::Legs),
-        armor_render_info(armor.get(3), EquipmentSlot::Feet),
-    ]
+    armor_render_infos([armor.first(), armor.get(1), armor.get(2), armor.get(3)])
 }
 
 const ARMOR_EMPTY_SPRITES: [SpriteId; 4] = [
