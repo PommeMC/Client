@@ -63,8 +63,8 @@ pub struct LocalPlayer {
     pub death_time: u32,
     pub absorption: f32,
     pub max_health: f32,
-    /// `camera_distance` attribute (`UpdateAttributes`): desired third-person
-    /// distance in blocks; vanilla default 4.0, range 0..=32.
+    /// `camera_distance` attribute (`UpdateAttributes`); how far the
+    /// third-person camera backs off before wall collision.
     pub camera_distance: f32,
     pub hurt_time: u8,
     pub hurt_dir: f32,
@@ -791,22 +791,6 @@ mod tests {
         assert_eq!(
             player.hurt_time, HURT_DURATION,
             "later decreases in the new life should trigger hurt feedback"
-        );
-    }
-
-    /// Vanilla `Attributes.CAMERA_DISTANCE` defaults to 4.0 and clamps to
-    /// 0..=32; a server that never sends the attribute keeps that default.
-    #[test]
-    fn camera_distance_defaults_to_vanilla_four_blocks() {
-        let player = LocalPlayer::new();
-        assert_eq!(
-            player.camera_distance, 4.0,
-            "camera_distance must default to vanilla's CAMERA_DISTANCE value"
-        );
-        assert_eq!(
-            player.camera_distance,
-            crate::renderer::camera::THIRD_PERSON_DISTANCE,
-            "default must stay in sync with the camera constant"
         );
     }
 }

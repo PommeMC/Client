@@ -810,14 +810,15 @@ impl Renderer {
         &mut self,
         eye_pos: Position,
         chunks: &crate::world::chunk::ChunkStore,
-        desired: f32,
+        max_distance: f32,
     ) {
         if self.camera.mode == camera::CameraMode::FirstPerson || self.camera.top_down().is_some() {
             return;
         }
-        // Desired distance from the CAMERA_DISTANCE attribute (already clamped
-        // 0..32 on receipt); the raycast below may pull it in for a wall.
-        let max = desired as f64;
+        // TODO: vanilla `Camera.getMaxZoom` clips 8 rays offset by 0.1 against
+        // visual shapes with no minimum; this marches 0.2 steps against full
+        // cubes with a 0.4 pad and a 0.5 floor, so a distance of 0 sits 0.5 back.
+        let max = max_distance as f64;
         let fwd = self.camera.look_dir.as_vec().as_dvec3();
         let dir = if self.camera.mode == camera::CameraMode::ThirdPersonFront {
             fwd

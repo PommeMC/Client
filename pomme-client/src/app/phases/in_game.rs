@@ -477,13 +477,27 @@ impl GameState {
             .is_some_and(|e| crate::entity::is_equine(&e.entity_type) && e.saddled)
     }
 
-    /// Vanilla `Hud.getPlayerVehicleWithHealth`: (health, max health) of the
-    /// ridden vehicle when it is living (`Entity.showVehicleHealth`); the
-    /// living-store lookup is the `instanceof LivingEntity` gate.
-    pub fn vehicle_health(&self) -> Option<(f32, f32)> {
+    /// The ridden vehicle when it is living; the living-store lookup is
+    /// vanilla's `instanceof LivingEntity` gate.
+    fn riding_vehicle(&self) -> Option<&crate::entity::LivingEntity> {
         self.riding_vehicle_id
             .and_then(|id| self.entity_store.living.get(&id))
-            .map(|e| (e.health, e.max_health))
+    }
+
+    /// Vanilla `Hud.getPlayerVehicleWithHealth`: (health, max health) of the
+    /// ridden vehicle when it is living (`Entity.showVehicleHealth`).
+    pub fn vehicle_health(&self) -> Option<(f32, f32)> {
+        self.riding_vehicle().map(|e| (e.health, e.max_health))
+    }
+
+    // TODO: vanilla scales each distance by `getScale()` (the `scale`
+    // attribute, not read yet) and reads the camera entity's, which differs
+    // while spectating a mob.
+    pub fn third_person_distance(&self) -> f32 {
+        detached_distance(
+            self.player.camera_distance,
+            self.riding_vehicle().map(|vehicle| vehicle.camera_distance),
+        )
     }
 
     /// A server dialog, or the confirm screen one raised, is the top screen.
@@ -1820,6 +1834,12 @@ fn head_is_carved_pumpkin(player: &LocalPlayer) -> bool {
     }
 }
 
+/// Vanilla `Camera.setup`: the third-person camera backs off by the larger of
+/// the player's and a living mount's `camera_distance`.
+fn detached_distance(own: f32, mount: Option<f32>) -> f32 {
+    mount.map_or(own, |mount| own.max(mount))
+}
+
 /// Vanilla `LivingEntityRenderer`: hurt or dying entities take the red overlay.
 fn has_red_overlay(hurt_time: u8, death_time: u32) -> bool {
     hurt_time > 0 || death_time > 0
@@ -2181,7 +2201,7 @@ pub fn update_game(
             .prev_eye_pos()
             .lerp(game.player.eye_pos(), partial_tick as f64),
         &game.chunk_store,
-        game.player.camera_distance,
+        game.third_person_distance(),
     );
     // Esc cancels a running benchmark: restore the render distance it changed.
     if std::mem::take(&mut game.chunk_load_abort)
@@ -4311,7 +4331,14 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_red_overlay, section_bit, section_bits};
+    use super::{detached_distance, has_red_overlay, section_bit, section_bits};
+
+    #[test]
+    fn third_person_distance_takes_the_further_of_player_and_mount() {
+        assert_eq!(detached_distance(4.0, None), 4.0);
+        assert_eq!(detached_distance(4.0, Some(8.0)), 8.0);
+        assert_eq!(detached_distance(10.0, Some(8.0)), 10.0);
+    }
 
     #[test]
     fn section_bits_cover_the_indices_and_ignore_the_rest() {

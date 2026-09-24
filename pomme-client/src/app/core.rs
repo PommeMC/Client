@@ -1437,9 +1437,11 @@ impl AppCore {
                     entity_id,
                     distance,
                 } => {
-                    // Third-person camera only frames the local player.
                     if entity_id == game.player.entity_id {
                         game.player.camera_distance = distance;
+                    }
+                    if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
+                        e.camera_distance = distance;
                     }
                 }
                 NetworkEvent::ContainerContent {

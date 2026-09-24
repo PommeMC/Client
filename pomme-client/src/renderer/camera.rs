@@ -17,6 +17,7 @@ const NEAR: f32 = 0.1;
 pub(crate) const MIN_FAR: f32 = 1000.0;
 /// Controller look speed in degrees per second, scaled by frame delta.
 const CONTROLLER_SENSITIVITY: f32 = 150.0;
+/// Vanilla `Attributes.CAMERA_DISTANCE`'s default.
 pub const THIRD_PERSON_DISTANCE: f32 = 4.0;
 
 fn death_duration(death_time: f32) -> f32 {
