@@ -1446,6 +1446,17 @@ impl AppCore {
                         e.max_health = max_health;
                     }
                 }
+                NetworkEvent::EntityCameraDistanceUpdate {
+                    entity_id,
+                    distance,
+                } => {
+                    if entity_id == game.player.entity_id {
+                        game.player.camera_distance = distance;
+                    }
+                    if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
+                        e.camera_distance = distance;
+                    }
+                }
                 NetworkEvent::ContainerContent {
                     container_id,
                     items,

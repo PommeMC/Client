@@ -63,6 +63,9 @@ pub struct LocalPlayer {
     pub death_time: u32,
     pub absorption: f32,
     pub max_health: f32,
+    /// `camera_distance` attribute (`UpdateAttributes`); how far the
+    /// third-person camera backs off before wall collision.
+    pub camera_distance: f32,
     pub hurt_time: u8,
     pub hurt_dir: f32,
     flash_on_set_health: bool,
@@ -132,6 +135,7 @@ impl LocalPlayer {
             death_time: 0,
             absorption: 0.0,
             max_health: 20.0,
+            camera_distance: crate::renderer::camera::THIRD_PERSON_DISTANCE,
             hurt_time: 0,
             hurt_dir: 0.0,
             flash_on_set_health: false,
