@@ -31,7 +31,8 @@ use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::entity_model::triangle_wave;
 use crate::renderer::pipelines::block_entity;
 use crate::renderer::pipelines::entity_renderer::{
-    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, dye_color_tint, jeb_sheep_tint, wool_color_tint,
+    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, armor_render_infos, dye_color_tint, jeb_sheep_tint,
+    wool_color_tint,
 };
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
@@ -474,7 +475,11 @@ impl GameState {
     pub fn riding_jumpable_vehicle(&self) -> bool {
         self.controlled_vehicle_id
             .and_then(|id| self.entity_store.living.get(&id))
-            .is_some_and(|e| crate::entity::is_equine(&e.entity_type) && e.saddled)
+            .is_some_and(|e| {
+                crate::entity::is_equine(&e.entity_type)
+                    && e.equipment(azalea_inventory::components::EquipmentSlot::Saddle)
+                        .is_some()
+            })
     }
 
     /// Vanilla `Hud.getPlayerVehicleWithHealth`: (health, max health) of the
@@ -3010,6 +3015,14 @@ pub fn update_game(
             core.input.right_held(),
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
+        player_preview = crate::ui::creative_inventory::player_preview(
+            &game.creative_state,
+            sw,
+            sh,
+            cursor,
+            &game.player.inventory,
+            gs,
+        );
         use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
         let mut set_creative_slot = |slot_num: u16, item: azalea_inventory::ItemStack| {
             if crate::player::is_creative(game.player.game_mode) {
@@ -3176,6 +3189,12 @@ pub fn update_game(
                     walk_anim_speed: e.walk_speed(partial_tick),
                     entity_kind: e.entity_type,
                     player_uuid: e.player_uuid,
+                    armor: armor_render_infos([
+                        e.equipment(azalea_inventory::components::EquipmentSlot::Head),
+                        e.equipment(azalea_inventory::components::EquipmentSlot::Chest),
+                        e.equipment(azalea_inventory::components::EquipmentSlot::Legs),
+                        e.equipment(azalea_inventory::components::EquipmentSlot::Feet),
+                    ]),
                     variant_index: extras.variant_index,
                     overlay_tints: extras.overlay_tints,
                     overlay_variants: extras.overlay_variants,
@@ -3189,9 +3208,9 @@ pub fn update_game(
                     flap_speed: extras.flap_speed,
                     is_creepy: e.is_creepy,
                     is_converting: e.is_converting,
-                    // TODO: derive from the main-hand item (vanilla
-                    // `isHoldingItem`) once mob equipment tracking lands.
-                    is_holding_item: e.witch_drinking,
+                    is_holding_item: e
+                        .equipment(azalea_inventory::components::EquipmentSlot::Mainhand)
+                        .is_some(),
                     nose_wobble_speed: extras.nose_wobble_speed,
                     is_sitting: e.is_sitting,
                     is_sprinting: e.is_sprinting,
@@ -3250,6 +3269,10 @@ pub fn update_game(
                 .min(1.0),
             entity_kind: EntityKind::Player,
             player_uuid: Some(core.user.uuid),
+            armor: {
+                let armor = game.player.inventory.armor_slots();
+                armor_render_infos([armor.first(), armor.get(1), armor.get(2), armor.get(3)])
+            },
             has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),
             death_time: render_death_time(game.player.death_time, partial_tick),
             skip_cull: true,

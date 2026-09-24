@@ -4,6 +4,8 @@ pub mod villager;
 use std::collections::HashMap;
 
 use azalea_core::position::ChunkPos;
+use azalea_inventory::ItemStack;
+use azalea_inventory::components::EquipmentSlot;
 use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
 
@@ -155,8 +157,6 @@ pub struct LivingEntity {
     pub is_creepy: bool,
     /// Zombie-family conversion (drowning / villager cure) — body-yaw shake.
     pub is_converting: bool,
-    /// Witch drinking flag — swings the nose down toward the potion.
-    pub witch_drinking: bool,
     /// Tamable (wolf/cat) state from the flags byte.
     pub is_sitting: bool,
     pub is_tame: bool,
@@ -195,8 +195,8 @@ pub struct LivingEntity {
     pub mouth_anim: f32,
     pub prev_mouth_anim: f32,
     pub has_chest: bool,
-    /// Saddle equipment slot occupied (`SetEquipment`); gates the jump bar.
-    pub saddled: bool,
+    /// Latest server equipment by slot (`SetEquipment`).
+    pub equipment: HashMap<EquipmentSlot, ItemStack>,
     /// Packet-driven velocity (vanilla remote entities never integrate their
     /// own); feeds the squid body-rotation sim.
     pub velocity: DVec3,
@@ -308,7 +308,6 @@ impl LivingEntity {
             slime_size: 1,
             is_creepy: false,
             is_converting: false,
-            witch_drinking: false,
             is_sitting: false,
             is_tame: false,
             is_sprinting: false,
@@ -342,7 +341,7 @@ impl LivingEntity {
             mouth_anim: 0.0,
             prev_mouth_anim: 0.0,
             has_chest: false,
-            saddled: false,
+            equipment: HashMap::new(),
             velocity: DVec3::ZERO,
             is_in_water: false,
             x_body_rot: 0.0,
@@ -389,6 +388,18 @@ impl LivingEntity {
             interp_head_y_rot_deg: head_y_rot_deg,
             interp_head_y_rot_steps: 0,
         }
+    }
+
+    pub fn set_equipment(&mut self, slot: EquipmentSlot, item: ItemStack) {
+        if item.is_present() {
+            self.equipment.insert(slot, item);
+        } else {
+            self.equipment.remove(&slot);
+        }
+    }
+
+    pub fn equipment(&self, slot: EquipmentSlot) -> Option<&ItemStack> {
+        self.equipment.get(&slot)
     }
 
     fn interpolate_to_pos(&mut self, pos: Position) {
@@ -1096,7 +1107,6 @@ impl EntityStore {
             }
             (EntityKind::Creeper, 17, Bool(b)) => entity.powered = b,
             (EntityKind::Enderman, 17, Bool(b)) => entity.is_creepy = b,
-            (EntityKind::Witch, 17, Bool(b)) => entity.witch_drinking = b,
             // Zombie-family underwater conversion / zombie villager curing.
             (EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned, 18, Bool(b))
             | (EntityKind::ZombieVillager, 19, Bool(b)) => entity.is_converting = b,
@@ -1485,7 +1495,33 @@ fn probes_water(kind: &EntityKind) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use azalea_registry::builtin::ItemKind;
+
     use super::*;
+
+    #[test]
+    fn equipment_state_replaces_and_clears_slots() {
+        let mut entity = LivingEntity::new(
+            EntityKind::Player,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            0.0,
+            None,
+        );
+        let helmet = ItemStack::new(ItemKind::DiamondHelmet, 1);
+        entity.set_equipment(EquipmentSlot::Head, helmet.clone());
+        assert_eq!(entity.equipment(EquipmentSlot::Head), Some(&helmet));
+
+        let saddle = ItemStack::new(ItemKind::Saddle, 1);
+        entity.set_equipment(EquipmentSlot::Saddle, saddle.clone());
+        assert_eq!(entity.equipment(EquipmentSlot::Saddle), Some(&saddle));
+
+        entity.set_equipment(EquipmentSlot::Head, ItemStack::Empty);
+        entity.set_equipment(EquipmentSlot::Saddle, ItemStack::Empty);
+        assert_eq!(entity.equipment(EquipmentSlot::Head), None);
+        assert_eq!(entity.equipment(EquipmentSlot::Saddle), None);
+    }
 
     #[test]
     fn tick_living_advances_remote_interpolation_state() {

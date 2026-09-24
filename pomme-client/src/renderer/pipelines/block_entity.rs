@@ -13,7 +13,7 @@ use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::{BakedEntityModel, ModelConvention, PartAnim};
 use crate::renderer::pipelines::entity_renderer::{
-    BlendMode, ModelInput, WHITE_TINT, create_pipeline, fallback_texture,
+    BlendMode, ENTITY_ALPHA_CUTOFF, ModelInput, WHITE_TINT, create_pipeline, fallback_texture,
 };
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, block_entity_model, util};
 
@@ -563,7 +563,7 @@ impl BlockEntityPipeline {
                 // Shared entity shader push block: mat, tint, overlay_color, uv_params.
                 // Block entities are opaque with no hurt flash or UV scroll.
                 let no_overlay = [0.0f32, 0.0, 0.0, 1.0];
-                let uv_params = [0.0f32; 4];
+                let uv_params = [0.0f32, 0.0, ENTITY_ALPHA_CUTOFF, 0.0];
                 let mut bytes = [0u8; 112];
                 bytes[..64].copy_from_slice(bytemuck::cast_slice(&cols));
                 bytes[64..80].copy_from_slice(bytemuck::cast_slice(&WHITE_TINT));

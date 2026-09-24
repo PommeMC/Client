@@ -707,15 +707,10 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::SetEquipment(p) => {
-            // Only the saddle slot is tracked; equipment rendering is a TODO.
-            for (slot, item) in &p.slots.slots {
-                if *slot == azalea_inventory::components::EquipmentSlot::Saddle {
-                    let _ = event_tx.try_send(NetworkEvent::EntitySaddle {
-                        entity_id: p.entity_id.0,
-                        saddled: item.is_present(),
-                    });
-                }
-            }
+            let _ = event_tx.try_send(NetworkEvent::EntityEquipment {
+                entity_id: p.entity_id.0,
+                slots: p.slots.slots.clone(),
+            });
         }
         ClientboundGamePacket::SetEntityData(p) => {
             // Avatar's absorption/score sit at 17/18 since 1.21.9 (773);
