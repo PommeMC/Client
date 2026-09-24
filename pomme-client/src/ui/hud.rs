@@ -4,9 +4,8 @@ use azalea_core::position::BlockPos;
 use azalea_inventory::ItemStack;
 use glam::DVec3;
 
-use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_count};
+use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
 use crate::mob_effect::ActiveMobEffects;
-use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::boss_bar::BossBarState;
 use crate::ui::text::TextSpan;
@@ -546,17 +545,7 @@ pub fn build_hud(
             if let ItemStack::Present(data) = item {
                 let ix = (hotbar_x + 3.0 * gs + i as f32 * SLOT_STRIDE * gs).round();
                 let iy = (hotbar_y + 3.0 * gs).round();
-                elements.push(MenuElement::ItemIcon {
-                    x: ix,
-                    y: iy,
-                    w: item_size,
-                    h: item_size,
-                    item_name: item_resource_name(data.kind),
-                    tint: WHITE,
-                });
-                if data.count > 1 {
-                    push_item_count(elements, ix, iy, item_size, gs, data.count);
-                }
+                push_item_icon(elements, ix, iy, item_size, gs, data);
             }
         }
     }

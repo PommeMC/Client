@@ -341,6 +341,9 @@ pub struct MenuInput {
     pub escape: bool,
     pub tab: bool,
     pub f5: bool,
+    /// Net DPad Right minus Left this frame: one step on the press edge, then
+    /// auto-repeat. Folded into `arrow_steps`.
+    pub gamepad_steps: i32,
     pub scroll_delta: f32,
     /// Seconds since the last frame, clamped against stalls by the app loop.
     /// Only the credits roll accumulates a delta; the other menu animations
@@ -375,6 +378,7 @@ impl MenuInput {
             escape: false,
             tab: false,
             f5: false,
+            gamepad_steps: 0,
             scroll_delta: 0.0,
             dt: 0.0,
             credits_keys_down: 0,
@@ -395,10 +399,12 @@ impl MenuInput {
             })
     }
 
-    /// Net Right minus Left presses this frame, key repeats included
+    /// Net Right minus Left this frame: arrow-key presses with their OS
+    /// repeats, plus the DPad's edge-and-repeat steps
     /// (`AbstractSliderButton.keyPressed`).
     pub fn arrow_steps(&self) -> i32 {
-        self.events
+        let keys: i32 = self
+            .events
             .iter()
             .map(|e| match e {
                 TextInputEvent::Key {
@@ -411,7 +417,8 @@ impl MenuInput {
                 } => -1,
                 _ => 0,
             })
-            .sum()
+            .sum();
+        keys + self.gamepad_steps
     }
 }
 

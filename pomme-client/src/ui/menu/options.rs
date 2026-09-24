@@ -1916,6 +1916,28 @@ mod tests {
     }
 
     #[test]
+    fn gamepad_dpad_steps_a_focused_slider() {
+        let mut grid = Grid::with_slider("First", "FOV: 70", "FOV:");
+        let dpad_right = MenuInput {
+            gamepad_steps: 1,
+            ..Default::default()
+        };
+
+        grid.frame(&MenuInput::default());
+        grid.frame(&tab());
+        grid.frame(&tab());
+        grid.frame(&dpad_right);
+        assert_eq!(grid.menu.fov, 71);
+    }
+
+    #[test]
+    fn arrow_steps_adds_the_dpad_to_the_keyboard_arrows() {
+        let mut input = key(KeyCode::ArrowRight);
+        input.gamepad_steps = 1;
+        assert_eq!(input.arrow_steps(), 2);
+    }
+
+    #[test]
     fn slider_click_then_tab_moves_to_the_next_widget() {
         let mut grid = Grid::with_slider("Sensitivity: 50%", "Second", "Sensitivity:");
 

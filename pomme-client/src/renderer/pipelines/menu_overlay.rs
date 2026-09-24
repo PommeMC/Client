@@ -3556,7 +3556,7 @@ fn load_single_texture(
     (image, view, allocation)
 }
 
-const MC_FONT_COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8Unorm;
+const MC_FONT_COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8Srgb;
 
 struct FontTextureUpload<'a> {
     pixels: &'a [u8],
@@ -4174,7 +4174,7 @@ fn tooltip_box(draw: McTooltipDraw, px: f32, line_widths: &[f32]) -> TooltipBox 
     let mut text_x = draw.x + 12.0;
     let mut text_y = draw.y - 12.0;
     if text_x + content_w > draw.screen_w {
-        text_x = (draw.x - 24.0 - content_w).max(4.0);
+        text_x = (text_x - 24.0 - content_w).max(4.0);
     }
     if text_y + content_h + 3.0 > draw.screen_h {
         text_y = draw.screen_h - content_h - 3.0;
@@ -4735,6 +4735,15 @@ mod tests {
     }
 
     #[test]
+    fn tooltip_flips_left_from_the_offset_position() {
+        // `DefaultTooltipPositioner`: `x + 12`, then `max(x - 24 - w, 4)`.
+        let flipped = tooltip_box(unscaled_tooltip(990.0, 100.0), 1.0, &[40.0]);
+        assert_eq!(flipped.text_x, 990.0 + 12.0 - 24.0 - 40.0);
+        let clamped = tooltip_box(unscaled_tooltip(990.0, 100.0), 1.0, &[995.0]);
+        assert_eq!(clamped.text_x, 4.0);
+    }
+
+    #[test]
     fn tooltip_height_sums_ten_per_line_less_two_when_single() {
         let one = tooltip_box(unscaled_tooltip(100.0, 100.0), 1.0, &[40.0]);
         assert_eq!(one.bg[3], 8.0 + 24.0);
@@ -4818,11 +4827,6 @@ mod tests {
         let mut rng = ObfuscationRng::new(0);
         let got: Vec<usize> = (0..10).map(|_| rng.next_int(16)).collect();
         assert_eq!(got, [11, 13, 3, 9, 10, 4, 8, 1, 9, 12]);
-    }
-
-    #[test]
-    fn colored_minecraft_fonts_use_linear_unorm_texture() {
-        assert_eq!(MC_FONT_COLOR_FORMAT, vk::Format::R8G8B8A8Unorm);
     }
 
     #[test]
