@@ -3261,15 +3261,12 @@ mod tests {
 
     #[test]
     fn nbt_dialog_list_unwraps_wrapped_entries() {
-        // `NbtOps` wraps the string id in a list that also holds a compound.
-        let mut wrapped = NbtCompound::new();
-        wrapped.insert("", "pomme:third");
         let mut list = notice("List");
         list.insert("type", "minecraft:dialog_list");
         list.insert(
             "dialogs",
             NbtTag::List(NbtList::from(vec![
-                NbtTag::Compound(wrapped),
+                crate::chat_component::wrapped("pomme:third".into()),
                 NbtTag::Compound(notice("Inline")),
             ])),
         );

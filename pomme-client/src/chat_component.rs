@@ -388,8 +388,8 @@ impl ResolvedStyle {
 /// `ListTag.WRAPPER_MARKER`.
 const WRAPPER_MARKER: &str = "";
 
-/// A list's elements as `ListTag.loadList` reads them. `NbtOps` wraps each
-/// element of a heterogeneous list in a single empty-key compound, and list
+/// A list's elements as `ListTag.loadList` reads them. `ListTag.write` wraps
+/// each element of a mixed-type list in a single empty-key compound, and list
 /// elements are the only tags vanilla unwraps.
 pub(crate) fn list_elements(list: &NbtList) -> Vec<NbtTag> {
     list.as_nbt_tags()
@@ -1060,6 +1060,14 @@ fn parse_color(value: &Value) -> Option<u32> {
     })
 }
 
+/// `ListTag`'s wrapper around an element of a mixed-type list.
+#[cfg(test)]
+pub(crate) fn wrapped(tag: NbtTag) -> NbtTag {
+    let mut wrapper = NbtCompound::new();
+    wrapper.insert(WRAPPER_MARKER, tag);
+    NbtTag::Compound(wrapper)
+}
+
 #[cfg(test)]
 mod tests {
     use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
@@ -1325,13 +1333,6 @@ mod tests {
         click.insert("id", "minecraft:test");
         click.insert("payload", payload);
         NbtTag::Compound(click)
-    }
-
-    /// `NbtOps`' wrapper around an element of a heterogeneous list.
-    fn wrapped(tag: NbtTag) -> NbtTag {
-        let mut wrapper = NbtCompound::new();
-        wrapper.insert("", tag);
-        NbtTag::Compound(wrapper)
     }
 
     /// The `custom` click payload on the run that shows `text`.
