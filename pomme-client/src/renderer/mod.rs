@@ -167,6 +167,9 @@ pub struct Renderer {
     cloud_pipeline: CloudPipeline,
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
     gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
+    /// Force Unicode Font also evens the Auto GUI scale the item atlas is sized
+    /// for.
+    font_options: FontOptions,
 
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
@@ -192,6 +195,7 @@ impl Renderer {
         let FontSources {
             jar_assets_dir,
             asset_index,
+            options: font_options,
             ..
         } = font_sources;
         let size = window.inner_size();
@@ -438,7 +442,7 @@ impl Renderer {
         splash(&mut menu_pipeline, 0.95, "Caching item meshes...");
 
         let initial_slot_px =
-            pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(sw, sh, 0));
+            pipelines::gui_item_atlas::slot_px_for_screen(sw, sh, font_options.uniform);
         let gui_item_atlas = build_gui_item_atlas(
             &ctx.device,
             &ctx.allocator,
@@ -491,6 +495,7 @@ impl Renderer {
             cloud_pipeline,
             gui_item_pipeline,
             gui_item_atlas,
+            font_options,
             chunk_buffers,
             render_finished_per_image,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
@@ -1237,6 +1242,7 @@ impl Renderer {
         packs: &crate::resource_pack::ResourcePackManager,
         font_options: FontOptions,
     ) {
+        self.font_options = font_options;
         self.ctx.device.wait_idle().unwrap();
         if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
             &self.ctx.device,
@@ -1548,12 +1554,11 @@ impl Renderer {
             RenderMode::MainMenu { elements, .. } => elements.as_slice(),
         };
 
-        let target_slot_px =
-            pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(
-                self.swapchain.extent.width as f32,
-                self.swapchain.extent.height as f32,
-                0,
-            ));
+        let target_slot_px = pipelines::gui_item_atlas::slot_px_for_screen(
+            self.swapchain.extent.width as f32,
+            self.swapchain.extent.height as f32,
+            self.font_options.uniform,
+        );
         if target_slot_px != self.gui_item_atlas.slot_px() {
             // Mid-cmd-recording wait_idle: this cmd buffer is unsubmitted so
             // holds no in-flight references, and `submit_one_time` inside the

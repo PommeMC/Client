@@ -835,6 +835,15 @@ impl MainMenu {
         self.fov_effect_scale * self.fov_effect_scale
     }
 
+    pub(crate) fn gui_scale(&self, screen_w: f32, screen_h: f32) -> f32 {
+        crate::ui::hud::gui_scale(
+            screen_w,
+            screen_h,
+            self.gui_scale_setting,
+            self.force_unicode_font,
+        )
+    }
+
     pub(crate) fn font_options(&self) -> FontOptions {
         FontOptions {
             uniform: self.force_unicode_font,

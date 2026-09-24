@@ -1242,7 +1242,7 @@ impl MainMenu {
             return (empty_result(2.0), Some(false));
         }
 
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
         let btn_w = CONFIRM_BTN_W * gs;

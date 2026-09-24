@@ -801,7 +801,7 @@ impl MainMenu {
             return empty_result(2.0);
         }
 
-        let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
+        let gs = self.gui_scale(sw, sh);
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
         let big_w = 310.0 * gs;
@@ -1058,7 +1058,9 @@ impl MainMenu {
                         }
                     }
                     if label.starts_with("GUI Scale:") {
-                        let max = crate::ui::hud::max_gui_scale(sw, sh);
+                        // Capped at what Auto resolves to, as vanilla's range is.
+                        let max =
+                            crate::ui::hud::gui_scale(sw, sh, 0, self.force_unicode_font) as u32;
                         self.gui_scale_setting = (self.gui_scale_setting + 1) % (max + 1);
                         self.save_settings();
                     }
@@ -1303,7 +1305,7 @@ impl MainMenu {
 
         self.cycle_fields(input, 1);
 
-        let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
+        let gs = self.gui_scale(sw, sh);
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
         let gap = BTN_GAP * gs;
@@ -1598,7 +1600,7 @@ impl MainMenu {
             return empty_result(2.0);
         }
 
-        let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
+        let gs = self.gui_scale(sw, sh);
         let cx = sw / 2.0;
 
         let mut elements = Vec::new();

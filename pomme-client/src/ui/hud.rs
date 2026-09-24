@@ -355,24 +355,21 @@ const ICON_STRIDE: f32 = 8.0;
 const XP_BAR_W: f32 = 182.0;
 const XP_BAR_H: f32 = 5.0;
 
-// TODO: vanilla `Window.calculateScale` bumps an odd scale to even while
-// Force Unicode Font is on (`Minecraft.isEnforceUnicode`), which also caps the
-// GUI Scale slider (`Options.java:517`).
-pub fn max_gui_scale(screen_w: f32, screen_h: f32) -> u32 {
+/// Vanilla `Window.calculateScale`: the largest scale that keeps the screen at
+/// least 320x240, capped by `setting` (0 is Auto), then made even while Force
+/// Unicode Font is on.
+pub fn gui_scale(screen_w: f32, screen_h: f32, setting: u32, enforce_unicode: bool) -> f32 {
     let mut scale = 1;
-    while (screen_w / (scale + 1) as f32) >= 320.0 && (screen_h / (scale + 1) as f32) >= 240.0 {
+    while scale != setting
+        && screen_w / (scale + 1) as f32 >= 320.0
+        && screen_h / (scale + 1) as f32 >= 240.0
+    {
         scale += 1;
     }
-    scale
-}
-
-pub fn gui_scale(screen_w: f32, screen_h: f32, setting: u32) -> f32 {
-    let max = max_gui_scale(screen_w, screen_h);
-    if setting == 0 {
-        max as f32
-    } else {
-        setting.min(max) as f32
+    if enforce_unicode && scale % 2 != 0 {
+        scale += 1;
     }
+    scale as f32
 }
 
 /// Vanilla `ScreenEffectRenderer.submitWater`: underwater.png tiled 4x and
@@ -493,11 +490,10 @@ pub fn build_hud(
     boss_bars: &BossBarState,
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
-    gui_scale_setting: u32,
+    gs: f32,
     attack: &AttackIndicatorState,
     text_width_fn: TextWidthFn,
 ) {
-    let gs = gui_scale(screen_w, screen_h, gui_scale_setting);
     let cx = screen_w / 2.0;
     let cy = screen_h / 2.0;
 
@@ -1639,5 +1635,28 @@ fn facing_name(y_rot_deg: f32) -> &'static str {
         135..=224 => "North (-Z)",
         225..=314 => "East (+X)",
         _ => "South (+Z)",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gui_scale_matches_window_calculate_scale() {
+        // 720p fits 3, 1080p fits 4.
+        assert_eq!(gui_scale(1280.0, 720.0, 0, false), 3.0);
+        assert_eq!(gui_scale(1920.0, 1080.0, 0, false), 4.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 2, false), 2.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 5, false), 3.0);
+    }
+
+    #[test]
+    fn force_unicode_font_makes_the_gui_scale_even() {
+        assert_eq!(gui_scale(1280.0, 720.0, 0, true), 4.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 3, true), 4.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 5, true), 4.0);
+        assert_eq!(gui_scale(1920.0, 1080.0, 1, true), 2.0);
+        assert_eq!(gui_scale(1920.0, 1080.0, 0, true), 4.0);
     }
 }
