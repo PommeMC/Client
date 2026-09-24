@@ -1542,15 +1542,26 @@ mod tests {
     fn wrapped_text_component_decodes_off_the_wire() {
         // The shape that logged "invalid text component: component object has
         // no recognized contents" for every message from a server whose chat
-        // goes through `NbtOps`.
+        // goes through `NbtOps`: a heterogeneous `extra` list wraps its string.
         let mut wrapper = NbtCompound::new();
         wrapper.insert("", NbtTag::String("[C02 COLORS] ".into()));
+        let mut name = NbtCompound::new();
+        name.insert("text", "Steve");
+        let mut root = NbtCompound::new();
+        root.insert("text", "");
+        root.insert(
+            "extra",
+            NbtTag::List(NbtList::from(vec![
+                NbtTag::Compound(wrapper),
+                NbtTag::Compound(name),
+            ])),
+        );
         let mut raw = Vec::new();
-        write_component(&mut raw, wrapper);
+        write_component(&mut raw, root);
 
         let mut pos = 0usize;
         let component = read_component(&raw, &mut pos).expect("wrapped component decodes");
-        assert_eq!(component.plain_text(), "[C02 COLORS] ");
+        assert_eq!(component.plain_text(), "[C02 COLORS] Steve");
         assert_eq!(pos, raw.len());
     }
 

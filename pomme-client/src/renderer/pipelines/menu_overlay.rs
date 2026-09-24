@@ -4174,7 +4174,7 @@ fn tooltip_box(draw: McTooltipDraw, px: f32, line_widths: &[f32]) -> TooltipBox 
     let mut text_x = draw.x + 12.0;
     let mut text_y = draw.y - 12.0;
     if text_x + content_w > draw.screen_w {
-        text_x = (draw.x - 24.0 - content_w).max(4.0);
+        text_x = (text_x - 24.0 - content_w).max(4.0);
     }
     if text_y + content_h + 3.0 > draw.screen_h {
         text_y = draw.screen_h - content_h - 3.0;
@@ -4732,6 +4732,15 @@ mod tests {
         assert_eq!(layout.text_x, 112.0);
         assert_eq!(layout.text_y, 88.0);
         assert_eq!(layout.bg, [100.0, 76.0, 64.0, 32.0]);
+    }
+
+    #[test]
+    fn tooltip_flips_left_from_the_offset_position() {
+        // `DefaultTooltipPositioner`: `x + 12`, then `max(x - 24 - w, 4)`.
+        let flipped = tooltip_box(unscaled_tooltip(990.0, 100.0), 1.0, &[40.0]);
+        assert_eq!(flipped.text_x, 990.0 + 12.0 - 24.0 - 40.0);
+        let clamped = tooltip_box(unscaled_tooltip(990.0, 100.0), 1.0, &[995.0]);
+        assert_eq!(clamped.text_x, 4.0);
     }
 
     #[test]

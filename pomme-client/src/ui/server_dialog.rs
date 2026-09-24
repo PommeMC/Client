@@ -1162,13 +1162,23 @@ impl<'a> Node<'a> {
             return vec![self.reborrow()];
         };
         let tags = match self.nbt.as_deref() {
-            Some(NbtTag::List(list)) => list.as_nbt_tags(),
+            Some(NbtTag::List(list)) => crate::chat_component::list_elements(list),
             _ => Vec::new(),
         };
         let mut tags = tags.into_iter();
         values
             .iter()
-            .map(|value| unwrap_entry(value, tags.next().map(Cow::Owned)))
+            .map(|value| match tags.next() {
+                // `nbt_to_value` unwrapped the JSON side along with the tag.
+                Some(tag) => Node {
+                    value,
+                    nbt: Some(Cow::Owned(tag)),
+                },
+                None => Node {
+                    value: crate::chat_component::unwrap_json_marker(value).unwrap_or(value),
+                    nbt: None,
+                },
+            })
             .collect()
     }
 
@@ -1296,27 +1306,6 @@ impl<'a> Node<'a> {
         self.int_or("width", default, 1, 1024)
             .map(|width| width as f32)
     }
-}
-
-/// Unwraps the `{"": value}` `NbtOps` puts around a primitive in a
-/// heterogeneous list.
-fn unwrap_entry<'a>(value: &'a Value, nbt: Option<Cow<'a, NbtTag>>) -> Node<'a> {
-    if let Value::Object(map) = value
-        && map.len() == 1
-        && let Some(inner) = map.get("")
-    {
-        let inner_nbt = match nbt.as_deref() {
-            Some(NbtTag::Compound(compound)) => compound.get("").cloned().map(Cow::Owned),
-            _ => None,
-        };
-        if nbt.is_none() || inner_nbt.is_some() {
-            return Node {
-                value: inner,
-                nbt: inner_nbt,
-            };
-        }
-    }
-    Node { value, nbt }
 }
 
 fn parse_dialog(node: &Node, registry: &DialogRegistry) -> Result<DialogData, String> {
@@ -3268,6 +3257,33 @@ mod tests {
         );
         // An unknown tag is an empty holder set.
         assert!(list_labels(&registry, "#minecraft:missing".into()).is_empty());
+    }
+
+    #[test]
+    fn nbt_dialog_list_unwraps_wrapped_entries() {
+        // `NbtOps` wraps the string id in a list that also holds a compound.
+        let mut wrapped = NbtCompound::new();
+        wrapped.insert("", "pomme:third");
+        let mut list = notice("List");
+        list.insert("type", "minecraft:dialog_list");
+        list.insert(
+            "dialogs",
+            NbtTag::List(NbtList::from(vec![
+                NbtTag::Compound(wrapped),
+                NbtTag::Compound(notice("Inline")),
+            ])),
+        );
+        let labels: Vec<String> = ServerDialogState::open(
+            DialogReference::Holder(DialogHolder::Nbt(NbtTag::Compound(list))),
+            &test_registry(),
+            &[],
+        )
+        .unwrap()
+        .dialog_list_labels
+        .iter()
+        .map(Component::plain_text)
+        .collect();
+        assert_eq!(labels, ["Third", "Inline"]);
     }
 
     #[test]
