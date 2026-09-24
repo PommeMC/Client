@@ -20,6 +20,7 @@ mod net;
 mod particle;
 mod physics;
 mod player;
+mod recipe;
 mod renderer;
 mod resource_pack;
 mod singleplayer;

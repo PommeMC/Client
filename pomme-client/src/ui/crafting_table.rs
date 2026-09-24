@@ -7,8 +7,8 @@ use azalea_inventory::ItemStack;
 
 use super::common::SLOT_STRIDE;
 use super::container::{
-    ContainerInput, ContainerResult, DragState, SlotCtx, push_cursor_stack, push_panel,
-    push_recipe_book_button, resolve_gesture,
+    ContainerInput, ContainerResult, DragState, SlotCtx, push_cursor_stack, push_panel_offset,
+    resolve_gesture,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -31,14 +31,17 @@ pub fn build_crafting_table(
     drag: &mut Option<DragState>,
     last_click: &mut Option<(u16, Instant)>,
     gs: f32,
+    x_offset: f32,
+    deferred_cursor: Option<&mut ItemStack>,
 ) -> ContainerResult {
-    let panel = push_panel(
+    let panel = push_panel_offset(
         elements,
         screen_w,
         screen_h,
         gs,
         166.0,
         SpriteId::CraftingTableBackground,
+        x_offset,
     );
     panel.label(elements, 29.0, 6.0, title);
     panel.label(elements, 8.0, 72.0, "Inventory");
@@ -74,8 +77,11 @@ pub fn build_crafting_table(
 
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
 
-    push_recipe_book_button(elements, &panel, cursor, 5.0, 34.0);
-    push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
+    if let Some(out) = deferred_cursor {
+        *out = shown_cursor;
+    } else {
+        push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
+    }
 
     let (ops, clicked_outside) = resolve_gesture(
         input,

@@ -296,7 +296,7 @@ impl InputState {
         phase.transition(|mut app| {
             if let AppPhase::InGame {
                 gfx,
-                connection: _connection,
+                connection,
                 game,
                 ..
             } = &mut app
@@ -307,7 +307,7 @@ impl InputState {
                     if game.creative_inventory_open {
                         game.close_creative_inventory();
                         should_apply_cursor_grab = true;
-                    } else if game.open_container.is_some() {
+                    } else if game.open_container.is_some() || game.inventory_open {
                         game.close_menu();
                         should_apply_cursor_grab = true;
                     } else if !game.paused
@@ -345,7 +345,12 @@ impl InputState {
                     } else if !game.dead && !game.death_screen_open && !game.options_from_game {
                         use crate::ui::pause::PauseScreen;
                         if game.inventory_open || game.open_container.is_some() {
-                            game.close_menu();
+                            if !game
+                                .recipe_book_ui
+                                .close_for_escape(&mut game.recipe_book, &connection.packet_tx)
+                            {
+                                game.close_menu();
+                            }
                         } else if game.paused {
                             // Step back through the benchmark sub-screens; close
                             // the menu from the main screen.
@@ -390,7 +395,16 @@ impl InputState {
                     self.recent_actions.remove(&Action::ChangePerspective);
                 }
                 if self.action_just_pressed(Action::OpenChat) {
-                    if !game.paused
+                    if game.recipe_book_ui.focus_search_from_chat_key(
+                        &game.recipe_book,
+                        game.recipe_book_screen_active(),
+                    ) {
+                        // Vanilla routes the chat binding to recipe search while
+                        // an open recipe book owns the container screen. Pomme's
+                        // text queue did not own this key press yet, so there is
+                        // no matching `t` character to suppress here.
+                        self.text_capture = true;
+                    } else if !game.paused
                         && !game.death_screen_open
                         && !game.gui_open()
                         && !game.chat.is_open()

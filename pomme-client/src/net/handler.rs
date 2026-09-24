@@ -421,17 +421,10 @@ pub fn handle_game_packet(
                 },
             )));
         }
-        ClientboundGamePacket::RecipeBookAdd(p) => {
-            // Entry.FLAG_NOTIFICATION = 1 (ClientboundRecipeBookAddPacket).
-            let entries: Vec<_> = p
-                .entries
-                .iter()
-                .filter(|e| e.flags & 1 != 0)
-                .map(|e| recipe_toast_entry(&e.contents.display))
-                .collect();
-            if !entries.is_empty() {
-                let _ = event_tx.try_send(NetworkEvent::RecipeToastAdd { entries });
-            }
+        ClientboundGamePacket::UpdateTags(p) => {
+            let _ = event_tx.try_send(NetworkEvent::ItemTags(super::recipe_wire::item_tags(
+                &p.tags,
+            )));
         }
         ClientboundGamePacket::SetTitleText(p) => {
             let _ = event_tx.try_send(NetworkEvent::TitleText {
@@ -1267,6 +1260,15 @@ pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bo
         return false;
     };
 
+    if let Some(result) =
+        super::recipe_wire::handle_raw_recipe_packet(packet_id, &mut cur, event_tx)
+    {
+        if let Err(e) = result {
+            tracing::warn!("Skipping malformed recipe packet: {e}");
+        }
+        return true;
+    }
+
     let sound_ids = sound_packet_ids();
     let sound_result = if packet_id == sound_ids.sound {
         Some(handle_raw_ui_sound(&mut cur, event_tx))
@@ -1464,53 +1466,6 @@ fn level_particles_packet_id() -> u32 {
             .id(Phase::Game, Direction::Clientbound, "level_particles")
             .expect("level_particles in packet table")
     })
-}
-
-/// Icon items for a recipe toast entry (vanilla `RecipeToast.addOrUpdate`:
-/// `craftingStation()` and `result()` resolved for their first stack).
-fn recipe_toast_entry(
-    display: &azalea_protocol::common::recipe::RecipeDisplayData,
-) -> crate::ui::toast::RecipeToastEntry {
-    use azalea_protocol::common::recipe::RecipeDisplayData;
-
-    let (station, result) = match display {
-        RecipeDisplayData::Shapeless(d) => (&d.crafting_station, &d.result),
-        RecipeDisplayData::Shaped(d) => (&d.crafting_station, &d.result),
-        RecipeDisplayData::Furnace(d) => (&d.crafting_station, &d.result),
-        RecipeDisplayData::Stonecutter(d) => (&d.crafting_station, &d.result),
-        RecipeDisplayData::Smithing(d) => (&d.crafting_station, &d.result),
-    };
-    crate::ui::toast::RecipeToastEntry {
-        category_item: slot_display_first_item(station),
-        unlocked_item: slot_display_first_item(result),
-    }
-}
-
-/// First-stack resolution of a slot display, mirroring vanilla
-/// `SlotDisplay.resolveForFirstStack` for the context-free variants.
-/// Component-modified displays fall back to the bare base item (pomme's icon
-/// atlas keys on item name only); `Tag`/`AnyFuel` need registries pomme
-/// doesn't track client-side and vanilla never uses them for station/result.
-fn slot_display_first_item(
-    slot: &azalea_protocol::common::recipe::SlotDisplayData,
-) -> Option<String> {
-    use azalea_inventory::ItemStack;
-    use azalea_protocol::common::recipe::SlotDisplayData;
-
-    match slot {
-        SlotDisplayData::Empty | SlotDisplayData::AnyFuel | SlotDisplayData::Tag(_) => None,
-        SlotDisplayData::Item(d) => Some(item_resource_name(d.item)),
-        SlotDisplayData::ItemStack(d) => match &d.stack {
-            ItemStack::Present(data) => Some(item_resource_name(data.kind)),
-            ItemStack::Empty => None,
-        },
-        SlotDisplayData::WithAnyPotion(d) => slot_display_first_item(&d.contents),
-        SlotDisplayData::OnlyWithComponent(d) => slot_display_first_item(&d.contents),
-        SlotDisplayData::Dyed(d) => slot_display_first_item(&d.target),
-        SlotDisplayData::SmithingTrim(d) => slot_display_first_item(&d.base),
-        SlotDisplayData::WithRemainder(d) => slot_display_first_item(&d.input),
-        SlotDisplayData::Composite(d) => d.contents.iter().find_map(slot_display_first_item),
-    }
 }
 
 #[cfg(test)]

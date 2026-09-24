@@ -159,6 +159,10 @@ pub struct GameState {
     pub inv_last_click: Option<(u16, Instant)>,
     /// Server registries, for hashing predicted container clicks.
     pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
+    /// Per-session recipe book, recipe container, ghost placement, and item
+    /// tags.
+    pub recipe_book: crate::recipe::RecipeBookState,
+    pub recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState,
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
     pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
@@ -394,6 +398,8 @@ impl GameState {
             inv_drag: None,
             inv_last_click: None,
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
+            recipe_book: crate::recipe::RecipeBookState::default(),
+            recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState::new(),
             chat: {
                 let mut chat = ChatState::new();
                 chat.set_options(chat_options);
@@ -575,6 +581,20 @@ impl GameState {
         self.cursor_item = azalea_inventory::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
+        self.recipe_book_ui
+            .reset_for_closed_screen(&mut self.recipe_book);
+    }
+
+    pub fn recipe_book_screen_active(&self) -> bool {
+        self.inventory_open
+            || matches!(
+                self.open_container.as_ref(),
+                Some(container)
+                    if matches!(
+                        container.screen,
+                        ContainerScreen::CraftingTable | ContainerScreen::Furnace(_)
+                    )
+            )
     }
 
     /// Replaces any open server dialog; false (logged) when `reference`
@@ -613,6 +633,9 @@ impl GameState {
         }
         if self.creative_inventory_open {
             return self.creative_state.tab.captures_typing();
+        }
+        if self.recipe_book_screen_active() && self.recipe_book_ui.captures_typing() {
+            return true;
         }
         matches!(
             &self.open_container,
@@ -2811,14 +2834,86 @@ pub fn update_game(
     let mut player_preview = None;
     let mut book_preview = None;
     if (game.inventory_open || game.open_container.is_some()) && !dialog_open {
-        // Key shortcuts stay quiet while a text field (anvil rename) types.
+        let cursor = core.input.cursor_pos();
+        let raw_left = core.input.left_just_pressed();
+        let raw_right = core.input.right_just_pressed();
+        let raw_middle = core.input.middle_just_pressed();
+        let recipe_context = if game.inventory_open {
+            Some((
+                crate::ui::recipe_book::RecipeBookScreenSpec::player(0),
+                game.player.inventory.slots().to_vec(),
+            ))
+        } else {
+            game.open_container
+                .as_ref()
+                .and_then(|container| match container.screen {
+                    ContainerScreen::CraftingTable => Some((
+                        crate::ui::recipe_book::RecipeBookScreenSpec::crafting_table(container.id),
+                        container.slots.clone(),
+                    )),
+                    ContainerScreen::Furnace(variant) => Some((
+                        crate::ui::recipe_book::RecipeBookScreenSpec::furnace(
+                            container.id,
+                            variant.recipe_book_type(),
+                        ),
+                        container.slots.clone(),
+                    )),
+                    _ => None,
+                })
+        };
+        if recipe_context.is_none() {
+            game.recipe_book_ui
+                .reset_for_closed_screen(&mut game.recipe_book);
+        }
+        let recipe_selection_key = !game.recipe_book_ui.captures_typing()
+            && (core.input.key_just_pressed(winit::keyboard::KeyCode::Space)
+                || core.input.key_just_pressed(winit::keyboard::KeyCode::Enter)
+                || core
+                    .input
+                    .key_just_pressed(winit::keyboard::KeyCode::NumpadEnter));
+        let recipe_frame = recipe_context.as_ref().map(|(spec, slots)| {
+            crate::ui::recipe_book::handle_input(
+                &mut game.recipe_book_ui,
+                &mut game.recipe_book,
+                &connection.packet_tx,
+                *spec,
+                sw,
+                sh,
+                gs,
+                cursor,
+                raw_left,
+                raw_right,
+                core.input.shift_held(),
+                recipe_selection_key,
+                &text_events,
+                slots,
+                &|t, s| gfx.renderer.menu_text_width(t, s),
+            )
+        });
+        let book_blocks_pointer = recipe_context
+            .as_ref()
+            .zip(recipe_frame.as_ref())
+            .is_some_and(|((spec, _), frame)| {
+                frame.consumed_left_click
+                    || frame.consumed_right_click
+                    || crate::ui::recipe_book::click_hits_book(
+                        &game.recipe_book,
+                        spec.kind,
+                        sw,
+                        sh,
+                        gs,
+                        cursor,
+                    )
+            });
+        // Key shortcuts stay quiet while a text field (anvil rename or recipe
+        // search) types.
         let keys_live = !game.wants_text_input();
         let input = crate::ui::container::ContainerInput {
-            left_pressed: core.input.left_just_pressed(),
-            right_pressed: core.input.right_just_pressed(),
-            middle_pressed: core.input.middle_just_pressed(),
-            left_held: core.input.left_held(),
-            right_held: core.input.right_held(),
+            left_pressed: raw_left && !book_blocks_pointer,
+            right_pressed: raw_right && !book_blocks_pointer,
+            middle_pressed: raw_middle && !book_blocks_pointer,
+            left_held: core.input.left_held() && !book_blocks_pointer,
+            right_held: core.input.right_held() && !book_blocks_pointer,
             shift: core.input.shift_held(),
             hotbar_swap: keys_live
                 .then(|| core.input.hotbar_key_just_pressed())
@@ -2843,84 +2938,82 @@ pub fn update_game(
                     name,
                 }));
         }
+        let main_x_offset = recipe_frame.map_or(0.0, |frame| frame.main_x_offset);
+        let recipe_book_visible = recipe_frame.is_some_and(|frame| frame.visible);
+        let hide_main_for_book = recipe_frame.is_some_and(|frame| frame.visible && frame.narrow);
+        let mut deferred_recipe_cursor = azalea_inventory::ItemStack::Empty;
         let (clicked_outside, ops) = if let Some(container) = &game.open_container {
-            let result = match container.screen {
-                ContainerScreen::CraftingTable => crate::ui::crafting_table::build_crafting_table(
-                    &mut elements,
-                    sw,
-                    sh,
-                    core.input.cursor_pos(),
-                    &input,
-                    &container.slots,
-                    &container.title,
-                    &game.cursor_item,
-                    &mut game.inv_drag,
-                    &mut game.inv_last_click,
-                    gs,
-                ),
-                ContainerScreen::Furnace(variant) => crate::ui::furnace::build_furnace(
-                    &mut elements,
-                    sw,
-                    sh,
-                    core.input.cursor_pos(),
-                    &input,
-                    variant,
-                    &container.slots,
-                    &container.data,
-                    &container.title,
-                    &game.cursor_item,
-                    &mut game.inv_drag,
-                    &mut game.inv_last_click,
-                    gs,
-                    &|t, s| gfx.renderer.menu_text_width(t, s),
-                ),
-                ContainerScreen::Chest { rows } => crate::ui::chest::build_chest(
-                    &mut elements,
-                    sw,
-                    sh,
-                    core.input.cursor_pos(),
-                    &input,
-                    rows,
-                    &container.slots,
-                    &container.title,
-                    &game.cursor_item,
-                    &mut game.inv_drag,
-                    &mut game.inv_last_click,
-                    gs,
-                ),
-                ContainerScreen::ShulkerBox => crate::ui::chest::build_shulker_box(
-                    &mut elements,
-                    sw,
-                    sh,
-                    core.input.cursor_pos(),
-                    &input,
-                    &container.slots,
-                    &container.title,
-                    &game.cursor_item,
-                    &mut game.inv_drag,
-                    &mut game.inv_last_click,
-                    gs,
-                ),
-                ContainerScreen::Anvil => crate::ui::anvil::build_anvil(
-                    &mut elements,
-                    sw,
-                    sh,
-                    core.input.cursor_pos(),
-                    &input,
-                    &container.slots,
-                    &container.data,
-                    &container.title,
-                    container.anvil.as_ref().expect("anvil screen has state"),
-                    game.player.experience_level,
-                    crate::player::is_creative(game.player.game_mode),
-                    &game.cursor_item,
-                    &mut game.inv_drag,
-                    &mut game.inv_last_click,
-                    gs,
-                    &|t, s| gfx.renderer.menu_text_width(t, s),
-                ),
-                ContainerScreen::Enchantment => {
-                    let result = crate::ui::enchantment::build_enchantment(
+            let result = if hide_main_for_book {
+                crate::ui::container::ContainerResult {
+                    clicked_outside: false,
+                    ops: Vec::new(),
+                    button: None,
+                }
+            } else {
+                match container.screen {
+                    ContainerScreen::CraftingTable => {
+                        crate::ui::crafting_table::build_crafting_table(
+                            &mut elements,
+                            sw,
+                            sh,
+                            core.input.cursor_pos(),
+                            &input,
+                            &container.slots,
+                            &container.title,
+                            &game.cursor_item,
+                            &mut game.inv_drag,
+                            &mut game.inv_last_click,
+                            gs,
+                            main_x_offset,
+                            recipe_book_visible.then_some(&mut deferred_recipe_cursor),
+                        )
+                    }
+                    ContainerScreen::Furnace(variant) => crate::ui::furnace::build_furnace(
+                        &mut elements,
+                        sw,
+                        sh,
+                        core.input.cursor_pos(),
+                        &input,
+                        variant,
+                        &container.slots,
+                        &container.data,
+                        &container.title,
+                        &game.cursor_item,
+                        &mut game.inv_drag,
+                        &mut game.inv_last_click,
+                        gs,
+                        main_x_offset,
+                        recipe_book_visible.then_some(&mut deferred_recipe_cursor),
+                        &|t, s| gfx.renderer.menu_text_width(t, s),
+                    ),
+                    ContainerScreen::Chest { rows } => crate::ui::chest::build_chest(
+                        &mut elements,
+                        sw,
+                        sh,
+                        core.input.cursor_pos(),
+                        &input,
+                        rows,
+                        &container.slots,
+                        &container.title,
+                        &game.cursor_item,
+                        &mut game.inv_drag,
+                        &mut game.inv_last_click,
+                        gs,
+                    ),
+                    ContainerScreen::ShulkerBox => crate::ui::chest::build_shulker_box(
+                        &mut elements,
+                        sw,
+                        sh,
+                        core.input.cursor_pos(),
+                        &input,
+                        &container.slots,
+                        &container.title,
+                        &game.cursor_item,
+                        &mut game.inv_drag,
+                        &mut game.inv_last_click,
+                        gs,
+                    ),
+                    ContainerScreen::Anvil => crate::ui::anvil::build_anvil(
                         &mut elements,
                         sw,
                         sh,
@@ -2929,12 +3022,7 @@ pub fn update_game(
                         &container.slots,
                         &container.data,
                         &container.title,
-                        container
-                            .enchant
-                            .as_ref()
-                            .expect("enchantment screen has state"),
-                        partial_tick,
-                        &game.registries,
+                        container.anvil.as_ref().expect("anvil screen has state"),
                         game.player.experience_level,
                         crate::player::is_creative(game.player.game_mode),
                         &game.cursor_item,
@@ -2942,10 +3030,35 @@ pub fn update_game(
                         &mut game.inv_last_click,
                         gs,
                         &|t, s| gfx.renderer.menu_text_width(t, s),
-                        &|t, s| gfx.renderer.menu_text_width_sga(t, s),
-                    );
-                    book_preview = Some(result.book);
-                    result.container
+                    ),
+                    ContainerScreen::Enchantment => {
+                        let result = crate::ui::enchantment::build_enchantment(
+                            &mut elements,
+                            sw,
+                            sh,
+                            core.input.cursor_pos(),
+                            &input,
+                            &container.slots,
+                            &container.data,
+                            &container.title,
+                            container
+                                .enchant
+                                .as_ref()
+                                .expect("enchantment screen has state"),
+                            partial_tick,
+                            &game.registries,
+                            game.player.experience_level,
+                            crate::player::is_creative(game.player.game_mode),
+                            &game.cursor_item,
+                            &mut game.inv_drag,
+                            &mut game.inv_last_click,
+                            gs,
+                            &|t, s| gfx.renderer.menu_text_width(t, s),
+                            &|t, s| gfx.renderer.menu_text_width_sga(t, s),
+                        );
+                        book_preview = Some(result.book);
+                        result.container
+                    }
                 }
             };
             if let Some(button_id) = result.button {
@@ -2960,6 +3073,8 @@ pub fn update_game(
                     ));
             }
             (result.clicked_outside, result.ops)
+        } else if hide_main_for_book {
+            (false, Vec::new())
         } else {
             let result = crate::ui::inventory::build_inventory(
                 &mut elements,
@@ -2972,10 +3087,55 @@ pub fn update_game(
                 &mut game.inv_drag,
                 &mut game.inv_last_click,
                 gs,
+                main_x_offset,
+                recipe_book_visible.then_some(&mut deferred_recipe_cursor),
             );
             player_preview = Some(result.player_preview);
             (result.clicked_outside, result.ops)
         };
+
+        if let Some((spec, _)) = recipe_context.as_ref()
+            && ops
+                .iter()
+                .filter_map(|op| op.slot_num())
+                .any(|slot| spec.crafting_slots.contains(&(slot as usize)))
+        {
+            game.recipe_book_ui
+                .crafting_slot_clicked(&mut game.recipe_book);
+        }
+
+        if let (Some((spec, slots)), Some(frame)) = (recipe_context.as_ref(), recipe_frame) {
+            crate::ui::recipe_book::render(
+                &mut elements,
+                &mut game.recipe_book_ui,
+                &mut game.recipe_book,
+                &connection.packet_tx,
+                *spec,
+                frame,
+                sw,
+                sh,
+                gs,
+                cursor,
+                slots,
+                core.input.ctrl_held(),
+                &|t, s| gfx.renderer.menu_text_width(t, s),
+            );
+            if frame.visible {
+                let cursor_scale = gs.min(sw / 176.0).min(sh / 166.0);
+                let shown_cursor = if hide_main_for_book {
+                    &game.cursor_item
+                } else {
+                    &deferred_recipe_cursor
+                };
+                crate::ui::container::push_cursor_stack(
+                    &mut elements,
+                    cursor,
+                    cursor_scale,
+                    shown_cursor,
+                );
+            }
+        }
+
         close_inventory = clicked_outside;
         send_container_clicks(game, connection, ops);
         core.input.clear_just_pressed_actions();

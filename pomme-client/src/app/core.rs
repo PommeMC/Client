@@ -1466,6 +1466,9 @@ impl AppCore {
                 NetworkEvent::DialogRegistry(registry) => {
                     game.dialog_registry = registry;
                 }
+                NetworkEvent::ItemTags(tags) => {
+                    game.recipe_book.item_tags = tags;
+                }
                 NetworkEvent::ContainerSlot {
                     container_id,
                     index,
@@ -1533,6 +1536,10 @@ impl AppCore {
                         // Vanilla setScreen replaces whatever screen is up,
                         // including the pause menu.
                         game.paused = false;
+                        if game.inventory_open || game.recipe_book_ui.captures_typing() {
+                            game.recipe_book_ui
+                                .reset_for_closed_screen(&mut game.recipe_book);
+                        }
                         game.inventory_open = false;
                         game.close_creative_inventory();
                         game.inv_drag = None;
@@ -1669,6 +1676,36 @@ impl AppCore {
                 }
                 NetworkEvent::AdvancementsUpdate(update) => {
                     game.toasts.apply_advancements(*update);
+                }
+                NetworkEvent::RecipeBookAdd { entries, replace } => {
+                    game.recipe_book.apply_add(entries, replace);
+                }
+                NetworkEvent::RecipeBookRemove { ids } => {
+                    game.recipe_book.remove(ids);
+                }
+                NetworkEvent::RecipeBookSettings(settings) => {
+                    game.recipe_book.settings = settings;
+                }
+                NetworkEvent::RecipeData(data) => {
+                    game.recipe_book.data = data;
+                }
+                NetworkEvent::GhostRecipe(ghost) => {
+                    use crate::app::phases::in_game::ContainerScreen;
+
+                    let active_recipe_container = if game.inventory_open {
+                        Some(0)
+                    } else {
+                        game.open_container.as_ref().and_then(|container| {
+                            matches!(
+                                container.screen,
+                                ContainerScreen::CraftingTable | ContainerScreen::Furnace(_)
+                            )
+                            .then_some(container.id)
+                        })
+                    };
+                    if active_recipe_container == Some(ghost.container_id) {
+                        game.recipe_book.ghost_recipe = Some(*ghost);
+                    }
                 }
                 NetworkEvent::RecipeToastAdd { entries } => {
                     game.toasts.add_recipes(entries);
@@ -1870,6 +1907,10 @@ impl AppCore {
                         }
                     }
                     if game.inventory_open || game.creative_inventory_open {
+                        if game.inventory_open && matches!(game_mode, 1 | 3) {
+                            game.recipe_book_ui
+                                .reset_for_closed_screen(&mut game.recipe_book);
+                        }
                         match game_mode {
                             1 => {
                                 game.inventory_open = false;
