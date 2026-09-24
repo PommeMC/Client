@@ -1053,7 +1053,6 @@ fn resolve_font_providers(
 fn build_font_set(providers: &[ResolvedProvider]) -> FontSetData {
     let mut glyphs: HashMap<char, Arc<GlyphInfo>> = HashMap::new();
     let mut non_fishy: HashMap<char, Option<Arc<GlyphInfo>>> = HashMap::new();
-    let mut supported = FastutilIntOpenHashSet::new();
     for resolved in providers {
         for (&ch, glyph) in &resolved.provider.glyphs {
             match glyphs.entry(ch) {
@@ -1072,34 +1071,16 @@ fn build_font_set(providers: &[ResolvedProvider]) -> FontSetData {
                 }
             }
         }
-
-        // FontSet gathers each provider's supported glyphs into a fastutil
-        // IntOpenHashSet, then unions those sets. The resulting iteration order
-        // is observable because obfuscated text uses a persistent Java RNG.
-        let mut provider_chars: Vec<u32> = resolved
-            .provider
-            .glyphs
-            .keys()
-            .map(|&ch| ch as u32)
-            .collect();
-        provider_chars.sort_unstable();
-        let mut provider_set = FastutilIntOpenHashSet::new();
-        for codepoint in provider_chars {
-            provider_set.add(codepoint);
-        }
-        supported.add_all(&provider_set);
     }
 
+    // The bucket order is unobservable: vanilla picks from it with a randomly
+    // seeded `RandomSource`.
+    let mut supported: Vec<char> = glyphs.keys().copied().collect();
+    supported.sort_unstable();
     let mut obfuscation_glyphs: HashMap<i32, Vec<char>> = HashMap::new();
-    for codepoint in supported.iter_order() {
-        let Some(ch) = char::from_u32(codepoint) else {
-            continue;
-        };
-        let Some(glyph) = glyphs.get(&ch) else {
-            continue;
-        };
+    for ch in supported {
         obfuscation_glyphs
-            .entry(glyph.advance.ceil() as i32)
+            .entry(glyphs[&ch].advance.ceil() as i32)
             .or_default()
             .push(ch);
     }
@@ -1636,123 +1617,6 @@ fn actual_glyph_width(image: &image::RgbaImage, cell: (u32, u32, u32, u32)) -> u
     0
 }
 
-/// Minimal emulation of fastutil 8.5.18's `IntOpenHashSet`, limited to the
-/// operations Minecraft's `FontSet` uses while building obfuscation buckets.
-const FASTUTIL_LOAD_NUM: usize = 3;
-const FASTUTIL_LOAD_DEN: usize = 4;
-
-struct FastutilIntOpenHashSet {
-    key: Vec<u32>,
-    n: usize,
-    mask: usize,
-    max_fill: usize,
-    size: usize,
-    contains_null: bool,
-}
-
-impl FastutilIntOpenHashSet {
-    fn new() -> Self {
-        let n = fastutil_array_size(16);
-        Self {
-            key: vec![0; n + 1],
-            n,
-            mask: n - 1,
-            max_fill: fastutil_max_fill(n),
-            size: 0,
-            contains_null: false,
-        }
-    }
-
-    fn add(&mut self, value: u32) -> bool {
-        if value == 0 {
-            if self.contains_null {
-                return false;
-            }
-            self.contains_null = true;
-            let old_size = self.size;
-            self.size += 1;
-            if old_size >= self.max_fill {
-                self.rehash(fastutil_array_size(self.size + 1));
-            }
-            return true;
-        }
-
-        let mut pos = fastutil_mix(value) as usize & self.mask;
-        loop {
-            let current = self.key[pos];
-            if current == 0 {
-                self.key[pos] = value;
-                let old_size = self.size;
-                self.size += 1;
-                if old_size >= self.max_fill {
-                    self.rehash(fastutil_array_size(self.size + 1));
-                }
-                return true;
-            }
-            if current == value {
-                return false;
-            }
-            pos = (pos + 1) & self.mask;
-        }
-    }
-
-    fn add_all(&mut self, other: &Self) {
-        let needed = fastutil_capacity_for(self.size + other.size);
-        if needed > self.n {
-            self.rehash(needed);
-        }
-        for value in other.iter_order() {
-            self.add(value);
-        }
-    }
-
-    fn iter_order(&self) -> impl Iterator<Item = u32> + '_ {
-        std::iter::once(0).filter(|_| self.contains_null).chain(
-            self.key[..self.n]
-                .iter()
-                .rev()
-                .copied()
-                .filter(|&value| value != 0),
-        )
-    }
-
-    fn rehash(&mut self, new_n: usize) {
-        let old_key = std::mem::replace(&mut self.key, vec![0; new_n + 1]);
-        let old_n = self.n;
-        self.n = new_n;
-        self.mask = new_n - 1;
-        self.max_fill = fastutil_max_fill(new_n);
-
-        for value in old_key[..old_n].iter().rev().copied().filter(|&v| v != 0) {
-            let mut pos = fastutil_mix(value) as usize & self.mask;
-            while self.key[pos] != 0 {
-                pos = (pos + 1) & self.mask;
-            }
-            self.key[pos] = value;
-        }
-    }
-}
-
-fn fastutil_mix(value: u32) -> u32 {
-    let h = (value as i32).wrapping_mul(-1_640_531_527);
-    (h ^ ((h as u32 >> 16) as i32)) as u32
-}
-
-fn fastutil_array_size(expected: usize) -> usize {
-    fastutil_capacity_for(expected)
-}
-
-fn fastutil_capacity_for(expected: usize) -> usize {
-    let needed = (expected * FASTUTIL_LOAD_DEN).div_ceil(FASTUTIL_LOAD_NUM);
-    needed.max(2).next_power_of_two()
-}
-
-fn fastutil_max_fill(n: usize) -> usize {
-    (n * FASTUTIL_LOAD_NUM)
-        .div_ceil(FASTUTIL_LOAD_DEN)
-        .min(n - 1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1830,36 +1694,6 @@ mod tests {
 
     fn glyph(advance: f32) -> Arc<GlyphInfo> {
         Arc::new(space_glyph(advance))
-    }
-
-    #[test]
-    fn fastutil_set_iteration_matches_8_5_18() {
-        let mut one = FastutilIntOpenHashSet::new();
-        for value in 1..=20 {
-            one.add(value);
-        }
-        assert_eq!(
-            one.iter_order().collect::<Vec<_>>(),
-            [
-                2, 6, 4, 15, 14, 12, 13, 8, 9, 11, 10, 1, 3, 7, 5, 16, 17, 19, 18, 20
-            ]
-        );
-
-        let mut first = FastutilIntOpenHashSet::new();
-        for value in [1, 2, 3, 100, 200, 300] {
-            first.add(value);
-        }
-        let mut second = FastutilIntOpenHashSet::new();
-        for value in [3, 4, 5, 101, 201, 301] {
-            second.add(value);
-        }
-        let mut union = FastutilIntOpenHashSet::new();
-        union.add_all(&first);
-        union.add_all(&second);
-        assert_eq!(
-            union.iter_order().collect::<Vec<_>>(),
-            [200, 101, 2, 4, 201, 1, 100, 300, 3, 5, 301]
-        );
     }
 
     #[test]
@@ -2327,17 +2161,16 @@ mod tests {
             provider(vec![('f', 6.0)]),
         ]);
         assert_eq!(set.obfuscation_glyphs[&-1], ['n']);
-        assert_eq!(set.obfuscation_glyphs[&40], ['g', 'f']);
+        assert_eq!(set.obfuscation_glyphs[&40], ['f', 'g']);
 
         let map = GlyphMap {
             font_sets: HashMap::from([(DEFAULT_FONT.to_owned(), set)]),
             missing_glyph: glyph(123.0),
             cell_h: 8,
         };
-        // Fastutil iteration places `g` before `f`: the fishy `g` has no
-        // non-fishy replacement, while `f` falls through to the second provider.
-        assert_eq!(map.random_glyph(40, None, |_| 0).advance, 123.0);
-        assert_eq!(map.random_glyph(40, None, |_| 1).advance, 6.0);
+        // A fishy first glyph picks the next non-fishy one, or MISSING.
+        assert_eq!(map.random_glyph(40, None, |_| 0).advance, 6.0);
+        assert_eq!(map.random_glyph(40, None, |_| 1).advance, 123.0);
         assert_eq!(map.random_glyph(6, None, |_| 0).advance, 6.0);
         assert_eq!(map.random_glyph(99, None, |_| 0).advance, 123.0);
     }

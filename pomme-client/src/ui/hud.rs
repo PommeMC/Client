@@ -355,6 +355,9 @@ const ICON_STRIDE: f32 = 8.0;
 const XP_BAR_W: f32 = 182.0;
 const XP_BAR_H: f32 = 5.0;
 
+// TODO: vanilla `Window.calculateScale` bumps an odd scale to even while
+// Force Unicode Font is on (`Minecraft.isEnforceUnicode`), which also caps the
+// GUI Scale slider (`Options.java:517`).
 pub fn max_gui_scale(screen_w: f32, screen_h: f32) -> u32 {
     let mut scale = 1;
     while (screen_w / (scale + 1) as f32) >= 320.0 && (screen_h / (scale + 1) as f32) >= 240.0 {

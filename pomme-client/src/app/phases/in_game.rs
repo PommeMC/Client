@@ -3522,6 +3522,9 @@ pub fn update_game(
     }
 
     if game.options_from_game {
+        // TODO: a resource-pack toggle's `menu.reload_assets` is only applied
+        // once back on the title screen.
+        core.apply_font_options(&mut gfx.renderer);
         if core.menu.render_distance != game.last_render_distance
             || game.chat_information_changed(core.menu.chat_options)
         {

@@ -1214,20 +1214,7 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
-        if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
-            &self.ctx.device,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            &self.ctx.allocator,
-            FontSources {
-                jar_assets_dir: &self.jar_assets_dir,
-                asset_index: &self.asset_index,
-                packs,
-                options: font_options,
-            },
-        ) {
-            tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
-        }
+        self.reload_fonts(packs, font_options);
 
         warm_item_meshes(
             &self.ctx.device,
@@ -1242,6 +1229,29 @@ impl Renderer {
         self.gui_item_atlas.invalidate_all();
 
         tracing::info!("Assets reloaded");
+    }
+
+    /// Vanilla `FontManager.updateOptions`: only the font sets change.
+    pub fn reload_fonts(
+        &mut self,
+        packs: &crate::resource_pack::ResourcePackManager,
+        font_options: FontOptions,
+    ) {
+        self.ctx.device.wait_idle().unwrap();
+        if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            FontSources {
+                jar_assets_dir: &self.jar_assets_dir,
+                asset_index: &self.asset_index,
+                packs,
+                options: font_options,
+            },
+        ) {
+            tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
+        }
     }
 
     pub fn reload_panorama(&mut self, panorama_dir: &Path) {

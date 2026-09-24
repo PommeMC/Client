@@ -24,6 +24,7 @@ use crate::renderer::pipelines::menu_overlay::{
     TooltipLine,
 };
 use crate::ui::chat::ChatOptions;
+use crate::ui::font::FontOptions;
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
 #[derive(Serialize, Deserialize)]
@@ -153,6 +154,8 @@ fn default_true() -> bool {
     true
 }
 
+// TODO: vanilla reads `Locale.getDefault()`, which follows the OS locale;
+// these variables are usually unset on Windows.
 fn default_japanese_glyph_variants() -> bool {
     ["LC_ALL", "LC_MESSAGES", "LANG"]
         .into_iter()
@@ -471,6 +474,7 @@ enum Screen {
     OptionsControls,
     OptionsKeybinds,
     OptionsLanguage,
+    OptionsFontSettings,
     OptionsChatSettings,
     OptionsResourcePacks,
     OptionsAccessibility,
@@ -492,6 +496,7 @@ impl Screen {
             Self::OptionsControls => Self::OptionsControls,
             Self::OptionsKeybinds => Self::OptionsKeybinds,
             Self::OptionsLanguage => Self::OptionsLanguage,
+            Self::OptionsFontSettings => Self::OptionsFontSettings,
             Self::OptionsChatSettings => Self::OptionsChatSettings,
             Self::OptionsResourcePacks => Self::OptionsResourcePacks,
             Self::OptionsAccessibility => Self::OptionsAccessibility,
@@ -659,6 +664,8 @@ pub struct MainMenu {
     pub pack_toggle: Option<(String, bool)>,
     pub rescan_packs: bool,
     pub reload_assets: bool,
+    /// Set by a Font Settings toggle, applied by `AppCore::apply_font_options`.
+    pub reload_fonts: bool,
     pack_search: TextFieldState,
 }
 
@@ -790,6 +797,7 @@ impl MainMenu {
             pack_toggle: None,
             rescan_packs: false,
             reload_assets: false,
+            reload_fonts: false,
             pack_search: TextFieldState::new(MAX_SEARCH),
         }
     }
@@ -827,8 +835,8 @@ impl MainMenu {
         self.fov_effect_scale * self.fov_effect_scale
     }
 
-    pub(crate) fn font_options(&self) -> crate::ui::font::FontOptions {
-        crate::ui::font::FontOptions {
+    pub(crate) fn font_options(&self) -> FontOptions {
+        FontOptions {
             uniform: self.force_unicode_font,
             japanese_variants: self.japanese_glyph_variants,
         }
@@ -949,6 +957,7 @@ impl MainMenu {
                 | Screen::OptionsControls
                 | Screen::OptionsKeybinds
                 | Screen::OptionsLanguage
+                | Screen::OptionsFontSettings
                 | Screen::OptionsChatSettings
                 | Screen::OptionsResourcePacks
                 | Screen::OptionsAccessibility
@@ -1181,10 +1190,21 @@ impl MainMenu {
                 input,
                 "Keybinds",
                 Screen::OptionsControls,
+                None,
             ),
             Screen::OptionsLanguage => {
                 let back = self.settings_back.clone_screen();
-                self.build_options_stub(screen_w, screen_h, input, "Language", back)
+                self.build_options_stub(
+                    screen_w,
+                    screen_h,
+                    input,
+                    "Language",
+                    back,
+                    Some(("Font Settings...", Screen::OptionsFontSettings)),
+                )
+            }
+            Screen::OptionsFontSettings => {
+                self.build_options_font(screen_w, screen_h, input, &text_width_fn)
             }
             Screen::OptionsChatSettings => {
                 self.build_options_chat(screen_w, screen_h, input, &text_width_fn)
@@ -1201,6 +1221,7 @@ impl MainMenu {
                 input,
                 "Telemetry Data",
                 Screen::Options,
+                None,
             ),
             Screen::OptionsCredits => self.build_options_credits(screen_w, screen_h, input),
             Screen::CreditsRoll => {

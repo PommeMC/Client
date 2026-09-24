@@ -50,9 +50,15 @@ const AUTO_SUGGESTIONS: &str = "Command Suggestions:";
 const HIDE_MATCHED_NAMES: &str = "Hide Matched Names:";
 const ONLY_SHOW_SECURE_CHAT: &str = "Only Show Secure Chat:";
 const SAVE_CHAT_DRAFTS: &str = "Save Unsent Chats:";
+const FORCE_UNICODE_FONT: &str = "Force Unicode Font:";
+const JAPANESE_GLYPH_VARIANTS: &str = "Japanese Glyph Variants:";
 
 /// The `chatDelay` slider's `IntRange(0, 60)`, in tenths of a second.
 const CHAT_DELAY_MAX_TENTHS: i32 = 60;
+
+fn on_off(value: bool) -> &'static str {
+    if value { "ON" } else { "OFF" }
+}
 
 /// Vanilla `Options.percentValueLabel`, which truncates.
 fn percent_label(prefix: &str, value: f64) -> String {
@@ -379,7 +385,6 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
         let o = self.chat_options;
-        let on_off = |v: bool| if v { "ON" } else { "OFF" };
         let chat = format!("{CHAT_VISIBILITY} {}", o.visibility.label());
         let colors = format!("{CHAT_COLORS} {}", on_off(o.colors));
         let links = format!("{CHAT_LINKS} {}", on_off(o.links));
@@ -450,6 +455,40 @@ impl MainMenu {
         )
     }
 
+    /// Vanilla `FontOptionsScreen`, opened from the Language screen.
+    pub(super) fn build_options_font(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+    ) -> MainMenuResult {
+        let force_unicode = format!("{FORCE_UNICODE_FONT} {}", on_off(self.force_unicode_font));
+        let japanese_variants = format!(
+            "{JAPANESE_GLYPH_VARIANTS} {}",
+            on_off(self.japanese_glyph_variants)
+        );
+        let rows = [OptRow::Pair(&force_unicode, &japanese_variants)];
+        let tooltips: &[(&str, &str)] = &[(
+            JAPANESE_GLYPH_VARIANTS,
+            "Uses Japanese variants of CJK characters in the default font.",
+        )];
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            "Font Settings",
+            Screen::OptionsLanguage,
+            &rows,
+            &[],
+            &[],
+            &[],
+            true,
+            tooltips,
+            text_width_fn,
+        )
+    }
+
     pub(super) fn build_options_accessibility(
         &mut self,
         sw: f32,
@@ -470,23 +509,12 @@ impl MainMenu {
                 (self.damage_tilt_strength * 100.0).round()
             )
         };
-        let force_unicode = if self.force_unicode_font {
-            "Force Unicode Font: ON"
-        } else {
-            "Force Unicode Font: OFF"
-        };
-        let japanese_variants = if self.japanese_glyph_variants {
-            "Japanese Glyph Variants: ON"
-        } else {
-            "Japanese Glyph Variants: OFF"
-        };
         let o = self.chat_options;
         let bg_opacity = percent_label(TEXT_BACKGROUND_OPACITY, o.text_background_opacity.into());
         let chat_opacity = chat_opacity_label(o.opacity);
         let spacing = percent_label(CHAT_LINE_SPACING, o.line_spacing.into());
         let delay = chat_delay_label(o.delay_secs);
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair(force_unicode, japanese_variants),
             OptRow::Pair("Narrator: OFF", self.show_subtitles_label()),
             OptRow::Pair("High Contrast: OFF", "Menu Background Blur: 50%"),
             OptRow::Pair(&bg_opacity, "Background for Chat Only: OFF"),
@@ -1061,14 +1089,14 @@ impl MainMenu {
                         self.show_subtitles = !self.show_subtitles;
                         self.save_settings();
                     }
-                    if label.starts_with("Force Unicode Font:") {
+                    if label.starts_with(FORCE_UNICODE_FONT) {
                         self.force_unicode_font = !self.force_unicode_font;
-                        self.reload_assets = true;
+                        self.reload_fonts = true;
                         self.save_settings();
                     }
-                    if label.starts_with("Japanese Glyph Variants:") {
+                    if label.starts_with(JAPANESE_GLYPH_VARIANTS) {
                         self.japanese_glyph_variants = !self.japanese_glyph_variants;
-                        self.reload_assets = true;
+                        self.reload_fonts = true;
                         self.save_settings();
                     }
                     if label.starts_with("Vignette:") {
@@ -1563,6 +1591,7 @@ impl MainMenu {
         input: &MenuInput,
         title: &str,
         back: Screen,
+        footer_nav: Option<(&str, Screen)>,
     ) -> MainMenuResult {
         if input.escape {
             self.set_screen(back.clone_screen());
@@ -1589,15 +1618,39 @@ impl MainMenu {
 
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
-        if push_done_button(
-            &mut elements,
-            &mut ctx,
-            &mut any_hovered,
-            input,
-            &chrome,
-            cx,
-            gs,
-        ) {
+        let done = if let Some((label, target)) = footer_nav {
+            // Vanilla `LanguageSelectScreen`: two default-width buttons, 8 apart.
+            let (w, gap) = (150.0 * gs, 8.0 * gs);
+            let x = cx - w - gap / 2.0;
+            let mut push = |x, label| {
+                push_footer_button(
+                    &mut elements,
+                    &mut ctx,
+                    &mut any_hovered,
+                    input,
+                    &chrome,
+                    x,
+                    w,
+                    gs,
+                    label,
+                )
+            };
+            if push(x, label) {
+                self.set_screen(target);
+            }
+            push(x + w + gap, "Done")
+        } else {
+            push_done_button(
+                &mut elements,
+                &mut ctx,
+                &mut any_hovered,
+                input,
+                &chrome,
+                cx,
+                gs,
+            )
+        };
+        if done {
             self.set_screen(back);
         }
         self.finish_focus(&ctx);
