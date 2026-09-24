@@ -11,7 +11,7 @@ use simdnbt::owned::{NbtCompound, NbtTag};
 
 use super::common;
 use crate::chat_component::{
-    Argument, ClickEvent, Component, HoverEvent, ResolvedStyle, normalize_identifier,
+    Argument, ClickEvent, Component, HoverEvent, ResolvedStyle, list_elements, normalize_identifier,
 };
 use crate::net::commands::{
     CommandParse, CommandTokenKind, CommandTokenRange, CommandTree, SyntaxError,
@@ -2596,10 +2596,9 @@ pub(crate) fn item_tooltip_lines(
 
     if tooltip_component_visible(tooltip_display, "lore") {
         let lore: Vec<Component> = match raw_component(raw_components, "lore") {
-            Some(NbtTag::List(lore)) => lore
-                .as_nbt_tags()
-                .into_iter()
-                .filter_map(|line| Component::from_nbt_tag(&line).ok())
+            Some(NbtTag::List(lore)) => list_elements(lore)
+                .iter()
+                .filter_map(|line| Component::from_nbt_tag(line).ok())
                 .collect(),
             _ => component_value(components, "lore")
                 .and_then(serde_json::Value::as_array)
@@ -4677,23 +4676,13 @@ mod tests {
         assert!(text.iter().any(|line| line == "minecraft:diamond_sword"));
     }
 
-    /// The dialog's item body hands over its raw components, so a lore line's
-    /// numbers keep Java's text instead of the JSON detour's widened float.
-    #[test]
-    fn raw_components_keep_lore_number_formatting() {
-        let mut lore_line = NbtCompound::new();
-        lore_line.insert("translate", "pomme.unknown");
-        lore_line.insert("fallback", "%s");
-        lore_line.insert(
-            "with",
-            NbtTag::List(simdnbt::owned::NbtList::from(vec![NbtTag::Float(0.1)])),
-        );
+    /// A stone stack's tooltip with `lore`, read through the JSON shape and
+    /// through the raw components a dialog's item body hands over.
+    fn lore_tooltips(lore: Vec<NbtTag>) -> (Vec<String>, Vec<String>) {
         let mut components = NbtCompound::new();
         components.insert(
             "minecraft:lore",
-            NbtTag::List(simdnbt::owned::NbtList::from(vec![NbtTag::Compound(
-                lore_line,
-            )])),
+            NbtTag::List(simdnbt::owned::NbtList::from(lore)),
         );
         let mut stack = NbtCompound::new();
         stack.insert("id", "minecraft:stone");
@@ -4706,9 +4695,37 @@ mod tests {
                 .map(|line| line_text(&line.spans))
                 .collect::<Vec<_>>()
         };
+        (text(None), text(Some(&components)))
+    }
+
+    #[test]
+    fn raw_components_keep_lore_number_formatting() {
+        let mut lore_line = NbtCompound::new();
+        lore_line.insert("translate", "pomme.unknown");
+        lore_line.insert("fallback", "%s");
+        lore_line.insert(
+            "with",
+            NbtTag::List(simdnbt::owned::NbtList::from(vec![NbtTag::Float(0.1)])),
+        );
+        let (json, raw) = lore_tooltips(vec![NbtTag::Compound(lore_line)]);
         // The JSON shape widens the float to a double.
-        assert!(text(None).iter().any(|line| line.contains("0.1000000")));
-        assert!(text(Some(&components)).iter().any(|line| line == "0.1"));
+        assert!(json.iter().any(|line| line.contains("0.1000000")));
+        assert!(raw.iter().any(|line| line == "0.1"));
+    }
+
+    #[test]
+    fn raw_components_keep_wrapped_lore_lines() {
+        let mut styled = NbtCompound::new();
+        styled.insert("text", "styled");
+        styled.insert("color", "red");
+        let (json, raw) = lore_tooltips(vec![
+            crate::chat_component::wrapped(NbtTag::String("plain".into())),
+            NbtTag::Compound(styled),
+        ]);
+        for lines in [json, raw] {
+            assert!(lines.iter().any(|line| line == "plain"), "{lines:?}");
+            assert!(lines.iter().any(|line| line == "styled"), "{lines:?}");
+        }
     }
 
     #[test]
