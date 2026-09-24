@@ -50,9 +50,15 @@ const AUTO_SUGGESTIONS: &str = "Command Suggestions:";
 const HIDE_MATCHED_NAMES: &str = "Hide Matched Names:";
 const ONLY_SHOW_SECURE_CHAT: &str = "Only Show Secure Chat:";
 const SAVE_CHAT_DRAFTS: &str = "Save Unsent Chats:";
+const FORCE_UNICODE_FONT: &str = "Force Unicode Font:";
+const JAPANESE_GLYPH_VARIANTS: &str = "Japanese Glyph Variants:";
 
 /// The `chatDelay` slider's `IntRange(0, 60)`, in tenths of a second.
 const CHAT_DELAY_MAX_TENTHS: i32 = 60;
+
+fn on_off(value: bool) -> &'static str {
+    if value { "ON" } else { "OFF" }
+}
 
 /// Vanilla `Options.percentValueLabel`, which truncates.
 fn percent_label(prefix: &str, value: f64) -> String {
@@ -379,7 +385,6 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
         let o = self.chat_options;
-        let on_off = |v: bool| if v { "ON" } else { "OFF" };
         let chat = format!("{CHAT_VISIBILITY} {}", o.visibility.label());
         let colors = format!("{CHAT_COLORS} {}", on_off(o.colors));
         let links = format!("{CHAT_LINKS} {}", on_off(o.links));
@@ -444,6 +449,40 @@ impl MainMenu {
             &[],
             sliders,
             disabled,
+            true,
+            tooltips,
+            text_width_fn,
+        )
+    }
+
+    /// Vanilla `FontOptionsScreen`, opened from the Language screen.
+    pub(super) fn build_options_font(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+    ) -> MainMenuResult {
+        let force_unicode = format!("{FORCE_UNICODE_FONT} {}", on_off(self.force_unicode_font));
+        let japanese_variants = format!(
+            "{JAPANESE_GLYPH_VARIANTS} {}",
+            on_off(self.japanese_glyph_variants)
+        );
+        let rows = [OptRow::Pair(&force_unicode, &japanese_variants)];
+        let tooltips: &[(&str, &str)] = &[(
+            JAPANESE_GLYPH_VARIANTS,
+            "Uses Japanese variants of CJK characters in the default font.",
+        )];
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            "Font Settings",
+            Screen::OptionsLanguage,
+            &rows,
+            &[],
+            &[],
+            &[],
             true,
             tooltips,
             text_width_fn,
@@ -762,7 +801,7 @@ impl MainMenu {
             return empty_result(2.0);
         }
 
-        let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
+        let gs = self.gui_scale(sw, sh);
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
         let big_w = 310.0 * gs;
@@ -1019,7 +1058,9 @@ impl MainMenu {
                         }
                     }
                     if label.starts_with("GUI Scale:") {
-                        let max = crate::ui::hud::max_gui_scale(sw, sh);
+                        // Capped at what Auto resolves to, as vanilla's range is.
+                        let max =
+                            crate::ui::hud::gui_scale(sw, sh, 0, self.force_unicode_font) as u32;
                         self.gui_scale_setting = (self.gui_scale_setting + 1) % (max + 1);
                         self.save_settings();
                     }
@@ -1048,6 +1089,16 @@ impl MainMenu {
                     }
                     if label.starts_with("Show Subtitles:") {
                         self.show_subtitles = !self.show_subtitles;
+                        self.save_settings();
+                    }
+                    if label.starts_with(FORCE_UNICODE_FONT) {
+                        self.force_unicode_font = !self.force_unicode_font;
+                        self.reload_fonts = true;
+                        self.save_settings();
+                    }
+                    if label.starts_with(JAPANESE_GLYPH_VARIANTS) {
+                        self.japanese_glyph_variants = !self.japanese_glyph_variants;
+                        self.reload_fonts = true;
                         self.save_settings();
                     }
                     if label.starts_with("Vignette:") {
@@ -1254,7 +1305,7 @@ impl MainMenu {
 
         self.cycle_fields(input, 1);
 
-        let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
+        let gs = self.gui_scale(sw, sh);
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
         let gap = BTN_GAP * gs;
@@ -1542,13 +1593,14 @@ impl MainMenu {
         input: &MenuInput,
         title: &str,
         back: Screen,
+        footer_nav: Option<(&str, Screen)>,
     ) -> MainMenuResult {
         if input.escape {
             self.set_screen(back.clone_screen());
             return empty_result(2.0);
         }
 
-        let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
+        let gs = self.gui_scale(sw, sh);
         let cx = sw / 2.0;
 
         let mut elements = Vec::new();
@@ -1568,15 +1620,39 @@ impl MainMenu {
 
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
-        if push_done_button(
-            &mut elements,
-            &mut ctx,
-            &mut any_hovered,
-            input,
-            &chrome,
-            cx,
-            gs,
-        ) {
+        let done = if let Some((label, target)) = footer_nav {
+            // Vanilla `LanguageSelectScreen`: two default-width buttons, 8 apart.
+            let (w, gap) = (150.0 * gs, 8.0 * gs);
+            let x = cx - w - gap / 2.0;
+            let mut push = |x, label| {
+                push_footer_button(
+                    &mut elements,
+                    &mut ctx,
+                    &mut any_hovered,
+                    input,
+                    &chrome,
+                    x,
+                    w,
+                    gs,
+                    label,
+                )
+            };
+            if push(x, label) {
+                self.set_screen(target);
+            }
+            push(x + w + gap, "Done")
+        } else {
+            push_done_button(
+                &mut elements,
+                &mut ctx,
+                &mut any_hovered,
+                input,
+                &chrome,
+                cx,
+                gs,
+            )
+        };
+        if done {
             self.set_screen(back);
         }
         self.finish_focus(&ctx);

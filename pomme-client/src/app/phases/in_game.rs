@@ -2084,11 +2084,9 @@ pub fn update_game(
         Vec::new()
     };
     let text_sw = gfx.renderer.screen_width() as f32;
-    let text_gs = hud::gui_scale(
-        text_sw,
-        gfx.renderer.screen_height() as f32,
-        core.menu.gui_scale_setting,
-    );
+    let text_gs = core
+        .menu
+        .gui_scale(text_sw, gfx.renderer.screen_height() as f32);
     let text_fs = common::FONT_SIZE * text_gs;
     let chat_was_open = game.chat.is_open();
     if game.dialog_open() {
@@ -2200,7 +2198,7 @@ pub fn update_game(
 
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
-    let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
+    let gs = core.menu.gui_scale(sw, sh);
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
@@ -2470,7 +2468,7 @@ pub fn update_game(
             &game.boss_bars,
             gfx.renderer.is_first_person(),
             debug.as_ref(),
-            core.menu.gui_scale_setting,
+            gs,
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
@@ -3522,6 +3520,9 @@ pub fn update_game(
     }
 
     if game.options_from_game {
+        // TODO: a resource-pack toggle's `menu.reload_assets` is only applied
+        // once back on the title screen.
+        core.apply_font_options(&mut gfx.renderer);
         if core.menu.render_distance != game.last_render_distance
             || game.chat_information_changed(core.menu.chat_options)
         {

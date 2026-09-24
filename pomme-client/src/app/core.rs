@@ -1095,17 +1095,30 @@ impl AppCore {
     /// Rebuilds every asset a pack can override. Only call this once the
     /// active stack has really changed: it waits for device idle, drops the
     /// block cache and rebuilds the texture atlas. Clearing
-    /// `menu.reload_assets` is safe here because the pending local-pack toggle
-    /// it stands for is covered by the reload we just did.
-    fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
+    /// `menu.reload_assets` and `menu.reload_fonts` is safe here because the
+    /// pending toggles they stand for are covered by the reload we just did.
+    pub(crate) fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
         self.menu.active_packs = self.resource_packs.active_pack_info();
-        renderer.reload_assets(&self.data_dirs.game_dir, &self.resource_packs);
+        renderer.reload_assets(
+            &self.data_dirs.game_dir,
+            &self.resource_packs,
+            self.menu.font_options(),
+        );
         self.audio.reload_assets(&self.resource_packs);
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects
             .retain(|_, entry| matches!(entry.content, InlineObjectContent::Head { .. }));
         self.game_dynamic_atlas_keys.clear();
         self.menu.reload_assets = false;
+        self.menu.reload_fonts = false;
+    }
+
+    /// Vanilla `Options.updateFontOptions`: a Font Settings toggle applies at
+    /// once, from the title screen or in game.
+    pub fn apply_font_options(&mut self, renderer: &mut Renderer) {
+        if std::mem::take(&mut self.menu.reload_fonts) {
+            renderer.reload_fonts(&self.resource_packs, self.menu.font_options());
+        }
     }
 
     pub fn drain_network_events(
