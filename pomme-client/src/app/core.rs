@@ -1433,6 +1433,15 @@ impl AppCore {
                         e.max_health = max_health;
                     }
                 }
+                NetworkEvent::EntityCameraDistanceUpdate {
+                    entity_id,
+                    distance,
+                } => {
+                    // Third-person camera only frames the local player.
+                    if entity_id == game.player.entity_id {
+                        game.player.camera_distance = distance;
+                    }
+                }
                 NetworkEvent::ContainerContent {
                     container_id,
                     items,

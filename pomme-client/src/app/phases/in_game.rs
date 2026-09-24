@@ -2181,6 +2181,7 @@ pub fn update_game(
             .prev_eye_pos()
             .lerp(game.player.eye_pos(), partial_tick as f64),
         &game.chunk_store,
+        game.player.camera_distance,
     );
     // Esc cancels a running benchmark: restore the render distance it changed.
     if std::mem::take(&mut game.chunk_load_abort)

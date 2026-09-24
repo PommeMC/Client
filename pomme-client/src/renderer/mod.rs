@@ -810,11 +810,14 @@ impl Renderer {
         &mut self,
         eye_pos: Position,
         chunks: &crate::world::chunk::ChunkStore,
+        desired: f32,
     ) {
         if self.camera.mode == camera::CameraMode::FirstPerson || self.camera.top_down().is_some() {
             return;
         }
-        let max = camera::THIRD_PERSON_DISTANCE as f64;
+        // Desired distance from the CAMERA_DISTANCE attribute (already clamped
+        // 0..32 on receipt); the raycast below may pull it in for a wall.
+        let max = desired as f64;
         let fwd = self.camera.look_dir.as_vec().as_dvec3();
         let dir = if self.camera.mode == camera::CameraMode::ThirdPersonFront {
             fwd
