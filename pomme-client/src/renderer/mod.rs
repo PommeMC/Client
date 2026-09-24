@@ -2085,16 +2085,11 @@ pub(crate) async fn fetch_skin_texture_from_profile_property(
 fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String> {
     #[derive(serde::Deserialize)]
     struct TexturesPayload {
-        textures: Textures,
+        textures: std::collections::HashMap<String, Texture>,
     }
     #[derive(serde::Deserialize)]
-    struct Textures {
-        #[serde(rename = "SKIN")]
-        skin: Option<SkinTexture>,
-    }
-    #[derive(serde::Deserialize)]
-    struct SkinTexture {
-        url: String,
+    struct Texture {
+        url: Option<String>,
         metadata: Option<SkinMetadata>,
     }
     #[derive(serde::Deserialize)]
@@ -2107,34 +2102,42 @@ fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String>
         .decode(value)
         .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
         .map_err(error_chain)?;
-    let payload: TexturesPayload = serde_json::from_slice(&decoded).map_err(error_chain)?;
+    let mut payload: TexturesPayload = serde_json::from_slice(&decoded).map_err(error_chain)?;
 
+    // authlib `unpackTextures`: one bad url empties the whole payload.
+    // TODO: vanilla also shows the default skin for other players whose
+    // textures property isn't SIGNED (`PlayerInfo.createSkinLookup`); pomme
+    // doesn't verify the signature yet.
+    if let Some(bad) = payload
+        .textures
+        .values()
+        .find(|t| !t.url.as_deref().is_some_and(is_allowed_texture_url))
+    {
+        return Err(format!("texture url not allowed: {:?}", bad.url));
+    }
     let skin = payload
         .textures
-        .skin
+        .remove("SKIN")
         .ok_or_else(|| "No skin texture".to_string())?;
-    if !is_allowed_texture_url(&skin.url) {
-        return Err(format!("texture url not allowed: {}", skin.url));
-    }
     let slim = skin.metadata.as_ref().and_then(|m| m.model.as_deref()) == Some("slim");
-    Ok((skin.url, slim))
+    Ok((skin.url.unwrap_or_default(), slim))
 }
 
-/// authlib's `TextureUrlChecker.isAllowedTextureDomain`: http(s) on exactly
-/// `textures.minecraft.net`. Scheme and host are checked on the raw text since
-/// `Url` lowercases both and authlib is case-sensitive.
+/// authlib's `TextureUrlChecker.isAllowedTextureDomain`: a `java.net.URI`
+/// (`parse_untrusted_url`'s rules) with a case-sensitive http(s) scheme and a
+/// host of exactly `textures.minecraft.net`.
 fn is_allowed_texture_url(url: &str) -> bool {
     const HOST: &str = "textures.minecraft.net";
-    let Ok(parsed) = reqwest::Url::parse(url) else {
+    if crate::chat_component::parse_untrusted_url(url.to_owned()).is_err() {
         return false;
-    };
+    }
     let Some((scheme, rest)) = url.split_once("://") else {
         return false;
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let host = host_port.split_once(':').map_or(host_port, |(h, _)| h);
-    matches!(scheme, "http" | "https") && host == HOST && parsed.host_str() == Some(HOST)
+    let (host, port) = host_port.split_once(':').unwrap_or((host_port, ""));
+    matches!(scheme, "http" | "https") && host == HOST && port.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Error message including the source chain (`reqwest` hides the detail there).
@@ -2325,11 +2328,9 @@ mod tests {
 
     #[test]
     fn decodes_skin_url_from_textures_property() {
-        use base64::Engine;
-
         let payload =
             r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin"}}}"#;
-        let value = base64::engine::general_purpose::STANDARD.encode(payload);
+        let value = textures_property(payload);
 
         assert_eq!(
             skin_url_from_texture_property(&value).unwrap(),
@@ -2342,11 +2343,9 @@ mod tests {
 
     #[test]
     fn decodes_unpadded_skin_url_from_textures_property() {
-        use base64::Engine;
-
         let payload =
             r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin"}}}"#;
-        let value = base64::engine::general_purpose::STANDARD.encode(payload);
+        let value = textures_property(payload);
         let value = value.trim_end_matches('=');
 
         assert_eq!(
@@ -2360,10 +2359,8 @@ mod tests {
 
     #[test]
     fn decodes_slim_model_from_textures_property() {
-        use base64::Engine;
-
         let payload = r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin","metadata":{"model":"slim"}}}}"#;
-        let value = base64::engine::general_purpose::STANDARD.encode(payload);
+        let value = textures_property(payload);
 
         assert_eq!(
             skin_url_from_texture_property(&value).unwrap(),
@@ -2372,6 +2369,12 @@ mod tests {
                 true
             )
         );
+    }
+
+    /// A profile's `textures` property value: the payload, base64-encoded.
+    fn textures_property(payload: &str) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(payload)
     }
 
     #[test]
@@ -2394,6 +2397,10 @@ mod tests {
             "ftp://textures.minecraft.net/texture/abc",
             "file:///etc/passwd",
             "http://192.168.0.1/skin.png",
+            "https://textures.minecraft.net/texture/a b",
+            "https://textures.minecraft.net/texture/a|b",
+            r"https://textures.minecraft.net\@evil.com/abc",
+            "https://textures.minecraft.net:abc/texture/abc",
             "not a url",
             "",
         ] {
@@ -2402,12 +2409,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_textures_property_with_foreign_url() {
-        use base64::Engine;
-
-        let payload = r#"{"textures":{"SKIN":{"url":"http://192.168.0.1/skin.png"}}}"#;
-        let value = base64::engine::general_purpose::STANDARD.encode(payload);
-        assert!(skin_url_from_texture_property(&value).is_err());
+    fn any_foreign_texture_url_rejects_the_whole_payload() {
+        for payload in [
+            r#"{"textures":{"SKIN":{"url":"http://192.168.0.1/skin.png"}}}"#,
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/a"},"CAPE":{"url":"http://192.168.0.1/cape.png"}}}"#,
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/a"},"ELYTRA":{}}}"#,
+        ] {
+            let value = textures_property(payload);
+            assert!(skin_url_from_texture_property(&value).is_err(), "{payload}");
+        }
     }
 
     fn set_px(img: &mut [u8], x: u32, y: u32, rgba: [u8; 4]) {
