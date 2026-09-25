@@ -1,5 +1,8 @@
-use azalea_inventory::components::{CustomName, ItemName};
+use azalea_inventory::components::{
+    Bees, BundleContents, CustomName, Damage, ItemName, MaxDamage, MaxStackSize, Unbreakable,
+};
 use azalea_inventory::{ItemStack, ItemStackData};
+use azalea_registry::tags::items::BUNDLES;
 
 use crate::benchmark::UploadStatus;
 use crate::player::inventory::item_resource_name;
@@ -350,12 +353,11 @@ pub fn push_item_count(
     let text = count.to_string();
     let char_w = DIGIT_WIDTH * gs;
     let text_w = text.len() as f32 * char_w;
-    let fs = FONT_SIZE * gs;
     elements.push(MenuElement::Text {
         x: x + size + gs - text_w,
-        y: y + size - fs,
+        y: y + 9.0 * gs,
         text,
-        scale: fs,
+        scale: FONT_SIZE * gs,
         color: WHITE,
         centered: false,
     });
@@ -412,7 +414,7 @@ pub fn push_slot(
     hovered
 }
 
-/// Draws an item icon (and its stack count when > 1) at the given position.
+/// Draws an item icon and the vanilla item decorations Pomme supports.
 pub fn push_item_icon(
     elements: &mut Vec<MenuElement>,
     x: f32,
@@ -429,10 +431,173 @@ pub fn push_item_icon(
         item_name: item_resource_name(data.kind),
         tint: WHITE,
     });
-    crate::ui::bundle::push_item_bar(elements, x, y, scale, data);
+    push_item_bar(elements, x, y, scale, data);
+    // TODO: itemCooldown overlay once item cooldowns are tracked.
     if data.count > 1 {
         push_item_count(elements, x, y, size, scale, data.count);
     }
+}
+
+/// Vanilla `Item.MAX_BAR_WIDTH`.
+const MAX_BAR_WIDTH: i32 = 13;
+
+fn push_item_bar(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    scale: f32,
+    data: &ItemStackData,
+) {
+    let Some((width, color)) = item_bar(data) else {
+        return;
+    };
+
+    let mut fill = |w: i32, h: f32, color| {
+        elements.push(MenuElement::Rect {
+            x: x + 2.0 * scale,
+            y: y + 13.0 * scale,
+            w: w as f32 * scale,
+            h: h * scale,
+            corner_radius: 0.0,
+            color,
+        });
+    };
+    fill(MAX_BAR_WIDTH, 2.0, [0.0, 0.0, 0.0, 1.0]);
+    fill(width, 1.0, color);
+}
+
+/// Bar width and colour, following `BundleItem`'s override of `Item`'s bar.
+fn item_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
+    if BUNDLES.contains(&data.kind) {
+        bundle_bar(data)
+    } else {
+        durability_bar(data)
+    }
+}
+
+// BundleItem FULL_BAR_COLOR / BAR_COLOR: colorFromFloat(1, 1, .33, .33) and
+// colorFromFloat(1, .44, .53, 1), channels floored.
+const BUNDLE_FULL_BAR_COLOR: [f32; 4] = rgb(0xFF5454);
+const BUNDLE_BAR_COLOR: [f32; 4] = rgb(0x7087FF);
+
+fn bundle_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
+    // getWeightSafe: an overflowing weight counts as full.
+    let weight = data
+        .get_component::<BundleContents>()
+        .map_or(Some(Frac::ZERO), |c| bundle_weight(&c.items))
+        .unwrap_or(Frac::ONE);
+    if weight.0 <= 0 {
+        return None;
+    }
+    let width = (1 + weight.0 * 12 / weight.1).min(MAX_BAR_WIDTH as i64) as i32;
+    let color = if weight.0 >= weight.1 {
+        BUNDLE_FULL_BAR_COLOR
+    } else {
+        BUNDLE_BAR_COLOR
+    };
+    Some((width, color))
+}
+
+/// Reduced `Fraction`; arithmetic is `None` on overflow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Frac(i64, i64);
+
+impl Frac {
+    const ZERO: Self = Self(0, 1);
+    const ONE: Self = Self(1, 1);
+
+    fn new(num: i64, den: i64) -> Self {
+        let (mut a, mut b) = (num.abs(), den.abs());
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        let g = a.max(1);
+        Self(num / g, den / g)
+    }
+
+    fn add(self, other: Self) -> Option<Self> {
+        let num = self
+            .0
+            .checked_mul(other.1)?
+            .checked_add(other.0.checked_mul(self.1)?)?;
+        Some(Self::new(num, self.1.checked_mul(other.1)?))
+    }
+
+    fn mul(self, n: i64) -> Option<Self> {
+        Some(Self::new(self.0.checked_mul(n)?, self.1))
+    }
+}
+
+/// `BundleContents#computeContentWeight`.
+fn bundle_weight(items: &[ItemStack]) -> Option<Frac> {
+    items
+        .iter()
+        .filter_map(ItemStack::as_present)
+        .try_fold(Frac::ZERO, |weight, item| {
+            weight.add(bundle_item_weight(item)?.mul(item.count as i64)?)
+        })
+}
+
+/// `BundleContents#getWeight`.
+fn bundle_item_weight(data: &ItemStackData) -> Option<Frac> {
+    if let Some(bundle) = data.get_component::<BundleContents>() {
+        return bundle_weight(&bundle.items)?.add(Frac(1, 16));
+    }
+    if data
+        .get_component::<Bees>()
+        .is_some_and(|bees| !bees.occupants.is_empty())
+    {
+        return Some(Frac::ONE);
+    }
+    let max_stack_size = data.get_component::<MaxStackSize>().map_or(1, |m| m.count);
+    (max_stack_size > 0).then(|| Frac::new(1, max_stack_size as i64))
+}
+
+/// Vanilla `Item` durability bar metrics for a damageable stack.
+fn durability_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
+    if data.get_component::<Unbreakable>().is_some() {
+        return None;
+    }
+    let max_damage = data.get_component::<MaxDamage>()?.amount;
+    let damage = data.get_component::<Damage>()?.amount;
+    if max_damage <= 0 {
+        return None;
+    }
+
+    // ItemStack#getDamageValue clamps the component before Item's bar math.
+    let damage = damage.clamp(0, max_damage);
+    if damage == 0 {
+        return None;
+    }
+
+    let max_width = MAX_BAR_WIDTH as f32;
+    let width = (max_width - damage as f32 * max_width / max_damage as f32)
+        .round()
+        .clamp(0.0, max_width) as i32;
+    let health = ((max_damage as f32 - damage as f32) / max_damage as f32).max(0.0);
+    Some((width, durability_color(health)))
+}
+
+fn durability_color(health: f32) -> [f32; 4] {
+    // Mth.hsvToRgb(health / 3, 1, 1) with vanilla's float order and truncation.
+    let hue = health / 3.0;
+    let scaled_hue = hue * 6.0;
+    let sector = scaled_hue as i32 % 6;
+    let fraction = scaled_hue - sector as f32;
+    let p = 0.0;
+    let q = 1.0 - fraction;
+    let t = fraction;
+    let (red, green, blue) = match sector {
+        0 => (1.0, t, p),
+        1 => (q, 1.0, p),
+        2 => (p, 1.0, t),
+        3 => (p, q, 1.0),
+        4 => (t, p, 1.0),
+        5 => (1.0, p, q),
+        _ => unreachable!("durability hue must remain in the vanilla HSV range"),
+    };
+    let channel = |value: f32| ((value * 255.0) as i32).clamp(0, 255) as u32;
+    rgb((channel(red) << 16) | (channel(green) << 8) | channel(blue))
 }
 
 /// Measures rendered text width in framebuffer px at the given font size.
@@ -670,4 +835,147 @@ pub struct SliderResult {
     pub hovered: bool,
     pub dragging: bool,
     pub new_value: Option<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use azalea_inventory::components::{BundleContents, Damage, MaxDamage, Unbreakable};
+    use azalea_inventory::{ItemStack, ItemStackData};
+    use azalea_registry::builtin::ItemKind;
+
+    use super::{
+        BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, MenuElement, item_bar, push_item_count,
+        push_item_icon,
+    };
+
+    fn present(stack: ItemStack) -> ItemStackData {
+        stack.as_present().expect("stack should be present").clone()
+    }
+
+    fn damaged_pickaxe(damage: i32) -> ItemStackData {
+        present(ItemStack::new(ItemKind::IronPickaxe, 1).with_component(Damage { amount: damage }))
+    }
+
+    fn pickaxe_max_damage() -> i32 {
+        ItemStackData::new(ItemKind::IronPickaxe, 1)
+            .get_component::<MaxDamage>()
+            .expect("iron pickaxe should have max damage")
+            .amount
+    }
+
+    #[test]
+    fn item_count_uses_vanilla_y_coordinate() {
+        let mut elements = Vec::new();
+        push_item_count(&mut elements, 10.0, 20.0, 32.0, 2.0, 64);
+
+        let MenuElement::Text { x, y, .. } = &elements[0] else {
+            panic!("item count should render as text");
+        };
+        assert_eq!(*x, 20.0);
+        assert_eq!(*y, 38.0);
+    }
+
+    #[test]
+    fn durability_bar_matches_vanilla_visibility_width_and_color() {
+        let max_damage = pickaxe_max_damage();
+        assert!(item_bar(&damaged_pickaxe(0)).is_none());
+
+        let halfway = damaged_pickaxe(max_damage / 2);
+        let (width, color) = item_bar(&halfway).expect("damaged item should show a bar");
+        assert_eq!(width, 7);
+        assert_eq!(color, [1.0, 1.0, 0.0, 1.0]);
+
+        let broken = damaged_pickaxe(max_damage);
+        let (width, color) = item_bar(&broken).expect("fully damaged item still has a bar");
+        assert_eq!(width, 0);
+        assert_eq!(color, [1.0, 0.0, 0.0, 1.0]);
+
+        assert!(item_bar(&damaged_pickaxe(-1)).is_none());
+
+        let over_damaged = damaged_pickaxe(max_damage + 1);
+        let (width, color) =
+            item_bar(&over_damaged).expect("over-max damage should clamp to max damage");
+        assert_eq!(width, 0);
+        assert_eq!(color, [1.0, 0.0, 0.0, 1.0]);
+
+        let unbreakable = present(
+            ItemStack::new(ItemKind::IronPickaxe, 1)
+                .with_component(Damage { amount: 1 })
+                .with_component(Unbreakable),
+        );
+        assert!(item_bar(&unbreakable).is_none());
+
+        let damage_without_max =
+            present(ItemStack::new(ItemKind::Stone, 1).with_component(Damage { amount: 1 }));
+        assert!(item_bar(&damage_without_max).is_none());
+
+        let max_without_damage =
+            present(ItemStack::new(ItemKind::Stone, 1).with_component(MaxDamage { amount: 10 }));
+        assert!(item_bar(&max_without_damage).is_none());
+    }
+
+    #[test]
+    fn item_icon_places_vanilla_durability_rectangles() {
+        let data = damaged_pickaxe(pickaxe_max_damage() / 2);
+        let mut elements = Vec::new();
+
+        push_item_icon(&mut elements, 10.0, 20.0, 32.0, 2.0, &data);
+
+        assert_eq!(elements.len(), 3);
+        let MenuElement::Rect {
+            x, y, w, h, color, ..
+        } = &elements[1]
+        else {
+            panic!("durability background should be a rectangle");
+        };
+        assert_eq!((*x, *y, *w, *h), (14.0, 46.0, 26.0, 4.0));
+        assert_eq!(*color, [0.0, 0.0, 0.0, 1.0]);
+
+        let MenuElement::Rect {
+            x, y, w, h, color, ..
+        } = &elements[2]
+        else {
+            panic!("durability fill should be a rectangle");
+        };
+        assert_eq!((*x, *y, *w, *h), (14.0, 46.0, 14.0, 2.0));
+        assert_eq!(*color, [1.0, 1.0, 0.0, 1.0]);
+    }
+
+    fn bundle(items: Vec<ItemStack>) -> ItemStackData {
+        present(ItemStack::new(ItemKind::Bundle, 1).with_component(BundleContents { items }))
+    }
+
+    #[test]
+    fn bundle_bar_matches_vanilla_fullness() {
+        assert!(item_bar(&ItemStackData::new(ItemKind::Bundle, 1)).is_none());
+        assert!(item_bar(&bundle(Vec::new())).is_none());
+
+        let stone = |count| ItemStack::new(ItemKind::Stone, count);
+        assert_eq!(
+            item_bar(&bundle(vec![stone(1)])),
+            Some((1, BUNDLE_BAR_COLOR))
+        );
+        assert_eq!(
+            item_bar(&bundle(vec![stone(32)])),
+            Some((7, BUNDLE_BAR_COLOR))
+        );
+        assert_eq!(
+            item_bar(&bundle(vec![stone(64)])),
+            Some((13, BUNDLE_FULL_BAR_COLOR))
+        );
+        assert_eq!(
+            item_bar(&bundle(vec![ItemStack::new(ItemKind::IronPickaxe, 1)])),
+            Some((13, BUNDLE_FULL_BAR_COLOR))
+        );
+
+        let nested = ItemStack::new(ItemKind::Bundle, 1);
+        assert_eq!(item_bar(&bundle(vec![nested])), Some((1, BUNDLE_BAR_COLOR)));
+
+        let damaged_empty = present(
+            ItemStack::new(ItemKind::Bundle, 1)
+                .with_component(MaxDamage { amount: 10 })
+                .with_component(Damage { amount: 5 }),
+        );
+        assert!(item_bar(&damaged_empty).is_none());
+    }
 }
