@@ -22,11 +22,12 @@ pub fn is_animated_item(item_name: &str) -> bool {
 const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8Unorm;
 const DEPTH_FORMAT: vk::Format = vk::Format::D32Sfloat;
 
-/// Returns the slot size in pixels matching `16 * gui_scale`, the vanilla
-/// formula (`GuiRenderer.prepareItemElements`). 16 is the base item size in
-/// logical GUI units; multiplying by gui_scale makes the bake 1:1 with display.
-pub fn slot_px_for_gui_scale(gui_scale: f32) -> u32 {
-    (16.0 * gui_scale.max(1.0)).round() as u32
+/// Returns the slot size in pixels matching `16 * gui_scale` at the Auto GUI
+/// scale, the vanilla formula (`GuiRenderer.prepareItemElements`). 16 is the
+/// base item size in logical GUI units; multiplying by gui_scale makes the bake
+/// 1:1 with display.
+pub fn slot_px_for_screen(screen_w: f32, screen_h: f32, enforce_unicode: bool) -> u32 {
+    (16.0 * crate::ui::hud::gui_scale(screen_w, screen_h, 0, enforce_unicode)).round() as u32
 }
 
 /// Picks the smallest power-of-two atlas size that fits TARGET_SLOT_CAPACITY

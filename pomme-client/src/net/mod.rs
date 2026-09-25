@@ -136,6 +136,10 @@ pub enum NetworkEvent {
         entity_id: i32,
         max_health: f32,
     },
+    EntityCameraDistanceUpdate {
+        entity_id: i32,
+        distance: f32,
+    },
     ContainerContent {
         container_id: i32,
         items: Vec<ItemStack>,

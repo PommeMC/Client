@@ -172,6 +172,9 @@ pub struct LivingEntity {
     pub health: f32,
     /// `max_health` attribute (`UpdateAttributes`); sizes the mount heart row.
     pub max_health: f32,
+    /// `camera_distance` attribute (`UpdateAttributes`); a ridden mount's can
+    /// push the third-person camera further out.
+    pub camera_distance: f32,
     pub interested_angle: f32,
     pub prev_interested_angle: f32,
     pub shake_anim: f32,
@@ -322,6 +325,7 @@ impl LivingEntity {
             // reads it before the metadata arrives.
             health: default_health,
             max_health: default_health,
+            camera_distance: crate::renderer::camera::THIRD_PERSON_DISTANCE,
             interested_angle: 0.0,
             prev_interested_angle: 0.0,
             shake_anim: 0.0,

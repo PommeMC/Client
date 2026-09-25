@@ -117,11 +117,9 @@ pub fn update_menu(
     }
 
     if core.menu.reload_assets {
-        core.menu.reload_assets = false;
-        gfx.renderer
-            .reload_assets(&core.data_dirs.game_dir, &core.resource_packs);
-        core.audio.reload_assets(&core.resource_packs);
+        core.reload_pack_assets(&mut gfx.renderer);
     }
+    core.apply_font_options(&mut gfx.renderer);
 
     if result.clicked_button {
         gfx.renderer.trigger_skin_swing();

@@ -1168,179 +1168,53 @@ impl MenuOverlayPipeline {
         }
 
         for elem in &deferred_tooltips {
-            if let MenuElement::Tooltip {
+            let (MenuElement::Tooltip {
                 x,
                 y,
-                text,
                 scale,
                 screen_w,
                 screen_h,
-            } = elem
-                && let Some(ref gm) = self.mc_glyph_map
-            {
-                let px = *scale / gm.cell_h as f32;
-                let padding = 3.0 * px;
-                let margin = 9.0 * px;
-                let line_h = *scale + 2.0 * px;
-                let max_w = (*screen_w * 0.4).max(100.0);
-
-                let words: Vec<&str> = text.split_whitespace().collect();
-                let mut lines: Vec<String> = Vec::new();
-                let mut current = String::new();
-                let space_w = self.mc_text_width(" ", *scale);
-                for word in &words {
-                    let word_w = self.mc_text_width(word, *scale);
-                    let test_w = if current.is_empty() {
-                        word_w
-                    } else {
-                        self.mc_text_width(&current, *scale) + space_w + word_w
-                    };
-                    if !current.is_empty() && test_w > max_w {
-                        lines.push(current);
-                        current = word.to_string();
-                    } else {
-                        if !current.is_empty() {
-                            current.push(' ');
-                        }
-                        current.push_str(word);
-                    }
-                }
-                if !current.is_empty() {
-                    lines.push(current);
-                }
-
-                let content_w = lines
-                    .iter()
-                    .map(|l| (self.mc_text_width(l, *scale) + px).ceil())
-                    .fold(0.0f32, f32::max);
-                let content_h = lines.len() as f32 * line_h - 2.0 * px;
-
-                let mut text_x = *x + 12.0;
-                let mut text_y = *y - 12.0;
-                if text_x + content_w > *screen_w {
-                    text_x = (*x - 24.0 - content_w).max(4.0);
-                }
-                if text_y + content_h + 3.0 > *screen_h {
-                    text_y = *screen_h - content_h - 3.0;
-                }
-
-                let bg_x = text_x - padding - margin - padding;
-                let bg_y = text_y - padding - margin - padding;
-                let bg_w = content_w + (padding + margin + padding) * 2.0;
-                let bg_h = content_h + (padding + margin + padding) * 2.0;
-                let bg_border = margin;
-                let frame_border = 10.0 * px;
-
-                let white = [1.0f32; 4];
-                if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
-                    push_nine_slice(&mut vertices, bg_x, bg_y, bg_w, bg_h, bg, bg_border, white);
-                }
-                if let Some(frame) = self.sprite_atlas.regions.get(&SpriteId::TooltipFrame) {
-                    push_nine_slice(
-                        &mut vertices,
-                        bg_x,
-                        bg_y,
-                        bg_w,
-                        bg_h,
-                        frame,
-                        frame_border,
-                        white,
-                    );
-                }
-
-                for (i, line) in lines.iter().enumerate() {
-                    let span = TextSpan::new(line.clone(), white);
-                    let line_y = text_y + i as f32 * line_h;
-                    self.push_text_into(
-                        &mut drawn_objects,
-                        &mut vertices,
-                        &[span],
-                        McTextDraw {
-                            x: text_x,
-                            y: line_y,
-                            scale: *scale,
-                            drop_shadow: true,
-                        },
-                        &mut obfuscation_rng,
-                    );
-                }
+                ..
             }
-            if let MenuElement::TooltipLines {
+            | MenuElement::TooltipLines {
                 x,
                 y,
+                scale,
+                screen_w,
+                screen_h,
+                ..
+            }) = elem
+            else {
+                continue;
+            };
+            let draw = McTooltipDraw {
+                x: *x,
+                y: *y,
+                scale: *scale,
+                screen_w: *screen_w,
+                screen_h: *screen_h,
+            };
+            // A plain-text tooltip wraps to its own lines first.
+            let wrapped;
+            let lines = match elem {
+                MenuElement::Tooltip { text, .. } => {
+                    wrapped = self
+                        .wrap_tooltip_text(text, draw.scale, (draw.screen_w * 0.4).max(100.0))
+                        .into_iter()
+                        .map(|line| TooltipLine::new(line, [1.0; 4]))
+                        .collect::<Vec<_>>();
+                    &wrapped
+                }
+                MenuElement::TooltipLines { lines, .. } => lines,
+                _ => continue,
+            };
+            self.push_tooltip(
+                &mut vertices,
+                &mut drawn_objects,
+                &mut obfuscation_rng,
+                draw,
                 lines,
-                scale,
-                screen_w,
-                screen_h,
-            } = elem
-                && let Some(ref gm) = self.mc_glyph_map
-            {
-                let px = *scale / gm.cell_h as f32;
-                let padding = 3.0 * px;
-                let margin = 9.0 * px;
-                let line_h = *scale + 2.0 * px;
-
-                let line_widths: Vec<f32> = lines
-                    .iter()
-                    .map(|l| (self.spans_width(&l.spans, *scale) + px).ceil())
-                    .collect();
-                let content_w = line_widths.iter().copied().fold(0.0f32, f32::max);
-                let content_h = lines.len() as f32 * line_h - 2.0 * px;
-
-                let mut text_x = *x + 12.0;
-                let mut text_y = *y - 12.0;
-                if text_x + content_w > *screen_w {
-                    text_x = (*x - 24.0 - content_w).max(4.0);
-                }
-                if text_y + content_h + 3.0 > *screen_h {
-                    text_y = *screen_h - content_h - 3.0;
-                }
-
-                let bg_x = text_x - padding - margin - padding;
-                let bg_y = text_y - padding - margin - padding;
-                let bg_w = content_w + (padding + margin + padding) * 2.0;
-                let bg_h = content_h + (padding + margin + padding) * 2.0;
-                let bg_border = margin;
-                let frame_border = 10.0 * px;
-                let white = [1.0f32; 4];
-
-                if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
-                    push_nine_slice(&mut vertices, bg_x, bg_y, bg_w, bg_h, bg, bg_border, white);
-                }
-                if let Some(frame) = self.sprite_atlas.regions.get(&SpriteId::TooltipFrame) {
-                    push_nine_slice(
-                        &mut vertices,
-                        bg_x,
-                        bg_y,
-                        bg_w,
-                        bg_h,
-                        frame,
-                        frame_border,
-                        white,
-                    );
-                }
-
-                for (i, (line, line_w)) in lines.iter().zip(&line_widths).enumerate() {
-                    let line_x = if line.right_align {
-                        text_x + content_w - line_w
-                    } else {
-                        text_x
-                    };
-                    let line_y = text_y + i as f32 * line_h;
-                    self.push_text_into(
-                        &mut drawn_objects,
-                        &mut vertices,
-                        &line.spans,
-                        McTextDraw {
-                            x: line_x,
-                            y: line_y,
-                            scale: *scale,
-                            drop_shadow: true,
-                        },
-                        &mut obfuscation_rng,
-                    );
-                }
-            }
+            );
         }
 
         self.obfuscation_rng = obfuscation_rng;
@@ -1600,6 +1474,90 @@ impl MenuOverlayPipeline {
             })
             .sum();
         (raw * scale / gm.cell_h as f32).ceil()
+    }
+
+    /// Greedy word-wrap of a plain tooltip string to `max_w`.
+    fn wrap_tooltip_text(&self, text: &str, scale: f32, max_w: f32) -> Vec<String> {
+        let space_w = self.mc_text_width(" ", scale);
+        let mut lines: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for word in text.split_whitespace() {
+            let word_w = self.mc_text_width(word, scale);
+            let test_w = if current.is_empty() {
+                word_w
+            } else {
+                self.mc_text_width(&current, scale) + space_w + word_w
+            };
+            if !current.is_empty() && test_w > max_w {
+                lines.push(std::mem::take(&mut current));
+                current = word.to_owned();
+            } else {
+                if !current.is_empty() {
+                    current.push(' ');
+                }
+                current.push_str(word);
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+        lines
+    }
+
+    /// `GuiGraphicsExtractor.tooltip`, which draws nothing when it has no
+    /// lines.
+    fn push_tooltip(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
+        obfuscation_rng: &mut ObfuscationRng,
+        draw: McTooltipDraw,
+        lines: &[TooltipLine],
+    ) {
+        let Some(gm) = &self.mc_glyph_map else {
+            return;
+        };
+        if lines.is_empty() {
+            return;
+        }
+        let scale = draw.scale;
+        let px = scale / gm.cell_h as f32;
+        let line_widths: Vec<f32> = lines
+            .iter()
+            .map(|line| self.spans_width(&line.spans, scale))
+            .collect();
+        let layout = tooltip_box(draw, px, &line_widths);
+
+        let [bg_x, bg_y, bg_w, bg_h] = layout.bg;
+        let white = [1.0f32; 4];
+        // 9 and 10 are the two sprites' own `.mcmeta` nine-slice borders, not
+        // the tooltip margin that happens to share the first number.
+        if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
+            push_nine_slice(vertices, bg_x, bg_y, bg_w, bg_h, bg, 9.0 * px, white);
+        }
+        if let Some(frame) = self.sprite_atlas.regions.get(&SpriteId::TooltipFrame) {
+            push_nine_slice(vertices, bg_x, bg_y, bg_w, bg_h, frame, 10.0 * px, white);
+        }
+
+        for (i, (line, line_w)) in lines.iter().zip(&line_widths).enumerate() {
+            let line_x = if line.right_align {
+                layout.text_x + layout.content_w - line_w
+            } else {
+                layout.text_x
+            };
+            self.push_text_into(
+                drawn_objects,
+                vertices,
+                &line.spans,
+                McTextDraw {
+                    x: line_x,
+                    y: tooltip_line_y(layout.text_y, i, layout.line_h, px),
+                    scale,
+                    drop_shadow: true,
+                },
+                obfuscation_rng,
+            );
+        }
     }
 
     /// Pushes Minecraft-font text; nothing when no fonts loaded.
@@ -3899,6 +3857,14 @@ fn push_rect(
     radius: f32,
     color: [f32; 4],
 ) {
+    // `GuiGraphics.fill` is a hard integer quad. Radius 0 must not go through
+    // the rounded-rect SDF: that softens every edge and adds a border band,
+    // which seams adjacent chat rows and shifts translucent fill opacity.
+    let (color, mode) = if radius <= 0.0 {
+        (premultiplied(color), 10.0)
+    } else {
+        (color, 0.0)
+    };
     push_quad(
         verts,
         x,
@@ -3910,10 +3876,16 @@ fn push_rect(
         1.0,
         1.0,
         color,
-        0.0,
+        mode,
         [w, h],
         radius,
     );
+}
+
+/// The premultiplied form mode 10 expects. The rounded-rect mode premultiplies
+/// in the shader and converts no gamma, so neither does this.
+fn premultiplied([r, g, b, a]: [f32; 4]) -> [f32; 4] {
+    [r * a, g * a, b * a, a]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3943,7 +3915,7 @@ fn push_gradient_rect(
         [1.0, 1.0],
         [0.0, 1.0],
     ];
-    let colors = [
+    let mut colors = [
         color_top,
         color_top,
         color_bottom,
@@ -3951,12 +3923,20 @@ fn push_gradient_rect(
         color_bottom,
         color_bottom,
     ];
+    let mode = if radius <= 0.0 {
+        for color in &mut colors {
+            *color = premultiplied(*color);
+        }
+        10.0
+    } else {
+        0.0
+    };
     for i in 0..6 {
         verts.push(Vertex {
             pos: positions[i],
             uv: uvs[i],
             color: colors[i],
-            mode: 0.0,
+            mode,
             rect_size: [w, h],
             corner_radius: radius,
         });
@@ -4154,6 +4134,71 @@ struct McTextDraw {
     y: f32,
     scale: f32,
     drop_shadow: bool,
+}
+
+/// Where a tooltip was asked for, in framebuffer pixels.
+#[derive(Clone, Copy)]
+struct McTooltipDraw {
+    x: f32,
+    y: f32,
+    scale: f32,
+    screen_w: f32,
+    screen_h: f32,
+}
+
+/// A laid-out tooltip, in framebuffer pixels.
+struct TooltipBox {
+    text_x: f32,
+    text_y: f32,
+    content_w: f32,
+    line_h: f32,
+    /// Background and frame rect, `[x, y, w, h]`.
+    bg: [f32; 4],
+}
+
+/// `TooltipRenderUtil.extractTooltipBackground` (PADDING 3, MARGIN 9) over the
+/// content box `GuiGraphicsExtractor.tooltip` measures: the widest line, and
+/// 10 per line less 2 when there is only one. `px` is one gui unit.
+// TODO: the mouse offset and the screen clamps below are framebuffer pixels,
+// but `TooltipRenderUtil.MOUSE_OFFSET` is 12 gui units, so they should scale
+// with `px`. Pre-existing, left alone to keep this change to the box itself.
+fn tooltip_box(draw: McTooltipDraw, px: f32, line_widths: &[f32]) -> TooltipBox {
+    let line_h = draw.scale + 2.0 * px;
+    let content_w = line_widths.iter().copied().fold(0.0f32, f32::max);
+    let content_h = if line_widths.len() == 1 {
+        draw.scale
+    } else {
+        line_widths.len() as f32 * line_h
+    };
+
+    let mut text_x = draw.x + 12.0;
+    let mut text_y = draw.y - 12.0;
+    if text_x + content_w > draw.screen_w {
+        text_x = (text_x - 24.0 - content_w).max(4.0);
+    }
+    if text_y + content_h + 3.0 > draw.screen_h {
+        text_y = draw.screen_h - content_h - 3.0;
+    }
+
+    let inset = (3.0 + 9.0) * px;
+    TooltipBox {
+        text_x,
+        text_y,
+        content_w,
+        line_h,
+        bg: [
+            text_x - inset,
+            text_y - inset,
+            content_w + inset * 2.0,
+            content_h + inset * 2.0,
+        ],
+    }
+}
+
+/// `localY += line.getHeight(font) + (i == 0 ? 2 : 0)`: every line after the
+/// first sits two pixels lower.
+fn tooltip_line_y(text_y: f32, index: usize, line_h: f32, px: f32) -> f32 {
+    text_y + index as f32 * line_h + if index > 0 { 2.0 * px } else { 0.0 }
 }
 
 /// Advance of an inline object glyph in font pixels (vanilla
@@ -4422,11 +4467,10 @@ fn push_mc_effect(verts: &mut Vec<Vertex>, effect: &McEffect, shadow_offset: f32
     push_mc_fill(verts, x0, y0, w, h, effect.color);
 }
 
-/// A hard-edged effect quad in the premultiplied mode, linearized here as the
-/// shader does for glyphs.
+/// A hard-edged effect quad, gamma-linearized first as the shader does for
+/// glyphs. Otherwise the same fill `push_rect` emits at radius 0.
 fn push_mc_fill(verts: &mut Vec<Vertex>, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
-    let a = color[3];
-    let linear = |c: f32| c.powf(2.2) * a;
+    let [r, g, b, a] = color;
     push_quad(
         verts,
         x,
@@ -4437,7 +4481,7 @@ fn push_mc_fill(verts: &mut Vec<Vertex>, x: f32, y: f32, w: f32, h: f32, color: 
         0.0,
         1.0,
         1.0,
-        [linear(color[0]), linear(color[1]), linear(color[2]), a],
+        premultiplied([r.powf(2.2), g.powf(2.2), b.powf(2.2), a]),
         10.0,
         [0.0, 0.0],
         0.0,
@@ -4670,6 +4714,71 @@ fn create_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tooltip at gui scale 1, where one gui unit is one framebuffer pixel.
+    fn unscaled_tooltip(x: f32, y: f32) -> McTooltipDraw {
+        McTooltipDraw {
+            x,
+            y,
+            scale: 8.0,
+            screen_w: 1000.0,
+            screen_h: 1000.0,
+        }
+    }
+
+    #[test]
+    fn tooltip_box_insets_by_the_padding_and_margin() {
+        let layout = tooltip_box(unscaled_tooltip(100.0, 100.0), 1.0, &[40.0]);
+        assert_eq!(layout.text_x, 112.0);
+        assert_eq!(layout.text_y, 88.0);
+        assert_eq!(layout.bg, [100.0, 76.0, 64.0, 32.0]);
+    }
+
+    #[test]
+    fn tooltip_flips_left_from_the_offset_position() {
+        // `DefaultTooltipPositioner`: `x + 12`, then `max(x - 24 - w, 4)`.
+        let flipped = tooltip_box(unscaled_tooltip(990.0, 100.0), 1.0, &[40.0]);
+        assert_eq!(flipped.text_x, 990.0 + 12.0 - 24.0 - 40.0);
+        let clamped = tooltip_box(unscaled_tooltip(990.0, 100.0), 1.0, &[995.0]);
+        assert_eq!(clamped.text_x, 4.0);
+    }
+
+    #[test]
+    fn tooltip_height_sums_ten_per_line_less_two_when_single() {
+        let one = tooltip_box(unscaled_tooltip(100.0, 100.0), 1.0, &[40.0]);
+        assert_eq!(one.bg[3], 8.0 + 24.0);
+        let three = tooltip_box(unscaled_tooltip(100.0, 100.0), 1.0, &[10.0, 40.0, 20.0]);
+        assert_eq!(three.bg[3], 30.0 + 24.0);
+        assert_eq!(three.content_w, 40.0);
+    }
+
+    #[test]
+    fn tooltip_lines_after_the_first_drop_two_pixels() {
+        let layout = tooltip_box(unscaled_tooltip(100.0, 100.0), 1.0, &[10.0, 10.0, 10.0]);
+        let y = |i| tooltip_line_y(layout.text_y, i, layout.line_h, 1.0);
+        assert_eq!([y(0), y(1), y(2)], [88.0, 100.0, 110.0]);
+    }
+
+    #[test]
+    fn radius_zero_rects_are_hard_premultiplied_quads() {
+        let mut verts = Vec::new();
+        push_rect(&mut verts, 0.0, 0.0, 10.0, 10.0, 0.0, [1.0, 0.0, 0.0, 0.5]);
+        assert_eq!(verts[0].mode, 10.0);
+        assert_eq!(verts[0].color, [0.5, 0.0, 0.0, 0.5]);
+
+        let mut rounded = Vec::new();
+        push_rect(
+            &mut rounded,
+            0.0,
+            0.0,
+            10.0,
+            10.0,
+            4.0,
+            [1.0, 0.0, 0.0, 0.5],
+        );
+        assert_eq!(rounded[0].mode, 0.0);
+        assert_eq!(rounded[0].color, [1.0, 0.0, 0.0, 0.5]);
+    }
 
     #[test]
     fn abutting_effects_merge_into_one_quad() {

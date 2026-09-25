@@ -57,7 +57,7 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: impl Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let gs = self.gui_scale(screen_w, screen_h);
         let cursor = input.cursor;
         let clicked = input.clicked;
         let fs = common::FONT_SIZE * gs;

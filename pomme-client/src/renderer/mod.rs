@@ -52,7 +52,7 @@ use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
-use crate::ui::font::FontSources;
+use crate::ui::font::{FontOptions, FontSources};
 use crate::world::block::registry::BlockRegistry;
 
 #[derive(Error, Debug)]
@@ -168,6 +168,9 @@ pub struct Renderer {
     cloud_pipeline: CloudPipeline,
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
     gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
+    /// Force Unicode Font also evens the Auto GUI scale the item atlas is sized
+    /// for.
+    font_options: FontOptions,
 
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
@@ -193,6 +196,7 @@ impl Renderer {
         let FontSources {
             jar_assets_dir,
             asset_index,
+            options: font_options,
             ..
         } = font_sources;
         let size = window.inner_size();
@@ -439,7 +443,7 @@ impl Renderer {
         splash(&mut menu_pipeline, 0.95, "Caching item meshes...");
 
         let initial_slot_px =
-            pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(sw, sh, 0));
+            pipelines::gui_item_atlas::slot_px_for_screen(sw, sh, font_options.uniform);
         let gui_item_atlas = build_gui_item_atlas(
             &ctx.device,
             &ctx.allocator,
@@ -455,7 +459,6 @@ impl Renderer {
             gui_item_atlas.atlas_px(),
             &ctx.allocator,
             &atlas,
-            jar_assets_dir,
         );
 
         warm_item_meshes(
@@ -493,6 +496,7 @@ impl Renderer {
             cloud_pipeline,
             gui_item_pipeline,
             gui_item_atlas,
+            font_options,
             chunk_buffers,
             render_finished_per_image,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
@@ -816,11 +820,15 @@ impl Renderer {
         &mut self,
         eye_pos: Position,
         chunks: &crate::world::chunk::ChunkStore,
+        max_distance: f32,
     ) {
         if self.camera.mode == camera::CameraMode::FirstPerson || self.camera.top_down().is_some() {
             return;
         }
-        let max = camera::THIRD_PERSON_DISTANCE as f64;
+        // TODO: vanilla `Camera.getMaxZoom` clips 8 rays offset by 0.1 against
+        // visual shapes with no minimum; this marches 0.2 steps against full
+        // cubes with a 0.4 pad and a 0.5 floor, so a distance of 0 sits 0.5 back.
+        let max = max_distance as f64;
         let fwd = self.camera.look_dir.as_vec().as_dvec3();
         let dir = if self.camera.mode == camera::CameraMode::ThirdPersonFront {
             fwd
@@ -1173,6 +1181,7 @@ impl Renderer {
         &mut self,
         game_dir: &Path,
         packs: &crate::resource_pack::ResourcePackManager,
+        font_options: FontOptions,
     ) {
         self.ctx.device.wait_idle().unwrap();
 
@@ -1221,19 +1230,7 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
-        if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
-            &self.ctx.device,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            &self.ctx.allocator,
-            FontSources {
-                jar_assets_dir: &self.jar_assets_dir,
-                asset_index: &self.asset_index,
-                packs,
-            },
-        ) {
-            tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
-        }
+        self.reload_fonts(packs, font_options);
 
         warm_item_meshes(
             &self.ctx.device,
@@ -1248,6 +1245,30 @@ impl Renderer {
         self.gui_item_atlas.invalidate_all();
 
         tracing::info!("Assets reloaded");
+    }
+
+    /// Vanilla `FontManager.updateOptions`: only the font sets change.
+    pub fn reload_fonts(
+        &mut self,
+        packs: &crate::resource_pack::ResourcePackManager,
+        font_options: FontOptions,
+    ) {
+        self.font_options = font_options;
+        self.ctx.device.wait_idle().unwrap();
+        if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            FontSources {
+                jar_assets_dir: &self.jar_assets_dir,
+                asset_index: &self.asset_index,
+                packs,
+                options: font_options,
+            },
+        ) {
+            tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
+        }
     }
 
     pub fn reload_panorama(&mut self, panorama_dir: &Path) {
@@ -1544,12 +1565,11 @@ impl Renderer {
             RenderMode::MainMenu { elements, .. } => elements.as_slice(),
         };
 
-        let target_slot_px =
-            pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(
-                self.swapchain.extent.width as f32,
-                self.swapchain.extent.height as f32,
-                0,
-            ));
+        let target_slot_px = pipelines::gui_item_atlas::slot_px_for_screen(
+            self.swapchain.extent.width as f32,
+            self.swapchain.extent.height as f32,
+            self.font_options.uniform,
+        );
         if target_slot_px != self.gui_item_atlas.slot_px() {
             // Mid-cmd-recording wait_idle: this cmd buffer is unsubmitted so
             // holds no in-flight references, and `submit_one_time` inside the
@@ -1589,7 +1609,7 @@ impl Renderer {
         struct BakeJob {
             slot: pipelines::gui_item_atlas::Slot,
             name: String,
-            is_block: bool,
+            display: crate::world::block::model::DisplayTransform,
             needs_clear: bool,
         }
         let mut bake_list: Vec<BakeJob> = Vec::new();
@@ -1601,7 +1621,7 @@ impl Renderer {
                     bake_list.push(BakeJob {
                         slot,
                         name: name.clone(),
-                        is_block: self.registry.get_item_model(name).is_some(),
+                        display: self.registry.get_item_gui_transform(name),
                         needs_clear: matches!(state, pipelines::gui_item_atlas::SlotState::Stale),
                     });
                 }
@@ -1623,7 +1643,7 @@ impl Renderer {
                     sy,
                     self.gui_item_atlas.slot_px(),
                     &job.name,
-                    job.is_block,
+                    job.display,
                 );
             }
             self.gui_item_atlas.end_bake_pass(cmd);

@@ -857,18 +857,44 @@ pub(super) fn push_done_button(
     gs: f32,
 ) -> bool {
     let w = 200.0 * gs;
+    push_footer_button(
+        elements,
+        ctx,
+        any_hovered,
+        input,
+        chrome,
+        cx - w / 2.0,
+        w,
+        gs,
+        "Done",
+    )
+}
+
+/// A button on a header/footer screen's footer row.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_footer_button(
+    elements: &mut Vec<MenuElement>,
+    ctx: &mut FocusCtx,
+    any_hovered: &mut bool,
+    input: &MenuInput,
+    chrome: &ChromeLayout,
+    x: f32,
+    w: f32,
+    gs: f32,
+    label: &str,
+) -> bool {
     push_button_f(
         elements,
         ctx,
         any_hovered,
         input.cursor,
         input.clicked,
-        cx - w / 2.0,
+        x,
         chrome.done_y,
         w,
         common::BTN_H * gs,
         gs,
-        "Done",
+        label,
         true,
     )
 }
@@ -1216,7 +1242,7 @@ impl MainMenu {
             return (empty_result(2.0), Some(false));
         }
 
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
         let btn_w = CONFIRM_BTN_W * gs;
