@@ -198,26 +198,23 @@ struct BlockData {
     is_air: bool,
     /// Vanilla `hasCollision` (`BlockBehaviour.Properties.noCollision()`).
     collides: bool,
-    /// Vanilla `BlockState.blocksMotion()`, consumed by the follow-up fluid
-    /// movement parity branch.
+    /// Vanilla state semantics dumped by `just stategen`, read by follow-up
+    /// branches; `None` where the table predates the probe or the version
+    /// lacks it (`blocksMotion` is gone in 26.3).
     #[allow(dead_code)]
-    blocks_motion: bool,
-    /// Vanilla cached `BlockState.isSolid()` / `legacySolid`, consumed by the
-    /// follow-up fluid renderer branch.
+    blocks_motion: Option<bool>,
     #[allow(dead_code)]
-    legacy_solid: bool,
-    /// Vanilla cached `BlockState.canBeReplaced()` property, consumed by the
-    /// follow-up interaction prediction branch.
+    legacy_solid: Option<bool>,
     #[allow(dead_code)]
-    replaceable: bool,
-    /// Packed Direction ordinal bits for
-    /// `BlockState.isFaceSturdy(..., SupportType.FULL)`; consumed by collision
-    /// and fluid renderer follow-ups.
+    replaceable: Option<bool>,
+    /// Direction ordinal bits for `isFaceSturdy(..., SupportType.FULL)`.
+    // TODO: CENTER/RIGID support types and the interaction shape aren't dumped.
     #[allow(dead_code)]
-    full_face_sturdy: u8,
-    /// Whether vanilla's logical collision/outline shape applies the state's
-    /// generated positional offset. Legacy compatibility tables keep these
-    /// false because they do not carry authoritative offset metadata.
+    full_face_sturdy: Option<u8>,
+    /// Vanilla `hasLargeCollisionShape`: the collision shape leaves the cell.
+    large_collision_shape: bool,
+    /// Whether the collision/outline shape follows `getOffset(pos)`; always
+    /// false for tables without generated shapes.
     collision_shape_uses_offset: bool,
     outline_shape_uses_offset: bool,
     position_offset: Option<PositionOffset>,
@@ -269,180 +266,88 @@ struct StateFile {
 #[derive(serde::Deserialize)]
 struct StateEntry {
     name: String,
-    e: ScalarOrPerState,
-    d: ScalarOrPerState,
-    p: ScalarOrPerState,
-    o: ScalarOrPerState,
-    u: ScalarOrPerState,
+    e: PerState<u8>,
+    d: PerState<u8>,
+    p: PerState<u8>,
+    o: PerState<u8>,
+    u: PerState<u8>,
     /// `hasCollision`; block-level in vanilla, so always a scalar.
     c: u8,
-    /// Vanilla `BlockState.blocksMotion()`. Exact generated state tables carry
-    /// `m/l/v/t` together; legacy embedded tables omit all four and are loaded
-    /// only through the explicit compatibility mode below.
+    /// `blocksMotion`, `isSolid`, `canBeReplaced` and full-face sturdy bits;
+    /// each absent from tables that predate it.
     #[serde(default)]
-    m: Option<ScalarOrPerState>,
-    /// Vanilla cached `BlockState.isSolid()` / `legacySolid`.
+    m: Option<PerState<u8>>,
     #[serde(default)]
-    l: Option<ScalarOrPerState>,
-    /// Vanilla cached `BlockState.canBeReplaced()` property.
+    l: Option<PerState<u8>>,
     #[serde(default)]
-    v: Option<ScalarOrPerState>,
-    /// Packed Direction ordinal bits for full-face sturdiness.
+    v: Option<PerState<u8>>,
     #[serde(default)]
-    t: Option<ScalarOrPerState>,
-    /// Whether the generated logical collision/outline shape is translated by
-    /// `BlockState.getOffset(pos)`. Legacy tables omit these fields and keep
-    /// their historical unshifted compatibility shapes.
+    t: Option<PerState<u8>>,
+    /// Whether the collision/outline shape follows `getOffset(pos)`.
     #[serde(default)]
-    co: Option<ScalarOrPerState>,
+    co: Option<PerState<u8>>,
     #[serde(default)]
-    oo: Option<ScalarOrPerState>,
-    /// Generated `BlockBehaviour.OffsetType` and its clamp parameters.
+    oo: Option<PerState<u8>>,
+    /// `BlockBehaviour.OffsetType` (0 none, 1 XZ, 2 XYZ) and its clamps.
     #[serde(default)]
-    q: Option<ScalarOrPerState>,
+    q: Option<PerState<u8>>,
     #[serde(default)]
-    h: Option<ScalarOrPerStateF32>,
+    h: Option<PerState<f32>>,
     #[serde(default)]
-    y: Option<ScalarOrPerStateF32>,
-    /// Collision and outline shape dictionary indices. Absent from older
-    /// generated tables, which fall back to the native shape code below.
+    y: Option<PerState<f32>>,
+    /// Collision and outline shape dictionary indices.
     #[serde(default)]
-    s: Option<ScalarOrPerStateU32>,
+    s: Option<PerState<u32>>,
     #[serde(default)]
-    r: Option<ScalarOrPerStateU32>,
+    r: Option<PerState<u32>>,
     #[serde(default)]
     f: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StateSemanticsMode {
-    Generated,
-    LegacyCompatibility,
+/// The generated shape and offset fields of a [`StateEntry`], which tables
+/// carry all together or not at all.
+struct GeneratedShapeFields<'a> {
+    collision_offset: &'a PerState<u8>,
+    outline_offset: &'a PerState<u8>,
+    offset_type: &'a PerState<u8>,
+    max_horizontal: &'a PerState<f32>,
+    max_vertical: &'a PerState<f32>,
+    collision: &'a PerState<u32>,
+    outline: &'a PerState<u32>,
 }
 
-fn state_semantics_mode(state_file: &StateFile) -> StateSemanticsMode {
-    let mut mode = None;
-    for entry in &state_file.blocks {
-        let present = [
-            entry.m.is_some(),
-            entry.l.is_some(),
-            entry.v.is_some(),
-            entry.t.is_some(),
-            entry.co.is_some(),
-            entry.oo.is_some(),
-            entry.q.is_some(),
-            entry.h.is_some(),
-            entry.y.is_some(),
-            entry.s.is_some(),
-            entry.r.is_some(),
-        ];
-        let entry_mode = if present.iter().all(|&value| value) {
-            StateSemanticsMode::Generated
-        } else if present.iter().all(|&value| !value) {
-            StateSemanticsMode::LegacyCompatibility
-        } else {
-            panic!(
-                "{}: generated block-state semantics/shape metadata is partial",
-                entry.name
-            );
-        };
-        if let Some(expected) = mode {
-            assert_eq!(
-                expected, entry_mode,
-                "{}: state table mixes generated and legacy compatibility semantics",
-                state_file.version
-            );
-        } else {
-            mode = Some(entry_mode);
-        }
-    }
-    let mode = mode.expect("state table must contain blocks");
-    assert_eq!(
-        !state_file.shapes.is_empty(),
-        mode == StateSemanticsMode::Generated,
-        "{}: shape dictionary does not match generated state metadata mode",
-        state_file.version
-    );
-    mode
-}
-
-fn resolve_state_semantics(
-    mode: StateSemanticsMode,
-    entry: &StateEntry,
-    offset: usize,
-    collides: bool,
-    is_air: bool,
-) -> (bool, bool, bool, u8) {
-    match mode {
-        StateSemanticsMode::Generated => (
-            entry
-                .m
-                .as_ref()
-                .expect("generated blocksMotion")
-                .get(offset)
-                != 0,
-            entry.l.as_ref().expect("generated legacySolid").get(offset) != 0,
-            entry.v.as_ref().expect("generated replaceable").get(offset) != 0,
-            entry
-                .t
-                .as_ref()
-                .expect("generated full-face sturdy")
-                .get(offset),
-        ),
-        StateSemanticsMode::LegacyCompatibility => {
-            // Historical embedded state files predate these vanilla probes.
-            // Keep their old runtime behavior explicitly, but do not present
-            // these values as generated or authoritative for those versions.
-            let blocks_motion = collides;
-            let legacy_solid = blocks_motion;
-            let replaceable = is_air;
-            let full_face_sturdy = if collides { 0x3f } else { 0 };
-            (blocks_motion, legacy_solid, replaceable, full_face_sturdy)
+impl StateEntry {
+    fn generated_shapes(&self) -> Option<GeneratedShapeFields<'_>> {
+        match (
+            &self.co, &self.oo, &self.q, &self.h, &self.y, &self.s, &self.r,
+        ) {
+            (Some(co), Some(oo), Some(q), Some(h), Some(y), Some(s), Some(r)) => {
+                Some(GeneratedShapeFields {
+                    collision_offset: co,
+                    outline_offset: oo,
+                    offset_type: q,
+                    max_horizontal: h,
+                    max_vertical: y,
+                    collision: s,
+                    outline: r,
+                })
+            }
+            (None, None, None, None, None, None, None) => None,
+            _ => panic!("{}: partial generated shape fields", self.name),
         }
     }
 }
 
+/// A scalar when uniform across the block's states, else one value per state.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
-enum ScalarOrPerState {
-    One(u8),
-    Many(Vec<u8>),
+enum PerState<T> {
+    One(T),
+    Many(Vec<T>),
 }
 
-impl ScalarOrPerState {
-    fn get(&self, offset: usize) -> u8 {
-        match self {
-            Self::One(v) => *v,
-            Self::Many(vs) => vs[offset],
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum ScalarOrPerStateF32 {
-    One(f32),
-    Many(Vec<f32>),
-}
-
-impl ScalarOrPerStateF32 {
-    fn get(&self, offset: usize) -> f32 {
-        match self {
-            Self::One(v) => *v,
-            Self::Many(vs) => vs[offset],
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum ScalarOrPerStateU32 {
-    One(u32),
-    Many(Vec<u32>),
-}
-
-impl ScalarOrPerStateU32 {
-    fn get(&self, offset: usize) -> u32 {
+impl<T: Copy> PerState<T> {
+    fn get(&self, offset: usize) -> T {
         match self {
             Self::One(v) => *v,
             Self::Many(vs) => vs[offset],
@@ -586,7 +491,6 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
         file.blocks.len(),
         "state data block count mismatch"
     );
-    let semantics_mode = state_semantics_mode(&state_file);
     let masks: &'static [FaceMask] = Vec::leak(
         state_file
             .masks
@@ -669,123 +573,60 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
             }
             let properties = PropMap::from_pairs(pairs);
             let fluid = state_fluid(name, &properties);
-            let (blocks_motion, legacy_solid, replaceable, full_face_sturdy) =
-                resolve_state_semantics(
-                    semantics_mode,
-                    state_entry,
-                    offset as usize,
-                    collides,
-                    is_air,
-                );
-            let (collision_shape_uses_offset, outline_shape_uses_offset, position_offset) =
-                match semantics_mode {
-                    StateSemanticsMode::Generated => {
-                        let collision_uses_offset = state_entry
-                            .co
-                            .as_ref()
-                            .expect("generated collision offset usage")
-                            .get(offset as usize)
-                            != 0;
-                        let outline_uses_offset = state_entry
-                            .oo
-                            .as_ref()
-                            .expect("generated outline offset usage")
-                            .get(offset as usize)
-                            != 0;
-                        let offset_type = state_entry
-                            .q
-                            .as_ref()
-                            .expect("generated position offset type")
-                            .get(offset as usize);
-                        let max_horizontal = state_entry
-                            .h
-                            .as_ref()
-                            .expect("generated horizontal offset bound")
-                            .get(offset as usize);
-                        let max_vertical = state_entry
-                            .y
-                            .as_ref()
-                            .expect("generated vertical offset bound")
-                            .get(offset as usize);
-                        assert!(
-                            max_horizontal.is_finite()
-                                && max_vertical.is_finite()
-                                && max_horizontal >= 0.0
-                                && max_vertical >= 0.0,
-                            "{}: invalid generated position offset bounds",
-                            block.name
-                        );
-                        let position_offset = match offset_type {
-                            0 => {
-                                assert_eq!(
-                                    (max_horizontal.to_bits(), max_vertical.to_bits()),
-                                    (0, 0),
-                                    "{}: offset-free state has nonzero offset bounds",
-                                    block.name
-                                );
-                                None
-                            }
-                            1 => {
-                                assert_eq!(
-                                    max_vertical.to_bits(),
-                                    0,
-                                    "{}: XZ offset state has a vertical bound",
-                                    block.name
-                                );
-                                Some(PositionOffset {
-                                    kind: PositionOffsetKind::Xz,
-                                    max_horizontal,
-                                    max_vertical: 0.0,
-                                })
-                            }
-                            2 => Some(PositionOffset {
-                                kind: PositionOffsetKind::Xyz,
-                                max_horizontal,
-                                max_vertical,
-                            }),
-                            value => panic!(
-                                "{}: invalid generated position offset type {value}",
-                                block.name
-                            ),
-                        };
-                        assert!(
-                            !(collision_uses_offset || outline_uses_offset)
-                                || position_offset.is_some(),
-                            "{}: shape uses a position offset but no offset function is generated",
-                            block.name
-                        );
-                        (collision_uses_offset, outline_uses_offset, position_offset)
-                    }
-                    StateSemanticsMode::LegacyCompatibility => (false, false, None),
-                };
-            let (shape, outline) = match (
-                generated_shapes.as_ref(),
-                state_entry.s.as_ref(),
-                state_entry.r.as_ref(),
-            ) {
-                (Some(shapes), Some(collision), Some(outline)) => {
-                    let collision = shapes[collision.get(offset as usize) as usize];
-                    let outline = shapes[outline.get(offset as usize) as usize];
+            let i = offset as usize;
+            let flag = |field: &Option<PerState<u8>>| field.as_ref().map(|f| f.get(i) != 0);
+            let generated = state_entry.generated_shapes();
+            assert_eq!(
+                generated.is_some(),
+                generated_shapes.is_some(),
+                "{}: generated shape fields don't match the shape dictionary",
+                block.name
+            );
+            let (
+                shape,
+                outline,
+                collision_shape_uses_offset,
+                outline_shape_uses_offset,
+                position_offset,
+            ) = match (&generated_shapes, generated) {
+                (Some(shapes), Some(g)) => {
+                    let collision = shapes[g.collision.get(i) as usize];
+                    let outline = shapes[g.outline.get(i) as usize];
+                    let kind = match g.offset_type.get(i) {
+                        0 => None,
+                        1 => Some(PositionOffsetKind::Xz),
+                        2 => Some(PositionOffsetKind::Xyz),
+                        value => panic!("{}: invalid position offset type {value}", block.name),
+                    };
                     (
                         (!is_full_cube_shape(collision)).then_some(collision),
                         (outline != collision).then_some(outline),
+                        g.collision_offset.get(i) != 0,
+                        g.outline_offset.get(i) != 0,
+                        kind.map(|kind| {
+                            PositionOffset::new(
+                                kind,
+                                g.max_horizontal.get(i),
+                                g.max_vertical.get(i),
+                            )
+                        }),
                     )
                 }
-                (None, None, None) => (
-                    compute_shape(name, &properties)
-                        .map(|boxes| Box::leak(boxes.into_boxed_slice()) as &'static [LocalBox]),
-                    compute_outline(name, &properties)
-                        .map(|boxes| Box::leak(boxes.into_boxed_slice()) as &'static [LocalBox]),
+                _ => (
+                    compute_shape(name, &properties).map(leak_boxes),
+                    compute_outline(name, &properties).map(leak_boxes),
+                    false,
+                    false,
+                    None,
                 ),
-                _ => panic!("{}: incomplete generated block-shape fields", block.name),
             };
             let light = LightProps {
-                emission: state_entry.e.get(offset as usize),
-                dampening: state_entry.d.get(offset as usize),
-                propagates_skylight_down: state_entry.p.get(offset as usize) != 0,
-                can_occlude: state_entry.o.get(offset as usize) != 0,
-                use_shape_for_light_occlusion: state_entry.u.get(offset as usize) != 0,
-                face_occlusion: face_indices[offset as usize].map(&mut tuple),
+                emission: state_entry.e.get(i),
+                dampening: state_entry.d.get(i),
+                propagates_skylight_down: state_entry.p.get(i) != 0,
+                can_occlude: state_entry.o.get(i) != 0,
+                use_shape_for_light_occlusion: state_entry.u.get(i) != 0,
+                face_occlusion: face_indices[i].map(&mut tuple),
             };
             table.push(BlockData {
                 id: name,
@@ -795,10 +636,15 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
                 outline,
                 is_air,
                 collides,
-                blocks_motion,
-                legacy_solid,
-                replaceable,
-                full_face_sturdy,
+                blocks_motion: flag(&state_entry.m),
+                legacy_solid: flag(&state_entry.l),
+                replaceable: flag(&state_entry.v),
+                full_face_sturdy: state_entry.t.as_ref().map(|t| t.get(i)),
+                large_collision_shape: shape.is_some_and(|boxes| {
+                    boxes
+                        .iter()
+                        .any(|b| b[..3].iter().any(|&v| v < 0.0) || b[3..].iter().any(|&v| v > 1.0))
+                }),
                 collision_shape_uses_offset,
                 outline_shape_uses_offset,
                 position_offset,
@@ -839,6 +685,10 @@ fn decode_block_shape(coords: &[f64]) -> &'static [LocalBox] {
             [c[0], c[1], c[2], c[3], c[4], c[5]]
         })
         .collect();
+    leak_boxes(boxes)
+}
+
+fn leak_boxes(boxes: Vec<LocalBox>) -> &'static [LocalBox] {
     Box::leak(boxes.into_boxed_slice())
 }
 
@@ -933,10 +783,11 @@ fn block_data(state: BlockState) -> &'static BlockData {
         outline: None,
         is_air: false,
         collides: true,
-        blocks_motion: true,
-        legacy_solid: true,
-        replaceable: false,
-        full_face_sturdy: 0x3f,
+        blocks_motion: None,
+        legacy_solid: None,
+        replaceable: None,
+        full_face_sturdy: None,
+        large_collision_shape: false,
         collision_shape_uses_offset: false,
         outline_shape_uses_offset: false,
         position_offset: None,
@@ -1012,28 +863,34 @@ pub fn has_collision(state: BlockState) -> bool {
 
 /// Vanilla `BlockState.blocksMotion()`, distinct from collision and occlusion.
 #[allow(dead_code)]
-pub fn blocks_motion(state: BlockState) -> bool {
+pub fn blocks_motion(state: BlockState) -> Option<bool> {
     block_data(state).blocks_motion
 }
 
 /// Vanilla cached `BlockState.isSolid()` / `legacySolid`.
 #[allow(dead_code)]
-pub fn is_solid(state: BlockState) -> bool {
+pub fn is_solid(state: BlockState) -> Option<bool> {
     block_data(state).legacy_solid
 }
 
-/// Vanilla cached `BlockState.canBeReplaced()` property. Context-sensitive
-/// overrides are handled by higher-level placement code when needed.
+/// Vanilla `BlockState.canBeReplaced()`, without a placement context; blocks
+/// that override `canBeReplaced(BlockPlaceContext)` need their own check.
 #[allow(dead_code)]
-pub fn is_replaceable(state: BlockState) -> bool {
+pub fn is_replaceable(state: BlockState) -> Option<bool> {
     block_data(state).replaceable
 }
 
-/// Vanilla `BlockState.isFaceSturdy(..., SupportType.FULL)` for a Direction
-/// ordinal (DOWN, UP, NORTH, SOUTH, WEST, EAST).
+/// Vanilla `BlockState.isFaceSturdy(..., SupportType.FULL)`.
 #[allow(dead_code)]
-pub fn is_full_face_sturdy(state: BlockState, direction: usize) -> bool {
-    direction < 6 && (block_data(state).full_face_sturdy & (1 << direction)) != 0
+pub fn is_full_face_sturdy(state: BlockState, direction: model::Direction) -> Option<bool> {
+    block_data(state)
+        .full_face_sturdy
+        .map(|mask| mask & (1 << direction as u8) != 0)
+}
+
+/// Vanilla `BlockState.hasLargeCollisionShape()`.
+pub(crate) fn has_large_collision_shape(state: BlockState) -> bool {
+    block_data(state).large_collision_shape
 }
 
 pub fn fluid(state: BlockState) -> Fluid {
@@ -1055,6 +912,38 @@ struct PositionOffset {
     kind: PositionOffsetKind,
     max_horizontal: f32,
     max_vertical: f32,
+    /// The offset at `BlockPos.ZERO`, which the generated shapes were dumped
+    /// at.
+    zero: DVec3,
+}
+
+impl PositionOffset {
+    fn new(kind: PositionOffsetKind, max_horizontal: f32, max_vertical: f32) -> Self {
+        let mut offset = Self {
+            kind,
+            max_horizontal,
+            max_vertical,
+            zero: DVec3::ZERO,
+        };
+        offset.zero = offset.at(0, 0);
+        offset
+    }
+
+    /// Vanilla `BlockBehaviour.OffsetType` function for this column.
+    fn at(&self, x: i32, z: i32) -> DVec3 {
+        let seed = vanilla_position_seed(x, z);
+        let raw_x = (f64::from((seed & 0xF) as f32 / 15.0_f32) - 0.5) * 0.5;
+        let raw_z = (f64::from(((seed >> 8) & 0xF) as f32 / 15.0_f32) - 0.5) * 0.5;
+        let max = f64::from(self.max_horizontal);
+        let y = match self.kind {
+            PositionOffsetKind::Xz => 0.0,
+            PositionOffsetKind::Xyz => {
+                (f64::from(((seed >> 4) & 0xF) as f32 / 15.0_f32) - 1.0)
+                    * f64::from(self.max_vertical)
+            }
+        };
+        dvec3(raw_x.clamp(-max, max), y, raw_z.clamp(-max, max))
+    }
 }
 
 fn vanilla_position_seed(x: i32, z: i32) -> i64 {
@@ -1067,48 +956,20 @@ fn vanilla_position_seed(x: i32, z: i32) -> i64 {
         >> 16
 }
 
-fn position_offset(
-    x: i32,
-    z: i32,
-    kind: PositionOffsetKind,
-    max_horizontal: f32,
-    max_vertical: f32,
-) -> DVec3 {
-    let seed = vanilla_position_seed(x, z);
-    let raw_x = (f64::from((seed & 0xF) as f32 / 15.0_f32) - 0.5) * 0.5;
-    let raw_z = (f64::from(((seed >> 8) & 0xF) as f32 / 15.0_f32) - 0.5) * 0.5;
-    let max = f64::from(max_horizontal);
-    let y = match kind {
-        PositionOffsetKind::Xz => 0.0,
-        PositionOffsetKind::Xyz => {
-            (f64::from(((seed >> 4) & 0xF) as f32 / 15.0_f32) - 1.0) * f64::from(max_vertical)
-        }
-    };
-    dvec3(raw_x.clamp(-max, max), y, raw_z.clamp(-max, max))
-}
-
-/// Vanilla block model/shape position offset at the requested world position.
-/// Generated tables own the offset kind and clamp parameters; legacy tables
-/// preserve their historical no-offset compatibility behavior.
+/// Vanilla `BlockState.getOffset(pos)`; zero for tables without offsets.
 #[allow(dead_code)]
 pub(crate) fn block_position_offset(state: BlockState, x: i32, z: i32) -> DVec3 {
-    let Some(offset) = block_data(state).position_offset else {
-        return DVec3::ZERO;
-    };
-    position_offset(
-        x,
-        z,
-        offset.kind,
-        offset.max_horizontal,
-        offset.max_vertical,
-    )
+    block_data(state)
+        .position_offset
+        .map_or(DVec3::ZERO, |offset| offset.at(x, z))
 }
 
+/// The generated shapes already hold ZERO's offset, so a position only adds
+/// the difference to its own.
 fn generated_shape_position_delta(state: BlockState, x: i32, z: i32) -> DVec3 {
-    // Generated vanilla shapes were dumped at BlockPos.ZERO, so they already
-    // contain ZERO's logical offset. Apply only the difference for this world
-    // position rather than offsetting the sampled geometry twice.
-    block_position_offset(state, x, z) - block_position_offset(state, 0, 0)
+    block_data(state)
+        .position_offset
+        .map_or(DVec3::ZERO, |offset| offset.at(x, z) - offset.zero)
 }
 
 fn shape_position(state: BlockState, x: i32, y: i32, z: i32, uses_position_offset: bool) -> DVec3 {
@@ -1288,10 +1149,11 @@ mod tests {
         setup();
         for name in ["cobweb", "bamboo_sapling"] {
             let state = find_state(name, &[]);
-            assert!(is_solid(state), "{name} is legacy-solid in vanilla 26.2");
-            assert!(
-                !blocks_motion(state),
-                "{name} must not be treated as motion-blocking"
+            assert_eq!(is_solid(state), Some(true), "{name} is legacy-solid");
+            assert_eq!(
+                blocks_motion(state),
+                Some(false),
+                "{name} doesn't block motion"
             );
         }
     }
@@ -1609,26 +1471,39 @@ mod tests {
         assert_eq!(block_outline(find_state("stone", &[])), None);
     }
 
-    /// Builds every embedded table so the block/light cross-checks fire for
-    /// all versions, not just the one `setup` activates.
+    /// Tables generated before the semantics probes report them as unknown
+    /// rather than guessing.
     #[test]
-    fn state_semantics_modes_are_explicit_per_embedded_table() {
-        for data in BLOCK_DATA {
-            let state_file: StateFile = serde_json::from_str(data.state).unwrap();
-            let expected = if state_file.version == "26.2" {
-                StateSemanticsMode::Generated
-            } else {
-                StateSemanticsMode::LegacyCompatibility
-            };
+    fn legacy_tables_leave_semantics_unknown() {
+        let data = BLOCK_DATA.iter().find(|data| data.protocol == 775).unwrap();
+        for state in build_table(data) {
+            assert_eq!(state.blocks_motion, None);
+            assert_eq!(state.legacy_solid, None);
+            assert_eq!(state.replaceable, None);
+            assert_eq!(state.full_face_sturdy, None);
+            assert!(state.position_offset.is_none());
+        }
+    }
+
+    #[test]
+    fn large_collision_shapes() {
+        setup();
+        for (name, large) in [
+            ("oak_fence", true),
+            ("cobblestone_wall", true),
+            ("stone", false),
+            ("oak_slab", false),
+        ] {
             assert_eq!(
-                state_semantics_mode(&state_file),
-                expected,
-                "unexpected movement/placement/support semantics mode for {}",
-                state_file.version
+                has_large_collision_shape(find_state(name, &[])),
+                large,
+                "{name}"
             );
         }
     }
 
+    /// Builds every embedded table so the block/light cross-checks fire for
+    /// all versions, not just the one `setup` activates.
     #[test]
     fn all_tables_build() {
         for data in BLOCK_DATA {

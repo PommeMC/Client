@@ -10,15 +10,19 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Dumps per-block-state properties (the baked light set plus hasCollision) by
- * running vanilla's own code: bootstraps the block registry from the server jar
- * on the classpath, then iterates Block.BLOCK_STATE_REGISTRY in state-id order.
+ * Dumps per-block-state properties by running vanilla's own code: the baked
+ * light set, hasCollision, blocksMotion/isSolid/canBeReplaced, full-face
+ * sturdiness, the empty-context collision and outline shapes, and the
+ * position offset parameters. Bootstraps the block registry from the server
+ * jar on the classpath, then iterates Block.BLOCK_STATE_REGISTRY in state-id
+ * order.
  *
  * Everything is reflection so one binary covers the 26.x API
- * (getLightDampening), the 1.21.2+ API (getLightBlock), and the older
- * world-context API (getLightBlock(BlockGetter, BlockPos), fed the empty
- * getter exactly like vanilla's own state cache); it also means the tool
- * compiles against nothing but the JDK.
+ * (getLightDampening), the 1.21.2+ API (getLightBlock, getOffset(BlockPos)),
+ * and the older world-context API (getLightBlock/getOffset taking a
+ * BlockGetter, fed the empty getter exactly like vanilla's own state cache);
+ * blocksMotion is omitted for versions without it (26.3+). It also means the
+ * tool compiles against nothing but the JDK.
  *
  * Face-occlusion shapes are emitted as 16x16 bitmasks over the face plane.
  * Vanilla's faceShapeOccludes(a, b) tests whether the union of two face
@@ -96,7 +100,9 @@ public final class StateDump {
             canOcclude.add(occludes ? 1 : 0);
             useShape.add(shaped ? 1 : 0);
             hasCollision.add(m.hasCollision.getBoolean(m.getBlock.invoke(state)) ? 1 : 0);
-            blocksMotion.add(((Boolean) m.blocksMotion.invoke(state)) ? 1 : 0);
+            if (m.blocksMotion != null) {
+                blocksMotion.add(((Boolean) m.blocksMotion.invoke(state)) ? 1 : 0);
+            }
             legacySolid.add(((Boolean) m.isSolid.invoke(state)) ? 1 : 0);
             replaceable.add(((Boolean) m.canBeReplaced.invoke(state)) ? 1 : 0);
             int sturdyMask = 0;
@@ -116,18 +122,19 @@ public final class StateDump {
                     m.getShape.invoke(state, m.emptyGetter, m.probePos), m, id);
             collisionShapes.add(collisionZero);
             outlineShapes.add(outlineZero);
+            double[] zeroOffset = m.offset(state, m.zeroPos);
+            double[] probeOffset = m.offset(state, m.probePos);
             collisionShapeUsesOffset.add(shapeUsesPositionOffset(
-                    state, collisionZero, collisionProbe, m, id, "collision") ? 1 : 0);
+                    collisionZero, collisionProbe, zeroOffset, probeOffset, id, "collision") ? 1 : 0);
             outlineShapeUsesOffset.add(shapeUsesPositionOffset(
-                    state, outlineZero, outlineProbe, m, id, "outline") ? 1 : 0);
+                    outlineZero, outlineProbe, zeroOffset, probeOffset, id, "outline") ? 1 : 0);
             Object block = m.getBlock.invoke(state);
             boolean hasOffset = (Boolean) m.hasOffsetFunction.invoke(state);
             int offsetType = 0;
             float maxHorizontal = 0.0f;
             float maxVertical = 0.0f;
             if (hasOffset) {
-                Object zeroOffset = m.getOffset.invoke(state, m.zeroPos);
-                offsetType = m.vec3("y").getDouble(zeroOffset) == 0.0 ? 1 : 2;
+                offsetType = zeroOffset[1] == 0.0 ? 1 : 2;
                 maxHorizontal = ((Float) m.getMaxHorizontalOffset.invoke(block)).floatValue();
                 if (offsetType == 2) {
                     maxVertical = ((Float) m.getMaxVerticalOffset.invoke(block)).floatValue();
@@ -157,7 +164,9 @@ public final class StateDump {
             writeIntArray(w, "can_occlude", canOcclude);
             writeIntArray(w, "use_shape_for_light_occlusion", useShape);
             writeIntArray(w, "has_collision", hasCollision);
-            writeIntArray(w, "blocks_motion", blocksMotion);
+            if (m.blocksMotion != null) {
+                writeIntArray(w, "blocks_motion", blocksMotion);
+            }
             writeIntArray(w, "legacy_solid", legacySolid);
             writeIntArray(w, "replaceable", replaceable);
             writeIntArray(w, "full_face_sturdy", fullFaceSturdy);
@@ -236,12 +245,12 @@ public final class StateDump {
     }
 
     private static boolean shapeUsesPositionOffset(
-            Object state,
             double[] zeroShape,
             double[] probeShape,
-            Methods m,
+            double[] zeroOffset,
+            double[] probeOffset,
             int stateId,
-            String kind) throws Exception {
+            String kind) {
         if (java.util.Arrays.equals(zeroShape, probeShape)) {
             return false;
         }
@@ -249,11 +258,9 @@ public final class StateDump {
             throw new IllegalStateException(kind + " shape changes topology by position at state " + stateId);
         }
 
-        Object zeroOffset = m.getOffset.invoke(state, m.zeroPos);
-        Object probeOffset = m.getOffset.invoke(state, m.probePos);
-        double dx = m.vec3("x").getDouble(probeOffset) - m.vec3("x").getDouble(zeroOffset);
-        double dy = m.vec3("y").getDouble(probeOffset) - m.vec3("y").getDouble(zeroOffset);
-        double dz = m.vec3("z").getDouble(probeOffset) - m.vec3("z").getDouble(zeroOffset);
+        double dx = probeOffset[0] - zeroOffset[0];
+        double dy = probeOffset[1] - zeroOffset[1];
+        double dz = probeOffset[2] - zeroOffset[2];
         double[] delta = { dx, dy, dz, dx, dy, dz };
         for (int i = 0; i < zeroShape.length; i++) {
             double expected = zeroShape[i] + delta[i % 6];
@@ -357,11 +364,13 @@ public final class StateDump {
         final Method propagatesSkylightDown;
         final Method canOcclude;
         final Method useShapeForLightOcclusion;
+        /** Null where the version has no blocksMotion (26.3+). */
         final Method blocksMotion;
         final Method isSolid;
         final Method canBeReplaced;
         final Method isFaceSturdy;
         final Method getOffset;
+        private final boolean getOffsetTakesGetter;
         final Method hasOffsetFunction;
         final Method getMaxHorizontalOffset;
         final Method getMaxVerticalOffset;
@@ -392,7 +401,17 @@ public final class StateDump {
             probePos = pos.getConstructor(int.class, int.class, int.class).newInstance(5, 0, -7);
             getCollisionShape = stateClass.getMethod("getCollisionShape", getter, pos);
             getShape = stateClass.getMethod("getShape", getter, pos);
-            getOffset = stateClass.getMethod("getOffset", pos);
+            Method offset;
+            boolean offsetTakesGetter = false;
+            try {
+                offset = stateClass.getMethod("getOffset", pos);
+            } catch (NoSuchMethodException e) {
+                // Pre-1.21.2: getOffset(BlockGetter, BlockPos).
+                offset = stateClass.getMethod("getOffset", getter, pos);
+                offsetTakesGetter = true;
+            }
+            getOffset = offset;
+            getOffsetTakesGetter = offsetTakesGetter;
             hasOffsetFunction = stateClass.getMethod("hasOffsetFunction");
             Class<?> blockBehaviour = Class.forName("net.minecraft.world.level.block.state.BlockBehaviour");
             getMaxHorizontalOffset = blockBehaviour.getDeclaredMethod("getMaxHorizontalOffset");
@@ -402,7 +421,13 @@ public final class StateDump {
             getLightEmission = stateClass.getMethod("getLightEmission");
             canOcclude = stateClass.getMethod("canOcclude");
             useShapeForLightOcclusion = stateClass.getMethod("useShapeForLightOcclusion");
-            blocksMotion = stateClass.getMethod("blocksMotion");
+            Method motion;
+            try {
+                motion = stateClass.getMethod("blocksMotion");
+            } catch (NoSuchMethodException e) {
+                motion = null;
+            }
+            blocksMotion = motion;
             isSolid = stateClass.getMethod("isSolid");
             canBeReplaced = stateClass.getMethod("canBeReplaced");
             isFaceSturdy = stateClass.getMethod("isFaceSturdy", getter, pos, direction);
@@ -455,6 +480,16 @@ public final class StateDump {
                 vec3Fields.put(name, f);
             }
             return f;
+        }
+
+        /** BlockState.getOffset(pos) as {x, y, z}. */
+        double[] offset(Object state, Object pos) throws Exception {
+            Object vec = getOffsetTakesGetter
+                    ? getOffset.invoke(state, emptyGetter, pos)
+                    : getOffset.invoke(state, pos);
+            return new double[] {
+                vec3("x").getDouble(vec), vec3("y").getDouble(vec), vec3("z").getDouble(vec)
+            };
         }
 
         Object invokeWorld(Method method, Object state, Object... extra) throws Exception {
