@@ -55,10 +55,8 @@ pub struct EntityRenderInfo {
     pub head_x_rot_deg: f32,
     pub head_y_rot_deg: f32,
     pub body_y_rot_deg: f32,
-    /// Vanilla sleeping pose is independent of whether a bed facing can
-    /// currently be resolved from the world.
     pub is_sleeping: bool,
-    /// Nullable bed facing used only for direction-dependent sleep transforms.
+    /// The bed's facing; `None` when no bed can be resolved.
     pub sleeping_direction: Option<BedDirection>,
     /// Standing-pose eye height used by LivingEntityRenderer's sleeping offset.
     pub sleeping_eye_height: f32,
@@ -151,7 +149,7 @@ impl Default for EntityRenderInfo {
             body_y_rot_deg: 0.0,
             is_sleeping: false,
             sleeping_direction: None,
-            sleeping_eye_height: 1.62,
+            sleeping_eye_height: crate::player::STANDING_EYE_HEIGHT,
             is_baby: false,
             is_crouching: false,
             walk_anim_pos: 0.0,
@@ -1791,35 +1789,34 @@ impl EntityRenderer {
             body_y_rot_deg += (info.age_in_ticks.floor() * 3.25).cos() * std::f32::consts::PI * 0.4;
         }
         let translation = glam::Mat4::from_translation((*info.position - anchor).as_vec3());
-        let base = if info.is_sleeping {
-            // LivingEntityRenderer.submit + setupRotations for Pose.SLEEPING.
-            // Bed orientation is nullable: without one Vanilla omits the
-            // directional translation and falls back to body rotation.
-            let (offset, sleeping_yaw) = if let Some(direction) = info.sleeping_direction {
-                let head_offset = info.sleeping_eye_height - 0.1;
-                let (step_x, step_z) = direction.step();
-                (
-                    glam::Vec3::new(-step_x * head_offset, 0.0, -step_z * head_offset),
-                    direction.render_yaw_deg(),
-                )
-            } else {
-                (glam::Vec3::ZERO, body_y_rot_deg)
-            };
-            translation
-                * glam::Mat4::from_translation(offset)
-                * glam::Mat4::from_rotation_y(sleeping_yaw.to_radians())
-                * glam::Mat4::from_rotation_z(90.0_f32.to_radians())
-                * glam::Mat4::from_rotation_y(270.0_f32.to_radians())
-        } else {
-            let mut base =
-                translation * glam::Mat4::from_rotation_y((180.0 - body_y_rot_deg).to_radians());
-            if info.death_time > 0.0 {
-                base *= glam::Mat4::from_rotation_z(
-                    death_fall_degrees(info.death_time, info.entity_kind).to_radians(),
-                );
-            }
-            base
-        };
+        // Vanilla `LivingEntityRenderer.submit`'s bed offset, then
+        // `setupRotations`: death wins over the sleeping pose.
+        // TODO: vanilla keys these on `Pose.SLEEPING`; pomme on SLEEPING_POS,
+        // since the handler reduces the pose to crouching.
+        let bed = info.sleeping_direction.filter(|_| info.is_sleeping);
+        let mut base = translation;
+        if let Some(direction) = bed {
+            let head_offset = info.sleeping_eye_height - 0.1;
+            let (step_x, step_z) = direction.step();
+            base *= glam::Mat4::from_translation(glam::Vec3::new(
+                -step_x * head_offset,
+                0.0,
+                -step_z * head_offset,
+            ));
+        }
+        if !info.is_sleeping {
+            base *= glam::Mat4::from_rotation_y((180.0 - body_y_rot_deg).to_radians());
+        }
+        if info.death_time > 0.0 {
+            base *= glam::Mat4::from_rotation_z(
+                death_fall_degrees(info.death_time, info.entity_kind).to_radians(),
+            );
+        } else if info.is_sleeping {
+            let angle = bed.map_or(body_y_rot_deg, BedDirection::render_yaw_deg);
+            base *= glam::Mat4::from_rotation_y(angle.to_radians())
+                * glam::Mat4::from_rotation_z(flip_degrees(info.entity_kind).to_radians())
+                * glam::Mat4::from_rotation_y(270.0_f32.to_radians());
+        }
         // body_transform sits before the parts (whose root transforms carry
         // the convention's X flip), matching vanilla's setupRotations order.
         let base = info.body_transform.map_or(base, |m| base * m);
@@ -2280,17 +2277,18 @@ const ANIM_MARGIN: f32 = 0.5;
 /// Vanilla `AvatarRenderer.scale`: players render at 15/16 model scale.
 const PLAYER_MODEL_SCALE: f32 = 0.9375;
 
-/// Vanilla (width, height) hitbox per supported mob, scaled for babies; used to
-/// build the cull bounding sphere.
+/// Standing eye height, which positions a sleeper on its bed.
 pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
     match kind {
-        EntityKind::Player => 1.62,
+        EntityKind::Player => crate::player::STANDING_EYE_HEIGHT,
         EntityKind::Villager if is_baby => 0.63,
         EntityKind::Villager => 1.62,
         _ => entity_bounds(kind, is_baby).1 * 0.85,
     }
 }
 
+/// Vanilla (width, height) hitbox per supported mob, scaled for babies; used to
+/// build the cull bounding sphere.
 fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
     // Vanilla babies declare explicit BABY_DIMENSIONS rather than a scale;
     // list kinds whose constant isn't the half-scale the fallback below
@@ -2928,6 +2926,40 @@ mod tests {
                 .truncate()
                 .abs_diff_eq(glam::Vec3::new(0.5, 64.6875, 0.5 - 0.53), 1e-5)
         );
+    }
+
+    #[test]
+    fn dying_sleeper_takes_the_death_fall_not_the_bed_rotation() {
+        use crate::entity::components::Position;
+        use crate::world::block::BedDirection;
+
+        let info = EntityRenderInfo {
+            position: Position::new(2.0, 3.0, 4.0),
+            is_sleeping: true,
+            sleeping_direction: Some(BedDirection::North),
+            sleeping_eye_height: 1.62,
+            death_time: 5.0,
+            entity_kind: EntityKind::Player,
+            ..Default::default()
+        };
+        let actual = EntityRenderer::entity_matrix(&info, glam::DVec3::ZERO);
+        // The bed offset still applies (`submit`), then only the death fall.
+        let expected = glam::Mat4::from_translation(glam::Vec3::new(2.0, 3.0, 4.0 + 1.52))
+            * glam::Mat4::from_rotation_z(
+                crate::renderer::pipelines::entity_renderer::death_fall_degrees(
+                    5.0,
+                    EntityKind::Player,
+                )
+                .to_radians(),
+            )
+            * glam::Mat4::from_scale(glam::Vec3::splat(PLAYER_MODEL_SCALE));
+        for (a, b) in actual
+            .to_cols_array()
+            .into_iter()
+            .zip(expected.to_cols_array())
+        {
+            assert!((a - b).abs() < 1e-5, "{a} != {b}");
+        }
     }
 
     #[test]

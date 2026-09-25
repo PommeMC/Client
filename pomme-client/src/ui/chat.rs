@@ -310,6 +310,16 @@ pub enum ChatMethod {
     Command,
 }
 
+/// What Escape did on the chat screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatEscape {
+    /// A modal or the suggestion list took it, or chat wasn't open.
+    Handled,
+    Closed,
+    /// `InBedChatScreen.onClose`: ask to leave the bed; the screen stays up.
+    WakeUp,
+}
+
 /// Vanilla `ChatScreen.ExitReason`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChatExitReason {
@@ -514,8 +524,7 @@ pub struct ChatState {
     messages: VecDeque<ChatLine>,
     input: TextFieldState,
     open: bool,
-    /// Vanilla `InBedChatScreen` mode. Enter submits without closing, and
-    /// waking either closes the screen or preserves non-empty typed input.
+    /// Vanilla `InBedChatScreen`: Enter submits without closing.
     in_bed: bool,
     /// Sent messages for Up/Down recall (vanilla `recentChat`): consecutive
     /// duplicates collapse, capped at 100.
@@ -970,8 +979,8 @@ impl ChatState {
         self.update_command_info(tree);
     }
 
-    /// Vanilla `InBedChatScreen` is created through `ChatComponent.openScreen`,
-    /// so saved message drafts are restored exactly like ordinary message chat.
+    /// Opens `InBedChatScreen` the way `ChatComponent.openScreen` does, so a
+    /// saved draft comes back.
     pub fn open_in_bed(&mut self, tree: Option<&CommandTree>) {
         self.open(ChatMethod::Message, tree);
         self.in_bed = true;
@@ -1049,23 +1058,25 @@ impl ChatState {
     }
 
     /// Vanilla key priority while ChatScreen is open: a child/overlay consumes
-    /// Escape before the screen itself closes. Returns true only when this call
-    /// actually closed chat and the game should recapture the cursor.
-    pub fn handle_escape(&mut self) -> bool {
+    /// Escape before the screen itself closes.
+    pub fn handle_escape(&mut self) -> ChatEscape {
         // ConfirmScreen answers Escape with `callback.accept(false)`.
         if self.modal.is_some() {
             self.close_modal();
-            return false;
+            return ChatEscape::Handled;
         }
         if !self.open {
-            return false;
+            return ChatEscape::Handled;
         }
         if !self.suggestions.is_empty() {
             self.hide_suggestions();
-            return false;
+            return ChatEscape::Handled;
+        }
+        if self.in_bed {
+            return ChatEscape::WakeUp;
         }
         self.close(ChatExitReason::Intentional);
-        true
+        ChatEscape::Closed
     }
 
     fn lines_per_page(&self) -> usize {
@@ -1533,13 +1544,8 @@ impl ChatState {
                 normalized
             });
             if self.in_bed {
-                // `closeOnSubmit=false`: remain in InBedChatScreen and clear
-                // only the editor/screen-local navigation state.
-                self.input.set_value("", inner_w, width_fn);
-                self.is_restored_draft = false;
-                self.clear_suggestions();
-                self.history_pos = self.sent_history.len();
-                self.history_buffer.clear();
+                // `closeOnSubmit=false`: `setValue("")`, then `resetChatScroll`.
+                self.set_input_value("", inner_w, width_fn, tree);
                 self.reset_chat_scroll();
             } else {
                 self.close(ChatExitReason::Done);
@@ -3575,6 +3581,16 @@ mod tests {
     }
 
     #[test]
+    fn escape_in_bed_asks_to_wake_and_keeps_the_chat() {
+        let mut chat = ChatState::new();
+        chat.open_in_bed(None);
+        set_input(&mut chat, "typed");
+        assert_eq!(chat.handle_escape(), ChatEscape::WakeUp);
+        assert!(chat.is_in_bed());
+        assert_eq!(chat.input.value(), "typed");
+    }
+
+    #[test]
     fn in_bed_submit_stays_open_and_wake_preserves_nonempty_input() {
         let mut chat = ChatState::new();
         chat.open_in_bed(None);
@@ -4364,7 +4380,7 @@ mod tests {
         chat.open(ChatMethod::Message, Some(&tree));
         type_text(&mut chat, "/ti", &tree);
         assert_eq!(texts(&chat.suggestions), vec!["time"]);
-        assert!(!chat.handle_escape());
+        assert_eq!(chat.handle_escape(), ChatEscape::Handled);
         assert!(chat.suggestions.is_empty());
 
         press(&mut chat, UP, &tree);
@@ -4500,10 +4516,10 @@ mod tests {
         let mut chat = open_chat(ChatMethod::Command, Some(&tree));
         type_text(&mut chat, "t", &tree);
         assert!(!chat.suggestions.is_empty());
-        assert!(!chat.handle_escape());
+        assert_eq!(chat.handle_escape(), ChatEscape::Handled);
         assert!(chat.suggestions.is_empty());
         assert!(chat.is_open());
-        assert!(chat.handle_escape());
+        assert_eq!(chat.handle_escape(), ChatEscape::Closed);
         assert!(!chat.is_open());
     }
 

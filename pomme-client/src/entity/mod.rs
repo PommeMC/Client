@@ -1068,18 +1068,15 @@ impl EntityStore {
         }
     }
 
-    /// Apply LivingEntity SLEEPING_POS and vanilla's immediate `setPosToBed`.
+    /// Apply LivingEntity SLEEPING_POS; `setPosToBed` is a plain `setPos`, so
+    /// the previous position and any interpolation are left alone.
     pub fn set_sleeping_pos(&mut self, id: i32, pos: Option<BlockPos>) {
         let Some(entity) = self.living.get_mut(&id) else {
             return;
         };
         entity.sleeping_pos = pos;
         if let Some(pos) = pos {
-            let position: Position = crate::world::block::sleeping_position(pos).into();
-            entity.position = position;
-            entity.prev_position = position;
-            entity.interp_target = position;
-            entity.interp_steps = 0;
+            entity.position = crate::world::block::sleeping_position(pos).into();
         }
     }
 
@@ -1510,7 +1507,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sleeping_metadata_snaps_remote_living_entity_to_bed_center() {
+    fn sleeping_metadata_moves_remote_living_entity_to_bed_center() {
         let mut store = EntityStore::new();
         store.spawn_living(
             1,
@@ -1526,9 +1523,8 @@ mod tests {
         let entity = &store.living[&1];
         assert_eq!(entity.sleeping_pos, Some(bed));
         assert_eq!(entity.position, Position::new(2.5, 64.6875, -4.5));
-        assert_eq!(entity.prev_position, entity.position);
-        assert_eq!(entity.interp_target, entity.position);
-        assert_eq!(entity.interp_steps, 0);
+        // `setPos` leaves the previous position, so the sleeper lerps in.
+        assert_eq!(entity.prev_position, Position::new(10.0, 70.0, 10.0));
 
         store.set_sleeping_pos(1, None);
         assert_eq!(store.living[&1].sleeping_pos, None);

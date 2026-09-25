@@ -121,7 +121,7 @@ impl BedDirection {
 }
 
 /// Vanilla `BedBlock.getBedOrientation`: only actual bed states provide a
-/// facing.
+/// facing. The `_bed` id suffix stands in for `instanceof BedBlock`.
 pub fn bed_direction(state: BlockState) -> Option<BedDirection> {
     if !block_id(state).ends_with("_bed") {
         return None;

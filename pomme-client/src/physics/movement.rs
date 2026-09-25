@@ -114,9 +114,8 @@ pub fn tick(
         }
     }
 
-    // Vanilla `Player.isImmobile` extends LivingEntity's immobility with
-    // `isSleeping()`. The gate zeroes only LivingEntity locomotion/jump input;
-    // existing velocity, gravity, drag, and collision still run through travel.
+    // `Player.isImmobile` (asleep) zeroes locomotion and jump input; travel
+    // still runs.
     let mut jump_held = raw_jump_held;
     apply_living_immobility(player, &mut forward, &mut strafe, &mut jump_held);
 
@@ -489,15 +488,16 @@ fn update_sprint_state(
     }
 }
 
-// Forces the crouch pose under ceilings too low to stand in; riding and
-// sleeping aren't simulated.
+// `LocalPlayer.aiStep`: forces the crouch pose under ceilings too low to
+// stand in, unless asleep. Riding isn't simulated.
 fn update_crouch_state(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkStore) {
     player.crouching = player.game_mode != 3
         && !player.flying
         && !player.swimming
         && can_fit_with_height(chunk_store, player.position.into(), CROUCH_HEIGHT)
         && (input.performing_action(input::Action::Sneak)
-            || !can_fit_with_height(chunk_store, player.position.into(), STANDING_HEIGHT));
+            || !player.is_sleeping()
+                && !can_fit_with_height(chunk_store, player.position.into(), STANDING_HEIGHT));
 }
 
 fn can_fit_with_height(chunk_store: &ChunkStore, pos: DVec3, height: f64) -> bool {
@@ -911,8 +911,6 @@ mod tests {
         apply_living_immobility(&player, &mut forward, &mut strafe, &mut jumping);
         assert_eq!((forward, strafe, jumping), (0.0, 0.0, false));
 
-        // isImmobile does not freeze the entity: LivingEntity.travel still
-        // processes existing velocity, gravity, drag, and collision.
         crate::world::block::init("26.2");
         player.position = dvec3(0.0, 80.0, 0.0).into();
         player.velocity = crate::entity::components::Velocity::new(0.25, 0.0, -0.1);

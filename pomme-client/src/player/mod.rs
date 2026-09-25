@@ -471,31 +471,21 @@ impl LocalPlayer {
         self.sleeping_pos.is_some()
     }
 
-    /// Apply LivingEntity SLEEPING_POS metadata. Vanilla `startSleepInBed`
-    /// resets `sleepCounter` exactly when a new sleep begins; without this,
-    /// re-entering a bed during the 100..110 wake fade starts nearly black.
+    /// `LivingEntity.onSyncedDataUpdated(SLEEPING_POS)`: `setPosToBed` moves
+    /// only the current position, so the camera lerps in. The sleep counter
+    /// is left alone; only the server's `startSleepInBed` zeroes it.
     pub fn set_sleeping_pos(&mut self, pos: Option<azalea_core::position::BlockPos>) {
-        let was_sleeping = self.is_sleeping();
         self.sleeping_pos = pos;
         if let Some(pos) = pos {
-            // Vanilla LivingEntity.onSyncedDataUpdated(SLEEPING_POS) calls
-            // setPosToBed on the client. `setPos` changes the current position
-            // but deliberately leaves the previous-tick interpolation endpoint.
             self.position = crate::world::block::sleeping_position(pos).into();
-        }
-        if !was_sleeping && self.is_sleeping() {
-            self.sleep_counter = 0;
         }
     }
 
-    /// Reconfiguration destroys Vanilla's LocalPlayer. Pomme keeps the object,
-    /// so clear sleep-only state that must not survive into the next play
-    /// level.
+    /// Reconfiguration replaces vanilla's LocalPlayer; the camera, and so the
+    /// eye height, carries over.
     pub fn reset_sleep_for_level_teardown(&mut self) {
         self.sleeping_pos = None;
         self.sleep_counter = 0;
-        self.eye_height = STANDING_EYE_HEIGHT;
-        self.prev_eye_height = STANDING_EYE_HEIGHT;
     }
 
     /// Vanilla Player.tick sleep-counter branch: ramps to 100 while sleeping,
@@ -719,14 +709,13 @@ mod tests {
     }
 
     #[test]
-    fn starting_sleep_resets_fade_counter_after_wake() {
+    fn sleeping_pos_moves_to_bed_and_keeps_the_fade_counter() {
         let mut player = LocalPlayer::new();
         let bed = azalea_core::position::BlockPos::new(1, 64, 1);
 
         player.position = Position::new(8.0, 70.0, -3.0);
         player.prev_position = Position::new(7.0, 70.0, -3.0);
         player.set_sleeping_pos(Some(bed));
-        assert_eq!(player.sleep_counter, 0);
         assert_eq!(player.position, Position::new(1.5, 64.6875, 1.5));
         assert_eq!(
             player.prev_position,
@@ -753,12 +742,11 @@ mod tests {
         player.tick_sleep();
         assert_eq!(player.sleep_counter, 101);
 
-        // Vanilla startSleepInBed begins a fresh fade even though the old wake
-        // fade has not yet reached 110.
+        // Only the server zeroes the counter; back in bed mid-fade, the
+        // client's `Player.tick` clamps it straight to fully dark.
         player.set_sleeping_pos(Some(bed));
-        assert_eq!(player.sleep_counter, 0);
         player.tick_sleep();
-        assert_eq!(player.sleep_counter, 1);
+        assert_eq!(player.sleep_counter, 100);
     }
 
     #[test]
@@ -776,17 +764,15 @@ mod tests {
     }
 
     #[test]
-    fn reconfiguration_sleep_reset_restores_fresh_player_eye_state() {
+    fn reconfiguration_sleep_reset_keeps_the_camera_eye_height() {
         let mut player = LocalPlayer::new();
         player.sleeping_pos = Some(azalea_core::position::BlockPos::new(1, 64, 1));
         player.sleep_counter = 87;
         player.eye_height = 0.3;
-        player.prev_eye_height = 0.4;
         player.reset_sleep_for_level_teardown();
         assert!(player.sleeping_pos.is_none());
         assert_eq!(player.sleep_counter, 0);
-        assert_eq!(player.eye_height, STANDING_EYE_HEIGHT);
-        assert_eq!(player.prev_eye_height, STANDING_EYE_HEIGHT);
+        assert_eq!(player.eye_height, 0.3);
     }
 
     #[test]

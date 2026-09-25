@@ -108,9 +108,7 @@ impl CloudMode {
 pub struct Camera {
     pub position: Position,
     pub look_dir: LookDirection,
-    /// First-person bed-facing sleeping orientation. Bed-facing yaw is
-    /// render-only; Vanilla's zero sleeping pitch is also applied to
-    /// `look_dir`.
+    /// The first-person view along the bed while asleep; render-only.
     sleeping_look_dir: Option<LookDirection>,
     pub mode: CameraMode,
     pub third_person_dist: f32,
@@ -282,8 +280,7 @@ impl Camera {
 
     pub fn set_sleeping_look(&mut self, yaw_deg: Option<f32>) {
         self.sleeping_look_dir = yaw_deg.map(|yaw| {
-            // LivingEntity.tick sets xRot=0 while sleeping. Keep the entity's
-            // yaw free for third person, but do not preserve stale pitch.
+            // `LivingEntity.tick` zeroes xRot while sleeping; yaw stays the entity's.
             self.look_dir = LookDirection::new(self.look_dir.y_rot_deg(), 0.0);
             LookDirection::new(yaw, 0.0)
         });
@@ -756,8 +753,6 @@ mod tests {
         );
     }
 
-    /// The midpoint is the multiplier pomme hardcoded before the slider
-    /// existed.
     #[test]
     fn sleeping_bed_yaw_is_render_only_but_pitch_is_authoritative() {
         let mut camera = Camera::new(16.0 / 9.0);
@@ -773,6 +768,8 @@ mod tests {
         assert_eq!(camera.effective_look_deg(), (37.0, 0.0));
     }
 
+    /// The midpoint is the multiplier pomme hardcoded before the slider
+    /// existed.
     #[test]
     fn mouse_sensitivity_curve_matches_vanilla() {
         for (sensitivity, expected) in [(0.0, 0.0096), (0.5, 0.15), (1.0, 0.6144)] {
