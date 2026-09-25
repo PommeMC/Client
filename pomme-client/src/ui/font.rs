@@ -31,6 +31,7 @@ pub(crate) struct FontSources<'a> {
     pub jar_assets_dir: &'a Path,
     pub asset_index: &'a Option<AssetIndex>,
     pub packs: &'a ResourcePackManager,
+    pub options: FontOptions,
 }
 
 impl FontSources<'_> {
@@ -472,8 +473,7 @@ impl GlyphMap {
         sources: FontSources<'_>,
         device_layer_limit: u32,
     ) -> Result<(Self, GlyphAtlasPixels), String> {
-        // TODO: the Force Unicode Font and Japanese Glyph Variants options.
-        let options = FontOptions::default();
+        let options = sources.options;
         let mut atlases = Atlases::new(device_layer_limit);
         let missing_position = atlases.gray.place(5, 8)?;
         let missing_glyph = Arc::new(append_missing_glyph(
@@ -535,6 +535,11 @@ impl GlyphMap {
             cell_h: 8,
         };
         Ok((map, pixels))
+    }
+
+    /// `SpecialGlyphs.MISSING`, which vanilla's missing font set renders.
+    pub(crate) fn missing(&self) -> &GlyphInfo {
+        &self.missing_glyph
     }
 
     /// The glyph for `ch` in `font`; unknown fonts render MISSING rather than
@@ -1651,6 +1656,7 @@ mod tests {
                     jar_assets_dir: &self.jar(),
                     asset_index: &None,
                     packs: &self.packs,
+                    options: FontOptions::default(),
                 },
                 u32::MAX,
             )
@@ -1662,6 +1668,7 @@ mod tests {
                     jar_assets_dir: self.root.as_path(),
                     asset_index: &None,
                     packs: &self.packs,
+                    options: FontOptions::default(),
                 },
                 missing: Arc::new(space_glyph(6.0)),
             }
@@ -2035,6 +2042,7 @@ mod tests {
                 jar_assets_dir: &fixture.jar(),
                 asset_index: &None,
                 packs: &packs,
+                options: FontOptions::default(),
             },
             u32::MAX,
         )
@@ -2084,6 +2092,7 @@ mod tests {
                     jar_assets_dir: &fixture.jar(),
                     asset_index: &None,
                     packs,
+                    options: FontOptions::default(),
                 },
                 u32::MAX,
             )

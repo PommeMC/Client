@@ -91,6 +91,9 @@ struct ServerVerifiedState {
 struct ActiveUse {
     kind: ItemKind,
     anim: ItemUseAnimation,
+    /// Bundle entries left to drop, predicted like vanilla's local
+    /// `removeOne`; `None` unless using a bundle.
+    bundle: Option<usize>,
     sound: SoundRef,
     has_particles: bool,
     /// Atlas key for the crumb particles, e.g. `item/cooked_beef`.
@@ -382,7 +385,7 @@ impl InteractionState {
             // No screen-open release in vanilla either: an in-flight use keeps
             // ticking (and completing) while a menu is up.
             self.update_using_item(
-                held_stack, audio, chunks, player_pos, eye_pos, look, effects,
+                held_stack, sender, audio, chunks, player_pos, eye_pos, look, effects,
             );
             self.tick_attack_cooldown(held_stack);
             self.update_swing();
@@ -482,7 +485,7 @@ impl InteractionState {
             self.use_delay -= 1;
         }
         self.update_using_item(
-            held_stack, audio, chunks, player_pos, eye_pos, look, effects,
+            held_stack, sender, audio, chunks, player_pos, eye_pos, look, effects,
         );
         self.tick_attack_cooldown(held_stack);
         self.update_swing();
@@ -777,6 +780,25 @@ impl InteractionState {
             x_rot: look.x_rot_deg(),
         }));
 
+        // `BundleItem`: a 200-tick use. Its BUNDLE animation is the plain
+        // swing pose, which `None` already draws.
+        if crate::ui::bundle::is_bundle(stack)
+            && let Some(contents) = crate::ui::bundle::contents(stack)
+        {
+            self.using_item = Some(ActiveUse {
+                kind: stack.kind,
+                anim: ItemUseAnimation::None,
+                bundle: Some(contents.items.len()),
+                sound: SoundRef::event("item.bundle.drop_contents"),
+                has_particles: false,
+                texture: format!("item/{}", item_resource_name(stack.kind)),
+                use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
+                duration: 200,
+                remaining: 200,
+            });
+            return true;
+        }
+
         let Some(consumable) = stack_component::<Consumable>(stack) else {
             return true;
         };
@@ -793,6 +815,7 @@ impl InteractionState {
         let active = ActiveUse {
             kind: stack.kind,
             anim: consumable.animation,
+            bundle: None,
             sound: SoundRef::resolve(&consumable.sound),
             has_particles: consumable.has_consume_particles,
             texture: format!("item/{}", item_resource_name(stack.kind)),
@@ -851,6 +874,7 @@ impl InteractionState {
     pub fn tick_dead_living_state(
         &mut self,
         held_stack: Option<&ItemStackData>,
+        sender: &PacketSender,
         audio: &AudioEngine,
         chunks: &ChunkStore,
         player_pos: DVec3,
@@ -859,7 +883,7 @@ impl InteractionState {
         effects: &mut BreakEffects,
     ) {
         self.update_using_item(
-            held_stack, audio, chunks, player_pos, eye_pos, look, effects,
+            held_stack, sender, audio, chunks, player_pos, eye_pos, look, effects,
         );
     }
 
@@ -887,6 +911,7 @@ impl InteractionState {
     fn update_using_item(
         &mut self,
         held_stack: Option<&ItemStackData>,
+        sender: &PacketSender,
         audio: &AudioEngine,
         chunks: &ChunkStore,
         player_pos: DVec3,
@@ -901,10 +926,40 @@ impl InteractionState {
             self.using_item = None;
             return;
         }
+        // `BundleItem.onUseTick`: the first tick, then every other tick after
+        // the tenth, drops one entry (`removeOne`'s sound, `Player.drop`'s
+        // client swing). The server's copy of the stack catches up the count.
+        let drop_tick = active.remaining == active.duration
+            || active.remaining < active.duration - 10 && active.remaining % 2 == 0;
+        if active.bundle.is_some() && drop_tick {
+            let held = held_stack
+                .and_then(crate::ui::bundle::contents)
+                .map_or(0, |c| c.items.len());
+            let dropped = self
+                .using_item
+                .as_mut()
+                .and_then(|a| a.bundle.as_mut())
+                .is_some_and(|left| {
+                    *left = (*left).min(held);
+                    let dropped = *left > 0;
+                    *left = left.saturating_sub(1);
+                    dropped
+                });
+            if dropped {
+                crate::ui::bundle::Sound::RemoveOne.play(audio, player_pos.into());
+                self.swing(sender);
+            }
+        }
+        let Some(active) = &self.using_item else {
+            return;
+        };
         // `Consumable.shouldEmitParticlesAndSounds`.
         let elapsed = active.duration - active.remaining;
         let wait = (active.duration as f32 * CONSUME_EFFECTS_START_FRACTION) as i32;
-        if elapsed > wait && active.remaining % CONSUME_EFFECTS_INTERVAL == 0 {
+        if active.bundle.is_none()
+            && elapsed > wait
+            && active.remaining % CONSUME_EFFECTS_INTERVAL == 0
+        {
             emit_consume_effects(
                 active,
                 5,
@@ -950,6 +1005,10 @@ impl InteractionState {
         let Some(active) = self.using_item.take() else {
             return;
         };
+        // A bundle isn't a `Consumable`: finishing it plays nothing.
+        if active.bundle.is_some() {
+            return;
+        }
         emit_consume_effects(
             &active, 16, audio, particles, chunks, player_pos, eye_pos, look,
         );
@@ -1716,6 +1775,7 @@ mod tests {
         state.using_item = Some(ActiveUse {
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
+            bundle: None,
             sound: SoundRef::event("entity.generic.eat"),
             has_particles: true,
             texture: "item/apple".to_string(),
@@ -1741,6 +1801,7 @@ mod tests {
         state.using_item = Some(ActiveUse {
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
+            bundle: None,
             sound: SoundRef::event("entity.generic.eat"),
             has_particles: true,
             texture: "item/apple".to_string(),

@@ -163,5 +163,6 @@ fn build_contents(
         clicked_outside,
         ops,
         button: None,
+        hovered,
     }
 }

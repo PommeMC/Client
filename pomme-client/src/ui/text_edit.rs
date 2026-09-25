@@ -474,9 +474,7 @@ impl TextFieldState {
         let caret_on_screen = rel_cursor >= 0 && rel_cursor <= displayed_len as isize;
         let caret_byte = rel_cursor.clamp(0, displayed_len as isize) as usize;
 
-        let elapsed = self.focused_time.elapsed().as_millis() as u64;
-        let caret_visible =
-            focused && (elapsed / CURSOR_BLINK_INTERVAL_MS).is_multiple_of(2) && caret_on_screen;
+        let caret_visible = focused && caret_visible(self.focused_time) && caret_on_screen;
 
         let insert_mode =
             self.cursor_pos < self.value.len() || utf16_len(&self.value) >= self.max_length;
@@ -502,6 +500,474 @@ impl TextFieldState {
             insert_mode,
         }
     }
+}
+
+/// `TextCursorUtils.isCursorVisible`: the caret blinks on and off.
+fn caret_visible(since: Instant) -> bool {
+    (since.elapsed().as_millis() as u64 / CURSOR_BLINK_INTERVAL_MS).is_multiple_of(2)
+}
+
+/// Vanilla `MultilineTextField`: the text model behind `MultiLineEditBox`.
+/// Positions are byte indices, as in [`TextFieldState`]; the display lines are
+/// byte ranges of `value`, re-flowed on every change.
+pub struct MultilineField {
+    value: String,
+    cursor: usize,
+    select_cursor: usize,
+    selecting: bool,
+    /// `characterLimit`, in UTF-16 code units like Java's `String.length()`.
+    character_limit: usize,
+    line_limit: usize,
+    lines: Vec<(usize, usize)>,
+    /// The wrap width, in the unit the measuring function returns.
+    width: f32,
+    /// `AbstractTextAreaWidget`'s scroll amount, in the same unit.
+    scroll: f32,
+    /// Whether the cursor moved since the last draw, which scrolls it back
+    /// into view (vanilla's `cursorListener`).
+    cursor_dirty: bool,
+    focused_time: Instant,
+}
+
+/// Where [`MultilineField::seek_cursor`] moves from.
+pub enum Whence {
+    Relative(i32),
+    End,
+}
+
+impl MultilineField {
+    pub fn new(character_limit: usize, line_limit: Option<usize>) -> Self {
+        Self {
+            value: String::new(),
+            cursor: 0,
+            select_cursor: 0,
+            selecting: false,
+            character_limit,
+            line_limit: line_limit.unwrap_or(usize::MAX),
+            lines: vec![(0, 0)],
+            width: 0.0,
+            scroll: 0.0,
+            cursor_dirty: false,
+            focused_time: Instant::now(),
+        }
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn lines(&self) -> &[(usize, usize)] {
+        &self.lines
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.select_cursor != self.cursor
+    }
+
+    /// The selected range, low end first (`getSelected`).
+    pub fn selection(&self) -> (usize, usize) {
+        (
+            self.cursor.min(self.select_cursor),
+            self.cursor.max(self.select_cursor),
+        )
+    }
+
+    pub fn set_selecting(&mut self, selecting: bool) {
+        self.selecting = selecting;
+    }
+
+    pub fn set_focused(&mut self, focused: bool) {
+        if focused {
+            self.focused_time = Instant::now();
+        }
+    }
+
+    pub fn scroll(&self) -> f32 {
+        self.scroll
+    }
+
+    pub fn set_scroll(&mut self, scroll: f32, max: f32) {
+        self.scroll = scroll.clamp(0.0, max.max(0.0));
+    }
+
+    /// `MultiLineEditBox.scrollToCursor`, run once after the cursor moves.
+    pub fn scroll_to_cursor(&mut self, height: f32, line_height: f32, padding: f32) {
+        if !std::mem::take(&mut self.cursor_dirty) {
+            return;
+        }
+        let max = (self.line_count() as f32 * line_height + 2.0 * padding - height).max(0.0);
+        let line = self.line_at_cursor() as f32;
+        let first_visible = (self.scroll / line_height) as usize;
+        let scroll = if self.cursor <= self.line_view(first_visible).0 {
+            line * line_height
+        } else {
+            let last_visible = ((self.scroll + height) / line_height) as usize;
+            if self.cursor > self.line_view(last_visible.saturating_sub(1)).1 {
+                line * line_height - height + line_height + 2.0 * padding
+            } else {
+                self.scroll
+            }
+        };
+        self.set_scroll(scroll, max);
+    }
+
+    /// `getLineView`, clamped to the existing lines.
+    fn line_view(&self, index: usize) -> (usize, usize) {
+        self.lines[index.min(self.lines.len() - 1)]
+    }
+
+    pub fn caret_visible(&self) -> bool {
+        caret_visible(self.focused_time)
+    }
+
+    /// Re-wraps on a new width; the layout owns it, so it arrives with each
+    /// frame rather than at construction.
+    pub fn set_width(&mut self, width: f32, width_fn: &dyn Fn(&str) -> f32) {
+        if self.width != width {
+            self.width = width;
+            self.reflow(width_fn);
+        }
+    }
+
+    pub fn set_value(&mut self, value: &str, width_fn: &dyn Fn(&str) -> f32) {
+        let value = truncate_to_utf16(value, self.character_limit);
+        if self.overflows_line_limit(&value, width_fn) {
+            return;
+        }
+        self.value = value;
+        self.cursor = self.value.len();
+        self.select_cursor = self.cursor;
+        self.reflow(width_fn);
+    }
+
+    /// `insertText`: replaces the selection, honouring both limits.
+    pub fn insert_text(&mut self, input: &str, width_fn: &dyn Fn(&str) -> f32) {
+        if input.is_empty() && !self.has_selection() {
+            return;
+        }
+        let (start, end) = self.selection();
+        let filtered: String = input
+            .chars()
+            .filter(|c| *c == '\n' || is_allowed_chat_character(*c))
+            .collect();
+        let selected_len = utf16_len(&self.value[start..end]);
+        let remaining = self
+            .character_limit
+            .saturating_sub(utf16_len(&self.value).saturating_sub(selected_len));
+        let text = truncate_to_utf16(&filtered, remaining);
+        let mut new_value = String::with_capacity(self.value.len() + text.len());
+        new_value.push_str(&self.value[..start]);
+        new_value.push_str(&text);
+        new_value.push_str(&self.value[end..]);
+        if self.overflows_line_limit(&new_value, width_fn) {
+            return;
+        }
+        self.value = new_value;
+        self.cursor = start + text.len();
+        self.select_cursor = self.cursor;
+        self.cursor_dirty = true;
+        self.reflow(width_fn);
+    }
+
+    /// `deleteText`: `dir` characters, or the selection when there is one.
+    pub fn delete_text(&mut self, dir: i32, width_fn: &dyn Fn(&str) -> f32) {
+        if !self.has_selection() {
+            self.select_cursor = offset_by_chars(&self.value, self.cursor, dir);
+        }
+        self.insert_text("", width_fn);
+    }
+
+    /// `seekCursor`, clamped to the value and following `selecting`.
+    pub fn seek_cursor(&mut self, whence: Whence) {
+        self.cursor = match whence {
+            Whence::Relative(delta) => offset_by_chars(&self.value, self.cursor, delta),
+            Whence::End => self.value.len(),
+        };
+        self.cursor = floor_char_boundary(&self.value, self.cursor.min(self.value.len()));
+        self.focused_time = Instant::now();
+        self.cursor_dirty = true;
+        if !self.selecting {
+            self.select_cursor = self.cursor;
+        }
+    }
+
+    pub fn seek_cursor_to(&mut self, position: usize) {
+        self.cursor = floor_char_boundary(&self.value, position.min(self.value.len()));
+        self.focused_time = Instant::now();
+        self.cursor_dirty = true;
+        if !self.selecting {
+            self.select_cursor = self.cursor;
+        }
+    }
+
+    /// `seekCursorLine`: keeps the cursor's horizontal offset across lines.
+    pub fn seek_cursor_line(&mut self, offset: i32, width_fn: &dyn Fn(&str) -> f32) {
+        if offset == 0 {
+            return;
+        }
+        let line = self.line_at_cursor();
+        let (begin, _) = self.lines[line];
+        // `+ 2` is vanilla's `LINE_SEEK_PIXEL_BIAS`.
+        let left = width_fn(&self.value[begin..self.cursor]) + 2.0;
+        let target = (line as i32 + offset).clamp(0, self.lines.len() as i32 - 1) as usize;
+        let (begin, end) = self.lines[target];
+        let column = plain_substr_by_width(&self.value[begin..end], left, false, width_fn).len();
+        self.seek_cursor_to(begin + column);
+    }
+
+    /// `seekCursorToPoint`: `x`/`y` are relative to the text's top-left.
+    pub fn seek_cursor_to_point(
+        &mut self,
+        x: f32,
+        y: f32,
+        line_height: f32,
+        width_fn: &dyn Fn(&str) -> f32,
+    ) {
+        let line =
+            ((y / line_height).floor() as i32).clamp(0, self.lines.len() as i32 - 1) as usize;
+        let (begin, end) = self.lines[line];
+        let column = plain_substr_by_width(&self.value[begin..end], x, false, width_fn).len();
+        self.seek_cursor_to(begin + column);
+    }
+
+    /// `getLineAtCursor`, which falls back to the last line.
+    pub fn line_at_cursor(&self) -> usize {
+        self.lines
+            .iter()
+            .position(|(begin, end)| self.cursor >= *begin && self.cursor <= *end)
+            .unwrap_or(self.lines.len() - 1)
+    }
+
+    pub fn key_pressed(
+        &mut self,
+        code: KeyCode,
+        mods: &KeyMods,
+        clipboard: &mut dyn ClipboardAccess,
+        width_fn: &dyn Fn(&str) -> f32,
+    ) -> bool {
+        self.selecting = mods.shift;
+        let edit = mods.edit_shortcut();
+        match code {
+            KeyCode::KeyA if edit => {
+                self.cursor = self.value.len();
+                self.select_cursor = 0;
+                true
+            }
+            KeyCode::KeyC if edit => {
+                clipboard.set(self.selected_text());
+                true
+            }
+            KeyCode::KeyV if edit => {
+                let text = clipboard.get();
+                self.insert_text(&text, width_fn);
+                true
+            }
+            KeyCode::KeyX if edit => {
+                clipboard.set(self.selected_text());
+                self.insert_text("", width_fn);
+                true
+            }
+            KeyCode::ArrowLeft => {
+                if edit {
+                    let (begin, _) = self.previous_word();
+                    self.seek_cursor_to(begin);
+                } else {
+                    self.seek_cursor(Whence::Relative(BACKWARDS));
+                }
+                true
+            }
+            KeyCode::ArrowRight => {
+                if edit {
+                    let (begin, _) = self.next_word();
+                    self.seek_cursor_to(begin);
+                } else {
+                    self.seek_cursor(Whence::Relative(FORWARDS));
+                }
+                true
+            }
+            KeyCode::ArrowUp => {
+                if !edit {
+                    self.seek_cursor_line(-1, width_fn);
+                }
+                true
+            }
+            KeyCode::ArrowDown => {
+                if !edit {
+                    self.seek_cursor_line(1, width_fn);
+                }
+                true
+            }
+            KeyCode::Home => {
+                if edit {
+                    self.seek_cursor_to(0);
+                } else {
+                    let (begin, _) = self.lines[self.line_at_cursor()];
+                    self.seek_cursor_to(begin);
+                }
+                true
+            }
+            KeyCode::End => {
+                if edit {
+                    self.seek_cursor(Whence::End);
+                } else {
+                    let (_, end) = self.lines[self.line_at_cursor()];
+                    self.seek_cursor_to(end);
+                }
+                true
+            }
+            KeyCode::Backspace => {
+                if edit {
+                    let (begin, _) = self.previous_word();
+                    self.delete_to(begin, width_fn);
+                } else {
+                    self.delete_text(BACKWARDS, width_fn);
+                }
+                true
+            }
+            KeyCode::Delete => {
+                if edit {
+                    let (begin, _) = self.next_word();
+                    self.delete_to(begin, width_fn);
+                } else {
+                    self.delete_text(FORWARDS, width_fn);
+                }
+                true
+            }
+            // The one widget where a newline is typed rather than filtered.
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                self.insert_text("\n", width_fn);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn handle(
+        &mut self,
+        event: &TextInputEvent,
+        clipboard: &mut dyn ClipboardAccess,
+        width_fn: &dyn Fn(&str) -> f32,
+    ) -> bool {
+        match event {
+            TextInputEvent::Key { code, mods } => {
+                self.key_pressed(*code, mods, clipboard, width_fn)
+            }
+            TextInputEvent::Char(c) => {
+                if is_allowed_chat_character(*c) {
+                    let mut buf = [0u8; 4];
+                    self.insert_text(c.encode_utf8(&mut buf), width_fn);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    fn selected_text(&self) -> &str {
+        let (start, end) = self.selection();
+        &self.value[start..end]
+    }
+
+    fn delete_to(&mut self, position: usize, width_fn: &dyn Fn(&str) -> f32) {
+        self.select_cursor = position.min(self.value.len());
+        self.insert_text("", width_fn);
+    }
+
+    /// `getPreviousWord`.
+    fn previous_word(&self) -> (usize, usize) {
+        if self.value.is_empty() {
+            return (0, 0);
+        }
+        let mut start = floor_char_boundary(&self.value, self.cursor.min(self.value.len() - 1));
+        while start > 0 && self.char_before(start).is_some_and(char::is_whitespace) {
+            start = offset_by_chars(&self.value, start, BACKWARDS);
+        }
+        while start > 0 && self.char_before(start).is_some_and(|c| !c.is_whitespace()) {
+            start = offset_by_chars(&self.value, start, BACKWARDS);
+        }
+        (start, self.word_end(start))
+    }
+
+    /// `getNextWord`.
+    fn next_word(&self) -> (usize, usize) {
+        if self.value.is_empty() {
+            return (0, 0);
+        }
+        let mut start = floor_char_boundary(&self.value, self.cursor.min(self.value.len() - 1));
+        while start < self.value.len() && self.char_at(start).is_some_and(|c| !c.is_whitespace()) {
+            start = offset_by_chars(&self.value, start, FORWARDS);
+        }
+        while start < self.value.len() && self.char_at(start).is_some_and(char::is_whitespace) {
+            start = offset_by_chars(&self.value, start, FORWARDS);
+        }
+        (start, self.word_end(start))
+    }
+
+    fn word_end(&self, from: usize) -> usize {
+        let mut end = from;
+        while end < self.value.len() && self.char_at(end).is_some_and(|c| !c.is_whitespace()) {
+            end = offset_by_chars(&self.value, end, FORWARDS);
+        }
+        end
+    }
+
+    fn char_at(&self, position: usize) -> Option<char> {
+        self.value[position..].chars().next()
+    }
+
+    fn char_before(&self, position: usize) -> Option<char> {
+        self.value[..position].chars().next_back()
+    }
+
+    fn overflows_line_limit(&self, value: &str, width_fn: &dyn Fn(&str) -> f32) -> bool {
+        self.line_limit != usize::MAX
+            && split_lines(value, self.width, width_fn).len() > self.line_limit
+    }
+
+    fn reflow(&mut self, width_fn: &dyn Fn(&str) -> f32) {
+        self.lines = split_lines(&self.value, self.width, width_fn);
+    }
+}
+
+/// `StringSplitter.splitLines` over plain text: the byte range of each display
+/// line, leaving out the newline (or the space) the line broke on. An empty
+/// value, and a trailing newline, still give a line.
+pub fn split_lines(value: &str, width: f32, width_fn: &dyn Fn(&str) -> f32) -> Vec<(usize, usize)> {
+    if value.is_empty() {
+        return vec![(0, 0)];
+    }
+    let mut lines = Vec::new();
+    let mut start = 0usize;
+    while start < value.len() {
+        let widths = value[start..].char_indices().map(|(offset, c)| {
+            let index = start + offset;
+            (index, c, width_fn(&value[index..index + c.len_utf8()]))
+        });
+        match crate::ui::text::find_line_break(widths, width) {
+            Some((end, next)) => {
+                lines.push((start, end));
+                start = next;
+            }
+            None => {
+                lines.push((start, value.len()));
+                return lines;
+            }
+        }
+    }
+    // `reflowDisplayLines`: a trailing newline leaves an empty last line.
+    if value.ends_with('\n') {
+        lines.push((value.len(), value.len()));
+    }
+    lines
 }
 
 /// `StringUtil.isAllowedChatCharacter`: not `§`, `>= ' '`, not DEL.
@@ -599,6 +1065,72 @@ fn plain_substr_by_width<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `MultilineTextField` wraps on the widget's width, breaks on a newline
+    /// and refuses an edit that would overflow either limit.
+    #[test]
+    fn multiline_field_wraps_and_enforces_its_limits() {
+        // 30px fits five 6px characters.
+        let mut field = MultilineField::new(32, Some(3));
+        field.set_width(30.0, W);
+        field.set_value("hello world", W);
+        assert_eq!(
+            field
+                .lines()
+                .iter()
+                .map(|(begin, end)| &field.value()[*begin..*end])
+                .collect::<Vec<_>>(),
+            ["hello", "world"]
+        );
+        assert_eq!(field.line_count(), 2);
+
+        // Enter is the one place a newline is allowed.
+        let mut clipboard = MockClipboard(String::new());
+        field.key_pressed(
+            KeyCode::Enter,
+            &KeyMods {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                super_key: false,
+            },
+            &mut clipboard,
+            W,
+        );
+        assert_eq!(field.value(), "hello world\n");
+        // A trailing newline still shows a line, which is the third and last
+        // the line limit allows, so a fourth is refused.
+        assert_eq!(field.line_count(), 3);
+        field.insert_text("\n", W);
+        assert_eq!(field.value(), "hello world\n");
+        // Text that stays within the limit still goes in.
+        field.insert_text("me", W);
+        assert_eq!(field.value(), "hello world\nme");
+
+        // The character limit truncates an insertion.
+        let mut field = MultilineField::new(8, None);
+        field.set_width(WIDE, W);
+        field.insert_text("123456789", W);
+        assert_eq!(field.value(), "12345678");
+    }
+
+    #[test]
+    fn split_lines_breaks_on_spaces_newlines_and_long_words() {
+        let lines = |text: &str, width: f32| {
+            split_lines(text, width, W)
+                .into_iter()
+                .map(|(begin, end)| text[begin..end].to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lines("", 60.0), [""]);
+        assert_eq!(lines("a\nb", 60.0), ["a", "b"]);
+        // A trailing newline leaves an empty last line.
+        assert_eq!(lines("a\n", 60.0), ["a", ""]);
+        // The space a line breaks on is dropped.
+        assert_eq!(lines("aa bb cc", 30.0), ["aa bb", "cc"]);
+        // A word longer than the line breaks mid-word.
+        assert_eq!(lines("abcdefgh", 18.0), ["abc", "def", "gh"]);
+    }
 
     // Fake font: 6px per char, so `inner_w / 6` chars fit.
     fn wf(s: &str) -> f32 {

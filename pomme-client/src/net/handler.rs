@@ -20,8 +20,18 @@ use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
+use crate::ui::server_dialog::DialogReference;
 use crate::ui::text::format_text_spans;
 use crate::world::block::model::CardinalLightType;
+
+fn dialog_holder_reference(
+    holder: &azalea_registry::Holder<azalea_registry::data::Dialog, simdnbt::owned::Nbt>,
+) -> DialogReference {
+    match holder {
+        azalea_registry::Holder::Reference(dialog) => DialogReference::ProtocolId(dialog.to_u32()),
+        azalea_registry::Holder::Direct(nbt) => DialogReference::inline(nbt),
+    }
+}
 
 /// Dimension info from a login/respawn registry entry. Fields that Azalea does
 /// not model directly live in its flattened extras. Missing `has_skylight`
@@ -208,22 +218,32 @@ pub fn handle_game_packet(
         ClientboundGamePacket::ContainerSetContent(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerContent {
                 container_id: p.container_id,
-                items: p.items.clone(),
-                carried: p.carried_item.clone(),
+                items: p
+                    .items
+                    .iter()
+                    .map(super::bundle_codec::normalized)
+                    .collect(),
+                carried: super::bundle_codec::normalized(&p.carried_item),
                 state_id: p.state_id,
             });
         }
         ClientboundGamePacket::SetCursorItem(p) => {
             let _ = event_tx.try_send(NetworkEvent::CursorItem {
-                item: p.contents.clone(),
+                item: super::bundle_codec::normalized(&p.contents),
             });
         }
         ClientboundGamePacket::ContainerSetSlot(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerSlot {
                 container_id: p.container_id,
                 index: p.slot,
-                item: p.item_stack.clone(),
+                item: super::bundle_codec::normalized(&p.item_stack),
                 state_id: p.state_id,
+            });
+        }
+        ClientboundGamePacket::SetPlayerInventory(p) => {
+            let _ = event_tx.try_send(NetworkEvent::PlayerInventorySlot {
+                index: p.slot,
+                item: super::bundle_codec::normalized(&p.contents),
             });
         }
         ClientboundGamePacket::SetHeldSlot(p) if (0..9).contains(&p.slot) => {
@@ -309,6 +329,11 @@ pub fn handle_game_packet(
                     Attribute::MaxHealth => NetworkEvent::EntityMaxHealthUpdate {
                         entity_id: p.entity_id.0,
                         max_health: value.clamp(1.0, 1024.0) as f32,
+                    },
+                    // Vanilla CAMERA_DISTANCE clamps to 0..32 (default 4.0).
+                    Attribute::CameraDistance => NetworkEvent::EntityCameraDistanceUpdate {
+                        entity_id: p.entity_id.0,
+                        distance: value.clamp(0.0, 32.0) as f32,
                     },
                     _ => continue,
                 };
@@ -1067,6 +1092,14 @@ pub fn handle_game_packet(
             );
             *shared_tree.lock() = Some(tree.clone());
             let _ = event_tx.try_send(NetworkEvent::CommandTree { tree });
+        }
+        ClientboundGamePacket::ShowDialog(p) => {
+            let _ = event_tx.try_send(NetworkEvent::ShowDialog {
+                dialog: dialog_holder_reference(&p.dialog),
+            });
+        }
+        ClientboundGamePacket::ClearDialog(_) => {
+            let _ = event_tx.try_send(NetworkEvent::ClearDialog);
         }
         ClientboundGamePacket::CustomChatCompletions(p) => {
             tracing::debug!(

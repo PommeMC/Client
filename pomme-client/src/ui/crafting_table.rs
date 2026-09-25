@@ -93,5 +93,6 @@ pub fn build_crafting_table(
         clicked_outside,
         ops,
         button: None,
+        hovered,
     }
 }

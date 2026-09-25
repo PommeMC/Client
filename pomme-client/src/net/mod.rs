@@ -1,11 +1,13 @@
 #[cfg(test)]
 mod azalea_compat;
+mod bundle_codec;
 pub(crate) mod chat;
 pub(crate) mod chat_security;
 pub mod chunk_batch;
 pub mod commands;
 pub mod conn;
 pub mod connection;
+mod dialog;
 pub mod handler;
 pub mod known_packs;
 pub mod resolve;
@@ -59,6 +61,9 @@ impl From<&azalea_protocol::packets::game::c_light_update::ClientboundLightUpdat
 pub enum NetworkEvent {
     Connected,
     Registries(Arc<azalea_core::registry_holder::RegistryHolder>),
+    /// The `minecraft:dialog` registry with its tags, sent with `Registries`
+    /// and again whenever a tag update replaces the dialog tags.
+    DialogRegistry(Arc<crate::ui::server_dialog::DialogRegistry>),
     BiomeColors {
         colors: std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
     },
@@ -132,6 +137,10 @@ pub enum NetworkEvent {
         entity_id: i32,
         max_health: f32,
     },
+    EntityCameraDistanceUpdate {
+        entity_id: i32,
+        distance: f32,
+    },
     ContainerContent {
         container_id: i32,
         items: Vec<ItemStack>,
@@ -143,6 +152,11 @@ pub enum NetworkEvent {
         index: u16,
         item: ItemStack,
         state_id: u32,
+    },
+    /// `SetPlayerInventory`, indexed by vanilla `Inventory` slot.
+    PlayerInventorySlot {
+        index: u32,
+        item: ItemStack,
     },
     HeldSlot {
         slot: u8,
@@ -180,6 +194,13 @@ pub enum NetworkEvent {
     ActionBar {
         spans: Vec<crate::ui::text::TextSpan>,
     },
+    ServerLinks {
+        links: Vec<crate::ui::server_dialog::ServerLink>,
+    },
+    ShowDialog {
+        dialog: crate::ui::server_dialog::DialogReference,
+    },
+    ClearDialog,
     BossBarUpdate {
         id: uuid::Uuid,
         op: crate::ui::boss_bar::BossBarOp,

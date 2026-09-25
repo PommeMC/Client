@@ -163,6 +163,7 @@ pub struct InputState {
     cursor_pos: (f32, f32),
     cursor_moved: bool,
     menu_scroll: f32,
+    menu_scroll_x: f32,
     /// A focused text field (anvil rename, creative search) is capturing
     /// keyboard input this frame: letter/digit hotkeys must type, not act.
     pub text_capture: bool,
@@ -259,6 +260,7 @@ impl InputState {
             cursor_pos: (0.0, 0.0),
             cursor_moved: false,
             menu_scroll: 0.0,
+            menu_scroll_x: 0.0,
             text_capture: false,
             menu_capture: false,
             spectator: false,
@@ -301,7 +303,9 @@ impl InputState {
                 ..
             } = &mut app
             {
-                if self.action_just_pressed(Action::ToggleInventory) {
+                // A dialog (or the confirm screen over it) is a screen, and
+                // vanilla runs no key mapping while one is up.
+                if self.action_just_pressed(Action::ToggleInventory) && !game.dialog_open() {
                     if game.creative_inventory_open {
                         game.close_creative_inventory();
                         should_apply_cursor_grab = true;
@@ -325,12 +329,12 @@ impl InputState {
 
                     self.recent_actions.remove(&Action::ToggleInventory);
                 }
-                if self.action_just_pressed(Action::OpenMenu) {
+                if self.action_just_pressed(Action::OpenMenu) && !game.dialog_open() {
                     if game.chat.is_open() {
                         // ChatScreen consumes Escape before the game-level
                         // pause action: link confirmation, then suggestions,
                         // then the chat screen itself.
-                        should_apply_cursor_grab = game.chat.handle_escape();
+                        should_apply_cursor_grab = game.escape_chat();
                     } else if game.game_mode_switcher.is_some() {
                         // Esc cancels the F3+F4 switcher without applying.
                         game.game_mode_switcher = None;
@@ -364,7 +368,7 @@ impl InputState {
 
                     self.recent_actions.remove(&Action::OpenMenu);
                 }
-                if self.action_just_pressed(Action::Close) {
+                if self.action_just_pressed(Action::Close) && !game.dialog_open() {
                     if !game.dead
                         && !game.death_screen_open
                         && (game.inventory_open || game.open_container.is_some())
@@ -375,7 +379,7 @@ impl InputState {
 
                     // Same order as Escape: modal, then suggestions, then chat.
                     if game.chat.is_open() {
-                        should_apply_cursor_grab |= game.chat.handle_escape();
+                        should_apply_cursor_grab |= game.escape_chat();
                     }
 
                     self.recent_actions.remove(&Action::Close);
@@ -785,13 +789,19 @@ impl InputState {
     }
 
     pub fn consume_menu_scroll(&mut self) -> f32 {
-        let s = self.menu_scroll;
-        self.menu_scroll = 0.0;
-        s
+        self.consume_menu_scroll_xy().1
     }
 
-    pub fn on_menu_scroll(&mut self, delta: f32) {
-        self.menu_scroll += delta;
+    pub fn consume_menu_scroll_xy(&mut self) -> (f32, f32) {
+        let scroll = (self.menu_scroll_x, self.menu_scroll);
+        self.menu_scroll_x = 0.0;
+        self.menu_scroll = 0.0;
+        scroll
+    }
+
+    pub fn on_menu_scroll_xy(&mut self, x: f32, y: f32) {
+        self.menu_scroll_x += x;
+        self.menu_scroll += y;
     }
 
     pub fn enter_pressed(&mut self) -> bool {

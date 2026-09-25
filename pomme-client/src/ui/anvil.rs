@@ -182,6 +182,7 @@ pub fn build_anvil(
         clicked_outside,
         ops,
         button: None,
+        hovered,
     }
 }
 

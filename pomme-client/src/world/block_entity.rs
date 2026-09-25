@@ -102,11 +102,6 @@ pub fn is_block_entity_block(name: &str) -> bool {
         | "yellow_wall_banner" | "lime_wall_banner" | "pink_wall_banner" | "gray_wall_banner"
         | "light_gray_wall_banner" | "cyan_wall_banner" | "purple_wall_banner" | "blue_wall_banner"
         | "brown_wall_banner" | "green_wall_banner" | "red_wall_banner" | "black_wall_banner"
-        // Beds
-        | "white_bed" | "orange_bed" | "magenta_bed" | "light_blue_bed"
-        | "yellow_bed" | "lime_bed" | "pink_bed" | "gray_bed"
-        | "light_gray_bed" | "cyan_bed" | "purple_bed" | "blue_bed"
-        | "brown_bed" | "green_bed" | "red_bed" | "black_bed"
         // Skulls / heads
         | "skeleton_skull" | "skeleton_wall_skull"
         | "wither_skeleton_skull" | "wither_skeleton_wall_skull"
@@ -140,4 +135,16 @@ pub fn is_invisible_block(name: &str) -> bool {
 
 pub fn is_fluid_block(name: &str) -> bool {
     matches!(name, "water" | "lava" | "bubble_column")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_beds_are_modeled_blocks_not_block_entities() {
+        assert!(!is_block_entity_block("red_bed"));
+        assert!(!is_block_entity_block("white_bed"));
+        assert!(rendered_kind("red_bed").is_none());
+    }
 }

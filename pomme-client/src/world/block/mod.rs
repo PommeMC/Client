@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use azalea_block::BlockState;
+use azalea_core::position::BlockPos;
 use glam::{DVec3, dvec3};
 
 use crate::physics::block_shape::{LocalBox, compute_outline, compute_shape};
@@ -78,6 +79,70 @@ const BEDROCK_LIGHT: LightProps = LightProps {
     use_shape_for_light_occlusion: false,
     face_occlusion: None,
 };
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BedDirection {
+    North,
+    South,
+    West,
+    East,
+}
+
+impl BedDirection {
+    /// Vanilla `Direction.toYRot() - 180` used by the first-person sleeping
+    /// camera.
+    pub fn camera_yaw_deg(self) -> f32 {
+        match self {
+            Self::North => 0.0,
+            Self::South => -180.0,
+            Self::West => -90.0,
+            Self::East => 90.0,
+        }
+    }
+
+    /// Vanilla `LivingEntityRenderer.sleepDirectionToRotation`.
+    pub fn render_yaw_deg(self) -> f32 {
+        match self {
+            Self::South => 90.0,
+            Self::West => 0.0,
+            Self::North => 270.0,
+            Self::East => 180.0,
+        }
+    }
+
+    pub fn step(self) -> (f32, f32) {
+        match self {
+            Self::North => (0.0, -1.0),
+            Self::South => (0.0, 1.0),
+            Self::West => (-1.0, 0.0),
+            Self::East => (1.0, 0.0),
+        }
+    }
+}
+
+/// Vanilla `BedBlock.getBedOrientation`: only actual bed states provide a
+/// facing. The `_bed` id suffix stands in for `instanceof BedBlock`.
+pub fn bed_direction(state: BlockState) -> Option<BedDirection> {
+    if !block_id(state).ends_with("_bed") {
+        return None;
+    }
+    match block_properties(state).get("facing")? {
+        "north" => Some(BedDirection::North),
+        "south" => Some(BedDirection::South),
+        "west" => Some(BedDirection::West),
+        "east" => Some(BedDirection::East),
+        _ => None,
+    }
+}
+
+/// Vanilla `LivingEntity.setPosToBed`.
+pub fn sleeping_position(pos: BlockPos) -> DVec3 {
+    dvec3(
+        pos.x as f64 + 0.5,
+        pos.y as f64 + 0.6875,
+        pos.z as f64 + 0.5,
+    )
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FluidKind {
@@ -1155,6 +1220,29 @@ mod tests {
         let count = table().len() as u32;
         assert!(try_state(count).is_none());
         assert!(try_state(count - 1).is_some());
+    }
+
+    #[test]
+    fn bed_direction_and_sleep_position_match_vanilla() {
+        setup();
+        let cases = [
+            ("north", BedDirection::North, 0.0, 270.0, (0.0, -1.0)),
+            ("south", BedDirection::South, -180.0, 90.0, (0.0, 1.0)),
+            ("west", BedDirection::West, -90.0, 0.0, (-1.0, 0.0)),
+            ("east", BedDirection::East, 90.0, 180.0, (1.0, 0.0)),
+        ];
+        for (facing, direction, camera_yaw, render_yaw, step) in cases {
+            let state = find_state("red_bed", &[("facing", facing)]);
+            assert_eq!(bed_direction(state), Some(direction));
+            assert_eq!(direction.camera_yaw_deg(), camera_yaw);
+            assert_eq!(direction.render_yaw_deg(), render_yaw);
+            assert_eq!(direction.step(), step);
+        }
+        assert_eq!(bed_direction(find_state("stone", &[])), None);
+        assert_eq!(
+            sleeping_position(BlockPos::new(2, 64, -5)),
+            dvec3(2.5, 64.6875, -4.5)
+        );
     }
 
     #[test]

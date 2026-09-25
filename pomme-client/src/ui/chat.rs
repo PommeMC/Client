@@ -7,10 +7,11 @@ use std::time::Instant;
 use azalea_inventory::components::{MaxDamage, Rarity};
 use azalea_inventory::default_components::get_default_component;
 use azalea_registry::builtin::ItemKind;
+use simdnbt::owned::{NbtCompound, NbtTag};
 
 use super::common;
 use crate::chat_component::{
-    Argument, ClickEvent, Component, HoverEvent, ResolvedStyle, normalize_identifier,
+    Argument, ClickEvent, Component, HoverEvent, ResolvedStyle, list_elements, normalize_identifier,
 };
 use crate::net::commands::{
     CommandParse, CommandTokenKind, CommandTokenRange, CommandTree, SyntaxError,
@@ -205,9 +206,42 @@ impl ChatOptions {
     }
 }
 
-struct ChatHitRegion {
+pub(crate) struct StyleHitRegion {
     rect: [f32; 4],
     style: Arc<ResolvedStyle>,
+}
+
+/// Records a hit region for each styled span of a line drawn from `x`.
+pub(crate) fn push_hit_regions(
+    regions: &mut Vec<StyleHitRegion>,
+    spans: &[TextSpan],
+    mut x: f32,
+    y: f32,
+    h: f32,
+    span_w: &dyn Fn(&TextSpan) -> f32,
+) {
+    for span in spans {
+        let w = span_w(span);
+        if let Some(style) = &span.component_style
+            && w > 0.0
+        {
+            regions.push(StyleHitRegion {
+                rect: [x, y, w, h],
+                style: style.clone(),
+            });
+        }
+        x += w;
+    }
+}
+
+pub(crate) fn style_at(
+    regions: &[StyleHitRegion],
+    cursor: (f32, f32),
+) -> Option<Arc<ResolvedStyle>> {
+    regions
+        .iter()
+        .find(|region| common::hit_test(cursor, region.rect))
+        .map(|region| region.style.clone())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -276,6 +310,16 @@ pub enum ChatMethod {
     Command,
 }
 
+/// What Escape did on the chat screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatEscape {
+    /// A modal or the suggestion list took it, or chat wasn't open.
+    Handled,
+    Closed,
+    /// `InBedChatScreen.onClose`: ask to leave the bed; the screen stays up.
+    WakeUp,
+}
+
 /// Vanilla `ChatScreen.ExitReason`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChatExitReason {
@@ -316,7 +360,7 @@ pub enum ChatUiAction {
         id: String,
         payload: Option<simdnbt::owned::NbtTag>,
     },
-    ShowDialog(serde_json::Value),
+    ShowDialog(crate::chat_component::DialogHolder),
 }
 
 pub struct ChatBuildContext<'a> {
@@ -326,6 +370,9 @@ pub struct ChatBuildContext<'a> {
     pub cursor: (f32, f32),
     pub clicked: bool,
     pub shift: bool,
+    /// A screen (a server dialog) covers the chat: it draws as the Hud's
+    /// unfocused backlog and takes no input.
+    pub covered: bool,
     pub command_tree: Option<&'a CommandTree>,
     pub advanced_item_tooltips: bool,
     pub text_width_fn: &'a dyn Fn(&str, f32) -> f32,
@@ -477,6 +524,8 @@ pub struct ChatState {
     messages: VecDeque<ChatLine>,
     input: TextFieldState,
     open: bool,
+    /// Vanilla `InBedChatScreen`: Enter submits without closing.
+    in_bed: bool,
     /// Sent messages for Up/Down recall (vanilla `recentChat`): consecutive
     /// duplicates collapse, capped at 100.
     sent_history: VecDeque<String>,
@@ -522,7 +571,7 @@ pub struct ChatState {
     outgoing_request: Option<(u32, String)>,
     /// Physical rectangles of styled chat spans as last drawn, for hover and
     /// click lookup (vanilla's active-text collector).
-    hit_regions: Vec<ChatHitRegion>,
+    hit_regions: Vec<StyleHitRegion>,
     /// Physical rectangles of the visible command-suggestion rows.
     suggestion_regions: Vec<(usize, [f32; 4])>,
     queue_region: Option<[f32; 4]>,
@@ -538,9 +587,10 @@ pub struct ChatState {
     previous_message_time: Option<Instant>,
     latest_draft: Option<String>,
     is_restored_draft: bool,
-    /// Input and draft flag of a chat screen that Chat Settings replaced,
-    /// re-opened when settings close (vanilla re-inits the parent screen).
-    settings_parent: Option<(String, bool)>,
+    /// Input, draft flag, and bed-screen mode of a chat screen that Chat
+    /// Settings replaced, re-opened when settings close (vanilla re-inits
+    /// the parent screen).
+    settings_parent: Option<(String, bool, bool)>,
 }
 
 impl ChatState {
@@ -550,6 +600,7 @@ impl ChatState {
             messages: VecDeque::new(),
             input: TextFieldState::new(MAX_MESSAGE_LEN),
             open: false,
+            in_bed: false,
             sent_history: VecDeque::new(),
             history_pos: 0,
             history_buffer: String::new(),
@@ -889,6 +940,10 @@ impl ChatState {
         self.open
     }
 
+    pub fn is_in_bed(&self) -> bool {
+        self.open && self.in_bed
+    }
+
     /// Vanilla `ChatComponent.openScreen`: restores the saved draft when the
     /// method allows it, else starts from the method's prefix.
     pub fn open(&mut self, method: ChatMethod, tree: Option<&CommandTree>) {
@@ -913,6 +968,7 @@ impl ChatState {
     /// responder is attached, so it doesn't count as an edit.
     fn open_with(&mut self, initial: &str, is_draft: bool, tree: Option<&CommandTree>) {
         self.open = true;
+        self.in_bed = false;
         self.is_restored_draft = is_draft;
         self.history_pos = self.sent_history.len();
         self.history_buffer.clear();
@@ -921,6 +977,32 @@ impl ChatState {
         self.clear_suggestions();
         self.allow_suggestions = false;
         self.update_command_info(tree);
+    }
+
+    /// Opens `InBedChatScreen` the way `ChatComponent.openScreen` does, so a
+    /// saved draft comes back.
+    pub fn open_in_bed(&mut self, tree: Option<&CommandTree>) {
+        self.open(ChatMethod::Message, tree);
+        self.in_bed = true;
+    }
+
+    /// Vanilla `InBedChatScreen.onPlayerWokeUp`. Returns true when the screen
+    /// closes and the mouse should be recaptured.
+    pub fn on_player_woke_up(&mut self, tree: Option<&CommandTree>) -> bool {
+        if !self.is_in_bed() {
+            return false;
+        }
+
+        if self.is_restored_draft || self.input.value().is_empty() {
+            self.close(ChatExitReason::Interrupted);
+            true
+        } else {
+            // Vanilla replaces the bed screen with `ChatScreen(text, false)`.
+            let text = self.input.value().to_owned();
+            self.close(ChatExitReason::Done);
+            self.open_with(&text, false, tree);
+            false
+        }
     }
 
     /// Vanilla `ChatScreen.removed`: what happens to the draft depends on why
@@ -943,25 +1025,31 @@ impl ChatState {
         self.finish_close();
     }
 
-    /// Chat Settings opened from chat replace it, with chat as the parent
-    /// screen they return to.
+    /// Chat Settings replace chat with the current screen as their parent.
     pub fn close_for_settings(&mut self) {
-        let parent = (self.input.value().to_owned(), self.is_restored_draft);
+        let parent = (
+            self.input.value().to_owned(),
+            self.is_restored_draft,
+            self.in_bed,
+        );
         self.close(ChatExitReason::Interrupted);
         self.settings_parent = Some(parent);
     }
 
-    /// Re-open the chat that Chat Settings replaced, if any.
+    /// Re-open the chat that Chat Settings replaced, preserving whether that
+    /// parent was the sleeping chat screen.
     pub fn return_from_settings(&mut self, tree: Option<&CommandTree>) -> bool {
-        let Some((initial, is_draft)) = self.settings_parent.take() else {
+        let Some((initial, is_draft, in_bed)) = self.settings_parent.take() else {
             return false;
         };
         self.open_with(&initial, is_draft, tree);
+        self.in_bed = in_bed;
         true
     }
 
     fn finish_close(&mut self) {
         self.open = false;
+        self.in_bed = false;
         self.is_restored_draft = false;
         self.input.set_focused(false);
         self.clear_suggestions();
@@ -970,23 +1058,25 @@ impl ChatState {
     }
 
     /// Vanilla key priority while ChatScreen is open: a child/overlay consumes
-    /// Escape before the screen itself closes. Returns true only when this call
-    /// actually closed chat and the game should recapture the cursor.
-    pub fn handle_escape(&mut self) -> bool {
+    /// Escape before the screen itself closes.
+    pub fn handle_escape(&mut self) -> ChatEscape {
         // ConfirmScreen answers Escape with `callback.accept(false)`.
         if self.modal.is_some() {
             self.close_modal();
-            return false;
+            return ChatEscape::Handled;
         }
         if !self.open {
-            return false;
+            return ChatEscape::Handled;
         }
         if !self.suggestions.is_empty() {
             self.hide_suggestions();
-            return false;
+            return ChatEscape::Handled;
+        }
+        if self.in_bed {
+            return ChatEscape::WakeUp;
         }
         self.close(ChatExitReason::Intentional);
-        true
+        ChatEscape::Closed
     }
 
     fn lines_per_page(&self) -> usize {
@@ -1453,7 +1543,13 @@ impl ChatState {
                 self.add_recent_chat(&normalized);
                 normalized
             });
-            self.close(ChatExitReason::Done);
+            if self.in_bed {
+                // `closeOnSubmit=false`: `setValue("")`, then `resetChatScroll`.
+                self.set_input_value("", inner_w, width_fn, tree);
+                self.reset_chat_scroll();
+            } else {
+                self.close(ChatExitReason::Done);
+            }
             return message;
         }
 
@@ -1476,33 +1572,7 @@ impl ChatState {
     }
 
     fn style_at(&self, cursor: (f32, f32)) -> Option<Arc<ResolvedStyle>> {
-        self.hit_regions
-            .iter()
-            .find(|region| common::hit_test(cursor, region.rect))
-            .map(|region| region.style.clone())
-    }
-
-    /// Records a hit region for each styled span of a line drawn from `x`.
-    fn push_hit_regions(
-        &mut self,
-        spans: &[TextSpan],
-        mut x: f32,
-        y: f32,
-        h: f32,
-        span_w: &dyn Fn(&TextSpan) -> f32,
-    ) {
-        for span in spans {
-            let w = span_w(span);
-            if let Some(style) = &span.component_style
-                && w > 0.0
-            {
-                self.hit_regions.push(ChatHitRegion {
-                    rect: [x, y, w, h],
-                    style: style.clone(),
-                });
-            }
-            x += w;
-        }
+        style_at(&self.hit_regions, cursor)
     }
 
     /// Whether the pointing-hand cursor applies: a hovered button
@@ -1605,6 +1675,7 @@ impl ChatState {
             cursor,
             clicked,
             shift,
+            covered,
             command_tree,
             advanced_item_tooltips,
             text_width_fn,
@@ -1614,8 +1685,9 @@ impl ChatState {
         self.hit_regions.clear();
         self.suggestion_regions.clear();
         self.queue_region = None;
-        // Under a modal the chat draws as Hud's unfocused background layer.
-        let focused = self.is_focused();
+        // Under a modal (or a dialog) the chat draws as Hud's unfocused
+        // background layer.
+        let focused = self.is_focused() && !covered;
         let chat_scale = self.options.scale.clamp(0.0, 1.0);
         // Vanilla `pose.scale(0, 0)` collapses every message, tag, queue and
         // restricted-prompt draw (and their click targets) at Chat Text
@@ -1726,7 +1798,14 @@ impl ChatState {
                 }
             }
 
-            self.push_hit_regions(line_spans, origin, entry_top, lh, &span_w);
+            push_hit_regions(
+                &mut self.hit_regions,
+                line_spans,
+                origin,
+                entry_top,
+                lh,
+                &span_w,
+            );
 
             // Vanilla `handleTagIcon`: the background access draws no icon.
             if focused && let Some(tag @ ChatMessageTag::Modified { .. }) = tag {
@@ -1807,7 +1886,14 @@ impl ChatState {
                     &width0,
                 );
             }
-            self.push_hit_regions(&restricted_spans, origin, restricted_y, lh, &span_w);
+            push_hit_regions(
+                &mut self.hit_regions,
+                &restricted_spans,
+                origin,
+                restricted_y,
+                lh,
+                &span_w,
+            );
             elements.push(MenuElement::McText {
                 x: origin,
                 y: restricted_y + (entry_height - text_baseline_offset - 1.0) * unit,
@@ -2367,7 +2453,10 @@ fn push_hover_tooltip(
             let max_width = ((screen_w / gs).ceil() / 2.0).floor().max(200.0);
             wrapped_tooltip_lines(component, max_width, width0)
         }
-        HoverEvent::Item(value) => item_tooltip_lines(value, advanced_item_tooltips),
+        // TODO: a `show_item` hover keeps only its JSON shape
+        // (`HoverEvent::Item`), so its components lose payload types and Java
+        // number text; the dialog's item body passes its raw tag.
+        HoverEvent::Item(value) => item_tooltip_lines(value, None, advanced_item_tooltips),
         HoverEvent::Entity(value) if advanced_item_tooltips => entity_tooltip_lines(value),
         HoverEvent::Entity(_) => Vec::new(),
     };
@@ -2392,7 +2481,7 @@ fn push_tag_tooltip(
 
 /// Vanilla `Font.split(component, max_width)` as tooltip lines, `max_width`
 /// in gui units.
-fn wrapped_tooltip_lines(
+pub(crate) fn wrapped_tooltip_lines(
     component: &Component,
     max_width: f32,
     width0: &dyn Fn(&[TextSpan]) -> f32,
@@ -2407,7 +2496,7 @@ fn wrapped_tooltip_lines(
         .collect()
 }
 
-fn component_tooltip_lines(component: &Component) -> Vec<TooltipLine> {
+pub(crate) fn component_tooltip_lines(component: &Component) -> Vec<TooltipLine> {
     span_tooltip_lines(format_component_spans(component, common::WHITE))
 }
 
@@ -2471,7 +2560,14 @@ fn entity_tooltip_lines(value: &serde_json::Value) -> Vec<TooltipLine> {
     lines
 }
 
-fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> Vec<TooltipLine> {
+/// The stack's tooltip. `raw_components` is the item's `components` tag where
+/// the stack came as NBT, so its components keep the payloads and Java number
+/// text the JSON shape loses.
+pub(crate) fn item_tooltip_lines(
+    value: &serde_json::Value,
+    raw_components: Option<&NbtCompound>,
+    advanced: bool,
+) -> Vec<TooltipLine> {
     let Some(map) = value.as_object() else {
         return vec![TooltipLine::new(value.to_string(), common::WHITE)];
     };
@@ -2518,10 +2614,8 @@ fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> Vec<TooltipL
         .map(str::to_owned)
         .unwrap_or_else(|| crate::lang::title_case_snake(path));
 
-    let custom_name = component_value(components, "custom_name")
-        .and_then(|value| Component::from_value(value).ok());
-    let item_name = component_value(components, "item_name")
-        .and_then(|value| Component::from_value(value).ok());
+    let custom_name = item_component(components, raw_components, "custom_name");
+    let item_name = item_component(components, raw_components, "item_name");
     let mut lines = if let Some(name) = custom_name.as_ref().or(item_name.as_ref()) {
         // `ItemStack.getStyledHoverName` wraps the name in a parent carrying
         // the rarity color (and italic for a custom name), so the name's own
@@ -2559,14 +2653,23 @@ fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> Vec<TooltipL
         }
     }
 
-    if tooltip_component_visible(tooltip_display, "lore")
-        && let Some(lore) =
-            component_value(components, "lore").and_then(serde_json::Value::as_array)
-    {
-        for line in lore {
-            if let Ok(component) = Component::from_value(line) {
-                lines.extend(component_tooltip_lines(&component));
-            }
+    if tooltip_component_visible(tooltip_display, "lore") {
+        let lore: Vec<Component> = match raw_component(raw_components, "lore") {
+            Some(NbtTag::List(lore)) => list_elements(lore)
+                .iter()
+                .filter_map(|line| Component::from_nbt_tag(line).ok())
+                .collect(),
+            _ => component_value(components, "lore")
+                .and_then(serde_json::Value::as_array)
+                .map(|lore| {
+                    lore.iter()
+                        .filter_map(|line| Component::from_value(line).ok())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        for line in &lore {
+            lines.extend(component_tooltip_lines(line));
         }
     }
 
@@ -2636,6 +2739,28 @@ fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> Vec<TooltipL
     }
 
     lines
+}
+
+/// A component of the stack that is itself a text component, read from the
+/// raw tag where there is one.
+fn item_component(
+    components: Option<&serde_json::Map<String, serde_json::Value>>,
+    raw_components: Option<&NbtCompound>,
+    name: &str,
+) -> Option<Component> {
+    if let Some(tag) = raw_component(raw_components, name) {
+        return Component::from_nbt_tag(tag).ok();
+    }
+    component_value(components, name).and_then(|value| Component::from_value(value).ok())
+}
+
+/// A component of the raw `components` tag, under either spelling of its id.
+fn raw_component<'a>(raw_components: Option<&'a NbtCompound>, name: &str) -> Option<&'a NbtTag> {
+    raw_components.and_then(|components| {
+        components
+            .get(name)
+            .or_else(|| components.get(&format!("minecraft:{name}")))
+    })
 }
 
 fn component_value<'a>(
@@ -3080,47 +3205,27 @@ pub(crate) fn wrap_spans(
     let mut lines: Vec<StyledLine> = Vec::new();
     let mut start = 0usize;
     while start < chars.len() {
-        let mut width = 0.0f32;
-        let mut had_non_zero = false;
-        let mut last_space: Option<usize> = None;
-        let mut i = start;
-        let mut split = false;
-
-        while i < chars.len() {
-            let (ch, style) = &chars[i];
-            if *ch == '\n' {
-                lines.push(chars[start..i].to_vec());
-                start = i + 1;
-                split = true;
+        // Each character is measured with its own style, as the splitter's
+        // sink does.
+        let widths = chars[start..]
+            .iter()
+            .enumerate()
+            .map(|(offset, (ch, style))| {
+                (
+                    start + offset,
+                    *ch,
+                    width0(&merge_chars(&[(*ch, style.clone())])),
+                )
+            });
+        match crate::ui::text::find_line_break(widths, max_w) {
+            Some((end, next)) => {
+                lines.push(chars[start..end].to_vec());
+                start = next;
+            }
+            None => {
+                lines.push(chars[start..].to_vec());
                 break;
             }
-            if *ch == ' ' {
-                last_space = Some(i);
-            }
-
-            let char_span = merge_chars(&[(*ch, style.clone())]);
-            let char_width = width0(&char_span);
-            width += char_width;
-            if had_non_zero && width > max_w {
-                if let Some(space) = last_space {
-                    // `FlatComponents.splitAt(lineBreak, 1, ...)`: the chosen
-                    // delimiter space is omitted from both display lines.
-                    lines.push(chars[start..space].to_vec());
-                    start = space + 1;
-                } else {
-                    lines.push(chars[start..i].to_vec());
-                    start = i;
-                }
-                split = true;
-                break;
-            }
-            had_non_zero |= char_width != 0.0;
-            i += 1;
-        }
-
-        if !split {
-            lines.push(chars[start..].to_vec());
-            break;
         }
     }
 
@@ -3288,8 +3393,8 @@ mod tests {
         (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0)
     }
 
-    fn hit_region(style: ResolvedStyle) -> ChatHitRegion {
-        ChatHitRegion {
+    fn hit_region(style: ResolvedStyle) -> StyleHitRegion {
+        StyleHitRegion {
             rect: [0.0, 0.0, 10.0, 10.0],
             style: Arc::new(style),
         }
@@ -3476,6 +3581,89 @@ mod tests {
     }
 
     #[test]
+    fn escape_in_bed_asks_to_wake_and_keeps_the_chat() {
+        let mut chat = ChatState::new();
+        chat.open_in_bed(None);
+        set_input(&mut chat, "typed");
+        assert_eq!(chat.handle_escape(), ChatEscape::WakeUp);
+        assert!(chat.is_in_bed());
+        assert_eq!(chat.input.value(), "typed");
+    }
+
+    #[test]
+    fn in_bed_submit_stays_open_and_wake_preserves_nonempty_input() {
+        let mut chat = ChatState::new();
+        chat.open_in_bed(None);
+        set_input(&mut chat, "hello");
+        let msg = chat.handle_key_input(
+            &[],
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            200.0,
+            &|_| 0.0,
+            None,
+        );
+        assert_eq!(msg.as_deref(), Some("hello"));
+        assert!(chat.is_in_bed());
+        assert!(chat.input.value().is_empty());
+
+        set_input(&mut chat, "draft");
+        chat.input.move_cursor_to_start(false, 200.0, &|_| 0.0);
+        chat.history_buffer = "stale".into();
+        chat.scroll_pos = 3;
+        assert!(!chat.on_player_woke_up(None));
+        assert!(chat.is_open());
+        assert!(!chat.is_in_bed());
+        assert_eq!(chat.input.value(), "draft");
+        assert!(
+            chat.input.cursor_at_end(),
+            "fresh ChatScreen moves the cursor to the end"
+        );
+        assert!(chat.history_buffer.is_empty());
+        assert_eq!(chat.scroll_pos, 0);
+        assert!(!chat.allow_suggestions);
+
+        chat.open_in_bed(None);
+        assert!(chat.on_player_woke_up(None));
+        assert!(!chat.is_open());
+    }
+
+    #[test]
+    fn in_bed_restores_saved_draft_and_wake_preserves_it() {
+        let mut chat = chat_with(ChatOptions {
+            save_drafts: true,
+            ..Default::default()
+        });
+        chat.latest_draft = Some("saved draft".to_owned());
+        chat.open_in_bed(None);
+        assert!(chat.is_in_bed());
+        assert!(chat.is_restored_draft);
+        assert_eq!(chat.input.value(), "saved draft");
+
+        assert!(chat.on_player_woke_up(None));
+        assert!(!chat.is_open());
+        assert_eq!(chat.latest_draft.as_deref(), Some("saved draft"));
+    }
+
+    #[test]
+    fn chat_settings_return_to_in_bed_screen() {
+        let mut chat = ChatState::new();
+        chat.open_in_bed(None);
+        set_input(&mut chat, "unsent");
+        chat.close_for_settings();
+        assert!(!chat.is_open());
+
+        assert!(chat.return_from_settings(None));
+        assert!(chat.is_in_bed());
+        assert_eq!(chat.input.value(), "unsent");
+    }
+
+    #[test]
     fn normalize_collapses_and_trims() {
         assert_eq!(normalize_chat_message("  hello   world  "), "hello world");
         assert_eq!(normalize_chat_message("/say   hi   there"), "/say hi there");
@@ -3597,6 +3785,7 @@ mod tests {
                 cursor: (0.0, 0.0),
                 clicked: false,
                 shift: false,
+                covered: false,
                 command_tree: None,
                 advanced_item_tooltips: false,
                 text_width_fn: &text_width,
@@ -3741,12 +3930,13 @@ mod tests {
         };
         let explicit = item_tooltip_lines(
             &item(serde_json::json!({"text":"Sword","italic":false,"color":"white"})),
+            None,
             false,
         );
         assert!(!explicit[0].spans[0].italic);
         assert_eq!(explicit[0].spans[0].color, common::WHITE);
 
-        let bare = item_tooltip_lines(&item(serde_json::json!({"text":"Sword"})), false);
+        let bare = item_tooltip_lines(&item(serde_json::json!({"text":"Sword"})), None, false);
         assert!(bare[0].spans[0].italic);
         assert_eq!(bare[0].spans[0].color, common::rgb(0xff55ff));
     }
@@ -4190,7 +4380,7 @@ mod tests {
         chat.open(ChatMethod::Message, Some(&tree));
         type_text(&mut chat, "/ti", &tree);
         assert_eq!(texts(&chat.suggestions), vec!["time"]);
-        assert!(!chat.handle_escape());
+        assert_eq!(chat.handle_escape(), ChatEscape::Handled);
         assert!(chat.suggestions.is_empty());
 
         press(&mut chat, UP, &tree);
@@ -4326,10 +4516,10 @@ mod tests {
         let mut chat = open_chat(ChatMethod::Command, Some(&tree));
         type_text(&mut chat, "t", &tree);
         assert!(!chat.suggestions.is_empty());
-        assert!(!chat.handle_escape());
+        assert_eq!(chat.handle_escape(), ChatEscape::Handled);
         assert!(chat.suggestions.is_empty());
         assert!(chat.is_open());
-        assert!(chat.handle_escape());
+        assert_eq!(chat.handle_escape(), ChatEscape::Closed);
         assert!(!chat.is_open());
     }
 
@@ -4598,7 +4788,7 @@ mod tests {
                 }
             }
         });
-        assert!(item_tooltip_lines(&value, false).is_empty());
+        assert!(item_tooltip_lines(&value, None, false).is_empty());
     }
 
     #[test]
@@ -4615,7 +4805,7 @@ mod tests {
                 "minecraft:max_damage": 1561
             }
         });
-        let lines = item_tooltip_lines(&value, true);
+        let lines = item_tooltip_lines(&value, None, true);
         let text = lines
             .iter()
             .map(|line| line_text(&line.spans))
@@ -4626,6 +4816,58 @@ mod tests {
         assert!(text.iter().any(|line| line.contains("Unbreakable")));
         assert!(text.iter().any(|line| line.contains("1551")));
         assert!(text.iter().any(|line| line == "minecraft:diamond_sword"));
+    }
+
+    /// A stone stack's tooltip with `lore`, read through the JSON shape and
+    /// through the raw components a dialog's item body hands over.
+    fn lore_tooltips(lore: Vec<NbtTag>) -> (Vec<String>, Vec<String>) {
+        let mut components = NbtCompound::new();
+        components.insert(
+            "minecraft:lore",
+            NbtTag::List(simdnbt::owned::NbtList::from(lore)),
+        );
+        let mut stack = NbtCompound::new();
+        stack.insert("id", "minecraft:stone");
+        stack.insert("components", NbtTag::Compound(components.clone()));
+        let value = crate::chat_component::nbt_to_value(&NbtTag::Compound(stack));
+
+        let text = |raw| {
+            item_tooltip_lines(&value, raw, false)
+                .iter()
+                .map(|line| line_text(&line.spans))
+                .collect::<Vec<_>>()
+        };
+        (text(None), text(Some(&components)))
+    }
+
+    #[test]
+    fn raw_components_keep_lore_number_formatting() {
+        let mut lore_line = NbtCompound::new();
+        lore_line.insert("translate", "pomme.unknown");
+        lore_line.insert("fallback", "%s");
+        lore_line.insert(
+            "with",
+            NbtTag::List(simdnbt::owned::NbtList::from(vec![NbtTag::Float(0.1)])),
+        );
+        let (json, raw) = lore_tooltips(vec![NbtTag::Compound(lore_line)]);
+        // The JSON shape widens the float to a double.
+        assert!(json.iter().any(|line| line.contains("0.1000000")));
+        assert!(raw.iter().any(|line| line == "0.1"));
+    }
+
+    #[test]
+    fn raw_components_keep_wrapped_lore_lines() {
+        let mut styled = NbtCompound::new();
+        styled.insert("text", "styled");
+        styled.insert("color", "red");
+        let (json, raw) = lore_tooltips(vec![
+            crate::chat_component::wrapped(NbtTag::String("plain".into())),
+            NbtTag::Compound(styled),
+        ]);
+        for lines in [json, raw] {
+            assert!(lines.iter().any(|line| line == "plain"), "{lines:?}");
+            assert!(lines.iter().any(|line| line == "styled"), "{lines:?}");
+        }
     }
 
     #[test]

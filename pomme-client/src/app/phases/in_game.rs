@@ -31,7 +31,8 @@ use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::entity_model::triangle_wave;
 use crate::renderer::pipelines::block_entity;
 use crate::renderer::pipelines::entity_renderer::{
-    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, dye_color_tint, jeb_sheep_tint, wool_color_tint,
+    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, dye_color_tint, jeb_sheep_tint,
+    standing_eye_height, wool_color_tint,
 };
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
@@ -41,6 +42,7 @@ use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
 use crate::world::block::model::CardinalLightType;
+use crate::world::block::{BedDirection, bed_direction};
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
@@ -157,9 +159,25 @@ pub struct GameState {
     pub inv_drag: Option<(azalea_inventory::operations::QuickCraftKind, Vec<u16>)>,
     /// Last survival left click (slot, time) for double-click detection.
     pub inv_last_click: Option<(u16, Instant)>,
+    /// The selected entry of a bundle in (menu id, slot). Vanilla keeps it on
+    /// the stack but never sends it, so a server update of the slot drops it.
+    pub bundle_selection: Option<(i32, u16, i32)>,
+    /// The slot the container screen hovered last frame (menu id, slot, and
+    /// whether it held a bundle), for vanilla `onStopHovering`.
+    pub bundle_hovered: Option<(i32, u16, bool)>,
+    /// `BundleMouseActions`' `ScrollWheelHandler` accumulators (x, y).
+    pub bundle_scroll: (f32, f32),
     /// Server registries, for hashing predicted container clicks.
     pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
     pub chat: ChatState,
+    pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
+    pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
+    pub dialog_registry: Arc<crate::ui::server_dialog::DialogRegistry>,
+    /// The connection is in the configuration phase (the join, or a
+    /// reconfiguration), where dialogs can't run commands.
+    pub configuring: bool,
+    /// UI actions that request vanilla STOP_SLEEPING on the next update pass.
+    pub stop_sleeping_requested: bool,
     pub command_tree: Option<Arc<crate::net::commands::CommandTree>>,
     pub tab_list: TabList,
     pub server_enforces_secure_chat: bool,
@@ -387,12 +405,20 @@ impl GameState {
             container_was_open: None,
             inv_drag: None,
             inv_last_click: None,
+            bundle_selection: None,
+            bundle_hovered: None,
+            bundle_scroll: (0.0, 0.0),
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
             chat: {
                 let mut chat = ChatState::new();
                 chat.set_options(chat_options);
                 chat
             },
+            server_dialog: None,
+            server_links: Vec::new(),
+            dialog_registry: Arc::default(),
+            configuring: true,
+            stop_sleeping_requested: false,
             command_tree: None,
             tab_list: TabList::new(),
             server_enforces_secure_chat: false,
@@ -467,20 +493,41 @@ impl GameState {
             .is_some_and(|e| crate::entity::is_equine(&e.entity_type) && e.saddled)
     }
 
-    /// Vanilla `Hud.getPlayerVehicleWithHealth`: (health, max health) of the
-    /// ridden vehicle when it is living (`Entity.showVehicleHealth`); the
-    /// living-store lookup is the `instanceof LivingEntity` gate.
-    pub fn vehicle_health(&self) -> Option<(f32, f32)> {
+    /// The ridden vehicle when it is living; the living-store lookup is
+    /// vanilla's `instanceof LivingEntity` gate.
+    fn riding_vehicle(&self) -> Option<&crate::entity::LivingEntity> {
         self.riding_vehicle_id
             .and_then(|id| self.entity_store.living.get(&id))
-            .map(|e| (e.health, e.max_health))
+    }
+
+    /// Vanilla `Hud.getPlayerVehicleWithHealth`: (health, max health) of the
+    /// ridden vehicle when it is living (`Entity.showVehicleHealth`).
+    pub fn vehicle_health(&self) -> Option<(f32, f32)> {
+        self.riding_vehicle().map(|e| (e.health, e.max_health))
+    }
+
+    // TODO: vanilla scales each distance by `getScale()` (the `scale`
+    // attribute, not read yet) and reads the camera entity's, which differs
+    // while spectating a mob.
+    pub fn third_person_distance(&self) -> f32 {
+        detached_distance(
+            self.player.camera_distance,
+            self.riding_vehicle().map(|vehicle| vehicle.camera_distance),
+        )
+    }
+
+    /// A server dialog, or the confirm screen one raised, is the top screen.
+    /// Vanilla runs no key mapping while a screen is up, and the screens under
+    /// it neither draw nor take input.
+    pub fn dialog_open(&self) -> bool {
+        self.server_dialog.is_some() || self.chat.has_pending_modal_prompt()
     }
 
     pub fn gui_open(&self) -> bool {
         self.inventory_open
             || self.creative_inventory_open
             || self.open_container.is_some()
-            || self.chat.has_pending_modal_prompt()
+            || self.dialog_open()
             || self.game_mode_switcher.is_some()
     }
 
@@ -558,6 +605,42 @@ impl GameState {
         self.cursor_item = azalea_inventory::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
+        self.bundle_selection = None;
+        self.bundle_hovered = None;
+        self.bundle_scroll = (0.0, 0.0);
+    }
+
+    /// A server update replaced the stack in `slot` of `menu` (every slot when
+    /// `None`), dropping any bundle selection it carried.
+    pub fn drop_bundle_selection(&mut self, menu: i32, slot: Option<u16>) {
+        if self
+            .bundle_selection
+            .is_some_and(|(m, s, _)| m == menu && slot.is_none_or(|slot| slot == s))
+        {
+            self.bundle_selection = None;
+        }
+    }
+
+    /// Replaces any open server dialog; false (logged) when `reference`
+    /// doesn't resolve to a dialog.
+    pub fn open_server_dialog(
+        &mut self,
+        reference: crate::ui::server_dialog::DialogReference,
+    ) -> bool {
+        match crate::ui::server_dialog::ServerDialogState::open(
+            reference,
+            &self.dialog_registry,
+            &self.server_links,
+        ) {
+            Ok(dialog) => {
+                self.server_dialog = Some(dialog);
+                true
+            }
+            Err(error) => {
+                tracing::warn!("Could not open server dialog: {error}");
+                false
+            }
+        }
     }
 
     /// A focused text field (anvil rename, creative search) is capturing
@@ -565,6 +648,13 @@ impl GameState {
     /// hotkeys. The anvil field is editable only while its input slot is
     /// filled, matching vanilla.
     pub fn wants_text_input(&self) -> bool {
+        if self
+            .server_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.wants_text_input())
+        {
+            return true;
+        }
         if self.creative_inventory_open {
             return self.creative_state.tab.captures_typing();
         }
@@ -573,6 +663,30 @@ impl GameState {
             Some(c) if c.screen == ContainerScreen::Anvil
                 && c.slots.first().is_some_and(|s| s.is_present())
         )
+    }
+
+    /// Escape on the chat screen; true when it closed chat and the cursor
+    /// should be recaptured.
+    pub fn escape_chat(&mut self) -> bool {
+        use crate::ui::chat::ChatEscape;
+        match self.chat.handle_escape() {
+            ChatEscape::Closed => true,
+            ChatEscape::WakeUp => {
+                self.stop_sleeping_requested = true;
+                false
+            }
+            ChatEscape::Handled => false,
+        }
+    }
+
+    /// Clears the bed state and screen a reconfiguration would destroy.
+    pub(crate) fn reset_sleep_for_level_teardown(&mut self) {
+        self.player.reset_sleep_for_level_teardown();
+        self.stop_sleeping_requested = false;
+        if self.chat.is_in_bed() {
+            self.chat
+                .close(crate::ui::chat::ChatExitReason::Interrupted);
+        }
     }
 
     /// Closes the death screen and its confirm, and re-arms the respawn send.
@@ -1367,15 +1481,11 @@ fn handle_chat_ui_action(
                 .packet_tx
                 .send_raw(crate::net::chat::encode_outbound_command(&command));
         }
-        ChatUiAction::Custom { id, payload } => {
-            match crate::net::chat::encode_outbound_custom_click_action(&id, payload.as_ref()) {
-                Ok(frame) => connection.packet_tx.send_raw(frame),
-                Err(e) => tracing::warn!("Could not encode custom chat click action {id:?}: {e}"),
-            }
+        ChatUiAction::Custom { id, payload } => connection.packet_tx.send_custom_click(id, payload),
+        // The chat screen stays as the dialog's `previousScreen`.
+        ChatUiAction::ShowDialog(dialog) => {
+            game.open_server_dialog(crate::ui::server_dialog::DialogReference::Holder(dialog));
         }
-        // TODO: open the dialog screen (`ClientPacketListener.showDialog`);
-        // dialogs land with the next PR in the stack.
-        ChatUiAction::ShowDialog(_) => {}
     }
 }
 
@@ -1402,6 +1512,190 @@ fn handle_unattended_command(command: &str, connection: &ConnectionHandle, game:
             // `removed` resets the scroll.
             game.chat.reset_chat_scroll();
         }
+    }
+}
+
+/// Drops the dialog if the input just handled finished it, then carries out
+/// the action it reported.
+pub(crate) fn settle_server_dialog(
+    action: Option<crate::ui::server_dialog::ServerDialogAction>,
+    core: &mut AppCore,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    use crate::ui::server_dialog::ServerDialogAction;
+
+    // Vanilla swaps in the after-action screen only where the click event
+    // reaches `setScreen` (`DialogScreen.runAction`).
+    let (activate, follow_up) = match action {
+        None => (false, None),
+        // `Screen.clickUrlAction`: the confirm screen replaces the dialog,
+        // while opening the link straight away (or chat links being off)
+        // leaves the screen alone.
+        Some(ServerDialogAction::OpenUrl(url)) => match game.chat.request_open_url(url) {
+            Some(action) => (false, Some(action)),
+            None => (game.chat.has_pending_modal_prompt(), None),
+        },
+        // `ClientConfigurationPacketListenerImpl.createDialogAccess`.
+        Some(ServerDialogAction::RunCommand(command)) if game.configuring => {
+            tracing::warn!(
+                "Commands are not supported in configuration phase, trying to run '{command}'"
+            );
+            (false, None)
+        }
+        Some(ServerDialogAction::RunCommand(command)) => {
+            (true, Some(ChatUiAction::RunCommand(command)))
+        }
+        Some(ServerDialogAction::Custom { id, payload }) => {
+            (true, Some(ChatUiAction::Custom { id, payload }))
+        }
+        // `showDialog` only warns when the dialog doesn't resolve, leaving the
+        // current one up.
+        Some(ServerDialogAction::ShowDialog(reference)) => {
+            game.open_server_dialog(reference);
+            (false, None)
+        }
+    };
+    if activate && let Some(dialog) = game.server_dialog.as_mut() {
+        dialog.activate();
+    }
+    if game
+        .server_dialog
+        .as_ref()
+        .is_some_and(|dialog| dialog.is_finished())
+    {
+        game.server_dialog = None;
+    }
+    if let Some(action) = follow_up {
+        handle_chat_ui_action(action, core, connection, game);
+    }
+}
+
+/// The server dialog and the confirm screen a chat or dialog link opens over
+/// it, with their clicks settled. The connecting screen shares it for
+/// configuration-phase dialogs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_server_screens(
+    elements: &mut Vec<MenuElement>,
+    sw: f32,
+    sh: f32,
+    gs: f32,
+    core: &mut AppCore,
+    gfx: &Gfx,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+    // The client tick count, or `None` where the phase runs no game ticks.
+    tick: Option<u64>,
+    text_events: &[crate::ui::text_edit::TextInputEvent],
+) {
+    let modal_open = game.chat.has_pending_modal_prompt();
+    if let Some(dialog) = game.server_dialog.as_mut() {
+        // The dialog types while it is the top screen; a confirm screen over
+        // it takes the keyboard instead.
+        if !modal_open {
+            let fs = common::FONT_SIZE * gs;
+            dialog.handle_text_input(text_events, gs, &|s| gfx.renderer.menu_text_width(s, fs));
+        }
+        let scroll = core.input.consume_menu_scroll();
+        if scroll != 0.0 && !modal_open {
+            dialog.handle_scroll(scroll);
+        }
+        let action = dialog.build(
+            elements,
+            sw,
+            sh,
+            gs,
+            crate::ui::server_dialog::WidgetInput {
+                cursor: core.input.cursor_pos(),
+                clicked: core.input.left_just_pressed() && !modal_open,
+                held: core.input.left_held() && !modal_open,
+                shift: core.input.shift_held(),
+                activate: !modal_open
+                    && (core.input.enter_pressed()
+                        || core.input.key_just_pressed(winit::keyboard::KeyCode::Space)),
+                arrow_steps: i32::from(
+                    core.input
+                        .key_just_pressed(winit::keyboard::KeyCode::ArrowRight),
+                ) - i32::from(
+                    core.input
+                        .key_just_pressed(winit::keyboard::KeyCode::ArrowLeft),
+                ),
+                tick,
+                advanced_tooltips: game.advanced_item_tooltips,
+            },
+            &|t, s| gfx.renderer.menu_text_width(t, s),
+            &|spans, s| gfx.renderer.menu_spans_width(spans, s),
+        );
+        if dialog.take_click_sound() {
+            core.audio.play_ui_click();
+        }
+        settle_server_dialog(action, core, connection, game);
+        core.input.clear_just_pressed_actions();
+        core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+
+    if game.chat.has_pending_modal_prompt() {
+        let cursor = core.input.cursor_pos();
+        let clicked = core.input.left_just_pressed();
+        // `AbstractButton.onClick` plays the click; this is the same
+        // last-frame hit test the modal presses with.
+        if clicked && game.chat.hovering_clickable(cursor, false) {
+            core.audio.play_ui_click();
+        }
+        if let Some(action) =
+            game.chat
+                .build_modal_prompt(elements, sw, sh, gs, cursor, clicked, &|spans, s| {
+                    gfx.renderer.menu_spans_width(spans, s)
+                })
+        {
+            handle_chat_ui_action(action, core, connection, game);
+        }
+        core.input.clear_just_pressed_actions();
+        core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+}
+
+/// A key press while a server dialog is the top screen: Escape cancels it,
+/// Tab cycles its text fields, and anything else types. A confirm screen the
+/// dialog raised sits above it and answers Escape first.
+pub(crate) fn server_dialog_key(
+    code: winit::keyboard::KeyCode,
+    event: &winit::event::KeyEvent,
+    core: &mut AppCore,
+    window: &winit::window::Window,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    use winit::keyboard::KeyCode;
+
+    if game.chat.has_pending_modal_prompt() {
+        // `ConfirmScreen` answers Escape with `accept(false)`, which returns
+        // to the screen under it.
+        if code == KeyCode::Escape {
+            game.escape_chat();
+            core.input.clear_action(input::Action::OpenMenu);
+            core.apply_cursor_grab(window, Some(game));
+        } else {
+            core.input.on_menu_key_event(event);
+        }
+        return;
+    }
+    match code {
+        KeyCode::Escape => {
+            let action = game
+                .server_dialog
+                .as_mut()
+                .and_then(|dialog| dialog.handle_escape());
+            settle_server_dialog(action, core, connection, game);
+            core.input.clear_action(input::Action::OpenMenu);
+            core.apply_cursor_grab(window, Some(game));
+        }
+        KeyCode::Tab => {
+            if let Some(dialog) = game.server_dialog.as_mut() {
+                dialog.handle_tab(core.input.shift_held());
+            }
+        }
+        _ => core.input.on_menu_key_event(event),
     }
 }
 
@@ -1459,12 +1753,59 @@ fn apply_render_distance(
     game.sync_client_information(connection, rd, core.menu.chat_options);
 }
 
+/// Vanilla `ScrollWheelHandler.onMouseScroll` on one frame's (x, y) scroll,
+/// folded to `BundleMouseActions`' wheel: vertical, else negated horizontal.
+fn scroll_wheel(accumulated: &mut (f32, f32), (x, y): (f32, f32)) -> i32 {
+    let step = |acc: &mut f32, delta: f32| {
+        // `Math.signum`, which is 0 for 0 (Rust's `signum` isn't).
+        if *acc != 0.0 && delta.partial_cmp(&0.0) != (*acc).partial_cmp(&0.0) {
+            *acc = 0.0;
+        }
+        *acc += delta;
+        let whole = acc.trunc();
+        *acc -= whole;
+        whole as i32
+    };
+    let wheel_x = step(&mut accumulated.0, x);
+    let wheel_y = step(&mut accumulated.1, y);
+    if wheel_y == 0 { -wheel_x } else { wheel_y }
+}
+
+/// Vanilla `BundleMouseActions.toggleSelectedBundleItem`: the stack's
+/// selection follows `Mutable.toggleSelectedItem`, and the packet always goes.
+fn toggle_bundle_selection(
+    game: &mut GameState,
+    sender: &crate::net::sender::PacketSender,
+    menu: i32,
+    slot: u16,
+    selected: i32,
+) {
+    let current = game
+        .bundle_selection
+        .filter(|(m, s, _)| *m == menu && *s == slot)
+        .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i);
+    game.bundle_selection =
+        (selected >= 0 && selected != current).then_some((menu, slot, selected));
+    send_bundle_selection(sender, slot, selected);
+}
+
+fn send_bundle_selection(sender: &crate::net::sender::PacketSender, slot: u16, selected: i32) {
+    use azalea_protocol::packets::game::s_bundle_item_selected::ServerboundBundleItemSelected;
+    sender.send(ServerboundGamePacket::BundleItemSelected(
+        ServerboundBundleItemSelected {
+            slot_id: i32::from(slot),
+            selected_item_index: selected as u32,
+        },
+    ));
+}
+
 /// Predict each container click locally (instant UI + drag preview), then send
 /// the predicted diff as `HashedStack`es so the server suppresses corrections
 /// when the prediction is right (vanilla lockstep).
 fn send_container_clicks(
     game: &mut GameState,
     connection: &ConnectionHandle,
+    audio: &crate::audio::AudioEngine,
     ops: Vec<azalea_inventory::operations::ClickOperation>,
 ) {
     use azalea_inventory::ItemStack;
@@ -1516,13 +1857,28 @@ fn send_container_clicks(
             },
             other => {
                 let mut cursor = std::mem::take(&mut game.cursor_item);
+                let mut bundle = menu_click::BundleClick {
+                    selection: game
+                        .bundle_selection
+                        .filter(|(menu, _, _)| *menu == container_id)
+                        .map(|(_, slot, selected)| (slot, selected)),
+                    sound: None,
+                };
+                let had_selection = bundle.selection.is_some();
                 let changed = menu_click::apply_click(
                     kind,
                     game.menu_slots(),
                     &mut cursor,
                     other,
                     crate::player::is_creative(game.player.game_mode),
+                    &mut bundle,
                 );
+                if had_selection && bundle.selection.is_none() {
+                    game.bundle_selection = None;
+                }
+                if let Some(sound) = bundle.sound {
+                    sound.play(audio, game.player.position);
+                }
                 game.cursor_item = cursor;
                 for (s, item) in &changed {
                     game.set_menu_slot(*s as usize, item.clone());
@@ -1572,6 +1928,19 @@ fn lightmap_brightness(chunks: &ChunkStore, dimension: &str, x: i32, y: i32, z: 
     curved + (1.0 - curved) * ambient
 }
 
+fn sleeping_head_pitch_deg(is_sleeping: bool, head_x_rot_deg: f32) -> f32 {
+    if is_sleeping { 0.0 } else { head_x_rot_deg }
+}
+
+fn should_render_local_player(
+    benchmark_running: bool,
+    first_person: bool,
+    sleeping: bool,
+    death_animation_finished: bool,
+) -> bool {
+    !benchmark_running && (!first_person || sleeping) && !death_animation_finished
+}
+
 fn eye_lightmap_brightness(game: &GameState) -> f32 {
     let eye = game.player.eye_pos();
     lightmap_brightness(
@@ -1592,6 +1961,21 @@ fn head_is_carved_pumpkin(player: &LocalPlayer) -> bool {
         }
         _ => false,
     }
+}
+
+/// Vanilla `Camera.setup`: the third-person camera backs off by the larger of
+/// the player's and a living mount's `camera_distance`.
+fn detached_distance(own: f32, mount: Option<f32>) -> f32 {
+    mount.map_or(own, |mount| own.max(mount))
+}
+
+/// Vanilla `LivingEntity.getBedOrientation` for a sleeper's bed.
+fn bed_orientation(
+    chunks: &ChunkStore,
+    sleeping_pos: Option<azalea_core::position::BlockPos>,
+) -> Option<BedDirection> {
+    let pos = sleeping_pos?;
+    bed_direction(chunks.get_block_state(pos.x, pos.y, pos.z))
 }
 
 /// Vanilla `LivingEntityRenderer`: hurt or dying entities take the red overlay.
@@ -1796,13 +2180,17 @@ pub fn update_game(
     if core.input.key_just_pressed(winit::keyboard::KeyCode::F1) && game.input_live() {
         game.hide_gui = !game.hide_gui;
     }
-    // Vanilla leaves bed via InBedChatScreen's ESC / "Leave bed" button; no
-    // bed screen yet, so the jump key wakes. TODO: InBedChatScreen.
-    if game.input_live()
-        && game.player.is_sleeping()
-        && core.input.action_just_pressed(input::Action::Jump)
-    {
-        core.send_stop_sleeping(connection);
+    if std::mem::take(&mut game.stop_sleeping_requested) {
+        core.send_stop_sleeping(connection, game);
+    }
+
+    // Vanilla `Gui.tick`: the bed chat follows the sleeping state.
+    if !game.player.is_sleeping() && game.chat.on_player_woke_up(game.command_tree.as_deref()) {
+        core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+    if game.player.is_sleeping() && game.input_live() {
+        game.chat.open_in_bed(game.command_tree.as_deref());
+        core.apply_cursor_grab(&gfx.window, Some(game));
     }
     // TODO: remaining vanilla keybinds with no backing feature yet:
     // L advancements, P social interactions, O friends overlay (in-game),
@@ -1858,15 +2246,14 @@ pub fn update_game(
         Vec::new()
     };
     let text_sw = gfx.renderer.screen_width() as f32;
-    let text_gs = hud::gui_scale(
-        text_sw,
-        gfx.renderer.screen_height() as f32,
-        core.menu.gui_scale_setting,
-    );
+    let text_gs = core
+        .menu
+        .gui_scale(text_sw, gfx.renderer.screen_height() as f32);
     let text_fs = common::FONT_SIZE * text_gs;
     let chat_was_open = game.chat.is_open();
-    if game.chat.has_pending_modal_prompt() {
-        // The ConfirmScreen replaces ChatScreen and takes its input.
+    if game.dialog_open() {
+        // The dialog, or the ConfirmScreen over it, replaces ChatScreen and
+        // takes its input; `build_server_screens` hands the typing on.
     } else if let Some(msg) = game.chat.handle_key_input(
         &text_events,
         enter,
@@ -1886,7 +2273,7 @@ pub fn update_game(
     if chat_was_open && !game.chat.is_open() {
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
-    if game.chat.is_open() {
+    if game.server_dialog.is_none() && game.chat.is_open() {
         let scroll = core.input.consume_menu_scroll();
         if scroll != 0.0 {
             game.chat
@@ -1906,9 +2293,11 @@ pub fn update_game(
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
     core.input.menu_capture = game.gui_open() || game.death_screen_open;
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
-    if core.input.spectator && game.spectator.is_menu_active() {
-        core.ensure_player_face_atlas(&mut gfx.renderer);
-    }
+    core.sync_game_dynamic_atlas(
+        game,
+        &mut gfx.renderer,
+        core.input.spectator && game.spectator.is_menu_active(),
+    );
 
     // The F3+F4 switcher shows the mouse cursor while open.
     let switcher_open = game.game_mode_switcher.is_some();
@@ -1921,11 +2310,25 @@ pub fn update_game(
     let mut pause_action = PauseAction::None;
     let mut death_action = DeathAction::None;
 
-    gfx.renderer.sync_camera_pos(
-        game.player
-            .prev_eye_pos()
-            .lerp(game.player.eye_pos(), partial_tick as f64),
-    );
+    let sleeping_direction = bed_orientation(&game.chunk_store, game.player.sleeping_pos);
+    let is_sleeping = game.player.is_sleeping();
+    // `Camera.alignWithEntity`, then the first-person sleeping `move(0, 0.15, 0)`.
+    let first_person_lift = if is_sleeping && gfx.renderer.is_first_person() {
+        0.15
+    } else {
+        0.0
+    };
+    let camera_pivot = game
+        .player
+        .prev_eye_pos()
+        .lerp(game.player.eye_pos(), partial_tick as f64)
+        + glam::dvec3(0.0, first_person_lift, 0.0);
+    gfx.renderer.sync_camera_pos(camera_pivot);
+    gfx.renderer.set_sleeping_camera_look(is_sleeping.then(|| {
+        sleeping_direction
+            .map(BedDirection::camera_yaw_deg)
+            .unwrap_or(0.0)
+    }));
     // Per-frame FOV interpolation; set before the frustum/view-projection reads.
     gfx.renderer.set_render_partial_tick(partial_tick);
     gfx.renderer.set_death_time(if game.dead {
@@ -1948,10 +2351,9 @@ pub fn update_game(
     gfx.renderer
         .set_view_bob(bob_walk, bob_amount, core.menu.view_bobbing);
     gfx.renderer.update_third_person_distance(
-        game.player
-            .prev_eye_pos()
-            .lerp(game.player.eye_pos(), partial_tick as f64),
+        camera_pivot,
         &game.chunk_store,
+        game.third_person_distance(),
     );
     // Esc cancels a running benchmark: restore the render distance it changed.
     if std::mem::take(&mut game.chunk_load_abort)
@@ -1971,7 +2373,7 @@ pub fn update_game(
 
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
-    let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
+    let gs = core.menu.gui_scale(sw, sh);
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
@@ -2241,7 +2643,7 @@ pub fn update_game(
             &game.boss_bars,
             gfx.renderer.is_first_person(),
             debug.as_ref(),
-            core.menu.gui_scale_setting,
+            gs,
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
@@ -2513,7 +2915,11 @@ pub fn update_game(
         apply_result_action(action, ResultKind::ChunkLoad, status, json, core, gfx, game);
     }
 
-    if game.options_from_game {
+    // A dialog is the top screen: the screens under it keep their state
+    // (vanilla's `previousScreen`) but neither draw nor take input. The Hud
+    // still draws, so chat keeps its unfocused backlog.
+    let dialog_open = game.dialog_open();
+    if game.options_from_game && !dialog_open {
         core.menu.server_render_distance = game.server_render_distance;
         let mut menu_input = core.build_menu_input(dt);
         // Chat consumed the enter/tab latches earlier this frame; hand them on.
@@ -2526,7 +2932,7 @@ pub fn update_game(
         elements.extend(result.elements);
         core.input.clear_just_pressed_actions();
         core.sync_display_mode(&gfx.window);
-    } else if game.death_screen_open {
+    } else if game.death_screen_open && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed() && !game.respawn_sent;
         death_action = if game.death_confirm {
@@ -2558,7 +2964,7 @@ pub fn update_game(
             )
         };
         core.input.clear_just_pressed_actions();
-    } else if game.paused && !matches!(game.pause_screen, PauseScreen::Hidden) {
+    } else if game.paused && !matches!(game.pause_screen, PauseScreen::Hidden) && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
         pause_action = pause::build_pause_menu(
@@ -2577,9 +2983,10 @@ pub fn update_game(
 
     let mut player_preview = None;
     let mut book_preview = None;
-    if game.inventory_open || game.open_container.is_some() {
+    if (game.inventory_open || game.open_container.is_some()) && !dialog_open {
         // Key shortcuts stay quiet while a text field (anvil rename) types.
         let keys_live = !game.wants_text_input();
+        let menu_scroll = core.input.consume_menu_scroll_xy();
         let input = crate::ui::container::ContainerInput {
             left_pressed: core.input.left_just_pressed(),
             right_pressed: core.input.right_just_pressed(),
@@ -2610,7 +3017,7 @@ pub fn update_game(
                     name,
                 }));
         }
-        let (clicked_outside, ops) = if let Some(container) = &game.open_container {
+        let (clicked_outside, ops, hovered) = if let Some(container) = &game.open_container {
             let result = match container.screen {
                 ContainerScreen::CraftingTable => crate::ui::crafting_table::build_crafting_table(
                     &mut elements,
@@ -2726,7 +3133,7 @@ pub fn update_game(
                         },
                     ));
             }
-            (result.clicked_outside, result.ops)
+            (result.clicked_outside, result.ops, result.hovered)
         } else {
             let result = crate::ui::inventory::build_inventory(
                 &mut elements,
@@ -2741,14 +3148,99 @@ pub fn update_game(
                 gs,
             );
             player_preview = Some(result.player_preview);
-            (result.clicked_outside, result.ops)
+            (result.clicked_outside, result.ops, result.hovered)
         };
         close_inventory = clicked_outside;
-        send_container_clicks(game, connection, ops);
+
+        let menu_id = game.open_container.as_ref().map_or(0, |c| c.id);
+        let is_bundle_slot = |game: &GameState, slot: u16| {
+            game.menu_slots()
+                .get(usize::from(slot))
+                .and_then(azalea_inventory::ItemStack::as_present)
+                .is_some_and(crate::ui::bundle::is_bundle)
+        };
+        // Vanilla `onMouseClickAction`: a shift-click or number-key swap on a
+        // bundle unselects it before the click goes out.
+        for op in &ops {
+            use azalea_inventory::operations::{ClickOperation, QuickMoveClick};
+            let slot = match op {
+                ClickOperation::QuickMove(
+                    QuickMoveClick::Left { slot } | QuickMoveClick::Right { slot },
+                ) => *slot,
+                ClickOperation::Swap(click) => click.source_slot,
+                _ => continue,
+            };
+            if is_bundle_slot(game, slot) {
+                toggle_bundle_selection(
+                    game,
+                    &connection.packet_tx,
+                    menu_id,
+                    slot,
+                    crate::ui::bundle::NO_SELECTION,
+                );
+            }
+        }
+        send_container_clicks(game, connection, &core.audio, ops);
+
+        // Vanilla `extractContents`: after the clicks, leaving a slot that
+        // holds a bundle unselects it (`onStopHovering`).
+        if let Some((menu, slot, _)) = game.bundle_hovered
+            && menu == menu_id
+            && Some(slot) != hovered
+            && is_bundle_slot(game, slot)
+        {
+            toggle_bundle_selection(
+                game,
+                &connection.packet_tx,
+                menu_id,
+                slot,
+                crate::ui::bundle::NO_SELECTION,
+            );
+        }
+        game.bundle_hovered = hovered.map(|slot| (menu_id, slot, is_bundle_slot(game, slot)));
+
+        if let Some((_, slot, true)) = game.bundle_hovered {
+            let data = game.menu_slots()[usize::from(slot)]
+                .as_present()
+                .cloned()
+                .expect("a bundle slot holds a stack");
+            let shown = crate::ui::bundle::contents(&data)
+                .map_or(0, |c| crate::ui::bundle::shown_count(c.items.len()));
+            let current = game
+                .bundle_selection
+                .filter(|(m, s, _)| *m == menu_id && *s == slot)
+                .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i);
+            // `BundleMouseActions.onMouseScrolled`.
+            // TODO: vanilla steps once per wheel event, scaled by
+            // `mouseWheelSensitivity`; the input layer sums a frame's events.
+            if shown > 0 && menu_scroll != (0.0, 0.0) {
+                let wheel = scroll_wheel(&mut game.bundle_scroll, menu_scroll);
+                let next = crate::ui::bundle::next_selection(wheel, current, shown);
+                if wheel != 0 && next != current {
+                    toggle_bundle_selection(game, &connection.packet_tx, menu_id, slot, next);
+                }
+            }
+            let selected = game
+                .bundle_selection
+                .filter(|(m, s, _)| *m == menu_id && *s == slot)
+                .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i);
+            crate::ui::bundle::push_selected_icon(&mut elements, &data, selected);
+            crate::ui::bundle::push_tooltip(
+                &mut elements,
+                &data,
+                selected,
+                core.input.cursor_pos(),
+                sw,
+                sh,
+                gs,
+            );
+        }
         core.input.clear_just_pressed_actions();
     }
 
-    if game.creative_inventory_open {
+    // TODO: vanilla's creative screen inherits `BundleMouseActions` (scroll
+    // selection, the bundle tooltip); only survival containers have them here.
+    if game.creative_inventory_open && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
         let middle_clicked = core.input.middle_just_pressed();
@@ -2818,6 +3310,11 @@ pub fn update_game(
     // regardless (vanilla Hud.extractChat vs ChatScreen).
     if !game.hide_gui || game.chat.is_focused() {
         let command_tree = game.command_tree.clone();
+        // Vanilla `ChatScreen.mouseClicked` offers the click to the chat's own
+        // targets before its widgets.
+        let chat_takes_click = game
+            .chat
+            .hovering_clickable(core.input.cursor_pos(), core.input.shift_held());
         let chat_action = game.chat.build(
             &mut elements,
             crate::ui::chat::ChatBuildContext {
@@ -2825,6 +3322,7 @@ pub fn update_game(
                 screen_h: sh,
                 gui_scale: gs,
                 cursor: core.input.cursor_pos(),
+                covered: dialog_open,
                 clicked: core.input.left_just_pressed(),
                 shift: core.input.shift_held(),
                 command_tree: command_tree.as_deref(),
@@ -2835,6 +3333,24 @@ pub fn update_game(
         );
         if let Some(action) = chat_action {
             handle_chat_ui_action(action, core, connection, game);
+        }
+        if game.chat.is_in_bed() && !dialog_open && !game.chat.has_pending_modal_prompt() {
+            let hovered = common::push_button(
+                &mut elements,
+                core.input.cursor_pos(),
+                sw / 2.0 - 100.0 * gs,
+                sh - 40.0 * gs,
+                200.0 * gs,
+                20.0 * gs,
+                gs,
+                common::FONT_SIZE * gs,
+                crate::lang::translate("multiplayer.stopSleeping").unwrap_or("Leave Bed"),
+                true,
+            );
+            if hovered && core.input.left_just_pressed() && !chat_takes_click {
+                core.audio.play_ui_click();
+                game.stop_sleeping_requested = true;
+            }
         }
     }
 
@@ -2871,27 +3387,20 @@ pub fn update_game(
         });
     }
 
-    if game.chat.has_pending_modal_prompt() {
-        let cursor = core.input.cursor_pos();
-        let clicked = core.input.left_just_pressed();
-        // `AbstractButton.onClick` plays the click; this is the same
-        // last-frame hit test the modal presses with.
-        if clicked && game.chat.hovering_clickable(cursor, false) {
-            core.audio.play_ui_click();
-        }
-        if let Some(action) =
-            game.chat
-                .build_modal_prompt(&mut elements, sw, sh, gs, cursor, clicked, &|spans, s| {
-                    gfx.renderer.menu_spans_width(spans, s)
-                })
-        {
-            handle_chat_ui_action(action, core, connection, game);
-        }
-        core.input.clear_just_pressed_actions();
-        core.apply_cursor_grab(&gfx.window, Some(game));
-    }
+    build_server_screens(
+        &mut elements,
+        sw,
+        sh,
+        gs,
+        core,
+        gfx,
+        connection,
+        game,
+        Some(game.tick_count),
+        &text_events,
+    );
 
-    if game.chat.is_open() && core.input.cursor_moved_this_frame() {
+    if game.chat.is_open() && !dialog_open && core.input.cursor_moved_this_frame() {
         let icon = if game
             .chat
             .hovering_clickable(core.input.cursor_pos(), core.input.shift_held())
@@ -2926,6 +3435,7 @@ pub fn update_game(
                 let interp_pos = e.prev_position.lerp(e.position, partial_tick as f64);
                 let extras =
                     entity_extras(entity_id, e, partial_tick, game.sky_state.game_time as i64);
+                let is_sleeping = e.sleeping_pos.is_some();
 
                 EntityRenderInfo {
                     position: interp_pos + extras.render_offset,
@@ -2934,15 +3444,20 @@ pub fn update_game(
                         e.head_y_rot_deg,
                         partial_tick,
                     ),
-                    head_x_rot_deg: e
-                        .prev_look_dir
-                        .x_rot_deg()
-                        .lerp(e.look_dir.x_rot_deg(), partial_tick),
+                    head_x_rot_deg: sleeping_head_pitch_deg(
+                        is_sleeping,
+                        e.prev_look_dir
+                            .x_rot_deg()
+                            .lerp(e.look_dir.x_rot_deg(), partial_tick),
+                    ),
                     body_y_rot_deg: lerp_angle(
                         e.prev_body_y_rot_deg,
                         e.body_y_rot_deg,
                         partial_tick,
                     ),
+                    is_sleeping,
+                    sleeping_direction: bed_orientation(&game.chunk_store, e.sleeping_pos),
+                    sleeping_eye_height: standing_eye_height(e.entity_type, e.is_baby),
                     is_baby: e.is_baby,
                     is_crouching: e.is_crouching,
                     walk_anim_pos: e.walk_pos(partial_tick),
@@ -2996,10 +3511,12 @@ pub fn update_game(
             .collect()
     };
 
-    if !benchmark_running
-        && !gfx.renderer.is_first_person()
-        && !game.player.death_animation_finished()
-    {
+    if should_render_local_player(
+        benchmark_running,
+        gfx.renderer.is_first_person(),
+        game.player.is_sleeping(),
+        game.player.death_animation_finished(),
+    ) {
         let interp_pos = game
             .player
             .prev_position
@@ -3014,8 +3531,14 @@ pub fn update_game(
         entity_renders.push(EntityRenderInfo {
             position: interp_pos,
             head_y_rot_deg: interp_y_rot_deg,
-            head_x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
+            head_x_rot_deg: sleeping_head_pitch_deg(
+                game.player.is_sleeping(),
+                gfx.renderer.camera_look_dir().x_rot_deg(),
+            ),
             body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
+            is_sleeping: game.player.is_sleeping(),
+            sleeping_direction,
+            sleeping_eye_height: crate::player::STANDING_EYE_HEIGHT,
             is_crouching: game.player.crouching && (!game.dead || game.player.death_time > 0),
             walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - partial_tick),
             walk_anim_speed: (game.player_prev_walk_speed
@@ -3169,6 +3692,7 @@ pub fn update_game(
         swing_progress,
         use_anim,
         held_item,
+        !game.player.is_sleeping(),
         destroy_info,
         game.show_chunk_borders,
         sky,
@@ -3192,6 +3716,10 @@ pub fn update_game(
     // Whole-frame wall time (incl. render), read next frame to align with `raw_dt`.
     game.last_update_phases.update_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
 
+    // Vanilla `onClose`: `closeContainer`, then `onStopHovering`.
+    let stop_hovering = close_inventory
+        .then(|| game.bundle_hovered.filter(|(_, _, bundle)| *bundle))
+        .flatten();
     if close_inventory {
         game.close_menu();
         game.close_creative_inventory();
@@ -3212,6 +3740,9 @@ pub fn update_game(
             ));
     }
     game.container_was_open = open_menu;
+    if let Some((_, slot, _)) = stop_hovering {
+        send_bundle_selection(&connection.packet_tx, slot, crate::ui::bundle::NO_SELECTION);
+    }
 
     match death_action {
         DeathAction::Respawn => {
@@ -3295,6 +3826,9 @@ pub fn update_game(
     }
 
     if game.options_from_game {
+        // TODO: a resource-pack toggle's `menu.reload_assets` is only applied
+        // once back on the title screen.
+        core.apply_font_options(&mut gfx.renderer);
         if core.menu.render_distance != game.last_render_distance
             || game.chat_information_changed(core.menu.chat_options)
         {
@@ -3420,13 +3954,40 @@ fn transform_item_bounds(
 
 #[cfg(test)]
 mod dropped_item_tests {
-    use super::{item_stack_seed, transform_item_bounds};
+    use azalea_registry::builtin::EntityKind;
+
+    use super::{
+        item_stack_seed, should_render_local_player, sleeping_head_pitch_deg, standing_eye_height,
+        transform_item_bounds,
+    };
 
     #[test]
     fn dropped_item_scatter_seed_includes_damage() {
         assert_eq!(item_stack_seed(42, 0), 42);
         assert_eq!(item_stack_seed(42, 7), 49);
         assert_eq!(item_stack_seed(u32::MAX, 2), 1);
+    }
+
+    #[test]
+    fn sleeping_head_pitch_is_zero_like_vanilla_living_entity_tick() {
+        assert_eq!(sleeping_head_pitch_deg(true, -43.0), 0.0);
+        assert_eq!(sleeping_head_pitch_deg(true, 61.5), 0.0);
+        assert_eq!(sleeping_head_pitch_deg(false, -17.25), -17.25);
+    }
+
+    #[test]
+    fn first_person_sleeping_player_remains_rendered_like_vanilla() {
+        assert!(!should_render_local_player(false, true, false, false));
+        assert!(should_render_local_player(false, true, true, false));
+        assert!(should_render_local_player(false, false, false, false));
+        assert!(!should_render_local_player(true, false, true, false));
+        assert!(!should_render_local_player(false, false, true, true));
+    }
+
+    #[test]
+    fn villager_sleeping_eye_height_uses_explicit_baby_dimensions() {
+        assert_eq!(standing_eye_height(EntityKind::Villager, false), 1.62);
+        assert_eq!(standing_eye_height(EntityKind::Villager, true), 0.63);
     }
 
     #[test]
@@ -4083,7 +4644,29 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_red_overlay, section_bit, section_bits};
+    use super::{detached_distance, has_red_overlay, scroll_wheel, section_bit, section_bits};
+
+    #[test]
+    fn third_person_distance_takes_the_further_of_player_and_mount() {
+        assert_eq!(detached_distance(4.0, None), 4.0);
+        assert_eq!(detached_distance(4.0, Some(8.0)), 8.0);
+        assert_eq!(detached_distance(10.0, Some(8.0)), 10.0);
+    }
+
+    #[test]
+    fn scroll_wheel_matches_scroll_wheel_handler() {
+        let mut acc = (0.0, 0.0);
+        // Fractions accumulate into whole steps; vertical wins over horizontal.
+        assert_eq!(scroll_wheel(&mut acc, (0.0, 0.6)), 0);
+        assert_eq!(scroll_wheel(&mut acc, (0.0, 0.6)), 1);
+        // A sign flip drops the leftover, and horizontal steps are negated.
+        assert_eq!(scroll_wheel(&mut acc, (0.0, -1.0)), -1);
+        assert_eq!(scroll_wheel(&mut acc, (1.0, 0.0)), -1);
+        // `Math.signum(0)` is 0, so an idle axis clears its leftover.
+        let mut acc = (0.5, 0.0);
+        assert_eq!(scroll_wheel(&mut acc, (0.0, 0.0)), 0);
+        assert_eq!(acc, (0.0, 0.0));
+    }
 
     #[test]
     fn section_bits_cover_the_indices_and_ignore_the_rest() {

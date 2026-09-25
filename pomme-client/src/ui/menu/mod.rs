@@ -1,6 +1,6 @@
 mod credits;
 mod friends_screen;
-mod helpers;
+pub(crate) mod helpers;
 mod main_screen;
 mod options;
 mod servers;
@@ -24,6 +24,7 @@ use crate::renderer::pipelines::menu_overlay::{
     TooltipLine,
 };
 use crate::ui::chat::ChatOptions;
+use crate::ui::font::FontOptions;
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
 #[derive(Serialize, Deserialize)]
@@ -105,6 +106,10 @@ struct Settings {
     theme: u8,
     #[serde(default)]
     chat: ChatOptions,
+    #[serde(default)]
+    force_unicode_font: bool,
+    #[serde(default = "default_japanese_glyph_variants")]
+    japanese_glyph_variants: bool,
 }
 
 fn default_fov() -> u32 {
@@ -147,6 +152,19 @@ fn default_attack_indicator() -> u8 {
 
 fn default_true() -> bool {
     true
+}
+
+// TODO: vanilla reads `Locale.getDefault()`, which follows the OS locale;
+// these variables are usually unset on Windows.
+fn default_japanese_glyph_variants() -> bool {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok())
+        .is_some_and(|locale| {
+            locale.eq_ignore_ascii_case("ja")
+                || locale.starts_with("ja_")
+                || locale.starts_with("ja-")
+        })
 }
 
 fn default_chunk_detail() -> u32 {
@@ -200,6 +218,8 @@ impl Default for Settings {
             display_mode: 0,
             theme: 0,
             chat: ChatOptions::default(),
+            force_unicode_font: false,
+            japanese_glyph_variants: default_japanese_glyph_variants(),
         }
     }
 }
@@ -324,6 +344,9 @@ pub struct MenuInput {
     pub escape: bool,
     pub tab: bool,
     pub f5: bool,
+    /// Net DPad Right minus Left this frame: one step on the press edge, then
+    /// auto-repeat. Folded into `arrow_steps`.
+    pub gamepad_steps: i32,
     pub scroll_delta: f32,
     /// Seconds since the last frame, clamped against stalls by the app loop.
     /// Only the credits roll accumulates a delta; the other menu animations
@@ -358,6 +381,7 @@ impl MenuInput {
             escape: false,
             tab: false,
             f5: false,
+            gamepad_steps: 0,
             scroll_delta: 0.0,
             dt: 0.0,
             credits_keys_down: 0,
@@ -378,10 +402,12 @@ impl MenuInput {
             })
     }
 
-    /// Net Right minus Left presses this frame, key repeats included
+    /// Net Right minus Left this frame: arrow-key presses with their OS
+    /// repeats, plus the DPad's edge-and-repeat steps
     /// (`AbstractSliderButton.keyPressed`).
     pub fn arrow_steps(&self) -> i32 {
-        self.events
+        let keys: i32 = self
+            .events
             .iter()
             .map(|e| match e {
                 TextInputEvent::Key {
@@ -394,7 +420,8 @@ impl MenuInput {
                 } => -1,
                 _ => 0,
             })
-            .sum()
+            .sum();
+        keys + self.gamepad_steps
     }
 }
 
@@ -447,6 +474,7 @@ enum Screen {
     OptionsControls,
     OptionsKeybinds,
     OptionsLanguage,
+    OptionsFontSettings,
     OptionsChatSettings,
     OptionsResourcePacks,
     OptionsAccessibility,
@@ -468,6 +496,7 @@ impl Screen {
             Self::OptionsControls => Self::OptionsControls,
             Self::OptionsKeybinds => Self::OptionsKeybinds,
             Self::OptionsLanguage => Self::OptionsLanguage,
+            Self::OptionsFontSettings => Self::OptionsFontSettings,
             Self::OptionsChatSettings => Self::OptionsChatSettings,
             Self::OptionsResourcePacks => Self::OptionsResourcePacks,
             Self::OptionsAccessibility => Self::OptionsAccessibility,
@@ -617,6 +646,8 @@ pub struct MainMenu {
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
     slider_can_change_value: bool,
     pub chat_options: ChatOptions,
+    pub force_unicode_font: bool,
+    pub japanese_glyph_variants: bool,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
     /// Set by slider drags, written by `flush_settings`.
@@ -633,6 +664,8 @@ pub struct MainMenu {
     pub pack_toggle: Option<(String, bool)>,
     pub rescan_packs: bool,
     pub reload_assets: bool,
+    /// Set by a Font Settings toggle, applied by `AppCore::apply_font_options`.
+    pub reload_fonts: bool,
     pack_search: TextFieldState,
 }
 
@@ -749,6 +782,8 @@ impl MainMenu {
             ),
             slider_can_change_value: true,
             chat_options: settings.chat.sanitized(),
+            force_unicode_font: settings.force_unicode_font,
+            japanese_glyph_variants: settings.japanese_glyph_variants,
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             settings_dirty: false,
@@ -762,6 +797,7 @@ impl MainMenu {
             pack_toggle: None,
             rescan_packs: false,
             reload_assets: false,
+            reload_fonts: false,
             pack_search: TextFieldState::new(MAX_SEARCH),
         }
     }
@@ -797,6 +833,22 @@ impl MainMenu {
     /// `Mth::square`).
     pub fn fov_effect(&self) -> f32 {
         self.fov_effect_scale * self.fov_effect_scale
+    }
+
+    pub(crate) fn gui_scale(&self, screen_w: f32, screen_h: f32) -> f32 {
+        crate::ui::hud::gui_scale(
+            screen_w,
+            screen_h,
+            self.gui_scale_setting,
+            self.force_unicode_font,
+        )
+    }
+
+    pub(crate) fn font_options(&self) -> FontOptions {
+        FontOptions {
+            uniform: self.force_unicode_font,
+            japanese_variants: self.japanese_glyph_variants,
+        }
     }
 
     /// Per-category volumes for the audio engine, indexed by `SoundCategory`;
@@ -870,6 +922,8 @@ impl MainMenu {
                 display_mode: self.display_mode.to_u8(),
                 theme: self.theme.to_u8(),
                 chat: self.chat_options,
+                force_unicode_font: self.force_unicode_font,
+                japanese_glyph_variants: self.japanese_glyph_variants,
             },
         )
         .is_err();
@@ -912,6 +966,7 @@ impl MainMenu {
                 | Screen::OptionsControls
                 | Screen::OptionsKeybinds
                 | Screen::OptionsLanguage
+                | Screen::OptionsFontSettings
                 | Screen::OptionsChatSettings
                 | Screen::OptionsResourcePacks
                 | Screen::OptionsAccessibility
@@ -1144,10 +1199,21 @@ impl MainMenu {
                 input,
                 "Keybinds",
                 Screen::OptionsControls,
+                None,
             ),
             Screen::OptionsLanguage => {
                 let back = self.settings_back.clone_screen();
-                self.build_options_stub(screen_w, screen_h, input, "Language", back)
+                self.build_options_stub(
+                    screen_w,
+                    screen_h,
+                    input,
+                    "Language",
+                    back,
+                    Some(("Font Settings...", Screen::OptionsFontSettings)),
+                )
+            }
+            Screen::OptionsFontSettings => {
+                self.build_options_font(screen_w, screen_h, input, &text_width_fn)
             }
             Screen::OptionsChatSettings => {
                 self.build_options_chat(screen_w, screen_h, input, &text_width_fn)
@@ -1164,6 +1230,7 @@ impl MainMenu {
                 input,
                 "Telemetry Data",
                 Screen::Options,
+                None,
             ),
             Screen::OptionsCredits => self.build_options_credits(screen_w, screen_h, input),
             Screen::CreditsRoll => {
@@ -1253,6 +1320,19 @@ mod tests {
             };
             assert_eq!(chat.sanitized().delay_secs, secs, "delay {secs}");
         }
+    }
+
+    #[test]
+    fn font_variant_settings_round_trip() {
+        let settings = Settings {
+            force_unicode_font: true,
+            japanese_glyph_variants: false,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert!(loaded.force_unicode_font);
+        assert!(!loaded.japanese_glyph_variants);
     }
 
     #[test]

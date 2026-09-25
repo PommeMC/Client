@@ -1,6 +1,6 @@
 use crate::app::TICK_RATE;
 use crate::app::core::AppCore;
-use crate::app::phases::in_game::GameState;
+use crate::app::phases::in_game::{GameState, build_server_screens};
 use crate::app::phases::{ConnectionPhase, Gfx, Panorama, draw_status};
 use crate::net::connection::ConnectionHandle;
 use crate::singleplayer::World;
@@ -83,9 +83,57 @@ pub fn update_connecting(
         ConnectionPhase::Connecting => "Connecting to the server...",
     };
 
-    if draw_status(core, dt, gfx, panorama, status_text, Some("Cancel")) {
+    if game.dialog_open() {
+        draw_server_dialog(core, dt, gfx, panorama, connection, game);
+    } else if draw_status(core, dt, gfx, panorama, status_text, Some("Cancel")) {
         return ConnectingUpdateResult::ManualDisconnect;
     }
 
     ConnectingUpdateResult::None
+}
+
+/// A configuration-phase dialog, shown in place of the connect screen with
+/// the confirm screen its links can open.
+fn draw_server_dialog(
+    core: &mut AppCore,
+    dt: f32,
+    gfx: &mut Gfx,
+    panorama: &mut Panorama,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    panorama.update(dt);
+
+    let sw = gfx.renderer.screen_width() as f32;
+    let sh = gfx.renderer.screen_height() as f32;
+    let gs = core.menu.gui_scale(sw, sh);
+
+    // A configuration-phase dialog can carry object glyphs, which load into
+    // the same atlas the in-game text uses.
+    core.sync_game_dynamic_atlas(game, &mut gfx.renderer, false);
+
+    let mut elements = Vec::new();
+    let text_events = core.input.drain_text_events();
+    // The connecting screen runs no client ticks, so the dialog's own
+    // timers fall back to wall time.
+    build_server_screens(
+        &mut elements,
+        sw,
+        sh,
+        gs,
+        core,
+        gfx,
+        connection,
+        game,
+        None,
+        &text_events,
+    );
+
+    let cursor = core.input.cursor_pos();
+    if let Err(e) =
+        gfx.renderer
+            .render_menu(&gfx.window, panorama.scroll(), 2.0, elements, cursor, false)
+    {
+        tracing::error!("Render error: {e}");
+    }
 }
