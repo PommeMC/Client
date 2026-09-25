@@ -499,7 +499,7 @@ impl ApplicationHandler for App {
                                 } else if game.chat.is_open() {
                                     match code {
                                         KeyCode::Escape => {
-                                            let closed = game.chat.handle_escape();
+                                            let closed = game.escape_chat();
                                             self.core
                                                 .input
                                                 .clear_action(crate::app::input::Action::OpenMenu);

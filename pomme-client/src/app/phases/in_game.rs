@@ -31,7 +31,8 @@ use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::entity_model::triangle_wave;
 use crate::renderer::pipelines::block_entity;
 use crate::renderer::pipelines::entity_renderer::{
-    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, dye_color_tint, jeb_sheep_tint, wool_color_tint,
+    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, dye_color_tint, jeb_sheep_tint,
+    standing_eye_height, wool_color_tint,
 };
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
@@ -41,6 +42,7 @@ use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
 use crate::world::block::model::CardinalLightType;
+use crate::world::block::{BedDirection, bed_direction};
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
@@ -174,6 +176,8 @@ pub struct GameState {
     /// The connection is in the configuration phase (the join, or a
     /// reconfiguration), where dialogs can't run commands.
     pub configuring: bool,
+    /// UI actions that request vanilla STOP_SLEEPING on the next update pass.
+    pub stop_sleeping_requested: bool,
     pub command_tree: Option<Arc<crate::net::commands::CommandTree>>,
     pub tab_list: TabList,
     pub server_enforces_secure_chat: bool,
@@ -414,6 +418,7 @@ impl GameState {
             server_links: Vec::new(),
             dialog_registry: Arc::default(),
             configuring: true,
+            stop_sleeping_requested: false,
             command_tree: None,
             tab_list: TabList::new(),
             server_enforces_secure_chat: false,
@@ -658,6 +663,30 @@ impl GameState {
             Some(c) if c.screen == ContainerScreen::Anvil
                 && c.slots.first().is_some_and(|s| s.is_present())
         )
+    }
+
+    /// Escape on the chat screen; true when it closed chat and the cursor
+    /// should be recaptured.
+    pub fn escape_chat(&mut self) -> bool {
+        use crate::ui::chat::ChatEscape;
+        match self.chat.handle_escape() {
+            ChatEscape::Closed => true,
+            ChatEscape::WakeUp => {
+                self.stop_sleeping_requested = true;
+                false
+            }
+            ChatEscape::Handled => false,
+        }
+    }
+
+    /// Clears the bed state and screen a reconfiguration would destroy.
+    pub(crate) fn reset_sleep_for_level_teardown(&mut self) {
+        self.player.reset_sleep_for_level_teardown();
+        self.stop_sleeping_requested = false;
+        if self.chat.is_in_bed() {
+            self.chat
+                .close(crate::ui::chat::ChatExitReason::Interrupted);
+        }
     }
 
     /// Closes the death screen and its confirm, and re-arms the respawn send.
@@ -1643,7 +1672,7 @@ pub(crate) fn server_dialog_key(
         // `ConfirmScreen` answers Escape with `accept(false)`, which returns
         // to the screen under it.
         if code == KeyCode::Escape {
-            game.chat.handle_escape();
+            game.escape_chat();
             core.input.clear_action(input::Action::OpenMenu);
             core.apply_cursor_grab(window, Some(game));
         } else {
@@ -1899,6 +1928,19 @@ fn lightmap_brightness(chunks: &ChunkStore, dimension: &str, x: i32, y: i32, z: 
     curved + (1.0 - curved) * ambient
 }
 
+fn sleeping_head_pitch_deg(is_sleeping: bool, head_x_rot_deg: f32) -> f32 {
+    if is_sleeping { 0.0 } else { head_x_rot_deg }
+}
+
+fn should_render_local_player(
+    benchmark_running: bool,
+    first_person: bool,
+    sleeping: bool,
+    death_animation_finished: bool,
+) -> bool {
+    !benchmark_running && (!first_person || sleeping) && !death_animation_finished
+}
+
 fn eye_lightmap_brightness(game: &GameState) -> f32 {
     let eye = game.player.eye_pos();
     lightmap_brightness(
@@ -1925,6 +1967,15 @@ fn head_is_carved_pumpkin(player: &LocalPlayer) -> bool {
 /// the player's and a living mount's `camera_distance`.
 fn detached_distance(own: f32, mount: Option<f32>) -> f32 {
     mount.map_or(own, |mount| own.max(mount))
+}
+
+/// Vanilla `LivingEntity.getBedOrientation` for a sleeper's bed.
+fn bed_orientation(
+    chunks: &ChunkStore,
+    sleeping_pos: Option<azalea_core::position::BlockPos>,
+) -> Option<BedDirection> {
+    let pos = sleeping_pos?;
+    bed_direction(chunks.get_block_state(pos.x, pos.y, pos.z))
 }
 
 /// Vanilla `LivingEntityRenderer`: hurt or dying entities take the red overlay.
@@ -2129,13 +2180,17 @@ pub fn update_game(
     if core.input.key_just_pressed(winit::keyboard::KeyCode::F1) && game.input_live() {
         game.hide_gui = !game.hide_gui;
     }
-    // Vanilla leaves bed via InBedChatScreen's ESC / "Leave bed" button; no
-    // bed screen yet, so the jump key wakes. TODO: InBedChatScreen.
-    if game.input_live()
-        && game.player.is_sleeping()
-        && core.input.action_just_pressed(input::Action::Jump)
-    {
-        core.send_stop_sleeping(connection);
+    if std::mem::take(&mut game.stop_sleeping_requested) {
+        core.send_stop_sleeping(connection, game);
+    }
+
+    // Vanilla `Gui.tick`: the bed chat follows the sleeping state.
+    if !game.player.is_sleeping() && game.chat.on_player_woke_up(game.command_tree.as_deref()) {
+        core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+    if game.player.is_sleeping() && game.input_live() {
+        game.chat.open_in_bed(game.command_tree.as_deref());
+        core.apply_cursor_grab(&gfx.window, Some(game));
     }
     // TODO: remaining vanilla keybinds with no backing feature yet:
     // L advancements, P social interactions, O friends overlay (in-game),
@@ -2255,11 +2310,25 @@ pub fn update_game(
     let mut pause_action = PauseAction::None;
     let mut death_action = DeathAction::None;
 
-    gfx.renderer.sync_camera_pos(
-        game.player
-            .prev_eye_pos()
-            .lerp(game.player.eye_pos(), partial_tick as f64),
-    );
+    let sleeping_direction = bed_orientation(&game.chunk_store, game.player.sleeping_pos);
+    let is_sleeping = game.player.is_sleeping();
+    // `Camera.alignWithEntity`, then the first-person sleeping `move(0, 0.15, 0)`.
+    let first_person_lift = if is_sleeping && gfx.renderer.is_first_person() {
+        0.15
+    } else {
+        0.0
+    };
+    let camera_pivot = game
+        .player
+        .prev_eye_pos()
+        .lerp(game.player.eye_pos(), partial_tick as f64)
+        + glam::dvec3(0.0, first_person_lift, 0.0);
+    gfx.renderer.sync_camera_pos(camera_pivot);
+    gfx.renderer.set_sleeping_camera_look(is_sleeping.then(|| {
+        sleeping_direction
+            .map(BedDirection::camera_yaw_deg)
+            .unwrap_or(0.0)
+    }));
     // Per-frame FOV interpolation; set before the frustum/view-projection reads.
     gfx.renderer.set_render_partial_tick(partial_tick);
     gfx.renderer.set_death_time(if game.dead {
@@ -2282,9 +2351,7 @@ pub fn update_game(
     gfx.renderer
         .set_view_bob(bob_walk, bob_amount, core.menu.view_bobbing);
     gfx.renderer.update_third_person_distance(
-        game.player
-            .prev_eye_pos()
-            .lerp(game.player.eye_pos(), partial_tick as f64),
+        camera_pivot,
         &game.chunk_store,
         game.third_person_distance(),
     );
@@ -3243,6 +3310,11 @@ pub fn update_game(
     // regardless (vanilla Hud.extractChat vs ChatScreen).
     if !game.hide_gui || game.chat.is_focused() {
         let command_tree = game.command_tree.clone();
+        // Vanilla `ChatScreen.mouseClicked` offers the click to the chat's own
+        // targets before its widgets.
+        let chat_takes_click = game
+            .chat
+            .hovering_clickable(core.input.cursor_pos(), core.input.shift_held());
         let chat_action = game.chat.build(
             &mut elements,
             crate::ui::chat::ChatBuildContext {
@@ -3261,6 +3333,24 @@ pub fn update_game(
         );
         if let Some(action) = chat_action {
             handle_chat_ui_action(action, core, connection, game);
+        }
+        if game.chat.is_in_bed() && !dialog_open && !game.chat.has_pending_modal_prompt() {
+            let hovered = common::push_button(
+                &mut elements,
+                core.input.cursor_pos(),
+                sw / 2.0 - 100.0 * gs,
+                sh - 40.0 * gs,
+                200.0 * gs,
+                20.0 * gs,
+                gs,
+                common::FONT_SIZE * gs,
+                crate::lang::translate("multiplayer.stopSleeping").unwrap_or("Leave Bed"),
+                true,
+            );
+            if hovered && core.input.left_just_pressed() && !chat_takes_click {
+                core.audio.play_ui_click();
+                game.stop_sleeping_requested = true;
+            }
         }
     }
 
@@ -3345,6 +3435,7 @@ pub fn update_game(
                 let interp_pos = e.prev_position.lerp(e.position, partial_tick as f64);
                 let extras =
                     entity_extras(entity_id, e, partial_tick, game.sky_state.game_time as i64);
+                let is_sleeping = e.sleeping_pos.is_some();
 
                 EntityRenderInfo {
                     position: interp_pos + extras.render_offset,
@@ -3353,15 +3444,20 @@ pub fn update_game(
                         e.head_y_rot_deg,
                         partial_tick,
                     ),
-                    head_x_rot_deg: e
-                        .prev_look_dir
-                        .x_rot_deg()
-                        .lerp(e.look_dir.x_rot_deg(), partial_tick),
+                    head_x_rot_deg: sleeping_head_pitch_deg(
+                        is_sleeping,
+                        e.prev_look_dir
+                            .x_rot_deg()
+                            .lerp(e.look_dir.x_rot_deg(), partial_tick),
+                    ),
                     body_y_rot_deg: lerp_angle(
                         e.prev_body_y_rot_deg,
                         e.body_y_rot_deg,
                         partial_tick,
                     ),
+                    is_sleeping,
+                    sleeping_direction: bed_orientation(&game.chunk_store, e.sleeping_pos),
+                    sleeping_eye_height: standing_eye_height(e.entity_type, e.is_baby),
                     is_baby: e.is_baby,
                     is_crouching: e.is_crouching,
                     walk_anim_pos: e.walk_pos(partial_tick),
@@ -3415,10 +3511,12 @@ pub fn update_game(
             .collect()
     };
 
-    if !benchmark_running
-        && !gfx.renderer.is_first_person()
-        && !game.player.death_animation_finished()
-    {
+    if should_render_local_player(
+        benchmark_running,
+        gfx.renderer.is_first_person(),
+        game.player.is_sleeping(),
+        game.player.death_animation_finished(),
+    ) {
         let interp_pos = game
             .player
             .prev_position
@@ -3433,8 +3531,14 @@ pub fn update_game(
         entity_renders.push(EntityRenderInfo {
             position: interp_pos,
             head_y_rot_deg: interp_y_rot_deg,
-            head_x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
+            head_x_rot_deg: sleeping_head_pitch_deg(
+                game.player.is_sleeping(),
+                gfx.renderer.camera_look_dir().x_rot_deg(),
+            ),
             body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
+            is_sleeping: game.player.is_sleeping(),
+            sleeping_direction,
+            sleeping_eye_height: crate::player::STANDING_EYE_HEIGHT,
             is_crouching: game.player.crouching && (!game.dead || game.player.death_time > 0),
             walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - partial_tick),
             walk_anim_speed: (game.player_prev_walk_speed
@@ -3588,6 +3692,7 @@ pub fn update_game(
         swing_progress,
         use_anim,
         held_item,
+        !game.player.is_sleeping(),
         destroy_info,
         game.show_chunk_borders,
         sky,
@@ -3849,13 +3954,40 @@ fn transform_item_bounds(
 
 #[cfg(test)]
 mod dropped_item_tests {
-    use super::{item_stack_seed, transform_item_bounds};
+    use azalea_registry::builtin::EntityKind;
+
+    use super::{
+        item_stack_seed, should_render_local_player, sleeping_head_pitch_deg, standing_eye_height,
+        transform_item_bounds,
+    };
 
     #[test]
     fn dropped_item_scatter_seed_includes_damage() {
         assert_eq!(item_stack_seed(42, 0), 42);
         assert_eq!(item_stack_seed(42, 7), 49);
         assert_eq!(item_stack_seed(u32::MAX, 2), 1);
+    }
+
+    #[test]
+    fn sleeping_head_pitch_is_zero_like_vanilla_living_entity_tick() {
+        assert_eq!(sleeping_head_pitch_deg(true, -43.0), 0.0);
+        assert_eq!(sleeping_head_pitch_deg(true, 61.5), 0.0);
+        assert_eq!(sleeping_head_pitch_deg(false, -17.25), -17.25);
+    }
+
+    #[test]
+    fn first_person_sleeping_player_remains_rendered_like_vanilla() {
+        assert!(!should_render_local_player(false, true, false, false));
+        assert!(should_render_local_player(false, true, true, false));
+        assert!(should_render_local_player(false, false, false, false));
+        assert!(!should_render_local_player(true, false, true, false));
+        assert!(!should_render_local_player(false, false, true, true));
+    }
+
+    #[test]
+    fn villager_sleeping_eye_height_uses_explicit_baby_dimensions() {
+        assert_eq!(standing_eye_height(EntityKind::Villager, false), 1.62);
+        assert_eq!(standing_eye_height(EntityKind::Villager, true), 0.63);
     }
 
     #[test]

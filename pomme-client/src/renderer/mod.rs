@@ -108,6 +108,7 @@ enum RenderMode<'a> {
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
         held_item: Option<pipelines::held_item::HeldItemInfo>,
+        render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
@@ -790,6 +791,10 @@ impl Renderer {
         self.camera.sync_pos(position);
     }
 
+    pub fn set_sleeping_camera_look(&mut self, yaw_deg: Option<f32>) {
+        self.camera.set_sleeping_look(yaw_deg);
+    }
+
     pub fn set_view_bob(&mut self, walk_dist: f32, bob: f32, enabled: bool) {
         self.camera.set_view_bob(walk_dist, bob, enabled);
     }
@@ -1088,6 +1093,7 @@ impl Renderer {
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
         held_item: Option<(String, f32)>,
+        render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
@@ -1130,6 +1136,7 @@ impl Renderer {
                 swing_progress,
                 use_anim,
                 held_item,
+                render_first_person_hand,
                 destroy_info,
                 show_chunk_borders,
                 sky,
@@ -1695,6 +1702,7 @@ impl Renderer {
                 swing_progress,
                 use_anim,
                 held_item,
+                render_first_person_hand,
                 destroy_info,
                 show_chunk_borders,
                 sky,
@@ -1819,7 +1827,8 @@ impl Renderer {
                 };
                 cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
 
-                if self.camera.mode == camera::CameraMode::FirstPerson
+                if *render_first_person_hand
+                    && self.camera.mode == camera::CameraMode::FirstPerson
                     && self.camera.top_down().is_none()
                 {
                     let aspect = sw / sh.max(1.0);

@@ -2190,13 +2190,16 @@ impl AppCore {
                 NetworkEvent::EntityPose { id, is_crouching } => {
                     game.entity_store.set_crouching(id, is_crouching);
                 }
-                // TODO: remote players' sleeping pose rendering.
                 NetworkEvent::EntitySleepingPos { id, pos } => {
+                    game.entity_store.set_sleeping_pos(id, pos);
                     if id == game.player.entity_id {
-                        game.player.sleeping_pos = pos;
+                        game.player.set_sleeping_pos(pos);
                     }
                 }
                 NetworkEvent::EntityWakeUp { id } => {
+                    // TODO: vanilla `stopSleeping` also stands a remote sleeper
+                    // up beside the bed, facing it, with pitch 0.
+                    game.entity_store.set_sleeping_pos(id, None);
                     if id == game.player.entity_id {
                         game.player.wake_up();
                     }
@@ -2425,6 +2428,7 @@ impl AppCore {
                     // links carry over.
                     game.server_dialog = None;
                     game.configuring = true;
+                    game.reset_sleep_for_level_teardown();
                     self.clear_server_ui(game, renderer);
                     self.apply_cursor_grab(window, Some(game));
                 }
@@ -2806,7 +2810,13 @@ impl AppCore {
             game.player.jump_riding_scale = 0.0;
         }
 
-        game.player.look_dir = renderer.camera_look_dir();
+        let camera_look = renderer.camera_look_dir();
+        game.player.look_dir = if game.player.is_sleeping() {
+            // `LivingEntity.tick` forces xRot to 0 while sleeping.
+            LookDirection::new(camera_look.y_rot_deg(), 0.0)
+        } else {
+            camera_look
+        };
 
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
@@ -2942,16 +2952,18 @@ impl AppCore {
         }
     }
 
+    /// `ServerboundPlayerCommandPacket(player, action)`.
     fn send_player_command(
         &self,
         connection: &ConnectionHandle,
+        game: &GameState,
         action: azalea_protocol::packets::game::s_player_command::Action,
     ) {
         connection
             .packet_tx
             .send(ServerboundGamePacket::PlayerCommand(
                 azalea_protocol::packets::game::s_player_command::ServerboundPlayerCommand {
-                    id: azalea_core::entity_id::MinecraftEntityId(0),
+                    id: azalea_core::entity_id::MinecraftEntityId(game.player.entity_id),
                     action,
                     data: 0,
                 },
@@ -2966,15 +2978,16 @@ impl AppCore {
             } else {
                 azalea_protocol::packets::game::s_player_command::Action::StopSprinting
             };
-            self.send_player_command(connection, action);
+            self.send_player_command(connection, game, action);
             game.was_sprinting = sprinting;
         }
     }
 
     /// Vanilla InBedChatScreen: leaving bed sends PlayerCommand STOP_SLEEPING.
-    pub fn send_stop_sleeping(&self, connection: &ConnectionHandle) {
+    pub fn send_stop_sleeping(&self, connection: &ConnectionHandle, game: &GameState) {
         self.send_player_command(
             connection,
+            game,
             azalea_protocol::packets::game::s_player_command::Action::StopSleeping,
         );
     }

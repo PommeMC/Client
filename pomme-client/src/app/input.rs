@@ -334,7 +334,7 @@ impl InputState {
                         // ChatScreen consumes Escape before the game-level
                         // pause action: link confirmation, then suggestions,
                         // then the chat screen itself.
-                        should_apply_cursor_grab = game.chat.handle_escape();
+                        should_apply_cursor_grab = game.escape_chat();
                     } else if game.game_mode_switcher.is_some() {
                         // Esc cancels the F3+F4 switcher without applying.
                         game.game_mode_switcher = None;
@@ -379,7 +379,7 @@ impl InputState {
 
                     // Same order as Escape: modal, then suggestions, then chat.
                     if game.chat.is_open() {
-                        should_apply_cursor_grab |= game.chat.handle_escape();
+                        should_apply_cursor_grab |= game.escape_chat();
                     }
 
                     self.recent_actions.remove(&Action::Close);
