@@ -2628,26 +2628,33 @@ impl AppCore {
             1.0
         });
 
-        // Vanilla ClientLevel keeps ticking other entities while the local
-        // player is dead.
-        game.entity_store.tick_living(
-            &game.chunk_store,
-            game.player.position,
-            game.server_simulation_distance,
-        );
-
         // Vanilla `LocalPlayer.tick` returns immediately until the client has
-        // loaded: no physics, no interaction, and no input, sprint or movement
-        // packets while the level is still coming in.
+        // loaded, while `ClientLevel.tickEntities` still advances remote entities.
         if !game.client_loaded {
+            let push_box = (game.player.health > 0.0
+                && !crate::player::is_spectator(game.player.game_mode))
+            .then(|| game.player.bounding_box());
+            *game.player.velocity += game.entity_store.tick_living(
+                &game.chunk_store,
+                game.player.position,
+                push_box,
+                game.server_simulation_distance,
+            );
             self.input.clear_click_counts();
             self.input.clear_just_pressed_actions();
             return;
         }
 
         // LocalPlayer.tickDeath removes the client player at tick 20; from then
-        // on ClientLevel.tickEntities skips it entirely.
+        // on ClientLevel.tickEntities skips it entirely. Remote entities still
+        // tick even though the removed local player no longer does.
         if game.dead && game.player.death_animation_finished() {
+            game.entity_store.tick_living(
+                &game.chunk_store,
+                game.player.position,
+                None,
+                game.server_simulation_distance,
+            );
             self.input.clear_click_counts();
             return;
         }
@@ -2656,6 +2663,12 @@ impl AppCore {
         // including dead-player ticks up through the removal tick.
         game.player.snapshot_render_state();
         if game.dead {
+            game.entity_store.tick_living(
+                &game.chunk_store,
+                game.player.position,
+                None,
+                game.server_simulation_distance,
+            );
             game.player.tick_death();
             let removed_this_tick = game.player.death_animation_finished();
             let held_stack = game
@@ -2808,6 +2821,27 @@ impl AppCore {
 
         game.player.look_dir = renderer.camera_look_dir();
 
+        // Vanilla `Minecraft.tick` performs picking before `ClientLevel.tickEntities`.
+        // Use the remote entities' pre-interpolation sample so an approaching mob
+        // does not become attackable a few centimeters too early.
+        game.interaction.update_target(
+            game.player.eye_pos(),
+            game.player.look_dir,
+            &game.chunk_store,
+            &game.entity_store,
+            crate::player::is_creative(game.player.game_mode),
+        );
+
+        let push_box = (game.player.health > 0.0
+            && !crate::player::is_spectator(game.player.game_mode))
+        .then(|| game.player.bounding_box());
+        *game.player.velocity += game.entity_store.tick_living(
+            &game.chunk_store,
+            game.player.position,
+            push_box,
+            game.server_simulation_distance,
+        );
+
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
         }
@@ -2833,15 +2867,6 @@ impl AppCore {
         Self::send_input_packet(input, connection, game);
         self.send_sprint_command(connection, game);
         self.send_position_packet(connection, game);
-
-        let eye_pos = game.player.eye_pos();
-        game.interaction.update_target(
-            eye_pos,
-            game.player.look_dir,
-            &game.chunk_store,
-            &game.entity_store,
-            crate::player::is_creative(game.player.game_mode),
-        );
 
         let held_stack = game.player.inventory.held_stack(input.selected_slot());
         let place_block = held_stack.and_then(|data| {

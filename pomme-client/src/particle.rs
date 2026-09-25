@@ -362,6 +362,7 @@ impl ParticleStore {
         // Vanilla `ParticleEngine.destroy` scatters over the outline shape's
         // boxes, so a block with an empty outline emits nothing.
         let boxes: &[LocalBox] = block_shape::outline_shape(state);
+        let shape_origin = crate::world::block::outline_shape_position(state, pos.x, pos.y, pos.z);
 
         for b in boxes {
             let width_x = (b[3] - b[0]).min(1.0);
@@ -377,9 +378,9 @@ impl ParticleStore {
                         let rel_y = (yy as f64 + 0.5) / count_y as f64;
                         let rel_z = (zz as f64 + 0.5) / count_z as f64;
                         let spawn = DVec3::new(
-                            pos.x as f64 + rel_x * width_x + b[0],
-                            pos.y as f64 + rel_y * width_y + b[1],
-                            pos.z as f64 + rel_z * width_z + b[2],
+                            shape_origin.x + rel_x * width_x + b[0],
+                            shape_origin.y + rel_y * width_y + b[1],
+                            shape_origin.z + rel_z * width_z + b[2],
                         );
                         self.push(Particle::terrain(
                             spawn,

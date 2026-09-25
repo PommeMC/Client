@@ -4,6 +4,7 @@ pub mod villager;
 use std::collections::HashMap;
 
 use azalea_core::position::ChunkPos;
+use azalea_entity::dimensions::EntityDimensions;
 use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
 
@@ -258,6 +259,70 @@ pub struct LivingEntity {
     interp_steps: i32,
     interp_head_y_rot_deg: f32,
     interp_head_y_rot_steps: i32,
+}
+
+pub(crate) fn living_entity_dimensions(entity: &LivingEntity) -> EntityDimensions {
+    let mut dims = EntityDimensions::from(entity.entity_type);
+    if entity.is_baby {
+        // Vanilla squid/glow-squid babies use an explicit 0.5 x 0.5 shape;
+        // other Pomme-modeled ageable living entities use half-scale dims.
+        if matches!(
+            entity.entity_type,
+            EntityKind::Squid | EntityKind::GlowSquid
+        ) {
+            dims.width = 0.5;
+            dims.height = 0.5;
+        } else {
+            dims.width *= 0.5;
+            dims.height *= 0.5;
+        }
+    }
+    dims
+}
+
+fn living_entity_aabb(entity: &LivingEntity) -> Aabb {
+    let dims = living_entity_dimensions(entity);
+    Aabb::from_center(
+        entity.position.into(),
+        f64::from(dims.width) * 0.5,
+        f64::from(dims.height) * 0.5,
+    )
+}
+
+fn pushes_local_player(entity: &LivingEntity) -> bool {
+    // Bat suppresses pushEntities entirely. Remote players use the normal
+    // client-side push path. Team collision rules and remote spectator state
+    // are not modeled here yet.
+    entity.entity_type != EntityKind::Bat
+}
+
+fn accepts_reciprocal_push(entity: &LivingEntity) -> bool {
+    // Entity.push applies the local impulse regardless of the pusher's
+    // isPushable result, but only applies the reciprocal impulse when the
+    // pusher itself is pushable. AbstractHorse overrides isPushable to depend
+    // on vehicle state rather than LivingEntity's alive/climbable check; Pomme
+    // does not model that vehicle state here, so this is the ordinary
+    // non-vehicle path.
+    is_equine(&entity.entity_type) || entity.health > 0.0
+}
+
+/// Horizontal impulse pair from vanilla `Entity.push(Entity)` for an
+/// overlapping remote living entity and the local player. The first vector is
+/// applied to the local player (`this`), the second to the remote entity.
+pub(crate) fn living_push_impulses(local: Position, remote: Position) -> Option<(DVec3, DVec3)> {
+    let mut x = remote.x - local.x;
+    let mut z = remote.z - local.z;
+    let mut distance = x.abs().max(z.abs()); // Mth.absMax
+    if distance < f64::from(0.01_f32) {
+        return None;
+    }
+    distance = distance.sqrt();
+    x /= distance;
+    z /= distance;
+    let scale = (1.0 / distance).min(1.0) * f64::from(0.05_f32);
+    x *= scale;
+    z *= scale;
+    Some((DVec3::new(-x, 0.0, -z), DVec3::new(x, 0.0, z)))
 }
 
 impl LivingEntity {
@@ -1339,8 +1404,10 @@ impl EntityStore {
         &mut self,
         chunks: &ChunkStore,
         player_position: Position,
+        local_push_box: Option<Aabb>,
         simulation_distance: u32,
-    ) {
+    ) -> DVec3 {
+        let mut local_push = DVec3::ZERO;
         for entity in self.living.values_mut() {
             entity.tick_interpolation();
             entity.tick_body_rotation();
@@ -1385,7 +1452,20 @@ impl EntityStore {
                 entity.unhappy_counter -= 1;
             }
             entity.age_in_ticks = entity.age_in_ticks.wrapping_add(1);
+
+            if let Some(local_box) = local_push_box
+                && pushes_local_player(entity)
+                && living_entity_aabb(entity).intersects(&local_box)
+                && let Some((local_impulse, remote_impulse)) =
+                    living_push_impulses(player_position, entity.position)
+            {
+                local_push += local_impulse;
+                if accepts_reciprocal_push(entity) {
+                    entity.velocity += remote_impulse;
+                }
+            }
         }
+        local_push
     }
 }
 
@@ -1492,6 +1572,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn local_player_push_matches_vanilla_pusher_rules() {
+        let mut store = EntityStore::new();
+        for (id, kind) in [
+            (1, EntityKind::Zombie),
+            (2, EntityKind::Player),
+            (3, EntityKind::Bat),
+            (4, EntityKind::Zombie),
+        ] {
+            store.spawn_living(
+                id,
+                kind,
+                Position::new(0.25, 64.0, 0.0),
+                LookDirection::default(),
+                0.0,
+                None,
+            );
+        }
+        store.living.get_mut(&4).unwrap().health = 0.0;
+
+        let local = Position::new(0.0, 64.0, 0.0);
+        let local_box = Aabb::from_center(local.into(), 0.3, 0.9);
+        let impulse = store.tick_living(&ChunkStore::new(2), local, Some(local_box), 10);
+        let expected = f64::from(0.05_f32) * 0.5;
+
+        // A normal mob, a remote player, and a dying mob all push the local
+        // player. Bat overrides the vanilla push path and does not.
+        assert_eq!(impulse, DVec3::new(-expected * 3.0, 0.0, 0.0));
+        assert_eq!(store.living[&1].velocity, DVec3::new(expected, 0.0, 0.0));
+        assert_eq!(store.living[&2].velocity, DVec3::new(expected, 0.0, 0.0));
+        assert_eq!(store.living[&3].velocity, DVec3::ZERO);
+        // Dead LivingEntity::isPushable is false, so it does not receive the
+        // reciprocal impulse even though its tick still pushes the local player.
+        assert_eq!(store.living[&4].velocity, DVec3::ZERO);
+    }
+
+    #[test]
+    fn living_push_impulse_matches_vanilla_entity_push_math() {
+        let local = Position::new(0.0, 64.0, 0.0);
+        let remote = Position::new(0.25, 64.0, 0.0);
+        let (local_impulse, remote_impulse) = living_push_impulses(local, remote).unwrap();
+        let expected = f64::from(0.05_f32) * 0.5;
+        assert_eq!(local_impulse, DVec3::new(-expected, 0.0, 0.0));
+        assert_eq!(remote_impulse, DVec3::new(expected, 0.0, 0.0));
+        assert!(living_push_impulses(local, Position::new(0.009, 64.0, 0.0)).is_none());
+    }
+
+    #[test]
     fn tick_living_advances_remote_interpolation_state() {
         let mut store = EntityStore::new();
         store.spawn_living(
@@ -1505,7 +1632,7 @@ mod tests {
         store.move_living_delta(1, 3.0, 0.0, 0.0, true);
         let before = store.living[&1].position;
 
-        store.tick_living(&ChunkStore::new(2), Position::default(), 10);
+        store.tick_living(&ChunkStore::new(2), Position::default(), None, 10);
 
         let entity = &store.living[&1];
         assert_eq!(

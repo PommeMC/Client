@@ -1,14 +1,13 @@
-//! Per-block-state collision shapes for the handful of blocks whose hitbox
-//! isn't a full cube. Ported from the vanilla block classes (`SlabBlock`,
-//! `StairBlock`, etc.). Boxes are block-local (0..1); the caller offsets them
-//! to the block position.
+//! Per-block-state collision and interaction-outline shapes. For 26.2 these
+//! are generated directly from vanilla's `VoxelShape` AABBs and deduplicated
+//! in the state table. The native computations below remain as a compatibility
+//! fallback for older embedded protocol tables that have not been regenerated.
 //!
-//! TODO: walls, fences, fence gates, panes, trapdoors, doors, beds, chests,
-//! cake, etc. still fall back to a full cube.
-//!
-//! TODO: blocks with no collision but a small outline (torches, flowers,
-//! buttons, plants, redstone dust) fall back to a full cube too, so the
-//! crosshair still reaches them from a block away.
+//! Boxes are block-local; callers translate them through the generated shape
+//! offset helpers. The generated collision shapes use
+//! `CollisionContext.empty()`. TODO: model entity-sensitive branches in
+//! `PowderSnowBlock`, `ScaffoldingBlock`, and `LiquidBlock` once Pomme has the
+//! required collision-context state.
 
 use azalea_block::BlockState;
 
