@@ -619,6 +619,15 @@ impl InputState {
         self.pressed.contains(&key)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_key_pressed_for_test(&mut self, key: KeyCode, pressed: bool) {
+        if pressed {
+            self.pressed.insert(key);
+        } else {
+            self.pressed.remove(&key);
+        }
+    }
+
     /// Pressed since the last `end_frame`, OS key repeats included (vanilla
     /// screens and debug chords receive GLFW repeat events).
     pub fn key_just_pressed(&self, key: KeyCode) -> bool {

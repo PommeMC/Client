@@ -988,7 +988,8 @@ fn tick_item_physics(id: i32, entity: &mut ItemEntity, chunk_store: &ChunkStore)
     }
 
     let aabb = Aabb::from_center(entity.position.into(), ITEM_HALF_WIDTH, ITEM_HALF_WIDTH);
-    let (delta, on_ground) = resolve_collision(chunk_store, aabb, entity.velocity.into(), 0.0);
+    let (delta, on_ground) =
+        resolve_collision(chunk_store, aabb, entity.velocity.into(), 0.0, false);
     entity.position += delta;
     entity.on_ground = on_ground;
 

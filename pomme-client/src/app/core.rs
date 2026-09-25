@@ -2169,12 +2169,6 @@ impl AppCore {
                         .set_item_data(id, item_name, item_id, damage, count);
                 }
                 NetworkEvent::EntityData { id, index, value } => {
-                    if id == game.player.entity_id
-                        && index == 8
-                        && let crate::entity::MetaValue::Byte(flags) = value
-                    {
-                        game.interaction.sync_using_item_flag(flags & 1 != 0);
-                    }
                     if index == 4
                         && let crate::entity::MetaValue::Bool(silent) = &value
                     {
@@ -2183,6 +2177,23 @@ impl AppCore {
                             self.audio.stop_entity_sounds(id);
                         } else {
                             game.silent_entities.remove(&id);
+                        }
+                    }
+                    if id == game.player.entity_id {
+                        if index == 0
+                            && let crate::entity::MetaValue::Byte(flags) = &value
+                        {
+                            // Vanilla ClientPacketListener applies the shared
+                            // entity-flags byte to LocalPlayer too. The local
+                            // player is intentionally not stored in EntityStore,
+                            // so mirror the synced sprint/swim bits here rather
+                            // than silently dropping authoritative self metadata.
+                            game.player.sync_shared_flags(*flags);
+                        }
+                        if index == 8
+                            && let crate::entity::MetaValue::Byte(flags) = &value
+                        {
+                            game.interaction.sync_using_item_flag(*flags & 1 != 0);
                         }
                     }
                     game.entity_store.apply_entity_data(id, index, value);
@@ -2683,7 +2694,12 @@ impl AppCore {
             // LocalPlayer.tick still executes its post-super player state and
             // input/position packet tail once.
             if !removed_this_tick {
-                movement::tick_dead(&mut game.player, &game.chunk_store);
+                movement::tick_dead(
+                    &mut game.player,
+                    &game.chunk_store,
+                    &game.block_entity_anim,
+                    game.riding_vehicle_id.is_some(),
+                );
                 crate::entity::stop_walk_animation(
                     &mut game.player_walk_pos,
                     &mut game.player_walk_speed,
@@ -2815,8 +2831,10 @@ impl AppCore {
             &mut game.player,
             input,
             &game.chunk_store,
+            &game.block_entity_anim,
             game.interaction.use_speed_multiplier(),
             game.interaction.slow_due_to_using_item(),
+            game.riding_vehicle_id.is_some(),
         );
         let dx = game.player.position.x - game.player.prev_position.x;
         let dz = game.player.position.z - game.player.prev_position.z;
