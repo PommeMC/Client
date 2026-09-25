@@ -1,18 +1,37 @@
-use azalea_inventory::components::{Bees, BundleContents, TooltipDisplay};
-use azalea_inventory::item::MaxStackSizeExt;
+use azalea_inventory::components::{Bees, BundleContents, MaxStackSize, TooltipDisplay};
 use azalea_inventory::{ItemStack, ItemStackData};
-use num_rational::Ratio;
 
-use crate::renderer::pipelines::menu_overlay::MenuElement;
+use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
 pub const NO_SELECTION: i32 = -1;
+
+/// Vanilla `ItemTags.BUNDLES`: the items `BundleItem` and `BundleMouseActions`
+/// act on.
+pub fn is_bundle(data: &ItemStackData) -> bool {
+    azalea_registry::tags::items::BUNDLES.contains(&data.kind)
+}
 
 pub fn contents(data: &ItemStackData) -> Option<std::borrow::Cow<'_, BundleContents>> {
     data.get_component::<BundleContents>()
 }
 
-pub fn shown_count(contents: &BundleContents) -> usize {
-    let count = contents.items.len();
+pub fn set_contents(stack: &mut ItemStack, contents: BundleContents) {
+    let ItemStack::Present(data) = stack else {
+        return;
+    };
+    let component = azalea_inventory::components::DataComponentUnion::from(contents);
+    // SAFETY: the union was constructed from BundleContents.
+    unsafe {
+        data.component_patch.unchecked_insert_component(
+            azalea_registry::builtin::DataComponentKind::BundleContents,
+            Some(component),
+        );
+    }
+}
+
+/// Vanilla `BundleItem.getNumberOfItemsToShow` for a bundle of `count`
+/// entries.
+pub fn shown_count(count: usize) -> usize {
     let available: usize = if count > 12 { 11 } else { 12 };
     let partial = count % 4;
     let empty = if partial == 0 { 0 } else { 4 - partial };
@@ -30,131 +49,205 @@ pub fn next_selection(wheel: i32, selected: i32, shown: usize) -> i32 {
     (selected - wheel).rem_euclid(max)
 }
 
-pub fn weight(contents: &BundleContents) -> Ratio<i64> {
-    contents
-        .items
+/// Reduced `Fraction`; arithmetic is `None` on overflow, which vanilla reports
+/// as a `DataResult` error.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frac(pub i64, pub i64);
+
+impl Frac {
+    pub const ZERO: Self = Self(0, 1);
+    pub const ONE: Self = Self(1, 1);
+
+    pub fn new(num: i64, den: i64) -> Self {
+        let (mut a, mut b) = (num.abs(), den.abs());
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        let g = a.max(1);
+        Self(num / g, den / g)
+    }
+
+    fn add(self, other: Self) -> Option<Self> {
+        let num = self
+            .0
+            .checked_mul(other.1)?
+            .checked_add(other.0.checked_mul(self.1)?)?;
+        Some(Self::new(num, self.1.checked_mul(other.1)?))
+    }
+
+    fn mul(self, n: i64) -> Option<Self> {
+        Some(Self::new(self.0.checked_mul(n)?, self.1))
+    }
+
+    /// `Mth.mulAndTruncate`.
+    pub fn mul_and_truncate(self, factor: i64) -> i64 {
+        self.0 * factor / self.1
+    }
+
+    pub fn is_full(self) -> bool {
+        self.0 >= self.1
+    }
+}
+
+/// `BundleContents#computeContentWeight`.
+pub fn weight(items: &[ItemStack]) -> Option<Frac> {
+    items
         .iter()
-        .map(|item| match item {
-            ItemStack::Empty => Ratio::from_integer(0),
-            ItemStack::Present(data) => item_weight(data) * i64::from(data.count.max(0)),
+        .filter_map(ItemStack::as_present)
+        .try_fold(Frac::ZERO, |weight, item| {
+            weight.add(item_weight(item)?.mul(item.count as i64)?)
         })
-        .sum()
 }
 
-pub fn fullness(contents: &BundleContents) -> f32 {
-    let weight = weight(contents);
-    *weight.numer() as f32 / *weight.denom() as f32
-}
-
-pub fn item_weight(data: &ItemStackData) -> Ratio<i64> {
-    if let Some(nested) = data.get_component::<BundleContents>() {
-        return weight(&nested) + Ratio::new(1, 16);
+/// `BundleContents#getWeight`.
+pub fn item_weight(data: &ItemStackData) -> Option<Frac> {
+    if let Some(bundle) = contents(data) {
+        return weight(&bundle.items)?.add(Frac(1, 16));
     }
     if data
         .get_component::<Bees>()
         .is_some_and(|bees| !bees.occupants.is_empty())
     {
-        return Ratio::from_integer(1);
+        return Some(Frac::ONE);
     }
-    let max_stack = data
-        .get_component::<azalea_inventory::components::MaxStackSize>()
-        .map_or_else(|| data.kind.max_stack_size(), |size| size.count)
-        .max(1);
-    Ratio::new(1, i64::from(max_stack))
+    let max_stack_size = data.get_component::<MaxStackSize>().map_or(1, |m| m.count);
+    (max_stack_size > 0).then(|| Frac::new(1, max_stack_size as i64))
 }
 
-pub fn item_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
-    let contents = contents(data)?;
-    let weight = fullness(&contents);
-    if weight <= 0.0 {
+/// `BundleContents.Mutable.getMaxAmountToAdd`: `(1 - weight) / item_weight`,
+/// truncated and floored at zero.
+pub fn max_amount_to_add(weight: Frac, item_weight: Frac) -> i32 {
+    let remaining = weight.1 - weight.0;
+    (remaining * item_weight.1 / (weight.1 * item_weight.0)).clamp(0, i32::MAX as i64) as i32
+}
+
+/// `BundleContents.canItemBeInBundle`.
+fn can_be_in_bundle(data: &ItemStackData) -> bool {
+    data.count > 0 && crate::player::inventory::can_fit_inside_container_items(data.kind)
+}
+
+/// `BundleContents.Mutable.tryInsert`: merges into a matching stackable entry
+/// (moved to the front) or adds a new front entry, shrinking `other`.
+pub fn try_insert(contents: &mut BundleContents, other: &mut ItemStack) -> i32 {
+    let Some(data) = other.as_present().filter(|d| can_be_in_bundle(d)) else {
+        return 0;
+    };
+    let (Some(current), Some(each)) = (weight(&contents.items), item_weight(data)) else {
+        return 0;
+    };
+    let amount = data.count.min(max_amount_to_add(current, each));
+    if amount == 0 {
+        return 0;
+    }
+    let stackable = data
+        .get_component::<MaxStackSize>()
+        .is_some_and(|m| m.count > 1);
+    let merge = stackable
+        .then(|| {
+            contents.items.iter().position(|i| {
+                i.as_present()
+                    .is_some_and(|e| e.is_same_item_and_components(data))
+            })
+        })
+        .flatten();
+    let added = other.split(amount as u32);
+    let entry = match merge {
+        Some(index) => {
+            let mut merged = contents.items.remove(index);
+            if let ItemStack::Present(m) = &mut merged {
+                m.count += amount;
+            }
+            merged
+        }
+        None => added,
+    };
+    contents.items.insert(0, entry);
+    amount
+}
+
+/// `BundleContents.Mutable.removeOne`: the selected entry, or the first when
+/// nothing valid is selected. Vanilla then clears the selection.
+pub fn remove_one(contents: &mut BundleContents, selected: i32) -> Option<ItemStack> {
+    if contents.items.is_empty() {
         return None;
     }
-    let width = (1 + (weight * 12.0).floor() as i32).min(13);
-    let color = if weight >= 1.0 {
-        [1.0, 0.33, 0.33, 1.0]
-    } else {
-        [0.44, 0.53, 1.0, 1.0]
-    };
-    Some((width, color))
+    let index = usize::try_from(selected)
+        .ok()
+        .filter(|&i| i < contents.items.len())
+        .unwrap_or(0);
+    Some(contents.items.remove(index))
 }
 
-pub fn push_item_bar(
-    elements: &mut Vec<MenuElement>,
-    x: f32,
-    y: f32,
-    scale: f32,
-    data: &ItemStackData,
-) {
-    let Some((width, color)) = item_bar(data) else {
-        return;
-    };
-    let bar_x = x + 2.0 * scale;
-    let bar_y = y + 13.0 * scale;
-    elements.push(MenuElement::Rect {
-        x: bar_x,
-        y: bar_y,
-        w: 13.0 * scale,
-        h: 2.0 * scale,
-        corner_radius: 0.0,
-        color: [0.0, 0.0, 0.0, 1.0],
-    });
-    elements.push(MenuElement::Rect {
-        x: bar_x,
-        y: bar_y,
-        w: width as f32 * scale,
-        h: scale,
-        corner_radius: 0.0,
-        color,
-    });
+/// `BundleItem`'s click sounds, played at the local player.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Sound {
+    Insert,
+    InsertFail,
+    RemoveOne,
 }
 
-pub fn push_selected_icon(
-    elements: &mut Vec<MenuElement>,
-    data: &ItemStackData,
-    selected: i32,
-    cursor: (f32, f32),
-) {
-    if selected < 0 {
-        return;
+impl Sound {
+    pub fn insert(inserted: bool) -> Self {
+        if inserted {
+            Self::Insert
+        } else {
+            Self::InsertFail
+        }
     }
-    let Some(contents) = contents(data) else {
-        return;
-    };
-    let Some(ItemStack::Present(selected_data)) = contents.items.get(selected as usize) else {
-        return;
-    };
-    let Some((icon_index, x, y, w, h)) =
-        elements
-            .iter()
-            .enumerate()
-            .find_map(|(index, element)| match element {
-                MenuElement::ItemIcon {
-                    x,
-                    y,
-                    w,
-                    h,
-                    item_name,
-                    ..
-                } if cursor.0 >= *x
-                    && cursor.0 <= *x + *w
-                    && cursor.1 >= *y
-                    && cursor.1 <= *y + *h
-                    && item_name.ends_with("bundle") =>
-                {
-                    Some((index, *x, *y, *w, *h))
-                }
-                _ => None,
-            })
+
+    pub fn play(self, audio: &crate::audio::AudioEngine, pos: crate::entity::components::Position) {
+        // `playInsertSound` / `playRemoveOneSound`: 0.8 volume, pitch 0.8-1.2.
+        let (event, volume, pitch) = match self {
+            Self::Insert => ("item.bundle.insert", 0.8, 0.8 + fastrand::f32() * 0.4),
+            Self::RemoveOne => ("item.bundle.remove_one", 0.8, 0.8 + fastrand::f32() * 0.4),
+            Self::InsertFail => ("item.bundle.insert_fail", 1.0, 1.0),
+        };
+        audio.play_world_sound(
+            &crate::audio::SoundRef::event(event),
+            crate::audio::CATEGORY_PLAYERS,
+            pos,
+            volume,
+            pitch,
+            fastrand::u64(..),
+        );
+    }
+}
+
+/// Vanilla's selected-bundle GUI model in place of the hovered slot's closed
+/// icon: the definition's back layers, the selected stack, its front layers.
+/// `push_slot` draws the hovered slot's back highlight right before its icon,
+/// and the icon's decorations and front highlight stay drawn after it.
+// TODO: a pack definition without the `has_selected_item` condition keeps the
+// closed icon in vanilla; here its missing layers draw nothing.
+pub fn push_selected_icon(elements: &mut Vec<MenuElement>, data: &ItemStackData, selected: i32) {
+    use crate::player::inventory::item_resource_name;
+    use crate::world::block::model::selected_bundle_layer_key;
+    let Some(selected) = usize::try_from(selected)
+        .ok()
+        .and_then(|i| contents(data)?.items.get(i)?.as_present().cloned())
     else {
         return;
     };
-    // Vanilla's selected GUI model *replaces* the closed bundle model. Pomme's
-    // dynamic composition used to append the open layers, leaving opaque pixels
-    // from the closed icon visible through transparent areas of some selected
-    // item models. Remove the closed model before emitting the composite.
-    elements.remove(icon_index);
-    let bundle_name = crate::player::inventory::item_resource_name(data.kind);
-    let icon = |item_name: String| MenuElement::ItemIcon {
+    let Some(index) = elements
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                MenuElement::Image {
+                    sprite: SpriteId::SlotHighlightBack,
+                    ..
+                }
+            )
+        })
+        .map(|i| i + 1)
+    else {
+        return;
+    };
+    let Some(&MenuElement::ItemIcon { x, y, w, h, .. }) = elements.get(index) else {
+        return;
+    };
+    let bundle = item_resource_name(data.kind);
+    let icon = |item_name| MenuElement::ItemIcon {
         x,
         y,
         w,
@@ -162,26 +255,20 @@ pub fn push_selected_icon(
         item_name,
         tint: [1.0; 4],
     };
-    elements.push(icon(format!("__pomme_{bundle_name}_open_back")));
-    elements.push(icon(crate::player::inventory::item_resource_name(
-        selected_data.kind,
-    )));
-    elements.push(icon(format!("__pomme_{bundle_name}_open_front")));
-    // The GUI model changes while an item is selected, but vanilla's bundle
-    // fullness bar is an item decoration and remains visible above that model.
-    push_item_bar(elements, x, y, w / 16.0, data);
+    elements.splice(
+        index..=index,
+        [
+            icon(selected_bundle_layer_key(&bundle, false)),
+            icon(item_resource_name(selected.kind)),
+            icon(selected_bundle_layer_key(&bundle, true)),
+        ],
+    );
 }
 
-pub fn tooltip_visible(data: &ItemStackData) -> bool {
-    let Some(display) = data.get_component::<TooltipDisplay>() else {
-        return true;
-    };
-    !display.hide_tooltip
-        && !display
-            .hidden_components
-            .contains(&azalea_registry::builtin::DataComponentKind::BundleContents)
-}
-
+/// Vanilla `BundleItem.getTooltipImage`: the bundle tooltip under its name,
+/// or just the name when `TooltipDisplay` hides the contents.
+// TODO: the name's lore and advanced lines, once containers show item
+// tooltips; and `TOOLTIP_STYLE`'s custom sprites.
 pub fn push_tooltip(
     elements: &mut Vec<MenuElement>,
     data: &ItemStackData,
@@ -191,23 +278,40 @@ pub fn push_tooltip(
     screen_h: f32,
     gui_scale: f32,
 ) {
-    if !tooltip_visible(data) {
+    let display = data.get_component::<TooltipDisplay>();
+    if display.as_ref().is_some_and(|d| d.hide_tooltip) {
         return;
     }
-    let Some(contents) = contents(data) else {
-        return;
-    };
-    elements.push(MenuElement::BundleTooltip {
-        x: cursor.0,
-        y: cursor.1,
-        title: crate::ui::common::item_display_name(data),
-        items: contents.items.clone(),
-        selected,
-        fullness: fullness(&contents),
-        item_scale: gui_scale,
-        font_scale: crate::ui::common::FONT_SIZE * gui_scale,
-        screen_w,
-        screen_h,
+    let title = crate::ui::common::styled_hover_name(data);
+    let (x, y) = cursor;
+    let scale = crate::ui::common::FONT_SIZE * gui_scale;
+    let contents_shown = display.is_none_or(|d| {
+        !d.hidden_components
+            .contains(&azalea_registry::builtin::DataComponentKind::BundleContents)
+    });
+    let image = contents(data)
+        .filter(|_| contents_shown)
+        .and_then(|contents| Some((weight(&contents.items)?, contents.into_owned().items)));
+    elements.push(match image {
+        Some((weight, items)) => MenuElement::BundleTooltip {
+            x,
+            y,
+            title,
+            items,
+            selected,
+            weight,
+            scale,
+            screen_w,
+            screen_h,
+        },
+        None => MenuElement::TooltipLines {
+            x,
+            y,
+            lines: vec![crate::renderer::pipelines::menu_overlay::TooltipLine::from_spans(title)],
+            scale,
+            screen_w,
+            screen_h,
+        },
     });
 }
 
@@ -219,58 +323,85 @@ mod tests {
 
     #[test]
     fn shown_items_match_vanilla_grid_rules() {
-        let stack = || ItemStack::from(ItemStackData::new(ItemKind::Stone, 1));
         for (count, expected) in [(0, 0), (1, 1), (4, 4), (5, 5), (8, 8), (12, 12), (13, 8)] {
-            let contents = BundleContents {
-                items: (0..count).map(|_| stack()).collect(),
-            };
-            assert_eq!(shown_count(&contents), expected, "count {count}");
+            assert_eq!(shown_count(count), expected, "count {count}");
         }
     }
 
     #[test]
     fn ordinary_stackable_items_have_vanilla_bundle_weight() {
-        for (kind, count, expected) in [
-            (ItemKind::Bread, 2, 2.0 / 64.0),
-            (ItemKind::HayBlock, 4, 4.0 / 64.0),
-        ] {
-            let contents = BundleContents {
-                items: vec![ItemStack::from(ItemStackData::new(kind, count))],
-            };
-            assert_eq!(fullness(&contents), expected, "{kind:?} x{count}");
+        for (kind, count, expected) in [(ItemKind::Bread, 2, 2), (ItemKind::HayBlock, 4, 4)] {
+            let items = vec![ItemStack::from(ItemStackData::new(kind, count))];
+            assert_eq!(
+                weight(&items),
+                Some(Frac::new(expected, 64)),
+                "{kind:?} x{count}"
+            );
         }
     }
 
-    #[test]
-    fn item_bar_matches_vanilla_bundle_width_and_colors() {
-        let bundle = |count| {
-            ItemStack::new(ItemKind::Bundle, 1)
-                .with_component(BundleContents {
-                    items: vec![ItemStack::from(ItemStackData::new(ItemKind::Stone, count))],
-                })
-                .as_present()
-                .expect("bundle stack should be present")
-                .clone()
-        };
-        let quarter = bundle(16);
-        let (width, color) = item_bar(&quarter).expect("non-empty bundle has a bar");
-        assert_eq!(width, 4);
-        assert_eq!(color, [0.44, 0.53, 1.0, 1.0]);
+    fn kinds(contents: &BundleContents) -> Vec<(ItemKind, i32)> {
+        contents
+            .items
+            .iter()
+            .filter_map(ItemStack::as_present)
+            .map(|d| (d.kind, d.count))
+            .collect()
+    }
 
-        let full = bundle(64);
-        let (width, color) = item_bar(&full).expect("full bundle has a bar");
-        assert_eq!(width, 13);
-        assert_eq!(color, [1.0, 0.33, 0.33, 1.0]);
+    #[test]
+    fn insert_merges_to_the_front_and_stops_at_capacity() {
+        let mut contents = BundleContents {
+            items: vec![
+                ItemStack::new(ItemKind::Dirt, 2),
+                ItemStack::new(ItemKind::Stone, 60),
+            ],
+        };
+        let mut stone = ItemStack::new(ItemKind::Stone, 5);
+        assert_eq!(try_insert(&mut contents, &mut stone), 2);
+        assert_eq!(stone.count(), 3);
+        assert_eq!(
+            kinds(&contents),
+            [(ItemKind::Stone, 62), (ItemKind::Dirt, 2)]
+        );
+    }
+
+    #[test]
+    fn shulker_boxes_cannot_be_inserted() {
+        let mut contents = BundleContents { items: Vec::new() };
+        let mut shulker = ItemStack::new(ItemKind::RedShulkerBox, 1);
+        assert_eq!(try_insert(&mut contents, &mut shulker), 0);
+        assert_eq!(shulker.count(), 1);
+    }
+
+    #[test]
+    fn remove_one_takes_the_selected_or_first_entry() {
+        let stacks = || BundleContents {
+            items: vec![
+                ItemStack::new(ItemKind::Stone, 3),
+                ItemStack::new(ItemKind::Dirt, 2),
+            ],
+        };
+        let mut contents = stacks();
+        let removed = remove_one(&mut contents, 1).unwrap();
+        assert_eq!(removed.as_present().map(|d| d.kind), Some(ItemKind::Dirt));
+        let mut contents = stacks();
+        let removed = remove_one(&mut contents, 5).unwrap();
+        assert_eq!(removed.as_present().map(|d| d.kind), Some(ItemKind::Stone));
+        assert_eq!(
+            remove_one(&mut BundleContents { items: Vec::new() }, 0),
+            None
+        );
     }
 
     #[test]
     fn stack_specific_max_stack_size_controls_weight() {
         let custom = ItemStack::new(ItemKind::Stone, 1)
-            .with_component(azalea_inventory::components::MaxStackSize { count: 4 })
+            .with_component(MaxStackSize { count: 4 })
             .as_present()
             .expect("stone stack should be present")
             .clone();
-        assert_eq!(item_weight(&custom), Ratio::new(1, 4));
+        assert_eq!(item_weight(&custom), Some(Frac::new(1, 4)));
     }
 
     #[test]

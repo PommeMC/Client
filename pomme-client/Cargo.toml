@@ -50,7 +50,6 @@ raw-window-handle = "0.6"
 glam = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 parking_lot = "0.12"
-num-rational = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 flate2 = "1"

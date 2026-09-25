@@ -1028,8 +1028,9 @@ fn outbound_frame(
 ) -> Result<Option<Vec<u8>>, ConnectionError> {
     Ok(match out {
         Outbound::Packet(mut packet) => {
-            if let Some(t) = translation {
-                t.remap_outbound(&mut packet);
+            match translation {
+                Some(t) => t.remap_outbound(&mut packet),
+                None => super::bundle_codec::encode_native_outbound(&mut packet),
             }
             Some(serialize_frame(&*packet)?)
         }

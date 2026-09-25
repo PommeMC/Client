@@ -6,146 +6,114 @@
 //! defect out of Pomme's UI/state by repairing it exactly once as decoded
 //! inventory packets enter Pomme. This module can disappear when Pomme owns
 //! the complete item-component wire codec.
+//!
+//! Inbound, only the inventory packets are repaired: equipment and entity
+//! metadata hand Pomme an item's kind and count, never its bundle contents.
+//! Outbound, `SetCreativeModeSlot` is the only packet carrying a full stack.
 
-use azalea_inventory::components::{BundleContents, DataComponentUnion};
+use azalea_inventory::components::BundleContents;
 use azalea_inventory::{ItemStack, ItemStackData};
+use azalea_protocol::packets::game::ServerboundGamePacket;
 use azalea_registry::Registry;
-use azalea_registry::builtin::{DataComponentKind, ItemKind};
+use azalea_registry::builtin::ItemKind;
 
-pub fn normalize_26_2_templates(stack: &mut ItemStack) {
-    if crate::version::session_protocol() != pomme_protocol::version::NATIVE.protocol {
-        return;
+/// An inbound stack with its bundle entries in Pomme's order.
+pub fn normalized(stack: &ItemStack) -> ItemStack {
+    let mut stack = stack.clone();
+    if crate::version::session_protocol() == pomme_protocol::version::NATIVE.protocol {
+        swap_template_fields(&mut stack);
     }
-    normalize_templates(stack);
+    stack
 }
 
-fn normalize_templates(stack: &mut ItemStack) {
-    let ItemStack::Present(data) = stack else {
-        return;
-    };
-    let Some(raw) = data.get_component::<BundleContents>() else {
-        return;
-    };
-    if raw.items.is_empty() {
-        return;
-    }
-    let items = raw.items.iter().map(normalize_template_stack).collect();
-    let component = DataComponentUnion::from(BundleContents { items });
-    // SAFETY: the union was constructed from BundleContents, so its arm is
-    // exactly BundleContents::KIND.
-    unsafe {
-        data.component_patch
-            .unchecked_insert_component(DataComponentKind::BundleContents, Some(component));
+/// Prepares a native 26.2 packet for Azalea's mismatched encoder.
+pub fn encode_native_outbound(packet: &mut ServerboundGamePacket) {
+    if let ServerboundGamePacket::SetCreativeModeSlot(p) = packet {
+        swap_template_fields(&mut p.item_stack);
     }
 }
 
-fn normalize_template_stack(stack: &ItemStack) -> ItemStack {
-    let ItemStack::Present(raw) = stack else {
-        return ItemStack::Empty;
-    };
-    let Some(kind) = ItemKind::from_u32(raw.count as u32) else {
-        return ItemStack::Empty;
-    };
-    let mut normalized = ItemStack::from(ItemStackData {
-        count: raw.kind.to_u32() as i32,
-        kind,
-        component_patch: raw.component_patch.clone(),
-    });
-    normalize_templates(&mut normalized);
-    normalized
-}
-
-/// Prepare a native 26.2 stack for Azalea's mismatched BundleContents encoder.
-/// This is the inverse of `normalize_26_2_templates`: Azalea will serialize
-/// these deliberately swapped fields as Vanilla's `(item, count, patch)`.
-pub fn encode_26_2_templates(stack: &mut ItemStack) {
-    if crate::version::session_protocol() != pomme_protocol::version::NATIVE.protocol {
-        return;
-    }
-    encode_templates(stack);
-}
-
-fn encode_templates(stack: &mut ItemStack) {
-    let ItemStack::Present(data) = stack else {
+/// Swaps every bundle entry's item and count, nested bundles included. Azalea
+/// orders them `(count, item)` where 26.2 has `(item, count)`, so one swap
+/// both repairs a decoded stack and readies one for encoding.
+fn swap_template_fields(stack: &mut ItemStack) {
+    let Some(contents) = stack.as_present().and_then(crate::ui::bundle::contents) else {
         return;
     };
-    let Some(contents) = data.get_component::<BundleContents>() else {
-        return;
-    };
-    let mut items = Vec::with_capacity(contents.items.len());
-    for item in &contents.items {
-        let ItemStack::Present(item_data) = item else {
-            items.push(ItemStack::Empty);
-            continue;
-        };
-        let mut nested = item.clone();
-        encode_templates(&mut nested);
-        let ItemStack::Present(nested_data) = nested else {
-            unreachable!()
-        };
-        let Some(fake_kind) = ItemKind::from_u32(item_data.count as u32) else {
-            // Valid Vanilla stacks cannot have a count that is not also a low
-            // item registry id in the pinned Azalea representation.
-            items.push(item.clone());
-            continue;
-        };
-        items.push(ItemStack::from(ItemStackData {
-            count: item_data.kind.to_u32() as i32,
-            kind: fake_kind,
-            component_patch: nested_data.component_patch,
-        }));
-    }
-    let component = DataComponentUnion::from(BundleContents { items });
-    // SAFETY: constructed from BundleContents immediately above.
-    unsafe {
-        data.component_patch
-            .unchecked_insert_component(DataComponentKind::BundleContents, Some(component));
-    }
+    let items = contents
+        .items
+        .iter()
+        .map(|entry| {
+            let Some(raw) = entry.as_present() else {
+                return ItemStack::Empty;
+            };
+            let Some(kind) = ItemKind::from_u32(raw.count as u32) else {
+                return ItemStack::Empty;
+            };
+            let mut swapped = ItemStack::from(ItemStackData {
+                count: raw.kind.to_u32() as i32,
+                kind,
+                component_patch: raw.component_patch.clone(),
+            });
+            swap_template_fields(&mut swapped);
+            swapped
+        })
+        .collect();
+    crate::ui::bundle::set_contents(stack, BundleContents { items });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn bundle_of(entry: ItemStack) -> ItemStack {
+        ItemStack::new(ItemKind::Bundle, 1).with_component(BundleContents { items: vec![entry] })
+    }
+
+    fn first_entry(stack: &ItemStack) -> (ItemKind, i32) {
+        let contents = crate::ui::bundle::contents(stack.as_present().unwrap()).unwrap();
+        let entry = contents.items[0].as_present().unwrap();
+        (entry.kind, entry.count)
+    }
+
     #[test]
     fn native_registry_ids_explain_the_azalea_field_swap() {
         assert_eq!(ItemKind::Bread.to_u32(), 981);
-        assert_eq!(ItemKind::HayBlock.to_u32(), 532);
         assert_eq!(ItemKind::Granite.to_u32(), 2);
-        assert_eq!(ItemKind::Diorite.to_u32(), 4);
     }
 
     #[test]
-    fn native_26_2_template_bridge_round_trips_nested_stack() {
-        let inner = ItemStack::from(ItemStackData::new(ItemKind::Bread, 2));
-        let mut bundle_data = ItemStackData::new(ItemKind::Bundle, 1);
-        let component = DataComponentUnion::from(BundleContents { items: vec![inner] });
-        unsafe {
-            bundle_data
-                .component_patch
-                .unchecked_insert_component(DataComponentKind::BundleContents, Some(component));
-        }
-        let mut stack = ItemStack::from(bundle_data);
-        encode_26_2_templates(&mut stack);
-        normalize_26_2_templates(&mut stack);
-        let data = stack.as_present().unwrap();
-        let contents = data.get_component::<BundleContents>().unwrap();
-        let item = contents.items[0].as_present().unwrap();
-        assert_eq!(item.kind, ItemKind::Bread);
-        assert_eq!(item.count, 2);
+    fn swapping_repairs_a_decoded_entry_and_undoes_itself() {
+        // Azalea decodes vanilla's bread x2 as item id 2 (granite) x981.
+        let mut stack = bundle_of(ItemStack::new(ItemKind::Granite, 981));
+        swap_template_fields(&mut stack);
+        assert_eq!(first_entry(&stack), (ItemKind::Bread, 2));
+
+        let nested = bundle_of(bundle_of(ItemStack::new(ItemKind::Bread, 2)));
+        let mut stack = nested.clone();
+        swap_template_fields(&mut stack);
+        swap_template_fields(&mut stack);
+        assert_eq!(stack, nested);
     }
 
     #[test]
-    fn normalizes_vanilla_26_2_item_stack_template_order() {
-        for (expected_kind, expected_count) in [(ItemKind::Bread, 2), (ItemKind::HayBlock, 4)] {
-            let raw = ItemStack::from(ItemStackData::new(
-                ItemKind::from_u32(expected_count as u32).unwrap(),
-                expected_kind.to_u32() as i32,
-            ));
-            let normalized = normalize_template_stack(&raw);
-            let data = normalized.as_present().unwrap();
-            assert_eq!(data.kind, expected_kind);
-            assert_eq!(data.count, expected_count);
-        }
+    fn creative_slot_bundle_entries_go_out_as_item_count_patch() {
+        use azalea_buf::AzBuf;
+        use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+
+        let mut packet =
+            ServerboundGamePacket::SetCreativeModeSlot(ServerboundSetCreativeModeSlot {
+                slot_num: 36,
+                item_stack: bundle_of(ItemStack::new(ItemKind::Bread, 2)),
+            });
+        encode_native_outbound(&mut packet);
+        let ServerboundGamePacket::SetCreativeModeSlot(p) = packet else {
+            unreachable!()
+        };
+        let mut wire = Vec::new();
+        p.item_stack.azalea_write(&mut wire).unwrap();
+        // `ItemStackTemplate`: bread (VarInt 981), count 2, empty patch.
+        let entry = [0xD5, 0x07, 0x02, 0x00, 0x00];
+        assert!(wire.windows(entry.len()).any(|w| w == entry), "{wire:02X?}");
     }
 }

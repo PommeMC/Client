@@ -599,22 +599,10 @@ pub fn build_hud(
         && game_mode != 3
         && let Some(ItemStack::Present(data)) = hotbar.get(selected_slot as usize)
     {
-        use azalea_inventory::components::{CustomName, Rarity};
         let alpha = (tool_highlight_timer as f32 * 256.0 / 10.0 / 255.0).min(1.0);
-        // Default-component rarities aren't synced; absent means common.
-        let color = match data.get_component::<Rarity>().as_deref() {
-            Some(Rarity::Uncommon) => super::common::rgb(0xffff55),
-            Some(Rarity::Rare) => super::common::rgb(0x55ffff),
-            Some(Rarity::Epic) => super::common::rgb(0xff55ff),
-            _ => WHITE,
-        };
-        // The rarity color and custom-name italic are vanilla's parent
-        // style: the name's own styling wins where it sets one.
-        let italic = data.get_component::<CustomName>().is_some();
-        let mut spans = super::common::item_display_spans(data, color);
+        let mut spans = super::common::styled_hover_name(data);
         for span in &mut spans {
             span.color[3] *= alpha;
-            span.italic |= italic;
         }
         let mut y = screen_h - 59.0 * gs;
         if game_mode == 1 {

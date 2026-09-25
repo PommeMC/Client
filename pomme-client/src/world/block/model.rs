@@ -559,24 +559,7 @@ pub fn bake_item_models(
     let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
 
-    for item_name in item_definition_names(jar_assets_dir, packs) {
-        let item_name = item_name.as_str();
-        let item_asset_key = format!("minecraft/items/{item_name}.json");
-        let item_path =
-            resolve_asset_path_with_packs(jar_assets_dir, asset_index, &item_asset_key, packs);
-        let Ok(contents) = std::fs::read_to_string(item_path) else {
-            continue;
-        };
-        let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&contents) else {
-            continue;
-        };
-
-        let parts = collect_model_parts(&json);
-        if parts.is_empty() {
-            continue;
-        }
-
-        let tint = determine_tint(item_name);
+    let mut bake = |name: &str, parts: &[ModelPart], tint: Tint| {
         let mut merged: Option<BakedModel> = None;
         // Vanilla applies each composite part's own display transforms. Pomme
         // merges the parts into one mesh, so it can apply only one; no vanilla
@@ -585,7 +568,7 @@ pub fn bake_item_models(
         let mut ground_transform: Option<Mat4> = None;
         let mut gui_transform: Option<DisplayTransform> = None;
         let mut gui_light: Option<GuiLight> = None;
-        for part in &parts {
+        for part in parts {
             let resolved = resolve_model(
                 &part.path,
                 jar_assets_dir,
@@ -597,7 +580,7 @@ pub fn bake_item_models(
                 None => ground_transform = Some(resolved.ground_transform),
                 Some(existing) if existing.abs_diff_eq(resolved.ground_transform, 1.0e-6) => {}
                 Some(_) => tracing::warn!(
-                    "{item_name}: composite part {} has a different ground transform; using the first part's",
+                    "{name}: composite part {} has a different ground transform; using the first part's",
                     part.path
                 ),
             }
@@ -605,7 +588,7 @@ pub fn bake_item_models(
                 None => gui_transform = Some(resolved.gui_transform),
                 Some(existing) if existing == resolved.gui_transform => {}
                 Some(_) => tracing::warn!(
-                    "{item_name}: composite part {} has a different GUI transform; using the first part's",
+                    "{name}: composite part {} has a different GUI transform; using the first part's",
                     part.path
                 ),
             }
@@ -613,7 +596,7 @@ pub fn bake_item_models(
                 None => gui_light = Some(resolved.gui_light),
                 Some(existing) if existing == resolved.gui_light => {}
                 Some(_) => tracing::warn!(
-                    "{item_name}: composite part {} has a different GUI light; using the first part's",
+                    "{name}: composite part {} has a different GUI light; using the first part's",
                     part.path
                 ),
             }
@@ -624,7 +607,7 @@ pub fn bake_item_models(
                     && let Some(key) = texture_to_name(value)
                 {
                     flat_item_textures.insert(key.clone());
-                    flat_keys.insert(item_name.to_string(), key);
+                    flat_keys.insert(name.to_string(), key);
                 }
                 break;
             }
@@ -649,43 +632,46 @@ pub fn bake_item_models(
             });
         }
         if let Some(transform) = ground_transform {
-            ground_transforms.insert(item_name.to_string(), transform);
+            ground_transforms.insert(name.to_string(), transform);
         }
         let gui_transform = gui_transform.unwrap_or(DisplayTransform::IDENTITY);
-        gui_transforms.insert(item_name.to_string(), gui_transform);
+        gui_transforms.insert(name.to_string(), gui_transform);
         if let Some(mut baked) = merged {
             apply_gui_lambert(
                 &mut baked.quads,
                 gui_transform,
                 gui_light.unwrap_or_default(),
             );
-            item_models.insert(item_name.to_string(), baked);
+            item_models.insert(name.to_string(), baked);
         }
-    }
+    };
 
-    // Bundle's GUI-selected state is a vanilla special renderer: open-back,
-    // selected nested item, open-front. Bake those ordinary model layers under
-    // private per-color keys so the menu renderer can compose them at runtime.
-    for bundle in item_definition_names(jar_assets_dir, packs)
-        .into_iter()
-        .filter(|name| name == "bundle" || name.ends_with("_bundle"))
-    {
-        for suffix in ["open_back", "open_front"] {
-            let key = format!("__pomme_{bundle}_{suffix}");
-            let path = format!("item/{bundle}_{suffix}");
-            let resolved =
-                resolve_model(&path, jar_assets_dir, asset_index, &mut model_cache, packs);
-            gui_transforms.insert(key.clone(), resolved.gui_transform);
-            if resolved.elements.is_empty() {
-                if let Some(value) = resolved.textures.get("layer0")
-                    && let Some(texture) = texture_to_name(value)
-                {
-                    flat_item_textures.insert(texture.clone());
-                    flat_keys.insert(key, texture);
-                }
-            } else if let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, Tint::None) {
-                apply_gui_lambert(&mut baked.quads, resolved.gui_transform, resolved.gui_light);
-                item_models.insert(key, baked);
+    for item_name in item_definition_names(jar_assets_dir, packs) {
+        let item_name = item_name.as_str();
+        let item_asset_key = format!("minecraft/items/{item_name}.json");
+        let item_path =
+            resolve_asset_path_with_packs(jar_assets_dir, asset_index, &item_asset_key, packs);
+        let Ok(contents) = std::fs::read_to_string(item_path) else {
+            continue;
+        };
+        let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&contents) else {
+            continue;
+        };
+
+        let parts = collect_model_parts(&json);
+        if parts.is_empty() {
+            continue;
+        }
+        bake(item_name, &parts, determine_tint(item_name));
+        // The bundle's selected-item model composes these around the
+        // selected stack at draw time.
+        if let Some(layers) = selected_bundle_layers(&json) {
+            for (front, parts) in [false, true].into_iter().zip(&layers) {
+                bake(
+                    &selected_bundle_layer_key(item_name, front),
+                    parts,
+                    Tint::None,
+                );
             }
         }
     }
@@ -994,6 +980,61 @@ pub fn first_item_model_ref(json: &serde_json::Value) -> Option<String> {
         .map(|path| strip_mc_prefix(&path).to_string())
 }
 
+/// An item-model node's `type`, without the `minecraft:` prefix.
+fn node_type(node: &serde_json::Value) -> Option<&str> {
+    node.get("type")
+        .and_then(|t| t.as_str())
+        .map(strip_mc_prefix)
+}
+
+/// The item-model key the bundle's selected layers bake under: behind the
+/// selected stack, or in front of it.
+pub fn selected_bundle_layer_key(item_name: &str, front: bool) -> String {
+    let side = if front { "front" } else { "back" };
+    format!("__pomme_{item_name}_selected_{side}")
+}
+
+/// The `on_true` of a `minecraft:bundle/has_selected_item` condition in an
+/// item definition, split around its `minecraft:bundle/selected_item`
+/// placeholder into the layers drawn behind and in front of the selected
+/// stack (vanilla `BundleSelectedItemSpecialRenderer`).
+fn selected_bundle_layers(json: &serde_json::Value) -> Option<[Vec<ModelPart>; 2]> {
+    fn find_condition(node: &serde_json::Value) -> Option<&serde_json::Value> {
+        let is_condition = node_type(node) == Some("condition")
+            && node
+                .get("property")
+                .and_then(|p| p.as_str())
+                .map(strip_mc_prefix)
+                == Some("bundle/has_selected_item");
+        if is_condition {
+            return Some(node);
+        }
+        match node {
+            serde_json::Value::Object(map) => map.values().find_map(find_condition),
+            serde_json::Value::Array(items) => items.iter().find_map(find_condition),
+            _ => None,
+        }
+    }
+    let on_true = find_condition(json.get("model")?)?.get("on_true")?;
+    let children: Vec<&serde_json::Value> = match node_type(on_true) {
+        Some("composite") => on_true.get("models")?.as_array()?.iter().collect(),
+        _ => vec![on_true],
+    };
+    let split = children
+        .iter()
+        .position(|child| node_type(child) == Some("bundle/selected_item"))?;
+    let transform = on_true
+        .get("transformation")
+        .and_then(parse_item_transformation);
+    let mut layers = [Vec::new(), Vec::new()];
+    for (i, child) in children.iter().enumerate() {
+        if i != split {
+            collect_parts_from_node(child, transform, &mut layers[usize::from(i > split)]);
+        }
+    }
+    Some(layers)
+}
+
 fn collect_parts_from_node(
     node: &serde_json::Value,
     parent_transform: Option<Mat4>,
@@ -1013,11 +1054,7 @@ fn collect_parts_from_node(
         (Some(parent), Some(own)) => Some(parent * own),
         (parent, own) => parent.or(own),
     };
-    let node_type = node
-        .get("type")
-        .and_then(|t| t.as_str())
-        .map(strip_mc_prefix);
-    match node_type {
+    match node_type(node) {
         Some("composite") => {
             if let Some(models) = node.get("models").and_then(|m| m.as_array()) {
                 for child in models {
@@ -2153,11 +2190,10 @@ mod tests {
         assert!(parse_item_transformation(&axis_angle).is_none());
     }
 
-    /// Dynamic trees still retain a representative fallback for contexts that
-    /// do not evaluate the runtime property (the GUI bundle path is composed
-    /// separately by the menu renderer).
+    /// Non-composite trees (bundles' select/condition) keep the old
+    /// first-model-string behavior.
     #[test]
-    fn select_item_retains_representative_fallback() {
+    fn select_item_falls_back_to_first_model() {
         let json: serde_json::Value = serde_json::from_str(
             r#"{
                 "model": {
@@ -2175,6 +2211,31 @@ mod tests {
         assert!(parts[0].transform.is_none());
         let legacy = find_first_model_string(&json).unwrap();
         assert_eq!(parts[0].path, strip_mc_prefix(&legacy));
+    }
+
+    #[test]
+    fn bundle_selected_layers_split_around_the_selected_item() {
+        // Vanilla 26.2 `items/bundle.json`.
+        let json = serde_json::json!({"model": {
+            "type": "minecraft:select",
+            "property": "minecraft:display_context",
+            "cases": [{"when": "gui", "model": {
+                "type": "minecraft:condition",
+                "property": "minecraft:bundle/has_selected_item",
+                "on_false": {"type": "minecraft:model", "model": "minecraft:item/bundle"},
+                "on_true": {"type": "minecraft:composite", "models": [
+                    {"type": "minecraft:model", "model": "minecraft:item/bundle_open_back"},
+                    {"type": "minecraft:bundle/selected_item"},
+                    {"type": "minecraft:model", "model": "minecraft:item/bundle_open_front"}
+                ]}
+            }}],
+            "fallback": {"type": "minecraft:model", "model": "minecraft:item/bundle"}
+        }});
+        let [back, front] = selected_bundle_layers(&json).unwrap();
+        let paths = |parts: &[ModelPart]| parts.iter().map(|p| p.path.clone()).collect::<Vec<_>>();
+        assert_eq!(paths(&back), ["item/bundle_open_back"]);
+        assert_eq!(paths(&front), ["item/bundle_open_front"]);
+        assert!(selected_bundle_layers(&serde_json::json!({"model": {}})).is_none());
     }
 
     use crate::test_util::test_temp_dir;

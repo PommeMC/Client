@@ -51,8 +51,6 @@ pub struct ContainerInput {
     pub throw: bool,
     /// Ctrl held with Q: throw the whole stack.
     pub throw_all: bool,
-    /// Mouse-wheel delta captured while a container screen is open.
-    pub scroll: f32,
 }
 
 /// The centered container panel's placement on screen.

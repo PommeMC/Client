@@ -4,13 +4,13 @@
 //! reconciles, so a wrong prediction only causes a self-correcting glitch,
 //! never item dup/loss.
 
-use azalea_inventory::components::{BundleContents, DataComponentUnion, EquipmentSlot, Equippable};
+use azalea_inventory::components::{BundleContents, EquipmentSlot, Equippable};
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::operations::{
     ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
 };
 use azalea_inventory::{ItemStack, ItemStackData, Menu, Player, SlotList};
-use azalea_registry::builtin::{DataComponentKind, ItemKind};
+use azalea_registry::builtin::ItemKind;
 
 /// Which container menu a click applies to. `Furnace` covers the furnace,
 /// blast furnace, and smoker menus, which share the same slot structure;
@@ -169,12 +169,28 @@ impl ContainerKind {
                 item.get_component::<Equippable>().map(|c| c.slot) == Some(want)
             }
             (Self::ShulkerBox, 0..=26) => {
-                !crate::player::inventory::item_resource_name(item.kind).ends_with("shulker_box")
+                crate::player::inventory::can_fit_inside_container_items(item.kind)
             }
             (Self::Enchantment, 1) => item.kind == ItemKind::LapisLazuli,
             _ => true,
         }
     }
+
+    /// Vanilla `Slot.allowModification`: `mayPickup && mayPlace(getItem())`.
+    // TODO: `mayPickup` (binding-cursed armor outside creative) isn't modelled.
+    fn allow_modification(self, s: usize, item: &ItemStackData) -> bool {
+        self.may_place(s, item)
+    }
+}
+
+/// A bundle click's local side: the hovered bundle's selection going in, and
+/// the `BundleItem` sound and selection reset coming out.
+#[derive(Default)]
+pub struct BundleClick {
+    /// The hovered bundle's slot and selected entry; cleared when the click
+    /// resets it (`removeOne`, `toggleSelectedItem(-1)`).
+    pub selection: Option<(u16, i32)>,
+    pub sound: Option<crate::ui::bundle::Sound>,
 }
 
 /// Predict a non-drag click against the given menu slots, returning the
@@ -186,7 +202,7 @@ pub fn apply_click(
     cursor: &mut ItemStack,
     op: &ClickOperation,
     creative: bool,
-    bundle_selection: Option<(u16, i32)>,
+    bundle: &mut BundleClick,
 ) -> Vec<(u16, ItemStack)> {
     // Crafting-result clicks need recipe logic; leave them to the server.
     if op
@@ -207,7 +223,7 @@ pub fn apply_click(
         return Vec::new();
     }
     let mut menu = kind.build_menu(slots);
-    apply_op(kind, &mut menu, cursor, op, creative, bundle_selection);
+    apply_op(kind, &mut menu, cursor, op, creative, bundle);
 
     let mut changed = Vec::new();
     for (i, before) in slots.iter().enumerate() {
@@ -287,15 +303,15 @@ fn apply_op(
     cursor: &mut ItemStack,
     op: &ClickOperation,
     creative: bool,
-    bundle_selection: Option<(u16, i32)>,
+    bundle: &mut BundleClick,
 ) {
     match op {
         ClickOperation::Pickup(p) => match p {
             PickupClick::Left { slot: Some(s) } => {
-                pickup_click(kind, menu, cursor, *s as usize, true, bundle_selection)
+                pickup_click(kind, menu, cursor, *s as usize, true, bundle)
             }
             PickupClick::Right { slot: Some(s) } => {
-                pickup_click(kind, menu, cursor, *s as usize, false, bundle_selection)
+                pickup_click(kind, menu, cursor, *s as usize, false, bundle)
             }
             PickupClick::Left { slot: None } | PickupClick::LeftOutside => {
                 *cursor = ItemStack::Empty; // drop whole
@@ -385,16 +401,18 @@ fn pickup_click(
     cursor: &mut ItemStack,
     s: usize,
     primary: bool,
-    bundle_selection: Option<(u16, i32)>,
+    bundle: &mut BundleClick,
 ) {
-    let selected = bundle_selection
-        .filter(|(slot, _)| usize::from(*slot) == s)
-        .map_or(crate::ui::bundle::NO_SELECTION, |(_, selected)| selected);
-    if bundle_click_override(kind, menu, cursor, s, primary, selected) {
-        return;
-    }
     let mut slot_item = take_slot(menu, s);
     let mut carried = std::mem::take(cursor);
+    // Vanilla `tryItemClickBehaviourOverride`: the carried stack first.
+    let overridden = stacked_on_other(kind, s, &mut carried, &mut slot_item, primary, bundle)
+        || other_stacked_on_me(kind, s, &mut slot_item, &mut carried, primary, bundle);
+    if overridden {
+        put_slot(menu, s, slot_item);
+        *cursor = carried;
+        return;
+    }
     if slot_item.is_empty() {
         let can_place = carried.as_present().is_some_and(|c| kind.may_place(s, c));
         if can_place {
@@ -424,134 +442,122 @@ fn pickup_click(
     *cursor = carried;
 }
 
-fn set_bundle_contents(stack: &mut ItemStack, contents: BundleContents) {
-    let ItemStack::Present(data) = stack else {
-        return;
-    };
-    let component = DataComponentUnion::from(contents);
-    // SAFETY: the union was constructed from BundleContents.
-    unsafe {
-        data.component_patch
-            .unchecked_insert_component(DataComponentKind::BundleContents, Some(component));
-    }
+fn bundle_contents(stack: &ItemStack) -> Option<BundleContents> {
+    stack
+        .as_present()
+        .filter(|d| crate::ui::bundle::is_bundle(d))
+        .and_then(crate::ui::bundle::contents)
+        .map(std::borrow::Cow::into_owned)
 }
 
-fn insert_into_bundle(bundle: &mut ItemStack, source: &mut ItemStack) -> i32 {
-    let Some(bundle_data) = bundle.as_present() else {
-        return 0;
-    };
-    let Some(current) = bundle_data.get_component::<BundleContents>() else {
-        return 0;
-    };
-    let ItemStack::Present(source_data) = source else {
-        return 0;
-    };
-    let source_snapshot = source_data.clone();
-    if crate::player::inventory::item_resource_name(source_snapshot.kind).ends_with("shulker_box") {
-        return 0;
-    }
-    let per_item = crate::ui::bundle::item_weight(&source_snapshot);
-    let remaining = (num_rational::Ratio::from_integer(1) - crate::ui::bundle::weight(&current))
-        .max(num_rational::Ratio::from_integer(0));
-    let capacity = (remaining / per_item)
-        .to_integer()
-        .clamp(0, i64::from(i32::MAX)) as i32;
-    let amount = source_data.count.min(capacity).max(0);
-    if amount == 0 {
-        return 0;
-    }
-    let mut contents = current.into_owned();
-    if let Some(existing) = contents
-        .items
-        .iter_mut()
-        .find(|item| matches!(item, ItemStack::Present(data) if data.is_same_item_and_components(&source_snapshot)))
-    {
-        if let ItemStack::Present(data) = existing {
-            data.count += amount;
-        }
-    } else {
-        let mut inserted = source_snapshot;
-        inserted.count = amount;
-        contents.items.insert(0, ItemStack::Present(inserted));
-    }
-    shrink(source, amount);
-    set_bundle_contents(bundle, contents);
-    amount
-}
-
-fn remove_from_bundle(bundle: &mut ItemStack, selected: i32) -> ItemStack {
-    let Some(bundle_data) = bundle.as_present() else {
-        return ItemStack::Empty;
-    };
-    let Some(current) = bundle_data.get_component::<BundleContents>() else {
-        return ItemStack::Empty;
-    };
-    let mut contents = current.into_owned();
-    if contents.items.is_empty() {
-        return ItemStack::Empty;
-    }
-    let index = usize::try_from(selected)
-        .ok()
-        .filter(|&i| i < contents.items.len())
-        .unwrap_or(0);
-    let removed = contents.items.remove(index);
-    set_bundle_contents(bundle, contents);
-    removed
-}
-
-/// Vanilla `tryItemClickBehaviourOverride` for bundles. This runs before the
-/// generic PICKUP path so local prediction matches BundleItem's insertion and
-/// extraction semantics while the server remains authoritative.
-fn bundle_click_override(
+/// Vanilla `BundleItem.overrideStackedOnOther`: the carried bundle clicked on
+/// a slot. Picking a bundle up cleared its selection, so it removes entry 0.
+fn stacked_on_other(
     kind: ContainerKind,
-    menu: &mut Menu,
-    cursor: &mut ItemStack,
     s: usize,
+    carried: &mut ItemStack,
+    slot: &mut ItemStack,
     primary: bool,
-    selected: i32,
+    bundle: &mut BundleClick,
 ) -> bool {
-    let mut slot = take_slot(menu, s);
-    let mut carried = std::mem::take(cursor);
-    let carried_bundle = carried
-        .as_present()
-        .is_some_and(|d| d.get_component::<BundleContents>().is_some());
-    let slot_bundle = slot
-        .as_present()
-        .is_some_and(|d| d.get_component::<BundleContents>().is_some());
-    let handled = if carried_bundle {
-        if primary && !slot.is_empty() {
-            insert_into_bundle(&mut carried, &mut slot);
-            true
-        } else if !primary && slot.is_empty() {
-            let mut removed = remove_from_bundle(&mut carried, selected);
-            if !removed.is_empty() && kind.may_place(s, removed.as_present().unwrap()) {
-                std::mem::swap(&mut slot, &mut removed);
-                if !removed.is_empty() {
-                    insert_into_bundle(&mut carried, &mut removed);
-                }
-            } else if !removed.is_empty() {
-                insert_into_bundle(&mut carried, &mut removed);
+    use crate::ui::bundle::{NO_SELECTION, Sound, remove_one, try_insert};
+    let Some(mut contents) = bundle_contents(carried) else {
+        return false;
+    };
+    if primary && !slot.is_empty() {
+        bundle.sound = Some(Sound::insert(
+            try_transfer(kind, s, &mut contents, slot) > 0,
+        ));
+    } else if !primary && slot.is_empty() {
+        if let Some(mut removed) = remove_one(&mut contents, NO_SELECTION) {
+            // `Slot.safeInsert`.
+            if removed.as_present().is_some_and(|d| kind.may_place(s, d)) {
+                let count = removed.count();
+                safe_insert(kind, s, slot, &mut removed, count);
             }
-            true
-        } else {
-            false
-        }
-    } else if slot_bundle {
-        if primary && !carried.is_empty() {
-            insert_into_bundle(&mut slot, &mut carried);
-            true
-        } else if !primary && carried.is_empty() {
-            carried = remove_from_bundle(&mut slot, selected);
-            true
-        } else {
-            false
+            if removed.is_empty() {
+                bundle.sound = Some(Sound::RemoveOne);
+            } else {
+                try_insert(&mut contents, &mut removed);
+            }
         }
     } else {
-        false
+        return false;
+    }
+    crate::ui::bundle::set_contents(carried, contents);
+    true
+}
+
+/// Vanilla `BundleItem.overrideOtherStackedOnMe`: the cursor clicked on a
+/// bundle in a slot.
+fn other_stacked_on_me(
+    kind: ContainerKind,
+    s: usize,
+    slot: &mut ItemStack,
+    carried: &mut ItemStack,
+    primary: bool,
+    bundle: &mut BundleClick,
+) -> bool {
+    use crate::ui::bundle::{NO_SELECTION, Sound, remove_one, try_insert};
+    let Some(mut contents) = bundle_contents(slot) else {
+        return false;
     };
-    put_slot(menu, s, slot);
-    *cursor = carried;
+    let hovered = bundle.selection.filter(|(slot, _)| usize::from(*slot) == s);
+    let allow = slot
+        .as_present()
+        .is_some_and(|d| kind.allow_modification(s, d));
+    let (handled, reset) = if primary && !carried.is_empty() {
+        let inserted = allow && try_insert(&mut contents, carried) > 0;
+        bundle.sound = Some(Sound::insert(inserted));
+        (true, false)
+    } else if !primary && carried.is_empty() {
+        let selected = hovered.map_or(NO_SELECTION, |(_, selected)| selected);
+        let removed = allow.then(|| remove_one(&mut contents, selected)).flatten();
+        let reset = removed.is_some();
+        if let Some(removed) = removed {
+            bundle.sound = Some(Sound::RemoveOne);
+            *carried = removed;
+        }
+        (true, reset)
+    } else {
+        // Picking the bundle up, or right-clicking it while holding
+        // something: `toggleSelectedItem(-1)` and the ordinary click.
+        (false, true)
+    };
+    if reset && hovered.is_some() {
+        bundle.selection = None;
+    }
+    if handled {
+        crate::ui::bundle::set_contents(slot, contents);
+    }
     handled
+}
+
+/// Vanilla `BundleContents.Mutable.tryTransfer` through `Slot.safeTake`.
+fn try_transfer(
+    kind: ContainerKind,
+    s: usize,
+    contents: &mut BundleContents,
+    slot: &mut ItemStack,
+) -> i32 {
+    use crate::ui::bundle::{item_weight, max_amount_to_add, try_insert, weight};
+    let Some(other) = slot.as_present() else {
+        return 0;
+    };
+    let (Some(current), Some(each)) = (weight(&contents.items), item_weight(other)) else {
+        return 0;
+    };
+    let max_amount = max_amount_to_add(current, each);
+    // `Slot.tryRemove`: an unmodifiable slot only gives up its whole stack.
+    if !kind.allow_modification(s, other) && max_amount < other.count {
+        return 0;
+    }
+    let take = other.count.min(max_amount);
+    if take <= 0 {
+        return 0;
+    }
+    let mut taken = slot.split(take as u32);
+    try_insert(contents, &mut taken)
 }
 
 /// Move up to `amount` of `carried` into `slot` (empty or same item), capped to
@@ -783,54 +789,54 @@ fn with_count(mut data: ItemStackData, count: i32) -> ItemStack {
 #[cfg(test)]
 mod bundle_tests {
     use super::*;
+    use crate::ui::bundle::Sound;
 
     fn bundle(items: Vec<ItemStack>) -> ItemStack {
         ItemStack::new(ItemKind::Bundle, 1).with_component(BundleContents { items })
     }
 
+    /// A right-click on a player-inventory bundle, with the hovered selection.
+    fn right_click(
+        slot_bundle: ItemStack,
+        selection: Option<(u16, i32)>,
+    ) -> (ItemStack, BundleClick) {
+        let mut slots = vec![ItemStack::Empty; crate::player::inventory::PLAYER_SLOTS];
+        slots[9] = slot_bundle;
+        let mut cursor = ItemStack::Empty;
+        let mut click = BundleClick {
+            selection,
+            sound: None,
+        };
+        apply_click(
+            ContainerKind::Player,
+            &slots,
+            &mut cursor,
+            &ClickOperation::Pickup(PickupClick::Right { slot: Some(9) }),
+            false,
+            &mut click,
+        );
+        (cursor, click)
+    }
+
     #[test]
-    fn selected_bundle_entry_is_removed() {
-        let mut stack = bundle(vec![
+    fn removing_the_selected_entry_clears_the_selection() {
+        let stacks = bundle(vec![
             ItemStack::new(ItemKind::Stone, 3),
             ItemStack::new(ItemKind::Dirt, 2),
         ]);
-        let removed = remove_from_bundle(&mut stack, 1);
-        assert_eq!(
-            removed.as_present().map(|d| (d.kind, d.count)),
-            Some((ItemKind::Dirt, 2))
-        );
-        let contents = stack
-            .as_present()
-            .and_then(|d| d.get_component::<BundleContents>())
-            .expect("bundle contents");
-        assert_eq!(contents.items.len(), 1);
-        assert_eq!(
-            contents.items[0].as_present().map(|d| d.kind),
-            Some(ItemKind::Stone)
-        );
+        let (cursor, click) = right_click(stacks, Some((9, 1)));
+        assert_eq!(cursor.as_present().map(|d| d.kind), Some(ItemKind::Dirt));
+        assert_eq!(click.selection, None);
+        assert_eq!(click.sound, Some(Sound::RemoveOne));
     }
 
     #[test]
-    fn shulker_boxes_cannot_be_inserted_into_bundle() {
-        let mut stack = bundle(Vec::new());
-        let mut source = ItemStack::new(ItemKind::ShulkerBox, 1);
-        assert_eq!(insert_into_bundle(&mut stack, &mut source), 0);
-        assert_eq!(source.count(), 1);
-    }
-
-    #[test]
-    fn insertion_stops_at_exact_bundle_capacity() {
-        let mut stack = bundle(vec![ItemStack::new(ItemKind::Stone, 63)]);
-        let mut source = ItemStack::new(ItemKind::Stone, 2);
-        assert_eq!(insert_into_bundle(&mut stack, &mut source), 1);
-        assert_eq!(source.count(), 1);
-        let contents = stack
-            .as_present()
-            .and_then(|d| d.get_component::<BundleContents>())
-            .expect("bundle contents");
-        assert_eq!(
-            crate::ui::bundle::weight(&contents),
-            num_rational::Ratio::from_integer(1)
+    fn a_selection_on_another_slot_survives() {
+        let (cursor, click) = right_click(
+            bundle(vec![ItemStack::new(ItemKind::Stone, 3)]),
+            Some((10, 0)),
         );
+        assert_eq!(cursor.as_present().map(|d| d.kind), Some(ItemKind::Stone));
+        assert_eq!(click.selection, Some((10, 0)));
     }
 }

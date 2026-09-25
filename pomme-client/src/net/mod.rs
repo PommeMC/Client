@@ -149,6 +149,11 @@ pub enum NetworkEvent {
         item: ItemStack,
         state_id: u32,
     },
+    /// `SetPlayerInventory`, indexed by vanilla `Inventory` slot.
+    PlayerInventorySlot {
+        index: u32,
+        item: ItemStack,
+    },
     HeldSlot {
         slot: u8,
     },

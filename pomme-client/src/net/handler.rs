@@ -216,42 +216,34 @@ pub fn handle_game_packet(
             ));
         }
         ClientboundGamePacket::ContainerSetContent(p) => {
-            let mut items = p.items.clone();
-            let mut carried = p.carried_item.clone();
-            for stack in &mut items {
-                super::bundle_codec::normalize_26_2_templates(stack);
-            }
-            super::bundle_codec::normalize_26_2_templates(&mut carried);
             let _ = event_tx.try_send(NetworkEvent::ContainerContent {
                 container_id: p.container_id,
-                items,
-                carried,
+                items: p
+                    .items
+                    .iter()
+                    .map(super::bundle_codec::normalized)
+                    .collect(),
+                carried: super::bundle_codec::normalized(&p.carried_item),
                 state_id: p.state_id,
             });
         }
         ClientboundGamePacket::SetCursorItem(p) => {
-            let mut item = p.contents.clone();
-            super::bundle_codec::normalize_26_2_templates(&mut item);
-            let _ = event_tx.try_send(NetworkEvent::CursorItem { item });
+            let _ = event_tx.try_send(NetworkEvent::CursorItem {
+                item: super::bundle_codec::normalized(&p.contents),
+            });
         }
         ClientboundGamePacket::ContainerSetSlot(p) => {
-            let mut item = p.item_stack.clone();
-            super::bundle_codec::normalize_26_2_templates(&mut item);
             let _ = event_tx.try_send(NetworkEvent::ContainerSlot {
                 container_id: p.container_id,
                 index: p.slot,
-                item,
+                item: super::bundle_codec::normalized(&p.item_stack),
                 state_id: p.state_id,
             });
         }
         ClientboundGamePacket::SetPlayerInventory(p) => {
-            let mut item = p.contents.clone();
-            super::bundle_codec::normalize_26_2_templates(&mut item);
-            let _ = event_tx.try_send(NetworkEvent::ContainerSlot {
-                container_id: -2,
-                index: p.slot as u16,
-                item,
-                state_id: 0,
+            let _ = event_tx.try_send(NetworkEvent::PlayerInventorySlot {
+                index: p.slot,
+                item: super::bundle_codec::normalized(&p.contents),
             });
         }
         ClientboundGamePacket::SetHeldSlot(p) if (0..9).contains(&p.slot) => {
