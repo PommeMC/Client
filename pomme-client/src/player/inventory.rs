@@ -12,6 +12,19 @@ pub const CRAFT_INPUT_START: usize = 1;
 pub const CRAFT_OUTPUT: usize = 0;
 pub const OFFHAND: usize = 45;
 
+/// A vanilla `Inventory` index (hotbar 0-8, main 9-35, armor feet to head
+/// 36-39, offhand 40) as its `InventoryMenu` slot.
+pub fn menu_slot_for_inventory_index(index: u32) -> Option<usize> {
+    let index = index as usize;
+    Some(match index {
+        0..=8 => HOTBAR_START + index,
+        9..=35 => index,
+        36..=39 => ARMOR_START + (39 - index),
+        40 => OFFHAND,
+        _ => return None,
+    })
+}
+
 pub struct Inventory {
     slots: Vec<ItemStack>,
 }
@@ -89,9 +102,33 @@ impl Inventory {
     }
 }
 
+/// Vanilla `Item.canFitInsideContainerItems`: false only for shulker boxes.
+pub fn can_fit_inside_container_items(kind: ItemKind) -> bool {
+    !azalea_registry::tags::items::SHULKER_BOXES.contains(&kind)
+}
+
 pub fn item_resource_name(kind: ItemKind) -> String {
     kind.to_string()
         .strip_prefix("minecraft:")
         .unwrap_or("air")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inventory_indices_map_to_inventory_menu_slots() {
+        // Vanilla `InventoryMenu`: armor head..feet at 5..8, hotbar last.
+        let mapped = |i| menu_slot_for_inventory_index(i);
+        assert_eq!(mapped(0), Some(HOTBAR_START));
+        assert_eq!(mapped(8), Some(HOTBAR_END - 1));
+        assert_eq!(mapped(9), Some(MAIN_START));
+        assert_eq!(mapped(35), Some(MAIN_END - 1));
+        assert_eq!(mapped(36), Some(ARMOR_END - 1));
+        assert_eq!(mapped(39), Some(ARMOR_START));
+        assert_eq!(mapped(40), Some(OFFHAND));
+        assert_eq!(mapped(41), None);
+    }
 }

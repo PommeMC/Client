@@ -218,22 +218,32 @@ pub fn handle_game_packet(
         ClientboundGamePacket::ContainerSetContent(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerContent {
                 container_id: p.container_id,
-                items: p.items.clone(),
-                carried: p.carried_item.clone(),
+                items: p
+                    .items
+                    .iter()
+                    .map(super::bundle_codec::normalized)
+                    .collect(),
+                carried: super::bundle_codec::normalized(&p.carried_item),
                 state_id: p.state_id,
             });
         }
         ClientboundGamePacket::SetCursorItem(p) => {
             let _ = event_tx.try_send(NetworkEvent::CursorItem {
-                item: p.contents.clone(),
+                item: super::bundle_codec::normalized(&p.contents),
             });
         }
         ClientboundGamePacket::ContainerSetSlot(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerSlot {
                 container_id: p.container_id,
                 index: p.slot,
-                item: p.item_stack.clone(),
+                item: super::bundle_codec::normalized(&p.item_stack),
                 state_id: p.state_id,
+            });
+        }
+        ClientboundGamePacket::SetPlayerInventory(p) => {
+            let _ = event_tx.try_send(NetworkEvent::PlayerInventorySlot {
+                index: p.slot,
+                item: super::bundle_codec::normalized(&p.contents),
             });
         }
         ClientboundGamePacket::SetHeldSlot(p) if (0..9).contains(&p.slot) => {

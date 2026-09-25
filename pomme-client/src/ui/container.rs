@@ -31,6 +31,8 @@ pub struct ContainerResult {
     /// Menu button clicked this frame (`ServerboundContainerButtonClick`),
     /// e.g. an enchantment option.
     pub button: Option<u32>,
+    /// Slot under the cursor this frame, for bundle mouse actions/tooltips.
+    pub hovered: Option<u16>,
 }
 
 /// Input for a container screen this frame.

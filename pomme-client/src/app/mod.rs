@@ -595,25 +595,28 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                let scroll = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                let (scroll_x, scroll_y) = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x, y),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
                 };
+                let scroll = scroll_y;
                 match self.phase.get_mut() {
                     AppPhase::InMenu { .. } | AppPhase::Connecting { .. } => {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(scroll_x, scroll_y);
                     }
                     AppPhase::InGame { game, .. }
                         if game.dialog_open()
                             || game.options_from_game
-                            || game.creative_inventory_open =>
+                            || game.creative_inventory_open
+                            || game.inventory_open
+                            || game.open_container.is_some() =>
                     {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(scroll_x, scroll_y);
                     }
                     // Queued raw: ChatScreen routes it to the completion popup
                     // or the backlog, with Shift's slower multiplier.
                     AppPhase::InGame { game, .. } if game.chat.is_open() => {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(0.0, scroll);
                     }
                     // Vanilla MouseHandler: a spectator's wheel moves the menu
                     // selection (sign-inverted) while it is open, and adjusts

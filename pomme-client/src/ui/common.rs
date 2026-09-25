@@ -1,12 +1,11 @@
-use azalea_inventory::components::{
-    Bees, BundleContents, CustomName, Damage, ItemName, MaxDamage, MaxStackSize, Unbreakable,
-};
+use azalea_inventory::components::{CustomName, Damage, ItemName, MaxDamage, Unbreakable};
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::tags::items::BUNDLES;
 
 use crate::benchmark::UploadStatus;
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
+use crate::ui::bundle::Frac;
 use crate::ui::text_edit::TextFieldRenderInfo;
 
 pub const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
@@ -35,6 +34,25 @@ pub fn item_display_name(data: &ItemStackData) -> String {
     item_hover_component(data)
         .map(|name| name.to_string())
         .unwrap_or_else(|| crate::lang::item_display_name(data.kind))
+}
+
+/// Vanilla `ItemStack.getStyledHoverName`: the hover name in its rarity color,
+/// italic when custom. The name's own styling wins where it sets one.
+pub fn styled_hover_name(data: &ItemStackData) -> Vec<crate::ui::text::TextSpan> {
+    use azalea_inventory::components::Rarity;
+    // Default-component rarities aren't synced; absent means common.
+    let color = match data.get_component::<Rarity>().as_deref() {
+        Some(Rarity::Uncommon) => rgb(0xffff55),
+        Some(Rarity::Rare) => rgb(0x55ffff),
+        Some(Rarity::Epic) => rgb(0xff55ff),
+        _ => WHITE,
+    };
+    let italic = data.get_component::<CustomName>().is_some();
+    let mut spans = item_display_spans(data, color);
+    for span in &mut spans {
+        span.italic |= italic;
+    }
+    spans
 }
 
 /// The hover name as styled spans; `base_color` fills wherever the name
@@ -467,7 +485,7 @@ fn push_item_bar(
 }
 
 /// Bar width and colour, following `BundleItem`'s override of `Item`'s bar.
-fn item_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
+pub(crate) fn item_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
     if BUNDLES.contains(&data.kind) {
         bundle_bar(data)
     } else {
@@ -482,75 +500,19 @@ const BUNDLE_BAR_COLOR: [f32; 4] = rgb(0x7087FF);
 
 fn bundle_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
     // getWeightSafe: an overflowing weight counts as full.
-    let weight = data
-        .get_component::<BundleContents>()
-        .map_or(Some(Frac::ZERO), |c| bundle_weight(&c.items))
+    let weight = crate::ui::bundle::contents(data)
+        .map_or(Some(Frac::ZERO), |c| crate::ui::bundle::weight(&c.items))
         .unwrap_or(Frac::ONE);
     if weight.0 <= 0 {
         return None;
     }
-    let width = (1 + weight.0 * 12 / weight.1).min(MAX_BAR_WIDTH as i64) as i32;
-    let color = if weight.0 >= weight.1 {
+    let width = (1 + weight.mul_and_truncate(12)).min(MAX_BAR_WIDTH as i64) as i32;
+    let color = if weight.is_full() {
         BUNDLE_FULL_BAR_COLOR
     } else {
         BUNDLE_BAR_COLOR
     };
     Some((width, color))
-}
-
-/// Reduced `Fraction`; arithmetic is `None` on overflow.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Frac(i64, i64);
-
-impl Frac {
-    const ZERO: Self = Self(0, 1);
-    const ONE: Self = Self(1, 1);
-
-    fn new(num: i64, den: i64) -> Self {
-        let (mut a, mut b) = (num.abs(), den.abs());
-        while b != 0 {
-            (a, b) = (b, a % b);
-        }
-        let g = a.max(1);
-        Self(num / g, den / g)
-    }
-
-    fn add(self, other: Self) -> Option<Self> {
-        let num = self
-            .0
-            .checked_mul(other.1)?
-            .checked_add(other.0.checked_mul(self.1)?)?;
-        Some(Self::new(num, self.1.checked_mul(other.1)?))
-    }
-
-    fn mul(self, n: i64) -> Option<Self> {
-        Some(Self::new(self.0.checked_mul(n)?, self.1))
-    }
-}
-
-/// `BundleContents#computeContentWeight`.
-fn bundle_weight(items: &[ItemStack]) -> Option<Frac> {
-    items
-        .iter()
-        .filter_map(ItemStack::as_present)
-        .try_fold(Frac::ZERO, |weight, item| {
-            weight.add(bundle_item_weight(item)?.mul(item.count as i64)?)
-        })
-}
-
-/// `BundleContents#getWeight`.
-fn bundle_item_weight(data: &ItemStackData) -> Option<Frac> {
-    if let Some(bundle) = data.get_component::<BundleContents>() {
-        return bundle_weight(&bundle.items)?.add(Frac(1, 16));
-    }
-    if data
-        .get_component::<Bees>()
-        .is_some_and(|bees| !bees.occupants.is_empty())
-    {
-        return Some(Frac::ONE);
-    }
-    let max_stack_size = data.get_component::<MaxStackSize>().map_or(1, |m| m.count);
-    (max_stack_size > 0).then(|| Frac::new(1, max_stack_size as i64))
 }
 
 /// Vanilla `Item` durability bar metrics for a damageable stack.
