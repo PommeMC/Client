@@ -8,7 +8,7 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let gs = self.gui_scale(screen_w, screen_h);
         let header_h = HEADER_FOOTER_H * gs;
         let sep_h = SEP_H * gs;
         let entry_h = ENTRY_H * gs;
@@ -550,7 +550,7 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
         let form_w = FORM_W * gs;
         let btn_h = common::BTN_H * gs;
@@ -681,7 +681,7 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
         let form_w = FORM_W * gs;
         let btn_h = common::BTN_H * gs;
@@ -1042,7 +1042,7 @@ impl MainMenu {
             _ => return empty_result(2.0),
         };
 
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let gs = self.gui_scale(screen_w, screen_h);
         let title_size = 18.0 * gs;
         let body_size = 11.0 * gs;
         let btn_w = 160.0 * gs;

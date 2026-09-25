@@ -488,13 +488,27 @@ impl GameState {
             .is_some_and(|e| crate::entity::is_equine(&e.entity_type) && e.saddled)
     }
 
-    /// Vanilla `Hud.getPlayerVehicleWithHealth`: (health, max health) of the
-    /// ridden vehicle when it is living (`Entity.showVehicleHealth`); the
-    /// living-store lookup is the `instanceof LivingEntity` gate.
-    pub fn vehicle_health(&self) -> Option<(f32, f32)> {
+    /// The ridden vehicle when it is living; the living-store lookup is
+    /// vanilla's `instanceof LivingEntity` gate.
+    fn riding_vehicle(&self) -> Option<&crate::entity::LivingEntity> {
         self.riding_vehicle_id
             .and_then(|id| self.entity_store.living.get(&id))
-            .map(|e| (e.health, e.max_health))
+    }
+
+    /// Vanilla `Hud.getPlayerVehicleWithHealth`: (health, max health) of the
+    /// ridden vehicle when it is living (`Entity.showVehicleHealth`).
+    pub fn vehicle_health(&self) -> Option<(f32, f32)> {
+        self.riding_vehicle().map(|e| (e.health, e.max_health))
+    }
+
+    // TODO: vanilla scales each distance by `getScale()` (the `scale`
+    // attribute, not read yet) and reads the camera entity's, which differs
+    // while spectating a mob.
+    pub fn third_person_distance(&self) -> f32 {
+        detached_distance(
+            self.player.camera_distance,
+            self.riding_vehicle().map(|vehicle| vehicle.camera_distance),
+        )
     }
 
     /// A server dialog, or the confirm screen one raised, is the top screen.
@@ -1907,6 +1921,12 @@ fn head_is_carved_pumpkin(player: &LocalPlayer) -> bool {
     }
 }
 
+/// Vanilla `Camera.setup`: the third-person camera backs off by the larger of
+/// the player's and a living mount's `camera_distance`.
+fn detached_distance(own: f32, mount: Option<f32>) -> f32 {
+    mount.map_or(own, |mount| own.max(mount))
+}
+
 /// Vanilla `LivingEntityRenderer`: hurt or dying entities take the red overlay.
 fn has_red_overlay(hurt_time: u8, death_time: u32) -> bool {
     hurt_time > 0 || death_time > 0
@@ -2171,11 +2191,9 @@ pub fn update_game(
         Vec::new()
     };
     let text_sw = gfx.renderer.screen_width() as f32;
-    let text_gs = hud::gui_scale(
-        text_sw,
-        gfx.renderer.screen_height() as f32,
-        core.menu.gui_scale_setting,
-    );
+    let text_gs = core
+        .menu
+        .gui_scale(text_sw, gfx.renderer.screen_height() as f32);
     let text_fs = common::FONT_SIZE * text_gs;
     let chat_was_open = game.chat.is_open();
     if game.dialog_open() {
@@ -2268,6 +2286,7 @@ pub fn update_game(
             .prev_eye_pos()
             .lerp(game.player.eye_pos(), partial_tick as f64),
         &game.chunk_store,
+        game.third_person_distance(),
     );
     // Esc cancels a running benchmark: restore the render distance it changed.
     if std::mem::take(&mut game.chunk_load_abort)
@@ -2287,7 +2306,7 @@ pub fn update_game(
 
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
-    let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
+    let gs = core.menu.gui_scale(sw, sh);
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
@@ -2557,7 +2576,7 @@ pub fn update_game(
             &game.boss_bars,
             gfx.renderer.is_first_person(),
             debug.as_ref(),
-            core.menu.gui_scale_setting,
+            gs,
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
@@ -3702,6 +3721,9 @@ pub fn update_game(
     }
 
     if game.options_from_game {
+        // TODO: a resource-pack toggle's `menu.reload_assets` is only applied
+        // once back on the title screen.
+        core.apply_font_options(&mut gfx.renderer);
         if core.menu.render_distance != game.last_render_distance
             || game.chat_information_changed(core.menu.chat_options)
         {
@@ -4490,7 +4512,14 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_red_overlay, scroll_wheel, section_bit, section_bits};
+    use super::{detached_distance, has_red_overlay, scroll_wheel, section_bit, section_bits};
+
+    #[test]
+    fn third_person_distance_takes_the_further_of_player_and_mount() {
+        assert_eq!(detached_distance(4.0, None), 4.0);
+        assert_eq!(detached_distance(4.0, Some(8.0)), 8.0);
+        assert_eq!(detached_distance(10.0, Some(8.0)), 10.0);
+    }
 
     #[test]
     fn scroll_wheel_matches_scroll_wheel_handler() {

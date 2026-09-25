@@ -330,6 +330,11 @@ pub fn handle_game_packet(
                         entity_id: p.entity_id.0,
                         max_health: value.clamp(1.0, 1024.0) as f32,
                     },
+                    // Vanilla CAMERA_DISTANCE clamps to 0..32 (default 4.0).
+                    Attribute::CameraDistance => NetworkEvent::EntityCameraDistanceUpdate {
+                        entity_id: p.entity_id.0,
+                        distance: value.clamp(0.0, 32.0) as f32,
+                    },
                     _ => continue,
                 };
                 let _ = event_tx.try_send(event);
