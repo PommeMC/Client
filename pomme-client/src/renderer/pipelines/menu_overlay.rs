@@ -720,7 +720,9 @@ impl MenuOverlayPipeline {
         for elem in elements {
             if matches!(
                 elem,
-                MenuElement::Tooltip { .. } | MenuElement::TooltipLines { .. }
+                MenuElement::Tooltip { .. }
+                    | MenuElement::TooltipLines { .. }
+                    | MenuElement::BundleTooltip { .. }
             ) {
                 deferred_tooltips.push(elem);
                 continue;
@@ -1168,6 +1170,40 @@ impl MenuOverlayPipeline {
         }
 
         for elem in &deferred_tooltips {
+            if let MenuElement::BundleTooltip {
+                x,
+                y,
+                title,
+                items,
+                selected,
+                weight,
+                scale,
+                screen_w,
+                screen_h,
+            } = elem
+            {
+                let draw = McTooltipDraw {
+                    x: *x,
+                    y: *y,
+                    scale: *scale,
+                    screen_w: *screen_w,
+                    screen_h: *screen_h,
+                };
+                self.push_bundle_tooltip(
+                    &mut vertices,
+                    &mut drawn_objects,
+                    &mut obfuscation_rng,
+                    item_atlas_uvs,
+                    draw,
+                    BundleImage {
+                        title,
+                        items,
+                        selected: *selected,
+                        weight: *weight,
+                    },
+                );
+                continue;
+            }
             let (MenuElement::Tooltip {
                 x,
                 y,
@@ -1526,22 +1562,19 @@ impl MenuOverlayPipeline {
             .iter()
             .map(|line| self.spans_width(&line.spans, scale))
             .collect();
-        let layout = tooltip_box(draw, px, &line_widths);
-
-        let [bg_x, bg_y, bg_w, bg_h] = layout.bg;
-        let white = [1.0f32; 4];
-        // 9 and 10 are the two sprites' own `.mcmeta` nine-slice borders, not
-        // the tooltip margin that happens to share the first number.
-        if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
-            push_nine_slice(vertices, bg_x, bg_y, bg_w, bg_h, bg, 9.0 * px, white);
-        }
-        if let Some(frame) = self.sprite_atlas.regions.get(&SpriteId::TooltipFrame) {
-            push_nine_slice(vertices, bg_x, bg_y, bg_w, bg_h, frame, 10.0 * px, white);
-        }
+        let content_w = line_widths.iter().copied().fold(0.0f32, f32::max);
+        let line_h = scale + 2.0 * px;
+        let content_h = if lines.len() == 1 {
+            scale
+        } else {
+            lines.len() as f32 * line_h
+        };
+        let layout = tooltip_box(draw, px, content_w, content_h);
+        self.push_tooltip_frame(vertices, layout.bg, px);
 
         for (i, (line, line_w)) in lines.iter().zip(&line_widths).enumerate() {
             let line_x = if line.right_align {
-                layout.text_x + layout.content_w - line_w
+                layout.text_x + content_w - line_w
             } else {
                 layout.text_x
             };
@@ -1551,7 +1584,337 @@ impl MenuOverlayPipeline {
                 &line.spans,
                 McTextDraw {
                     x: line_x,
-                    y: tooltip_line_y(layout.text_y, i, layout.line_h, px),
+                    y: tooltip_line_y(layout.text_y, i, line_h, px),
+                    scale,
+                    drop_shadow: true,
+                },
+                obfuscation_rng,
+            );
+        }
+    }
+
+    /// `TooltipRenderUtil`'s background and frame over `bg`; 9 and 10 are the
+    /// two sprites' own `.mcmeta` nine-slice borders.
+    fn push_tooltip_frame(&self, vertices: &mut Vec<Vertex>, [x, y, w, h]: [f32; 4], px: f32) {
+        let white = [1.0f32; 4];
+        if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
+            push_nine_slice(vertices, x, y, w, h, bg, 9.0 * px, white);
+        }
+        if let Some(frame) = self.sprite_atlas.regions.get(&SpriteId::TooltipFrame) {
+            push_nine_slice(vertices, x, y, w, h, frame, 10.0 * px, white);
+        }
+    }
+
+    /// `GuiGraphicsExtractor.tooltip` over the bundle's name and its
+    /// `ClientBundleTooltip`, all laid out in whole gui units.
+    #[allow(clippy::too_many_arguments)]
+    fn push_bundle_tooltip(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
+        obfuscation_rng: &mut ObfuscationRng,
+        item_atlas_uvs: &HashMap<String, [f32; 4]>,
+        draw: McTooltipDraw,
+        image: BundleImage<'_>,
+    ) {
+        let Some(gm) = &self.mc_glyph_map else {
+            return;
+        };
+        let scale = draw.scale;
+        let px = scale / gm.cell_h as f32;
+        let gui_width = |width: f32| (width / px).round() as i32;
+        let white = [1.0f32; 4];
+        let text = |vertices: &mut Vec<Vertex>,
+                    drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
+                    obfuscation_rng: &mut ObfuscationRng,
+                    spans: &[TextSpan],
+                    x: f32,
+                    y: f32| {
+            self.push_text_into(
+                drawn_objects,
+                vertices,
+                spans,
+                McTextDraw {
+                    x,
+                    y,
+                    scale,
+                    drop_shadow: true,
+                },
+                obfuscation_rng,
+            );
+        };
+
+        let items = image.items;
+        let rows = items.len().min(12).div_ceil(4) as i32;
+        let empty_lines = if items.is_empty() {
+            let description = crate::lang::translate("item.minecraft.bundle.empty.description")
+                .unwrap_or("Can hold a mixed stack of items");
+            self.wrap_tooltip_text(description, scale, 96.0 * px)
+        } else {
+            Vec::new()
+        };
+        // `getHeight`: the grid or the wrapped description, then the bar.
+        let body_h = if items.is_empty() {
+            empty_lines.len() as i32 * 9
+        } else {
+            rows * 24
+        };
+        // The name line is 10 tall and the image follows a 2px first-line gap.
+        let w = gui_width(self.spans_width(image.title, scale)).max(96);
+        let h = 10 + body_h + 21;
+        let layout = tooltip_box(draw, px, w as f32 * px, h as f32 * px);
+        self.push_tooltip_frame(vertices, layout.bg, px);
+        text(
+            vertices,
+            drawn_objects,
+            obfuscation_rng,
+            image.title,
+            layout.text_x,
+            layout.text_y,
+        );
+
+        // `getContentXOffset`.
+        let left = layout.text_x + ((w - 96) / 2) as f32 * px;
+        let top = layout.text_y + 12.0 * px;
+        let centered = |label: &str, center_x: f32| {
+            center_x - (gui_width(self.mc_text_width(label, scale)) / 2) as f32 * px
+        };
+        let sprite = |vertices: &mut Vec<Vertex>, id: SpriteId, x: f32, y: f32, size: f32| {
+            if let Some(region) = self.sprite_atlas.regions.get(&id) {
+                push_quad(
+                    vertices,
+                    x,
+                    y,
+                    size,
+                    size,
+                    region.u0,
+                    region.v0,
+                    region.u1,
+                    region.v1,
+                    white,
+                    2.0,
+                    [0.0, 0.0],
+                    0.0,
+                );
+            }
+        };
+
+        if items.is_empty() {
+            let grey = [0.6667, 0.6667, 0.6667, 1.0];
+            for (i, line) in empty_lines.iter().enumerate() {
+                let spans = [TextSpan::new(line.clone(), grey)];
+                text(
+                    vertices,
+                    drawn_objects,
+                    obfuscation_rng,
+                    &spans,
+                    left,
+                    top + (i as i32 * 9) as f32 * px,
+                );
+            }
+        } else {
+            let shown_items = &items[..crate::ui::bundle::shown_count(items.len())];
+            let mut slot_number = 1;
+            for row in 1..=rows {
+                for col in 1..=4 {
+                    let x = left + (96 - col * 24) as f32 * px;
+                    let y = top + ((rows - row) * 24) as f32 * px;
+                    if items.len() > 12 && col == 1 && row == 1 {
+                        let hidden: i32 =
+                            items[shown_items.len()..].iter().map(|s| s.count()).sum();
+                        let label = format!("+{hidden}");
+                        let label_x = centered(&label, x + 12.0 * px);
+                        let spans = [TextSpan::new(label, white)];
+                        text(
+                            vertices,
+                            drawn_objects,
+                            obfuscation_rng,
+                            &spans,
+                            label_x,
+                            y + 10.0 * px,
+                        );
+                        continue;
+                    }
+                    if slot_number > shown_items.len() {
+                        continue;
+                    }
+                    let visual = shown_items.len() - slot_number;
+                    let highlighted = visual as i32 == image.selected;
+                    let back = if highlighted {
+                        SpriteId::BundleSlotHighlightBack
+                    } else {
+                        SpriteId::BundleSlotBackground
+                    };
+                    sprite(vertices, back, x, y, 24.0 * px);
+                    if let azalea_inventory::ItemStack::Present(data) = &shown_items[visual] {
+                        self.push_tooltip_item(
+                            vertices,
+                            drawn_objects,
+                            obfuscation_rng,
+                            item_atlas_uvs,
+                            data,
+                            (x + 4.0 * px, y + 4.0 * px),
+                            scale,
+                            px,
+                        );
+                    }
+                    if highlighted {
+                        sprite(
+                            vertices,
+                            SpriteId::BundleSlotHighlightFront,
+                            x,
+                            y,
+                            24.0 * px,
+                        );
+                    }
+                    slot_number += 1;
+                }
+            }
+            if let Some(azalea_inventory::ItemStack::Present(data)) =
+                usize::try_from(image.selected)
+                    .ok()
+                    .and_then(|i| items.get(i))
+            {
+                // `extractSelectedItemTooltip`: its own tooltip, centred above.
+                let name = crate::ui::common::styled_hover_name(data);
+                let center = gui_width(layout.text_x) + w / 2 - 12;
+                let anchor = center - gui_width(self.spans_width(&name, scale)) / 2;
+                self.push_tooltip(
+                    vertices,
+                    drawn_objects,
+                    obfuscation_rng,
+                    McTooltipDraw {
+                        x: anchor as f32 * px,
+                        y: top - 15.0 * px,
+                        ..draw
+                    },
+                    &[TooltipLine::from_spans(name)],
+                );
+            }
+        }
+
+        // `extractProgressbar`.
+        let bar_y = top + (body_h + 4) as f32 * px;
+        let fill = image.weight.mul_and_truncate(94).clamp(0, 94) as f32;
+        let fill_id = if image.weight.is_full() {
+            SpriteId::BundleProgressFull
+        } else {
+            SpriteId::BundleProgressFill
+        };
+        if fill > 0.0
+            && let Some(region) = self.sprite_atlas.regions.get(&fill_id)
+        {
+            push_nine_slice(
+                vertices,
+                left + px,
+                bar_y,
+                fill * px,
+                13.0 * px,
+                region,
+                2.0 * px,
+                white,
+            );
+        }
+        if let Some(region) = self
+            .sprite_atlas
+            .regions
+            .get(&SpriteId::BundleProgressBorder)
+        {
+            push_nine_slice(
+                vertices,
+                left,
+                bar_y,
+                96.0 * px,
+                13.0 * px,
+                region,
+                2.0 * px,
+                white,
+            );
+        }
+        let label = if image.weight.0 == 0 {
+            crate::lang::translate("item.minecraft.bundle.empty")
+        } else if image.weight.is_full() {
+            crate::lang::translate("item.minecraft.bundle.full")
+        } else {
+            None
+        };
+        if let Some(label) = label {
+            let label_x = centered(label, left + 48.0 * px);
+            let spans = [TextSpan::new(label.to_owned(), white)];
+            text(
+                vertices,
+                drawn_objects,
+                obfuscation_rng,
+                &spans,
+                label_x,
+                bar_y + 3.0 * px,
+            );
+        }
+    }
+
+    /// `GuiGraphicsExtractor.item` plus `itemDecorations` at `(x, y)`: the
+    /// icon, then the stack's bar and count.
+    #[allow(clippy::too_many_arguments)]
+    fn push_tooltip_item(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
+        obfuscation_rng: &mut ObfuscationRng,
+        item_atlas_uvs: &HashMap<String, [f32; 4]>,
+        data: &azalea_inventory::ItemStackData,
+        (x, y): (f32, f32),
+        scale: f32,
+        px: f32,
+    ) {
+        let name = crate::player::inventory::item_resource_name(data.kind);
+        if let Some(uv) = item_atlas_uvs.get(&name) {
+            push_quad(
+                vertices,
+                x,
+                y,
+                16.0 * px,
+                16.0 * px,
+                uv[0],
+                uv[1],
+                uv[2],
+                uv[3],
+                [1.0; 4],
+                3.0,
+                [0.0, 0.0],
+                0.0,
+            );
+        }
+        // TODO: the cooldown overlay, as in `common::push_item_icon`.
+        if let Some((width, color)) = crate::ui::common::item_bar(data) {
+            push_rect(
+                vertices,
+                x + 2.0 * px,
+                y + 13.0 * px,
+                13.0 * px,
+                2.0 * px,
+                0.0,
+                [0.0, 0.0, 0.0, 1.0],
+            );
+            push_rect(
+                vertices,
+                x + 2.0 * px,
+                y + 13.0 * px,
+                width as f32 * px,
+                px,
+                0.0,
+                color,
+            );
+        }
+        if data.count > 1 {
+            let count = data.count.to_string();
+            let count_x = x + 17.0 * px - self.mc_text_width(&count, scale);
+            self.push_text_into(
+                drawn_objects,
+                vertices,
+                &[TextSpan::new(count, [1.0; 4])],
+                McTextDraw {
+                    x: count_x,
+                    y: y + 9.0 * px,
                     scale,
                     drop_shadow: true,
                 },
@@ -1693,12 +2056,16 @@ pub struct TooltipLine {
 }
 
 impl TooltipLine {
-    /// A single-color line.
-    pub fn new(text: String, color: [f32; 4]) -> Self {
+    pub fn from_spans(spans: Vec<TextSpan>) -> Self {
         Self {
-            spans: vec![TextSpan::new(text, color)],
+            spans,
             right_align: false,
         }
+    }
+
+    /// A single-color line.
+    pub fn new(text: String, color: [f32; 4]) -> Self {
+        Self::from_spans(vec![TextSpan::new(text, color)])
     }
 
     /// A single-color right-aligned line.
@@ -1832,6 +2199,18 @@ pub enum MenuElement {
         x: f32,
         y: f32,
         text: String,
+        scale: f32,
+        screen_w: f32,
+        screen_h: f32,
+    },
+    /// `ClientBundleTooltip` under the bundle's styled name.
+    BundleTooltip {
+        x: f32,
+        y: f32,
+        title: Vec<TextSpan>,
+        items: Vec<azalea_inventory::ItemStack>,
+        selected: i32,
+        weight: crate::ui::bundle::Frac,
         scale: f32,
         screen_w: f32,
         screen_h: f32,
@@ -2046,6 +2425,12 @@ pub enum SpriteId {
     HeaderSeparator,
     FooterSeparator,
     MenuBackground,
+    BundleProgressBorder,
+    BundleProgressFill,
+    BundleProgressFull,
+    BundleSlotBackground,
+    BundleSlotHighlightBack,
+    BundleSlotHighlightFront,
     TooltipBackground,
     TooltipFrame,
     Scroller,
@@ -2654,6 +3039,36 @@ fn build_sprite_atlas(
         (
             SpriteId::MenuBackground,
             "minecraft/textures/gui/inworld_menu_background.png",
+            0.0,
+        ),
+        (
+            SpriteId::BundleProgressBorder,
+            "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_border.png",
+            2.0,
+        ),
+        (
+            SpriteId::BundleProgressFill,
+            "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_fill.png",
+            2.0,
+        ),
+        (
+            SpriteId::BundleProgressFull,
+            "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_full.png",
+            2.0,
+        ),
+        (
+            SpriteId::BundleSlotBackground,
+            "minecraft/textures/gui/sprites/container/bundle/slot_background.png",
+            0.0,
+        ),
+        (
+            SpriteId::BundleSlotHighlightBack,
+            "minecraft/textures/gui/sprites/container/bundle/slot_highlight_back.png",
+            0.0,
+        ),
+        (
+            SpriteId::BundleSlotHighlightFront,
+            "minecraft/textures/gui/sprites/container/bundle/slot_highlight_front.png",
             0.0,
         ),
         (
@@ -4150,42 +4565,40 @@ struct McTooltipDraw {
 struct TooltipBox {
     text_x: f32,
     text_y: f32,
-    content_w: f32,
-    line_h: f32,
     /// Background and frame rect, `[x, y, w, h]`.
     bg: [f32; 4],
 }
 
-/// `TooltipRenderUtil.extractTooltipBackground` (PADDING 3, MARGIN 9) over the
-/// content box `GuiGraphicsExtractor.tooltip` measures: the widest line, and
-/// 10 per line less 2 when there is only one. `px` is one gui unit.
-// TODO: the mouse offset and the screen clamps below are framebuffer pixels,
-// but `TooltipRenderUtil.MOUSE_OFFSET` is 12 gui units, so they should scale
-// with `px`. Pre-existing, left alone to keep this change to the box itself.
-fn tooltip_box(draw: McTooltipDraw, px: f32, line_widths: &[f32]) -> TooltipBox {
-    let line_h = draw.scale + 2.0 * px;
-    let content_w = line_widths.iter().copied().fold(0.0f32, f32::max);
-    let content_h = if line_widths.len() == 1 {
-        draw.scale
-    } else {
-        line_widths.len() as f32 * line_h
-    };
+/// The bundle half of a `BundleTooltip` element.
+struct BundleImage<'a> {
+    title: &'a [TextSpan],
+    items: &'a [azalea_inventory::ItemStack],
+    selected: i32,
+    weight: crate::ui::bundle::Frac,
+}
 
-    let mut text_x = draw.x + 12.0;
-    let mut text_y = draw.y - 12.0;
-    if text_x + content_w > draw.screen_w {
-        text_x = (text_x - 24.0 - content_w).max(4.0);
+/// `DefaultTooltipPositioner` then `TooltipRenderUtil.extractTooltipBackground`
+/// (PADDING 3, MARGIN 9) around a `content_w` x `content_h` box. Positioning
+/// runs in whole gui units of `px` framebuffer pixels, as vanilla's does.
+fn tooltip_box(draw: McTooltipDraw, px: f32, content_w: f32, content_h: f32) -> TooltipBox {
+    // `Window.guiScaledWidth` rounds up; the cursor's gui position truncates.
+    let screen_w = (draw.screen_w / px).ceil() as i32;
+    let screen_h = (draw.screen_h / px).ceil() as i32;
+    let w = (content_w / px).round() as i32;
+    let h = (content_h / px).round() as i32;
+    let mut x = (draw.x / px).floor() as i32 + 12;
+    let mut y = (draw.y / px).floor() as i32 - 12;
+    if x + w > screen_w {
+        x = (x - 24 - w).max(4);
     }
-    if text_y + content_h + 3.0 > draw.screen_h {
-        text_y = draw.screen_h - content_h - 3.0;
+    if y + h + 3 > screen_h {
+        y = screen_h - h - 3;
     }
-
+    let (text_x, text_y) = (x as f32 * px, y as f32 * px);
     let inset = (3.0 + 9.0) * px;
     TooltipBox {
         text_x,
         text_y,
-        content_w,
-        line_h,
         bg: [
             text_x - inset,
             text_y - inset,
@@ -4728,7 +5141,7 @@ mod tests {
 
     #[test]
     fn tooltip_box_insets_by_the_padding_and_margin() {
-        let layout = tooltip_box(unscaled_tooltip(100.0, 100.0), 1.0, &[40.0]);
+        let layout = tooltip_box(unscaled_tooltip(100.0, 100.0), 1.0, 40.0, 8.0);
         assert_eq!(layout.text_x, 112.0);
         assert_eq!(layout.text_y, 88.0);
         assert_eq!(layout.bg, [100.0, 76.0, 64.0, 32.0]);
@@ -4737,25 +5150,26 @@ mod tests {
     #[test]
     fn tooltip_flips_left_from_the_offset_position() {
         // `DefaultTooltipPositioner`: `x + 12`, then `max(x - 24 - w, 4)`.
-        let flipped = tooltip_box(unscaled_tooltip(990.0, 100.0), 1.0, &[40.0]);
+        let flipped = tooltip_box(unscaled_tooltip(990.0, 100.0), 1.0, 40.0, 8.0);
         assert_eq!(flipped.text_x, 990.0 + 12.0 - 24.0 - 40.0);
-        let clamped = tooltip_box(unscaled_tooltip(990.0, 100.0), 1.0, &[995.0]);
+        let clamped = tooltip_box(unscaled_tooltip(990.0, 100.0), 1.0, 995.0, 8.0);
         assert_eq!(clamped.text_x, 4.0);
     }
 
     #[test]
-    fn tooltip_height_sums_ten_per_line_less_two_when_single() {
-        let one = tooltip_box(unscaled_tooltip(100.0, 100.0), 1.0, &[40.0]);
-        assert_eq!(one.bg[3], 8.0 + 24.0);
-        let three = tooltip_box(unscaled_tooltip(100.0, 100.0), 1.0, &[10.0, 40.0, 20.0]);
-        assert_eq!(three.bg[3], 30.0 + 24.0);
-        assert_eq!(three.content_w, 40.0);
+    fn tooltip_positions_in_whole_gui_units() {
+        // At gui scale 3 the 12-unit offset is 36px, from the truncated cursor.
+        let draw = McTooltipDraw {
+            scale: 24.0,
+            ..unscaled_tooltip(100.0, 100.0)
+        };
+        let layout = tooltip_box(draw, 3.0, 120.0, 24.0);
+        assert_eq!((layout.text_x, layout.text_y), (99.0 + 36.0, 99.0 - 36.0));
     }
 
     #[test]
     fn tooltip_lines_after_the_first_drop_two_pixels() {
-        let layout = tooltip_box(unscaled_tooltip(100.0, 100.0), 1.0, &[10.0, 10.0, 10.0]);
-        let y = |i| tooltip_line_y(layout.text_y, i, layout.line_h, 1.0);
+        let y = |i| tooltip_line_y(88.0, i, 10.0, 1.0);
         assert_eq!([y(0), y(1), y(2)], [88.0, 100.0, 110.0]);
     }
 

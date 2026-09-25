@@ -163,6 +163,7 @@ pub struct InputState {
     cursor_pos: (f32, f32),
     cursor_moved: bool,
     menu_scroll: f32,
+    menu_scroll_x: f32,
     /// A focused text field (anvil rename, creative search) is capturing
     /// keyboard input this frame: letter/digit hotkeys must type, not act.
     pub text_capture: bool,
@@ -259,6 +260,7 @@ impl InputState {
             cursor_pos: (0.0, 0.0),
             cursor_moved: false,
             menu_scroll: 0.0,
+            menu_scroll_x: 0.0,
             text_capture: false,
             menu_capture: false,
             spectator: false,
@@ -787,13 +789,19 @@ impl InputState {
     }
 
     pub fn consume_menu_scroll(&mut self) -> f32 {
-        let s = self.menu_scroll;
-        self.menu_scroll = 0.0;
-        s
+        self.consume_menu_scroll_xy().1
     }
 
-    pub fn on_menu_scroll(&mut self, delta: f32) {
-        self.menu_scroll += delta;
+    pub fn consume_menu_scroll_xy(&mut self) -> (f32, f32) {
+        let scroll = (self.menu_scroll_x, self.menu_scroll);
+        self.menu_scroll_x = 0.0;
+        self.menu_scroll = 0.0;
+        scroll
+    }
+
+    pub fn on_menu_scroll_xy(&mut self, x: f32, y: f32) {
+        self.menu_scroll_x += x;
+        self.menu_scroll += y;
     }
 
     pub fn enter_pressed(&mut self) -> bool {

@@ -159,6 +159,14 @@ pub struct GameState {
     pub inv_drag: Option<(azalea_inventory::operations::QuickCraftKind, Vec<u16>)>,
     /// Last survival left click (slot, time) for double-click detection.
     pub inv_last_click: Option<(u16, Instant)>,
+    /// The selected entry of a bundle in (menu id, slot). Vanilla keeps it on
+    /// the stack but never sends it, so a server update of the slot drops it.
+    pub bundle_selection: Option<(i32, u16, i32)>,
+    /// The slot the container screen hovered last frame (menu id, slot, and
+    /// whether it held a bundle), for vanilla `onStopHovering`.
+    pub bundle_hovered: Option<(i32, u16, bool)>,
+    /// `BundleMouseActions`' `ScrollWheelHandler` accumulators (x, y).
+    pub bundle_scroll: (f32, f32),
     /// Server registries, for hashing predicted container clicks.
     pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
     pub chat: ChatState,
@@ -397,6 +405,9 @@ impl GameState {
             container_was_open: None,
             inv_drag: None,
             inv_last_click: None,
+            bundle_selection: None,
+            bundle_hovered: None,
+            bundle_scroll: (0.0, 0.0),
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
             chat: {
                 let mut chat = ChatState::new();
@@ -594,6 +605,20 @@ impl GameState {
         self.cursor_item = azalea_inventory::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
+        self.bundle_selection = None;
+        self.bundle_hovered = None;
+        self.bundle_scroll = (0.0, 0.0);
+    }
+
+    /// A server update replaced the stack in `slot` of `menu` (every slot when
+    /// `None`), dropping any bundle selection it carried.
+    pub fn drop_bundle_selection(&mut self, menu: i32, slot: Option<u16>) {
+        if self
+            .bundle_selection
+            .is_some_and(|(m, s, _)| m == menu && slot.is_none_or(|slot| slot == s))
+        {
+            self.bundle_selection = None;
+        }
     }
 
     /// Replaces any open server dialog; false (logged) when `reference`
@@ -1728,12 +1753,59 @@ fn apply_render_distance(
     game.sync_client_information(connection, rd, core.menu.chat_options);
 }
 
+/// Vanilla `ScrollWheelHandler.onMouseScroll` on one frame's (x, y) scroll,
+/// folded to `BundleMouseActions`' wheel: vertical, else negated horizontal.
+fn scroll_wheel(accumulated: &mut (f32, f32), (x, y): (f32, f32)) -> i32 {
+    let step = |acc: &mut f32, delta: f32| {
+        // `Math.signum`, which is 0 for 0 (Rust's `signum` isn't).
+        if *acc != 0.0 && delta.partial_cmp(&0.0) != (*acc).partial_cmp(&0.0) {
+            *acc = 0.0;
+        }
+        *acc += delta;
+        let whole = acc.trunc();
+        *acc -= whole;
+        whole as i32
+    };
+    let wheel_x = step(&mut accumulated.0, x);
+    let wheel_y = step(&mut accumulated.1, y);
+    if wheel_y == 0 { -wheel_x } else { wheel_y }
+}
+
+/// Vanilla `BundleMouseActions.toggleSelectedBundleItem`: the stack's
+/// selection follows `Mutable.toggleSelectedItem`, and the packet always goes.
+fn toggle_bundle_selection(
+    game: &mut GameState,
+    sender: &crate::net::sender::PacketSender,
+    menu: i32,
+    slot: u16,
+    selected: i32,
+) {
+    let current = game
+        .bundle_selection
+        .filter(|(m, s, _)| *m == menu && *s == slot)
+        .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i);
+    game.bundle_selection =
+        (selected >= 0 && selected != current).then_some((menu, slot, selected));
+    send_bundle_selection(sender, slot, selected);
+}
+
+fn send_bundle_selection(sender: &crate::net::sender::PacketSender, slot: u16, selected: i32) {
+    use azalea_protocol::packets::game::s_bundle_item_selected::ServerboundBundleItemSelected;
+    sender.send(ServerboundGamePacket::BundleItemSelected(
+        ServerboundBundleItemSelected {
+            slot_id: i32::from(slot),
+            selected_item_index: selected as u32,
+        },
+    ));
+}
+
 /// Predict each container click locally (instant UI + drag preview), then send
 /// the predicted diff as `HashedStack`es so the server suppresses corrections
 /// when the prediction is right (vanilla lockstep).
 fn send_container_clicks(
     game: &mut GameState,
     connection: &ConnectionHandle,
+    audio: &crate::audio::AudioEngine,
     ops: Vec<azalea_inventory::operations::ClickOperation>,
 ) {
     use azalea_inventory::ItemStack;
@@ -1785,13 +1857,28 @@ fn send_container_clicks(
             },
             other => {
                 let mut cursor = std::mem::take(&mut game.cursor_item);
+                let mut bundle = menu_click::BundleClick {
+                    selection: game
+                        .bundle_selection
+                        .filter(|(menu, _, _)| *menu == container_id)
+                        .map(|(_, slot, selected)| (slot, selected)),
+                    sound: None,
+                };
+                let had_selection = bundle.selection.is_some();
                 let changed = menu_click::apply_click(
                     kind,
                     game.menu_slots(),
                     &mut cursor,
                     other,
                     crate::player::is_creative(game.player.game_mode),
+                    &mut bundle,
                 );
+                if had_selection && bundle.selection.is_none() {
+                    game.bundle_selection = None;
+                }
+                if let Some(sound) = bundle.sound {
+                    sound.play(audio, game.player.position);
+                }
                 game.cursor_item = cursor;
                 for (s, item) in &changed {
                     game.set_menu_slot(*s as usize, item.clone());
@@ -2899,6 +2986,7 @@ pub fn update_game(
     if (game.inventory_open || game.open_container.is_some()) && !dialog_open {
         // Key shortcuts stay quiet while a text field (anvil rename) types.
         let keys_live = !game.wants_text_input();
+        let menu_scroll = core.input.consume_menu_scroll_xy();
         let input = crate::ui::container::ContainerInput {
             left_pressed: core.input.left_just_pressed(),
             right_pressed: core.input.right_just_pressed(),
@@ -2929,7 +3017,7 @@ pub fn update_game(
                     name,
                 }));
         }
-        let (clicked_outside, ops) = if let Some(container) = &game.open_container {
+        let (clicked_outside, ops, hovered) = if let Some(container) = &game.open_container {
             let result = match container.screen {
                 ContainerScreen::CraftingTable => crate::ui::crafting_table::build_crafting_table(
                     &mut elements,
@@ -3045,7 +3133,7 @@ pub fn update_game(
                         },
                     ));
             }
-            (result.clicked_outside, result.ops)
+            (result.clicked_outside, result.ops, result.hovered)
         } else {
             let result = crate::ui::inventory::build_inventory(
                 &mut elements,
@@ -3060,13 +3148,98 @@ pub fn update_game(
                 gs,
             );
             player_preview = Some(result.player_preview);
-            (result.clicked_outside, result.ops)
+            (result.clicked_outside, result.ops, result.hovered)
         };
         close_inventory = clicked_outside;
-        send_container_clicks(game, connection, ops);
+
+        let menu_id = game.open_container.as_ref().map_or(0, |c| c.id);
+        let is_bundle_slot = |game: &GameState, slot: u16| {
+            game.menu_slots()
+                .get(usize::from(slot))
+                .and_then(azalea_inventory::ItemStack::as_present)
+                .is_some_and(crate::ui::bundle::is_bundle)
+        };
+        // Vanilla `onMouseClickAction`: a shift-click or number-key swap on a
+        // bundle unselects it before the click goes out.
+        for op in &ops {
+            use azalea_inventory::operations::{ClickOperation, QuickMoveClick};
+            let slot = match op {
+                ClickOperation::QuickMove(
+                    QuickMoveClick::Left { slot } | QuickMoveClick::Right { slot },
+                ) => *slot,
+                ClickOperation::Swap(click) => click.source_slot,
+                _ => continue,
+            };
+            if is_bundle_slot(game, slot) {
+                toggle_bundle_selection(
+                    game,
+                    &connection.packet_tx,
+                    menu_id,
+                    slot,
+                    crate::ui::bundle::NO_SELECTION,
+                );
+            }
+        }
+        send_container_clicks(game, connection, &core.audio, ops);
+
+        // Vanilla `extractContents`: after the clicks, leaving a slot that
+        // holds a bundle unselects it (`onStopHovering`).
+        if let Some((menu, slot, _)) = game.bundle_hovered
+            && menu == menu_id
+            && Some(slot) != hovered
+            && is_bundle_slot(game, slot)
+        {
+            toggle_bundle_selection(
+                game,
+                &connection.packet_tx,
+                menu_id,
+                slot,
+                crate::ui::bundle::NO_SELECTION,
+            );
+        }
+        game.bundle_hovered = hovered.map(|slot| (menu_id, slot, is_bundle_slot(game, slot)));
+
+        if let Some((_, slot, true)) = game.bundle_hovered {
+            let data = game.menu_slots()[usize::from(slot)]
+                .as_present()
+                .cloned()
+                .expect("a bundle slot holds a stack");
+            let shown = crate::ui::bundle::contents(&data)
+                .map_or(0, |c| crate::ui::bundle::shown_count(c.items.len()));
+            let current = game
+                .bundle_selection
+                .filter(|(m, s, _)| *m == menu_id && *s == slot)
+                .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i);
+            // `BundleMouseActions.onMouseScrolled`.
+            // TODO: vanilla steps once per wheel event, scaled by
+            // `mouseWheelSensitivity`; the input layer sums a frame's events.
+            if shown > 0 && menu_scroll != (0.0, 0.0) {
+                let wheel = scroll_wheel(&mut game.bundle_scroll, menu_scroll);
+                let next = crate::ui::bundle::next_selection(wheel, current, shown);
+                if wheel != 0 && next != current {
+                    toggle_bundle_selection(game, &connection.packet_tx, menu_id, slot, next);
+                }
+            }
+            let selected = game
+                .bundle_selection
+                .filter(|(m, s, _)| *m == menu_id && *s == slot)
+                .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i);
+            crate::ui::bundle::push_selected_icon(&mut elements, &data, selected);
+            crate::ui::bundle::push_tooltip(
+                &mut elements,
+                &data,
+                selected,
+                core.input.cursor_pos(),
+                sw,
+                sh,
+                gs,
+            );
+        }
         core.input.clear_just_pressed_actions();
     }
 
+    // TODO: vanilla's creative screen inherits `BundleMouseActions` (scroll
+    // selection, the bundle tooltip); only survival containers have them here.
     if game.creative_inventory_open && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
@@ -3543,6 +3716,10 @@ pub fn update_game(
     // Whole-frame wall time (incl. render), read next frame to align with `raw_dt`.
     game.last_update_phases.update_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
 
+    // Vanilla `onClose`: `closeContainer`, then `onStopHovering`.
+    let stop_hovering = close_inventory
+        .then(|| game.bundle_hovered.filter(|(_, _, bundle)| *bundle))
+        .flatten();
     if close_inventory {
         game.close_menu();
         game.close_creative_inventory();
@@ -3563,6 +3740,9 @@ pub fn update_game(
             ));
     }
     game.container_was_open = open_menu;
+    if let Some((_, slot, _)) = stop_hovering {
+        send_bundle_selection(&connection.packet_tx, slot, crate::ui::bundle::NO_SELECTION);
+    }
 
     match death_action {
         DeathAction::Respawn => {
@@ -4464,13 +4644,28 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{detached_distance, has_red_overlay, section_bit, section_bits};
+    use super::{detached_distance, has_red_overlay, scroll_wheel, section_bit, section_bits};
 
     #[test]
     fn third_person_distance_takes_the_further_of_player_and_mount() {
         assert_eq!(detached_distance(4.0, None), 4.0);
         assert_eq!(detached_distance(4.0, Some(8.0)), 8.0);
         assert_eq!(detached_distance(10.0, Some(8.0)), 10.0);
+    }
+
+    #[test]
+    fn scroll_wheel_matches_scroll_wheel_handler() {
+        let mut acc = (0.0, 0.0);
+        // Fractions accumulate into whole steps; vertical wins over horizontal.
+        assert_eq!(scroll_wheel(&mut acc, (0.0, 0.6)), 0);
+        assert_eq!(scroll_wheel(&mut acc, (0.0, 0.6)), 1);
+        // A sign flip drops the leftover, and horizontal steps are negated.
+        assert_eq!(scroll_wheel(&mut acc, (0.0, -1.0)), -1);
+        assert_eq!(scroll_wheel(&mut acc, (1.0, 0.0)), -1);
+        // `Math.signum(0)` is 0, so an idle axis clears its leftover.
+        let mut acc = (0.5, 0.0);
+        assert_eq!(scroll_wheel(&mut acc, (0.0, 0.0)), 0);
+        assert_eq!(acc, (0.0, 0.0));
     }
 
     #[test]

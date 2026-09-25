@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod azalea_compat;
+mod bundle_codec;
 pub(crate) mod chat;
 pub(crate) mod chat_security;
 pub mod chunk_batch;
@@ -151,6 +152,11 @@ pub enum NetworkEvent {
         index: u16,
         item: ItemStack,
         state_id: u32,
+    },
+    /// `SetPlayerInventory`, indexed by vanilla `Inventory` slot.
+    PlayerInventorySlot {
+        index: u32,
+        item: ItemStack,
     },
     HeldSlot {
         slot: u8,

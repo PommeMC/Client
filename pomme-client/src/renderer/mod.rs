@@ -1593,8 +1593,19 @@ impl Renderer {
 
         let mut unique_names: HashSet<String> = HashSet::new();
         for elem in menu_elements {
-            if let MenuElement::ItemIcon { item_name, .. } = elem {
-                unique_names.insert(item_name.clone());
+            match elem {
+                MenuElement::ItemIcon { item_name, .. } => {
+                    unique_names.insert(item_name.clone());
+                }
+                MenuElement::BundleTooltip { items, .. } => {
+                    for item in items {
+                        if let azalea_inventory::ItemStack::Present(data) = item {
+                            unique_names
+                                .insert(crate::player::inventory::item_resource_name(data.kind));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         if !self.gui_item_atlas.has_space_for_all(&unique_names)

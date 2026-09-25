@@ -1463,6 +1463,7 @@ impl AppCore {
                     carried,
                     state_id,
                 } => {
+                    game.drop_bundle_selection(container_id, None);
                     // State ids are per-menu (vanilla scopes them to the menu
                     // the packet addresses); the rendered carried stack is the
                     // open menu's, so an inventory sync must not clobber it.
@@ -1496,16 +1497,23 @@ impl AppCore {
                     item,
                     state_id,
                 } => {
-                    // Direct inventory updates (-2) carry no menu state id.
-                    if container_id == 0 || container_id == -2 {
+                    game.drop_bundle_selection(container_id, Some(index));
+                    if container_id == 0 {
                         game.player.inventory.set_slot(index as usize, item);
                         game.sync_container_from_inventory();
-                        if container_id == 0 {
-                            game.inventory_state_id = state_id;
-                        }
+                        game.inventory_state_id = state_id;
                     } else if game.open_menu_id() == Some(container_id) {
                         game.set_menu_slot(index as usize, item);
                         game.set_container_state_id(state_id);
+                    }
+                }
+                NetworkEvent::PlayerInventorySlot { index, item } => {
+                    if let Some(slot) =
+                        crate::player::inventory::menu_slot_for_inventory_index(index)
+                    {
+                        game.drop_bundle_selection(0, Some(slot as u16));
+                        game.player.inventory.set_slot(slot, item);
+                        game.sync_container_from_inventory();
                     }
                 }
                 NetworkEvent::HeldSlot { slot } => {
@@ -2661,6 +2669,7 @@ impl AppCore {
                 .cloned();
             game.interaction.tick_dead_living_state(
                 held_stack.as_ref(),
+                &connection.packet_tx,
                 &self.audio,
                 &game.chunk_store,
                 game.player.position.into(),
