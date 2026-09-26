@@ -41,6 +41,22 @@ pub struct PacketLightData {
     pub empty_block_y_mask: azalea_core::bitset::BitSet,
 }
 
+pub(crate) fn block_tags_from_packet(
+    tags: &azalea_protocol::common::tags::TagMap,
+) -> Option<Vec<(String, Vec<i32>)>> {
+    let block_tags = tags
+        .0
+        .iter()
+        .find(|(registry, _)| registry.namespace() == "minecraft" && registry.path() == "block")?
+        .1;
+    Some(
+        block_tags
+            .iter()
+            .map(|tag| (tag.name.to_string(), tag.elements.clone()))
+            .collect(),
+    )
+}
+
 impl From<&azalea_protocol::packets::game::c_light_update::ClientboundLightUpdatePacketData>
     for PacketLightData
 {
@@ -64,6 +80,9 @@ pub enum NetworkEvent {
     /// The `minecraft:dialog` registry with its tags, sent with `Registries`
     /// and again whenever a tag update replaces the dialog tags.
     DialogRegistry(Arc<crate::ui::server_dialog::DialogRegistry>),
+    BlockTags {
+        tags: Vec<(String, Vec<i32>)>,
+    },
     BiomeColors {
         colors: std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
     },

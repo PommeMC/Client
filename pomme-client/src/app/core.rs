@@ -1509,6 +1509,9 @@ impl AppCore {
                 NetworkEvent::DialogRegistry(registry) => {
                     game.dialog_registry = registry;
                 }
+                NetworkEvent::BlockTags { tags } => {
+                    crate::world::block::replace_block_tags(tags);
+                }
                 NetworkEvent::ContainerSlot {
                     container_id,
                     index,
@@ -2865,10 +2868,26 @@ impl AppCore {
             game.player.look_dir,
             &game.chunk_store,
             &game.entity_store,
+            &game.player.attributes,
             crate::player::is_creative(game.player.game_mode),
         );
 
         let held_stack = game.player.inventory.held_stack(input.selected_slot());
+        let protocol = crate::version::session_protocol();
+        let mut legacy_mining = held_stack
+            .map(|stack| crate::tool::legacy_mining_enchantments(stack, protocol))
+            .unwrap_or_default();
+        if protocol <= 766 {
+            legacy_mining.aqua_affinity |= game
+                .player
+                .inventory
+                .armor_slots()
+                .iter()
+                .filter_map(|stack| stack.as_present())
+                .any(|stack| {
+                    crate::tool::legacy_mining_enchantments(stack, protocol).aqua_affinity
+                });
+        }
         let place_block = held_stack.and_then(|data| {
             let name = crate::player::inventory::item_resource_name(data.kind);
             renderer.registry().placeable_block_for_item(&name)
@@ -2890,6 +2909,10 @@ impl AppCore {
             game.player.food,
             input.selected_slot(),
             held_stack,
+            &game.player.attributes,
+            &game.player.effects,
+            game.player.eyes_in_water,
+            legacy_mining,
             place_block,
             hands_empty,
             &mut crate::player::interaction::BreakEffects {
@@ -3518,12 +3541,16 @@ mod tests {
             }],
         }));
 
+        // KEEP_ATTRIBUTE_MODIFIERS: reset installs fresh-player defaults first,
+        // then retained attribute values rebuild mirrors and clamp health.
         player.reset_for_respawn(false);
         sync_respawn_attributes(&mut player, true);
         assert_eq!(player.armor, 8);
         assert_eq!(player.max_health, 14.0);
         assert_eq!(player.health, 14.0);
 
+        // Base-values-only copy: the same post-reset ordering drops modifiers,
+        // preserves bases, rebuilds armor, and clamps the default 20 health.
         player.reset_for_respawn(false);
         sync_respawn_attributes(&mut player, false);
         assert_eq!(player.armor, 6);

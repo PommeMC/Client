@@ -371,10 +371,11 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::UpdateMobEffect(p) => {
-            let _ = event_tx.try_send(NetworkEvent::UpdateMobEffect {
+            let _ = event_tx.send(NetworkEvent::UpdateMobEffect {
                 entity_id: p.entity_id.0,
                 effect: crate::mob_effect::MobEffectInstance {
                     effect_id: p.mob_effect.to_u32(),
+                    amplifier: p.data.amplifier,
                     duration: p.data.duration,
                     ambient: p.data.flags.ambient,
                     show_icon: p.data.flags.show_icon,
@@ -382,7 +383,7 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::RemoveMobEffect(p) => {
-            let _ = event_tx.try_send(NetworkEvent::RemoveMobEffect {
+            let _ = event_tx.send(NetworkEvent::RemoveMobEffect {
                 entity_id: p.entity_id.0,
                 effect_id: p.effect.to_u32(),
             });
@@ -1030,7 +1031,7 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::Respawn(p) => {
-            let _ = event_tx.try_send(NetworkEvent::PlayerRespawned {
+            let _ = event_tx.send(NetworkEvent::PlayerRespawned {
                 keep_entity_data: p.data_to_keep & 2 != 0,
                 keep_attribute_modifiers: p.data_to_keep & 1 != 0,
             });
@@ -1046,7 +1047,7 @@ pub fn handle_game_packet(
             });
             // Vanilla recreates the player on respawn; the server re-sends any
             // effects kept across it.
-            let _ = event_tx.try_send(NetworkEvent::ClearMobEffects);
+            let _ = event_tx.send(NetworkEvent::ClearMobEffects);
         }
         ClientboundGamePacket::PlayerCombatKill(p) => {
             tracing::info!("Player died: {}", p.message);
@@ -1174,6 +1175,11 @@ pub fn handle_game_packet(
                 p.action,
                 p.entries.len()
             );
+        }
+        ClientboundGamePacket::UpdateTags(p) => {
+            if let Some(tags) = super::block_tags_from_packet(&p.tags) {
+                let _ = event_tx.send(NetworkEvent::BlockTags { tags });
+            }
         }
         _other => {}
     }
