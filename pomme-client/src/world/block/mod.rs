@@ -3,7 +3,7 @@ pub mod registry;
 pub mod sound;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock, RwLock, RwLockReadGuard};
 
 use azalea_block::BlockState;
 use azalea_core::position::BlockPos;
@@ -329,6 +329,25 @@ const NATIVE_SLOT: usize = 0;
 static ACTIVE_TABLE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(NATIVE_SLOT);
 
+/// Server-provided block tags, resolved into Pomme's native block resource
+/// names. Vanilla sends these during configuration and may replace them after
+/// a datapack reload.
+#[derive(Debug, Default)]
+pub struct BlockTags {
+    tags: HashMap<String, HashSet<&'static str>>,
+}
+
+impl BlockTags {
+    pub fn contains(&self, tag: &str, block: &str) -> bool {
+        self.tags
+            .get(tag)
+            .is_some_and(|blocks| blocks.contains(block))
+    }
+}
+
+static BLOCK_TAGS: LazyLock<RwLock<BlockTags>> =
+    LazyLock::new(|| RwLock::new(BlockTags::default()));
+
 /// Vanilla getFluidState overrides on blocks without a `waterlogged` property.
 const IMPLICIT_WATER: [&str; 4] = ["seagrass", "tall_seagrass", "kelp", "kelp_plant"];
 
@@ -586,6 +605,129 @@ fn table() -> &'static Vec<BlockData> {
         .expect("world::block::init must be called before use")
 }
 
+/// Built-in block registry order for the active protocol. Pomme's generated
+/// state table is grouped by block in registry order, so collapsing adjacent
+/// states yields the registry id -> resource-name mapping used by UpdateTags.
+fn block_registry_names() -> Vec<&'static str> {
+    let mut names = Vec::new();
+    let mut previous = None;
+    for data in table() {
+        if previous != Some(data.id) {
+            names.push(data.id);
+            previous = Some(data.id);
+        }
+    }
+    names
+}
+
+/// Resolves a built-in block registry id in an arbitrary supported protocol
+/// without switching the active world's block-state table.
+pub(crate) fn block_registry_name(protocol: i32, registry_id: u32) -> Option<&'static str> {
+    let slot = prewarm_protocol(protocol);
+    let table = BLOCK_TABLES[slot]
+        .get()
+        .expect("prewarm_protocol initializes block table");
+    let mut previous = None;
+    let mut index = 0u32;
+    for data in table {
+        if previous != Some(data.id) {
+            if index == registry_id {
+                return Some(data.id);
+            }
+            index += 1;
+            previous = Some(data.id);
+        }
+    }
+    None
+}
+
+/// Resolves a built-in block resource name to its registry id in an arbitrary
+/// supported protocol, without switching the active world's block-state table.
+pub(crate) fn block_registry_id(protocol: i32, name: &str) -> Option<u32> {
+    let slot = prewarm_protocol(protocol);
+    let table = BLOCK_TABLES[slot]
+        .get()
+        .expect("prewarm_protocol initializes block table");
+    let mut previous = None;
+    let mut index = 0u32;
+    for data in table {
+        if previous != Some(data.id) {
+            if data.id == name {
+                return Some(index);
+            }
+            index += 1;
+            previous = Some(data.id);
+        }
+    }
+    None
+}
+
+fn resolve_block_tags(
+    raw_tags: Vec<(String, Vec<i32>)>,
+    registry_names: &[&'static str],
+) -> BlockTags {
+    let mut tags = HashMap::with_capacity(raw_tags.len());
+    for (name, elements) in raw_tags {
+        let mut blocks = HashSet::with_capacity(elements.len());
+        for id in elements {
+            let Ok(index) = usize::try_from(id) else {
+                tracing::warn!("ignoring negative block registry id {id} in tag {name}");
+                continue;
+            };
+            let Some(&block) = registry_names.get(index) else {
+                tracing::warn!(
+                    "ignoring out-of-range block registry id {id} in tag {name} ({} blocks)",
+                    registry_names.len()
+                );
+                continue;
+            };
+            blocks.insert(block);
+        }
+        tags.insert(name, blocks);
+    }
+    BlockTags { tags }
+}
+
+/// Replaces the active server's block tags from `ClientboundUpdateTags`.
+/// Element ids are built-in block registry ids, not block-state ids.
+pub fn replace_block_tags(raw_tags: Vec<(String, Vec<i32>)>) {
+    let resolved = resolve_block_tags(raw_tags, &block_registry_names());
+    *BLOCK_TAGS.write().expect("block tag lock poisoned") = resolved;
+}
+
+pub fn block_tags() -> RwLockReadGuard<'static, BlockTags> {
+    BLOCK_TAGS.read().expect("block tag lock poisoned")
+}
+
+pub fn clear_block_tags() {
+    *BLOCK_TAGS.write().expect("block tag lock poisoned") = BlockTags::default();
+}
+
+#[cfg(test)]
+pub(crate) fn block_tags_for_test(entries: &[(&str, &[&str])]) -> BlockTags {
+    let registry_names = block_registry_names();
+    let mut tags = HashMap::new();
+    for (tag, block_names) in entries {
+        let blocks = block_names
+            .iter()
+            .map(|name| {
+                registry_names
+                    .iter()
+                    .copied()
+                    .find(|candidate| candidate == name)
+                    .unwrap_or_else(|| panic!("unknown block {name}"))
+            })
+            .collect();
+        tags.insert(format!("minecraft:{tag}"), blocks);
+    }
+    BlockTags { tags }
+}
+
+#[cfg(test)]
+pub(crate) fn replace_block_tags_for_test(entries: &[(&str, &[&str])]) {
+    *BLOCK_TAGS.write().expect("block tag lock poisoned") = block_tags_for_test(entries);
+}
+
 fn block_data(state: BlockState) -> &'static BlockData {
     static UNKNOWN: std::sync::LazyLock<BlockData> = std::sync::LazyLock::new(|| BlockData {
         id: "unknown",
@@ -782,6 +924,31 @@ mod tests {
             sleeping_position(BlockPos::new(2, 64, -5)),
             dvec3(2.5, 64.6875, -4.5)
         );
+    }
+
+    #[test]
+    fn block_tag_registry_ids_resolve_to_native_block_names() {
+        setup();
+        let names = block_registry_names();
+        let stone_id = names
+            .iter()
+            .position(|name| *name == "stone")
+            .expect("stone registry id") as i32;
+        let dirt_id = names
+            .iter()
+            .position(|name| *name == "dirt")
+            .expect("dirt registry id") as i32;
+        let tags = resolve_block_tags(
+            vec![(
+                "minecraft:mineable/pickaxe".to_owned(),
+                vec![stone_id, -1, i32::MAX],
+            )],
+            &names,
+        );
+
+        assert!(tags.contains("minecraft:mineable/pickaxe", "stone"));
+        assert!(!tags.contains("minecraft:mineable/pickaxe", "dirt"));
+        assert_ne!(stone_id, dirt_id);
     }
 
     #[test]

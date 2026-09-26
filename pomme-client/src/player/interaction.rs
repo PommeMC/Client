@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 
 use azalea_block::BlockState;
-use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
 use azalea_core::direction::Direction;
 use azalea_core::position::BlockPos;
 use azalea_entity::dimensions::EntityDimensions;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
-    AttributeModifiers, Consumable, EquipmentSlotGroup, Food, ItemUseAnimation,
-    MinimumAttackCharge, Tool, ToolRule, UseEffects,
+    Consumable, Food, ItemUseAnimation, MinimumAttackCharge, UseEffects,
 };
 use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
 use azalea_protocol::packets::game::ServerboundGamePacket;
@@ -17,28 +15,28 @@ use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerA
 use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
 use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
-use azalea_registry::builtin::{Attribute, BlockKind, EntityKind, ItemKind};
+use azalea_registry::builtin::{EntityKind, ItemKind};
 use glam::{DVec3, Vec3, dvec3};
 use pomme_protocol::wire;
 
 use crate::app::input::{self, InputState};
+use crate::attribute::{AttributeKind, AttributeMap};
 use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
 use crate::entity::EntityStore;
 use crate::entity::components::{LookDirection, Position};
+use crate::mob_effect::{ActiveMobEffects, MINING_FATIGUE};
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
 use crate::physics::aabb::{self, Aabb, Axis, Face};
 use crate::physics::block_shape::{self, LocalBox};
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::held_item::UseAnim;
+use crate::tool::{LegacyMiningEnchantments, stack_tool};
 use crate::world::block::registry::BlockRegistry;
 use crate::world::block::sound::block_sounds;
-use crate::world::block::{has_collision, is_air};
+use crate::world::block::{block_tags, has_collision, is_air};
 use crate::world::chunk::ChunkStore;
 
-const REACH: f32 = 4.5;
-const ENTITY_REACH: f64 = 3.0;
-const CREATIVE_ENTITY_REACH_BONUS: f64 = 2.0;
 const DESTROY_COOLDOWN: u32 = 5;
 const MISS_COOLDOWN: u32 = 10;
 const USE_DELAY: u32 = 4;
@@ -321,19 +319,18 @@ impl InteractionState {
         look_dir: LookDirection,
         chunks: &ChunkStore,
         entities: &EntityStore,
+        attributes: &AttributeMap,
         creative: bool,
     ) {
-        let entity_reach = ENTITY_REACH
-            + if creative {
-                CREATIVE_ENTITY_REACH_BONUS
-            } else {
-                0.0
-            };
-        let max_dist = (REACH as f64).max(entity_reach);
+        // Vanilla `LocalPlayer.pick`: raycast blocks out to the larger normal
+        // interaction range, then filter the winning hit by its own range.
+        let (block_reach, entity_reach) =
+            interaction_ranges(attributes, creative, crate::version::session_protocol());
+        let max_dist = block_reach.max(entity_reach);
 
         let from: DVec3 = eye_pos.into();
         let dir = look_dir.as_vec();
-        let block_hit = raycast(from, dir, REACH, chunks);
+        let block_hit = raycast(from, dir, max_dist as f32, chunks);
 
         let block_dist_sq = block_hit
             .map(|h| h.hit_point.distance_squared(from))
@@ -349,7 +346,9 @@ impl InteractionState {
             }
         }
 
-        self.target = block_hit.map(HitResult::Block);
+        self.target = block_hit
+            .filter(|hit| hit.hit_point.distance_squared(from) < block_reach * block_reach)
+            .map(HitResult::Block);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -368,6 +367,10 @@ impl InteractionState {
         food: u32,
         selected_slot: u8,
         held_stack: Option<&ItemStackData>,
+        attributes: &AttributeMap,
+        mob_effects: &ActiveMobEffects,
+        eyes_in_water: bool,
+        legacy_mining: LegacyMiningEnchantments,
         place_block: Option<BlockState>,
         hands_empty: bool,
         effects: &mut BreakEffects,
@@ -406,6 +409,10 @@ impl InteractionState {
                 on_ground,
                 creative,
                 held_stack,
+                attributes,
+                mob_effects,
+                eyes_in_water,
+                legacy_mining,
                 effects,
                 &mut dirty_chunks,
             );
@@ -466,6 +473,10 @@ impl InteractionState {
                     on_ground,
                     creative,
                     held_stack,
+                    attributes,
+                    mob_effects,
+                    eyes_in_water,
+                    legacy_mining,
                     effects,
                     &mut dirty_chunks,
                 );
@@ -540,12 +551,16 @@ impl InteractionState {
 
     /// Vanilla `Player.cannotAttackWithItem(stack, 0)` (the one call site
     /// passes no tolerance); the ratio is unclamped, unlike the scale.
-    fn cannot_attack_with_item(&self, held: Option<&ItemStackData>) -> bool {
+    fn cannot_attack_with_item(
+        &self,
+        held: Option<&ItemStackData>,
+        attributes: &AttributeMap,
+    ) -> bool {
         let required = held
             .and_then(stack_component::<MinimumAttackCharge>)
             .map_or(0.0, |c| c.value);
         required > 0.0
-            && (self.attack_strength_ticker as f32 / attack_strength_delay(held)) < required
+            && (self.attack_strength_ticker as f32 / attack_strength_delay(attributes)) < required
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -559,6 +574,10 @@ impl InteractionState {
         on_ground: bool,
         creative: bool,
         held_stack: Option<&ItemStackData>,
+        attributes: &AttributeMap,
+        mob_effects: &ActiveMobEffects,
+        eyes_in_water: bool,
+        legacy_mining: LegacyMiningEnchantments,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
@@ -568,7 +587,7 @@ impl InteractionState {
 
         // TODO: full-charge spears take vanilla's PIERCING_WEAPON branch
         // instead of the plain entity/block dispatch.
-        if self.cannot_attack_with_item(held_stack) {
+        if self.cannot_attack_with_item(held_stack, attributes) {
             return;
         }
 
@@ -607,6 +626,10 @@ impl InteractionState {
             on_ground,
             creative,
             held_stack,
+            attributes,
+            mob_effects,
+            eyes_in_water,
+            legacy_mining,
             effects,
             dirty_chunks,
         );
@@ -623,6 +646,10 @@ impl InteractionState {
         on_ground: bool,
         creative: bool,
         held_stack: Option<&ItemStackData>,
+        attributes: &AttributeMap,
+        mob_effects: &ActiveMobEffects,
+        eyes_in_water: bool,
+        legacy_mining: LegacyMiningEnchantments,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
@@ -652,6 +679,10 @@ impl InteractionState {
             on_ground,
             creative,
             held_stack,
+            attributes,
+            mob_effects,
+            eyes_in_water,
+            legacy_mining,
             effects,
             dirty_chunks,
         );
@@ -1090,6 +1121,10 @@ impl InteractionState {
         on_ground: bool,
         creative: bool,
         held_stack: Option<&ItemStackData>,
+        attributes: &AttributeMap,
+        mob_effects: &ActiveMobEffects,
+        eyes_in_water: bool,
+        legacy_mining: LegacyMiningEnchantments,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
@@ -1099,7 +1134,35 @@ impl InteractionState {
             return;
         }
 
-        let progress = destroy_progress(state, on_ground, creative, held_stack);
+        // Vanilla `Item.canDestroyBlock`: Tool components can opt out of
+        // creative block destruction (notably swords, mace, and trident).
+        if creative
+            && held_stack
+                .and_then(|stack| stack_tool(stack, crate::version::session_protocol()))
+                .is_some_and(|tool| !tool.can_destroy_blocks_in_creative)
+        {
+            self.seq += 1;
+            send_action(
+                sender,
+                Action::StartDestroyBlock,
+                hit.block_pos,
+                hit.face,
+                self.seq,
+            );
+            self.destroy_delay = DESTROY_COOLDOWN;
+            return;
+        }
+
+        let progress = destroy_progress(
+            state,
+            on_ground,
+            creative,
+            held_stack,
+            attributes,
+            mob_effects,
+            eyes_in_water,
+            legacy_mining,
+        );
 
         if progress >= 1.0 {
             if self.is_destroying {
@@ -1175,6 +1238,10 @@ impl InteractionState {
         on_ground: bool,
         creative: bool,
         held_stack: Option<&ItemStackData>,
+        attributes: &AttributeMap,
+        mob_effects: &ActiveMobEffects,
+        eyes_in_water: bool,
+        legacy_mining: LegacyMiningEnchantments,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
@@ -1193,6 +1260,10 @@ impl InteractionState {
                 on_ground,
                 creative,
                 held_stack,
+                attributes,
+                mob_effects,
+                eyes_in_water,
+                legacy_mining,
                 effects,
                 dirty_chunks,
             );
@@ -1205,7 +1276,16 @@ impl InteractionState {
             return;
         }
 
-        self.destroy_progress += destroy_progress(state, on_ground, creative, held_stack);
+        self.destroy_progress += destroy_progress(
+            state,
+            on_ground,
+            creative,
+            held_stack,
+            attributes,
+            mob_effects,
+            eyes_in_water,
+            legacy_mining,
+        );
         if self.destroy_ticks % 4.0 == 0.0 {
             play_hit_sound(audio, state, hit.block_pos);
         }
@@ -1278,47 +1358,32 @@ impl InteractionState {
     }
 }
 
-/// The player's attack speed with the given main-hand item: base 4.0 plus the
-/// item's `AttributeModifiers` component, folded like vanilla
-/// `AttributeInstance.calculateValue`. Computed locally like vanilla's client;
-/// the server's `UpdateAttributes` snapshot is deliberately not used (it
-/// already bakes in the held item's modifier and lags item switches).
-/// TODO: haste / mining fatigue modifiers once mob effects are tracked.
-pub fn attack_speed(held: Option<&ItemStackData>) -> f64 {
-    let base = 4.0f64;
-    let mut add = 0.0f64;
-    let mut mul_base = 0.0f64;
-    let mut mul_total = 1.0f64;
-    if let Some(stack) = held
-        && let Some(mods) = stack_component::<AttributeModifiers>(stack)
-    {
-        for entry in &mods.modifiers {
-            if entry.kind != Attribute::AttackSpeed
-                || !matches!(
-                    entry.slot,
-                    EquipmentSlotGroup::Mainhand
-                        | EquipmentSlotGroup::Hand
-                        | EquipmentSlotGroup::Any
-                )
-            {
-                continue;
-            }
-            match entry.modifier.operation {
-                AttributeModifierOperation::AddValue => add += entry.modifier.amount,
-                AttributeModifierOperation::AddMultipliedBase => mul_base += entry.modifier.amount,
-                AttributeModifierOperation::AddMultipliedTotal => {
-                    mul_total *= 1.0 + entry.modifier.amount
-                }
-            }
-        }
-    }
-    // Vanilla `RangedAttribute` ATTACK_SPEED bounds.
-    ((base + add) * (1.0 + mul_base) * mul_total).clamp(0.0, 1024.0)
+fn player_attribute(attributes: &AttributeMap, attribute: AttributeKind) -> f64 {
+    attributes
+        .value(attribute)
+        .or_else(|| attribute.player_base_value())
+        .unwrap_or(attribute.definition().default_value)
 }
 
-/// Vanilla `Player.getCurrentItemAttackStrengthDelay`, in ticks.
-pub fn attack_strength_delay(held: Option<&ItemStackData>) -> f32 {
-    let speed = attack_speed(held);
+fn interaction_ranges(attributes: &AttributeMap, creative: bool, protocol: i32) -> (f64, f64) {
+    if protocol <= 765 {
+        // Interaction-range attributes were introduced in 1.20.5. Before
+        // that, vanilla used fixed pick distances: survival 4.5/3.0 and
+        // creative 5.0/6.0 for block/entity targeting respectively.
+        if creative { (5.0, 6.0) } else { (4.5, 3.0) }
+    } else {
+        (
+            player_attribute(attributes, AttributeKind::BlockInteractionRange),
+            player_attribute(attributes, AttributeKind::EntityInteractionRange),
+        )
+    }
+}
+
+/// Vanilla `Player.getCurrentItemAttackStrengthDelay`, in ticks. Equipment
+/// and enchantment modifiers are applied server-side and arrive in the synced
+/// `ATTACK_SPEED` attribute snapshot.
+pub fn attack_strength_delay(attributes: &AttributeMap) -> f32 {
+    let speed = player_attribute(attributes, AttributeKind::AttackSpeed);
     if speed <= 0.0 {
         f32::INFINITY
     } else {
@@ -1357,11 +1422,16 @@ fn opens_menu(state: BlockState) -> bool {
 /// Vanilla `BlockBehaviour.getDestroyProgress` with `Player.getDestroySpeed`
 /// as the numerator: the held tool's mining speed over hardness, divided by 30
 /// with the correct tool for drops and 100 without.
+#[allow(clippy::too_many_arguments)]
 fn destroy_progress(
     state: BlockState,
     on_ground: bool,
     creative: bool,
     held_stack: Option<&ItemStackData>,
+    attributes: &AttributeMap,
+    mob_effects: &ActiveMobEffects,
+    eyes_in_water: bool,
+    legacy_mining: LegacyMiningEnchantments,
 ) -> f32 {
     if creative {
         return 1.0;
@@ -1376,44 +1446,79 @@ fn destroy_progress(
         return 1.0;
     }
 
-    let tool = held_stack.and_then(stack_component::<Tool>);
-    let tool = tool.as_ref();
-    let kind = state.as_block_kind();
-
-    let mut speed = tool.map_or(1.0, |t| tool_mining_speed(t, kind));
-    // TODO: the `getDestroySpeed` modifier chain (mining efficiency, haste /
-    // mining fatigue, block break speed, submerged mining speed) needs
-    // attribute and mob-effect tracking.
-    if !on_ground {
-        speed /= 5.0;
-    }
+    let protocol = crate::version::session_protocol();
+    let tool = held_stack.and_then(|stack| stack_tool(stack, protocol));
+    let block = crate::world::block::block_id(state);
+    let tags = block_tags();
+    let speed = destroy_speed(
+        tool.as_deref()
+            .map_or(1.0, |tool| tool.mining_speed(block, &tags)),
+        on_ground,
+        attributes,
+        mob_effects,
+        eyes_in_water,
+        protocol,
+        legacy_mining,
+    );
 
     let correct_tool = !behavior.requires_correct_tool_for_drops
-        || tool.is_some_and(|t| tool_correct_for_drops(t, kind));
+        || tool
+            .as_deref()
+            .is_some_and(|tool| tool.correct_for_drops(block, &tags, protocol));
     let divisor = if correct_tool { 30.0 } else { 100.0 };
     speed / hardness / divisor
 }
 
-/// Vanilla `Tool.getMiningSpeed`: first rule with a speed that covers the
-/// block wins, else the default.
-fn tool_mining_speed(tool: &Tool, kind: BlockKind) -> f32 {
-    first_rule_value(tool, kind, |r| r.speed).unwrap_or(tool.default_mining_speed)
-}
+/// Vanilla 26.2 `Player.getDestroySpeed` modifier chain after the held
+/// `Tool` component has supplied its base speed for the targeted block.
+fn destroy_speed(
+    mut speed: f32,
+    on_ground: bool,
+    attributes: &AttributeMap,
+    mob_effects: &ActiveMobEffects,
+    eyes_in_water: bool,
+    protocol: i32,
+    legacy_mining: LegacyMiningEnchantments,
+) -> f32 {
+    if speed > 1.0 {
+        if protocol <= 766 {
+            if legacy_mining.efficiency > 0 {
+                speed += (legacy_mining.efficiency * legacy_mining.efficiency + 1) as f32;
+            }
+        } else {
+            speed += player_attribute(attributes, AttributeKind::MiningEfficiency) as f32;
+        }
+    }
 
-/// Vanilla `Tool.isCorrectForDrops`: first rule with a verdict that covers
-/// the block wins, else false.
-fn tool_correct_for_drops(tool: &Tool, kind: BlockKind) -> bool {
-    first_rule_value(tool, kind, |r| r.correct_for_drops).unwrap_or(false)
-}
+    if let Some(amplifier) = mob_effects.dig_speed_amplifier() {
+        speed *= 1.0 + (amplifier + 1) as f32 * 0.2;
+    }
 
-fn first_rule_value<T: Copy>(
-    tool: &Tool,
-    kind: BlockKind,
-    field: impl Fn(&ToolRule) -> Option<T>,
-) -> Option<T> {
-    tool.rules
-        .iter()
-        .find_map(|rule| field(rule).filter(|_| rule.blocks.contains(kind)))
+    if let Some(amplifier) = mob_effects.amplifier(MINING_FATIGUE) {
+        speed *= match amplifier {
+            0 => 0.3,
+            1 => 0.09,
+            2 => 0.0027,
+            _ => 0.00081,
+        };
+    }
+
+    if protocol >= 766 {
+        speed *= player_attribute(attributes, AttributeKind::BlockBreakSpeed) as f32;
+    }
+    if eyes_in_water {
+        if protocol <= 766 {
+            if !legacy_mining.aqua_affinity {
+                speed /= 5.0;
+            }
+        } else {
+            speed *= player_attribute(attributes, AttributeKind::SubmergedMiningSpeed) as f32;
+        }
+    }
+    if !on_ground {
+        speed /= 5.0;
+    }
+    speed
 }
 
 /// Plays a block's mining hit sound, matching vanilla
@@ -1757,10 +1862,9 @@ pub(crate) fn send_swap_offhand(sender: &PacketSender) {
 
 #[cfg(test)]
 mod tests {
-    use azalea_registry::HolderSet;
-    use azalea_registry::identifier::Identifier;
-
     use super::*;
+    use crate::attribute::AttributeSnapshot;
+    use crate::mob_effect::{CONDUIT_POWER, HASTE};
 
     #[test]
     fn respawn_resets_player_owned_interaction_transients() {
@@ -1939,62 +2043,297 @@ mod tests {
         assert!(clip_shape(from, from + dvec3(0.0, -4.0, 0.0), block, &[]).is_none());
     }
 
-    fn rule(blocks: Vec<BlockKind>, speed: Option<f32>, correct: Option<bool>) -> ToolRule {
-        ToolRule {
-            blocks: HolderSet::Direct { contents: blocks },
-            speed,
-            correct_for_drops: correct,
+    fn set_attribute(attributes: &mut AttributeMap, attribute: AttributeKind, base: f64) {
+        assert!(attributes.apply_snapshot(&AttributeSnapshot {
+            attribute,
+            base,
+            modifiers: vec![],
+        }));
+    }
+
+    #[test]
+    fn attack_delay_uses_synced_attack_speed_attribute() {
+        let mut attributes = AttributeMap::player();
+        set_attribute(&mut attributes, AttributeKind::AttackSpeed, 1.6);
+        assert_eq!(attack_strength_delay(&attributes), 12.5);
+    }
+
+    #[test]
+    fn destroy_speed_matches_vanilla_modifier_order() {
+        let mut attributes = AttributeMap::player();
+        set_attribute(&mut attributes, AttributeKind::MiningEfficiency, 3.0);
+        set_attribute(&mut attributes, AttributeKind::BlockBreakSpeed, 2.0);
+        // Default submerged mining speed is 0.2; keep it to exercise the
+        // underwater penalty after the block-break-speed multiplier.
+
+        let mut effects = ActiveMobEffects::default();
+        effects.update(crate::mob_effect::MobEffectInstance {
+            effect_id: HASTE,
+            amplifier: 1,
+            duration: 200,
+            ambient: false,
+            show_icon: true,
+        });
+        effects.update(crate::mob_effect::MobEffectInstance {
+            effect_id: MINING_FATIGUE,
+            amplifier: 0,
+            duration: 200,
+            ambient: false,
+            show_icon: true,
+        });
+
+        // 6 + 3 efficiency = 9
+        // Haste II: *1.4 = 12.6
+        // Mining Fatigue I: *0.3 = 3.78
+        // block_break_speed 2: *2 = 7.56
+        // underwater default 0.2: *0.2 = 1.512
+        // airborne: /5 = 0.3024
+        let speed = destroy_speed(
+            6.0,
+            false,
+            &attributes,
+            &effects,
+            true,
+            pomme_protocol::version::NATIVE.protocol,
+            LegacyMiningEnchantments::default(),
+        );
+        assert!((speed - 0.3024).abs() < 1.0e-6, "speed={speed}");
+    }
+
+    #[test]
+    fn mining_efficiency_only_applies_when_tool_speed_exceeds_one() {
+        let mut attributes = AttributeMap::player();
+        set_attribute(&mut attributes, AttributeKind::MiningEfficiency, 100.0);
+        let effects = ActiveMobEffects::default();
+
+        assert_eq!(
+            destroy_speed(
+                1.0,
+                true,
+                &attributes,
+                &effects,
+                false,
+                pomme_protocol::version::NATIVE.protocol,
+                LegacyMiningEnchantments::default()
+            ),
+            1.0
+        );
+        assert_eq!(
+            destroy_speed(
+                2.0,
+                true,
+                &attributes,
+                &effects,
+                false,
+                pomme_protocol::version::NATIVE.protocol,
+                LegacyMiningEnchantments::default()
+            ),
+            102.0
+        );
+    }
+
+    #[test]
+    fn conduit_power_uses_same_dig_speed_multiplier_as_haste() {
+        let attributes = AttributeMap::player();
+        let mut effects = ActiveMobEffects::default();
+        effects.update(crate::mob_effect::MobEffectInstance {
+            effect_id: CONDUIT_POWER,
+            amplifier: 2,
+            duration: 200,
+            ambient: false,
+            show_icon: true,
+        });
+
+        assert_eq!(
+            destroy_speed(
+                2.0,
+                true,
+                &attributes,
+                &effects,
+                false,
+                pomme_protocol::version::NATIVE.protocol,
+                LegacyMiningEnchantments::default()
+            ),
+            3.2
+        );
+    }
+
+    #[test]
+    fn legacy_mining_uses_direct_efficiency_and_aqua_affinity() {
+        let mut attributes = AttributeMap::player();
+        set_attribute(&mut attributes, AttributeKind::BlockBreakSpeed, 2.0);
+        let effects = ActiveMobEffects::default();
+        let legacy = LegacyMiningEnchantments {
+            efficiency: 3,
+            aqua_affinity: false,
+        };
+
+        // 1.20.6: tool 6 + Efficiency III (3^2 + 1) = 16, then
+        // block_break_speed 2 = 32, underwater /5 = 6.4.
+        assert_eq!(
+            destroy_speed(6.0, true, &attributes, &effects, true, 766, legacy),
+            6.4
+        );
+        // Aqua Affinity removes the historical underwater /5 penalty.
+        assert_eq!(
+            destroy_speed(
+                6.0,
+                true,
+                &attributes,
+                &effects,
+                true,
+                766,
+                LegacyMiningEnchantments {
+                    aqua_affinity: true,
+                    ..legacy
+                },
+            ),
+            32.0
+        );
+        // 1.20.4 predates BLOCK_BREAK_SPEED but uses the same direct
+        // Efficiency and Aqua Affinity logic.
+        assert_eq!(
+            destroy_speed(6.0, true, &attributes, &effects, false, 765, legacy),
+            16.0
+        );
+    }
+
+    #[test]
+    fn legacy_creative_entity_reach_is_preserved_before_range_attributes() {
+        let attributes = AttributeMap::player();
+        assert_eq!(interaction_ranges(&attributes, false, 765), (4.5, 3.0));
+        assert_eq!(interaction_ranges(&attributes, true, 765), (5.0, 6.0));
+        assert_eq!(
+            interaction_ranges(&attributes, true, pomme_protocol::version::NATIVE.protocol),
+            (4.5, 3.0)
+        );
+    }
+
+    fn seed_standard_tool_tags() {
+        crate::world::block::init("26.2");
+        crate::world::block::replace_block_tags_for_test(&[
+            ("mineable/pickaxe", &["stone"]),
+            ("mineable/shovel", &["dirt"]),
+            ("mineable/axe", &["oak_log"]),
+            ("mineable/hoe", &["hay_block"]),
+            ("incorrect_for_wooden_tool", &[]),
+            ("incorrect_for_stone_tool", &[]),
+            ("incorrect_for_copper_tool", &[]),
+            ("incorrect_for_iron_tool", &[]),
+            ("incorrect_for_diamond_tool", &[]),
+            ("incorrect_for_gold_tool", &[]),
+            ("incorrect_for_netherite_tool", &[]),
+            ("sword_instantly_mines", &[]),
+            ("sword_efficient", &[]),
+        ]);
+    }
+
+    #[test]
+    fn runtime_26_2_block_state_resolves_through_native_tool_tags() {
+        seed_standard_tool_tags();
+        let stone = crate::world::block::first_state_of("stone").expect("stone state");
+        assert_eq!(crate::world::block::block_id(stone), "stone");
+
+        let pickaxe = ItemStackData::new(ItemKind::IronPickaxe, 1);
+        let tool = stack_tool(&pickaxe, pomme_protocol::version::NATIVE.protocol)
+            .expect("iron pickaxe tool component");
+        let tags = block_tags();
+        assert_eq!(tool.mining_speed("stone", &tags), 6.0);
+        assert!(tool.correct_for_drops("stone", &tags, pomme_protocol::version::NATIVE.protocol));
+    }
+
+    #[test]
+    fn runtime_destroy_progress_differs_by_tool() {
+        seed_standard_tool_tags();
+        let stone = crate::world::block::first_state_of("stone").expect("stone state");
+        let attributes = AttributeMap::player();
+        let effects = ActiveMobEffects::default();
+        let wooden = ItemStackData::new(ItemKind::WoodenPickaxe, 1);
+        let iron = ItemStackData::new(ItemKind::IronPickaxe, 1);
+
+        let hand_progress = destroy_progress(
+            stone,
+            true,
+            false,
+            None,
+            &attributes,
+            &effects,
+            false,
+            LegacyMiningEnchantments::default(),
+        );
+        let wooden_progress = destroy_progress(
+            stone,
+            true,
+            false,
+            Some(&wooden),
+            &attributes,
+            &effects,
+            false,
+            LegacyMiningEnchantments::default(),
+        );
+        let iron_progress = destroy_progress(
+            stone,
+            true,
+            false,
+            Some(&iron),
+            &attributes,
+            &effects,
+            false,
+            LegacyMiningEnchantments::default(),
+        );
+
+        assert!(hand_progress < wooden_progress);
+        assert!(wooden_progress < iron_progress);
+    }
+
+    #[test]
+    fn standard_pickaxe_tiers_match_vanilla_26_2_speeds() {
+        seed_standard_tool_tags();
+        let tags = block_tags();
+        for (kind, expected) in [
+            (ItemKind::WoodenPickaxe, 2.0),
+            (ItemKind::StonePickaxe, 4.0),
+            (ItemKind::CopperPickaxe, 5.0),
+            (ItemKind::IronPickaxe, 6.0),
+            (ItemKind::DiamondPickaxe, 8.0),
+            (ItemKind::GoldenPickaxe, 12.0),
+            (ItemKind::NetheritePickaxe, 9.0),
+        ] {
+            let stack = ItemStackData::new(kind, 1);
+            let tool = stack_tool(&stack, pomme_protocol::version::NATIVE.protocol)
+                .expect("pickaxe has a native tool component");
+            assert_eq!(tool.mining_speed("stone", &tags), expected, "{kind:?}");
         }
     }
 
-    /// Vanilla rule resolution: the first matching rule with the queried
-    /// field wins, and each field resolves independently.
     #[test]
-    fn tool_rules_first_match_per_field() {
-        let tool = Tool {
-            rules: vec![
-                rule(vec![BlockKind::Obsidian], None, Some(false)),
-                rule(
-                    vec![BlockKind::Stone, BlockKind::Obsidian],
-                    Some(4.0),
-                    Some(true),
-                ),
-            ],
-            default_mining_speed: 1.5,
-            ..Tool::new()
-        };
-        assert_eq!(tool_mining_speed(&tool, BlockKind::Stone), 4.0);
-        assert!(tool_correct_for_drops(&tool, BlockKind::Stone));
-        // The speedless first rule is skipped for speed but wins for drops.
-        assert_eq!(tool_mining_speed(&tool, BlockKind::Obsidian), 4.0);
-        assert!(!tool_correct_for_drops(&tool, BlockKind::Obsidian));
-        // No matching rule: default speed, not correct for drops.
-        assert_eq!(tool_mining_speed(&tool, BlockKind::Dirt), 1.5);
-        assert!(!tool_correct_for_drops(&tool, BlockKind::Dirt));
+    fn standard_tool_families_use_native_block_tags() {
+        seed_standard_tool_tags();
+        let tags = block_tags();
+        for (item, block_name, expected) in [
+            (ItemKind::IronPickaxe, "stone", 6.0),
+            (ItemKind::IronShovel, "dirt", 6.0),
+            (ItemKind::IronAxe, "oak_log", 6.0),
+            (ItemKind::IronHoe, "hay_block", 6.0),
+            (ItemKind::IronSword, "cobweb", 15.0),
+        ] {
+            let stack = ItemStackData::new(item, 1);
+            let tool = stack_tool(&stack, pomme_protocol::version::NATIVE.protocol)
+                .expect("standard tool has a native tool component");
+            assert_eq!(tool.mining_speed(block_name, &tags), expected, "{item:?}");
+        }
     }
 
-    /// Anchor on azalea's `HolderSet::contains`: `Named` sets reference a
-    /// block tag whose contents aren't on the wire and are never populated,
-    /// so tool rules sent with tags conservatively match nothing (azalea's
-    /// item defaults inline every tag as `Direct`).
     #[test]
-    fn named_holder_set_matches_nothing() {
-        let set: HolderSet<BlockKind, Identifier> = HolderSet::Named {
-            key: Identifier::new("minecraft:mineable/pickaxe"),
-            contents: vec![],
-        };
-        assert!(!set.contains(BlockKind::Stone));
-    }
-
-    /// The generated iron pickaxe default resolves like vanilla: fast and
-    /// correct on stone, default speed on dirt.
-    #[test]
-    fn iron_pickaxe_default_tool() {
+    fn iron_pickaxe_default_tool_uses_native_tags() {
+        seed_standard_tool_tags();
+        let tags = block_tags();
         let pickaxe = ItemStackData::new(ItemKind::IronPickaxe, 1);
-        let tool = stack_component::<Tool>(&pickaxe).expect("iron pickaxe has a tool component");
-        assert_eq!(tool_mining_speed(&tool, BlockKind::Stone), 6.0);
-        assert!(tool_correct_for_drops(&tool, BlockKind::Stone));
-        assert_eq!(tool_mining_speed(&tool, BlockKind::Dirt), 1.0);
-        assert!(!tool_correct_for_drops(&tool, BlockKind::Dirt));
+        let tool = stack_tool(&pickaxe, pomme_protocol::version::NATIVE.protocol)
+            .expect("iron pickaxe has a native tool component");
+        assert_eq!(tool.mining_speed("stone", &tags), 6.0);
+        assert!(tool.correct_for_drops("stone", &tags, pomme_protocol::version::NATIVE.protocol));
+        assert_eq!(tool.mining_speed("dirt", &tags), 1.0);
+        assert!(!tool.correct_for_drops("dirt", &tags, pomme_protocol::version::NATIVE.protocol));
     }
 }

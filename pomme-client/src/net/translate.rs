@@ -162,8 +162,8 @@
 //!   1.21.5 split into splash/lingering
 //! - serverbound `set_creative_mode_slot` wrote item component values bare,
 //!   where 1.21.5 length-prefixes each one
-//!   (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`); untranslated — see the
-//!   azalea-divergence list
+//!   (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`); Pomme's raw creative writer
+//!   handles that framing boundary explicitly
 //!
 //! 1.21.3 -> 26.2 wire changes (all of 1.21.4's plus):
 //! - `level_particles` lacks the `alwaysShow` bool 1.21.4 inserted after
@@ -228,6 +228,13 @@
 //!   attribute values)
 //! - `projectile_power` carried a per-axis acceleration vector, collapsed to
 //!   its magnitude
+//! - player inventory/equipment item patches get a targeted component rewrite:
+//!   vanilla enchantments are remapped, mining metadata is preserved, Tool
+//!   removals survive, and unsupported old Tool values degrade to native
+//!   per-item defaults without dropping the surrounding packet
+//! - serverbound `set_creative_mode_slot` rewrites the supported component
+//!   subset back into 1.20.5/1.20.6 ids/layouts while scrubbing client-private
+//!   mining metadata
 //! - serverbound `use_item` lacks the rotation floats 1.21 appended
 //! - the damage/effect/dimension holder codecs merely moved into their types
 //!   (wire-identical), and the block set matches 1.21.1's
@@ -239,12 +246,11 @@
 //!
 //! 1.20.4 -> 26.2 wire changes (the 1.20.5 item-component rework; all of
 //! 1.20.6's plus):
-//! - items are `bool + id + byte count + NBT`; they translate bare (type and
-//!   count survive, the NBT is dropped) in `container_set_content`,
-//!   `container_set_slot`, `set_equipment`, `merchant_offers` (whose costs
-//!   became `ItemCost`s), entity-data item values, and outbound
-//!   `container_click`/`set_creative_mode_slot` — enchant glints, custom names
-//!   and damage bars render plain on 765 servers
+//! - items are `bool + id + byte count + NBT`; inbound player-inventory and
+//!   equipment stacks preserve their legacy NBT as latest `custom_data` so
+//!   mining can still inspect enchantments, while several unrelated old-form
+//!   item paths still translate bare (merchant offers, entity-data items, and
+//!   outbound `container_click`/`set_creative_mode_slot`)
 //! - the configuration phase diverges for the first time: ids remap, and the
 //!   single whole-holder NBT `registry_data` packet fans out into the
 //!   per-registry form (entries reordered by their explicit ids, which the
@@ -312,21 +318,21 @@
 //!   `map_item_data`, `update_recipes`, `player_chat`, the chunk framing) was
 //!   refactored without changing its layout
 //!
-//! Known limitation (accepted): an inbound item stack carrying a data
-//! component at/after the first id the versions number differently (26.3:
-//! 40, where 26.3 replaced `swing_animation` with `attack_animation`; 26.1:
-//! 78, where 26.2 inserted `sulfur_cube_content`; 1.21.11: 41, where 26.x
-//! inserted `additional_trade_cost`; 1.21.10 and every older version with a
-//! component registry: 5, where 1.21.11 inserted `use_effects` — so even
-//! `custom_name` and `enchantments` are affected on all of them) decodes under
-//! the wrong 26.2 codec — usually a misparse that skips the packet via
-//! `skip_malformed_packet`, though a coincidentally parsable layout yields a
-//! silently wrong component. Common survival items only use earlier, unshifted
-//! components. Items nested inside component values (bundles, containers) also
-//! keep their source-version ids. On 26.3 a stack carrying one of the
-//! components whose value layout changed (`pot_decorations`, inline `trim` or
-//! `instrument`, a `teleport_randomly` consume effect) misdecodes the same
-//! way, and recipe displays keep their items in wire space.
+//! Component-era item patches on protocols 767-775 are normalized before
+//! Azalea's native decode: outer component ids are remapped semantically,
+//! known historical layout changes have exact walkers/transcoders, nested item
+//! stacks recurse through the same normalizer, and registry-bearing payloads
+//! that cannot be remapped losslessly are consumed and dropped individually.
+//! Protocol 766 has its own targeted player-inventory/equipment rewrite. Tool
+//! values on 766-773 degrade to Pomme's native per-item defaults; 774-775 keep
+//! their layout-compatible Tool payloads and resolve direct block ids through
+//! the negotiated block registry.
+//!
+//! Known limitation (accepted): protocol 777 / 26.3 component patches are not
+//! normalized yet. Components at or after its first shifted id can therefore
+//! decode under the wrong 26.2 codec, and 26.3-only value-layout changes can
+//! misparse in the same way. Recipe displays also keep their item values in
+//! wire space.
 //!
 //! Depends on azalea diverging from 26.2: these translations are correct only
 //! because azalea encodes or decodes something differently from the reference,
@@ -335,8 +341,6 @@
 //! carries a `TODO` pointing here.
 //! - inbound `set_player_team` copies the color through as a plain
 //!   `ChatFormatting` ordinal, where 26.2 writes an `Optional<TeamColor>`
-//! - outbound `set_creative_mode_slot` leaves component values undelimited,
-//!   which is 1.21.4's layout rather than 26.2's
 //! - inbound `cooldown` carries an item registry id, where 26.2 names a
 //!   cooldown group
 
@@ -345,8 +349,12 @@ use std::sync::Mutex;
 
 use azalea_buf::{AzBuf, AzBufVar};
 use azalea_core::sound::CustomSound;
-use azalea_inventory::components::{DataComponentUnion, Profile};
-use azalea_inventory::{ItemStack, ItemStackData};
+use azalea_inventory::components::{
+    CreativeSlotLock, CustomData, CustomName, Damage, DataComponentUnion, EnchantmentGlintOverride,
+    Enchantments, IntangibleProjectile, ItemName, MaxDamage, MaxStackSize, Profile, Rarity,
+    RepairCost, Unbreakable,
+};
+use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
 use azalea_protocol::packets::game::s_container_click::HashedStack;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
 use azalea_registry::builtin::{DataComponentKind, SoundEvent};
@@ -378,6 +386,10 @@ pub struct Translation {
     /// Game-phase packet-id translation and the rewrites tied to it; `None`
     /// when the wire version's ids match the native (26.1).
     game_ids: Option<GameIds>,
+    /// Player inventory/equipment component normalization is independent of
+    /// packet-id translation: 26.1's packet ids match 26.2, but its component
+    /// registry still shifts after `sulfur_cube_content`.
+    components: Option<ComponentIds>,
     /// Configuration-phase translation; `None` when the wire version's
     /// config ids match the native (766 up: additions were appended).
     config_ids: Option<ConfigIds>,
@@ -443,8 +455,8 @@ struct GameIds {
     /// The rewrites 1.21 introduced, for wire versions below it.
     v766: Option<Ids766>,
     /// The rewrites 1.20.5 introduced (the item-component era), for wire
-    /// version 765; old-form items translate bare (type + count, NBT
-    /// dropped).
+    /// version 765; player inventory/equipment preserve legacy NBT as
+    /// `custom_data`, while unrelated old-form item paths may remain bare.
     v765: Option<Ids765>,
     /// The rewrites 1.20.3 introduced (NBT text components, the scoreboard
     /// rework, the resource_pack split), for wire version 764.
@@ -456,6 +468,43 @@ struct GameIds {
     /// version (`client_tick_end`, `player_loaded`, the pick pair); suppressed
     /// quietly.
     quiet_suppressed: Box<[u32]>,
+}
+
+struct ComponentIds {
+    protocol: i32,
+    registry: &'static RegistryTable,
+    container_set_content_id: u32,
+    set_equipment_id: u32,
+    container_set_slot_id: u32,
+    set_cursor_item_id: u32,
+    set_player_inventory_id: u32,
+    creative_slot_id: u32,
+    creative_slot_old_id: u32,
+}
+
+impl ComponentIds {
+    fn build(protocol: i32, table: &PacketTable, native: &PacketTable) -> Option<Self> {
+        if !(767..=775).contains(&protocol) {
+            return None;
+        }
+        let id = |dir, name| required_id(native, Phase::Game, dir, name);
+        Some(Self {
+            protocol,
+            registry: RegistryTable::for_protocol(protocol).expect("embedded registry table"),
+            container_set_content_id: id(Direction::Clientbound, "container_set_content"),
+            set_equipment_id: id(Direction::Clientbound, "set_equipment"),
+            container_set_slot_id: id(Direction::Clientbound, "container_set_slot"),
+            set_cursor_item_id: id(Direction::Clientbound, "set_cursor_item"),
+            set_player_inventory_id: id(Direction::Clientbound, "set_player_inventory"),
+            creative_slot_id: id(Direction::Serverbound, "set_creative_mode_slot"),
+            creative_slot_old_id: required_id(
+                table,
+                Phase::Game,
+                Direction::Serverbound,
+                "set_creative_mode_slot",
+            ),
+        })
+    }
 }
 
 /// Native-space dispatch ids for the frame rewrites protocols at or below
@@ -526,6 +575,11 @@ impl Ids767 {
 /// Native-space dispatch ids for the frame rewrites protocol 766 needs.
 struct Ids766 {
     projectile_power_id: u32,
+    container_set_content_id: u32,
+    set_equipment_id: u32,
+    /// Serverbound ids for payloads that need a 1.20.5/1.20.6 layout rewrite.
+    creative_slot_id: u32,
+    creative_slot_old_id: u32,
     /// Serverbound `use_item`: native + wire ids for the rotation strip.
     use_item_id: u32,
     use_item_old_id: u32,
@@ -874,6 +928,7 @@ impl Translation {
             }),
             update_attributes_id: id(Phase::Game, "update_attributes"),
             game_ids: GameIds::build(protocol, table, native),
+            components: ComponentIds::build(protocol, table, native),
             config_ids: ConfigIds::build(protocol, table, native),
             no_config_phase: table
                 .name_of(Phase::Configuration, Direction::Clientbound, 0)
@@ -1135,6 +1190,52 @@ impl Translation {
             }
         } else if v775.is_some_and(|v| id == v.set_player_team_id) {
             translate_team(id, payload, v769)
+        } else if self
+            .components
+            .as_ref()
+            .is_some_and(|c| id == c.container_set_content_id)
+        {
+            translate_container_set_content_components(
+                id,
+                payload,
+                self.components.as_ref().unwrap(),
+                self.to_native,
+            )
+        } else if self
+            .components
+            .as_ref()
+            .is_some_and(|c| id == c.set_equipment_id)
+        {
+            translate_set_equipment_components(
+                id,
+                payload,
+                self.components.as_ref().unwrap(),
+                self.to_native,
+            )
+        } else if let Some(c) = self
+            .components
+            .as_ref()
+            .filter(|c| id == c.container_set_slot_id)
+        {
+            if c.protocol == 767 {
+                v767.and_then(|v| {
+                    translate_container_set_slot_components_767(v, payload, c, self.to_native)
+                })
+            } else {
+                translate_container_set_slot_components(id, payload, c, self.to_native)
+            }
+        } else if let Some(c) = self
+            .components
+            .as_ref()
+            .filter(|c| id == c.set_cursor_item_id)
+        {
+            translate_set_cursor_item_components(id, payload, c, self.to_native)
+        } else if let Some(c) = self
+            .components
+            .as_ref()
+            .filter(|c| id == c.set_player_inventory_id)
+        {
+            translate_set_player_inventory_components(id, payload, c, self.to_native)
         } else if let Some(ids) = &self.game_ids {
             // Pre-1.20.2 wire NBT carries an empty root name the native
             // version's readers don't expect.
@@ -1153,12 +1254,21 @@ impl Translation {
                 translate_set_score_764(v, payload)
             } else if v765.is_some_and(|v| id == v.container_set_content_id) {
                 translate_container_set_content_765(id, payload, named_nbt)
+            } else if v765.is_none() && v766.is_some_and(|v| id == v.container_set_content_id) {
+                translate_container_set_content_766(id, payload, self.to_native)
             } else if v765.is_some_and(|v| id == v.set_equipment_id) {
                 translate_set_equipment_765(id, payload, named_nbt)
+            } else if v765.is_none() && v766.is_some_and(|v| id == v.set_equipment_id) {
+                translate_set_equipment_766(id, payload, self.to_native)
             } else if v765.is_some_and(|v| id == v.merchant_offers_id) {
                 translate_merchant_offers_765(id, payload, named_nbt)
             } else if v765.is_some_and(|v| id == v.container_set_slot_id) {
                 v767.and_then(|v| translate_container_set_slot_765(v, payload, named_nbt))
+            } else if v765.is_none()
+                && v766.is_some()
+                && v767.is_some_and(|v| id == v.container_set_slot_id)
+            {
+                v767.and_then(|v| translate_container_set_slot_766(v, payload, self.to_native))
             } else if ids.v772.as_ref().is_some_and(|v| id == v.explode_id) {
                 translate_explode(id, payload, ids, self.to_native)
             } else if v777.is_some_and(|v| id == v.explode_id) {
@@ -1219,7 +1329,7 @@ impl Translation {
     /// Whether outbound game frames need translation before hitting the
     /// wire (the version's serverbound ids or layouts diverge from native).
     pub fn translates_outbound(&self) -> bool {
-        self.game_ids.is_some()
+        self.game_ids.is_some() || self.components.is_some()
     }
 
     /// Translates a native-layout serverbound game frame into the wire
@@ -1227,12 +1337,24 @@ impl Translation {
     /// suppression of packets the older version lacks. Returns the frames to
     /// send (empty = suppressed, two for `interact`, one otherwise).
     pub fn translate_outbound_game_frame(&self, mut frame: Vec<u8>) -> Vec<Vec<u8>> {
-        let Some(ids) = &self.game_ids else {
-            return vec![frame];
-        };
         let mut pos = 0;
         let Some(id) = wire::read_varint(&frame, &mut pos) else {
             return Vec::new();
+        };
+        if let Some(components) = &self.components
+            && id == components.creative_slot_id
+        {
+            return translate_creative_slot_components(
+                components.creative_slot_old_id,
+                &frame[pos..],
+                components,
+                self.from_native,
+            )
+            .into_iter()
+            .collect();
+        }
+        let Some(ids) = &self.game_ids else {
+            return vec![frame];
         };
         if let Some(v777) = &ids.v777 {
             if id == v777.swing_id {
@@ -1300,6 +1422,18 @@ impl Translation {
                 return translate_container_click(v769.container_click_old_id, &frame[pos..]);
             }
         }
+        if ids.v765.is_none()
+            && let Some(v766) = &ids.v766
+            && id == v766.creative_slot_id
+        {
+            return translate_creative_slot_766(
+                v766.creative_slot_old_id,
+                &frame[pos..],
+                self.from_native,
+            )
+            .into_iter()
+            .collect();
+        }
         if let Some(v766) = &ids.v766
             && id == v766.use_item_id
         {
@@ -1354,11 +1488,10 @@ impl Translation {
             }
             ClientboundGamePacket::Sound(p) => self.remap_sound(&mut p.sound),
             ClientboundGamePacket::SoundEntity(p) => self.remap_sound(&mut p.sound),
-            ClientboundGamePacket::UpdateAttributes(p) => {
-                p.values
-                    .retain_mut(|v| remap_with(self.to_native, R::Attribute, &mut v.attribute));
-                true
-            }
+            // `update_attributes` is normalized at the raw-frame layer before
+            // native-codec decode (including 26.1, whose packet ids otherwise
+            // match native). Remapping here would apply the registry map twice.
+            ClientboundGamePacket::UpdateAttributes(_) => true,
             ClientboundGamePacket::BlockEntityData(p) => {
                 remap_with(self.to_native, R::BlockEntityType, &mut p.block_entity_type)
             }
@@ -1420,8 +1553,6 @@ impl Translation {
     /// Remaps an outbound packet's static-registry ids into the launched
     /// version's id space. Never drops the packet; entries the older version
     /// lacks degrade to empty (the server resyncs the slot).
-    /// TODO: delimit `set_creative_mode_slot` component values for 1.21.5 and
-    /// up once pomme owns the encoder (see the azalea-divergence list).
     pub fn remap_outbound(&self, packet: &mut ServerboundGamePacket) {
         match packet {
             ServerboundGamePacket::ContainerClick(p) => {
@@ -1431,9 +1562,26 @@ impl Translation {
                 self.remap_hashed(&mut p.carried_item);
             }
             ServerboundGamePacket::SetCreativeModeSlot(p) => {
-                remap_stack(self.from_native, &mut p.item_stack);
-                if let ItemStack::Present(data) = &mut p.item_stack {
-                    strip_untranslatable_components(self.from_native, data);
+                let component_protocol = self.components.is_some();
+                let protocol_766 = self
+                    .game_ids
+                    .as_ref()
+                    .is_some_and(|ids| ids.v766.is_some() && ids.v765.is_none());
+                if component_protocol {
+                    if let ItemStack::Present(data) = &mut p.item_stack
+                        && !remap_with(self.from_native, ClientRegistry::Item, &mut data.kind)
+                    {
+                        p.item_stack = ItemStack::Empty;
+                    }
+                } else {
+                    if protocol_766 && let ItemStack::Present(data) = &mut p.item_stack {
+                        scrub_legacy_mining_metadata(data);
+                        retain_creative_components_766(data);
+                    }
+                    remap_stack(self.from_native, &mut p.item_stack);
+                    if !protocol_766 && let ItemStack::Present(data) = &mut p.item_stack {
+                        strip_untranslatable_components(self.from_native, data);
+                    }
                 }
             }
             _ => {}
@@ -1640,6 +1788,15 @@ impl GameIds {
             }),
             v766: (protocol <= 766).then(|| Ids766 {
                 projectile_power_id: id(Clientbound, "projectile_power"),
+                container_set_content_id: id(Clientbound, "container_set_content"),
+                set_equipment_id: id(Clientbound, "set_equipment"),
+                creative_slot_id: id(Serverbound, "set_creative_mode_slot"),
+                creative_slot_old_id: required_id(
+                    table,
+                    Phase::Game,
+                    Serverbound,
+                    "set_creative_mode_slot",
+                ),
                 use_item_id: id(Serverbound, "use_item"),
                 use_item_old_id: required_id(table, Phase::Game, Serverbound, "use_item"),
             }),
@@ -2305,32 +2462,46 @@ fn translate_player_input(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// Reads one 1.20.4 optional item stack (`bool present + item id +
-/// i8 count + NBT`), skipping the NBT per the bare-items decision; `None`
-/// is a malformed stack, `Some(None)` an absent one.
-/// TODO: translate the legacy NBT (enchantments, custom names, damage)
-/// into 26.2 data components instead of dropping it.
-fn read_old_item(cur: &mut Cursor<&[u8]>, named_nbt: bool) -> Option<Option<(u32, u8)>> {
+/// i8 count + NBT`). The legacy NBT is retained so mining can still inspect
+/// enchantments after the 1.20.5 component boundary; `None` is a malformed
+/// stack, `Some(None)` an absent one.
+fn read_old_item(
+    cur: &mut Cursor<&[u8]>,
+    named_nbt: bool,
+) -> Option<Option<(u32, u8, simdnbt::owned::Nbt)>> {
     if read_u8(cur)? == 0 {
         return Some(None);
     }
     let item = u32::azalea_read_var(cur).ok()?;
     let count = read_u8(cur)?;
-    skip_nbt_root(cur, named_nbt)?;
-    Some(Some((item, count)))
+    let nbt = if named_nbt {
+        simdnbt::owned::read(cur).ok()?
+    } else {
+        simdnbt::owned::read_unnamed(cur).ok()?
+    };
+    Some(Some((item, count, nbt)))
 }
 
-/// Translates one 1.20.4 optional item stack into a bare 26.2 stack
-/// (count + item + empty patch). Item ids stay in the wire version's
-/// space for `remap_inbound`/`remap_stack`.
+/// Translates one pre-1.20.5 optional item stack into a 26.2 stack. Legacy
+/// NBT is preserved as `minecraft:custom_data` rather than discarded; this
+/// keeps enchantments available to Pomme's protocol-aware mining logic while
+/// avoiding a broad NBT-to-components data-fixer in the protocol bridge.
 fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: bool) -> Option<()> {
-    let Some((item, count)) = read_old_item(cur, named_nbt)? else {
+    let Some((item, count, nbt)) = read_old_item(cur, named_nbt)? else {
         wire::write_varint(out, 0);
         return Some(());
     };
     wire::write_varint(out, u32::from(count));
     wire::write_varint(out, item);
-    wire::write_varint(out, 0);
-    wire::write_varint(out, 0);
+    if nbt.is_some() {
+        wire::write_varint(out, 1); // one added component
+        wire::write_varint(out, 0); // no removed components
+        wire::write_varint(out, COMPONENT_CUSTOM_DATA);
+        nbt.azalea_write(out).ok()?;
+    } else {
+        wire::write_varint(out, 0);
+        wire::write_varint(out, 0);
+    }
     Some(())
 }
 
@@ -2410,7 +2581,7 @@ fn translate_item_cost_765(
     optional: bool,
     named_nbt: bool,
 ) -> Option<()> {
-    let Some((item, count)) = read_old_item(cur, named_nbt)? else {
+    let Some((item, count, _nbt)) = read_old_item(cur, named_nbt)? else {
         // Only the optional second cost can be absent; a missing base cost
         // has no `ItemCost` form, so the frame is unrepresentable.
         if !optional {
@@ -3097,6 +3268,1403 @@ fn translate_resource_pack_response_764(old_id: u32, payload: &[u8]) -> Vec<Vec<
         None => Vec::new(),
     }
 }
+const COMPONENT_766_CUSTOM_DATA: u32 = 0;
+const COMPONENT_766_MAX_STACK_SIZE: u32 = 1;
+const COMPONENT_766_MAX_DAMAGE: u32 = 2;
+const COMPONENT_766_DAMAGE: u32 = 3;
+const COMPONENT_766_UNBREAKABLE: u32 = 4;
+const COMPONENT_766_CUSTOM_NAME: u32 = 5;
+const COMPONENT_766_ITEM_NAME: u32 = 6;
+const COMPONENT_766_RARITY: u32 = 8;
+const COMPONENT_766_ENCHANTMENTS: u32 = 9;
+const COMPONENT_766_HIDE_ADDITIONAL_TOOLTIP: u32 = 14;
+const COMPONENT_766_HIDE_TOOLTIP: u32 = 15;
+const COMPONENT_766_REPAIR_COST: u32 = 16;
+const COMPONENT_766_CREATIVE_SLOT_LOCK: u32 = 17;
+const COMPONENT_766_GLINT_OVERRIDE: u32 = 18;
+const COMPONENT_766_INTANGIBLE_PROJECTILE: u32 = 19;
+const COMPONENT_766_FIRE_RESISTANT: u32 = 21;
+const COMPONENT_766_TOOL: u32 = 22;
+
+// BuiltInRegistries.ENCHANTMENT registration ids in 1.20.5/1.20.6.
+const ENCHANTMENT_766_AQUA_AFFINITY: u32 = 6;
+const ENCHANTMENT_766_EFFICIENCY: u32 = 20;
+const ENCHANTMENT_766_RIPTIDE: u32 = 32;
+const ENCHANTMENT_766_VANISHING_CURSE: u32 = 41;
+const LEGACY_EFFICIENCY_KEY: &str = "pomme:legacy_efficiency";
+const LEGACY_AQUA_AFFINITY_KEY: &str = "pomme:legacy_aqua_affinity";
+
+fn skip_holder_set_766(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    let encoded = u32::azalea_read_var(cur).ok()?;
+    if encoded == 0 {
+        skip_utf(cur)?;
+    } else {
+        for _ in 0..encoded - 1 {
+            u32::azalea_read_var(cur).ok()?;
+        }
+    }
+    Some(())
+}
+
+fn skip_tag_key(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    skip_utf(cur)
+}
+
+fn skip_tool_component(cur: &mut Cursor<&[u8]>, protocol: i32) -> Option<()> {
+    let rules = u32::azalea_read_var(cur).ok()?;
+    for _ in 0..rules {
+        skip_holder_set_766(cur)?;
+        if read_u8(cur)? != 0 {
+            advance(cur, 4)?;
+        }
+        if read_u8(cur)? != 0 {
+            advance(cur, 1)?;
+        }
+    }
+    advance(cur, 4)?;
+    u32::azalea_read_var(cur).ok()?;
+    if protocol >= 770 {
+        advance(cur, 1)?; // canDestroyBlocksInCreative (added in 1.21.5)
+    }
+    Some(())
+}
+
+fn skip_tool_766(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    skip_tool_component(cur, 766)
+}
+
+fn translate_tool_component_to_target(cur: &mut Cursor<&[u8]>, protocol: i32) -> Option<Vec<u8>> {
+    let rules = u32::azalea_read_var(cur).ok()?;
+    let mut translated_rules = Vec::with_capacity(rules as usize);
+    for _ in 0..rules {
+        let mut rule = Vec::new();
+        let encoded = u32::azalea_read_var(cur).ok()?;
+        let mut representable = true;
+        if encoded == 0 {
+            wire::write_varint(&mut rule, 0);
+            let start = cur.position() as usize;
+            skip_utf(cur)?;
+            rule.extend_from_slice(&cur.get_ref()[start..cur.position() as usize]);
+        } else {
+            let mut blocks = Vec::with_capacity((encoded - 1) as usize);
+            for _ in 0..encoded - 1 {
+                let latest_id = u32::azalea_read_var(cur).ok()?;
+                let Some(name) =
+                    crate::world::block::block_registry_name(NATIVE.protocol, latest_id)
+                else {
+                    representable = false;
+                    continue;
+                };
+                let Some(target_id) = crate::world::block::block_registry_id(protocol, name) else {
+                    representable = false;
+                    continue;
+                };
+                blocks.push(target_id);
+            }
+            if representable {
+                wire::write_varint(&mut rule, blocks.len() as u32 + 1);
+                for block in blocks {
+                    wire::write_varint(&mut rule, block);
+                }
+            }
+        }
+
+        let has_speed = read_u8(cur)?;
+        rule.push(has_speed);
+        if has_speed != 0 {
+            let start = cur.position() as usize;
+            advance(cur, 4)?;
+            rule.extend_from_slice(&cur.get_ref()[start..cur.position() as usize]);
+        }
+        let has_correct = read_u8(cur)?;
+        rule.push(has_correct);
+        if has_correct != 0 {
+            rule.push(read_u8(cur)?);
+        }
+        if representable {
+            translated_rules.push(rule);
+        }
+    }
+
+    let mut payload = Vec::new();
+    wire::write_varint(&mut payload, translated_rules.len() as u32);
+    for rule in translated_rules {
+        payload.extend_from_slice(&rule);
+    }
+    let start = cur.position() as usize;
+    advance(cur, 4)?; // default mining speed
+    payload.extend_from_slice(&cur.get_ref()[start..cur.position() as usize]);
+    let damage = u32::azalea_read_var(cur).ok()?;
+    wire::write_varint(&mut payload, damage);
+    // Protocols 774/775 and 26.2 all include this field.
+    payload.push(read_u8(cur)?);
+    Some(payload)
+}
+
+fn copy_latest_component_payload(
+    cur: &mut Cursor<&[u8]>,
+    kind: DataComponentKind,
+) -> Option<Vec<u8>> {
+    let start = cur.position() as usize;
+    let mut value = DataComponentUnion::azalea_read_as(kind, cur).ok()?;
+    // SAFETY: `value` was constructed by `azalea_read_as` for exactly `kind`.
+    unsafe { value.drop_as(kind) };
+    Some(cur.get_ref()[start..cur.position() as usize].to_vec())
+}
+
+/// Component payloads that contain numeric ids from registries whose ordering
+/// differs across the supported component-era protocols. These must never be
+/// copied verbatim into another protocol's registry space.
+fn historical_payload_has_unremapped_registry_ids(kind: DataComponentKind) -> bool {
+    matches!(
+        kind,
+        DataComponentKind::Enchantments
+            | DataComponentKind::CanPlaceOn
+            | DataComponentKind::CanBreak
+            | DataComponentKind::AttributeModifiers
+            | DataComponentKind::Consumable
+            | DataComponentKind::DamageResistant
+            | DataComponentKind::Tool
+            | DataComponentKind::Repairable
+            | DataComponentKind::DeathProtection
+            | DataComponentKind::BlocksAttacks
+            | DataComponentKind::StoredEnchantments
+            | DataComponentKind::PotionContents
+            | DataComponentKind::SuspiciousStewEffects
+            | DataComponentKind::Trim
+            | DataComponentKind::EntityData
+            | DataComponentKind::BlockEntityData
+            | DataComponentKind::Instrument
+            | DataComponentKind::ProvidesTrimMaterial
+            | DataComponentKind::JukeboxPlayable
+            | DataComponentKind::ProvidesBannerPatterns
+            | DataComponentKind::BannerPatterns
+            | DataComponentKind::PotDecorations
+            | DataComponentKind::BreakSound
+            | DataComponentKind::VillagerVariant
+            | DataComponentKind::WolfVariant
+            | DataComponentKind::WolfSoundVariant
+            | DataComponentKind::PigVariant
+            | DataComponentKind::PigSoundVariant
+            | DataComponentKind::CowVariant
+            | DataComponentKind::CowSoundVariant
+            | DataComponentKind::ChickenVariant
+            | DataComponentKind::ChickenSoundVariant
+            | DataComponentKind::ZombieNautilusVariant
+            | DataComponentKind::FrogVariant
+            | DataComponentKind::PaintingVariant
+            | DataComponentKind::CatVariant
+            | DataComponentKind::CatSoundVariant
+            | DataComponentKind::DamageType
+            | DataComponentKind::PiercingWeapon
+            | DataComponentKind::KineticWeapon
+            | DataComponentKind::TooltipDisplay
+    )
+}
+
+fn skip_old_attribute_modifiers(cur: &mut Cursor<&[u8]>, protocol: i32) -> Option<()> {
+    let count = u32::azalea_read_var(cur).ok()?;
+    for _ in 0..count {
+        u32::azalea_read_var(cur).ok()?; // attribute registry id
+        skip_utf(cur)?; // modifier identifier
+        advance(cur, 8)?; // amount f64
+        u32::azalea_read_var(cur).ok()?; // operation
+        u32::azalea_read_var(cur).ok()?; // equipment slot group
+    }
+    if protocol <= 769 {
+        advance(cur, 1)?; // showInTooltip, removed in 1.21.5
+    }
+    Some(())
+}
+
+fn translate_tooltip_display_payload(
+    cur: &mut Cursor<&[u8]>,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let hide_tooltip = read_u8(cur)?;
+    let count = u32::azalea_read_var(cur).ok()?;
+    let mut hidden = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let component = u32::azalea_read_var(cur).ok()?;
+        if let Some(component) = remaps.remap(ClientRegistry::DataComponentType, component) {
+            hidden.push(component);
+        }
+    }
+    let mut payload = Vec::new();
+    payload.push(hide_tooltip);
+    wire::write_varint(&mut payload, hidden.len() as u32);
+    for component in hidden {
+        wire::write_varint(&mut payload, component);
+    }
+    Some(payload)
+}
+
+fn translate_attribute_modifiers_payload(
+    cur: &mut Cursor<&[u8]>,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let count = u32::azalea_read_var(cur).ok()?;
+    let mut entries = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let attribute = u32::azalea_read_var(cur).ok()?;
+        let body_start = cur.position() as usize;
+        skip_utf(cur)?; // modifier identifier
+        advance(cur, 8)?; // amount f64
+        u32::azalea_read_var(cur).ok()?; // operation
+        u32::azalea_read_var(cur).ok()?; // equipment slot group
+        let display =
+            azalea_inventory::components::AttributeModifierDisplay::azalea_read(cur).ok()?;
+        drop(display);
+        let body_end = cur.position() as usize;
+        if let Some(attribute) = remaps.remap(ClientRegistry::Attribute, attribute) {
+            let mut entry = Vec::with_capacity(body_end - body_start + 5);
+            wire::write_varint(&mut entry, attribute);
+            entry.extend_from_slice(&cur.get_ref()[body_start..body_end]);
+            entries.push(entry);
+        }
+    }
+
+    let mut payload = Vec::new();
+    wire::write_varint(&mut payload, entries.len() as u32);
+    for entry in entries {
+        payload.extend_from_slice(&entry);
+    }
+    Some(payload)
+}
+
+fn skip_old_custom_model_data(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    i32::azalea_read_var(cur).ok()?;
+    Some(())
+}
+
+fn skip_old_mob_effect_details(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    i32::azalea_read_var(cur).ok()?; // amplifier
+    i32::azalea_read_var(cur).ok()?; // duration
+    advance(cur, 3)?; // ambient, visible, showIcon
+    if read_u8(cur)? != 0 {
+        skip_old_mob_effect_details(cur)?;
+    }
+    Some(())
+}
+
+fn skip_old_mob_effect_instance(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    u32::azalea_read_var(cur).ok()?; // raw registry holder id
+    skip_old_mob_effect_details(cur)
+}
+
+fn skip_old_food(
+    cur: &mut Cursor<&[u8]>,
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    i32::azalea_read_var(cur).ok()?; // nutrition
+    advance(cur, 4)?; // saturation modifier
+    advance(cur, 1)?; // canAlwaysEat
+    advance(cur, 4)?; // eatSeconds
+    let mut sink = Vec::new();
+    translate_item_components(cur, &mut sink, ids, remaps)?; // usingConvertsTo ItemStack
+    let effects = u32::azalea_read_var(cur).ok()?;
+    for _ in 0..effects {
+        skip_old_mob_effect_instance(cur)?;
+        advance(cur, 4)?; // probability
+    }
+    Some(())
+}
+
+fn skip_old_potion_contents_767(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    if read_u8(cur)? != 0 {
+        u32::azalea_read_var(cur).ok()?; // raw potion holderRegistry id
+    }
+    if read_u8(cur)? != 0 {
+        advance(cur, 4)?; // custom color int
+    }
+    let effects = u32::azalea_read_var(cur).ok()?;
+    for _ in 0..effects {
+        skip_old_mob_effect_instance(cur)?;
+    }
+    Some(())
+}
+
+fn skip_old_equippable(cur: &mut Cursor<&[u8]>, protocol: i32) -> Option<()> {
+    azalea_inventory::components::EquipmentSlot::azalea_read(cur).ok()?;
+    u32::azalea_read_var(cur).ok()?; // raw sound-event registry id
+    skip_optional(cur, skip_utf)?; // model/asset id
+    skip_optional(cur, skip_utf)?; // camera overlay
+    skip_optional(cur, skip_holder_set_766)?; // allowed entities
+    advance(cur, 3)?; // dispensable, swappable, damageOnHurt
+    if protocol >= 770 {
+        advance(cur, 1)?; // equipOnInteract
+    }
+    if protocol >= 771 {
+        advance(cur, 1)?; // canBeSheared
+        u32::azalea_read_var(cur).ok()?; // raw shearing sound-event registry id
+    }
+    Some(())
+}
+
+fn skip_old_jukebox_song_direct(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    azalea_inventory::components::JukeboxSongData::azalea_read(cur).ok()?;
+    Some(())
+}
+
+fn skip_old_instrument_direct(cur: &mut Cursor<&[u8]>, protocol: i32) -> Option<()> {
+    if protocol == 767 {
+        azalea_registry::Holder::<
+            azalea_registry::builtin::SoundEvent,
+            azalea_core::sound::CustomSound,
+        >::azalea_read(cur)
+        .ok()?;
+        i32::azalea_read_var(cur).ok()?; // use duration
+        advance(cur, 4)?; // range
+    } else {
+        azalea_inventory::components::InstrumentData::azalea_read(cur).ok()?;
+    }
+    Some(())
+}
+
+fn skip_either_holder(
+    cur: &mut Cursor<&[u8]>,
+    mut skip_direct: impl FnMut(&mut Cursor<&[u8]>) -> Option<()>,
+) -> Option<()> {
+    if read_u8(cur)? != 0 {
+        let holder = u32::azalea_read_var(cur).ok()?;
+        if holder == 0 {
+            skip_direct(cur)?;
+        }
+    } else {
+        skip_utf(cur)?; // resource key
+    }
+    Some(())
+}
+
+fn skip_either_registry_holder(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    if read_u8(cur)? != 0 {
+        u32::azalea_read_var(cur).ok()?; // raw holderRegistry id
+    } else {
+        skip_utf(cur)?; // resource key
+    }
+    Some(())
+}
+
+fn skip_old_jukebox_playable(cur: &mut Cursor<&[u8]>, protocol: i32) -> Option<()> {
+    skip_either_holder(cur, skip_old_jukebox_song_direct)?;
+    if protocol <= 769 {
+        advance(cur, 1)?; // showInTooltip
+    }
+    Some(())
+}
+
+fn skip_old_instrument(cur: &mut Cursor<&[u8]>, protocol: i32) -> Option<()> {
+    if protocol <= 769 {
+        // Through 1.21.4 the component stores a registry Holder directly.
+        let holder = u32::azalea_read_var(cur).ok()?;
+        if holder == 0 {
+            skip_old_instrument_direct(cur, protocol)?;
+        }
+    } else {
+        // 1.21.5+ wraps the holder/resource key in InstrumentComponent.
+        skip_either_holder(cur, |cur| skip_old_instrument_direct(cur, protocol))?;
+    }
+    Some(())
+}
+
+fn skip_sound_holder(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    azalea_registry::Holder::<
+        azalea_registry::builtin::SoundEvent,
+        azalea_core::sound::CustomSound,
+    >::azalea_read(cur)
+    .ok()?;
+    Some(())
+}
+
+fn skip_old_blocks_attacks(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    advance(cur, 8)?; // blockDelaySeconds, disableCooldownScale
+    let reductions = u32::azalea_read_var(cur).ok()?;
+    for _ in 0..reductions {
+        advance(cur, 4)?; // horizontalBlockingAngle
+        if read_u8(cur)? != 0 {
+            skip_holder_set_766(cur)?; // optional damage-type HolderSet
+        }
+        advance(cur, 8)?; // base, factor
+    }
+    advance(cur, 12)?; // ItemDamageFunction: threshold, base, factor
+    if read_u8(cur)? != 0 {
+        skip_tag_key(cur)?; // optional bypassedBy damage-type TagKey through 1.21.11
+    }
+    if read_u8(cur)? != 0 {
+        skip_sound_holder(cur)?;
+    }
+    if read_u8(cur)? != 0 {
+        skip_sound_holder(cur)?;
+    }
+    Some(())
+}
+
+fn skip_old_provides_trim_material(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    skip_either_holder(cur, |cur| {
+        azalea_inventory::components::DirectTrimMaterial::azalea_read(cur).ok()?;
+        Some(())
+    })
+}
+
+fn translate_nested_item_stack_payload(
+    cur: &mut Cursor<&[u8]>,
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let mut payload = Vec::new();
+    if ids.protocol == 775 {
+        translate_item_template_to_native_stack(cur, &mut payload, ids, remaps)?;
+    } else {
+        translate_item_components_inner(cur, &mut payload, ids, remaps, true)?;
+    }
+    Some(payload)
+}
+
+fn translate_nested_item_vec_payload(
+    cur: &mut Cursor<&[u8]>,
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+    container: bool,
+) -> Option<Vec<u8>> {
+    let count = u32::azalea_read_var(cur).ok()?;
+    let mut payload = Vec::new();
+    wire::write_varint(&mut payload, count);
+    for _ in 0..count {
+        if ids.protocol == 775 {
+            if container {
+                let present = read_u8(cur)?;
+                if present == 0 {
+                    wire::write_varint(&mut payload, 0);
+                    continue;
+                }
+            }
+            translate_item_template_to_native_stack(cur, &mut payload, ids, remaps)?;
+        } else {
+            translate_item_components_inner(cur, &mut payload, ids, remaps, true)?;
+        }
+    }
+    Some(payload)
+}
+
+fn translate_item_components(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    translate_item_components_inner(cur, out, ids, remaps, false)
+}
+
+fn historical_unmapped_unit_component(protocol: i32, name: &str) -> bool {
+    ((767..=769).contains(&protocol) && matches!(name, "hide_additional_tooltip" | "hide_tooltip"))
+        || (protocol == 767 && name == "fire_resistant")
+}
+
+fn translate_component_patch(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    let added = u32::azalea_read_var(cur).ok()?;
+    let removed = u32::azalea_read_var(cur).ok()?;
+    let mut added_out: Vec<(u32, Vec<u8>)> = Vec::with_capacity(added as usize);
+    for _ in 0..added {
+        let component = u32::azalea_read_var(cur).ok()?;
+        let name = ids
+            .registry
+            .name_of(ClientRegistry::DataComponentType, component)?;
+        if name == "tool" && ids.protocol <= 773 {
+            skip_tool_component(cur, ids.protocol)?;
+            continue;
+        }
+        if historical_unmapped_unit_component(ids.protocol, name) {
+            // These old-only components use unit StreamCodecs, so their
+            // network payload is empty. Drop only the unsupported component;
+            // the rest of the item patch remains valid.
+            continue;
+        }
+        let latest = remaps.remap(ClientRegistry::DataComponentType, component)?;
+        let latest_kind = DataComponentKind::from_u32(latest)?;
+        let payload = if ids.protocol <= 769
+            && matches!(
+                name,
+                "unbreakable"
+                    | "enchantments"
+                    | "stored_enchantments"
+                    | "can_place_on"
+                    | "can_break"
+                    | "dyed_color"
+                    | "trim"
+            ) {
+            let payload = copy_latest_component_payload(cur, latest_kind)?;
+            advance(cur, 1)?; // pre-1.21.5 showInTooltip
+            if historical_payload_has_unremapped_registry_ids(latest_kind) {
+                continue;
+            }
+            payload
+        } else if ids.protocol <= 770 && name == "attribute_modifiers" {
+            skip_old_attribute_modifiers(cur, ids.protocol)?;
+            continue;
+        } else if (771..=775).contains(&ids.protocol) && name == "attribute_modifiers" {
+            translate_attribute_modifiers_payload(cur, remaps)?
+        } else if (770..=775).contains(&ids.protocol) && name == "tooltip_display" {
+            translate_tooltip_display_payload(cur, remaps)?
+        } else if (774..=775).contains(&ids.protocol) && name == "tool" {
+            // Direct HolderSet block ids intentionally remain in source-version
+            // numeric space here; stack_tool reinterprets them through Pomme's
+            // negotiated block registry before gameplay uses them.
+            copy_latest_component_payload(cur, latest_kind)?
+        } else if ids.protocol == 767 && name == "food" {
+            skip_old_food(cur, ids, remaps)?;
+            continue;
+        } else if name == "use_remainder" {
+            translate_nested_item_stack_payload(cur, ids, remaps)?
+        } else if matches!(name, "charged_projectiles" | "bundle_contents") {
+            translate_nested_item_vec_payload(cur, ids, remaps, false)?
+        } else if name == "container" {
+            translate_nested_item_vec_payload(cur, ids, remaps, true)?
+        } else if ids.protocol <= 768 && name == "custom_model_data" {
+            skip_old_custom_model_data(cur)?;
+            continue;
+        } else if ids.protocol == 767 && name == "potion_contents" {
+            skip_old_potion_contents_767(cur)?;
+            continue;
+        } else if (768..=775).contains(&ids.protocol) && name == "equippable" {
+            skip_old_equippable(cur, ids.protocol)?;
+            continue;
+        } else if ids.protocol <= 774 && name == "jukebox_playable" {
+            skip_old_jukebox_playable(cur, ids.protocol)?;
+            continue;
+        } else if ids.protocol <= 772 && name == "profile" {
+            let mut payload = Vec::new();
+            translate_old_profile(cur, &mut payload)?;
+            payload
+        } else if ids.protocol <= 772 && matches!(name, "entity_data" | "block_entity_data") {
+            skip_nbt(cur)?;
+            continue;
+        } else if ids.protocol <= 774 && name == "instrument" {
+            skip_old_instrument(cur, ids.protocol)?;
+            continue;
+        } else if (768..=774).contains(&ids.protocol) && name == "damage_resistant" {
+            skip_tag_key(cur)?;
+            continue;
+        } else if (770..=774).contains(&ids.protocol) && name == "blocks_attacks" {
+            skip_old_blocks_attacks(cur)?;
+            continue;
+        } else if (770..=774).contains(&ids.protocol) && name == "provides_trim_material" {
+            skip_old_provides_trim_material(cur)?;
+            continue;
+        } else if (770..=774).contains(&ids.protocol) && name == "provides_banner_patterns" {
+            skip_tag_key(cur)?;
+            continue;
+        } else if ((770..=774).contains(&ids.protocol) && name == "chicken/variant")
+            || (ids.protocol == 774 && matches!(name, "damage_type" | "zombie_nautilus/variant"))
+        {
+            skip_either_registry_holder(cur)?;
+            continue;
+        } else {
+            let payload = copy_latest_component_payload(cur, latest_kind)?;
+            if historical_payload_has_unremapped_registry_ids(latest_kind) {
+                continue;
+            }
+            payload
+        };
+        added_out.push((latest, payload));
+    }
+    let mut removed_out = Vec::with_capacity(removed as usize);
+    for _ in 0..removed {
+        let component = u32::azalea_read_var(cur).ok()?;
+        let name = ids
+            .registry
+            .name_of(ClientRegistry::DataComponentType, component)?;
+        if let Some(component) = remaps.remap(ClientRegistry::DataComponentType, component) {
+            removed_out.push(component);
+        } else if !historical_unmapped_unit_component(ids.protocol, name) {
+            return None;
+        }
+    }
+    wire::write_varint(out, added_out.len() as u32);
+    wire::write_varint(out, removed_out.len() as u32);
+    for (component, payload) in added_out {
+        wire::write_varint(out, component);
+        out.extend_from_slice(&payload);
+    }
+    for component in removed_out {
+        wire::write_varint(out, component);
+    }
+    Some(())
+}
+
+fn translate_item_components_inner(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+    remap_item_kind: bool,
+) -> Option<()> {
+    let count = i32::azalea_read_var(cur).ok()?;
+    wire::write_varint(out, count as u32);
+    if count <= 0 {
+        return Some(());
+    }
+    let item = u32::azalea_read_var(cur).ok()?;
+    let item = if remap_item_kind {
+        remaps.remap(ClientRegistry::Item, item)?
+    } else {
+        item
+    };
+    wire::write_varint(out, item);
+    translate_component_patch(cur, out, ids, remaps)
+}
+
+fn translate_item_template_to_native_stack(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    let item = u32::azalea_read_var(cur).ok()?;
+    let count = i32::azalea_read_var(cur).ok()?;
+    if count <= 0 {
+        return None;
+    }
+    let item = remaps.remap(ClientRegistry::Item, item)?;
+    wire::write_varint(out, count as u32);
+    wire::write_varint(out, item);
+    translate_component_patch(cur, out, ids, remaps)
+}
+
+fn translate_container_set_content_components(
+    id: u32,
+    payload: &[u8],
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let mut out = Vec::with_capacity(payload.len() + 16);
+    wire::write_varint(&mut out, id);
+    if ids.protocol == 767 {
+        let container = read_u8(&mut cur)?;
+        wire::write_varint(&mut out, u32::from(container));
+    } else {
+        let container = varint_span(&mut cur)?;
+        out.extend_from_slice(&payload[container]);
+    }
+    let state = varint_span(&mut cur)?;
+    out.extend_from_slice(&payload[state]);
+    let count = u32::azalea_read_var(&mut cur).ok()?;
+    wire::write_varint(&mut out, count);
+    for _ in 0..=count {
+        translate_item_components(&mut cur, &mut out, ids, remaps)?;
+    }
+    Some(out)
+}
+
+fn translate_set_equipment_components(
+    id: u32,
+    payload: &[u8],
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let entity = varint_span(&mut cur)?;
+    let mut out = Vec::with_capacity(payload.len() + 16);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[entity]);
+    loop {
+        let slot = read_u8(&mut cur)?;
+        out.push(slot);
+        translate_item_components(&mut cur, &mut out, ids, remaps)?;
+        if slot & 0x80 == 0 {
+            return Some(out);
+        }
+    }
+}
+
+fn translate_container_set_slot_components(
+    id: u32,
+    payload: &[u8],
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    varint_span(&mut cur)?;
+    varint_span(&mut cur)?;
+    advance(&mut cur, 2)?;
+    let mut out = Vec::with_capacity(payload.len() + 12);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..cur.position() as usize]);
+    translate_item_components(&mut cur, &mut out, ids, remaps)?;
+    Some(out)
+}
+
+fn translate_container_set_slot_components_767(
+    v: &Ids767,
+    payload: &[u8],
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let container = *payload.first()? as i8;
+    let mut cur = Cursor::new(payload);
+    advance(&mut cur, 1)?;
+    let state = varint_span(&mut cur)?;
+    let slot_at = cur.position() as usize;
+    let slot = i16::from_be_bytes(payload.get(slot_at..slot_at + 2)?.try_into().ok()?);
+    advance(&mut cur, 2)?;
+    let mut out = Vec::with_capacity(payload.len() + 12);
+    match container {
+        -1 => wire::write_varint(&mut out, v.set_cursor_item_id),
+        -2 => {
+            wire::write_varint(&mut out, v.set_player_inventory_id);
+            wire::write_varint(&mut out, slot as u32);
+        }
+        _ => {
+            wire::write_varint(&mut out, v.container_set_slot_id);
+            wire::write_varint(&mut out, container as u32);
+            out.extend_from_slice(&payload[state.start..slot_at + 2]);
+        }
+    }
+    translate_item_components(&mut cur, &mut out, ids, remaps)?;
+    Some(out)
+}
+
+fn translate_set_cursor_item_components(
+    id: u32,
+    payload: &[u8],
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    wire::write_varint(&mut out, id);
+    translate_item_components(&mut cur, &mut out, ids, remaps)?;
+    Some(out)
+}
+
+fn translate_set_player_inventory_components(
+    id: u32,
+    payload: &[u8],
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let slot = varint_span(&mut cur)?;
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[slot]);
+    translate_item_components(&mut cur, &mut out, ids, remaps)?;
+    Some(out)
+}
+
+fn remap_enchantment_766(id: u32) -> Option<u32> {
+    // 1.20.5/1.20.6's built-in order matches 26.2 through Riptide. 26.2
+    // inserts Lunge immediately after Riptide, shifting every older vanilla
+    // enchantment from Channeling through Vanishing Curse by one.
+    match id {
+        0..=ENCHANTMENT_766_RIPTIDE => Some(id),
+        33..=ENCHANTMENT_766_VANISHING_CURSE => Some(id + 1),
+        _ => None,
+    }
+}
+
+fn unmap_enchantment_766(id: u32) -> Option<u32> {
+    match id {
+        0..=ENCHANTMENT_766_RIPTIDE => Some(id),
+        34..=42 => Some(id - 1),
+        _ => None, // Lunge and later 26.2-only enchantments do not exist on 766.
+    }
+}
+
+fn translate_item_to_766(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    let count_at = cur.position() as usize;
+    let count = i32::azalea_read_var(cur).ok()?;
+    out.extend_from_slice(&cur.get_ref()[count_at..cur.position() as usize]);
+    if count <= 0 {
+        return Some(());
+    }
+    let item = varint_span(cur)?;
+    out.extend_from_slice(&cur.get_ref()[item]);
+    let added = u32::azalea_read_var(cur).ok()?;
+    let removed = u32::azalea_read_var(cur).ok()?;
+    let mut added_out: Vec<(u32, Vec<u8>)> = Vec::with_capacity(added as usize);
+    for _ in 0..added {
+        let component = u32::azalea_read_var(cur).ok()?;
+        let old = remaps.remap(ClientRegistry::DataComponentType, component)?;
+        let mut payload = Vec::new();
+        if component == DataComponentKind::CustomData.to_u32() {
+            let value = nbt_span(cur)?;
+            payload.extend_from_slice(&cur.get_ref()[value]);
+        } else if matches!(component, c if c == DataComponentKind::MaxStackSize.to_u32()
+            || c == DataComponentKind::MaxDamage.to_u32()
+            || c == DataComponentKind::Damage.to_u32()
+            || c == DataComponentKind::Rarity.to_u32()
+            || c == DataComponentKind::RepairCost.to_u32())
+        {
+            let value = varint_span(cur)?;
+            payload.extend_from_slice(&cur.get_ref()[value]);
+        } else if component == DataComponentKind::Unbreakable.to_u32() {
+            payload.push(1);
+        } else if component == DataComponentKind::CustomName.to_u32()
+            || component == DataComponentKind::ItemName.to_u32()
+        {
+            let value = nbt_span(cur)?;
+            payload.extend_from_slice(&cur.get_ref()[value]);
+        } else if component == DataComponentKind::Enchantments.to_u32() {
+            let entries = u32::azalea_read_var(cur).ok()?;
+            let mut old_entries = Vec::with_capacity(entries as usize);
+            for _ in 0..entries {
+                let enchantment = u32::azalea_read_var(cur).ok()?;
+                let level = i32::azalea_read_var(cur).ok()?;
+                if let Some(old_enchantment) = unmap_enchantment_766(enchantment) {
+                    old_entries.push((old_enchantment, level));
+                }
+            }
+            wire::write_varint(&mut payload, old_entries.len() as u32);
+            for (enchantment, level) in old_entries {
+                wire::write_varint(&mut payload, enchantment);
+                wire::write_varint(&mut payload, level as u32);
+            }
+            payload.push(1);
+        } else if component == DataComponentKind::EnchantmentGlintOverride.to_u32() {
+            payload.push(read_u8(cur)?);
+        } else if component == DataComponentKind::CreativeSlotLock.to_u32()
+            || component == DataComponentKind::IntangibleProjectile.to_u32()
+        {
+        } else {
+            return None;
+        }
+        added_out.push((old, payload));
+    }
+    let mut removed_out = Vec::with_capacity(removed as usize);
+    for _ in 0..removed {
+        let component = u32::azalea_read_var(cur).ok()?;
+        if let Some(old) = remaps.remap(ClientRegistry::DataComponentType, component) {
+            removed_out.push(old);
+        }
+    }
+    wire::write_varint(out, added_out.len() as u32);
+    wire::write_varint(out, removed_out.len() as u32);
+    for (component, payload) in added_out {
+        wire::write_varint(out, component);
+        out.extend_from_slice(&payload);
+    }
+    for component in removed_out {
+        wire::write_varint(out, component);
+    }
+    Some(())
+}
+
+fn creative_component_supported(protocol: i32, kind: DataComponentKind) -> bool {
+    if protocol <= 770 && kind == DataComponentKind::AttributeModifiers {
+        return false;
+    }
+    if historical_payload_has_unremapped_registry_ids(kind)
+        && kind != DataComponentKind::AttributeModifiers
+        && kind != DataComponentKind::TooltipDisplay
+        && !((774..=775).contains(&protocol) && kind == DataComponentKind::Tool)
+    {
+        return false;
+    }
+    if protocol == 767 && kind == DataComponentKind::Food {
+        return false;
+    }
+    if protocol <= 768 && kind == DataComponentKind::CustomModelData {
+        return false;
+    }
+    if protocol == 767 && kind == DataComponentKind::PotionContents {
+        return false;
+    }
+    if protocol <= 775 && kind == DataComponentKind::Equippable {
+        return false;
+    }
+    if protocol <= 774
+        && matches!(
+            kind,
+            DataComponentKind::JukeboxPlayable
+                | DataComponentKind::Instrument
+                | DataComponentKind::DamageResistant
+                | DataComponentKind::BlocksAttacks
+                | DataComponentKind::ProvidesTrimMaterial
+                | DataComponentKind::ProvidesBannerPatterns
+        )
+    {
+        return false;
+    }
+    if (770..=774).contains(&protocol) && kind == DataComponentKind::ChickenVariant {
+        return false;
+    }
+    if protocol == 774
+        && matches!(
+            kind,
+            DataComponentKind::DamageType | DataComponentKind::ZombieNautilusVariant
+        )
+    {
+        return false;
+    }
+    if protocol <= 772
+        && matches!(
+            kind,
+            DataComponentKind::Profile
+                | DataComponentKind::EntityData
+                | DataComponentKind::BlockEntityData
+        )
+    {
+        return false;
+    }
+    true
+}
+
+fn translate_nested_item_to_target(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+    container: bool,
+) -> Option<()> {
+    // Pinned Azalea still serializes the source value as an ordinary ItemStack
+    // (count, item, patch). Mojang 26.1 switched these component payloads to
+    // ItemStackTemplate (item, count, patch), with Optional<Template> slots for
+    // container. The nested patch itself always uses
+    // DataComponentPatch.STREAM_CODEC, never the outer creative packet's
+    // length-delimited value framing.
+    let count = i32::azalea_read_var(cur).ok()?;
+    if ids.protocol == 775 {
+        if container {
+            out.push(u8::from(count > 0));
+        }
+        if count <= 0 {
+            return container.then_some(());
+        }
+        let item = u32::azalea_read_var(cur).ok()?;
+        let item = remaps.remap(ClientRegistry::Item, item)?;
+        wire::write_varint(out, item);
+        wire::write_varint(out, count as u32);
+        return translate_component_patch_to_target(cur, out, ids, remaps, false);
+    }
+
+    wire::write_varint(out, count as u32);
+    if count <= 0 {
+        return Some(());
+    }
+    let item = u32::azalea_read_var(cur).ok()?;
+    let item = remaps.remap(ClientRegistry::Item, item)?;
+    wire::write_varint(out, item);
+    translate_component_patch_to_target(cur, out, ids, remaps, false)
+}
+
+fn translate_nested_item_stack_to_target(
+    cur: &mut Cursor<&[u8]>,
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let mut payload = Vec::new();
+    translate_nested_item_to_target(cur, &mut payload, ids, remaps, false)?;
+    Some(payload)
+}
+
+fn translate_nested_item_vec_to_target(
+    cur: &mut Cursor<&[u8]>,
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+    container: bool,
+) -> Option<Vec<u8>> {
+    let count = u32::azalea_read_var(cur).ok()?;
+    let mut payload = Vec::new();
+    wire::write_varint(&mut payload, count);
+    for _ in 0..count {
+        translate_nested_item_to_target(cur, &mut payload, ids, remaps, container)?;
+    }
+    Some(payload)
+}
+
+fn creative_component_payload(
+    cur: &mut Cursor<&[u8]>,
+    ids: &ComponentIds,
+    kind: DataComponentKind,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let protocol = ids.protocol;
+    let mut payload =
+        if (771..=775).contains(&protocol) && kind == DataComponentKind::AttributeModifiers {
+            translate_attribute_modifiers_payload(cur, remaps)?
+        } else if (770..=775).contains(&protocol) && kind == DataComponentKind::TooltipDisplay {
+            translate_tooltip_display_payload(cur, remaps)?
+        } else if (774..=775).contains(&protocol) && kind == DataComponentKind::Tool {
+            translate_tool_component_to_target(cur, protocol)?
+        } else if kind == DataComponentKind::UseRemainder {
+            translate_nested_item_stack_to_target(cur, ids, remaps)?
+        } else if matches!(
+            kind,
+            DataComponentKind::ChargedProjectiles | DataComponentKind::BundleContents
+        ) {
+            translate_nested_item_vec_to_target(cur, ids, remaps, false)?
+        } else if kind == DataComponentKind::Container {
+            translate_nested_item_vec_to_target(cur, ids, remaps, true)?
+        } else {
+            copy_latest_component_payload(cur, kind)?
+        };
+    if protocol <= 769
+        && matches!(
+            kind,
+            DataComponentKind::Unbreakable
+                | DataComponentKind::Enchantments
+                | DataComponentKind::StoredEnchantments
+                | DataComponentKind::CanPlaceOn
+                | DataComponentKind::CanBreak
+                | DataComponentKind::DyedColor
+                | DataComponentKind::Trim
+        )
+    {
+        payload.push(1); // old showInTooltip
+    }
+    Some(payload)
+}
+
+fn translate_item_to_components_target(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    let count = i32::azalea_read_var(cur).ok()?;
+    wire::write_varint(out, count as u32);
+    if count <= 0 {
+        return Some(());
+    }
+    let item = u32::azalea_read_var(cur).ok()?;
+    wire::write_varint(out, item);
+    translate_component_patch_to_target(cur, out, ids, remaps, true)
+}
+
+fn translate_component_patch_to_target(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+    delimit_values: bool,
+) -> Option<()> {
+    let added = u32::azalea_read_var(cur).ok()?;
+    let removed = u32::azalea_read_var(cur).ok()?;
+    let mut added_out = Vec::with_capacity(added as usize);
+    for _ in 0..added {
+        let native_id = u32::azalea_read_var(cur).ok()?;
+        let kind = DataComponentKind::from_u32(native_id)?;
+        let payload = creative_component_payload(cur, ids, kind, remaps)?;
+        if !creative_component_supported(ids.protocol, kind) {
+            continue;
+        }
+        let Some(target_id) = remaps.remap(ClientRegistry::DataComponentType, native_id) else {
+            continue;
+        };
+        added_out.push((target_id, payload));
+    }
+
+    let mut removed_out = Vec::with_capacity(removed as usize);
+    for _ in 0..removed {
+        let native_id = u32::azalea_read_var(cur).ok()?;
+        if let Some(target_id) = remaps.remap(ClientRegistry::DataComponentType, native_id) {
+            removed_out.push(target_id);
+        }
+    }
+
+    wire::write_varint(out, added_out.len() as u32);
+    wire::write_varint(out, removed_out.len() as u32);
+    for (component, payload) in added_out {
+        wire::write_varint(out, component);
+        if delimit_values && ids.protocol >= 770 {
+            wire::write_varint(out, payload.len() as u32);
+        }
+        out.extend_from_slice(&payload);
+    }
+    for component in removed_out {
+        wire::write_varint(out, component);
+    }
+    Some(())
+}
+
+fn translate_creative_slot_components(
+    old_id: u32,
+    payload: &[u8],
+    ids: &ComponentIds,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let slot_at = cur.position() as usize;
+    advance(&mut cur, 2)?;
+    let mut out = Vec::with_capacity(payload.len() + 16);
+    wire::write_varint(&mut out, old_id);
+    out.extend_from_slice(&payload[slot_at..slot_at + 2]);
+    translate_item_to_components_target(&mut cur, &mut out, ids, remaps)?;
+    (cur.position() as usize == payload.len()).then_some(out)
+}
+
+fn translate_creative_slot_766(
+    old_id: u32,
+    payload: &[u8],
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let slot_at = cur.position() as usize;
+    advance(&mut cur, 2)?;
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    wire::write_varint(&mut out, old_id);
+    out.extend_from_slice(&payload[slot_at..slot_at + 2]);
+    translate_item_to_766(&mut cur, &mut out, remaps)?;
+    (cur.position() as usize == payload.len()).then_some(out)
+}
+
+/// Rewrites one 1.20.5/1.20.6 component-era stack into the latest component
+/// id space. Stable scalar/text fields pass through, the full vanilla
+/// enchantment map is remapped into 26.2's dynamic enchantment-id order, and
+/// Efficiency/Aqua Affinity are additionally mirrored into client-private
+/// custom-data fields for the historical mining formula.
+fn translate_item_766(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    let count_at = cur.position() as usize;
+    let count = i32::azalea_read_var(cur).ok()?;
+    out.extend_from_slice(&cur.get_ref()[count_at..cur.position() as usize]);
+    if count <= 0 {
+        return Some(());
+    }
+
+    // Item ids are left in wire space here. `remap_inbound` runs after typed
+    // decode and moves the ItemKind into latest space exactly once.
+    let item = varint_span(cur)?;
+    out.extend_from_slice(&cur.get_ref()[item]);
+
+    let added = u32::azalea_read_var(cur).ok()?;
+    let removed = u32::azalea_read_var(cur).ok()?;
+    let mut added_out: Vec<(u32, Vec<u8>)> = Vec::with_capacity(added as usize + 1);
+    let mut custom_data: Option<simdnbt::owned::NbtCompound> = None;
+    let mut enchantments_766 = Vec::new();
+    let mut efficiency = 0i32;
+    let mut aqua_affinity = false;
+
+    for _ in 0..added {
+        let component = u32::azalea_read_var(cur).ok()?;
+        match component {
+            COMPONENT_766_CUSTOM_DATA => {
+                let nbt = simdnbt::owned::read_unnamed(cur).ok()?;
+                custom_data = Some(match nbt {
+                    simdnbt::owned::Nbt::Some(root) => root.as_compound(),
+                    simdnbt::owned::Nbt::None => simdnbt::owned::NbtCompound::new(),
+                });
+            }
+            COMPONENT_766_ENCHANTMENTS => {
+                let entries = u32::azalea_read_var(cur).ok()?;
+                for _ in 0..entries {
+                    let enchantment = u32::azalea_read_var(cur).ok()?;
+                    let level = i32::azalea_read_var(cur).ok()?;
+                    if let Some(latest) = remap_enchantment_766(enchantment) {
+                        enchantments_766.push((latest, level));
+                    } else {
+                        tracing::warn!(
+                            "Dropping unknown 1.20.6 enchantment id {enchantment} while translating item stack"
+                        );
+                    }
+                    match enchantment {
+                        ENCHANTMENT_766_EFFICIENCY => efficiency = efficiency.max(level),
+                        ENCHANTMENT_766_AQUA_AFFINITY if level > 0 => aqua_affinity = true,
+                        _ => {}
+                    }
+                }
+                advance(cur, 1)?; // showInTooltip
+                let latest = remaps.remap(ClientRegistry::DataComponentType, component)?;
+                let mut payload = Vec::new();
+                wire::write_varint(&mut payload, enchantments_766.len() as u32);
+                for (enchantment, level) in &enchantments_766 {
+                    wire::write_varint(&mut payload, *enchantment);
+                    wire::write_varint(&mut payload, *level as u32);
+                }
+                added_out.push((latest, payload));
+            }
+            COMPONENT_766_UNBREAKABLE => {
+                advance(cur, 1)?; // old showInTooltip; latest is a unit value
+                let latest = remaps.remap(ClientRegistry::DataComponentType, component)?;
+                added_out.push((latest, Vec::new()));
+            }
+            COMPONENT_766_MAX_STACK_SIZE
+            | COMPONENT_766_MAX_DAMAGE
+            | COMPONENT_766_DAMAGE
+            | COMPONENT_766_RARITY
+            | COMPONENT_766_REPAIR_COST => {
+                let value = varint_span(cur)?;
+                let latest = remaps.remap(ClientRegistry::DataComponentType, component)?;
+                added_out.push((latest, cur.get_ref()[value].to_vec()));
+            }
+            COMPONENT_766_CUSTOM_NAME | COMPONENT_766_ITEM_NAME => {
+                let value = nbt_span(cur)?;
+                let latest = remaps.remap(ClientRegistry::DataComponentType, component)?;
+                added_out.push((latest, cur.get_ref()[value].to_vec()));
+            }
+            COMPONENT_766_GLINT_OVERRIDE => {
+                let value_at = cur.position() as usize;
+                advance(cur, 1)?;
+                let latest = remaps.remap(ClientRegistry::DataComponentType, component)?;
+                added_out.push((
+                    latest,
+                    cur.get_ref()[value_at..cur.position() as usize].to_vec(),
+                ));
+            }
+            COMPONENT_766_CREATIVE_SLOT_LOCK | COMPONENT_766_INTANGIBLE_PROJECTILE => {
+                let latest = remaps.remap(ClientRegistry::DataComponentType, component)?;
+                added_out.push((latest, Vec::new()));
+            }
+            COMPONENT_766_HIDE_ADDITIONAL_TOOLTIP
+            | COMPONENT_766_HIDE_TOOLTIP
+            | COMPONENT_766_FIRE_RESISTANT => {
+                // Old-only 1.20.6 unit components have zero-byte stream
+                // payloads and no native 26.2 registry entry. Drop only the
+                // unsupported marker; keep translating the surrounding patch.
+            }
+            COMPONENT_766_TOOL => {
+                // The old Tool payload predates latest-only fields. Skip it
+                // precisely so one unsupported override cannot drop the whole
+                // inventory/equipment packet; gameplay uses the native item
+                // default for protocol-766 Tool value overrides.
+                skip_tool_766(cur)?;
+            }
+            _ => return None,
+        }
+    }
+
+    let mut removed_out = Vec::with_capacity(removed as usize);
+    for _ in 0..removed {
+        let component = u32::azalea_read_var(cur).ok()?;
+        if matches!(
+            component,
+            COMPONENT_766_HIDE_ADDITIONAL_TOOLTIP
+                | COMPONENT_766_HIDE_TOOLTIP
+                | COMPONENT_766_FIRE_RESISTANT
+        ) {
+            continue;
+        }
+        removed_out.push(remaps.remap(ClientRegistry::DataComponentType, component)?);
+    }
+
+    if let Some(compound) = custom_data.as_mut() {
+        // These names are client-private transport metadata, never trusted
+        // from server-provided custom_data.
+        compound.remove(LEGACY_EFFICIENCY_KEY);
+        compound.remove(LEGACY_AQUA_AFFINITY_KEY);
+    }
+    if efficiency > 0 || aqua_affinity {
+        let compound = custom_data.get_or_insert_with(simdnbt::owned::NbtCompound::new);
+        if efficiency > 0 {
+            compound.insert(LEGACY_EFFICIENCY_KEY, efficiency);
+        }
+        if aqua_affinity {
+            compound.insert(LEGACY_AQUA_AFFINITY_KEY, 1i8);
+        }
+    }
+    if let Some(compound) = custom_data {
+        let mut payload = Vec::new();
+        simdnbt::owned::Nbt::new("".into(), compound)
+            .azalea_write(&mut payload)
+            .ok()?;
+        added_out.push((COMPONENT_CUSTOM_DATA, payload));
+        removed_out.retain(|component| *component != COMPONENT_CUSTOM_DATA);
+    }
+
+    wire::write_varint(out, added_out.len() as u32);
+    wire::write_varint(out, removed_out.len() as u32);
+    for (component, payload) in added_out {
+        wire::write_varint(out, component);
+        out.extend_from_slice(&payload);
+    }
+    for component in removed_out {
+        wire::write_varint(out, component);
+    }
+    Some(())
+}
+
+/// Rewrites the 1.20.5/1.20.6 `container_set_content` byte container id and
+/// every component-era stack into the latest packet/patch layout.
+fn translate_container_set_content_766(
+    id: u32,
+    payload: &[u8],
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let container = read_u8(&mut cur)?;
+    let state = u32::azalea_read_var(&mut cur).ok()?;
+    let count = u32::azalea_read_var(&mut cur).ok()?;
+
+    let mut out = Vec::with_capacity(payload.len() + 16);
+    wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, u32::from(container));
+    wire::write_varint(&mut out, state);
+    wire::write_varint(&mut out, count);
+    for _ in 0..=count {
+        // The trailing iteration is the carried item.
+        translate_item_766(&mut cur, &mut out, remaps)?;
+    }
+    Some(out)
+}
+
+/// Rewrites a 1.20.5/1.20.6 `set_equipment` list, translating each stack.
+fn translate_set_equipment_766(
+    id: u32,
+    payload: &[u8],
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let entity = varint_span(&mut cur)?;
+    let mut out = Vec::with_capacity(payload.len() + 16);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[entity]);
+    loop {
+        let slot = read_u8(&mut cur)?;
+        out.push(slot);
+        translate_item_766(&mut cur, &mut out, remaps)?;
+        if slot & 0x80 == 0 {
+            return Some(out);
+        }
+    }
+}
+
+/// Rewrites 1.20.5/1.20.6 `container_set_slot`, including the -1/-2 cursor
+/// and player-inventory sentinel split introduced later.
+fn translate_container_set_slot_766(
+    v: &Ids767,
+    payload: &[u8],
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let container = *payload.first()? as i8;
+    let mut cur = Cursor::new(payload);
+    advance(&mut cur, 1)?;
+    let state = u32::azalea_read_var(&mut cur).ok()?;
+    let slot_at = cur.position() as usize;
+    let slot = i16::from_be_bytes(payload.get(slot_at..slot_at + 2)?.try_into().ok()?);
+    advance(&mut cur, 2)?;
+
+    let mut out = Vec::with_capacity(payload.len() + 12);
+    match container {
+        -1 => wire::write_varint(&mut out, v.set_cursor_item_id),
+        -2 => {
+            wire::write_varint(&mut out, v.set_player_inventory_id);
+            wire::write_varint(&mut out, slot as u32);
+        }
+        _ => {
+            wire::write_varint(&mut out, v.container_set_slot_id);
+            wire::write_varint(&mut out, container as u32);
+            wire::write_varint(&mut out, state);
+            out.extend_from_slice(&payload[slot_at..slot_at + 2]);
+        }
+    }
+    translate_item_766(&mut cur, &mut out, remaps)?;
+    Some(out)
+}
+
 /// Rewrites `projectile_power`: 1.21 collapsed the per-axis acceleration
 /// vector into its magnitude.
 fn translate_projectile_power_766(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
@@ -3435,6 +5003,7 @@ fn translate_entity_data(
 /// past (26.2 `DataComponents` registration order; anchored in
 /// `component_id_anchors` in `azalea_compat`). Matching happens after the
 /// remap, so one set of ids serves every wire version.
+pub(crate) const COMPONENT_CUSTOM_DATA: u32 = 0;
 pub(crate) const COMPONENT_MAP_ID: u32 = 46;
 pub(crate) const COMPONENT_PROFILE: u32 = 70;
 
@@ -4169,6 +5738,105 @@ fn remap_with<T: Registry>(remaps: &RegistryRemaps, reg: ClientRegistry, value: 
             true
         }
         None => false,
+    }
+}
+
+fn retain_creative_components_766(data: &mut ItemStackData) {
+    let original = &data.component_patch;
+    let mut retained = DataComponentPatch::default();
+    let mut kept = 0usize;
+
+    macro_rules! keep_component {
+        ($kind:ident, $ty:ty) => {
+            if let Some((_, value)) = original
+                .iter()
+                .find(|(kind, _)| *kind == DataComponentKind::$kind)
+            {
+                unsafe {
+                    match value {
+                        Some(_) => {
+                            if let Some(component) = original.get::<$ty>().cloned() {
+                                retained.unchecked_insert_component(
+                                    DataComponentKind::$kind,
+                                    Some(DataComponentUnion::from(component)),
+                                );
+                                kept += 1;
+                            }
+                        }
+                        None => {
+                            retained.unchecked_insert_component(DataComponentKind::$kind, None);
+                            kept += 1;
+                        }
+                    }
+                }
+            }
+        };
+    }
+
+    keep_component!(CustomData, CustomData);
+    keep_component!(MaxStackSize, MaxStackSize);
+    keep_component!(MaxDamage, MaxDamage);
+    keep_component!(Damage, Damage);
+    keep_component!(Unbreakable, Unbreakable);
+    keep_component!(CustomName, CustomName);
+    keep_component!(ItemName, ItemName);
+    keep_component!(Rarity, Rarity);
+    keep_component!(Enchantments, Enchantments);
+    keep_component!(RepairCost, RepairCost);
+    keep_component!(CreativeSlotLock, CreativeSlotLock);
+    keep_component!(EnchantmentGlintOverride, EnchantmentGlintOverride);
+    keep_component!(IntangibleProjectile, IntangibleProjectile);
+    if let Some((_, value)) = original
+        .iter()
+        .find(|(kind, _)| *kind == DataComponentKind::Tool)
+        && value.is_none()
+    {
+        unsafe {
+            retained.unchecked_insert_component(DataComponentKind::Tool, None);
+        }
+        kept += 1;
+    }
+
+    let total = original.iter().count();
+    if kept != total {
+        tracing::warn!(
+            dropped = total - kept,
+            "Dropping unsupported creative item components before protocol-766 encoding"
+        );
+    }
+    data.component_patch = retained;
+}
+
+/// Removes protocol-766 mining bookkeeping before a creative stack can be
+/// serialized back to the server. Real server custom_data survives unchanged.
+fn scrub_legacy_mining_metadata(data: &mut ItemStackData) {
+    let Some(custom) = data.component_patch.get::<CustomData>().cloned() else {
+        return;
+    };
+    let simdnbt::owned::Nbt::Some(root) = custom.nbt else {
+        return;
+    };
+    let mut compound = root.as_compound();
+    let removed = compound.remove(LEGACY_EFFICIENCY_KEY).is_some()
+        | compound.remove(LEGACY_AQUA_AFFINITY_KEY).is_some();
+    if !removed {
+        return;
+    }
+
+    // SAFETY: the union payload matches DataComponentKind::CustomData.
+    unsafe {
+        if compound.is_empty() {
+            data.component_patch
+                .unchecked_insert_component(DataComponentKind::CustomData, None);
+        } else {
+            let custom = CustomData {
+                nbt: simdnbt::owned::Nbt::new("".into(), compound),
+            };
+            data.component_patch.unchecked_insert_component(
+                DataComponentKind::CustomData,
+                Some(DataComponentUnion::from(custom)),
+            );
+        }
     }
 }
 
