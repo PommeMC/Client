@@ -641,6 +641,27 @@ pub(crate) fn block_registry_name(protocol: i32, registry_id: u32) -> Option<&'s
     None
 }
 
+/// Resolves a built-in block resource name to its registry id in an arbitrary
+/// supported protocol, without switching the active world's block-state table.
+pub(crate) fn block_registry_id(protocol: i32, name: &str) -> Option<u32> {
+    let slot = prewarm_protocol(protocol);
+    let table = BLOCK_TABLES[slot]
+        .get()
+        .expect("prewarm_protocol initializes block table");
+    let mut previous = None;
+    let mut index = 0u32;
+    for data in table {
+        if previous != Some(data.id) {
+            if data.id == name {
+                return Some(index);
+            }
+            index += 1;
+            previous = Some(data.id);
+        }
+    }
+    None
+}
+
 fn resolve_block_tags(
     raw_tags: Vec<(String, Vec<i32>)>,
     registry_names: &[&'static str],

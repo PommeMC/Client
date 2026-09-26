@@ -286,9 +286,9 @@ mod tests {
     /// The divergence anchors every version below 1.21.11 shares: 26.x
     /// inserted air_drag_modifier at attribute 0, 1.21.11 inserted
     /// camel_husk at entity 20 and use_effects at component 5 (far earlier
-    /// than 1.21.11's own divergence at 41, so the raw item-stack
-    /// limitation in translate.rs covers common components like custom_name
-    /// on these versions), and particle ids diverge right after bubble (3).
+    /// than 1.21.11's own divergence at 41, which is why the client-side item
+    /// component bridge remaps ids semantically before latest decode), and
+    /// particle ids diverge right after bubble (3).
     fn assert_pre_1_21_11_anchors(r: &RegistryRemaps, from: &RegistryTable) {
         assert_eq!(from.name_of(ClientRegistry::Attribute, 0), Some("armor"));
         assert_eq!(r.remap(ClientRegistry::Attribute, 0), Some(1));
@@ -493,8 +493,8 @@ mod tests {
         assert_ne!(r.remap(ClientRegistry::ParticleType, 4), Some(4));
 
         // Component ids diverge at 41, where 26.x inserted
-        // additional_trade_cost; this is where inbound item components start
-        // decoding under the wrong codec (see translate.rs).
+        // additional_trade_cost; the client item-component bridge remaps
+        // these semantic ids before latest decode.
         assert_eq!(
             from.name_of(ClientRegistry::DataComponentType, 41),
             Some("stored_enchantments")
