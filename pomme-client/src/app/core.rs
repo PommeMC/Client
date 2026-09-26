@@ -20,6 +20,7 @@ use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx};
 use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
 use crate::assets::AssetIndex;
+use crate::attribute::{AttributeInstance, AttributeKind, AttributeMap};
 use crate::dirs::DataDirs;
 use crate::discord::DiscordPresence;
 use crate::entity::components::{LookDirection, Position, Velocity};
@@ -1414,9 +1415,34 @@ impl AppCore {
                 } => {
                     game.waypoints.apply(operation, waypoint);
                 }
-                NetworkEvent::EntityArmorUpdate { entity_id, armor } => {
+                NetworkEvent::EntityAttributesUpdate {
+                    entity_id,
+                    snapshots,
+                } => {
+                    let dirty = |kind| snapshots.iter().any(|snapshot| snapshot.attribute == kind);
                     if entity_id == game.player.entity_id {
-                        game.player.armor = armor;
+                        for snapshot in &snapshots {
+                            if !game.player.attributes.apply_snapshot(snapshot) {
+                                tracing::warn!(
+                                    "Server tried to update unsupported player attribute {:?}",
+                                    snapshot.attribute
+                                );
+                            }
+                        }
+                        sync_player_attribute_mirrors(&mut game.player, dirty);
+                    }
+
+                    if let Some(entity) = game.entity_store.living.get_mut(&entity_id) {
+                        for snapshot in &snapshots {
+                            entity.attributes.apply_snapshot_or_insert(snapshot);
+                        }
+                        sync_living_attribute_mirrors(
+                            &entity.attributes,
+                            &mut entity.health,
+                            &mut entity.max_health,
+                            &mut entity.camera_distance,
+                            dirty,
+                        );
                     }
                 }
                 NetworkEvent::UpdateMobEffect { entity_id, effect } => {
@@ -1434,28 +1460,6 @@ impl AppCore {
                 }
                 NetworkEvent::ClearMobEffects => {
                     game.player.effects.clear();
-                }
-                NetworkEvent::EntityMaxHealthUpdate {
-                    entity_id,
-                    max_health,
-                } => {
-                    if entity_id == game.player.entity_id {
-                        game.player.max_health = max_health;
-                    }
-                    if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
-                        e.max_health = max_health;
-                    }
-                }
-                NetworkEvent::EntityCameraDistanceUpdate {
-                    entity_id,
-                    distance,
-                } => {
-                    if entity_id == game.player.entity_id {
-                        game.player.camera_distance = distance;
-                    }
-                    if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
-                        e.camera_distance = distance;
-                    }
                 }
                 NetworkEvent::ContainerContent {
                     container_id,
@@ -2315,6 +2319,9 @@ impl AppCore {
                     game.player.entity_id = entity_id;
                     game.hardcore = hardcore;
                     game.show_death_screen = show_death_screen;
+                    // The fresh LocalPlayer starts from supplier defaults.
+                    game.player.attributes = AttributeMap::player();
+                    sync_player_attribute_mirrors(&mut game.player, |_| false);
                     // Vanilla `handleLogin` builds a new LocalPlayer on slot 0,
                     // with the server's SetHeldSlot to follow. Ours lives in the
                     // app-wide input state, so a reconnect would otherwise
@@ -2350,15 +2357,12 @@ impl AppCore {
                     if !keep_entity_data {
                         game.player.absorption = 0.0;
                     }
-                    // Vanilla always copies attribute base values to the fresh
-                    // player; bit 1 controls extra values/modifiers. Pomme only
-                    // models the max-health base, so it remains unchanged here.
-                    let _ = keep_attribute_modifiers;
                     game.dead = false;
                     // `startWaitingForNewLevel` replaces an open dialog here too.
                     game.server_dialog = None;
                     game.start_level_load();
                     game.player.reset_for_respawn(keep_entity_data);
+                    sync_respawn_attributes(&mut game.player, keep_attribute_modifiers);
                     game.interaction.reset_player_transients_for_respawn();
                     // A fresh LocalPlayer gets a fresh KeyboardInput and packet
                     // baselines even when bit 2 keeps its entity data, so a kept
@@ -3098,6 +3102,70 @@ pub(crate) fn accepted_player_chat_tag(
     })
 }
 
+fn sync_respawn_attributes(player: &mut LocalPlayer, keep_attribute_modifiers: bool) {
+    if keep_attribute_modifiers {
+        // `assignAllValues` dirties every instance.
+        sync_player_attribute_mirrors(player, |_| true);
+    } else {
+        // Vanilla constructs a fresh player attribute map, then copies only
+        // old base values into it; only a base that differs from the
+        // supplier default dirties its instance.
+        player.attributes.clear_modifiers();
+        let dirty: Vec<AttributeKind> = AttributeKind::ALL
+            .into_iter()
+            .filter(|&kind| {
+                player
+                    .attributes
+                    .instance(kind)
+                    .map(AttributeInstance::base_value)
+                    != kind.player_base_value()
+            })
+            .collect();
+        sync_player_attribute_mirrors(player, |kind| dirty.contains(&kind));
+    }
+}
+
+/// Refresh the fields current consumers read from an attribute map. `dirty`
+/// gates vanilla `LivingEntity.onAttributeUpdated`'s clamps, which only run
+/// for instances that changed.
+fn sync_living_attribute_mirrors(
+    attributes: &AttributeMap,
+    health: &mut f32,
+    max_health: &mut f32,
+    camera_distance: &mut f32,
+    dirty: impl Fn(AttributeKind) -> bool,
+) {
+    if let Some(value) = attributes.value(AttributeKind::MaxHealth) {
+        *max_health = value as f32;
+        if dirty(AttributeKind::MaxHealth) {
+            *health = health.min(*max_health);
+        }
+    }
+    if let Some(value) = attributes.value(AttributeKind::CameraDistance) {
+        *camera_distance = value as f32;
+    }
+    // TODO: SCALE refreshes dimensions in vanilla once Pomme consumes it.
+}
+
+fn sync_player_attribute_mirrors(player: &mut LocalPlayer, dirty: impl Fn(AttributeKind) -> bool) {
+    let attributes = &player.attributes;
+    sync_living_attribute_mirrors(
+        attributes,
+        &mut player.health,
+        &mut player.max_health,
+        &mut player.camera_distance,
+        &dirty,
+    );
+    if let Some(value) = attributes.value(AttributeKind::Armor) {
+        player.armor = value.floor() as u32;
+    }
+    if dirty(AttributeKind::MaxAbsorption)
+        && let Some(value) = attributes.value(AttributeKind::MaxAbsorption)
+    {
+        player.absorption = player.absorption.min(value as f32);
+    }
+}
+
 /// New `server_render_distance` for a server view-distance announcement, or
 /// `None` to keep the current one. Some servers announce min(our request,
 /// server max); an echo of our own request carries no cap information and
@@ -3151,11 +3219,16 @@ mod tests {
         CursorOp, DeathRoute, HeadProfile, MENU_REPEAT_DELAY, MENU_REPEAT_INTERVAL, RepeatStepper,
         accepted_player_chat_tag, cursor_step, death_route, player_input_state,
         resolve_head_profile, server_view_distance_update, serverbound_player_input,
+        sync_living_attribute_mirrors, sync_player_attribute_mirrors, sync_respawn_attributes,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
+    use crate::attribute::{
+        AttributeKind, AttributeMap, AttributeModifier, AttributeModifierOperation,
+        AttributeSnapshot,
+    };
     use crate::net::chat_security::SignedChatBody;
     use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry, TabList};
-    use crate::player::valid_player_name;
+    use crate::player::{LocalPlayer, valid_player_name};
     use crate::ui::chat::ChatMessageTag;
 
     fn tab_list_with(uuid: uuid::Uuid, name: &str, textures: Option<&str>) -> TabList {
@@ -3440,5 +3513,79 @@ mod tests {
         assert_eq!(server_view_distance_update(20, 12), Some(20));
         // Wire values past the chunk grid's extent clamp to it.
         assert_eq!(server_view_distance_update(300, 12), Some(128));
+    }
+
+    #[test]
+    fn max_health_updates_clamp_current_health() {
+        let mut attributes = AttributeMap::player();
+        let (mut health, mut max_health, mut camera_distance) = (18.0, 20.0, 4.0);
+        let mut set_max_health = |base, dirty: bool| {
+            assert!(attributes.apply_snapshot(&AttributeSnapshot {
+                attribute: AttributeKind::MaxHealth,
+                base,
+                modifiers: vec![],
+            }));
+            sync_living_attribute_mirrors(
+                &attributes,
+                &mut health,
+                &mut max_health,
+                &mut camera_distance,
+                |_| dirty,
+            );
+            (health, max_health)
+        };
+        assert_eq!(set_max_health(10.0, false), (18.0, 10.0));
+        assert_eq!(set_max_health(10.0, true), (10.0, 10.0));
+        assert_eq!(set_max_health(30.0, true), (10.0, 30.0));
+    }
+
+    #[test]
+    fn respawn_sync_applies_attributes_after_player_reset() {
+        let mut player = LocalPlayer::new();
+        assert!(player.attributes.apply_snapshot(&AttributeSnapshot {
+            attribute: AttributeKind::Armor,
+            base: 6.0,
+            modifiers: vec![AttributeModifier {
+                id: "minecraft:test_armor".into(),
+                amount: 2.0,
+                operation: AttributeModifierOperation::Value,
+            }],
+        }));
+        assert!(player.attributes.apply_snapshot(&AttributeSnapshot {
+            attribute: AttributeKind::MaxHealth,
+            base: 10.0,
+            modifiers: vec![AttributeModifier {
+                id: "minecraft:test_health".into(),
+                amount: 4.0,
+                operation: AttributeModifierOperation::Value,
+            }],
+        }));
+
+        player.reset_for_respawn(false);
+        sync_respawn_attributes(&mut player, true);
+        assert_eq!(player.armor, 8);
+        assert_eq!(player.max_health, 14.0);
+        assert_eq!(player.health, 14.0);
+
+        player.reset_for_respawn(false);
+        sync_respawn_attributes(&mut player, false);
+        assert_eq!(player.armor, 6);
+        assert_eq!(player.max_health, 10.0);
+        assert_eq!(player.health, 10.0);
+    }
+
+    #[test]
+    fn max_absorption_update_clamps_absorption() {
+        let mut player = LocalPlayer::new();
+        player.absorption = 8.0;
+        assert!(player.attributes.apply_snapshot(&AttributeSnapshot {
+            attribute: AttributeKind::MaxAbsorption,
+            base: 4.0,
+            modifiers: vec![],
+        }));
+        sync_player_attribute_mirrors(&mut player, |_| false);
+        assert_eq!(player.absorption, 8.0);
+        sync_player_attribute_mirrors(&mut player, |kind| kind == AttributeKind::MaxAbsorption);
+        assert_eq!(player.absorption, 4.0);
     }
 }
