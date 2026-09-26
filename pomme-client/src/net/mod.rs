@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod azalea_compat;
+mod bundle_codec;
 pub(crate) mod chat;
 pub(crate) mod chat_security;
 pub mod chunk_batch;
@@ -137,13 +138,9 @@ pub enum NetworkEvent {
         operation: azalea_protocol::packets::game::c_waypoint::WaypointOperation,
         waypoint: azalea_protocol::packets::game::c_waypoint::TrackedWaypoint,
     },
-    EntityArmorUpdate {
+    EntityAttributesUpdate {
         entity_id: i32,
-        armor: u32,
-    },
-    EntityMaxHealthUpdate {
-        entity_id: i32,
-        max_health: f32,
+        snapshots: Vec<crate::attribute::AttributeSnapshot>,
     },
     ContainerContent {
         container_id: i32,
@@ -156,6 +153,11 @@ pub enum NetworkEvent {
         index: u16,
         item: ItemStack,
         state_id: u32,
+    },
+    /// `SetPlayerInventory`, indexed by vanilla `Inventory` slot.
+    PlayerInventorySlot {
+        index: u32,
+        item: ItemStack,
     },
     HeldSlot {
         slot: u8,

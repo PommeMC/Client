@@ -165,7 +165,7 @@ impl MainMenu {
             return empty_result(2.0);
         }
 
-        let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
+        let gs = self.gui_scale(sw, sh);
         let btn_h = common::BTN_H * gs;
         let cx = sw / 2.0;
 
@@ -260,7 +260,7 @@ impl MainMenu {
             return empty_result(2.0);
         }
 
-        let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
+        let gs = self.gui_scale(sw, sh);
         let fs = common::FONT_SIZE * gs;
 
         let keys = latch_keys(

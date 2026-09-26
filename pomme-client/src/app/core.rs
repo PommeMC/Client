@@ -20,6 +20,7 @@ use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx};
 use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
 use crate::assets::AssetIndex;
+use crate::attribute::{AttributeInstance, AttributeKind, AttributeMap};
 use crate::dirs::DataDirs;
 use crate::discord::DiscordPresence;
 use crate::entity::components::{LookDirection, Position, Velocity};
@@ -427,6 +428,42 @@ fn serverbound_player_input(state: &PlayerInputState) -> ServerboundPlayerInput 
     }
 }
 
+// GLFW's key-repeat shape, so a held DPad steps like a held arrow key
+// instead of once per rendered frame.
+const MENU_REPEAT_DELAY: f32 = 0.4;
+const MENU_REPEAT_INTERVAL: f32 = 1.0 / 30.0;
+
+/// Edge-plus-repeat stepping for a held direction. The gamepad exposes level
+/// state only, which would step once per frame and tie the rate to the
+/// framerate.
+#[derive(Default)]
+struct RepeatStepper {
+    dir: i32,
+    countdown: f32,
+}
+
+impl RepeatStepper {
+    fn step(&mut self, dir: i32, dt: f32) -> i32 {
+        if dir != self.dir {
+            self.dir = dir;
+            self.countdown = MENU_REPEAT_DELAY;
+            // The press edge steps immediately; a release returns 0.
+            return dir;
+        }
+        if dir == 0 {
+            return 0;
+        }
+        self.countdown -= dt;
+        let mut steps = 0;
+        // `dt` is clamped against stalls by the app loop, so this is bounded.
+        while self.countdown <= 0.0 {
+            self.countdown += MENU_REPEAT_INTERVAL;
+            steps += 1;
+        }
+        steps * dir
+    }
+}
+
 pub struct AppCore {
     pub user: UserData,
     pub presence: Option<DiscordPresence>,
@@ -442,6 +479,7 @@ pub struct AppCore {
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
     pub time_tick_accumulator: f32,
+    menu_dpad: RepeatStepper,
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
     pub unfocused_since: Option<Instant>,
@@ -590,6 +628,7 @@ impl AppCore {
             audio,
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
+            menu_dpad: RepeatStepper::default(),
             unfocused_since: None,
             mouse_grabbed: false,
             os_grab_stale: false,
@@ -611,6 +650,9 @@ impl AppCore {
     pub fn build_menu_input(&mut self, dt: f32) -> MenuInput {
         let credits_keys_down = credits_key_mask(|code| self.input.key_pressed(code));
         let credits_keys_pressed = credits_key_mask(|code| self.input.key_just_pressed(code));
+        let dpad_dir = i32::from(self.input.gamepad_button_down(gilrs::Button::DPadRight))
+            - i32::from(self.input.gamepad_button_down(gilrs::Button::DPadLeft));
+        let gamepad_steps = self.menu_dpad.step(dpad_dir, dt);
         MenuInput {
             cursor: self.input.cursor_pos(),
             clicked: self.input.left_just_pressed(),
@@ -621,6 +663,7 @@ impl AppCore {
             escape: self.input.escape_pressed(),
             tab: self.input.tab_pressed(),
             f5: self.input.f5_pressed(),
+            gamepad_steps,
             scroll_delta: self.input.consume_menu_scroll(),
             dt,
             credits_keys_down,
@@ -1145,17 +1188,30 @@ impl AppCore {
     /// Rebuilds every asset a pack can override. Only call this once the
     /// active stack has really changed: it waits for device idle, drops the
     /// block cache and rebuilds the texture atlas. Clearing
-    /// `menu.reload_assets` is safe here because the pending local-pack toggle
-    /// it stands for is covered by the reload we just did.
-    fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
+    /// `menu.reload_assets` and `menu.reload_fonts` is safe here because the
+    /// pending toggles they stand for are covered by the reload we just did.
+    pub(crate) fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
         self.menu.active_packs = self.resource_packs.active_pack_info();
-        renderer.reload_assets(&self.data_dirs.game_dir, &self.resource_packs);
+        renderer.reload_assets(
+            &self.data_dirs.game_dir,
+            &self.resource_packs,
+            self.menu.font_options(),
+        );
         self.audio.reload_assets(&self.resource_packs);
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects
             .retain(|_, entry| matches!(entry.content, InlineObjectContent::Head { .. }));
         self.game_dynamic_atlas_keys.clear();
         self.menu.reload_assets = false;
+        self.menu.reload_fonts = false;
+    }
+
+    /// Vanilla `Options.updateFontOptions`: a Font Settings toggle applies at
+    /// once, from the title screen or in game.
+    pub fn apply_font_options(&mut self, renderer: &mut Renderer) {
+        if std::mem::take(&mut self.menu.reload_fonts) {
+            renderer.reload_fonts(&self.resource_packs, self.menu.font_options());
+        }
     }
 
     pub fn drain_network_events(
@@ -1459,9 +1515,34 @@ impl AppCore {
                 } => {
                     game.waypoints.apply(operation, waypoint);
                 }
-                NetworkEvent::EntityArmorUpdate { entity_id, armor } => {
+                NetworkEvent::EntityAttributesUpdate {
+                    entity_id,
+                    snapshots,
+                } => {
+                    let dirty = |kind| snapshots.iter().any(|snapshot| snapshot.attribute == kind);
                     if entity_id == game.player.entity_id {
-                        game.player.armor = armor;
+                        for snapshot in &snapshots {
+                            if !game.player.attributes.apply_snapshot(snapshot) {
+                                tracing::warn!(
+                                    "Server tried to update unsupported player attribute {:?}",
+                                    snapshot.attribute
+                                );
+                            }
+                        }
+                        sync_player_attribute_mirrors(&mut game.player, dirty);
+                    }
+
+                    if let Some(entity) = game.entity_store.living.get_mut(&entity_id) {
+                        for snapshot in &snapshots {
+                            entity.attributes.apply_snapshot_or_insert(snapshot);
+                        }
+                        sync_living_attribute_mirrors(
+                            &entity.attributes,
+                            &mut entity.health,
+                            &mut entity.max_health,
+                            &mut entity.camera_distance,
+                            dirty,
+                        );
                     }
                 }
                 NetworkEvent::UpdateMobEffect { entity_id, effect } => {
@@ -1480,23 +1561,13 @@ impl AppCore {
                 NetworkEvent::ClearMobEffects => {
                     game.player.effects.clear();
                 }
-                NetworkEvent::EntityMaxHealthUpdate {
-                    entity_id,
-                    max_health,
-                } => {
-                    if entity_id == game.player.entity_id {
-                        game.player.max_health = max_health;
-                    }
-                    if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
-                        e.max_health = max_health;
-                    }
-                }
                 NetworkEvent::ContainerContent {
                     container_id,
                     items,
                     carried,
                     state_id,
                 } => {
+                    game.drop_bundle_selection(container_id, None);
                     // State ids are per-menu (vanilla scopes them to the menu
                     // the packet addresses); the rendered carried stack is the
                     // open menu's, so an inventory sync must not clobber it.
@@ -1530,16 +1601,23 @@ impl AppCore {
                     item,
                     state_id,
                 } => {
-                    // Direct inventory updates (-2) carry no menu state id.
-                    if container_id == 0 || container_id == -2 {
+                    game.drop_bundle_selection(container_id, Some(index));
+                    if container_id == 0 {
                         game.player.inventory.set_slot(index as usize, item);
                         game.sync_container_from_inventory();
-                        if container_id == 0 {
-                            game.inventory_state_id = state_id;
-                        }
+                        game.inventory_state_id = state_id;
                     } else if game.open_menu_id() == Some(container_id) {
                         game.set_menu_slot(index as usize, item);
                         game.set_container_state_id(state_id);
+                    }
+                }
+                NetworkEvent::PlayerInventorySlot { index, item } => {
+                    if let Some(slot) =
+                        crate::player::inventory::menu_slot_for_inventory_index(index)
+                    {
+                        game.drop_bundle_selection(0, Some(slot as u16));
+                        game.player.inventory.set_slot(slot, item);
+                        game.sync_container_from_inventory();
                     }
                 }
                 NetworkEvent::HeldSlot { slot } => {
@@ -2232,13 +2310,16 @@ impl AppCore {
                 NetworkEvent::EntityPose { id, is_crouching } => {
                     game.entity_store.set_crouching(id, is_crouching);
                 }
-                // TODO: remote players' sleeping pose rendering.
                 NetworkEvent::EntitySleepingPos { id, pos } => {
+                    game.entity_store.set_sleeping_pos(id, pos);
                     if id == game.player.entity_id {
-                        game.player.sleeping_pos = pos;
+                        game.player.set_sleeping_pos(pos);
                     }
                 }
                 NetworkEvent::EntityWakeUp { id } => {
+                    // TODO: vanilla `stopSleeping` also stands a remote sleeper
+                    // up beside the bed, facing it, with pitch 0.
+                    game.entity_store.set_sleeping_pos(id, None);
                     if id == game.player.entity_id {
                         game.player.wake_up();
                     }
@@ -2354,6 +2435,9 @@ impl AppCore {
                     game.player.entity_id = entity_id;
                     game.hardcore = hardcore;
                     game.show_death_screen = show_death_screen;
+                    // The fresh LocalPlayer starts from supplier defaults.
+                    game.player.attributes = AttributeMap::player();
+                    sync_player_attribute_mirrors(&mut game.player, |_| false);
                     // Vanilla `handleLogin` builds a new LocalPlayer on slot 0,
                     // with the server's SetHeldSlot to follow. Ours lives in the
                     // app-wide input state, so a reconnect would otherwise
@@ -2389,15 +2473,12 @@ impl AppCore {
                     if !keep_entity_data {
                         game.player.absorption = 0.0;
                     }
-                    // Vanilla always copies attribute base values to the fresh
-                    // player; bit 1 controls extra values/modifiers. Pomme only
-                    // models the max-health base, so it remains unchanged here.
-                    let _ = keep_attribute_modifiers;
                     game.dead = false;
                     // `startWaitingForNewLevel` replaces an open dialog here too.
                     game.server_dialog = None;
                     game.start_level_load();
                     game.player.reset_for_respawn(keep_entity_data);
+                    sync_respawn_attributes(&mut game.player, keep_attribute_modifiers);
                     game.interaction.reset_player_transients_for_respawn();
                     // A fresh LocalPlayer gets a fresh KeyboardInput and packet
                     // baselines even when bit 2 keeps its entity data, so a kept
@@ -2467,6 +2548,7 @@ impl AppCore {
                     // links carry over.
                     game.server_dialog = None;
                     game.configuring = true;
+                    game.reset_sleep_for_level_teardown();
                     self.clear_server_ui(game, renderer);
                     self.apply_cursor_grab(window, Some(game));
                 }
@@ -2707,6 +2789,7 @@ impl AppCore {
                 .cloned();
             game.interaction.tick_dead_living_state(
                 held_stack.as_ref(),
+                &connection.packet_tx,
                 &self.audio,
                 &game.chunk_store,
                 game.player.position.into(),
@@ -2847,28 +2930,37 @@ impl AppCore {
             game.player.jump_riding_scale = 0.0;
         }
 
-        game.player.look_dir = renderer.camera_look_dir();
+        let camera_look = renderer.camera_look_dir();
+        game.player.look_dir = if game.player.is_sleeping() {
+            // `LivingEntity.tick` forces xRot to 0 while sleeping.
+            LookDirection::new(camera_look.y_rot_deg(), 0.0)
+        } else {
+            camera_look
+        };
 
         // Vanilla updates the crosshair target and handles game-mode/keybind
         // interactions before LocalPlayer.tick sends input/sprint/movement.
         // Packets emitted by interaction handling therefore belong before the
         // movement packet inside this CLIENT_TICK_END envelope.
+        let held_stack = game
+            .player
+            .inventory
+            .held_stack(input.selected_slot())
+            .cloned();
+        let held_item = held_stack
+            .as_ref()
+            .map(|data| crate::player::inventory::item_resource_name(data.kind));
         game.interaction.update_target(
             game.player.eye_pos(),
             game.player.look_dir,
             &game.chunk_store,
             &game.entity_store,
             crate::player::is_creative(game.player.game_mode),
+            held_item.as_deref(),
         );
-        let held_stack = game
-            .player
-            .inventory
-            .held_stack(input.selected_slot())
-            .cloned();
-        let place_block = held_stack.as_ref().and_then(|data| {
-            let name = crate::player::inventory::item_resource_name(data.kind);
-            renderer.registry().placeable_block_for_item(&name)
-        });
+        let place_block = held_item
+            .as_deref()
+            .and_then(|name| renderer.registry().placeable_block_for_item(name));
         let hands_empty = held_stack.is_none() && game.player.inventory.offhand().is_empty();
         let player_aabb = game.player.bounding_box();
         let dirty = game.interaction.tick_actions(
@@ -2916,11 +3008,11 @@ impl AppCore {
         game.player.tick_bob(dx, dz, false);
 
         // LivingEntity/Player heartbeat state advances during the entity tick,
-        // still before LocalPlayer sends its changed input and movement. This
-        // path deliberately sends no packets.
+        // still before LocalPlayer sends its changed input and movement.
         game.interaction.tick_player_state(
             input.is_cursor_captured(),
             held_stack.as_ref(),
+            &connection.packet_tx,
             &self.audio,
             &game.chunk_store,
             game.player.position.into(),
@@ -3007,17 +3099,18 @@ impl AppCore {
         }
     }
 
+    /// `ServerboundPlayerCommandPacket(player, action)`.
     fn send_player_command(
         &self,
         connection: &ConnectionHandle,
-        entity_id: i32,
+        game: &GameState,
         action: azalea_protocol::packets::game::s_player_command::Action,
     ) {
         connection
             .packet_tx
             .send(ServerboundGamePacket::PlayerCommand(
                 azalea_protocol::packets::game::s_player_command::ServerboundPlayerCommand {
-                    id: azalea_core::entity_id::MinecraftEntityId(entity_id),
+                    id: azalea_core::entity_id::MinecraftEntityId(game.player.entity_id),
                     action,
                     data: 0,
                 },
@@ -3032,16 +3125,16 @@ impl AppCore {
             } else {
                 azalea_protocol::packets::game::s_player_command::Action::StopSprinting
             };
-            self.send_player_command(connection, game.player.entity_id, action);
+            self.send_player_command(connection, game, action);
             game.was_sprinting = sprinting;
         }
     }
 
     /// Vanilla InBedChatScreen: leaving bed sends PlayerCommand STOP_SLEEPING.
-    pub fn send_stop_sleeping(&self, connection: &ConnectionHandle, entity_id: i32) {
+    pub fn send_stop_sleeping(&self, connection: &ConnectionHandle, game: &GameState) {
         self.send_player_command(
             connection,
-            entity_id,
+            game,
             azalea_protocol::packets::game::s_player_command::Action::StopSleeping,
         );
     }
@@ -3152,6 +3245,70 @@ pub(crate) fn accepted_player_chat_tag(
     })
 }
 
+fn sync_respawn_attributes(player: &mut LocalPlayer, keep_attribute_modifiers: bool) {
+    if keep_attribute_modifiers {
+        // `assignAllValues` dirties every instance.
+        sync_player_attribute_mirrors(player, |_| true);
+    } else {
+        // Vanilla constructs a fresh player attribute map, then copies only
+        // old base values into it; only a base that differs from the
+        // supplier default dirties its instance.
+        player.attributes.clear_modifiers();
+        let dirty: Vec<AttributeKind> = AttributeKind::ALL
+            .into_iter()
+            .filter(|&kind| {
+                player
+                    .attributes
+                    .instance(kind)
+                    .map(AttributeInstance::base_value)
+                    != kind.player_base_value()
+            })
+            .collect();
+        sync_player_attribute_mirrors(player, |kind| dirty.contains(&kind));
+    }
+}
+
+/// Refresh the fields current consumers read from an attribute map. `dirty`
+/// gates vanilla `LivingEntity.onAttributeUpdated`'s clamps, which only run
+/// for instances that changed.
+fn sync_living_attribute_mirrors(
+    attributes: &AttributeMap,
+    health: &mut f32,
+    max_health: &mut f32,
+    camera_distance: &mut f32,
+    dirty: impl Fn(AttributeKind) -> bool,
+) {
+    if let Some(value) = attributes.value(AttributeKind::MaxHealth) {
+        *max_health = value as f32;
+        if dirty(AttributeKind::MaxHealth) {
+            *health = health.min(*max_health);
+        }
+    }
+    if let Some(value) = attributes.value(AttributeKind::CameraDistance) {
+        *camera_distance = value as f32;
+    }
+    // TODO: SCALE refreshes dimensions in vanilla once Pomme consumes it.
+}
+
+fn sync_player_attribute_mirrors(player: &mut LocalPlayer, dirty: impl Fn(AttributeKind) -> bool) {
+    let attributes = &player.attributes;
+    sync_living_attribute_mirrors(
+        attributes,
+        &mut player.health,
+        &mut player.max_health,
+        &mut player.camera_distance,
+        &dirty,
+    );
+    if let Some(value) = attributes.value(AttributeKind::Armor) {
+        player.armor = value.floor() as u32;
+    }
+    if dirty(AttributeKind::MaxAbsorption)
+        && let Some(value) = attributes.value(AttributeKind::MaxAbsorption)
+    {
+        player.absorption = player.absorption.min(value as f32);
+    }
+}
+
 /// New `server_render_distance` for a server view-distance announcement, or
 /// `None` to keep the current one. Some servers announce min(our request,
 /// server max); an echo of our own request carries no cap information and
@@ -3202,11 +3359,17 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CursorOp, DeathRoute, HeadProfile, accepted_player_chat_tag, cursor_step, death_route,
-        player_input_state, resolve_corrected_look, resolve_head_profile,
-        resolve_player_position_correction, server_view_distance_update, serverbound_player_input,
+        CursorOp, DeathRoute, HeadProfile, MENU_REPEAT_DELAY, MENU_REPEAT_INTERVAL, RepeatStepper,
+        accepted_player_chat_tag, cursor_step, death_route, player_input_state,
+        resolve_corrected_look, resolve_head_profile, resolve_player_position_correction,
+        server_view_distance_update, serverbound_player_input, sync_living_attribute_mirrors,
+        sync_player_attribute_mirrors, sync_respawn_attributes,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
+    use crate::attribute::{
+        AttributeKind, AttributeMap, AttributeModifier, AttributeModifierOperation,
+        AttributeSnapshot,
+    };
     use crate::entity::components::{LookDirection, Position, Velocity};
     use crate::net::chat_security::SignedChatBody;
     use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry, TabList};
@@ -3306,6 +3469,55 @@ mod tests {
             }
             .is_static()
         );
+    }
+
+    /// Total steps from holding `dir` for `seconds` at a fixed frame time.
+    fn held_steps(dir: i32, seconds: f32, dt: f32) -> i32 {
+        let mut stepper = RepeatStepper::default();
+        let mut total = 0;
+        let mut elapsed = 0.0;
+        while elapsed < seconds {
+            total += stepper.step(dir, dt);
+            elapsed += dt;
+        }
+        total
+    }
+
+    #[test]
+    fn dpad_press_steps_once_then_waits_for_the_repeat_delay() {
+        let dt = 1.0 / 60.0;
+        // Only the press itself until the delay is up, then repeats.
+        assert_eq!(held_steps(1, MENU_REPEAT_DELAY - dt, dt), 1);
+        assert!(held_steps(1, MENU_REPEAT_DELAY + MENU_REPEAT_INTERVAL * 2.0, dt) > 1);
+    }
+
+    /// The regression this guards: reading the DPad as level state stepped
+    /// once per rendered frame, so a second of holding gave 60 steps at 60fps
+    /// and 300 at 300fps. Sampling a fixed repeat at different frame times
+    /// still lands a step either side of a boundary, hence the tolerance.
+    #[test]
+    fn dpad_repeat_rate_does_not_depend_on_the_framerate() {
+        // One press plus a second minus the delay, repeating at the interval.
+        let expected = 1 + ((1.0 - MENU_REPEAT_DELAY) / MENU_REPEAT_INTERVAL) as i32;
+        for dt in [1.0 / 30.0, 1.0 / 60.0, 1.0 / 144.0, 1.0 / 300.0] {
+            let steps = held_steps(1, 1.0, dt);
+            assert!(
+                (steps - expected).abs() <= 1,
+                "{steps} steps in a second at dt {dt}, expected about {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn releasing_re_arms_the_delay_and_a_flip_steps_immediately() {
+        let dt = 1.0 / 60.0;
+        let mut stepper = RepeatStepper::default();
+        assert_eq!(stepper.step(1, dt), 1);
+        assert_eq!(stepper.step(0, dt), 0);
+        assert_eq!(stepper.step(1, dt), 1);
+        // Right to Left with no neutral frame between.
+        assert_eq!(stepper.step(-1, dt), -1);
+        assert_eq!(stepper.step(-1, dt), 0);
     }
 
     #[test]
@@ -3499,5 +3711,79 @@ mod tests {
         assert_eq!(server_view_distance_update(20, 12), Some(20));
         // Wire values past the chunk grid's extent clamp to it.
         assert_eq!(server_view_distance_update(300, 12), Some(128));
+    }
+
+    #[test]
+    fn max_health_updates_clamp_current_health() {
+        let mut attributes = AttributeMap::player();
+        let (mut health, mut max_health, mut camera_distance) = (18.0, 20.0, 4.0);
+        let mut set_max_health = |base, dirty: bool| {
+            assert!(attributes.apply_snapshot(&AttributeSnapshot {
+                attribute: AttributeKind::MaxHealth,
+                base,
+                modifiers: vec![],
+            }));
+            sync_living_attribute_mirrors(
+                &attributes,
+                &mut health,
+                &mut max_health,
+                &mut camera_distance,
+                |_| dirty,
+            );
+            (health, max_health)
+        };
+        assert_eq!(set_max_health(10.0, false), (18.0, 10.0));
+        assert_eq!(set_max_health(10.0, true), (10.0, 10.0));
+        assert_eq!(set_max_health(30.0, true), (10.0, 30.0));
+    }
+
+    #[test]
+    fn respawn_sync_applies_attributes_after_player_reset() {
+        let mut player = LocalPlayer::new();
+        assert!(player.attributes.apply_snapshot(&AttributeSnapshot {
+            attribute: AttributeKind::Armor,
+            base: 6.0,
+            modifiers: vec![AttributeModifier {
+                id: "minecraft:test_armor".into(),
+                amount: 2.0,
+                operation: AttributeModifierOperation::Value,
+            }],
+        }));
+        assert!(player.attributes.apply_snapshot(&AttributeSnapshot {
+            attribute: AttributeKind::MaxHealth,
+            base: 10.0,
+            modifiers: vec![AttributeModifier {
+                id: "minecraft:test_health".into(),
+                amount: 4.0,
+                operation: AttributeModifierOperation::Value,
+            }],
+        }));
+
+        player.reset_for_respawn(false);
+        sync_respawn_attributes(&mut player, true);
+        assert_eq!(player.armor, 8);
+        assert_eq!(player.max_health, 14.0);
+        assert_eq!(player.health, 14.0);
+
+        player.reset_for_respawn(false);
+        sync_respawn_attributes(&mut player, false);
+        assert_eq!(player.armor, 6);
+        assert_eq!(player.max_health, 10.0);
+        assert_eq!(player.health, 10.0);
+    }
+
+    #[test]
+    fn max_absorption_update_clamps_absorption() {
+        let mut player = LocalPlayer::new();
+        player.absorption = 8.0;
+        assert!(player.attributes.apply_snapshot(&AttributeSnapshot {
+            attribute: AttributeKind::MaxAbsorption,
+            base: 4.0,
+            modifiers: vec![],
+        }));
+        sync_player_attribute_mirrors(&mut player, |_| false);
+        assert_eq!(player.absorption, 8.0);
+        sync_player_attribute_mirrors(&mut player, |kind| kind == AttributeKind::MaxAbsorption);
+        assert_eq!(player.absorption, 4.0);
     }
 }

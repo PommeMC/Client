@@ -4,7 +4,6 @@ use crate::app::phases::in_game::{GameState, build_server_screens};
 use crate::app::phases::{ConnectionPhase, Gfx, Panorama, draw_status};
 use crate::net::connection::ConnectionHandle;
 use crate::singleplayer::World;
-use crate::ui::hud;
 
 pub enum ConnectingUpdateResult {
     None,
@@ -107,7 +106,7 @@ fn draw_server_dialog(
 
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
-    let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
+    let gs = core.menu.gui_scale(sw, sh);
 
     // A configuration-phase dialog can carry object glyphs, which load into
     // the same atlas the in-game text uses.

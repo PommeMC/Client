@@ -6,6 +6,7 @@ use glam::{DVec3, dvec3};
 use winit::keyboard::KeyCode;
 
 use super::aabb::Aabb;
+use super::block_shape::CollisionContext;
 use super::collision::{no_collision, resolve_collision};
 use crate::app::input::{self, InputState};
 use crate::player::{CROUCH_HEIGHT, LocalPlayer, PLAYER_HALF_WIDTH, STANDING_HEIGHT};
@@ -68,7 +69,7 @@ pub fn tick(
     use_speed_multiplier: f32,
     slow_due_to_using_item: bool,
 ) {
-    let jump_held = input.performing_action(input::Action::Jump);
+    let raw_jump_held = input.performing_action(input::Action::Jump);
 
     // Vanilla `LivingEntity.aiStep`.
     if player.no_jump_delay > 0 {
@@ -81,7 +82,7 @@ pub fn tick(
 
     // Vanilla `LocalPlayer.modifyInput` keeps the entire input pipeline in
     // float: damping, item-use slowdown, sneaking slowdown, then square remap.
-    let (forward, strafe) = movement_input(input, player.crouching, use_speed_multiplier);
+    let (mut forward, mut strafe) = movement_input(input, player.crouching, use_speed_multiplier);
     let forward_pressed = input.key_pressed(KeyCode::KeyW)
         || input
             .get_gamepad_movement_axes()
@@ -105,7 +106,7 @@ pub fn tick(
         if input.performing_action(input::Action::Sneak) {
             input_ya -= 1.0;
         }
-        if jump_held {
+        if raw_jump_held {
             input_ya += 1.0;
         }
         if input_ya != 0.0 {
@@ -113,6 +114,11 @@ pub fn tick(
             player.velocity.y += f64::from(input_ya * player.fly_speed * 3.0);
         }
     }
+
+    // `Player.isImmobile` (asleep) zeroes locomotion and jump input; travel
+    // still runs.
+    let mut jump_held = raw_jump_held;
+    apply_living_immobility(player, &mut forward, &mut strafe, &mut jump_held);
 
     // Vanilla `LivingEntity.aiStep`: swim upward when submerged past the jump
     // threshold, otherwise a full jump off the ground or the shallow-fluid floor.
@@ -144,7 +150,20 @@ pub fn tick(
     stop_flying_on_ground(player);
 
     player.was_forward_pressed = forward_pressed;
-    player.was_jump_pressed = jump_held;
+    player.was_jump_pressed = raw_jump_held;
+}
+
+fn apply_living_immobility(
+    player: &LocalPlayer,
+    forward: &mut f32,
+    strafe: &mut f32,
+    jumping: &mut bool,
+) {
+    if player.is_sleeping() {
+        *forward = 0.0;
+        *strafe = 0.0;
+        *jumping = false;
+    }
 }
 
 /// Vanilla `LivingEntity.travel`: the water or air routine for this tick.
@@ -379,6 +398,7 @@ fn apply_collision(
     cos_y_rot: f32,
 ) {
     let aabb = player.bounding_box();
+    let ctx = collision_context(player, input);
     let delta = back_off_from_edge(
         chunk_store,
         &aabb,
@@ -386,13 +406,15 @@ fn apply_collision(
         input.performing_action(input::Action::Sneak),
         player.on_ground,
         player.flying,
+        &ctx,
     );
     let step_height = if player.on_ground {
         f64::from(STEP_HEIGHT)
     } else {
         0.0
     };
-    let (resolved, on_ground) = resolve_collision(chunk_store, aabb, delta.into(), step_height);
+    let (resolved, on_ground) =
+        resolve_collision(chunk_store, aabb, delta.into(), step_height, &ctx);
 
     // Vanilla horizontal collision flags use Mth.equal(double, double), whose
     // epsilon is the widened float constant 1.0E-5f.
@@ -470,21 +492,39 @@ fn update_sprint_state(
     }
 }
 
-// Forces the crouch pose under ceilings too low to stand in; riding and
-// sleeping aren't simulated.
+// `LocalPlayer.aiStep`: forces the crouch pose under ceilings too low to
+// stand in, unless asleep. Riding isn't simulated.
 fn update_crouch_state(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkStore) {
+    let ctx = collision_context(player, input);
+    let pos = player.position.into();
     player.crouching = player.game_mode != 3
         && !player.flying
         && !player.swimming
-        && can_fit_with_height(chunk_store, player.position.into(), CROUCH_HEIGHT)
+        && can_fit_with_height(chunk_store, pos, CROUCH_HEIGHT, &ctx)
         && (input.performing_action(input::Action::Sneak)
-            || !can_fit_with_height(chunk_store, player.position.into(), STANDING_HEIGHT));
+            || !player.is_sleeping()
+                && !can_fit_with_height(chunk_store, pos, STANDING_HEIGHT, &ctx));
 }
 
-fn can_fit_with_height(chunk_store: &ChunkStore, pos: DVec3, height: f64) -> bool {
+/// `CollisionContext.of(player)`.
+fn collision_context(player: &LocalPlayer, input: &InputState) -> CollisionContext {
+    CollisionContext::entity(
+        player.position.y,
+        input.performing_action(input::Action::Sneak),
+        player.inventory.wears_leather_boots(),
+    )
+}
+
+fn can_fit_with_height(
+    chunk_store: &ChunkStore,
+    pos: DVec3,
+    height: f64,
+    ctx: &CollisionContext,
+) -> bool {
     no_collision(
         chunk_store,
         &Aabb::from_center(pos, PLAYER_HALF_WIDTH, height / 2.0).deflate(1.0e-7),
+        ctx,
     )
 }
 
@@ -497,14 +537,15 @@ fn back_off_from_edge(
     shift_down: bool,
     on_ground: bool,
     flying: bool,
+    ctx: &CollisionContext,
 ) -> DVec3 {
     if !shift_down || flying || delta.y > 0.0 {
         return delta;
     }
+    let can_fall = |dx, dz| can_fall_at_least(chunk_store, bb, dx, dz, f64::from(STEP_HEIGHT), ctx);
     // TODO: fall distance - falling less than the step height still counts
     // as above ground
-    let above_ground =
-        on_ground || !can_fall_at_least(chunk_store, bb, 0.0, 0.0, f64::from(STEP_HEIGHT));
+    let above_ground = on_ground || !can_fall(0.0, 0.0);
     if !above_ground {
         return delta;
     }
@@ -514,24 +555,21 @@ fn back_off_from_edge(
     let step_x = dx.signum() * 0.05;
     let step_z = dz.signum() * 0.05;
 
-    while dx != 0.0 && can_fall_at_least(chunk_store, bb, dx, 0.0, f64::from(STEP_HEIGHT)) {
+    while dx != 0.0 && can_fall(dx, 0.0) {
         if dx.abs() <= 0.05 {
             dx = 0.0;
             break;
         }
         dx -= step_x;
     }
-    while dz != 0.0 && can_fall_at_least(chunk_store, bb, 0.0, dz, f64::from(STEP_HEIGHT)) {
+    while dz != 0.0 && can_fall(0.0, dz) {
         if dz.abs() <= 0.05 {
             dz = 0.0;
             break;
         }
         dz -= step_z;
     }
-    while dx != 0.0
-        && dz != 0.0
-        && can_fall_at_least(chunk_store, bb, dx, dz, f64::from(STEP_HEIGHT))
-    {
+    while dx != 0.0 && dz != 0.0 && can_fall(dx, dz) {
         dx = if dx.abs() <= 0.05 { 0.0 } else { dx - step_x };
         if dz.abs() <= 0.05 {
             dz = 0.0;
@@ -549,6 +587,7 @@ fn can_fall_at_least(
     dx: f64,
     dz: f64,
     min_height: f64,
+    ctx: &CollisionContext,
 ) -> bool {
     no_collision(
         chunk_store,
@@ -560,6 +599,7 @@ fn can_fall_at_least(
             ),
             dvec3(bb.max.x - 1.0e-7 + dx, bb.min.y, bb.max.z - 1.0e-7 + dz),
         ),
+        ctx,
     )
 }
 
@@ -879,6 +919,27 @@ mod tests {
         assert_eq!(dz.to_bits(), 0x3fa999996d18578d);
 
         assert_eq!(vanilla_look_y(30.0).to_bits(), 0xbfdfff8be0000000);
+    }
+
+    #[test]
+    fn sleeping_player_is_immobile_without_freezing_travel() {
+        let mut player = LocalPlayer::new();
+        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(0, 64, 0));
+
+        let mut forward = 0.75;
+        let mut strafe = -0.25;
+        let mut jumping = true;
+        apply_living_immobility(&player, &mut forward, &mut strafe, &mut jumping);
+        assert_eq!((forward, strafe, jumping), (0.0, 0.0, false));
+
+        crate::world::block::init("26.2");
+        player.position = dvec3(0.0, 80.0, 0.0).into();
+        player.velocity = crate::entity::components::Velocity::new(0.25, 0.0, -0.1);
+        let chunks = ChunkStore::new(2);
+        tick(&mut player, &InputState::released(), &chunks, 1.0, false);
+        assert!(player.position.x > 0.0);
+        assert!(player.position.z < 0.0);
+        assert!(player.position.y <= 80.0);
     }
 
     #[test]

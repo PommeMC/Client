@@ -155,6 +155,17 @@ fn packet_ids_match_azalea() {
         table_id(Phase::Game, Direction::Serverbound, "pick_item_from_entity")
     );
 
+    let bundle_selected = ServerboundGamePacket::BundleItemSelected(
+        azalea_protocol::packets::game::s_bundle_item_selected::ServerboundBundleItemSelected {
+            slot_id: 0,
+            selected_item_index: 0,
+        },
+    );
+    assert_eq!(
+        bundle_selected.id(),
+        table_id(Phase::Game, Direction::Serverbound, "bundle_item_selected")
+    );
+
     let teleport = ServerboundGamePacket::TeleportToEntity(
         azalea_protocol::packets::game::s_teleport_to_entity::ServerboundTeleportToEntity {
             uuid: uuid::Uuid::nil(),

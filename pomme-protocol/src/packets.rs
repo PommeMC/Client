@@ -239,6 +239,10 @@ mod tests {
         assert_eq!(t.version().protocol, 776);
         assert_eq!(t.id(Phase::Game, Direction::Serverbound, "attack"), Some(1));
         assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "bundle_item_selected"),
+            Some(3)
+        );
+        assert_eq!(
             t.id(Phase::Game, Direction::Serverbound, "pick_item_from_block"),
             Some(0x24)
         );

@@ -1725,6 +1725,7 @@ impl GameIds {
                 "chunk_batch_received",
                 "pick_item_from_block",
                 "pick_item_from_entity",
+                "bundle_item_selected",
             ]
             .iter()
             .filter(|n| table.id(Phase::Game, Serverbound, n).is_none())
