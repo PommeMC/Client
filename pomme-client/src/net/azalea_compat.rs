@@ -1443,6 +1443,60 @@ fn translate_explode_772() {
     assert!(p.block_particles.is_empty());
 }
 
+/// Pins the azalea bug the raw explode path in
+/// `handler::handle_raw_game_packet` works around: a native 26.2 explosion with
+/// vanilla's default block particles (`Level.
+/// DEFAULT_EXPLOSION_BLOCK_PARTICLES`) doesn't decode faithfully through
+/// azalea's typed codec. When it does, the raw path can go.
+#[test]
+fn azalea_explode_still_misdecodes_native_particles() {
+    use azalea_entity::particle::Particle;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let table = RegistryTable::native();
+    let particle = |name| registry_id(table, ClientRegistry::ParticleType, name);
+
+    let mut raw = Vec::new();
+    wire::write_varint(
+        &mut raw,
+        table_id(Phase::Game, Direction::Clientbound, "explode"),
+    );
+    for c in [1.0f64, 65.0, -2.0] {
+        raw.extend_from_slice(&c.to_be_bytes());
+    }
+    raw.extend_from_slice(&4.0f32.to_be_bytes()); // radius
+    raw.extend_from_slice(&7i32.to_be_bytes()); // block count
+    raw.push(0); // no knockback
+    wire::write_varint(&mut raw, particle("explosion_emitter"));
+    wire::write_varint(
+        &mut raw,
+        registry_id(table, ClientRegistry::SoundEvent, "entity.generic.explode") + 1,
+    );
+    wire::write_varint(&mut raw, 2);
+    for (name, scaling) in [("poof", 0.5f32), ("smoke", 1.0)] {
+        wire::write_varint(&mut raw, particle(name));
+        raw.extend_from_slice(&scaling.to_be_bytes());
+        raw.extend_from_slice(&1.0f32.to_be_bytes()); // speed
+        wire::write_varint(&mut raw, 1); // weight
+    }
+
+    let decoded = azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+        &mut std::io::Cursor::new(&raw[..]),
+    );
+    let faithful = matches!(
+        &decoded,
+        Ok(ClientboundGamePacket::Explode(p))
+            if p.explosion_particle == Particle::ExplosionEmitter
+                && p.block_particles.len() == 2
+                && p.block_particles[0].value.particle == Particle::Poof
+                && p.block_particles[1].value.particle == Particle::Smoke
+    );
+    assert!(
+        !faithful,
+        "azalea now decodes native explosions: {decoded:?}"
+    );
+}
+
 /// 1.21.5's `player_command` action enum still opens with PRESS/RELEASE_
 /// SHIFT_KEY (`ServerboundPlayerCommandPacket.Action` in both references),
 /// so a 26.2 action ordinal gains two on the old wire.

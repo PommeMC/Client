@@ -435,10 +435,8 @@ impl Camera {
         } else {
             look_dir
         };
-        // Use the same analytical roll-free up axis as vanilla's camera
-        // quaternion / particle billboards. A fixed world-up vector becomes
-        // collinear with `forward` at exactly ±90° pitch and makes the view
-        // basis singular, which caused the screen to flip 180° at the limits.
+        // World up is collinear with `forward` at ±90° pitch; the billboard
+        // up axis stays defined there.
         let (_, up) = self.billboard_axes();
         (forward, up)
     }

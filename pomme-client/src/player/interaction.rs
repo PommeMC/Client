@@ -353,12 +353,8 @@ impl InteractionState {
         self.target = block_hit.map(HitResult::Block);
     }
 
-    /// Vanilla `Minecraft.handleKeybinds` / `MultiPlayerGameMode` traffic.
-    ///
-    /// All packets emitted here must precede `LocalPlayer.sendPosition` in the
-    /// same client tick. Keeping this separate from the entity heartbeat below
-    /// mirrors vanilla's top-level tick order and prevents ordinary interaction
-    /// packets from landing between a movement packet and CLIENT_TICK_END.
+    /// Vanilla `MultiPlayerGameMode.tick` + `Minecraft.handleKeybinds`; runs
+    /// before the entity tick, so its packets precede the movement packet.
     #[allow(clippy::too_many_arguments)]
     pub fn tick_actions(
         &mut self,
@@ -381,9 +377,8 @@ impl InteractionState {
     ) -> Vec<BlockPos> {
         let mut dirty_chunks = Vec::new();
 
-        // Vanilla `Minecraft.tick` decrements rightClickDelay before
-        // MultiPlayerGameMode.tick / handleKeybinds, and gameMode.tick performs
-        // the carried-slot synchronization before keybind traffic.
+        // Vanilla `Minecraft.tick`: `rightClickDelay` first, then
+        // `gameMode.tick` syncs the carried slot.
         if self.use_delay > 0 {
             self.use_delay -= 1;
         }
@@ -394,7 +389,7 @@ impl InteractionState {
             return dirty_chunks;
         }
 
-        // Vanilla `handleKeybinds` drains attack/use input while an item is in
+        // Vanilla `handleKeybinds` drains attack clicks while an item is in
         // use, and `continueAttack` early-returns on `isUsingItem`.
         let using = self.using_item.is_some();
 
@@ -414,7 +409,9 @@ impl InteractionState {
         }
 
         // Vanilla `handleKeybinds`: while an item is in use, holding the use
-        // key continues it and releasing sends RELEASE_USE_ITEM.
+        // key continues it and releasing sends RELEASE_USE_ITEM (an early
+        // cancel; consumables finish on the server's own timer, never on
+        // release).
         if using {
             if !input.performing_action(input::Action::Use) {
                 self.release_using_item(sender);
@@ -481,31 +478,13 @@ impl InteractionState {
         dirty_chunks
     }
 
-    /// Vanilla local-player/LivingEntity heartbeat that follows keybind
-    /// handling but still precedes LocalPlayer's input/sprint/movement
-    /// packets.
-    #[allow(clippy::too_many_arguments)]
-    pub fn tick_player_state(
-        &mut self,
-        cursor_captured: bool,
-        held_stack: Option<&ItemStackData>,
-        sender: &PacketSender,
-        audio: &AudioEngine,
-        chunks: &ChunkStore,
-        player_pos: DVec3,
-        eye_pos: DVec3,
-        look: LookDirection,
-        effects: &mut BreakEffects,
-    ) {
-        // Preserve the existing GUI semantics: these Minecraft-level action
-        // timers only advance while gameplay input is active.
+    /// Post-movement player state: `Player.aiStep` swings after
+    /// `super.aiStep`, still ahead of LocalPlayer's input/movement packets.
+    pub fn tick_player_state(&mut self, cursor_captured: bool, held_stack: Option<&ItemStackData>) {
+        // TODO: vanilla sets missTime = 10000 while a screen is open.
         if cursor_captured && self.miss_time > 0 {
             self.miss_time -= 1;
         }
-
-        self.update_using_item(
-            held_stack, sender, audio, chunks, player_pos, eye_pos, look, effects,
-        );
         self.tick_attack_cooldown(held_stack);
         self.update_swing();
     }
@@ -884,11 +863,11 @@ impl InteractionState {
         }
     }
 
-    /// Dead-player `LivingEntity.tick` heartbeat that still runs before the
-    /// removed check around `aiStep`. This deliberately excludes keybind and
-    /// block-interaction handling: only an already-active item use advances.
+    /// `LivingEntity.tick` → `updatingUsingItem`, which runs before `aiStep`
+    /// (so before movement), dead or alive: only an already-active use
+    /// advances.
     #[allow(clippy::too_many_arguments)]
-    pub fn tick_dead_living_state(
+    pub fn tick_using_item(
         &mut self,
         held_stack: Option<&ItemStackData>,
         sender: &PacketSender,
