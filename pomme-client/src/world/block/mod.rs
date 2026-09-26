@@ -198,6 +198,7 @@ struct BlockData {
     is_air: bool,
     /// Vanilla `hasCollision` (`BlockBehaviour.Properties.noCollision()`).
     collides: bool,
+    special_collision: SpecialCollision,
     /// Vanilla state semantics dumped by `just stategen`, read by follow-up
     /// branches; `None` where the table predates the probe or the version
     /// lacks it (`blocksMotion` is gone in 26.3).
@@ -561,6 +562,12 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
             .collect();
         let is_air = matches!(block.name.as_str(), "air" | "cave_air" | "void_air");
         let collides = state_entry.c != 0;
+        let special_collision = match block.name.as_str() {
+            "scaffolding" => SpecialCollision::Scaffolding,
+            "powder_snow" => SpecialCollision::PowderSnow,
+            "moving_piston" => SpecialCollision::MovingPiston,
+            _ => SpecialCollision::None,
+        };
 
         let count: u32 = props.iter().map(|(_, vs)| vs.len() as u32).product();
         let face_indices = light_face_indices(state_entry, count as usize);
@@ -636,6 +643,7 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
                 outline,
                 is_air,
                 collides,
+                special_collision,
                 blocks_motion: flag(&state_entry.m),
                 legacy_solid: flag(&state_entry.l),
                 replaceable: flag(&state_entry.v),
@@ -783,6 +791,7 @@ fn block_data(state: BlockState) -> &'static BlockData {
         outline: None,
         is_air: false,
         collides: true,
+        special_collision: SpecialCollision::None,
         blocks_motion: None,
         legacy_solid: None,
         replaceable: None,
@@ -859,6 +868,20 @@ pub fn is_air(state: BlockState) -> bool {
 /// Whether the state's block collides with entities (vanilla `hasCollision`).
 pub fn has_collision(state: BlockState) -> bool {
     block_data(state).collides
+}
+
+/// Blocks the collision scan special-cases, tagged at table build so it
+/// doesn't compare ids per cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpecialCollision {
+    None,
+    Scaffolding,
+    PowderSnow,
+    MovingPiston,
+}
+
+pub(crate) fn special_collision(state: BlockState) -> SpecialCollision {
+    block_data(state).special_collision
 }
 
 /// Vanilla `BlockState.blocksMotion()`, distinct from collision and occlusion.

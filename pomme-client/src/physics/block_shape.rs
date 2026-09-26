@@ -9,7 +9,9 @@
 
 use azalea_block::BlockState;
 
-use crate::world::block::{PropMap, block_id, block_properties, has_collision};
+use crate::world::block::{
+    PropMap, SpecialCollision, block_id, block_properties, has_collision, special_collision,
+};
 
 /// A block-local axis-aligned box: `[min_x, min_y, min_z, max_x, max_y,
 /// max_z]`.
@@ -36,6 +38,7 @@ pub struct CollisionContext {
 }
 
 impl CollisionContext {
+    #[cfg(test)]
     pub const EMPTY: Self = Self {
         entity_bottom: None,
         descending: false,
@@ -53,6 +56,12 @@ impl CollisionContext {
         }
     }
 
+    /// `CollisionContext.positionContext(y)`: never descending, and not an
+    /// entity context, so powder snow stays empty.
+    pub fn position(y: f64) -> Self {
+        Self::entity(y, false, false)
+    }
+
     /// `isAbove(shape, pos, default)` for a shape whose top is `shape_max_y`.
     fn is_above(&self, shape_max_y: f64, pos_y: i32, default: bool) -> bool {
         self.entity_bottom.map_or(default, |bottom| {
@@ -68,9 +77,9 @@ pub fn collision_shape(
     pos_y: i32,
     ctx: &CollisionContext,
 ) -> Option<&'static [LocalBox]> {
-    match block_id(state) {
+    match special_collision(state) {
         // `ScaffoldingBlock.getCollisionShape`: the table holds SHAPE_STABLE.
-        "scaffolding" => {
+        SpecialCollision::Scaffolding => {
             if ctx.is_above(1.0, pos_y, true) && !ctx.descending {
                 return partial_shape(state);
             }
@@ -86,11 +95,9 @@ pub fn collision_shape(
         }
         // `PowderSnowBlock.getCollisionShape`.
         // TODO: the `fallDistance > 2.5` shape once fall distance is tracked.
-        "powder_snow" => {
-            let walkable = ctx.entity_bottom.is_some()
-                && ctx.walks_on_powder_snow
-                && ctx.is_above(1.0, pos_y, false)
-                && !ctx.descending;
+        SpecialCollision::PowderSnow => {
+            let walkable =
+                ctx.walks_on_powder_snow && ctx.is_above(1.0, pos_y, false) && !ctx.descending;
             if walkable { None } else { Some(&[]) }
         }
         _ if !has_collision(state) => Some(&[]),

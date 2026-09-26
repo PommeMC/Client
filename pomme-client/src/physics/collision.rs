@@ -4,7 +4,9 @@ use glam::{DVec3, dvec3};
 use super::aabb::Aabb;
 use super::block_shape::{self, CollisionContext};
 use crate::entity::components::Velocity;
-use crate::world::block::{block_id, collision_shape_position, has_large_collision_shape};
+use crate::world::block::{
+    SpecialCollision, collision_shape_position, has_large_collision_shape, special_collision,
+};
 use crate::world::chunk::ChunkStore;
 
 /// Vanilla `BlockCollisions`: scans one cell past the region so shapes that
@@ -42,7 +44,7 @@ fn block_aabbs(
                 }
                 let state = state_at(bx, by, bz);
                 if shell_axes == 1 && !has_large_collision_shape(state)
-                    || shell_axes == 2 && block_id(state) != "moving_piston"
+                    || shell_axes == 2 && special_collision(state) != SpecialCollision::MovingPiston
                 {
                     continue;
                 }
@@ -209,6 +211,10 @@ mod tests {
         assert!(boxes_near(scaffolding, top, &sneaking).is_empty());
         let climbing = CollisionContext::entity(inside.y, false, false);
         assert!(boxes_near(scaffolding, inside, &climbing).is_empty());
+        // A particle inside falls through; the empty context always stands.
+        let particle = CollisionContext::position(inside.y);
+        assert!(boxes_near(scaffolding, inside, &particle).is_empty());
+        assert!(!boxes_near(scaffolding, inside, &CollisionContext::EMPTY).is_empty());
     }
 
     #[test]
