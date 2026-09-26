@@ -394,6 +394,9 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::UpdateAttributes(p) => {
+            // TODO: a duplicate modifier id makes vanilla's `addModifier` throw
+            // after earlier snapshots applied, and `onPacketError` disconnects;
+            // Pomme has no packet-error disconnect yet, so it drops the packet.
             let Some(snapshots) = p
                 .values
                 .iter()
@@ -402,7 +405,7 @@ pub fn handle_game_packet(
             else {
                 return;
             };
-            let _ = event_tx.send(NetworkEvent::EntityAttributesUpdate {
+            let _ = event_tx.try_send(NetworkEvent::EntityAttributesUpdate {
                 entity_id: p.entity_id.0,
                 snapshots,
             });

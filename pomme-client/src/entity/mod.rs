@@ -176,9 +176,8 @@ pub struct LivingEntity {
     /// `camera_distance` attribute (`UpdateAttributes`); a ridden mount can
     /// push the third-person camera further out.
     pub camera_distance: f32,
-    /// Server-synced attribute snapshots retained for client gameplay/render
-    /// consumers. Remote entity suppliers are not fully modeled yet, so this
-    /// map learns attributes from packets as they arrive.
+    /// Attributes learned from `UpdateAttributes`; per-type suppliers aren't
+    /// modeled yet.
     pub attributes: AttributeMap,
     pub interested_angle: f32,
     pub prev_interested_angle: f32,

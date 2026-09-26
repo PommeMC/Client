@@ -61,9 +61,63 @@ impl AttributeDefinition {
             value.clamp(self.min_value, self.max_value)
         }
     }
+
+    const fn new(default_value: f64, min_value: f64, max_value: f64) -> Self {
+        Self {
+            default_value,
+            min_value,
+            max_value,
+        }
+    }
 }
 
 impl AttributeKind {
+    pub const ALL: [AttributeKind; 40] = {
+        use AttributeKind::*;
+        [
+            AirDragModifier,
+            Armor,
+            ArmorToughness,
+            AttackDamage,
+            AttackKnockback,
+            AttackSpeed,
+            BelowNameDistance,
+            BlockBreakSpeed,
+            BlockInteractionRange,
+            Bounciness,
+            BurningTime,
+            CameraDistance,
+            ExplosionKnockbackResistance,
+            EntityInteractionRange,
+            FallDamageMultiplier,
+            FlyingSpeed,
+            FollowRange,
+            FrictionModifier,
+            Gravity,
+            JumpStrength,
+            KnockbackResistance,
+            Luck,
+            MaxAbsorption,
+            MaxHealth,
+            MiningEfficiency,
+            MovementEfficiency,
+            MovementSpeed,
+            NameTagDistance,
+            OxygenBonus,
+            SafeFallDistance,
+            Scale,
+            SneakingSpeed,
+            SpawnReinforcements,
+            StepHeight,
+            SubmergedMiningSpeed,
+            SweepingDamageRatio,
+            TemptRange,
+            WaterMovementEfficiency,
+            WaypointTransmitRange,
+            WaypointReceiveRange,
+        ]
+    };
+
     /// Vanilla 26.2 `Attributes` defaults and `RangedAttribute` bounds.
     pub const fn definition(self) -> AttributeDefinition {
         use AttributeKind::*;
@@ -111,11 +165,8 @@ impl AttributeKind {
         }
     }
 
-    /// Base value supplied by vanilla 26.2 `Player.createAttributes()`.
-    ///
-    /// `None` means the attribute is not part of the player's supplier, so a
-    /// server snapshot for it must be ignored just like vanilla's
-    /// `ClientPacketListener.handleUpdateAttributes` does.
+    /// Base value from vanilla 26.2 `Player.createAttributes()`, or `None`
+    /// when the attribute isn't in the player's supplier.
     pub const fn player_base_value(self) -> Option<f64> {
         use AttributeKind::*;
         match self {
@@ -124,16 +175,6 @@ impl AttributeKind {
             MovementSpeed => Some(0.1_f32 as f64),
             WaypointTransmitRange | WaypointReceiveRange => Some(60_000_000.0),
             _ => Some(self.definition().default_value),
-        }
-    }
-}
-
-impl AttributeDefinition {
-    const fn new(default_value: f64, min_value: f64, max_value: f64) -> Self {
-        Self {
-            default_value,
-            min_value,
-            max_value,
         }
     }
 }
@@ -175,6 +216,10 @@ impl AttributeInstance {
         }
     }
 
+    pub fn base_value(&self) -> f64 {
+        self.base_value
+    }
+
     pub fn add_or_update_modifier(&mut self, modifier: AttributeModifier) {
         self.modifiers.insert(modifier.id.clone(), modifier);
     }
@@ -186,35 +231,31 @@ impl AttributeInstance {
     pub fn apply_snapshot(&mut self, snapshot: &AttributeSnapshot) {
         debug_assert_eq!(self.attribute, snapshot.attribute);
         self.base_value = snapshot.base;
-        self.modifiers.clear();
+        self.clear_modifiers();
         for modifier in &snapshot.modifiers {
             self.add_or_update_modifier(modifier.clone());
         }
     }
 
-    /// Vanilla 26.2 `AttributeInstance.calculateValue`: modifier operation
-    /// phases are ordered, regardless of the order modifiers were received.
+    fn amounts(&self, operation: AttributeModifierOperation) -> impl Iterator<Item = f64> + '_ {
+        self.modifiers
+            .values()
+            .filter(move |modifier| modifier.operation == operation)
+            .map(|modifier| modifier.amount)
+    }
+
+    /// Vanilla 26.2 `AttributeInstance.calculateValue`.
     pub fn value(&self) -> f64 {
-        let mut base = self.base_value;
-        for modifier in self.modifiers.values() {
-            if modifier.operation == AttributeModifierOperation::Value {
-                base += modifier.amount;
-            }
-        }
-
-        let mut result = base;
-        for modifier in self.modifiers.values() {
-            if modifier.operation == AttributeModifierOperation::MultipliedBase {
-                result += base * modifier.amount;
-            }
-        }
-
-        for modifier in self.modifiers.values() {
-            if modifier.operation == AttributeModifierOperation::MultipliedTotal {
-                result *= 1.0 + modifier.amount;
-            }
-        }
-
+        use AttributeModifierOperation::*;
+        let base = self
+            .amounts(Value)
+            .fold(self.base_value, |acc, amount| acc + amount);
+        let result = self
+            .amounts(MultipliedBase)
+            .fold(base, |acc, amount| acc + base * amount);
+        let result = self
+            .amounts(MultipliedTotal)
+            .fold(result, |acc, amount| acc * (1.0 + amount));
         self.attribute.definition().sanitize(result)
     }
 }
@@ -226,52 +267,8 @@ pub struct AttributeMap {
 
 impl AttributeMap {
     pub fn player() -> Self {
-        use AttributeKind::*;
-        const ALL: [AttributeKind; 40] = [
-            AirDragModifier,
-            Armor,
-            ArmorToughness,
-            AttackDamage,
-            AttackKnockback,
-            AttackSpeed,
-            BelowNameDistance,
-            BlockBreakSpeed,
-            BlockInteractionRange,
-            Bounciness,
-            BurningTime,
-            CameraDistance,
-            ExplosionKnockbackResistance,
-            EntityInteractionRange,
-            FallDamageMultiplier,
-            FlyingSpeed,
-            FollowRange,
-            FrictionModifier,
-            Gravity,
-            JumpStrength,
-            KnockbackResistance,
-            Luck,
-            MaxAbsorption,
-            MaxHealth,
-            MiningEfficiency,
-            MovementEfficiency,
-            MovementSpeed,
-            NameTagDistance,
-            OxygenBonus,
-            SafeFallDistance,
-            Scale,
-            SneakingSpeed,
-            SpawnReinforcements,
-            StepHeight,
-            SubmergedMiningSpeed,
-            SweepingDamageRatio,
-            TemptRange,
-            WaterMovementEfficiency,
-            WaypointTransmitRange,
-            WaypointReceiveRange,
-        ];
-
         let mut map = Self::default();
-        for attribute in ALL {
+        for attribute in AttributeKind::ALL {
             if let Some(base_value) = attribute.player_base_value() {
                 map.instances
                     .insert(attribute, AttributeInstance::new(attribute, base_value));
@@ -288,9 +285,8 @@ impl AttributeMap {
         self.instance(attribute).map(AttributeInstance::value)
     }
 
-    /// Apply a server snapshot only when this map's vanilla supplier contains
-    /// the attribute. Used for the local player to mirror vanilla's warning +
-    /// ignore behavior for unsupported attributes.
+    /// Apply a server snapshot if the supplier has the attribute; `false`
+    /// means vanilla would warn and ignore it.
     pub fn apply_snapshot(&mut self, snapshot: &AttributeSnapshot) -> bool {
         let Some(instance) = self.instances.get_mut(&snapshot.attribute) else {
             return false;
@@ -299,9 +295,8 @@ impl AttributeMap {
         true
     }
 
-    /// Retain a snapshot even when Pomme does not yet model the remote
-    /// entity's complete attribute supplier. Existing instances are replaced
-    /// with vanilla snapshot semantics; new ones start from the packet base.
+    /// Apply a snapshot, inserting the instance for maps whose supplier isn't
+    /// modeled yet (remote entities).
     pub fn apply_snapshot_or_insert(&mut self, snapshot: &AttributeSnapshot) {
         self.instances
             .entry(snapshot.attribute)
@@ -309,8 +304,7 @@ impl AttributeMap {
             .apply_snapshot(snapshot);
     }
 
-    /// Vanilla respawn `assignBaseValues`: keep every base value but drop the
-    /// old player's modifiers from the newly constructed attribute map.
+    /// Vanilla respawn `assignBaseValues`: keep base values, drop modifiers.
     pub fn clear_modifiers(&mut self) {
         for instance in self.instances.values_mut() {
             instance.clear_modifiers();
