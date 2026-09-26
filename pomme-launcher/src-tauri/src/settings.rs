@@ -14,6 +14,8 @@ pub struct LauncherSettings {
     pub language: String,
     pub keep_launcher_open: bool,
     pub launch_with_console: bool,
+    #[serde(default)]
+    pub selected_account_uuid: Option<String>,
 }
 
 impl Default for LauncherSettings {
@@ -22,6 +24,7 @@ impl Default for LauncherSettings {
             language: "English".into(),
             keep_launcher_open: true,
             launch_with_console: false,
+            selected_account_uuid: None,
         }
     }
 }
