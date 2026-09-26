@@ -816,6 +816,27 @@ fn block_registry_names() -> Vec<&'static str> {
     names
 }
 
+/// Resolves a built-in block registry id in an arbitrary supported protocol
+/// without switching the active world's block-state table.
+pub(crate) fn block_registry_name(protocol: i32, registry_id: u32) -> Option<&'static str> {
+    let slot = prewarm_protocol(protocol);
+    let table = BLOCK_TABLES[slot]
+        .get()
+        .expect("prewarm_protocol initializes block table");
+    let mut previous = None;
+    let mut index = 0u32;
+    for data in table {
+        if previous != Some(data.id) {
+            if index == registry_id {
+                return Some(data.id);
+            }
+            index += 1;
+            previous = Some(data.id);
+        }
+    }
+    None
+}
+
 fn resolve_block_tags(
     raw_tags: Vec<(String, Vec<i32>)>,
     registry_names: &[&'static str],
@@ -872,6 +893,11 @@ pub(crate) fn block_tags_for_test(entries: &[(&str, &[&str])]) -> BlockTags {
         })
         .collect();
     resolve_block_tags(raw_tags, &names)
+}
+
+#[cfg(test)]
+pub(crate) fn replace_block_tags_for_test(entries: &[(&str, &[&str])]) {
+    *BLOCK_TAGS.write().expect("block tag lock poisoned") = block_tags_for_test(entries);
 }
 
 fn block_data(state: BlockState) -> &'static BlockData {
