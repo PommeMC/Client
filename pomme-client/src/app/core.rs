@@ -2848,6 +2848,9 @@ impl AppCore {
         self.send_sprint_command(connection, game);
         self.send_position_packet(connection, game);
 
+        let held_stack = game.player.inventory.held_stack(input.selected_slot());
+        let held_item =
+            held_stack.map(|data| crate::player::inventory::item_resource_name(data.kind));
         let eye_pos = game.player.eye_pos();
         game.interaction.update_target(
             eye_pos,
@@ -2855,13 +2858,12 @@ impl AppCore {
             &game.chunk_store,
             &game.entity_store,
             crate::player::is_creative(game.player.game_mode),
+            held_item.as_deref(),
         );
 
-        let held_stack = game.player.inventory.held_stack(input.selected_slot());
-        let place_block = held_stack.and_then(|data| {
-            let name = crate::player::inventory::item_resource_name(data.kind);
-            renderer.registry().placeable_block_for_item(&name)
-        });
+        let place_block = held_item
+            .as_deref()
+            .and_then(|name| renderer.registry().placeable_block_for_item(name));
         let hands_empty = held_stack.is_none() && game.player.inventory.offhand().is_empty();
 
         let player_aabb = game.player.bounding_box();

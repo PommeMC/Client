@@ -18,7 +18,7 @@ use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedIte
 use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
 use azalea_registry::builtin::{Attribute, BlockKind, EntityKind, ItemKind};
-use glam::{DVec3, Vec3, dvec3};
+use glam::{DVec3, Vec3};
 use pomme_protocol::wire;
 
 use crate::app::input::{self, InputState};
@@ -33,7 +33,7 @@ use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::held_item::UseAnim;
 use crate::world::block::registry::BlockRegistry;
 use crate::world::block::sound::block_sounds;
-use crate::world::block::{has_collision, is_air};
+use crate::world::block::{has_collision, is_air, outline_shape_position};
 use crate::world::chunk::ChunkStore;
 
 const REACH: f32 = 4.5;
@@ -322,6 +322,7 @@ impl InteractionState {
         chunks: &ChunkStore,
         entities: &EntityStore,
         creative: bool,
+        held_item: Option<&str>,
     ) {
         let entity_reach = ENTITY_REACH
             + if creative {
@@ -333,7 +334,7 @@ impl InteractionState {
 
         let from: DVec3 = eye_pos.into();
         let dir = look_dir.as_vec();
-        let block_hit = raycast(from, dir, REACH, chunks);
+        let block_hit = raycast(from, dir, REACH, chunks, held_item);
 
         let block_dist_sq = block_hit
             .map(|h| h.hit_point.distance_squared(from))
@@ -1521,11 +1522,13 @@ fn mark_dirty(pos: &BlockPos, dirty: &mut Vec<BlockPos>) {
     }
 }
 
+/// `held_item` is the main-hand item id, which some outlines depend on.
 pub fn raycast(
     origin: DVec3,
     dir: Vec3,
     max_dist: f32,
     chunks: &ChunkStore,
+    held_item: Option<&str>,
 ) -> Option<BlockHitResult> {
     let dir = dir.as_dvec3();
     let mut bx = origin.x.floor() as i32;
@@ -1578,8 +1581,9 @@ pub fn raycast(
                 y: by,
                 z: bz,
             };
-            let outline = block_shape::outline_shape(state);
-            if let Some((hit_point, face)) = clip_shape(origin, reach_end, block_pos, outline) {
+            let outline = block_shape::outline_shape_holding(state, held_item);
+            let shape_offset = outline_shape_position(state, bx, by, bz);
+            if let Some((hit_point, face)) = clip_shape(origin, reach_end, shape_offset, outline) {
                 return Some(BlockHitResult {
                     block_pos,
                     face,
@@ -1668,13 +1672,12 @@ const INSIDE_PROBE_FRACTION: f64 = 0.001;
 fn clip_shape(
     from: DVec3,
     to: DVec3,
-    block_pos: BlockPos,
+    offset: DVec3,
     boxes: &[LocalBox],
 ) -> Option<(DVec3, Direction)> {
     if boxes.is_empty() {
         return None;
     }
-    let offset = dvec3(block_pos.x as f64, block_pos.y as f64, block_pos.z as f64);
     let ray = to - from;
     let probe = from + ray * INSIDE_PROBE_FRACTION;
 
@@ -1759,6 +1762,7 @@ pub(crate) fn send_swap_offhand(sender: &PacketSender) {
 mod tests {
     use azalea_registry::HolderSet;
     use azalea_registry::identifier::Identifier;
+    use glam::dvec3;
 
     use super::*;
 
@@ -1899,7 +1903,7 @@ mod tests {
     #[test]
     fn ray_over_partial_block_misses_but_ray_onto_it_hits() {
         let slab_height = 0.5;
-        let block = BlockPos::new(0, 0, 0);
+        let block = DVec3::ZERO;
         let bottom_slab: [LocalBox; 1] = [[0.0, 0.0, 0.0, 1.0, slab_height, 1.0]];
         let origin = dvec3(-1.0, 1.5, 0.5);
 
@@ -1919,7 +1923,7 @@ mod tests {
     /// not at the ray's origin.
     #[test]
     fn ray_starting_inside_partial_block_hits_immediately() {
-        let block = BlockPos::new(0, 0, 0);
+        let block = DVec3::ZERO;
         let bottom_slab: [LocalBox; 1] = [[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]];
         let inside_the_slab = dvec3(0.5, 0.25, 0.5);
         let ray = dvec3(0.0, -4.0, 0.0);
@@ -1934,7 +1938,7 @@ mod tests {
     /// so the caller walks on to the block behind it.
     #[test]
     fn ray_passes_through_an_empty_shape() {
-        let block = BlockPos::new(0, 0, 0);
+        let block = DVec3::ZERO;
         let from = dvec3(0.5, 2.0, 0.5);
         assert!(clip_shape(from, from + dvec3(0.0, -4.0, 0.0), block, &[]).is_none());
     }

@@ -6,6 +6,7 @@ use glam::{DVec3, dvec3};
 use winit::keyboard::KeyCode;
 
 use super::aabb::Aabb;
+use super::block_shape::CollisionContext;
 use super::collision::{no_collision, resolve_collision};
 use crate::app::input::{self, InputState};
 use crate::player::{CROUCH_HEIGHT, LocalPlayer, PLAYER_HALF_WIDTH, STANDING_HEIGHT};
@@ -397,6 +398,7 @@ fn apply_collision(
     cos_y_rot: f32,
 ) {
     let aabb = player.bounding_box();
+    let ctx = collision_context(player, input);
     let delta = back_off_from_edge(
         chunk_store,
         &aabb,
@@ -404,13 +406,15 @@ fn apply_collision(
         input.performing_action(input::Action::Sneak),
         player.on_ground,
         player.flying,
+        &ctx,
     );
     let step_height = if player.on_ground {
         f64::from(STEP_HEIGHT)
     } else {
         0.0
     };
-    let (resolved, on_ground) = resolve_collision(chunk_store, aabb, delta.into(), step_height);
+    let (resolved, on_ground) =
+        resolve_collision(chunk_store, aabb, delta.into(), step_height, &ctx);
 
     // Vanilla horizontal collision flags use Mth.equal(double, double), whose
     // epsilon is the widened float constant 1.0E-5f.
@@ -491,19 +495,36 @@ fn update_sprint_state(
 // `LocalPlayer.aiStep`: forces the crouch pose under ceilings too low to
 // stand in, unless asleep. Riding isn't simulated.
 fn update_crouch_state(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkStore) {
+    let ctx = collision_context(player, input);
+    let pos = player.position.into();
     player.crouching = player.game_mode != 3
         && !player.flying
         && !player.swimming
-        && can_fit_with_height(chunk_store, player.position.into(), CROUCH_HEIGHT)
+        && can_fit_with_height(chunk_store, pos, CROUCH_HEIGHT, &ctx)
         && (input.performing_action(input::Action::Sneak)
             || !player.is_sleeping()
-                && !can_fit_with_height(chunk_store, player.position.into(), STANDING_HEIGHT));
+                && !can_fit_with_height(chunk_store, pos, STANDING_HEIGHT, &ctx));
 }
 
-fn can_fit_with_height(chunk_store: &ChunkStore, pos: DVec3, height: f64) -> bool {
+/// `CollisionContext.of(player)`.
+fn collision_context(player: &LocalPlayer, input: &InputState) -> CollisionContext {
+    CollisionContext::entity(
+        player.position.y,
+        input.performing_action(input::Action::Sneak),
+        player.inventory.wears_leather_boots(),
+    )
+}
+
+fn can_fit_with_height(
+    chunk_store: &ChunkStore,
+    pos: DVec3,
+    height: f64,
+    ctx: &CollisionContext,
+) -> bool {
     no_collision(
         chunk_store,
         &Aabb::from_center(pos, PLAYER_HALF_WIDTH, height / 2.0).deflate(1.0e-7),
+        ctx,
     )
 }
 
@@ -516,14 +537,15 @@ fn back_off_from_edge(
     shift_down: bool,
     on_ground: bool,
     flying: bool,
+    ctx: &CollisionContext,
 ) -> DVec3 {
     if !shift_down || flying || delta.y > 0.0 {
         return delta;
     }
+    let can_fall = |dx, dz| can_fall_at_least(chunk_store, bb, dx, dz, f64::from(STEP_HEIGHT), ctx);
     // TODO: fall distance - falling less than the step height still counts
     // as above ground
-    let above_ground =
-        on_ground || !can_fall_at_least(chunk_store, bb, 0.0, 0.0, f64::from(STEP_HEIGHT));
+    let above_ground = on_ground || !can_fall(0.0, 0.0);
     if !above_ground {
         return delta;
     }
@@ -533,24 +555,21 @@ fn back_off_from_edge(
     let step_x = dx.signum() * 0.05;
     let step_z = dz.signum() * 0.05;
 
-    while dx != 0.0 && can_fall_at_least(chunk_store, bb, dx, 0.0, f64::from(STEP_HEIGHT)) {
+    while dx != 0.0 && can_fall(dx, 0.0) {
         if dx.abs() <= 0.05 {
             dx = 0.0;
             break;
         }
         dx -= step_x;
     }
-    while dz != 0.0 && can_fall_at_least(chunk_store, bb, 0.0, dz, f64::from(STEP_HEIGHT)) {
+    while dz != 0.0 && can_fall(0.0, dz) {
         if dz.abs() <= 0.05 {
             dz = 0.0;
             break;
         }
         dz -= step_z;
     }
-    while dx != 0.0
-        && dz != 0.0
-        && can_fall_at_least(chunk_store, bb, dx, dz, f64::from(STEP_HEIGHT))
-    {
+    while dx != 0.0 && dz != 0.0 && can_fall(dx, dz) {
         dx = if dx.abs() <= 0.05 { 0.0 } else { dx - step_x };
         if dz.abs() <= 0.05 {
             dz = 0.0;
@@ -568,6 +587,7 @@ fn can_fall_at_least(
     dx: f64,
     dz: f64,
     min_height: f64,
+    ctx: &CollisionContext,
 ) -> bool {
     no_collision(
         chunk_store,
@@ -579,6 +599,7 @@ fn can_fall_at_least(
             ),
             dvec3(bb.max.x - 1.0e-7 + dx, bb.min.y, bb.max.z - 1.0e-7 + dz),
         ),
+        ctx,
     )
 }
 

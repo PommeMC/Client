@@ -11,6 +11,7 @@ use crate::attribute::AttributeMap;
 use crate::entity::components::{LookDirection, Position};
 use crate::entity::villager::{VillagerKind, VillagerProfession};
 use crate::physics::aabb::Aabb;
+use crate::physics::block_shape::CollisionContext;
 use crate::physics::collision::resolve_collision;
 use crate::world::block::{FluidKind, fluid};
 use crate::world::chunk::ChunkStore;
@@ -996,7 +997,9 @@ fn tick_item_physics(id: i32, entity: &mut ItemEntity, chunk_store: &ChunkStore)
     }
 
     let aabb = Aabb::from_center(entity.position.into(), ITEM_HALF_WIDTH, ITEM_HALF_WIDTH);
-    let (delta, on_ground) = resolve_collision(chunk_store, aabb, entity.velocity.into(), 0.0);
+    let ctx = CollisionContext::entity(entity.position.y, false, false);
+    let (delta, on_ground) =
+        resolve_collision(chunk_store, aabb, entity.velocity.into(), 0.0, &ctx);
     entity.position += delta;
     entity.on_ground = on_ground;
 

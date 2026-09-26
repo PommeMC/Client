@@ -71,6 +71,14 @@ impl Inventory {
         self.slot(CRAFT_OUTPUT)
     }
 
+    /// The `canEntityWalkOnPowderSnow` check: leather boots in the feet slot.
+    pub fn wears_leather_boots(&self) -> bool {
+        matches!(
+            self.slot(ARMOR_END - 1),
+            ItemStack::Present(data) if data.kind == ItemKind::LeatherBoots
+        )
+    }
+
     pub fn offhand(&self) -> &ItemStack {
         self.slot(OFFHAND)
     }
