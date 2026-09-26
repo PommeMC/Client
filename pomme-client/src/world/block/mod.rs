@@ -1259,8 +1259,7 @@ mod tests {
     fn generated_26_2_collision_shapes_cover_state_derived_families() {
         setup();
 
-        // Fence collision rises to 1.5 blocks while its interaction outline is
-        // only one block tall. This was previously a full-cube fallback.
+        // Fence collision is 1.5 tall; its outline stays one block.
         let fence = find_state(
             "oak_fence",
             &[
@@ -1343,8 +1342,7 @@ mod tests {
             Some(&[[0.0625, 0.0, 0.0625, 0.9375, 0.5, 0.9375]][..])
         );
 
-        // Hollow container shapes prove we retain multi-box geometry rather
-        // than replacing complex blocks with a bounding cube.
+        // Hollow containers keep their multi-box geometry.
         let cauldron = block_shape(find_state("cauldron", &[])).unwrap();
         assert!(cauldron.len() > 4);
         assert!(!is_full_cube_shape(cauldron));

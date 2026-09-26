@@ -542,18 +542,19 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
         }
     }
 
-    // Dedupe collision + outline AABBs into a shared dictionary. Exact IEEE-754
-    // bit patterns are the key: no coordinate quantization or fuzzy equality.
+    // Dedupe collision + outline shapes into one dictionary keyed on exact bits.
     let mut shape_dict: Vec<Vec<f64>> = Vec::new();
     let mut shape_dict_index: std::collections::HashMap<Vec<u64>, u32> =
         std::collections::HashMap::new();
-    let mut state_collision_shapes = Vec::with_capacity(n);
-    let mut state_outline_shapes = Vec::with_capacity(n);
+    let mut state_shapes = [Vec::with_capacity(n), Vec::with_capacity(n)];
     for i in 0..n {
-        for (kind, shape) in [
+        for (k, (kind, shape)) in [
             ("collision", &dump.collision_shapes[i]),
             ("outline", &dump.outline_shapes[i]),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             if shape.len() % 6 != 0 {
                 return Err(format!(
                     "state {i}: {kind} shape has {} coordinates, expected a multiple of 6",
@@ -575,18 +576,10 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
                     .into());
                 }
             }
+            state_shapes[k].push(shape_index(shape, &mut shape_dict, &mut shape_dict_index));
         }
-        state_collision_shapes.push(shape_index(
-            &dump.collision_shapes[i],
-            &mut shape_dict,
-            &mut shape_dict_index,
-        ));
-        state_outline_shapes.push(shape_index(
-            &dump.outline_shapes[i],
-            &mut shape_dict,
-            &mut shape_dict_index,
-        ));
     }
+    let [state_collision_shapes, state_outline_shapes] = state_shapes;
 
     // Dedupe face masks into a dictionary, iterating in ascending state-id
     // order so the output is deterministic.
