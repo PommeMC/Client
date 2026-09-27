@@ -2183,21 +2183,13 @@ impl AppCore {
                             game.silent_entities.remove(&id);
                         }
                     }
-                    if id == game.player.entity_id {
-                        if index == 0
-                            && let crate::entity::MetaValue::Byte(flags) = &value
-                        {
-                            // Vanilla ClientPacketListener applies the shared
-                            // entity-flags byte to LocalPlayer too. The local
-                            // player is intentionally not stored in EntityStore,
-                            // so mirror the synced sprint/swim bits here rather
-                            // than silently dropping authoritative self metadata.
-                            game.player.sync_shared_flags(*flags);
-                        }
-                        if index == 8
-                            && let crate::entity::MetaValue::Byte(flags) = &value
-                        {
-                            game.interaction.sync_using_item_flag(*flags & 1 != 0);
+                    if id == game.player.entity_id
+                        && let crate::entity::MetaValue::Byte(flags) = value
+                    {
+                        match index {
+                            0 => game.player.sync_shared_flags(flags),
+                            8 => game.interaction.sync_using_item_flag(flags & 1 != 0),
+                            _ => {}
                         }
                     }
                     game.entity_store.apply_entity_data(id, index, value);
@@ -2841,6 +2833,9 @@ impl AppCore {
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
         }
+        let vehicle = game.riding_vehicle_id.map(|_| movement::Vehicle {
+            jumpable: game.riding_jumpable_vehicle(),
+        });
         movement::tick(
             &mut game.player,
             input,
@@ -2848,7 +2843,7 @@ impl AppCore {
             &game.block_entity_anim,
             game.interaction.use_speed_multiplier(),
             game.interaction.slow_due_to_using_item(),
-            game.riding_vehicle_id.is_some(),
+            vehicle,
         );
         let dx = game.player.position.x - game.player.prev_position.x;
         let dz = game.player.position.z - game.player.prev_position.z;

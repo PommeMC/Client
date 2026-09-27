@@ -113,26 +113,20 @@ impl Aabb {
     }
 
     fn clip_axis(&self, other: &Aabb, mut delta: f64, axis: Axis) -> f64 {
-        // Vanilla `Shapes.collide` treats sub-epsilon motion as zero before
-        // examining shapes. This is observable in exact ground/contact probes.
+        // Vanilla `Shapes.collide` zeroes sub-epsilon motion.
         if delta.abs() < EPSILON {
             return 0.0;
         }
 
         let (c1, c2) = axis.cross_axes();
 
-        // `VoxelShape.collideX` samples the two cross axes from the moving
-        // AABB's min+epsilon / max-epsilon. For an AABB voxel shape this is
-        // equivalent to deflating the moving box on those axes by EPSILON.
-        if component(other.max, c1) - EPSILON <= component(self.min, c1)
-            || component(other.min, c1) + EPSILON >= component(self.max, c1)
-        {
-            return delta;
-        }
-        if component(other.max, c2) - EPSILON <= component(self.min, c2)
-            || component(other.min, c2) + EPSILON >= component(self.max, c2)
-        {
-            return delta;
+        // `VoxelShape.collideX` samples the cross axes EPSILON inside the box.
+        for c in [c1, c2] {
+            if component(other.max, c) - EPSILON <= component(self.min, c)
+                || component(other.min, c) + EPSILON >= component(self.max, c)
+            {
+                return delta;
+            }
         }
 
         if delta > 0.0 {

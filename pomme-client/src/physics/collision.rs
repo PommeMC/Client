@@ -52,8 +52,23 @@ impl CollisionWorld<'_> {
         }
         Some(Aabb::from_local(
             local,
-            dvec3(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z)),
+            collision_shape_position(state, pos.x, pos.y, pos.z),
         ))
+    }
+
+    fn for_each_block_collision(
+        &self,
+        region: &Aabb,
+        ctx: &CollisionContext,
+        visit: impl FnMut(BlockPos, &[Aabb]),
+    ) {
+        for_each_block_collision(
+            region,
+            ctx,
+            |x, y, z| self.chunks.get_block_state(x, y, z),
+            |state, pos| self.shulker_lid(state, pos),
+            visit,
+        );
     }
 }
 
@@ -111,30 +126,14 @@ fn for_each_block_collision(
     }
 }
 
-fn block_aabbs(
-    region: &Aabb,
-    ctx: &CollisionContext,
-    state_at: impl Fn(i32, i32, i32) -> BlockState,
-    shulker_lid: impl Fn(BlockState, BlockPos) -> Option<Aabb>,
-) -> Vec<Aabb> {
-    let mut aabbs = Vec::new();
-    for_each_block_collision(region, ctx, state_at, shulker_lid, |_, boxes| {
-        aabbs.extend_from_slice(boxes)
-    });
-    aabbs
-}
-
 pub fn collect_block_aabbs(
     world: CollisionWorld<'_>,
     region: &Aabb,
     ctx: &CollisionContext,
 ) -> Vec<Aabb> {
-    block_aabbs(
-        region,
-        ctx,
-        |x, y, z| world.chunks.get_block_state(x, y, z),
-        |state, pos| world.shulker_lid(state, pos),
-    )
+    let mut aabbs = Vec::new();
+    world.for_each_block_collision(region, ctx, |_, boxes| aabbs.extend_from_slice(boxes));
+    aabbs
 }
 
 pub fn no_collision(world: CollisionWorld<'_>, aabb: &Aabb, ctx: &CollisionContext) -> bool {
@@ -155,27 +154,21 @@ pub fn find_supporting_block(
     ctx: &CollisionContext,
 ) -> Option<BlockPos> {
     let mut best: Option<(BlockPos, f64)> = None;
-    for_each_block_collision(
-        test_area,
-        ctx,
-        |x, y, z| world.chunks.get_block_state(x, y, z),
-        |state, pos| world.shulker_lid(state, pos),
-        |pos, _| {
-            let center = dvec3(
-                f64::from(pos.x) + 0.5,
-                f64::from(pos.y) + 0.5,
-                f64::from(pos.z) + 0.5,
-            );
-            let distance = (center - entity_position).length_squared();
-            let wins = best.is_none_or(|(current, best_distance)| {
-                distance < best_distance
-                    || distance == best_distance && support_pos_greater(pos, current)
-            });
-            if wins {
-                best = Some((pos, distance));
-            }
-        },
-    );
+    world.for_each_block_collision(test_area, ctx, |pos, _| {
+        let center = dvec3(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.5,
+            f64::from(pos.z) + 0.5,
+        );
+        let distance = (center - entity_position).length_squared();
+        let wins = best.is_none_or(|(current, best_distance)| {
+            distance < best_distance
+                || distance == best_distance && support_pos_greater(pos, current)
+        });
+        if wins {
+            best = Some((pos, distance));
+        }
+    });
     best.map(|(pos, _)| pos)
 }
 
@@ -319,7 +312,8 @@ mod tests {
             feet - dvec3(PLAYER_HALF_WIDTH, 0.1, PLAYER_HALF_WIDTH),
             feet + dvec3(PLAYER_HALF_WIDTH, 1.8, PLAYER_HALF_WIDTH),
         );
-        block_aabbs(
+        let mut aabbs = Vec::new();
+        for_each_block_collision(
             &region,
             ctx,
             |x, y, z| {
@@ -330,7 +324,9 @@ mod tests {
                 }
             },
             |_, _| None,
-        )
+            |_, boxes| aabbs.extend_from_slice(boxes),
+        );
+        aabbs
     }
 
     #[test]

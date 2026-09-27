@@ -135,6 +135,13 @@ impl ActiveMobEffects {
         self.0.is_empty()
     }
 
+    /// Vanilla `hasEffect`, by registry path.
+    pub fn has(&self, name: &str) -> bool {
+        self.0
+            .iter()
+            .any(|e| info(e.effect_id).is_some_and(|i| i.name == name))
+    }
+
     /// Vanilla `tickClient`: durations floor at 0 and the entry stays until
     /// the server's remove packet.
     pub fn tick(&mut self) {
