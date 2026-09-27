@@ -3,13 +3,15 @@ pub mod villager;
 
 use std::collections::HashMap;
 
-use azalea_core::position::ChunkPos;
+use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
 
+use crate::attribute::AttributeMap;
 use crate::entity::components::{LookDirection, Position};
 use crate::entity::villager::{VillagerKind, VillagerProfession};
 use crate::physics::aabb::Aabb;
+use crate::physics::block_shape::CollisionContext;
 use crate::physics::collision::resolve_collision;
 use crate::world::block::{FluidKind, fluid};
 use crate::world::chunk::ChunkStore;
@@ -131,6 +133,8 @@ pub struct LivingEntity {
     pub prev_walk_anim_speed: f32,
     pub is_baby: bool,
     pub is_crouching: bool,
+    /// Vanilla LivingEntity SLEEPING_POS metadata.
+    pub sleeping_pos: Option<BlockPos>,
     pub on_ground: bool,
     pub wool_color: Option<u8>,
     /// Sheep wool shorn / bogged mushrooms shorn.
@@ -170,6 +174,12 @@ pub struct LivingEntity {
     pub health: f32,
     /// `max_health` attribute (`UpdateAttributes`); sizes the mount heart row.
     pub max_health: f32,
+    /// `camera_distance` attribute (`UpdateAttributes`); a ridden mount can
+    /// push the third-person camera further out.
+    pub camera_distance: f32,
+    /// Attributes learned from `UpdateAttributes`; per-type suppliers aren't
+    /// modeled yet.
+    pub attributes: AttributeMap,
     pub interested_angle: f32,
     pub prev_interested_angle: f32,
     pub shake_anim: f32,
@@ -287,6 +297,7 @@ impl LivingEntity {
             prev_walk_anim_speed: 0.0,
             is_baby: false,
             is_crouching: false,
+            sleeping_pos: None,
             // Spawn grounded: on_ground is packet-driven and a stationary
             // entity gets no movement packet for up to 60 ticks.
             on_ground: true,
@@ -319,6 +330,8 @@ impl LivingEntity {
             // reads it before the metadata arrives.
             health: default_health,
             max_health: default_health,
+            camera_distance: crate::renderer::camera::THIRD_PERSON_DISTANCE,
+            attributes: AttributeMap::default(),
             interested_angle: 0.0,
             prev_interested_angle: 0.0,
             shake_anim: 0.0,
@@ -984,8 +997,15 @@ fn tick_item_physics(id: i32, entity: &mut ItemEntity, chunk_store: &ChunkStore)
     }
 
     let aabb = Aabb::from_center(entity.position.into(), ITEM_HALF_WIDTH, ITEM_HALF_WIDTH);
-    let (delta, on_ground) =
-        resolve_collision(chunk_store, aabb, entity.velocity.into(), 0.0, false);
+    let ctx = CollisionContext::entity(entity.position.y, false, false);
+    let (delta, on_ground) = resolve_collision(
+        chunk_store.into(),
+        aabb,
+        entity.velocity.into(),
+        0.0,
+        entity.on_ground,
+        &ctx,
+    );
     entity.position += delta;
     entity.on_ground = on_ground;
 
@@ -1059,6 +1079,18 @@ impl EntityStore {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.interpolate_to_pos(position);
             entity.on_ground = on_ground;
+        }
+    }
+
+    /// Apply LivingEntity SLEEPING_POS; `setPosToBed` is a plain `setPos`, so
+    /// the previous position and any interpolation are left alone.
+    pub fn set_sleeping_pos(&mut self, id: i32, pos: Option<BlockPos>) {
+        let Some(entity) = self.living.get_mut(&id) else {
+            return;
+        };
+        entity.sleeping_pos = pos;
+        if let Some(pos) = pos {
+            entity.position = crate::world::block::sleeping_position(pos).into();
         }
     }
 
@@ -1487,6 +1519,35 @@ fn probes_water(kind: &EntityKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sleeping_metadata_moves_remote_living_entity_to_bed_center() {
+        let mut store = EntityStore::new();
+        store.spawn_living(
+            1,
+            EntityKind::Villager,
+            Position::new(10.0, 70.0, 10.0),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+
+        let bed = BlockPos::new(2, 64, -5);
+        store.set_sleeping_pos(1, Some(bed));
+        let entity = &store.living[&1];
+        assert_eq!(entity.sleeping_pos, Some(bed));
+        assert_eq!(entity.position, Position::new(2.5, 64.6875, -4.5));
+        // `setPos` leaves the previous position, so the sleeper lerps in.
+        assert_eq!(entity.prev_position, Position::new(10.0, 70.0, 10.0));
+
+        store.set_sleeping_pos(1, None);
+        assert_eq!(store.living[&1].sleeping_pos, None);
+        assert_eq!(
+            store.living[&1].position,
+            Position::new(2.5, 64.6875, -4.5),
+            "clearing SLEEPING_POS does not choose the collision-dependent stand-up position"
+        );
+    }
 
     #[test]
     fn tick_living_advances_remote_interpolation_state() {

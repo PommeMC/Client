@@ -1,5 +1,5 @@
 use glam::camera::rh::{proj, view};
-use glam::{DVec3, FloatExt, Mat4, Vec3};
+use glam::{DVec3, FloatExt, Mat4, Vec2, Vec3};
 
 use crate::app::input::InputState;
 use crate::entity::HURT_DURATION;
@@ -17,6 +17,7 @@ const NEAR: f32 = 0.1;
 pub(crate) const MIN_FAR: f32 = 1000.0;
 /// Controller look speed in degrees per second, scaled by frame delta.
 const CONTROLLER_SENSITIVITY: f32 = 150.0;
+/// Vanilla `Attributes.CAMERA_DISTANCE`'s default.
 pub const THIRD_PERSON_DISTANCE: f32 = 4.0;
 
 fn death_duration(death_time: f32) -> f32 {
@@ -107,6 +108,8 @@ impl CloudMode {
 pub struct Camera {
     pub position: Position,
     pub look_dir: LookDirection,
+    /// The first-person view along the bed while asleep; render-only.
+    sleeping_look_dir: Option<LookDirection>,
     pub mode: CameraMode,
     pub third_person_dist: f32,
     /// When set, render straight down from this many blocks above the pivot,
@@ -137,6 +140,7 @@ impl Camera {
         Self {
             position: Position::default(),
             look_dir: LookDirection::default(),
+            sleeping_look_dir: None,
             mode: CameraMode::FirstPerson,
             third_person_dist: THIRD_PERSON_DISTANCE,
             top_down: None,
@@ -230,22 +234,35 @@ impl Camera {
 
     pub fn update_look(&mut self, input: &mut InputState, dt: f32, sensitivity: f32) {
         if let Some(look_vec) = input.get_gamepad_right_analog() {
-            let step = CONTROLLER_SENSITIVITY * dt;
-            let y_rot_deg =
-                ((self.look_dir.y_rot_deg() + look_vec.x * step) + 180.0).rem_euclid(360.0) - 180.0;
-            let x_rot_deg = self.look_dir.x_rot_deg() - look_vec.y * step; //TODO: Add preference for inverting the Y axis
-            self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
+            self.update_gamepad_look(look_vec, dt, false);
         }
 
         if input.is_cursor_captured() {
             let (dx, dy) = input.consume_mouse_delta();
             let mouse_sensitivity = mouse_sensitivity_multiplier(sensitivity);
-            let y_rot_deg = ((self.look_dir.y_rot_deg() + dx as f32 * mouse_sensitivity) + 180.0)
-                .rem_euclid(360.0)
-                - 180.0;
-            let x_rot_deg = self.look_dir.x_rot_deg() + dy as f32 * mouse_sensitivity;
-            self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
+            self.turn(dx as f32 * mouse_sensitivity, dy as f32 * mouse_sensitivity);
         }
+    }
+
+    /// gilrs reports stick-up as `+y` and `x_rot` is positive downwards, so
+    /// the un-inverted case negates.
+    ///
+    /// TODO: nothing passes `invert_y: true` yet — there is no invert
+    /// preference.
+    fn update_gamepad_look(&mut self, look_vec: Vec2, dt: f32, invert_y: bool) {
+        let step = CONTROLLER_SENSITIVITY * dt;
+        let pitch_sign = if invert_y { 1.0 } else { -1.0 };
+        self.turn(look_vec.x * step, look_vec.y * pitch_sign * step);
+    }
+
+    /// Vanilla `Entity.turn`: add the already-scaled deltas, clamping pitch
+    /// (in `LookDirection::new`). Pomme additionally wraps yaw into
+    /// (-180, 180].
+    fn turn(&mut self, y_rot_delta: f32, x_rot_delta: f32) {
+        let y_rot_deg =
+            ((self.look_dir.y_rot_deg() + y_rot_delta) + 180.0).rem_euclid(360.0) - 180.0;
+        let x_rot_deg = self.look_dir.x_rot_deg() + x_rot_delta;
+        self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
     }
 
     pub fn set_aspect_ratio(&mut self, aspect: f32) {
@@ -259,6 +276,22 @@ impl Camera {
 
     pub fn sync_pos(&mut self, position: Position) {
         self.position = position
+    }
+
+    pub fn set_sleeping_look(&mut self, yaw_deg: Option<f32>) {
+        self.sleeping_look_dir = yaw_deg.map(|yaw| {
+            // `LivingEntity.tick` zeroes xRot while sleeping; yaw stays the entity's.
+            self.look_dir = LookDirection::new(self.look_dir.y_rot_deg(), 0.0);
+            LookDirection::new(yaw, 0.0)
+        });
+    }
+
+    fn render_look_dir(&self) -> LookDirection {
+        if self.mode == CameraMode::FirstPerson {
+            self.sleeping_look_dir.unwrap_or(self.look_dir)
+        } else {
+            self.look_dir
+        }
     }
 
     /// Render-space anchor: the camera's block position (vanilla
@@ -361,7 +394,7 @@ impl Camera {
         if let Some(height) = self.top_down {
             return Vec3::new(0.0, height, 0.0);
         }
-        let fwd = self.look_dir.as_vec();
+        let fwd = self.render_look_dir().as_vec();
         match self.mode {
             CameraMode::FirstPerson => Vec3::ZERO,
             CameraMode::ThirdPersonBack => -fwd * self.third_person_dist,
@@ -378,8 +411,9 @@ impl Camera {
             // Looking straight down with north up.
             return (Vec3::X, Vec3::NEG_Z);
         }
-        let (sin_yaw, cos_yaw) = self.look_dir.y_rot_rad().sin_cos();
-        let (sin_pitch, cos_pitch) = self.look_dir.x_rot_rad().sin_cos();
+        let look_dir = self.render_look_dir();
+        let (sin_yaw, cos_yaw) = look_dir.y_rot_rad().sin_cos();
+        let (sin_pitch, cos_pitch) = look_dir.x_rot_rad().sin_cos();
         let right = Vec3::new(-cos_yaw, 0.0, -sin_yaw);
         let up = Vec3::new(-sin_yaw * sin_pitch, cos_pitch, cos_yaw * sin_pitch);
         if self.mode == CameraMode::ThirdPersonFront {
@@ -397,7 +431,7 @@ impl Camera {
             // Looking straight down Y; Y can't be the up hint, so use -Z (north up).
             return (Vec3::NEG_Y, Vec3::NEG_Z);
         }
-        let look_dir = self.look_dir.as_vec();
+        let look_dir = self.render_look_dir().as_vec();
         let forward = if self.mode == CameraMode::ThirdPersonFront {
             -look_dir
         } else {
@@ -463,8 +497,9 @@ impl Camera {
     /// Camera yaw/pitch in degrees as vanilla `Camera.setRotation` sees them:
     /// the mirrored third-person view turns around (yaw + 180, pitch negated).
     pub fn effective_look_deg(&self) -> (f32, f32) {
-        let yaw = self.look_dir.y_rot_deg();
-        let pitch = self.look_dir.x_rot_deg();
+        let look_dir = self.render_look_dir();
+        let yaw = look_dir.y_rot_deg();
+        let pitch = look_dir.x_rot_deg();
         if self.mode == CameraMode::ThirdPersonFront {
             (yaw + 180.0, -pitch)
         } else {
@@ -718,12 +753,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sleeping_bed_yaw_is_render_only_but_pitch_is_authoritative() {
+        let mut camera = Camera::new(16.0 / 9.0);
+        camera.look_dir = LookDirection::new(37.0, -12.0);
+        camera.set_sleeping_look(Some(90.0));
+        assert_eq!(camera.look_dir.y_rot_deg(), 37.0);
+        assert_eq!(camera.look_dir.x_rot_deg(), 0.0);
+        assert_eq!(camera.effective_look_deg(), (90.0, 0.0));
+        camera.mode = CameraMode::ThirdPersonBack;
+        assert_eq!(camera.effective_look_deg(), (37.0, 0.0));
+        camera.mode = CameraMode::FirstPerson;
+        camera.set_sleeping_look(None);
+        assert_eq!(camera.effective_look_deg(), (37.0, 0.0));
+    }
+
     /// The midpoint is the multiplier pomme hardcoded before the slider
     /// existed.
     #[test]
     fn mouse_sensitivity_curve_matches_vanilla() {
         for (sensitivity, expected) in [(0.0, 0.0096), (0.5, 0.15), (1.0, 0.6144)] {
             assert!((mouse_sensitivity_multiplier(sensitivity) - expected).abs() < 1e-6);
+        }
+    }
+
+    /// Vanilla `MouseHandler.turnPlayer` applies the invert option as a sign
+    /// flip on the look delta, and only on the axis it names.
+    #[test]
+    fn gamepad_invert_y_flips_pitch_without_touching_yaw() {
+        for (invert_y, expected_pitch) in [(false, -15.0), (true, 15.0)] {
+            let mut camera = Camera::new(16.0 / 9.0);
+            camera.update_gamepad_look(Vec2::new(0.2, 0.1), 1.0, invert_y);
+            assert!(
+                (camera.look_dir.x_rot_deg() - expected_pitch).abs() < 1e-5,
+                "invert_y={invert_y} gave pitch {}, expected {expected_pitch}",
+                camera.look_dir.x_rot_deg()
+            );
+            assert!(
+                (camera.look_dir.y_rot_deg() - 30.0).abs() < 1e-5,
+                "invert_y={invert_y} changed yaw to {}",
+                camera.look_dir.y_rot_deg()
+            );
         }
     }
 }

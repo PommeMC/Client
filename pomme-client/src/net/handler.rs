@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use azalea_buf::{AzBuf, AzBufVar};
 use azalea_core::bitset::FixedBitSet;
 use azalea_core::position::ChunkPos;
@@ -13,6 +15,11 @@ use super::NetworkEvent;
 use super::chat_security::ProfileKeyServices;
 use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
+use crate::attribute::{
+    AttributeKind, AttributeModifier as ClientAttributeModifier,
+    AttributeModifierOperation as ClientAttributeModifierOperation,
+    AttributeSnapshot as ClientAttributeSnapshot,
+};
 use crate::entity::MetaValue;
 use crate::entity::components::Position;
 use crate::net::chunk_batch::ChunkBatchSizeCalculator;
@@ -20,8 +27,18 @@ use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
+use crate::ui::server_dialog::DialogReference;
 use crate::ui::text::format_text_spans;
 use crate::world::block::model::CardinalLightType;
+
+fn dialog_holder_reference(
+    holder: &azalea_registry::Holder<azalea_registry::data::Dialog, simdnbt::owned::Nbt>,
+) -> DialogReference {
+    match holder {
+        azalea_registry::Holder::Reference(dialog) => DialogReference::ProtocolId(dialog.to_u32()),
+        azalea_registry::Holder::Direct(nbt) => DialogReference::inline(nbt),
+    }
+}
 
 /// Dimension info from a login/respawn registry entry. Fields that Azalea does
 /// not model directly live in its flattened extras. Missing `has_skylight`
@@ -49,6 +66,90 @@ fn dimension_info(
             _ => CardinalLightType::Default,
         },
     }
+}
+
+fn client_attribute_kind(attribute: azalea_registry::builtin::Attribute) -> AttributeKind {
+    use azalea_registry::builtin::Attribute as Wire;
+    match attribute {
+        Wire::AirDragModifier => AttributeKind::AirDragModifier,
+        Wire::Armor => AttributeKind::Armor,
+        Wire::ArmorToughness => AttributeKind::ArmorToughness,
+        Wire::AttackDamage => AttributeKind::AttackDamage,
+        Wire::AttackKnockback => AttributeKind::AttackKnockback,
+        Wire::AttackSpeed => AttributeKind::AttackSpeed,
+        Wire::BelowNameDistance => AttributeKind::BelowNameDistance,
+        Wire::BlockBreakSpeed => AttributeKind::BlockBreakSpeed,
+        Wire::BlockInteractionRange => AttributeKind::BlockInteractionRange,
+        Wire::Bounciness => AttributeKind::Bounciness,
+        Wire::BurningTime => AttributeKind::BurningTime,
+        Wire::CameraDistance => AttributeKind::CameraDistance,
+        Wire::ExplosionKnockbackResistance => AttributeKind::ExplosionKnockbackResistance,
+        Wire::EntityInteractionRange => AttributeKind::EntityInteractionRange,
+        Wire::FallDamageMultiplier => AttributeKind::FallDamageMultiplier,
+        Wire::FlyingSpeed => AttributeKind::FlyingSpeed,
+        Wire::FollowRange => AttributeKind::FollowRange,
+        Wire::FrictionModifier => AttributeKind::FrictionModifier,
+        Wire::Gravity => AttributeKind::Gravity,
+        Wire::JumpStrength => AttributeKind::JumpStrength,
+        Wire::KnockbackResistance => AttributeKind::KnockbackResistance,
+        Wire::Luck => AttributeKind::Luck,
+        Wire::MaxAbsorption => AttributeKind::MaxAbsorption,
+        Wire::MaxHealth => AttributeKind::MaxHealth,
+        Wire::MiningEfficiency => AttributeKind::MiningEfficiency,
+        Wire::MovementEfficiency => AttributeKind::MovementEfficiency,
+        Wire::MovementSpeed => AttributeKind::MovementSpeed,
+        Wire::NameTagDistance => AttributeKind::NameTagDistance,
+        Wire::OxygenBonus => AttributeKind::OxygenBonus,
+        Wire::SafeFallDistance => AttributeKind::SafeFallDistance,
+        Wire::Scale => AttributeKind::Scale,
+        Wire::SneakingSpeed => AttributeKind::SneakingSpeed,
+        Wire::SpawnReinforcements => AttributeKind::SpawnReinforcements,
+        Wire::StepHeight => AttributeKind::StepHeight,
+        Wire::SubmergedMiningSpeed => AttributeKind::SubmergedMiningSpeed,
+        Wire::SweepingDamageRatio => AttributeKind::SweepingDamageRatio,
+        Wire::TemptRange => AttributeKind::TemptRange,
+        Wire::WaterMovementEfficiency => AttributeKind::WaterMovementEfficiency,
+        Wire::WaypointTransmitRange => AttributeKind::WaypointTransmitRange,
+        Wire::WaypointReceiveRange => AttributeKind::WaypointReceiveRange,
+    }
+}
+
+fn client_attribute_operation(
+    operation: azalea_core::attribute_modifier_operation::AttributeModifierOperation,
+) -> ClientAttributeModifierOperation {
+    use azalea_core::attribute_modifier_operation::AttributeModifierOperation as Wire;
+    match operation {
+        Wire::AddValue => ClientAttributeModifierOperation::Value,
+        Wire::AddMultipliedBase => ClientAttributeModifierOperation::MultipliedBase,
+        Wire::AddMultipliedTotal => ClientAttributeModifierOperation::MultipliedTotal,
+    }
+}
+
+fn client_attribute_snapshot(
+    snapshot: &azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot,
+) -> Option<ClientAttributeSnapshot> {
+    let attribute = client_attribute_kind(snapshot.attribute);
+    let mut seen = HashSet::with_capacity(snapshot.modifiers.len());
+    let mut modifiers = Vec::with_capacity(snapshot.modifiers.len());
+    for modifier in &snapshot.modifiers {
+        let id = modifier.id.to_string();
+        if !seen.insert(id.clone()) {
+            tracing::warn!(
+                "Ignoring malformed {attribute:?} snapshot with duplicate modifier {id}"
+            );
+            return None;
+        }
+        modifiers.push(ClientAttributeModifier {
+            id,
+            amount: modifier.amount,
+            operation: client_attribute_operation(modifier.operation),
+        });
+    }
+    Some(ClientAttributeSnapshot {
+        attribute,
+        base: snapshot.base,
+        modifiers,
+    })
 }
 
 pub fn handle_game_packet(
@@ -208,22 +309,32 @@ pub fn handle_game_packet(
         ClientboundGamePacket::ContainerSetContent(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerContent {
                 container_id: p.container_id,
-                items: p.items.clone(),
-                carried: p.carried_item.clone(),
+                items: p
+                    .items
+                    .iter()
+                    .map(super::bundle_codec::normalized)
+                    .collect(),
+                carried: super::bundle_codec::normalized(&p.carried_item),
                 state_id: p.state_id,
             });
         }
         ClientboundGamePacket::SetCursorItem(p) => {
             let _ = event_tx.try_send(NetworkEvent::CursorItem {
-                item: p.contents.clone(),
+                item: super::bundle_codec::normalized(&p.contents),
             });
         }
         ClientboundGamePacket::ContainerSetSlot(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerSlot {
                 container_id: p.container_id,
                 index: p.slot,
-                item: p.item_stack.clone(),
+                item: super::bundle_codec::normalized(&p.item_stack),
                 state_id: p.state_id,
+            });
+        }
+        ClientboundGamePacket::SetPlayerInventory(p) => {
+            let _ = event_tx.try_send(NetworkEvent::PlayerInventorySlot {
+                index: p.slot,
+                item: super::bundle_codec::normalized(&p.contents),
             });
         }
         ClientboundGamePacket::SetHeldSlot(p) if (0..9).contains(&p.slot) => {
@@ -283,37 +394,21 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::UpdateAttributes(p) => {
-            use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
-            use azalea_registry::builtin::Attribute;
-            for snapshot in &p.values {
-                let base = snapshot.base;
-                let mut add = 0.0f64;
-                let mut mul_base = 0.0f64;
-                let mut mul_total = 1.0f64;
-                for m in &snapshot.modifiers {
-                    match m.operation {
-                        AttributeModifierOperation::AddValue => add += m.amount,
-                        AttributeModifierOperation::AddMultipliedBase => mul_base += m.amount,
-                        AttributeModifierOperation::AddMultipliedTotal => {
-                            mul_total *= 1.0 + m.amount
-                        }
-                    }
-                }
-                let value = (base + add) * (1.0 + mul_base) * mul_total;
-                let event = match snapshot.attribute {
-                    Attribute::Armor => NetworkEvent::EntityArmorUpdate {
-                        entity_id: p.entity_id.0,
-                        armor: value.clamp(0.0, 30.0).round() as u32,
-                    },
-                    // Vanilla RangedAttribute MAX_HEALTH clamps to 1..1024.
-                    Attribute::MaxHealth => NetworkEvent::EntityMaxHealthUpdate {
-                        entity_id: p.entity_id.0,
-                        max_health: value.clamp(1.0, 1024.0) as f32,
-                    },
-                    _ => continue,
-                };
-                let _ = event_tx.try_send(event);
-            }
+            // TODO: a duplicate modifier id makes vanilla's `addModifier` throw
+            // after earlier snapshots applied, and `onPacketError` disconnects;
+            // Pomme has no packet-error disconnect yet, so it drops the packet.
+            let Some(snapshots) = p
+                .values
+                .iter()
+                .map(client_attribute_snapshot)
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let _ = event_tx.try_send(NetworkEvent::EntityAttributesUpdate {
+                entity_id: p.entity_id.0,
+                snapshots,
+            });
         }
         ClientboundGamePacket::PlayerAbilities(p) => {
             // TODO: invulnerable and instant_break flags
@@ -1068,6 +1163,14 @@ pub fn handle_game_packet(
             *shared_tree.lock() = Some(tree.clone());
             let _ = event_tx.try_send(NetworkEvent::CommandTree { tree });
         }
+        ClientboundGamePacket::ShowDialog(p) => {
+            let _ = event_tx.try_send(NetworkEvent::ShowDialog {
+                dialog: dialog_holder_reference(&p.dialog),
+            });
+        }
+        ClientboundGamePacket::ClearDialog(_) => {
+            let _ = event_tx.try_send(NetworkEvent::ClearDialog);
+        }
         ClientboundGamePacket::CustomChatCompletions(p) => {
             tracing::debug!(
                 "Custom chat completions: {:?} ({} entries)",
@@ -1593,6 +1696,34 @@ mod tests {
             }
             _ => panic!("expected PlayEntitySound"),
         }
+    }
+
+    #[test]
+    fn duplicate_attribute_modifier_ids_reject_snapshot() {
+        use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
+        use azalea_inventory::components::AttributeModifier;
+        use azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot;
+        use azalea_registry::builtin::Attribute;
+
+        let duplicate = Identifier::new("minecraft:test_duplicate");
+        let snapshot = AttributeSnapshot {
+            attribute: Attribute::AttackSpeed,
+            base: 4.0,
+            modifiers: vec![
+                AttributeModifier {
+                    id: duplicate.clone(),
+                    amount: 1.0,
+                    operation: AttributeModifierOperation::AddValue,
+                },
+                AttributeModifier {
+                    id: duplicate,
+                    amount: 2.0,
+                    operation: AttributeModifierOperation::AddValue,
+                },
+            ],
+        };
+
+        assert!(client_attribute_snapshot(&snapshot).is_none());
     }
 
     #[test]

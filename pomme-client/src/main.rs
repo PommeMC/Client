@@ -7,6 +7,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod app;
 mod args;
 mod assets;
+mod attribute;
 mod audio;
 mod benchmark;
 mod chat_component;

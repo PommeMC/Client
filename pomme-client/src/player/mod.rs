@@ -6,9 +6,11 @@ pub mod tab_list;
 use glam::{dvec2, dvec3};
 use inventory::Inventory;
 
+use crate::attribute::AttributeMap;
 use crate::entity::HURT_DURATION;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::physics::aabb::Aabb;
+use crate::world::block::model::Direction;
 use crate::world::block::{Fluid, FluidKind, block_id, blocks_motion, fluid, is_full_face_sturdy};
 
 pub const MAX_AIR_SUPPLY: i32 = 300;
@@ -21,6 +23,7 @@ pub const SWIMMING_HEIGHT: f64 = 0.6_f32 as f64;
 pub const STANDING_EYE_HEIGHT: f32 = 1.62;
 pub const CROUCH_EYE_HEIGHT: f32 = 1.27;
 pub const SWIMMING_EYE_HEIGHT: f32 = 0.4;
+const SLEEPING_EYE_HEIGHT: f32 = 0.2;
 // Entity.checkInsideBlocks passes the float literal through AABB's double API.
 const INSIDE_BLOCK_MARGIN: f64 = 1.0e-5_f32 as f64;
 const DROWN_DAMAGE_THRESHOLD: i32 = -20;
@@ -37,6 +40,12 @@ pub fn is_survival(game_mode: u8) -> bool {
 /// Matches vanilla GameType.isCreative(): Creative (1).
 pub fn is_creative(game_mode: u8) -> bool {
     game_mode == 1
+}
+
+/// `StringUtil.isValidPlayerName`, which `ExtraCodecs.PLAYER_NAME` enforces
+/// before a profile can be looked up by name.
+pub fn valid_player_name(name: &str) -> bool {
+    name.chars().count() <= 16 && name.chars().all(|c| ('!'..='~').contains(&c))
 }
 
 /// Spectator (3).
@@ -107,7 +116,12 @@ fn water_flow_at(
 
     let mut flow = dvec3(flow_x, 0.0, flow_z);
     if state_fluid.falling {
-        for (dx, dz, direction) in [(0, -1, 2_usize), (1, 0, 5), (0, 1, 3), (-1, 0, 4)] {
+        for (dx, dz, direction) in [
+            (0, -1, Direction::North),
+            (1, 0, Direction::East),
+            (0, 1, Direction::South),
+            (-1, 0, Direction::West),
+        ] {
             let nx = x + dx;
             let nz = z + dz;
             let solid_face = |by| {
@@ -115,7 +129,7 @@ fn water_flow_at(
                 let same_water = fluid(state).kind == FluidKind::Water;
                 !same_water
                     && !matches!(block_id(state), "ice" | "frosted_ice")
-                    && is_full_face_sturdy(state, direction)
+                    && is_full_face_sturdy(state, direction) == Some(true)
             };
             if solid_face(y) || solid_face(y + 1) {
                 flow = vanilla_vec3_normalize(flow) + dvec3(0.0, -6.0, 0.0);
@@ -140,6 +154,10 @@ pub struct LocalPlayer {
     pub death_time: u32,
     pub absorption: f32,
     pub max_health: f32,
+    /// `camera_distance` attribute (`UpdateAttributes`); how far the
+    /// third-person camera backs off before wall collision.
+    pub camera_distance: f32,
+    pub attributes: AttributeMap,
     pub hurt_time: u8,
     pub hurt_dir: f32,
     flash_on_set_health: bool,
@@ -238,6 +256,8 @@ impl LocalPlayer {
             death_time: 0,
             absorption: 0.0,
             max_health: 20.0,
+            camera_distance: crate::renderer::camera::THIRD_PERSON_DISTANCE,
+            attributes: AttributeMap::player(),
             hurt_time: 0,
             hurt_dir: 0.0,
             flash_on_set_health: false,
@@ -453,7 +473,9 @@ impl LocalPlayer {
     }
 
     pub fn target_eye_height(&self) -> f32 {
-        if self.swimming_pose {
+        if self.is_sleeping() {
+            SLEEPING_EYE_HEIGHT
+        } else if self.swimming_pose {
             SWIMMING_EYE_HEIGHT
         } else if self.crouching {
             CROUCH_EYE_HEIGHT
@@ -701,6 +723,23 @@ impl LocalPlayer {
         self.sleeping_pos.is_some()
     }
 
+    /// `LivingEntity.onSyncedDataUpdated(SLEEPING_POS)`: `setPosToBed` moves
+    /// only the current position, so the camera lerps in. The sleep counter
+    /// is left alone; only the server's `startSleepInBed` zeroes it.
+    pub fn set_sleeping_pos(&mut self, pos: Option<azalea_core::position::BlockPos>) {
+        self.sleeping_pos = pos;
+        if let Some(pos) = pos {
+            self.position = crate::world::block::sleeping_position(pos).into();
+        }
+    }
+
+    /// Reconfiguration replaces vanilla's LocalPlayer; the camera, and so the
+    /// eye height, carries over.
+    pub fn reset_sleep_for_level_teardown(&mut self) {
+        self.sleeping_pos = None;
+        self.sleep_counter = 0;
+    }
+
     /// Vanilla Player.tick sleep-counter branch: ramps to 100 while sleeping,
     /// then runs 100..110 after waking and resets to 0.
     pub fn tick_sleep(&mut self) {
@@ -925,6 +964,73 @@ mod tests {
             (player.bob - 0.06).abs() < 1e-6,
             "vanilla dead-player bob decays 40% toward zero per tick"
         );
+    }
+
+    #[test]
+    fn sleeping_pos_moves_to_bed_and_keeps_the_fade_counter() {
+        let mut player = LocalPlayer::new();
+        let bed = azalea_core::position::BlockPos::new(1, 64, 1);
+
+        player.position = Position::new(8.0, 70.0, -3.0);
+        player.prev_position = Position::new(7.0, 70.0, -3.0);
+        player.set_sleeping_pos(Some(bed));
+        assert_eq!(player.position, Position::new(1.5, 64.6875, 1.5));
+        assert_eq!(
+            player.prev_position,
+            Position::new(7.0, 70.0, -3.0),
+            "vanilla setPosToBed updates current position without rewriting old position"
+        );
+        for _ in 0..40 {
+            player.tick_sleep();
+        }
+        assert_eq!(player.sleep_counter, 40);
+
+        // Repeated synced data while already asleep must not restart the fade.
+        player.set_sleeping_pos(Some(bed));
+        assert_eq!(player.sleep_counter, 40);
+
+        // A changed SLEEPING_POS still has Vanilla's synced-data repositioning
+        // semantics even without an intervening wake.
+        let other_bed = azalea_core::position::BlockPos::new(-4, 72, 9);
+        player.set_sleeping_pos(Some(other_bed));
+        assert_eq!(player.sleep_counter, 40);
+        assert_eq!(player.position, Position::new(-3.5, 72.6875, 9.5));
+
+        player.wake_up();
+        player.tick_sleep();
+        assert_eq!(player.sleep_counter, 101);
+
+        // Only the server zeroes the counter; back in bed mid-fade, the
+        // client's `Player.tick` clamps it straight to fully dark.
+        player.set_sleeping_pos(Some(bed));
+        player.tick_sleep();
+        assert_eq!(player.sleep_counter, 100);
+    }
+
+    #[test]
+    fn sleeping_eye_height_uses_vanilla_camera_smoothing_target() {
+        let mut player = LocalPlayer::new();
+        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(0, 64, 0));
+        player.tick_eye_height();
+        assert_eq!(player.prev_eye_height, STANDING_EYE_HEIGHT);
+        assert!((player.eye_height - 0.91).abs() < 1e-6);
+
+        player.sleeping_pos = None;
+        player.tick_eye_height();
+        assert!((player.prev_eye_height - 0.91).abs() < 1e-6);
+        assert!((player.eye_height - 1.265).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reconfiguration_sleep_reset_keeps_the_camera_eye_height() {
+        let mut player = LocalPlayer::new();
+        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(1, 64, 1));
+        player.sleep_counter = 87;
+        player.eye_height = 0.3;
+        player.reset_sleep_for_level_teardown();
+        assert!(player.sleeping_pos.is_none());
+        assert_eq!(player.sleep_counter, 0);
+        assert_eq!(player.eye_height, 0.3);
     }
 
     #[test]

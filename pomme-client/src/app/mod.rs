@@ -233,6 +233,7 @@ impl ApplicationHandler for App {
                         jar_assets_dir: &self.core.data_dirs.jar_assets_dir,
                         asset_index: &self.core.asset_index,
                         packs: &self.core.resource_packs,
+                        options: self.core.menu.font_options(),
                     },
                     &self.core.data_dirs.game_dir,
                     self.core.menu.vsync,
@@ -420,10 +421,32 @@ impl ApplicationHandler for App {
                             panorama,
                             connect_phase,
                             connection,
-                            game,
+                            mut game,
                             world,
                         } => {
+                            // A configuration-phase dialog replaces the
+                            // connect screen and takes its keys.
                             if event.state.is_pressed()
+                                && let PhysicalKey::Code(code) = event.physical_key
+                                && game.dialog_open()
+                            {
+                                crate::app::phases::in_game::server_dialog_key(
+                                    code,
+                                    &event,
+                                    &mut self.core,
+                                    &gfx.window,
+                                    &connection,
+                                    &mut game,
+                                );
+                                AppPhase::Connecting {
+                                    gfx,
+                                    panorama,
+                                    connect_phase,
+                                    connection,
+                                    game,
+                                    world,
+                                }
+                            } else if event.state.is_pressed()
                                 && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
                             {
                                 leave_world(
@@ -461,10 +484,22 @@ impl ApplicationHandler for App {
                                     if !game.handle_debug_key(code, f3_held, &connection) {
                                         self.core.input.on_menu_key_event(&event);
                                     }
+                                } else if game.server_dialog.is_some()
+                                    || (game.chat.has_pending_modal_prompt()
+                                        && !game.chat.is_open())
+                                {
+                                    crate::app::phases::in_game::server_dialog_key(
+                                        code,
+                                        &event,
+                                        &mut self.core,
+                                        &gfx.window,
+                                        &connection,
+                                        &mut game,
+                                    );
                                 } else if game.chat.is_open() {
                                     match code {
                                         KeyCode::Escape => {
-                                            let closed = game.chat.handle_escape();
+                                            let closed = game.escape_chat();
                                             self.core
                                                 .input
                                                 .clear_action(crate::app::input::Action::OpenMenu);
@@ -560,23 +595,28 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                let scroll = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                let (scroll_x, scroll_y) = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x, y),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
                 };
+                let scroll = scroll_y;
                 match self.phase.get_mut() {
                     AppPhase::InMenu { .. } | AppPhase::Connecting { .. } => {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(scroll_x, scroll_y);
                     }
                     AppPhase::InGame { game, .. }
-                        if game.options_from_game || game.creative_inventory_open =>
+                        if game.dialog_open()
+                            || game.options_from_game
+                            || game.creative_inventory_open
+                            || game.inventory_open
+                            || game.open_container.is_some() =>
                     {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(scroll_x, scroll_y);
                     }
                     // Queued raw: ChatScreen routes it to the completion popup
                     // or the backlog, with Shift's slower multiplier.
                     AppPhase::InGame { game, .. } if game.chat.is_open() => {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(0.0, scroll);
                     }
                     // Vanilla MouseHandler: a spectator's wheel moves the menu
                     // selection (sign-inverted) while it is open, and adjusts

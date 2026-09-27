@@ -369,9 +369,10 @@ struct StateDumpFile {
     /// `BlockBehaviour.hasCollision`; block-level, so uniform across each
     /// block's states.
     has_collision: Vec<u8>,
-    /// Vanilla `BlockState.blocksMotion()`; state-level because solidity can
-    /// vary across a block's state space in newer versions.
-    blocks_motion: Vec<u8>,
+    /// Vanilla `BlockState.blocksMotion()`; absent from versions without the
+    /// method (26.3 dropped it).
+    #[serde(default)]
+    blocks_motion: Option<Vec<u8>>,
     /// Vanilla cached `BlockState.isSolid()` / `legacySolid`.
     legacy_solid: Vec<u8>,
     /// Vanilla cached `BlockState.canBeReplaced()` property.
@@ -444,7 +445,10 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
             dump.use_shape_for_light_occlusion.len(),
         ),
         ("has_collision", dump.has_collision.len()),
-        ("blocks_motion", dump.blocks_motion.len()),
+        (
+            "blocks_motion",
+            dump.blocks_motion.as_ref().map_or(n, Vec::len),
+        ),
         ("legacy_solid", dump.legacy_solid.len()),
         ("replaceable", dump.replaceable.len()),
         ("full_face_sturdy", dump.full_face_sturdy.len()),
@@ -478,7 +482,10 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
                 dump.use_shape_for_light_occlusion[i],
             ),
             ("has_collision", dump.has_collision[i]),
-            ("blocks_motion", dump.blocks_motion[i]),
+            (
+                "blocks_motion",
+                dump.blocks_motion.as_ref().map_or(0, |m| m[i]),
+            ),
             ("legacy_solid", dump.legacy_solid[i]),
             ("replaceable", dump.replaceable[i]),
             (
@@ -528,20 +535,26 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
             )
             .into());
         }
+        if offset_type == 0
+            && (dump.collision_shape_uses_offset[i] != 0 || dump.outline_shape_uses_offset[i] != 0)
+        {
+            return Err(format!("state {i}: shape uses an offset but has no offset type").into());
+        }
     }
 
-    // Dedupe collision + outline AABBs into a shared dictionary. Exact IEEE-754
-    // bit patterns are the key: no coordinate quantization or fuzzy equality.
+    // Dedupe collision + outline shapes into one dictionary keyed on exact bits.
     let mut shape_dict: Vec<Vec<f64>> = Vec::new();
     let mut shape_dict_index: std::collections::HashMap<Vec<u64>, u32> =
         std::collections::HashMap::new();
-    let mut state_collision_shapes = Vec::with_capacity(n);
-    let mut state_outline_shapes = Vec::with_capacity(n);
+    let mut state_shapes = [Vec::with_capacity(n), Vec::with_capacity(n)];
     for i in 0..n {
-        for (kind, shape) in [
+        for (k, (kind, shape)) in [
             ("collision", &dump.collision_shapes[i]),
             ("outline", &dump.outline_shapes[i]),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             if shape.len() % 6 != 0 {
                 return Err(format!(
                     "state {i}: {kind} shape has {} coordinates, expected a multiple of 6",
@@ -549,7 +562,7 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
                 )
                 .into());
             }
-            for (box_index, b) in shape.chunks_exact(6).enumerate() {
+            for (box_index, b) in shape.as_chunks::<6>().0.iter().enumerate() {
                 if !b.iter().all(|v| v.is_finite()) {
                     return Err(format!(
                         "state {i}: {kind} shape box {box_index} has a non-finite coordinate"
@@ -563,18 +576,10 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
                     .into());
                 }
             }
+            state_shapes[k].push(shape_index(shape, &mut shape_dict, &mut shape_dict_index));
         }
-        state_collision_shapes.push(shape_index(
-            &dump.collision_shapes[i],
-            &mut shape_dict,
-            &mut shape_dict_index,
-        ));
-        state_outline_shapes.push(shape_index(
-            &dump.outline_shapes[i],
-            &mut shape_dict,
-            &mut shape_dict_index,
-        ));
     }
+    let [state_collision_shapes, state_outline_shapes] = state_shapes;
 
     // Dedupe face masks into a dictionary, iterating in ascending state-id
     // order so the output is deterministic.
@@ -647,74 +652,42 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
 
         let mut line = format!("    {{\"name\": {}", serde_json::to_string(&block.name)?);
         for (key, values) in [
-            ("e", &dump.emission[range.clone()]),
-            ("d", &dump.dampening[range.clone()]),
-            ("p", &dump.propagates_skylight_down[range.clone()]),
-            ("o", &dump.can_occlude[range.clone()]),
-            ("u", &dump.use_shape_for_light_occlusion[range.clone()]),
+            ("e", &dump.emission),
+            ("d", &dump.dampening),
+            ("p", &dump.propagates_skylight_down),
+            ("o", &dump.can_occlude),
+            ("u", &dump.use_shape_for_light_occlusion),
         ] {
-            write!(line, ", \"{key}\": {}", scalar_or_array(values)?)?;
+            write!(line, ", \"{key}\": {}", scalar_or_array(values, &range)?)?;
         }
         let collision = &dump.has_collision[range.clone()];
         if collision.iter().any(|&c| c != collision[0]) {
             return Err(format!("{}: has_collision varies across states", block.name).into());
         }
         write!(line, ", \"c\": {}", collision[0])?;
-        write!(
-            line,
-            ", \"m\": {}",
-            scalar_or_array(&dump.blocks_motion[range.clone()])?
-        )?;
-        write!(
-            line,
-            ", \"l\": {}",
-            scalar_or_array(&dump.legacy_solid[range.clone()])?
-        )?;
-        write!(
-            line,
-            ", \"v\": {}",
-            scalar_or_array(&dump.replaceable[range.clone()])?
-        )?;
-        write!(
-            line,
-            ", \"t\": {}",
-            scalar_or_array(&dump.full_face_sturdy[range.clone()])?
-        )?;
-        write!(
-            line,
-            ", \"co\": {}",
-            scalar_or_array(&dump.collision_shape_uses_offset[range.clone()])?
-        )?;
-        write!(
-            line,
-            ", \"oo\": {}",
-            scalar_or_array(&dump.outline_shape_uses_offset[range.clone()])?
-        )?;
-        write!(
-            line,
-            ", \"q\": {}",
-            scalar_or_array(&dump.position_offset_type[range.clone()])?
-        )?;
-        write!(
-            line,
-            ", \"h\": {}",
-            scalar_or_array_f32(&dump.max_horizontal_offset[range.clone()])?
-        )?;
-        write!(
-            line,
-            ", \"y\": {}",
-            scalar_or_array_f32(&dump.max_vertical_offset[range.clone()])?
-        )?;
-        write!(
-            line,
-            ", \"s\": {}",
-            scalar_or_array_u32(&state_collision_shapes[range.clone()])?
-        )?;
-        write!(
-            line,
-            ", \"r\": {}",
-            scalar_or_array_u32(&state_outline_shapes[range.clone()])?
-        )?;
+        if let Some(blocks_motion) = &dump.blocks_motion {
+            write!(line, ", \"m\": {}", scalar_or_array(blocks_motion, &range)?)?;
+        }
+        for (key, values) in [
+            ("l", scalar_or_array(&dump.legacy_solid, &range)?),
+            ("v", scalar_or_array(&dump.replaceable, &range)?),
+            ("t", scalar_or_array(&dump.full_face_sturdy, &range)?),
+            (
+                "co",
+                scalar_or_array(&dump.collision_shape_uses_offset, &range)?,
+            ),
+            (
+                "oo",
+                scalar_or_array(&dump.outline_shape_uses_offset, &range)?,
+            ),
+            ("q", scalar_or_array(&dump.position_offset_type, &range)?),
+            ("h", scalar_or_array(&dump.max_horizontal_offset, &range)?),
+            ("y", scalar_or_array(&dump.max_vertical_offset, &range)?),
+            ("s", scalar_or_array(&state_collision_shapes, &range)?),
+            ("r", scalar_or_array(&state_outline_shapes, &range)?),
+        ] {
+            write!(line, ", \"{key}\": {values}")?;
+        }
         let masks = &state_masks[range];
         if masks.iter().any(Option::is_some) {
             if masks.iter().all(|m| *m == masks[0]) {
@@ -761,30 +734,18 @@ fn shape_index(
     })
 }
 
-/// A single JSON value when every entry is equal, else the full array.
-fn scalar_or_array(values: &[u8]) -> Result<String, Error> {
-    let first = *values.first().ok_or("block with zero states")?;
-    if values.iter().all(|&v| v == first) {
-        Ok(first.to_string())
-    } else {
-        Ok(serde_json::to_string(values)?)
+/// A single JSON value when every entry in `range` serializes identically, else
+/// the full array.
+fn scalar_or_array<T: serde::Serialize>(
+    all: &[T],
+    range: &std::ops::Range<usize>,
+) -> Result<String, Error> {
+    let values = &all[range.clone()];
+    let first = serde_json::to_string(values.first().ok_or("block with zero states")?)?;
+    for value in &values[1..] {
+        if serde_json::to_string(value)? != first {
+            return Ok(serde_json::to_string(values)?);
+        }
     }
-}
-
-fn scalar_or_array_f32(values: &[f32]) -> Result<String, Error> {
-    let first = *values.first().ok_or("block with zero states")?;
-    if values.iter().all(|&v| v.to_bits() == first.to_bits()) {
-        Ok(serde_json::to_string(&first)?)
-    } else {
-        Ok(serde_json::to_string(values)?)
-    }
-}
-
-fn scalar_or_array_u32(values: &[u32]) -> Result<String, Error> {
-    let first = *values.first().ok_or("block with zero states")?;
-    if values.iter().all(|&v| v == first) {
-        Ok(first.to_string())
-    } else {
-        Ok(serde_json::to_string(values)?)
-    }
+    Ok(first)
 }

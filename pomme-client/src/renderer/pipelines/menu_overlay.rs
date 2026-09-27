@@ -10,7 +10,7 @@ use pyronyx::vk;
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::{packing, shader, util};
 use crate::ui::font::{FontSources, GLYPH_ATLAS_SIZE, GlyphAtlasPixels, GlyphInfo, GlyphMap};
-use crate::ui::text::TextSpan;
+use crate::ui::text::{InlineObject, TextSpan};
 
 const FONT_BYTES: &[u8] = include_bytes!("../fonts/Montserrat-Medium.ttf");
 const ICON_FONT_BYTES: &[u8] = include_bytes!("../fonts/fa-solid-900.ttf");
@@ -243,6 +243,9 @@ pub struct MenuOverlayPipeline {
     favicon_sampler: vk::Sampler,
     favicon_allocation: Option<Allocation>,
     favicon_regions: std::collections::HashMap<String, [f32; 4]>,
+    /// Inline objects drawn since the app last drained them, so the next
+    /// frame's atlas holds what the text actually asked for.
+    drawn_inline_objects: std::collections::HashMap<String, InlineObject>,
     favicon_atlas_size: u32,
     overlay_image: vk::Image,
     overlay_view: vk::ImageView,
@@ -615,6 +618,7 @@ impl MenuOverlayPipeline {
             favicon_sampler,
             favicon_allocation: Some(favicon_alloc),
             favicon_regions: std::collections::HashMap::new(),
+            drawn_inline_objects: std::collections::HashMap::new(),
             favicon_atlas_size: 1,
             overlay_image,
             overlay_view,
@@ -703,6 +707,9 @@ impl MenuOverlayPipeline {
             .copy_from_slice(bytemuck::cast_slice(&globals));
 
         let mut vertices: Vec<Vertex> = Vec::with_capacity(elements.len() * 24);
+        // Moved out so the element loop can record into it while `self` is
+        // borrowed for the glyph and atlas sources; it keeps its allocation.
+        let mut drawn_objects = std::mem::take(&mut self.drawn_inline_objects);
         let mut deferred_tooltips: Vec<&MenuElement> = Vec::new();
         let mut draw_ops: Vec<DrawOp> = Vec::new();
         let mut scissor_stack: Vec<[f32; 4]> = Vec::new();
@@ -713,7 +720,9 @@ impl MenuOverlayPipeline {
         for elem in elements {
             if matches!(
                 elem,
-                MenuElement::Tooltip { .. } | MenuElement::TooltipLines { .. }
+                MenuElement::Tooltip { .. }
+                    | MenuElement::TooltipLines { .. }
+                    | MenuElement::BundleTooltip { .. }
             ) {
                 deferred_tooltips.push(elem);
                 continue;
@@ -785,7 +794,8 @@ impl MenuOverlayPipeline {
                         *x
                     };
                     let span = TextSpan::new(text.clone(), *color);
-                    self.push_text(
+                    self.push_text_into(
+                        &mut drawn_objects,
                         &mut vertices,
                         &[span],
                         McTextDraw {
@@ -805,7 +815,8 @@ impl MenuOverlayPipeline {
                     color,
                 } => {
                     let span = TextSpan::new(text.clone(), *color);
-                    self.push_text(
+                    self.push_text_into(
+                        &mut drawn_objects,
                         &mut vertices,
                         &[span],
                         McTextDraw {
@@ -829,7 +840,8 @@ impl MenuOverlayPipeline {
                     } else {
                         *x
                     };
-                    self.push_text(
+                    self.push_text_into(
+                        &mut drawn_objects,
                         &mut vertices,
                         spans,
                         McTextDraw {
@@ -965,7 +977,8 @@ impl MenuOverlayPipeline {
                     } else {
                         *x
                     };
-                    self.push_text(
+                    self.push_text_into(
+                        &mut drawn_objects,
                         &mut vertices,
                         spans,
                         McTextDraw {
@@ -987,7 +1000,8 @@ impl MenuOverlayPipeline {
                     shadow,
                 } => {
                     let start = vertices.len();
-                    self.push_text(
+                    self.push_text_into(
+                        &mut drawn_objects,
                         &mut vertices,
                         spans,
                         McTextDraw {
@@ -1156,180 +1170,91 @@ impl MenuOverlayPipeline {
         }
 
         for elem in &deferred_tooltips {
-            if let MenuElement::Tooltip {
+            if let MenuElement::BundleTooltip {
                 x,
                 y,
-                text,
+                title,
+                items,
+                selected,
+                weight,
                 scale,
                 screen_w,
                 screen_h,
             } = elem
-                && let Some(ref gm) = self.mc_glyph_map
             {
-                let px = *scale / gm.cell_h as f32;
-                let padding = 3.0 * px;
-                let margin = 9.0 * px;
-                let line_h = *scale + 2.0 * px;
-                let max_w = (*screen_w * 0.4).max(100.0);
-
-                let words: Vec<&str> = text.split_whitespace().collect();
-                let mut lines: Vec<String> = Vec::new();
-                let mut current = String::new();
-                let space_w = self.mc_text_width(" ", *scale);
-                for word in &words {
-                    let word_w = self.mc_text_width(word, *scale);
-                    let test_w = if current.is_empty() {
-                        word_w
-                    } else {
-                        self.mc_text_width(&current, *scale) + space_w + word_w
-                    };
-                    if !current.is_empty() && test_w > max_w {
-                        lines.push(current);
-                        current = word.to_string();
-                    } else {
-                        if !current.is_empty() {
-                            current.push(' ');
-                        }
-                        current.push_str(word);
-                    }
-                }
-                if !current.is_empty() {
-                    lines.push(current);
-                }
-
-                let content_w = lines
-                    .iter()
-                    .map(|l| (self.mc_text_width(l, *scale) + px).ceil())
-                    .fold(0.0f32, f32::max);
-                let content_h = lines.len() as f32 * line_h - 2.0 * px;
-
-                let mut text_x = *x + 12.0;
-                let mut text_y = *y - 12.0;
-                if text_x + content_w > *screen_w {
-                    text_x = (*x - 24.0 - content_w).max(4.0);
-                }
-                if text_y + content_h + 3.0 > *screen_h {
-                    text_y = *screen_h - content_h - 3.0;
-                }
-
-                let bg_x = text_x - padding - margin - padding;
-                let bg_y = text_y - padding - margin - padding;
-                let bg_w = content_w + (padding + margin + padding) * 2.0;
-                let bg_h = content_h + (padding + margin + padding) * 2.0;
-                let bg_border = margin;
-                let frame_border = 10.0 * px;
-
-                let white = [1.0f32; 4];
-                if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
-                    push_nine_slice(&mut vertices, bg_x, bg_y, bg_w, bg_h, bg, bg_border, white);
-                }
-                if let Some(frame) = self.sprite_atlas.regions.get(&SpriteId::TooltipFrame) {
-                    push_nine_slice(
-                        &mut vertices,
-                        bg_x,
-                        bg_y,
-                        bg_w,
-                        bg_h,
-                        frame,
-                        frame_border,
-                        white,
-                    );
-                }
-
-                for (i, line) in lines.iter().enumerate() {
-                    let span = TextSpan::new(line.clone(), white);
-                    let line_y = text_y + i as f32 * line_h;
-                    self.push_text(
-                        &mut vertices,
-                        &[span],
-                        McTextDraw {
-                            x: text_x,
-                            y: line_y,
-                            scale: *scale,
-                            drop_shadow: true,
-                        },
-                        &mut obfuscation_rng,
-                    );
-                }
+                let draw = McTooltipDraw {
+                    x: *x,
+                    y: *y,
+                    scale: *scale,
+                    screen_w: *screen_w,
+                    screen_h: *screen_h,
+                };
+                self.push_bundle_tooltip(
+                    &mut vertices,
+                    &mut drawn_objects,
+                    &mut obfuscation_rng,
+                    item_atlas_uvs,
+                    draw,
+                    BundleImage {
+                        title,
+                        items,
+                        selected: *selected,
+                        weight: *weight,
+                    },
+                );
+                continue;
             }
-            if let MenuElement::TooltipLines {
+            let (MenuElement::Tooltip {
                 x,
                 y,
+                scale,
+                screen_w,
+                screen_h,
+                ..
+            }
+            | MenuElement::TooltipLines {
+                x,
+                y,
+                scale,
+                screen_w,
+                screen_h,
+                ..
+            }) = elem
+            else {
+                continue;
+            };
+            let draw = McTooltipDraw {
+                x: *x,
+                y: *y,
+                scale: *scale,
+                screen_w: *screen_w,
+                screen_h: *screen_h,
+            };
+            // A plain-text tooltip wraps to its own lines first.
+            let wrapped;
+            let lines = match elem {
+                MenuElement::Tooltip { text, .. } => {
+                    wrapped = self
+                        .wrap_tooltip_text(text, draw.scale, (draw.screen_w * 0.4).max(100.0))
+                        .into_iter()
+                        .map(|line| TooltipLine::new(line, [1.0; 4]))
+                        .collect::<Vec<_>>();
+                    &wrapped
+                }
+                MenuElement::TooltipLines { lines, .. } => lines,
+                _ => continue,
+            };
+            self.push_tooltip(
+                &mut vertices,
+                &mut drawn_objects,
+                &mut obfuscation_rng,
+                draw,
                 lines,
-                scale,
-                screen_w,
-                screen_h,
-            } = elem
-                && let Some(ref gm) = self.mc_glyph_map
-            {
-                let px = *scale / gm.cell_h as f32;
-                let padding = 3.0 * px;
-                let margin = 9.0 * px;
-                let line_h = *scale + 2.0 * px;
-
-                let line_widths: Vec<f32> = lines
-                    .iter()
-                    .map(|l| (self.spans_width(&l.spans, *scale) + px).ceil())
-                    .collect();
-                let content_w = line_widths.iter().copied().fold(0.0f32, f32::max);
-                let content_h = lines.len() as f32 * line_h - 2.0 * px;
-
-                let mut text_x = *x + 12.0;
-                let mut text_y = *y - 12.0;
-                if text_x + content_w > *screen_w {
-                    text_x = (*x - 24.0 - content_w).max(4.0);
-                }
-                if text_y + content_h + 3.0 > *screen_h {
-                    text_y = *screen_h - content_h - 3.0;
-                }
-
-                let bg_x = text_x - padding - margin - padding;
-                let bg_y = text_y - padding - margin - padding;
-                let bg_w = content_w + (padding + margin + padding) * 2.0;
-                let bg_h = content_h + (padding + margin + padding) * 2.0;
-                let bg_border = margin;
-                let frame_border = 10.0 * px;
-                let white = [1.0f32; 4];
-
-                if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
-                    push_nine_slice(&mut vertices, bg_x, bg_y, bg_w, bg_h, bg, bg_border, white);
-                }
-                if let Some(frame) = self.sprite_atlas.regions.get(&SpriteId::TooltipFrame) {
-                    push_nine_slice(
-                        &mut vertices,
-                        bg_x,
-                        bg_y,
-                        bg_w,
-                        bg_h,
-                        frame,
-                        frame_border,
-                        white,
-                    );
-                }
-
-                for (i, (line, line_w)) in lines.iter().zip(&line_widths).enumerate() {
-                    let line_x = if line.right_align {
-                        text_x + content_w - line_w
-                    } else {
-                        text_x
-                    };
-                    let line_y = text_y + i as f32 * line_h;
-                    self.push_text(
-                        &mut vertices,
-                        &line.spans,
-                        McTextDraw {
-                            x: line_x,
-                            y: line_y,
-                            scale: *scale,
-                            drop_shadow: true,
-                        },
-                        &mut obfuscation_rng,
-                    );
-                }
-            }
+            );
         }
 
         self.obfuscation_rng = obfuscation_rng;
+        self.drawn_inline_objects = drawn_objects;
 
         flush_draw_op(
             &mut draw_ops,
@@ -1587,9 +1512,422 @@ impl MenuOverlayPipeline {
         (raw * scale / gm.cell_h as f32).ceil()
     }
 
-    /// Pushes Minecraft-font text; nothing when no fonts loaded.
-    fn push_text(
+    /// Greedy word-wrap of a plain tooltip string to `max_w`.
+    fn wrap_tooltip_text(&self, text: &str, scale: f32, max_w: f32) -> Vec<String> {
+        let space_w = self.mc_text_width(" ", scale);
+        let mut lines: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for word in text.split_whitespace() {
+            let word_w = self.mc_text_width(word, scale);
+            let test_w = if current.is_empty() {
+                word_w
+            } else {
+                self.mc_text_width(&current, scale) + space_w + word_w
+            };
+            if !current.is_empty() && test_w > max_w {
+                lines.push(std::mem::take(&mut current));
+                current = word.to_owned();
+            } else {
+                if !current.is_empty() {
+                    current.push(' ');
+                }
+                current.push_str(word);
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+        lines
+    }
+
+    /// `GuiGraphicsExtractor.tooltip`, which draws nothing when it has no
+    /// lines.
+    fn push_tooltip(
         &self,
+        vertices: &mut Vec<Vertex>,
+        drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
+        obfuscation_rng: &mut ObfuscationRng,
+        draw: McTooltipDraw,
+        lines: &[TooltipLine],
+    ) {
+        let Some(gm) = &self.mc_glyph_map else {
+            return;
+        };
+        if lines.is_empty() {
+            return;
+        }
+        let scale = draw.scale;
+        let px = scale / gm.cell_h as f32;
+        let line_widths: Vec<f32> = lines
+            .iter()
+            .map(|line| self.spans_width(&line.spans, scale))
+            .collect();
+        let content_w = line_widths.iter().copied().fold(0.0f32, f32::max);
+        let line_h = scale + 2.0 * px;
+        let content_h = if lines.len() == 1 {
+            scale
+        } else {
+            lines.len() as f32 * line_h
+        };
+        let layout = tooltip_box(draw, px, content_w, content_h);
+        self.push_tooltip_frame(vertices, layout.bg, px);
+
+        for (i, (line, line_w)) in lines.iter().zip(&line_widths).enumerate() {
+            let line_x = if line.right_align {
+                layout.text_x + content_w - line_w
+            } else {
+                layout.text_x
+            };
+            self.push_text_into(
+                drawn_objects,
+                vertices,
+                &line.spans,
+                McTextDraw {
+                    x: line_x,
+                    y: tooltip_line_y(layout.text_y, i, line_h, px),
+                    scale,
+                    drop_shadow: true,
+                },
+                obfuscation_rng,
+            );
+        }
+    }
+
+    /// `TooltipRenderUtil`'s background and frame over `bg`; 9 and 10 are the
+    /// two sprites' own `.mcmeta` nine-slice borders.
+    fn push_tooltip_frame(&self, vertices: &mut Vec<Vertex>, [x, y, w, h]: [f32; 4], px: f32) {
+        let white = [1.0f32; 4];
+        if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
+            push_nine_slice(vertices, x, y, w, h, bg, 9.0 * px, white);
+        }
+        if let Some(frame) = self.sprite_atlas.regions.get(&SpriteId::TooltipFrame) {
+            push_nine_slice(vertices, x, y, w, h, frame, 10.0 * px, white);
+        }
+    }
+
+    /// `GuiGraphicsExtractor.tooltip` over the bundle's name and its
+    /// `ClientBundleTooltip`, all laid out in whole gui units.
+    #[allow(clippy::too_many_arguments)]
+    fn push_bundle_tooltip(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
+        obfuscation_rng: &mut ObfuscationRng,
+        item_atlas_uvs: &HashMap<String, [f32; 4]>,
+        draw: McTooltipDraw,
+        image: BundleImage<'_>,
+    ) {
+        let Some(gm) = &self.mc_glyph_map else {
+            return;
+        };
+        let scale = draw.scale;
+        let px = scale / gm.cell_h as f32;
+        let gui_width = |width: f32| (width / px).round() as i32;
+        let white = [1.0f32; 4];
+        let text = |vertices: &mut Vec<Vertex>,
+                    drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
+                    obfuscation_rng: &mut ObfuscationRng,
+                    spans: &[TextSpan],
+                    x: f32,
+                    y: f32| {
+            self.push_text_into(
+                drawn_objects,
+                vertices,
+                spans,
+                McTextDraw {
+                    x,
+                    y,
+                    scale,
+                    drop_shadow: true,
+                },
+                obfuscation_rng,
+            );
+        };
+
+        let items = image.items;
+        let rows = items.len().min(12).div_ceil(4) as i32;
+        let empty_lines = if items.is_empty() {
+            let description = crate::lang::translate("item.minecraft.bundle.empty.description")
+                .unwrap_or("Can hold a mixed stack of items");
+            self.wrap_tooltip_text(description, scale, 96.0 * px)
+        } else {
+            Vec::new()
+        };
+        // `getHeight`: the grid or the wrapped description, then the bar.
+        let body_h = if items.is_empty() {
+            empty_lines.len() as i32 * 9
+        } else {
+            rows * 24
+        };
+        // The name line is 10 tall and the image follows a 2px first-line gap.
+        let w = gui_width(self.spans_width(image.title, scale)).max(96);
+        let h = 10 + body_h + 21;
+        let layout = tooltip_box(draw, px, w as f32 * px, h as f32 * px);
+        self.push_tooltip_frame(vertices, layout.bg, px);
+        text(
+            vertices,
+            drawn_objects,
+            obfuscation_rng,
+            image.title,
+            layout.text_x,
+            layout.text_y,
+        );
+
+        // `getContentXOffset`.
+        let left = layout.text_x + ((w - 96) / 2) as f32 * px;
+        let top = layout.text_y + 12.0 * px;
+        let centered = |label: &str, center_x: f32| {
+            center_x - (gui_width(self.mc_text_width(label, scale)) / 2) as f32 * px
+        };
+        let sprite = |vertices: &mut Vec<Vertex>, id: SpriteId, x: f32, y: f32, size: f32| {
+            if let Some(region) = self.sprite_atlas.regions.get(&id) {
+                push_quad(
+                    vertices,
+                    x,
+                    y,
+                    size,
+                    size,
+                    region.u0,
+                    region.v0,
+                    region.u1,
+                    region.v1,
+                    white,
+                    2.0,
+                    [0.0, 0.0],
+                    0.0,
+                );
+            }
+        };
+
+        if items.is_empty() {
+            let grey = [0.6667, 0.6667, 0.6667, 1.0];
+            for (i, line) in empty_lines.iter().enumerate() {
+                let spans = [TextSpan::new(line.clone(), grey)];
+                text(
+                    vertices,
+                    drawn_objects,
+                    obfuscation_rng,
+                    &spans,
+                    left,
+                    top + (i as i32 * 9) as f32 * px,
+                );
+            }
+        } else {
+            let shown_items = &items[..crate::ui::bundle::shown_count(items.len())];
+            let mut slot_number = 1;
+            for row in 1..=rows {
+                for col in 1..=4 {
+                    let x = left + (96 - col * 24) as f32 * px;
+                    let y = top + ((rows - row) * 24) as f32 * px;
+                    if items.len() > 12 && col == 1 && row == 1 {
+                        let hidden: i32 =
+                            items[shown_items.len()..].iter().map(|s| s.count()).sum();
+                        let label = format!("+{hidden}");
+                        let label_x = centered(&label, x + 12.0 * px);
+                        let spans = [TextSpan::new(label, white)];
+                        text(
+                            vertices,
+                            drawn_objects,
+                            obfuscation_rng,
+                            &spans,
+                            label_x,
+                            y + 10.0 * px,
+                        );
+                        continue;
+                    }
+                    if slot_number > shown_items.len() {
+                        continue;
+                    }
+                    let visual = shown_items.len() - slot_number;
+                    let highlighted = visual as i32 == image.selected;
+                    let back = if highlighted {
+                        SpriteId::BundleSlotHighlightBack
+                    } else {
+                        SpriteId::BundleSlotBackground
+                    };
+                    sprite(vertices, back, x, y, 24.0 * px);
+                    if let azalea_inventory::ItemStack::Present(data) = &shown_items[visual] {
+                        self.push_tooltip_item(
+                            vertices,
+                            drawn_objects,
+                            obfuscation_rng,
+                            item_atlas_uvs,
+                            data,
+                            (x + 4.0 * px, y + 4.0 * px),
+                            scale,
+                            px,
+                        );
+                    }
+                    if highlighted {
+                        sprite(
+                            vertices,
+                            SpriteId::BundleSlotHighlightFront,
+                            x,
+                            y,
+                            24.0 * px,
+                        );
+                    }
+                    slot_number += 1;
+                }
+            }
+            if let Some(azalea_inventory::ItemStack::Present(data)) =
+                usize::try_from(image.selected)
+                    .ok()
+                    .and_then(|i| items.get(i))
+            {
+                // `extractSelectedItemTooltip`: its own tooltip, centred above.
+                let name = crate::ui::common::styled_hover_name(data);
+                let center = gui_width(layout.text_x) + w / 2 - 12;
+                let anchor = center - gui_width(self.spans_width(&name, scale)) / 2;
+                self.push_tooltip(
+                    vertices,
+                    drawn_objects,
+                    obfuscation_rng,
+                    McTooltipDraw {
+                        x: anchor as f32 * px,
+                        y: top - 15.0 * px,
+                        ..draw
+                    },
+                    &[TooltipLine::from_spans(name)],
+                );
+            }
+        }
+
+        // `extractProgressbar`.
+        let bar_y = top + (body_h + 4) as f32 * px;
+        let fill = image.weight.mul_and_truncate(94).clamp(0, 94) as f32;
+        let fill_id = if image.weight.is_full() {
+            SpriteId::BundleProgressFull
+        } else {
+            SpriteId::BundleProgressFill
+        };
+        if fill > 0.0
+            && let Some(region) = self.sprite_atlas.regions.get(&fill_id)
+        {
+            push_nine_slice(
+                vertices,
+                left + px,
+                bar_y,
+                fill * px,
+                13.0 * px,
+                region,
+                2.0 * px,
+                white,
+            );
+        }
+        if let Some(region) = self
+            .sprite_atlas
+            .regions
+            .get(&SpriteId::BundleProgressBorder)
+        {
+            push_nine_slice(
+                vertices,
+                left,
+                bar_y,
+                96.0 * px,
+                13.0 * px,
+                region,
+                2.0 * px,
+                white,
+            );
+        }
+        let label = if image.weight.0 == 0 {
+            crate::lang::translate("item.minecraft.bundle.empty")
+        } else if image.weight.is_full() {
+            crate::lang::translate("item.minecraft.bundle.full")
+        } else {
+            None
+        };
+        if let Some(label) = label {
+            let label_x = centered(label, left + 48.0 * px);
+            let spans = [TextSpan::new(label.to_owned(), white)];
+            text(
+                vertices,
+                drawn_objects,
+                obfuscation_rng,
+                &spans,
+                label_x,
+                bar_y + 3.0 * px,
+            );
+        }
+    }
+
+    /// `GuiGraphicsExtractor.item` plus `itemDecorations` at `(x, y)`: the
+    /// icon, then the stack's bar and count.
+    #[allow(clippy::too_many_arguments)]
+    fn push_tooltip_item(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
+        obfuscation_rng: &mut ObfuscationRng,
+        item_atlas_uvs: &HashMap<String, [f32; 4]>,
+        data: &azalea_inventory::ItemStackData,
+        (x, y): (f32, f32),
+        scale: f32,
+        px: f32,
+    ) {
+        let name = crate::player::inventory::item_resource_name(data.kind);
+        if let Some(uv) = item_atlas_uvs.get(&name) {
+            push_quad(
+                vertices,
+                x,
+                y,
+                16.0 * px,
+                16.0 * px,
+                uv[0],
+                uv[1],
+                uv[2],
+                uv[3],
+                [1.0; 4],
+                3.0,
+                [0.0, 0.0],
+                0.0,
+            );
+        }
+        // TODO: the cooldown overlay, as in `common::push_item_icon`.
+        if let Some((width, color)) = crate::ui::common::item_bar(data) {
+            push_rect(
+                vertices,
+                x + 2.0 * px,
+                y + 13.0 * px,
+                13.0 * px,
+                2.0 * px,
+                0.0,
+                [0.0, 0.0, 0.0, 1.0],
+            );
+            push_rect(
+                vertices,
+                x + 2.0 * px,
+                y + 13.0 * px,
+                width as f32 * px,
+                px,
+                0.0,
+                color,
+            );
+        }
+        if data.count > 1 {
+            let count = data.count.to_string();
+            let count_x = x + 17.0 * px - self.mc_text_width(&count, scale);
+            self.push_text_into(
+                drawn_objects,
+                vertices,
+                &[TextSpan::new(count, [1.0; 4])],
+                McTextDraw {
+                    x: count_x,
+                    y: y + 9.0 * px,
+                    scale,
+                    drop_shadow: true,
+                },
+                obfuscation_rng,
+            );
+        }
+    }
+
+    /// Pushes Minecraft-font text; nothing when no fonts loaded.
+    #[allow(clippy::too_many_arguments)]
+    fn push_text_into(
+        &self,
+        drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
         vertices: &mut Vec<Vertex>,
         spans: &[TextSpan],
         draw: McTextDraw,
@@ -1601,7 +1939,30 @@ impl MenuOverlayPipeline {
                 dynamic_regions: &self.favicon_regions,
                 sprite_atlas: &self.sprite_atlas,
             };
-            push_mc_text(vertices, sources, spans, draw, obfuscation_rng);
+            push_mc_text(
+                vertices,
+                sources,
+                spans,
+                draw,
+                obfuscation_rng,
+                drawn_objects,
+            );
+        }
+    }
+
+    /// The inline objects drawn since the last call, which the app loads into
+    /// the atlas for the next frame.
+    pub fn drain_drawn_inline_objects(
+        &mut self,
+    ) -> std::collections::hash_map::Drain<'_, String, InlineObject> {
+        self.drawn_inline_objects.drain()
+    }
+
+    /// Points an inline object's key at one of its animation frames, which
+    /// were packed under their own keys.
+    pub fn set_inline_object_frame(&mut self, key: &str, frame_key: &str) {
+        if let Some(region) = self.favicon_regions.get(frame_key).copied() {
+            self.favicon_regions.insert(key.to_owned(), region);
         }
     }
 
@@ -1695,12 +2056,16 @@ pub struct TooltipLine {
 }
 
 impl TooltipLine {
-    /// A single-color line.
-    pub fn new(text: String, color: [f32; 4]) -> Self {
+    pub fn from_spans(spans: Vec<TextSpan>) -> Self {
         Self {
-            spans: vec![TextSpan::new(text, color)],
+            spans,
             right_align: false,
         }
+    }
+
+    /// A single-color line.
+    pub fn new(text: String, color: [f32; 4]) -> Self {
+        Self::from_spans(vec![TextSpan::new(text, color)])
     }
 
     /// A single-color right-aligned line.
@@ -1834,6 +2199,18 @@ pub enum MenuElement {
         x: f32,
         y: f32,
         text: String,
+        scale: f32,
+        screen_w: f32,
+        screen_h: f32,
+    },
+    /// `ClientBundleTooltip` under the bundle's styled name.
+    BundleTooltip {
+        x: f32,
+        y: f32,
+        title: Vec<TextSpan>,
+        items: Vec<azalea_inventory::ItemStack>,
+        selected: i32,
+        weight: crate::ui::bundle::Frac,
         scale: f32,
         screen_w: f32,
         screen_h: f32,
@@ -2048,10 +2425,22 @@ pub enum SpriteId {
     HeaderSeparator,
     FooterSeparator,
     MenuBackground,
+    BundleProgressBorder,
+    BundleProgressFill,
+    BundleProgressFull,
+    BundleSlotBackground,
+    BundleSlotHighlightBack,
+    BundleSlotHighlightFront,
     TooltipBackground,
     TooltipFrame,
     Scroller,
     ScrollerBackground,
+    WarningButton,
+    WarningButtonHighlighted,
+    Checkbox,
+    CheckboxHighlighted,
+    CheckboxSelected,
+    CheckboxSelectedHighlighted,
     Ping1,
     Ping2,
     Ping3,
@@ -2653,6 +3042,36 @@ fn build_sprite_atlas(
             0.0,
         ),
         (
+            SpriteId::BundleProgressBorder,
+            "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_border.png",
+            2.0,
+        ),
+        (
+            SpriteId::BundleProgressFill,
+            "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_fill.png",
+            2.0,
+        ),
+        (
+            SpriteId::BundleProgressFull,
+            "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_full.png",
+            2.0,
+        ),
+        (
+            SpriteId::BundleSlotBackground,
+            "minecraft/textures/gui/sprites/container/bundle/slot_background.png",
+            0.0,
+        ),
+        (
+            SpriteId::BundleSlotHighlightBack,
+            "minecraft/textures/gui/sprites/container/bundle/slot_highlight_back.png",
+            0.0,
+        ),
+        (
+            SpriteId::BundleSlotHighlightFront,
+            "minecraft/textures/gui/sprites/container/bundle/slot_highlight_front.png",
+            0.0,
+        ),
+        (
             SpriteId::TooltipBackground,
             "minecraft/textures/gui/sprites/tooltip/background.png",
             9.0,
@@ -2671,6 +3090,38 @@ fn build_sprite_atlas(
             SpriteId::ScrollerBackground,
             "minecraft/textures/gui/sprites/widget/scroller_background.png",
             1.0,
+        ),
+        // `DialogScreen.WARNING_BUTTON_SPRITES` and `Checkbox`, all plain
+        // 20x20 blits.
+        (
+            SpriteId::WarningButton,
+            "minecraft/textures/gui/sprites/dialog/warning_button.png",
+            0.0,
+        ),
+        (
+            SpriteId::WarningButtonHighlighted,
+            "minecraft/textures/gui/sprites/dialog/warning_button_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::Checkbox,
+            "minecraft/textures/gui/sprites/widget/checkbox.png",
+            0.0,
+        ),
+        (
+            SpriteId::CheckboxHighlighted,
+            "minecraft/textures/gui/sprites/widget/checkbox_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::CheckboxSelected,
+            "minecraft/textures/gui/sprites/widget/checkbox_selected.png",
+            0.0,
+        ),
+        (
+            SpriteId::CheckboxSelectedHighlighted,
+            "minecraft/textures/gui/sprites/widget/checkbox_selected_highlighted.png",
+            0.0,
         ),
         (
             SpriteId::FriendsBackground,
@@ -3821,6 +4272,14 @@ fn push_rect(
     radius: f32,
     color: [f32; 4],
 ) {
+    // `GuiGraphics.fill` is a hard integer quad. Radius 0 must not go through
+    // the rounded-rect SDF: that softens every edge and adds a border band,
+    // which seams adjacent chat rows and shifts translucent fill opacity.
+    let (color, mode) = if radius <= 0.0 {
+        (premultiplied(color), 10.0)
+    } else {
+        (color, 0.0)
+    };
     push_quad(
         verts,
         x,
@@ -3832,10 +4291,16 @@ fn push_rect(
         1.0,
         1.0,
         color,
-        0.0,
+        mode,
         [w, h],
         radius,
     );
+}
+
+/// The premultiplied form mode 10 expects. The rounded-rect mode premultiplies
+/// in the shader and converts no gamma, so neither does this.
+fn premultiplied([r, g, b, a]: [f32; 4]) -> [f32; 4] {
+    [r * a, g * a, b * a, a]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3865,7 +4330,7 @@ fn push_gradient_rect(
         [1.0, 1.0],
         [0.0, 1.0],
     ];
-    let colors = [
+    let mut colors = [
         color_top,
         color_top,
         color_bottom,
@@ -3873,12 +4338,20 @@ fn push_gradient_rect(
         color_bottom,
         color_bottom,
     ];
+    let mode = if radius <= 0.0 {
+        for color in &mut colors {
+            *color = premultiplied(*color);
+        }
+        10.0
+    } else {
+        0.0
+    };
     for i in 0..6 {
         verts.push(Vertex {
             pos: positions[i],
             uv: uvs[i],
             color: colors[i],
-            mode: 0.0,
+            mode,
             rect_size: [w, h],
             corner_radius: radius,
         });
@@ -4057,12 +4530,88 @@ struct McTextSources<'a> {
     sprite_atlas: &'a SpriteAtlas,
 }
 
+/// The side of the atlas cell an inline object's tile is packed into.
+pub const ATLAS_CELL: u32 = 64;
+
+/// Whether the object has a glyph at all: a player head always does, an atlas
+/// sprite only in one of the atlases the client stitches
+/// (`AtlasManager.KNOWN_ATLASES`).
+fn object_has_glyph(object: &InlineObject) -> bool {
+    match object {
+        InlineObject::Player { .. } => true,
+        InlineObject::AtlasSprite { atlas, .. } => crate::ui::object_glyph::is_known_atlas(atlas),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct McTextDraw {
     x: f32,
     y: f32,
     scale: f32,
     drop_shadow: bool,
+}
+
+/// Where a tooltip was asked for, in framebuffer pixels.
+#[derive(Clone, Copy)]
+struct McTooltipDraw {
+    x: f32,
+    y: f32,
+    scale: f32,
+    screen_w: f32,
+    screen_h: f32,
+}
+
+/// A laid-out tooltip, in framebuffer pixels.
+struct TooltipBox {
+    text_x: f32,
+    text_y: f32,
+    /// Background and frame rect, `[x, y, w, h]`.
+    bg: [f32; 4],
+}
+
+/// The bundle half of a `BundleTooltip` element.
+struct BundleImage<'a> {
+    title: &'a [TextSpan],
+    items: &'a [azalea_inventory::ItemStack],
+    selected: i32,
+    weight: crate::ui::bundle::Frac,
+}
+
+/// `DefaultTooltipPositioner` then `TooltipRenderUtil.extractTooltipBackground`
+/// (PADDING 3, MARGIN 9) around a `content_w` x `content_h` box. Positioning
+/// runs in whole gui units of `px` framebuffer pixels, as vanilla's does.
+fn tooltip_box(draw: McTooltipDraw, px: f32, content_w: f32, content_h: f32) -> TooltipBox {
+    // `Window.guiScaledWidth` rounds up; the cursor's gui position truncates.
+    let screen_w = (draw.screen_w / px).ceil() as i32;
+    let screen_h = (draw.screen_h / px).ceil() as i32;
+    let w = (content_w / px).round() as i32;
+    let h = (content_h / px).round() as i32;
+    let mut x = (draw.x / px).floor() as i32 + 12;
+    let mut y = (draw.y / px).floor() as i32 - 12;
+    if x + w > screen_w {
+        x = (x - 24 - w).max(4);
+    }
+    if y + h + 3 > screen_h {
+        y = screen_h - h - 3;
+    }
+    let (text_x, text_y) = (x as f32 * px, y as f32 * px);
+    let inset = (3.0 + 9.0) * px;
+    TooltipBox {
+        text_x,
+        text_y,
+        bg: [
+            text_x - inset,
+            text_y - inset,
+            content_w + inset * 2.0,
+            content_h + inset * 2.0,
+        ],
+    }
+}
+
+/// `localY += line.getHeight(font) + (i == 0 ? 2 : 0)`: every line after the
+/// first sits two pixels lower.
+fn tooltip_line_y(text_y: f32, index: usize, line_h: f32, px: f32) -> f32 {
+    text_y + index as f32 * line_h + if index > 0 { 2.0 * px } else { 0.0 }
 }
 
 /// Advance of an inline object glyph in font pixels (vanilla
@@ -4127,6 +4676,7 @@ fn push_mc_text(
     spans: &[TextSpan],
     draw: McTextDraw,
     obfuscation_rng: &mut ObfuscationRng,
+    drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
 ) {
     let McTextDraw {
         x,
@@ -4189,14 +4739,15 @@ fn push_mc_text(
             span_position = span_position.wrapping_add(1);
             let advance = if ch == '\u{fffc}'
                 && let Some(object) = span.inline_object.as_ref()
+                && object_has_glyph(object)
             {
                 let glyph_w = 8.0 * px_scale;
                 let sx = cx.round();
                 let sy = (cy - px_scale).round();
                 let key = object.atlas_key();
                 let fallback = match object {
-                    crate::ui::text::InlineObject::Player { .. } => SpriteId::SteveHead,
-                    crate::ui::text::InlineObject::AtlasSprite { .. } => SpriteId::UnknownServer,
+                    InlineObject::Player { .. } => SpriteId::SteveHead,
+                    InlineObject::AtlasSprite { .. } => SpriteId::UnknownServer,
                 };
                 let mut draw_object = |dx: f32, color: [f32; 4]| {
                     push_atlas_image(
@@ -4215,9 +4766,14 @@ fn push_mc_text(
                     draw_object(px_scale, shadow_color);
                 }
                 draw_object(0.0, span.color);
+                drawn_objects.entry(key).or_insert_with(|| object.clone());
                 inline_object_advance(span.bold) * px_scale
             } else {
-                let gi = if span.obfuscated && ch != ' ' {
+                let gi = if ch == '\u{fffc}' && span.inline_object.is_some() {
+                    // `FontManager.getSpriteFont`: an atlas with no provider
+                    // renders the missing-font glyph.
+                    gm.missing()
+                } else if span.obfuscated && ch != ' ' {
                     let width = gm.glyph(ch, font).advance.ceil() as i32;
                     gm.random_glyph(width, font, |len| obfuscation_rng.next_int(len))
                 } else {
@@ -4324,11 +4880,10 @@ fn push_mc_effect(verts: &mut Vec<Vertex>, effect: &McEffect, shadow_offset: f32
     push_mc_fill(verts, x0, y0, w, h, effect.color);
 }
 
-/// A hard-edged effect quad in the premultiplied mode, linearized here as the
-/// shader does for glyphs.
+/// A hard-edged effect quad, gamma-linearized first as the shader does for
+/// glyphs. Otherwise the same fill `push_rect` emits at radius 0.
 fn push_mc_fill(verts: &mut Vec<Vertex>, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
-    let a = color[3];
-    let linear = |c: f32| c.powf(2.2) * a;
+    let [r, g, b, a] = color;
     push_quad(
         verts,
         x,
@@ -4339,7 +4894,7 @@ fn push_mc_fill(verts: &mut Vec<Vertex>, x: f32, y: f32, w: f32, h: f32, color: 
         0.0,
         1.0,
         1.0,
-        [linear(color[0]), linear(color[1]), linear(color[2]), a],
+        premultiplied([r.powf(2.2), g.powf(2.2), b.powf(2.2), a]),
         10.0,
         [0.0, 0.0],
         0.0,
@@ -4572,6 +5127,72 @@ fn create_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tooltip at gui scale 1, where one gui unit is one framebuffer pixel.
+    fn unscaled_tooltip(x: f32, y: f32) -> McTooltipDraw {
+        McTooltipDraw {
+            x,
+            y,
+            scale: 8.0,
+            screen_w: 1000.0,
+            screen_h: 1000.0,
+        }
+    }
+
+    #[test]
+    fn tooltip_box_insets_by_the_padding_and_margin() {
+        let layout = tooltip_box(unscaled_tooltip(100.0, 100.0), 1.0, 40.0, 8.0);
+        assert_eq!(layout.text_x, 112.0);
+        assert_eq!(layout.text_y, 88.0);
+        assert_eq!(layout.bg, [100.0, 76.0, 64.0, 32.0]);
+    }
+
+    #[test]
+    fn tooltip_flips_left_from_the_offset_position() {
+        // `DefaultTooltipPositioner`: `x + 12`, then `max(x - 24 - w, 4)`.
+        let flipped = tooltip_box(unscaled_tooltip(990.0, 100.0), 1.0, 40.0, 8.0);
+        assert_eq!(flipped.text_x, 990.0 + 12.0 - 24.0 - 40.0);
+        let clamped = tooltip_box(unscaled_tooltip(990.0, 100.0), 1.0, 995.0, 8.0);
+        assert_eq!(clamped.text_x, 4.0);
+    }
+
+    #[test]
+    fn tooltip_positions_in_whole_gui_units() {
+        // At gui scale 3 the 12-unit offset is 36px, from the truncated cursor.
+        let draw = McTooltipDraw {
+            scale: 24.0,
+            ..unscaled_tooltip(100.0, 100.0)
+        };
+        let layout = tooltip_box(draw, 3.0, 120.0, 24.0);
+        assert_eq!((layout.text_x, layout.text_y), (99.0 + 36.0, 99.0 - 36.0));
+    }
+
+    #[test]
+    fn tooltip_lines_after_the_first_drop_two_pixels() {
+        let y = |i| tooltip_line_y(88.0, i, 10.0, 1.0);
+        assert_eq!([y(0), y(1), y(2)], [88.0, 100.0, 110.0]);
+    }
+
+    #[test]
+    fn radius_zero_rects_are_hard_premultiplied_quads() {
+        let mut verts = Vec::new();
+        push_rect(&mut verts, 0.0, 0.0, 10.0, 10.0, 0.0, [1.0, 0.0, 0.0, 0.5]);
+        assert_eq!(verts[0].mode, 10.0);
+        assert_eq!(verts[0].color, [0.5, 0.0, 0.0, 0.5]);
+
+        let mut rounded = Vec::new();
+        push_rect(
+            &mut rounded,
+            0.0,
+            0.0,
+            10.0,
+            10.0,
+            4.0,
+            [1.0, 0.0, 0.0, 0.5],
+        );
+        assert_eq!(rounded[0].mode, 0.0);
+        assert_eq!(rounded[0].color, [1.0, 0.0, 0.0, 0.5]);
+    }
 
     #[test]
     fn abutting_effects_merge_into_one_quad() {

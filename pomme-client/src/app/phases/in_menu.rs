@@ -77,6 +77,11 @@ pub fn update_menu(
         }
     }
 
+    // TODO: menu screens (a server MOTD, say) draw object glyphs as their
+    // fallback sprite; dropping what they drew keeps those keys out of the
+    // next session's atlas.
+    gfx.renderer.drain_drawn_inline_objects();
+
     if let Err(e) = gfx.renderer.render_menu(
         &gfx.window,
         panorama.scroll(),
@@ -112,11 +117,9 @@ pub fn update_menu(
     }
 
     if core.menu.reload_assets {
-        core.menu.reload_assets = false;
-        gfx.renderer
-            .reload_assets(&core.data_dirs.game_dir, &core.resource_packs);
-        core.audio.reload_assets(&core.resource_packs);
+        core.reload_pack_assets(&mut gfx.renderer);
     }
+    core.apply_font_options(&mut gfx.renderer);
 
     if result.clicked_button {
         gfx.renderer.trigger_skin_swing();

@@ -22,7 +22,7 @@ pub(super) fn push_separator(elements: &mut Vec<MenuElement>, x: f32, y: f32, w:
     });
 }
 
-pub(super) fn push_outline(
+pub(crate) fn push_outline(
     elements: &mut Vec<MenuElement>,
     x: f32,
     y: f32,
@@ -157,7 +157,7 @@ pub(super) fn push_text_field(
 
 /// One Tab step around a focus ring of `n` widgets (`None` = nothing focused
 /// yet), wrapping at the ends. `n` must be non-zero.
-pub(super) fn step_ring(cur: Option<usize>, n: usize, reverse: bool) -> usize {
+pub(crate) fn step_ring(cur: Option<usize>, n: usize, reverse: bool) -> usize {
     match cur {
         Some(f) if reverse => (f + n - 1) % n,
         Some(f) => (f + 1) % n,
@@ -185,19 +185,19 @@ pub(super) fn focus_cursor(
 }
 
 /// Per-frame keyboard focus state threaded through a screen's widget builders.
-pub(super) struct FocusCtx {
+pub(crate) struct FocusCtx {
     /// Running index assigned to each focusable as it is built.
-    pub(super) next_index: usize,
+    pub(crate) next_index: usize,
     /// The focused widget index (from `MainMenu::focus`), if any.
-    pub(super) focus: Option<usize>,
+    pub(crate) focus: Option<usize>,
     /// Left button pressed this frame; a click on a widget focuses it.
-    pub(super) clicked: bool,
+    pub(crate) clicked: bool,
     /// `MainMenu::screen_gen` at build time.
-    pub(super) screen_gen: u32,
+    pub(crate) screen_gen: u32,
     /// Enter / Space pressed this frame (`InputWithModifiers.isSelection`).
-    pub(super) activate: bool,
+    pub(crate) activate: bool,
     /// Set once a keyboard activation fires, so the click sound still plays.
-    pub(super) fired: bool,
+    pub(crate) fired: bool,
 }
 
 impl FocusCtx {
@@ -205,7 +205,7 @@ impl FocusCtx {
     /// matching vanilla Tab navigation) and reports whether the widget is
     /// focused. A click takes focus (`ContainerEventHandler.mouseClicked`);
     /// widgets built earlier in the frame see that next frame.
-    pub(super) fn focused(&mut self, enabled: bool, hovered: bool) -> bool {
+    pub(crate) fn focused(&mut self, enabled: bool, hovered: bool) -> bool {
         if !enabled {
             return false;
         }
@@ -857,18 +857,44 @@ pub(super) fn push_done_button(
     gs: f32,
 ) -> bool {
     let w = 200.0 * gs;
+    push_footer_button(
+        elements,
+        ctx,
+        any_hovered,
+        input,
+        chrome,
+        cx - w / 2.0,
+        w,
+        gs,
+        "Done",
+    )
+}
+
+/// A button on a header/footer screen's footer row.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_footer_button(
+    elements: &mut Vec<MenuElement>,
+    ctx: &mut FocusCtx,
+    any_hovered: &mut bool,
+    input: &MenuInput,
+    chrome: &ChromeLayout,
+    x: f32,
+    w: f32,
+    gs: f32,
+    label: &str,
+) -> bool {
     push_button_f(
         elements,
         ctx,
         any_hovered,
         input.cursor,
         input.clicked,
-        cx - w / 2.0,
+        x,
         chrome.done_y,
         w,
         common::BTN_H * gs,
         gs,
-        "Done",
+        label,
         true,
     )
 }
@@ -1130,23 +1156,51 @@ pub(super) fn nine_slice(
     });
 }
 
-pub(super) fn push_scrollbar(
+/// A list's scrollbar, whose track sits 2px in from the content's right edge.
+pub(super) fn push_list_scrollbar(
     elements: &mut Vec<MenuElement>,
-    right_x: f32,
+    content_right: f32,
     top: f32,
     h: f32,
     total: f32,
     scroll: f32,
     gs: f32,
 ) {
+    push_scrollbar(
+        elements,
+        content_right - (SCROLLBAR_W + 2.0) * gs,
+        top,
+        h,
+        total,
+        scroll,
+        gs,
+        16.0 * gs,
+    );
+}
+
+/// `AbstractScrollArea.SCROLLBAR_WIDTH`.
+const SCROLLBAR_W: f32 = 6.0;
+
+/// `AbstractScrollArea.extractScrollbar`: a 6px track at `track_x`, with the
+/// thumb clamped between `min_thumb` and the track less 8px (both in
+/// framebuffer pixels), as `scrollerHeight` does.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_scrollbar(
+    elements: &mut Vec<MenuElement>,
+    track_x: f32,
+    top: f32,
+    h: f32,
+    total: f32,
+    scroll: f32,
+    gs: f32,
+    min_thumb: f32,
+) {
     let max_scroll = (total - h).max(0.0);
     if max_scroll <= 0.0 {
         return;
     }
-    // 6px track, inset 2px from the content's right edge (vanilla spacing).
-    let track_w = 6.0 * gs;
-    let track_x = right_x - track_w - 2.0 * gs;
-    let thumb_h = (h * h / total).max(16.0 * gs); // vanilla min thumb is larger
+    let track_w = SCROLLBAR_W * gs;
+    let thumb_h = (h * h / total).clamp(min_thumb, (h - 8.0 * gs).max(min_thumb));
     let thumb_y = top + (scroll / max_scroll) * (h - thumb_h);
     nine_slice(
         elements,
@@ -1188,7 +1242,7 @@ impl MainMenu {
             return (empty_result(2.0), Some(false));
         }
 
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
         let btn_w = CONFIRM_BTN_W * gs;
