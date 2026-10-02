@@ -250,14 +250,12 @@ impl Scoreboard {
     /// Vanilla `EntitySelector.pushableBy(pusher)` tested against `target`,
     /// both by scoreboard name. A team is only allied to itself.
     pub fn pushable_by(&self, pusher: &str, target: &str) -> bool {
-        let own = self.team_of(pusher);
-        let own_rule = own.map_or(CollisionRule::Always, |(_, team)| team.collision_rule);
-        if own_rule == CollisionRule::Never {
-            return false;
-        }
-        let their = self.team_of(target);
-        let their_rule = their.map_or(CollisionRule::Always, |(_, team)| team.collision_rule);
-        if their_rule == CollisionRule::Never {
+        let (own, their) = (self.team_of(pusher), self.team_of(target));
+        let rule = |team: Option<(&str, &ScoreboardTeam)>| {
+            team.map_or(CollisionRule::Always, |(_, team)| team.collision_rule)
+        };
+        let (own_rule, their_rule) = (rule(own), rule(their));
+        if own_rule == CollisionRule::Never || their_rule == CollisionRule::Never {
             return false;
         }
         let same_team = own.is_some_and(|(own, _)| their.is_some_and(|(their, _)| own == their));
@@ -1686,27 +1684,28 @@ mod tests {
         assert_eq!(gui_scale(1920.0, 1080.0, 0, true), 4.0);
     }
 
+    fn add_team(scoreboard: &mut Scoreboard, name: &str, rule: CollisionRule, members: &[&str]) {
+        scoreboard.set_team(
+            name.into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            WHITE,
+            None,
+            rule,
+            Some(members.iter().map(|m| (*m).into()).collect()),
+        );
+    }
+
     #[test]
     fn pushable_by_follows_team_collision_rules() {
         let pushable = |own: CollisionRule, their: CollisionRule, same_team: bool| {
             let mut scoreboard = Scoreboard::default();
-            let mut add = |name: &str, rule: CollisionRule, members: &[&str]| {
-                scoreboard.set_team(
-                    name.into(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    WHITE,
-                    None,
-                    rule,
-                    Some(members.iter().map(|m| (*m).into()).collect()),
-                );
-            };
             if same_team {
-                add("a", own, &["pusher", "target"]);
+                add_team(&mut scoreboard, "a", own, &["pusher", "target"]);
             } else {
-                add("a", own, &["pusher"]);
-                add("b", their, &["target"]);
+                add_team(&mut scoreboard, "a", own, &["pusher"]);
+                add_team(&mut scoreboard, "b", their, &["target"]);
             }
             scoreboard.pushable_by("pusher", "target")
         };
@@ -1725,16 +1724,7 @@ mod tests {
 
         // A teamless target is never an ally, so PUSH_OTHER_TEAMS still blocks.
         let mut scoreboard = Scoreboard::default();
-        scoreboard.set_team(
-            "a".into(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            WHITE,
-            None,
-            PushOtherTeams,
-            Some(vec!["pusher".into()]),
-        );
+        add_team(&mut scoreboard, "a", PushOtherTeams, &["pusher"]);
         assert!(!scoreboard.pushable_by("pusher", "target"));
     }
 }

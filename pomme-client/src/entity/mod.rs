@@ -273,8 +273,8 @@ pub struct LivingEntity {
 pub(crate) fn living_entity_dimensions(entity: &LivingEntity) -> EntityDimensions {
     let mut dims = EntityDimensions::from(entity.entity_type);
     if entity.is_baby {
-        // Vanilla squid/glow-squid babies use an explicit 0.5 x 0.5 shape;
-        // other Pomme-modeled ageable living entities use half-scale dims.
+        // `Squid.BABY_DIMENSIONS` is an explicit 0.5x0.5, not the generic
+        // half scale.
         if matches!(
             entity.entity_type,
             EntityKind::Squid | EntityKind::GlowSquid
@@ -307,20 +307,15 @@ fn pushes_local_player(entity: &LivingEntity) -> bool {
     entity.entity_type != EntityKind::Bat
 }
 
+/// The pusher's `isPushable`, which gates only the reciprocal impulse.
+// TODO: AbstractHorse.isPushable is `!isVehicle()`; ridden equines aren't
+// tracked.
 fn accepts_reciprocal_push(entity: &LivingEntity) -> bool {
-    // Entity.push applies the local impulse regardless of the pusher's
-    // isPushable result, but only applies the reciprocal impulse when the
-    // pusher itself is pushable. AbstractHorse overrides isPushable to depend
-    // on vehicle state rather than LivingEntity's alive/climbable check; Pomme
-    // does not model that vehicle state here, so this is the ordinary
-    // non-vehicle path.
     is_equine(&entity.entity_type) || entity.health > 0.0
 }
 
-/// Horizontal impulse pair from vanilla `Entity.push(Entity)` for an
-/// overlapping remote living entity and the local player. The first vector is
-/// applied to the local player (`this`), the second to the remote entity.
-pub(crate) fn living_push_impulses(local: Position, remote: Position) -> Option<(DVec3, DVec3)> {
+/// `Entity.push(Entity)` impulses as (local player, remote entity).
+fn living_push_impulses(local: Position, remote: Position) -> Option<(DVec3, DVec3)> {
     let mut x = remote.x - local.x;
     let mut z = remote.z - local.z;
     let mut distance = x.abs().max(z.abs()); // Mth.absMax
@@ -497,8 +492,7 @@ impl LivingEntity {
             self.look_dir = LookDirection::new(y_rot, x_rot);
             self.interp_steps -= 1;
         } else {
-            // `LivingEntity.aiStep`: a remote entity can't simulate movement,
-            // so its idle delta movement decays.
+            // `LivingEntity.aiStep` for an entity that can't simulate movement.
             self.velocity *= 0.98;
         }
 
@@ -1611,16 +1605,29 @@ fn probes_water(kind: &EntityKind) -> bool {
 mod tests {
     use super::*;
 
+    fn spawn(store: &mut EntityStore, id: i32, kind: EntityKind, position: Position) {
+        let uuid = uuid::Uuid::from_u128(id as u128);
+        store.spawn_living(id, kind, position, LookDirection::default(), 0.0, uuid);
+    }
+
+    fn tick(store: &mut EntityStore) {
+        store.tick_living(
+            &ChunkStore::new(2),
+            Position::default(),
+            None,
+            |_, _| true,
+            10,
+        );
+    }
+
     #[test]
     fn sleeping_metadata_moves_remote_living_entity_to_bed_center() {
         let mut store = EntityStore::new();
-        store.spawn_living(
+        spawn(
+            &mut store,
             1,
             EntityKind::Villager,
             Position::new(10.0, 70.0, 10.0),
-            LookDirection::default(),
-            0.0,
-            uuid::Uuid::nil(),
         );
 
         let bed = BlockPos::new(2, 64, -5);
@@ -1650,14 +1657,7 @@ mod tests {
             (4, EntityKind::Zombie),
             (5, EntityKind::Zombie),
         ] {
-            store.spawn_living(
-                id,
-                kind,
-                Position::new(0.25, 64.0, 0.0),
-                LookDirection::default(),
-                0.0,
-                uuid::Uuid::from_u128(id as u128),
-            );
+            spawn(&mut store, id, kind, Position::new(0.25, 64.0, 0.0));
         }
         store.living.get_mut(&4).unwrap().health = 0.0;
 
@@ -1688,34 +1688,20 @@ mod tests {
     #[test]
     fn remote_velocity_decays_only_while_not_interpolating() {
         let mut store = EntityStore::new();
-        store.spawn_living(
+        spawn(
+            &mut store,
             1,
             EntityKind::Zombie,
             Position::new(0.0, 64.0, 0.0),
-            LookDirection::default(),
-            0.0,
-            uuid::Uuid::nil(),
         );
         store.set_living_motion(1, DVec3::new(1.0, 0.0, 0.0));
         store.move_living_delta(1, 1.0, 0.0, 0.0, true);
-        store.tick_living(
-            &ChunkStore::new(2),
-            Position::default(),
-            None,
-            |_, _| true,
-            10,
-        );
+        tick(&mut store);
         assert_eq!(store.living[&1].velocity, DVec3::new(1.0, 0.0, 0.0));
 
         let entity = store.living.get_mut(&1).unwrap();
         entity.interp_steps = 0;
-        store.tick_living(
-            &ChunkStore::new(2),
-            Position::default(),
-            None,
-            |_, _| true,
-            10,
-        );
+        tick(&mut store);
         assert_eq!(store.living[&1].velocity, DVec3::new(0.98, 0.0, 0.0));
     }
 
@@ -1733,24 +1719,16 @@ mod tests {
     #[test]
     fn tick_living_advances_remote_interpolation_state() {
         let mut store = EntityStore::new();
-        store.spawn_living(
+        spawn(
+            &mut store,
             1,
             EntityKind::Zombie,
             Position::new(0.0, 64.0, 0.0),
-            LookDirection::default(),
-            0.0,
-            uuid::Uuid::nil(),
         );
         store.move_living_delta(1, 3.0, 0.0, 0.0, true);
         let before = store.living[&1].position;
 
-        store.tick_living(
-            &ChunkStore::new(2),
-            Position::default(),
-            None,
-            |_, _| true,
-            10,
-        );
+        tick(&mut store);
 
         let entity = &store.living[&1];
         assert_eq!(
@@ -1826,22 +1804,8 @@ mod tests {
     #[test]
     fn death_event_forces_mobs_but_not_players_to_zero_health() {
         let mut store = EntityStore::new();
-        store.spawn_living(
-            1,
-            EntityKind::Zombie,
-            Position::default(),
-            LookDirection::default(),
-            0.0,
-            uuid::Uuid::nil(),
-        );
-        store.spawn_living(
-            2,
-            EntityKind::Player,
-            Position::default(),
-            LookDirection::default(),
-            0.0,
-            uuid::Uuid::nil(),
-        );
+        spawn(&mut store, 1, EntityKind::Zombie, Position::default());
+        spawn(&mut store, 2, EntityKind::Player, Position::default());
 
         store.living.get_mut(&1).unwrap().death_time = 6;
         store.living.get_mut(&1).unwrap().is_crouching = true;

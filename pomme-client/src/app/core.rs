@@ -2713,10 +2713,9 @@ impl AppCore {
         game: &mut GameState,
     ) {
         // `handleLogin` adds the local player before any remote entity, so
-        // `ClientLevel.tickEntities` ticks it first and remote entities push its
-        // post-move box; the impulse lands in next tick's travel.
-        // TODO: a same-dimension `handleRespawn` re-adds the player after the
-        // existing entities, which then tick (and push) before it.
+        // `ClientLevel.tickEntities` ticks it first and pushes land in next
+        // tick's travel.
+        // TODO: a same-dimension `handleRespawn` re-adds it after them.
         self.tick_local_player(renderer, connection, game);
         self.tick_remote_entities(game);
     }
@@ -2729,8 +2728,7 @@ impl AppCore {
         let vehicle = game.riding_vehicle_id;
         let (scoreboard, tab_list) = (&game.scoreboard, &game.tab_list);
         let pusher_allowed = |id: i32, entity: &crate::entity::LivingEntity| {
-            // `isPassengerOfSameVehicle`.
-            // TODO: co-passengers of the local player's vehicle.
+            // `isPassengerOfSameVehicle`. TODO: co-passengers.
             if Some(id) == vehicle {
                 return false;
             }
