@@ -1240,8 +1240,23 @@ fn send_scoreboard_team(
         suffix: format_text_spans(&parameters.player_suffix, color),
         color,
         fill_color: parameters.color.color().map(crate::ui::common::rgb),
+        collision_rule: collision_rule(parameters.collision_rule),
         members,
     });
+}
+
+fn collision_rule(
+    rule: azalea_protocol::packets::game::c_set_player_team::CollisionRule,
+) -> crate::ui::hud::CollisionRule {
+    use azalea_protocol::packets::game::c_set_player_team::CollisionRule as Wire;
+
+    use crate::ui::hud::CollisionRule;
+    match rule {
+        Wire::Always => CollisionRule::Always,
+        Wire::Never => CollisionRule::Never,
+        Wire::PushOtherTeams => CollisionRule::PushOtherTeams,
+        Wire::PushOwnTeam => CollisionRule::PushOwnTeam,
+    }
 }
 
 fn score_number_format(

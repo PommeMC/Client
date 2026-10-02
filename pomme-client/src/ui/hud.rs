@@ -47,6 +47,16 @@ pub enum ScoreNumberFormat {
     Fixed(Vec<TextSpan>),
 }
 
+/// Vanilla `Team.CollisionRule`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CollisionRule {
+    #[default]
+    Always,
+    Never,
+    PushOtherTeams,
+    PushOwnTeam,
+}
+
 struct ScoreEntry {
     score: i32,
     display: Option<Vec<TextSpan>>,
@@ -74,6 +84,7 @@ pub(crate) struct ScoreboardTeam {
     /// None for RESET / non-color formatting (no icon fill in the spectator
     /// menu), like vanilla's `PlayerTeam.getColor()` Optional.
     pub(crate) fill_color: Option<[f32; 4]>,
+    collision_rule: CollisionRule,
     pub(crate) members: HashSet<String>,
 }
 
@@ -151,6 +162,7 @@ impl Scoreboard {
         suffix: Vec<TextSpan>,
         color: [f32; 4],
         fill_color: Option<[f32; 4]>,
+        collision_rule: CollisionRule,
         members: Option<Vec<String>>,
     ) {
         // Vanilla ignores a parameter change for a team it doesn't know;
@@ -167,6 +179,7 @@ impl Scoreboard {
             suffix: Vec::new(),
             color,
             fill_color: None,
+            collision_rule,
             members: HashSet::new(),
         });
         team.display_name = display_name;
@@ -174,6 +187,7 @@ impl Scoreboard {
         team.suffix = suffix;
         team.color = color;
         team.fill_color = fill_color;
+        team.collision_rule = collision_rule;
         // ADD unions its player list onto an existing team, like vanilla's
         // addPlayerTeam + per-player addPlayerToTeam.
         if let Some(members) = members {
@@ -222,18 +236,40 @@ impl Scoreboard {
             .unwrap_or_else(|| self.line(name, None))
     }
 
-    pub fn team_name(&self, member: &str) -> &str {
+    fn team_of(&self, member: &str) -> Option<(&str, &ScoreboardTeam)> {
         self.teams
             .iter()
             .find(|(_, team)| team.members.contains(member))
-            .map_or("", |(name, _)| name)
+            .map(|(name, team)| (name.as_str(), team))
+    }
+
+    pub fn team_name(&self, member: &str) -> &str {
+        self.team_of(member).map_or("", |(name, _)| name)
+    }
+
+    /// Vanilla `EntitySelector.pushableBy(pusher)` tested against `target`,
+    /// both by scoreboard name. A team is only allied to itself.
+    pub fn pushable_by(&self, pusher: &str, target: &str) -> bool {
+        let (own, their) = (self.team_of(pusher), self.team_of(target));
+        let rule = |team: Option<(&str, &ScoreboardTeam)>| {
+            team.map_or(CollisionRule::Always, |(_, team)| team.collision_rule)
+        };
+        let (own_rule, their_rule) = (rule(own), rule(their));
+        if own_rule == CollisionRule::Never || their_rule == CollisionRule::Never {
+            return false;
+        }
+        let same_team = own.is_some_and(|(own, _)| their.is_some_and(|(their, _)| own == their));
+        if (own_rule == CollisionRule::PushOwnTeam || their_rule == CollisionRule::PushOwnTeam)
+            && same_team
+        {
+            return false;
+        }
+        own_rule != CollisionRule::PushOtherTeams && their_rule != CollisionRule::PushOtherTeams
+            || same_team
     }
 
     fn line(&self, owner: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
-        let team = self
-            .teams
-            .values()
-            .find(|team| team.members.contains(owner));
+        let team = self.team_of(owner).map(|(_, team)| team);
         let mut line = team.map_or_else(Vec::new, |team| team.prefix.clone());
         line.extend(display.map_or_else(
             || {
@@ -1646,5 +1682,49 @@ mod tests {
         assert_eq!(gui_scale(1280.0, 720.0, 5, true), 4.0);
         assert_eq!(gui_scale(1920.0, 1080.0, 1, true), 2.0);
         assert_eq!(gui_scale(1920.0, 1080.0, 0, true), 4.0);
+    }
+
+    fn add_team(scoreboard: &mut Scoreboard, name: &str, rule: CollisionRule, members: &[&str]) {
+        scoreboard.set_team(
+            name.into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            WHITE,
+            None,
+            rule,
+            Some(members.iter().map(|m| (*m).into()).collect()),
+        );
+    }
+
+    #[test]
+    fn pushable_by_follows_team_collision_rules() {
+        let pushable = |own: CollisionRule, their: CollisionRule, same_team: bool| {
+            let mut scoreboard = Scoreboard::default();
+            if same_team {
+                add_team(&mut scoreboard, "a", own, &["pusher", "target"]);
+            } else {
+                add_team(&mut scoreboard, "a", own, &["pusher"]);
+                add_team(&mut scoreboard, "b", their, &["target"]);
+            }
+            scoreboard.pushable_by("pusher", "target")
+        };
+        use CollisionRule::*;
+
+        assert!(Scoreboard::default().pushable_by("pusher", "target"));
+        assert!(pushable(Always, Always, false));
+        assert!(!pushable(Never, Always, false));
+        assert!(!pushable(Always, Never, false));
+        assert!(!pushable(Never, Never, true));
+        assert!(pushable(PushOwnTeam, Always, false));
+        assert!(!pushable(PushOwnTeam, PushOwnTeam, true));
+        assert!(!pushable(PushOtherTeams, Always, false));
+        assert!(!pushable(Always, PushOtherTeams, false));
+        assert!(pushable(PushOtherTeams, PushOtherTeams, true));
+
+        // A teamless target is never an ally, so PUSH_OTHER_TEAMS still blocks.
+        let mut scoreboard = Scoreboard::default();
+        add_team(&mut scoreboard, "a", PushOtherTeams, &["pusher"]);
+        assert!(!scoreboard.pushable_by("pusher", "target"));
     }
 }

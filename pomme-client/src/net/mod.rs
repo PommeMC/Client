@@ -250,6 +250,7 @@ pub enum NetworkEvent {
         suffix: Vec<crate::ui::text::TextSpan>,
         color: [f32; 4],
         fill_color: Option<[f32; 4]>,
+        collision_rule: crate::ui::hud::CollisionRule,
         members: Option<Vec<String>>,
     },
     ScoreboardTeamMembers {

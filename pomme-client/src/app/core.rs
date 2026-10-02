@@ -175,6 +175,15 @@ fn apply_server_block(
     );
 }
 
+/// The local player's box as a push target, gated on `LivingEntity.isPushable`
+/// and `EntitySelector.NO_SPECTATORS`.
+// TODO: isPushable also needs !onClimbable (Player: unless flying); climbable
+// movement isn't modeled yet (physics/movement.rs).
+fn local_push_box(game: &GameState) -> Option<crate::physics::aabb::Aabb> {
+    (game.player.health > 0.0 && !crate::player::is_spectator(game.player.game_mode))
+        .then(|| game.player.bounding_box())
+}
+
 /// Starts an entity's hurt animation, with a direction for the packets that
 /// carry one. The local player lives outside the entity store.
 fn hurt_entity(game: &mut GameState, id: i32, dir: Option<f32>) {
@@ -1829,6 +1838,7 @@ impl AppCore {
                     suffix,
                     color,
                     fill_color,
+                    collision_rule,
                     members,
                 } => {
                     game.scoreboard.set_team(
@@ -1838,6 +1848,7 @@ impl AppCore {
                         suffix,
                         color,
                         fill_color,
+                        collision_rule,
                         members,
                     );
                 }
@@ -2075,18 +2086,15 @@ impl AppCore {
                     game.entity_positions.insert(id, position);
                     game.silent_entities.remove(&id);
                     if crate::entity::is_living_mob(&entity_type) {
-                        let player_uuid = (entity_type
-                            == azalea_registry::builtin::EntityKind::Player)
-                            .then_some(uuid);
                         game.entity_store.spawn_living(
                             id,
                             entity_type,
                             position,
                             LookDirection::new(head_y_rot_deg, x_rot_deg),
                             y_rot_deg,
-                            player_uuid,
+                            uuid,
                         );
-                        if let Some(uuid) = player_uuid {
+                        if entity_type == azalea_registry::builtin::EntityKind::Player {
                             let textures = game
                                 .tab_list
                                 .players
@@ -2704,6 +2712,55 @@ impl AppCore {
         connection: &ConnectionHandle,
         game: &mut GameState,
     ) {
+        // `handleLogin` adds the local player before any remote entity, so
+        // `ClientLevel.tickEntities` ticks it first and pushes land in next
+        // tick's travel.
+        // TODO: a same-dimension `handleRespawn` re-adds it after them.
+        self.tick_local_player(renderer, connection, game);
+        self.tick_remote_entities(game);
+    }
+
+    /// `LivingEntity.pushEntities` from every remote living entity's tick,
+    /// filtered by `EntitySelector.pushableBy` with the local player as target.
+    fn tick_remote_entities(&self, game: &mut GameState) {
+        let push_box = local_push_box(game);
+        let local_name = self.user.username.as_str();
+        let vehicle = game.riding_vehicle_id;
+        let (scoreboard, tab_list) = (&game.scoreboard, &game.tab_list);
+        let pusher_allowed = |id: i32, entity: &crate::entity::LivingEntity| {
+            // `isPassengerOfSameVehicle`. TODO: co-passengers.
+            if Some(id) == vehicle {
+                return false;
+            }
+            let pusher_name = match entity.player_uuid {
+                Some(uuid) => match tab_list.players.get(&uuid) {
+                    // `Player.tick` sets `noPhysics` for spectators, so
+                    // `Entity.push` returns before any impulse.
+                    Some(info) if crate::player::is_spectator(info.game_mode) => return false,
+                    Some(info) => info.name.clone(),
+                    // TODO: keep the spawn-time profile name; a player
+                    // dropped from the tab list falls back to no team.
+                    None => return true,
+                },
+                None => entity.uuid.to_string(),
+            };
+            scoreboard.pushable_by(&pusher_name, local_name)
+        };
+        *game.player.velocity += game.entity_store.tick_living(
+            &game.chunk_store,
+            game.player.position,
+            push_box,
+            pusher_allowed,
+            game.server_simulation_distance,
+        );
+    }
+
+    fn tick_local_player(
+        &mut self,
+        renderer: &mut Renderer,
+        connection: &ConnectionHandle,
+        game: &mut GameState,
+    ) {
         if game.death_screen_open {
             if game.death_confirm {
                 game.death_confirm_ticks = game.death_confirm_ticks.saturating_add(1);
@@ -2722,14 +2779,6 @@ impl AppCore {
         } else {
             1.0
         });
-
-        // Vanilla ClientLevel keeps ticking other entities while the local
-        // player is dead.
-        game.entity_store.tick_living(
-            &game.chunk_store,
-            game.player.position,
-            game.server_simulation_distance,
-        );
 
         // Vanilla `LocalPlayer.tick` returns immediately until the client has
         // loaded: no physics, no interaction, and no input, sprint or movement
