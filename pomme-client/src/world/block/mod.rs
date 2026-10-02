@@ -925,9 +925,33 @@ pub fn blocks_motion(state: BlockState) -> bool {
 }
 
 /// Vanilla cached `BlockState.isSolid()` / `legacySolid`.
-#[allow(dead_code)]
 pub fn is_solid(state: BlockState) -> Option<bool> {
     block_data(state).legacy_solid
+}
+
+/// [`is_solid`], falling back to `BlockBehaviour.calculateSolid` over the
+/// collision shape for tables without it.
+// TODO: older tables lack forceSolidOn/forceSolidOff (cobweb, bamboo_sapling).
+pub fn legacy_solid(state: BlockState) -> bool {
+    is_solid(state).unwrap_or_else(|| calculate_solid(block_data(state).shape))
+}
+
+fn calculate_solid(collision: Option<&[LocalBox]>) -> bool {
+    let Some(boxes) = collision else {
+        return true;
+    };
+    let Some(&first) = boxes.first() else {
+        return false;
+    };
+    let bounds = boxes.iter().fold(first, |mut b, bx| {
+        for i in 0..3 {
+            b[i] = b[i].min(bx[i]);
+            b[i + 3] = b[i + 3].max(bx[i + 3]);
+        }
+        b
+    });
+    let [dx, dy, dz] = [0, 1, 2].map(|i| bounds[i + 3] - bounds[i]);
+    (dx + dy + dz) / 3.0 >= 0.7291666666666666 || dy >= 1.0
 }
 
 /// Vanilla `BlockState.canBeReplaced()`, without a placement context; blocks
@@ -1220,6 +1244,26 @@ mod tests {
             let state = find_state(name, &[]);
             assert_eq!(is_solid(state), Some(true), "{name} is legacy-solid");
             assert!(!blocks_motion(state), "{name} doesn't block motion");
+        }
+    }
+
+    #[test]
+    fn calculate_solid_matches_the_dumped_legacy_solid() {
+        setup();
+        for (name, props) in [
+            ("stone", &[][..]),
+            ("air", &[]),
+            ("oak_slab", &[("type", "bottom")]),
+            ("white_carpet", &[]),
+            ("oak_fence", &[]),
+            ("chest", &[]),
+        ] {
+            let state = find_state(name, props);
+            assert_eq!(
+                Some(calculate_solid(block_data(state).shape)),
+                is_solid(state),
+                "{name}"
+            );
         }
     }
 

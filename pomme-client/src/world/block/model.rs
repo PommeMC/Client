@@ -212,6 +212,17 @@ pub enum Direction {
 }
 
 impl Direction {
+    pub fn opposite(self) -> Self {
+        match self {
+            Direction::Down => Direction::Up,
+            Direction::Up => Direction::Down,
+            Direction::North => Direction::South,
+            Direction::South => Direction::North,
+            Direction::West => Direction::East,
+            Direction::East => Direction::West,
+        }
+    }
+
     pub fn offset(&self) -> [i32; 3] {
         match self {
             Direction::Down => [0, -1, 0],
