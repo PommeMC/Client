@@ -1570,11 +1570,7 @@ fn mesh_chunk_snapshot(
                     (bz - world_z) as f32,
                 ];
                 let model_offset = crate::world::block::block_position_offset(state, bx, bz);
-                let model_pos = [
-                    block_pos[0] + model_offset.x as f32,
-                    block_pos[1] + model_offset.y as f32,
-                    block_pos[2] + model_offset.z as f32,
-                ];
+                let model_pos = (glam::Vec3::from(block_pos) + model_offset.as_vec3()).to_array();
 
                 if lod > 0 {
                     emit_lod_cube(
@@ -1868,20 +1864,21 @@ fn add_weighted_fluid_height(sum: &mut f32, weight: &mut f32, height: f32) {
     }
 }
 
-fn average_fluid_corner_values(
+/// `FluidRenderer.calculateAverageHeight`; `corner` is only sampled when a
+/// side neighbor holds fluid.
+fn average_fluid_corner_height(
     height_self: f32,
     height2: f32,
     height1: f32,
-    corner: Option<f32>,
+    corner: impl FnOnce() -> f32,
 ) -> f32 {
     if height1 >= 1.0 || height2 >= 1.0 {
         return 1.0;
     }
     let mut sum = 0.0;
     let mut weight = 0.0;
-    if (height1 > 0.0 || height2 > 0.0)
-        && let Some(corner) = corner
-    {
+    if height1 > 0.0 || height2 > 0.0 {
+        let corner = corner();
         if corner >= 1.0 {
             return 1.0;
         }
@@ -1894,23 +1891,8 @@ fn average_fluid_corner_values(
     sum / weight
 }
 
-fn average_fluid_corner_height(
-    snapshot: &ChunkStoreSnapshot,
-    kind: FluidKind,
-    height_self: f32,
-    height2: f32,
-    height1: f32,
-    corner_pos: [i32; 3],
-) -> f32 {
-    let [corner_x, y, corner_z] = corner_pos;
-    let corner = (height1 > 0.0 || height2 > 0.0)
-        .then(|| fluid_render_height(snapshot, kind, corner_x, y, corner_z));
-    average_fluid_corner_values(height_self, height2, height1, corner)
-}
-
-/// Vanilla FluidRenderer corner order: north-west, south-west, south-east,
-/// north-east. These are logical fluid-surface heights before the renderer's
-/// 0.001 anti-z-fighting inset.
+/// Corner heights in `FluidRenderer` order (north-west, south-west,
+/// south-east, north-east), before [`FLUID_INSET`].
 fn fluid_corner_heights(
     snapshot: &ChunkStoreSnapshot,
     kind: FluidKind,
@@ -1918,50 +1900,22 @@ fn fluid_corner_heights(
     by: i32,
     bz: i32,
 ) -> [f32; 4] {
-    let self_height = fluid_render_height(snapshot, kind, bx, by, bz);
+    let height = |x, z| fluid_render_height(snapshot, kind, x, by, z);
+    let self_height = height(bx, bz);
     if self_height >= 1.0 {
         return [1.0; 4];
     }
-
-    let north = fluid_render_height(snapshot, kind, bx, by, bz - 1);
-    let south = fluid_render_height(snapshot, kind, bx, by, bz + 1);
-    let east = fluid_render_height(snapshot, kind, bx + 1, by, bz);
-    let west = fluid_render_height(snapshot, kind, bx - 1, by, bz);
-
+    let (north, south) = (height(bx, bz - 1), height(bx, bz + 1));
+    let (west, east) = (height(bx - 1, bz), height(bx + 1, bz));
     [
-        average_fluid_corner_height(
-            snapshot,
-            kind,
-            self_height,
-            north,
-            west,
-            [bx - 1, by, bz - 1],
-        ),
-        average_fluid_corner_height(
-            snapshot,
-            kind,
-            self_height,
-            south,
-            west,
-            [bx - 1, by, bz + 1],
-        ),
-        average_fluid_corner_height(
-            snapshot,
-            kind,
-            self_height,
-            south,
-            east,
-            [bx + 1, by, bz + 1],
-        ),
-        average_fluid_corner_height(
-            snapshot,
-            kind,
-            self_height,
-            north,
-            east,
-            [bx + 1, by, bz - 1],
-        ),
+        (north, west, -1, -1),
+        (south, west, -1, 1),
+        (south, east, 1, 1),
+        (north, east, 1, -1),
     ]
+    .map(|(height2, height1, dx, dz)| {
+        average_fluid_corner_height(self_height, height2, height1, || height(bx + dx, bz + dz))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2471,26 +2425,25 @@ pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4
 #[cfg(test)]
 mod fluid_height_tests {
     use super::{
-        average_fluid_corner_values, fluid_face_occluded_by_self, fluid_face_occluded_by_state,
+        average_fluid_corner_height, fluid_face_occluded_by_self, fluid_face_occluded_by_state,
     };
     use crate::world::block::find_state;
     use crate::world::block::model::Direction;
 
     #[test]
     fn fluid_corner_averaging_matches_vanilla_weighting() {
+        let unsampled = || unreachable!("corner sampled without a fluid side");
         let low = 1.0_f32 / 9.0;
-        let isolated = average_fluid_corner_values(low, 0.0, 0.0, None);
-        assert!((isolated - low / 3.0).abs() < 1e-7);
-
-        let flat = average_fluid_corner_values(low, low, low, Some(low));
-        assert!((flat - low).abs() < 1e-7);
-
         let source = 8.0_f32 / 9.0;
-        let weighted = average_fluid_corner_values(source, source, source, Some(source));
+        let isolated = average_fluid_corner_height(low, 0.0, 0.0, unsampled);
+        assert!((isolated - low / 3.0).abs() < 1e-7);
+        let flat = average_fluid_corner_height(low, low, low, || low);
+        assert!((flat - low).abs() < 1e-7);
+        let weighted = average_fluid_corner_height(source, source, source, || source);
         assert!((weighted - source).abs() < 1e-7);
 
-        assert_eq!(average_fluid_corner_values(low, 1.0, 0.0, None), 1.0);
-        assert_eq!(average_fluid_corner_values(low, low, low, Some(1.0)), 1.0);
+        assert_eq!(average_fluid_corner_height(low, 1.0, 0.0, unsampled), 1.0);
+        assert_eq!(average_fluid_corner_height(low, low, low, || 1.0), 1.0);
     }
 
     #[test]
@@ -2499,44 +2452,22 @@ mod fluid_height_tests {
         let stone = find_state("stone", &[]);
         let bottom = find_state("oak_slab", &[("type", "bottom"), ("waterlogged", "false")]);
         let top = find_state("oak_slab", &[("type", "top"), ("waterlogged", "false")]);
+        let occluded = fluid_face_occluded_by_state;
 
-        // Full blocks hide every horizontal fluid side regardless of height.
-        assert!(fluid_face_occluded_by_state(
-            stone,
-            Direction::North,
-            1.0 / 9.0
-        ));
+        // Full blocks hide side faces at any height; a bottom slab only the
+        // lower half.
+        assert!(occluded(stone, Direction::North, 1.0 / 9.0));
+        assert!(occluded(bottom, Direction::North, 0.5));
+        assert!(!occluded(bottom, Direction::North, 0.75));
+        assert!(!occluded(top, Direction::North, 0.5));
 
-        // A bottom slab covers only the lower half of a horizontal face.
-        assert!(fluid_face_occluded_by_state(bottom, Direction::North, 0.5));
-        assert!(!fluid_face_occluded_by_state(
-            bottom,
-            Direction::North,
-            0.75
-        ));
-        assert!(!fluid_face_occluded_by_state(top, Direction::North, 0.5));
+        // The surface is only hidden once the fluid reaches y=1.
+        assert!(!occluded(stone, Direction::Up, 8.0 / 9.0));
+        assert!(occluded(stone, Direction::Up, 1.0));
 
-        // `Shapes.blockOccludes` requires a top fluid face to reach y=1 before
-        // the block above can hide it, even when that neighbor is a full cube.
-        assert!(!fluid_face_occluded_by_state(
-            stone,
-            Direction::Up,
-            8.0 / 9.0
-        ));
-        assert!(fluid_face_occluded_by_state(stone, Direction::Up, 1.0));
-
-        // The below-neighbor test uses its UP face. A top slab reaches that
-        // boundary; a bottom slab does not.
-        assert!(fluid_face_occluded_by_state(
-            top,
-            Direction::Down,
-            8.0 / 9.0
-        ));
-        assert!(!fluid_face_occluded_by_state(
-            bottom,
-            Direction::Down,
-            8.0 / 9.0
-        ));
+        // The bottom face tests the below neighbor's top face.
+        assert!(occluded(top, Direction::Down, 8.0 / 9.0));
+        assert!(!occluded(bottom, Direction::Down, 8.0 / 9.0));
     }
 
     #[test]

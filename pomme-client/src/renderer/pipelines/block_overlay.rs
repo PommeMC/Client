@@ -647,9 +647,8 @@ mod tests {
         let offset = block_position_offset(bamboo, pos.x, pos.z);
 
         assert_ne!(offset, glam::DVec3::ZERO);
-        assert_eq!(origin[0], (pos.x as f64 + offset.x) as f32);
-        assert_eq!(origin[1], (pos.y as f64 + offset.y) as f32);
-        assert_eq!(origin[2], (pos.z as f64 + offset.z) as f32);
+        let block = glam::DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64);
+        assert_eq!(origin, (block + offset).as_vec3().to_array());
     }
 
     /// Each axis-aligned cube face must project to exactly one crack tile: its
