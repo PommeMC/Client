@@ -148,11 +148,9 @@ function App() {
     const res = await commands.addAccount();
     if (res.ok) {
       const acc = res.value;
-      setAccounts((prev) => {
-        const filtered = prev.filter((a) => a.uuid !== acc.uuid);
-        return [...filtered, acc];
-      });
-      activateAccount(acc, accounts.filter((a) => a.uuid !== acc.uuid).length);
+      const others = accounts.filter((a) => a.uuid !== acc.uuid);
+      setAccounts([...others, acc]);
+      activateAccount(acc, others.length);
       setStatus(`Signed in as ${acc.username}`);
     } else {
       setStatus(`Auth failed: ${res.error}`);
