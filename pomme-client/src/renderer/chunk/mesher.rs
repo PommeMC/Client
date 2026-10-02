@@ -13,7 +13,7 @@ use crate::world::block::model::{
     BakedModel, CardinalLighting, Direction, face_positions, face_uvs,
 };
 use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
-use crate::world::block::{FluidKind, fluid, is_air, is_solid, light_props};
+use crate::world::block::{FluidKind, block_outline, fluid, is_air, legacy_solid, light_props};
 use crate::world::chunk;
 use crate::world::chunk::ChunkStore;
 
@@ -1799,26 +1799,15 @@ fn classify_block(state: azalea_block::BlockState) -> BlockKind {
 // TODO: flowing water texture (water_flow) with direction-based rotation
 
 const MAX_FLUID_HEIGHT: f32 = 8.0 / 9.0;
+/// `FluidRenderer`'s `offs` anti-z-fighting inset.
+const FLUID_INSET: f32 = 0.001;
 
 fn same_fluid(state: azalea_block::BlockState, kind: FluidKind) -> bool {
     fluid(state).kind == kind
 }
 
-fn direction_ordinal(direction: Direction) -> usize {
-    match direction {
-        Direction::Down => 0,
-        Direction::Up => 1,
-        Direction::North => 2,
-        Direction::South => 3,
-        Direction::West => 4,
-        Direction::East => 5,
-    }
-}
-
-/// Vanilla `FluidRenderer.isFaceOccludedByState` reduced to the generated
-/// face-occlusion mask. The mask is exact for vanilla's 1/16-aligned block
-/// face shapes; the fluid box contributes a full-width face from y=0 through
-/// `height` on horizontal sides.
+/// Vanilla `FluidRenderer.isFaceOccludedByState` over the generated 16x16
+/// face masks; on side faces the fluid box covers rows `0..height`.
 fn fluid_face_occluded_by_state(
     state: azalea_block::BlockState,
     direction: Direction,
@@ -1828,42 +1817,23 @@ fn fluid_face_occluded_by_state(
     if !props.can_occlude {
         return false;
     }
-
-    let state_face = direction_ordinal(direction) ^ 1;
-    let row = |v: usize| -> u16 {
-        if props.use_shape_for_light_occlusion {
-            props
-                .face_occlusion
-                .expect("shaped occluder must carry generated face masks")[state_face][v]
-        } else {
-            0xFFFF
-        }
+    let full_row = |v: usize| match props.face_occlusion {
+        Some(masks) => masks[direction.opposite() as usize][v] == 0xFFFF,
+        // TODO: masks are only dumped for useShapeForLightOcclusion states, so
+        // other partial occlusion shapes (fence posts, chests) count as empty.
+        None => block_outline(state).is_none(),
     };
-
-    match direction {
-        Direction::Up => {
-            // Shapes.blockOccludes requires the fluid box to reach the shared
-            // top boundary before the above block can hide the surface.
-            (height - 1.0).abs() <= 1.0e-7 && (0..16).all(|v| row(v) == 0xFFFF)
-        }
-        Direction::Down => (0..16).all(|v| row(v) == 0xFFFF),
-        Direction::North | Direction::South | Direction::West | Direction::East => {
-            let rows = ((height.clamp(0.0, 1.0) * 16.0).ceil() as usize).min(16);
-            (0..rows).all(|v| row(v) == 0xFFFF)
-        }
-    }
+    let rows = match direction {
+        // `Shapes.blockOccludes` needs the fluid box to reach the top boundary.
+        Direction::Up if (height - 1.0).abs() > 1.0e-7 => return false,
+        Direction::Up | Direction::Down => 16,
+        _ => ((height.clamp(0.0, 1.0) * 16.0).ceil() as usize).min(16),
+    };
+    (0..rows).all(full_row)
 }
 
 fn fluid_face_occluded_by_self(state: azalea_block::BlockState, direction: Direction) -> bool {
-    let opposite = match direction {
-        Direction::Down => Direction::Up,
-        Direction::Up => Direction::Down,
-        Direction::North => Direction::South,
-        Direction::South => Direction::North,
-        Direction::West => Direction::East,
-        Direction::East => Direction::West,
-    };
-    fluid_face_occluded_by_state(state, opposite, 1.0)
+    fluid_face_occluded_by_state(state, direction.opposite(), 1.0)
 }
 
 fn fluid_render_height(
@@ -1881,7 +1851,7 @@ fn fluid_render_height(
         } else {
             state_fluid.height()
         }
-    } else if is_solid(state) != Some(true) {
+    } else if !legacy_solid(state) {
         0.0
     } else {
         -1.0
@@ -2070,8 +2040,7 @@ fn emit_fluid(
     let above = snapshot.get_block_state(bx, by + 1, bz);
     let below = snapshot.get_block_state(bx, by - 1, bz);
 
-    // Vanilla computes the logical fluid surface first, then applies the
-    // 0.001 render inset only when the top face is actually visible.
+    // The occlusion test sees the surface before the top face's inset.
     let mut heights = fluid_corner_heights(snapshot, fluid_kind, bx, by, bz);
     let min_top = heights.iter().copied().fold(1.0_f32, f32::min);
     let render_up = !same_fluid(above, fluid_kind)
@@ -2079,11 +2048,11 @@ fn emit_fluid(
     let render_down = !same_fluid(below, fluid_kind)
         && !fluid_face_occluded_by_self(state, Direction::Down)
         && !fluid_face_occluded_by_state(below, Direction::Down, MAX_FLUID_HEIGHT);
-    let bottom_offset = if render_down { 0.001 } else { 0.0 };
+    let bottom_offset = if render_down { FLUID_INSET } else { 0.0 };
 
     if render_up {
         for height in &mut heights {
-            *height -= 0.001;
+            *height -= FLUID_INSET;
         }
     }
     let [north_west, south_west, south_east, north_east] = heights;
@@ -2112,9 +2081,7 @@ fn emit_fluid(
                     vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
                 );
 
-                // TODO(vanilla FluidState.shouldRenderBackwardUpFace): gate this
-                // backface on the 3x3 neighborhood above once exact `isSolidRender`
-                // state is available instead of approximating it from other flags.
+                // TODO: gate on `FluidState.shouldRenderBackwardUpFace`.
                 let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
                 let rev_uvs = [uvs[0], uvs[3], uvs[2], uvs[1]];
                 emit_face_into(
@@ -2137,65 +2104,26 @@ fn emit_fluid(
                     p[1] = bottom_offset;
                 }
             }
-            Direction::North => {
-                let side_height = north_east.max(north_west);
+            _ => {
+                // (top of vertex 0, top of vertex 3, inset axis, inset plane)
+                let (top0, top3, axis, plane) = match dir {
+                    Direction::North => (north_east, north_west, 2, FLUID_INSET),
+                    Direction::South => (south_west, south_east, 2, 1.0 - FLUID_INSET),
+                    Direction::West => (north_west, south_west, 0, FLUID_INSET),
+                    _ => (south_east, north_east, 0, 1.0 - FLUID_INSET),
+                };
                 if fluid_face_occluded_by_self(state, *dir)
-                    || fluid_face_occluded_by_state(neighbor, *dir, side_height)
+                    || fluid_face_occluded_by_state(neighbor, *dir, top0.max(top3))
                 {
                     continue;
                 }
-                positions[0][1] = north_east;
-                positions[3][1] = north_west;
-                for p in &mut positions {
-                    p[2] = 0.001;
-                }
+                positions[0][1] = top0;
                 positions[1][1] = bottom_offset;
                 positions[2][1] = bottom_offset;
-            }
-            Direction::South => {
-                let side_height = south_west.max(south_east);
-                if fluid_face_occluded_by_self(state, *dir)
-                    || fluid_face_occluded_by_state(neighbor, *dir, side_height)
-                {
-                    continue;
-                }
-                positions[0][1] = south_west;
-                positions[3][1] = south_east;
+                positions[3][1] = top3;
                 for p in &mut positions {
-                    p[2] = 1.0 - 0.001;
+                    p[axis] = plane;
                 }
-                positions[1][1] = bottom_offset;
-                positions[2][1] = bottom_offset;
-            }
-            Direction::West => {
-                let side_height = north_west.max(south_west);
-                if fluid_face_occluded_by_self(state, *dir)
-                    || fluid_face_occluded_by_state(neighbor, *dir, side_height)
-                {
-                    continue;
-                }
-                positions[0][1] = north_west;
-                positions[3][1] = south_west;
-                for p in &mut positions {
-                    p[0] = 0.001;
-                }
-                positions[1][1] = bottom_offset;
-                positions[2][1] = bottom_offset;
-            }
-            Direction::East => {
-                let side_height = south_east.max(north_east);
-                if fluid_face_occluded_by_self(state, *dir)
-                    || fluid_face_occluded_by_state(neighbor, *dir, side_height)
-                {
-                    continue;
-                }
-                positions[0][1] = south_east;
-                positions[3][1] = north_east;
-                for p in &mut positions {
-                    p[0] = 1.0 - 0.001;
-                }
-                positions[1][1] = bottom_offset;
-                positions[2][1] = bottom_offset;
             }
         }
 
@@ -2542,7 +2470,9 @@ pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4
 
 #[cfg(test)]
 mod fluid_height_tests {
-    use super::{average_fluid_corner_values, fluid_face_occluded_by_state};
+    use super::{
+        average_fluid_corner_values, fluid_face_occluded_by_self, fluid_face_occluded_by_state,
+    };
     use crate::world::block::find_state;
     use crate::world::block::model::Direction;
 
@@ -2607,6 +2537,24 @@ mod fluid_height_tests {
             Direction::Down,
             8.0 / 9.0
         ));
+    }
+
+    #[test]
+    fn partial_occluders_without_face_masks_keep_fluid_faces() {
+        crate::world::block::init("26.2");
+        for name in ["oak_fence", "cobblestone_wall", "chest"] {
+            let state = find_state(name, &[("waterlogged", "true")]);
+            for dir in [Direction::North, Direction::South, Direction::Down] {
+                assert!(
+                    !fluid_face_occluded_by_self(state, dir),
+                    "{name} hides its own {dir:?} water face"
+                );
+                assert!(
+                    !fluid_face_occluded_by_state(state, dir, 8.0 / 9.0),
+                    "{name} hides a neighbor's {dir:?} water face"
+                );
+            }
+        }
     }
 }
 

@@ -326,21 +326,20 @@ impl BlockOverlayPipeline {
     }
 }
 
-/// Builds the crumbling overlay for a block by re-tessellating its model with
-/// vanilla's per-face crack projection (`SheetedDecalTextureGenerator`). There
-/// is no geometry inflation: the overlay sits exactly on the block and relies
-/// on the pipeline's polygon offset to avoid z-fighting, matching vanilla.
+/// Anchor-relative (see Camera::anchor) model origin, including the block's
+/// position offset like `LevelRenderer`'s breaking pass. Crack UVs project from
+/// block-local coordinates, so neither shift touches the texture.
 fn overlay_origin(state: BlockState, pos: &BlockPos, anchor: glam::DVec3) -> [f32; 3] {
-    // Anchor-relative (see Camera::anchor); the crack UVs are projected from
-    // block-local coordinates, so the rebase never touches the texture. The
-    // rendered block model itself may have vanilla's deterministic positional
-    // offset (bamboo/flowers/etc.), and the destroy overlay must follow it.
     let model_offset = block_position_offset(state, pos.x, pos.z);
     (glam::DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64) + model_offset - anchor)
         .as_vec3()
         .to_array()
 }
 
+/// Builds the crumbling overlay for a block by re-tessellating its model with
+/// vanilla's per-face crack projection (`SheetedDecalTextureGenerator`). There
+/// is no geometry inflation: the overlay sits exactly on the block and relies
+/// on the pipeline's polygon offset to avoid z-fighting, matching vanilla.
 fn build_overlay_vertices(
     registry: &BlockRegistry,
     state: BlockState,
@@ -639,8 +638,6 @@ fn create_pipeline(
 mod tests {
     use super::*;
 
-    /// Each axis-aligned cube face must project to exactly one crack tile: its
-    /// four corners span 1.0 in both texture axes (no axis collapse, scale 1).
     #[test]
     fn randomized_model_offset_moves_destroy_overlay_with_bamboo() {
         crate::world::block::init("26.2");
@@ -655,6 +652,8 @@ mod tests {
         assert_eq!(origin[2], (pos.z as f64 + offset.z) as f32);
     }
 
+    /// Each axis-aligned cube face must project to exactly one crack tile: its
+    /// four corners span 1.0 in both texture axes (no axis collapse, scale 1).
     #[test]
     fn projection_maps_each_face_to_a_unit_tile() {
         let span = |xs: [f32; 4]| {
