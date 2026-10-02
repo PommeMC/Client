@@ -128,6 +128,8 @@ pub struct LivingEntity {
     pub body_y_rot_deg: f32,
     pub prev_body_y_rot_deg: f32,
     pub entity_type: EntityKind,
+    pub uuid: uuid::Uuid,
+    /// `uuid` for a remote player, the key into the tab list and skin cache.
     pub player_uuid: Option<uuid::Uuid>,
     pub walk_anim_pos: f32,
     pub walk_anim_speed: f32,
@@ -296,10 +298,12 @@ fn living_entity_aabb(entity: &LivingEntity) -> Aabb {
     )
 }
 
+/// Per-kind `pushEntities` / `doPush` overrides. Team rules, spectators and
+/// shared vehicles are the caller's `pusher_allowed` filter.
+// TODO: once these kinds are modeled: Parrot.doPush skips players, ArmorStand
+// no-ops doPush/pushEntities, Vex ticks with noPhysics (no push), and Warden /
+// Creaking gate the reciprocal impulse in isPushable.
 fn pushes_local_player(entity: &LivingEntity) -> bool {
-    // Bat suppresses pushEntities entirely. Remote players use the normal
-    // client-side push path. Team collision rules and remote spectator state
-    // are not modeled here yet.
     entity.entity_type != EntityKind::Bat
 }
 
@@ -339,7 +343,7 @@ impl LivingEntity {
         look_dir: LookDirection,
         head_y_rot_deg: f32,
         body_y_rot_deg: f32,
-        player_uuid: Option<uuid::Uuid>,
+        uuid: uuid::Uuid,
     ) -> Self {
         let default_health = if entity_type == EntityKind::IronGolem {
             100.0
@@ -356,7 +360,8 @@ impl LivingEntity {
             body_y_rot_deg,
             prev_body_y_rot_deg: body_y_rot_deg,
             entity_type,
-            player_uuid,
+            uuid,
+            player_uuid: (entity_type == EntityKind::Player).then_some(uuid),
             walk_anim_pos: 0.0,
             walk_anim_speed: 0.0,
             prev_walk_anim_speed: 0.0,
@@ -491,6 +496,10 @@ impl LivingEntity {
                     / self.interp_steps as f32;
             self.look_dir = LookDirection::new(y_rot, x_rot);
             self.interp_steps -= 1;
+        } else {
+            // `LivingEntity.aiStep`: a remote entity can't simulate movement,
+            // so its idle delta movement decays.
+            self.velocity *= 0.98;
         }
 
         self.prev_head_y_rot_deg = self.head_y_rot_deg;
@@ -1117,7 +1126,7 @@ impl EntityStore {
         position: Position,
         look_dir: LookDirection,
         body_y_rot_deg: f32,
-        player_uuid: Option<uuid::Uuid>,
+        uuid: uuid::Uuid,
     ) {
         self.living.insert(
             id,
@@ -1127,7 +1136,7 @@ impl EntityStore {
                 look_dir,
                 look_dir.y_rot_deg(),
                 body_y_rot_deg,
-                player_uuid,
+                uuid,
             ),
         );
     }
@@ -1434,10 +1443,11 @@ impl EntityStore {
         chunks: &ChunkStore,
         player_position: Position,
         local_push_box: Option<Aabb>,
+        pusher_allowed: impl Fn(i32, &LivingEntity) -> bool,
         simulation_distance: u32,
     ) -> DVec3 {
         let mut local_push = DVec3::ZERO;
-        for entity in self.living.values_mut() {
+        for (&id, entity) in &mut self.living {
             entity.tick_interpolation();
             entity.tick_body_rotation();
             let dx = entity.position.x - entity.prev_position.x;
@@ -1484,6 +1494,7 @@ impl EntityStore {
 
             if let Some(local_box) = local_push_box
                 && pushes_local_player(entity)
+                && pusher_allowed(id, entity)
                 && living_entity_aabb(entity).intersects(&local_box)
                 && let Some((local_impulse, remote_impulse)) =
                     living_push_impulses(player_position, entity.position)
@@ -1609,7 +1620,7 @@ mod tests {
             Position::new(10.0, 70.0, 10.0),
             LookDirection::default(),
             0.0,
-            None,
+            uuid::Uuid::nil(),
         );
 
         let bed = BlockPos::new(2, 64, -5);
@@ -1637,6 +1648,7 @@ mod tests {
             (2, EntityKind::Player),
             (3, EntityKind::Bat),
             (4, EntityKind::Zombie),
+            (5, EntityKind::Zombie),
         ] {
             store.spawn_living(
                 id,
@@ -1644,14 +1656,21 @@ mod tests {
                 Position::new(0.25, 64.0, 0.0),
                 LookDirection::default(),
                 0.0,
-                None,
+                uuid::Uuid::from_u128(id as u128),
             );
         }
         store.living.get_mut(&4).unwrap().health = 0.0;
 
         let local = Position::new(0.0, 64.0, 0.0);
         let local_box = Aabb::from_center(local.into(), 0.3, 0.9);
-        let impulse = store.tick_living(&ChunkStore::new(2), local, Some(local_box), 10);
+        // Id 5 stands in for a pusher the caller's pushableBy filter rejects.
+        let impulse = store.tick_living(
+            &ChunkStore::new(2),
+            local,
+            Some(local_box),
+            |id, _| id != 5,
+            10,
+        );
         let expected = f64::from(0.05_f32) * 0.5;
 
         // A normal mob, a remote player, and a dying mob all push the local
@@ -1663,6 +1682,41 @@ mod tests {
         // Dead LivingEntity::isPushable is false, so it does not receive the
         // reciprocal impulse even though its tick still pushes the local player.
         assert_eq!(store.living[&4].velocity, DVec3::ZERO);
+        assert_eq!(store.living[&5].velocity, DVec3::ZERO);
+    }
+
+    #[test]
+    fn remote_velocity_decays_only_while_not_interpolating() {
+        let mut store = EntityStore::new();
+        store.spawn_living(
+            1,
+            EntityKind::Zombie,
+            Position::new(0.0, 64.0, 0.0),
+            LookDirection::default(),
+            0.0,
+            uuid::Uuid::nil(),
+        );
+        store.set_living_motion(1, DVec3::new(1.0, 0.0, 0.0));
+        store.move_living_delta(1, 1.0, 0.0, 0.0, true);
+        store.tick_living(
+            &ChunkStore::new(2),
+            Position::default(),
+            None,
+            |_, _| true,
+            10,
+        );
+        assert_eq!(store.living[&1].velocity, DVec3::new(1.0, 0.0, 0.0));
+
+        let entity = store.living.get_mut(&1).unwrap();
+        entity.interp_steps = 0;
+        store.tick_living(
+            &ChunkStore::new(2),
+            Position::default(),
+            None,
+            |_, _| true,
+            10,
+        );
+        assert_eq!(store.living[&1].velocity, DVec3::new(0.98, 0.0, 0.0));
     }
 
     #[test]
@@ -1685,12 +1739,18 @@ mod tests {
             Position::new(0.0, 64.0, 0.0),
             LookDirection::default(),
             0.0,
-            None,
+            uuid::Uuid::nil(),
         );
         store.move_living_delta(1, 3.0, 0.0, 0.0, true);
         let before = store.living[&1].position;
 
-        store.tick_living(&ChunkStore::new(2), Position::default(), None, 10);
+        store.tick_living(
+            &ChunkStore::new(2),
+            Position::default(),
+            None,
+            |_, _| true,
+            10,
+        );
 
         let entity = &store.living[&1];
         assert_eq!(
@@ -1772,7 +1832,7 @@ mod tests {
             Position::default(),
             LookDirection::default(),
             0.0,
-            None,
+            uuid::Uuid::nil(),
         );
         store.spawn_living(
             2,
@@ -1780,7 +1840,7 @@ mod tests {
             Position::default(),
             LookDirection::default(),
             0.0,
-            None,
+            uuid::Uuid::nil(),
         );
 
         store.living.get_mut(&1).unwrap().death_time = 6;
