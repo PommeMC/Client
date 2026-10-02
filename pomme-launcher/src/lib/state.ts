@@ -1,4 +1,12 @@
-import { createContext, createElement, ReactNode, useContext, useEffect, useState } from "react";
+import {
+  createContext,
+  createElement,
+  ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
 import { commands } from "../bindings";
 import { AuthAccount } from "../bindings/pomme_launcher/auth";
 import { GameVersion, PatchNote } from "../bindings/pomme_launcher/commands";
@@ -48,11 +56,23 @@ const useLauncherSettings = () => {
       console.error("Error while setting `launchWithConsole`: ", res.error);
     }
   };
+
+  // Memoized: App lists it in effect and callback dependencies.
+  const setSelectedAccountUuid = useCallback(async (uuid: string | null) => {
+    let res = await commands.setSelectedAccountUuid(uuid);
+    if (res.ok) {
+      setLauncherSettings((prev) => ({ ...prev, selectedAccountUuid: uuid }));
+    } else {
+      console.error("Error while setting `selectedAccountUuid`: ", res.error);
+    }
+  }, []);
+
   return {
     ...launcherSettings,
     setLanguage,
     setKeepLauncherOpen,
     setLaunchWithConsole,
+    setSelectedAccountUuid,
   };
 };
 

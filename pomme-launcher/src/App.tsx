@@ -2,6 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useRef } from "react";
 
 import { commands, events } from "./bindings";
+import { AuthAccount } from "./bindings/pomme_launcher/auth";
 import { PatchNote } from "./bindings/pomme_launcher/commands";
 import { ACTIVITY_IDLE } from "./lib/friends";
 import { useAppStateContext } from "./lib/state";
@@ -55,6 +56,7 @@ function App() {
   } = useAppStateContext();
 
   const { setIsOpen: setAccountDropdownOpen } = accountDropdown;
+  const { setSelectedAccountUuid } = launcherSettings;
 
   const openPatchNote = useCallback(
     async (note: PatchNote) => {
@@ -85,30 +87,26 @@ function App() {
     [setSkinUrl],
   );
 
-  const persistSelectedAccountUuid = useCallback((uuid: string | null) => {
-    void commands.setSelectedAccountUuid(uuid).then((res) => {
-      if (!res.ok) console.error("Error while setting `selectedAccountUuid`: ", res.error);
-    });
-  }, []);
+  const activateAccount = useCallback(
+    (acc: AuthAccount | undefined, index: number) => {
+      setActiveIndex(index);
+      void setSelectedAccountUuid(acc?.uuid ?? null);
+      if (acc) loadSkin(acc.uuid);
+      else setSkinUrl(null);
+    },
+    [loadSkin, setActiveIndex, setSelectedAccountUuid, setSkinUrl],
+  );
 
   useEffect(() => {
     Promise.all([commands.getAllAccounts(), commands.loadLauncherSettings()]).then(
       ([accs, settings]) => {
-        if (accs.length > 0) {
-          const savedIndex = settings.selectedAccountUuid
-            ? accs.findIndex((acc) => acc.uuid === settings.selectedAccountUuid)
-            : -1;
-          const selectedIndex = savedIndex >= 0 ? savedIndex : 0;
-          const selectedUuid = accs[selectedIndex].uuid;
-          setAccounts(accs);
-          setActiveIndex(selectedIndex);
-          loadSkin(selectedUuid);
-          if ((settings.selectedAccountUuid ?? null) !== selectedUuid) {
-            persistSelectedAccountUuid(selectedUuid);
-          }
-        } else if (settings.selectedAccountUuid) {
-          persistSelectedAccountUuid(null);
-        }
+        // A saved account that was removed elsewhere falls back to the first.
+        const index = Math.max(
+          0,
+          accs.findIndex((acc) => acc.uuid === settings.selectedAccountUuid),
+        );
+        setAccounts(accs);
+        activateAccount(accs[index], index);
       },
     );
     commands.getPatchNotes(6).then((res) => {
@@ -119,7 +117,7 @@ function App() {
       if (res.ok) setVersions(res.value);
       else console.error("Failed to fetch versions:", res.error);
     });
-  }, [loadSkin, persistSelectedAccountUuid, setAccounts, setActiveIndex, setNews, setVersions]);
+  }, [activateAccount, setAccounts, setNews, setVersions]);
 
   useEffect(() => {
     requestAnimationFrame(() => getCurrentWindow().show());
@@ -154,9 +152,7 @@ function App() {
         const filtered = prev.filter((a) => a.uuid !== acc.uuid);
         return [...filtered, acc];
       });
-      setActiveIndex(accounts.filter((a) => a.uuid !== acc.uuid).length);
-      persistSelectedAccountUuid(acc.uuid);
-      loadSkin(acc.uuid);
+      activateAccount(acc, accounts.filter((a) => a.uuid !== acc.uuid).length);
       setStatus(`Signed in as ${acc.username}`);
     } else {
       setStatus(`Auth failed: ${res.error}`);
@@ -165,11 +161,9 @@ function App() {
     setAuthUrl(null);
   }, [
     accounts,
-    loadSkin,
-    persistSelectedAccountUuid,
+    activateAccount,
     setAccountDropdownOpen,
     setAccounts,
-    setActiveIndex,
     setAuthLoading,
     setAuthUrl,
     setStatus,
@@ -177,34 +171,25 @@ function App() {
 
   const switchAccount = useCallback(
     (index: number) => {
-      setActiveIndex(index);
       setAccountDropdownOpen(false);
-      if (accounts[index]) {
-        persistSelectedAccountUuid(accounts[index].uuid);
-        loadSkin(accounts[index].uuid);
-      }
+      activateAccount(accounts[index], index);
     },
-    [accounts, loadSkin, persistSelectedAccountUuid, setAccountDropdownOpen, setActiveIndex],
+    [accounts, activateAccount, setAccountDropdownOpen],
   );
 
   const removeAccount = useCallback(
     (uuid: string) => {
       commands.removeAccount(uuid).catch((e) => console.error("Failed to remove account:", e));
-      const remainingAccounts = accounts.filter((a) => a.uuid !== uuid);
-      setAccounts(remainingAccounts);
-      setActiveIndex(0);
-      persistSelectedAccountUuid(remainingAccounts[0]?.uuid ?? null);
+      const remaining = accounts.filter((a) => a.uuid !== uuid);
+      setAccounts(remaining);
       setAccountDropdownOpen(false);
-      setSkinUrl(null);
+      if (account && account.uuid !== uuid) {
+        setActiveIndex(remaining.indexOf(account));
+      } else {
+        activateAccount(remaining[0], 0);
+      }
     },
-    [
-      accounts,
-      persistSelectedAccountUuid,
-      setAccountDropdownOpen,
-      setAccounts,
-      setActiveIndex,
-      setSkinUrl,
-    ],
+    [account, accounts, activateAccount, setAccountDropdownOpen, setAccounts, setActiveIndex],
   );
 
   const ensureAssets = useCallback(

@@ -69,12 +69,9 @@ impl LauncherSettings {
     where
         F: FnOnce(&mut LauncherSettings),
     {
-        let cloned = {
-            let mut settings = LAUNCHER_SETTINGS.write().await;
-            f(&mut settings);
-            settings.clone()
-        };
-
-        cloned.save().await
+        // Saving under the lock keeps concurrent updates from landing out of order.
+        let mut settings = LAUNCHER_SETTINGS.write().await;
+        f(&mut settings);
+        settings.save().await
     }
 }
