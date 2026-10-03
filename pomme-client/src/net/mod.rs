@@ -64,6 +64,9 @@ pub enum NetworkEvent {
     /// The `minecraft:dialog` registry with its tags, sent with `Registries`
     /// and again whenever a tag update replaces the dialog tags.
     DialogRegistry(Arc<crate::ui::server_dialog::DialogRegistry>),
+    BlockTags {
+        tags: Vec<(String, Vec<i32>)>,
+    },
     BiomeColors {
         colors: std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
     },
