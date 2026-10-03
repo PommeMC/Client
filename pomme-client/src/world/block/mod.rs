@@ -413,15 +413,12 @@ static BLOCK_TABLES: [OnceLock<Vec<BlockData>>; BLOCK_DATA.len()] =
 /// active table and the fallback for protocols without their own data.
 /// Server-provided block tags, resolved into Pomme's native block resource
 /// names. Sent during configuration and replaced after a datapack reload.
-// TODO: the allows go once a gameplay check reads the tags (#620, #647).
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct BlockTags {
     tags: HashMap<String, HashSet<&'static str>>,
 }
 
 impl BlockTags {
-    #[allow(dead_code)]
     pub fn contains(&self, tag: &str, block: &str) -> bool {
         self.tags
             .get(tag)
@@ -848,13 +845,33 @@ pub fn replace_block_tags(raw_tags: Vec<(String, Vec<i32>)>) {
         resolve_block_tags(raw_tags, &block_registry_names());
 }
 
-#[allow(dead_code)]
 pub fn block_tags() -> RwLockReadGuard<'static, BlockTags> {
     BLOCK_TAGS.read().expect("block tag lock poisoned")
 }
 
 pub fn clear_block_tags() {
     *BLOCK_TAGS.write().expect("block tag lock poisoned") = BlockTags::default();
+}
+
+#[cfg(test)]
+pub(crate) fn block_tags_for_test(entries: &[(&str, &[&str])]) -> BlockTags {
+    let registry_names = block_registry_names();
+    let tags = entries
+        .iter()
+        .map(|(tag, blocks)| {
+            let blocks = blocks
+                .iter()
+                .map(|name| {
+                    *registry_names
+                        .iter()
+                        .find(|candidate| *candidate == name)
+                        .unwrap_or_else(|| panic!("unknown block {name}"))
+                })
+                .collect();
+            (format!("minecraft:{tag}"), blocks)
+        })
+        .collect();
+    BlockTags { tags }
 }
 
 fn block_data(state: BlockState) -> &'static BlockData {
