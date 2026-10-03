@@ -409,8 +409,6 @@ const SHARED_BLOCK_DATA: &[(i32, i32)] = &[
 /// protocol currently spoken (see [`set_active_protocol`]).
 static BLOCK_TABLES: [OnceLock<Vec<BlockData>>; BLOCK_DATA.len()] =
     [const { OnceLock::new() }; BLOCK_DATA.len()];
-/// The [`BLOCK_DATA`] slot holding the native version's tables: the initial
-/// active table and the fallback for protocols without their own data.
 /// Server-provided block tags, resolved into Pomme's native block resource
 /// names. Sent during configuration and replaced after a datapack reload.
 // TODO: the allows go once a gameplay check reads the tags (#620, #647).
@@ -432,6 +430,8 @@ impl BlockTags {
 static BLOCK_TAGS: LazyLock<RwLock<BlockTags>> =
     LazyLock::new(|| RwLock::new(BlockTags::default()));
 
+/// The [`BLOCK_DATA`] slot holding the native version's tables: the initial
+/// active table and the fallback for protocols without their own data.
 const NATIVE_SLOT: usize = 0;
 static ACTIVE_TABLE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(NATIVE_SLOT);
@@ -857,6 +857,14 @@ pub fn clear_block_tags() {
     *BLOCK_TAGS.write().expect("block tag lock poisoned") = BlockTags::default();
 }
 
+#[cfg(test)]
+fn block_registry_id(names: &[&str], block: &str) -> i32 {
+    names
+        .iter()
+        .position(|name| *name == block)
+        .unwrap_or_else(|| panic!("unknown block {block}")) as i32
+}
+
 fn block_data(state: BlockState) -> &'static BlockData {
     static UNKNOWN: std::sync::LazyLock<BlockData> = std::sync::LazyLock::new(|| BlockData {
         id: "unknown",
@@ -1262,11 +1270,10 @@ mod tests {
     fn block_tag_registry_ids_resolve_to_native_block_names() {
         setup();
         let names = block_registry_names();
-        let id = |block| names.iter().position(|name| *name == block).unwrap() as i32;
         let tags = resolve_block_tags(
             vec![(
                 "minecraft:mineable/pickaxe".to_owned(),
-                vec![id("stone"), -1, i32::MAX],
+                vec![block_registry_id(&names, "stone"), -1, i32::MAX],
             )],
             &names,
         );
