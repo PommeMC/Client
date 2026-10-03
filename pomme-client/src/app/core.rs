@@ -1578,6 +1578,9 @@ impl AppCore {
                 NetworkEvent::DialogRegistry(registry) => {
                     game.dialog_registry = registry;
                 }
+                NetworkEvent::BlockTags { tags } => {
+                    crate::world::block::replace_block_tags(tags);
+                }
                 NetworkEvent::ContainerSlot {
                     container_id,
                     index,

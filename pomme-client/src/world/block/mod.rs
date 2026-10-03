@@ -3,7 +3,7 @@ pub mod registry;
 pub mod sound;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock, RwLock, RwLockReadGuard};
 
 use azalea_block::BlockState;
 use azalea_core::position::BlockPos;
@@ -411,6 +411,27 @@ static BLOCK_TABLES: [OnceLock<Vec<BlockData>>; BLOCK_DATA.len()] =
     [const { OnceLock::new() }; BLOCK_DATA.len()];
 /// The [`BLOCK_DATA`] slot holding the native version's tables: the initial
 /// active table and the fallback for protocols without their own data.
+/// Server-provided block tags, resolved into Pomme's native block resource
+/// names. Sent during configuration and replaced after a datapack reload.
+// TODO: the allows go once a gameplay check reads the tags (#620, #647).
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub struct BlockTags {
+    tags: HashMap<String, HashSet<&'static str>>,
+}
+
+impl BlockTags {
+    #[allow(dead_code)]
+    pub fn contains(&self, tag: &str, block: &str) -> bool {
+        self.tags
+            .get(tag)
+            .is_some_and(|blocks| blocks.contains(block))
+    }
+}
+
+static BLOCK_TAGS: LazyLock<RwLock<BlockTags>> =
+    LazyLock::new(|| RwLock::new(BlockTags::default()));
+
 const NATIVE_SLOT: usize = 0;
 static ACTIVE_TABLE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(NATIVE_SLOT);
@@ -783,6 +804,57 @@ fn table() -> &'static Vec<BlockData> {
     BLOCK_TABLES[ACTIVE_TABLE.load(std::sync::atomic::Ordering::Acquire)]
         .get()
         .expect("world::block::init must be called before use")
+}
+
+/// Built-in block registry order for the active protocol. The generated state
+/// table is grouped by block in registry order, so collapsing adjacent states
+/// yields the registry id -> resource-name mapping UpdateTags uses.
+fn block_registry_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = Vec::new();
+    for data in table() {
+        if names.last() != Some(&data.id) {
+            names.push(data.id);
+        }
+    }
+    names
+}
+
+fn resolve_block_tags(
+    raw_tags: Vec<(String, Vec<i32>)>,
+    registry_names: &[&'static str],
+) -> BlockTags {
+    let mut tags = HashMap::with_capacity(raw_tags.len());
+    for (name, elements) in raw_tags {
+        let mut blocks = HashSet::with_capacity(elements.len());
+        for id in elements {
+            let Some(&block) = usize::try_from(id)
+                .ok()
+                .and_then(|index| registry_names.get(index))
+            else {
+                tracing::warn!("ignoring unknown block registry id {id} in tag {name}");
+                continue;
+            };
+            blocks.insert(block);
+        }
+        tags.insert(name, blocks);
+    }
+    BlockTags { tags }
+}
+
+/// Replaces the session's block tags from `ClientboundUpdateTags`. Element ids
+/// are built-in block registry ids, not block-state ids.
+pub fn replace_block_tags(raw_tags: Vec<(String, Vec<i32>)>) {
+    *BLOCK_TAGS.write().expect("block tag lock poisoned") =
+        resolve_block_tags(raw_tags, &block_registry_names());
+}
+
+#[allow(dead_code)]
+pub fn block_tags() -> RwLockReadGuard<'static, BlockTags> {
+    BLOCK_TAGS.read().expect("block tag lock poisoned")
+}
+
+pub fn clear_block_tags() {
+    *BLOCK_TAGS.write().expect("block tag lock poisoned") = BlockTags::default();
 }
 
 fn block_data(state: BlockState) -> &'static BlockData {
@@ -1184,6 +1256,23 @@ mod tests {
             sleeping_position(BlockPos::new(2, 64, -5)),
             dvec3(2.5, 64.6875, -4.5)
         );
+    }
+
+    #[test]
+    fn block_tag_registry_ids_resolve_to_native_block_names() {
+        setup();
+        let names = block_registry_names();
+        let id = |block| names.iter().position(|name| *name == block).unwrap() as i32;
+        let tags = resolve_block_tags(
+            vec![(
+                "minecraft:mineable/pickaxe".to_owned(),
+                vec![id("stone"), -1, i32::MAX],
+            )],
+            &names,
+        );
+
+        assert!(tags.contains("minecraft:mineable/pickaxe", "stone"));
+        assert!(!tags.contains("minecraft:mineable/pickaxe", "dirt"));
     }
 
     #[test]
