@@ -203,7 +203,7 @@ fn apply_living_immobility(
 
 /// Vanilla `LivingEntity.travel`: fluid travel only when fluids affect the
 /// player (not while flying).
-// TODO: lava travel and climbable (ladder) movement.
+// TODO: lava travel.
 fn travel(
     player: &mut LocalPlayer,
     input: &InputState,
@@ -327,23 +327,18 @@ fn trapdoor_usable_as_ladder(
     trapdoor: azalea_block::BlockState,
     below: azalea_block::BlockState,
 ) -> bool {
-    if !block_id(trapdoor).ends_with("_trapdoor")
-        || block_properties(trapdoor).get("open") != Some("true")
-        || block_id(below) != "ladder"
-    {
-        return false;
-    }
-
-    block_properties(trapdoor).get("facing") == block_properties(below).get("facing")
+    let props = block_properties(trapdoor);
+    block_id(trapdoor).ends_with("_trapdoor")
+        && props.get("open") == Some("true")
+        && block_id(below) == "ladder"
+        && props.get("facing") == block_properties(below).get("facing")
 }
 
 fn on_climbable_state(
     player: &LocalPlayer,
     chunk_store: &ChunkStore,
 ) -> Option<azalea_block::BlockState> {
-    // Vanilla `LivingEntity.onClimbable` also rejects fall-flying entities in
-    // `BlockTags.CAN_GLIDE_THROUGH`. TODO: add that branch when fall-flying
-    // state is modeled by local movement.
+    // TODO: `onClimbable` also rejects fall-flying in `can_glide_through`.
     if player.flying || is_spectator(player.game_mode) {
         return None;
     }
@@ -383,6 +378,11 @@ fn handle_on_climbable(player: &mut LocalPlayer, chunk_store: &ChunkStore, suppr
     apply_climbable_velocity(player, state, suppress_slide);
 }
 
+/// `Player.onClimbable`.
+pub(crate) fn on_climbable(player: &LocalPlayer, chunk_store: &ChunkStore) -> bool {
+    on_climbable_state(player, chunk_store).is_some()
+}
+
 fn tick_land(
     player: &mut LocalPlayer,
     input: &InputState,
@@ -414,8 +414,9 @@ fn tick_land(
 
     apply_collision(player, input, world, forward, strafe, sin_y_rot, cos_y_rot);
 
+    // TODO: `wasInPowderSnow && canEntityWalkOnPowderSnow` also takes the impulse.
     if (player.horizontal_collision || input.performing_action(input::Action::Jump))
-        && on_climbable_state(player, world.chunks).is_some()
+        && on_climbable(player, world.chunks)
     {
         player.velocity.y = CLIMB_UP_VELOCITY;
     }
@@ -503,7 +504,7 @@ fn tick_water(
     apply_collision(player, input, world, forward, strafe, sin_y_rot, cos_y_rot);
     // TODO: `Entity.move`'s block speed factor also applies in water.
 
-    if player.horizontal_collision && on_climbable_state(player, world.chunks).is_some() {
+    if player.horizontal_collision && on_climbable(player, world.chunks) {
         player.velocity.y = CLIMB_UP_VELOCITY;
     }
 

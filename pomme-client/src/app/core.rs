@@ -177,11 +177,11 @@ fn apply_server_block(
 
 /// The local player's box as a push target, gated on `LivingEntity.isPushable`
 /// and `EntitySelector.NO_SPECTATORS`.
-// TODO: isPushable also needs !onClimbable (Player: unless flying); climbable
-// movement isn't modeled yet (physics/movement.rs).
 fn local_push_box(game: &GameState) -> Option<crate::physics::aabb::Aabb> {
-    (game.player.health > 0.0 && !crate::player::is_spectator(game.player.game_mode))
-        .then(|| game.player.bounding_box())
+    (game.player.health > 0.0
+        && !crate::player::is_spectator(game.player.game_mode)
+        && !movement::on_climbable(&game.player, &game.chunk_store))
+    .then(|| game.player.bounding_box())
 }
 
 /// Starts an entity's hurt animation, with a direction for the packets that
