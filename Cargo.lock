@@ -6898,6 +6898,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "steel-core"
 version = "0.15.3+mc26.2"
+source = "git+https://github.com/Steel-Foundation/SteelMC.git?rev=9142c96#9142c96cfe72441c6050d98800cbb395dc92e964"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -6949,6 +6950,7 @@ dependencies = [
 [[package]]
 name = "steel-crypto"
 version = "0.15.3+mc26.2"
+source = "git+https://github.com/Steel-Foundation/SteelMC.git?rev=9142c96#9142c96cfe72441c6050d98800cbb395dc92e964"
 dependencies = [
  "log",
  "rand 0.10.2",
@@ -6960,6 +6962,7 @@ dependencies = [
 [[package]]
 name = "steel-login"
 version = "0.15.3+mc26.2"
+source = "git+https://github.com/Steel-Foundation/SteelMC.git?rev=9142c96#9142c96cfe72441c6050d98800cbb395dc92e964"
 dependencies = [
  "base64 0.23.1",
  "crossbeam",
@@ -6984,6 +6987,7 @@ dependencies = [
 [[package]]
 name = "steel-macros"
 version = "0.15.3+mc26.2"
+source = "git+https://github.com/Steel-Foundation/SteelMC.git?rev=9142c96#9142c96cfe72441c6050d98800cbb395dc92e964"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6993,10 +6997,12 @@ dependencies = [
 [[package]]
 name = "steel-math"
 version = "0.15.3+mc26.2"
+source = "git+https://github.com/Steel-Foundation/SteelMC.git?rev=9142c96#9142c96cfe72441c6050d98800cbb395dc92e964"
 
 [[package]]
 name = "steel-protocol"
 version = "0.15.3+mc26.2"
+source = "git+https://github.com/Steel-Foundation/SteelMC.git?rev=9142c96#9142c96cfe72441c6050d98800cbb395dc92e964"
 dependencies = [
  "aes",
  "cfb8",
@@ -7021,6 +7027,7 @@ dependencies = [
 [[package]]
 name = "steel-registry"
 version = "0.15.3+mc26.2"
+source = "git+https://github.com/Steel-Foundation/SteelMC.git?rev=9142c96#9142c96cfe72441c6050d98800cbb395dc92e964"
 dependencies = [
  "bitflags 2.13.2",
  "flate2",
@@ -7045,6 +7052,7 @@ dependencies = [
 [[package]]
 name = "steel-utils"
 version = "0.15.3+mc26.2"
+source = "git+https://github.com/Steel-Foundation/SteelMC.git?rev=9142c96#9142c96cfe72441c6050d98800cbb395dc92e964"
 dependencies = [
  "bitflags 2.13.2",
  "crc32c",
@@ -7079,6 +7087,7 @@ dependencies = [
 [[package]]
 name = "steel-worldgen"
 version = "0.15.3+mc26.2"
+source = "git+https://github.com/Steel-Foundation/SteelMC.git?rev=9142c96#9142c96cfe72441c6050d98800cbb395dc92e964"
 dependencies = [
  "glam",
  "proc-macro2",

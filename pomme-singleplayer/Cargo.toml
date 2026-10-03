@@ -7,10 +7,10 @@ edition = "2024"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-steel-core = { path = "../third_party/SteelMC/steel-core" }
-steel-login = { path = "../third_party/SteelMC/steel-login" }
-steel-registry = { path = "../third_party/SteelMC/steel-registry" }
-steel-utils = { path = "../third_party/SteelMC/steel-utils" }
+steel-core = { git = "https://github.com/Steel-Foundation/SteelMC.git", rev = "9142c96" }
+steel-login = { git = "https://github.com/Steel-Foundation/SteelMC.git", rev = "9142c96" }
+steel-registry = { git = "https://github.com/Steel-Foundation/SteelMC.git", rev = "9142c96" }
+steel-utils = { git = "https://github.com/Steel-Foundation/SteelMC.git", rev = "9142c96" }
 tokio = { workspace = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { workspace = true }
