@@ -41,22 +41,6 @@ pub struct PacketLightData {
     pub empty_block_y_mask: azalea_core::bitset::BitSet,
 }
 
-/// The `minecraft:block` entries of an UpdateTags map, as (tag, registry ids).
-pub(crate) fn block_tags_from_packet(
-    tags: &azalea_protocol::common::tags::TagMap,
-) -> Option<Vec<(String, Vec<i32>)>> {
-    let (_, block_tags) = tags
-        .0
-        .iter()
-        .find(|(registry, _)| registry.namespace() == "minecraft" && registry.path() == "block")?;
-    Some(
-        block_tags
-            .iter()
-            .map(|tag| (tag.name.to_string(), tag.elements.clone()))
-            .collect(),
-    )
-}
-
 impl From<&azalea_protocol::packets::game::c_light_update::ClientboundLightUpdatePacketData>
     for PacketLightData
 {

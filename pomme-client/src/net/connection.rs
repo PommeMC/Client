@@ -589,9 +589,7 @@ async fn config_sequence(
                 if let Some(tags) = dialog_tags(&p.tags) {
                     received_dialog_tags = Some(tags);
                 }
-                if let Some(tags) = super::block_tags_from_packet(&p.tags) {
-                    let _ = event_tx.try_send(NetworkEvent::BlockTags { tags });
-                }
+                forward_block_tags(event_tx, &p.tags);
             }
             ClientboundConfigPacket::SelectKnownPacks(p) => {
                 // Vanilla `handleSelectKnownPacks`: claim the offered packs we
@@ -826,6 +824,23 @@ fn dialog_tags(
     )
 }
 
+/// Forwards the `minecraft:block` tags of an `update_tags` packet, if it has
+/// any.
+fn forward_block_tags(
+    event_tx: &Sender<NetworkEvent>,
+    tags: &azalea_protocol::common::tags::TagMap,
+) {
+    let key: azalea_registry::identifier::Identifier = "minecraft:block".into();
+    let Some(tags) = tags.0.get(&key) else {
+        return;
+    };
+    let tags = tags
+        .iter()
+        .map(|tag| (tag.name.to_string(), tag.elements.clone()))
+        .collect();
+    let _ = event_tx.try_send(NetworkEvent::BlockTags { tags });
+}
+
 fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -> Option<String> {
     compound.get(key).and_then(|v| match v {
         simdnbt::owned::NbtTag::String(s) => Some(s.to_string()),
@@ -1013,9 +1028,7 @@ async fn game_loop(
                         let _ = event_tx
                             .try_send(NetworkEvent::DialogRegistry(configured.dialogs.clone()));
                     }
-                    if let Some(tags) = super::block_tags_from_packet(&p.tags) {
-                        let _ = event_tx.try_send(NetworkEvent::BlockTags { tags });
-                    }
+                    forward_block_tags(event_tx, &p.tags);
                 }
                 if let ClientboundGamePacket::Login(login) = &mut packet {
                     inbound_chat.reset();
