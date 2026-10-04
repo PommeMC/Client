@@ -3,6 +3,72 @@ use std::path::{Path, PathBuf};
 
 use crate::resource_pack::ResourcePackManager;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AssetId<'a> {
+    pub namespace: &'a str,
+    pub path: &'a str,
+}
+
+impl<'a> AssetId<'a> {
+    pub fn parse(value: &'a str) -> Self {
+        match value.split_once(':') {
+            Some((namespace, path)) if !namespace.is_empty() && !path.is_empty() => {
+                Self { namespace, path }
+            }
+            _ => Self {
+                namespace: "minecraft",
+                path: value,
+            },
+        }
+    }
+
+    pub fn asset_key(self, category: &str, suffix: &str) -> String {
+        format!("{}/{category}/{}{}", self.namespace, self.path, suffix)
+    }
+
+    pub fn canonical(self) -> String {
+        if self.namespace == "minecraft" {
+            self.path.to_string()
+        } else {
+            format!("{}:{}", self.namespace, self.path)
+        }
+    }
+}
+
+/// `Identifier.toString` omits the default namespace, so ids written either
+/// way compare equal once stripped.
+pub(crate) fn strip_default_namespace(value: &str) -> &str {
+    value.strip_prefix("minecraft:").unwrap_or(value)
+}
+
+/// `Identifier` namespace (`path` false) or path characters; only the path
+/// allows `/`.
+pub(crate) fn identifier_chars(text: &str, path: bool) -> bool {
+    text.bytes().all(|byte| {
+        byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || matches!(byte, b'_' | b'.' | b'-')
+            || path && byte == b'/'
+    })
+}
+
+pub(crate) fn valid_asset_key(asset_key: &str) -> bool {
+    let Some((namespace, path)) = asset_key.split_once('/') else {
+        return false;
+    };
+    !matches!(namespace, "" | "." | "..")
+        && identifier_chars(namespace, false)
+        && identifier_chars(path, true)
+        && !path
+            .split('/')
+            .any(|component| matches!(component, "" | "." | ".."))
+}
+
+/// Pomme's brand mark, embedded rather than resolved from the vanilla asset
+/// tree: the window icon and the credits roll's logo both come from it.
+pub const POMME_ICON_PNG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"));
+
 pub fn load_image(path: &Path) -> Result<image::DynamicImage, image::ImageError> {
     image::open(path).or_else(|_| {
         let data = std::fs::read(path).map_err(image::ImageError::IoError)?;
@@ -18,21 +84,65 @@ pub fn resolve_asset_path(
     resolve_asset_path_with_packs(jar_assets_dir, asset_index, asset_key, None)
 }
 
+pub fn resource_stack_paths(
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    asset_key: &str,
+    packs: Option<&ResourcePackManager>,
+) -> Vec<PathBuf> {
+    if !checked_asset_key(asset_key) {
+        return Vec::new();
+    }
+    let mut stack: Vec<_> = builtin_asset(jar_assets_dir, asset_index, asset_key)
+        .into_iter()
+        .collect();
+    if let Some(packs) = packs {
+        for root in packs.active_pack_dirs() {
+            let path = root.join("assets").join(asset_key);
+            if path.is_file() {
+                stack.push(path);
+            }
+        }
+    }
+    stack
+}
+
 pub fn resolve_asset_path_with_packs(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     asset_key: &str,
     packs: Option<&ResourcePackManager>,
 ) -> PathBuf {
-    if let Some(packs) = packs
-        && let Some(path) = packs.resolve_asset(asset_key)
-    {
-        return path;
+    if !checked_asset_key(asset_key) {
+        return jar_assets_dir.join("__invalid_asset_key__");
     }
-    if let Some(path) = asset_index.as_ref().and_then(|idx| idx.resolve(asset_key)) {
-        return path;
+    packs
+        .and_then(|packs| packs.resolve_asset(asset_key))
+        .or_else(|| builtin_asset(jar_assets_dir, asset_index, asset_key))
+        .unwrap_or_else(|| jar_assets_dir.join(asset_key))
+}
+
+fn checked_asset_key(asset_key: &str) -> bool {
+    let valid = valid_asset_key(asset_key);
+    if !valid {
+        tracing::warn!("Rejecting invalid Minecraft asset key {asset_key:?}");
     }
-    jar_assets_dir.join(asset_key)
+    valid
+}
+
+/// The jar and the asset index are one built-in pack, the index first.
+fn builtin_asset(
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    asset_key: &str,
+) -> Option<PathBuf> {
+    asset_index
+        .as_ref()
+        .and_then(|idx| idx.resolve(asset_key))
+        .or_else(|| {
+            let jar = jar_assets_dir.join(asset_key);
+            jar.is_file().then_some(jar)
+        })
 }
 
 #[derive(Clone)]
@@ -71,5 +181,49 @@ impl AssetIndex {
         let hash = self.hashes.get(asset_key)?;
         let path = self.objects_dir.join(&hash[..2]).join(hash);
         path.exists().then_some(path)
+    }
+
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &str> {
+        self.hashes.keys().map(String::as_str)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asset_keys_reject_traversal_and_invalid_resource_location_syntax() {
+        for valid in [
+            "minecraft/font/default.json",
+            "example/textures/font/custom.png",
+            "example/font/subdir/test.ttf",
+        ] {
+            assert!(valid_asset_key(valid), "expected valid asset key: {valid}");
+        }
+        for invalid in [
+            "../outside",
+            "minecraft/../outside",
+            "minecraft/font/../../outside",
+            "minecraft/./font/default.json",
+            "minecraft//font/default.json",
+            "minecraft/\\outside",
+            "/minecraft/font/default.json",
+            "Minecraft/font/default.json",
+            "minecraft/CAPS.ttf",
+            "minecraft/",
+        ] {
+            assert!(
+                !valid_asset_key(invalid),
+                "accepted invalid asset key: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_asset_key_never_joins_outside_root() {
+        let root = std::env::temp_dir().join(format!("pomme-assets-{}", uuid::Uuid::new_v4()));
+        let resolved = resolve_asset_path_with_packs(&root, &None, "minecraft/../../outside", None);
+        assert_eq!(resolved, root.join("__invalid_asset_key__"));
+        assert!(resource_stack_paths(&root, &None, "minecraft/../../outside", None).is_empty());
     }
 }

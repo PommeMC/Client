@@ -1,13 +1,28 @@
 use crate::app::TICK_RATE;
 use crate::app::core::AppCore;
 use crate::app::phases::{Gfx, Panorama};
-use crate::net::connection::ConnectArgs;
-use crate::ui::menu::{MenuAction, PanoramaTheme};
+use crate::net::connection::{ConnectArgs, Transport};
+use crate::singleplayer::{self, World};
+use crate::ui::menu::MenuAction;
 
 pub enum MenuUpdateResult {
     None,
-    Connect { connect_args: ConnectArgs },
+    Connect {
+        connect_args: ConnectArgs,
+        world: Option<World>,
+    },
     Quit,
+}
+
+fn connect_args(core: &AppCore, transport: Transport, username: String) -> ConnectArgs {
+    ConnectArgs {
+        transport,
+        username,
+        uuid: core.user.uuid,
+        access_token: core.user.access_token.clone(),
+        view_distance: core.view_distance(),
+        chat_options: core.menu.chat_options,
+    }
 }
 
 pub fn update_menu(
@@ -33,7 +48,15 @@ pub fn update_menu(
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
 
-    let menu_input = core.build_menu_input();
+    // No chat in the menus; F2 results just log.
+    for result in gfx.renderer.take_screenshot_messages() {
+        match result {
+            Ok(path) => tracing::info!("Saved screenshot as {path}"),
+            Err(err) => tracing::warn!("Couldn't save screenshot: {err}"),
+        }
+    }
+
+    let menu_input = core.build_menu_input(dt);
 
     let result = core.menu.build(sw, sh, &menu_input, |t, s| {
         gfx.renderer.menu_text_width(t, s)
@@ -64,23 +87,25 @@ pub fn update_menu(
         }
     }
 
+    // TODO: menu screens (a server MOTD, say) draw object glyphs as their
+    // fallback sprite; dropping what they drew keeps those keys out of the
+    // next session's atlas.
+    gfx.renderer.drain_drawn_inline_objects();
+
     if let Err(e) = gfx.renderer.render_menu(
         &gfx.window,
         panorama.scroll(),
         result.blur,
         result.elements,
         core.input.cursor_pos(),
-        core.menu.is_main_screen(),
+        core.menu.show_skin_preview(),
     ) {
         tracing::error!("Render error: {e}");
     }
 
     core.input.clear_just_pressed_actions();
 
-    if core.menu.display_mode != core.display_mode {
-        core.display_mode = core.menu.display_mode;
-        core.apply_display_mode(&gfx.window);
-    }
+    core.sync_display_mode(&gfx.window);
 
     gfx.renderer.set_vsync(core.menu.vsync);
 
@@ -102,10 +127,9 @@ pub fn update_menu(
     }
 
     if core.menu.reload_assets {
-        core.menu.reload_assets = false;
-        gfx.renderer
-            .reload_assets(&core.data_dirs.game_dir, &core.resource_packs);
+        core.reload_pack_assets(&mut gfx.renderer);
     }
+    core.apply_font_options(&mut gfx.renderer);
 
     if result.clicked_button {
         gfx.renderer.trigger_skin_swing();
@@ -119,24 +143,37 @@ pub fn update_menu(
             protocol,
         } => {
             core.audio.stop_menu_music();
-            let connect_args = ConnectArgs {
-                server,
-                username,
-                uuid: core.user.uuid,
-                access_token: core.user.access_token.clone(),
-                view_distance: core.menu.render_distance as u8,
-                protocol,
+
+            return MenuUpdateResult::Connect {
+                connect_args: connect_args(core, Transport::Remote { server, protocol }, username),
+                world: None,
+            };
+        }
+        MenuAction::PlayWorld { folder } => {
+            let Some((summary, dir)) = core.menu.world_to_launch(&folder) else {
+                return MenuUpdateResult::None;
             };
 
-            return MenuUpdateResult::Connect { connect_args };
+            match singleplayer::open(&summary, &dir, core.view_distance()) {
+                Ok((world, client_end)) => {
+                    core.menu.world_played(&folder);
+                    core.audio.stop_menu_music();
+
+                    let username = core.user.username.clone();
+                    return MenuUpdateResult::Connect {
+                        connect_args: connect_args(core, Transport::Memory(client_end), username),
+                        world: Some(world),
+                    };
+                }
+                Err(reason) => {
+                    tracing::error!("Failed to open {folder}: {reason}");
+                    core.menu.show_disconnect(reason);
+                }
+            }
         }
         MenuAction::ChangeTheme(theme) => {
-            let panorama_dir = match theme {
-                PanoramaTheme::Default => core.data_dirs.jar_assets_dir.clone(),
-                PanoramaTheme::Pomme => core.data_dirs.pomme_assets_dir.join("panoramas"),
-            };
             gfx.renderer
-                .reload_panorama(&panorama_dir, &core.asset_index);
+                .reload_panorama(&theme.panorama_dir(&core.data_dirs));
             core.menu.start_transition_open();
         }
         MenuAction::Quit => {

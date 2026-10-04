@@ -1,17 +1,75 @@
+use azalea_inventory::components::{CustomName, Damage, ItemName, MaxDamage, Unbreakable};
 use azalea_inventory::{ItemStack, ItemStackData};
+use azalea_registry::tags::items::BUNDLES;
 
 use crate::benchmark::UploadStatus;
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
+use crate::ui::bundle::Frac;
+use crate::ui::text_edit::TextFieldRenderInfo;
 
 pub const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 pub const FONT_SIZE: f32 = 8.0;
 pub const BTN_H: f32 = 20.0;
-pub const COL_DISABLED: [f32; 4] = [0.35, 0.36, 0.45, 1.0];
+/// Vanilla's inactive-widget text colour, `0xA0A0A0`
+/// (`AbstractWidget.WithInactiveMessage.defaultInactiveMessage`).
+pub const COL_DISABLED: [f32; 4] = [0.627, 0.627, 0.627, 1.0];
 pub const SLOT_SIZE: f32 = 16.0;
 pub const SLOT_STRIDE: f32 = 18.0;
 pub const SLOT_LABEL_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
 const BTN_BORDER: f32 = 3.0;
+
+pub type SpansWidthFn<'a> = &'a dyn Fn(&[crate::ui::text::TextSpan], f32) -> f32;
+
+/// The hover-name component: custom name, else item-name component.
+fn item_hover_component(data: &ItemStackData) -> Option<azalea_chat::FormattedText> {
+    if let Some(name) = data.get_component::<CustomName>() {
+        return Some(name.name.clone());
+    }
+    data.get_component::<ItemName>()
+        .map(|name| name.name.clone())
+}
+
+pub fn item_display_name(data: &ItemStackData) -> String {
+    item_hover_component(data)
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| crate::lang::item_display_name(data.kind))
+}
+
+/// Vanilla `ItemStack.getStyledHoverName`: the hover name in its rarity color,
+/// italic when custom. The name's own styling wins where it sets one.
+pub fn styled_hover_name(data: &ItemStackData) -> Vec<crate::ui::text::TextSpan> {
+    use azalea_inventory::components::Rarity;
+    // Default-component rarities aren't synced; absent means common.
+    let color = match data.get_component::<Rarity>().as_deref() {
+        Some(Rarity::Uncommon) => rgb(0xffff55),
+        Some(Rarity::Rare) => rgb(0x55ffff),
+        Some(Rarity::Epic) => rgb(0xff55ff),
+        _ => WHITE,
+    };
+    let italic = data.get_component::<CustomName>().is_some();
+    let mut spans = item_display_spans(data, color);
+    for span in &mut spans {
+        span.italic |= italic;
+    }
+    spans
+}
+
+/// The hover name as styled spans; `base_color` fills wherever the name
+/// component carries no explicit color (vanilla's parent style).
+pub fn item_display_spans(
+    data: &ItemStackData,
+    base_color: [f32; 4],
+) -> Vec<crate::ui::text::TextSpan> {
+    item_hover_component(data)
+        .map(|name| crate::ui::text::format_text_spans(&name, base_color))
+        .unwrap_or_else(|| {
+            vec![crate::ui::text::TextSpan::new(
+                crate::lang::item_display_name(data.kind),
+                base_color,
+            )]
+        })
+}
 
 pub const fn rgb(hex: u32) -> [f32; 4] {
     [
@@ -198,9 +256,106 @@ pub fn push_results_overlay(
 
 /// Copy `text` to the system clipboard, returning whether it succeeded.
 pub(crate) fn set_clipboard(text: &str) -> bool {
-    arboard::Clipboard::new()
-        .and_then(|mut cb| cb.set_text(text.to_string()))
-        .is_ok()
+    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!("Failed to set clipboard: {err}");
+            false
+        }
+    }
+}
+
+/// Vanilla-EditBox selection highlight: a solid blue block behind the (white)
+/// text (`EditBox.extractWidgetRenderState` -> `graphics.textHighlight`).
+pub(crate) const FIELD_SELECTION: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+/// Selection highlight, display text, and caret for one text-field frame
+/// (`EditBox.renderWidget`): blue block behind the shown slice, then a
+/// `bar_w`-wide caret bar in insert mode or a trailing `_` glyph otherwise.
+/// `pad_y` is the scaled-pixel unit for the vanilla overdraw: selection/caret
+/// rects span `textY-1 .. textY+lineHeight+1` (one above, two below the 8px
+/// glyph line). `ghost` is chat's inline suggestion suffix, drawn one `bar_w`
+/// left of the caret (vanilla draws it at `cursorX - 1`, under the caret).
+/// `spans` styles the shown text (ChatScreen's Brigadier coloring); `None`
+/// draws it plain white.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_field_text(
+    elements: &mut Vec<MenuElement>,
+    info: &TextFieldRenderInfo,
+    shown: &str,
+    spans: Option<&[crate::ui::text::TextSpan]>,
+    text_x: f32,
+    text_y: f32,
+    fs: f32,
+    bar_w: f32,
+    pad_y: f32,
+    caret_color: [f32; 4],
+    ghost: Option<(&str, [f32; 4])>,
+    wf: &dyn Fn(&str) -> f32,
+) {
+    if let Some((a, b)) = info.selection {
+        let x0 = text_x + wf(&shown[..a]);
+        let x1 = text_x + wf(&shown[..b]);
+        elements.push(MenuElement::Rect {
+            x: x0,
+            y: text_y - pad_y,
+            w: x1 - x0,
+            h: fs + 3.0 * pad_y,
+            corner_radius: 0.0,
+            color: FIELD_SELECTION,
+        });
+    }
+    elements.push(match spans {
+        Some(spans) => MenuElement::McText {
+            x: text_x,
+            y: text_y,
+            spans: spans.to_vec(),
+            scale: fs,
+            centered: false,
+            shadow: false,
+        },
+        None => MenuElement::Text {
+            x: text_x,
+            y: text_y,
+            text: shown.into(),
+            scale: fs,
+            color: WHITE,
+            centered: false,
+        },
+    });
+    let caret_x = text_x + wf(&shown[..info.caret_byte]);
+    if let Some((text, color)) = ghost {
+        elements.push(MenuElement::Text {
+            x: caret_x - bar_w,
+            y: text_y,
+            text: text.into(),
+            scale: fs,
+            color,
+            centered: false,
+        });
+    }
+    if info.caret_visible {
+        if info.insert_mode {
+            elements.push(MenuElement::Rect {
+                x: caret_x,
+                y: text_y - pad_y,
+                w: bar_w,
+                h: fs + 3.0 * pad_y,
+                corner_radius: 0.0,
+                color: caret_color,
+            });
+        } else {
+            // Vanilla appends the `_` one pixel after the text (`drawX += 1`).
+            elements.push(MenuElement::Text {
+                x: caret_x + bar_w,
+                y: text_y,
+                text: "_".into(),
+                scale: fs,
+                color: caret_color,
+                centered: false,
+            });
+        }
+    }
 }
 
 const DIGIT_WIDTH: f32 = 6.0;
@@ -216,12 +371,11 @@ pub fn push_item_count(
     let text = count.to_string();
     let char_w = DIGIT_WIDTH * gs;
     let text_w = text.len() as f32 * char_w;
-    let fs = FONT_SIZE * gs;
     elements.push(MenuElement::Text {
         x: x + size + gs - text_w,
-        y: y + size - fs,
+        y: y + 9.0 * gs,
         text,
-        scale: fs,
+        scale: FONT_SIZE * gs,
         color: WHITE,
         centered: false,
     });
@@ -278,7 +432,7 @@ pub fn push_slot(
     hovered
 }
 
-/// Draws an item icon (and its stack count when > 1) at the given position.
+/// Draws an item icon and the vanilla item decorations Pomme supports.
 pub fn push_item_icon(
     elements: &mut Vec<MenuElement>,
     x: f32,
@@ -295,9 +449,117 @@ pub fn push_item_icon(
         item_name: item_resource_name(data.kind),
         tint: WHITE,
     });
+    push_item_bar(elements, x, y, scale, data);
+    // TODO: itemCooldown overlay once item cooldowns are tracked.
     if data.count > 1 {
         push_item_count(elements, x, y, size, scale, data.count);
     }
+}
+
+/// Vanilla `Item.MAX_BAR_WIDTH`.
+const MAX_BAR_WIDTH: i32 = 13;
+
+fn push_item_bar(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    scale: f32,
+    data: &ItemStackData,
+) {
+    let Some((width, color)) = item_bar(data) else {
+        return;
+    };
+
+    let mut fill = |w: i32, h: f32, color| {
+        elements.push(MenuElement::Rect {
+            x: x + 2.0 * scale,
+            y: y + 13.0 * scale,
+            w: w as f32 * scale,
+            h: h * scale,
+            corner_radius: 0.0,
+            color,
+        });
+    };
+    fill(MAX_BAR_WIDTH, 2.0, [0.0, 0.0, 0.0, 1.0]);
+    fill(width, 1.0, color);
+}
+
+/// Bar width and colour, following `BundleItem`'s override of `Item`'s bar.
+pub(crate) fn item_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
+    if BUNDLES.contains(&data.kind) {
+        bundle_bar(data)
+    } else {
+        durability_bar(data)
+    }
+}
+
+// BundleItem FULL_BAR_COLOR / BAR_COLOR: colorFromFloat(1, 1, .33, .33) and
+// colorFromFloat(1, .44, .53, 1), channels floored.
+const BUNDLE_FULL_BAR_COLOR: [f32; 4] = rgb(0xFF5454);
+const BUNDLE_BAR_COLOR: [f32; 4] = rgb(0x7087FF);
+
+fn bundle_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
+    // getWeightSafe: an overflowing weight counts as full.
+    let weight = crate::ui::bundle::contents(data)
+        .map_or(Some(Frac::ZERO), |c| crate::ui::bundle::weight(&c.items))
+        .unwrap_or(Frac::ONE);
+    if weight.0 <= 0 {
+        return None;
+    }
+    let width = (1 + weight.mul_and_truncate(12)).min(MAX_BAR_WIDTH as i64) as i32;
+    let color = if weight.is_full() {
+        BUNDLE_FULL_BAR_COLOR
+    } else {
+        BUNDLE_BAR_COLOR
+    };
+    Some((width, color))
+}
+
+/// Vanilla `Item` durability bar metrics for a damageable stack.
+fn durability_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
+    if data.get_component::<Unbreakable>().is_some() {
+        return None;
+    }
+    let max_damage = data.get_component::<MaxDamage>()?.amount;
+    let damage = data.get_component::<Damage>()?.amount;
+    if max_damage <= 0 {
+        return None;
+    }
+
+    // ItemStack#getDamageValue clamps the component before Item's bar math.
+    let damage = damage.clamp(0, max_damage);
+    if damage == 0 {
+        return None;
+    }
+
+    let max_width = MAX_BAR_WIDTH as f32;
+    let width = (max_width - damage as f32 * max_width / max_damage as f32)
+        .round()
+        .clamp(0.0, max_width) as i32;
+    let health = ((max_damage as f32 - damage as f32) / max_damage as f32).max(0.0);
+    Some((width, durability_color(health)))
+}
+
+fn durability_color(health: f32) -> [f32; 4] {
+    // Mth.hsvToRgb(health / 3, 1, 1) with vanilla's float order and truncation.
+    let hue = health / 3.0;
+    let scaled_hue = hue * 6.0;
+    let sector = scaled_hue as i32 % 6;
+    let fraction = scaled_hue - sector as f32;
+    let p = 0.0;
+    let q = 1.0 - fraction;
+    let t = fraction;
+    let (red, green, blue) = match sector {
+        0 => (1.0, t, p),
+        1 => (q, 1.0, p),
+        2 => (p, 1.0, t),
+        3 => (p, q, 1.0),
+        4 => (t, p, 1.0),
+        5 => (1.0, p, q),
+        _ => unreachable!("durability hue must remain in the vanilla HSV range"),
+    };
+    let channel = |value: f32| ((value * 255.0) as i32).clamp(0, 255) as u32;
+    rgb((channel(red) << 16) | (channel(green) << 8) | channel(blue))
 }
 
 /// Measures rendered text width in framebuffer px at the given font size.
@@ -456,6 +718,7 @@ fn push_button_inner(
 pub fn push_slider(
     elements: &mut Vec<MenuElement>,
     cursor: (f32, f32),
+    mouse_pressed: bool,
     mouse_held: bool,
     x: f32,
     y: f32,
@@ -465,16 +728,19 @@ pub fn push_slider(
     fs: f32,
     label: &str,
     value: f32,
+    enabled: bool,
+    focused: bool,
+    can_change_value: bool,
     dragging: bool,
     scroll: &LabelScroll<'_>,
 ) -> SliderResult {
-    let hovered = hit_test(cursor, [x, y, w, h]);
+    let hovered = enabled && hit_test(cursor, [x, y, w, h]);
     let handle_w = 8.0 * gs;
     let track_w = w - handle_w;
     let handle_x = x + value.clamp(0.0, 1.0) * track_w;
 
-    let actively_dragging = dragging && mouse_held;
-    let start_drag = hovered && mouse_held && !dragging;
+    let actively_dragging = enabled && dragging && mouse_held;
+    let start_drag = hovered && mouse_pressed && !dragging;
 
     let new_value = if actively_dragging || start_drag {
         let rel = (cursor.0 - x - handle_w / 2.0) / track_w;
@@ -483,18 +749,27 @@ pub fn push_slider(
         None
     };
 
-    let track_sprite = SpriteId::SliderTrack;
+    // `getSprite` / `getHandleSprite`: a focused slider highlights its handle
+    // while Left/Right can move it, and its track once Enter has locked it.
+    let track_sprite = if enabled && focused && !can_change_value {
+        SpriteId::SliderTrackHover
+    } else {
+        SpriteId::SliderTrack
+    };
     elements.push(MenuElement::NineSlice {
         x,
         y,
         w,
         h,
         sprite: track_sprite,
-        border: BTN_BORDER * gs,
+        // `widget/slider.png.mcmeta` declares a 1px border, not the button's 3.
+        border: 1.0 * gs,
         tint: WHITE,
     });
 
-    let handle_sprite = if actively_dragging || start_drag || hovered {
+    let handle_sprite = if enabled
+        && (hovered || actively_dragging || start_drag || (focused && can_change_value))
+    {
         SpriteId::SliderHandleHover
     } else {
         SpriteId::SliderHandle
@@ -508,7 +783,8 @@ pub fn push_slider(
         tint: WHITE,
     });
 
-    push_widget_label(elements, x, y, w, h, gs, fs, label, WHITE, Some(scroll));
+    let text_col = if enabled { WHITE } else { COL_DISABLED };
+    push_widget_label(elements, x, y, w, h, gs, fs, label, text_col, Some(scroll));
 
     SliderResult {
         hovered,
@@ -523,23 +799,145 @@ pub struct SliderResult {
     pub new_value: Option<f32>,
 }
 
-pub fn push_cursor_blink(
-    elements: &mut Vec<MenuElement>,
-    cursor_blink: &std::time::Instant,
-    x: f32,
-    y: f32,
-    gs: f32,
-    fs: f32,
-    text_width: f32,
-) {
-    if cursor_blink.elapsed().as_millis() % 1000 < 500 {
-        elements.push(MenuElement::Rect {
-            x: x + text_width,
-            y,
-            w: 1.0 * gs,
-            h: fs,
-            corner_radius: 0.0,
-            color: WHITE,
-        });
+#[cfg(test)]
+mod tests {
+    use azalea_inventory::components::{BundleContents, Damage, MaxDamage, Unbreakable};
+    use azalea_inventory::{ItemStack, ItemStackData};
+    use azalea_registry::builtin::ItemKind;
+
+    use super::{
+        BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, MenuElement, item_bar, push_item_count,
+        push_item_icon,
+    };
+
+    fn present(stack: ItemStack) -> ItemStackData {
+        stack.as_present().expect("stack should be present").clone()
+    }
+
+    fn damaged_pickaxe(damage: i32) -> ItemStackData {
+        present(ItemStack::new(ItemKind::IronPickaxe, 1).with_component(Damage { amount: damage }))
+    }
+
+    fn pickaxe_max_damage() -> i32 {
+        ItemStackData::new(ItemKind::IronPickaxe, 1)
+            .get_component::<MaxDamage>()
+            .expect("iron pickaxe should have max damage")
+            .amount
+    }
+
+    #[test]
+    fn item_count_uses_vanilla_y_coordinate() {
+        let mut elements = Vec::new();
+        push_item_count(&mut elements, 10.0, 20.0, 32.0, 2.0, 64);
+
+        let MenuElement::Text { x, y, .. } = &elements[0] else {
+            panic!("item count should render as text");
+        };
+        assert_eq!(*x, 20.0);
+        assert_eq!(*y, 38.0);
+    }
+
+    #[test]
+    fn durability_bar_matches_vanilla_visibility_width_and_color() {
+        let max_damage = pickaxe_max_damage();
+        assert!(item_bar(&damaged_pickaxe(0)).is_none());
+
+        let halfway = damaged_pickaxe(max_damage / 2);
+        let (width, color) = item_bar(&halfway).expect("damaged item should show a bar");
+        assert_eq!(width, 7);
+        assert_eq!(color, [1.0, 1.0, 0.0, 1.0]);
+
+        let broken = damaged_pickaxe(max_damage);
+        let (width, color) = item_bar(&broken).expect("fully damaged item still has a bar");
+        assert_eq!(width, 0);
+        assert_eq!(color, [1.0, 0.0, 0.0, 1.0]);
+
+        assert!(item_bar(&damaged_pickaxe(-1)).is_none());
+
+        let over_damaged = damaged_pickaxe(max_damage + 1);
+        let (width, color) =
+            item_bar(&over_damaged).expect("over-max damage should clamp to max damage");
+        assert_eq!(width, 0);
+        assert_eq!(color, [1.0, 0.0, 0.0, 1.0]);
+
+        let unbreakable = present(
+            ItemStack::new(ItemKind::IronPickaxe, 1)
+                .with_component(Damage { amount: 1 })
+                .with_component(Unbreakable),
+        );
+        assert!(item_bar(&unbreakable).is_none());
+
+        let damage_without_max =
+            present(ItemStack::new(ItemKind::Stone, 1).with_component(Damage { amount: 1 }));
+        assert!(item_bar(&damage_without_max).is_none());
+
+        let max_without_damage =
+            present(ItemStack::new(ItemKind::Stone, 1).with_component(MaxDamage { amount: 10 }));
+        assert!(item_bar(&max_without_damage).is_none());
+    }
+
+    #[test]
+    fn item_icon_places_vanilla_durability_rectangles() {
+        let data = damaged_pickaxe(pickaxe_max_damage() / 2);
+        let mut elements = Vec::new();
+
+        push_item_icon(&mut elements, 10.0, 20.0, 32.0, 2.0, &data);
+
+        assert_eq!(elements.len(), 3);
+        let MenuElement::Rect {
+            x, y, w, h, color, ..
+        } = &elements[1]
+        else {
+            panic!("durability background should be a rectangle");
+        };
+        assert_eq!((*x, *y, *w, *h), (14.0, 46.0, 26.0, 4.0));
+        assert_eq!(*color, [0.0, 0.0, 0.0, 1.0]);
+
+        let MenuElement::Rect {
+            x, y, w, h, color, ..
+        } = &elements[2]
+        else {
+            panic!("durability fill should be a rectangle");
+        };
+        assert_eq!((*x, *y, *w, *h), (14.0, 46.0, 14.0, 2.0));
+        assert_eq!(*color, [1.0, 1.0, 0.0, 1.0]);
+    }
+
+    fn bundle(items: Vec<ItemStack>) -> ItemStackData {
+        present(ItemStack::new(ItemKind::Bundle, 1).with_component(BundleContents { items }))
+    }
+
+    #[test]
+    fn bundle_bar_matches_vanilla_fullness() {
+        assert!(item_bar(&ItemStackData::new(ItemKind::Bundle, 1)).is_none());
+        assert!(item_bar(&bundle(Vec::new())).is_none());
+
+        let stone = |count| ItemStack::new(ItemKind::Stone, count);
+        assert_eq!(
+            item_bar(&bundle(vec![stone(1)])),
+            Some((1, BUNDLE_BAR_COLOR))
+        );
+        assert_eq!(
+            item_bar(&bundle(vec![stone(32)])),
+            Some((7, BUNDLE_BAR_COLOR))
+        );
+        assert_eq!(
+            item_bar(&bundle(vec![stone(64)])),
+            Some((13, BUNDLE_FULL_BAR_COLOR))
+        );
+        assert_eq!(
+            item_bar(&bundle(vec![ItemStack::new(ItemKind::IronPickaxe, 1)])),
+            Some((13, BUNDLE_FULL_BAR_COLOR))
+        );
+
+        let nested = ItemStack::new(ItemKind::Bundle, 1);
+        assert_eq!(item_bar(&bundle(vec![nested])), Some((1, BUNDLE_BAR_COLOR)));
+
+        let damaged_empty = present(
+            ItemStack::new(ItemKind::Bundle, 1)
+                .with_component(MaxDamage { amount: 10 })
+                .with_component(Damage { amount: 5 }),
+        );
+        assert!(item_bar(&damaged_empty).is_none());
     }
 }

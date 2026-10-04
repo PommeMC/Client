@@ -2,4 +2,5 @@
 /node_modules
 /reference
 /test-server
-/tools/lightgen/out
+/logs
+/tools/stategen/out

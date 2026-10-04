@@ -5,7 +5,7 @@
 //! Usage:
 //!   blockgen blocks <reports/blocks.json> <version> <out.json>
 //!   blockgen behavior <azalea generated.rs> <out.json>
-//!   blockgen light <generated/light.json> <blocks-<v>.json> <out.json>
+//!   blockgen state <generated/state.json> <blocks-<v>.json> <out.json>
 //!
 //! `blocks` flattens the report into a compact per-block table (name, first
 //! state id, default state id, ordered property lists). Every explicit state
@@ -16,14 +16,17 @@
 //! `behavior` seeds the name-keyed destroy-time table from an azalea
 //! `generated.rs` (e.g. `~/.cargo/git/checkouts/azalea-*/<rev>/azalea-block/
 //! src/generated.rs`); new blocks the seed doesn't know must be appended by
-//! hand from the decompiled `Blocks.java`.
+//! hand from the decompiled `Blocks.java`. Hand-added entries survive a
+//! regen (existing keys the seed doesn't produce are carried over and
+//! listed), but the seed wins for keys it does produce — a hand-correction
+//! to a seeded value does not survive.
 //!
-//! `light` compacts the raw per-state light-property dump produced by
-//! `tools/lightgen/LightDump.java` (see `just lightgen`) into the per-block
-//! table the client embeds: each field is a scalar when uniform across the
-//! block's states, else a per-state array, and face-occlusion masks are
-//! deduped into a dictionary. State counts and value ranges are cross-checked
-//! against the version's blocks table.
+//! `state` compacts the raw per-state property dump produced by running
+//! vanilla (`tools/stategen/StateDump.java`, see `just stategen`) into the
+//! per-block table the client embeds: each field is a scalar when uniform
+//! across the block's states, else a per-state array, and face-occlusion
+//! masks are deduped into a dictionary. State counts and value ranges are
+//! cross-checked against the version's blocks table.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -34,8 +37,8 @@ fn main() -> ExitCode {
     let result = match args.as_slice() {
         [cmd, report, version, out] if cmd == "blocks" => gen_blocks(report, version, out),
         [cmd, generated, out] if cmd == "behavior" => gen_behavior(generated, out),
-        [cmd, dump, blocks, out] if cmd == "light" => gen_light(dump, blocks, out),
-        _ => Err("usage: blockgen blocks <blocks.json> <version> <out.json>\n       blockgen behavior <generated.rs> <out.json>\n       blockgen light <light.json> <blocks-<v>.json> <out.json>".into()),
+        [cmd, dump, blocks, out] if cmd == "state" => gen_state(dump, blocks, out),
+        _ => Err("usage: blockgen blocks <blocks.json> <version> <out.json>\n       blockgen behavior <generated.rs> <out.json>\n       blockgen state <state.json> <blocks-<v>.json> <out.json>".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -297,6 +300,23 @@ fn gen_behavior(generated_path: &str, out_path: &str) -> Result<(), Error> {
         return Err("no block behavior entries found — wrong input file?".into());
     }
 
+    // Carry over hand-appended keys the seed doesn't know.
+    let mut carried: Vec<String> = Vec::new();
+    match std::fs::read_to_string(out_path) {
+        Ok(existing) => {
+            let existing: BTreeMap<String, BehaviorJson> =
+                serde_json::from_str(&existing).map_err(|e| format!("{out_path}: {e}"))?;
+            for (name, b) in existing {
+                if !entries.contains_key(&name) {
+                    entries.insert(name.clone(), (b.destroy_time, b.requires_correct_tool));
+                    carried.push(name);
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{out_path}: {e}").into()),
+    }
+
     let mut out = String::new();
     writeln!(out, "{{")?;
     let len = entries.len();
@@ -312,7 +332,21 @@ fn gen_behavior(generated_path: &str, out_path: &str) -> Result<(), Error> {
 
     std::fs::write(out_path, &out)?;
     println!("wrote {len} behavior entries to {out_path}");
+    if !carried.is_empty() {
+        println!(
+            "carried over {} hand-added entries: {}",
+            carried.len(),
+            carried.join(", ")
+        );
+    }
     Ok(())
+}
+
+/// An entry of the emitted `block_behavior.json`, read back on regen.
+#[derive(serde::Deserialize)]
+struct BehaviorJson {
+    destroy_time: f32,
+    requires_correct_tool: bool,
 }
 
 fn extract_float_arg(text: &str, method: &str) -> Option<f32> {
@@ -322,9 +356,9 @@ fn extract_float_arg(text: &str, method: &str) -> Option<f32> {
     rest[..end].trim().parse().ok()
 }
 
-/// Raw per-state dump written by `tools/lightgen/LightDump.java`.
+/// Raw per-state dump written by `tools/stategen/StateDump.java`.
 #[derive(serde::Deserialize)]
-struct LightDumpFile {
+struct StateDumpFile {
     version: String,
     state_count: u32,
     emission: Vec<u8>,
@@ -332,6 +366,33 @@ struct LightDumpFile {
     propagates_skylight_down: Vec<u8>,
     can_occlude: Vec<u8>,
     use_shape_for_light_occlusion: Vec<u8>,
+    /// `BlockBehaviour.hasCollision`; block-level, so uniform across each
+    /// block's states.
+    has_collision: Vec<u8>,
+    /// Vanilla `BlockState.blocksMotion()`; absent from versions without the
+    /// method (26.3 dropped it).
+    #[serde(default)]
+    blocks_motion: Option<Vec<u8>>,
+    /// Vanilla cached `BlockState.isSolid()` / `legacySolid`.
+    legacy_solid: Vec<u8>,
+    /// Vanilla cached `BlockState.canBeReplaced()` property.
+    replaceable: Vec<u8>,
+    /// Packed six Direction ordinal bits for
+    /// `BlockState.isFaceSturdy(..., SupportType.FULL)`.
+    full_face_sturdy: Vec<u8>,
+    /// Whether vanilla's logical collision/outline shape actually applies the
+    /// block state's positional offset. Render/model offsets are independent.
+    collision_shape_uses_offset: Vec<u8>,
+    outline_shape_uses_offset: Vec<u8>,
+    /// `BlockBehaviour.OffsetType`: 0 none, 1 XZ, 2 XYZ.
+    position_offset_type: Vec<u8>,
+    /// Runtime clamp parameters used by vanilla's registered offset function.
+    max_horizontal_offset: Vec<f32>,
+    max_vertical_offset: Vec<f32>,
+    /// Flattened vanilla AABBs (`[min_x,min_y,min_z,max_x,max_y,max_z,...]`),
+    /// one entry per state. `StateDump` obtains these from vanilla itself.
+    collision_shapes: Vec<Vec<f64>>,
+    outline_shapes: Vec<Vec<f64>>,
     /// State id (as string) -> 6 face masks, 64 hex chars each, present
     /// exactly for states with `can_occlude && use_shape_for_light_occlusion`.
     face_masks: std::collections::HashMap<String, [String; 6]>,
@@ -352,20 +413,20 @@ struct BlocksEntry {
     props: Vec<(String, Vec<String>)>,
 }
 
-fn gen_light(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), Error> {
-    let dump: LightDumpFile = serde_json::from_str(&std::fs::read_to_string(dump_path)?)?;
+fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), Error> {
+    let dump: StateDumpFile = serde_json::from_str(&std::fs::read_to_string(dump_path)?)?;
     let blocks: BlocksFile = serde_json::from_str(&std::fs::read_to_string(blocks_path)?)?;
 
     if dump.version != blocks.version {
         return Err(format!(
-            "version mismatch: light dump is '{}', blocks table is '{}'",
+            "version mismatch: state dump is '{}', blocks table is '{}'",
             dump.version, blocks.version
         )
         .into());
     }
     if dump.state_count != blocks.state_count {
         return Err(format!(
-            "state count mismatch: light dump has {}, blocks table has {}",
+            "state count mismatch: state dump has {}, blocks table has {}",
             dump.state_count, blocks.state_count
         )
         .into());
@@ -383,6 +444,27 @@ fn gen_light(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
             "use_shape_for_light_occlusion",
             dump.use_shape_for_light_occlusion.len(),
         ),
+        ("has_collision", dump.has_collision.len()),
+        (
+            "blocks_motion",
+            dump.blocks_motion.as_ref().map_or(n, Vec::len),
+        ),
+        ("legacy_solid", dump.legacy_solid.len()),
+        ("replaceable", dump.replaceable.len()),
+        ("full_face_sturdy", dump.full_face_sturdy.len()),
+        (
+            "collision_shape_uses_offset",
+            dump.collision_shape_uses_offset.len(),
+        ),
+        (
+            "outline_shape_uses_offset",
+            dump.outline_shape_uses_offset.len(),
+        ),
+        ("position_offset_type", dump.position_offset_type.len()),
+        ("max_horizontal_offset", dump.max_horizontal_offset.len()),
+        ("max_vertical_offset", dump.max_vertical_offset.len()),
+        ("collision_shapes", dump.collision_shapes.len()),
+        ("outline_shapes", dump.outline_shapes.len()),
     ] {
         if len != n {
             return Err(format!("{key} has {len} entries, expected {n}").into());
@@ -399,12 +481,105 @@ fn gen_light(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
                 "use_shape_for_light_occlusion",
                 dump.use_shape_for_light_occlusion[i],
             ),
+            ("has_collision", dump.has_collision[i]),
+            (
+                "blocks_motion",
+                dump.blocks_motion.as_ref().map_or(0, |m| m[i]),
+            ),
+            ("legacy_solid", dump.legacy_solid[i]),
+            ("replaceable", dump.replaceable[i]),
+            (
+                "collision_shape_uses_offset",
+                dump.collision_shape_uses_offset[i],
+            ),
+            (
+                "outline_shape_uses_offset",
+                dump.outline_shape_uses_offset[i],
+            ),
         ] {
             if v > 1 {
                 return Err(format!("state {i}: {key} is {v}, expected 0/1").into());
             }
         }
+        if dump.full_face_sturdy[i] > 0x3f {
+            return Err(format!(
+                "state {i}: full_face_sturdy is {}, expected a 6-bit mask",
+                dump.full_face_sturdy[i]
+            )
+            .into());
+        }
+        let offset_type = dump.position_offset_type[i];
+        if offset_type > 2 {
+            return Err(format!(
+                "state {i}: position_offset_type is {offset_type}, expected 0..=2"
+            )
+            .into());
+        }
+        let max_horizontal = dump.max_horizontal_offset[i];
+        let max_vertical = dump.max_vertical_offset[i];
+        if !max_horizontal.is_finite()
+            || !max_vertical.is_finite()
+            || max_horizontal < 0.0
+            || max_vertical < 0.0
+        {
+            return Err(format!(
+                "state {i}: invalid offset bounds {max_horizontal}/{max_vertical}"
+            )
+            .into());
+        }
+        if (offset_type == 0 && (max_horizontal != 0.0 || max_vertical != 0.0))
+            || (offset_type == 1 && max_vertical != 0.0)
+        {
+            return Err(format!(
+                "state {i}: offset type {offset_type} is inconsistent with bounds {max_horizontal}/{max_vertical}"
+            )
+            .into());
+        }
+        if offset_type == 0
+            && (dump.collision_shape_uses_offset[i] != 0 || dump.outline_shape_uses_offset[i] != 0)
+        {
+            return Err(format!("state {i}: shape uses an offset but has no offset type").into());
+        }
     }
+
+    // Dedupe collision + outline shapes into one dictionary keyed on exact bits.
+    let mut shape_dict: Vec<Vec<f64>> = Vec::new();
+    let mut shape_dict_index: std::collections::HashMap<Vec<u64>, u32> =
+        std::collections::HashMap::new();
+    let mut state_shapes = [Vec::with_capacity(n), Vec::with_capacity(n)];
+    for i in 0..n {
+        for (k, (kind, shape)) in [
+            ("collision", &dump.collision_shapes[i]),
+            ("outline", &dump.outline_shapes[i]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if shape.len() % 6 != 0 {
+                return Err(format!(
+                    "state {i}: {kind} shape has {} coordinates, expected a multiple of 6",
+                    shape.len()
+                )
+                .into());
+            }
+            for (box_index, b) in shape.as_chunks::<6>().0.iter().enumerate() {
+                if !b.iter().all(|v| v.is_finite()) {
+                    return Err(format!(
+                        "state {i}: {kind} shape box {box_index} has a non-finite coordinate"
+                    )
+                    .into());
+                }
+                if b[0] > b[3] || b[1] > b[4] || b[2] > b[5] {
+                    return Err(format!(
+                        "state {i}: {kind} shape box {box_index} has inverted bounds"
+                    )
+                    .into());
+                }
+            }
+            state_shapes[k].push(shape_index(shape, &mut shape_dict, &mut shape_dict_index));
+        }
+    }
+    let [state_collision_shapes, state_outline_shapes] = state_shapes;
 
     // Dedupe face masks into a dictionary, iterating in ascending state-id
     // order so the output is deterministic.
@@ -456,6 +631,11 @@ fn gen_light(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
     )?;
     writeln!(out, "  \"state_count\": {n},")?;
     writeln!(out, "  \"masks\": {},", serde_json::to_string(&dict)?)?;
+    writeln!(
+        out,
+        "  \"shapes\": {},",
+        serde_json::to_string(&shape_dict)?
+    )?;
     writeln!(out, "  \"blocks\": [")?;
     let mut expected_id = 0u32;
     for (i, block) in blocks.blocks.iter().enumerate() {
@@ -472,13 +652,41 @@ fn gen_light(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
 
         let mut line = format!("    {{\"name\": {}", serde_json::to_string(&block.name)?);
         for (key, values) in [
-            ("e", &dump.emission[range.clone()]),
-            ("d", &dump.dampening[range.clone()]),
-            ("p", &dump.propagates_skylight_down[range.clone()]),
-            ("o", &dump.can_occlude[range.clone()]),
-            ("u", &dump.use_shape_for_light_occlusion[range.clone()]),
+            ("e", &dump.emission),
+            ("d", &dump.dampening),
+            ("p", &dump.propagates_skylight_down),
+            ("o", &dump.can_occlude),
+            ("u", &dump.use_shape_for_light_occlusion),
         ] {
-            write!(line, ", \"{key}\": {}", scalar_or_array(values)?)?;
+            write!(line, ", \"{key}\": {}", scalar_or_array(values, &range)?)?;
+        }
+        let collision = &dump.has_collision[range.clone()];
+        if collision.iter().any(|&c| c != collision[0]) {
+            return Err(format!("{}: has_collision varies across states", block.name).into());
+        }
+        write!(line, ", \"c\": {}", collision[0])?;
+        if let Some(blocks_motion) = &dump.blocks_motion {
+            write!(line, ", \"m\": {}", scalar_or_array(blocks_motion, &range)?)?;
+        }
+        for (key, values) in [
+            ("l", scalar_or_array(&dump.legacy_solid, &range)?),
+            ("v", scalar_or_array(&dump.replaceable, &range)?),
+            ("t", scalar_or_array(&dump.full_face_sturdy, &range)?),
+            (
+                "co",
+                scalar_or_array(&dump.collision_shape_uses_offset, &range)?,
+            ),
+            (
+                "oo",
+                scalar_or_array(&dump.outline_shape_uses_offset, &range)?,
+            ),
+            ("q", scalar_or_array(&dump.position_offset_type, &range)?),
+            ("h", scalar_or_array(&dump.max_horizontal_offset, &range)?),
+            ("y", scalar_or_array(&dump.max_vertical_offset, &range)?),
+            ("s", scalar_or_array(&state_collision_shapes, &range)?),
+            ("r", scalar_or_array(&state_outline_shapes, &range)?),
+        ] {
+            write!(line, ", \"{key}\": {values}")?;
         }
         let masks = &state_masks[range];
         if masks.iter().any(Option::is_some) {
@@ -505,20 +713,39 @@ fn gen_light(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
 
     std::fs::write(out_path, &out)?;
     println!(
-        "wrote light data for {} states ({} shaped, {} distinct masks) to {out_path}",
+        "wrote state data for {} states ({} light-shaped, {} distinct masks, {} distinct block shapes) to {out_path}",
         n,
         masks_by_state.len(),
-        dict.len()
+        dict.len(),
+        shape_dict.len()
     );
     Ok(())
 }
 
-/// A single JSON value when every entry is equal, else the full array.
-fn scalar_or_array(values: &[u8]) -> Result<String, Error> {
-    let first = *values.first().ok_or("block with zero states")?;
-    if values.iter().all(|&v| v == first) {
-        Ok(first.to_string())
-    } else {
-        Ok(serde_json::to_string(values)?)
+fn shape_index(
+    shape: &[f64],
+    dict: &mut Vec<Vec<f64>>,
+    index: &mut std::collections::HashMap<Vec<u64>, u32>,
+) -> u32 {
+    let key: Vec<u64> = shape.iter().map(|v| v.to_bits()).collect();
+    *index.entry(key).or_insert_with(|| {
+        dict.push(shape.to_vec());
+        dict.len() as u32 - 1
+    })
+}
+
+/// A single JSON value when every entry in `range` serializes identically, else
+/// the full array.
+fn scalar_or_array<T: serde::Serialize>(
+    all: &[T],
+    range: &std::ops::Range<usize>,
+) -> Result<String, Error> {
+    let values = &all[range.clone()];
+    let first = serde_json::to_string(values.first().ok_or("block with zero states")?)?;
+    for value in &values[1..] {
+        if serde_json::to_string(value)? != first {
+            return Ok(serde_json::to_string(values)?);
+        }
     }
+    Ok(first)
 }

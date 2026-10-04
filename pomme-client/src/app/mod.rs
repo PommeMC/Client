@@ -1,5 +1,6 @@
 pub mod core;
 pub mod input;
+pub mod level_load;
 pub mod phases;
 pub mod state_slot;
 
@@ -18,11 +19,13 @@ use crate::app::core::AppCore;
 use crate::app::phases::connecting::{ConnectingUpdateResult, update_connecting};
 use crate::app::phases::in_game::{GameState, GameUpdateResult, update_game};
 use crate::app::phases::in_menu::{MenuUpdateResult, update_menu};
-use crate::app::phases::{AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
+use crate::app::phases::saving::update_saving;
+use crate::app::phases::{AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
 use crate::app::state_slot::StateSlot;
 use crate::dirs::DataDirs;
-use crate::net::connection::{ConnectArgs, spawn_connection};
+use crate::net::connection::{ConnectArgs, ConnectionHandle, Transport, spawn_connection};
 use crate::renderer::{self, Renderer};
+use crate::singleplayer::World;
 use crate::user::UserData;
 
 #[derive(Error, Debug)]
@@ -39,7 +42,6 @@ pub enum WindowError {
 
 const TICK_RATE: f32 = 1.0 / 20.0;
 const TICK_RATE_MS: u32 = 1000 / 20;
-const DEFAULT_RENDER_DISTANCE: u32 = 12;
 const POSITION_SEND_INTERVAL: u32 = 20;
 const POSITION_THRESHOLD_SQ: f64 = 4.0e-8;
 
@@ -106,6 +108,39 @@ impl FramerateLimiter {
     }
 }
 
+/// The tail of every exit from a world or server.
+///
+/// Takes the connection by value and drops it before the server is asked to
+/// stop, in `Minecraft.disconnect`'s order. Dropping aborts the connection
+/// task, which closes the pipe on a runtime thread, so the server may see the
+/// cancel first; that is fine, since steel's `save_and_shutdown` disconnects
+/// and persists every player still online before it saves the worlds.
+fn leave_world(
+    core: &mut AppCore,
+    mut gfx: Gfx,
+    panorama: Panorama,
+    connection: ConnectionHandle,
+    world: Option<World>,
+    then: AfterSaving,
+) -> AppPhase {
+    drop(connection);
+    core.audio.stop_all_sounds();
+    core.return_to_menu(&mut gfx);
+
+    match world {
+        Some(world) => {
+            world.begin_close();
+            AppPhase::SavingWorld {
+                gfx,
+                panorama,
+                world,
+                then,
+            }
+        }
+        None => AppPhase::InMenu { gfx, panorama },
+    }
+}
+
 impl App {
     pub fn new(
         version: String,
@@ -148,6 +183,11 @@ impl App {
 }
 
 impl ApplicationHandler for App {
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Minecraft.exitWorldAndClose runs screen().removed() before close().
+        self.core.menu.flush_settings();
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.phase.transition(|app| match app {
             AppPhase::Setup {
@@ -155,17 +195,23 @@ impl ApplicationHandler for App {
                 mut pending_skin_uuid,
             } => {
                 let window_icon = {
-                    let png =
-                        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"));
-                    let img = image::load_from_memory(png).expect("failed to decode icon");
+                    let img = image::load_from_memory(crate::assets::POMME_ICON_PNG)
+                        .expect("failed to decode icon");
                     let rgba = img.to_rgba8();
                     let (w, h) = (rgba.width(), rgba.height());
                     winit::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
                 };
 
+                // Born in the persisted mode: the swapchain is sized from
+                // `inner_size()` before the window is shown, so switching after
+                // creation would leave it built for the windowed size.
+                let monitor = event_loop
+                    .primary_monitor()
+                    .or_else(|| event_loop.available_monitors().next());
                 let window_attrs = Window::default_attributes()
                     .with_title("Pomme")
                     .with_inner_size(winit::dpi::LogicalSize::new(854, 480))
+                    .with_fullscreen(self.core.display_mode.fullscreen_for(monitor))
                     .with_visible(false)
                     .with_window_icon(window_icon);
 
@@ -183,10 +229,15 @@ impl ApplicationHandler for App {
 
                 let mut renderer = match Renderer::new(
                     Arc::clone(&window),
-                    &self.core.data_dirs.jar_assets_dir,
-                    &self.core.asset_index,
+                    crate::ui::font::FontSources {
+                        jar_assets_dir: &self.core.data_dirs.jar_assets_dir,
+                        asset_index: &self.core.asset_index,
+                        packs: &self.core.resource_packs,
+                        options: self.core.menu.font_options(),
+                    },
                     &self.core.data_dirs.game_dir,
                     self.core.menu.vsync,
+                    &self.core.menu.theme().panorama_dir(&self.core.data_dirs),
                 ) {
                     Ok(r) => r,
                     Err(e) => {
@@ -214,18 +265,27 @@ impl ApplicationHandler for App {
                     let connection = spawn_connection(
                         &self.core.tokio_rt,
                         ConnectArgs {
-                            server: server_ip,
+                            // TODO: read the saved server list's protocol for
+                            // this address to skip the join-time probe.
+                            transport: Transport::Remote {
+                                server: server_ip,
+                                protocol: None,
+                            },
                             username: self.core.user.username.clone(),
                             uuid: self.core.user.uuid,
                             access_token: self.core.user.access_token.clone(),
-                            view_distance: self.core.menu.render_distance as u8,
-                            // TODO: read the saved server list's protocol for
-                            // this address to skip the join-time probe.
-                            protocol: None,
+                            view_distance: self.core.view_distance(),
+                            chat_options: self.core.menu.chat_options,
                         },
                     );
 
-                    let game = GameState::new(&renderer, &self.core.resource_packs);
+                    let game = GameState::new(
+                        &renderer,
+                        &self.core.resource_packs,
+                        self.core.menu.render_distance,
+                        false,
+                        self.core.menu.chat_options,
+                    );
 
                     let gfx = Gfx {
                         renderer: ManuallyDrop::new(renderer),
@@ -240,6 +300,7 @@ impl ApplicationHandler for App {
                         connect_phase: ConnectionPhase::Connecting,
                         connection,
                         game,
+                        world: None,
                     }
                 } else {
                     let gfx = Gfx {
@@ -266,8 +327,53 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::CloseRequested => {
-                event_loop.exit();
+            WindowEvent::CloseRequested | WindowEvent::Destroyed => {
+                // A world saves on the way out, so the window stays up for it
+                // rather than vanishing while the process finishes writing.
+                self.phase.transition(|app| match app {
+                    AppPhase::Connecting {
+                        gfx,
+                        panorama,
+                        connection,
+                        world: world @ Some(_),
+                        ..
+                    } => leave_world(
+                        &mut self.core,
+                        gfx,
+                        panorama,
+                        connection,
+                        world,
+                        AfterSaving::Quit,
+                    ),
+                    AppPhase::InGame {
+                        gfx,
+                        connection,
+                        world: world @ Some(_),
+                        ..
+                    } => leave_world(
+                        &mut self.core,
+                        gfx,
+                        Panorama::new(),
+                        connection,
+                        world,
+                        AfterSaving::Quit,
+                    ),
+                    AppPhase::SavingWorld {
+                        gfx,
+                        panorama,
+                        world,
+                        ..
+                    } => AppPhase::SavingWorld {
+                        gfx,
+                        panorama,
+                        world,
+                        then: AfterSaving::Quit,
+                    },
+                    app => {
+                        event_loop.exit();
+                        app
+                    }
+                });
             }
             WindowEvent::Resized(new_size) => {
                 if let Some(gfx) = self.phase.gfx_mut() {
@@ -280,45 +386,78 @@ impl ApplicationHandler for App {
             // TODO: Migrate _fully_ to Action system
             WindowEvent::KeyboardInput { event, .. } => {
                 self.phase.transition(|mut app| {
+                    // F3 held suppresses global keys (vanilla
+                    // handleGlobalKeyPress); press only, no repeat.
                     if let Some(Gfx { window, .. }) = app.gfx_mut()
                         && event.state.is_pressed()
+                        && !event.repeat
+                        && !self.core.input.key_pressed(KeyCode::F3)
                         && let PhysicalKey::Code(KeyCode::F11) = event.physical_key
                     {
-                        self.core.display_mode = self.core.display_mode.cycle();
-                        self.core.menu.display_mode = self.core.display_mode;
-                        self.core.apply_display_mode(window);
+                        let display_mode = self.core.display_mode.cycle();
+                        self.core.menu.set_display_mode(display_mode);
+                        self.core.sync_display_mode(window);
+                    }
+                    // F2 screenshot works in every phase, like vanilla.
+                    // TODO: Ctrl+F2 panoramic screenshot
+                    if let Some(Gfx { renderer, .. }) = app.gfx_mut()
+                        && event.state.is_pressed()
+                        && !event.repeat
+                        && !self.core.input.key_pressed(KeyCode::F3)
+                        && let PhysicalKey::Code(KeyCode::F2) = event.physical_key
+                    {
+                        renderer.request_screenshot();
                     }
 
                     self.core.input.on_key_event(&event);
 
                     match app {
-                        AppPhase::Setup { .. } => app,
+                        AppPhase::Setup { .. } | AppPhase::SavingWorld { .. } => app,
                         AppPhase::InMenu { gfx, panorama } => {
                             self.core.input.on_menu_key_event(&event);
                             AppPhase::InMenu { gfx, panorama }
                         }
                         AppPhase::Connecting {
-                            mut gfx,
+                            gfx,
                             panorama,
                             connect_phase,
                             connection,
-                            game,
+                            mut game,
+                            world,
                         } => {
+                            // A configuration-phase dialog replaces the
+                            // connect screen and takes its keys.
                             if event.state.is_pressed()
+                                && let PhysicalKey::Code(code) = event.physical_key
+                                && game.dialog_open()
+                            {
+                                crate::app::phases::in_game::server_dialog_key(
+                                    code,
+                                    &event,
+                                    &mut self.core,
+                                    &gfx.window,
+                                    &connection,
+                                    &mut game,
+                                );
+                                AppPhase::Connecting {
+                                    gfx,
+                                    panorama,
+                                    connect_phase,
+                                    connection,
+                                    game,
+                                    world,
+                                }
+                            } else if event.state.is_pressed()
                                 && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
                             {
-                                gfx.renderer.clear_chunk_meshes();
-
-                                if let Some(p) = &mut self.core.presence {
-                                    p.set_in_menu(&self.core.version);
-                                }
-
-                                self.core.apply_cursor_grab(&gfx.window, None);
-
-                                AppPhase::InMenu {
+                                leave_world(
+                                    &mut self.core,
                                     gfx,
-                                    panorama: Panorama::new(),
-                                }
+                                    Panorama::new(),
+                                    connection,
+                                    world,
+                                    AfterSaving::Menu,
+                                )
                             } else {
                                 AppPhase::Connecting {
                                     gfx,
@@ -326,6 +465,7 @@ impl ApplicationHandler for App {
                                     connect_phase,
                                     connection,
                                     game,
+                                    world,
                                 }
                             }
                         }
@@ -333,32 +473,47 @@ impl ApplicationHandler for App {
                             gfx,
                             connection,
                             mut game,
+                            world,
                         } => {
+                            // No repeat filter: vanilla dispatches GLFW repeats
+                            // to screens and debug chords alike.
                             if event.state.is_pressed()
-                                && !event.repeat
                                 && let PhysicalKey::Code(code) = event.physical_key
                             {
-                                if code == KeyCode::KeyH && self.core.input.key_pressed(KeyCode::F3)
-                                {
-                                    game.advanced_item_tooltips = !game.advanced_item_tooltips;
-                                } else if game.options_from_game {
+                                if game.options_from_game {
                                     let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                    if !game.handle_debug_key(code, f3_held) {
+                                    if !game.handle_debug_key(code, f3_held, &connection) {
                                         self.core.input.on_menu_key_event(&event);
                                     }
+                                } else if game.server_dialog.is_some()
+                                    || (game.chat.has_pending_modal_prompt()
+                                        && !game.chat.is_open())
+                                {
+                                    crate::app::phases::in_game::server_dialog_key(
+                                        code,
+                                        &event,
+                                        &mut self.core,
+                                        &gfx.window,
+                                        &connection,
+                                        &mut game,
+                                    );
                                 } else if game.chat.is_open() {
                                     match code {
                                         KeyCode::Escape => {
-                                            game.chat.close();
+                                            let closed = game.escape_chat();
                                             self.core
                                                 .input
                                                 .clear_action(crate::app::input::Action::OpenMenu);
-                                            self.core
-                                                .apply_cursor_grab(&gfx.window, Some(&mut game));
+                                            if closed {
+                                                self.core.apply_cursor_grab(
+                                                    &gfx.window,
+                                                    Some(&mut game),
+                                                );
+                                            }
                                         }
                                         _ => {
                                             let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                            if !game.handle_debug_key(code, f3_held) {
+                                            if !game.handle_debug_key(code, f3_held, &connection) {
                                                 self.core.input.on_menu_key_event(&event);
                                             }
                                         }
@@ -375,7 +530,7 @@ impl ApplicationHandler for App {
                                         }
                                         _ => {
                                             let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                            if !game.handle_debug_key(code, f3_held) {
+                                            if !game.handle_debug_key(code, f3_held, &connection) {
                                                 self.core.input.on_menu_key_event(&event);
                                             }
                                         }
@@ -385,34 +540,55 @@ impl ApplicationHandler for App {
                                     // focus; keys type into it. Escape still
                                     // closes via the OpenMenu action.
                                     let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                    if !game.handle_debug_key(code, f3_held) {
+                                    if !game.handle_debug_key(code, f3_held, &connection) {
                                         self.core.input.on_menu_key_event(&event);
                                     }
                                 } else {
                                     match code {
+                                        // F3+Esc pauses without opening the
+                                        // menu (vanilla pauseGame(true)).
+                                        KeyCode::Escape
+                                            if self.core.input.key_pressed(KeyCode::F3)
+                                                && game.input_live() =>
+                                        {
+                                            game.paused = true;
+                                            game.pause_screen =
+                                                crate::ui::pause::PauseScreen::Hidden;
+                                            game.f3_chord_consumed = true;
+                                            self.core
+                                                .input
+                                                .clear_action(crate::app::input::Action::OpenMenu);
+                                            self.core
+                                                .apply_cursor_grab(&gfx.window, Some(&mut game));
+                                        }
                                         KeyCode::Escape
                                             if game.death_confirm
-                                                && game
-                                                    .death_confirm_instant
-                                                    .elapsed()
-                                                    .as_secs_f32()
-                                                    >= 1.0 =>
+                                                && crate::ui::death::buttons_ready(
+                                                    game.death_confirm_ticks,
+                                                ) =>
                                         {
                                             game.death_confirm = false;
                                             self.core.send_respawn(&connection, &mut game);
                                         }
                                         _ => {
                                             let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                            game.handle_debug_key(code, f3_held);
+                                            game.handle_debug_key(code, f3_held, &connection);
                                         }
                                     }
                                 }
+                            } else if !event.state.is_pressed()
+                                && matches!(event.physical_key, PhysicalKey::Code(KeyCode::F3))
+                            {
+                                // Overlay toggles on F3 release, unless a chord
+                                // consumed it; runs in every in-game sub-state.
+                                game.handle_f3_release(&connection);
                             }
 
                             AppPhase::InGame {
                                 gfx,
                                 connection,
                                 game,
+                                world,
                             }
                         }
                     }
@@ -420,20 +596,51 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                let scroll = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                let (scroll_x, scroll_y) = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x, y),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
                 };
-                match self.phase.get() {
+                let scroll = scroll_y;
+                match self.phase.get_mut() {
                     AppPhase::InMenu { .. } | AppPhase::Connecting { .. } => {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(scroll_x, scroll_y);
                     }
                     AppPhase::InGame { game, .. }
-                        if game.options_from_game || game.creative_inventory_open =>
+                        if game.dialog_open()
+                            || game.options_from_game
+                            || game.creative_inventory_open
+                            || game.inventory_open
+                            || game.open_container.is_some() =>
                     {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(scroll_x, scroll_y);
                     }
-                    // TODO: open chat should capture scroll (chat history scrolling)
+                    // Queued raw: ChatScreen routes it to the completion popup
+                    // or the backlog, with Shift's slower multiplier.
+                    AppPhase::InGame { game, .. } if game.chat.is_open() => {
+                        self.core.input.on_menu_scroll_xy(0.0, scroll);
+                    }
+                    // Vanilla MouseHandler: a spectator's wheel moves the menu
+                    // selection (sign-inverted) while it is open, and adjusts
+                    // flying speed (local-only) otherwise.
+                    AppPhase::InGame {
+                        game, connection, ..
+                    } if game.input_live()
+                        && crate::player::is_spectator(game.player.game_mode) =>
+                    {
+                        if game.spectator.is_menu_active() {
+                            // f32::signum maps 0.0 to 1.0; skip empty deltas.
+                            if scroll != 0.0 {
+                                game.spectator.on_mouse_scrolled(
+                                    -(scroll.signum() as i32),
+                                    &game.tab_list,
+                                    &connection.packet_tx,
+                                );
+                            }
+                        } else {
+                            game.player.fly_speed =
+                                (game.player.fly_speed + scroll * 0.005).clamp(0.0, 0.2);
+                        }
+                    }
                     AppPhase::InGame { game, .. } if game.input_live() => {
                         self.core.input.on_scroll(scroll)
                     }
@@ -457,6 +664,27 @@ impl ApplicationHandler for App {
 
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
+            }
+
+            WindowEvent::Focused(focused) => {
+                self.core.unfocused_since = (!focused).then(Instant::now);
+                // The window manager may silently drop a cursor lock on focus
+                // change, so a quick refocus (under the pause-on-lost-focus
+                // delay) re-issues the grab.
+                self.core.invalidate_cursor_grab_state();
+                if focused {
+                    match self.phase.get_mut() {
+                        AppPhase::Setup { .. } => {}
+                        AppPhase::InMenu { gfx, .. }
+                        | AppPhase::Connecting { gfx, .. }
+                        | AppPhase::SavingWorld { gfx, .. } => {
+                            self.core.apply_cursor_grab(&gfx.window, None);
+                        }
+                        AppPhase::InGame { gfx, game, .. } => {
+                            self.core.apply_cursor_grab(&gfx.window, Some(game));
+                        }
+                    }
+                }
             }
 
             WindowEvent::RedrawRequested => {
@@ -500,18 +728,33 @@ impl ApplicationHandler for App {
 
                         match update_result {
                             MenuUpdateResult::None => AppPhase::InMenu { gfx, panorama },
-                            MenuUpdateResult::Connect { connect_args } => {
+                            MenuUpdateResult::Connect {
+                                connect_args,
+                                world,
+                            } => {
+                                let connect_phase = if world.is_some() {
+                                    ConnectionPhase::StartingWorld
+                                } else {
+                                    ConnectionPhase::Connecting
+                                };
                                 let connection = spawn_connection(&core.tokio_rt, connect_args);
 
-                                let game = GameState::new(&gfx.renderer, &core.resource_packs);
+                                let game = GameState::new(
+                                    &gfx.renderer,
+                                    &core.resource_packs,
+                                    core.menu.render_distance,
+                                    world.is_some(),
+                                    core.menu.chat_options,
+                                );
                                 core.apply_cursor_grab(&gfx.window, None);
 
                                 AppPhase::Connecting {
                                     gfx,
                                     panorama,
-                                    connect_phase: ConnectionPhase::Connecting,
+                                    connect_phase,
                                     connection,
                                     game,
+                                    world,
                                 }
                             }
                             MenuUpdateResult::Quit => {
@@ -526,6 +769,7 @@ impl ApplicationHandler for App {
                         mut connect_phase,
                         connection,
                         mut game,
+                        mut world,
                     } => {
                         let update_result = update_connecting(
                             core,
@@ -535,6 +779,7 @@ impl ApplicationHandler for App {
                             &mut connect_phase,
                             &connection,
                             &mut game,
+                            world.as_mut(),
                         );
 
                         match update_result {
@@ -544,31 +789,35 @@ impl ApplicationHandler for App {
                                 connect_phase,
                                 connection,
                                 game,
+                                world,
                             },
-                            ConnectingUpdateResult::ManualDisconnect => {
-                                gfx.renderer.clear_chunk_meshes();
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
-
-                                AppPhase::InMenu { gfx, panorama }
-                            }
+                            ConnectingUpdateResult::ManualDisconnect => leave_world(
+                                core,
+                                gfx,
+                                panorama,
+                                connection,
+                                world,
+                                AfterSaving::Menu,
+                            ),
                             ConnectingUpdateResult::Disconnected { reason } => {
-                                gfx.renderer.clear_chunk_meshes();
                                 core.menu.show_disconnect(reason);
 
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
-
-                                AppPhase::InMenu { gfx, panorama }
+                                leave_world(
+                                    core,
+                                    gfx,
+                                    panorama,
+                                    connection,
+                                    world,
+                                    AfterSaving::Menu,
+                                )
                             }
                             ConnectingUpdateResult::JoinGame => {
                                 if let Some(p) = &mut core.presence {
-                                    p.playing_multiplayer(&core.version);
+                                    if world.is_some() {
+                                        p.playing_singleplayer(&core.version);
+                                    } else {
+                                        p.playing_multiplayer(&core.version);
+                                    }
                                 }
                                 // In-game screens use the plain arrow like vanilla, not
                                 // the pointer the branded menu may have left set.
@@ -579,6 +828,7 @@ impl ApplicationHandler for App {
                                     gfx,
                                     connection,
                                     game,
+                                    world,
                                 }
                             }
                         }
@@ -587,46 +837,65 @@ impl ApplicationHandler for App {
                         mut gfx,
                         connection,
                         mut game,
+                        mut world,
                     } => {
-                        let update_result =
-                            update_game(core, dt, raw_dt, &mut gfx, &connection, &mut game);
+                        let update_result = match world.as_mut().map(World::poll) {
+                            Some(Err(reason)) => GameUpdateResult::Disconnected { reason },
+                            _ => update_game(core, dt, raw_dt, &mut gfx, &connection, &mut game),
+                        };
 
                         match update_result {
                             GameUpdateResult::None => AppPhase::InGame {
                                 gfx,
                                 connection,
                                 game,
+                                world,
                             },
-                            GameUpdateResult::ManualDisconnect => {
-                                gfx.renderer.clear_chunk_meshes();
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
-
-                                AppPhase::InMenu {
-                                    gfx,
-                                    panorama: Panorama::new(),
-                                }
-                            }
+                            GameUpdateResult::ManualDisconnect => leave_world(
+                                core,
+                                gfx,
+                                Panorama::new(),
+                                connection,
+                                world,
+                                AfterSaving::Menu,
+                            ),
                             GameUpdateResult::Disconnected { reason } => {
-                                gfx.renderer.clear_chunk_meshes();
                                 core.menu.show_disconnect(reason);
 
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
-
-                                AppPhase::InMenu {
+                                leave_world(
+                                    core,
                                     gfx,
-                                    panorama: Panorama::new(),
-                                }
+                                    Panorama::new(),
+                                    connection,
+                                    world,
+                                    AfterSaving::Menu,
+                                )
+                            }
+                        }
+                    }
+                    AppPhase::SavingWorld {
+                        mut gfx,
+                        mut panorama,
+                        world,
+                        then,
+                    } => {
+                        if update_saving(core, dt, &mut gfx, &mut panorama, &world) {
+                            if then == AfterSaving::Quit {
+                                event_loop.exit();
+                            }
+                            AppPhase::InMenu { gfx, panorama }
+                        } else {
+                            AppPhase::SavingWorld {
+                                gfx,
+                                panorama,
+                                world,
+                                then,
                             }
                         }
                     }
                 });
+
+                core.input.end_frame();
 
                 let limit = self.effective_framerate_limit();
                 if let Some(gfx) = self.phase.gfx_mut() {
@@ -651,7 +920,7 @@ impl ApplicationHandler for App {
     ) {
         if let DeviceEvent::MouseMotion { delta } = event
             && self.core.input.is_cursor_captured()
-            && matches!(self.phase.get(), AppPhase::InGame { game,.. } if !game.paused && !game.dead && !game.gui_open() && !game.chat.is_open())
+            && matches!(self.phase.get(), AppPhase::InGame { game,.. } if !game.paused && !game.dead && !game.death_screen_open && !game.gui_open() && !game.chat.is_open())
         {
             self.core.input.on_mouse_motion(delta);
         }

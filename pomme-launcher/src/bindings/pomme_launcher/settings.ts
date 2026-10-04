@@ -3,4 +3,5 @@ export type LauncherSettings = {
 	language: string,
 	keepLauncherOpen: boolean,
 	launchWithConsole: boolean,
+	selectedAccountUuid?: string | null,
 };

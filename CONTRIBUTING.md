@@ -8,9 +8,12 @@ Thanks for your interest in contributing to Pomme!
 2. Clone your fork and set up the development environment:
 
    ```bash
-   git clone https://github.com/<your-username>/Pomme.git
-   cd Pomme
+   git clone --recurse-submodules https://github.com/<your-username>/Client.git
+   cd Client
    ```
+
+   SteelMC is a submodule; see [Building](./README.md#building) for the
+   submodule, first-build, and skip notes.
 
 3. Build and run:
 
@@ -24,31 +27,37 @@ Thanks for your interest in contributing to Pomme!
 All of these must pass. CI will reject your PR if they don't.
 
 ```bash
-just client-pre-pr          # Client (Rust)
+just client-pre-pr          # Client, protocol, and singleplayer (Rust)
 just launcher-pre-pr        # Launcher (Rust & TypeScript)
 ```
 
+`client-pre-pr` includes the singleplayer crate's ignored test, which boots a
+real SteelMC server and writes a world to the temp dir, so it takes a minute.
+CI additionally runs the client's clippy and tests with `--no-default-features`,
+which the recipe does not.
+
 ## Development Guidelines
 
-- **Rust nightly** is required (due to `simdnbt` dependency)
+- **The toolchain is pinned** in `rust-toolchain.toml` (a nightly: rustfmt's
+  options, SteelMC's pin, and simdnbt's and azalea's unstable feature gates).
+  Never override it locally; when it has to move, bump SteelMC first
 - No unnecessary comments. Code should be self-explanatory
 - No DRY violations. Don't duplicate logic, extract shared helpers
 - No `unwrap()` outside of tests
 - Keep changes focused. One feature or fix per PR
-- Use `feat/`, `fix/`, `perf/`, `refactor/`, `chore/` branch prefixes
+- Use `feat/`, `fix/`, `perf/`, `refactor/`, `chore/`, `docs/` branch prefixes
 
 ## Pull Request Format
 
-Every PR must include:
+Opening a PR prefills a template with the sections we expect. Fill them in rather
+than deleting them.
 
-```markdown
-## Summary
-- Brief bullet points of what changed and why
+Ticking a box under **Type of change** applies the matching label automatically,
+and unticking it removes the label again.
 
-## Test plan
-- [ ] Steps to verify the changes work
-- [ ] Edge cases checked
-```
+Under **Reference**, name the classes in `reference/26.2/decompiled` you checked
+the change against. This is what reviewers compare against, so it saves a round
+trip. Put `n/a` for launcher, tooling and chore PRs.
 
 For bug fixes, also include:
 
@@ -60,12 +69,8 @@ For bug fixes, also include:
 
 ## Project Structure
 
-```bash
-Pomme/
-├── pomme-client            # Minecraft client (Vulkan, Rust)
-├── pomme-gpu-allocator     # Port of gpu-allocator, required by the client (Vulkan, Rust)
-└── pomme-launcher          # Launcher app (Tauri, React, TypeScript)
-```
+The workspace crates are listed under [Architecture](./README.md#architecture)
+in the README. Inside the two apps:
 
 ### Pomme client
 
@@ -75,16 +80,23 @@ pomme-client/
     ├── main.rs             # Entry point
     ├── app/                # Winit event loop, input handling, state machine
     ├── args.rs             # CLI arguments
-    ├── entity/             # Entity storage (item drops)
+    ├── audio/              # OpenAL playback, sound events, music, subtitles
+    ├── entity/             # Entities, mobs, villagers, item drops
+    ├── net/                # Connection, framing, packet handling, per-version translation
+    ├── physics/            # Movement, collision
+    ├── player/             # Local player, inventory, interaction
     ├── renderer/           # Vulkan rendering, chunk meshing, texture atlas
     │   ├── pipelines/      # GPU pipelines (chunk, sky, hand, overlay, etc.)
     │   ├── shaders/        # GLSL shaders
     │   └── chunk/          # Chunk buffer management, meshing, atlas
-    ├── net/                # Server connection, packet handling
-    ├── world/              # Chunk storage, block registry, models
-    ├── physics/            # Movement, collision
-    ├── player/             # Local player, inventory, interaction
-    └── ui/                 # HUD, chat, menus, pause screen
+    ├── ui/                 # HUD, chat, menus, pause screen
+    ├── world/              # Chunk storage, block registry, models, lighting
+    ├── singleplayer.rs     # The integrated server as the client sees it
+    ├── resource_pack.rs    # Local and server-sent resource packs
+    ├── particle.rs         # Particle simulation
+    ├── mob_effect.rs       # Status effects
+    ├── lang.rs             # Vanilla translation strings
+    └── discord.rs          # Discord rich presence
 ```
 
 ### Pomme launcher
@@ -98,16 +110,22 @@ pomme-launcher/
 
 ## Releases
 
-Releases are cut by pushing tags:
+Client releases are built by `.github/workflows/release-client.yml`:
 
-- `client-v*` (e.g. `client-v0.1.1`) builds and publishes the client.
-- `launcher-v*` (e.g. `launcher-v0.1.1`) builds and publishes the launcher.
+- Pushing a `client-v*` tag (e.g. `client-v0.2.2+26.2`; the suffix is the
+  Minecraft version the build targets).
+- A weekly run from `master` every Sunday, skipped when nothing landed since the
+  last tag or when that commit's CI is not green.
+- A manual dispatch, optionally with a version core; blank bumps the patch.
+
+Launcher releases are cut by pushing a `launcher-v*` tag (e.g. `launcher-v0.1.2`)
+or by manual dispatch.
 
 A plain `v*` tag does nothing.
 
 ## Reporting Issues
 
-Include reproduction steps and your system info (OS, GPU, Rust version)
+Include reproduction steps and your system info (OS, GPU, Pomme version)
 for bug reports.
 
 ## Code of Conduct

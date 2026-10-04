@@ -1,0 +1,82 @@
+name: PR auto-labeler
+
+# Not `pull_request`, whose token is read-only on fork PRs. Safe only because
+# nothing checks out the PR branch; the body comes from the event payload, so
+# do not add a checkout step.
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync labels from "Type of change" checklist
+        uses: actions/github-script@v9
+        with:
+          script: |
+            // Checkbox text must match .github/PULL_REQUEST_TEMPLATE.md exactly;
+            // CI's pr-template job fails if the two drift. A label missing from
+            // the repo is created on first use.
+            const TYPE_LABELS = [
+              { text: "Bug fix",                 label: "bug",             color: "d73a4a" },
+              { text: "New feature",             label: "enhancement",     color: "a2eeef" },
+              { text: "Breaking change",         label: "breaking change", color: "b60205" },
+              { text: "Refactor / code cleanup", label: "refactor",        color: "cfd3d7" },
+              { text: "Performance improvement", label: "performance",     color: "fbca04" },
+              { text: "Chore / tooling",         label: "chore",           color: "cccccc" },
+              { text: "Documentation",           label: "documentation",   color: "0075ca" },
+            ];
+
+            // Case-insensitive key, so a differently cased label already on the
+            // repo still matches and can be synced or removed.
+            const norm = s => s.trim().toLowerCase();
+            const managed = new Map(TYPE_LABELS.map(t => [norm(t.label), t]));
+
+            // Matches "- [x] Some text" checklist lines.
+            const checked = new Set();
+            for (const line of (context.payload.pull_request.body || "").split("\n")) {
+              const m = line.match(/^\s*-\s*\[\s*[xX]\s*\]\s*(.+?)\s*$/);
+              if (m) checked.add(m[1].trim());
+            }
+            const wanted = new Set(
+              TYPE_LABELS.filter(t => checked.has(t.text)).map(t => norm(t.label))
+            );
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            const current = await github.paginate(github.rest.issues.listLabelsOnIssue, {
+              owner, repo, issue_number,
+            });
+            // Keep the repo's actual spelling around for removeLabel calls.
+            const currentByNorm = new Map(current.map(l => [norm(l.name), l.name]));
+
+            const toAdd = [];
+            for (const key of wanted) {
+              if (currentByNorm.has(key)) continue;
+              const { label, color } = managed.get(key);
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: label });
+              } catch (e) {
+                if (e.status !== 404) throw e;
+                await github.rest.issues.createLabel({ owner, repo, name: label, color });
+              }
+              toAdd.push(label);
+            }
+            if (toAdd.length) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number, labels: toAdd });
+            }
+
+            for (const [key, name] of currentByNorm) {
+              if (managed.has(key) && !wanted.has(key)) {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number, name });
+              }
+            }

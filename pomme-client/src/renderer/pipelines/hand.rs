@@ -197,10 +197,11 @@ impl HandPipeline {
         cmd: vk::CommandBuffer,
         frame: usize,
         aspect: f32,
+        hud_fov: f32,
         swing_progress: f32,
         bob: Mat4,
     ) {
-        let proj = projection(aspect);
+        let proj = projection(aspect, hud_fov);
 
         let sp = swing_progress;
         let sqrt_sp = sp.sqrt();
@@ -353,13 +354,8 @@ impl HandPipeline {
     }
 }
 
-pub(super) fn projection(aspect: f32) -> Mat4 {
-    let mut proj = proj::directx::perspective(
-        crate::renderer::camera::DEFAULT_FOV_DEGREES.to_radians(),
-        aspect,
-        NEAR,
-        FAR,
-    );
+pub(super) fn projection(aspect: f32, hud_fov: f32) -> Mat4 {
+    let mut proj = proj::directx::perspective(hud_fov, aspect, NEAR, FAR);
     proj.y_axis.y *= -1.0;
     proj
 }
@@ -532,10 +528,7 @@ fn update_skin_descriptor(
 fn fallback_skin() -> (Vec<u8>, u32, u32) {
     let w = 64u32;
     let h = 64u32;
-    let mut pixels = vec![0u8; (w * h * 4) as usize];
-    for pixel in pixels.chunks_exact_mut(4) {
-        pixel.copy_from_slice(&[196, 161, 125, 255]);
-    }
+    let pixels = [196u8, 161, 125, 255].repeat((w * h) as usize);
     (pixels, w, h)
 }
 

@@ -1,9 +1,12 @@
 //! Ported 1:1 from vanilla `PlayerTabOverlay.extractRenderState`
 //! (reference/26.1/decompiled/.../PlayerTabOverlay.java:103-204).
 
+use crate::entity::EntityStore;
 use crate::player::tab_list::{TabList, TabListPlayer};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::common::FONT_SIZE;
+use crate::ui::hud::Scoreboard;
+use crate::ui::text::TextSpan;
 
 const MAX_ROWS_PER_COL: usize = 20;
 const HEAD_COL_W: i32 = 9;
@@ -13,7 +16,6 @@ const SPECTATOR_GAME_MODE: u8 = 3;
 const BG_BACKDROP: [f32; 4] = [0.0, 0.0, 0.0, 0.5]; // Integer.MIN_VALUE (0x80000000)
 const BG_ROW: [f32; 4] = [1.0, 1.0, 1.0, 0x20 as f32 / 255.0]; // 0x20FFFFFF
 const COL_NAME: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-const COL_SPECTATOR: [f32; 4] = [1.0, 1.0, 1.0, 0x90 as f32 / 255.0]; // 0x90FFFFFF
 
 /// `text_width(text, FONT_SIZE)` must return the width in pixels at 1x GUI
 /// scale.
@@ -21,10 +23,12 @@ pub fn build_player_tab_overlay(
     elements: &mut Vec<MenuElement>,
     screen_w: f32,
     tab_list: &TabList,
+    scoreboard: &Scoreboard,
     gs: f32,
     text_width: &dyn Fn(&str, f32) -> f32,
+    spans_width: crate::ui::common::SpansWidthFn<'_>,
 ) {
-    let players = tab_list.sorted_listed();
+    let players = tab_list.sorted_listed(scoreboard);
     if players.is_empty() {
         return;
     }
@@ -32,10 +36,13 @@ pub fn build_player_tab_overlay(
     let gw = (screen_w / gs).floor();
     let font_w = |s: &str| text_width(s, FONT_SIZE);
 
-    let display_names: Vec<String> = players.iter().map(|p| display_name_for(p)).collect();
+    let display_names: Vec<Vec<TextSpan>> = players
+        .iter()
+        .map(|p| display_name_for(p, scoreboard))
+        .collect();
     let max_name_w: i32 = display_names
         .iter()
-        .map(|n| font_w(n).ceil() as i32)
+        .map(|n| spans_width(n, FONT_SIZE).ceil() as i32)
         .max()
         .unwrap_or(0);
 
@@ -55,14 +62,16 @@ pub fn build_player_tab_overlay(
     let cx = (gw as i32) / 2;
 
     let wrap_width_px = (gw - 50.0).max(1.0);
+    // TODO: wrapping flattens the header/footer to plain text, dropping
+    // their formatting; wrap the spans themselves to keep it.
     let header_lines = tab_list
         .header
         .as_ref()
-        .map(|h| wrap_text(h, wrap_width_px, &font_w));
+        .map(|h| wrap_text(&span_text(h), wrap_width_px, &font_w));
     let footer_lines = tab_list
         .footer
         .as_ref()
-        .map(|f| wrap_text(f, wrap_width_px, &font_w));
+        .map(|f| wrap_text(&span_text(f), wrap_width_px, &font_w));
 
     let mut max_line_w = grid_w;
     for lines in [&header_lines, &footer_lines].into_iter().flatten() {
@@ -93,6 +102,15 @@ pub fn build_player_tab_overlay(
                 centered: false,
             });
         };
+    let push_spans = |elements: &mut Vec<MenuElement>, spans: Vec<TextSpan>, x: i32, y: i32| {
+        elements.push(MenuElement::TextSpans {
+            x: x as f32 * gs,
+            y: y as f32 * gs,
+            spans,
+            scale: FONT_SIZE * gs,
+            centered: false,
+        });
+    };
     let push_image =
         |elements: &mut Vec<MenuElement>, x: i32, y: i32, w: i32, h: i32, sprite: SpriteId| {
             elements.push(MenuElement::Image {
@@ -158,18 +176,14 @@ pub fn build_player_tab_overlay(
         push_image(elements, row_left, yo, 8, 8, SpriteId::SteveHead);
 
         let info = players[i];
-        let name_color = if info.game_mode == SPECTATOR_GAME_MODE {
-            COL_SPECTATOR
-        } else {
-            COL_NAME
-        };
-        push_text(
-            elements,
-            display_names[i].clone(),
-            row_left + HEAD_COL_W,
-            yo,
-            name_color,
-        );
+        let mut spans = display_names[i].clone();
+        if info.game_mode == SPECTATOR_GAME_MODE {
+            // Vanilla `decorateName`: spectators are italicized, nothing else.
+            for span in &mut spans {
+                span.italic = true;
+            }
+        }
+        push_spans(elements, spans, row_left + HEAD_COL_W, yo);
         push_image(
             elements,
             row_left + slot_width - 11,
@@ -186,8 +200,63 @@ pub fn build_player_tab_overlay(
     }
 }
 
-fn display_name_for(p: &TabListPlayer) -> String {
-    p.display_name.clone().unwrap_or_else(|| p.name.clone())
+fn display_name_for(p: &TabListPlayer, scoreboard: &Scoreboard) -> Vec<TextSpan> {
+    scoreboard.player_name(&p.name, p.display_name.as_deref())
+}
+
+fn span_text(spans: &[TextSpan]) -> String {
+    spans.iter().map(|span| span.text.as_str()).collect()
+}
+
+pub struct PlayerNameplates<'a> {
+    pub entity_store: &'a EntityStore,
+    pub tab_list: &'a TabList,
+    pub scoreboard: &'a Scoreboard,
+    pub local_uuid: uuid::Uuid,
+    pub partial_tick: f32,
+    pub gs: f32,
+    pub camera_pos: glam::DVec3,
+    pub project: &'a dyn Fn(glam::DVec3) -> Option<(f32, f32)>,
+}
+
+// TODO: vanilla renders name tags as world-space billboards (0.025 scale,
+// shrinking with distance, 25% black backdrop, a see-through pass behind
+// walls, sneak dimming, no shadow) and honors team nametagVisibility; this
+// screen-space projection is an approximation until a world-space text path
+// exists.
+pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: PlayerNameplates<'_>) {
+    for entity in nameplates.entity_store.living.values() {
+        let Some(uuid) = entity.player_uuid else {
+            continue;
+        };
+        if uuid == nameplates.local_uuid {
+            continue;
+        }
+        let Some(player) = nameplates.tab_list.players.get(&uuid) else {
+            continue;
+        };
+        let pos = entity
+            .prev_position
+            .lerp(entity.position, nameplates.partial_tick as f64)
+            // Vanilla anchors at the pose bounding-box height + 0.5.
+            + glam::DVec3::Y * if entity.is_crouching { 2.0 } else { 2.3 };
+        let max_distance = if entity.is_crouching { 32.0 } else { 64.0 };
+        if (*pos - nameplates.camera_pos).length_squared() > max_distance * max_distance {
+            continue;
+        }
+        let Some((x, y)) = (nameplates.project)(*pos) else {
+            continue;
+        };
+        elements.push(MenuElement::TextSpans {
+            x,
+            y: y - 4.0 * nameplates.gs,
+            // The tab-list display name is tab-only in vanilla; name tags
+            // always use the team-formatted profile name.
+            spans: nameplates.scoreboard.player_name(&player.name, None),
+            scale: FONT_SIZE * nameplates.gs,
+            centered: true,
+        });
+    }
 }
 
 fn ping_sprite(latency: i32) -> SpriteId {

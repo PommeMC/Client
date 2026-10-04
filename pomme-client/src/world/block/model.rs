@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use glam::{Mat3, Mat4, Quat, Vec3};
 use serde::Deserialize;
 
 use super::registry::{FaceTextures, Tint};
-use crate::assets::{AssetIndex, resolve_asset_path_with_packs};
+use crate::assets::{AssetId, AssetIndex, resolve_asset_path_with_packs};
 
 #[derive(Deserialize)]
 struct BlockstateFile {
@@ -69,6 +70,82 @@ struct ModelFile {
     textures: HashMap<String, String>,
     #[serde(default)]
     elements: Vec<ElementDef>,
+    #[serde(default)]
+    display: HashMap<String, serde_json::Value>,
+    gui_light: Option<GuiLight>,
+}
+
+#[derive(Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum GuiLight {
+    Front,
+    #[default]
+    Side,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DisplayTransform {
+    pub(crate) rotation: Vec3,
+    pub(crate) translation: Vec3,
+    pub(crate) scale: Vec3,
+}
+
+impl DisplayTransform {
+    pub(crate) const IDENTITY: Self = Self {
+        rotation: Vec3::ZERO,
+        translation: Vec3::ZERO,
+        scale: Vec3::ONE,
+    };
+
+    pub(crate) fn to_matrix(self) -> Mat4 {
+        Mat4::from_translation(self.translation)
+            * Mat4::from_rotation_x(self.rotation.x.to_radians())
+            * Mat4::from_rotation_y(self.rotation.y.to_radians())
+            * Mat4::from_rotation_z(self.rotation.z.to_radians())
+            * Mat4::from_scale(self.scale)
+    }
+}
+
+pub(crate) fn parse_display_transform(json: &serde_json::Value) -> Option<DisplayTransform> {
+    let obj = json.as_object()?;
+    let rotation = obj
+        .get("rotation")
+        .map(|value| parse_vec3(value, Vec3::ZERO))
+        .unwrap_or(Vec3::ZERO);
+    let translation = obj
+        .get("translation")
+        .map(|value| parse_vec3(value, Vec3::ZERO))
+        .unwrap_or(Vec3::ZERO)
+        * (1.0 / 16.0);
+    let scale = obj
+        .get("scale")
+        .map(|value| parse_vec3(value, Vec3::ONE))
+        .unwrap_or(Vec3::ONE);
+    Some(DisplayTransform {
+        rotation,
+        translation: translation.clamp(Vec3::splat(-5.0), Vec3::splat(5.0)),
+        scale: scale.clamp(Vec3::splat(-4.0), Vec3::splat(4.0)),
+    })
+}
+
+/// The shape vanilla's `display.gui` entries share, which differ only in yaw:
+/// `block/block` is 225, `item/template_chest` 45.
+#[cfg(test)]
+fn gui_transform(y_rot_deg: f32) -> DisplayTransform {
+    DisplayTransform {
+        rotation: Vec3::new(30.0, y_rot_deg, 0.0),
+        translation: Vec3::ZERO,
+        scale: Vec3::splat(0.625),
+    }
+}
+
+pub(crate) fn default_block_ground_transform() -> Mat4 {
+    DisplayTransform {
+        rotation: Vec3::ZERO,
+        translation: Vec3::new(0.0, 3.0 / 16.0, 0.0),
+        scale: Vec3::splat(0.25),
+    }
+    .to_matrix()
 }
 
 fn deserialize_texture_map<'de, D>(de: D) -> Result<HashMap<String, String>, D::Error>
@@ -135,6 +212,17 @@ pub enum Direction {
 }
 
 impl Direction {
+    pub fn opposite(self) -> Self {
+        match self {
+            Direction::Down => Direction::Up,
+            Direction::Up => Direction::Down,
+            Direction::North => Direction::South,
+            Direction::South => Direction::North,
+            Direction::West => Direction::East,
+            Direction::East => Direction::West,
+        }
+    }
+
     pub fn offset(&self) -> [i32; 3] {
         match self {
             Direction::Down => [0, -1, 0],
@@ -188,12 +276,68 @@ impl Direction {
         d
     }
 
-    fn shade_light(&self) -> f32 {
+    /// The default table's shade, for the item paths that bake it in; terrain
+    /// looks its dimension's table up at mesh time instead.
+    pub(crate) fn shade_light(&self) -> f32 {
+        CardinalLighting::DEFAULT.by_face(*self)
+    }
+}
+
+/// Vanilla `CardinalLighting`: the per-face brightness a dimension shades
+/// block faces with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CardinalLighting {
+    pub down: f32,
+    pub up: f32,
+    pub north: f32,
+    pub south: f32,
+    pub west: f32,
+    pub east: f32,
+}
+
+impl CardinalLighting {
+    pub const DEFAULT: Self = Self {
+        down: 0.5,
+        up: 1.0,
+        north: 0.8,
+        south: 0.8,
+        west: 0.6,
+        east: 0.6,
+    };
+    pub const NETHER: Self = Self {
+        down: 0.9,
+        up: 0.9,
+        north: 0.8,
+        south: 0.8,
+        west: 0.6,
+        east: 0.6,
+    };
+
+    pub fn by_face(&self, dir: Direction) -> f32 {
+        match dir {
+            Direction::Down => self.down,
+            Direction::Up => self.up,
+            Direction::North => self.north,
+            Direction::South => self.south,
+            Direction::West => self.west,
+            Direction::East => self.east,
+        }
+    }
+}
+
+/// A dimension type's `cardinal_light`, vanilla `CardinalLighting.Type`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CardinalLightType {
+    #[default]
+    Default,
+    Nether,
+}
+
+impl CardinalLightType {
+    pub fn table(self) -> CardinalLighting {
         match self {
-            Direction::Up => 1.0,
-            Direction::Down => 0.5,
-            Direction::North | Direction::South => 0.8,
-            Direction::East | Direction::West => 0.6,
+            Self::Default => CardinalLighting::DEFAULT,
+            Self::Nether => CardinalLighting::NETHER,
         }
     }
 }
@@ -205,7 +349,10 @@ pub struct BakedQuad {
     pub texture: String,
     pub cullface: Option<Direction>,
     pub tint: super::registry::Tint,
+    /// The default table's shade, for GUI and held items.
     pub shade_light: f32,
+    /// The face terrain shades this quad as, `None` for `shade: false`.
+    pub shade_face: Option<Direction>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -236,6 +383,7 @@ const DRY_FOLIAGE_TINTED: &[&str] = &["leaf_litter"];
 
 const GRASS_TINTED: &[&str] = &[
     "grass_block",
+    "grass",
     "short_grass",
     "tall_grass",
     "fern",
@@ -376,85 +524,205 @@ pub fn bake_all_models(
     (results, multipart_results)
 }
 
+pub struct BakedItemModels {
+    pub models: HashMap<String, BakedModel>,
+    pub generated_textures: HashSet<String>,
+    pub flat_texture_keys: HashMap<String, String>,
+    pub(crate) gui_transforms: HashMap<String, DisplayTransform>,
+    pub ground_transforms: HashMap<String, Mat4>,
+}
+
+/// Every `minecraft/items/*.json` name across the jar and the active packs,
+/// so a pack can add an item, not only replace one. Vanilla walks every pack
+/// in `FallbackResourceManager`.
+fn item_definition_names(
+    jar_assets_dir: &Path,
+    packs: Option<&crate::resource_pack::ResourcePackManager>,
+) -> std::collections::BTreeSet<String> {
+    let pack_dirs = packs
+        .into_iter()
+        .flat_map(|packs| packs.active_pack_dirs())
+        .map(|dir| dir.join("assets"));
+    std::iter::once(jar_assets_dir.to_path_buf())
+        .chain(pack_dirs)
+        .filter_map(|root| std::fs::read_dir(root.join("minecraft").join("items")).ok())
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()?
+                .strip_suffix(".json")
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
 pub fn bake_item_models(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
-) -> (
-    HashMap<String, BakedModel>,
-    HashSet<String>,
-    HashMap<String, String>,
-) {
+) -> BakedItemModels {
     let mut item_models: HashMap<String, BakedModel> = HashMap::new();
-    let mut item_textures: HashSet<String> = HashSet::new();
+    let mut flat_item_textures: HashSet<String> = HashSet::new();
     let mut flat_keys: HashMap<String, String> = HashMap::new();
+    let mut gui_transforms: HashMap<String, DisplayTransform> = HashMap::new();
+    let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
 
-    let items_dir = jar_assets_dir.join("minecraft").join("items");
-    let entries = match std::fs::read_dir(&items_dir) {
-        Ok(e) => e,
-        Err(_) => return (item_models, item_textures, flat_keys),
+    let mut bake = |name: &str, parts: &[ModelPart], tint: Tint| {
+        let mut merged: Option<BakedModel> = None;
+        // Vanilla applies each composite part's own display transforms. Pomme
+        // merges the parts into one mesh, so it can apply only one; no vanilla
+        // composite disagrees (beds share `block/template_bed`), so the first
+        // part's wins and a disagreement is logged rather than modelled.
+        let mut ground_transform: Option<Mat4> = None;
+        let mut gui_transform: Option<DisplayTransform> = None;
+        let mut gui_light: Option<GuiLight> = None;
+        for part in parts {
+            let resolved = resolve_model(
+                &part.path,
+                jar_assets_dir,
+                asset_index,
+                &mut model_cache,
+                packs,
+            );
+            match ground_transform {
+                None => ground_transform = Some(resolved.ground_transform),
+                Some(existing) if existing.abs_diff_eq(resolved.ground_transform, 1.0e-6) => {}
+                Some(_) => tracing::warn!(
+                    "{name}: composite part {} has a different ground transform; using the first part's",
+                    part.path
+                ),
+            }
+            match gui_transform {
+                None => gui_transform = Some(resolved.gui_transform),
+                Some(existing) if existing == resolved.gui_transform => {}
+                Some(_) => tracing::warn!(
+                    "{name}: composite part {} has a different GUI transform; using the first part's",
+                    part.path
+                ),
+            }
+            match gui_light {
+                None => gui_light = Some(resolved.gui_light),
+                Some(existing) if existing == resolved.gui_light => {}
+                Some(_) => tracing::warn!(
+                    "{name}: composite part {} has a different GUI light; using the first part's",
+                    part.path
+                ),
+            }
+            // A flat sprite (layer0, no elements) only makes sense as the
+            // sole part; `merged` stays empty so no 3D model is inserted.
+            if parts.len() == 1 && resolved.elements.is_empty() {
+                if let Some(value) = resolved.textures.get("layer0")
+                    && let Some(key) = texture_to_name(value)
+                {
+                    flat_item_textures.insert(key.clone());
+                    flat_keys.insert(name.to_string(), key);
+                }
+                break;
+            }
+            let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, tint) else {
+                continue;
+            };
+            if let Some(m) = part.transform {
+                for quad in &mut baked.quads {
+                    for p in &mut quad.positions {
+                        *p = m.transform_point3(Vec3::from_array(*p)).to_array();
+                    }
+                }
+            }
+            merged = Some(match merged.take() {
+                None => baked,
+                Some(mut model) => {
+                    model.quads.extend(baked.quads);
+                    model.is_full_cube = false;
+                    model.occludes = false;
+                    model
+                }
+            });
+        }
+        if let Some(transform) = ground_transform {
+            ground_transforms.insert(name.to_string(), transform);
+        }
+        let gui_transform = gui_transform.unwrap_or(DisplayTransform::IDENTITY);
+        gui_transforms.insert(name.to_string(), gui_transform);
+        if let Some(mut baked) = merged {
+            apply_gui_lambert(
+                &mut baked.quads,
+                gui_transform,
+                gui_light.unwrap_or_default(),
+            );
+            item_models.insert(name.to_string(), baked);
+        }
     };
 
-    for entry in entries.flatten() {
-        let fname = entry.file_name().to_string_lossy().to_string();
-        let Some(item_name) = fname.strip_suffix(".json") else {
-            continue;
-        };
-        let Ok(contents) = std::fs::read_to_string(entry.path()) else {
+    for item_name in item_definition_names(jar_assets_dir, packs) {
+        let item_name = item_name.as_str();
+        let item_asset_key = format!("minecraft/items/{item_name}.json");
+        let item_path =
+            resolve_asset_path_with_packs(jar_assets_dir, asset_index, &item_asset_key, packs);
+        let Ok(contents) = std::fs::read_to_string(item_path) else {
             continue;
         };
         let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&contents) else {
             continue;
         };
 
-        let raw_path =
-            find_first_model_string(&json).or_else(|| find_first_string_for_key(&json, "base"));
-        let Some(raw_path) = raw_path else { continue };
-        let path = raw_path
-            .strip_prefix("minecraft:")
-            .unwrap_or(&raw_path)
-            .to_string();
-
-        let resolved = resolve_model(&path, jar_assets_dir, asset_index, &mut model_cache, packs);
-
-        if resolved.elements.is_empty() {
-            if let Some(value) = resolved.textures.get("layer0") {
-                let stripped = value.strip_prefix("minecraft:").unwrap_or(value);
-                let key = if let Some(rest) = stripped.strip_prefix("block/") {
-                    rest.to_string()
-                } else {
-                    item_textures.insert(stripped.to_string());
-                    stripped.to_string()
-                };
-                flat_keys.insert(item_name.to_string(), key);
-            }
+        let parts = collect_model_parts(&json);
+        if parts.is_empty() {
             continue;
         }
-
-        let tint = determine_tint(item_name);
-        if let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, tint) {
-            apply_gui_lambert(&mut baked.quads, BLOCK_GUI_ROTATION_DEG);
-            item_models.insert(item_name.to_string(), baked);
+        bake(item_name, &parts, determine_tint(item_name));
+        // The bundle's selected-item model composes these around the
+        // selected stack at draw time.
+        if let Some(layers) = selected_bundle_layers(&json) {
+            for (front, parts) in [false, true].into_iter().zip(&layers) {
+                bake(
+                    &selected_bundle_layer_key(item_name, front),
+                    parts,
+                    Tint::None,
+                );
+            }
         }
     }
 
-    item_models.insert("chest".to_string(), bake_chest_item_model());
+    // The mesh comes from the special renderer, but the chest's display
+    // transforms live in `item/template_chest` like any other item's.
+    let chest = resolve_model(
+        "item/template_chest",
+        jar_assets_dir,
+        asset_index,
+        &mut model_cache,
+        packs,
+    );
+    item_models.insert(
+        "chest".to_string(),
+        bake_chest_item_model(chest.gui_transform, chest.gui_light),
+    );
+    gui_transforms.insert("chest".to_string(), chest.gui_transform);
+    ground_transforms.insert("chest".to_string(), chest.ground_transform);
     flat_keys.remove("chest");
 
     tracing::info!(
-        "Baked {} item models, {} flat items, and registered {} item textures",
+        "Baked {} item models, {} flat items, and registered {} generated-item textures",
         item_models.len(),
         flat_keys.len(),
-        item_textures.len()
+        flat_item_textures.len()
     );
-    (item_models, item_textures, flat_keys)
+    BakedItemModels {
+        models: item_models,
+        generated_textures: flat_item_textures,
+        flat_texture_keys: flat_keys,
+        gui_transforms,
+        ground_transforms,
+    }
 }
 
-pub fn bake_chest_item_model() -> BakedModel {
+fn bake_chest_item_model(gui: DisplayTransform, gui_light: GuiLight) -> BakedModel {
     let tex = "entity/chest/normal";
     let mut quads = Vec::new();
-    let shades = vanilla_gui_face_shades(CHEST_GUI_ROTATION_DEG);
+    let shades = vanilla_gui_face_shades(gui, gui_light);
     add_chest_cube(
         &mut quads,
         1.0 / 16.0,
@@ -510,35 +778,34 @@ pub fn bake_chest_item_model() -> BakedModel {
     }
 }
 
-const CHEST_GUI_ROTATION_DEG: [f32; 3] = [30.0, 45.0, 0.0];
-const BLOCK_GUI_ROTATION_DEG: [f32; 3] = [30.0, 225.0, 0.0];
-
-fn rotate_y(v: [f32; 3], angle: f32) -> [f32; 3] {
-    let (s, c) = angle.sin_cos();
-    [c * v[0] + s * v[2], v[1], -s * v[0] + c * v[2]]
-}
-
-fn rotate_x(v: [f32; 3], angle: f32) -> [f32; 3] {
-    let (s, c) = angle.sin_cos();
-    [v[0], c * v[1] - s * v[2], s * v[1] + c * v[2]]
-}
-
 fn items_3d_lights() -> ([f32; 3], [f32; 3]) {
-    let base = |x: f32, y: f32, z: f32| {
-        let len = (x * x + y * y + z * z).sqrt();
-        [x / len, y / len, z / len]
+    let pose = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0))
+        * Mat4::from_rotation_y(1.0821041)
+        * Mat4::from_rotation_x(3.2375858)
+        * Mat4::from_rotation_y(-std::f32::consts::PI / 8.0)
+        * Mat4::from_rotation_x(2.3561945);
+    let transform = |x: f32, y: f32, z: f32| {
+        pose.transform_vector3(Vec3::new(x, y, z).normalize())
+            .to_array()
     };
-    let transform = |v: [f32; 3]| {
-        let v = rotate_y(v, -std::f32::consts::PI / 8.0);
-        let v = rotate_x(v, 2.3561945);
-        let v = rotate_y(v, 1.0821041);
-        let v = rotate_x(v, 3.2375858);
-        [v[0], -v[1], v[2]]
+    (transform(0.2, 1.0, -0.7), transform(-0.2, 1.0, 0.7))
+}
+
+fn items_flat_lights() -> ([f32; 3], [f32; 3]) {
+    let pose =
+        Mat4::from_rotation_y(-std::f32::consts::PI / 8.0) * Mat4::from_rotation_x(2.3561945);
+    let transform = |x: f32, y: f32, z: f32| {
+        pose.transform_vector3(Vec3::new(x, y, z).normalize())
+            .to_array()
     };
-    (
-        transform(base(0.2, 1.0, -0.7)),
-        transform(base(-0.2, 1.0, 0.7)),
-    )
+    (transform(0.2, 1.0, -0.7), transform(-0.2, 1.0, 0.7))
+}
+
+fn gui_lights(gui_light: GuiLight) -> ([f32; 3], [f32; 3]) {
+    match gui_light {
+        GuiLight::Front => items_flat_lights(),
+        GuiLight::Side => items_3d_lights(),
+    }
 }
 
 fn lambert_shade(world_normal: [f32; 3], l0: [f32; 3], l1: [f32; 3]) -> f32 {
@@ -547,13 +814,17 @@ fn lambert_shade(world_normal: [f32; 3], l0: [f32; 3], l1: [f32; 3]) -> f32 {
     ((d0 + d1) * 0.6 + 0.4).min(1.0)
 }
 
-fn rotate_mesh_normal(n_mesh: [f32; 3], rotation_deg: [f32; 3]) -> [f32; 3] {
-    let after_y = rotate_y(n_mesh, rotation_deg[1].to_radians());
-    rotate_x(after_y, rotation_deg[0].to_radians())
+fn transform_gui_normal(n_mesh: [f32; 3], display: DisplayTransform) -> [f32; 3] {
+    // GuiItemAtlas applies (slot, -slot, slot) before ItemTransform. Vanilla's
+    // PoseStack transforms normals by the inverse-transpose of that composed
+    // pose, including each model's actual GUI rotation/scale.
+    let pose = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)) * display.to_matrix();
+    let normal = Mat3::from_mat4(pose).inverse().transpose() * Vec3::from_array(n_mesh);
+    normal.normalize_or_zero().to_array()
 }
 
-fn vanilla_gui_face_shades(rotation_deg: [f32; 3]) -> [f32; 6] {
-    let (l0, l1) = items_3d_lights();
+fn vanilla_gui_face_shades(display: DisplayTransform, gui_light: GuiLight) -> [f32; 6] {
+    let (l0, l1) = gui_lights(gui_light);
     let normals = [
         [0.0, 1.0, 0.0],
         [0.0, -1.0, 0.0],
@@ -564,27 +835,29 @@ fn vanilla_gui_face_shades(rotation_deg: [f32; 3]) -> [f32; 6] {
     ];
     let mut shades = [0.0; 6];
     for (i, &n) in normals.iter().enumerate() {
-        shades[i] = lambert_shade(rotate_mesh_normal(n, rotation_deg), l0, l1);
+        shades[i] = lambert_shade(transform_gui_normal(n, display), l0, l1);
     }
     shades
 }
 
-fn apply_gui_lambert(quads: &mut [BakedQuad], rotation_deg: [f32; 3]) {
-    let (l0, l1) = items_3d_lights();
+/// TODO: `held_item.rs` draws this same mesh through `item_entity.vert`, so
+/// the first-person hand picks up the GUI pose's lambert too. Vanilla lights
+/// the hand with `Lighting.Entry.LEVEL` (it draws inside `renderLevel`, before
+/// `GameRenderer` switches to `ITEMS_3D` for the GUI).
+fn apply_gui_lambert(quads: &mut [BakedQuad], display: DisplayTransform, gui_light: GuiLight) {
+    let (l0, l1) = gui_lights(gui_light);
     for quad in quads {
-        let p = &quad.positions;
-        let e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
-        let e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
-        let nx = e1[1] * e2[2] - e1[2] * e2[1];
-        let ny = e1[2] * e2[0] - e1[0] * e2[2];
-        let nz = e1[0] * e2[1] - e1[1] * e2[0];
-        let len = (nx * nx + ny * ny + nz * nz).sqrt();
-        if len < 1e-6 {
-            continue;
-        }
-        let n_mesh = [nx / len, ny / len, nz / len];
-        let n_world = rotate_mesh_normal(n_mesh, rotation_deg);
-        quad.shade_light *= lambert_shade(n_world, l0, l1);
+        // ItemFeatureRenderer sends BakedQuad.direction() through the pose's
+        // normal matrix. It does not apply BlockModelLighter's cardinal face
+        // brightness in GUI rendering, so this replaces (rather than
+        // multiplies) the terrain-oriented shade byte from bake_resolved_model.
+        //
+        // Not `quad.shade_face`: that is `None` for `shade: false` elements,
+        // and `putBakedQuad` takes `direction()` regardless of `shade()`.
+        let direction = direction_from_positions(&quad.positions).unwrap_or(Direction::Up);
+        let n_mesh = direction.offset().map(|component| component as f32);
+        let n_gui = transform_gui_normal(n_mesh, display);
+        quad.shade_light = lambert_shade(n_gui, l0, l1);
     }
 }
 
@@ -606,79 +879,266 @@ fn add_chest_cube(
     shades: [f32; 6],
 ) {
     const TEX_SIZE: f32 = 64.0;
-    let face_specs: [FaceSpec; 6] = [
+
+    // Vanilla ModelPart.Cube names the z=min vertices `t*` and z=max
+    // vertices `l*`, then builds faces in DOWN/UP/WEST/NORTH/EAST/SOUTH
+    // order. Keep that layout exactly: chest items use the special entity
+    // model rather than a normal block/item JSON mesh.
+    let t0 = [x0, y0, z0];
+    let t1 = [x1, y0, z0];
+    let t2 = [x1, y1, z0];
+    let t3 = [x0, y1, z0];
+    let l0 = [x0, y0, z1];
+    let l1 = [x1, y0, z1];
+    let l2 = [x1, y1, z1];
+    let l3 = [x0, y1, z1];
+
+    let u0 = u;
+    let u1 = u + d;
+    let u2 = u + d + w;
+    let u22 = u + d + w + w;
+    let u3 = u + d + w + d;
+    let u4 = u + d + w + d + w;
+    let v0 = v;
+    let v1 = v + d;
+    let v2 = v + d + h;
+
+    let face_specs = [
         FaceSpec {
-            positions: [[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]],
-            uv_pixels: (u + d + w, v, u + d + w + w, v + d),
-            uv_pattern: UvPattern::Up,
-            shade: shades[0],
-        },
-        FaceSpec {
-            positions: [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
-            uv_pixels: (u + d, v, u + d + w, v + d),
-            uv_pattern: UvPattern::Down,
+            positions: [l1, l0, t0, t1],
+            uv_pixels: [[u2, v0], [u1, v0], [u1, v1], [u2, v1]],
             shade: shades[1],
         },
         FaceSpec {
-            positions: [[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]],
-            uv_pixels: (u + d, v + d, u + d + w, v + d + h),
-            uv_pattern: UvPattern::North,
-            shade: shades[2],
+            positions: [t2, t3, l3, l2],
+            uv_pixels: [[u22, v1], [u2, v1], [u2, v0], [u22, v0]],
+            shade: shades[0],
         },
         FaceSpec {
-            positions: [[x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [x0, y0, z1]],
-            uv_pixels: (u + d + w + d, v + d, u + d + w + d + w, v + d + h),
-            uv_pattern: UvPattern::SouthWestEast,
-            shade: shades[3],
-        },
-        FaceSpec {
-            positions: [[x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [x0, y0, z0]],
-            uv_pixels: (u, v + d, u + d, v + d + h),
-            uv_pattern: UvPattern::SouthWestEast,
+            positions: [t0, l0, l3, t3],
+            uv_pixels: [[u1, v1], [u0, v1], [u0, v2], [u1, v2]],
             shade: shades[4],
         },
         FaceSpec {
-            positions: [[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]],
-            uv_pixels: (u + d + w, v + d, u + d + w + d, v + d + h),
-            uv_pattern: UvPattern::SouthWestEast,
+            positions: [t1, t0, t3, t2],
+            uv_pixels: [[u2, v1], [u1, v1], [u1, v2], [u2, v2]],
+            shade: shades[2],
+        },
+        FaceSpec {
+            positions: [l1, t1, t2, l2],
+            uv_pixels: [[u3, v1], [u2, v1], [u2, v2], [u3, v2]],
             shade: shades[5],
         },
+        FaceSpec {
+            positions: [l0, l1, l2, l3],
+            uv_pixels: [[u4, v1], [u3, v1], [u3, v2], [u4, v2]],
+            shade: shades[3],
+        },
     ];
+
     for spec in face_specs {
-        let (u_min_px, v_min_px, u_max_px, v_max_px) = spec.uv_pixels;
-        let u1 = (u_min_px + 0.5) / TEX_SIZE;
-        let v1 = (v_min_px + 0.5) / TEX_SIZE;
-        let u2 = (u_max_px - 0.5) / TEX_SIZE;
-        let v2 = (v_max_px - 0.5) / TEX_SIZE;
-        let uvs = match spec.uv_pattern {
-            UvPattern::Up => [[u1, v2], [u2, v2], [u2, v1], [u1, v1]],
-            UvPattern::Down => [[u1, v1], [u2, v1], [u2, v2], [u1, v2]],
-            UvPattern::North => [[u1, v2], [u1, v1], [u2, v1], [u2, v2]],
-            UvPattern::SouthWestEast => [[u2, v2], [u2, v1], [u1, v1], [u1, v2]],
-        };
         quads.push(BakedQuad {
             positions: spec.positions,
-            uvs,
+            uvs: spec
+                .uv_pixels
+                .map(|[u_px, v_px]| [u_px / TEX_SIZE, v_px / TEX_SIZE]),
             texture: texture.to_string(),
             cullface: None,
             tint: super::registry::Tint::None,
             shade_light: spec.shade,
+            shade_face: None,
         });
     }
 }
 
 struct FaceSpec {
     positions: [[f32; 3]; 4],
-    uv_pixels: (f32, f32, f32, f32),
-    uv_pattern: UvPattern,
+    uv_pixels: [[f32; 2]; 4],
     shade: f32,
 }
 
-enum UvPattern {
-    Up,
-    Down,
-    North,
-    SouthWestEast,
+struct ModelPart {
+    path: String,
+    transform: Option<Mat4>,
+}
+
+/// Model references to bake for one item. `minecraft:composite` contributes
+/// every child, with the children's `transformation`s composed parent-to-child
+/// (vanilla `CompositeModel.Unbaked.bake`); anything else keeps the old
+/// first-model-string heuristic, which for select/condition trees picks one
+/// representative state.
+fn collect_model_parts(json: &serde_json::Value) -> Vec<ModelPart> {
+    let mut parts = Vec::new();
+    if let Some(node) = json.get("model") {
+        collect_parts_from_node(node, None, &mut parts);
+    }
+    if parts.is_empty()
+        && let Some(path) = first_item_model_ref(json)
+    {
+        parts.push(ModelPart {
+            path,
+            transform: None,
+        });
+    }
+    parts
+}
+
+/// First `model` reference in an item definition, falling back to a special
+/// renderer's `base`.
+pub fn first_item_model_ref(json: &serde_json::Value) -> Option<String> {
+    find_first_model_string(json)
+        .or_else(|| find_first_string_for_key(json, "base"))
+        .map(|path| strip_mc_prefix(&path).to_string())
+}
+
+/// An item-model node's `type`, without the `minecraft:` prefix.
+fn node_type(node: &serde_json::Value) -> Option<&str> {
+    node.get("type")
+        .and_then(|t| t.as_str())
+        .map(strip_mc_prefix)
+}
+
+/// The item-model key the bundle's selected layers bake under: behind the
+/// selected stack, or in front of it.
+pub fn selected_bundle_layer_key(item_name: &str, front: bool) -> String {
+    let side = if front { "front" } else { "back" };
+    format!("__pomme_{item_name}_selected_{side}")
+}
+
+/// The `on_true` of a `minecraft:bundle/has_selected_item` condition in an
+/// item definition, split around its `minecraft:bundle/selected_item`
+/// placeholder into the layers drawn behind and in front of the selected
+/// stack (vanilla `BundleSelectedItemSpecialRenderer`).
+fn selected_bundle_layers(json: &serde_json::Value) -> Option<[Vec<ModelPart>; 2]> {
+    fn find_condition(node: &serde_json::Value) -> Option<&serde_json::Value> {
+        let is_condition = node_type(node) == Some("condition")
+            && node
+                .get("property")
+                .and_then(|p| p.as_str())
+                .map(strip_mc_prefix)
+                == Some("bundle/has_selected_item");
+        if is_condition {
+            return Some(node);
+        }
+        match node {
+            serde_json::Value::Object(map) => map.values().find_map(find_condition),
+            serde_json::Value::Array(items) => items.iter().find_map(find_condition),
+            _ => None,
+        }
+    }
+    let on_true = find_condition(json.get("model")?)?.get("on_true")?;
+    let children: Vec<&serde_json::Value> = match node_type(on_true) {
+        Some("composite") => on_true.get("models")?.as_array()?.iter().collect(),
+        _ => vec![on_true],
+    };
+    let split = children
+        .iter()
+        .position(|child| node_type(child) == Some("bundle/selected_item"))?;
+    let transform = on_true
+        .get("transformation")
+        .and_then(parse_item_transformation);
+    let mut layers = [Vec::new(), Vec::new()];
+    for (i, child) in children.iter().enumerate() {
+        if i != split {
+            collect_parts_from_node(child, transform, &mut layers[usize::from(i > split)]);
+        }
+    }
+    Some(layers)
+}
+
+fn collect_parts_from_node(
+    node: &serde_json::Value,
+    parent_transform: Option<Mat4>,
+    parts: &mut Vec<ModelPart>,
+) {
+    let own_transform = match node.get("transformation") {
+        Some(value) => match parse_item_transformation(value) {
+            Some(transform) => Some(transform),
+            None => {
+                tracing::warn!("Skipping item-model part with unsupported transformation encoding");
+                return;
+            }
+        },
+        None => None,
+    };
+    let transform = match (parent_transform, own_transform) {
+        (Some(parent), Some(own)) => Some(parent * own),
+        (parent, own) => parent.or(own),
+    };
+    match node_type(node) {
+        Some("composite") => {
+            if let Some(models) = node.get("models").and_then(|m| m.as_array()) {
+                for child in models {
+                    collect_parts_from_node(child, transform, parts);
+                }
+            }
+        }
+        Some("model") => {
+            if let Some(path) = node.get("model").and_then(|m| m.as_str()) {
+                parts.push(ModelPart {
+                    path: strip_mc_prefix(path).to_string(),
+                    transform,
+                });
+            }
+        }
+        // Other node types are left for the caller's whole-file fallback.
+        _ => {}
+    }
+}
+
+/// Vanilla `Transformation.compose` (Transformation.java:103): `translation ·
+/// leftRotation · scale · rightRotation`, translation in block units. Pomme
+/// currently supports the stock quaternion-array encoding. Other valid codec
+/// forms are rejected by the caller instead of silently becoming identity.
+fn parse_item_transformation(json: &serde_json::Value) -> Option<Mat4> {
+    let object = json.as_object()?;
+    let quat = |key: &str| -> Option<Quat> {
+        let Some(value) = object.get(key) else {
+            return Some(Quat::IDENTITY);
+        };
+        let arr = value.as_array()?;
+        if arr.len() != 4 {
+            return None;
+        }
+        let get = |i: usize| arr.get(i)?.as_f64().map(|v| v as f32);
+        Some(Quat::from_xyzw(get(0)?, get(1)?, get(2)?, get(3)?))
+    };
+    let vec3 = |key: &str, default: Vec3| {
+        object.get(key).map_or(Some(default), |v| {
+            v.as_array().and_then(|arr| {
+                if arr.len() != 3 {
+                    return None;
+                }
+                Some(Vec3::new(
+                    arr[0].as_f64()? as f32,
+                    arr[1].as_f64()? as f32,
+                    arr[2].as_f64()? as f32,
+                ))
+            })
+        })
+    };
+    Some(
+        Mat4::from_translation(vec3("translation", Vec3::ZERO)?)
+            * Mat4::from_quat(quat("left_rotation")?)
+            * Mat4::from_scale(vec3("scale", Vec3::ONE)?)
+            * Mat4::from_quat(quat("right_rotation")?),
+    )
+}
+
+pub fn parse_vec3(value: &serde_json::Value, default: Vec3) -> Vec3 {
+    let Some(arr) = value.as_array() else {
+        return default;
+    };
+    let get = |i: usize| arr.get(i).and_then(|v| v.as_f64()).map(|v| v as f32);
+    Vec3::new(
+        get(0).unwrap_or(default.x),
+        get(1).unwrap_or(default.y),
+        get(2).unwrap_or(default.z),
+    )
+}
+
+pub fn strip_mc_prefix(s: &str) -> &str {
+    s.strip_prefix("minecraft:").unwrap_or(s)
 }
 
 pub fn find_first_model_string(json: &serde_json::Value) -> Option<String> {
@@ -820,6 +1280,9 @@ fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<ModelRef> {
 struct ResolvedModel {
     textures: HashMap<String, String>,
     elements: Vec<ElementDef>,
+    gui_transform: DisplayTransform,
+    gui_light: GuiLight,
+    ground_transform: Mat4,
 }
 
 fn resolve_model(
@@ -831,6 +1294,9 @@ fn resolve_model(
 ) -> ResolvedModel {
     let mut texture_map: HashMap<String, String> = HashMap::new();
     let mut elements: Option<Vec<ElementDef>> = None;
+    let mut gui_transform: Option<DisplayTransform> = None;
+    let mut gui_light: Option<GuiLight> = None;
+    let mut ground_transform: Option<Mat4> = None;
     let mut current_id = model_id.to_string();
 
     for _ in 0..20 {
@@ -847,6 +1313,22 @@ fn resolve_model(
         if elements.is_none() && !model.elements.is_empty() {
             elements = Some(model.elements.clone());
         }
+        if gui_transform.is_none()
+            && let Some(transform) = model.display.get("gui").and_then(parse_display_transform)
+        {
+            gui_transform = Some(transform);
+        }
+        if gui_light.is_none() {
+            gui_light = model.gui_light;
+        }
+        if ground_transform.is_none()
+            && let Some(transform) = model
+                .display
+                .get("ground")
+                .and_then(parse_display_transform)
+        {
+            ground_transform = Some(transform.to_matrix());
+        }
 
         match &model.parent {
             Some(parent) => current_id = parent.clone(),
@@ -862,6 +1344,9 @@ fn resolve_model(
     ResolvedModel {
         textures: resolved_textures,
         elements: elements.unwrap_or_default(),
+        gui_transform: gui_transform.unwrap_or(DisplayTransform::IDENTITY),
+        gui_light: gui_light.unwrap_or_default(),
+        ground_transform: ground_transform.unwrap_or(Mat4::IDENTITY),
     }
 }
 
@@ -892,7 +1377,14 @@ fn load_model<'a>(
     let file_path = resolve_model_path(jar_assets_dir, asset_index, &asset_key, packs)?;
 
     let contents = std::fs::read_to_string(&file_path).ok()?;
-    let model: ModelFile = serde_json::from_str(&contents).ok()?;
+    let model: ModelFile = match serde_json::from_str(&contents) {
+        Ok(model) => model,
+        Err(error) => {
+            // Vanilla rejects the model too, but it says so rather than going quiet.
+            tracing::warn!("{model_id}: model JSON is invalid ({error}); skipping");
+            return None;
+        }
+    };
     cache.insert(model_id.to_string(), model);
     cache.get(model_id)
 }
@@ -918,18 +1410,36 @@ fn resolve_model_path(
 }
 
 fn model_id_to_asset_key(model_id: &str) -> String {
-    let stripped = model_id.strip_prefix("minecraft:").unwrap_or(model_id);
-    format!("minecraft/models/{stripped}.json")
+    AssetId::parse(model_id).asset_key("models", ".json")
 }
 
-fn texture_to_name(texture_ref: &str) -> Option<&str> {
+fn texture_to_name(texture_ref: &str) -> Option<String> {
     if texture_ref.starts_with('#') {
         return None;
     }
-    let stripped = texture_ref
-        .strip_prefix("minecraft:")
-        .unwrap_or(texture_ref);
-    stripped.strip_prefix("block/")
+    let id = AssetId::parse(texture_ref);
+    if id.namespace == "minecraft" {
+        if let Some(block_path) = id.path.strip_prefix("block/") {
+            Some(block_path.to_string())
+        } else if id.path.starts_with("item/")
+            || id.path.starts_with("entity/")
+            || id.path.starts_with("particle/")
+        {
+            Some(id.path.to_string())
+        } else {
+            Some(format!("minecraft:{}", id.path))
+        }
+    } else {
+        Some(id.canonical())
+    }
+}
+
+fn resolve_face_texture<'a>(
+    reference: &str,
+    textures: &'a HashMap<String, String>,
+) -> Option<&'a str> {
+    let slot = reference.strip_prefix('#').unwrap_or(reference);
+    textures.get(slot).map(String::as_str)
 }
 
 fn bake_resolved_model(
@@ -961,8 +1471,11 @@ fn bake_resolved_model(
                 continue;
             };
 
-            let texture_ref = resolve_ref(&face_def.texture, &resolved.textures, 0);
-            let Some(texture_name) = texture_to_name(&texture_ref) else {
+            let Some(texture_ref) = resolve_face_texture(&face_def.texture, &resolved.textures)
+            else {
+                continue;
+            };
+            let Some(texture_name) = texture_to_name(texture_ref) else {
                 continue;
             };
 
@@ -972,12 +1485,6 @@ fn bake_resolved_model(
             let mut positions = apply_element_rotation(positions, &element.rotation);
 
             let mut cullface = face_def.cullface.as_deref().and_then(Direction::from_str);
-
-            let shade_light = if element.shade {
-                dir.shade_light()
-            } else {
-                1.0
-            };
             let quad_tint = if face_def.tint_index.is_some() {
                 tint
             } else {
@@ -989,13 +1496,20 @@ fn bake_resolved_model(
                 cullface = cullface.map(|d| d.rotate_x(rot_x).rotate_y(rot_y));
             }
 
+            // Vanilla `FaceBakery.bakeQuad`: the shade direction is the
+            // rotated quad's nearest cardinal, `UP` for a degenerate quad.
+            let shade_face = element
+                .shade
+                .then(|| direction_from_positions(&positions).unwrap_or(Direction::Up));
+
             quads.push(BakedQuad {
                 positions,
                 uvs,
-                texture: texture_name.to_string(),
+                texture: texture_name,
                 cullface,
                 tint: quad_tint,
-                shade_light,
+                shade_light: shade_face.map_or(1.0, |face| face.shade_light()),
+                shade_face,
             });
         }
     }
@@ -1031,83 +1545,58 @@ fn check_full_cube(quads: &[BakedQuad]) -> bool {
     dirs.iter().all(|&d| d)
 }
 
-fn face_positions(dir: Direction, from: [f32; 3], to: [f32; 3]) -> [[f32; 3]; 4] {
-    // CCW winding when viewed from outside, matching chunk pipeline backface
-    // culling
+/// Vanilla `FaceInfo`: the per-face vertex order all the UV rules are defined
+/// against. Every face winds CCW viewed from outside, which the chunk
+/// pipeline's backface culling needs.
+pub(crate) fn face_positions(dir: Direction, from: [f32; 3], to: [f32; 3]) -> [[f32; 3]; 4] {
+    let [x0, y0, z0] = from;
+    let [x1, y1, z1] = to;
     match dir {
-        Direction::Up => [
-            [from[0], to[1], to[2]],
-            [to[0], to[1], to[2]],
-            [to[0], to[1], from[2]],
-            [from[0], to[1], from[2]],
-        ],
-        Direction::Down => [
-            [from[0], from[1], from[2]],
-            [to[0], from[1], from[2]],
-            [to[0], from[1], to[2]],
-            [from[0], from[1], to[2]],
-        ],
-        Direction::North => [
-            [from[0], from[1], from[2]],
-            [from[0], to[1], from[2]],
-            [to[0], to[1], from[2]],
-            [to[0], from[1], from[2]],
-        ],
-        Direction::South => [
-            [to[0], from[1], to[2]],
-            [to[0], to[1], to[2]],
-            [from[0], to[1], to[2]],
-            [from[0], from[1], to[2]],
-        ],
-        Direction::West => [
-            [from[0], from[1], to[2]],
-            [from[0], to[1], to[2]],
-            [from[0], to[1], from[2]],
-            [from[0], from[1], from[2]],
-        ],
-        Direction::East => [
-            [to[0], from[1], from[2]],
-            [to[0], to[1], from[2]],
-            [to[0], to[1], to[2]],
-            [to[0], from[1], to[2]],
-        ],
+        Direction::Down => [[x0, y0, z1], [x0, y0, z0], [x1, y0, z0], [x1, y0, z1]],
+        Direction::Up => [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]],
+        Direction::North => [[x1, y1, z0], [x1, y0, z0], [x0, y0, z0], [x0, y1, z0]],
+        Direction::South => [[x0, y1, z1], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1]],
+        Direction::West => [[x0, y1, z0], [x0, y0, z0], [x0, y0, z1], [x0, y1, z1]],
+        Direction::East => [[x1, y1, z1], [x1, y0, z1], [x1, y0, z0], [x1, y1, z0]],
     }
 }
 
-fn face_uvs(
+pub(crate) fn face_uvs(
     dir: Direction,
     from: [f32; 3],
     to: [f32; 3],
     explicit_uv: Option<&[f32; 4]>,
     rotation: Option<i32>,
 ) -> [[f32; 2]; 4] {
+    // Vanilla `FaceBakery.defaultFaceUV`, normalized to 0..1: some faces
+    // sample a window reflected about the texture center.
     let (u1, v1, u2, v2) = if let Some(uv) = explicit_uv {
         (uv[0] / 16.0, uv[1] / 16.0, uv[2] / 16.0, uv[3] / 16.0)
     } else {
         match dir {
-            Direction::Up | Direction::Down => (from[0], from[2], to[0], to[2]),
-            Direction::North | Direction::South => (from[0], 1.0 - to[1], to[0], 1.0 - from[1]),
-            Direction::East | Direction::West => (from[2], 1.0 - to[1], to[2], 1.0 - from[1]),
+            Direction::Down => (from[0], 1.0 - to[2], to[0], 1.0 - from[2]),
+            Direction::Up => (from[0], from[2], to[0], to[2]),
+            Direction::North => (1.0 - to[0], 1.0 - to[1], 1.0 - from[0], 1.0 - from[1]),
+            Direction::South => (from[0], 1.0 - to[1], to[0], 1.0 - from[1]),
+            Direction::West => (from[2], 1.0 - to[1], to[2], 1.0 - from[1]),
+            Direction::East => (1.0 - to[2], 1.0 - to[1], 1.0 - from[2], 1.0 - from[1]),
         }
     };
 
-    let mut uvs = match dir {
-        Direction::Up => [[u1, v2], [u2, v2], [u2, v1], [u1, v1]],
-        Direction::Down => [[u1, v1], [u2, v1], [u2, v2], [u1, v2]],
-        Direction::North => [[u1, v2], [u1, v1], [u2, v1], [u2, v2]],
-        Direction::South | Direction::West | Direction::East => {
-            [[u2, v2], [u2, v1], [u1, v1], [u1, v2]]
+    // Vanilla `CuboidFace.UVs` corner cycle, identical for every face (the
+    // per-face variation lives in `face_positions`' vertex order).
+    // `Quadrant.rotateVertexIndex` shifts each vertex forward through the
+    // cycle, spinning the texture clockwise per 90 degrees viewed from
+    // outside the block.
+    let cycle = [[u1, v1], [u1, v2], [u2, v2], [u2, v1]];
+    let shift = rotation.map_or(0, |r| {
+        if r % 90 != 0 {
+            // Vanilla `Quadrant.parseJson` rejects the whole model instead.
+            tracing::warn!("face uv rotation {r} is not a multiple of 90, truncating");
         }
-    };
-
-    if let Some(rot) = rotation {
-        let steps = ((rot % 360 + 360) % 360) / 90;
-        for _ in 0..steps {
-            uvs.rotate_right(1);
-        }
-    }
-
-    uvs
+        r.rem_euclid(360) / 90
+    }) as usize;
+    std::array::from_fn(|i| cycle[(i + shift) % 4])
 }
 
 fn apply_element_rotation(
@@ -1127,6 +1616,22 @@ fn apply_element_rotation(
     let cos = angle_rad.cos();
     let sin = angle_rad.sin();
 
+    // Vanilla `CuboidRotation.computeRescale` uses the reciprocal of each
+    // transformed basis vector's largest absolute component. For a single-axis
+    // rotation, that leaves the rotation axis unchanged and gives both
+    // perpendicular axes the same compensating scale.
+    let scale = if rot.rescale {
+        1.0 / cos.abs().max(sin.abs())
+    } else {
+        1.0
+    };
+    let [sx, sy, sz] = match rot.axis.as_str() {
+        "x" => [1.0, scale, scale],
+        "y" => [scale, 1.0, scale],
+        "z" => [scale, scale, 1.0],
+        _ => [1.0; 3],
+    };
+
     for pos in &mut positions {
         let dx = pos[0] - origin[0];
         let dy = pos[1] - origin[1];
@@ -1139,19 +1644,47 @@ fn apply_element_rotation(
             _ => (dx, dy, dz),
         };
 
-        if rot.rescale {
-            let scale = 1.0 / cos.abs();
-            pos[0] = origin[0] + nx * scale;
-            pos[1] = origin[1] + ny * scale;
-            pos[2] = origin[2] + nz * scale;
-        } else {
-            pos[0] = origin[0] + nx;
-            pos[1] = origin[1] + ny;
-            pos[2] = origin[2] + nz;
-        }
+        pos[0] = origin[0] + nx * sx;
+        pos[1] = origin[1] + ny * sy;
+        pos[2] = origin[2] + nz * sz;
     }
 
     positions
+}
+
+/// The quad's winding normal, or `None` when it is degenerate.
+pub(crate) fn quad_normal(positions: &[[f32; 3]; 4]) -> Option<Vec3> {
+    let p0 = Vec3::from_array(positions[0]);
+    let p1 = Vec3::from_array(positions[1]);
+    let p2 = Vec3::from_array(positions[2]);
+    (p1 - p0).cross(p2 - p0).try_normalize()
+}
+
+/// Vanilla `FaceBakery.findClosestDirection`: the cardinal with the largest
+/// positive dot product, first in `Direction` order on a tie; `None` when the
+/// normal points nowhere.
+pub(crate) fn nearest_cardinal_direction(normal: Vec3) -> Option<Direction> {
+    let mut best = None;
+    let mut closest_product = 0.0f32;
+    for candidate in [
+        Direction::Down,
+        Direction::Up,
+        Direction::North,
+        Direction::South,
+        Direction::West,
+        Direction::East,
+    ] {
+        let product = normal.dot(Vec3::from_array(candidate.offset().map(|v| v as f32)));
+        if product >= 0.0 && product > closest_product {
+            closest_product = product;
+            best = Some(candidate);
+        }
+    }
+    best
+}
+
+pub(crate) fn direction_from_positions(positions: &[[f32; 3]; 4]) -> Option<Direction> {
+    nearest_cardinal_direction(quad_normal(positions)?)
 }
 
 fn rotate_positions(mut positions: [[f32; 3]; 4], rot_x: i32, rot_y: i32) -> [[f32; 3]; 4] {
@@ -1189,10 +1722,7 @@ fn build_face_textures(
     textures: &HashMap<String, String>,
 ) -> Option<FaceTextures> {
     let mut faces = face_textures_base(block_name, textures)?;
-    faces.particle = textures
-        .get("particle")
-        .and_then(|v| texture_to_name(v))
-        .map(Into::into);
+    faces.particle = textures.get("particle").and_then(|v| texture_to_name(v));
     Some(faces)
 }
 
@@ -1200,7 +1730,7 @@ fn face_textures_base(
     block_name: &str,
     textures: &HashMap<String, String>,
 ) -> Option<FaceTextures> {
-    let get = |key: &str| -> Option<&str> { textures.get(key).and_then(|v| texture_to_name(v)) };
+    let get = |key: &str| -> Option<String> { textures.get(key).and_then(|v| texture_to_name(v)) };
 
     let (up, down, north, south, east, west) = (
         get("up"),
@@ -1222,62 +1752,64 @@ fn face_textures_base(
             (None, tint)
         };
         return Some(FaceTextures::new(
-            up,
-            down,
-            north,
-            south,
-            east,
-            west,
+            &up,
+            &down,
+            &north,
+            &south,
+            &east,
+            &west,
             side_overlay,
             tint,
         ));
     }
 
     if let Some(all) = get("all") {
-        return Some(FaceTextures::uniform(all, tint));
+        return Some(FaceTextures::uniform(&all, tint));
     }
 
     if let (Some(end), Some(side)) = (get("end"), get("side")) {
         return Some(FaceTextures::new(
-            end,
-            end,
-            side,
-            side,
-            side,
-            side,
+            &end,
+            &end,
+            &side,
+            &side,
+            &side,
+            &side,
             None,
             Tint::None,
         ));
     }
 
     if let (Some(top), Some(side)) = (get("top"), get("side")) {
-        let bottom = get("bottom").unwrap_or(top);
+        let bottom = get("bottom").unwrap_or_else(|| top.clone());
         return Some(FaceTextures::new(
-            top, bottom, side, side, side, side, None, tint,
+            &top, &bottom, &side, &side, &side, &side, None, tint,
         ));
     }
 
     if let Some(cross) = get("cross") {
-        return Some(FaceTextures::uniform(cross, tint));
+        return Some(FaceTextures::uniform(&cross, tint));
     }
 
     if let (Some(front), Some(side)) = (get("front"), get("side")) {
-        let top = get("top").or(get("end")).unwrap_or(side);
-        let bottom = get("bottom").unwrap_or(top);
+        let top = get("top")
+            .or_else(|| get("end"))
+            .unwrap_or_else(|| side.clone());
+        let bottom = get("bottom").unwrap_or_else(|| top.clone());
         return Some(FaceTextures::new(
-            top,
-            bottom,
-            front,
-            side,
-            side,
-            side,
+            &top,
+            &bottom,
+            &front,
+            &side,
+            &side,
+            &side,
             None,
             Tint::None,
         ));
     }
 
     if let Some(p) = get("particle") {
-        return Some(FaceTextures::uniform(p, tint));
+        return Some(FaceTextures::uniform(&p, tint));
     }
 
     None
@@ -1292,7 +1824,9 @@ fn is_non_occluding(block_name: &str) -> bool {
 }
 
 fn determine_tint(block_name: &str) -> Tint {
-    if GRASS_TINTED.contains(&block_name) {
+    if block_name == "redstone_wire" {
+        Tint::Redstone
+    } else if GRASS_TINTED.contains(&block_name) {
         Tint::Grass
     } else if DRY_FOLIAGE_TINTED.contains(&block_name) {
         Tint::DryFoliage
@@ -1303,5 +1837,577 @@ fn determine_tint(block_name: &str) -> Tint {
         Tint::Foliage
     } else {
         Tint::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DIRS: [Direction; 6] = [
+        Direction::Down,
+        Direction::Up,
+        Direction::North,
+        Direction::South,
+        Direction::West,
+        Direction::East,
+    ];
+
+    /// The (right, up) axes of each face viewed from outside the block:
+    /// sky-up for the sides, and vanilla's map orientation for up/down.
+    /// `right x up` is the outward normal.
+    fn face_axes(dir: Direction) -> (Vec3, Vec3) {
+        match dir {
+            Direction::Down => (Vec3::X, Vec3::Z),
+            Direction::Up => (Vec3::X, Vec3::NEG_Z),
+            Direction::North => (Vec3::NEG_X, Vec3::Y),
+            Direction::South => (Vec3::X, Vec3::Y),
+            Direction::West => (Vec3::Z, Vec3::Y),
+            Direction::East => (Vec3::NEG_Z, Vec3::Y),
+        }
+    }
+
+    /// Quads must stay CCW viewed from outside for backface culling.
+    #[test]
+    fn face_winding_is_ccw_from_outside() {
+        for dir in DIRS {
+            let p = face_positions(dir, [0.0; 3], [1.0; 3]).map(Vec3::from_array);
+            let normal = (p[1] - p[0]).cross(p[2] - p[0]);
+            let outward = Vec3::from_array(dir.offset().map(|c| c as f32));
+            assert!(normal.dot(outward) > 0.0, "{dir:?} winds the wrong way");
+            assert_eq!(
+                direction_from_positions(&p.map(|position| position.to_array())),
+                Some(dir)
+            );
+        }
+    }
+
+    #[test]
+    fn items_3d_lights_match_vanilla_pose_order() {
+        let (light0, light1) = items_3d_lights();
+        let expected = [
+            (light0, [-0.9334393, -0.26269472, -0.24430019]),
+            (light1, [-0.10357136, -0.97660685, 0.18844643]),
+        ];
+        for (actual, expected) in expected {
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() < 1.0e-6,
+                    "expected {expected}, got {actual}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn items_flat_lights_match_vanilla_pose_order() {
+        let (light0, light1) = items_flat_lights();
+        let expected = [
+            (light0, [-0.222519, -0.17149863, 0.9597257]),
+            (light1, [-0.21501213, -0.97182524, 0.0965678]),
+        ];
+        for (actual, expected) in expected {
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() < 1.0e-6,
+                    "expected {expected}, got {actual}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gui_face_shades_include_vanilla_atlas_y_flip() {
+        let block = vanilla_gui_face_shades(gui_transform(225.0), GuiLight::Side);
+        let chest = vanilla_gui_face_shades(gui_transform(45.0), GuiLight::Side);
+        let expected_block = [1.0, 0.4, 0.4, 1.0, 0.49398834, 0.6505372];
+        let expected_chest = [1.0, 0.4, 1.0, 0.4, 0.6505372, 0.49398834];
+        for (actual, expected) in block.into_iter().zip(expected_block) {
+            assert!(
+                (actual - expected).abs() < 1.0e-6,
+                "expected {expected}, got {actual}"
+            );
+        }
+        for (actual, expected) in chest.into_iter().zip(expected_chest) {
+            assert!(
+                (actual - expected).abs() < 1.0e-6,
+                "expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn gui_face_shades_follow_model_display_transform() {
+        let fence = vanilla_gui_face_shades(gui_transform(135.0), GuiLight::Side);
+        let expected = [1.0, 0.4, 0.65053713, 0.49398836, 0.4, 1.0];
+        for (actual, expected) in fence.into_iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1.0e-6,
+                "expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn gui_lambert_replaces_terrain_cardinal_shade() {
+        let mut quad = BakedQuad {
+            positions: face_positions(Direction::Up, [0.0; 3], [1.0; 3]),
+            uvs: [[0.0; 2]; 4],
+            texture: "block/stone".to_string(),
+            cullface: None,
+            tint: Tint::None,
+            shade_light: 0.25,
+            shade_face: Some(Direction::Up),
+        };
+        apply_gui_lambert(
+            std::slice::from_mut(&mut quad),
+            gui_transform(225.0),
+            GuiLight::Side,
+        );
+        assert!((quad.shade_light - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn chest_body_faces_match_vanilla_modelpart_cube() {
+        let model = bake_chest_item_model(gui_transform(45.0), GuiLight::Side);
+        assert_eq!(model.quads.len(), 18);
+
+        let x0 = 1.0 / 16.0;
+        let x1 = 15.0 / 16.0;
+        let y0 = 0.0;
+        let y1 = 10.0 / 16.0;
+        let z0 = 1.0 / 16.0;
+        let z1 = 15.0 / 16.0;
+        let t0 = [x0, y0, z0];
+        let t1 = [x1, y0, z0];
+        let t2 = [x1, y1, z0];
+        let t3 = [x0, y1, z0];
+        let l0 = [x0, y0, z1];
+        let l1 = [x1, y0, z1];
+        let l2 = [x1, y1, z1];
+        let l3 = [x0, y1, z1];
+
+        let expected = [
+            (
+                [l1, l0, t0, t1],
+                [[28.0, 19.0], [14.0, 19.0], [14.0, 33.0], [28.0, 33.0]],
+            ),
+            (
+                [t2, t3, l3, l2],
+                [[42.0, 33.0], [28.0, 33.0], [28.0, 19.0], [42.0, 19.0]],
+            ),
+            (
+                [t0, l0, l3, t3],
+                [[14.0, 33.0], [0.0, 33.0], [0.0, 43.0], [14.0, 43.0]],
+            ),
+            (
+                [t1, t0, t3, t2],
+                [[28.0, 33.0], [14.0, 33.0], [14.0, 43.0], [28.0, 43.0]],
+            ),
+            (
+                [l1, t1, t2, l2],
+                [[42.0, 33.0], [28.0, 33.0], [28.0, 43.0], [42.0, 43.0]],
+            ),
+            (
+                [l0, l1, l2, l3],
+                [[56.0, 33.0], [42.0, 33.0], [42.0, 43.0], [56.0, 43.0]],
+            ),
+        ];
+
+        for (quad, (positions, uv_pixels)) in model.quads.iter().take(6).zip(expected) {
+            assert_eq!(quad.positions, positions);
+            assert_eq!(quad.uvs, uv_pixels.map(|[u, v]| [u / 64.0, v / 64.0]));
+        }
+    }
+
+    #[test]
+    fn model_rotation_uses_final_face_direction_for_cardinal_shading() {
+        let face = FaceDef {
+            uv: Some([0.0, 0.0, 16.0, 16.0]),
+            texture: "side".to_string(),
+            cullface: None,
+            rotation: None,
+            tint_index: None,
+        };
+        let resolved = ResolvedModel {
+            textures: HashMap::from([("side".to_string(), "block/piston_side".to_string())]),
+            elements: vec![ElementDef {
+                from: [6.0, 6.0, 4.0],
+                to: [10.0, 10.0, 20.0],
+                rotation: None,
+                faces: HashMap::from([("west".to_string(), face)]),
+                shade: true,
+            }],
+            gui_transform: DisplayTransform::IDENTITY,
+            gui_light: GuiLight::Side,
+            ground_transform: Mat4::IDENTITY,
+        };
+
+        let baked = bake_resolved_model(&resolved, 0, 270, Tint::None).unwrap();
+        assert_eq!(baked.quads.len(), 1);
+        assert!((baked.quads[0].shade_light - Direction::South.shade_light()).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn element_rescale_preserves_rotation_axis() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ];
+        for (axis, axis_index) in [("x", 0), ("y", 1), ("z", 2)] {
+            let rotation = Some(ElementRotation {
+                origin: [8.0, 8.0, 8.0],
+                axis: axis.to_string(),
+                angle: 45.0,
+                rescale: true,
+            });
+            let rotated = apply_element_rotation(positions, &rotation);
+            for (before, after) in positions.iter().zip(rotated) {
+                assert_eq!(
+                    before[axis_index], after[axis_index],
+                    "{axis}-axis rescale changed the rotation-axis coordinate"
+                );
+            }
+        }
+
+        let quarter_turn = Some(ElementRotation {
+            origin: [8.0, 8.0, 8.0],
+            axis: "y".to_string(),
+            angle: 90.0,
+            rescale: true,
+        });
+        let rotated = apply_element_rotation([[0.75, 0.5, 0.5]; 4], &quarter_turn);
+        assert!((rotated[0][0] - 0.5).abs() < 1.0e-6);
+        assert!((rotated[0][1] - 0.5).abs() < 1.0e-6);
+        assert!((rotated[0][2] - 0.25).abs() < 1.0e-6);
+
+        let steep_turn = Some(ElementRotation {
+            origin: [8.0, 8.0, 8.0],
+            axis: "y".to_string(),
+            angle: 67.5,
+            rescale: true,
+        });
+        let rotated = apply_element_rotation([[0.75, 0.5, 0.5]; 4], &steep_turn);
+        let expected_x = 0.5 + 0.25 * 67.5_f32.to_radians().tan().recip();
+        assert!((rotated[0][0] - expected_x).abs() < 1.0e-6);
+        assert!((rotated[0][1] - 0.5).abs() < 1.0e-6);
+        assert!((rotated[0][2] - 0.25).abs() < 1.0e-6);
+    }
+
+    /// Every face must show the full-tile texture upright at rotation 0 and
+    /// spin it clockwise per 90 degrees, vanilla's `FaceInfo` +
+    /// `CuboidFace.UVs` + `Quadrant` behavior (the piston's side faces use
+    /// 90/270 and read 180 degrees off when the direction is inverted).
+    #[test]
+    fn face_uvs_show_upright_clockwise_rotated_texture() {
+        // Image corners in clockwise order; screen corner `s` under a
+        // clockwise rotation by `steps` shows image corner `(s - steps) % 4`.
+        const IMAGE_CORNERS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        for dir in DIRS {
+            let (right, up) = face_axes(dir);
+            let positions = face_positions(dir, [0.0; 3], [1.0; 3]).map(Vec3::from_array);
+            for (rot, steps) in [
+                (None, 0),
+                (Some(0), 0),
+                (Some(90), 1),
+                (Some(180), 2),
+                (Some(270), 3),
+            ] {
+                let uvs = face_uvs(dir, [0.0; 3], [1.0; 3], Some(&[0.0, 0.0, 16.0, 16.0]), rot);
+                let mid = |axis: Vec3| {
+                    let coords = positions.map(|p| p.dot(axis));
+                    (coords.iter().copied().fold(f32::INFINITY, f32::min)
+                        + coords.iter().copied().fold(f32::NEG_INFINITY, f32::max))
+                        / 2.0
+                };
+                let (right_mid, up_mid) = (mid(right), mid(up));
+                for (p, uv) in positions.iter().zip(uvs) {
+                    let screen_corner = match (p.dot(right) > right_mid, p.dot(up) > up_mid) {
+                        (false, true) => 0,
+                        (true, true) => 1,
+                        (true, false) => 2,
+                        (false, false) => 3,
+                    };
+                    let expected = IMAGE_CORNERS[(screen_corner + 4 - steps) % 4];
+                    assert_eq!(uv, expected, "{dir:?} rotation {rot:?} vertex {p:?}");
+                }
+            }
+        }
+    }
+
+    /// Default UV windows per face, vanilla `FaceBakery.defaultFaceUV`: the
+    /// down/north/east windows reflect about the texture center.
+    #[test]
+    fn default_uv_windows_match_vanilla() {
+        let from = [2.0 / 16.0, 3.0 / 16.0, 4.0 / 16.0];
+        let to = [8.0 / 16.0, 9.0 / 16.0, 10.0 / 16.0];
+        let expected = [
+            (Direction::Down, (0.125, 0.375, 0.5, 0.75)),
+            (Direction::Up, (0.125, 0.25, 0.5, 0.625)),
+            (Direction::North, (0.5, 0.4375, 0.875, 0.8125)),
+            (Direction::South, (0.125, 0.4375, 0.5, 0.8125)),
+            (Direction::West, (0.25, 0.4375, 0.625, 0.8125)),
+            (Direction::East, (0.375, 0.4375, 0.75, 0.8125)),
+        ];
+        for (dir, (u1, v1, u2, v2)) in expected {
+            let uvs = face_uvs(dir, from, to, None, None);
+            // The cycle assigns vertex 0 the (u1, v1) corner and vertex 2 the
+            // (u2, v2) corner.
+            assert_eq!(uvs[0], [u1, v1], "{dir:?} window origin");
+            assert_eq!(uvs[2], [u2, v2], "{dir:?} window extent");
+        }
+    }
+
+    /// The bed shape: a composite item model contributes every child, the
+    /// foot carrying its one-block translation.
+    #[test]
+    fn composite_item_collects_all_parts() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "model": {
+                    "type": "minecraft:composite",
+                    "models": [
+                        {"type": "minecraft:model", "model": "minecraft:block/red_bed_head"},
+                        {
+                            "type": "minecraft:model",
+                            "model": "minecraft:block/red_bed_foot",
+                            "transformation": {"translation": [0.0, 0.0, 1.0]}
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        let parts = collect_model_parts(&json);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].path, "block/red_bed_head");
+        assert!(parts[0].transform.is_none());
+        assert_eq!(parts[1].path, "block/red_bed_foot");
+        let moved = parts[1].transform.unwrap().transform_point3(Vec3::ZERO);
+        assert!((moved - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn unsupported_item_transformation_encoding_is_rejected() {
+        let raw_matrix = serde_json::json!([
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0
+        ]);
+        let axis_angle = serde_json::json!({
+            "left_rotation": {"axis": [0.0, 1.0, 0.0], "angle": 90.0}
+        });
+        assert!(parse_item_transformation(&raw_matrix).is_none());
+        assert!(parse_item_transformation(&axis_angle).is_none());
+    }
+
+    /// Non-composite trees (bundles' select/condition) keep the old
+    /// first-model-string behavior.
+    #[test]
+    fn select_item_falls_back_to_first_model() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "model": {
+                    "type": "minecraft:select",
+                    "cases": [
+                        {"model": {"type": "minecraft:model", "model": "minecraft:item/bundle_open"}}
+                    ],
+                    "fallback": {"type": "minecraft:model", "model": "minecraft:item/bundle"}
+                }
+            }"#,
+        )
+        .unwrap();
+        let parts = collect_model_parts(&json);
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].transform.is_none());
+        let legacy = find_first_model_string(&json).unwrap();
+        assert_eq!(parts[0].path, strip_mc_prefix(&legacy));
+    }
+
+    #[test]
+    fn bundle_selected_layers_split_around_the_selected_item() {
+        // Vanilla 26.2 `items/bundle.json`.
+        let json = serde_json::json!({"model": {
+            "type": "minecraft:select",
+            "property": "minecraft:display_context",
+            "cases": [{"when": "gui", "model": {
+                "type": "minecraft:condition",
+                "property": "minecraft:bundle/has_selected_item",
+                "on_false": {"type": "minecraft:model", "model": "minecraft:item/bundle"},
+                "on_true": {"type": "minecraft:composite", "models": [
+                    {"type": "minecraft:model", "model": "minecraft:item/bundle_open_back"},
+                    {"type": "minecraft:bundle/selected_item"},
+                    {"type": "minecraft:model", "model": "minecraft:item/bundle_open_front"}
+                ]}
+            }}],
+            "fallback": {"type": "minecraft:model", "model": "minecraft:item/bundle"}
+        }});
+        let [back, front] = selected_bundle_layers(&json).unwrap();
+        let paths = |parts: &[ModelPart]| parts.iter().map(|p| p.path.clone()).collect::<Vec<_>>();
+        assert_eq!(paths(&back), ["item/bundle_open_back"]);
+        assert_eq!(paths(&front), ["item/bundle_open_front"]);
+        assert!(selected_bundle_layers(&serde_json::json!({"model": {}})).is_none());
+    }
+
+    use crate::test_util::test_temp_dir;
+
+    #[test]
+    fn resolved_model_inherits_gui_transform() {
+        let root = test_temp_dir("item_gui_transform");
+        let models = root.join("minecraft/models/block");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(
+            models.join("child.json"),
+            r#"{"parent":"minecraft:block/parent"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            models.join("parent.json"),
+            r#"{"gui_light":"front","display":{"gui":{"rotation":[30,135,0],"scale":[0.625,0.625,0.625]}}}"#,
+        )
+        .unwrap();
+
+        let mut cache = HashMap::new();
+        let resolved = resolve_model("block/child", &root, &None, &mut cache, None);
+        assert_eq!(resolved.gui_transform, gui_transform(135.0));
+        assert_eq!(resolved.gui_light, GuiLight::Front);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn item_definition_and_display_transforms_follow_resource_pack_override() {
+        let root = test_temp_dir("item_model_pack");
+        let jar = root.join("jar");
+        let instance = root.join("instance");
+        let items = jar.join("minecraft/items");
+        let models = jar.join("minecraft/models/item");
+        let pack_items = instance.join("resourcepacks/test_pack/assets/minecraft/items");
+        let pack_models = instance.join("resourcepacks/test_pack/assets/other/models/item");
+        std::fs::create_dir_all(&items).unwrap();
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::create_dir_all(&pack_items).unwrap();
+        std::fs::create_dir_all(&pack_models).unwrap();
+        std::fs::write(
+            instance.join("resourcepacks/test_pack/pack.mcmeta"),
+            r#"{"pack":{"pack_format":84,"description":"test"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            items.join("test_item.json"),
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:item/base"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            models.join("base.json"),
+            r#"{"parent":"minecraft:item/generated","textures":{"layer0":"minecraft:item/base"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            models.join("generated.json"),
+            r#"{"display":{"ground":{"translation":[0,2,0],"scale":[0.5,0.5,0.5]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pack_items.join("test_item.json"),
+            r#"{"model":{"type":"minecraft:model","model":"other:item/replacement"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pack_models.join("replacement.json"),
+            r#"{"parent":"minecraft:item/generated","textures":{"layer0":"other:item/replacement"},"display":{"gui":{"translation":[32,-96,0],"scale":[8,-8,1]}}}"#,
+        )
+        .unwrap();
+        // An item the jar does not define at all.
+        std::fs::write(
+            pack_items.join("pack_only.json"),
+            r#"{"model":{"type":"minecraft:model","model":"other:item/replacement"}}"#,
+        )
+        .unwrap();
+
+        let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
+        packs.enable_local_pack("test_pack");
+        let baked = bake_item_models(&jar, &None, Some(&packs));
+        assert_eq!(
+            baked.flat_texture_keys.get("test_item").map(String::as_str),
+            Some("other:item/replacement")
+        );
+        assert_eq!(
+            baked.flat_texture_keys.get("pack_only").map(String::as_str),
+            Some("other:item/replacement")
+        );
+        assert_eq!(
+            baked.gui_transforms["test_item"],
+            DisplayTransform {
+                rotation: Vec3::ZERO,
+                translation: Vec3::new(2.0, -5.0, 0.0),
+                scale: Vec3::new(4.0, -4.0, 1.0),
+            }
+        );
+        let transform = baked.ground_transforms["test_item"];
+        let origin = transform.transform_point3(Vec3::ZERO);
+        assert!((origin - Vec3::new(0.0, 2.0 / 16.0, 0.0)).length() < 1.0e-6);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bare_face_texture_slot_matches_vanilla_texture_slots() {
+        let root = test_temp_dir("bare_texture_slot");
+        let models = root.join("minecraft/models/block");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(
+            models.join("test_core.json"),
+            r#"{
+                "textures":{"all":"block/test_core"},
+                "elements":[{
+                    "from":[4,0,4],"to":[12,8,12],
+                    "faces":{
+                        "down":{"texture":"all"},"up":{"texture":"all"},
+                        "north":{"texture":"all"},"south":{"texture":"all"},
+                        "west":{"texture":"all"},"east":{"texture":"all"}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut cache = HashMap::new();
+        let resolved = resolve_model("block/test_core", &root, &None, &mut cache, None);
+        let baked = bake_resolved_model(&resolved, 0, 0, Tint::None).unwrap();
+        assert_eq!(baked.quads.len(), 6);
+        assert!(baked.quads.iter().all(|quad| quad.texture == "test_core"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ground_display_transform_matches_vanilla_centered_mesh() {
+        let json = serde_json::json!({
+            "rotation": [0.0, 0.0, 0.0],
+            "translation": [0.0, 3.0, 0.0],
+            "scale": [0.5, 0.5, 0.5]
+        });
+        let transform = parse_display_transform(&json).unwrap().to_matrix();
+
+        // ItemTransform applies translation/rotation/scale and then recenters
+        // vanilla's 0..1 model. Pomme stores its item mesh already centered,
+        // so the equivalent matrix leaves out only that final -0.5 step.
+        let min = transform.transform_point3(Vec3::splat(-0.5));
+        let max = transform.transform_point3(Vec3::splat(0.5));
+        assert!((min - Vec3::new(-0.25, -0.0625, -0.25)).length() < 1e-6);
+        assert!((max - Vec3::new(0.25, 0.4375, 0.25)).length() < 1e-6);
+    }
+
+    #[test]
+    fn plain_item_is_a_single_part() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"model": {"type": "minecraft:model", "model": "minecraft:block/oak_stairs"}}"#,
+        )
+        .unwrap();
+        let parts = collect_model_parts(&json);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].path, "block/oak_stairs");
+        assert!(parts[0].transform.is_none());
     }
 }

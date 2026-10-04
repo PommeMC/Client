@@ -7,19 +7,25 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod app;
 mod args;
 mod assets;
+mod attribute;
 mod audio;
 mod benchmark;
+mod chat_component;
 mod dirs;
 mod discord;
 mod entity;
 mod lang;
 mod logging;
+mod mob_effect;
 mod net;
 mod particle;
 mod physics;
 mod player;
 mod renderer;
 mod resource_pack;
+mod singleplayer;
+#[cfg(test)]
+mod test_util;
 mod ui;
 mod user;
 mod util;
@@ -30,7 +36,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use pomme_protocol::ProtocolVersion;
-use pomme_protocol::version::{LATEST, VERSIONS};
+use pomme_protocol::version::{NATIVE, VERSIONS};
 
 use crate::app::App;
 use crate::user::UserData;
@@ -57,7 +63,12 @@ fn main() {
         }
     }
 
-    let version = args.version.as_deref().unwrap_or(LATEST.name);
+    // Bare launches take the newest joinable version, skipping any staged one.
+    let default_version = VERSIONS
+        .iter()
+        .find(|v| net::translate::joinable(v.protocol))
+        .unwrap_or(&NATIVE);
+    let version = args.version.as_deref().unwrap_or(default_version.name);
 
     match ProtocolVersion::from_name(version) {
         Some(v) => version::set_selected_protocol(v.protocol),
@@ -109,6 +120,10 @@ fn main() {
             .build()
             .expect("Failed to create tokio runtime"),
     );
+    {
+        let _runtime = rt.enter();
+        crate::net::chat_security::ProfileKeyServices::prefetch();
+    }
 
     let user = UserData::from_args(args.username, args.uuid, args.access_token);
 

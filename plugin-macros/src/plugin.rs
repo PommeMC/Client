@@ -4,6 +4,7 @@ use syn::ItemStruct;
 
 pub fn plugin(_attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
     let input = syn::parse2::<ItemStruct>(item)?;
+    let ident = &input.ident;
 
     Ok(quote! {
         #input
@@ -17,7 +18,7 @@ pub fn plugin(_attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream>
                     minor: ::plugin_api::meta::parse_u32(env!("CARGO_PKG_VERSION_MINOR")),
                     patch: ::plugin_api::meta::parse_u32(env!("CARGO_PKG_VERSION_PATCH")),
                 },
-                plugin: ::stabby::boxed::Box::new(<ExamplePlugin as Plugin>::new()).into(),
+                plugin: ::stabby::boxed::Box::new(<#ident as ::plugin_api::Plugin>::new()).into(),
             }
         }
 

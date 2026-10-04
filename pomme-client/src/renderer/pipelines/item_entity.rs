@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::slice;
 use std::sync::{Arc, Mutex};
 
@@ -7,17 +6,80 @@ use glam::Mat4;
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
-use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::camera::CameraUniform;
-use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, TextureAtlas, atlas_asset_path};
-use crate::renderer::chunk::mesher::ChunkVertex;
+use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, SpriteAlphaMask, TextureAtlas};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
-use crate::world::block::model::BakedModel;
+use crate::world::block::model::{BakedModel, Direction, direction_from_positions};
+
+/// Item-only vertex format. Vanilla's ENTITY item format keeps UV0 as floats
+/// and carries a baked face normal; both matter here because generated sprite
+/// texel boundaries must line up with extrusion geometry and dropped items use
+/// the normal for two-direction diffuse lighting.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ItemVertex {
+    position: [f32; 3],
+    tex_coords: [f32; 2],
+    light_tint: u32,
+    normal: [i8; 4],
+}
+
+impl ItemVertex {
+    const STRIDE: u32 = size_of::<Self>() as u32;
+
+    fn binding_description() -> vk::VertexInputBindingDescription {
+        vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: Self::STRIDE,
+            input_rate: vk::VertexInputRate::Vertex,
+        }
+    }
+
+    fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 4] {
+        [
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32B32Sfloat,
+                offset: 0,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32Sfloat,
+                offset: 12,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 2,
+                binding: 0,
+                format: vk::Format::R8G8B8A8Unorm,
+                offset: 20,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 3,
+                binding: 0,
+                format: vk::Format::R8G8B8A8Snorm,
+                offset: 24,
+            },
+        ]
+    }
+}
+
+fn pack_normal(normal: glam::Vec3) -> [i8; 4] {
+    let normal = normal.normalize_or_zero();
+    [
+        (normal.x.clamp(-1.0, 1.0) * 127.0).round() as i8,
+        (normal.y.clamp(-1.0, 1.0) * 127.0).round() as i8,
+        (normal.z.clamp(-1.0, 1.0) * 127.0).round() as i8,
+        0,
+    ]
+}
 
 pub struct ItemRenderInfo {
     pub item_name: String,
     pub model_matrix: Mat4,
     pub light: f32,
+    pub nether_lighting: bool,
 }
 
 /// What the item-entity renderer needs to place a mesh: whether it baked from a
@@ -27,8 +89,8 @@ pub struct ItemRenderInfo {
 #[derive(Clone, Copy)]
 pub struct ItemMeshInfo {
     pub is_block_model: bool,
-    pub min_y: f32,
-    pub z_size: f32,
+    pub bounds_min: glam::Vec3,
+    pub bounds_max: glam::Vec3,
 }
 
 struct MeshEntry {
@@ -36,8 +98,11 @@ struct MeshEntry {
     allocation: Allocation,
     vertex_count: u32,
     is_3d_model: bool,
-    min_y: f32,
-    z_size: f32,
+    /// Vanilla `BakedQuad.MaterialInfo`: a sprite with partial alpha draws on
+    /// the translucent item sheet, everything else on the cutout one.
+    translucent: bool,
+    bounds_min: glam::Vec3,
+    bounds_max: glam::Vec3,
 }
 
 /// Descriptor layouts, per-frame camera UBOs, and atlas set shared by the
@@ -49,8 +114,31 @@ pub(super) struct ItemPipelineShared {
     descriptor_pool: vk::DescriptorPool,
     camera_sets: Vec<vk::DescriptorSet>,
     atlas_set: vk::DescriptorSet,
+    atlas_sampler: vk::Sampler,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Option<Allocation>>,
+}
+
+fn write_atlas_descriptor(
+    device: &vk::Device,
+    set: vk::DescriptorSet,
+    atlas: &TextureAtlas,
+    sampler: vk::Sampler,
+) {
+    let image_info = vk::DescriptorImageInfo {
+        sampler,
+        image_view: atlas.view,
+        image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+    };
+    let write = vk::WriteDescriptorSet {
+        dst_set: set,
+        dst_binding: 0,
+        descriptor_type: vk::DescriptorType::CombinedImageSampler,
+        descriptor_count: 1,
+        image_info: &image_info,
+        ..Default::default()
+    };
+    device.update_descriptor_sets(&[write], &[]);
 }
 
 impl ItemPipelineShared {
@@ -74,7 +162,9 @@ impl ItemPipelineShared {
         let push_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
             offset: 0,
-            size: 68,
+            // 64-byte model + fragment light + world-light selector + padded
+            // mat3 normal matrix. Vulkan guarantees at least 128 push bytes.
+            size: 128,
         };
         let layouts = [camera_layout, atlas_layout];
         let layout_info = vk::PipelineLayoutCreateInfo {
@@ -99,7 +189,7 @@ impl ItemPipelineShared {
             },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: (MAX_FRAMES_IN_FLIGHT + 1) as u32,
+            max_sets: MAX_FRAMES_IN_FLIGHT as u32 + 1,
             pool_size_count: pool_sizes.len() as u32,
             pool_sizes: pool_sizes.as_ptr(),
             ..Default::default()
@@ -130,6 +220,10 @@ impl ItemPipelineShared {
         device
             .allocate_descriptor_sets(&atlas_alloc_info, slice::from_mut(&mut atlas_set))
             .unwrap_or_else(|_| panic!("failed to allocate {label} atlas set"));
+        // Vanilla's items atlas has no mip chain, so generated items sample
+        // level 0. TODO: block-model items draw from the mipmapped blocks atlas
+        // in vanilla; pomme samples those at level 0 too.
+        let atlas_sampler = unsafe { util::create_nearest_sampler(device) };
 
         let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut camera_allocations: Vec<Option<Allocation>> =
@@ -167,6 +261,7 @@ impl ItemPipelineShared {
             descriptor_pool,
             camera_sets,
             atlas_set,
+            atlas_sampler,
             camera_buffers,
             camera_allocations,
         };
@@ -175,20 +270,7 @@ impl ItemPipelineShared {
     }
 
     pub(super) fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
-        let image_info = vk::DescriptorImageInfo {
-            sampler: atlas.sampler,
-            image_view: atlas.view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let write = vk::WriteDescriptorSet {
-            dst_set: self.atlas_set,
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 1,
-            image_info: &image_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[write], &[]);
+        write_atlas_descriptor(device, self.atlas_set, atlas, self.atlas_sampler);
     }
 
     pub(super) fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
@@ -217,6 +299,7 @@ impl ItemPipelineShared {
             }
         }
 
+        device.destroy_sampler(self.atlas_sampler, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);
@@ -245,8 +328,39 @@ pub(super) fn push_model_light(
     );
 }
 
+fn push_world_lighting(
+    cmd: vk::CommandBuffer,
+    layout: vk::PipelineLayout,
+    model: &Mat4,
+    nether: bool,
+) {
+    let nether = if nether { 1.0_f32 } else { 0.0_f32 };
+    cmd.push_constants(
+        layout,
+        vk::ShaderStageFlags::Vertex,
+        68,
+        bytemuck::bytes_of(&nether),
+    );
+
+    let normal = glam::Mat3::from_mat4(*model).inverse().transpose();
+    let cols = normal.to_cols_array();
+    let padded_cols = [
+        cols[0], cols[1], cols[2], 0.0, cols[3], cols[4], cols[5], 0.0, cols[6], cols[7], cols[8],
+        0.0,
+    ];
+    cmd.push_constants(
+        layout,
+        vk::ShaderStageFlags::Vertex,
+        80,
+        bytemuck::bytes_of(&padded_cols),
+    );
+}
+
 pub struct ItemEntityPipeline {
-    pipeline: vk::Pipeline,
+    /// Vanilla `ITEM_CUTOUT`: alpha-tested, no blending.
+    cutout: vk::Pipeline,
+    /// Vanilla `ITEM_TRANSLUCENT`: alpha-tested and blended.
+    translucent: vk::Pipeline,
     shared: ItemPipelineShared,
     meshes: HashMap<String, MeshEntry>,
 }
@@ -259,10 +373,12 @@ impl ItemEntityPipeline {
         atlas: &TextureAtlas,
     ) -> Self {
         let shared = ItemPipelineShared::new(device, allocator, atlas, "item_entity");
-        let pipeline = create_pipeline(device, render_pass, shared.pipeline_layout);
+        let (cutout, translucent) =
+            create_world_pipelines(device, render_pass, shared.pipeline_layout);
 
         Self {
-            pipeline,
+            cutout,
+            translucent,
             shared,
             meshes: HashMap::new(),
         }
@@ -277,8 +393,9 @@ impl ItemEntityPipeline {
         device: &vk::Device,
         allocator: &Arc<Mutex<Allocator>>,
         name: &str,
-        vertices: &[ChunkVertex],
+        vertices: &[ItemVertex],
         is_3d_model: bool,
+        translucent: bool,
     ) {
         let bytes = bytemuck::cast_slice(vertices);
         let (buffer, allocation) = util::create_mapped_buffer(
@@ -288,7 +405,7 @@ impl ItemEntityPipeline {
             vk::BufferUsageFlags::VertexBuffer,
             &format!("item_{name}"),
         );
-        let (min_y, z_size) = mesh_bounds(vertices);
+        let (bounds_min, bounds_max) = mesh_bounds(vertices);
         self.meshes.insert(
             name.to_string(),
             MeshEntry {
@@ -296,8 +413,9 @@ impl ItemEntityPipeline {
                 allocation,
                 vertex_count: vertices.len() as u32,
                 is_3d_model,
-                min_y,
-                z_size,
+                translucent,
+                bounds_min,
+                bounds_max,
             },
         );
     }
@@ -306,8 +424,8 @@ impl ItemEntityPipeline {
     pub fn mesh_info(&self, name: &str) -> Option<ItemMeshInfo> {
         self.meshes.get(name).map(|m| ItemMeshInfo {
             is_block_model: m.is_3d_model,
-            min_y: m.min_y,
-            z_size: m.z_size,
+            bounds_min: m.bounds_min,
+            bounds_max: m.bounds_max,
         })
     }
 
@@ -328,11 +446,14 @@ impl ItemEntityPipeline {
         }
         let vertices = build_item_mesh(model, uv_map);
         if !vertices.is_empty() {
-            self.insert_mesh(device, allocator, name, &vertices, true);
+            let translucent = model
+                .quads
+                .iter()
+                .any(|quad| uv_map.get_region(&quad.texture).translucent);
+            self.insert_mesh(device, allocator, name, &vertices, true, translucent);
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn ensure_flat_mesh(
         &mut self,
         device: &vk::Device,
@@ -340,8 +461,6 @@ impl ItemEntityPipeline {
         name: &str,
         texture_key: &str,
         uv_map: &AtlasUVMap,
-        assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
     ) {
         if self.meshes.contains_key(name) {
             return;
@@ -350,77 +469,114 @@ impl ItemEntityPipeline {
             return;
         }
         let region = uv_map.get_region(texture_key);
-        let asset_path = atlas_asset_path(texture_key);
-        let path = resolve_asset_path(assets_dir, asset_index, &asset_path);
-        let vertices = match crate::assets::load_image(&path) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
-                build_extruded_item(&rgba, region)
-            }
-            Err(_) => build_flat_quad(region),
-        };
+        let vertices = uv_map
+            .sprite_alpha_mask(texture_key)
+            .map(|mask| build_extruded_item_mask(mask, region))
+            .unwrap_or_else(|| build_flat_quad(region));
         if !vertices.is_empty() {
-            self.insert_mesh(device, allocator, name, &vertices, false);
+            self.insert_mesh(
+                device,
+                allocator,
+                name,
+                &vertices,
+                false,
+                region.translucent,
+            );
         }
     }
 
+    /// Cutout meshes first, then translucent ones, as vanilla's item sheets
+    /// are ordered.
     pub fn draw(&self, cmd: vk::CommandBuffer, frame: usize, items: &[ItemRenderInfo]) {
         if items.is_empty() {
             return;
         }
 
-        self.shared.bind(cmd, frame, self.pipeline);
-
-        for item in items {
-            let mesh = match self.meshes.get(&item.item_name) {
-                Some(m) => m,
-                None => continue,
-            };
-
-            cmd.bind_vertex_buffers(0, &[mesh.buffer], &[0]);
-            push_model_light(
-                cmd,
-                self.shared.pipeline_layout,
-                &item.model_matrix,
-                item.light,
-            );
-            cmd.draw(mesh.vertex_count, 1, 0, 0);
+        for (pipeline, translucent) in [(self.cutout, false), (self.translucent, true)] {
+            let mut bound = false;
+            for item in items {
+                let Some(mesh) = self.meshes.get(&item.item_name) else {
+                    continue;
+                };
+                if mesh.translucent != translucent {
+                    continue;
+                }
+                if !bound {
+                    self.shared.bind(cmd, frame, pipeline);
+                    bound = true;
+                }
+                cmd.bind_vertex_buffers(0, &[mesh.buffer], &[0]);
+                push_model_light(
+                    cmd,
+                    self.shared.pipeline_layout,
+                    &item.model_matrix,
+                    item.light,
+                );
+                push_world_lighting(
+                    cmd,
+                    self.shared.pipeline_layout,
+                    &item.model_matrix,
+                    item.nether_lighting,
+                );
+                cmd.draw(mesh.vertex_count, 1, 0, 0);
+            }
         }
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.shared.pipeline_layout);
+        self.destroy_pipelines(device);
+        (self.cutout, self.translucent) =
+            create_world_pipelines(device, render_pass, self.shared.pipeline_layout);
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+    fn destroy_pipelines(&self, device: &vk::Device) {
+        device.destroy_pipeline(self.cutout, None);
+        device.destroy_pipeline(self.translucent, None);
+    }
+
+    pub fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
+        self.shared.rebind_atlas(device, atlas);
+    }
+
+    pub fn clear_meshes(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         for (_, entry) in self.meshes.drain() {
             device.destroy_buffer(entry.buffer, None);
             allocator.lock().unwrap().free(entry.allocation).ok();
         }
-        device.destroy_pipeline(self.pipeline, None);
+    }
+
+    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        self.clear_meshes(device, allocator);
+        self.destroy_pipelines(device);
         self.shared.destroy(device, allocator);
     }
 }
 
-/// Local-space `(min_y, z_size)` of a baked mesh, before the per-entity model
-/// scale. Empty meshes report a degenerate box at the origin.
-fn mesh_bounds(vertices: &[ChunkVertex]) -> (f32, f32) {
-    let mut min_y = f32::INFINITY;
-    let mut min_z = f32::INFINITY;
-    let mut max_z = f32::NEG_INFINITY;
-    for v in vertices {
-        min_y = min_y.min(v.position[1]);
-        min_z = min_z.min(v.position[2]);
-        max_z = max_z.max(v.position[2]);
-    }
+/// Local-space bounds of a baked item mesh before its display transform.
+/// Empty meshes report a degenerate box at the origin.
+fn mesh_bounds(vertices: &[ItemVertex]) -> (glam::Vec3, glam::Vec3) {
     if vertices.is_empty() {
-        return (0.0, 0.0);
+        return (glam::Vec3::ZERO, glam::Vec3::ZERO);
     }
-    (min_y, max_z - min_z)
+
+    let mut min = glam::Vec3::splat(f32::INFINITY);
+    let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+    for vertex in vertices {
+        let position = glam::Vec3::from_array(vertex.position);
+        min = min.min(position);
+        max = max.max(position);
+    }
+    (min, max)
 }
 
-fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ChunkVertex> {
+/// Vanilla stores a cardinal `BakedQuad.direction()` even when an element
+/// rotation makes the geometric normal oblique, `UP` for a degenerate quad.
+fn cardinal_normal(positions: &[[f32; 3]; 4]) -> glam::Vec3 {
+    let direction = direction_from_positions(positions).unwrap_or(Direction::Up);
+    glam::Vec3::from_array(direction.offset().map(|v| v as f32))
+}
+
+fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ItemVertex> {
     let mut vertices = Vec::new();
     for quad in &model.quads {
         let region = uv_map.get_region(&quad.texture);
@@ -431,25 +587,42 @@ fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ChunkVertex> 
         } else {
             crate::renderer::chunk::mesher::pack_tint_shifted([0.569, 0.741, 0.349])
         };
+        let normal = pack_normal(cardinal_normal(&quad.positions));
 
         for i in [0, 1, 2, 2, 3, 0] {
             let p = quad.positions[i];
-            vertices.push(ChunkVertex {
+            vertices.push(ItemVertex {
                 position: [p[0] - 0.5, p[1] - 0.5, p[2] - 0.5],
-                tex_coords: crate::renderer::chunk::mesher::pack_uv(
+                tex_coords: [
                     region.u_min + quad.uvs[i][0] * u_span,
                     region.v_min + quad.uvs[i][1] * v_span,
-                ),
+                ],
+                // Held/GUI item rendering still consumes the baked shade byte.
+                // The dropped-item world shader ignores it and instead uses
+                // the baked cardinal normal, matching vanilla's item shader.
                 light_tint: crate::renderer::chunk::mesher::pack_light_tint(quad.shade_light, tint),
+                normal,
             });
         }
     }
     vertices
 }
 
-fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<ChunkVertex> {
-    let w = img.width() as i32;
-    let h = img.height() as i32;
+#[cfg(test)]
+fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<ItemVertex> {
+    let w = img.width();
+    let h = img.height();
+    let mask = SpriteAlphaMask {
+        width: w,
+        height: h,
+        frames: vec![img.pixels().map(|pixel| pixel[3] != 0).collect()],
+    };
+    build_extruded_item_mask(&mask, region)
+}
+
+fn build_extruded_item_mask(mask: &SpriteAlphaMask, region: AtlasRegion) -> Vec<ItemVertex> {
+    let w = mask.width as i32;
+    let h = mask.height as i32;
     let mut vertices = Vec::new();
 
     let px = 1.0 / w as f32;
@@ -458,10 +631,6 @@ fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<Chunk
     let v_span = region.v_max - region.v_min;
     let z_min = 7.5 / 16.0 - 0.5;
     let z_max = 8.5 / 16.0 - 0.5;
-
-    let is_opaque = |x: i32, y: i32| -> bool {
-        x >= 0 && y >= 0 && x < w && y < h && img.get_pixel(x as u32, y as u32)[3] > 0
-    };
 
     let front = [
         [-0.5, -0.5, z_max],
@@ -480,13 +649,14 @@ fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<Chunk
         [region.u_min, region.v_min],
     ];
     for i in 0..6 {
-        vertices.push(ChunkVertex {
+        vertices.push(ItemVertex {
             position: front[i],
-            tex_coords: crate::renderer::chunk::mesher::pack_uv(front_uvs[i][0], front_uvs[i][1]),
+            tex_coords: front_uvs[i],
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
                 1.0,
                 crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
             ),
+            normal: pack_normal(glam::Vec3::Z),
         });
     }
 
@@ -498,52 +668,102 @@ fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<Chunk
         [-0.5, 0.5, z_min],
         [0.5, 0.5, z_min],
     ];
+    // Vanilla's generated-item NORTH face uses UVs [16, 0, 0, 16].
+    // With the north-face winding below that preserves the sprite's model-space
+    // orientation: x=+0.5 samples the right side of the sprite, just like the
+    // SOUTH face. Mirroring these UVs makes an asymmetric back silhouette no
+    // longer line up with the generated side faces.
     let back_uvs = [
-        [region.u_min, region.v_max],
         [region.u_max, region.v_max],
-        [region.u_max, region.v_min],
         [region.u_min, region.v_max],
-        [region.u_max, region.v_min],
         [region.u_min, region.v_min],
+        [region.u_max, region.v_max],
+        [region.u_min, region.v_min],
+        [region.u_max, region.v_min],
     ];
     for i in 0..6 {
-        vertices.push(ChunkVertex {
+        vertices.push(ItemVertex {
             position: back[i],
-            tex_coords: crate::renderer::chunk::mesher::pack_uv(back_uvs[i][0], back_uvs[i][1]),
+            tex_coords: back_uvs[i],
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
                 1.0,
                 crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
             ),
+            normal: pack_normal(glam::Vec3::NEG_Z),
         });
     }
 
     for y in 0..h {
         for x in 0..w {
-            if !is_opaque(x, y) {
+            let top_exposed = mask.has_exposed_edge(x, y, x, y - 1);
+            let bottom_exposed = mask.has_exposed_edge(x, y, x, y + 1);
+            let left_exposed = mask.has_exposed_edge(x, y, x - 1, y);
+            let right_exposed = mask.has_exposed_edge(x, y, x + 1, y);
+            if !(top_exposed || bottom_exposed || left_exposed || right_exposed) {
                 continue;
             }
             let fx = x as f32 * px - 0.5;
             let fy = 0.5 - (y + 1) as f32 * py;
             let fx1 = fx + px;
             let fy1 = fy + py;
-            let u0 = region.u_min + x as f32 * px * u_span;
-            let u1 = region.u_min + (x + 1) as f32 * px * u_span;
-            let v0 = region.v_min + y as f32 * py * v_span;
-            let v1 = region.v_min + (y + 1) as f32 * py * v_span;
-            let um = (u0 + u1) * 0.5;
-            let vm = (v0 + v1) * 0.5;
+            // Vanilla ItemModelGenerator maps each side face from 0.1 to 0.9
+            // inside its source pixel, measured across the exact sprite bounds.
+            let u0 = region.u_min + (x as f32 + 0.1) * px * u_span;
+            let u1 = region.u_min + (x as f32 + 0.9) * px * u_span;
+            let v0 = region.v_min + (y as f32 + 0.1) * py * v_span;
+            let v1 = region.v_min + (y as f32 + 0.9) * py * v_span;
 
-            if !is_opaque(x, y - 1) {
-                push_side_quad(&mut vertices, fx, fy1, fx1, fy1, z_min, z_max, um, vm, 0.8);
+            if top_exposed {
+                push_side_quad(
+                    &mut vertices,
+                    fx,
+                    fy1,
+                    fx1,
+                    fy1,
+                    z_min,
+                    z_max,
+                    [[u0, v0], [u0, v1], [u1, v1], [u1, v0]],
+                    0.8,
+                );
             }
-            if !is_opaque(x, y + 1) {
-                push_side_quad(&mut vertices, fx1, fy, fx, fy, z_min, z_max, um, vm, 0.8);
+            if bottom_exposed {
+                push_side_quad(
+                    &mut vertices,
+                    fx1,
+                    fy,
+                    fx,
+                    fy,
+                    z_min,
+                    z_max,
+                    [[u1, v1], [u1, v0], [u0, v0], [u0, v1]],
+                    0.8,
+                );
             }
-            if !is_opaque(x - 1, y) {
-                push_side_quad(&mut vertices, fx, fy, fx, fy1, z_min, z_max, um, vm, 0.8);
+            if left_exposed {
+                push_side_quad(
+                    &mut vertices,
+                    fx,
+                    fy,
+                    fx,
+                    fy1,
+                    z_min,
+                    z_max,
+                    [[u1, v1], [u0, v1], [u0, v0], [u1, v0]],
+                    0.8,
+                );
             }
-            if !is_opaque(x + 1, y) {
-                push_side_quad(&mut vertices, fx1, fy1, fx1, fy, z_min, z_max, um, vm, 0.8);
+            if right_exposed {
+                push_side_quad(
+                    &mut vertices,
+                    fx1,
+                    fy1,
+                    fx1,
+                    fy,
+                    z_min,
+                    z_max,
+                    [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
+                    0.8,
+                );
             }
         }
     }
@@ -553,38 +773,32 @@ fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<Chunk
 
 #[allow(clippy::too_many_arguments)]
 fn push_side_quad(
-    vertices: &mut Vec<ChunkVertex>,
+    vertices: &mut Vec<ItemVertex>,
     x0: f32,
     y0: f32,
     x1: f32,
     y1: f32,
     z0: f32,
     z1: f32,
-    u: f32,
-    v: f32,
+    uvs: [[f32; 2]; 4],
     light: f32,
 ) {
-    let positions = [
-        [x0, y0, z0],
-        [x1, y1, z0],
-        [x1, y1, z1],
-        [x0, y0, z0],
-        [x1, y1, z1],
-        [x0, y0, z1],
-    ];
-    for p in &positions {
-        vertices.push(ChunkVertex {
-            position: *p,
-            tex_coords: crate::renderer::chunk::mesher::pack_uv(u, v),
+    let positions = [[x0, y0, z0], [x0, y0, z1], [x1, y1, z1], [x1, y1, z0]];
+    let normal = pack_normal(cardinal_normal(&positions));
+    for i in [0, 1, 2, 0, 2, 3] {
+        vertices.push(ItemVertex {
+            position: positions[i],
+            tex_coords: uvs[i],
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
                 light,
                 crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
             ),
+            normal,
         });
     }
 }
 
-fn build_flat_quad(region: AtlasRegion) -> Vec<ChunkVertex> {
+fn build_flat_quad(region: AtlasRegion) -> Vec<ItemVertex> {
     let h = 0.5;
     let positions = [
         [-h, -h, 0.0],
@@ -605,13 +819,14 @@ fn build_flat_quad(region: AtlasRegion) -> Vec<ChunkVertex> {
     positions
         .iter()
         .zip(uvs.iter())
-        .map(|(p, uv)| ChunkVertex {
+        .map(|(p, uv)| ItemVertex {
             position: *p,
-            tex_coords: crate::renderer::chunk::mesher::pack_uv(uv[0], uv[1]),
+            tex_coords: *uv,
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
                 1.0,
                 crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
             ),
+            normal: pack_normal(glam::Vec3::Z),
         })
         .collect()
 }
@@ -621,7 +836,33 @@ pub(super) fn create_pipeline(
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
 ) -> vk::Pipeline {
-    create_pipeline_with_front_face(device, render_pass, layout, vk::FrontFace::CounterClockwise)
+    create_pipeline_impl(
+        device,
+        render_pass,
+        layout,
+        vk::FrontFace::CounterClockwise,
+        false,
+        true,
+    )
+}
+
+/// The dropped-item pipelines: `(cutout, translucent)`.
+fn create_world_pipelines(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+) -> (vk::Pipeline, vk::Pipeline) {
+    let world = |blend| {
+        create_pipeline_impl(
+            device,
+            render_pass,
+            layout,
+            vk::FrontFace::CounterClockwise,
+            true,
+            blend,
+        )
+    };
+    (world(false), world(true))
 }
 
 pub(super) fn create_pipeline_with_front_face(
@@ -630,7 +871,22 @@ pub(super) fn create_pipeline_with_front_face(
     layout: vk::PipelineLayout,
     front_face: vk::FrontFace,
 ) -> vk::Pipeline {
-    let vert_spv = shader::include_spirv!("item_entity.vert.spv");
+    create_pipeline_impl(device, render_pass, layout, front_face, false, true)
+}
+
+fn create_pipeline_impl(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+    front_face: vk::FrontFace,
+    world_lighting: bool,
+    blend: bool,
+) -> vk::Pipeline {
+    let vert_spv: &[u8] = if world_lighting {
+        &shader::include_spirv!("item_entity_world.vert.spv")[..]
+    } else {
+        &shader::include_spirv!("item_entity.vert.spv")[..]
+    };
     let frag_spv = shader::include_spirv!("item_entity.frag.spv");
     let vert_mod = shader::create_shader_module(device, vert_spv);
     let frag_mod = shader::create_shader_module(device, frag_spv);
@@ -650,8 +906,8 @@ pub(super) fn create_pipeline_with_front_face(
         },
     ];
 
-    let binding = ChunkVertex::binding_description();
-    let attrs = ChunkVertex::attribute_descriptions();
+    let binding = ItemVertex::binding_description();
+    let attrs = ItemVertex::attribute_descriptions();
 
     let vertex_input = vk::PipelineVertexInputStateCreateInfo {
         vertex_binding_description_count: 1,
@@ -683,11 +939,16 @@ pub(super) fn create_pipeline_with_front_face(
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
         depth_write_enable: vk::TRUE,
-        depth_compare_op: vk::CompareOp::Less,
+        // Vanilla 26.2's DepthStencilState.DEFAULT is inclusive
+        // GREATER_THAN_OR_EQUAL under reversed-Z. Pomme uses conventional
+        // depth here, so the equivalent comparison is LESS_OR_EQUAL. The
+        // equality case matters where generated front/back planes meet their
+        // per-pixel extrusion walls at the exact same depth.
+        depth_compare_op: vk::CompareOp::LessOrEqual,
         ..Default::default()
     };
     let blend_attachment = vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::TRUE,
+        blend_enable: if blend { vk::TRUE } else { vk::FALSE },
         src_color_blend_factor: vk::BlendFactor::SrcAlpha,
         dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
         color_blend_op: vk::BlendOp::Add,
@@ -739,4 +1000,223 @@ pub(super) fn create_pipeline_with_front_face(
     device.destroy_shader_module(frag_mod, None);
 
     pipeline
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unit_region() -> AtlasRegion {
+        AtlasRegion {
+            u_min: 0.0,
+            v_min: 0.0,
+            u_max: 1.0,
+            v_max: 1.0,
+            pixel_rect: [0, 0, 1, 1],
+            sprite: 0,
+            opaque: true,
+            translucent: false,
+        }
+    }
+
+    fn unpack_uv(vertex: &ItemVertex) -> [f32; 2] {
+        vertex.tex_coords
+    }
+
+    fn assert_uvs_near(vertices: &[ItemVertex], expected: &[[f32; 2]]) {
+        assert_eq!(vertices.len(), expected.len());
+        for (vertex, expected) in vertices.iter().zip(expected) {
+            let actual = unpack_uv(vertex);
+            assert!(
+                (actual[0] - expected[0]).abs() <= f32::EPSILON
+                    && (actual[1] - expected[1]).abs() <= f32::EPSILON,
+                "UV {actual:?} differs from expected {expected:?}"
+            );
+        }
+    }
+
+    fn unpack_normal(vertex: &ItemVertex) -> glam::Vec3 {
+        glam::Vec3::new(
+            vertex.normal[0] as f32 / 127.0,
+            vertex.normal[1] as f32 / 127.0,
+            vertex.normal[2] as f32 / 127.0,
+        )
+    }
+
+    #[test]
+    fn extruded_item_side_faces_wind_outward() {
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
+        let vertices = build_extruded_item(&image, unit_region());
+        let expected_normals = [
+            glam::Vec3::Y,
+            glam::Vec3::NEG_Y,
+            glam::Vec3::NEG_X,
+            glam::Vec3::X,
+        ];
+
+        assert_eq!(vertices.len(), 36);
+        for (face, expected) in vertices[12..]
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .zip(expected_normals)
+        {
+            let p0 = glam::Vec3::from_array(face[0].position);
+            let p1 = glam::Vec3::from_array(face[1].position);
+            let p2 = glam::Vec3::from_array(face[2].position);
+            let normal = (p1 - p0).cross(p2 - p0);
+            assert!(
+                normal.dot(expected) > 0.0,
+                "side face normal {normal:?} points away from {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn extruded_item_carries_vanilla_cardinal_normals() {
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
+        let vertices = build_extruded_item(&image, unit_region());
+        let expected = [
+            glam::Vec3::Z,
+            glam::Vec3::NEG_Z,
+            glam::Vec3::Y,
+            glam::Vec3::NEG_Y,
+            glam::Vec3::NEG_X,
+            glam::Vec3::X,
+        ];
+
+        for (face, expected) in vertices.as_chunks::<6>().0.iter().zip(expected) {
+            for vertex in face {
+                assert_eq!(unpack_normal(vertex), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn baked_quad_normal_matches_vanilla_closest_cardinal_direction() {
+        let angle = 22.5_f32.to_radians();
+        let normal = glam::Vec3::new(angle.sin(), 0.0, angle.cos());
+        let tangent = glam::Vec3::X * angle.cos() - glam::Vec3::Z * angle.sin();
+        let up = glam::Vec3::Y;
+        let p0 = -tangent * 0.5 - up * 0.5;
+        let p1 = tangent * 0.5 - up * 0.5;
+        let p2 = tangent * 0.5 + up * 0.5;
+        let p3 = -tangent * 0.5 + up * 0.5;
+        let mut positions = [p0.to_array(), p1.to_array(), p2.to_array(), p3.to_array()];
+
+        // Ensure the synthetic winding points along the intended oblique normal.
+        if crate::world::block::model::quad_normal(&positions)
+            .unwrap()
+            .dot(normal)
+            < 0.0
+        {
+            positions.reverse();
+        }
+        assert_eq!(cardinal_normal(&positions), glam::Vec3::Z);
+    }
+
+    #[test]
+    fn animated_extrusion_unions_exposed_edges_per_frame() {
+        let mask = SpriteAlphaMask {
+            width: 2,
+            height: 1,
+            frames: vec![vec![true, false], vec![false, true]],
+        };
+        let vertices = build_extruded_item_mask(&mask, unit_region());
+
+        // Each frame exposes the shared edge from one side, so vanilla emits
+        // eight side quads total. Collapsing the frames into one opacity bitmap
+        // would incorrectly remove both shared-edge quads and yield 48 vertices.
+        assert_eq!(vertices.len(), 12 + 8 * 6);
+    }
+
+    #[test]
+    fn extruded_item_back_face_preserves_sprite_orientation() {
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
+        let vertices = build_extruded_item(&image, unit_region());
+
+        assert_uvs_near(
+            &vertices[6..12],
+            &[
+                [1.0, 1.0],
+                [0.0, 1.0],
+                [0.0, 0.0],
+                [1.0, 1.0],
+                [0.0, 0.0],
+                [1.0, 0.0],
+            ],
+        );
+    }
+
+    #[test]
+    fn extruded_item_front_and_back_use_true_sprite_bounds() {
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
+        let region = AtlasRegion {
+            u_min: 16.0 / 64.0,
+            v_min: 8.0 / 64.0,
+            u_max: 32.0 / 64.0,
+            v_max: 24.0 / 64.0,
+            pixel_rect: [16, 8, 16, 16],
+            sprite: 1,
+            opaque: true,
+            translucent: false,
+        };
+        let vertices = build_extruded_item(&image, region);
+
+        assert_uvs_near(
+            &vertices[..12],
+            &[
+                [region.u_min, region.v_max],
+                [region.u_max, region.v_max],
+                [region.u_max, region.v_min],
+                [region.u_min, region.v_max],
+                [region.u_max, region.v_min],
+                [region.u_min, region.v_min],
+                [region.u_max, region.v_max],
+                [region.u_min, region.v_max],
+                [region.u_min, region.v_min],
+                [region.u_max, region.v_max],
+                [region.u_min, region.v_min],
+                [region.u_max, region.v_min],
+            ],
+        );
+    }
+
+    #[test]
+    fn extruded_item_side_faces_match_vanilla_pixel_inset_uvs() {
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
+        let vertices = build_extruded_item(&image, unit_region());
+        let expected = [
+            // UP
+            [0.1, 0.1],
+            [0.1, 0.9],
+            [0.9, 0.9],
+            [0.1, 0.1],
+            [0.9, 0.9],
+            [0.9, 0.1],
+            // DOWN
+            [0.9, 0.9],
+            [0.9, 0.1],
+            [0.1, 0.1],
+            [0.9, 0.9],
+            [0.1, 0.1],
+            [0.1, 0.9],
+            // LEFT / west-facing geometry
+            [0.9, 0.9],
+            [0.1, 0.9],
+            [0.1, 0.1],
+            [0.9, 0.9],
+            [0.1, 0.1],
+            [0.9, 0.1],
+            // RIGHT / east-facing geometry
+            [0.1, 0.1],
+            [0.9, 0.1],
+            [0.9, 0.9],
+            [0.1, 0.1],
+            [0.9, 0.9],
+            [0.1, 0.9],
+        ];
+
+        assert_uvs_near(&vertices[12..], &expected);
+    }
 }

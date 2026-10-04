@@ -31,6 +31,14 @@ pub(crate) fn mesh_neighborhood(pos: ChunkPos) -> [ChunkPos; 5] {
     ]
 }
 
+/// `pos` and the eight columns around it: what vanilla requires to be loaded
+/// and lit before a section in the middle one may first compile
+/// (`SectionUpdateTracker.hasAllNeighbors`). The smaller set a mesh samples is
+/// `mesh_neighborhood`.
+pub(crate) fn column_neighborhood(pos: ChunkPos) -> impl Iterator<Item = ChunkPos> {
+    (-1..=1).flat_map(move |dx| (-1..=1).map(move |dz| ChunkPos::new(pos.x + dx, pos.z + dz)))
+}
+
 #[derive(Error, Debug)]
 pub enum ChunkError {
     #[error("failed to parse chunk data: {0}")]
@@ -120,6 +128,10 @@ pub struct ChunkStore {
     pub block_entities: std::collections::HashMap<BlockPos, StoredBlockEntity>,
 }
 
+/// The 128-chunk max extended-view-distance servers allow; server
+/// announcements clamp to it and the chunk grid is sized for it.
+pub const MAX_VIEW_DISTANCE: u32 = 128;
+
 impl ChunkStore {
     pub fn new(view_distance: u32) -> Self {
         Self::new_with_dimension(view_distance, OVERWORLD_HEIGHT, OVERWORLD_MIN_Y)
@@ -128,7 +140,9 @@ impl ChunkStore {
     pub fn new_with_dimension(view_distance: u32, height: u32, min_y: i32) -> Self {
         Self {
             chunk_storage: ChunkStorage::new(height, min_y),
-            partial_storage: PartialChunkStorage::new(view_distance.max(64)),
+            // The grid silently drops out-of-range chunks and is never resized,
+            // so floor it at the max view distance (~0.5 MB of Option slots).
+            partial_storage: PartialChunkStorage::new(view_distance.max(MAX_VIEW_DISTANCE)),
             light_data: std::collections::HashMap::new(),
             block_entities: std::collections::HashMap::new(),
         }
@@ -320,4 +334,38 @@ pub fn block_state_from_section(chunk: &Chunk, x: i32, y: i32, z: i32, min_y: i3
         y: local_y,
         z: local_z,
     })
+}
+
+#[cfg(test)]
+impl ChunkStore {
+    /// A 26.2 store with an empty chunk (0, 0) loaded.
+    pub(crate) fn with_origin_chunk() -> Self {
+        crate::world::block::init("26.2");
+        let mut chunks = Self::new(2);
+        chunks.partial_storage.set(
+            &ChunkPos::new(0, 0),
+            Some(Chunk::default()),
+            &mut chunks.chunk_storage,
+        );
+        chunks
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn column_neighborhood_is_the_full_three_by_three() {
+        let columns: Vec<_> = column_neighborhood(ChunkPos::new(4, -2)).collect();
+        assert_eq!(columns.len(), 9);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                assert!(
+                    columns.contains(&ChunkPos::new(4 + dx, -2 + dz)),
+                    "{dx},{dz}"
+                );
+            }
+        }
+    }
 }

@@ -8,8 +8,8 @@ use crate::packets::{Direction, PacketTable, Phase};
 
 const MAIN_HAND: u32 = 0;
 
-fn game_serverbound_id(name: &str) -> u32 {
-    PacketTable::latest()
+pub fn game_serverbound_id(name: &str) -> u32 {
+    PacketTable::native()
         .id(Phase::Game, Direction::Serverbound, name)
         .unwrap_or_else(|| panic!("{name} missing from packet table"))
 }
@@ -33,6 +33,29 @@ pub fn encode_attack(entity_id: i32) -> Vec<u8> {
     let mut buf = Vec::new();
     write_varint(&mut buf, game_serverbound_id("attack"));
     write_varint(&mut buf, entity_id as u32);
+    buf
+}
+
+/// Vanilla 26.2 `ServerboundPickItemFromBlockPacket`: packed BlockPos then
+/// whether Ctrl requested block-entity/component data.
+pub fn encode_pick_item_from_block(x: i32, y: i32, z: i32, include_data: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_varint(&mut buf, game_serverbound_id("pick_item_from_block"));
+    let packed = ((i64::from(x) & 0x3ff_ffff) << 38)
+        | ((i64::from(z) & 0x3ff_ffff) << 12)
+        | (i64::from(y) & 0xfff);
+    buf.extend_from_slice(&packed.to_be_bytes());
+    buf.push(include_data as u8);
+    buf
+}
+
+/// Vanilla 26.2 `ServerboundPickItemFromEntityPacket`: entity VarInt then
+/// the Ctrl/include-data flag.
+pub fn encode_pick_item_from_entity(entity_id: i32, include_data: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_varint(&mut buf, game_serverbound_id("pick_item_from_entity"));
+    write_varint(&mut buf, entity_id as u32);
+    buf.push(include_data as u8);
     buf
 }
 
@@ -150,6 +173,23 @@ mod tests {
     fn attack_packet_layout() {
         // id 0x01, entity id 42.
         assert_eq!(encode_attack(42), [0x01, 42]);
+    }
+
+    #[test]
+    fn pick_item_packet_layouts() {
+        assert_eq!(
+            encode_pick_item_from_block(1, 2, 3, true),
+            [0x24, 0, 0, 0, 64, 0, 0, 48, 2, 1]
+        );
+        assert_eq!(
+            encode_pick_item_from_block(-1, -2, -3, false),
+            [0x24, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xdf, 0xfe, 0]
+        );
+        assert_eq!(encode_pick_item_from_entity(42, false), [0x25, 42, 0]);
+        assert_eq!(
+            encode_pick_item_from_entity(300, true),
+            [0x25, 0xac, 0x02, 1]
+        );
     }
 
     #[test]

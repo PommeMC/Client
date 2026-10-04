@@ -1,7 +1,10 @@
 use super::*;
 
 impl MainMenu {
-    #[allow(clippy::too_many_lines)]
+    /// The title screen in the selected theme. Branching here keeps the
+    /// Friends backdrop, which re-runs this builder, on the same theme; the
+    /// theme wipe itself is driven by the dispatcher so the backdrop can't
+    /// commit a switch.
     pub(super) fn build_main(
         &mut self,
         screen_w: f32,
@@ -9,7 +12,23 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: impl Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        match self.theme {
+            PanoramaTheme::Pomme => self.build_main_pomme(screen_w, screen_h, input, text_width_fn),
+            PanoramaTheme::Default => {
+                self.build_main_vanilla(screen_w, screen_h, input, text_width_fn)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn build_main_pomme(
+        &mut self,
+        screen_w: f32,
+        screen_h: f32,
+        input: &MenuInput,
+        text_width_fn: impl Fn(&str, f32) -> f32,
+    ) -> MainMenuResult {
+        let gs = self.gui_scale(screen_w, screen_h);
         let cursor = input.cursor;
         let clicked = input.clicked;
 
@@ -31,24 +50,29 @@ impl MainMenu {
         let text_col: [f32; 4] = [0.89, 0.90, 0.96, 0.85];
         let text_bright: [f32; 4] = [0.94, 0.95, 0.98, 1.0];
         let text_dim: [f32; 4] = [0.53, 0.56, 0.69, 0.6];
+        let text_disabled: [f32; 4] = [0.45, 0.47, 0.58, 0.35];
         let border: [f32; 4] = [1.0, 1.0, 1.0, 0.05];
 
         struct BtnDef {
             label: &'static str,
             id: u8,
+            enabled: bool,
         }
         let buttons = [
             BtnDef {
                 label: "Singleplayer",
                 id: 0,
+                enabled: true,
             },
             BtnDef {
                 label: "Multiplayer",
                 id: 1,
+                enabled: true,
             },
             BtnDef {
                 label: "Quit Game",
                 id: 2,
+                enabled: true,
             },
         ];
 
@@ -117,7 +141,7 @@ impl MainMenu {
             y: cy,
             text: "Pomme".into(),
             scale: title_size,
-            color: [0.94, 0.96, 0.99, 0.95],
+            color: COL_WORDMARK,
             centered: false,
         });
 
@@ -190,11 +214,19 @@ impl MainMenu {
         });
         cy += 1.0 + 16.0 * s;
 
+        // TODO: fold the bottom icon rows into the focus ring too (arrow-key
+        // nearest-rect navigation is still deferred).
+        self.focus_advance(input);
+        let mut ctx = self.make_focus_ctx(input);
+
         for (i, def) in buttons.iter().enumerate() {
             let by = cy + i as f32 * (btn_h + btn_gap);
             let rect = [btn_x, by, content_w, btn_h];
-            let hovered = common::hit_test(cursor, rect);
+            let hovered = def.enabled && common::hit_test(cursor, rect);
+            let focused = ctx.focused(def.enabled, hovered);
             any_hovered |= hovered;
+            // Keyboard focus shows the same highlight as hover (vanilla).
+            let active = hovered || focused;
 
             elements.push(MenuElement::Rect {
                 x: rect[0],
@@ -202,7 +234,7 @@ impl MainMenu {
                 w: rect[2],
                 h: rect[3],
                 corner_radius: btn_r,
-                color: if hovered { glass_hover } else { glass },
+                color: if active { glass_hover } else { glass },
             });
 
             let bar_margin = btn_h * 0.18;
@@ -216,7 +248,13 @@ impl MainMenu {
                     accent[0],
                     accent[1],
                     accent[2],
-                    if hovered { 0.9 } else { 0.12 },
+                    if !def.enabled {
+                        0.04
+                    } else if active {
+                        0.9
+                    } else {
+                        0.12
+                    },
                 ],
             });
 
@@ -225,17 +263,27 @@ impl MainMenu {
                 y: rect[1] + (rect[3] - font_size) / 2.0,
                 text: def.label.into(),
                 scale: font_size,
-                color: if hovered { text_bright } else { text_col },
+                color: if !def.enabled {
+                    text_disabled
+                } else if active {
+                    text_bright
+                } else {
+                    text_col
+                },
                 centered: false,
             });
 
-            if clicked && hovered {
+            if (clicked && hovered) || (focused && ctx.activate) {
                 any_clicked = true;
                 if def.id == 2 {
                     action = MenuAction::Quit;
                 } else {
                     match def.id {
-                        0 => {}
+                        0 => {
+                            self.open_world_list(gs, &|t: &str| {
+                                text_width_fn(t, common::FONT_SIZE * gs)
+                            });
+                        }
                         1 => {
                             self.set_screen(Screen::ServerList);
                             self.scroll_offset = 0.0;
@@ -272,7 +320,7 @@ impl MainMenu {
                     icon,
                     scale: icon_scale,
                     color: if !enabled {
-                        [0.45, 0.47, 0.58, 0.35]
+                        text_disabled
                     } else if hovered {
                         text_bright
                     } else {
@@ -282,38 +330,29 @@ impl MainMenu {
                 hovered
             };
 
-        let bottom_icons: [(f32, char); 4] = [
-            (btn_x, ICON_USER),
-            (btn_x + icon_size + icon_gap, ICON_LINK),
-            (btn_x + content_w - icon_size, ICON_GEAR),
+        let bottom_icons: [(f32, char, bool); 4] = [
+            (btn_x, ICON_USER, false),
+            (btn_x + icon_size + icon_gap, ICON_LINK, true),
+            (btn_x + content_w - icon_size, ICON_GEAR, true),
             (
                 btn_x + content_w - icon_size * 2.0 - icon_gap,
                 ICON_PAINTBRUSH,
+                true,
             ),
         ];
 
-        for &(bx, icon) in &bottom_icons {
-            let hovered = icon_btn(&mut elements, bx, icon_area_y, icon, true);
-            any_hovered |= hovered;
+        for &(bx, icon, enabled) in &bottom_icons {
+            let hovered = icon_btn(&mut elements, bx, icon_area_y, icon, enabled);
+            any_hovered |= enabled && hovered;
 
-            if clicked && hovered {
+            if enabled && clicked && hovered {
                 any_clicked = true;
                 match icon {
-                    ICON_LINK => {
-                        self.links_open = !self.links_open;
-                        if self.links_open {
-                            self.theme_open = false;
-                        }
-                    }
+                    ICON_LINK => self.toggle_links(),
                     ICON_GEAR => {
                         self.open_options();
                     }
-                    ICON_PAINTBRUSH => {
-                        self.theme_open = !self.theme_open;
-                        if self.theme_open {
-                            self.links_open = false;
-                        }
-                    }
+                    ICON_PAINTBRUSH => self.toggle_theme(),
                     _ => {}
                 }
             }
@@ -334,7 +373,7 @@ impl MainMenu {
             (
                 new_x0 + icon_size + icon_gap,
                 ICON_LANGUAGE,
-                true,
+                false,
                 "Language",
             ),
             (
@@ -370,122 +409,34 @@ impl MainMenu {
             }
         }
 
-        if self.links_open {
-            let anchor_x = btn_x + icon_size + icon_gap;
-            let drop_w = 140.0 * s;
-            let drop_x = anchor_x;
-            let drop_y = icon_area_y - 2.0 * s;
-            let links: [(&str, char, &str); 3] = [
-                ("Website", ICON_GLOBE, "https://pomme.rs"),
-                ("Discord", ICON_COMMENT, "https://discord.gg/ucBA55bHPR"),
-                (
-                    "GitHub",
-                    ICON_CODE,
-                    "https://github.com/PommeMC/Pomme-Client",
-                ),
-            ];
-            let total_h = links.len() as f32 * drop_style.item_h;
-            let drop_y_top = drop_y - total_h;
-            drop_style.draw_background(&mut elements, drop_x, drop_y_top, drop_w, total_h);
-            let mut clicked_inside = false;
-            for (i, (label, icon, url)) in links.iter().enumerate() {
-                let item = drop_style.draw_item(
-                    &mut elements,
-                    &mut any_hovered,
-                    cursor,
-                    drop_x,
-                    drop_y_top,
-                    drop_w,
-                    i,
-                    links.len(),
-                    label,
-                    Some((*icon, [0.6, 0.7, 0.85, 0.8])),
-                    text_bright,
-                    text_col,
-                );
-                if item {
-                    clicked_inside = true;
-                }
-                if clicked && item {
-                    let _ = open::that(url);
-                    self.links_open = false;
-                }
-            }
-            if dismiss_dropdown(
-                cursor,
-                clicked,
-                clicked_inside,
-                [drop_x, drop_y_top, drop_w, total_h],
-                [anchor_x, icon_area_y, icon_size, icon_size],
-            ) {
-                self.links_open = false;
-            }
-        }
+        // Links open rightwards off their icon; the theme picker is at the far
+        // end of the row, so it right-aligns to its own icon instead.
+        let links_x = btn_x + icon_size + icon_gap;
+        self.push_links_dropdown(
+            &mut elements,
+            &mut any_hovered,
+            cursor,
+            clicked,
+            &drop_style,
+            [links_x, icon_area_y, icon_size, icon_size],
+            links_x,
+            icon_area_y - 2.0 * s,
+            140.0 * s,
+        );
 
-        if self.theme_open {
-            let anchor_x = btn_x + content_w - icon_size * 2.0 - icon_gap;
-            let drop_w = 120.0 * s;
-            let drop_x = anchor_x + icon_size - drop_w;
-            let drop_y = icon_area_y - 2.0 * s;
-            let themes: [(&str, PanoramaTheme); 2] = [
-                ("Pomme", PanoramaTheme::Pomme),
-                ("Default", PanoramaTheme::Default),
-            ];
-            let total_h = themes.len() as f32 * drop_style.item_h;
-            let drop_y_top = drop_y - total_h;
-            drop_style.draw_background(&mut elements, drop_x, drop_y_top, drop_w, total_h);
-            let mut clicked_inside = false;
-            for (i, (label, theme_val)) in themes.iter().enumerate() {
-                let selected = self.theme == *theme_val;
-                let check = if selected {
-                    Some((ICON_CHECK, [0.39, 0.71, 1.0, 0.9]))
-                } else {
-                    None
-                };
-                let text_c = if selected {
-                    [0.39, 0.71, 1.0, 0.9]
-                } else {
-                    text_col
-                };
-                let item = drop_style.draw_item(
-                    &mut elements,
-                    &mut any_hovered,
-                    cursor,
-                    drop_x,
-                    drop_y_top,
-                    drop_w,
-                    i,
-                    themes.len(),
-                    label,
-                    check,
-                    text_bright,
-                    text_c,
-                );
-                if item {
-                    clicked_inside = true;
-                }
-                if clicked && item && !selected {
-                    self.transition = Some(ThemeTransition {
-                        start: Instant::now(),
-                        target: *theme_val,
-                        reloaded: false,
-                        open_start: None,
-                    });
-                    self.theme_open = false;
-                } else if clicked && item {
-                    self.theme_open = false;
-                }
-            }
-            if dismiss_dropdown(
-                cursor,
-                clicked,
-                clicked_inside,
-                [drop_x, drop_y_top, drop_w, total_h],
-                [anchor_x, icon_area_y, icon_size, icon_size],
-            ) {
-                self.theme_open = false;
-            }
-        }
+        let theme_x = btn_x + content_w - icon_size * 2.0 - icon_gap;
+        let theme_w = 120.0 * s;
+        self.push_theme_dropdown(
+            &mut elements,
+            &mut any_hovered,
+            cursor,
+            clicked,
+            &drop_style,
+            [theme_x, icon_area_y, icon_size, icon_size],
+            theme_x + icon_size - theme_w,
+            icon_area_y - 2.0 * s,
+            theme_w,
+        );
 
         let footer_size = 8.0 * s;
         let footer_pad = 8.0 * s;
@@ -510,22 +461,7 @@ impl MainMenu {
             centered: false,
         });
 
-        if let Some(ref mut tr) = self.transition {
-            let close_t = (tr.start.elapsed().as_secs_f32() / CLOSE_DURATION).min(1.0);
-            if close_t >= 1.0 && !tr.reloaded {
-                tr.reloaded = true;
-                self.theme = tr.target;
-                action = MenuAction::ChangeTheme(tr.target);
-            }
-            let open_t = tr
-                .open_start
-                .map(|s| (s.elapsed().as_secs_f32() / OPEN_DURATION).min(1.0))
-                .unwrap_or(0.0);
-            emit_transition_strips(&mut elements, screen_w, screen_h, close_t, open_t);
-            if open_t >= 1.0 {
-                self.transition = None;
-            }
-        }
+        self.finish_focus(&ctx);
 
         MainMenuResult {
             elements,

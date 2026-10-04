@@ -22,11 +22,12 @@ pub fn is_animated_item(item_name: &str) -> bool {
 const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8Unorm;
 const DEPTH_FORMAT: vk::Format = vk::Format::D32Sfloat;
 
-/// Returns the slot size in pixels matching `16 * gui_scale`, the vanilla
-/// formula (`GuiRenderer.prepareItemElements`). 16 is the base item size in
-/// logical GUI units; multiplying by gui_scale makes the bake 1:1 with display.
-pub fn slot_px_for_gui_scale(gui_scale: f32) -> u32 {
-    (16.0 * gui_scale.max(1.0)).round() as u32
+/// Returns the slot size in pixels matching `16 * gui_scale` at the Auto GUI
+/// scale, the vanilla formula (`GuiRenderer.prepareItemElements`). 16 is the
+/// base item size in logical GUI units; multiplying by gui_scale makes the bake
+/// 1:1 with display.
+pub fn slot_px_for_screen(screen_w: f32, screen_h: f32, enforce_unicode: bool) -> u32 {
+    (16.0 * crate::ui::hud::gui_scale(screen_w, screen_h, 0, enforce_unicode)).round() as u32
 }
 
 /// Picks the smallest power-of-two atlas size that fits TARGET_SLOT_CAPACITY
@@ -141,6 +142,14 @@ impl DynamicAtlasAllocator {
 
     fn end_frame(&mut self) {
         self.free_slot_if(|_, slot| slot.discard_after_frame);
+    }
+
+    fn invalidate_all(&mut self) {
+        self.used_by_key.clear();
+        self.free.fill(true);
+        for slot in &mut self.slots {
+            slot.discard_after_frame = false;
+        }
     }
 
     fn free_slot_if(&mut self, mut predicate: impl FnMut(&str, &SlotInternal) -> bool) {
@@ -270,6 +279,10 @@ impl GuiItemAtlas {
 
     pub fn end_frame(&mut self) {
         self.allocator.end_frame();
+    }
+
+    pub fn invalidate_all(&mut self) {
+        self.allocator.invalidate_all();
     }
 
     /// Top-origin pixel coordinates of the slot's upper-left corner; pair with
@@ -655,4 +668,23 @@ fn create_framebuffer(
     device
         .create_framebuffer(&info, None)
         .expect("failed to create gui_item_atlas framebuffer")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalidate_all_releases_cached_slots_as_stale() {
+        let mut atlas = DynamicAtlasAllocator::new(2, 1);
+        let (_, first_state) = atlas.get_or_allocate("cocoa_beans", false).unwrap();
+        assert!(matches!(first_state, SlotState::Empty));
+        let (_, ready_state) = atlas.get_or_allocate("cocoa_beans", false).unwrap();
+        assert!(matches!(ready_state, SlotState::Ready));
+
+        atlas.invalidate_all();
+
+        let (_, rebake_state) = atlas.get_or_allocate("cocoa_beans", false).unwrap();
+        assert!(matches!(rebake_state, SlotState::Stale));
+    }
 }

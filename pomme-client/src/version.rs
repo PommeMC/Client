@@ -10,11 +10,12 @@ pub fn set_selected_protocol(protocol: i32) {
     let _ = SELECTED_PROTOCOL.set(protocol);
 }
 
-/// The protocol id of the version the client was launched as.
+/// The protocol id of the version the client was launched as; the native
+/// one outside `main` (tests, headless tools).
 pub fn selected_protocol() -> i32 {
     *SELECTED_PROTOCOL
         .get()
-        .unwrap_or(&azalea_protocol::packets::PROTOCOL_VERSION)
+        .unwrap_or(&pomme_protocol::version::NATIVE.protocol)
 }
 
 /// Record the wire version negotiated for the current connection (see

@@ -18,6 +18,7 @@ pub enum PresenceState {
     Loading,
     InMenu,
     Multiplayer,
+    Singleplayer,
 }
 
 pub struct DiscordPresence {
@@ -38,19 +39,24 @@ impl DiscordPresence {
     }
 
     pub fn set_in_menu(&mut self, version: &str) {
-        if self.state == PresenceState::InMenu {
-            return;
-        }
-        self.state = PresenceState::InMenu;
-        let _ = self.set_activity(base_activity(version).state("In the menu"));
+        self.enter(PresenceState::InMenu, version, "In the menu");
     }
 
     pub fn playing_multiplayer(&mut self, version: &str) {
-        if self.state == PresenceState::Multiplayer {
+        self.enter(PresenceState::Multiplayer, version, "In a server");
+    }
+
+    pub fn playing_singleplayer(&mut self, version: &str) {
+        self.enter(PresenceState::Singleplayer, version, "In a world");
+    }
+
+    /// Re-entering the current state sends nothing.
+    fn enter(&mut self, state: PresenceState, version: &str, text: &str) {
+        if self.state == state {
             return;
         }
-        self.state = PresenceState::Multiplayer;
-        let _ = self.set_activity(base_activity(version).state("In a server"));
+        self.state = state;
+        let _ = self.set_activity(base_activity(version).state(text));
     }
 
     fn set_activity(&mut self, payload: Activity) -> Result<(), Box<dyn std::error::Error>> {

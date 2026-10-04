@@ -642,12 +642,15 @@ impl From<usize> for Face {
 }
 
 impl Face {
-    pub fn shade_light(&self) -> f32 {
+    pub fn direction(&self) -> crate::world::block::model::Direction {
+        use crate::world::block::model::Direction;
         match self {
-            Self::Up => 1.0,
-            Self::Down => 0.5,
-            Self::Front | Self::Back => 0.8,
-            Self::Right | Self::Left => 0.6,
+            Self::Up => Direction::Up,
+            Self::Down => Direction::Down,
+            Self::Right => Direction::East,
+            Self::Left => Direction::West,
+            Self::Front => Direction::South,
+            Self::Back => Direction::North,
         }
     }
 

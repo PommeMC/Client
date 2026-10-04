@@ -13,6 +13,7 @@
     "shell:allow-open",
     "dialog:allow-open",
     "opener:default",
+    "clipboard-manager:allow-write-text",
     {
       "identifier": "opener:allow-reveal-item-in-dir",
       "allow": [

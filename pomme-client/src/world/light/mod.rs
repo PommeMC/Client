@@ -178,6 +178,18 @@ impl LevelLightEngine {
         }
     }
 
+    /// Vanilla `LevelLightEngine.lightOnInColumn`: the column's light has been
+    /// applied, in both layers the dimension has. Vanilla's renderer requires
+    /// it of a section's whole 3x3 neighbourhood before the section may first
+    /// compile (`SectionUpdateTracker.hasAllNeighbors`).
+    pub fn light_on_in_column(&self, column: (i32, i32)) -> bool {
+        self.block.storage.light_on_in_column(column)
+            && self
+                .sky
+                .as_ref()
+                .is_none_or(|sky| sky.storage.light_on_in_column(column))
+    }
+
     pub fn light_section_count(&self) -> usize {
         (self.section_count + 2) as usize
     }

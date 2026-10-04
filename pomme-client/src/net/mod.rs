@@ -1,10 +1,18 @@
 #[cfg(test)]
 mod azalea_compat;
+mod bundle_codec;
+pub(crate) mod chat;
+pub(crate) mod chat_security;
+pub mod chunk_batch;
 pub mod commands;
+pub mod conn;
 pub mod connection;
+mod dialog;
 pub mod handler;
+pub mod known_packs;
 pub mod resolve;
 pub mod sender;
+pub mod stream;
 pub mod translate;
 
 use std::sync::Arc;
@@ -17,6 +25,7 @@ use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::DVec3;
 use simdnbt::owned::NbtCompound;
 
+use crate::entity::MetaValue;
 use crate::entity::components::Position;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
 
@@ -52,13 +61,22 @@ impl From<&azalea_protocol::packets::game::c_light_update::ClientboundLightUpdat
 pub enum NetworkEvent {
     Connected,
     Registries(Arc<azalea_core::registry_holder::RegistryHolder>),
+    /// The `minecraft:dialog` registry with its tags, sent with `Registries`
+    /// and again whenever a tag update replaces the dialog tags.
+    DialogRegistry(Arc<crate::ui::server_dialog::DialogRegistry>),
+    BlockTags {
+        tags: Vec<(String, Vec<i32>)>,
+    },
     BiomeColors {
         colors: std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
     },
+    /// `LEVEL_CHUNKS_LOAD_START`: the server has started sending the level.
+    LevelChunksLoadStart,
     DimensionInfo {
         height: u32,
         min_y: i32,
         has_skylight: bool,
+        cardinal_light: crate::world::block::model::CardinalLightType,
     },
     ChunkLoaded {
         pos: ChunkPos,
@@ -78,9 +96,20 @@ pub enum NetworkEvent {
         x: i32,
         z: i32,
     },
+    Ping {
+        id: u32,
+    },
     PlayerPosition {
+        /// Teleport id to acknowledge.
+        id: u32,
         change: azalea_protocol::common::movements::PositionMoveRotation,
         relative: azalea_protocol::common::movements::RelativeMovements,
+    },
+    PlayerRotation {
+        y_rot: f32,
+        relative_y: bool,
+        x_rot: f32,
+        relative_x: bool,
     },
     PlayerHealth {
         health: f32,
@@ -91,13 +120,30 @@ pub enum NetworkEvent {
         progress: f32,
         level: i32,
     },
+    UpdateMobEffect {
+        entity_id: i32,
+        effect: crate::mob_effect::MobEffectInstance,
+    },
+    RemoveMobEffect {
+        entity_id: i32,
+        effect_id: u32,
+    },
+    ClearMobEffects,
+    SetPassengers {
+        vehicle: i32,
+        passengers: Vec<i32>,
+    },
+    EntitySaddle {
+        entity_id: i32,
+        saddled: bool,
+    },
     Waypoint {
         operation: azalea_protocol::packets::game::c_waypoint::WaypointOperation,
         waypoint: azalea_protocol::packets::game::c_waypoint::TrackedWaypoint,
     },
-    EntityArmorUpdate {
+    EntityAttributesUpdate {
         entity_id: i32,
-        armor: u32,
+        snapshots: Vec<crate::attribute::AttributeSnapshot>,
     },
     ContainerContent {
         container_id: i32,
@@ -110,6 +156,14 @@ pub enum NetworkEvent {
         index: u16,
         item: ItemStack,
         state_id: u32,
+    },
+    /// `SetPlayerInventory`, indexed by vanilla `Inventory` slot.
+    PlayerInventorySlot {
+        index: u32,
+        item: ItemStack,
+    },
+    HeldSlot {
+        slot: u8,
     },
     /// A menu data value (furnace lit/cook progress, etc.).
     ContainerData {
@@ -128,6 +182,87 @@ pub enum NetworkEvent {
     },
     ChatMessage {
         spans: Vec<crate::ui::text::TextSpan>,
+        /// Same bound chat type rendered from the signed body with unsigned
+        /// content removed, for Vanilla's `onlyShowSecureChat` path.
+        secure_spans: Option<Vec<crate::ui::text::TextSpan>>,
+        missing_profile_spans: Option<Vec<crate::ui::text::TextSpan>>,
+        signature: Option<[u8; 256]>,
+        sender_uuid: Option<uuid::Uuid>,
+        signed_body: Option<crate::net::chat_security::SignedChatBody>,
+        source: crate::ui::chat::ChatMessageSource,
+        tag: Option<crate::ui::chat::ChatMessageTag>,
+    },
+    DeleteChatMessage {
+        signature: [u8; 256],
+    },
+    ActionBar {
+        spans: Vec<crate::ui::text::TextSpan>,
+    },
+    ServerLinks {
+        links: Vec<crate::ui::server_dialog::ServerLink>,
+    },
+    ShowDialog {
+        dialog: crate::ui::server_dialog::DialogReference,
+    },
+    ClearDialog,
+    BossBarUpdate {
+        id: uuid::Uuid,
+        op: crate::ui::boss_bar::BossBarOp,
+    },
+    AdvancementsUpdate(Box<crate::ui::toast::AdvancementsUpdate>),
+    RecipeToastAdd {
+        entries: Vec<crate::ui::toast::RecipeToastEntry>,
+    },
+    TitleText {
+        spans: Vec<crate::ui::text::TextSpan>,
+    },
+    SubtitleText {
+        spans: Vec<crate::ui::text::TextSpan>,
+    },
+    TitlesAnimation {
+        fade_in: i32,
+        stay: i32,
+        fade_out: i32,
+    },
+    ClearTitles {
+        reset_times: bool,
+    },
+    ScoreboardObjective {
+        name: String,
+        display: Option<Vec<crate::ui::text::TextSpan>>,
+        number_format: Option<crate::ui::hud::ScoreNumberFormat>,
+    },
+    ScoreboardDisplay {
+        name: Option<String>,
+    },
+    ScoreboardScore {
+        owner: String,
+        objective: String,
+        score: i32,
+        display: Option<Vec<crate::ui::text::TextSpan>>,
+        number_format: Option<crate::ui::hud::ScoreNumberFormat>,
+    },
+    ScoreboardReset {
+        owner: String,
+        objective: Option<String>,
+    },
+    ScoreboardTeam {
+        name: String,
+        display_name: Vec<crate::ui::text::TextSpan>,
+        prefix: Vec<crate::ui::text::TextSpan>,
+        suffix: Vec<crate::ui::text::TextSpan>,
+        color: [f32; 4],
+        fill_color: Option<[f32; 4]>,
+        collision_rule: crate::ui::hud::CollisionRule,
+        members: Option<Vec<String>>,
+    },
+    ScoreboardTeamMembers {
+        name: String,
+        members: Vec<String>,
+        join: bool,
+    },
+    ScoreboardTeamRemoved {
+        name: String,
     },
     CommandTree {
         tree: Arc<crate::net::commands::CommandTree>,
@@ -137,7 +272,7 @@ pub enum NetworkEvent {
         /// Offset into the command string (as sent, including the leading `/`)
         /// where the completed range begins.
         start: usize,
-        options: Vec<String>,
+        options: Vec<crate::ui::chat::ChatSuggestion>,
     },
     BlockUpdate {
         pos: BlockPos,
@@ -179,6 +314,10 @@ pub enum NetworkEvent {
         pitch: f32,
         seed: u64,
     },
+    StopSound {
+        sound_id: Option<String>,
+        category: Option<u8>,
+    },
     TimeUpdate {
         game_time: u64,
         day_time: Option<u64>,
@@ -189,9 +328,19 @@ pub enum NetworkEvent {
     },
     GameModeChanged {
         game_mode: u8,
+        /// `Some` = authoritative previous mode from login/respawn (which may
+        /// itself be absent); `None` = derive from the mode being replaced
+        /// (the GameEvent packet carries no previous mode).
+        previous: Option<Option<u8>>,
+    },
+    DimensionName {
+        name: String,
     },
     PlayerAbilitiesChanged {
         flying: bool,
+        can_fly: bool,
+        flying_speed: f32,
+        walking_speed: f32,
     },
     ServerViewDistance {
         distance: u32,
@@ -225,9 +374,18 @@ pub enum NetworkEvent {
         x_rot_deg: f32,
         on_ground: bool,
     },
+    EntityRotated {
+        id: i32,
+        y_rot_deg: f32,
+        x_rot_deg: f32,
+        on_ground: bool,
+    },
     EntityMotion {
         id: i32,
         velocity: DVec3,
+    },
+    PlayerKnockback {
+        delta: DVec3,
     },
     EntityTeleported {
         id: i32,
@@ -265,24 +423,35 @@ pub enum NetworkEvent {
         id: i32,
         item_name: String,
         item_id: u32,
+        damage: i32,
         count: i32,
     },
     EntityHeadRotation {
         id: i32,
         head_y_rot_deg: f32,
     },
-    EntityBabyFlag {
+    /// A raw scalar entity-data value; `EntityStore::apply_entity_data`
+    /// resolves its meaning per (kind, index) like vanilla's
+    /// `onSyncedDataUpdated`.
+    EntityData {
         id: i32,
-        is_baby: bool,
+        index: u8,
+        value: MetaValue,
     },
     EntityPose {
         id: i32,
         is_crouching: bool,
     },
-    SheepWoolData {
+    /// LivingEntity metadata index 14 (SLEEPING_POS): Some while in a bed.
+    /// Vanilla `isSleeping()` is `getSleepingPos().isPresent()`.
+    EntitySleepingPos {
         id: i32,
-        color: u8,
-        sheared: bool,
+        pos: Option<BlockPos>,
+    },
+    /// `ClientboundAnimate` action 2: vanilla `handleAnimate` calls
+    /// `stopSleepInBed(false, false)`, forcing the sleep counter to 100.
+    EntityWakeUp {
+        id: i32,
     },
     SheepEatStart {
         id: i32,
@@ -291,9 +460,31 @@ pub enum NetworkEvent {
     FinishUseItem {
         id: i32,
     },
-    CowVariant {
+    /// Registry/wire variant slot; meaning is per-kind. `kind` is the mob
+    /// the emitting arm resolved for, guarding overloaded metadata indices.
+    EntityVariant {
         id: i32,
-        variant: u8,
+        kind: EntityKind,
+        variant: u32,
+    },
+    WolfShaking {
+        id: i32,
+        shaking: bool,
+    },
+    RabbitJump {
+        id: i32,
+    },
+    SquidTentacleReset {
+        id: i32,
+    },
+    /// Entity event 4: iron golem punch.
+    GolemPunch {
+        id: i32,
+    },
+    /// Entity events 11 / 34: iron golem flower offer start / stop.
+    GolemOfferFlower {
+        id: i32,
+        offering: bool,
     },
     VillagerData {
         id: i32,
@@ -301,27 +492,22 @@ pub enum NetworkEvent {
         profession: VillagerProfession,
         level: u32,
     },
-    VillagerUnhappy {
-        id: i32,
-        counter: i32,
-    },
     EntityCustomName {
         id: i32,
         name: Option<String>,
     },
-    EntityAggressive {
-        id: i32,
-        aggressive: bool,
-    },
     EntitySwing {
         id: i32,
     },
-    CreeperPowered {
-        id: i32,
-        powered: bool,
-    },
     EntityDamaged {
         id: i32,
+    },
+    EntityDied {
+        id: i32,
+    },
+    HurtAnimation {
+        id: i32,
+        yaw: f32,
     },
     ItemPickedUp {
         item_id: i32,
@@ -330,12 +516,29 @@ pub enum NetworkEvent {
     },
     PlayerLogin {
         entity_id: i32,
+        hardcore: bool,
+        show_death_screen: bool,
+        online_mode: bool,
+    },
+    SecureChatEnforced {
+        enforced: bool,
     },
     PlayerScore {
         entity_id: i32,
         score: i32,
     },
+    PlayerAbsorption {
+        entity_id: i32,
+        absorption: f32,
+    },
+    /// Vanilla `handleRespawn`: a fresh `LocalPlayer` is built, restoring old
+    /// entity data / attribute modifiers only per the packet's keep flags.
+    PlayerRespawned {
+        keep_entity_data: bool,
+        keep_attribute_modifiers: bool,
+    },
     PlayerDied {
+        player_id: i32,
         message: String,
     },
     ResourcePackPush {
@@ -347,6 +550,9 @@ pub enum NetworkEvent {
     ResourcePackPop {
         id: Option<uuid::Uuid>,
     },
+    /// The server re-entered the configuration phase (a proxy transfer);
+    /// world-scoped state resets like vanilla's `clearClientLevel`.
+    Reconfiguring,
     Disconnected {
         reason: String,
     },
@@ -358,7 +564,50 @@ pub enum NetworkEvent {
         uuids: Vec<uuid::Uuid>,
     },
     TabListHeaderFooter {
-        header: String,
-        footer: String,
+        header: Vec<crate::ui::text::TextSpan>,
+        footer: Vec<crate::ui::text::TextSpan>,
     },
+}
+
+/// The client information pomme reports. The configuration and game phase
+/// packets wrap the same struct under different field names, and 1.20.1 sends
+/// it in the game phase only, so all three sites share this.
+pub fn client_information(
+    view_distance: u8,
+    chat_options: crate::ui::chat::ChatOptions,
+) -> azalea_protocol::common::client_information::ClientInformation {
+    use azalea_entity::HumanoidArm;
+    use azalea_protocol::common::client_information::*;
+    let chat_visibility = match chat_options.visibility {
+        crate::ui::chat::ChatVisibilitySetting::Full => ChatVisibility::Full,
+        crate::ui::chat::ChatVisibilitySetting::System => ChatVisibility::System,
+        crate::ui::chat::ChatVisibilitySetting::Hidden => ChatVisibility::Hidden,
+    };
+    ClientInformation {
+        language: "en_us".into(),
+        view_distance,
+        chat_visibility,
+        chat_colors: chat_options.colors,
+        model_customization: ModelCustomization {
+            cape: true,
+            jacket: true,
+            left_sleeve: true,
+            right_sleeve: true,
+            left_pants: true,
+            right_pants: true,
+            hat: true,
+        },
+        main_hand: HumanoidArm::Right,
+        text_filtering_enabled: false,
+        allows_listing: true,
+        particle_status: ParticleStatus::All,
+    }
+}
+
+/// The `minecraft:brand` payload pomme announces itself with. Sent from the
+/// configuration phase, or the game phase on versions without one.
+pub fn brand_payload() -> Vec<u8> {
+    let mut out = Vec::new();
+    azalea_core::delta::AzBuf::azalea_write(&String::from("pomme"), &mut out).unwrap();
+    out
 }

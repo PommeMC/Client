@@ -1,34 +1,55 @@
+mod credits;
 mod friends_screen;
-mod helpers;
+pub(crate) mod helpers;
 mod main_screen;
 mod options;
 mod servers;
+mod splash;
+mod title_screen;
+mod worlds;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use winit::keyboard::KeyCode;
 
 use crate::app::core::DisplayMode;
+use crate::audio::SoundCategory;
 use crate::renderer::CloudMode;
 use crate::renderer::pipelines::menu_overlay::{
     ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_GEAR, ICON_GLOBE, ICON_LANGUAGE, ICON_LINK,
     ICON_PAINTBRUSH, ICON_UNIVERSAL_ACCESS, ICON_USER, ICON_USERS, MenuElement, SpriteId,
     TooltipLine,
 };
+use crate::ui::chat::ChatOptions;
+use crate::ui::font::FontOptions;
+use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
 #[derive(Serialize, Deserialize)]
 struct Settings {
     gui_scale: u32,
     render_distance: u32,
+    #[serde(default = "default_chunk_detail")]
+    chunk_detail: u32,
     simulation_distance: u32,
     #[serde(default = "default_fov")]
     fov: u32,
     #[serde(default = "default_fov_effect_scale")]
     fov_effect_scale: f32,
+    #[serde(default = "default_damage_tilt_strength")]
+    damage_tilt_strength: f32,
+    #[serde(default = "default_sensitivity")]
+    sensitivity: f32,
     #[serde(default = "default_true")]
     view_bobbing: bool,
+    #[serde(default)]
+    show_subtitles: bool,
+    #[serde(default = "default_true")]
+    vignette: bool,
+    #[serde(default = "default_true")]
+    show_autosave_indicator: bool,
     #[serde(default = "default_true")]
     vsync: bool,
     #[serde(default = "default_max_framerate")]
@@ -77,6 +98,18 @@ struct Settings {
     ui_volume: f32,
     #[serde(default = "default_cloud_mode")]
     cloud_mode: u8,
+    #[serde(default = "default_attack_indicator")]
+    attack_indicator: u8,
+    #[serde(default)]
+    display_mode: u8,
+    #[serde(default)]
+    theme: u8,
+    #[serde(default)]
+    chat: ChatOptions,
+    #[serde(default)]
+    force_unicode_font: bool,
+    #[serde(default = "default_japanese_glyph_variants")]
+    japanese_glyph_variants: bool,
 }
 
 fn default_fov() -> u32 {
@@ -95,12 +128,47 @@ fn default_fov_effect_scale() -> f32 {
     1.0
 }
 
+fn default_damage_tilt_strength() -> f32 {
+    1.0
+}
+
+/// Vanilla's `OptionInstance.UnitDouble` range, for sliders an out-of-range
+/// options.json would otherwise feed straight into a render or input curve.
+fn unit_range(value: f32) -> f32 {
+    value.clamp(0.0, 1.0)
+}
+
+fn default_sensitivity() -> f32 {
+    0.5
+}
+
 fn default_cloud_mode() -> u8 {
     2
 }
 
+fn default_attack_indicator() -> u8 {
+    1
+}
+
 fn default_true() -> bool {
     true
+}
+
+// TODO: vanilla reads `Locale.getDefault()`, which follows the OS locale;
+// these variables are usually unset on Windows.
+fn default_japanese_glyph_variants() -> bool {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok())
+        .is_some_and(|locale| {
+            locale.eq_ignore_ascii_case("ja")
+                || locale.starts_with("ja_")
+                || locale.starts_with("ja-")
+        })
+}
+
+fn default_chunk_detail() -> u32 {
+    8
 }
 
 fn default_volume() -> f32 {
@@ -112,10 +180,16 @@ impl Default for Settings {
         Self {
             gui_scale: 0,
             render_distance: 12,
+            chunk_detail: 8,
             simulation_distance: 12,
             fov: 70,
             fov_effect_scale: 1.0,
+            damage_tilt_strength: 1.0,
+            sensitivity: 0.5,
             view_bobbing: true,
+            show_subtitles: false,
+            show_autosave_indicator: true,
+            vignette: true,
             vsync: true,
             max_framerate: 120,
             show_online_status: true,
@@ -140,6 +214,12 @@ impl Default for Settings {
             voice_volume: 1.0,
             ui_volume: 1.0,
             cloud_mode: 2,
+            attack_indicator: 1,
+            display_mode: 0,
+            theme: 0,
+            chat: ChatOptions::default(),
+            force_unicode_font: false,
+            japanese_glyph_variants: default_japanese_glyph_variants(),
         }
     }
 }
@@ -152,14 +232,19 @@ fn load_settings(game_dir: &Path) -> Settings {
         .unwrap_or_default()
 }
 
-fn save_settings(game_dir: &Path, settings: &Settings) {
+fn save_settings(game_dir: &Path, settings: &Settings) -> std::io::Result<()> {
     let path = game_dir.join("options.json");
-    if let Ok(json) = serde_json::to_string_pretty(settings) {
-        let _ = std::fs::write(path, json);
+    let result = serde_json::to_string_pretty(settings)
+        .map_err(std::io::Error::other)
+        .and_then(|json| crate::util::write_atomic(&path, json.as_bytes()));
+    if let Err(error) = &result {
+        tracing::warn!("Failed to save options to {}: {error}", path.display());
     }
+    result
 }
 
 use helpers::*;
+use servers::TextTarget;
 
 use super::common;
 use super::common::WHITE;
@@ -169,10 +254,35 @@ use super::server_list::{
     ping_all_servers,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanoramaTheme {
     Pomme,
     Default,
+}
+
+impl PanoramaTheme {
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Pomme => 0,
+            Self::Default => 1,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Default,
+            _ => Self::Pomme,
+        }
+    }
+
+    /// The panorama cubemap each theme draws: vanilla's ships in the version
+    /// jar, Pomme's alongside the rest of the branded assets.
+    pub fn panorama_dir(self, dirs: &crate::dirs::DataDirs) -> std::path::PathBuf {
+        match self {
+            Self::Default => dirs.jar_assets_dir.clone(),
+            Self::Pomme => dirs.pomme_assets_dir.join("panoramas"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -201,35 +311,122 @@ pub enum MenuAction {
         protocol: Option<i32>,
     },
     ChangeTheme(PanoramaTheme),
+    /// Open the singleplayer world in this save folder.
+    PlayWorld {
+        folder: String,
+    },
     Quit,
 }
 
 pub struct MainMenuResult {
     pub elements: Vec<MenuElement>,
     pub action: MenuAction,
+    // TODO: vanilla `AbstractWidget.handleCursor` wants NOT_ALLOWED over a
+    // hovered inactive widget; one bool only says pointer or arrow.
     pub cursor_pointer: bool,
     pub blur: f32,
     pub clicked_button: bool,
 }
 
+#[derive(Default)]
 pub struct MenuInput {
     pub cursor: (f32, f32),
     pub clicked: bool,
     pub mouse_held: bool,
-    pub typed_chars: Vec<char>,
-    pub backspace: bool,
+    /// Ordered key/char events for the focused text field, mirroring vanilla's
+    /// `keyPressed` + `charTyped` pair (drained once per frame in
+    /// `build_menu_input`).
+    pub events: Vec<TextInputEvent>,
+    /// Shift held this frame, for Shift+Tab reverse focus and shift-click
+    /// select.
+    pub shift: bool,
     pub enter: bool,
     pub escape: bool,
     pub tab: bool,
     pub f5: bool,
-    pub select_all: bool,
-    pub copy: bool,
-    pub cut: bool,
-    pub undo: bool,
+    /// Net DPad Right minus Left this frame: one step on the press edge, then
+    /// auto-repeat. Folded into `arrow_steps`.
+    pub gamepad_steps: i32,
     pub scroll_delta: f32,
+    /// Seconds since the last frame, clamped against stalls by the app loop.
+    /// Only the credits roll accumulates a delta; the other menu animations
+    /// time off an anchor `Instant`.
+    pub dt: f32,
+    /// `CREDITS_KEY_*` masks of the roll's keys. `pressed` carries OS key
+    /// repeats, as vanilla's `KeyboardHandler` routes those to `keyPressed`.
+    pub credits_keys_down: u8,
+    pub credits_keys_pressed: u8,
 }
 
-const HEADER_H: f32 = 33.0;
+/// `WinScreen.direction`.
+pub const CREDITS_KEY_UP: u8 = 1 << 0;
+/// `WinScreen.speedupActive`.
+pub const CREDITS_KEY_SPACE: u8 = 1 << 1;
+/// `WinScreen.speedupModifiers` holds keys 341 / 345, the two Control keys,
+/// and counts them.
+pub const CREDITS_KEY_CTRL_L: u8 = 1 << 2;
+pub const CREDITS_KEY_CTRL_R: u8 = 1 << 3;
+
+impl MenuInput {
+    /// Neutral input: builds a screen for its visuals only, with no hover,
+    /// click or key state.
+    pub fn backdrop() -> Self {
+        Self {
+            cursor: (-1.0, -1.0),
+            clicked: false,
+            mouse_held: false,
+            events: Vec::new(),
+            shift: false,
+            enter: false,
+            escape: false,
+            tab: false,
+            f5: false,
+            gamepad_steps: 0,
+            scroll_delta: 0.0,
+            dt: 0.0,
+            credits_keys_down: 0,
+            credits_keys_pressed: 0,
+        }
+    }
+
+    /// `InputWithModifiers.isSelection`: Enter / NumpadEnter (folded into
+    /// `enter`) or Space with no modifiers activates the focused widget.
+    pub fn activate(&self) -> bool {
+        self.enter
+            || self.events.iter().any(|e| {
+                matches!(
+                    e,
+                    TextInputEvent::Key { code: KeyCode::Space, mods }
+                        if !mods.ctrl && !mods.alt && !mods.super_key && !mods.shift
+                )
+            })
+    }
+
+    /// Net Right minus Left this frame: arrow-key presses with their OS
+    /// repeats, plus the DPad's edge-and-repeat steps
+    /// (`AbstractSliderButton.keyPressed`).
+    pub fn arrow_steps(&self) -> i32 {
+        let keys: i32 = self
+            .events
+            .iter()
+            .map(|e| match e {
+                TextInputEvent::Key {
+                    code: KeyCode::ArrowRight,
+                    ..
+                } => 1,
+                TextInputEvent::Key {
+                    code: KeyCode::ArrowLeft,
+                    ..
+                } => -1,
+                _ => 0,
+            })
+            .sum();
+        keys + self.gamepad_steps
+    }
+}
+
+/// Vanilla `HeaderAndFooterLayout.DEFAULT_HEADER_AND_FOOTER_HEIGHT`.
+const HEADER_FOOTER_H: f32 = 33.0;
 const ENTRY_H: f32 = 36.0;
 /// Inset (GUI units) keeping server-list entry content off the raw row edges.
 const SERVER_ENTRY_PAD: f32 = 2.0;
@@ -240,11 +437,15 @@ const TOP_BTN_W: f32 = 100.0;
 const BOT_BTN_W: f32 = 74.0;
 const SEP_H: f32 = 2.0;
 const FIELD_H: f32 = 20.0;
+/// Text a field can show: its width less the 4-unit padding on each side.
+const FIELD_TEXT_PAD: f32 = 8.0;
 
 const COL_DIM: [f32; 4] = [0.55, 0.57, 0.69, 1.0];
 const COL_DARK_DIM: [f32; 4] = [0.4, 0.42, 0.52, 1.0];
 const COL_RED: [f32; 4] = [0.88, 0.25, 0.32, 1.0];
 const COL_SEP: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
+/// Tint of the "Pomme" wordmark, on the title screen and in the credits roll.
+const COL_WORDMARK: [f32; 4] = [0.94, 0.96, 0.99, 0.95];
 
 const FIELD_BG: [f32; 4] = [0.06, 0.07, 0.14, 0.8];
 const FIELD_BORDER: [f32; 4] = [1.0, 1.0, 1.0, 0.08];
@@ -255,6 +456,10 @@ const DOUBLE_CLICK_MS: u128 = 400;
 enum Screen {
     Main,
     ServerList,
+    WorldList,
+    CreateWorld,
+    EditWorld(String),
+    ConfirmDeleteWorld(String),
     Friends,
     ConfirmDelete(usize),
     DirectConnect,
@@ -269,11 +474,13 @@ enum Screen {
     OptionsControls,
     OptionsKeybinds,
     OptionsLanguage,
+    OptionsFontSettings,
     OptionsChatSettings,
     OptionsResourcePacks,
     OptionsAccessibility,
     OptionsTelemetry,
     OptionsCredits,
+    CreditsRoll,
 }
 
 impl Screen {
@@ -289,12 +496,18 @@ impl Screen {
             Self::OptionsControls => Self::OptionsControls,
             Self::OptionsKeybinds => Self::OptionsKeybinds,
             Self::OptionsLanguage => Self::OptionsLanguage,
+            Self::OptionsFontSettings => Self::OptionsFontSettings,
             Self::OptionsChatSettings => Self::OptionsChatSettings,
             Self::OptionsResourcePacks => Self::OptionsResourcePacks,
             Self::OptionsAccessibility => Self::OptionsAccessibility,
             Self::OptionsTelemetry => Self::OptionsTelemetry,
             Self::OptionsCredits => Self::OptionsCredits,
+            Self::CreditsRoll => Self::CreditsRoll,
             Self::ServerList => Self::ServerList,
+            Self::WorldList => Self::WorldList,
+            Self::CreateWorld => Self::CreateWorld,
+            Self::EditWorld(f) => Self::EditWorld(f.clone()),
+            Self::ConfirmDeleteWorld(f) => Self::ConfirmDeleteWorld(f.clone()),
             Self::DirectConnect => Self::DirectConnect,
             Self::AddServer => Self::AddServer,
             Self::ConfirmDelete(i) => Self::ConfirmDelete(*i),
@@ -329,8 +542,17 @@ pub struct MainMenu {
     screen: Screen,
     server_list: ServerList,
     selected_server: Option<usize>,
-    edit_name: String,
-    edit_address: String,
+    world_list: crate::ui::world_list::WorldList,
+    /// Keyed by folder name, not row index: filtering rebuilds the rows every
+    /// frame, so an index would follow the filter rather than the world.
+    selected_world: Option<String>,
+    world_search: TextFieldState,
+    world_name: TextFieldState,
+    world_seed: TextFieldState,
+    create: worlds::CreateWorldState,
+    saves_dir: PathBuf,
+    edit_name: TextFieldState,
+    edit_address: TextFieldState,
     last_mp_ip: String,
     ping_results: PingResults,
     ping_generation: PingGeneration,
@@ -340,35 +562,60 @@ pub struct MainMenu {
     last_face_count: usize,
     face_dirty_since: Option<Instant>,
     friend_tab: FriendTab,
-    add_friend_name: String,
+    add_friend_name: TextFieldState,
     action_error: ActionError,
     pending_remove: Option<(String, String)>,
     rt: Arc<tokio::runtime::Runtime>,
     links_open: bool,
     theme_open: bool,
     /// Return target for Language/Accessibility, which open from both the
-    /// title-screen icon row and the Options grid.
+    /// title-screen icon row and the Options grid, and for Chat Settings,
+    /// which also open from chat.
     settings_back: Screen,
     theme: PanoramaTheme,
     transition: Option<ThemeTransition>,
     scroll_offset: f32,
+    /// Which text field of the current form has keyboard focus (index within
+    /// the form). Separate from `focus` (button/widget focus ring).
     focused_field: Option<u8>,
-    field_all_selected: bool,
     last_field_click_time: Instant,
     last_field_click: Option<u8>,
+    /// Ctrl+Z history per field index (pomme extra; vanilla EditBox has none).
     field_undo_stack: Vec<(u8, String)>,
-    cursor_blink: Instant,
+    /// Keyboard focus index into the current screen's focusable widgets
+    /// (buttons and sliders). `focusable_count` records how many the last
+    /// frame built, so Tab can wrap before the count for this frame is known.
+    focus: Option<usize>,
+    focusable_count: usize,
+    /// Bumped by `set_screen`, so a frame that swapped screens mid-build
+    /// doesn't write its focus into the new screen.
+    screen_gen: u32,
     last_click_time: Instant,
     /// Steady clock for label scroll animation.
     created: Instant,
+    /// Credits roll position in unscaled GUI units, and the `CREDITS_KEY_*`
+    /// mask latched from presses and releases the way `WinScreen` latches its.
+    credits_scroll: f32,
+    credits_keys: u8,
     last_click_index: Option<usize>,
     pub gui_scale_setting: u32,
     pub render_distance: u32,
+    /// Radius of full-detail meshing (LOD 0), in chunks; coarser LODs start
+    /// beyond it. Pomme-custom: vanilla has no LOD, this buys its look back
+    /// within a VRAM budget.
+    pub chunk_detail: u32,
     pub simulation_distance: u32,
+    /// Server-announced view distance cap; 0 when unknown (slider runs 2..32).
+    pub server_render_distance: u32,
     pub fov: u32,
     /// FOV Effects slider fraction (0..1); squared by `fov_effect()`.
     pub fov_effect_scale: f32,
+    pub damage_tilt_strength: f32,
+    pub sensitivity: f32,
     pub view_bobbing: bool,
+    pub show_subtitles: bool,
+    pub show_autosave_indicator: bool,
+    pub vignette: bool,
     pub vsync: bool,
     pub max_framerate: u32,
     pub show_online_status: bool,
@@ -394,8 +641,20 @@ pub struct MainMenu {
     skin_main_hand_right: bool,
     pub display_mode: DisplayMode,
     pub cloud_mode: CloudMode,
+    pub attack_indicator: crate::ui::hud::AttackIndicatorMode,
+    /// `AbstractSliderButton.canChangeValue` for the focused slider: armed
+    /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
+    slider_can_change_value: bool,
+    pub chat_options: ChatOptions,
+    pub force_unicode_font: bool,
+    pub japanese_glyph_variants: bool,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
+    /// Set by slider drags, written by `flush_settings`.
+    settings_dirty: bool,
+    /// The title screen's splash line, rolled at launch and on every return
+    /// from a world like vanilla's fresh `TitleScreen`. `None` renders nothing.
+    pub splash: Option<String>,
     menu_open_time: Option<Instant>,
     last_favicon_count: usize,
     favicon_dirty_since: Option<Instant>,
@@ -405,8 +664,19 @@ pub struct MainMenu {
     pub pack_toggle: Option<(String, bool)>,
     pub rescan_packs: bool,
     pub reload_assets: bool,
-    pack_search: String,
+    /// Set by a Font Settings toggle, applied by `AppCore::apply_font_options`.
+    pub reload_fonts: bool,
+    pack_search: TextFieldState,
 }
+
+/// Vanilla EditBox max lengths (UTF-16 units): server name uses the EditBox
+/// default (`EditBox.maxLength = 32`), the address is `128` per
+/// `ManageServerScreen`/`DirectJoinServerScreen`. Friend name has no vanilla
+/// analog, so cap at a Minecraft username length.
+const MAX_NAME: usize = 32;
+const MAX_ADDRESS: usize = 128;
+const MAX_FRIEND: usize = 16;
+const MAX_SEARCH: usize = 128;
 
 impl MainMenu {
     pub fn new(
@@ -417,6 +687,7 @@ impl MainMenu {
         access_token: Option<String>,
     ) -> Self {
         let server_list = ServerList::load(game_dir);
+        let saves_dir = game_dir.join("saves");
         // Servers ping lazily as their rows draw (build_server_list), not at boot.
         let ping_results: PingResults = Default::default();
         let settings = load_settings(game_dir);
@@ -426,8 +697,15 @@ impl MainMenu {
             screen: Screen::Main,
             server_list,
             selected_server: None,
-            edit_name: String::new(),
-            edit_address: String::new(),
+            world_list: crate::ui::world_list::WorldList::scan(&saves_dir),
+            selected_world: None,
+            world_search: TextFieldState::new(MAX_SEARCH),
+            world_name: TextFieldState::new(MAX_NAME),
+            world_seed: TextFieldState::new(MAX_NAME),
+            create: worlds::CreateWorldState::default(),
+            saves_dir,
+            edit_name: TextFieldState::new(MAX_NAME),
+            edit_address: TextFieldState::new(MAX_ADDRESS),
             last_mp_ip: String::new(),
             ping_results,
             ping_generation: Default::default(),
@@ -437,31 +715,43 @@ impl MainMenu {
             last_face_count: 0,
             face_dirty_since: None,
             friend_tab: FriendTab::Friends,
-            add_friend_name: String::new(),
+            add_friend_name: TextFieldState::new(MAX_FRIEND),
             action_error: Default::default(),
             pending_remove: None,
             rt,
             links_open: false,
             theme_open: false,
             settings_back: Screen::Options,
-            theme: PanoramaTheme::Pomme,
+            theme: PanoramaTheme::from_u8(settings.theme),
             transition: None,
             scroll_offset: 0.0,
             focused_field: None,
-            field_all_selected: false,
             last_field_click_time: Instant::now(),
             last_field_click: None,
             field_undo_stack: Vec::new(),
-            cursor_blink: Instant::now(),
+            focus: None,
+            focusable_count: 0,
+            screen_gen: 0,
             last_click_time: Instant::now(),
             created: Instant::now(),
+            credits_scroll: 0.0,
+            credits_keys: 0,
             last_click_index: None,
             gui_scale_setting: settings.gui_scale,
             render_distance: settings.render_distance,
+            chunk_detail: settings.chunk_detail,
             simulation_distance: settings.simulation_distance,
+            server_render_distance: 0,
             fov: settings.fov,
             fov_effect_scale: settings.fov_effect_scale,
+            damage_tilt_strength: unit_range(settings.damage_tilt_strength),
+            // Cubed by the look curve, so an out-of-range value reaches
+            // infinity and leaves the look direction NaN for good.
+            sensitivity: unit_range(settings.sensitivity),
             view_bobbing: settings.view_bobbing,
+            show_subtitles: settings.show_subtitles,
+            show_autosave_indicator: settings.show_autosave_indicator,
+            vignette: settings.vignette,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
             show_online_status: settings.show_online_status,
@@ -485,10 +775,19 @@ impl MainMenu {
             skin_right_pants: settings.skin_right_pants,
             skin_hat: settings.skin_hat,
             skin_main_hand_right: settings.skin_main_hand_right,
-            display_mode: DisplayMode::Windowed,
+            display_mode: DisplayMode::from_u8(settings.display_mode),
             cloud_mode: CloudMode::from_u8(settings.cloud_mode),
+            attack_indicator: crate::ui::hud::AttackIndicatorMode::from_u8(
+                settings.attack_indicator,
+            ),
+            slider_can_change_value: true,
+            chat_options: settings.chat.sanitized(),
+            force_unicode_font: settings.force_unicode_font,
+            japanese_glyph_variants: settings.japanese_glyph_variants,
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
+            settings_dirty: false,
+            splash: None,
             menu_open_time: None,
             last_favicon_count: 0,
             favicon_dirty_since: None,
@@ -498,17 +797,29 @@ impl MainMenu {
             pack_toggle: None,
             rescan_packs: false,
             reload_assets: false,
-            pack_search: String::new(),
+            reload_fonts: false,
+            pack_search: TextFieldState::new(MAX_SEARCH),
         }
     }
 
+    /// Chat Settings opened from chat; leaving them leaves the menu, back to
+    /// the chat screen that opened them.
+    pub fn open_chat_settings(&mut self) {
+        self.settings_back = Screen::Main;
+        self.set_screen(Screen::OptionsChatSettings);
+    }
+
     fn set_screen(&mut self, screen: Screen) {
+        self.flush_settings();
         self.screen = screen;
         self.focused_field = None;
-        self.field_all_selected = false;
+        self.focus = None;
+        self.screen_gen += 1;
+        self.slider_can_change_value = true;
+        self.active_slider = None;
+        self.focusable_count = 0;
         self.last_field_click = None;
         self.field_undo_stack.clear();
-        self.cursor_blink = Instant::now();
         // Favicons and friend faces share one GPU atlas; force a rebuild on
         // screen change so the correct set loads for the screen we're entering.
         self.last_favicon_count = usize::MAX;
@@ -524,34 +835,65 @@ impl MainMenu {
         self.fov_effect_scale * self.fov_effect_scale
     }
 
-    /// Per-category volumes in `SoundCategory` order
-    /// (master, music, records, weather, blocks, hostile, neutral, players,
-    /// ambient, voice) for the audio engine.
-    pub fn category_volumes(&self) -> [f32; 10] {
-        [
-            self.master_volume,
-            self.music_volume,
-            self.jukebox_volume,
-            self.weather_volume,
-            self.blocks_volume,
-            self.hostile_volume,
-            self.friendly_volume,
-            self.players_volume,
-            self.ambient_volume,
-            self.voice_volume,
-        ]
+    pub(crate) fn gui_scale(&self, screen_w: f32, screen_h: f32) -> f32 {
+        crate::ui::hud::gui_scale(
+            screen_w,
+            screen_h,
+            self.gui_scale_setting,
+            self.force_unicode_font,
+        )
     }
 
-    fn save_settings(&self) {
-        save_settings(
+    pub(crate) fn font_options(&self) -> FontOptions {
+        FontOptions {
+            uniform: self.force_unicode_font,
+            japanese_variants: self.japanese_glyph_variants,
+        }
+    }
+
+    /// Per-category volumes for the audio engine, indexed by `SoundCategory`;
+    /// the exhaustive match keeps a new category from compiling without a
+    /// slider.
+    pub fn category_volumes(&self) -> [f32; SoundCategory::COUNT] {
+        std::array::from_fn(|index| match SoundCategory::from_index(index as u8) {
+            SoundCategory::Master => self.master_volume,
+            SoundCategory::Music => self.music_volume,
+            SoundCategory::Records => self.jukebox_volume,
+            SoundCategory::Weather => self.weather_volume,
+            SoundCategory::Blocks => self.blocks_volume,
+            SoundCategory::Hostile => self.hostile_volume,
+            SoundCategory::Neutral => self.friendly_volume,
+            SoundCategory::Players => self.players_volume,
+            SoundCategory::Ambient => self.ambient_volume,
+            SoundCategory::Voice => self.voice_volume,
+            SoundCategory::Ui => self.ui_volume,
+        })
+    }
+
+    /// Writes pending slider changes, vanilla `OptionsSubScreen.removed()`.
+    pub fn flush_settings(&mut self) {
+        if self.settings_dirty {
+            self.save_settings();
+        }
+    }
+
+    fn save_settings(&mut self) {
+        // A failed write stays dirty so the next screen change retries it.
+        self.settings_dirty = save_settings(
             &self.settings_dir,
             &Settings {
                 gui_scale: self.gui_scale_setting,
                 render_distance: self.render_distance,
+                chunk_detail: self.chunk_detail,
                 simulation_distance: self.simulation_distance,
                 fov: self.fov,
                 fov_effect_scale: self.fov_effect_scale,
+                damage_tilt_strength: self.damage_tilt_strength,
+                sensitivity: self.sensitivity,
                 view_bobbing: self.view_bobbing,
+                show_subtitles: self.show_subtitles,
+                show_autosave_indicator: self.show_autosave_indicator,
+                vignette: self.vignette,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,
                 show_online_status: self.show_online_status,
@@ -576,11 +918,29 @@ impl MainMenu {
                 skin_hat: self.skin_hat,
                 skin_main_hand_right: self.skin_main_hand_right,
                 cloud_mode: self.cloud_mode.to_u8(),
+                attack_indicator: self.attack_indicator.to_u8(),
+                display_mode: self.display_mode.to_u8(),
+                theme: self.theme.to_u8(),
+                chat: self.chat_options,
+                force_unicode_font: self.force_unicode_font,
+                japanese_glyph_variants: self.japanese_glyph_variants,
             },
-        );
+        )
+        .is_err();
+    }
+
+    pub fn set_display_mode(&mut self, display_mode: DisplayMode) {
+        self.display_mode = display_mode;
+        self.save_settings();
+    }
+
+    pub fn main_hand_right(&self) -> bool {
+        self.skin_main_hand_right
     }
 
     pub fn open_options(&mut self) {
+        // Stale after a disconnect; the in-game path re-sets it every frame.
+        self.server_render_distance = 0;
         self.set_screen(Screen::Options);
     }
 
@@ -606,11 +966,13 @@ impl MainMenu {
                 | Screen::OptionsControls
                 | Screen::OptionsKeybinds
                 | Screen::OptionsLanguage
+                | Screen::OptionsFontSettings
                 | Screen::OptionsChatSettings
                 | Screen::OptionsResourcePacks
                 | Screen::OptionsAccessibility
                 | Screen::OptionsTelemetry
                 | Screen::OptionsCredits
+                | Screen::CreditsRoll
         )
     }
 
@@ -622,6 +984,34 @@ impl MainMenu {
 
     pub fn is_main_screen(&self) -> bool {
         matches!(self.screen, Screen::Main)
+    }
+
+    pub fn theme(&self) -> PanoramaTheme {
+        self.theme
+    }
+
+    /// The rotating 3D skin is Pomme's own chrome; the vanilla title screen
+    /// has no such thing.
+    pub fn show_skin_preview(&self) -> bool {
+        self.is_main_screen() && self.theme == PanoramaTheme::Pomme
+    }
+
+    /// Picks the title screen's splash line. Separate from `new` because the
+    /// asset index it reads through isn't built until after the menu is.
+    pub fn load_splash(
+        &mut self,
+        jar_assets_dir: &Path,
+        asset_index: &Option<crate::assets::AssetIndex>,
+    ) {
+        let now =
+            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        self.splash = splash::pick(
+            jar_assets_dir,
+            asset_index,
+            &self.username,
+            now.month() as u32,
+            u32::from(now.day()),
+        );
     }
 
     pub fn is_server_list_screen(&self) -> bool {
@@ -690,6 +1080,61 @@ impl MainMenu {
         self.set_screen(Screen::Disconnected(reason));
     }
 
+    /// Resolves a world for launch, since the world list and the saves
+    /// directory are private to the menu.
+    pub fn world_to_launch(
+        &self,
+        folder: &str,
+    ) -> Option<(crate::ui::world_list::WorldSummary, PathBuf)> {
+        let world = self.world_list.get(folder)?.clone();
+        Some((world, self.saves_dir.join(folder)))
+    }
+
+    /// Marks a world as played once its server has opened, so a failed launch
+    /// leaves the list order alone.
+    pub fn world_played(&mut self, folder: &str) {
+        if let Err(error) = self.world_list.touch_last_played(folder) {
+            tracing::warn!("Failed to record the last played time for {folder}: {error}");
+        }
+    }
+
+    /// Advance the button focus ring on Tab / Shift+Tab. Wrapping uses last
+    /// frame's widget count, since this frame's isn't known until the immediate
+    /// mode build finishes; the count is stable frame-to-frame.
+    fn focus_advance(&mut self, input: &MenuInput) {
+        if !input.tab {
+            return;
+        }
+        let n = self.focusable_count;
+        self.focus = (n != 0).then(|| helpers::step_ring(self.focus, n, input.shift));
+        // `setFocused` from a Tab arms keyboard editing on a slider.
+        self.slider_can_change_value = true;
+    }
+
+    fn make_focus_ctx(&self, input: &MenuInput) -> FocusCtx {
+        FocusCtx {
+            next_index: 0,
+            focus: self.focus,
+            clicked: input.clicked,
+            screen_gen: self.screen_gen,
+            activate: input.activate(),
+            fired: false,
+        }
+    }
+
+    /// Takes back the frame's focus and widget count, dropping a stale index;
+    /// a frame that switched screens leaves the new screen's reset alone.
+    fn finish_focus(&mut self, ctx: &FocusCtx) {
+        if ctx.screen_gen != self.screen_gen {
+            return;
+        }
+        self.focus = ctx.focus;
+        self.focusable_count = ctx.next_index;
+        if self.focus.is_some_and(|f| f >= ctx.next_index) {
+            self.focus = None;
+        }
+    }
+
     pub fn build(
         &mut self,
         screen_w: f32,
@@ -698,9 +1143,27 @@ impl MainMenu {
         text_width_fn: impl Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
         match self.screen {
-            Screen::Main => self.build_main(screen_w, screen_h, input, text_width_fn),
+            Screen::Main => {
+                let mut result = self.build_main(screen_w, screen_h, input, text_width_fn);
+                if let Some(action) =
+                    self.drive_theme_transition(&mut result.elements, screen_w, screen_h)
+                {
+                    result.action = action;
+                }
+                result
+            }
 
             Screen::ServerList => self.build_server_list(screen_w, screen_h, input, &text_width_fn),
+            Screen::WorldList => self.build_world_list(screen_w, screen_h, input, &text_width_fn),
+            Screen::CreateWorld => {
+                self.build_create_world(screen_w, screen_h, input, &text_width_fn)
+            }
+            Screen::EditWorld(_) => {
+                self.build_edit_world(screen_w, screen_h, input, &text_width_fn)
+            }
+            Screen::ConfirmDeleteWorld(_) => {
+                self.build_confirm_delete_world(screen_w, screen_h, input, &text_width_fn)
+            }
             Screen::Friends => self.build_friends(screen_w, screen_h, input, &text_width_fn),
             Screen::ConfirmDelete(_) => {
                 self.build_confirm_delete(screen_w, screen_h, input, &text_width_fn)
@@ -736,10 +1199,21 @@ impl MainMenu {
                 input,
                 "Keybinds",
                 Screen::OptionsControls,
+                None,
             ),
             Screen::OptionsLanguage => {
                 let back = self.settings_back.clone_screen();
-                self.build_options_stub(screen_w, screen_h, input, "Language", back)
+                self.build_options_stub(
+                    screen_w,
+                    screen_h,
+                    input,
+                    "Language",
+                    back,
+                    Some(("Font Settings...", Screen::OptionsFontSettings)),
+                )
+            }
+            Screen::OptionsFontSettings => {
+                self.build_options_font(screen_w, screen_h, input, &text_width_fn)
             }
             Screen::OptionsChatSettings => {
                 self.build_options_chat(screen_w, screen_h, input, &text_width_fn)
@@ -756,14 +1230,12 @@ impl MainMenu {
                 input,
                 "Telemetry Data",
                 Screen::Options,
+                None,
             ),
-            Screen::OptionsCredits => self.build_options_stub(
-                screen_w,
-                screen_h,
-                input,
-                "Credits & Attribution",
-                Screen::Options,
-            ),
+            Screen::OptionsCredits => self.build_options_credits(screen_w, screen_h, input),
+            Screen::CreditsRoll => {
+                self.build_credits_roll(screen_w, screen_h, input, &text_width_fn)
+            }
         }
     }
 
@@ -773,5 +1245,133 @@ impl MainMenu {
         self.ping_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.ping_results.write().clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn damage_tilt_defaults_to_full_strength_and_clamps_to_unit_range() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("damage_tilt_strength");
+        let legacy: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            legacy.damage_tilt_strength, 1.0,
+            "legacy settings should default Damage Tilt to vanilla's 100%"
+        );
+
+        for (stored, expected) in [(-0.25, 0.0), (0.35, 0.35), (1.25, 1.0)] {
+            assert_eq!(
+                unit_range(stored),
+                expected,
+                "stored slider value {stored} should clamp to {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_chat_settings_keep_the_rest() {
+        let mut json = serde_json::to_value(Settings {
+            fov: 90,
+            ..Settings::default()
+        })
+        .unwrap();
+        json["chat"] = serde_json::json!({ "opacity": 0.3 });
+        let loaded: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.fov, 90);
+        assert_eq!(
+            loaded.chat,
+            ChatOptions {
+                opacity: 0.3,
+                ..ChatOptions::default()
+            }
+        );
+    }
+
+    #[test]
+    fn chat_settings_sanitize_like_option_instance_set() {
+        let default = ChatOptions::default();
+        assert_eq!(default.sanitized(), default);
+        let invalid = ChatOptions {
+            opacity: 1.5,
+            scale: -0.1,
+            width: f32::NAN,
+            delay_secs: 7.0,
+            ..default
+        };
+        assert_eq!(invalid.sanitized(), default);
+        for (stored, expected) in [(0.55, 0.5), (6.0, 6.0), (-0.05, 0.0), (-1.0, 0.0)] {
+            let chat = ChatOptions {
+                delay_secs: stored,
+                ..default
+            };
+            assert_eq!(chat.sanitized().delay_secs, expected, "delay {stored}");
+        }
+        for tenths in 0..=60 {
+            let secs = tenths as f32 / 10.0;
+            let chat = ChatOptions {
+                delay_secs: secs,
+                ..default
+            };
+            assert_eq!(chat.sanitized().delay_secs, secs, "delay {secs}");
+        }
+    }
+
+    #[test]
+    fn font_variant_settings_round_trip() {
+        let settings = Settings {
+            force_unicode_font: true,
+            japanese_glyph_variants: false,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert!(loaded.force_unicode_font);
+        assert!(!loaded.japanese_glyph_variants);
+    }
+
+    #[test]
+    fn display_mode_settings_are_backward_compatible_and_round_trip() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("display_mode");
+        let legacy: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.display_mode, 0);
+
+        for mode in [
+            DisplayMode::Windowed,
+            DisplayMode::Borderless,
+            DisplayMode::Fullscreen,
+        ] {
+            let settings = Settings {
+                display_mode: mode.to_u8(),
+                ..Settings::default()
+            };
+            let json = serde_json::to_string(&settings).unwrap();
+            let loaded: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(DisplayMode::from_u8(loaded.display_mode), mode);
+        }
+    }
+
+    #[test]
+    fn theme_settings_are_backward_compatible_and_round_trip() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("theme");
+        let legacy: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(PanoramaTheme::from_u8(legacy.theme), PanoramaTheme::Pomme);
+
+        for theme in [PanoramaTheme::Pomme, PanoramaTheme::Default] {
+            let settings = Settings {
+                theme: theme.to_u8(),
+                ..Settings::default()
+            };
+            let json = serde_json::to_string(&settings).unwrap();
+            let loaded: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(PanoramaTheme::from_u8(loaded.theme), theme);
+        }
     }
 }

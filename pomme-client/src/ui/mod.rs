@@ -1,4 +1,5 @@
 pub mod anvil;
+pub mod boss_bar;
 pub mod chat;
 pub mod chest;
 pub mod common;
@@ -8,14 +9,24 @@ pub mod creative_inventory;
 pub mod creative_tab_data;
 pub mod death;
 pub mod enchantment;
-#[allow(dead_code)]
 pub mod font;
 pub mod friends;
 pub mod furnace;
+pub mod game_mode_switcher;
 pub mod hud;
 pub mod inventory;
 pub mod menu;
+pub mod object_glyph;
 pub mod pause;
 pub mod player_tab;
+pub mod server_dialog;
 pub mod server_list;
+pub mod spectator_menu;
+pub mod subtitles;
 pub mod text;
+pub mod text_edit;
+pub mod title;
+pub mod toast;
+pub mod world_list;
+
+pub mod bundle;

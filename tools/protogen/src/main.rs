@@ -17,17 +17,23 @@
 //! `<reference-root>/generated/reports/registries.json`, for building
 //! cross-version id remaps.
 //!
+//! The `knownpacks` mode emits the packs the client can claim in
+//! `select_known_packs` and the synchronized-registry elements they carry,
+//! read from `<reference-root>/extracted/data/minecraft`.
+//!
 //! The protocol number is parsed from `SharedConstants.getProtocolVersion()`;
 //! `--protocol` overrides it (and is required if the method body isn't a bare
 //! integer literal). The parser hard-fails on anything it can't resolve
 //! rather than emit silently-wrong data.
+
+mod known_packs;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-type Error = Box<dyn std::error::Error>;
+pub type Error = Box<dyn std::error::Error>;
 
 /// (JSON key, `<Phase>Protocols.java` path, has a clientbound template).
 const PHASES: [(&str, &str, bool); 5] = [
@@ -42,19 +48,24 @@ const PHASES: [(&str, &str, bool); 5] = [
     ("game", "game/GameProtocols.java", true),
 ];
 
+/// First protocol with a configuration phase (1.20.2).
+const FIRST_CONFIGURATION_PROTOCOL: i32 = 764;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("registries") {
+    type Mode = fn(&Path, &str, &str) -> Result<(), Error>;
+    let modes: [(&str, Mode); 2] = [
+        ("registries", generate_registries),
+        ("knownpacks", known_packs::generate),
+    ];
+    if let Some((name, mode)) = modes
+        .iter()
+        .find(|(name, _)| args.first().map(String::as_str) == Some(name))
+    {
         return match args.as_slice() {
-            [_, root, version, out] => match generate_registries(Path::new(root), version, out) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("protogen: {e}");
-                    ExitCode::FAILURE
-                }
-            },
+            [_, root, version, out] => exit_code(mode(Path::new(root), version, out)),
             _ => {
-                eprintln!("usage: protogen registries <reference-root> <version> <out.json>");
+                eprintln!("usage: protogen {name} <reference-root> <version> <out.json>");
                 ExitCode::FAILURE
             }
         };
@@ -73,7 +84,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match generate(Path::new(root), version, out, protocol_override) {
+    exit_code(generate(Path::new(root), version, out, protocol_override))
+}
+
+fn exit_code(result: Result<(), Error>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("protogen: {e}");
@@ -91,9 +106,118 @@ enum Direction {
 /// Resource name + direction for every `PacketType<...>` constant, keyed two
 /// ways: by `TypesClass.CONSTANT` (addPacket args) and by packet class name
 /// (the bundle-delimiter instance in `withBundlePacket`).
+#[derive(Default)]
 struct TypeMaps {
     by_constant: HashMap<(String, String), (Direction, String)>,
     by_class: HashMap<String, (Direction, String)>,
+}
+
+/// Extracts one direction's ordered resource names for a phase from the
+/// pre-1.20.5 `ConnectionProtocol` enum, whose constants register packet
+/// classes in single `.addFlow(PacketFlow.X, new PacketSet()...)` chains.
+/// Resource names don't exist yet at these versions; they are derived from
+/// the class names, which is exactly how 1.20.5 named them. `None` for a
+/// direction with no registrations (handshake clientbound) or for a phase the
+/// version predates (configuration, before 1.20.2).
+///
+/// Assumes each enum constant is on one line, as CFR emits them; a decompile
+/// that wrapped them would yield a short table rather than an error, which the
+/// per-version anchor tests' id and count pins are what catch.
+fn parse_legacy(
+    source: &str,
+    phase_key: &str,
+    direction: Direction,
+) -> Result<Option<Vec<String>>, Error> {
+    let constant = match phase_key {
+        "handshake" => "HANDSHAKING",
+        "status" => "STATUS",
+        "login" => "LOGIN",
+        "configuration" => "CONFIGURATION",
+        "game" => "PLAY",
+        _ => unreachable!(),
+    };
+    // 1.20.2 names its constants (`CONFIGURATION("configuration", ..)`); older
+    // enums open with the numeric protocol id, so the argument isn't quoted.
+    let Some(start) = source.find(&format!("    {constant}(")) else {
+        return Ok(None);
+    };
+    let line = source[start..]
+        .lines()
+        .next()
+        .ok_or("ConnectionProtocol: truncated constant")?;
+
+    let flow = match direction {
+        Direction::Serverbound => "PacketFlow.SERVERBOUND,",
+        Direction::Clientbound => "PacketFlow.CLIENTBOUND,",
+    };
+    let Some(flow_at) = line.find(flow) else {
+        return Ok(None);
+    };
+    let section = &line[flow_at..];
+    let section = match section[1..].find(".addFlow(") {
+        Some(at) => &section[..at + 1],
+        None => section,
+    };
+
+    let mut calls: Vec<(usize, bool)> = section
+        .match_indices(".addPacket(")
+        .map(|(at, _)| (at, false))
+        .chain(
+            section
+                .match_indices(".withBundlePacket(")
+                .map(|(at, _)| (at, true)),
+        )
+        .collect();
+    calls.sort_unstable_by_key(|&(at, _)| at);
+    if calls.is_empty() {
+        return Ok(None);
+    }
+
+    let mut names = Vec::with_capacity(calls.len());
+    for (at, is_bundle) in calls {
+        if is_bundle {
+            // The delimiter's slot, named bundle_delimiter from 1.20.5 on.
+            names.push("bundle_delimiter".to_string());
+            continue;
+        }
+        let args = &section[section[at..].find('(').unwrap() + at + 1..];
+        let class = args
+            .split(".class")
+            .next()
+            .ok_or_else(|| format!("ConnectionProtocol: malformed addPacket in {constant}"))?;
+        names.push(class_to_resource(class, direction));
+    }
+    Ok(Some(names))
+}
+
+/// The 1.20.5 resource name for a pre-1.20.5 packet class:
+/// `Clientbound<Name>Packet` -> snake-cased `<Name>`.
+fn class_to_resource(class: &str, direction: Direction) -> String {
+    let prefix = match direction {
+        Direction::Serverbound => "Serverbound",
+        Direction::Clientbound => "Clientbound",
+    };
+    let base = class.strip_prefix(prefix).unwrap_or(class);
+    // A nested registration (`MovePlayerPacket.Pos`) names the family on the
+    // outer class and the variant on the inner one; 1.20.5 joined the two.
+    let (outer, inner) = base.split_once('.').unwrap_or((base, ""));
+    let outer = outer.strip_suffix("Packet").unwrap_or(outer);
+    let base = format!("{outer}{inner}");
+    if base == "ClientIntention" {
+        return "intention".to_string();
+    }
+    let mut out = String::with_capacity(base.len() + 8);
+    for (i, c) in base.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn generate(
@@ -104,19 +228,47 @@ fn generate(
 ) -> Result<(), Error> {
     let proto_dir = root.join("net/minecraft/network/protocol");
     let protocol = resolve_protocol_number(root, protocol_override)?;
-    let maps = collect_packet_types(&proto_dir)?;
+    // Pre-1.20.5 versions register packets in the ConnectionProtocol enum
+    // and have no per-phase Protocols files (or packet resource names).
+    let legacy = if proto_dir.join(PHASES[0].1).exists() {
+        None
+    } else {
+        Some(std::fs::read_to_string(
+            root.join("net/minecraft/network/ConnectionProtocol.java"),
+        )?)
+    };
+    let maps = if legacy.is_some() {
+        TypeMaps::default()
+    } else {
+        collect_packet_types(&proto_dir)?
+    };
 
     let mut out = String::from("{\n");
     writeln!(out, "  \"version\": \"{version}\",")?;
     writeln!(out, "  \"protocol\": {protocol},")?;
 
     for (i, (key, file, has_clientbound)) in PHASES.iter().enumerate() {
-        let source =
-            std::fs::read_to_string(proto_dir.join(file)).map_err(|e| format!("{file}: {e}"))?;
-        let serverbound = parse_template(&source, file, Direction::Serverbound, &maps)?
-            .ok_or_else(|| format!("{file}: no SERVERBOUND_TEMPLATE"))?;
-        let clientbound = parse_template(&source, file, Direction::Clientbound, &maps)?;
+        let phase_absent = *key == "configuration" && protocol < FIRST_CONFIGURATION_PROTOCOL;
+        let (serverbound, clientbound) = if let Some(source) = &legacy {
+            let serverbound = parse_legacy(source, key, Direction::Serverbound)?;
+            if serverbound.is_none() && !phase_absent {
+                return Err(format!("ConnectionProtocol: no {key} serverbound").into());
+            }
+            (
+                serverbound.unwrap_or_default(),
+                parse_legacy(source, key, Direction::Clientbound)?,
+            )
+        } else {
+            let source = std::fs::read_to_string(proto_dir.join(file))
+                .map_err(|e| format!("{file}: {e}"))?;
+            (
+                parse_template(&source, file, Direction::Serverbound, &maps)?
+                    .ok_or_else(|| format!("{file}: no SERVERBOUND_TEMPLATE"))?,
+                parse_template(&source, file, Direction::Clientbound, &maps)?,
+            )
+        };
         match (clientbound.is_some(), has_clientbound) {
+            (false, true) if phase_absent => {}
             (false, true) => return Err(format!("{file}: no CLIENTBOUND_TEMPLATE").into()),
             (true, false) => {
                 return Err(format!("{file}: unexpected CLIENTBOUND_TEMPLATE").into());
@@ -143,15 +295,24 @@ fn generate(
 }
 
 /// The static registries whose numeric ids reach the client over the wire
-/// and can shift between versions; the remap layer covers exactly these.
-const CLIENT_REGISTRIES: [&str; 8] = [
+/// and can shift between versions, whether remapped or only named for decoding.
+const CLIENT_REGISTRIES: [&str; 17] = [
     "attribute",
     "block_entity_type",
+    "command_argument_type",
+    "consume_effect_type",
     "data_component_type",
+    "debug_subscription",
     "entity_type",
     "game_event",
     "item",
+    "menu",
+    "number_format_type",
     "particle_type",
+    "position_source_type",
+    "recipe_display",
+    "recipe_serializer",
+    "slot_display",
     "sound_event",
 ];
 
@@ -166,11 +327,16 @@ fn generate_registries(root: &Path, version: &str, out_path: &str) -> Result<(),
 
     let mut registries = serde_json::Map::new();
     for name in CLIENT_REGISTRIES {
-        let entries = report
+        // Absent registries (data_component_type before 1.20.5) are skipped;
+        // the remap layer treats them as empty.
+        let Some(entries) = report
             .get(format!("minecraft:{name}"))
             .and_then(|r| r.get("entries"))
             .and_then(|e| e.as_object())
-            .ok_or_else(|| format!("registry minecraft:{name} missing from report"))?;
+        else {
+            eprintln!("warning: {name} absent from this version's report, skipping");
+            continue;
+        };
         let mut ordered: Vec<(&str, u64)> = entries
             .iter()
             .map(|(key, v)| {
@@ -178,9 +344,8 @@ fn generate_registries(root: &Path, version: &str, out_path: &str) -> Result<(),
                     .get("protocol_id")
                     .and_then(|id| id.as_u64())
                     .ok_or_else(|| format!("{name}: {key} has no protocol_id"))?;
-                let key = key
-                    .strip_prefix("minecraft:")
-                    .ok_or_else(|| format!("{name}: non-minecraft entry {key}"))?;
+                // As `Identifier.toShortString`: other namespaces (brigadier:) stay.
+                let key = key.strip_prefix("minecraft:").unwrap_or(key);
                 Ok((key, id))
             })
             .collect::<Result<_, Error>>()?;
@@ -323,11 +488,13 @@ fn parse_template(
     direction: Direction,
     maps: &TypeMaps,
 ) -> Result<Option<Vec<String>>, Error> {
-    let needle = match direction {
-        Direction::Serverbound => " SERVERBOUND_TEMPLATE = ",
-        Direction::Clientbound => " CLIENTBOUND_TEMPLATE = ",
+    // 1.21 split the registrations into `*_TEMPLATE` constants bound
+    // separately; before that the bound constant holds them directly.
+    let needles = match direction {
+        Direction::Serverbound => [" SERVERBOUND_TEMPLATE = ", " SERVERBOUND = "],
+        Direction::Clientbound => [" CLIENTBOUND_TEMPLATE = ", " CLIENTBOUND = "],
     };
-    let Some(start) = source.find(needle) else {
+    let Some(start) = needles.iter().find_map(|n| source.find(n)) else {
         return Ok(None);
     };
     let statement = &source[start..];

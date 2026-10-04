@@ -12,6 +12,12 @@ use crate::app::state_slot::StateSlot;
 /// Left-stick deflection past which a direction counts as a digital press.
 pub const STICK_MOVEMENT_THRESHOLD: f32 = 0.25;
 
+/// Convert gilrs left-stick axes into vanilla movement axes: X is `xxa`
+/// (positive left, negative right) and Y is `zza` (positive forward).
+pub(crate) fn gamepad_movement_axes(analog: glam::Vec2) -> glam::Vec2 {
+    glam::vec2(-analog.x, analog.y)
+}
+
 /// Value in milliseconds for how long the controller should rumble to be only
 /// an "instant".
 pub const SHORT_RUMBLE_TIME: u32 = 5;
@@ -30,6 +36,119 @@ pub enum Action {
     OpenChat,
     OpenCommands,
     Close,
+    DropItem,
+    SwapOffhand,
+    SpectatorHotbar,
+}
+
+pub const KEY_FORWARD: KeyCode = KeyCode::KeyW;
+pub const KEY_LEFT: KeyCode = KeyCode::KeyA;
+pub const KEY_BACK: KeyCode = KeyCode::KeyS;
+pub const KEY_RIGHT: KeyCode = KeyCode::KeyD;
+
+impl Action {
+    pub const fn default_key(self) -> Option<KeyCode> {
+        match self {
+            Self::Jump => Some(KeyCode::Space),
+            Self::Sneak => Some(KeyCode::ShiftLeft),
+            Self::Sprint => Some(KeyCode::ControlLeft),
+            Self::ToggleInventory => Some(KeyCode::KeyE),
+            Self::OpenMenu => Some(KeyCode::Escape),
+            Self::ViewPlayerList => Some(KeyCode::Tab),
+            Self::ChangePerspective => Some(KeyCode::F5),
+            Self::OpenChat => Some(KeyCode::KeyT),
+            Self::OpenCommands => Some(KeyCode::Slash),
+            Self::DropItem => Some(KeyCode::KeyQ),
+            Self::SwapOffhand => Some(KeyCode::KeyF),
+            Self::Destroy | Self::Use | Self::Close | Self::SpectatorHotbar => None,
+        }
+    }
+}
+
+/// Label of key mapping `key`: Pomme's binding for the actions it has, else
+/// vanilla's default (`Options` key mappings). A lang key and its en_us
+/// fallback.
+pub fn keybind_label(key: &str) -> Option<(&'static str, &'static str)> {
+    Some(match key {
+        "key.forward" => ("key.keyboard.w", "W"),
+        "key.left" => ("key.keyboard.a", "A"),
+        "key.back" => ("key.keyboard.s", "S"),
+        "key.right" => ("key.keyboard.d", "D"),
+        "key.jump" => action_label(Action::Jump)?,
+        "key.sneak" => action_label(Action::Sneak)?,
+        "key.sprint" => action_label(Action::Sprint)?,
+        "key.inventory" => action_label(Action::ToggleInventory)?,
+        "key.swapOffhand" => action_label(Action::SwapOffhand)?,
+        "key.drop" => action_label(Action::DropItem)?,
+        "key.use" => ("key.mouse.right", "Right Button"),
+        "key.attack" => ("key.mouse.left", "Left Button"),
+        "key.pickItem" | "key.spectatorHotbar" => ("key.mouse.middle", "Middle Button"),
+        "key.chat" => action_label(Action::OpenChat)?,
+        "key.playerlist" => action_label(Action::ViewPlayerList)?,
+        "key.command" => action_label(Action::OpenCommands)?,
+        "key.togglePerspective" => action_label(Action::ChangePerspective)?,
+        "key.friends" => ("key.keyboard.o", "O"),
+        "key.socialInteractions" => ("key.keyboard.p", "P"),
+        "key.screenshot" => ("key.keyboard.f2", "F2"),
+        "key.smoothCamera" | "key.spectatorOutlines" => ("key.keyboard.unknown", "Not Bound"),
+        "key.fullscreen" => ("key.keyboard.f11", "F11"),
+        "key.advancements" => ("key.keyboard.l", "L"),
+        "key.quickActions" => ("key.keyboard.g", "G"),
+        "key.toggleGui" => ("key.keyboard.f1", "F1"),
+        "key.toggleSpectatorShaderEffects" => ("key.keyboard.f4", "F4"),
+        "key.saveToolbarActivator" => ("key.keyboard.c", "C"),
+        "key.loadToolbarActivator" => ("key.keyboard.x", "X"),
+        "key.hotbar.1" => ("key.keyboard.1", "1"),
+        "key.hotbar.2" => ("key.keyboard.2", "2"),
+        "key.hotbar.3" => ("key.keyboard.3", "3"),
+        "key.hotbar.4" => ("key.keyboard.4", "4"),
+        "key.hotbar.5" => ("key.keyboard.5", "5"),
+        "key.hotbar.6" => ("key.keyboard.6", "6"),
+        "key.hotbar.7" => ("key.keyboard.7", "7"),
+        "key.hotbar.8" => ("key.keyboard.8", "8"),
+        "key.hotbar.9" => ("key.keyboard.9", "9"),
+        "key.debug.overlay" | "key.debug.modifier" => ("key.keyboard.f3", "F3"),
+        "key.debug.crash" | "key.debug.copyLocation" => ("key.keyboard.c", "C"),
+        "key.debug.reloadChunk" => ("key.keyboard.a", "A"),
+        "key.debug.showHitboxes" => ("key.keyboard.b", "B"),
+        "key.debug.clearChat" => ("key.keyboard.d", "D"),
+        "key.debug.showChunkBorders" => ("key.keyboard.g", "G"),
+        "key.debug.showAdvancedTooltips" => ("key.keyboard.h", "H"),
+        "key.debug.copyRecreateCommand" => ("key.keyboard.i", "I"),
+        "key.debug.spectate" => ("key.keyboard.n", "N"),
+        "key.debug.switchGameMode" => ("key.keyboard.f4", "F4"),
+        "key.debug.debugOptions" => ("key.keyboard.f6", "F6"),
+        "key.debug.focusPause" => ("key.keyboard.p", "P"),
+        "key.debug.dumpDynamicTextures" => ("key.keyboard.s", "S"),
+        "key.debug.reloadResourcePacks" => ("key.keyboard.t", "T"),
+        "key.debug.profiling" => ("key.keyboard.l", "L"),
+        "key.debug.dumpVersion" => ("key.keyboard.v", "V"),
+        "key.debug.profilingChart" => ("key.keyboard.1", "1"),
+        "key.debug.fpsCharts" => ("key.keyboard.2", "2"),
+        "key.debug.networkCharts" => ("key.keyboard.3", "3"),
+        "key.debug.lightmapTexture" => ("key.keyboard.4", "4"),
+        _ => return None,
+    })
+}
+
+fn action_label(action: Action) -> Option<(&'static str, &'static str)> {
+    keycode_translation(action.default_key()?)
+}
+
+fn keycode_translation(key: KeyCode) -> Option<(&'static str, &'static str)> {
+    match key {
+        KeyCode::Space => Some(("key.keyboard.space", "Space")),
+        KeyCode::ShiftLeft => Some(("key.keyboard.left.shift", "Left Shift")),
+        KeyCode::ControlLeft => Some(("key.keyboard.left.control", "Left Control")),
+        KeyCode::KeyE => Some(("key.keyboard.e", "E")),
+        KeyCode::KeyF => Some(("key.keyboard.f", "F")),
+        KeyCode::KeyQ => Some(("key.keyboard.q", "Q")),
+        KeyCode::KeyT => Some(("key.keyboard.t", "T")),
+        KeyCode::Tab => Some(("key.keyboard.tab", "Tab")),
+        KeyCode::Slash => Some(("key.keyboard.slash", "/")),
+        KeyCode::F5 => Some(("key.keyboard.f5", "F5")),
+        _ => None,
+    }
 }
 
 pub struct InputState {
@@ -43,20 +162,38 @@ pub struct InputState {
     middle_click: ClickState,
     cursor_pos: (f32, f32),
     cursor_moved: bool,
-    typed_chars: Vec<char>,
     menu_scroll: f32,
+    menu_scroll_x: f32,
     /// A focused text field (anvil rename, creative search) is capturing
     /// keyboard input this frame: letter/digit hotkeys must type, not act.
     pub text_capture: bool,
-    backspace_pressed: bool,
+    /// A container screen (inventory, chest, creative) is open: it consumes
+    /// hotbar digits and the drop/swap keys, like vanilla screens do.
+    pub menu_capture: bool,
+    /// The player is a spectator: digits drive the spectator menu instead of
+    /// the carried slot, and middle click is `key.spectatorHotbar`.
+    pub spectator: bool,
+    /// Digit presses queued for the spectator menu, drained per tick like the
+    /// click counts (vanilla routes them in `handleKeybinds`).
+    spectator_slot_presses: Vec<u8>,
+    /// Keys pressed since the last `end_frame`, including OS key repeats:
+    /// vanilla dispatches GLFW repeats to screens and debug chords.
+    just_pressed: HashSet<KeyCode>,
+    /// Per-action press counters mirroring vanilla `KeyMapping.click`, so a
+    /// key repeating faster than the tick rate still fires once per press.
+    click_counts: HashMap<Action, u32>,
+    /// Ordered key/char events for focused text fields, mirroring vanilla's
+    /// `keyPressed` + `charTyped` callback pair. Drained once per frame by
+    /// whichever screen owns the focused field.
+    text_events: Vec<crate::ui::text_edit::TextInputEvent>,
     enter_pressed: bool,
     escape_pressed: bool,
     tab_pressed: bool,
     f5_pressed: bool,
-    select_all_pressed: bool,
-    copy_pressed: bool,
-    cut_pressed: bool,
-    undo_pressed: bool,
+    up_pressed: bool,
+    down_pressed: bool,
+    page_up_pressed: bool,
+    page_down_pressed: bool,
     gamepad_manager: Option<Gilrs>,
     weak_rumble_effect: Option<Effect>,
     strong_rumble_effect: Option<Effect>,
@@ -122,18 +259,23 @@ impl InputState {
             middle_click: ClickState::default(),
             cursor_pos: (0.0, 0.0),
             cursor_moved: false,
-            typed_chars: Vec::new(),
             menu_scroll: 0.0,
+            menu_scroll_x: 0.0,
             text_capture: false,
-            backspace_pressed: false,
+            menu_capture: false,
+            spectator: false,
+            spectator_slot_presses: Vec::new(),
+            just_pressed: HashSet::new(),
+            click_counts: HashMap::new(),
+            text_events: Vec::new(),
             enter_pressed: false,
             escape_pressed: false,
             tab_pressed: false,
             f5_pressed: false,
-            select_all_pressed: false,
-            copy_pressed: false,
-            cut_pressed: false,
-            undo_pressed: false,
+            up_pressed: false,
+            down_pressed: false,
+            page_up_pressed: false,
+            page_down_pressed: false,
             gamepad_manager,
             weak_rumble_effect: weak_effect,
             strong_rumble_effect: strong_effect,
@@ -158,9 +300,12 @@ impl InputState {
                 gfx,
                 connection: _connection,
                 game,
+                ..
             } = &mut app
             {
-                if self.action_just_pressed(Action::ToggleInventory) {
+                // A dialog (or the confirm screen over it) is a screen, and
+                // vanilla runs no key mapping while one is up.
+                if self.action_just_pressed(Action::ToggleInventory) && !game.dialog_open() {
                     if game.creative_inventory_open {
                         game.close_creative_inventory();
                         should_apply_cursor_grab = true;
@@ -169,8 +314,10 @@ impl InputState {
                         should_apply_cursor_grab = true;
                     } else if !game.paused
                         && !game.dead
+                        && !game.death_screen_open
                         && game.player.game_mode != 3
                         && !game.chat.is_open()
+                        && game.game_mode_switcher.is_none()
                     {
                         if crate::player::is_creative(game.player.game_mode) {
                             game.creative_inventory_open = true;
@@ -182,13 +329,22 @@ impl InputState {
 
                     self.recent_actions.remove(&Action::ToggleInventory);
                 }
-                if self.action_just_pressed(Action::OpenMenu) {
-                    if game.chunk_load_bench.is_some() {
+                if self.action_just_pressed(Action::OpenMenu) && !game.dialog_open() {
+                    if game.chat.is_open() {
+                        // ChatScreen consumes Escape before the game-level
+                        // pause action: link confirmation, then suggestions,
+                        // then the chat screen itself.
+                        should_apply_cursor_grab = game.escape_chat();
+                    } else if game.game_mode_switcher.is_some() {
+                        // Esc cancels the F3+F4 switcher without applying.
+                        game.game_mode_switcher = None;
+                        should_apply_cursor_grab = true;
+                    } else if game.chunk_load_bench.is_some() {
                         // Cancel a running benchmark instead of opening the menu;
                         // update_game restores the render distance next frame.
                         game.chunk_load_abort = true;
                         should_apply_cursor_grab = true;
-                    } else if !game.dead && !game.options_from_game {
+                    } else if !game.dead && !game.death_screen_open && !game.options_from_game {
                         use crate::ui::pause::PauseScreen;
                         if game.inventory_open || game.open_container.is_some() {
                             game.close_menu();
@@ -200,7 +356,7 @@ impl InputState {
                                     game.pause_screen = PauseScreen::Benchmark
                                 }
                                 PauseScreen::Benchmark => game.pause_screen = PauseScreen::Main,
-                                PauseScreen::Main => game.paused = false,
+                                PauseScreen::Main | PauseScreen::Hidden => game.paused = false,
                             }
                         } else {
                             game.paused = true;
@@ -212,35 +368,58 @@ impl InputState {
 
                     self.recent_actions.remove(&Action::OpenMenu);
                 }
-                if self.action_just_pressed(Action::Close) {
-                    if !game.dead && (game.inventory_open || game.open_container.is_some()) {
+                if self.action_just_pressed(Action::Close) && !game.dialog_open() {
+                    if !game.dead
+                        && !game.death_screen_open
+                        && (game.inventory_open || game.open_container.is_some())
+                    {
                         game.close_menu();
                         should_apply_cursor_grab = true;
                     }
 
+                    // Same order as Escape: modal, then suggestions, then chat.
                     if game.chat.is_open() {
-                        game.chat.close();
-                        should_apply_cursor_grab = true;
+                        should_apply_cursor_grab |= game.escape_chat();
                     }
 
                     self.recent_actions.remove(&Action::Close);
                 }
                 if self.action_just_pressed(Action::ChangePerspective) {
-                    gfx.renderer.cycle_camera_mode();
+                    if !game.death_screen_open {
+                        gfx.renderer.cycle_camera_mode();
+                    }
 
                     self.recent_actions.remove(&Action::ChangePerspective);
                 }
                 if self.action_just_pressed(Action::OpenChat) {
-                    if !game.paused && !game.gui_open() && !game.chat.is_open() {
-                        game.chat.open();
+                    if !game.paused
+                        && !game.death_screen_open
+                        && !game.gui_open()
+                        && !game.chat.is_open()
+                    {
+                        game.chat.open(
+                            crate::ui::chat::ChatMethod::Message,
+                            game.command_tree.as_deref(),
+                        );
+                        // The frame flag is written at end of update; set it now
+                        // so keys later in this same event batch already type.
+                        self.text_capture = true;
                         should_apply_cursor_grab = true;
                     }
 
                     self.recent_actions.remove(&Action::OpenChat);
                 }
                 if self.action_just_pressed(Action::OpenCommands) {
-                    if !game.paused && !game.gui_open() && !game.chat.is_open() {
-                        game.chat.open_with_slash();
+                    if !game.paused
+                        && !game.death_screen_open
+                        && !game.gui_open()
+                        && !game.chat.is_open()
+                    {
+                        game.chat.open(
+                            crate::ui::chat::ChatMethod::Command,
+                            game.command_tree.as_deref(),
+                        );
+                        self.text_capture = true;
                         should_apply_cursor_grab = true;
                     }
 
@@ -278,13 +457,14 @@ impl InputState {
                 Button::RightTrigger2 => {
                     self.recent_actions.insert(Action::Destroy, true);
                 }
-                Button::RightTrigger => {
+                // TODO: gamepad spectator-menu support (vanilla has none).
+                Button::RightTrigger if !self.spectator && !self.menu_capture => {
                     self.selected_slot = (self.selected_slot + 1) % 9;
                 }
                 Button::LeftTrigger2 => {
                     self.recent_actions.insert(Action::Use, true);
                 }
-                Button::LeftTrigger => {
+                Button::LeftTrigger if !self.spectator && !self.menu_capture => {
                     self.selected_slot = (self.selected_slot + 8) % 9;
                 }
                 Button::North => {
@@ -346,13 +526,13 @@ impl InputState {
     pub fn performing_action(&self, action: Action) -> bool {
         match action {
             Action::Jump => {
-                self.key_pressed(KeyCode::Space) || self.gamepad_button_down(Button::South)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::South)
             }
             Action::Sneak => {
-                self.key_pressed(KeyCode::ShiftLeft) || self.gamepad_button_down(Button::LeftThumb)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::LeftThumb)
             }
             Action::Sprint => {
-                self.key_pressed(KeyCode::ControlLeft) || self.gamepad_button_down(Button::West)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::West)
             }
             Action::Destroy => self.left_held() || self.gamepad_button_down(Button::RightTrigger2),
             Action::Use => self.right_held() || self.gamepad_button_down(Button::LeftTrigger2),
@@ -361,21 +541,31 @@ impl InputState {
                     || self.gamepad_button_down(Button::North)
             }
             Action::OpenMenu => {
-                self.key_pressed(KeyCode::Escape) || self.gamepad_button_down(Button::Start)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::Start)
             }
             Action::ViewPlayerList => {
-                self.key_pressed(KeyCode::Tab) || self.gamepad_button_down(Button::Select)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::Select)
             }
             Action::ChangePerspective => {
-                self.key_pressed(KeyCode::F5) || self.gamepad_button_down(Button::DPadUp)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::DPadUp)
             }
             Action::OpenChat => {
-                self.key_pressed(KeyCode::KeyT) || self.gamepad_button_down(Button::DPadRight)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::DPadRight)
             }
-            Action::OpenCommands => self.key_pressed(KeyCode::Slash),
+            Action::OpenCommands => self.default_key_pressed(action),
             // Controller-only; keyboard Escape closes via OpenMenu and the chat path.
             Action::Close => self.gamepad_button_down(Button::East),
+            // Click-count driven (`consume_click`); held state only.
+            Action::DropItem | Action::SwapOffhand => self.default_key_pressed(action),
+            // Vanilla `key.spectatorHotbar` default: middle mouse.
+            Action::SpectatorHotbar => self.middle_click.held,
         }
+    }
+
+    fn default_key_pressed(&self, action: Action) -> bool {
+        action
+            .default_key()
+            .is_some_and(|key| self.key_pressed(key))
     }
 
     pub fn action_just_pressed(&self, action: Action) -> bool {
@@ -417,12 +607,68 @@ impl InputState {
         self.gamepad_stick(gilrs::Axis::LeftStickX, gilrs::Axis::LeftStickY)
     }
 
+    pub fn get_gamepad_movement_axes(&self) -> Option<glam::Vec2> {
+        self.get_gamepad_left_analog().map(gamepad_movement_axes)
+    }
+
     pub fn get_gamepad_right_analog(&self) -> Option<glam::Vec2> {
         self.gamepad_stick(gilrs::Axis::RightStickX, gilrs::Axis::RightStickY)
     }
 
     pub fn key_pressed(&self, key: KeyCode) -> bool {
         self.pressed.contains(&key)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_key_pressed_for_test(&mut self, key: KeyCode, pressed: bool) {
+        if pressed {
+            self.pressed.insert(key);
+        } else {
+            self.pressed.remove(&key);
+        }
+    }
+
+    /// Pressed since the last `end_frame`, OS key repeats included (vanilla
+    /// screens and debug chords receive GLFW repeat events).
+    pub fn key_just_pressed(&self, key: KeyCode) -> bool {
+        self.just_pressed.contains(&key)
+    }
+
+    /// Hotbar digit pressed since the last `end_frame`, for container swaps.
+    pub fn hotbar_key_just_pressed(&self) -> Option<u8> {
+        self.just_pressed.iter().find_map(|&c| hotbar_slot(c))
+    }
+
+    /// Consume one queued press of `action`, vanilla `KeyMapping.consumeClick`.
+    pub fn consume_click(&mut self, action: Action) -> bool {
+        match self.click_counts.get_mut(&action) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn clear_click_counts(&mut self) {
+        self.click_counts.clear();
+        self.spectator_slot_presses.clear();
+    }
+
+    /// Digit presses queued for the spectator menu since the last tick.
+    pub fn take_spectator_slot_presses(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.spectator_slot_presses)
+    }
+
+    /// Frame-scoped input state; called once at the end of each redraw so a
+    /// latch set outside its consumer's screen can't fire later.
+    pub fn end_frame(&mut self) {
+        self.just_pressed.clear();
+        self.up_pressed = false;
+        self.down_pressed = false;
+        self.page_up_pressed = false;
+        self.page_down_pressed = false;
+        self.text_events.clear();
     }
 
     pub fn weak_rumble_for_instant(&self) -> Result<(), gilrs::ff::Error> {
@@ -442,14 +688,28 @@ impl InputState {
             match event.state {
                 ElementState::Pressed => {
                     self.pressed.insert(code);
+                    self.just_pressed.insert(code);
                     if !self.text_capture
+                        && !self.menu_capture
                         && let Some(slot) = hotbar_slot(code)
                     {
-                        self.selected_slot = slot;
+                        // Vanilla handleKeybinds: spectator digits drive the
+                        // spectator menu and never touch the carried slot.
+                        if self.spectator {
+                            self.spectator_slot_presses.push(slot);
+                        } else {
+                            self.selected_slot = slot;
+                        }
                     }
                     match code {
                         KeyCode::KeyE if !self.text_capture => {
                             self.recent_actions.insert(Action::ToggleInventory, true);
+                        }
+                        KeyCode::KeyQ if !self.text_capture && !self.menu_capture => {
+                            *self.click_counts.entry(Action::DropItem).or_insert(0) += 1;
+                        }
+                        KeyCode::KeyF if !self.text_capture && !self.menu_capture => {
+                            *self.click_counts.entry(Action::SwapOffhand).or_insert(0) += 1;
                         }
                         KeyCode::Escape => {
                             self.recent_actions.insert(Action::OpenMenu, true);
@@ -483,70 +743,74 @@ impl InputState {
             return;
         }
 
+        // The ordered event stream for caret-editing text fields. Chars are
+        // suppressed while the edit modifier is held, like GLFW's char
+        // callback for Ctrl (Cmd) chords.
+        if let PhysicalKey::Code(code) = event.physical_key {
+            self.text_events
+                .push(crate::ui::text_edit::TextInputEvent::Key {
+                    code,
+                    mods: self.key_mods(),
+                });
+        }
+        let state = self.modifiers.state();
+        if let Some(text) = &event.text
+            && !state.control_key()
+            && !state.super_key()
+        {
+            for ch in text.chars() {
+                if !ch.is_control() {
+                    self.text_events
+                        .push(crate::ui::text_edit::TextInputEvent::Char(ch));
+                }
+            }
+        }
+
         if let PhysicalKey::Code(code) = event.physical_key {
             match code {
-                KeyCode::Backspace => self.backspace_pressed = true,
                 KeyCode::Enter | KeyCode::NumpadEnter => self.enter_pressed = true,
                 KeyCode::Escape => self.escape_pressed = true,
                 KeyCode::Tab => self.tab_pressed = true,
                 KeyCode::F5 => self.f5_pressed = true,
-                KeyCode::KeyV if self.modifiers.state().control_key() => {
-                    if let Ok(mut cb) = arboard::Clipboard::new()
-                        && let Ok(text) = cb.get_text()
-                    {
-                        for ch in text.chars() {
-                            if !ch.is_control() {
-                                self.typed_chars.push(ch);
-                            }
-                        }
-                    }
-                    return;
-                }
-                KeyCode::KeyA if self.modifiers.state().control_key() => {
-                    self.select_all_pressed = true;
-                    return;
-                }
-                KeyCode::KeyC if self.modifiers.state().control_key() => {
-                    self.copy_pressed = true;
-                    return;
-                }
-                KeyCode::KeyX if self.modifiers.state().control_key() => {
-                    self.cut_pressed = true;
-                    return;
-                }
-                KeyCode::KeyZ if self.modifiers.state().control_key() => {
-                    self.undo_pressed = true;
-                    return;
-                }
+                // Chat history/scroll keys; latched here so OS key repeat
+                // works like vanilla.
+                KeyCode::ArrowUp => self.up_pressed = true,
+                KeyCode::ArrowDown => self.down_pressed = true,
+                KeyCode::PageUp => self.page_up_pressed = true,
+                KeyCode::PageDown => self.page_down_pressed = true,
                 _ => {}
             }
         }
+    }
 
-        if let Some(text) = &event.text {
-            for ch in text.chars() {
-                if !ch.is_control() {
-                    self.typed_chars.push(ch);
-                }
-            }
+    pub fn drain_text_events(&mut self) -> Vec<crate::ui::text_edit::TextInputEvent> {
+        std::mem::take(&mut self.text_events)
+    }
+
+    pub fn key_mods(&self) -> crate::ui::text_edit::KeyMods {
+        let state = self.modifiers.state();
+        crate::ui::text_edit::KeyMods {
+            shift: state.shift_key(),
+            ctrl: state.control_key(),
+            alt: state.alt_key(),
+            super_key: state.super_key(),
         }
     }
 
-    pub fn drain_typed_chars(&mut self) -> Vec<char> {
-        std::mem::take(&mut self.typed_chars)
-    }
-
     pub fn consume_menu_scroll(&mut self) -> f32 {
-        let s = self.menu_scroll;
+        self.consume_menu_scroll_xy().1
+    }
+
+    pub fn consume_menu_scroll_xy(&mut self) -> (f32, f32) {
+        let scroll = (self.menu_scroll_x, self.menu_scroll);
+        self.menu_scroll_x = 0.0;
         self.menu_scroll = 0.0;
-        s
+        scroll
     }
 
-    pub fn on_menu_scroll(&mut self, delta: f32) {
-        self.menu_scroll += delta;
-    }
-
-    pub fn backspace_pressed(&mut self) -> bool {
-        std::mem::take(&mut self.backspace_pressed)
+    pub fn on_menu_scroll_xy(&mut self, x: f32, y: f32) {
+        self.menu_scroll_x += x;
+        self.menu_scroll += y;
     }
 
     pub fn enter_pressed(&mut self) -> bool {
@@ -565,31 +829,44 @@ impl InputState {
         self.modifiers.state().shift_key()
     }
 
+    pub fn ctrl_held(&self) -> bool {
+        self.modifiers.state().control_key()
+    }
+
     pub fn f5_pressed(&mut self) -> bool {
         std::mem::take(&mut self.f5_pressed)
     }
 
-    pub fn select_all_pressed(&mut self) -> bool {
-        std::mem::take(&mut self.select_all_pressed)
+    pub fn up_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.up_pressed)
     }
 
-    pub fn copy_pressed(&mut self) -> bool {
-        std::mem::take(&mut self.copy_pressed)
+    pub fn down_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.down_pressed)
     }
 
-    pub fn cut_pressed(&mut self) -> bool {
-        std::mem::take(&mut self.cut_pressed)
+    pub fn page_up_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.page_up_pressed)
     }
 
-    pub fn undo_pressed(&mut self) -> bool {
-        std::mem::take(&mut self.undo_pressed)
+    pub fn page_down_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.page_down_pressed)
     }
 
     pub fn selected_slot(&self) -> u8 {
         self.selected_slot
     }
 
+    /// The server's held slot; the handler has already checked it is a hotbar
+    /// index.
+    pub fn set_selected_slot(&mut self, slot: u8) {
+        self.selected_slot = slot;
+    }
+
     pub fn on_scroll(&mut self, delta: f32) {
+        if self.menu_capture {
+            return;
+        }
         if delta > 0.0 {
             self.selected_slot = (self.selected_slot + 8) % 9;
         } else if delta < 0.0 {
@@ -639,6 +916,12 @@ impl InputState {
                 self.middle_click.held = was_pressed;
                 if was_pressed {
                     self.middle_click.just_pressed = true;
+                    if self.spectator && !self.menu_capture {
+                        *self
+                            .click_counts
+                            .entry(Action::SpectatorHotbar)
+                            .or_insert(0) += 1;
+                    }
                 } else {
                     self.middle_click.just_released = true;
                 }

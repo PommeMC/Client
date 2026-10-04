@@ -1,5 +1,11 @@
 use glam::{DVec3, dvec3};
 
+use super::block_shape::LocalBox;
+
+/// Vanilla's double `1.0E-7` slop used by `AABB.clip`/voxel collision math.
+/// This is intentionally not `Mth.EPSILON`, which is the float `1.0E-5f`.
+const EPSILON: f64 = 1.0e-7;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Aabb {
     pub min: DVec3,
@@ -19,6 +25,14 @@ impl Aabb {
         )
     }
 
+    /// A block-local box placed at `offset`, usually the block position.
+    pub fn from_local([min_x, min_y, min_z, max_x, max_y, max_z]: LocalBox, offset: DVec3) -> Self {
+        Self::new(
+            offset + dvec3(min_x, min_y, min_z),
+            offset + dvec3(max_x, max_y, max_z),
+        )
+    }
+
     pub fn from_center(center: DVec3, half_width: f64, half_height: f64) -> Self {
         Self {
             min: dvec3(center.x - half_width, center.y, center.z - half_width),
@@ -28,6 +42,16 @@ impl Aabb {
                 center.z + half_width,
             ),
         }
+    }
+
+    /// Vanilla `AABB.contains`: half-open, so a point on a max face is outside.
+    pub fn contains(&self, point: DVec3) -> bool {
+        point.x >= self.min.x
+            && point.x < self.max.x
+            && point.y >= self.min.y
+            && point.y < self.max.y
+            && point.z >= self.min.z
+            && point.z < self.max.z
     }
 
     pub fn intersects(&self, other: &Aabb) -> bool {
@@ -89,27 +113,30 @@ impl Aabb {
     }
 
     fn clip_axis(&self, other: &Aabb, mut delta: f64, axis: Axis) -> f64 {
+        // Vanilla `Shapes.collide` zeroes sub-epsilon motion.
+        if delta.abs() < EPSILON {
+            return 0.0;
+        }
+
         let (c1, c2) = axis.cross_axes();
 
-        if component(other.max, c1) <= component(self.min, c1)
-            || component(other.min, c1) >= component(self.max, c1)
-        {
-            return delta;
-        }
-        if component(other.max, c2) <= component(self.min, c2)
-            || component(other.min, c2) >= component(self.max, c2)
-        {
-            return delta;
+        // `VoxelShape.collideX` samples the cross axes EPSILON inside the box.
+        for c in [c1, c2] {
+            if component(other.max, c) - EPSILON <= component(self.min, c)
+                || component(other.min, c) + EPSILON >= component(self.max, c)
+            {
+                return delta;
+            }
         }
 
-        if delta > 0.0 && component(other.max, axis) <= component(self.min, axis) {
+        if delta > 0.0 {
             let clip = component(self.min, axis) - component(other.max, axis);
-            if clip < delta {
+            if clip >= -EPSILON && clip < delta {
                 delta = clip;
             }
-        } else if delta < 0.0 && component(other.min, axis) >= component(self.max, axis) {
+        } else if delta < 0.0 {
             let clip = component(self.max, axis) - component(other.min, axis);
-            if clip > delta {
+            if clip <= EPSILON && clip > delta {
                 delta = clip;
             }
         }
@@ -118,8 +145,79 @@ impl Aabb {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Axis {
+/// The face of a box a ray entered through: the axis it lies on plus whether
+/// it is the box's max side. Callers that need vanilla's `Direction` map it at
+/// their own boundary, keeping this module free of wire types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Face {
+    pub axis: Axis,
+    pub max: bool,
+}
+
+/// Ports vanilla `AABB.clip(Iterable<AABB>, Vec3, Vec3, BlockPos)`: the nearest
+/// entry across `boxes` (block-local, shifted by `offset`), as the fraction
+/// along `from -> to` and the face entered. `None` if the ray misses them all.
+pub fn clip_boxes(
+    boxes: &[LocalBox],
+    offset: DVec3,
+    from: DVec3,
+    to: DVec3,
+) -> Option<(f64, Face)> {
+    let delta = to - from;
+    let mut nearest = 1.0;
+    let mut face = None;
+
+    for &local in boxes {
+        let aabb = Aabb::from_local(local, offset);
+        for axis in [Axis::X, Axis::Y, Axis::Z] {
+            // A ray only enters through the face it travels towards, so the
+            // sign of its component picks which plane to test.
+            let d = component(delta, axis);
+            let max = if d > EPSILON {
+                false
+            } else if d < -EPSILON {
+                true
+            } else {
+                continue;
+            };
+            let plane = component(if max { aabb.max } else { aabb.min }, axis);
+            if let Some(t) = clip_point(&aabb, plane, axis, from, delta, nearest) {
+                nearest = t;
+                face = Some(Face { axis, max });
+            }
+        }
+    }
+
+    face.map(|face| (nearest, face))
+}
+
+/// Ports vanilla `AABB.clipPoint`: the fraction at which the ray crosses
+/// `plane` on `axis`, if that lands inside the box's face rect and nearer than
+/// `nearest`.
+fn clip_point(
+    aabb: &Aabb,
+    plane: f64,
+    axis: Axis,
+    from: DVec3,
+    delta: DVec3,
+    nearest: f64,
+) -> Option<f64> {
+    let t = (plane - component(from, axis)) / component(delta, axis);
+    if t <= 0.0 || t >= nearest {
+        return None;
+    }
+    let (b, c) = axis.cross_axes();
+    for cross in [b, c] {
+        let p = component(from, cross) + t * component(delta, cross);
+        if p <= component(aabb.min, cross) - EPSILON || p >= component(aabb.max, cross) + EPSILON {
+            return None;
+        }
+    }
+    Some(t)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
     X,
     Y,
     Z,
@@ -140,5 +238,93 @@ fn component(v: DVec3, axis: Axis) -> f64 {
         Axis::X => v.x,
         Axis::Y => v.y,
         Axis::Z => v.z,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BOTTOM_SLAB: LocalBox = [0.0, 0.0, 0.0, 1.0, 0.5, 1.0];
+
+    #[test]
+    fn contains_is_half_open() {
+        let unit = Aabb::block(0, 0, 0);
+        assert!(unit.contains(dvec3(0.0, 0.0, 0.0)));
+        assert!(unit.contains(dvec3(0.5, 0.5, 0.5)));
+        assert!(!unit.contains(dvec3(1.0, 0.5, 0.5)));
+        assert!(!unit.contains(dvec3(0.5, -0.001, 0.5)));
+    }
+
+    #[test]
+    fn collision_clipping_uses_vanilla_epsilon() {
+        let block = Aabb::block(0, 0, 0);
+        let touching = Aabb::new(dvec3(-0.6, 0.0, 0.0), dvec3(0.0, 1.0, 1.0));
+
+        assert_eq!(block.clip_x_collide(&touching, 0.5e-7), 0.0);
+        assert_eq!(block.clip_x_collide(&touching, 1.5e-7), 0.0);
+
+        let separated = touching.offset(dvec3(-1.5e-7, 0.0, 0.0));
+        assert_eq!(block.clip_x_collide(&separated, 2.0e-7), 1.5e-7);
+    }
+
+    #[test]
+    fn clip_hits_the_top_of_a_slab() {
+        let from = dvec3(0.5, 2.0, 0.5);
+        let to = dvec3(0.5, -1.0, 0.5);
+        let (t, face) = clip_boxes(&[BOTTOM_SLAB], DVec3::ZERO, from, to).unwrap();
+
+        assert_eq!(
+            face,
+            Face {
+                axis: Axis::Y,
+                max: true
+            }
+        );
+        let hit = from + (to - from) * t;
+        assert!((hit.y - 0.5).abs() < 1e-9, "hit {hit:?}");
+    }
+
+    /// A ray passing through the block cell but over the slab's shape misses.
+    #[test]
+    fn clip_misses_above_a_slab() {
+        let from = dvec3(-1.0, 0.75, 0.5);
+        let to = dvec3(2.0, 0.75, 0.5);
+        assert!(clip_boxes(&[BOTTOM_SLAB], DVec3::ZERO, from, to).is_none());
+    }
+
+    /// Vanilla carries `t` across the whole iterable, so listing order can't
+    /// change the answer.
+    #[test]
+    fn clip_keeps_the_nearest_of_several_boxes() {
+        let far: LocalBox = [0.0, 0.0, 0.0, 1.0, 0.25, 1.0];
+        let near: LocalBox = [0.0, 0.5, 0.0, 1.0, 0.75, 1.0];
+        let from = dvec3(0.5, 2.0, 0.5);
+        let to = dvec3(0.5, -1.0, 0.5);
+
+        for boxes in [[far, near], [near, far]] {
+            let (t, face) = clip_boxes(&boxes, DVec3::ZERO, from, to).unwrap();
+            assert_eq!(
+                face,
+                Face {
+                    axis: Axis::Y,
+                    max: true
+                }
+            );
+            let hit = from + (to - from) * t;
+            assert!((hit.y - 0.75).abs() < 1e-9, "hit {hit:?}");
+        }
+    }
+
+    #[test]
+    fn clip_respects_the_block_offset() {
+        let from = dvec3(3.5, 2.0, -4.5);
+        let to = dvec3(3.5, -1.0, -4.5);
+        let offset = dvec3(3.0, 0.0, -5.0);
+        let (t, _) = clip_boxes(&[BOTTOM_SLAB], offset, from, to).unwrap();
+
+        let hit = from + (to - from) * t;
+        assert!((hit.y - 0.5).abs() < 1e-9, "hit {hit:?}");
+        assert!(clip_boxes(&[BOTTOM_SLAB], DVec3::ZERO, from, to).is_none());
     }
 }

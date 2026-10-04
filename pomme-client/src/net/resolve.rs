@@ -11,16 +11,16 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use azalea_protocol::address::ServerAddr;
-use azalea_protocol::connect::{Connection, ConnectionError};
 use azalea_protocol::packets::ClientIntention;
 use azalea_protocol::packets::handshake::s_intention::ServerboundIntention;
-use azalea_protocol::packets::handshake::{ClientboundHandshakePacket, ServerboundHandshakePacket};
+use azalea_protocol::packets::status::ClientboundStatusPacket;
 use azalea_protocol::packets::status::c_status_response::ClientboundStatusResponse;
 use azalea_protocol::packets::status::s_status_request::ServerboundStatusRequest;
-use azalea_protocol::packets::status::{ClientboundStatusPacket, ServerboundStatusPacket};
 use azalea_protocol::resolve::{ResolveError, resolve_address};
 use thiserror::Error;
 use tokio::net::TcpStream;
+
+use super::conn::Conn;
 
 /// Socket addresses to try in order: IPv4 first, the SRV-correct ones (derived
 /// from azalea's resolution) ahead of the system-resolver fallbacks.
@@ -87,36 +87,51 @@ fn nat64_embedded_ipv4(addr: Ipv6Addr) -> Option<Ipv4Addr> {
         .then(|| Ipv4Addr::new(o[12], o[13], o[14], o[15]))
 }
 
-pub type HandshakeConnection = Connection<ClientboundHandshakePacket, ServerboundHandshakePacket>;
-pub type StatusConnection = Connection<ClientboundStatusPacket, ServerboundStatusPacket>;
-
 /// Fetch `server`'s status response, returning the still-open connection for
 /// a follow-up latency ping. Shared by the server-list ping and join-time
 /// wire-version negotiation.
 pub async fn request_status(
     server: &ServerAddr,
-) -> Result<(ClientboundStatusResponse, StatusConnection), String> {
+) -> Result<(ClientboundStatusResponse, Conn), String> {
     let mut conn = connect(server, ClientIntention::Status)
         .await
-        .map_err(|e| e.to_string())?
-        .status();
-    conn.write(ServerboundStatusRequest {})
+        .map_err(|e| e.to_string())?;
+    conn.write_packet(ServerboundStatusRequest {})
         .await
         .map_err(|e| format!("Status request failed: {e}"))?;
-    match conn.read().await.map_err(|e| format!("Read failed: {e}"))? {
+    match conn
+        .read_packet::<ClientboundStatusPacket>()
+        .await
+        .map_err(|e| format!("Read failed: {e}"))?
+    {
         ClientboundStatusPacket::StatusResponse(s) => Ok((s, conn)),
         _ => Err("Unexpected packet".into()),
     }
+}
+
+/// Opens the handshake, naming the protocol this session speaks.
+pub async fn send_intention(
+    conn: &mut Conn,
+    host: &str,
+    port: u16,
+    intention: ClientIntention,
+) -> std::io::Result<()> {
+    conn.write_packet(ServerboundIntention {
+        protocol_version: crate::version::session_protocol(),
+        hostname: host.to_owned(),
+        port,
+        intention,
+    })
+    .await
 }
 
 #[derive(Debug, Error)]
 pub enum ConnectError {
     #[error("{0}")]
     Resolve(ResolveError),
+    /// No candidate accepted a socket, or the handshake could not be sent.
     #[error("{0}")]
-    Unreachable(std::io::Error),
-    #[error("{0}")]
-    Handshake(ConnectionError),
+    Io(std::io::Error),
 }
 
 /// Resolve `server` and open a handshake-stage connection with the given intent
@@ -125,7 +140,7 @@ pub enum ConnectError {
 pub async fn connect(
     server: &ServerAddr,
     intention: ClientIntention,
-) -> Result<HandshakeConnection, ConnectError> {
+) -> Result<Conn, ConnectError> {
     let candidates = resolve_candidates(server)
         .await
         .map_err(ConnectError::Resolve)?;
@@ -136,17 +151,10 @@ pub async fn connect(
             Ok(Ok(stream)) => {
                 let _ = stream.set_nodelay(true);
                 tracing::info!("Connecting to {} (resolved: {addr})...", server.host);
-                let mut conn = Connection::new_from_stream(stream)
+                let mut conn = Conn::from_tcp(stream);
+                send_intention(&mut conn, &server.host, server.port, intention)
                     .await
-                    .map_err(ConnectError::Handshake)?;
-                conn.write(ServerboundIntention {
-                    protocol_version: crate::version::session_protocol(),
-                    hostname: server.host.clone(),
-                    port: server.port,
-                    intention,
-                })
-                .await
-                .map_err(|e| ConnectError::Handshake(e.into()))?;
+                    .map_err(ConnectError::Io)?;
                 return Ok(conn);
             }
             Ok(Err(e)) => {
@@ -159,5 +167,5 @@ pub async fn connect(
             }
         }
     }
-    Err(ConnectError::Unreachable(last_err))
+    Err(ConnectError::Io(last_err))
 }

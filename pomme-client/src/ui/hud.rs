@@ -1,20 +1,28 @@
+use std::collections::{HashMap, HashSet};
+
 use azalea_core::position::BlockPos;
 use azalea_inventory::ItemStack;
 use glam::DVec3;
 
-use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_count};
-use crate::player::inventory::item_resource_name;
+use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
+use crate::mob_effect::ActiveMobEffects;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
+use crate::ui::boss_bar::BossBarState;
+use crate::ui::text::TextSpan;
 use crate::world::waypoints::{LocatorDot, PitchDirection, WaypointStyleId};
 
 /// Which bar occupies the slot above the hotbar (vanilla `ContextualInfo`).
-// TODO: JumpableVehicle bar.
 pub enum ContextualBarKind<'a> {
     Empty,
     Experience,
     Locator {
         dots: &'a [LocatorDot],
         arrow_frame_1: bool,
+    },
+    /// Ride-jump charge meter (vanilla `JumpableVehicleBar`).
+    // TODO: cooldown overlay when camel/nautilus dash mounts land.
+    JumpableVehicle {
+        charge: f32,
     },
 }
 
@@ -25,6 +33,272 @@ pub struct FrameTimings {
     pub cull_ms: f32,
     pub draw_ms: f32,
     pub present_ms: f32,
+}
+
+type ScoreKey = (String, String);
+
+/// Vanilla `NumberFormat`: how a score's value renders in the sidebar.
+/// Styled keeps only the resolved color; a per-score format overrides the
+/// objective's, and no format at all means the styled-red default.
+#[derive(Clone)]
+pub enum ScoreNumberFormat {
+    Blank,
+    Styled([f32; 4]),
+    Fixed(Vec<TextSpan>),
+}
+
+/// Vanilla `Team.CollisionRule`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CollisionRule {
+    #[default]
+    Always,
+    Never,
+    PushOtherTeams,
+    PushOwnTeam,
+}
+
+struct ScoreEntry {
+    score: i32,
+    display: Option<Vec<TextSpan>>,
+    number_format: Option<ScoreNumberFormat>,
+}
+
+struct Objective {
+    display: Vec<TextSpan>,
+    number_format: Option<ScoreNumberFormat>,
+}
+
+#[derive(Default)]
+pub struct Scoreboard {
+    sidebar: Option<String>,
+    objectives: HashMap<String, Objective>,
+    scores: HashMap<ScoreKey, ScoreEntry>,
+    teams: HashMap<String, ScoreboardTeam>,
+}
+
+pub(crate) struct ScoreboardTeam {
+    pub(crate) display_name: Vec<TextSpan>,
+    prefix: Vec<TextSpan>,
+    suffix: Vec<TextSpan>,
+    color: [f32; 4],
+    /// None for RESET / non-color formatting (no icon fill in the spectator
+    /// menu), like vanilla's `PlayerTeam.getColor()` Optional.
+    pub(crate) fill_color: Option<[f32; 4]>,
+    collision_rule: CollisionRule,
+    pub(crate) members: HashSet<String>,
+}
+
+impl Scoreboard {
+    pub fn clear(&mut self) {
+        self.sidebar = None;
+        self.objectives.clear();
+        self.scores.clear();
+        self.teams.clear();
+    }
+
+    pub fn set_objective(
+        &mut self,
+        name: String,
+        display: Option<Vec<TextSpan>>,
+        number_format: Option<ScoreNumberFormat>,
+    ) {
+        if let Some(display) = display {
+            self.objectives.insert(
+                name,
+                Objective {
+                    display,
+                    number_format,
+                },
+            );
+        } else {
+            self.objectives.remove(&name);
+            self.scores.retain(|(objective, _), _| objective != &name);
+            if self.sidebar.as_deref() == Some(&name) {
+                self.sidebar = None;
+            }
+        }
+    }
+
+    pub fn set_display(&mut self, name: Option<String>) {
+        // Vanilla resolves the objective at packet time; an unknown name
+        // leaves the slot empty even if the objective arrives later.
+        self.sidebar = name.filter(|name| self.objectives.contains_key(name));
+    }
+
+    pub fn set_score(
+        &mut self,
+        owner: String,
+        objective: String,
+        score: i32,
+        display: Option<Vec<TextSpan>>,
+        number_format: Option<ScoreNumberFormat>,
+    ) {
+        // Vanilla drops scores for objectives it doesn't know.
+        if !self.objectives.contains_key(&objective) {
+            return;
+        }
+        self.scores.insert(
+            (objective, owner),
+            ScoreEntry {
+                score,
+                display,
+                number_format,
+            },
+        );
+    }
+
+    pub fn reset_score(&mut self, owner: &str, objective: Option<&str>) {
+        self.scores.retain(|(entry_objective, entry_owner), _| {
+            entry_owner != owner || objective.is_some_and(|objective| entry_objective != objective)
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_team(
+        &mut self,
+        name: String,
+        display_name: Vec<TextSpan>,
+        prefix: Vec<TextSpan>,
+        suffix: Vec<TextSpan>,
+        color: [f32; 4],
+        fill_color: Option<[f32; 4]>,
+        collision_rule: CollisionRule,
+        members: Option<Vec<String>>,
+    ) {
+        // Vanilla ignores a parameter change for a team it doesn't know;
+        // only method ADD creates one.
+        if members.is_none() && !self.teams.contains_key(&name) {
+            return;
+        }
+        if let Some(members) = &members {
+            self.strip_members(members);
+        }
+        let team = self.teams.entry(name).or_insert_with(|| ScoreboardTeam {
+            display_name: Vec::new(),
+            prefix: Vec::new(),
+            suffix: Vec::new(),
+            color,
+            fill_color: None,
+            collision_rule,
+            members: HashSet::new(),
+        });
+        team.display_name = display_name;
+        team.prefix = prefix;
+        team.suffix = suffix;
+        team.color = color;
+        team.fill_color = fill_color;
+        team.collision_rule = collision_rule;
+        // ADD unions its player list onto an existing team, like vanilla's
+        // addPlayerTeam + per-player addPlayerToTeam.
+        if let Some(members) = members {
+            team.members.extend(members);
+        }
+    }
+
+    pub fn update_team_members(&mut self, name: &str, members: Vec<String>, join: bool) {
+        // Vanilla ignores joins/leaves for unknown teams without touching
+        // other teams' rosters.
+        if !self.teams.contains_key(name) {
+            return;
+        }
+        if join {
+            self.strip_members(&members);
+        }
+        if let Some(team) = self.teams.get_mut(name) {
+            for member in members {
+                if join {
+                    team.members.insert(member);
+                } else {
+                    team.members.remove(&member);
+                }
+            }
+        }
+    }
+
+    pub fn remove_team(&mut self, name: &str) {
+        self.teams.remove(name);
+    }
+
+    pub(crate) fn teams(&self) -> impl Iterator<Item = (&String, &ScoreboardTeam)> {
+        self.teams.iter()
+    }
+
+    /// Team membership is exclusive: joining players leave their old team.
+    fn strip_members(&mut self, members: &[String]) {
+        for team in self.teams.values_mut() {
+            team.members.retain(|member| !members.contains(member));
+        }
+    }
+
+    pub fn player_name(&self, name: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
+        display
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| self.line(name, None))
+    }
+
+    fn team_of(&self, member: &str) -> Option<(&str, &ScoreboardTeam)> {
+        self.teams
+            .iter()
+            .find(|(_, team)| team.members.contains(member))
+            .map(|(name, team)| (name.as_str(), team))
+    }
+
+    pub fn team_name(&self, member: &str) -> &str {
+        self.team_of(member).map_or("", |(name, _)| name)
+    }
+
+    /// Vanilla `EntitySelector.pushableBy(pusher)` tested against `target`,
+    /// both by scoreboard name. A team is only allied to itself.
+    pub fn pushable_by(&self, pusher: &str, target: &str) -> bool {
+        let (own, their) = (self.team_of(pusher), self.team_of(target));
+        let rule = |team: Option<(&str, &ScoreboardTeam)>| {
+            team.map_or(CollisionRule::Always, |(_, team)| team.collision_rule)
+        };
+        let (own_rule, their_rule) = (rule(own), rule(their));
+        if own_rule == CollisionRule::Never || their_rule == CollisionRule::Never {
+            return false;
+        }
+        let same_team = own.is_some_and(|(own, _)| their.is_some_and(|(their, _)| own == their));
+        if (own_rule == CollisionRule::PushOwnTeam || their_rule == CollisionRule::PushOwnTeam)
+            && same_team
+        {
+            return false;
+        }
+        own_rule != CollisionRule::PushOtherTeams && their_rule != CollisionRule::PushOtherTeams
+            || same_team
+    }
+
+    fn line(&self, owner: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
+        let team = self.team_of(owner).map(|(_, team)| team);
+        let mut line = team.map_or_else(Vec::new, |team| team.prefix.clone());
+        line.extend(display.map_or_else(
+            || {
+                vec![TextSpan::new(
+                    owner.into(),
+                    team.map_or(WHITE, |team| team.color),
+                )]
+            },
+            |display| {
+                let mut display = display.to_owned();
+                // Vanilla's team color is the root style over the display
+                // component too; spans were formatted with a white base, so
+                // recolor the base-white ones (an explicitly white-styled
+                // span is indistinguishable and rare).
+                if let Some(team) = team {
+                    for span in &mut display {
+                        if span.color == WHITE {
+                            span.color = team.color;
+                        }
+                    }
+                }
+                display
+            },
+        ));
+        if let Some(team) = team {
+            line.extend(team.suffix.clone());
+        }
+        line
+    }
 }
 
 pub struct DebugInfo<'a> {
@@ -52,8 +326,60 @@ pub struct DebugInfo<'a> {
     pub timings: Option<FrameTimings>,
 }
 
-const CROSSHAIR_SIZE: f32 = 10.0;
-const CROSSHAIR_THICKNESS: f32 = 2.0;
+/// Vanilla `AttackIndicatorStatus`; the u8 values are its ordinals.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AttackIndicatorMode {
+    Off,
+    #[default]
+    Crosshair,
+    Hotbar,
+}
+
+impl AttackIndicatorMode {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::Crosshair,
+            Self::Crosshair => Self::Hotbar,
+            Self::Hotbar => Self::Off,
+        }
+    }
+
+    /// Short label for the options row (the menu prefixes "Attack Indicator:
+    /// ").
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "OFF",
+            Self::Crosshair => "Crosshair",
+            Self::Hotbar => "Hotbar",
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Crosshair => 1,
+            Self::Hotbar => 2,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Off,
+            2 => Self::Hotbar,
+            _ => Self::Crosshair,
+        }
+    }
+}
+
+/// Per-frame attack-indicator inputs; the caller computes scale and the
+/// full-charge state (vanilla `renderMaxAttackIndicator`).
+pub struct AttackIndicatorState {
+    pub mode: AttackIndicatorMode,
+    /// Vanilla `getAttackStrengthScale(0.0)`.
+    pub scale: f32,
+    pub show_full: bool,
+    pub main_hand_right: bool,
+}
 
 const HOTBAR_W: f32 = 182.0;
 const HOTBAR_H: f32 = 22.0;
@@ -65,21 +391,109 @@ const ICON_STRIDE: f32 = 8.0;
 const XP_BAR_W: f32 = 182.0;
 const XP_BAR_H: f32 = 5.0;
 
-pub fn max_gui_scale(screen_w: f32, screen_h: f32) -> u32 {
+/// Vanilla `Window.calculateScale`: the largest scale that keeps the screen at
+/// least 320x240, capped by `setting` (0 is Auto), then made even while Force
+/// Unicode Font is on.
+pub fn gui_scale(screen_w: f32, screen_h: f32, setting: u32, enforce_unicode: bool) -> f32 {
     let mut scale = 1;
-    while (screen_w / (scale + 1) as f32) >= 320.0 && (screen_h / (scale + 1) as f32) >= 240.0 {
+    while scale != setting
+        && screen_w / (scale + 1) as f32 >= 320.0
+        && screen_h / (scale + 1) as f32 >= 240.0
+    {
         scale += 1;
     }
-    scale
+    if enforce_unicode && scale % 2 != 0 {
+        scale += 1;
+    }
+    scale as f32
 }
 
-pub fn gui_scale(screen_w: f32, screen_h: f32, setting: u32) -> f32 {
-    let max = max_gui_scale(screen_w, screen_h);
-    if setting == 0 {
-        max as f32
-    } else {
-        setting.min(max) as f32
+/// Vanilla `ScreenEffectRenderer.submitWater`: underwater.png tiled 4x and
+/// scrolled by the look direction, alpha 0.1, tinted by the local lightmap
+/// brightness.
+pub fn build_underwater_overlay(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    brightness: f32,
+    yaw_deg: f32,
+    pitch_deg: f32,
+) {
+    elements.push(MenuElement::UnderwaterOverlay {
+        w: screen_w,
+        h: screen_h,
+        u0: -yaw_deg / 64.0,
+        v0: pitch_deg / 64.0,
+        brightness,
+    });
+}
+
+/// Vanilla `Hud.extractCameraOverlays`: vignette, equippable camera overlay
+/// (pumpkin), and nether-portal overlay, drawn under the rest of the HUD.
+/// TODO: powder snow, spyglass, nausea overlays; the portal/nausea projection
+/// spin warp lives in GameRenderer and is also unimplemented.
+pub fn build_camera_overlays(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    vignette_brightness: Option<f32>,
+    pumpkin: bool,
+    portal_intensity: f32,
+) {
+    if let Some(brightness) = vignette_brightness {
+        // TODO: nearing the world border tints the vignette cyan (no border
+        // tracking yet).
+        elements.push(MenuElement::Vignette {
+            w: screen_w,
+            h: screen_h,
+            brightness,
+        });
     }
+    if pumpkin {
+        elements.push(MenuElement::PumpkinOverlay {
+            w: screen_w,
+            h: screen_h,
+        });
+    }
+    if portal_intensity > 0.0 {
+        // Vanilla Hud.extractPortalOverlay's alpha curve (0.2 floor).
+        let mut a = portal_intensity;
+        if a < 1.0 {
+            a *= a;
+            a *= a;
+            a = a * 0.8 + 0.2;
+        }
+        elements.push(MenuElement::Image {
+            x: 0.0,
+            y: 0.0,
+            w: screen_w,
+            h: screen_h,
+            sprite: SpriteId::NetherPortal,
+            tint: [1.0, 1.0, 1.0, a],
+        });
+    }
+}
+
+/// Vanilla `Hud.extractSleepOverlay`: full-screen 0x101020 fill fading in over
+/// counter 0..100 and out over 100..110.
+pub fn build_sleep_overlay(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    sleep_timer: u32,
+) {
+    if sleep_timer == 0 {
+        return;
+    }
+    let mut amount = sleep_timer as f32 / 100.0;
+    if amount > 1.0 {
+        amount = 1.0 - (sleep_timer as f32 - 100.0) / 10.0;
+    }
+    elements.push(MenuElement::SleepOverlay {
+        w: screen_w,
+        h: screen_h,
+        amount,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -89,108 +503,228 @@ pub fn build_hud(
     screen_h: f32,
     selected_slot: u8,
     health: f32,
+    absorption: f32,
+    max_health: f32,
     food: u32,
     armor: u32,
     // Gated to survival by the caller.
     air_bubbles: Option<AirBubbles>,
     eyes_in_water: bool,
+    // (health, max health) of the ridden living vehicle, if any.
+    vehicle_health: Option<(f32, f32)>,
     tick: u64,
     experience_level: i32,
     experience_progress: f32,
     bar: ContextualBarKind<'_>,
     game_mode: u8,
     hotbar: &[ItemStack],
+    tool_highlight_timer: u32,
+    action_bar: Option<(&[TextSpan], u64)>,
+    spans_width_fn: super::common::SpansWidthFn<'_>,
+    scoreboard: &Scoreboard,
+    effects: &ActiveMobEffects,
+    boss_bars: &BossBarState,
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
-    gui_scale_setting: u32,
+    gs: f32,
+    attack: &AttackIndicatorState,
     text_width_fn: TextWidthFn,
 ) {
-    let gs = gui_scale(screen_w, screen_h, gui_scale_setting);
     let cx = screen_w / 2.0;
     let cy = screen_h / 2.0;
 
-    if first_person {
-        build_crosshair(elements, cx, cy);
+    // Vanilla also shows the crosshair in spectator when looking at a menu
+    // provider, and hides it for the F3 3D-crosshair entry; neither concept
+    // exists here yet.
+    if first_person && game_mode != 3 {
+        build_crosshair(elements, cx, cy, gs, attack);
     }
 
     if let Some(info) = debug {
         build_debug_overlay(elements, info, gs, text_width_fn);
     }
 
+    // The bar geometry also anchors the status rows and XP bar below.
     let hotbar_w = HOTBAR_W * gs;
     let hotbar_h = HOTBAR_H * gs;
     let hotbar_x = (cx - hotbar_w / 2.0).round();
     let hotbar_y = (screen_h - hotbar_h).round();
 
-    elements.push(MenuElement::Image {
-        x: hotbar_x,
-        y: hotbar_y,
-        w: hotbar_w,
-        h: hotbar_h,
-        sprite: SpriteId::Hotbar,
-        tint: WHITE,
-    });
+    // Vanilla `Hud.extractHotbarAndDecorations`: spectators get the spectator
+    // command bar (pushed by the caller) instead of the item hotbar.
+    if game_mode != 3 {
+        elements.push(MenuElement::Image {
+            x: hotbar_x,
+            y: hotbar_y,
+            w: hotbar_w,
+            h: hotbar_h,
+            sprite: SpriteId::Hotbar,
+            tint: WHITE,
+        });
 
-    let sel_w = SELECTION_W * gs;
-    let sel_h = SELECTION_H * gs;
-    let sel_x = (hotbar_x - 1.0 * gs + selected_slot as f32 * SLOT_STRIDE * gs).round();
-    let sel_y = (hotbar_y - 1.0 * gs).round();
-    elements.push(MenuElement::Image {
-        x: sel_x,
-        y: sel_y,
-        w: sel_w,
-        h: sel_h,
-        sprite: SpriteId::HotbarSelection,
-        tint: WHITE,
-    });
+        let sel_w = SELECTION_W * gs;
+        let sel_h = SELECTION_H * gs;
+        let sel_x = (hotbar_x - 1.0 * gs + selected_slot as f32 * SLOT_STRIDE * gs).round();
+        let sel_y = (hotbar_y - 1.0 * gs).round();
+        elements.push(MenuElement::Image {
+            x: sel_x,
+            y: sel_y,
+            w: sel_w,
+            h: sel_h,
+            sprite: SpriteId::HotbarSelection,
+            tint: WHITE,
+        });
 
-    let item_size = 16.0 * gs;
-    for (i, item) in hotbar.iter().enumerate().take(9) {
-        if let ItemStack::Present(data) = item {
-            let ix = (hotbar_x + 3.0 * gs + i as f32 * SLOT_STRIDE * gs).round();
-            let iy = (hotbar_y + 3.0 * gs).round();
-            elements.push(MenuElement::ItemIcon {
-                x: ix,
-                y: iy,
-                w: item_size,
-                h: item_size,
-                item_name: item_resource_name(data.kind),
-                tint: WHITE,
-            });
-            if data.count > 1 {
-                push_item_count(elements, ix, iy, item_size, gs, data.count);
+        let item_size = 16.0 * gs;
+        for (i, item) in hotbar.iter().enumerate().take(9) {
+            if let ItemStack::Present(data) = item {
+                let ix = (hotbar_x + 3.0 * gs + i as f32 * SLOT_STRIDE * gs).round();
+                let iy = (hotbar_y + 3.0 * gs).round();
+                push_item_icon(elements, ix, iy, item_size, gs, data);
             }
         }
     }
 
+    // Vanilla `Hud.extractItemHotbar`: 18x18 indicator on the main-hand side
+    // of the hotbar, bottom-up fill, plain alpha (no invert, no full-charge
+    // sprite). Spectators get the SpectatorGui hotbar instead
+    // (`extractHotbarAndDecorations`). TODO: `skin_main_hand_right` isn't
+    // sent in ClientInformation yet (hardcoded Right in net/connection.rs).
+    if game_mode != 3 && attack.mode == AttackIndicatorMode::Hotbar && attack.scale < 1.0 {
+        let y = (screen_h - 20.0 * gs).round();
+        let x = if attack.main_hand_right {
+            (cx + (91.0 + 6.0) * gs).round()
+        } else {
+            (cx - (91.0 + 22.0) * gs).round()
+        };
+        let progress = (attack.scale * 19.0) as i32;
+        elements.push(MenuElement::Image {
+            x,
+            y,
+            w: 18.0 * gs,
+            h: 18.0 * gs,
+            sprite: SpriteId::HotbarAttackIndicatorBackground,
+            tint: WHITE,
+        });
+        if progress > 0 {
+            // Vanilla blits the (0, 18-progress, 18, progress) sub-rect at
+            // (x, y + 18 - progress): the bottom rows of a full-size draw.
+            elements.push(MenuElement::ScissorPush {
+                x,
+                y: (y + (18 - progress) as f32 * gs).round(),
+                w: 18.0 * gs,
+                h: (progress as f32 * gs).round(),
+            });
+            elements.push(MenuElement::Image {
+                x,
+                y,
+                w: 18.0 * gs,
+                h: 18.0 * gs,
+                sprite: SpriteId::HotbarAttackIndicatorProgress,
+                tint: WHITE,
+            });
+            elements.push(MenuElement::ScissorPop);
+        }
+    }
+
+    // Vanilla `Hud.extractSelectedItemName`: rarity-colored, italic for
+    // custom names, alpha `timer * 256 / 10` (10-tick fade), y = height - 59
+    // (+14 when the player can't be hurt). Spectators get none.
+    if tool_highlight_timer > 0
+        && game_mode != 3
+        && let Some(ItemStack::Present(data)) = hotbar.get(selected_slot as usize)
+    {
+        let alpha = (tool_highlight_timer as f32 * 256.0 / 10.0 / 255.0).min(1.0);
+        let mut spans = super::common::styled_hover_name(data);
+        for span in &mut spans {
+            span.color[3] *= alpha;
+        }
+        let mut y = screen_h - 59.0 * gs;
+        if game_mode == 1 {
+            y += 14.0 * gs;
+        }
+        elements.push(MenuElement::McText {
+            x: cx,
+            y,
+            spans,
+            scale: FONT_SIZE * gs,
+            centered: true,
+            shadow: true,
+        });
+    }
+
+    if let Some((spans, ticks)) = action_bar
+        && ticks < 60
+    {
+        let alpha = ((60 - ticks).min(20) as f32) / 20.0;
+        let spans = crate::ui::text::with_alpha(spans, alpha);
+        elements.push(MenuElement::McText {
+            x: cx,
+            // Vanilla translates to height - 68 and draws at local y -4.
+            y: screen_h - 72.0 * gs,
+            spans,
+            scale: FONT_SIZE * gs,
+            centered: true,
+            shadow: true,
+        });
+    }
+
+    build_effect_icons(elements, screen_w, gs, effects);
+
+    build_boss_bars(elements, screen_w, screen_h, gs, boss_bars);
+
+    build_scoreboard(
+        elements,
+        screen_w,
+        screen_h,
+        gs,
+        scoreboard,
+        text_width_fn,
+        spans_width_fn,
+    );
+
     let status_bar_y = (hotbar_y - (XP_BAR_H + 1.0 + 2.0) * gs).round();
+    // Vanilla Hud shares one Random across heart jitter, food shake and bubble
+    // wobble, seeded once per frame; `tickCount * 312871` wraps at 32 bits.
+    let mut hud_rng = crate::util::JavaRandom::new((tick as i32).wrapping_mul(312871) as i64);
+    // Vanilla getVehicleMaxHearts: (maxHealth + 0.5) / 2 hearts, capped at 30.
+    let vehicle_hearts = vehicle_health.map_or(0, |(_, max)| ((max + 0.5) as i32 / 2).min(30));
+    let vehicle_rows = (vehicle_hearts + 9) / 10;
     let is_survival = crate::player::is_survival(game_mode);
     if is_survival {
-        build_status_bar(
+        let absorption_halves = absorption.ceil().max(0.0) as i32;
+        let layout = heart_layout(max_health, health, absorption_halves);
+        build_hearts(
             elements,
             hotbar_x,
             status_bar_y,
+            &layout,
             health,
-            false,
-            SpriteId::HeartContainer,
-            SpriteId::HeartFull,
-            SpriteId::HeartHalf,
+            absorption_halves,
+            &mut hud_rng,
             gs,
         );
-        build_status_bar(
-            elements,
-            hotbar_x + hotbar_w,
-            status_bar_y,
-            food as f32,
-            true,
-            SpriteId::FoodEmpty,
-            SpriteId::FoodFull,
-            SpriteId::FoodHalf,
-            gs,
-        );
+        // Mount hearts replace the food bar (vanilla extractPlayerHealth).
+        // TODO: food shake consumes from hud_rng between hearts and bubbles in
+        // vanilla.
+        if vehicle_hearts == 0 {
+            build_status_bar(
+                elements,
+                hotbar_x + hotbar_w,
+                status_bar_y,
+                food as f32,
+                true,
+                SpriteId::FoodEmpty,
+                SpriteId::FoodFull,
+                SpriteId::FoodHalf,
+                gs,
+            );
+        }
 
         if armor > 0 {
-            let armor_y = (status_bar_y - (ICON_SIZE + 1.0) * gs).round();
+            // Vanilla `yLineBase - (rows - 1) * rowHeight - 10`.
+            let armor_y =
+                (status_bar_y - ((layout.rows - 1) * layout.row_height + 10) as f32 * gs).round();
             build_status_bar(
                 elements,
                 hotbar_x,
@@ -205,6 +739,21 @@ pub fn build_hud(
         }
     }
 
+    // Vanilla draws these outside the canHurtPlayer gate, so creative shows
+    // mount hearts too.
+    if let Some((vehicle_hp, _)) = vehicle_health
+        && vehicle_hearts > 0
+    {
+        build_vehicle_hearts(
+            elements,
+            hotbar_x + hotbar_w,
+            status_bar_y,
+            vehicle_hearts,
+            vehicle_hp,
+            gs,
+        );
+    }
+
     let bar_w = XP_BAR_W * gs;
     let bar_h = XP_BAR_H * gs;
     let bar_x = (cx - bar_w / 2.0).round();
@@ -213,6 +762,7 @@ pub fn build_hud(
     let bar_background = match bar {
         ContextualBarKind::Experience => Some(SpriteId::ExperienceBarBackground),
         ContextualBarKind::Locator { .. } => Some(SpriteId::LocatorBarBackground),
+        ContextualBarKind::JumpableVehicle { .. } => Some(SpriteId::JumpBarBackground),
         ContextualBarKind::Empty => None,
     };
     if let Some(sprite) = bar_background {
@@ -226,27 +776,39 @@ pub fn build_hud(
         });
     }
 
-    if matches!(bar, ContextualBarKind::Experience) {
+    // Left-clipped progress fill; the scissored full-width draw is pixel-
+    // equivalent to vanilla's UV sub-rect blit at identical scale.
+    let bar_fill = match bar {
         // Vanilla ExperienceBar: (int)(experienceProgress * 183).
-        let fill_px = (experience_progress.clamp(0.0, 1.0) * 183.0) as i32;
-        if fill_px > 0 {
-            let fill_w = (fill_px as f32 * gs).round();
-            elements.push(MenuElement::ScissorPush {
-                x: bar_x,
-                y: bar_y,
-                w: fill_w,
-                h: bar_h,
-            });
-            elements.push(MenuElement::Image {
-                x: bar_x,
-                y: bar_y,
-                w: bar_w,
-                h: bar_h,
-                sprite: SpriteId::ExperienceBarProgress,
-                tint: WHITE,
-            });
-            elements.push(MenuElement::ScissorPop);
-        }
+        ContextualBarKind::Experience => Some((
+            (experience_progress.clamp(0.0, 1.0) * 183.0) as i32,
+            SpriteId::ExperienceBarProgress,
+        )),
+        // Vanilla JumpableVehicleBar: Mth.lerpDiscrete(scale, 0, 182).
+        ContextualBarKind::JumpableVehicle { charge } => Some((
+            (charge.clamp(0.0, 1.0) * 181.0).floor() as i32 + i32::from(charge > 0.0),
+            SpriteId::JumpBarProgress,
+        )),
+        _ => None,
+    };
+    if let Some((fill_px, sprite)) = bar_fill
+        && fill_px > 0
+    {
+        elements.push(MenuElement::ScissorPush {
+            x: bar_x,
+            y: bar_y,
+            w: (fill_px as f32 * gs).round(),
+            h: bar_h,
+        });
+        elements.push(MenuElement::Image {
+            x: bar_x,
+            y: bar_y,
+            w: bar_w,
+            h: bar_h,
+            sprite,
+            tint: WHITE,
+        });
+        elements.push(MenuElement::ScissorPop);
     }
 
     // Vanilla draws the level number over whichever bar is showing, between
@@ -286,9 +848,13 @@ pub fn build_hud(
     }
 
     if let Some(bubbles) = air_bubbles {
-        let bubble_y = (status_bar_y - (ICON_SIZE * 2.0 + 1.0) * gs).round();
+        // Vanilla getAirBubbleYLine: one 10px slot above the topmost mount
+        // heart row (or the food bar when there is no mount).
+        let bubble_y = (status_bar_y
+            - (ICON_SIZE * 2.0 + 1.0) * gs
+            - (vehicle_rows.max(1) - 1) as f32 * 10.0 * gs)
+            .round();
         let icon_size = ICON_SIZE * gs;
-        let mut rng = crate::util::JavaRandom::new((tick as i64).wrapping_mul(312871));
         let wobbling = bubbles.empty == 10 && tick.is_multiple_of(2);
         for b in 1..=10i32 {
             let mut y = bubble_y;
@@ -300,7 +866,7 @@ pub fn build_hud(
                 continue;
             } else {
                 if wobbling {
-                    y += rng.next_int(2) as f32 * gs;
+                    y += hud_rng.next_int(2) as f32 * gs;
                 }
                 SpriteId::AirEmpty
             };
@@ -315,6 +881,292 @@ pub fn build_hud(
             });
         }
     }
+}
+
+/// Vanilla `Hud.extractEffects`: active effect icons anchored to the top-right,
+/// beneficial on the first row, everything else (harmful and neutral) on the
+/// second.
+// TODO: hide while a screen showing effects is open, once the vanilla
+// `EffectsInInventory` panel is ported.
+fn build_effect_icons(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    gs: f32,
+    effects: &ActiveMobEffects,
+) {
+    if effects.is_empty() {
+        return;
+    }
+    let mut beneficial_count = 0;
+    let mut harmful_count = 0;
+    for instance in effects.sorted_desc() {
+        if !instance.show_icon {
+            continue;
+        }
+        let Some(info) = crate::mob_effect::info(instance.effect_id) else {
+            continue;
+        };
+        let (n, y_gui) = if info.beneficial {
+            beneficial_count += 1;
+            (beneficial_count, 1.0)
+        } else {
+            harmful_count += 1;
+            (harmful_count, 27.0)
+        };
+        let x_gui = -25.0 * n as f32;
+        let background = if instance.ambient {
+            SpriteId::EffectBackgroundAmbient
+        } else {
+            SpriteId::EffectBackground
+        };
+        elements.push(MenuElement::Image {
+            x: (screen_w + x_gui * gs).round(),
+            y: (y_gui * gs).round(),
+            w: 24.0 * gs,
+            h: 24.0 * gs,
+            sprite: background,
+            tint: WHITE,
+        });
+        let mut alpha = 1.0f32;
+        if !instance.ambient && instance.ends_within(200) {
+            let d = instance.duration as f32;
+            let used_seconds = 10 - instance.duration / 20;
+            alpha = (d / 10.0 / 5.0 * 0.5).clamp(0.0, 0.5)
+                + (d * std::f32::consts::PI / 5.0).cos()
+                    * (used_seconds as f32 / 10.0 * 0.25).clamp(0.0, 0.25);
+            alpha = alpha.clamp(0.0, 1.0);
+        }
+        elements.push(MenuElement::Image {
+            x: (screen_w + (x_gui + 3.0) * gs).round(),
+            y: ((y_gui + 3.0) * gs).round(),
+            w: 18.0 * gs,
+            h: 18.0 * gs,
+            sprite: SpriteId::MobEffect(instance.effect_id as u8),
+            tint: [1.0, 1.0, 1.0, alpha],
+        });
+    }
+}
+
+/// Vanilla `BossHealthOverlay.extractRenderState`: bars centered at the top
+/// starting y=12, name centered 9 above each bar, rows 19 apart, stopping
+/// once past a third of the screen (checked after drawing, so at least one
+/// bar always shows). Per bar: colored background, notched background, then
+/// progress variants of both cropped to the fill width.
+fn build_boss_bars(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    boss_bars: &BossBarState,
+) {
+    const BAR_WIDTH: f32 = 182.0;
+    const BAR_HEIGHT: f32 = 5.0;
+    let x = (screen_w / 2.0 - 91.0 * gs).round();
+    let w = BAR_WIDTH * gs;
+    let h = BAR_HEIGHT * gs;
+    let mut y_units = 12.0;
+    for bar in boss_bars.iter() {
+        let y = (y_units * gs).round();
+        let bar_image = |sprite| MenuElement::Image {
+            x,
+            y,
+            w,
+            h,
+            sprite,
+            tint: WHITE,
+        };
+        elements.push(bar_image(SpriteId::BossBarBackground(bar.color)));
+        if bar.overlay != 0 {
+            elements.push(bar_image(SpriteId::BossBarNotchedBackground(
+                bar.overlay - 1,
+            )));
+        }
+        let progress = bar.progress();
+        // Vanilla `Mth.lerpDiscrete(progress, 0, 182)`: any nonzero progress
+        // fills at least one pixel.
+        let fill_px =
+            (progress * (BAR_WIDTH - 1.0)).floor() + if progress > 0.0 { 1.0 } else { 0.0 };
+        if fill_px > 0.0 {
+            elements.push(MenuElement::ScissorPush {
+                x,
+                y,
+                w: (fill_px * gs).round(),
+                h,
+            });
+            elements.push(bar_image(SpriteId::BossBarProgress(bar.color)));
+            if bar.overlay != 0 {
+                elements.push(bar_image(SpriteId::BossBarNotchedProgress(bar.overlay - 1)));
+            }
+            elements.push(MenuElement::ScissorPop);
+        }
+        elements.push(MenuElement::McText {
+            x: screen_w / 2.0,
+            y: ((y_units - 9.0) * gs).round(),
+            spans: bar.name.clone(),
+            scale: FONT_SIZE * gs,
+            centered: true,
+            shadow: true,
+        });
+        y_units += 10.0 + 9.0;
+        if y_units >= screen_h / gs / 3.0 {
+            break;
+        }
+    }
+}
+
+/// Vanilla `Hud.displayScoreboardSidebar`: entries sorted by score
+/// descending then owner case-insensitive, `#`-prefixed owners hidden, at
+/// most 15 rows, number format per score falling back to the objective's and
+/// then to styled red, block anchored at `height/2 + rowsHeight/3`, title
+/// background 0.4 over rows 0.3, no text shadow.
+fn build_scoreboard(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    scoreboard: &Scoreboard,
+    text_width_fn: TextWidthFn,
+    spans_width_fn: super::common::SpansWidthFn<'_>,
+) {
+    let Some(objective) = scoreboard.sidebar.as_ref() else {
+        return;
+    };
+    let Some(obj) = scoreboard.objectives.get(objective) else {
+        return;
+    };
+    let fs = FONT_SIZE * gs;
+    let mut entries: Vec<_> = scoreboard
+        .scores
+        .iter()
+        .filter(|((entry_objective, owner), _)| {
+            entry_objective == objective && !owner.starts_with('#')
+        })
+        .collect();
+    entries.sort_by(|((_, a), a_entry), ((_, b), b_entry)| {
+        b_entry
+            .score
+            .cmp(&a_entry.score)
+            .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+    });
+    entries.truncate(15);
+    let rows: Vec<(Vec<TextSpan>, Vec<TextSpan>, f32)> = entries
+        .iter()
+        .map(|((_, owner), entry)| {
+            let name = scoreboard.line(owner, entry.display.as_deref());
+            let number = match entry
+                .number_format
+                .as_ref()
+                .or(obj.number_format.as_ref())
+                .cloned()
+                .unwrap_or(ScoreNumberFormat::Styled(super::common::rgb(0xff5555)))
+            {
+                ScoreNumberFormat::Blank => Vec::new(),
+                ScoreNumberFormat::Styled(color) => {
+                    vec![TextSpan::new(entry.score.to_string(), color)]
+                }
+                ScoreNumberFormat::Fixed(spans) => spans,
+            };
+            let number_w = spans_width_fn(&number, fs);
+            (name, number, number_w)
+        })
+        .collect();
+
+    let title = &obj.display;
+    let title_w = spans_width_fn(title, fs);
+    let spacer_w = text_width_fn(": ", fs);
+    let width = rows.iter().fold(title_w, |width, (name, _, number_w)| {
+        let extra = if *number_w > 0.0 {
+            spacer_w + number_w
+        } else {
+            0.0
+        };
+        width.max(spans_width_fn(name, fs) + extra)
+    });
+
+    let line_h = 9.0 * gs;
+    let height = rows.len() as f32 * line_h;
+    let bottom = screen_h / 2.0 + height / 3.0;
+    let header_y = bottom - height;
+    let left = screen_w - width - 3.0 * gs;
+    let right = screen_w - 1.0 * gs;
+    let bg_x = left - 2.0 * gs;
+    elements.push(MenuElement::Rect {
+        x: bg_x,
+        y: header_y - line_h - gs,
+        w: right - bg_x,
+        h: line_h,
+        corner_radius: 0.0,
+        color: [0.0, 0.0, 0.0, 0.4],
+    });
+    elements.push(MenuElement::Rect {
+        x: bg_x,
+        y: header_y - gs,
+        w: right - bg_x,
+        h: bottom - (header_y - gs),
+        corner_radius: 0.0,
+        color: [0.0, 0.0, 0.0, 0.3],
+    });
+    elements.push(MenuElement::McText {
+        x: left + width / 2.0 - title_w / 2.0,
+        y: header_y - line_h,
+        spans: title.clone(),
+        scale: fs,
+        centered: false,
+        shadow: false,
+    });
+    for (index, (name, number, number_w)) in rows.iter().enumerate() {
+        let row_y = bottom - (rows.len() - index) as f32 * line_h;
+        elements.push(MenuElement::McText {
+            x: left,
+            y: row_y,
+            spans: name.clone(),
+            scale: fs,
+            centered: false,
+            shadow: false,
+        });
+        if *number_w > 0.0 {
+            elements.push(MenuElement::McText {
+                x: right - number_w,
+                y: row_y,
+                spans: number.clone(),
+                scale: fs,
+                centered: false,
+                shadow: false,
+            });
+        }
+    }
+}
+
+/// Vanilla `Gui.SAVING_LEVEL`, shared by the indicator and the saving screen.
+pub fn saving_level_text() -> &'static str {
+    crate::lang::translate("menu.savingLevel").unwrap_or("Saving world")
+}
+
+/// Vanilla `Hud.extractSavingIndicator`: "Saving world" text 5 GUI units from
+/// the bottom-right, faded by `alpha`. No backdrop rect: vanilla's
+/// `getBackgroundColor(0.0f)` is 0 under default options.
+pub fn build_saving_indicator(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    alpha: f32,
+    text_width_fn: TextWidthFn,
+) {
+    let text = saving_level_text();
+    let fs = FONT_SIZE * gs;
+    let w = text_width_fn(text, fs);
+    let mut span = TextSpan::new(text.into(), WHITE);
+    span.color[3] *= alpha;
+    elements.push(MenuElement::McText {
+        x: (screen_w - w - 5.0 * gs).round(),
+        // Vanilla `guiHeight - lineHeight(9) - 5`.
+        y: (screen_h - 14.0 * gs).round(),
+        spans: vec![span],
+        scale: fs,
+        centered: false,
+        shadow: true,
+    });
 }
 
 /// Right-aligned status icon x, matching vanilla `xRight - i * 8 - 9`.
@@ -427,23 +1279,157 @@ fn build_locator_dots(
     }
 }
 
-fn build_crosshair(elements: &mut Vec<MenuElement>, cx: f32, cy: f32) {
-    elements.push(MenuElement::Rect {
-        x: cx - CROSSHAIR_SIZE,
-        y: cy - CROSSHAIR_THICKNESS / 2.0,
-        w: CROSSHAIR_SIZE * 2.0,
-        h: CROSSHAIR_THICKNESS,
-        corner_radius: 0.0,
-        color: WHITE,
+/// Vanilla `Hud.extractCrosshair`: the 15x15 crosshair and, in Crosshair
+/// mode, the attack indicator below it, all INVERT-blended
+/// (`RenderPipelines.CROSSHAIR`).
+fn build_crosshair(
+    elements: &mut Vec<MenuElement>,
+    cx: f32,
+    cy: f32,
+    gs: f32,
+    attack: &AttackIndicatorState,
+) {
+    elements.push(MenuElement::ImageInvert {
+        x: (cx - 15.0 * gs / 2.0).round(),
+        y: (cy - 15.0 * gs / 2.0).round(),
+        w: 15.0 * gs,
+        h: 15.0 * gs,
+        sprite: SpriteId::Crosshair,
+        tint: WHITE,
     });
-    elements.push(MenuElement::Rect {
-        x: cx - CROSSHAIR_THICKNESS / 2.0,
-        y: cy - CROSSHAIR_SIZE,
-        w: CROSSHAIR_THICKNESS,
-        h: CROSSHAIR_SIZE * 2.0,
-        corner_radius: 0.0,
-        color: WHITE,
-    });
+
+    if attack.mode != AttackIndicatorMode::Crosshair {
+        return;
+    }
+    // Vanilla: x = w/2 - 8, y = h/2 - 7 + 16.
+    let ix = (cx - 8.0 * gs).round();
+    let iy = (cy + 9.0 * gs).round();
+    if attack.show_full {
+        elements.push(MenuElement::ImageInvert {
+            x: ix,
+            y: iy,
+            w: 16.0 * gs,
+            h: 16.0 * gs,
+            sprite: SpriteId::CrosshairAttackIndicatorFull,
+            tint: WHITE,
+        });
+    } else if attack.scale < 1.0 {
+        let progress = (attack.scale * 17.0) as i32;
+        elements.push(MenuElement::ImageInvert {
+            x: ix,
+            y: iy,
+            w: 16.0 * gs,
+            h: 4.0 * gs,
+            sprite: SpriteId::CrosshairAttackIndicatorBackground,
+            tint: WHITE,
+        });
+        if progress > 0 {
+            // Vanilla blits the (0, 0, progress, 4) sub-rect; scissoring the
+            // full-size draw to `progress` px is identical.
+            elements.push(MenuElement::ScissorPush {
+                x: ix,
+                y: iy,
+                w: (progress as f32 * gs).round(),
+                h: 4.0 * gs,
+            });
+            elements.push(MenuElement::ImageInvert {
+                x: ix,
+                y: iy,
+                w: 16.0 * gs,
+                h: 4.0 * gs,
+                sprite: SpriteId::CrosshairAttackIndicatorProgress,
+                tint: WHITE,
+            });
+            elements.push(MenuElement::ScissorPop);
+        }
+    }
+}
+
+struct HeartLayout {
+    health_containers: i32,
+    absorption_containers: i32,
+    rows: i32,
+    row_height: i32,
+}
+
+/// Vanilla `Hud.extractPlayerHealth` layout math.
+fn heart_layout(max_health: f32, health: f32, absorption_halves: i32) -> HeartLayout {
+    // TODO: also max with displayHealth once the damage-flash blink exists.
+    let max_health = max_health.max(health.ceil());
+    let health_containers = (max_health as f64 / 2.0).ceil() as i32;
+    let rows = ((max_health + absorption_halves as f32) / 2.0 / 10.0).ceil() as i32;
+    HeartLayout {
+        health_containers,
+        absorption_containers: (absorption_halves as f64 / 2.0).ceil() as i32,
+        rows,
+        row_height: (10 - (rows - 2)).max(3),
+    }
+}
+
+/// Vanilla `Hud.extractHearts`: health and absorption hearts share one
+/// 10-per-row grid, absorption occupying the container indices past the
+/// health containers and wrapping upward into new rows.
+///
+/// `y_row_bottom` is the BOTTOM of the bottom row; vanilla's `yLineBase` is
+/// its top, so `y_row_bottom - icon_size` ≡ `yLineBase * gs` and vanilla's
+/// downward-growing y offsets map unchanged.
+#[allow(clippy::too_many_arguments)]
+fn build_hearts(
+    elements: &mut Vec<MenuElement>,
+    x_left: f32,
+    y_row_bottom: f32,
+    layout: &HeartLayout,
+    health: f32,
+    absorption_halves: i32,
+    rng: &mut crate::util::JavaRandom,
+    gs: f32,
+) {
+    let icon_size = ICON_SIZE * gs;
+    let current_health = health.ceil().max(0.0) as i32;
+    let max_health_halves = layout.health_containers * 2;
+    for i in (0..layout.health_containers + layout.absorption_containers).rev() {
+        let x = (x_left + (i % 10 * 8) as f32 * gs).round();
+        let mut y_off = -(i / 10 * layout.row_height);
+        if current_health + absorption_halves <= 4 {
+            y_off += rng.next_int(2);
+        }
+        // TODO: regen wave (i < health_containers && i == heart_offset_index
+        // => y_off -= 2) once mob effects are tracked.
+        let y = (y_row_bottom - icon_size + y_off as f32 * gs).round();
+        let mut push = |sprite| {
+            elements.push(MenuElement::Image {
+                x,
+                y,
+                w: icon_size,
+                h: icon_size,
+                sprite,
+                tint: WHITE,
+            });
+        };
+        // TODO: blinking container / hardcore variants.
+        push(SpriteId::HeartContainer);
+        let halves = i * 2;
+        if i >= layout.health_containers {
+            // TODO: WITHERED replaces ABSORBING under the wither effect.
+            let ah = halves - max_health_halves;
+            if ah < absorption_halves {
+                push(if ah + 1 == absorption_halves {
+                    SpriteId::HeartAbsorbingHalf
+                } else {
+                    SpriteId::HeartAbsorbingFull
+                });
+            }
+        }
+        // TODO: blinking old-health overlay; poisoned/withered/frozen/hardcore
+        // heart types.
+        if halves < current_health {
+            push(if halves + 1 == current_health {
+                SpriteId::HeartHalf
+            } else {
+                SpriteId::HeartFull
+            });
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -502,7 +1488,52 @@ fn build_status_bar(
     }
 }
 
-fn build_debug_overlay(
+/// Vanilla `Hud.extractVehicleHealth`: right-aligned mount hearts in rows of
+/// 10 stacked 10px apart, bottom row first; no blink or hardcore variants.
+fn build_vehicle_hearts(
+    elements: &mut Vec<MenuElement>,
+    x_right: f32,
+    y: f32,
+    hearts: i32,
+    health: f32,
+    gs: f32,
+) {
+    let icon_size = ICON_SIZE * gs;
+    let current = health.ceil() as i32;
+    let mut remaining = hearts;
+    let mut row_y = y;
+    let mut base_health = 0;
+    while remaining > 0 {
+        let row_hearts = remaining.min(10);
+        remaining -= row_hearts;
+        let iy = (row_y - icon_size).round();
+        for i in 0..row_hearts {
+            let x = icon_row_x_rtl(x_right, i, gs);
+            let mut push = |sprite| {
+                elements.push(MenuElement::Image {
+                    x,
+                    y: iy,
+                    w: icon_size,
+                    h: icon_size,
+                    sprite,
+                    tint: WHITE,
+                });
+            };
+            push(SpriteId::HeartVehicleContainer);
+            let halves = i * 2 + 1 + base_health;
+            if halves < current {
+                push(SpriteId::HeartVehicleFull);
+            }
+            if halves == current {
+                push(SpriteId::HeartVehicleHalf);
+            }
+        }
+        row_y -= 10.0 * gs;
+        base_health += 20;
+    }
+}
+
+pub fn build_debug_overlay(
     elements: &mut Vec<MenuElement>,
     info: &DebugInfo<'_>,
     gs: f32,
@@ -628,5 +1659,72 @@ fn facing_name(y_rot_deg: f32) -> &'static str {
         135..=224 => "North (-Z)",
         225..=314 => "East (+X)",
         _ => "South (+Z)",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gui_scale_matches_window_calculate_scale() {
+        // 720p fits 3, 1080p fits 4.
+        assert_eq!(gui_scale(1280.0, 720.0, 0, false), 3.0);
+        assert_eq!(gui_scale(1920.0, 1080.0, 0, false), 4.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 2, false), 2.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 5, false), 3.0);
+    }
+
+    #[test]
+    fn force_unicode_font_makes_the_gui_scale_even() {
+        assert_eq!(gui_scale(1280.0, 720.0, 0, true), 4.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 3, true), 4.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 5, true), 4.0);
+        assert_eq!(gui_scale(1920.0, 1080.0, 1, true), 2.0);
+        assert_eq!(gui_scale(1920.0, 1080.0, 0, true), 4.0);
+    }
+
+    fn add_team(scoreboard: &mut Scoreboard, name: &str, rule: CollisionRule, members: &[&str]) {
+        scoreboard.set_team(
+            name.into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            WHITE,
+            None,
+            rule,
+            Some(members.iter().map(|m| (*m).into()).collect()),
+        );
+    }
+
+    #[test]
+    fn pushable_by_follows_team_collision_rules() {
+        let pushable = |own: CollisionRule, their: CollisionRule, same_team: bool| {
+            let mut scoreboard = Scoreboard::default();
+            if same_team {
+                add_team(&mut scoreboard, "a", own, &["pusher", "target"]);
+            } else {
+                add_team(&mut scoreboard, "a", own, &["pusher"]);
+                add_team(&mut scoreboard, "b", their, &["target"]);
+            }
+            scoreboard.pushable_by("pusher", "target")
+        };
+        use CollisionRule::*;
+
+        assert!(Scoreboard::default().pushable_by("pusher", "target"));
+        assert!(pushable(Always, Always, false));
+        assert!(!pushable(Never, Always, false));
+        assert!(!pushable(Always, Never, false));
+        assert!(!pushable(Never, Never, true));
+        assert!(pushable(PushOwnTeam, Always, false));
+        assert!(!pushable(PushOwnTeam, PushOwnTeam, true));
+        assert!(!pushable(PushOtherTeams, Always, false));
+        assert!(!pushable(Always, PushOtherTeams, false));
+        assert!(pushable(PushOtherTeams, PushOtherTeams, true));
+
+        // A teamless target is never an ally, so PUSH_OTHER_TEAMS still blocks.
+        let mut scoreboard = Scoreboard::default();
+        add_team(&mut scoreboard, "a", PushOtherTeams, &["pusher"]);
+        assert!(!scoreboard.pushable_by("pusher", "target"));
     }
 }

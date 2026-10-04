@@ -1,5 +1,9 @@
+import { getVersion } from "@tauri-apps/api/app";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { useEffect, useState } from "react";
 import {
   HiArrowRightOnRectangle,
+  HiClipboardDocument,
   HiChevronDown,
   HiCog6Tooth,
   HiHome,
@@ -54,8 +58,28 @@ export default function Navbar({ startAddAccount, switchAccount, removeAccount }
 
     activeIndex,
     authLoading,
+    authUrl,
     friendsList,
   } = useAppStateContext();
+
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    getVersion().then(setVersion).catch(console.error);
+  }, []);
+
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
+
+  const copyAuthUrl = () => {
+    if (!authUrl) return;
+    writeText(authUrl)
+      .then(() => setCopied(true))
+      .catch((e) => console.error("Failed to copy sign-in link:", e));
+  };
 
   const incomingCount = friendsList.incomingRequests?.length ?? 0;
 
@@ -71,7 +95,7 @@ export default function Navbar({ startAddAccount, switchAccount, removeAccount }
           <span className="brand-name">POMME</span>
           <span className="brand-sub">LAUNCHER</span>
         </div>
-        <span className="brand-version">v0.1.0</span>
+        <span className="brand-version">{version && `v${version}`}</span>
       </div>
 
       <div className="sidebar-nav">
@@ -146,6 +170,12 @@ export default function Navbar({ startAddAccount, switchAccount, removeAccount }
         ) : (
           <button className="sign-in-sidebar" onClick={startAddAccount} disabled={authLoading}>
             {authLoading ? "Signing in..." : "SIGN IN"}
+          </button>
+        )}
+        {authLoading && authUrl && (
+          <button className="auth-copy-link" onClick={copyAuthUrl}>
+            <HiClipboardDocument />
+            <span>{copied ? "Copied!" : "Link didn't open? Copy it"}</span>
           </button>
         )}
       </div>

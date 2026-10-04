@@ -4,7 +4,7 @@ use std::path::Path;
 use azalea_block::BlockState;
 use serde::{Deserialize, Serialize};
 
-pub const BLOCK_CACHE_FILE: &str = "block_cache_v2.json";
+pub const BLOCK_CACHE_FILE: &str = "block_cache_v3.json";
 
 use super::model;
 use super::model::BakedModel;
@@ -16,6 +16,8 @@ pub enum Tint {
     Grass,
     Foliage,
     DryFoliage,
+    /// Power-level color, resolved at mesh time from the state's `power`.
+    Redstone,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -72,6 +74,8 @@ pub struct BlockRegistry {
     item_models: HashMap<String, BakedModel>,
     flat_item_textures: std::collections::HashSet<String>,
     flat_item_texture_keys: HashMap<String, String>,
+    item_gui_transforms: HashMap<String, model::DisplayTransform>,
+    item_ground_transforms: HashMap<String, glam::Mat4>,
     /// Block name -> its single `BlockState`, for one-state blocks (see
     /// `placeable_block_for_item`).
     placeable_blocks: HashMap<&'static str, BlockState>,
@@ -116,8 +120,12 @@ impl BlockRegistry {
         });
 
         let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index, packs);
-        let (item_models, flat_item_textures, flat_item_texture_keys) =
-            model::bake_item_models(jar_assets_dir, asset_index, packs);
+        let baked_items = model::bake_item_models(jar_assets_dir, asset_index, packs);
+        let item_models = baked_items.models;
+        let flat_item_textures = baked_items.generated_textures;
+        let flat_item_texture_keys = baked_items.flat_texture_keys;
+        let item_gui_transforms = baked_items.gui_transforms;
+        let item_ground_transforms = baked_items.ground_transforms;
 
         Self {
             textures,
@@ -126,6 +134,8 @@ impl BlockRegistry {
             item_models,
             flat_item_textures,
             flat_item_texture_keys,
+            item_gui_transforms,
+            item_ground_transforms,
             placeable_blocks: build_placeable_blocks(),
         }
     }
@@ -141,12 +151,31 @@ impl BlockRegistry {
         self.item_models.get(name)
     }
 
+    /// Every item with a baked 3D model or a generated flat sprite.
+    pub fn item_names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.item_models
+            .keys()
+            .chain(self.flat_item_texture_keys.keys())
+            .map(String::as_str)
+    }
+
     pub fn flat_item_textures(&self) -> impl Iterator<Item = &str> + '_ {
         self.flat_item_textures.iter().map(String::as_str)
     }
 
     pub fn get_flat_item_texture_key(&self, name: &str) -> Option<&str> {
         self.flat_item_texture_keys.get(name).map(String::as_str)
+    }
+
+    pub(crate) fn get_item_gui_transform(&self, name: &str) -> model::DisplayTransform {
+        self.item_gui_transforms
+            .get(name)
+            .copied()
+            .unwrap_or(model::DisplayTransform::IDENTITY)
+    }
+
+    pub fn get_item_ground_transform(&self, name: &str) -> Option<glam::Mat4> {
+        self.item_ground_transforms.get(name).copied()
     }
 
     pub fn get_textures(&self, state: BlockState) -> Option<&FaceTextures> {

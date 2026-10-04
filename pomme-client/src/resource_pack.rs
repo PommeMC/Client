@@ -55,11 +55,44 @@ impl ResourcePackManager {
     }
 
     pub fn resolve_asset(&self, asset_key: &str) -> Option<PathBuf> {
+        if !crate::assets::valid_asset_key(asset_key) {
+            return None;
+        }
         for pack in self.active_packs.iter().rev() {
             let path = pack.dir.join("assets").join(asset_key);
             if path.exists() {
                 return Some(path);
             }
+        }
+        None
+    }
+
+    /// Active pack roots in low-to-high priority order, matching the order in
+    /// which stacked resources are registered by Vanilla.
+    pub fn active_pack_dirs(&self) -> impl Iterator<Item = &Path> {
+        self.active_packs.iter().map(|pack| pack.dir.as_path())
+    }
+
+    /// Resolve a resource-pack asset together with the metadata sidecar that
+    /// vanilla would expose for that resource. Metadata may come from the same
+    /// pack or a higher-priority pack, but never from below the pack that
+    /// supplied the resource itself.
+    pub fn resolve_asset_with_metadata(
+        &self,
+        asset_key: &str,
+    ) -> Option<(PathBuf, Option<PathBuf>)> {
+        let metadata_key = format!("{asset_key}.mcmeta");
+        for (source_index, pack) in self.active_packs.iter().enumerate().rev() {
+            let path = pack.dir.join("assets").join(asset_key);
+            if !path.exists() {
+                continue;
+            }
+            let metadata = self.active_packs[source_index..]
+                .iter()
+                .rev()
+                .map(|candidate| candidate.dir.join("assets").join(&metadata_key))
+                .find(|candidate| candidate.exists());
+            return Some((path, metadata));
         }
         None
     }
@@ -116,9 +149,14 @@ impl ResourcePackManager {
         removed
     }
 
-    pub fn clear_server_packs(&mut self) {
+    pub fn clear_server_packs(&mut self) -> bool {
+        let before = self.active_packs.len();
         self.active_packs.retain(|p| p.source != PackSource::Server);
-        tracing::info!("Cleared all server resource packs");
+        let removed = self.active_packs.len() != before;
+        if removed {
+            tracing::info!("Cleared all server resource packs");
+        }
+        removed
     }
 
     pub fn scan_local_packs(&mut self) {

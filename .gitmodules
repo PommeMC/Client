@@ -1,0 +1,4 @@
+[submodule "third_party/SteelMC"]
+	path = third_party/SteelMC
+	url = https://github.com/Steel-Foundation/SteelMC.git
+	shallow = true

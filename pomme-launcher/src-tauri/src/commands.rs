@@ -167,8 +167,8 @@ pub fn get_all_accounts() -> Vec<crate::auth::AuthAccount> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn add_account() -> Result<crate::auth::AuthAccount, String> {
-    crate::auth::oauth_sign_in().await
+pub async fn add_account(app: AppHandle) -> Result<crate::auth::AuthAccount, String> {
+    crate::auth::oauth_sign_in(app).await
 }
 
 #[tauri::command]
@@ -452,6 +452,11 @@ pub async fn launch_game(
     #[cfg(unix)]
     cmd.process_group(0);
 
+    // The client is a console-subsystem binary; without this, Windows pops a
+    // terminal window for it alongside the game.
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
 
     let stdout = child.stdout.take().expect("couldn't take stdout");
@@ -611,6 +616,12 @@ pub async fn set_keep_launcher_open(keep: bool) -> Result<(), String> {
 #[specta::specta]
 pub async fn set_launch_with_console(launch: bool) -> Result<(), String> {
     LauncherSettings::update(|s| s.launch_with_console = launch).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_selected_account_uuid(uuid: Option<String>) -> Result<(), String> {
+    LauncherSettings::update(|s| s.selected_account_uuid = uuid).await
 }
 
 #[tauri::command]

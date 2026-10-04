@@ -13,8 +13,26 @@ use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::BakedEntityModel;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, entity_model, shader, util};
+use crate::world::block::BedDirection;
 
 pub const MAX_OVERLAYS: usize = 4;
+
+fn flip_degrees(kind: EntityKind) -> f32 {
+    match kind {
+        EntityKind::Spider
+        | EntityKind::CaveSpider
+        | EntityKind::Endermite
+        | EntityKind::Silverfish => 180.0,
+        _ => 90.0,
+    }
+}
+
+fn death_fall_degrees(death_time: f32, kind: EntityKind) -> f32 {
+    if death_time <= 0.0 || matches!(kind, EntityKind::Squid | EntityKind::GlowSquid) {
+        return 0.0;
+    }
+    (((death_time - 1.0) / 20.0 * 1.6).sqrt()).min(1.0) * flip_degrees(kind)
+}
 
 /// Per-frame instance buffer capacity, in (entity, part) draws. Far above any
 /// realistic on-screen entity count; excess is dropped with a warning.
@@ -37,6 +55,11 @@ pub struct EntityRenderInfo {
     pub head_x_rot_deg: f32,
     pub head_y_rot_deg: f32,
     pub body_y_rot_deg: f32,
+    pub is_sleeping: bool,
+    /// The bed's facing; `None` when no bed can be resolved.
+    pub sleeping_direction: Option<BedDirection>,
+    /// Standing-pose eye height used by LivingEntityRenderer's sleeping offset.
+    pub sleeping_eye_height: f32,
     pub is_baby: bool,
     pub is_crouching: bool,
     pub walk_anim_pos: f32,
@@ -52,8 +75,60 @@ pub struct EntityRenderInfo {
     pub head_y_offset: f32,
     pub head_x_rot_deg_override: Option<f32>,
     pub has_red_overlay: bool,
+    pub death_time: f32,
     /// Mob is targeting/attacking — raises zombie/skeleton arms.
     pub aggressive: bool,
+    /// Chicken wing-flap phase and 0..1 amplitude, interpolated.
+    pub flap: f32,
+    pub flap_speed: f32,
+    /// Enderman screaming state — raises the head.
+    pub is_creepy: bool,
+    /// Zombie-family conversion — shakes the whole body.
+    pub is_converting: bool,
+    /// Witch drinking. Driven by the using-item metadata flag rather than
+    /// vanilla's `isHoldingItem` (main-hand item check) — pomme tracks no
+    /// mob equipment; the two only diverge for command-equipped witches.
+    pub is_holding_item: bool,
+    /// Witch per-entity nose-wobble rate, resolved from the entity id.
+    pub nose_wobble_speed: f32,
+    /// Tamable sitting pose (wolf/cat).
+    pub is_sitting: bool,
+    pub is_sprinting: bool,
+    /// Wolf anger — angry face texture is picked upstream; this pins the tail.
+    pub is_angry: bool,
+    /// Wolf tail pitch (vanilla `getTailAngle`), radians.
+    pub tail_angle: f32,
+    /// Wolf beg head tilt, radians, interpolated.
+    pub head_roll_angle: f32,
+    /// Wolf wet-shake progress 0..2, interpolated.
+    pub shake_anim: f32,
+    /// Cat lie-down / relax springs, interpolated.
+    pub lie_down_amount: f32,
+    pub lie_down_amount_tail: f32,
+    pub relax_state_one_amount: f32,
+    /// Rabbit hop keyframe clock, seconds since the hop started.
+    pub hop_elapsed_secs: Option<f32>,
+    /// Equine grass-eat / rear-up / feeding springs, interpolated.
+    pub eat_anim: f32,
+    pub stand_anim: f32,
+    pub feeding_anim: f32,
+    /// Equine tail swish (client-local RNG counter).
+    pub animate_tail: bool,
+    /// Fish flop pose / squid body branch.
+    pub is_in_water: bool,
+    /// Squid tentacle stroke angle, interpolated.
+    pub tentacle_angle: f32,
+    /// Bat pose flag + its fly/rest animation clock.
+    pub bat_resting: bool,
+    pub bat_elapsed_secs: Option<f32>,
+    /// Iron golem countdowns; the punch one is partial-tick adjusted.
+    pub golem_attack_ticks: f32,
+    pub golem_offer_flower_ticks: u32,
+    /// Base-model tint (wolf wet-shade grayscale); white for everyone else.
+    pub base_tint: [f32; 4],
+    /// Extra scale applied after the entity rotation (slime size + squish),
+    /// shared by base and overlay draws.
+    pub body_transform: Option<glam::Mat4>,
     /// Interpolated entity age in ticks; drives the undead idle arm bob.
     pub age_in_ticks: f32,
     /// Arm-swing progress 0..1; drives the zombie attack swing.
@@ -63,14 +138,82 @@ pub struct EntityRenderInfo {
     pub skip_cull: bool,
 }
 
+/// Everything inert: mob-family animation inputs zeroed, no overlays, white
+/// tint. Construction sites spell out only the fields that apply to them.
+impl Default for EntityRenderInfo {
+    fn default() -> Self {
+        Self {
+            position: Position::new(0.0, 0.0, 0.0),
+            head_x_rot_deg: 0.0,
+            head_y_rot_deg: 0.0,
+            body_y_rot_deg: 0.0,
+            is_sleeping: false,
+            sleeping_direction: None,
+            sleeping_eye_height: crate::player::STANDING_EYE_HEIGHT,
+            is_baby: false,
+            is_crouching: false,
+            walk_anim_pos: 0.0,
+            walk_anim_speed: 0.0,
+            entity_kind: EntityKind::Player,
+            player_uuid: None,
+            variant_index: 0,
+            overlay_tints: [None; MAX_OVERLAYS],
+            overlay_variants: [0; MAX_OVERLAYS],
+            is_unhappy: false,
+            head_y_offset: 0.0,
+            head_x_rot_deg_override: None,
+            has_red_overlay: false,
+            death_time: 0.0,
+            aggressive: false,
+            flap: 0.0,
+            flap_speed: 0.0,
+            is_creepy: false,
+            is_converting: false,
+            is_holding_item: false,
+            nose_wobble_speed: 0.0,
+            is_sitting: false,
+            is_sprinting: false,
+            is_angry: false,
+            tail_angle: 0.0,
+            head_roll_angle: 0.0,
+            shake_anim: 0.0,
+            lie_down_amount: 0.0,
+            lie_down_amount_tail: 0.0,
+            relax_state_one_amount: 0.0,
+            hop_elapsed_secs: None,
+            eat_anim: 0.0,
+            stand_anim: 0.0,
+            feeding_anim: 0.0,
+            animate_tail: false,
+            is_in_water: false,
+            tentacle_angle: 0.0,
+            bat_resting: false,
+            bat_elapsed_secs: None,
+            golem_attack_ticks: 0.0,
+            golem_offer_flower_ticks: 0,
+            base_tint: WHITE_TINT,
+            body_transform: None,
+            age_in_ticks: 0.0,
+            attack_time: 0.0,
+            skip_cull: false,
+        }
+    }
+}
+
 /// How an overlay layer is blended. Base/baby variants are always `Opaque`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OverlayKind {
     /// Cutout, depth-writing — sheep wool and all base models.
     Opaque,
+    /// `Opaque` with backface culling (vanilla `entityCutoutCull`) — meshes
+    /// with coplanar zero-depth quads (bat wings).
+    OpaqueCulled,
+    /// Translucent, depth-writing — the slime shell (vanilla
+    /// `entityTranslucent`; the alpha lives in the texture).
+    BodyTranslucent,
     /// Translucent, full-bright, depth-write off — spider glowing eyes.
     EyesTranslucent,
-    /// Additive, full-bright, depth-write off, scrolling UV — charged creeper
+    /// Additive, full-bright, depth-writing, scrolling UV — charged creeper
     /// swirl.
     SwirlAdditive,
 }
@@ -84,6 +227,10 @@ struct MobVariant {
     texture_allocation: Allocation,
     texture_set: vk::DescriptorSet,
     overlay_kind: OverlayKind,
+    /// Overlay whose part poses (pivots/rotations/scales) differ from the
+    /// base model's, so its part transforms can't be shared with the base
+    /// (stray/bogged clothing: humanoid ±1.9 legs over skeleton ±2.0).
+    own_pivots: bool,
 }
 
 struct MobEntry {
@@ -132,6 +279,42 @@ impl MobEntry {
 
 pub const WHITE_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
+/// Each mob's flattened variant pool by registry path; the net handler
+/// resolves synced registry entries by name against these same slices (so
+/// their order is pomme's, not the protocol id's), and the renderer
+/// constructor asserts the pools line up.
+pub const CHICKEN_VARIANT_ORDER: &[&str] = &["temperate", "warm", "cold"];
+pub const COW_VARIANT_ORDER: &[&str] = &["temperate", "cold", "warm"];
+/// Wolf pool interleaves 3 state textures (wild/tame/angry) per variant.
+pub const WOLF_VARIANT_ORDER: &[&str] = &[
+    "pale", "spotted", "snowy", "black", "ashen", "rusty", "woods", "chestnut", "striped",
+];
+pub const CAT_VARIANT_ORDER: &[&str] = &[
+    "all_black",
+    "black",
+    "british_shorthair",
+    "calico",
+    "jellie",
+    "persian",
+    "ragdoll",
+    "red",
+    "siamese",
+    "tabby",
+    "white",
+];
+
+/// Pool length the `*_VARIANT_ORDER` slice implies for mobs whose variant
+/// index comes from a synced registry.
+fn expected_variant_count(kind: EntityKind) -> Option<usize> {
+    match kind {
+        EntityKind::Chicken => Some(CHICKEN_VARIANT_ORDER.len()),
+        EntityKind::Cow => Some(COW_VARIANT_ORDER.len()),
+        EntityKind::Wolf => Some(WOLF_VARIANT_ORDER.len() * 3),
+        EntityKind::Cat => Some(CAT_VARIANT_ORDER.len()),
+        _ => None,
+    }
+}
+
 /// Vanilla `OverlayTexture` hurt pixel (ARGB 0xB2FF0000): rgb is the overlay
 /// color, `a` is how much of the base color survives the mix.
 const HURT_OVERLAY: [f32; 4] = [1.0, 0.0, 0.0, 178.0 / 255.0];
@@ -167,6 +350,35 @@ pub fn wool_color_tint(color: u8) -> [f32; 4] {
     WOOL_COLOR_RGBA[(color & 0x0F) as usize]
 }
 
+/// Vanilla `DyeColor.getTextureDiffuseColor` — the modern dye table used by
+/// collar layers (`WOOL_COLOR_RGBA` above is the legacy wool table).
+pub const DYE_COLOR_RGBA: [[f32; 4]; 16] = [
+    rgb(0xF9FFFE), // 0 white
+    rgb(0xF9801D), // 1 orange
+    rgb(0xC74EBD), // 2 magenta
+    rgb(0x3AB3DA), // 3 light_blue
+    rgb(0xFED83D), // 4 yellow
+    rgb(0x80C71F), // 5 lime
+    rgb(0xF38BAA), // 6 pink
+    rgb(0x474F52), // 7 gray
+    rgb(0x9D9D97), // 8 light_gray
+    rgb(0x169C9C), // 9 cyan
+    rgb(0x8932B8), // 10 purple
+    rgb(0x3C44AA), // 11 blue
+    rgb(0x835432), // 12 brown
+    rgb(0x5E7C16), // 13 green
+    rgb(0xB02E26), // 14 red
+    rgb(0x1D1D21), // 15 black
+];
+
+/// Out-of-range ids are white (vanilla `DyeColor.byId`).
+pub fn dye_color_tint(color: u8) -> [f32; 4] {
+    DYE_COLOR_RGBA
+        .get(color as usize)
+        .copied()
+        .unwrap_or(DYE_COLOR_RGBA[0])
+}
+
 pub fn jeb_sheep_tint(entity_id: i32, age_in_ticks: u32) -> [f32; 4] {
     let base = (age_in_ticks / 25).wrapping_add(entity_id as u32);
     let c1 = (base % 16) as usize;
@@ -184,9 +396,13 @@ pub fn jeb_sheep_tint(entity_id: i32, age_in_ticks: u32) -> [f32; 4] {
 
 pub struct EntityRenderer {
     pipeline: vk::Pipeline,
+    /// Opaque with backface culling — bat wings.
+    culled_pipeline: vk::Pipeline,
+    /// Translucent, depth-writing — slime shell.
+    body_translucent_pipeline: vk::Pipeline,
     /// Translucent, depth-write off — spider eyes.
     eyes_pipeline: vk::Pipeline,
-    /// Additive, depth-write off — charged-creeper energy swirl.
+    /// Additive, depth-writing — charged-creeper energy swirl.
     swirl_pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
     camera_layout: vk::DescriptorSetLayout,
@@ -209,18 +425,40 @@ pub struct EntityRenderer {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BlendMode {
     Opaque,
+    /// Opaque with backface culling (vanilla `entityCutoutCull`) — used by
+    /// meshes with coplanar zero-depth quads (bat wings).
+    OpaqueCulled,
     Translucent,
+    /// Same blend as `Translucent` but keeps depth writes (vanilla
+    /// `entityTranslucent` vs `EYES`).
+    TranslucentDepthWrite,
     Additive,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AnimationType {
     Quadruped,
+    Chicken,
     Humanoid,
+    Enderman,
     Zombie,
     Skeleton,
     Spider,
     Villager,
+    Witch,
+    Wolf,
+    /// Cat and ocelot (ocelots only drive the crouch/sprint inputs).
+    Feline,
+    Rabbit,
+    /// Horse family; the hook set is derived from (entity kind, is_baby).
+    Equine,
+    Squid,
+    Bat,
+    /// Cod, salmon, tropical fish, pufferfish.
+    Fish,
+    Golem,
+    /// No part animation (slime — size/squish live in the body transform).
+    Static,
 }
 
 struct VariantDef {
@@ -242,6 +480,35 @@ struct MobDef {
 }
 
 fn mob_definitions() -> Vec<MobDef> {
+    // One single-fallback texture entry per name under an entity texture dir.
+    macro_rules! tex_table {
+        ($dir:expr => $($name:literal),+ $(,)?) => {
+            &[$(&[concat!("minecraft/textures/entity/", $dir, "/", $name, ".png")]),+]
+        };
+    }
+    // The villager and zombie-villager overlay dirs ship identical
+    // registry-ordered file names; each list is written once here and both
+    // mobs' tables expand from it. Types index by the builtin VillagerKind
+    // registry order, professions by VillagerProfession order minus "none"
+    // (which has no texture), levels by profession level 1-5 minus one.
+    macro_rules! villager_type_table {
+        ($dir:expr) => {
+            tex_table!($dir => "desert", "jungle", "plains", "savanna", "snow", "swamp", "taiga")
+        };
+    }
+    macro_rules! villager_profession_table {
+        ($dir:expr) => {
+            tex_table!($dir => "armorer", "butcher", "cartographer", "cleric", "farmer",
+                "fisherman", "fletcher", "leatherworker", "librarian", "mason", "nitwit",
+                "shepherd", "toolsmith", "weaponsmith")
+        };
+    }
+    macro_rules! villager_level_table {
+        ($dir:expr) => {
+            tex_table!($dir => "stone", "iron", "gold", "emerald", "diamond")
+        };
+    }
+
     const PIG_ADULT_TEX: &[&[&str]] = &[&[
         "minecraft/textures/entity/pig/pig_temperate.png",
         "minecraft/textures/entity/pig/temperate_pig.png",
@@ -260,69 +527,153 @@ fn mob_definitions() -> Vec<MobDef> {
         &["minecraft/textures/entity/cow/cow_cold_baby.png"],
         &["minecraft/textures/entity/cow/cow_warm_baby.png"],
     ];
-    const SHEEP_ADULT_TEX: &[&[&str]] = &[&["minecraft/textures/entity/sheep/sheep.png"]];
-    const SHEEP_BABY_TEX: &[&[&str]] = &[&["minecraft/textures/entity/sheep/sheep_baby.png"]];
-    const SHEEP_WOOL_UNDERCOAT_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/sheep/sheep_wool_undercoat.png"]];
-    const SHEEP_WOOL_TEX: &[&[&str]] = &[&["minecraft/textures/entity/sheep/sheep_wool.png"]];
-    const SHEEP_BABY_WOOL_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/sheep/sheep_wool_baby.png"]];
-    const PLAYER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/player/wide/steve.png"]];
-    const ZOMBIE_TEX: &[&[&str]] = &[&["minecraft/textures/entity/zombie/zombie.png"]];
-    const SKELETON_TEX: &[&[&str]] = &[&["minecraft/textures/entity/skeleton/skeleton.png"]];
-    const CREEPER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/creeper/creeper.png"]];
-    const CREEPER_ARMOR_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/creeper/creeper_armor.png"]];
-    const SPIDER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/spider/spider.png"]];
-    const SPIDER_EYES_TEX: &[&[&str]] = &[&["minecraft/textures/entity/spider/spider_eyes.png"]];
-    const VILLAGER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/villager/villager.png"]];
-    const VILLAGER_BABY_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/villager/villager_baby.png"]];
-    // Indexed by the builtin VillagerKind registry order.
-    const VILLAGER_TYPE_TEX: &[&[&str]] = &[
-        &["minecraft/textures/entity/villager/type/desert.png"],
-        &["minecraft/textures/entity/villager/type/jungle.png"],
-        &["minecraft/textures/entity/villager/type/plains.png"],
-        &["minecraft/textures/entity/villager/type/savanna.png"],
-        &["minecraft/textures/entity/villager/type/snow.png"],
-        &["minecraft/textures/entity/villager/type/swamp.png"],
-        &["minecraft/textures/entity/villager/type/taiga.png"],
+    // The two normal-mesh variants share one VariantDef, the cold mesh gets
+    // its own; the flattened pool follows CHICKEN_VARIANT_ORDER.
+    const CHICKEN_NORMAL_TEX: &[&[&str]] = &[
+        &[
+            "minecraft/textures/entity/chicken/chicken_temperate.png",
+            "minecraft/textures/entity/chicken.png",
+        ],
+        &["minecraft/textures/entity/chicken/chicken_warm.png"],
     ];
-    const VILLAGER_BABY_TYPE_TEX: &[&[&str]] = &[
-        &["minecraft/textures/entity/villager/baby/desert.png"],
-        &["minecraft/textures/entity/villager/baby/jungle.png"],
-        &["minecraft/textures/entity/villager/baby/plains.png"],
-        &["minecraft/textures/entity/villager/baby/savanna.png"],
-        &["minecraft/textures/entity/villager/baby/snow.png"],
-        &["minecraft/textures/entity/villager/baby/swamp.png"],
-        &["minecraft/textures/entity/villager/baby/taiga.png"],
+    const CHICKEN_COLD_TEX: &[&[&str]] = &[&["minecraft/textures/entity/chicken/chicken_cold.png"]];
+    const CHICKEN_BABY_TEX: &[&[&str]] = &[
+        &["minecraft/textures/entity/chicken/chicken_temperate_baby.png"],
+        &["minecraft/textures/entity/chicken/chicken_warm_baby.png"],
+        &["minecraft/textures/entity/chicken/chicken_cold_baby.png"],
     ];
-    // Indexed by VillagerProfession registry order minus one ("none" has no
-    // texture).
-    const VILLAGER_PROFESSION_TEX: &[&[&str]] = &[
-        &["minecraft/textures/entity/villager/profession/armorer.png"],
-        &["minecraft/textures/entity/villager/profession/butcher.png"],
-        &["minecraft/textures/entity/villager/profession/cartographer.png"],
-        &["minecraft/textures/entity/villager/profession/cleric.png"],
-        &["minecraft/textures/entity/villager/profession/farmer.png"],
-        &["minecraft/textures/entity/villager/profession/fisherman.png"],
-        &["minecraft/textures/entity/villager/profession/fletcher.png"],
-        &["minecraft/textures/entity/villager/profession/leatherworker.png"],
-        &["minecraft/textures/entity/villager/profession/librarian.png"],
-        &["minecraft/textures/entity/villager/profession/mason.png"],
-        &["minecraft/textures/entity/villager/profession/nitwit.png"],
-        &["minecraft/textures/entity/villager/profession/shepherd.png"],
-        &["minecraft/textures/entity/villager/profession/toolsmith.png"],
-        &["minecraft/textures/entity/villager/profession/weaponsmith.png"],
-    ];
-    // Indexed by profession level 1-5 minus one.
-    const VILLAGER_LEVEL_TEX: &[&[&str]] = &[
-        &["minecraft/textures/entity/villager/profession_level/stone.png"],
-        &["minecraft/textures/entity/villager/profession_level/iron.png"],
-        &["minecraft/textures/entity/villager/profession_level/gold.png"],
-        &["minecraft/textures/entity/villager/profession_level/emerald.png"],
-        &["minecraft/textures/entity/villager/profession_level/diamond.png"],
-    ];
+    const SHEEP_ADULT_TEX: &[&[&str]] = tex_table!("sheep" => "sheep");
+    const SHEEP_BABY_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_baby");
+    const SHEEP_WOOL_UNDERCOAT_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_wool_undercoat");
+    const SHEEP_WOOL_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_wool");
+    const SHEEP_BABY_WOOL_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_wool_baby");
+    const PLAYER_TEX: &[&[&str]] = tex_table!("player/wide" => "steve");
+    const ZOMBIE_TEX: &[&[&str]] = tex_table!("zombie" => "zombie");
+    const ZOMBIE_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "zombie_baby");
+    const HUSK_TEX: &[&[&str]] = tex_table!("zombie" => "husk");
+    const HUSK_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "husk_baby");
+    const DROWNED_TEX: &[&[&str]] = tex_table!("zombie" => "drowned");
+    const DROWNED_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "drowned_baby");
+    const DROWNED_OUTER_TEX: &[&[&str]] = tex_table!("zombie" => "drowned_outer_layer");
+    const DROWNED_OUTER_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "drowned_outer_layer_baby");
+    const ZOMBIE_VILLAGER_TEX: &[&[&str]] = tex_table!("zombie_villager" => "zombie_villager");
+    const ZOMBIE_VILLAGER_BABY_TEX: &[&[&str]] =
+        tex_table!("zombie_villager" => "zombie_villager_baby");
+    const ZOMBIE_VILLAGER_TYPE_TEX: &[&[&str]] = villager_type_table!("zombie_villager/type");
+    const ZOMBIE_VILLAGER_BABY_TYPE_TEX: &[&[&str]] = villager_type_table!("zombie_villager/baby");
+    const ZOMBIE_VILLAGER_PROFESSION_TEX: &[&[&str]] =
+        villager_profession_table!("zombie_villager/profession");
+    const ZOMBIE_VILLAGER_LEVEL_TEX: &[&[&str]] =
+        villager_level_table!("zombie_villager/profession_level");
+    // Wolf pool: variant_index = variant * 3 + state (0 wild, 1 tame,
+    // 2 angry); variants follow WOLF_VARIANT_ORDER.
+    const WOLF_TEX: &[&[&str]] = tex_table!("wolf" =>
+        "wolf", "wolf_tame", "wolf_angry",
+        "wolf_spotted", "wolf_spotted_tame", "wolf_spotted_angry",
+        "wolf_snowy", "wolf_snowy_tame", "wolf_snowy_angry",
+        "wolf_black", "wolf_black_tame", "wolf_black_angry",
+        "wolf_ashen", "wolf_ashen_tame", "wolf_ashen_angry",
+        "wolf_rusty", "wolf_rusty_tame", "wolf_rusty_angry",
+        "wolf_woods", "wolf_woods_tame", "wolf_woods_angry",
+        "wolf_chestnut", "wolf_chestnut_tame", "wolf_chestnut_angry",
+        "wolf_striped", "wolf_striped_tame", "wolf_striped_angry");
+    const WOLF_BABY_TEX: &[&[&str]] = tex_table!("wolf" =>
+        "wolf_baby", "wolf_tame_baby", "wolf_angry_baby",
+        "wolf_spotted_baby", "wolf_spotted_tame_baby", "wolf_spotted_angry_baby",
+        "wolf_snowy_baby", "wolf_snowy_tame_baby", "wolf_snowy_angry_baby",
+        "wolf_black_baby", "wolf_black_tame_baby", "wolf_black_angry_baby",
+        "wolf_ashen_baby", "wolf_ashen_tame_baby", "wolf_ashen_angry_baby",
+        "wolf_rusty_baby", "wolf_rusty_tame_baby", "wolf_rusty_angry_baby",
+        "wolf_woods_baby", "wolf_woods_tame_baby", "wolf_woods_angry_baby",
+        "wolf_chestnut_baby", "wolf_chestnut_tame_baby", "wolf_chestnut_angry_baby",
+        "wolf_striped_baby", "wolf_striped_tame_baby", "wolf_striped_angry_baby");
+    const WOLF_COLLAR_TEX: &[&[&str]] = tex_table!("wolf" => "wolf_collar");
+    const WOLF_COLLAR_BABY_TEX: &[&[&str]] = tex_table!("wolf" => "wolf_collar_baby");
+    // Cat pool follows CAT_VARIANT_ORDER.
+    const CAT_TEX: &[&[&str]] = tex_table!("cat" =>
+        "cat_all_black", "cat_black", "cat_british_shorthair", "cat_calico", "cat_jellie",
+        "cat_persian", "cat_ragdoll", "cat_red", "cat_siamese", "cat_tabby", "cat_white");
+    const CAT_BABY_TEX: &[&[&str]] = tex_table!("cat" =>
+        "cat_all_black_baby", "cat_black_baby", "cat_british_shorthair_baby", "cat_calico_baby",
+        "cat_jellie_baby", "cat_persian_baby", "cat_ragdoll_baby", "cat_red_baby",
+        "cat_siamese_baby", "cat_tabby_baby", "cat_white_baby");
+    const CAT_COLLAR_TEX: &[&[&str]] = tex_table!("cat" => "cat_collar");
+    const CAT_COLLAR_BABY_TEX: &[&[&str]] = tex_table!("cat" => "cat_collar_baby");
+    const OCELOT_TEX: &[&[&str]] = tex_table!("cat" => "ocelot");
+    const OCELOT_BABY_TEX: &[&[&str]] = tex_table!("cat" => "ocelot_baby");
+    // Rabbit: variant ids 0-6 in vanilla id order, slot 7 = the "Toast"
+    // custom-name override.
+    const RABBIT_TEX: &[&[&str]] = tex_table!("rabbit" =>
+        "rabbit_brown", "rabbit_white", "rabbit_black", "rabbit_white_splotched",
+        "rabbit_gold", "rabbit_salt", "rabbit_caerbannog", "rabbit_toast");
+    const RABBIT_BABY_TEX: &[&[&str]] = tex_table!("rabbit" =>
+        "rabbit_brown_baby", "rabbit_white_baby", "rabbit_black_baby",
+        "rabbit_white_splotched_baby", "rabbit_gold_baby", "rabbit_salt_baby",
+        "rabbit_caerbannog_baby", "rabbit_toast_baby");
+    // Horse variant_index = color id 0-6; markings overlay variant = id - 1.
+    const HORSE_TEX: &[&[&str]] = tex_table!("horse" =>
+        "horse_white", "horse_creamy", "horse_chestnut", "horse_brown", "horse_black",
+        "horse_gray", "horse_darkbrown");
+    const HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse" =>
+        "horse_white_baby", "horse_creamy_baby", "horse_chestnut_baby", "horse_brown_baby",
+        "horse_black_baby", "horse_gray_baby", "horse_darkbrown_baby");
+    const HORSE_MARKINGS_TEX: &[&[&str]] = tex_table!("horse" =>
+        "horse_markings_white", "horse_markings_whitefield", "horse_markings_whitedots",
+        "horse_markings_blackdots");
+    const HORSE_MARKINGS_BABY_TEX: &[&[&str]] = tex_table!("horse" =>
+        "horse_markings_white_baby", "horse_markings_whitefield_baby",
+        "horse_markings_whitedots_baby", "horse_markings_blackdots_baby");
+    const DONKEY_TEX: &[&[&str]] = tex_table!("horse" => "donkey");
+    const DONKEY_BABY_TEX: &[&[&str]] = tex_table!("horse" => "donkey_baby");
+    const MULE_TEX: &[&[&str]] = tex_table!("horse" => "mule");
+    const MULE_BABY_TEX: &[&[&str]] = tex_table!("horse" => "mule_baby");
+    const SKELETON_HORSE_TEX: &[&[&str]] = tex_table!("horse" => "horse_skeleton");
+    const SKELETON_HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse" => "horse_skeleton_baby");
+    const ZOMBIE_HORSE_TEX: &[&[&str]] = tex_table!("horse" => "horse_zombie");
+    const ZOMBIE_HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse" => "horse_zombie_baby");
+    const SQUID_TEX: &[&[&str]] = tex_table!("squid" => "squid");
+    const SQUID_BABY_TEX: &[&[&str]] = tex_table!("squid" => "squid_baby");
+    const GLOW_SQUID_TEX: &[&[&str]] = tex_table!("squid" => "glow_squid");
+    const GLOW_SQUID_BABY_TEX: &[&[&str]] = tex_table!("squid" => "glow_squid_baby");
+    const BAT_TEX: &[&[&str]] = tex_table!("bat" => "bat");
+    const COD_TEX: &[&[&str]] = tex_table!("fish" => "cod");
+    const SALMON_TEX: &[&[&str]] = tex_table!("fish" => "salmon");
+    const PUFFERFISH_TEX: &[&[&str]] = tex_table!("fish" => "pufferfish");
+    const IRON_GOLEM_TEX: &[&[&str]] = tex_table!("iron_golem" => "iron_golem");
+    // Indexed by crackiness level minus one (low, medium, high).
+    const IRON_GOLEM_CRACKINESS_TEX: &[&[&str]] = tex_table!("iron_golem" =>
+        "iron_golem_crackiness_low", "iron_golem_crackiness_medium",
+        "iron_golem_crackiness_high");
+    const TROPICAL_A_TEX: &[&[&str]] = tex_table!("fish" => "tropical_a");
+    const TROPICAL_B_TEX: &[&[&str]] = tex_table!("fish" => "tropical_b");
+    const TROPICAL_A_PATTERN_TEX: &[&[&str]] = tex_table!("fish" =>
+        "tropical_a_pattern_1", "tropical_a_pattern_2", "tropical_a_pattern_3",
+        "tropical_a_pattern_4", "tropical_a_pattern_5", "tropical_a_pattern_6");
+    const TROPICAL_B_PATTERN_TEX: &[&[&str]] = tex_table!("fish" =>
+        "tropical_b_pattern_1", "tropical_b_pattern_2", "tropical_b_pattern_3",
+        "tropical_b_pattern_4", "tropical_b_pattern_5", "tropical_b_pattern_6");
+    const SKELETON_TEX: &[&[&str]] = tex_table!("skeleton" => "skeleton");
+    const STRAY_TEX: &[&[&str]] = tex_table!("skeleton" => "stray");
+    const STRAY_OVERLAY_TEX: &[&[&str]] = tex_table!("skeleton" => "stray_overlay");
+    const BOGGED_TEX: &[&[&str]] = tex_table!("skeleton" => "bogged");
+    const BOGGED_OVERLAY_TEX: &[&[&str]] = tex_table!("skeleton" => "bogged_overlay");
+    const CREEPER_TEX: &[&[&str]] = tex_table!("creeper" => "creeper");
+    const CREEPER_ARMOR_TEX: &[&[&str]] = tex_table!("creeper" => "creeper_armor");
+    const SPIDER_TEX: &[&[&str]] = tex_table!("spider" => "spider");
+    const SPIDER_EYES_TEX: &[&[&str]] = tex_table!("spider" => "spider_eyes");
+    const ENDERMAN_TEX: &[&[&str]] = tex_table!("enderman" => "enderman");
+    const ENDERMAN_EYES_TEX: &[&[&str]] = tex_table!("enderman" => "enderman_eyes");
+    const SLIME_TEX: &[&[&str]] = tex_table!("slime" => "slime");
+    const WITCH_TEX: &[&[&str]] = &[&[
+        "minecraft/textures/entity/witch/witch.png",
+        "minecraft/textures/entity/witch.png",
+    ]];
+    const VILLAGER_TEX: &[&[&str]] = tex_table!("villager" => "villager");
+    const VILLAGER_BABY_TEX: &[&[&str]] = tex_table!("villager" => "villager_baby");
+    const VILLAGER_TYPE_TEX: &[&[&str]] = villager_type_table!("villager/type");
+    const VILLAGER_BABY_TYPE_TEX: &[&[&str]] = villager_type_table!("villager/baby");
+    const VILLAGER_PROFESSION_TEX: &[&[&str]] = villager_profession_table!("villager/profession");
+    const VILLAGER_LEVEL_TEX: &[&[&str]] = villager_level_table!("villager/profession_level");
 
     // Base and baby models, plus opaque overlays (sheep wool), are all Opaque.
     fn opaque(
@@ -336,6 +687,38 @@ fn mob_definitions() -> Vec<MobDef> {
             tex_size,
             overlay_kind: OverlayKind::Opaque,
         }
+    }
+
+    // Cutout layers over a villager-like base skin (vanilla
+    // `VillagerProfessionLayer`, shared by villager and zombie villager):
+    // slot 0 = biome type, slot 1 = biome type on the no-hat model (used when
+    // the profession texture brings its own hat), slot 2 = profession, slot 3
+    // = profession level badge. entity_extras gates slot 0 xor 1 and picks
+    // each slot's texture variant. The `bake` parameter takes `no_hat`.
+    fn villager_like_overlays(
+        bake: fn(bool) -> BakedEntityModel,
+        type_tex: &'static [&'static [&'static str]],
+        profession_tex: &'static [&'static [&'static str]],
+        level_tex: &'static [&'static [&'static str]],
+    ) -> Vec<VariantDef> {
+        // Slots 0/2/3 share one bake of the hatted model.
+        let hatted = bake(false);
+        vec![
+            opaque(hatted.clone(), type_tex, 64),
+            opaque(bake(true), type_tex, 64),
+            opaque(hatted.clone(), profession_tex, 64),
+            opaque(hatted, level_tex, 64),
+        ]
+    }
+
+    fn villager_like_baby_overlays(
+        bake: fn(bool) -> BakedEntityModel,
+        type_tex: &'static [&'static [&'static str]],
+    ) -> Vec<VariantDef> {
+        vec![
+            opaque(bake(false), type_tex, 64),
+            opaque(bake(true), type_tex, 64),
+        ]
     }
 
     vec![
@@ -359,6 +742,25 @@ fn mob_definitions() -> Vec<MobDef> {
                 entity_model::bake_baby_cow_model(),
                 COW_BABY_TEX,
                 64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Chicken,
+            anim: AnimationType::Chicken,
+            adult: vec![
+                opaque(entity_model::bake_chicken_model(), CHICKEN_NORMAL_TEX, 64),
+                opaque(
+                    entity_model::bake_cold_chicken_model(),
+                    CHICKEN_COLD_TEX,
+                    64,
+                ),
+            ],
+            baby: Some(opaque(
+                entity_model::bake_baby_chicken_model(),
+                CHICKEN_BABY_TEX,
+                16,
             )),
             adult_overlays: vec![],
             baby_overlays: vec![],
@@ -409,11 +811,71 @@ fn mob_definitions() -> Vec<MobDef> {
             adult: vec![opaque(entity_model::bake_zombie_model(), ZOMBIE_TEX, 64)],
             baby: Some(opaque(
                 entity_model::bake_baby_zombie_model(),
-                ZOMBIE_TEX,
+                ZOMBIE_BABY_TEX,
                 64,
             )),
             adult_overlays: vec![],
             baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Husk,
+            anim: AnimationType::Zombie,
+            adult: vec![opaque(entity_model::bake_husk_model(), HUSK_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_zombie_model(),
+                HUSK_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Drowned,
+            anim: AnimationType::Zombie,
+            adult: vec![opaque(
+                entity_model::bake_drowned_model(0.0),
+                DROWNED_TEX,
+                64,
+            )],
+            baby: Some(opaque(
+                entity_model::bake_baby_zombie_model(),
+                DROWNED_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![opaque(
+                entity_model::bake_drowned_model(0.25),
+                DROWNED_OUTER_TEX,
+                64,
+            )],
+            baby_overlays: vec![opaque(
+                entity_model::bake_baby_drowned_outer_model(),
+                DROWNED_OUTER_BABY_TEX,
+                64,
+            )],
+        },
+        MobDef {
+            kind: EntityKind::ZombieVillager,
+            anim: AnimationType::Zombie,
+            adult: vec![opaque(
+                entity_model::bake_zombie_villager_model(false),
+                ZOMBIE_VILLAGER_TEX,
+                64,
+            )],
+            baby: Some(opaque(
+                entity_model::bake_baby_zombie_villager_model(false),
+                ZOMBIE_VILLAGER_BABY_TEX,
+                64,
+            )),
+            adult_overlays: villager_like_overlays(
+                entity_model::bake_zombie_villager_model,
+                ZOMBIE_VILLAGER_TYPE_TEX,
+                ZOMBIE_VILLAGER_PROFESSION_TEX,
+                ZOMBIE_VILLAGER_LEVEL_TEX,
+            ),
+            baby_overlays: villager_like_baby_overlays(
+                entity_model::bake_baby_zombie_villager_model,
+                ZOMBIE_VILLAGER_BABY_TYPE_TEX,
+            ),
         },
         MobDef {
             kind: EntityKind::Skeleton,
@@ -425,6 +887,37 @@ fn mob_definitions() -> Vec<MobDef> {
             )],
             baby: None,
             adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Stray,
+            anim: AnimationType::Skeleton,
+            adult: vec![opaque(entity_model::bake_skeleton_model(), STRAY_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![opaque(
+                entity_model::bake_skeleton_clothing_model(0.25),
+                STRAY_OVERLAY_TEX,
+                64,
+            )],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Bogged,
+            anim: AnimationType::Skeleton,
+            // Variant 0 = mushrooms, 1 = sheared (empty mushroom parts).
+            // TODO: replace with a per-part visibility mask (vanilla
+            // `mushrooms.visible = !isSheared`) instead of a second baked
+            // model; would also drop the cubeless overlay padding.
+            adult: vec![
+                opaque(entity_model::bake_bogged_model(false), BOGGED_TEX, 64),
+                opaque(entity_model::bake_bogged_model(true), BOGGED_TEX, 64),
+            ],
+            baby: None,
+            adult_overlays: vec![opaque(
+                entity_model::bake_bogged_clothing_model(),
+                BOGGED_OVERLAY_TEX,
+                64,
+            )],
             baby_overlays: vec![],
         },
         MobDef {
@@ -455,47 +948,18 @@ fn mob_definitions() -> Vec<MobDef> {
                 VILLAGER_BABY_TEX,
                 64,
             )),
-            // Cutout layers over the base skin (vanilla `VillagerProfessionLayer`):
-            // slot 0 = biome type, slot 1 = biome type on the no-hat model (used
-            // when the profession texture brings its own hat), slot 2 =
-            // profession, slot 3 = profession level badge. entity_extras gates
-            // slot 0 xor 1 and picks each slot's texture variant.
             // TODO: CustomHeadLayer (worn head items) and CrossedArmsItemLayer
             // (held item) need a held-item layer first.
-            adult_overlays: vec![
-                opaque(
-                    entity_model::bake_villager_model(false),
-                    VILLAGER_TYPE_TEX,
-                    64,
-                ),
-                opaque(
-                    entity_model::bake_villager_model(true),
-                    VILLAGER_TYPE_TEX,
-                    64,
-                ),
-                opaque(
-                    entity_model::bake_villager_model(false),
-                    VILLAGER_PROFESSION_TEX,
-                    64,
-                ),
-                opaque(
-                    entity_model::bake_villager_model(false),
-                    VILLAGER_LEVEL_TEX,
-                    64,
-                ),
-            ],
-            baby_overlays: vec![
-                opaque(
-                    entity_model::bake_baby_villager_model(false),
-                    VILLAGER_BABY_TYPE_TEX,
-                    64,
-                ),
-                opaque(
-                    entity_model::bake_baby_villager_model(true),
-                    VILLAGER_BABY_TYPE_TEX,
-                    64,
-                ),
-            ],
+            adult_overlays: villager_like_overlays(
+                entity_model::bake_villager_model,
+                VILLAGER_TYPE_TEX,
+                VILLAGER_PROFESSION_TEX,
+                VILLAGER_LEVEL_TEX,
+            ),
+            baby_overlays: villager_like_baby_overlays(
+                entity_model::bake_baby_villager_model,
+                VILLAGER_BABY_TYPE_TEX,
+            ),
         },
         MobDef {
             kind: EntityKind::Spider,
@@ -509,6 +973,331 @@ fn mob_definitions() -> Vec<MobDef> {
                 tex_size: 64,
                 overlay_kind: OverlayKind::EyesTranslucent,
             }],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Enderman,
+            anim: AnimationType::Enderman,
+            adult: vec![opaque(
+                entity_model::bake_enderman_model(),
+                ENDERMAN_TEX,
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![VariantDef {
+                model: entity_model::bake_enderman_model(),
+                tex_variants: ENDERMAN_EYES_TEX,
+                tex_size: 64,
+                overlay_kind: OverlayKind::EyesTranslucent,
+            }],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Slime,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_model::bake_slime_inner_model(),
+                SLIME_TEX,
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![VariantDef {
+                model: entity_model::bake_slime_outer_model(),
+                tex_variants: SLIME_TEX,
+                tex_size: 64,
+                overlay_kind: OverlayKind::BodyTranslucent,
+            }],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Witch,
+            anim: AnimationType::Witch,
+            adult: vec![opaque(entity_model::bake_witch_model(), WITCH_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // TODO: wolf armor layer (needs the equipment-asset pipeline).
+        MobDef {
+            kind: EntityKind::Wolf,
+            anim: AnimationType::Wolf,
+            adult: vec![opaque(entity_model::bake_wolf_model(), WOLF_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_wolf_model(),
+                WOLF_BABY_TEX,
+                32,
+            )),
+            // Slot 0: dye-tinted collar, tame only.
+            adult_overlays: vec![opaque(
+                entity_model::bake_wolf_collar_model(),
+                WOLF_COLLAR_TEX,
+                64,
+            )],
+            baby_overlays: vec![opaque(
+                entity_model::bake_baby_wolf_model(),
+                WOLF_COLLAR_BABY_TEX,
+                32,
+            )],
+        },
+        MobDef {
+            kind: EntityKind::Cat,
+            anim: AnimationType::Feline,
+            adult: vec![opaque(entity_model::bake_cat_model(), CAT_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_cat_model(),
+                CAT_BABY_TEX,
+                32,
+            )),
+            // Slot 0: dye-tinted collar, tame only (its bake is inflated /
+            // rescaled per vanilla's collar layers).
+            adult_overlays: vec![opaque(
+                entity_model::bake_cat_collar_model(),
+                CAT_COLLAR_TEX,
+                64,
+            )],
+            baby_overlays: vec![opaque(
+                entity_model::bake_baby_cat_collar_model(),
+                CAT_COLLAR_BABY_TEX,
+                32,
+            )],
+        },
+        MobDef {
+            kind: EntityKind::Ocelot,
+            anim: AnimationType::Feline,
+            adult: vec![opaque(entity_model::bake_ocelot_model(), OCELOT_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_ocelot_model(),
+                OCELOT_BABY_TEX,
+                32,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Rabbit,
+            anim: AnimationType::Rabbit,
+            adult: vec![opaque(entity_model::bake_rabbit_model(), RABBIT_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_rabbit_model(),
+                RABBIT_BABY_TEX,
+                32,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // TODO: saddle and horse-armor equipment layers.
+        MobDef {
+            kind: EntityKind::Horse,
+            anim: AnimationType::Equine,
+            adult: vec![opaque(entity_model::bake_horse_model(), HORSE_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_horse_model(),
+                HORSE_BABY_TEX,
+                64,
+            )),
+            // Slot 0: markings (vanilla `entityTranslucent`), gated on
+            // markings != NONE.
+            adult_overlays: vec![VariantDef {
+                model: entity_model::bake_horse_model(),
+                tex_variants: HORSE_MARKINGS_TEX,
+                tex_size: 64,
+                overlay_kind: OverlayKind::BodyTranslucent,
+            }],
+            baby_overlays: vec![VariantDef {
+                model: entity_model::bake_baby_horse_model(),
+                tex_variants: HORSE_MARKINGS_BABY_TEX,
+                tex_size: 64,
+                overlay_kind: OverlayKind::BodyTranslucent,
+            }],
+        },
+        MobDef {
+            kind: EntityKind::Donkey,
+            anim: AnimationType::Equine,
+            // Variant 0 = no chest, 1 = chest; the single baby bake absorbs
+            // both through `base_variant`'s pool clamp.
+            adult: vec![
+                opaque(entity_model::bake_donkey_model(0.87, false), DONKEY_TEX, 64),
+                opaque(entity_model::bake_donkey_model(0.87, true), DONKEY_TEX, 64),
+            ],
+            baby: Some(opaque(
+                entity_model::bake_baby_donkey_model(),
+                DONKEY_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Mule,
+            anim: AnimationType::Equine,
+            adult: vec![
+                opaque(entity_model::bake_donkey_model(0.92, false), MULE_TEX, 64),
+                opaque(entity_model::bake_donkey_model(0.92, true), MULE_TEX, 64),
+            ],
+            baby: Some(opaque(
+                entity_model::bake_baby_donkey_model(),
+                MULE_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::SkeletonHorse,
+            anim: AnimationType::Equine,
+            adult: vec![opaque(
+                entity_model::bake_undead_horse_model(),
+                SKELETON_HORSE_TEX,
+                64,
+            )],
+            baby: Some(opaque(
+                entity_model::bake_baby_horse_model(),
+                SKELETON_HORSE_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::ZombieHorse,
+            anim: AnimationType::Equine,
+            adult: vec![opaque(
+                entity_model::bake_undead_horse_model(),
+                ZOMBIE_HORSE_TEX,
+                64,
+            )],
+            baby: Some(opaque(
+                entity_model::bake_baby_horse_model(),
+                ZOMBIE_HORSE_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Squid,
+            anim: AnimationType::Squid,
+            adult: vec![opaque(entity_model::bake_squid_model(), SQUID_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_squid_model(),
+                SQUID_BABY_TEX,
+                32,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // The glow itself is free (the entity pipeline is unlit/fullbright);
+        // the post-hurt dimming rides base_tint.
+        MobDef {
+            kind: EntityKind::GlowSquid,
+            anim: AnimationType::Squid,
+            adult: vec![opaque(entity_model::bake_squid_model(), GLOW_SQUID_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_squid_model(),
+                GLOW_SQUID_BABY_TEX,
+                32,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Bat,
+            anim: AnimationType::Bat,
+            // Backface-culled: the bat's zero-depth quads are coplanar
+            // front/back pairs (vanilla `entityCutoutCull`).
+            adult: vec![VariantDef {
+                model: entity_model::bake_bat_model(),
+                tex_variants: BAT_TEX,
+                tex_size: 32,
+                overlay_kind: OverlayKind::OpaqueCulled,
+            }],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Cod,
+            anim: AnimationType::Fish,
+            adult: vec![opaque(entity_model::bake_cod_model(), COD_TEX, 32)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // Variant = size (small/medium/large), three root-scaled bakes.
+        MobDef {
+            kind: EntityKind::Salmon,
+            anim: AnimationType::Fish,
+            adult: vec![
+                opaque(entity_model::bake_salmon_model(0.5), SALMON_TEX, 32),
+                opaque(entity_model::bake_salmon_model(1.0), SALMON_TEX, 32),
+                opaque(entity_model::bake_salmon_model(1.5), SALMON_TEX, 32),
+            ],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // Variant = shape; the dye-tinted pattern layer picks the matching
+        // shape slot (0 small / 1 large, xor-gated in entity_extras).
+        MobDef {
+            kind: EntityKind::TropicalFish,
+            anim: AnimationType::Fish,
+            adult: vec![
+                opaque(
+                    entity_model::bake_tropical_fish_model(false, 0.0),
+                    TROPICAL_A_TEX,
+                    32,
+                ),
+                opaque(
+                    entity_model::bake_tropical_fish_model(true, 0.0),
+                    TROPICAL_B_TEX,
+                    32,
+                ),
+            ],
+            baby: None,
+            adult_overlays: vec![
+                opaque(
+                    entity_model::bake_tropical_fish_model(false, 0.008),
+                    TROPICAL_A_PATTERN_TEX,
+                    32,
+                ),
+                opaque(
+                    entity_model::bake_tropical_fish_model(true, 0.008),
+                    TROPICAL_B_PATTERN_TEX,
+                    32,
+                ),
+            ],
+            baby_overlays: vec![],
+        },
+        // Variant = puff state (three meshes).
+        MobDef {
+            kind: EntityKind::Pufferfish,
+            anim: AnimationType::Fish,
+            adult: vec![
+                opaque(entity_model::bake_pufferfish_model(0), PUFFERFISH_TEX, 32),
+                opaque(entity_model::bake_pufferfish_model(1), PUFFERFISH_TEX, 32),
+                opaque(entity_model::bake_pufferfish_model(2), PUFFERFISH_TEX, 32),
+            ],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // TODO: `IronGolemFlowerLayer` (the offered poppy) needs block models
+        // rendered inside an entity pose.
+        MobDef {
+            kind: EntityKind::IronGolem,
+            anim: AnimationType::Golem,
+            adult: vec![opaque(
+                entity_model::bake_iron_golem_model(),
+                IRON_GOLEM_TEX,
+                128,
+            )],
+            baby: None,
+            // Slot 0: crack overlay, gated on health in entity_extras.
+            adult_overlays: vec![opaque(
+                entity_model::bake_iron_golem_model(),
+                IRON_GOLEM_CRACKINESS_TEX,
+                128,
+            )],
             baby_overlays: vec![],
         },
     ]
@@ -545,8 +1334,13 @@ impl EntityRenderer {
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create entity pipeline layout");
 
-        let [pipeline, eyes_pipeline, swirl_pipeline] =
-            create_pipelines(device, render_pass, pipeline_layout);
+        let [
+            pipeline,
+            culled_pipeline,
+            body_translucent_pipeline,
+            eyes_pipeline,
+            swirl_pipeline,
+        ] = create_pipelines(device, render_pass, pipeline_layout);
 
         let defs = mob_definitions();
         let tex_count: u32 = defs
@@ -624,17 +1418,31 @@ impl EntityRenderer {
             let adult_variants: Vec<MobVariant> =
                 def.adult.into_iter().flat_map(&mut build).collect();
             let baby_variants = def.baby.map(&mut build);
-            let adult_overlays: Vec<Vec<MobVariant>> =
+            let mut adult_overlays: Vec<Vec<MobVariant>> =
                 def.adult_overlays.into_iter().map(&mut build).collect();
-            let baby_overlays: Vec<Vec<MobVariant>> =
+            let mut baby_overlays: Vec<Vec<MobVariant>> =
                 def.baby_overlays.into_iter().map(&mut build).collect();
 
-            // Anim part-name indices are computed against the base variant's model and
-            // reused for each overlay draw. Catch mismatched part order at construction
-            // time rather than rendering wrong limbs in production.
-            assert_part_order_matches(&adult_variants, &adult_overlays);
+            link_overlays(&adult_variants, &mut adult_overlays);
             if let Some(baby) = &baby_variants {
-                assert_part_order_matches(baby, &baby_overlays);
+                link_overlays(baby, &mut baby_overlays);
+            }
+
+            if let Some(n) = expected_variant_count(def.kind) {
+                assert_eq!(
+                    adult_variants.len(),
+                    n,
+                    "{:?} adult variant pool != variant order length",
+                    def.kind
+                );
+                if let Some(baby) = &baby_variants {
+                    assert_eq!(
+                        baby.len(),
+                        n,
+                        "{:?} baby variant pool != variant order length",
+                        def.kind
+                    );
+                }
             }
 
             mobs.insert(
@@ -651,6 +1459,8 @@ impl EntityRenderer {
 
         Self {
             pipeline,
+            culled_pipeline,
+            body_translucent_pipeline,
             eyes_pipeline,
             swirl_pipeline,
             pipeline_layout,
@@ -797,7 +1607,9 @@ impl EntityRenderer {
         model: &BakedEntityModel,
         info: &EntityRenderInfo,
     ) -> entity_model::PartAnim {
-        let local_head_y = info.head_y_rot_deg - info.body_y_rot_deg;
+        // Vanilla `wrapDegrees(headRot - bodyRot)`; matters once a model
+        // clamps it (equine +-20).
+        let local_head_y = crate::entity::wrap_degrees(info.head_y_rot_deg - info.body_y_rot_deg);
         match anim_type {
             AnimationType::Quadruped => entity_model::compute_quadruped_anim(
                 model,
@@ -808,6 +1620,15 @@ impl EntityRenderer {
                 info.head_y_offset,
                 info.head_x_rot_deg_override,
             ),
+            AnimationType::Chicken => entity_model::compute_chicken_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.flap,
+                info.flap_speed,
+            ),
             AnimationType::Humanoid => entity_model::compute_humanoid_anim(
                 model,
                 info.head_x_rot_deg,
@@ -815,6 +1636,15 @@ impl EntityRenderer {
                 info.walk_anim_pos,
                 info.walk_anim_speed,
                 info.is_crouching,
+            ),
+            AnimationType::Enderman => entity_model::compute_enderman_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.age_in_ticks,
+                info.is_creepy,
             ),
             AnimationType::Zombie => entity_model::compute_zombie_anim(
                 model,
@@ -851,14 +1681,153 @@ impl EntityRenderer {
                 info.is_unhappy,
                 info.age_in_ticks,
             ),
+            AnimationType::Witch => entity_model::compute_witch_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.age_in_ticks,
+                info.nose_wobble_speed,
+                info.is_holding_item,
+            ),
+            AnimationType::Wolf => entity_model::compute_wolf_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                &entity_model::WolfAnimInputs {
+                    is_sitting: info.is_sitting,
+                    is_angry: info.is_angry,
+                    is_baby: info.is_baby,
+                    tail_angle: info.tail_angle,
+                    head_roll_angle: info.head_roll_angle,
+                    shake_anim: info.shake_anim,
+                },
+            ),
+            AnimationType::Feline => entity_model::compute_feline_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                &entity_model::FelineAnimInputs {
+                    is_crouching: info.is_crouching,
+                    is_sprinting: info.is_sprinting,
+                    is_sitting: info.is_sitting,
+                    lie_down_amount: info.lie_down_amount,
+                    lie_down_amount_tail: info.lie_down_amount_tail,
+                    relax_state_one_amount: info.relax_state_one_amount,
+                    is_baby: info.is_baby,
+                },
+            ),
+            AnimationType::Rabbit => entity_model::compute_rabbit_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.hop_elapsed_secs,
+                info.is_baby,
+            ),
+            AnimationType::Equine => entity_model::compute_equine_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.age_in_ticks,
+                &entity_model::EquineAnimInputs {
+                    kind: if !info.is_baby {
+                        entity_model::EquineKind::Adult
+                    } else if matches!(info.entity_kind, EntityKind::Donkey | EntityKind::Mule) {
+                        entity_model::EquineKind::BabyDonkey
+                    } else {
+                        entity_model::EquineKind::BabyHorse
+                    },
+                    eat_anim: info.eat_anim,
+                    stand_anim: info.stand_anim,
+                    feeding_anim: info.feeding_anim,
+                    animate_tail: info.animate_tail,
+                },
+            ),
+            AnimationType::Squid => entity_model::compute_squid_anim(model, info.tentacle_angle),
+            AnimationType::Bat => entity_model::compute_bat_anim(
+                model,
+                local_head_y,
+                info.bat_elapsed_secs,
+                info.bat_resting,
+            ),
+            AnimationType::Fish => entity_model::compute_fish_anim(
+                model,
+                info.age_in_ticks,
+                info.is_in_water,
+                info.entity_kind == EntityKind::Pufferfish,
+            ),
+            AnimationType::Golem => entity_model::compute_golem_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.golem_attack_ticks,
+                info.golem_offer_flower_ticks,
+            ),
+            AnimationType::Static => entity_model::PartAnim::default(),
         }
     }
 
     /// The translation is anchor-relative, subtracted in f64 (see
     /// `Camera::anchor`).
     fn entity_matrix(info: &EntityRenderInfo, anchor: glam::DVec3) -> glam::Mat4 {
-        glam::Mat4::from_translation((*info.position - anchor).as_vec3())
-            * glam::Mat4::from_rotation_y((180.0 - info.body_y_rot_deg).to_radians())
+        let mut body_y_rot_deg = info.body_y_rot_deg;
+        if info.is_converting {
+            // Vanilla `setupRotations` isShaking: a per-tick body-yaw jitter.
+            // The addend is a radians-magnitude value applied to degrees —
+            // vanilla's own unit mixing, ported literally (~±1.26 degrees).
+            // Applied here, after the head-vs-body split, so the head shakes
+            // with the body like vanilla.
+            body_y_rot_deg += (info.age_in_ticks.floor() * 3.25).cos() * std::f32::consts::PI * 0.4;
+        }
+        let translation = glam::Mat4::from_translation((*info.position - anchor).as_vec3());
+        // Vanilla `LivingEntityRenderer.submit`'s bed offset, then
+        // `setupRotations`: death wins over the sleeping pose.
+        // TODO: vanilla keys these on `Pose.SLEEPING`; pomme on SLEEPING_POS,
+        // since the handler reduces the pose to crouching.
+        let bed = info.sleeping_direction.filter(|_| info.is_sleeping);
+        let mut base = translation;
+        if let Some(direction) = bed {
+            let head_offset = info.sleeping_eye_height - 0.1;
+            let (step_x, step_z) = direction.step();
+            base *= glam::Mat4::from_translation(glam::Vec3::new(
+                -step_x * head_offset,
+                0.0,
+                -step_z * head_offset,
+            ));
+        }
+        if !info.is_sleeping {
+            base *= glam::Mat4::from_rotation_y((180.0 - body_y_rot_deg).to_radians());
+        }
+        if info.death_time > 0.0 {
+            base *= glam::Mat4::from_rotation_z(
+                death_fall_degrees(info.death_time, info.entity_kind).to_radians(),
+            );
+        } else if info.is_sleeping {
+            let angle = bed.map_or(body_y_rot_deg, BedDirection::render_yaw_deg);
+            base *= glam::Mat4::from_rotation_y(angle.to_radians())
+                * glam::Mat4::from_rotation_z(flip_degrees(info.entity_kind).to_radians())
+                * glam::Mat4::from_rotation_y(270.0_f32.to_radians());
+        }
+        // body_transform sits before the parts (whose root transforms carry
+        // the convention's X flip), matching vanilla's setupRotations order.
+        let base = info.body_transform.map_or(base, |m| base * m);
+        // AvatarRenderer applies its fixed player scale after setupRotations and
+        // before the model's -1.501 Y translation. Pomme's part transforms own
+        // that rebase, so the scale belongs immediately before the parts here.
+        if info.entity_kind == EntityKind::Player {
+            base * glam::Mat4::from_scale(glam::Vec3::splat(PLAYER_MODEL_SCALE))
+        } else {
+            base
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -880,25 +1849,27 @@ impl EntityRenderer {
         // (immutable reads of self.mobs), grouped by variant so each (variant,
         // part) becomes a single instanced draw. `vis`/`groups` borrow self.mobs
         // and are dropped at the end of this block, before the buffer write below.
-        let cull_dist_sq = cull_dist * cull_dist;
         let mut instances: Vec<EntityInstance> = Vec::new();
-        let (opaque, eyes, swirl) = {
+        let (opaque, culled, body, eyes, swirl) = {
             let mut vis: Vec<VisEntity> = Vec::new();
             for info in entities {
                 let Some(entry) = self.mobs.get(&info.entity_kind) else {
                     continue;
                 };
-                if !info.skip_cull && !entity_visible(info, frustum, eye, cull_dist_sq) {
+                if !info.skip_cull && !entity_visible(info, frustum, eye, cull_dist) {
                     continue;
                 }
                 let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
                 let entity_mat = Self::entity_matrix(info, anchor);
                 let anim = self.compute_anim(entry.anim, &variant.model, info);
+                // Shared with every overlay that isn't `own_pivots`.
+                let part_transforms = variant.model.compute_part_transforms(&anim);
                 vis.push(VisEntity {
                     info,
                     entry,
                     entity_mat,
                     anim,
+                    part_transforms,
                 });
             }
             if vis.is_empty() {
@@ -912,23 +1883,22 @@ impl EntityRenderer {
             // 1, ...) — interleaving per entity would let a shared group
             // created by an earlier entity draw a later entity's lower layer
             // after its upper one.
-            let hurt_color = |info: &EntityRenderInfo| {
-                if info.has_red_overlay {
-                    HURT_OVERLAY
-                } else {
-                    NO_OVERLAY
-                }
-            };
             let mut opaque = VariantGroups::default();
+            let mut culled = VariantGroups::default();
             for (vi, v) in vis.iter().enumerate() {
                 let base = v
                     .entry
                     .base_variant(v.info.is_baby, self.effective_variant_index(v.info));
                 let texture_set = self.player_texture_set(v.info, base.texture_set);
-                opaque.add(
+                let group = if base.overlay_kind == OverlayKind::OpaqueCulled {
+                    &mut culled
+                } else {
+                    &mut opaque
+                };
+                group.add(
                     base,
                     texture_set,
-                    (vi, WHITE_TINT, hurt_color(v.info), [0.0, 0.0]),
+                    (vi, v.info.base_tint, hurt_color(v.info), [0.0, 0.0]),
                 );
             }
             for slot in 0..MAX_OVERLAYS {
@@ -941,11 +1911,13 @@ impl EntityRenderer {
                         slot,
                         v.info.overlay_variants[slot],
                     );
-                    if overlay.overlay_kind != OverlayKind::Opaque {
-                        continue;
-                    }
+                    let group = match overlay.overlay_kind {
+                        OverlayKind::Opaque => &mut opaque,
+                        OverlayKind::OpaqueCulled => &mut culled,
+                        _ => continue,
+                    };
                     if let Some(tint) = v.info.overlay_tints[slot] {
-                        opaque.add(
+                        group.add(
                             overlay,
                             overlay.texture_set,
                             (vi, tint, hurt_color(v.info), [0.0, 0.0]),
@@ -954,11 +1926,14 @@ impl EntityRenderer {
                 }
             }
 
-            let eyes = collect_emissive(&vis, OverlayKind::EyesTranslucent);
-            let swirl = collect_emissive(&vis, OverlayKind::SwirlAdditive);
+            let body = collect_overlays(&vis, OverlayKind::BodyTranslucent);
+            let eyes = collect_overlays(&vis, OverlayKind::EyesTranslucent);
+            let swirl = collect_overlays(&vis, OverlayKind::SwirlAdditive);
 
             (
                 opaque.emit(&vis, &mut instances),
+                culled.emit(&vis, &mut instances),
+                body.emit(&vis, &mut instances),
                 eyes.emit(&vis, &mut instances),
                 swirl.emit(&vis, &mut instances),
             )
@@ -979,6 +1954,8 @@ impl EntityRenderer {
             .copy_from_slice(bytes);
 
         self.record_pass(cmd, frame, self.pipeline, &opaque, count);
+        self.record_pass(cmd, frame, self.culled_pipeline, &culled, count);
+        self.record_pass(cmd, frame, self.body_translucent_pipeline, &body, count);
         self.record_pass(cmd, frame, self.eyes_pipeline, &eyes, count);
         self.record_pass(cmd, frame, self.swirl_pipeline, &swirl, count);
     }
@@ -1027,10 +2004,17 @@ impl EntityRenderer {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.culled_pipeline, None);
+        device.destroy_pipeline(self.body_translucent_pipeline, None);
         device.destroy_pipeline(self.eyes_pipeline, None);
         device.destroy_pipeline(self.swirl_pipeline, None);
-        [self.pipeline, self.eyes_pipeline, self.swirl_pipeline] =
-            create_pipelines(device, render_pass, self.pipeline_layout);
+        [
+            self.pipeline,
+            self.culled_pipeline,
+            self.body_translucent_pipeline,
+            self.eyes_pipeline,
+            self.swirl_pipeline,
+        ] = create_pipelines(device, render_pass, self.pipeline_layout);
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -1085,6 +2069,8 @@ impl EntityRenderer {
         drop(alloc);
 
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.culled_pipeline, None);
+        device.destroy_pipeline(self.body_translucent_pipeline, None);
         device.destroy_pipeline(self.eyes_pipeline, None);
         device.destroy_pipeline(self.swirl_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
@@ -1158,13 +2144,14 @@ fn create_camera_sets(
     (sets, buffers, allocations)
 }
 
-/// A culled, drawable entity with its world transform and animation
-/// precomputed.
+/// A culled, drawable entity with its world transform, animation, and the
+/// base model's per-part matrices precomputed.
 struct VisEntity<'a> {
     info: &'a EntityRenderInfo,
     entry: &'a MobEntry,
     entity_mat: glam::Mat4,
     anim: entity_model::PartAnim,
+    part_transforms: Vec<glam::Mat4>,
 }
 
 /// One instanced (variant, part) draw: a run of `instance_count` instances from
@@ -1207,18 +2194,23 @@ impl<'a> VariantGroups<'a> {
     fn emit(&self, vis: &[VisEntity], instances: &mut Vec<EntityInstance>) -> Vec<DrawRecord> {
         let mut records = Vec::new();
         for (variant, texture_set, members) in &self.groups {
-            // Part transforms differ per entity (animation), so compute per member.
-            let pts: Vec<Vec<glam::Mat4>> = members
-                .iter()
-                .map(|(vi, ..)| variant.model.compute_part_transforms(&vis[*vi].anim))
-                .collect();
+            let own: Option<Vec<Vec<glam::Mat4>>> = variant.own_pivots.then(|| {
+                members
+                    .iter()
+                    .map(|(vi, ..)| variant.model.compute_part_transforms(&vis[*vi].anim))
+                    .collect()
+            });
             for (p, (start, part_count)) in variant.model.part_ranges.iter().enumerate() {
                 if *part_count == 0 {
                     continue;
                 }
                 let first_instance = instances.len() as u32;
                 for (k, (vi, tint, overlay, uv)) in members.iter().enumerate() {
-                    let model = vis[*vi].entity_mat * pts[k][p];
+                    let part = match &own {
+                        Some(own) => own[k][p],
+                        None => vis[*vi].part_transforms[p],
+                    };
+                    let model = vis[*vi].entity_mat * part;
                     instances.push(EntityInstance {
                         model: model.to_cols_array_2d(),
                         tint: *tint,
@@ -1240,8 +2232,8 @@ impl<'a> VariantGroups<'a> {
     }
 }
 
-/// Group the emissive overlays of one kind (eyes / swirl) by variant.
-fn collect_emissive<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGroups<'a> {
+/// Group the non-opaque overlays of one kind (body / eyes / swirl) by variant.
+fn collect_overlays<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGroups<'a> {
     let mut groups = VariantGroups::default();
     for (vi, v) in vis.iter().enumerate() {
         // Energy swirl scrolls its UVs over time (vanilla `EnergySwirlLayer`).
@@ -1251,6 +2243,13 @@ fn collect_emissive<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGrou
         } else {
             [0.0, 0.0]
         };
+        // The body layer flashes red with the entity (vanilla passes the hurt
+        // overlay coords); the emissive eyes/swirl layers never do.
+        let overlay_color = if kind == OverlayKind::BodyTranslucent {
+            hurt_color(v.info)
+        } else {
+            NO_OVERLAY
+        };
         for slot in 0..v.entry.overlays(v.info.is_baby).len() {
             let overlay =
                 v.entry
@@ -1259,27 +2258,94 @@ fn collect_emissive<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGrou
                 continue;
             }
             if let Some(tint) = v.info.overlay_tints[slot] {
-                groups.add(overlay, overlay.texture_set, (vi, tint, NO_OVERLAY, uv));
+                groups.add(overlay, overlay.texture_set, (vi, tint, overlay_color, uv));
             }
         }
     }
     groups
 }
 
+fn hurt_color(info: &EntityRenderInfo) -> [f32; 4] {
+    if info.has_red_overlay {
+        HURT_OVERLAY
+    } else {
+        NO_OVERLAY
+    }
+}
+
 const ANIM_MARGIN: f32 = 0.5;
+/// Vanilla `AvatarRenderer.scale`: players render at 15/16 model scale.
+const PLAYER_MODEL_SCALE: f32 = 0.9375;
+
+/// Standing eye height, which positions a sleeper on its bed.
+pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
+    match kind {
+        EntityKind::Player => crate::player::STANDING_EYE_HEIGHT,
+        EntityKind::Villager if is_baby => 0.63,
+        EntityKind::Villager => 1.62,
+        _ => entity_bounds(kind, is_baby).1 * 0.85,
+    }
+}
 
 /// Vanilla (width, height) hitbox per supported mob, scaled for babies; used to
 /// build the cull bounding sphere.
 fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
+    // Vanilla babies declare explicit BABY_DIMENSIONS rather than a scale;
+    // list kinds whose constant isn't the half-scale the fallback below
+    // assumes. Every new baby mob must be checked against its class.
+    if is_baby {
+        match kind {
+            EntityKind::Chicken => return (0.3, 0.4),
+            EntityKind::Rabbit => return (0.24, 0.4),
+            EntityKind::Zombie
+            | EntityKind::Husk
+            | EntityKind::Drowned
+            | EntityKind::ZombieVillager
+            | EntityKind::Villager => return (0.49, 0.98),
+            _ => {}
+        }
+    }
     let (w, h) = match kind {
         EntityKind::Pig => (0.9, 0.9),
         EntityKind::Cow => (0.9, 1.4),
+        EntityKind::Chicken => (0.4, 0.7),
         EntityKind::Sheep => (0.9, 1.3),
-        EntityKind::Zombie => (0.6, 1.95),
-        EntityKind::Skeleton => (0.6, 1.99),
+        EntityKind::Zombie
+        | EntityKind::Husk
+        | EntityKind::Drowned
+        | EntityKind::ZombieVillager
+        | EntityKind::Villager
+        | EntityKind::Witch => (0.6, 1.95),
+        EntityKind::Skeleton | EntityKind::Stray | EntityKind::Bogged => (0.6, 1.99),
         EntityKind::Creeper => (0.6, 1.7),
         EntityKind::Spider => (1.4, 0.9),
-        EntityKind::Villager => (0.6, 1.95),
+        EntityKind::Enderman => (0.6, 2.9),
+        EntityKind::Slime => (0.52, 0.52),
+        EntityKind::Wolf => (0.6, 0.85),
+        EntityKind::Cat | EntityKind::Ocelot => (0.6, 0.7),
+        EntityKind::Rabbit => (0.49, 0.6),
+        // Horse babies scale 0.7 since 26.1 (`Horse.BABY_DIMENSIONS`; 1.21.x
+        // halved, harmless for the cull sphere); donkey/mule babies are the
+        // generic half scale.
+        EntityKind::Horse | EntityKind::SkeletonHorse | EntityKind::ZombieHorse if is_baby => {
+            return (1.3964844 * 0.7, 1.6 * 0.7);
+        }
+        EntityKind::Horse
+        | EntityKind::Mule
+        | EntityKind::SkeletonHorse
+        | EntityKind::ZombieHorse => (1.3964844, 1.6),
+        EntityKind::Donkey => (1.3964844, 1.5),
+        // Baby squid dimensions are an explicit 0.5x0.5 in vanilla, not the
+        // generic half scale.
+        EntityKind::Squid | EntityKind::GlowSquid if is_baby => return (0.5, 0.5),
+        EntityKind::Squid | EntityKind::GlowSquid => (0.8, 0.8),
+        EntityKind::Bat => (0.5, 0.9),
+        EntityKind::Cod => (0.5, 0.3),
+        // Salmon/pufferfish scale with their variant; use the largest.
+        EntityKind::Salmon => (1.05, 0.6),
+        EntityKind::TropicalFish => (0.5, 0.4),
+        EntityKind::Pufferfish => (0.7, 0.7),
+        EntityKind::IronGolem => (1.4, 2.7),
         EntityKind::Player => (0.6, 1.8),
         _ => (1.0, 1.0),
     };
@@ -1294,13 +2360,30 @@ fn entity_visible(
     info: &EntityRenderInfo,
     frustum: &[[f32; 4]; 6],
     eye: glam::DVec3,
-    cull_dist_sq: f32,
+    cull_dist: f32,
 ) -> bool {
     let (w, h) = entity_bounds(info.entity_kind, info.is_baby);
-    let radius = 0.5 * (2.0 * w * w + h * h).sqrt() + ANIM_MARGIN;
+    // A body transform (slime size/squish) can grow the entity well past its
+    // base bounds: scale the sphere and its center by the largest axis scale,
+    // and pad the radius by the translation (pure-rotation transforms still
+    // displace pivots — squid pitch, cat lie-down).
+    let (scale, shift) = info.body_transform.map_or((1.0, 0.0), |m| {
+        let s = m
+            .x_axis
+            .length_squared()
+            .max(m.y_axis.length_squared())
+            .max(m.z_axis.length_squared())
+            .sqrt()
+            .max(1.0);
+        (s, m.w_axis.truncate().length())
+    });
+    let radius = (0.5 * (2.0 * w * w + h * h).sqrt() + ANIM_MARGIN) * scale + shift;
     let mut q = (*info.position - eye).as_vec3();
-    q.y += h * 0.5;
-    if q.length_squared() > cull_dist_sq {
+    q.y += h * 0.5 * scale;
+    // Distance-cull with the radius as margin so an oversized entity stays
+    // visible while any of its body is in range.
+    let max_dist = cull_dist + radius;
+    if q.length_squared() > max_dist * max_dist {
         return false;
     }
     for pl in frustum {
@@ -1311,7 +2394,12 @@ fn entity_visible(
     true
 }
 
-fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) {
+/// Anim part-name indices are computed against the base variant's model and
+/// reused for each overlay draw, so overlay part order must match the base
+/// (asserted at construction rather than rendering wrong limbs). Overlays
+/// whose part poses also match share the base's transforms; the rest are
+/// flagged `own_pivots` and get their own.
+fn link_overlays(base: &[MobVariant], overlays: &mut [Vec<MobVariant>]) {
     let Some(base_first) = base.first() else {
         return;
     };
@@ -1321,7 +2409,7 @@ fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) 
         .iter()
         .map(|p| p.name.as_str())
         .collect();
-    for overlay in overlays.iter().flatten() {
+    for overlay in overlays.iter_mut().flatten() {
         let overlay_names: Vec<&str> = overlay
             .model
             .parts
@@ -1332,9 +2420,13 @@ fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) 
             base_names, overlay_names,
             "overlay part order must match base; anim indices are shared across both"
         );
+        overlay.own_pivots = !base_first.model.same_part_poses(&overlay.model);
     }
 }
 
+// TODO: share one vertex buffer + model per distinct mesh across texture
+// variants (a zombie villager's 33 texture variants clone 2 meshes), and
+// batch the per-texture one-time upload submits into one fence wait.
 #[allow(clippy::too_many_arguments)]
 fn build_variants(
     device: &vk::Device,
@@ -1419,6 +2511,7 @@ fn build_variants(
                 texture_allocation,
                 texture_set,
                 overlay_kind,
+                own_pivots: false,
             }
         })
         .collect()
@@ -1518,10 +2611,7 @@ fn destroy_player_skin_texture(
 }
 
 pub(super) fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
-    let mut pixels = vec![0u8; (size * size * 4) as usize];
-    for pixel in pixels.chunks_exact_mut(4) {
-        pixel.copy_from_slice(&[219, 148, 148, 255]);
-    }
+    let pixels = [219u8, 148, 148, 255].repeat((size * size) as usize);
     (pixels, size, size)
 }
 
@@ -1531,13 +2621,27 @@ fn create_pipelines(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
-) -> [vk::Pipeline; 3] {
+) -> [vk::Pipeline; 5] {
     [
         create_pipeline(
             device,
             render_pass,
             layout,
             BlendMode::Opaque,
+            ModelInput::Instanced,
+        ),
+        create_pipeline(
+            device,
+            render_pass,
+            layout,
+            BlendMode::OpaqueCulled,
+            ModelInput::Instanced,
+        ),
+        create_pipeline(
+            device,
+            render_pass,
+            layout,
+            BlendMode::TranslucentDepthWrite,
             ModelInput::Instanced,
         ),
         create_pipeline(
@@ -1638,7 +2742,11 @@ pub(super) fn create_pipeline(
 
     let rasterizer = vk::PipelineRasterizationStateCreateInfo {
         polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeFlags::None,
+        cull_mode: if blend == BlendMode::OpaqueCulled {
+            vk::CullModeFlags::Back
+        } else {
+            vk::CullModeFlags::None
+        },
         front_face: vk::FrontFace::CounterClockwise,
         line_width: 1.0,
         ..Default::default()
@@ -1650,11 +2758,10 @@ pub(super) fn create_pipeline(
     };
 
     // Only the translucent eyes overlay skips depth-write (vanilla `EYES`); the
-    // opaque base and additive swirl write depth (vanilla `ENERGY_SWIRL`).
-    let depth_write = if blend == BlendMode::Translucent {
-        vk::FALSE
-    } else {
-        vk::TRUE
+    // opaque base, slime shell, and additive swirl write depth.
+    let depth_write = match blend {
+        BlendMode::Translucent => vk::FALSE,
+        _ => vk::TRUE,
     };
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
@@ -1664,22 +2771,24 @@ pub(super) fn create_pipeline(
     };
 
     let blend_attachment = match blend {
-        BlendMode::Opaque => vk::PipelineColorBlendAttachmentState {
+        BlendMode::Opaque | BlendMode::OpaqueCulled => vk::PipelineColorBlendAttachmentState {
             blend_enable: vk::FALSE,
             color_write_mask: vk::ColorComponentFlags::RGBA,
             ..Default::default()
         },
-        // Standard src-alpha over (glowing eyes).
-        BlendMode::Translucent => vk::PipelineColorBlendAttachmentState {
-            blend_enable: vk::TRUE,
-            src_color_blend_factor: vk::BlendFactor::SrcAlpha,
-            dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
-            color_blend_op: vk::BlendOp::Add,
-            src_alpha_blend_factor: vk::BlendFactor::One,
-            dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
-            alpha_blend_op: vk::BlendOp::Add,
-            color_write_mask: vk::ColorComponentFlags::RGBA,
-        },
+        // Standard src-alpha over (glowing eyes, slime shell).
+        BlendMode::Translucent | BlendMode::TranslucentDepthWrite => {
+            vk::PipelineColorBlendAttachmentState {
+                blend_enable: vk::TRUE,
+                src_color_blend_factor: vk::BlendFactor::SrcAlpha,
+                dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+                color_blend_op: vk::BlendOp::Add,
+                src_alpha_blend_factor: vk::BlendFactor::One,
+                dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+                alpha_blend_op: vk::BlendOp::Add,
+                color_write_mask: vk::ColorComponentFlags::RGBA,
+            }
+        }
         // Additive (energy swirl glow).
         BlendMode::Additive => vk::PipelineColorBlendAttachmentState {
             blend_enable: vk::TRUE,
@@ -1736,4 +2845,188 @@ pub(super) fn create_pipeline(
     device.destroy_shader_module(frag_module, None);
 
     pipeline
+}
+
+#[cfg(test)]
+mod tests {
+    use azalea_registry::builtin::EntityKind;
+
+    use super::{EntityRenderInfo, EntityRenderer, PLAYER_MODEL_SCALE};
+
+    #[test]
+    fn player_matrix_applies_vanilla_avatar_scale() {
+        let player = EntityRenderInfo {
+            entity_kind: EntityKind::Player,
+            ..Default::default()
+        };
+        let player_matrix = EntityRenderer::entity_matrix(&player, glam::DVec3::ZERO);
+        assert!((player_matrix.x_axis.truncate().length() - PLAYER_MODEL_SCALE).abs() < 1e-6);
+        assert!((player_matrix.y_axis.truncate().length() - PLAYER_MODEL_SCALE).abs() < 1e-6);
+        assert!((player_matrix.z_axis.truncate().length() - PLAYER_MODEL_SCALE).abs() < 1e-6);
+
+        let zombie = EntityRenderInfo {
+            entity_kind: EntityKind::Zombie,
+            ..Default::default()
+        };
+        let zombie_matrix = EntityRenderer::entity_matrix(&zombie, glam::DVec3::ZERO);
+        assert!((zombie_matrix.x_axis.truncate().length() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sleeping_player_matrix_uses_bed_facing_and_standing_eye_offset() {
+        use crate::entity::components::Position;
+        use crate::world::block::BedDirection;
+
+        let cases = [
+            BedDirection::North,
+            BedDirection::South,
+            BedDirection::West,
+            BedDirection::East,
+        ];
+        for direction in cases {
+            let info = EntityRenderInfo {
+                position: Position::new(10.0, 64.6875, -4.5),
+                is_sleeping: true,
+                sleeping_direction: Some(direction),
+                sleeping_eye_height: 1.62,
+                entity_kind: EntityKind::Player,
+                ..Default::default()
+            };
+            let matrix = EntityRenderer::entity_matrix(&info, glam::DVec3::ZERO);
+            let (step_x, step_z) = direction.step();
+            let translation = matrix.w_axis.truncate();
+            let expected_translation =
+                glam::Vec3::new(10.0 - step_x * 1.52, 64.6875, -4.5 - step_z * 1.52);
+            assert!(
+                translation.abs_diff_eq(expected_translation, 1e-5),
+                "sleeping translation mismatch for {direction:?}: {translation:?} != {expected_translation:?}"
+            );
+
+            let model_up = matrix.y_axis.truncate().normalize();
+            let expected_axis = glam::Vec3::new(step_x, 0.0, step_z);
+            assert!(
+                model_up.abs_diff_eq(expected_axis, 1e-5),
+                "sleeping body axis mismatch for {direction:?}: {model_up:?} != {expected_axis:?}"
+            );
+        }
+
+        let baby_villager = EntityRenderInfo {
+            position: Position::new(0.5, 64.6875, 0.5),
+            is_sleeping: true,
+            sleeping_direction: Some(BedDirection::South),
+            sleeping_eye_height: 0.63,
+            entity_kind: EntityKind::Villager,
+            is_baby: true,
+            ..Default::default()
+        };
+        let matrix = EntityRenderer::entity_matrix(&baby_villager, glam::DVec3::ZERO);
+        assert!(
+            matrix
+                .w_axis
+                .truncate()
+                .abs_diff_eq(glam::Vec3::new(0.5, 64.6875, 0.5 - 0.53), 1e-5)
+        );
+    }
+
+    #[test]
+    fn dying_sleeper_takes_the_death_fall_not_the_bed_rotation() {
+        use crate::entity::components::Position;
+        use crate::world::block::BedDirection;
+
+        let info = EntityRenderInfo {
+            position: Position::new(2.0, 3.0, 4.0),
+            is_sleeping: true,
+            sleeping_direction: Some(BedDirection::North),
+            sleeping_eye_height: 1.62,
+            death_time: 5.0,
+            entity_kind: EntityKind::Player,
+            ..Default::default()
+        };
+        let actual = EntityRenderer::entity_matrix(&info, glam::DVec3::ZERO);
+        // The bed offset still applies (`submit`), then only the death fall.
+        let expected = glam::Mat4::from_translation(glam::Vec3::new(2.0, 3.0, 4.0 + 1.52))
+            * glam::Mat4::from_rotation_z(
+                crate::renderer::pipelines::entity_renderer::death_fall_degrees(
+                    5.0,
+                    EntityKind::Player,
+                )
+                .to_radians(),
+            )
+            * glam::Mat4::from_scale(glam::Vec3::splat(PLAYER_MODEL_SCALE));
+        for (a, b) in actual
+            .to_cols_array()
+            .into_iter()
+            .zip(expected.to_cols_array())
+        {
+            assert!((a - b).abs() < 1e-5, "{a} != {b}");
+        }
+    }
+
+    #[test]
+    fn sleeping_matrix_falls_back_to_body_yaw_without_bed_direction() {
+        use crate::entity::components::Position;
+
+        let info = EntityRenderInfo {
+            position: Position::new(2.0, 3.0, 4.0),
+            body_y_rot_deg: 37.0,
+            is_sleeping: true,
+            sleeping_direction: None,
+            entity_kind: EntityKind::Player,
+            ..Default::default()
+        };
+        let actual = EntityRenderer::entity_matrix(&info, glam::DVec3::ZERO);
+        let expected = glam::Mat4::from_translation(glam::Vec3::new(2.0, 3.0, 4.0))
+            * glam::Mat4::from_rotation_y(37.0_f32.to_radians())
+            * glam::Mat4::from_rotation_z(90.0_f32.to_radians())
+            * glam::Mat4::from_rotation_y(270.0_f32.to_radians())
+            * glam::Mat4::from_scale(glam::Vec3::splat(PLAYER_MODEL_SCALE));
+        for (a, b) in actual
+            .to_cols_array()
+            .into_iter()
+            .zip(expected.to_cols_array())
+        {
+            assert!((a - b).abs() < 1e-5, "{a} != {b}");
+        }
+    }
+
+    #[test]
+    fn death_fall_matches_vanilla_boundaries_and_flip_overrides() {
+        use azalea_registry::builtin::EntityKind;
+
+        assert_eq!(super::death_fall_degrees(0.0, EntityKind::Zombie), 0.0);
+        assert_eq!(super::death_fall_degrees(1.0, EntityKind::Zombie), 0.0);
+        assert!(
+            (super::death_fall_degrees(6.0, EntityKind::Zombie) - (0.4_f32.sqrt() * 90.0)).abs()
+                < 1e-5
+        );
+        assert_eq!(super::death_fall_degrees(20.0, EntityKind::Zombie), 90.0);
+        assert_eq!(super::death_fall_degrees(200.0, EntityKind::Zombie), 90.0);
+
+        for kind in [
+            EntityKind::Spider,
+            EntityKind::CaveSpider,
+            EntityKind::Endermite,
+            EntityKind::Silverfish,
+        ] {
+            assert_eq!(
+                super::death_fall_degrees(20.0, kind),
+                180.0,
+                "vanilla renderer override must use a 180-degree death flip for {kind:?}"
+            );
+        }
+        for kind in [EntityKind::Squid, EntityKind::GlowSquid] {
+            assert_eq!(
+                super::death_fall_degrees(20.0, kind),
+                0.0,
+                "Vanilla SquidRenderer bypasses LivingEntityRenderer.setupRotations for {kind:?}"
+            );
+        }
+    }
+
+    /// Bakes every mob model; `generate_cube_vertices`' UV seam
+    /// `debug_assert!` fires for any mesh that straddles its sheet.
+    #[test]
+    fn all_mob_meshes_bake() {
+        super::mob_definitions();
+    }
 }

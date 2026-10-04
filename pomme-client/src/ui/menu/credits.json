@@ -1,0 +1,77 @@
+[
+  {
+    "section": "",
+    "disciplines": [
+      {
+        "discipline": "",
+        "titles": [
+          {
+            "title": "Created By",
+            "names": ["Purdze"]
+          },
+          {
+            "title": "Contributors",
+            "names": [
+              "arse09",
+              "colonthreeing",
+              "Sqrilizz",
+              "uri singer",
+              "Bjorn Beishline",
+              "Matvei",
+              "Spencer0187",
+              "ChocoDev",
+              "Collin Budrick",
+              "Maksas Gornostajus"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "section": "Built With",
+    "disciplines": [
+      {
+        "discipline": "",
+        "titles": [
+          {
+            "title": "Networking",
+            "names": ["azalea", "simdnbt"]
+          },
+          {
+            "title": "Rendering",
+            "names": [
+              "ash",
+              "gpu-allocator",
+              "binary-greedy-meshing",
+              "glam",
+              "fontdue"
+            ]
+          },
+          {
+            "title": "Platform",
+            "names": ["winit", "OpenAL Soft", "libloading", "symphonia", "tokio"]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "section": "Minecraft",
+    "disciplines": [
+      {
+        "discipline": "",
+        "titles": [
+          {
+            "title": "Original Game By",
+            "names": ["Mojang Studios"]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "section": "Thank You For Playing",
+    "disciplines": []
+  }
+]

@@ -6,6 +6,7 @@ members = [
     "pomme-gpu-allocator",
     "pomme-block",
     "pomme-protocol",
+    "pomme-singleplayer",
     "tools/blockgen",
     "tools/protogen",
 
@@ -14,6 +15,8 @@ members = [
     "plugin-macros",
     "plugin-example",
 ]
+# Steel is its own workspace; pomme-singleplayer reaches into it by path.
+exclude = ["third_party/SteelMC"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -22,7 +25,7 @@ thiserror = "2"
 directories = "6"
 sha1_smol = "1"
 open = "5"
-base64 = "0.22"
+base64 = "0.23"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["json"] }
@@ -31,7 +34,14 @@ reqwest = { version = "0.13", features = ["json"] }
 glam = "0.33"
 
 # client
-pyronyx = "=0.3.2"
+pyronyx = "=0.4.0"
+regex = "1"
+# Secure chat. rsa, sha1 and sha2 match the versions azalea-crypto pins.
+chrono = { version = "0.4.44", features = ["serde"] }
+rand = "0.10.2"
+rsa = "0.10.0-rc.18"
+sha1 = "0.11"
+sha2 = "0.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-shared = "0.1"
@@ -64,6 +74,22 @@ azalea-block = { path = "pomme-block" }
 
 [profile.dev]
 opt-level = 1
+# Backtraces and profilers keep file:line; full local-variable debuginfo is
+# opt-in via CARGO_PROFILE_DEV_DEBUG=full.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# Mirrors steel's own dev overrides. Its workspace profile does not apply when
+# pomme is the root, and without these worldgen is unusably slow and the density
+# functions overflow-panic.
+[profile.dev.package.steel-worldgen]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.steel-math]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false

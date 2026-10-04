@@ -19,7 +19,7 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
         let cursor = input.cursor;
         let clicked = input.clicked;
@@ -53,7 +53,7 @@ impl MainMenu {
 
         let on_friends = self.friend_tab == FriendTab::Friends;
         if on_friends {
-            self.handle_text_input(input, 1);
+            self.cycle_fields(input, 1);
         }
         let popup_open = self.pending_remove.is_some();
 
@@ -90,24 +90,9 @@ impl MainMenu {
         let incoming_count = lists.as_ref().map(|l| l.incoming.len()).unwrap_or(0);
 
         // Vanilla renders Friends as a dialog over the previous screen. Re-draw
-        // the title screen as a static backdrop (neutral input → visuals only,
-        // no hover/click/actions); the renderer blurs it behind the panel.
-        let backdrop_input = MenuInput {
-            cursor: (-1.0, -1.0),
-            clicked: false,
-            mouse_held: false,
-            typed_chars: Vec::new(),
-            backspace: false,
-            enter: false,
-            escape: false,
-            tab: false,
-            f5: false,
-            select_all: false,
-            copy: false,
-            cut: false,
-            undo: false,
-            scroll_delta: 0.0,
-        };
+        // the title screen as a static backdrop; the renderer blurs it behind
+        // the panel.
+        let backdrop_input = MenuInput::backdrop();
         let mut elements = self
             .build_main(screen_w, screen_h, &backdrop_input, text_width_fn)
             .elements;
@@ -332,21 +317,21 @@ impl MainMenu {
         // `lw - 20(button) - 3(gap)`, 20px send button flush right.
         let field_y = content_y + 3.0 * gs;
         let field_w = lw - 23.0 * gs;
-        push_text_field(
+        self.text_field(
             elements,
+            TextTarget::AddFriend,
+            0,
+            input,
             lx,
             field_y,
             field_w,
             field_h,
             fs,
             gs,
-            &self.add_friend_name,
-            self.focused_field == Some(0),
-            self.focused_field == Some(0) && self.field_all_selected,
-            &self.cursor_blink,
             text_width_fn,
         );
-        if self.add_friend_name.is_empty() {
+        // Vanilla EditBox hint: shown only while empty and unfocused.
+        if self.add_friend_name.value().is_empty() && self.focused_field != Some(0) {
             elements.push(MenuElement::Text {
                 x: lx + 4.0 * gs,
                 y: field_y + (field_h - fs) / 2.0,
@@ -355,9 +340,6 @@ impl MainMenu {
                 color: MSG_DIM,
                 centered: false,
             });
-        }
-        if clicked && common::hit_test(cursor, [lx, field_y, field_w, field_h]) {
-            self.on_field_click(0);
         }
         let send_hit = icon_button(
             elements,
@@ -375,7 +357,7 @@ impl MainMenu {
         );
         let submit = (clicked && send_hit) || (self.focused_field == Some(0) && input.enter);
         if submit {
-            let name = self.add_friend_name.trim().to_string();
+            let name = self.add_friend_name.value().trim().to_string();
             if !name.is_empty() {
                 self.add_friend_name.clear();
                 self.friend_mutate(FriendAction::AddByName(name));
@@ -527,7 +509,7 @@ impl MainMenu {
             );
         }
         elements.push(MenuElement::ScissorPop);
-        push_scrollbar(
+        push_list_scrollbar(
             elements,
             content_x + content_w,
             list_top,
@@ -699,7 +681,7 @@ impl MainMenu {
             }
         }
         elements.push(MenuElement::ScissorPop);
-        push_scrollbar(
+        push_list_scrollbar(
             elements,
             content_x + content_w,
             content_y,
@@ -712,7 +694,13 @@ impl MainMenu {
 
     /// Apply mouse-wheel scrolling within `area`, clamp the offset, and return
     /// the right-edge gutter to reserve for the scrollbar (0 when it all fits).
-    fn scroll_region(&mut self, input: &MenuInput, area: [f32; 4], total: f32, gs: f32) -> f32 {
+    pub(super) fn scroll_region(
+        &mut self,
+        input: &MenuInput,
+        area: [f32; 4],
+        total: f32,
+        gs: f32,
+    ) -> f32 {
         let max_scroll = (total - area[3]).max(0.0);
         if common::hit_test(input.cursor, area) {
             self.scroll_offset -= input.scroll_delta * 20.0 * gs;
@@ -747,30 +735,9 @@ impl MainMenu {
     }
 }
 
-fn nine_slice(
-    elements: &mut Vec<MenuElement>,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    sprite: SpriteId,
-    border: f32,
-) {
-    elements.push(MenuElement::NineSlice {
-        x,
-        y,
-        w,
-        h,
-        sprite,
-        border,
-        tint: WHITE,
-    });
-}
-
-/// A 20×20 sprite button with a faint hover highlight; returns whether hovered.
-/// Vanilla `SpriteIconButton`: a widget-button background with the icon
-/// centered at its native size (`iw`×`ih` source pixels), not stretched to the
-/// button.
+/// An icon button with a faint hover highlight; returns whether hovered. These
+/// aren't in a focus ring, so unlike the title screen's they take no
+/// `FocusCtx`.
 #[allow(clippy::too_many_arguments)]
 fn icon_button(
     elements: &mut Vec<MenuElement>,
@@ -787,28 +754,20 @@ fn icon_button(
     tooltip: &str,
 ) -> bool {
     let hovered = common::hit_test(cursor, [x, y, size, size]);
-    nine_slice(
+    push_icon_widget(
         elements,
         x,
         y,
         size,
-        size,
-        if hovered {
-            SpriteId::ButtonHover
-        } else {
-            SpriteId::ButtonNormal
+        gs,
+        IconFace::Sprite {
+            id: sprite,
+            w: iw,
+            h: ih,
         },
-        3.0 * gs,
+        true,
+        hovered,
     );
-    let (icon_w, icon_h) = (iw * gs, ih * gs);
-    elements.push(MenuElement::Image {
-        x: x + (size - icon_w) / 2.0,
-        y: y + (size - icon_h) / 2.0,
-        w: icon_w,
-        h: icon_h,
-        sprite,
-        tint: WHITE,
-    });
     if hovered && !tooltip.is_empty() {
         common::push_tooltip(elements, cursor, screen_w, screen_h, gs, tooltip);
     }
@@ -835,6 +794,7 @@ fn push_face_name(
         y: ey + (row_h - face) / 2.0,
         size: face,
         uuid: uuid.into(),
+        tint: [1.0, 1.0, 1.0, 1.0],
     });
     let text_x = content_x + face + 4.0 * gs;
     match status {
@@ -904,44 +864,6 @@ fn push_section_header(
         corner_radius: 0.0,
         color: WHITE,
     });
-}
-
-fn push_scrollbar(
-    elements: &mut Vec<MenuElement>,
-    right_x: f32,
-    top: f32,
-    h: f32,
-    total: f32,
-    scroll: f32,
-    gs: f32,
-) {
-    let max_scroll = (total - h).max(0.0);
-    if max_scroll <= 0.0 {
-        return;
-    }
-    // 6px track, inset 2px from the content's right edge (vanilla spacing).
-    let track_w = 6.0 * gs;
-    let track_x = right_x - track_w - 2.0 * gs;
-    let thumb_h = (h * h / total).max(16.0 * gs); // vanilla min thumb is larger
-    let thumb_y = top + (scroll / max_scroll) * (h - thumb_h);
-    nine_slice(
-        elements,
-        track_x,
-        top,
-        track_w,
-        h,
-        SpriteId::ScrollerBackground,
-        gs,
-    );
-    nine_slice(
-        elements,
-        track_x,
-        thumb_y,
-        track_w,
-        thumb_h,
-        SpriteId::Scroller,
-        gs,
-    );
 }
 
 /// Vanilla `gui.friends.presence.status.*` label + color for a friend.

@@ -61,6 +61,7 @@ impl HeldItemPipeline {
         cmd: vk::CommandBuffer,
         frame: usize,
         aspect: f32,
+        hud_fov: f32,
         swing_progress: f32,
         use_anim: Option<UseAnim>,
         item: &HeldItemInfo,
@@ -71,7 +72,7 @@ impl HeldItemPipeline {
             return;
         };
 
-        let uniform = CameraUniform::with_view_proj(hand::projection(aspect) * bob);
+        let uniform = CameraUniform::with_view_proj(hand::projection(aspect, hud_fov) * bob);
         self.shared.update_camera(frame, &uniform);
 
         let display = self

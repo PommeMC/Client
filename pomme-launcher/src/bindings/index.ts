@@ -28,6 +28,7 @@ export const commands = {
 	setLauncherLanguage: (language: string) => typedError<null, string>(__TAURI_INVOKE("set_launcher_language", { language })),
 	setKeepLauncherOpen: (keep: boolean) => typedError<null, string>(__TAURI_INVOKE("set_keep_launcher_open", { keep })),
 	setLaunchWithConsole: (launch: boolean) => typedError<null, string>(__TAURI_INVOKE("set_launch_with_console", { launch })),
+	setSelectedAccountUuid: (uuid: string | null) => typedError<null, string>(__TAURI_INVOKE("set_selected_account_uuid", { uuid })),
 	pingServer: (address: string) => __TAURI_INVOKE<pomme_launcher$ping.ServerStatus>("ping_server", { address }),
 	loadServers: () => __TAURI_INVOKE<pomme_launcher$ping.SavedServer[]>("load_servers"),
 	saveServers: (servers: pomme_launcher$ping.SavedServer[]) => typedError<null, string>(__TAURI_INVOKE("save_servers", { servers })),
@@ -51,6 +52,7 @@ export const commands = {
 
 /** Events */
 export const events = {
+	authUrlEvent: makeEvent<pomme_launcher$auth.AuthUrlEvent>("auth-url-event"),
 	consoleMessageEvent: makeEvent<pomme_launcher$commands.ConsoleMessageEvent>("console-message-event"),
 	downloadProgressEvent: makeEvent<pomme_launcher$downloader.DownloadProgressEvent>("download-progress-event"),
 	gameExitedEvent: makeEvent<pomme_launcher$commands.GameExitedEvent>("game-exited-event"),

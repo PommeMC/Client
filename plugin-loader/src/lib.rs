@@ -111,19 +111,6 @@ impl Plugins {
                 continue;
             }
 
-            let load_plugin =
-                match unsafe { lib.get_stabbied::<LoadPluginFn>(LOAD_PLUGIN_FN_NAME.as_bytes()) } {
-                    Ok(f) => f,
-                    Err(err) => {
-                        tracing::error!(
-                            "Plugin {name:?} is missing required symbol `{}`: {err}",
-                            LOAD_PLUGIN_FN_NAME,
-                        );
-                        continue;
-                    }
-                };
-            let plugin = load_plugin();
-
             let setup_logger =
                 match unsafe { lib.get::<SetupLoggerFn>(SETUP_LOGGER_FN_NAME.as_bytes()) } {
                     Ok(f) => f,
@@ -136,6 +123,19 @@ impl Plugins {
                     }
                 };
             setup_logger(&logger);
+
+            let load_plugin =
+                match unsafe { lib.get_stabbied::<LoadPluginFn>(LOAD_PLUGIN_FN_NAME.as_bytes()) } {
+                    Ok(f) => f,
+                    Err(err) => {
+                        tracing::error!(
+                            "Plugin {name:?} is missing required symbol `{}`: {err}",
+                            LOAD_PLUGIN_FN_NAME,
+                        );
+                        continue;
+                    }
+                };
+            let plugin = load_plugin();
 
             loaded.push(LoadedPlugin {
                 name: plugin.name.as_str(),

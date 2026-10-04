@@ -1,5 +1,13 @@
-import { createContext, createElement, ReactNode, useContext, useEffect, useState } from "react";
-import { commands } from "../bindings";
+import {
+  createContext,
+  createElement,
+  ReactNode,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import { commands, Result } from "../bindings";
 import { AuthAccount } from "../bindings/pomme_launcher/auth";
 import { GameVersion, PatchNote } from "../bindings/pomme_launcher/commands";
 import { LauncherSettings } from "../bindings/pomme_launcher/settings";
@@ -14,6 +22,7 @@ const useLauncherSettings = () => {
     language: "English",
     keepLauncherOpen: true,
     launchWithConsole: false,
+    selectedAccountUuid: null,
   });
 
   useEffect(() => {
@@ -23,37 +32,27 @@ const useLauncherSettings = () => {
       .catch(console.error);
   }, []);
 
-  const setLanguage = async (language: string) => {
-    let res = await commands.setLauncherLanguage(language);
-    if (res.ok) {
-      setLauncherSettings((prev) => ({ ...prev, language }));
-    } else {
-      console.error("Error while setting `launcherLanguage: ", res.error);
-    }
-  };
-  const setKeepLauncherOpen = async (keep: boolean) => {
-    let res = await commands.setKeepLauncherOpen(keep);
-    if (res.ok) {
-      setLauncherSettings((prev) => ({ ...prev, keepLauncherOpen: keep }));
-    } else {
-      console.error("Error while setting `keepLauncherOpen`: ", res.error);
-    }
-  };
-  const setLaunchWithConsole = async (launch: boolean) => {
-    let res = await commands.setLaunchWithConsole(launch);
-    if (res.ok) {
-      setLauncherSettings((prev) => ({ ...prev, launchWithConsole: launch }));
-    } else {
-      console.error("Error while setting `launchWithConsole`: ", res.error);
-    }
-  };
+  // Stable identities: App lists these in effect and callback dependencies.
+  const setters = useMemo(() => {
+    const persist =
+      <K extends keyof LauncherSettings, V extends LauncherSettings[K]>(
+        key: K,
+        save: (value: V) => Promise<Result<null, string>>,
+      ) =>
+      async (value: V) => {
+        const res = await save(value);
+        if (res.ok) setLauncherSettings((prev) => ({ ...prev, [key]: value }));
+        else console.error(`Error while setting \`${key}\`: `, res.error);
+      };
+    return {
+      setLanguage: persist("language", commands.setLauncherLanguage),
+      setKeepLauncherOpen: persist("keepLauncherOpen", commands.setKeepLauncherOpen),
+      setLaunchWithConsole: persist("launchWithConsole", commands.setLaunchWithConsole),
+      setSelectedAccountUuid: persist("selectedAccountUuid", commands.setSelectedAccountUuid),
+    };
+  }, []);
 
-  return {
-    ...launcherSettings,
-    setLanguage,
-    setKeepLauncherOpen,
-    setLaunchWithConsole,
-  };
+  return { ...launcherSettings, ...setters };
 };
 
 const useAppState = () => {
@@ -69,6 +68,7 @@ const useAppState = () => {
   const [versions, setVersions] = useState<GameVersion[]>([]);
   const [launchingStatus, setLaunchingStatus] = useState<LaunchingStatus>(null);
   const [authLoading, setAuthLoading] = useState(false);
+  const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [status, setStatus] = useState("");
   const [news, setNews] = useState<PatchNote[]>([]);
   const [skinUrl, setSkinUrl] = useState<string | null>(null);
@@ -106,6 +106,8 @@ const useAppState = () => {
     setLaunchingStatus,
     authLoading,
     setAuthLoading,
+    authUrl,
+    setAuthUrl,
     status,
     setStatus,
     news,

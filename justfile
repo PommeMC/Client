@@ -12,25 +12,39 @@ launcher-pre-pr:
     @cargo clippy -p pomme-launcher --release --all-targets --all-features -- -D warnings
     @pnpm --filter pomme-launcher pre-pr
 
-client-dev *args:
+# Stage Minecraft's OpenAL Soft next to the dev binaries, as the release job does.
+openal:
+    #!/usr/bin/env bash
+    python=$(command -v python3 || command -v python) || {
+        echo "warning: no python on PATH, skipping OpenAL staging (audio will be disabled)" >&2
+        exit 0
+    }
+    "$python" tools/fetch_openal.py target/debug target/release
+
+client-dev *args: openal
     @cargo build -p plugin-example
     @cargo run -p pomme-client {{ args }}
 
 # Optimized release client for accurate benchmarking (supplies the launch token the guard needs).
-client-release *args:
+client-release *args: openal
     #!/usr/bin/env bash
     cargo run --release -p pomme-client -- --launch-token "$(mktemp)" {{ args }}
 
-client-build *args:
+client-build *args: openal
     @cargo build -p pomme-client {{ args }}
+
+# TODO: CI also runs the client's clippy and tests with --no-default-features; mirror it here.
 
 client-pre-pr:
     @cargo fmt -p pomme-client -- --check
     @cargo fmt -p pomme-protocol -- --check
+    @cargo fmt -p pomme-singleplayer -- --check
     @cargo clippy -p pomme-client --release --all-targets --all-features -- -D warnings
     @cargo clippy -p pomme-protocol --release --all-targets --all-features -- -D warnings
+    @cargo clippy -p pomme-singleplayer --release --all-targets -- -D warnings
     @cargo test -p pomme-protocol
-    @cargo test -p pomme-client -- net::azalea_compat world::block
+    @cargo test -p pomme-client
+    @cargo test -p pomme-singleplayer -- --include-ignored
 
 # Regenerate a version's packet-id table from the decompiled reference.
 protogen version="26.2":
@@ -40,18 +54,24 @@ protogen version="26.2":
 registrygen version="26.2":
     @cargo run -p protogen -- registries reference/{{ version }} {{ version }} pomme-protocol/src/data/registries-{{ version }}.json
 
+# Regenerate a version's known-pack table from the extracted reference data.
+knownpackgen version="26.2":
+    @cargo run -p protogen -- knownpacks reference/{{ version }} {{ version }} pomme-protocol/src/data/known-packs-{{ version }}.json
+
 # Regenerate a version's block-state table from the data-generator report.
 blockgen version="26.2":
     @cargo run -p blockgen -- blocks reference/{{ version }}/generated/reports/blocks.json {{ version }} pomme-client/src/world/block/data/blocks-{{ version }}.json
 
-# JDK 25 bin dir for lightgen; override with `just jdk=<path> lightgen`.
+# JDK 25 bin dir for stategen; override with `just jdk=<path> stategen`.
 jdk := "C:/Program Files/Amazon Corretto/jdk25.0.2_10/bin"
 
-# Regenerate a version's light-property table by running vanilla's own code
-# (tools/lightgen/LightDump.java) against the reference server jar, then
-# compacting the dump with `blockgen light`. Uses the deobf server jar when
+# TODO: Windows only (javac.exe, ';' classpath separator); make portable.
+
+# Regenerate a version's per-state property table by running vanilla's own code
+# (tools/stategen/StateDump.java) against the reference server jar, then
+# compacting the dump with `blockgen state`. Uses the deobf server jar when
 # one exists (pre-26.x); needs the Corretto JDK for 26.x class files.
-lightgen version="26.2":
+stategen version="26.2":
     #!/usr/bin/env bash
     set -euo pipefail
     v="{{ version }}"
@@ -65,7 +85,7 @@ lightgen version="26.2":
             | xargs unzip -qn "$ref/server.jar" -d "$ref/bundler"
     fi
     libs=$(find "$ref/bundler" -name '*.jar' | tr '\n' ';')
-    mkdir -p tools/lightgen/out
-    "$jdk/javac.exe" --release 21 -d tools/lightgen/out tools/lightgen/LightDump.java
-    "$jdk/java.exe" -cp "$classes;${libs}tools/lightgen/out" LightDump "$v" "$ref/generated/light.json"
-    cargo run -p blockgen -- light "$ref/generated/light.json" pomme-client/src/world/block/data/blocks-"$v".json pomme-client/src/world/block/data/light-"$v".json
+    mkdir -p tools/stategen/out
+    "$jdk/javac.exe" --release 21 -d tools/stategen/out tools/stategen/StateDump.java
+    "$jdk/java.exe" -cp "$classes;${libs}tools/stategen/out" StateDump "$v" "$ref/generated/state.json"
+    cargo run -p blockgen -- state "$ref/generated/state.json" pomme-client/src/world/block/data/blocks-"$v".json pomme-client/src/world/block/data/state-"$v".json
