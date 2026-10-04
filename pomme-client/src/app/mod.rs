@@ -219,6 +219,10 @@ impl ApplicationHandler for App {
                     Ok(w) => Arc::new(w),
                     Err(e) => {
                         tracing::error!("Failed to create window: {e}");
+
+                        tracing::info!("Stopping!");
+                        self.core.plugins.fire_client_stopping();
+
                         event_loop.exit();
                         return AppPhase::Setup {
                             quick_access_multiplayer,
@@ -242,6 +246,10 @@ impl ApplicationHandler for App {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::error!("Failed to create renderer: {e}");
+
+                        tracing::info!("Stopping!");
+                        self.core.plugins.fire_client_stopping();
+
                         event_loop.exit();
                         return AppPhase::Setup {
                             quick_access_multiplayer,
@@ -328,6 +336,9 @@ impl ApplicationHandler for App {
     ) {
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
+                tracing::info!("Stopping!");
+                self.core.plugins.fire_client_stopping();
+
                 // A world saves on the way out, so the window stays up for it
                 // rather than vanishing while the process finishes writing.
                 self.phase.transition(|app| match app {
@@ -758,6 +769,9 @@ impl ApplicationHandler for App {
                                 }
                             }
                             MenuUpdateResult::Quit => {
+                                tracing::info!("Stopping!");
+                                core.plugins.fire_client_stopping();
+
                                 event_loop.exit();
                                 AppPhase::InMenu { gfx, panorama }
                             }
@@ -928,11 +942,5 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
-    }
-}
-
-impl Drop for App {
-    fn drop(&mut self) {
-        self.core.plugins.fire_client_stopping();
     }
 }
