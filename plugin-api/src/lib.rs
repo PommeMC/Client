@@ -21,37 +21,37 @@ pub trait Plugin {
 
 #[stabby::stabby]
 pub trait SPlugin {
-    extern "C" fn on_client_started(&mut self);
-    extern "C" fn on_client_stopping(&mut self);
+    extern "C" fn on_client_started(&mut self, caller: Str<'_>);
+    extern "C" fn on_client_stopping(&mut self, caller: Str<'_>);
 
-    extern "C" fn on_client_tick_start(&mut self);
-    extern "C" fn on_client_tick_end(&mut self);
+    extern "C" fn on_client_tick_start(&mut self, caller: Str<'_>);
+    extern "C" fn on_client_tick_end(&mut self, caller: Str<'_>);
 }
 
-fn guarded(hook: &str, f: impl FnOnce()) {
+fn guarded(name: Str<'_>, hook: &str, f: impl FnOnce()) {
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
-        tracing::error!("plugin panicked in {hook}");
+        tracing::error!("plugin \"{name}\" panicked in \"{hook}\"");
     }
 }
 
 impl<T: Plugin> SPlugin for T {
-    extern "C" fn on_client_started(&mut self) {
-        guarded("on_client_started", || {
+    extern "C" fn on_client_started(&mut self, caller: Str<'_>) {
+        guarded(caller, "on_client_started", || {
             <Self as Plugin>::on_client_started(self)
         });
     }
-    extern "C" fn on_client_stopping(&mut self) {
-        guarded("on_client_stopping", || {
+    extern "C" fn on_client_stopping(&mut self, caller: Str<'_>) {
+        guarded(caller, "on_client_stopping", || {
             <Self as Plugin>::on_client_stopping(self)
         });
     }
-    extern "C" fn on_client_tick_start(&mut self) {
-        guarded("on_client_tick_start", || {
+    extern "C" fn on_client_tick_start(&mut self, caller: Str<'_>) {
+        guarded(caller, "on_client_tick_start", || {
             <Self as Plugin>::on_client_tick_start(self)
         });
     }
-    extern "C" fn on_client_tick_end(&mut self) {
-        guarded("on_client_tick_end", || {
+    extern "C" fn on_client_tick_end(&mut self, caller: Str<'_>) {
+        guarded(caller, "on_client_tick_end", || {
             <Self as Plugin>::on_client_tick_end(self)
         });
     }

@@ -11,6 +11,7 @@ use plugin_api::{SPlugin, SPluginDynMut as _};
 use stabby::boxed::Box as SBox;
 use stabby::dynptr;
 use stabby::libloading::StabbyLibrary;
+use stabby::str::Str;
 use tracing_shared::SharedLogger;
 
 #[cfg(target_os = "windows")]
@@ -21,7 +22,7 @@ const LIB_EXT: &str = "dylib";
 const LIB_EXT: &str = "so";
 
 pub struct LoadedPlugin {
-    name: &'static str,
+    name: Str<'static>,
     version: Version,
     plugin: dynptr!(SBox<dyn SPlugin>),
     _library: Library,
@@ -135,10 +136,16 @@ impl Plugins {
                         continue;
                     }
                 };
-            let plugin = load_plugin();
+            let plugin = match load_plugin().match_owned(Some, || None) {
+                Some(module) => module,
+                None => {
+                    tracing::error!("Plugin {name:?} failed to initialize");
+                    continue;
+                }
+            };
 
             loaded.push(LoadedPlugin {
-                name: plugin.name.as_str(),
+                name: plugin.name,
                 version: plugin.version,
                 plugin: plugin.plugin,
                 _library: lib,
@@ -155,28 +162,28 @@ impl Plugins {
     #[inline]
     pub fn fire_client_started(&mut self) {
         for plugin in &mut self.plugins {
-            plugin.plugin.on_client_started();
+            plugin.plugin.on_client_started(plugin.name);
         }
     }
 
     #[inline]
     pub fn fire_client_stopping(&mut self) {
         for plugin in &mut self.plugins {
-            plugin.plugin.on_client_stopping();
+            plugin.plugin.on_client_stopping(plugin.name);
         }
     }
 
     #[inline]
     pub fn fire_client_tick_start(&mut self) {
         for plugin in &mut self.plugins {
-            plugin.plugin.on_client_tick_start();
+            plugin.plugin.on_client_tick_start(plugin.name);
         }
     }
 
     #[inline]
     pub fn fire_client_tick_end(&mut self) {
         for plugin in &mut self.plugins {
-            plugin.plugin.on_client_tick_end();
+            plugin.plugin.on_client_tick_end(plugin.name);
         }
     }
 }

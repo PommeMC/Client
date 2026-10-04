@@ -68,7 +68,7 @@ pub const PLUGIN_API_VERSION_VALUE: PluginApiVersion = PluginApiVersion {
 
 // Must match the generated fn in plugin macro
 pub const LOAD_PLUGIN_FN_NAME: &str = "load_plugin";
-pub type LoadPluginFn = extern "C" fn() -> PluginModule;
+pub type LoadPluginFn = extern "C" fn() -> stabby::option::Option<PluginModule>;
 
 pub const SETUP_LOGGER_FN_NAME: &str = "setup_shared_logger_ref";
 pub type SetupLoggerFn = extern "C" fn(logger: &SharedLogger);
