@@ -5117,8 +5117,6 @@ version = "0.2.0"
 dependencies = [
  "plugin-macros",
  "stabby",
- "tracing",
- "tracing-shared",
 ]
 
 [[package]]
@@ -5128,6 +5126,7 @@ dependencies = [
  "plugin-api",
  "stabby",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5139,7 +5138,6 @@ dependencies = [
  "stabby",
  "thiserror 2.0.21",
  "tracing",
- "tracing-shared",
 ]
 
 [[package]]
@@ -5251,7 +5249,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-appender",
- "tracing-shared",
  "tracing-subscriber",
  "uuid 1.24.0",
  "winit",
@@ -8276,16 +8273,6 @@ dependencies = [
  "log",
  "once_cell",
  "tracing-core",
-]
-
-[[package]]
-name = "tracing-shared"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba6ce98e2ac6c82f52c702ecdf07740259fc665e0e78bacf9c888ac39bec085c"
-dependencies = [
- "log",
- "tracing",
 ]
 
 [[package]]

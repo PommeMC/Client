@@ -17,6 +17,8 @@ impl Plugin for ExamplePlugin {
     fn new() -> Self {
         let now = Instant::now();
 
+        tracing_subscriber::fmt().init();
+
         Self {
             total_ticks: 0,
 

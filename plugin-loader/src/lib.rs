@@ -4,15 +4,12 @@ use std::{fmt, fs};
 use libloading::Library;
 use plugin_api::meta::{
     LOAD_PLUGIN_FN_NAME, LoadPluginFn, PLUGIN_API_VERSION_SYMBOL_NAME, PLUGIN_API_VERSION_VALUE,
-    PLUGIN_MARKER_SYMBOL_NAME, PLUGIN_MARKER_VALUE, PluginApiVersion, PluginMarker,
-    SETUP_LOGGER_FN_NAME, SetupLoggerFn, Version,
+    PLUGIN_MARKER_SYMBOL_NAME, PLUGIN_MARKER_VALUE, PluginApiVersion, PluginMarker, Version,
 };
-use plugin_api::{SPlugin, SPluginDynMut as _};
+use plugin_api::{PluginModule, SPlugin, SPluginDynMut as _};
 use stabby::boxed::Box as SBox;
 use stabby::dynptr;
 use stabby::libloading::StabbyLibrary;
-use stabby::str::Str;
-use tracing_shared::SharedLogger;
 
 #[cfg(target_os = "windows")]
 const LIB_EXT: &str = "dll";
@@ -22,7 +19,7 @@ const LIB_EXT: &str = "dylib";
 const LIB_EXT: &str = "so";
 
 pub struct LoadedPlugin {
-    name: Str<'static>,
+    name: String,
     version: Version,
     plugin: dynptr!(SBox<dyn SPlugin>),
     _library: Library,
@@ -48,7 +45,6 @@ impl Plugins {
             }
         };
 
-        let logger = SharedLogger::new();
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
@@ -112,19 +108,6 @@ impl Plugins {
                 continue;
             }
 
-            let setup_logger =
-                match unsafe { lib.get::<SetupLoggerFn>(SETUP_LOGGER_FN_NAME.as_bytes()) } {
-                    Ok(f) => f,
-                    Err(err) => {
-                        tracing::error!(
-                            "Plugin {name:?} is missing required symbol `{}`: {err}",
-                            SETUP_LOGGER_FN_NAME,
-                        );
-                        continue;
-                    }
-                };
-            setup_logger(&logger);
-
             let load_plugin =
                 match unsafe { lib.get_stabbied::<LoadPluginFn>(LOAD_PLUGIN_FN_NAME.as_bytes()) } {
                     Ok(f) => f,
@@ -136,7 +119,7 @@ impl Plugins {
                         continue;
                     }
                 };
-            let plugin = match load_plugin().match_owned(Some, || None) {
+            let module = match Option::<PluginModule>::from(load_plugin()) {
                 Some(module) => module,
                 None => {
                     tracing::error!("Plugin {name:?} failed to initialize");
@@ -145,9 +128,9 @@ impl Plugins {
             };
 
             loaded.push(LoadedPlugin {
-                name: plugin.name,
-                version: plugin.version,
-                plugin: plugin.plugin,
+                name: module.name.to_string(),
+                version: module.version,
+                plugin: module.plugin,
                 _library: lib,
             });
         }
@@ -159,32 +142,34 @@ impl Plugins {
         slf
     }
 
+    fn fire(&mut self, hook: &'static str, call: impl Fn(&mut dynptr!(SBox<dyn SPlugin>)) -> bool) {
+        self.plugins.retain_mut(|p| {
+            if call(&mut p.plugin) {
+                return true;
+            }
+            tracing::error!("plugin {:?} panicked in {hook}; dropping it", p.name);
+            false
+        });
+    }
+
     #[inline]
     pub fn fire_client_started(&mut self) {
-        for plugin in &mut self.plugins {
-            plugin.plugin.on_client_started(plugin.name);
-        }
+        self.fire("on_client_started", |p| p.on_client_started());
     }
 
     #[inline]
     pub fn fire_client_stopping(&mut self) {
-        for plugin in &mut self.plugins {
-            plugin.plugin.on_client_stopping(plugin.name);
-        }
+        self.fire("on_client_stopping", |p| p.on_client_stopping());
     }
 
     #[inline]
     pub fn fire_client_tick_start(&mut self) {
-        for plugin in &mut self.plugins {
-            plugin.plugin.on_client_tick_start(plugin.name);
-        }
+        self.fire("on_client_tick_start", |p| p.on_client_tick_start());
     }
 
     #[inline]
     pub fn fire_client_tick_end(&mut self) {
-        for plugin in &mut self.plugins {
-            plugin.plugin.on_client_tick_end(plugin.name);
-        }
+        self.fire("on_client_tick_end", |p| p.on_client_tick_end());
     }
 }
 

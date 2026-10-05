@@ -4,7 +4,5 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-tracing.workspace = true
 stabby.workspace = true
-tracing-shared.workspace = true
 plugin-macros.workspace = true

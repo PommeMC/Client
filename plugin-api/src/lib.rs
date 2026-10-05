@@ -21,39 +21,29 @@ pub trait Plugin {
 
 #[stabby::stabby]
 pub trait SPlugin {
-    extern "C" fn on_client_started(&mut self, caller: Str<'_>);
-    extern "C" fn on_client_stopping(&mut self, caller: Str<'_>);
+    extern "C" fn on_client_started(&mut self) -> bool;
+    extern "C" fn on_client_stopping(&mut self) -> bool;
 
-    extern "C" fn on_client_tick_start(&mut self, caller: Str<'_>);
-    extern "C" fn on_client_tick_end(&mut self, caller: Str<'_>);
+    extern "C" fn on_client_tick_start(&mut self) -> bool;
+    extern "C" fn on_client_tick_end(&mut self) -> bool;
 }
 
-fn guarded(name: Str<'_>, hook: &str, f: impl FnOnce()) {
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
-        tracing::error!("plugin \"{name}\" panicked in \"{hook}\"");
-    }
+fn guarded(f: impl FnOnce()) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_ok()
 }
 
 impl<T: Plugin> SPlugin for T {
-    extern "C" fn on_client_started(&mut self, caller: Str<'_>) {
-        guarded(caller, "on_client_started", || {
-            <Self as Plugin>::on_client_started(self)
-        });
+    extern "C" fn on_client_started(&mut self) -> bool {
+        guarded(|| self.on_client_started())
     }
-    extern "C" fn on_client_stopping(&mut self, caller: Str<'_>) {
-        guarded(caller, "on_client_stopping", || {
-            <Self as Plugin>::on_client_stopping(self)
-        });
+    extern "C" fn on_client_stopping(&mut self) -> bool {
+        guarded(|| <Self as Plugin>::on_client_stopping(self))
     }
-    extern "C" fn on_client_tick_start(&mut self, caller: Str<'_>) {
-        guarded(caller, "on_client_tick_start", || {
-            <Self as Plugin>::on_client_tick_start(self)
-        });
+    extern "C" fn on_client_tick_start(&mut self) -> bool {
+        guarded(|| <Self as Plugin>::on_client_tick_start(self))
     }
-    extern "C" fn on_client_tick_end(&mut self, caller: Str<'_>) {
-        guarded(caller, "on_client_tick_end", || {
-            <Self as Plugin>::on_client_tick_end(self)
-        });
+    extern "C" fn on_client_tick_end(&mut self) -> bool {
+        guarded(|| <Self as Plugin>::on_client_tick_end(self))
     }
 }
 

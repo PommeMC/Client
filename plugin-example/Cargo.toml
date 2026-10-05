@@ -8,5 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 plugin-api.workspace = true
-tracing.workspace = true
 stabby.workspace = true
+
+tracing.workspace = true
+tracing-subscriber.workspace = true

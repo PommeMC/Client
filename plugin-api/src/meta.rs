@@ -1,9 +1,5 @@
 use std::fmt;
 
-use tracing_shared::SharedLogger;
-
-use crate::PluginModule;
-
 #[stabby::stabby]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Version {
@@ -68,9 +64,5 @@ pub const PLUGIN_API_VERSION_VALUE: PluginApiVersion = PluginApiVersion {
 
 // Must match the generated fn in plugin macro
 pub const LOAD_PLUGIN_FN_NAME: &str = "load_plugin";
-pub type LoadPluginFn = extern "C" fn() -> stabby::option::Option<PluginModule>;
-
-pub const SETUP_LOGGER_FN_NAME: &str = "setup_shared_logger_ref";
-pub type SetupLoggerFn = extern "C" fn(logger: &SharedLogger);
-
-pub use tracing_shared::setup_shared_logger_ref;
+pub type LoadResult = stabby::option::Option<crate::PluginModule>;
+pub type LoadPluginFn = extern "C" fn() -> LoadResult;
