@@ -1817,10 +1817,16 @@ fn face_textures_base(
 
 /// Full-cube blocks that mustn't cull adjacent faces (vanilla `noOcclusion`).
 /// Solid `packed_ice`/`blue_ice` still occlude, so `ice` is matched exactly.
+/// Every oxidation/waxed state of the grate family is `noOcclusion`, hence the
+/// suffix; `barrier` bakes as a full cube but is cutout in vanilla.
 fn is_non_occluding(block_name: &str) -> bool {
     block_name.ends_with("_leaves")
         || block_name.ends_with("_stained_glass")
-        || matches!(block_name, "glass" | "tinted_glass" | "ice" | "frosted_ice")
+        || block_name.ends_with("_copper_grate")
+        || matches!(
+            block_name,
+            "glass" | "tinted_glass" | "ice" | "frosted_ice" | "barrier" | "copper_grate"
+        )
 }
 
 fn determine_tint(block_name: &str) -> Tint {
@@ -2409,5 +2415,45 @@ mod tests {
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].path, "block/oak_stairs");
         assert!(parts[0].transform.is_none());
+    }
+
+    /// The grate family and `barrier` are the only full-cube blocks vanilla
+    /// marks `noOcclusion` besides the glass/ice/leaves sets: a baked full cube
+    /// of them must keep its neighbors' faces alive.
+    #[test]
+    fn non_occluding_covers_copper_grates_and_barrier() {
+        for name in [
+            "copper_grate",
+            "exposed_copper_grate",
+            "weathered_copper_grate",
+            "oxidized_copper_grate",
+            "waxed_copper_grate",
+            "waxed_exposed_copper_grate",
+            "waxed_weathered_copper_grate",
+            "waxed_oxidized_copper_grate",
+            "barrier",
+            "glass",
+            "blue_stained_glass",
+            "tinted_glass",
+            "ice",
+            "frosted_ice",
+            "oak_leaves",
+        ] {
+            assert!(is_non_occluding(name), "{name} should not occlude");
+        }
+
+        // Solid lookalikes that must keep culling.
+        for name in [
+            "stone",
+            "oak_planks",
+            "copper_block",
+            "exposed_copper",
+            "packed_ice",
+            "blue_ice",
+            "tinted_glass_pane",
+            "glass_pane",
+        ] {
+            assert!(!is_non_occluding(name), "{name} should occlude");
+        }
     }
 }
