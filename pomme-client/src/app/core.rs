@@ -2985,22 +2985,15 @@ impl AppCore {
             crate::player::is_creative(game.player.game_mode),
             held_item.as_deref(),
         );
-        let protocol = crate::version::session_protocol();
-        let mut legacy_mining = held_stack
-            .as_ref()
-            .map(|stack| crate::tool::legacy_mining_enchantments(stack, protocol))
-            .unwrap_or_default();
-        if protocol <= 766 {
-            legacy_mining.aqua_affinity |= game
-                .player
+        let legacy_mining = crate::tool::legacy_mining(
+            held_stack.as_ref(),
+            game.player
                 .inventory
                 .armor_slots()
                 .iter()
-                .filter_map(|stack| stack.as_present())
-                .any(|stack| {
-                    crate::tool::legacy_mining_enchantments(stack, protocol).aqua_affinity
-                });
-        }
+                .filter_map(|stack| stack.as_present()),
+            crate::version::session_protocol(),
+        );
         let place_block = held_item
             .as_deref()
             .and_then(|name| renderer.registry().placeable_block_for_item(name));
@@ -3807,16 +3800,12 @@ mod tests {
             }],
         }));
 
-        // KEEP_ATTRIBUTE_MODIFIERS: reset installs fresh-player defaults first,
-        // then retained attribute values rebuild mirrors and clamp health.
         player.reset_for_respawn(false);
         sync_respawn_attributes(&mut player, true);
         assert_eq!(player.armor, 8);
         assert_eq!(player.max_health, 14.0);
         assert_eq!(player.health, 14.0);
 
-        // Base-values-only copy: the same post-reset ordering drops modifiers,
-        // preserves bases, rebuilds armor, and clamps the default 20 health.
         player.reset_for_respawn(false);
         sync_respawn_attributes(&mut player, false);
         assert_eq!(player.armor, 6);

@@ -153,16 +153,10 @@ impl ActiveMobEffects {
             .map(|effect| effect.amplifier)
     }
 
-    /// Vanilla `MobEffectUtil.getDigSpeedAmplification`: the larger amplifier
-    /// from Haste and Conduit Power. Presence is checked separately because a
-    /// level-I effect has amplifier 0.
+    /// Vanilla `MobEffectUtil.getDigSpeedAmplification`, `None` without
+    /// Haste or Conduit Power.
     pub fn dig_speed_amplifier(&self) -> Option<i32> {
-        match (self.amplifier(HASTE), self.amplifier(CONDUIT_POWER)) {
-            (Some(haste), Some(conduit)) => Some(haste.max(conduit)),
-            (Some(haste), None) => Some(haste),
-            (None, Some(conduit)) => Some(conduit),
-            (None, None) => None,
-        }
+        self.amplifier(HASTE).max(self.amplifier(CONDUIT_POWER))
     }
 
     /// Vanilla `tickClient`: durations floor at 0 and the entry stays until

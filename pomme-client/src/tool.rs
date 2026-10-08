@@ -11,6 +11,9 @@ use pomme_protocol::version::NATIVE;
 
 use crate::world::block::BlockTags;
 
+/// First protocol whose shears use the `shears_*_breaking_speed` tags (26.2).
+const SHEARS_SPEED_TAGS_PROTOCOL: i32 = 776;
+
 const LEGACY_EFFICIENCY_KEY: &str = "pomme:legacy_efficiency";
 const LEGACY_AQUA_AFFINITY_KEY: &str = "pomme:legacy_aqua_affinity";
 
@@ -20,14 +23,9 @@ pub struct LegacyMiningEnchantments {
     pub aqua_affinity: bool,
 }
 
-/// Mining enchantments that were still read directly from item state before
-/// 1.21 moved them into synced player attributes. Pre-1.20.5 stacks keep the
-/// original `Enchantments` NBT list in CustomData; 1.20.5/1.20.6 stack
-/// translation writes only the two mining-relevant values as Pomme metadata.
-pub fn legacy_mining_enchantments(
-    stack: &ItemStackData,
-    protocol: i32,
-) -> LegacyMiningEnchantments {
+/// A stack's mining enchantments before 1.21: the `Enchantments` NBT list in
+/// CustomData before 1.20.5, Pomme's translated metadata keys on 1.20.5/6.
+fn legacy_mining_enchantments(stack: &ItemStackData, protocol: i32) -> LegacyMiningEnchantments {
     if protocol > 766 {
         return LegacyMiningEnchantments::default();
     }
@@ -70,6 +68,33 @@ pub fn legacy_mining_enchantments(
         }
     }
     result
+}
+
+/// The mining enchantments `Player.getDestroySpeed` reads directly before
+/// 1.21: Efficiency from the main hand (`EquipmentSlot.MAINHAND`) and Aqua
+/// Affinity from the armor (`ARMOR_SLOTS`).
+pub fn legacy_mining<'a>(
+    held: Option<&ItemStackData>,
+    armor: impl IntoIterator<Item = &'a ItemStackData>,
+    protocol: i32,
+) -> LegacyMiningEnchantments {
+    LegacyMiningEnchantments {
+        efficiency: held.map_or(0, |stack| {
+            legacy_mining_enchantments(stack, protocol).efficiency
+        }),
+        aqua_affinity: armor
+            .into_iter()
+            .any(|stack| legacy_mining_enchantments(stack, protocol).aqua_affinity),
+    }
+}
+
+/// Before 1.21.5's `sword_instantly_mines` tag, `BambooStalkBlock` and
+/// `BambooSaplingBlock.getDestroyProgress` returned 1 for any `SwordItem`,
+/// bypassing the destroy-speed chain.
+pub fn sword_instantly_mines_legacy(held: ItemKind, block: &str, protocol: i32) -> bool {
+    protocol < 770
+        && matches!(block, "bamboo" | "bamboo_sapling")
+        && held.to_str().ends_with("_sword")
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -120,10 +145,9 @@ impl Tool {
         }
     }
 
+    /// Vanilla `Tool.getMiningSpeed`.
     pub fn mining_speed(&self, block: &str, tags: &BlockTags) -> f32 {
-        self.rules
-            .iter()
-            .find_map(|rule| rule.speed.filter(|_| rule.blocks.contains(block, tags)))
+        self.first_rule(block, tags, |rule| rule.speed)
             .unwrap_or(self.default_mining_speed)
     }
 
@@ -140,13 +164,21 @@ impl Tool {
             return false;
         }
 
+        self.first_rule(block, tags, |rule| rule.correct_for_drops)
+            .unwrap_or(false)
+    }
+
+    /// The first rule with a value for `field` that covers the block; each
+    /// field resolves independently.
+    fn first_rule<T>(
+        &self,
+        block: &str,
+        tags: &BlockTags,
+        field: impl Fn(&ToolRule) -> Option<T>,
+    ) -> Option<T> {
         self.rules
             .iter()
-            .find_map(|rule| {
-                rule.correct_for_drops
-                    .filter(|_| rule.blocks.contains(block, tags))
-            })
-            .unwrap_or(false)
+            .find_map(|rule| field(rule).filter(|_| rule.blocks.contains(block, tags)))
     }
 }
 
@@ -166,6 +198,10 @@ fn direct(blocks: &[&str], speed: Option<f32>, correct_for_drops: Option<bool>) 
     }
 }
 
+fn cobweb_rule() -> ToolRule {
+    direct(&["cobweb"], Some(15.0), Some(true))
+}
+
 fn material_tool(speed: f32, incorrect_tag: &str, mineable_tag: &str, legacy_tier: u8) -> Tool {
     let mut tool = Tool::new(
         vec![
@@ -182,7 +218,7 @@ fn material_tool(speed: f32, incorrect_tag: &str, mineable_tag: &str, legacy_tie
 fn sword_tool() -> Tool {
     Tool::new(
         vec![
-            direct(&["cobweb"], Some(15.0), Some(true)),
+            cobweb_rule(),
             tag("sword_instantly_mines", Some(f32::MAX), None),
             tag("sword_efficient", Some(1.5), None),
         ],
@@ -194,10 +230,25 @@ fn sword_tool() -> Tool {
 fn shears_tool() -> Tool {
     Tool::new(
         vec![
-            direct(&["cobweb"], Some(15.0), Some(true)),
+            cobweb_rule(),
             tag("shears_extreme_breaking_speed", Some(15.0), None),
             tag("shears_major_breaking_speed", Some(5.0), None),
             tag("shears_minor_breaking_speed", Some(2.0), None),
+        ],
+        1,
+        true,
+    )
+}
+
+/// Shears before 26.2: the same speeds keyed by the `leaves` and `wool` tags
+/// plus a direct vine list.
+fn legacy_shears_tool() -> Tool {
+    Tool::new(
+        vec![
+            cobweb_rule(),
+            tag("leaves", Some(15.0), None),
+            tag("wool", Some(5.0), None),
+            direct(&["vine", "glow_lichen"], Some(2.0), None),
         ],
         1,
         true,
@@ -288,7 +339,12 @@ static DEFAULT_TOOLS: LazyLock<HashMap<String, Tool>> = LazyLock::new(|| {
     tools
 });
 
-fn default_tool(kind: ItemKind) -> Option<&'static Tool> {
+static LEGACY_SHEARS: LazyLock<Tool> = LazyLock::new(legacy_shears_tool);
+
+fn default_tool(kind: ItemKind, protocol: i32) -> Option<&'static Tool> {
+    if kind == ItemKind::Shears && protocol < SHEARS_SPEED_TAGS_PROTOCOL {
+        return Some(&LEGACY_SHEARS);
+    }
     DEFAULT_TOOLS.get(kind.to_str())
 }
 
@@ -309,11 +365,8 @@ fn wire_blocks(blocks: &HolderSet<BlockKind, Identifier>, protocol: i32) -> Tool
                     if protocol == NATIVE.protocol {
                         block_name(kind)
                     } else {
-                        // Tool's component id is layout-compatible on 1.21.11
-                        // and 26.1, but direct HolderSet block ids are still in
-                        // that protocol's block registry. Azalea decoded the raw
-                        // integer as a latest BlockKind, so reinterpret its
-                        // numeric discriminant through Pomme's protocol table.
+                        // azalea decoded the raw id as a native BlockKind;
+                        // map it through that protocol's block registry.
                         crate::world::block::block_registry_name(protocol, kind.to_u32())
                             .map(str::to_owned)
                             .unwrap_or_else(|| block_name(kind))
@@ -343,38 +396,26 @@ fn from_wire(tool: &WireTool, protocol: i32) -> Tool {
     }
 }
 
-/// Resolve the effective Tool component for a stack without consulting
-/// Azalea's generated default-component tables.
-///
-/// Explicit Tool patches are converted into Pomme's native model on lookup
-/// when the negotiated protocol uses Tool's current component id (1.21.11+).
-/// Direct holder block ids are resolved through Pomme's protocol-specific
-/// registry table. On protocols 766-773 Tool value payloads are deliberately
-/// skipped by the compatibility layer and gameplay uses Pomme's native per-item
-/// default; payload-free Tool removals are normalized and preserved exactly.
+/// The stack's effective Tool: its patch (a removal, or a value on 1.21.11+),
+/// else Pomme's per-item default.
 pub fn stack_tool(stack: &ItemStackData, protocol: i32) -> Option<Cow<'static, Tool>> {
     if let Some((_, patch_value)) = stack
         .component_patch
         .iter()
         .find(|(kind, _)| *kind == DataComponentKind::Tool)
     {
-        // The component-era compatibility translators normalize payload-free
-        // Tool removals even when Tool value payloads are intentionally skipped.
-        if (766..=773).contains(&protocol) && patch_value.is_none() {
-            return None;
-        }
+        patch_value?;
+        // TODO: Tool values on 766-773 (1.20.5 through 1.21.10) are skipped,
+        // so server-customised tools there mine at the item's default speed.
         if protocol >= 774 {
-            return match patch_value {
-                Some(_) => stack
-                    .component_patch
-                    .get::<WireTool>()
-                    .map(|tool| Cow::Owned(from_wire(tool, protocol))),
-                None => None,
-            };
+            return stack
+                .component_patch
+                .get::<WireTool>()
+                .map(|tool| Cow::Owned(from_wire(tool, protocol)));
         }
     }
 
-    default_tool(stack.kind).map(Cow::Borrowed)
+    default_tool(stack.kind, protocol).map(Cow::Borrowed)
 }
 
 #[cfg(test)]
@@ -452,36 +493,46 @@ mod tests {
         assert!(diamond.correct_for_drops("obsidian", &tags, 765));
     }
 
-    #[test]
-    fn legacy_nbt_enchantments_feed_mining_metadata() {
+    /// A pre-1.20.5 stack with its `Enchantments` NBT list in CustomData.
+    fn enchanted_stack(kind: ItemKind, enchantments: &[(&str, i16)]) -> ItemStackData {
         use simdnbt::owned::{Nbt, NbtCompound, NbtList, NbtTag};
 
-        let efficiency = NbtCompound::from_values(vec![
-            ("id".into(), NbtTag::String("minecraft:efficiency".into())),
-            ("lvl".into(), NbtTag::Short(3)),
-        ]);
-        let aqua = NbtCompound::from_values(vec![
-            (
-                "id".into(),
-                NbtTag::String("minecraft:aqua_affinity".into()),
-            ),
-            ("lvl".into(), NbtTag::Short(1)),
-        ]);
+        let list = enchantments
+            .iter()
+            .map(|(id, level)| {
+                NbtCompound::from_values(vec![
+                    (
+                        "id".into(),
+                        NbtTag::String(format!("minecraft:{id}").into()),
+                    ),
+                    ("lvl".into(), NbtTag::Short(*level)),
+                ])
+            })
+            .collect();
         let root = NbtCompound::from_values(vec![(
             "Enchantments".into(),
-            NbtTag::List(NbtList::Compound(vec![efficiency, aqua])),
+            NbtTag::List(NbtList::Compound(list)),
         )]);
-        let mut stack = ItemStackData::new(ItemKind::IronPickaxe, 1);
+        let mut stack = ItemStackData::new(kind, 1);
         let custom = CustomData {
             nbt: Nbt::new("".into(), root),
         };
+        // SAFETY: the union variant matches DataComponentKind::CustomData.
         unsafe {
             stack.component_patch.unchecked_insert_component(
                 DataComponentKind::CustomData,
                 Some(DataComponentUnion::from(custom)),
             );
         }
+        stack
+    }
 
+    #[test]
+    fn legacy_nbt_enchantments_feed_mining_metadata() {
+        let stack = enchanted_stack(
+            ItemKind::IronPickaxe,
+            &[("efficiency", 3), ("aqua_affinity", 1)],
+        );
         assert_eq!(
             legacy_mining_enchantments(&stack, 765),
             LegacyMiningEnchantments {
@@ -489,6 +540,71 @@ mod tests {
                 aqua_affinity: true,
             }
         );
+    }
+
+    #[test]
+    fn legacy_mining_reads_efficiency_from_hand_and_aqua_affinity_from_armor() {
+        let held = enchanted_stack(
+            ItemKind::IronPickaxe,
+            &[("efficiency", 2), ("aqua_affinity", 1)],
+        );
+        let helmet = enchanted_stack(ItemKind::IronHelmet, &[("aqua_affinity", 1)]);
+
+        assert_eq!(
+            legacy_mining(Some(&held), [], 765),
+            LegacyMiningEnchantments {
+                efficiency: 2,
+                aqua_affinity: false,
+            }
+        );
+        assert!(legacy_mining(None, [&helmet], 765).aqua_affinity);
+        assert_eq!(
+            legacy_mining(Some(&held), [&helmet], 767),
+            LegacyMiningEnchantments::default()
+        );
+    }
+
+    #[test]
+    fn shears_use_leaves_and_wool_tags_before_26_2() {
+        crate::world::block::init("26.2");
+        let tags = crate::world::block::block_tags_for_test(&[
+            ("leaves", &["oak_leaves"]),
+            ("wool", &["white_wool"]),
+        ]);
+        let shears = default_tool(ItemKind::Shears, 775).expect("26.1 shears");
+        assert_eq!(*shears, legacy_shears_tool());
+        assert_eq!(shears.mining_speed("cobweb", &tags), 15.0);
+        assert_eq!(shears.mining_speed("oak_leaves", &tags), 15.0);
+        assert_eq!(shears.mining_speed("white_wool", &tags), 5.0);
+        assert_eq!(shears.mining_speed("vine", &tags), 2.0);
+        assert_eq!(shears.mining_speed("stone", &tags), 1.0);
+
+        assert_eq!(
+            *default_tool(ItemKind::Shears, NATIVE.protocol).expect("26.2 shears"),
+            shears_tool()
+        );
+    }
+
+    #[test]
+    fn swords_instantly_mine_bamboo_before_1_21_5() {
+        for block in ["bamboo", "bamboo_sapling"] {
+            assert!(sword_instantly_mines_legacy(
+                ItemKind::IronSword,
+                block,
+                769
+            ));
+            assert!(!sword_instantly_mines_legacy(
+                ItemKind::IronSword,
+                block,
+                770
+            ));
+            assert!(!sword_instantly_mines_legacy(ItemKind::IronAxe, block, 769));
+        }
+        assert!(!sword_instantly_mines_legacy(
+            ItemKind::IronSword,
+            "stone",
+            769
+        ));
     }
 
     #[test]
@@ -602,24 +718,27 @@ mod tests {
             ItemKind::Mace,
             ItemKind::Trident,
         ] {
-            assert!(default_tool(kind).is_some(), "missing {kind:?}");
+            assert!(
+                default_tool(kind, NATIVE.protocol).is_some(),
+                "missing {kind:?}"
+            );
         }
     }
 
     #[test]
     fn sword_special_rules_match_vanilla_shape() {
-        let tool = default_tool(ItemKind::IronSword).expect("iron sword tool");
+        let tool = default_tool(ItemKind::IronSword, NATIVE.protocol).expect("iron sword tool");
         assert_eq!(tool.rules.len(), 3);
         assert_eq!(tool.damage_per_block, 2);
         assert!(!tool.can_destroy_blocks_in_creative);
         assert_eq!(tool.default_mining_speed, 1.0);
-        assert_eq!(tool.rules[0], direct(&["cobweb"], Some(15.0), Some(true)));
+        assert_eq!(tool.rules[0], cobweb_rule());
     }
 
     #[test]
     fn mace_and_trident_cannot_destroy_blocks_in_creative() {
         for kind in [ItemKind::Mace, ItemKind::Trident] {
-            let tool = default_tool(kind).expect("special tool");
+            let tool = default_tool(kind, NATIVE.protocol).expect("special tool");
             assert!(tool.rules.is_empty());
             assert_eq!(tool.damage_per_block, 2);
             assert!(!tool.can_destroy_blocks_in_creative);

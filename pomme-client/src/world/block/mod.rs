@@ -803,38 +803,26 @@ fn table() -> &'static Vec<BlockData> {
         .expect("world::block::init must be called before use")
 }
 
-/// Built-in block registry order for the active protocol. The generated state
-/// table is grouped by block in registry order, so collapsing adjacent states
-/// yields the registry id -> resource-name mapping UpdateTags uses.
-fn block_registry_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = Vec::new();
-    for data in table() {
-        if names.last() != Some(&data.id) {
-            names.push(data.id);
-        }
-    }
-    names
+/// Built-in block registry order: the generated state table is grouped by
+/// block in registry order, so collapsing adjacent states yields the registry
+/// id -> resource-name mapping UpdateTags uses.
+fn registry_names(table: &[BlockData]) -> impl Iterator<Item = &'static str> + '_ {
+    table
+        .chunk_by(|a, b| a.id == b.id)
+        .map(|states| states[0].id)
 }
 
-/// Resolves a built-in block registry id in an arbitrary supported protocol
-/// without switching the active world's block-state table.
+fn block_registry_names() -> Vec<&'static str> {
+    registry_names(table()).collect()
+}
+
+/// Resolves a built-in block registry id in any supported protocol without
+/// switching the active table.
 pub(crate) fn block_registry_name(protocol: i32, registry_id: u32) -> Option<&'static str> {
-    let slot = prewarm_protocol(protocol);
-    let table = BLOCK_TABLES[slot]
+    let table = BLOCK_TABLES[prewarm_protocol(protocol)]
         .get()
         .expect("prewarm_protocol initializes block table");
-    let mut previous = None;
-    let mut index = 0u32;
-    for data in table {
-        if previous != Some(data.id) {
-            if index == registry_id {
-                return Some(data.id);
-            }
-            index += 1;
-            previous = Some(data.id);
-        }
-    }
-    None
+    registry_names(table).nth(registry_id as usize)
 }
 
 fn resolve_block_tags(
