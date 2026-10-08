@@ -359,9 +359,6 @@ pub struct BakedQuad {
 pub struct BakedModel {
     pub quads: Vec<BakedQuad>,
     pub is_full_cube: bool,
-    /// Vanilla `canOcclude`: full cubes occlude, but cutout blocks like leaves
-    /// don't, so neighbor faces against them still render.
-    pub occludes: bool,
 }
 
 #[derive(Clone)]
@@ -456,12 +453,9 @@ pub fn bake_all_models(
                         &mut model_cache,
                         packs,
                     );
-                    if let Some(mut baked) =
+                    if let Some(baked) =
                         bake_resolved_model(&resolved, model_ref.x, model_ref.y, block_tint)
                     {
-                        if is_non_occluding(block_name) {
-                            baked.occludes = false;
-                        }
                         variants_map.insert(variant_key.clone(), baked);
                     }
                 }
@@ -637,7 +631,6 @@ pub fn bake_item_models(
                 Some(mut model) => {
                     model.quads.extend(baked.quads);
                     model.is_full_cube = false;
-                    model.occludes = false;
                     model
                 }
             });
@@ -774,7 +767,6 @@ fn bake_chest_item_model(gui: DisplayTransform, gui_light: GuiLight) -> BakedMod
     BakedModel {
         quads,
         is_full_cube: false,
-        occludes: false,
     }
 }
 
@@ -1518,11 +1510,9 @@ fn bake_resolved_model(
         return None;
     }
 
-    let is_full_cube = check_full_cube(&quads);
     Some(BakedModel {
+        is_full_cube: check_full_cube(&quads),
         quads,
-        is_full_cube,
-        occludes: is_full_cube,
     })
 }
 
@@ -1813,20 +1803,6 @@ fn face_textures_base(
     }
 
     None
-}
-
-/// Full-cube blocks that mustn't cull adjacent faces (vanilla `noOcclusion`).
-/// Solid `packed_ice`/`blue_ice` still occlude, so `ice` is matched exactly.
-/// Every oxidation/waxed state of the grate family is `noOcclusion`, hence the
-/// suffix; `barrier` bakes as a full cube but is cutout in vanilla.
-fn is_non_occluding(block_name: &str) -> bool {
-    block_name.ends_with("_leaves")
-        || block_name.ends_with("_stained_glass")
-        || block_name.ends_with("_copper_grate")
-        || matches!(
-            block_name,
-            "glass" | "tinted_glass" | "ice" | "frosted_ice" | "barrier" | "copper_grate"
-        )
 }
 
 fn determine_tint(block_name: &str) -> Tint {
@@ -2415,45 +2391,5 @@ mod tests {
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].path, "block/oak_stairs");
         assert!(parts[0].transform.is_none());
-    }
-
-    /// The grate family and `barrier` are the only full-cube blocks vanilla
-    /// marks `noOcclusion` besides the glass/ice/leaves sets: a baked full cube
-    /// of them must keep its neighbors' faces alive.
-    #[test]
-    fn non_occluding_covers_copper_grates_and_barrier() {
-        for name in [
-            "copper_grate",
-            "exposed_copper_grate",
-            "weathered_copper_grate",
-            "oxidized_copper_grate",
-            "waxed_copper_grate",
-            "waxed_exposed_copper_grate",
-            "waxed_weathered_copper_grate",
-            "waxed_oxidized_copper_grate",
-            "barrier",
-            "glass",
-            "blue_stained_glass",
-            "tinted_glass",
-            "ice",
-            "frosted_ice",
-            "oak_leaves",
-        ] {
-            assert!(is_non_occluding(name), "{name} should not occlude");
-        }
-
-        // Solid lookalikes that must keep culling.
-        for name in [
-            "stone",
-            "oak_planks",
-            "copper_block",
-            "exposed_copper",
-            "packed_ice",
-            "blue_ice",
-            "tinted_glass_pane",
-            "glass_pane",
-        ] {
-            assert!(!is_non_occluding(name), "{name} should occlude");
-        }
     }
 }
