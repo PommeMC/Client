@@ -2062,6 +2062,7 @@ pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<SkinData, String> {
         .properties
         .iter()
         .find(|p| p.name.as_deref() == Some("textures"))
+        // TODO: authlib reads only the `textures` property; drop this fallback.
         .or_else(|| profile.properties.first())
         .ok_or("No properties")?
         .value;
@@ -2085,8 +2086,9 @@ pub(crate) async fn fetch_skin_texture_from_profile_property(
 fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String> {
     #[derive(serde::Deserialize)]
     struct TexturesPayload {
-        textures: std::collections::HashMap<String, Texture>,
+        textures: Textures,
     }
+    struct Textures(Vec<(String, Texture)>);
     #[derive(serde::Deserialize)]
     struct Texture {
         url: Option<String>,
@@ -2097,30 +2099,63 @@ fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String>
         model: Option<String>,
     }
 
+    /// Gson's map adapter fails on a repeated key. Keys are authlib's texture
+    /// `Type`, so unknown names all collide as `null`.
+    impl<'de> serde::Deserialize<'de> for Textures {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = Textures;
+
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a textures map")
+                }
+
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<Textures, A::Error> {
+                    fn slot(key: &str) -> Option<&str> {
+                        matches!(key, "SKIN" | "CAPE" | "ELYTRA").then_some(key)
+                    }
+                    let mut entries: Vec<(String, Texture)> = Vec::new();
+                    while let Some((key, texture)) = map.next_entry::<String, Texture>()? {
+                        if entries.iter().any(|(k, _)| slot(k) == slot(&key)) {
+                            return Err(serde::de::Error::custom(format!("duplicate key: {key}")));
+                        }
+                        entries.push((key, texture));
+                    }
+                    Ok(Textures(entries))
+                }
+            }
+            deserializer.deserialize_map(Visitor)
+        }
+    }
+
     use base64::Engine;
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(value)
         .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
         .map_err(error_chain)?;
-    let mut payload: TexturesPayload = serde_json::from_slice(&decoded).map_err(error_chain)?;
+    let payload: TexturesPayload = serde_json::from_slice(&decoded).map_err(error_chain)?;
 
     // authlib `unpackTextures`: one bad url empties the whole payload.
     // TODO: vanilla also shows the default skin for other players whose
     // textures property isn't SIGNED (`PlayerInfo.createSkinLookup`); pomme
     // doesn't verify the signature yet.
-    if let Some(bad) = payload
-        .textures
-        .values()
-        .find(|t| !t.url.as_deref().is_some_and(is_allowed_texture_url))
-    {
-        return Err(format!("texture url not allowed: {:?}", bad.url));
+    let mut skin = None;
+    for (key, texture) in payload.textures.0 {
+        match texture.url {
+            Some(url) if is_allowed_texture_url(&url) => {
+                if key == "SKIN" {
+                    let slim = texture.metadata.and_then(|m| m.model).as_deref() == Some("slim");
+                    skin = Some((url, slim));
+                }
+            }
+            url => return Err(format!("texture url not allowed: {url:?}")),
+        }
     }
-    let skin = payload
-        .textures
-        .remove("SKIN")
-        .ok_or_else(|| "No skin texture".to_string())?;
-    let slim = skin.metadata.as_ref().and_then(|m| m.model.as_deref()) == Some("slim");
-    Ok((skin.url.unwrap_or_default(), slim))
+    skin.ok_or_else(|| "No skin texture".to_string())
 }
 
 /// authlib's `TextureUrlChecker.isAllowedTextureDomain`: a `java.net.URI`
@@ -2137,7 +2172,11 @@ fn is_allowed_texture_url(url: &str) -> bool {
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
     let (host, port) = host_port.split_once(':').unwrap_or((host_port, ""));
-    matches!(scheme, "http" | "https") && host == HOST && port.bytes().all(|b| b.is_ascii_digit())
+    // `URI` scans the port as digits, then `Integer.parseInt`; an overflow
+    // leaves no host.
+    let port_ok = port.is_empty()
+        || (port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<i32>().is_ok());
+    matches!(scheme, "http" | "https") && host == HOST && port_ok
 }
 
 /// Error message including the source chain (`reqwest` hides the detail there).
@@ -2401,6 +2440,7 @@ mod tests {
             "https://textures.minecraft.net/texture/a|b",
             r"https://textures.minecraft.net\@evil.com/abc",
             "https://textures.minecraft.net:abc/texture/abc",
+            "https://textures.minecraft.net:99999999999/texture/abc",
             "not a url",
             "",
         ] {
@@ -2409,11 +2449,13 @@ mod tests {
     }
 
     #[test]
-    fn any_foreign_texture_url_rejects_the_whole_payload() {
+    fn foreign_urls_and_duplicate_keys_reject_the_whole_payload() {
         for payload in [
             r#"{"textures":{"SKIN":{"url":"http://192.168.0.1/skin.png"}}}"#,
             r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/a"},"CAPE":{"url":"http://192.168.0.1/cape.png"}}}"#,
             r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/a"},"ELYTRA":{}}}"#,
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/a"},"SKIN":{"url":"https://textures.minecraft.net/texture/b"}}}"#,
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/a"},"FOO":{"url":"https://textures.minecraft.net/texture/b"},"BAR":{"url":"https://textures.minecraft.net/texture/c"}}}"#,
         ] {
             let value = textures_property(payload);
             assert!(skin_url_from_texture_property(&value).is_err(), "{payload}");
