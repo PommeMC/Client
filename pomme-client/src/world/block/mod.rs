@@ -1625,6 +1625,29 @@ mod tests {
     }
 
     #[test]
+    fn can_occlude_follows_no_occlusion() {
+        setup();
+        for (name, occludes) in [
+            ("copper_grate", false),
+            ("waxed_oxidized_copper_grate", false),
+            ("test_instance_block", false),
+            ("glass", false),
+            ("oak_leaves", false),
+            ("ice", false),
+            ("stone", true),
+            ("packed_ice", true),
+            ("blue_ice", true),
+            ("copper_block", true),
+        ] {
+            assert_eq!(
+                light_props(find_state(name, &[])).can_occlude,
+                occludes,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn slab_face_occlusion() {
         setup();
         let top = find_state("oak_slab", &[("type", "top"), ("waterlogged", "false")]);
