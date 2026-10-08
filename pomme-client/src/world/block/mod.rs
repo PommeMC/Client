@@ -803,17 +803,26 @@ fn table() -> &'static Vec<BlockData> {
         .expect("world::block::init must be called before use")
 }
 
-/// Built-in block registry order for the active protocol. The generated state
-/// table is grouped by block in registry order, so collapsing adjacent states
-/// yields the registry id -> resource-name mapping UpdateTags uses.
+/// Built-in block registry order: the generated state table is grouped by
+/// block in registry order, so collapsing adjacent states yields the registry
+/// id -> resource-name mapping UpdateTags uses.
+fn registry_names(table: &[BlockData]) -> impl Iterator<Item = &'static str> + '_ {
+    table
+        .chunk_by(|a, b| a.id == b.id)
+        .map(|states| states[0].id)
+}
+
 fn block_registry_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = Vec::new();
-    for data in table() {
-        if names.last() != Some(&data.id) {
-            names.push(data.id);
-        }
-    }
-    names
+    registry_names(table()).collect()
+}
+
+/// Resolves a built-in block registry id in any supported protocol without
+/// switching the active table.
+pub(crate) fn block_registry_name(protocol: i32, registry_id: u32) -> Option<&'static str> {
+    let table = BLOCK_TABLES[prewarm_protocol(protocol)]
+        .get()
+        .expect("prewarm_protocol initializes block table");
+    registry_names(table).nth(registry_id as usize)
 }
 
 fn resolve_block_tags(
@@ -872,6 +881,11 @@ pub(crate) fn block_tags_for_test(entries: &[(&str, &[&str])]) -> BlockTags {
         })
         .collect();
     resolve_block_tags(raw_tags, &names)
+}
+
+#[cfg(test)]
+pub(crate) fn replace_block_tags_for_test(entries: &[(&str, &[&str])]) {
+    *BLOCK_TAGS.write().expect("block tag lock poisoned") = block_tags_for_test(entries);
 }
 
 fn block_data(state: BlockState) -> &'static BlockData {

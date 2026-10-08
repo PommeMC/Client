@@ -2981,8 +2981,18 @@ impl AppCore {
             game.player.look_dir,
             &game.chunk_store,
             &game.entity_store,
+            &game.player.attributes,
             crate::player::is_creative(game.player.game_mode),
             held_item.as_deref(),
+        );
+        let legacy_mining = crate::tool::legacy_mining(
+            held_stack.as_ref(),
+            game.player
+                .inventory
+                .armor_slots()
+                .iter()
+                .filter_map(|stack| stack.as_present()),
+            crate::version::session_protocol(),
         );
         let place_block = held_item
             .as_deref()
@@ -3008,6 +3018,10 @@ impl AppCore {
             game.player.food,
             input.selected_slot(),
             held_stack.as_ref(),
+            &game.player.attributes,
+            &game.player.effects,
+            game.player.eyes_in_water,
+            legacy_mining,
             place_block,
             hands_empty,
             &mut effects,

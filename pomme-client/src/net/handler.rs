@@ -413,6 +413,7 @@ pub fn handle_game_packet(
                 entity_id: p.entity_id.0,
                 effect: crate::mob_effect::MobEffectInstance {
                     effect_id: p.mob_effect.to_u32(),
+                    amplifier: p.data.amplifier,
                     duration: p.data.duration,
                     ambient: p.data.flags.ambient,
                     show_icon: p.data.flags.show_icon,
