@@ -359,9 +359,6 @@ pub struct BakedQuad {
 pub struct BakedModel {
     pub quads: Vec<BakedQuad>,
     pub is_full_cube: bool,
-    /// Vanilla `canOcclude`: full cubes occlude, but cutout blocks like leaves
-    /// don't, so neighbor faces against them still render.
-    pub occludes: bool,
 }
 
 #[derive(Clone)]
@@ -456,12 +453,9 @@ pub fn bake_all_models(
                         &mut model_cache,
                         packs,
                     );
-                    if let Some(mut baked) =
+                    if let Some(baked) =
                         bake_resolved_model(&resolved, model_ref.x, model_ref.y, block_tint)
                     {
-                        if is_non_occluding(block_name) {
-                            baked.occludes = false;
-                        }
                         variants_map.insert(variant_key.clone(), baked);
                     }
                 }
@@ -637,7 +631,6 @@ pub fn bake_item_models(
                 Some(mut model) => {
                     model.quads.extend(baked.quads);
                     model.is_full_cube = false;
-                    model.occludes = false;
                     model
                 }
             });
@@ -774,7 +767,6 @@ fn bake_chest_item_model(gui: DisplayTransform, gui_light: GuiLight) -> BakedMod
     BakedModel {
         quads,
         is_full_cube: false,
-        occludes: false,
     }
 }
 
@@ -1518,11 +1510,9 @@ fn bake_resolved_model(
         return None;
     }
 
-    let is_full_cube = check_full_cube(&quads);
     Some(BakedModel {
+        is_full_cube: check_full_cube(&quads),
         quads,
-        is_full_cube,
-        occludes: is_full_cube,
     })
 }
 
@@ -1813,14 +1803,6 @@ fn face_textures_base(
     }
 
     None
-}
-
-/// Full-cube blocks that mustn't cull adjacent faces (vanilla `noOcclusion`).
-/// Solid `packed_ice`/`blue_ice` still occlude, so `ice` is matched exactly.
-fn is_non_occluding(block_name: &str) -> bool {
-    block_name.ends_with("_leaves")
-        || block_name.ends_with("_stained_glass")
-        || matches!(block_name, "glass" | "tinted_glass" | "ice" | "frosted_ice")
 }
 
 fn determine_tint(block_name: &str) -> Tint {

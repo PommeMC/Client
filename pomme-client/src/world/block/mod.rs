@@ -803,17 +803,26 @@ fn table() -> &'static Vec<BlockData> {
         .expect("world::block::init must be called before use")
 }
 
-/// Built-in block registry order for the active protocol. The generated state
-/// table is grouped by block in registry order, so collapsing adjacent states
-/// yields the registry id -> resource-name mapping UpdateTags uses.
+/// Built-in block registry order: the generated state table is grouped by
+/// block in registry order, so collapsing adjacent states yields the registry
+/// id -> resource-name mapping UpdateTags uses.
+fn registry_names(table: &[BlockData]) -> impl Iterator<Item = &'static str> + '_ {
+    table
+        .chunk_by(|a, b| a.id == b.id)
+        .map(|states| states[0].id)
+}
+
 fn block_registry_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = Vec::new();
-    for data in table() {
-        if names.last() != Some(&data.id) {
-            names.push(data.id);
-        }
-    }
-    names
+    registry_names(table()).collect()
+}
+
+/// Resolves a built-in block registry id in any supported protocol without
+/// switching the active table.
+pub(crate) fn block_registry_name(protocol: i32, registry_id: u32) -> Option<&'static str> {
+    let table = BLOCK_TABLES[prewarm_protocol(protocol)]
+        .get()
+        .expect("prewarm_protocol initializes block table");
+    registry_names(table).nth(registry_id as usize)
 }
 
 fn resolve_block_tags(
@@ -872,6 +881,11 @@ pub(crate) fn block_tags_for_test(entries: &[(&str, &[&str])]) -> BlockTags {
         })
         .collect();
     resolve_block_tags(raw_tags, &names)
+}
+
+#[cfg(test)]
+pub(crate) fn replace_block_tags_for_test(entries: &[(&str, &[&str])]) {
+    *BLOCK_TAGS.write().expect("block tag lock poisoned") = block_tags_for_test(entries);
 }
 
 fn block_data(state: BlockState) -> &'static BlockData {
@@ -1608,6 +1622,29 @@ mod tests {
         assert_eq!(glass.dampening, 0);
         assert!(glass.propagates_skylight_down);
         assert_eq!(light_props(BlockState::AIR).dampening, 0);
+    }
+
+    #[test]
+    fn can_occlude_follows_no_occlusion() {
+        setup();
+        for (name, occludes) in [
+            ("copper_grate", false),
+            ("waxed_oxidized_copper_grate", false),
+            ("test_instance_block", false),
+            ("glass", false),
+            ("oak_leaves", false),
+            ("ice", false),
+            ("stone", true),
+            ("packed_ice", true),
+            ("blue_ice", true),
+            ("copper_block", true),
+        ] {
+            assert_eq!(
+                light_props(find_state(name, &[])).can_occlude,
+                occludes,
+                "{name}"
+            );
+        }
     }
 
     #[test]

@@ -2720,7 +2720,7 @@ dependencies = [
  "vec_map",
  "wasm-bindgen",
  "web-sys",
- "windows 0.61.3",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -2763,6 +2763,12 @@ checksum = "7f22fb22f065b308be0d8724e3706c7fa3fc2a6c7d6899df4cad7860e7a75436"
 dependencies = [
  "serde_core",
 ]
+
+[[package]]
+name = "glam"
+version = "0.34.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc148d4ddd3930c52f9e5ae79b89805c6f07e9ff417e7b083e0348cea60a5aba"
 
 [[package]]
 name = "glib"
@@ -3233,7 +3239,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -4276,7 +4282,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 2.0.2",
+ "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -5133,7 +5139,7 @@ dependencies = [
 name = "plugin-loader"
 version = "0.1.0"
 dependencies = [
- "libloading 0.8.9",
+ "libloading 0.9.0",
  "plugin-api",
  "stabby",
  "thiserror 2.0.21",
@@ -5217,7 +5223,7 @@ dependencies = [
  "fontdue",
  "freetype-rs",
  "gilrs",
- "glam",
+ "glam 0.34.1",
  "image",
  "libloading 0.9.0",
  "md-5 0.11.0",
@@ -5305,7 +5311,7 @@ dependencies = [
 name = "pomme-protocol"
 version = "0.1.0"
 dependencies = [
- "glam",
+ "glam 0.34.1",
  "serde",
  "serde_json",
 ]
@@ -6915,7 +6921,7 @@ version = "72.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d53d2428934c46277fafd2d41e39357595aa1e47954c75db2b14ed90632f3cc"
 dependencies = [
- "libloading 0.8.9",
+ "libloading 0.9.0",
  "rustversion",
  "stabby-abi",
 ]
@@ -6938,7 +6944,7 @@ version = "72.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea664671a576c5f7e32fee291ac123d82af5e92b0689beb3555347c00c76eef1"
 dependencies = [
- "proc-macro-crate 2.0.2",
+ "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6968,7 +6974,7 @@ dependencies = [
  "enum_dispatch",
  "flate2",
  "futures",
- "glam",
+ "glam 0.33.2",
  "glob",
  "heck 0.5.0",
  "log",
@@ -7062,7 +7068,7 @@ dependencies = [
  "aes",
  "cfb8",
  "flate2",
- "glam",
+ "glam 0.33.2",
  "log",
  "replace_with",
  "rustc-hash",
@@ -7085,7 +7091,7 @@ version = "0.15.3+mc26.2"
 dependencies = [
  "bitflags 2.13.2",
  "flate2",
- "glam",
+ "glam 0.33.2",
  "heck 0.5.0",
  "log",
  "proc-macro2",
@@ -7110,7 +7116,7 @@ dependencies = [
  "bitflags 2.13.2",
  "crc32c",
  "enum_dispatch",
- "glam",
+ "glam 0.33.2",
  "heck 0.5.0",
  "parking_lot",
  "phf 0.14.0",
@@ -7141,7 +7147,7 @@ dependencies = [
 name = "steel-worldgen"
 version = "0.15.3+mc26.2"
 dependencies = [
- "glam",
+ "glam 0.33.2",
  "proc-macro2",
  "quote",
  "rayon",
@@ -7784,7 +7790,7 @@ dependencies = [
  "serde_with",
  "swift-rs",
  "thiserror 2.0.21",
- "toml 0.9.12+spec-1.1.0",
+ "toml 1.1.6+spec-1.1.0",
  "url",
  "urlpattern",
  "uuid 1.24.0",
@@ -8052,21 +8058,6 @@ dependencies = [
  "serde_spanned 0.6.9",
  "toml_datetime 0.6.3",
  "toml_edit 0.20.2",
-]
-
-[[package]]
-name = "toml"
-version = "0.9.12+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
-dependencies = [
- "indexmap 2.14.0",
- "serde_core",
- "serde_spanned 1.1.1",
- "toml_datetime 0.7.5+spec-1.1.0",
- "toml_parser",
- "toml_writer",
- "winnow 0.7.15",
 ]
 
 [[package]]
