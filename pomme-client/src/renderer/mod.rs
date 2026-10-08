@@ -2452,50 +2452,28 @@ mod tests {
 
     #[test]
     fn decodes_skin_url_from_textures_property() {
-        let payload =
-            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin"}}}"#;
-        let value = textures_property(payload);
-
-        assert_eq!(
-            skin_url_from_texture_property(&value).unwrap(),
-            (
-                "https://textures.minecraft.net/texture/testskin".into(),
-                false
-            )
+        let classic = textures_property(
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin"}}}"#,
         );
+        let slim = textures_property(
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin","metadata":{"model":"slim"}}}}"#,
+        );
+        for (value, is_slim) in [
+            (classic.as_str(), false),
+            (classic.trim_end_matches('='), false),
+            (slim.as_str(), true),
+        ] {
+            assert_eq!(
+                skin_url_from_texture_property(value).unwrap(),
+                (
+                    "https://textures.minecraft.net/texture/testskin".to_owned(),
+                    is_slim
+                ),
+                "{value}"
+            );
+        }
     }
 
-    #[test]
-    fn decodes_unpadded_skin_url_from_textures_property() {
-        let payload =
-            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin"}}}"#;
-        let value = textures_property(payload);
-        let value = value.trim_end_matches('=');
-
-        assert_eq!(
-            skin_url_from_texture_property(value).unwrap(),
-            (
-                "https://textures.minecraft.net/texture/testskin".into(),
-                false
-            )
-        );
-    }
-
-    #[test]
-    fn decodes_slim_model_from_textures_property() {
-        let payload = r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin","metadata":{"model":"slim"}}}}"#;
-        let value = textures_property(payload);
-
-        assert_eq!(
-            skin_url_from_texture_property(&value).unwrap(),
-            (
-                "https://textures.minecraft.net/texture/testskin".into(),
-                true
-            )
-        );
-    }
-
-    /// A profile's `textures` property value: the payload, base64-encoded.
     fn textures_property(payload: &str) -> String {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.encode(payload)
