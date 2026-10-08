@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::slice;
 use std::sync::{Arc, Mutex};
 
@@ -9,9 +8,9 @@ use pyronyx::vk;
 
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
-use crate::renderer::pipelines::item_display::{DisplayResolver, DisplayTransform};
 use crate::renderer::pipelines::item_entity::{self, ItemEntityPipeline, push_model_light};
 use crate::renderer::util;
+use crate::world::block::model::DisplayTransform;
 
 pub struct GuiItemPipeline {
     pipeline: vk::Pipeline,
@@ -25,7 +24,6 @@ pub struct GuiItemPipeline {
     camera_alloc: Option<Allocation>,
     sampler: vk::Sampler,
     atlas_px: u32,
-    display: DisplayResolver,
 }
 
 impl GuiItemPipeline {
@@ -35,7 +33,6 @@ impl GuiItemPipeline {
         atlas_px: u32,
         allocator: &Arc<Mutex<Allocator>>,
         atlas: &TextureAtlas,
-        jar_assets_dir: &Path,
     ) -> Self {
         let camera_layout = util::create_descriptor_set_layout(
             device,
@@ -176,7 +173,6 @@ impl GuiItemPipeline {
             camera_alloc: Some(camera_alloc),
             sampler,
             atlas_px,
-            display: DisplayResolver::new(jar_assets_dir, "gui"),
         };
         this.write_atlas_ortho(atlas_px as f32);
         this
@@ -255,13 +251,12 @@ impl GuiItemPipeline {
         slot_y_px: u32,
         slot_size_px: u32,
         item_name: &str,
-        is_block: bool,
+        display: DisplayTransform,
     ) {
         let Some((buffer, vertex_count)) = item_entity.mesh_handle(item_name) else {
             return;
         };
 
-        let display = self.display.resolve(item_name, default_display(is_block));
         let model = slot_model_matrix(
             slot_x_px as f32,
             slot_y_px as f32,
@@ -296,16 +291,4 @@ fn slot_model_matrix(x: f32, y: f32, w: f32, h: f32, display: DisplayTransform) 
     Mat4::from_translation(Vec3::new(x + w * 0.5, y + h * 0.5, 0.0))
         * Mat4::from_scale(Vec3::new(w, -h, depth_scale))
         * display.to_matrix()
-}
-
-fn default_display(is_block: bool) -> DisplayTransform {
-    if is_block {
-        DisplayTransform {
-            rotation: Vec3::new(30.0, 225.0, 0.0),
-            translation: Vec3::ZERO,
-            scale: Vec3::splat(0.625),
-        }
-    } else {
-        DisplayTransform::IDENTITY
-    }
 }

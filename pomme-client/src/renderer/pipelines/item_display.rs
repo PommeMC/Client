@@ -2,35 +2,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use glam::{Mat4, Vec3};
-
-use crate::world::block::model::{first_item_model_ref, parse_vec3, strip_mc_prefix};
+pub(crate) use crate::world::block::model::DisplayTransform;
+use crate::world::block::model::{first_item_model_ref, parse_display_transform, strip_mc_prefix};
 
 const MODEL_PARENT_LIMIT: u32 = 16;
-
-#[derive(Debug, Clone, Copy)]
-pub struct DisplayTransform {
-    pub rotation: Vec3,
-    pub translation: Vec3,
-    pub scale: Vec3,
-}
-
-impl DisplayTransform {
-    pub const IDENTITY: Self = Self {
-        rotation: Vec3::ZERO,
-        translation: Vec3::ZERO,
-        scale: Vec3::ONE,
-    };
-
-    pub fn to_matrix(self) -> Mat4 {
-        let t = Mat4::from_translation(self.translation);
-        let r = Mat4::from_rotation_x(self.rotation.x.to_radians())
-            * Mat4::from_rotation_y(self.rotation.y.to_radians())
-            * Mat4::from_rotation_z(self.rotation.z.to_radians());
-        let s = Mat4::from_scale(self.scale);
-        t * r * s
-    }
-}
 
 /// Per-item cache of one `display.<key>` transform, resolved from the item's
 /// model JSON parent chain.
@@ -74,27 +49,6 @@ fn read_json(path: &Path) -> Option<serde_json::Value> {
 fn resolve_item_model_path(name: &str, items_dir: &Path) -> Option<String> {
     let item_json = read_json(&items_dir.join(format!("{name}.json")))?;
     first_item_model_ref(&item_json)
-}
-
-fn parse_display_transform(json: &serde_json::Value) -> Option<DisplayTransform> {
-    let obj = json.as_object()?;
-    let rotation = obj
-        .get("rotation")
-        .map(|v| parse_vec3(v, Vec3::ZERO))
-        .unwrap_or(Vec3::ZERO);
-    let translation = obj
-        .get("translation")
-        .map(|v| parse_vec3(v, Vec3::ZERO))
-        .unwrap_or(Vec3::ZERO);
-    let scale = obj
-        .get("scale")
-        .map(|v| parse_vec3(v, Vec3::ONE))
-        .unwrap_or(Vec3::ONE);
-    Some(DisplayTransform {
-        rotation,
-        translation: translation * (1.0 / 16.0),
-        scale,
-    })
 }
 
 /// First `display.<key>` transform found walking up the model parent chain.

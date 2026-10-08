@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use azalea_buf::{AzBuf, AzBufVar};
 use azalea_core::bitset::FixedBitSet;
 use azalea_core::position::ChunkPos;
@@ -7,12 +9,17 @@ use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacke
 use azalea_registry::builtin::{EntityKind, SoundEvent};
 use azalea_registry::identifier::Identifier;
 use azalea_registry::{Holder, Registry};
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, TrySendError};
 
 use super::NetworkEvent;
 use super::chat_security::ProfileKeyServices;
 use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
+use crate::attribute::{
+    AttributeKind, AttributeModifier as ClientAttributeModifier,
+    AttributeModifierOperation as ClientAttributeModifierOperation,
+    AttributeSnapshot as ClientAttributeSnapshot,
+};
 use crate::entity::MetaValue;
 use crate::entity::components::Position;
 use crate::net::chunk_batch::ChunkBatchSizeCalculator;
@@ -20,8 +27,18 @@ use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
+use crate::ui::server_dialog::DialogReference;
 use crate::ui::text::format_text_spans;
 use crate::world::block::model::CardinalLightType;
+
+fn dialog_holder_reference(
+    holder: &azalea_registry::Holder<azalea_registry::data::Dialog, simdnbt::owned::Nbt>,
+) -> DialogReference {
+    match holder {
+        azalea_registry::Holder::Reference(dialog) => DialogReference::ProtocolId(dialog.to_u32()),
+        azalea_registry::Holder::Direct(nbt) => DialogReference::inline(nbt),
+    }
+}
 
 /// Dimension info from a login/respawn registry entry. Fields that Azalea does
 /// not model directly live in its flattened extras. Missing `has_skylight`
@@ -49,6 +66,108 @@ fn dimension_info(
             _ => CardinalLightType::Default,
         },
     }
+}
+
+/// Queues an event the game thread must not lose, blocking while the queue is
+/// full. Blocking stalls this connection's reads and writes until the game
+/// thread drains, so on a multi-thread runtime the worker's other tasks are
+/// handed off first.
+fn send_ordered(event_tx: &Sender<NetworkEvent>, event: NetworkEvent) {
+    if let Err(TrySendError::Full(event)) = event_tx.try_send(event) {
+        let block = || {
+            let _ = event_tx.send(event);
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) if rt.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(block)
+            }
+            _ => block(),
+        }
+    }
+}
+
+fn client_attribute_kind(attribute: azalea_registry::builtin::Attribute) -> AttributeKind {
+    use azalea_registry::builtin::Attribute as Wire;
+    match attribute {
+        Wire::AirDragModifier => AttributeKind::AirDragModifier,
+        Wire::Armor => AttributeKind::Armor,
+        Wire::ArmorToughness => AttributeKind::ArmorToughness,
+        Wire::AttackDamage => AttributeKind::AttackDamage,
+        Wire::AttackKnockback => AttributeKind::AttackKnockback,
+        Wire::AttackSpeed => AttributeKind::AttackSpeed,
+        Wire::BelowNameDistance => AttributeKind::BelowNameDistance,
+        Wire::BlockBreakSpeed => AttributeKind::BlockBreakSpeed,
+        Wire::BlockInteractionRange => AttributeKind::BlockInteractionRange,
+        Wire::Bounciness => AttributeKind::Bounciness,
+        Wire::BurningTime => AttributeKind::BurningTime,
+        Wire::CameraDistance => AttributeKind::CameraDistance,
+        Wire::ExplosionKnockbackResistance => AttributeKind::ExplosionKnockbackResistance,
+        Wire::EntityInteractionRange => AttributeKind::EntityInteractionRange,
+        Wire::FallDamageMultiplier => AttributeKind::FallDamageMultiplier,
+        Wire::FlyingSpeed => AttributeKind::FlyingSpeed,
+        Wire::FollowRange => AttributeKind::FollowRange,
+        Wire::FrictionModifier => AttributeKind::FrictionModifier,
+        Wire::Gravity => AttributeKind::Gravity,
+        Wire::JumpStrength => AttributeKind::JumpStrength,
+        Wire::KnockbackResistance => AttributeKind::KnockbackResistance,
+        Wire::Luck => AttributeKind::Luck,
+        Wire::MaxAbsorption => AttributeKind::MaxAbsorption,
+        Wire::MaxHealth => AttributeKind::MaxHealth,
+        Wire::MiningEfficiency => AttributeKind::MiningEfficiency,
+        Wire::MovementEfficiency => AttributeKind::MovementEfficiency,
+        Wire::MovementSpeed => AttributeKind::MovementSpeed,
+        Wire::NameTagDistance => AttributeKind::NameTagDistance,
+        Wire::OxygenBonus => AttributeKind::OxygenBonus,
+        Wire::SafeFallDistance => AttributeKind::SafeFallDistance,
+        Wire::Scale => AttributeKind::Scale,
+        Wire::SneakingSpeed => AttributeKind::SneakingSpeed,
+        Wire::SpawnReinforcements => AttributeKind::SpawnReinforcements,
+        Wire::StepHeight => AttributeKind::StepHeight,
+        Wire::SubmergedMiningSpeed => AttributeKind::SubmergedMiningSpeed,
+        Wire::SweepingDamageRatio => AttributeKind::SweepingDamageRatio,
+        Wire::TemptRange => AttributeKind::TemptRange,
+        Wire::WaterMovementEfficiency => AttributeKind::WaterMovementEfficiency,
+        Wire::WaypointTransmitRange => AttributeKind::WaypointTransmitRange,
+        Wire::WaypointReceiveRange => AttributeKind::WaypointReceiveRange,
+    }
+}
+
+fn client_attribute_operation(
+    operation: azalea_core::attribute_modifier_operation::AttributeModifierOperation,
+) -> ClientAttributeModifierOperation {
+    use azalea_core::attribute_modifier_operation::AttributeModifierOperation as Wire;
+    match operation {
+        Wire::AddValue => ClientAttributeModifierOperation::Value,
+        Wire::AddMultipliedBase => ClientAttributeModifierOperation::MultipliedBase,
+        Wire::AddMultipliedTotal => ClientAttributeModifierOperation::MultipliedTotal,
+    }
+}
+
+fn client_attribute_snapshot(
+    snapshot: &azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot,
+) -> Option<ClientAttributeSnapshot> {
+    let attribute = client_attribute_kind(snapshot.attribute);
+    let mut seen = HashSet::with_capacity(snapshot.modifiers.len());
+    let mut modifiers = Vec::with_capacity(snapshot.modifiers.len());
+    for modifier in &snapshot.modifiers {
+        let id = modifier.id.to_string();
+        if !seen.insert(id.clone()) {
+            tracing::warn!(
+                "Ignoring malformed {attribute:?} snapshot with duplicate modifier {id}"
+            );
+            return None;
+        }
+        modifiers.push(ClientAttributeModifier {
+            id,
+            amount: modifier.amount,
+            operation: client_attribute_operation(modifier.operation),
+        });
+    }
+    Some(ClientAttributeSnapshot {
+        attribute,
+        base: snapshot.base,
+        modifiers,
+    })
 }
 
 pub fn handle_game_packet(
@@ -180,16 +299,36 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::ChunkCacheCenter { x: p.x, z: p.z });
         }
         ClientboundGamePacket::PlayerPosition(p) => {
-            let _ = event_tx.try_send(NetworkEvent::PlayerPosition {
-                id: p.id,
-                change: p.change.clone(),
-                relative: p.relative.clone(),
-            });
+            // Acknowledged on the game thread once the correction is applied.
+            send_ordered(
+                event_tx,
+                NetworkEvent::PlayerPosition {
+                    id: p.id,
+                    change: p.change.clone(),
+                    relative: p.relative.clone(),
+                },
+            );
+        }
+        ClientboundGamePacket::PlayerRotation(p) => {
+            send_ordered(
+                event_tx,
+                NetworkEvent::PlayerRotation {
+                    y_rot: p.y_rot,
+                    relative_y: p.relative_y,
+                    x_rot: p.x_rot,
+                    relative_x: p.relative_x,
+                },
+            );
         }
         ClientboundGamePacket::KeepAlive(p) => {
             sender.send(ServerboundGamePacket::KeepAlive(
                 azalea_protocol::packets::game::s_keep_alive::ServerboundKeepAlive { id: p.id },
             ));
+        }
+        ClientboundGamePacket::Ping(p) => {
+            // Vanilla `handlePing` pongs from the main thread, in order with
+            // the other main-thread packets.
+            send_ordered(event_tx, NetworkEvent::Ping { id: p.id });
         }
         ClientboundGamePacket::ChunkBatchStart(_) => {
             batch_size_calculator.on_batch_start();
@@ -208,22 +347,32 @@ pub fn handle_game_packet(
         ClientboundGamePacket::ContainerSetContent(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerContent {
                 container_id: p.container_id,
-                items: p.items.clone(),
-                carried: p.carried_item.clone(),
+                items: p
+                    .items
+                    .iter()
+                    .map(super::bundle_codec::normalized)
+                    .collect(),
+                carried: super::bundle_codec::normalized(&p.carried_item),
                 state_id: p.state_id,
             });
         }
         ClientboundGamePacket::SetCursorItem(p) => {
             let _ = event_tx.try_send(NetworkEvent::CursorItem {
-                item: p.contents.clone(),
+                item: super::bundle_codec::normalized(&p.contents),
             });
         }
         ClientboundGamePacket::ContainerSetSlot(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerSlot {
                 container_id: p.container_id,
                 index: p.slot,
-                item: p.item_stack.clone(),
+                item: super::bundle_codec::normalized(&p.item_stack),
                 state_id: p.state_id,
+            });
+        }
+        ClientboundGamePacket::SetPlayerInventory(p) => {
+            let _ = event_tx.try_send(NetworkEvent::PlayerInventorySlot {
+                index: p.slot,
+                item: super::bundle_codec::normalized(&p.contents),
             });
         }
         ClientboundGamePacket::SetHeldSlot(p) if (0..9).contains(&p.slot) => {
@@ -264,6 +413,7 @@ pub fn handle_game_packet(
                 entity_id: p.entity_id.0,
                 effect: crate::mob_effect::MobEffectInstance {
                     effect_id: p.mob_effect.to_u32(),
+                    amplifier: p.data.amplifier,
                     duration: p.data.duration,
                     ambient: p.data.flags.ambient,
                     show_icon: p.data.flags.show_icon,
@@ -283,37 +433,21 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::UpdateAttributes(p) => {
-            use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
-            use azalea_registry::builtin::Attribute;
-            for snapshot in &p.values {
-                let base = snapshot.base;
-                let mut add = 0.0f64;
-                let mut mul_base = 0.0f64;
-                let mut mul_total = 1.0f64;
-                for m in &snapshot.modifiers {
-                    match m.operation {
-                        AttributeModifierOperation::AddValue => add += m.amount,
-                        AttributeModifierOperation::AddMultipliedBase => mul_base += m.amount,
-                        AttributeModifierOperation::AddMultipliedTotal => {
-                            mul_total *= 1.0 + m.amount
-                        }
-                    }
-                }
-                let value = (base + add) * (1.0 + mul_base) * mul_total;
-                let event = match snapshot.attribute {
-                    Attribute::Armor => NetworkEvent::EntityArmorUpdate {
-                        entity_id: p.entity_id.0,
-                        armor: value.clamp(0.0, 30.0).round() as u32,
-                    },
-                    // Vanilla RangedAttribute MAX_HEALTH clamps to 1..1024.
-                    Attribute::MaxHealth => NetworkEvent::EntityMaxHealthUpdate {
-                        entity_id: p.entity_id.0,
-                        max_health: value.clamp(1.0, 1024.0) as f32,
-                    },
-                    _ => continue,
-                };
-                let _ = event_tx.try_send(event);
-            }
+            // TODO: a duplicate modifier id makes vanilla's `addModifier` throw
+            // after earlier snapshots applied, and `onPacketError` disconnects;
+            // Pomme has no packet-error disconnect yet, so it drops the packet.
+            let Some(snapshots) = p
+                .values
+                .iter()
+                .map(client_attribute_snapshot)
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let _ = event_tx.try_send(NetworkEvent::EntityAttributesUpdate {
+                entity_id: p.entity_id.0,
+                snapshots,
+            });
         }
         ClientboundGamePacket::PlayerAbilities(p) => {
             // TODO: invulnerable and instant_break flags
@@ -528,10 +662,13 @@ pub fn handle_game_packet(
             }
         }
         ClientboundGamePacket::BlockUpdate(p) => {
-            let _ = event_tx.try_send(NetworkEvent::BlockUpdate {
-                pos: p.pos,
-                state: p.block_state,
-            });
+            send_ordered(
+                event_tx,
+                NetworkEvent::BlockUpdate {
+                    pos: p.pos,
+                    state: p.block_state,
+                },
+            );
         }
         ClientboundGamePacket::SectionBlocksUpdate(p) => {
             let updates: Vec<_> = p
@@ -546,10 +683,10 @@ pub fn handle_game_packet(
                     (block_pos, s.state)
                 })
                 .collect();
-            let _ = event_tx.try_send(NetworkEvent::SectionBlocksUpdate { updates });
+            send_ordered(event_tx, NetworkEvent::SectionBlocksUpdate { updates });
         }
         ClientboundGamePacket::BlockChangedAck(p) => {
-            let _ = event_tx.try_send(NetworkEvent::BlockChangedAck { seq: p.seq });
+            send_ordered(event_tx, NetworkEvent::BlockChangedAck { seq: p.seq });
         }
         ClientboundGamePacket::SetTime(p) => {
             let day_time = p.clock_updates.values().next().map(|c| c.total_ticks);
@@ -674,10 +811,13 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::SetEntityMotion(p) => {
-            let _ = event_tx.try_send(NetworkEvent::EntityMotion {
-                id: p.id.0,
-                velocity: lp_to_dvec3(&p.delta),
-            });
+            send_ordered(
+                event_tx,
+                NetworkEvent::EntityMotion {
+                    id: p.id.0,
+                    velocity: lp_to_dvec3(&p.delta),
+                },
+            );
         }
         ClientboundGamePacket::LevelEvent(p) => {
             let _ = event_tx.try_send(NetworkEvent::LevelEvent {
@@ -1068,6 +1208,14 @@ pub fn handle_game_packet(
             *shared_tree.lock() = Some(tree.clone());
             let _ = event_tx.try_send(NetworkEvent::CommandTree { tree });
         }
+        ClientboundGamePacket::ShowDialog(p) => {
+            let _ = event_tx.try_send(NetworkEvent::ShowDialog {
+                dialog: dialog_holder_reference(&p.dialog),
+            });
+        }
+        ClientboundGamePacket::ClearDialog(_) => {
+            let _ = event_tx.try_send(NetworkEvent::ClearDialog);
+        }
         ClientboundGamePacket::CustomChatCompletions(p) => {
             tracing::debug!(
                 "Custom chat completions: {:?} ({} entries)",
@@ -1093,8 +1241,23 @@ fn send_scoreboard_team(
         suffix: format_text_spans(&parameters.player_suffix, color),
         color,
         fill_color: parameters.color.color().map(crate::ui::common::rgb),
+        collision_rule: collision_rule(parameters.collision_rule),
         members,
     });
+}
+
+fn collision_rule(
+    rule: azalea_protocol::packets::game::c_set_player_team::CollisionRule,
+) -> crate::ui::hud::CollisionRule {
+    use azalea_protocol::packets::game::c_set_player_team::CollisionRule as Wire;
+
+    use crate::ui::hud::CollisionRule;
+    match rule {
+        Wire::Always => CollisionRule::Always,
+        Wire::Never => CollisionRule::Never,
+        Wire::PushOtherTeams => CollisionRule::PushOtherTeams,
+        Wire::PushOwnTeam => CollisionRule::PushOwnTeam,
+    }
 }
 
 fn score_number_format(
@@ -1269,6 +1432,13 @@ pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bo
         };
     }
 
+    if packet_id == explode_packet_id() {
+        if let Err(e) = handle_raw_explode(&mut cur, event_tx) {
+            tracing::warn!("Skipping malformed Explode packet prefix: {e}");
+        }
+        return true;
+    }
+
     if packet_id != level_particles_packet_id() {
         return false;
     }
@@ -1280,6 +1450,48 @@ pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bo
         Err(e) => tracing::warn!("Skipping malformed LevelParticles packet: {e}"),
     }
     true
+}
+
+/// Vanilla 26.2 `ClientboundExplodePacket` starts with the center, radius,
+/// block count and optional player knockback. azalea's typed codec misreads
+/// the particle tail (see
+/// `azalea_compat::azalea_explode_still_misdecodes_native_particles`),
+/// so the knockback prefix is read here and the frame consumed.
+fn handle_raw_explode(
+    cur: &mut std::io::Cursor<&[u8]>,
+    event_tx: &Sender<NetworkEvent>,
+) -> Result<(), azalea_buf::BufReadError> {
+    // TODO: vanilla `handleExplosion` also plays the explosion sound and
+    // spawns its particles from the center and the payload tail.
+    let _center = <[f64; 3]>::azalea_read(cur)?;
+    let _radius = f32::azalea_read(cur)?;
+    let _block_count = i32::azalea_read(cur)?;
+
+    if bool::azalea_read(cur)? {
+        let [x, y, z] = <[f64; 3]>::azalea_read(cur)?;
+        send_ordered(
+            event_tx,
+            NetworkEvent::PlayerKnockback {
+                delta: glam::DVec3::new(x, y, z),
+            },
+        );
+    }
+    Ok(())
+}
+
+/// The native version whose explode layout [`handle_raw_explode`] reads.
+#[cfg(test)]
+const RAW_EXPLODE_LAYOUT: (&str, i32) = ("26.2", 776);
+
+fn explode_packet_id() -> u32 {
+    use pomme_protocol::{Direction, PacketTable, Phase};
+
+    static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| {
+        PacketTable::native()
+            .id(Phase::Game, Direction::Clientbound, "explode")
+            .expect("explode in packet table")
+    })
 }
 
 /// Azalea's pinned 26.2 `SoundSource` omits Vanilla's ordinal-10 `UI` value
@@ -1497,13 +1709,192 @@ fn slot_display_first_item(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier, mpsc as std_mpsc};
+    use std::time::Duration;
 
+    use azalea_protocol::packets::game::c_block_changed_ack::ClientboundBlockChangedAck;
+    use azalea_protocol::packets::game::c_ping::ClientboundPing;
+    use azalea_protocol::packets::game::c_player_rotation::ClientboundPlayerRotation;
     use azalea_protocol::packets::game::c_set_held_slot::ClientboundSetHeldSlot;
     use parking_lot::Mutex;
     use pomme_protocol::wire;
 
     use super::*;
+
+    /// Runs `packet` through [`handle_game_packet`], returning what it sent.
+    fn handle(
+        packet: ClientboundGamePacket,
+        event_tx: &Sender<NetworkEvent>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::net::sender::Outbound> {
+        let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_game_packet(
+            &packet,
+            &PacketSender::new(out_tx),
+            event_tx,
+            &RegistryHolder::default(),
+            &Arc::new(Mutex::new(None)),
+            &mut ChunkBatchSizeCalculator::default(),
+        );
+        out_rx
+    }
+
+    fn assert_event_backpressures(
+        queue: impl FnOnce(Sender<NetworkEvent>) + Send,
+        assert_event: impl FnOnce(NetworkEvent),
+    ) {
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        event_tx.send(NetworkEvent::Connected).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let (done_tx, done_rx) = std_mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let worker_barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                worker_barrier.wait();
+                queue(event_tx);
+                done_tx.send(()).unwrap();
+            });
+
+            barrier.wait();
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+                "authoritative event must wait for queue capacity instead of being dropped"
+            );
+            assert!(matches!(event_rx.recv().unwrap(), NetworkEvent::Connected));
+            done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_event(event_rx.recv().unwrap());
+        });
+    }
+
+    #[test]
+    fn forced_player_rotation_backpressures_instead_of_being_dropped() {
+        assert_event_backpressures(
+            |event_tx| {
+                handle(
+                    ClientboundGamePacket::PlayerRotation(ClientboundPlayerRotation {
+                        y_rot: 45.0,
+                        relative_y: false,
+                        x_rot: 20.0,
+                        relative_x: false,
+                    }),
+                    &event_tx,
+                );
+            },
+            |event| {
+                assert!(matches!(
+                    event,
+                    NetworkEvent::PlayerRotation {
+                        y_rot: 45.0,
+                        x_rot: 20.0,
+                        relative_y: false,
+                        relative_x: false,
+                    }
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn authoritative_entity_motion_backpressures_instead_of_being_dropped() {
+        let expected = glam::DVec3::new(0.125, 0.75, -0.25);
+        assert_event_backpressures(
+            move |event_tx| {
+                send_ordered(
+                    &event_tx,
+                    NetworkEvent::EntityMotion {
+                        id: 42,
+                        velocity: expected,
+                    },
+                )
+            },
+            |event| {
+                assert!(matches!(
+                    event,
+                    NetworkEvent::EntityMotion { id: 42, velocity } if velocity == expected
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn send_ordered_blocks_in_place_on_a_multi_thread_runtime() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        assert_event_backpressures(
+            move |event_tx| {
+                rt.block_on(async {
+                    tokio::spawn(async move {
+                        send_ordered(&event_tx, NetworkEvent::BlockChangedAck { seq: 3 })
+                    })
+                    .await
+                    .unwrap()
+                })
+            },
+            |event| assert!(matches!(event, NetworkEvent::BlockChangedAck { seq: 3 })),
+        );
+    }
+
+    #[test]
+    fn raw_explode_layout_matches_native() {
+        let native = pomme_protocol::version::NATIVE;
+        assert_eq!(
+            (native.name, native.protocol),
+            RAW_EXPLODE_LAYOUT,
+            "re-check handle_raw_explode against the new native ClientboundExplodePacket"
+        );
+    }
+
+    #[test]
+    fn explosion_knockback_backpressures_instead_of_being_dropped() {
+        let expected = glam::DVec3::new(0.25, 0.5, -0.125);
+        assert_event_backpressures(
+            move |event_tx| {
+                assert!(handle_raw_game_packet(
+                    &explosion_prefix(Some(expected)),
+                    &event_tx
+                ))
+            },
+            |event| {
+                assert!(matches!(
+                    event,
+                    NetworkEvent::PlayerKnockback { delta } if delta == expected
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn block_change_ack_backpressures_instead_of_being_dropped() {
+        assert_event_backpressures(
+            |event_tx| {
+                handle(
+                    ClientboundGamePacket::BlockChangedAck(ClientboundBlockChangedAck { seq: 17 }),
+                    &event_tx,
+                );
+            },
+            |event| assert!(matches!(event, NetworkEvent::BlockChangedAck { seq: 17 })),
+        );
+    }
+
+    #[test]
+    fn play_ping_is_queued_for_ordered_app_thread_handling() {
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        let mut out_rx = handle(
+            ClientboundGamePacket::Ping(ClientboundPing { id: 0x1234_5678 }),
+            &event_tx,
+        );
+
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::Ping { id: 0x1234_5678 }
+        ));
+        assert!(
+            out_rx.try_recv().is_err(),
+            "network task must not pong immediately"
+        );
+    }
 
     #[test]
     fn set_held_slot_emits_authoritative_hotbar_selection() {
@@ -1536,6 +1927,51 @@ mod tests {
                 Err(crossbeam_channel::TryRecvError::Empty)
             ));
         }
+    }
+
+    fn explosion_prefix(knockback: Option<glam::DVec3>) -> Vec<u8> {
+        let mut raw = Vec::new();
+        wire::write_varint(&mut raw, explode_packet_id());
+        for value in [12.5_f64, 64.0, -3.25] {
+            raw.extend_from_slice(&value.to_be_bytes());
+        }
+        raw.extend_from_slice(&4.0_f32.to_be_bytes());
+        raw.extend_from_slice(&7_i32.to_be_bytes());
+        raw.push(knockback.is_some() as u8);
+        if let Some(delta) = knockback {
+            for value in [delta.x, delta.y, delta.z] {
+                raw.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        raw
+    }
+
+    #[test]
+    fn raw_native_explosion_recovers_knockback_without_decoding_trailing_payload() {
+        let expected = glam::DVec3::new(-0.3125, 0.4375, 0.0625);
+        let mut raw = explosion_prefix(Some(expected));
+        // A tail azalea can't decode must not cost the knockback.
+        raw.extend_from_slice(&[0xff, 0x80]);
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            NetworkEvent::PlayerKnockback { delta } if delta == expected
+        ));
+    }
+
+    #[test]
+    fn raw_native_explosion_without_knockback_is_consumed_without_event() {
+        let mut raw = explosion_prefix(None);
+        raw.push(0xff);
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Empty)
+        ));
     }
 
     fn direct_sound() -> Holder<SoundEvent, CustomSound> {
@@ -1593,6 +2029,34 @@ mod tests {
             }
             _ => panic!("expected PlayEntitySound"),
         }
+    }
+
+    #[test]
+    fn duplicate_attribute_modifier_ids_reject_snapshot() {
+        use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
+        use azalea_inventory::components::AttributeModifier;
+        use azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot;
+        use azalea_registry::builtin::Attribute;
+
+        let duplicate = Identifier::new("minecraft:test_duplicate");
+        let snapshot = AttributeSnapshot {
+            attribute: Attribute::AttackSpeed,
+            base: 4.0,
+            modifiers: vec![
+                AttributeModifier {
+                    id: duplicate.clone(),
+                    amount: 1.0,
+                    operation: AttributeModifierOperation::AddValue,
+                },
+                AttributeModifier {
+                    id: duplicate,
+                    amount: 2.0,
+                    operation: AttributeModifierOperation::AddValue,
+                },
+            ],
+        };
+
+        assert!(client_attribute_snapshot(&snapshot).is_none());
     }
 
     #[test]

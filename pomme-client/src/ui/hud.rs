@@ -4,9 +4,8 @@ use azalea_core::position::BlockPos;
 use azalea_inventory::ItemStack;
 use glam::DVec3;
 
-use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_count};
+use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
 use crate::mob_effect::ActiveMobEffects;
-use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::boss_bar::BossBarState;
 use crate::ui::text::TextSpan;
@@ -48,6 +47,16 @@ pub enum ScoreNumberFormat {
     Fixed(Vec<TextSpan>),
 }
 
+/// Vanilla `Team.CollisionRule`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CollisionRule {
+    #[default]
+    Always,
+    Never,
+    PushOtherTeams,
+    PushOwnTeam,
+}
+
 struct ScoreEntry {
     score: i32,
     display: Option<Vec<TextSpan>>,
@@ -75,6 +84,7 @@ pub(crate) struct ScoreboardTeam {
     /// None for RESET / non-color formatting (no icon fill in the spectator
     /// menu), like vanilla's `PlayerTeam.getColor()` Optional.
     pub(crate) fill_color: Option<[f32; 4]>,
+    collision_rule: CollisionRule,
     pub(crate) members: HashSet<String>,
 }
 
@@ -152,6 +162,7 @@ impl Scoreboard {
         suffix: Vec<TextSpan>,
         color: [f32; 4],
         fill_color: Option<[f32; 4]>,
+        collision_rule: CollisionRule,
         members: Option<Vec<String>>,
     ) {
         // Vanilla ignores a parameter change for a team it doesn't know;
@@ -168,6 +179,7 @@ impl Scoreboard {
             suffix: Vec::new(),
             color,
             fill_color: None,
+            collision_rule,
             members: HashSet::new(),
         });
         team.display_name = display_name;
@@ -175,6 +187,7 @@ impl Scoreboard {
         team.suffix = suffix;
         team.color = color;
         team.fill_color = fill_color;
+        team.collision_rule = collision_rule;
         // ADD unions its player list onto an existing team, like vanilla's
         // addPlayerTeam + per-player addPlayerToTeam.
         if let Some(members) = members {
@@ -223,18 +236,40 @@ impl Scoreboard {
             .unwrap_or_else(|| self.line(name, None))
     }
 
-    pub fn team_name(&self, member: &str) -> &str {
+    fn team_of(&self, member: &str) -> Option<(&str, &ScoreboardTeam)> {
         self.teams
             .iter()
             .find(|(_, team)| team.members.contains(member))
-            .map_or("", |(name, _)| name)
+            .map(|(name, team)| (name.as_str(), team))
+    }
+
+    pub fn team_name(&self, member: &str) -> &str {
+        self.team_of(member).map_or("", |(name, _)| name)
+    }
+
+    /// Vanilla `EntitySelector.pushableBy(pusher)` tested against `target`,
+    /// both by scoreboard name. A team is only allied to itself.
+    pub fn pushable_by(&self, pusher: &str, target: &str) -> bool {
+        let (own, their) = (self.team_of(pusher), self.team_of(target));
+        let rule = |team: Option<(&str, &ScoreboardTeam)>| {
+            team.map_or(CollisionRule::Always, |(_, team)| team.collision_rule)
+        };
+        let (own_rule, their_rule) = (rule(own), rule(their));
+        if own_rule == CollisionRule::Never || their_rule == CollisionRule::Never {
+            return false;
+        }
+        let same_team = own.is_some_and(|(own, _)| their.is_some_and(|(their, _)| own == their));
+        if (own_rule == CollisionRule::PushOwnTeam || their_rule == CollisionRule::PushOwnTeam)
+            && same_team
+        {
+            return false;
+        }
+        own_rule != CollisionRule::PushOtherTeams && their_rule != CollisionRule::PushOtherTeams
+            || same_team
     }
 
     fn line(&self, owner: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
-        let team = self
-            .teams
-            .values()
-            .find(|team| team.members.contains(owner));
+        let team = self.team_of(owner).map(|(_, team)| team);
         let mut line = team.map_or_else(Vec::new, |team| team.prefix.clone());
         line.extend(display.map_or_else(
             || {
@@ -356,21 +391,21 @@ const ICON_STRIDE: f32 = 8.0;
 const XP_BAR_W: f32 = 182.0;
 const XP_BAR_H: f32 = 5.0;
 
-pub fn max_gui_scale(screen_w: f32, screen_h: f32) -> u32 {
+/// Vanilla `Window.calculateScale`: the largest scale that keeps the screen at
+/// least 320x240, capped by `setting` (0 is Auto), then made even while Force
+/// Unicode Font is on.
+pub fn gui_scale(screen_w: f32, screen_h: f32, setting: u32, enforce_unicode: bool) -> f32 {
     let mut scale = 1;
-    while (screen_w / (scale + 1) as f32) >= 320.0 && (screen_h / (scale + 1) as f32) >= 240.0 {
+    while scale != setting
+        && screen_w / (scale + 1) as f32 >= 320.0
+        && screen_h / (scale + 1) as f32 >= 240.0
+    {
         scale += 1;
     }
-    scale
-}
-
-pub fn gui_scale(screen_w: f32, screen_h: f32, setting: u32) -> f32 {
-    let max = max_gui_scale(screen_w, screen_h);
-    if setting == 0 {
-        max as f32
-    } else {
-        setting.min(max) as f32
+    if enforce_unicode && scale % 2 != 0 {
+        scale += 1;
     }
+    scale as f32
 }
 
 /// Vanilla `ScreenEffectRenderer.submitWater`: underwater.png tiled 4x and
@@ -491,11 +526,10 @@ pub fn build_hud(
     boss_bars: &BossBarState,
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
-    gui_scale_setting: u32,
+    gs: f32,
     attack: &AttackIndicatorState,
     text_width_fn: TextWidthFn,
 ) {
-    let gs = gui_scale(screen_w, screen_h, gui_scale_setting);
     let cx = screen_w / 2.0;
     let cy = screen_h / 2.0;
 
@@ -546,17 +580,7 @@ pub fn build_hud(
             if let ItemStack::Present(data) = item {
                 let ix = (hotbar_x + 3.0 * gs + i as f32 * SLOT_STRIDE * gs).round();
                 let iy = (hotbar_y + 3.0 * gs).round();
-                elements.push(MenuElement::ItemIcon {
-                    x: ix,
-                    y: iy,
-                    w: item_size,
-                    h: item_size,
-                    item_name: item_resource_name(data.kind),
-                    tint: WHITE,
-                });
-                if data.count > 1 {
-                    push_item_count(elements, ix, iy, item_size, gs, data.count);
-                }
+                push_item_icon(elements, ix, iy, item_size, gs, data);
             }
         }
     }
@@ -610,22 +634,10 @@ pub fn build_hud(
         && game_mode != 3
         && let Some(ItemStack::Present(data)) = hotbar.get(selected_slot as usize)
     {
-        use azalea_inventory::components::{CustomName, Rarity};
         let alpha = (tool_highlight_timer as f32 * 256.0 / 10.0 / 255.0).min(1.0);
-        // Default-component rarities aren't synced; absent means common.
-        let color = match data.get_component::<Rarity>().as_deref() {
-            Some(Rarity::Uncommon) => super::common::rgb(0xffff55),
-            Some(Rarity::Rare) => super::common::rgb(0x55ffff),
-            Some(Rarity::Epic) => super::common::rgb(0xff55ff),
-            _ => WHITE,
-        };
-        // The rarity color and custom-name italic are vanilla's parent
-        // style: the name's own styling wins where it sets one.
-        let italic = data.get_component::<CustomName>().is_some();
-        let mut spans = super::common::item_display_spans(data, color);
+        let mut spans = super::common::styled_hover_name(data);
         for span in &mut spans {
             span.color[3] *= alpha;
-            span.italic |= italic;
         }
         let mut y = screen_h - 59.0 * gs;
         if game_mode == 1 {
@@ -1647,5 +1659,72 @@ fn facing_name(y_rot_deg: f32) -> &'static str {
         135..=224 => "North (-Z)",
         225..=314 => "East (+X)",
         _ => "South (+Z)",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gui_scale_matches_window_calculate_scale() {
+        // 720p fits 3, 1080p fits 4.
+        assert_eq!(gui_scale(1280.0, 720.0, 0, false), 3.0);
+        assert_eq!(gui_scale(1920.0, 1080.0, 0, false), 4.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 2, false), 2.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 5, false), 3.0);
+    }
+
+    #[test]
+    fn force_unicode_font_makes_the_gui_scale_even() {
+        assert_eq!(gui_scale(1280.0, 720.0, 0, true), 4.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 3, true), 4.0);
+        assert_eq!(gui_scale(1280.0, 720.0, 5, true), 4.0);
+        assert_eq!(gui_scale(1920.0, 1080.0, 1, true), 2.0);
+        assert_eq!(gui_scale(1920.0, 1080.0, 0, true), 4.0);
+    }
+
+    fn add_team(scoreboard: &mut Scoreboard, name: &str, rule: CollisionRule, members: &[&str]) {
+        scoreboard.set_team(
+            name.into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            WHITE,
+            None,
+            rule,
+            Some(members.iter().map(|m| (*m).into()).collect()),
+        );
+    }
+
+    #[test]
+    fn pushable_by_follows_team_collision_rules() {
+        let pushable = |own: CollisionRule, their: CollisionRule, same_team: bool| {
+            let mut scoreboard = Scoreboard::default();
+            if same_team {
+                add_team(&mut scoreboard, "a", own, &["pusher", "target"]);
+            } else {
+                add_team(&mut scoreboard, "a", own, &["pusher"]);
+                add_team(&mut scoreboard, "b", their, &["target"]);
+            }
+            scoreboard.pushable_by("pusher", "target")
+        };
+        use CollisionRule::*;
+
+        assert!(Scoreboard::default().pushable_by("pusher", "target"));
+        assert!(pushable(Always, Always, false));
+        assert!(!pushable(Never, Always, false));
+        assert!(!pushable(Always, Never, false));
+        assert!(!pushable(Never, Never, true));
+        assert!(pushable(PushOwnTeam, Always, false));
+        assert!(!pushable(PushOwnTeam, PushOwnTeam, true));
+        assert!(!pushable(PushOtherTeams, Always, false));
+        assert!(!pushable(Always, PushOtherTeams, false));
+        assert!(pushable(PushOtherTeams, PushOtherTeams, true));
+
+        // A teamless target is never an ally, so PUSH_OTHER_TEAMS still blocks.
+        let mut scoreboard = Scoreboard::default();
+        add_team(&mut scoreboard, "a", PushOtherTeams, &["pusher"]);
+        assert!(!scoreboard.pushable_by("pusher", "target"));
     }
 }

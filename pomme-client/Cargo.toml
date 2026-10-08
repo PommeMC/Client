@@ -29,6 +29,7 @@ rand = { workspace = true }
 rsa = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
+regex = { workspace = true }
 zip = { workspace = true }
 tokio = { workspace = true, features = ["tracing", "net", "time"] }
 reqwest = { workspace = true, features = ["blocking"] }

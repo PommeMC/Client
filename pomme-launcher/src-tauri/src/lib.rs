@@ -60,6 +60,7 @@ pub fn get_builder() -> tauri_specta::Builder {
             commands::set_launcher_language,
             commands::set_keep_launcher_open,
             commands::set_launch_with_console,
+            commands::set_selected_account_uuid,
             commands::ping_server,
             commands::load_servers,
             commands::save_servers,

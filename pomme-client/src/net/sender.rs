@@ -15,6 +15,12 @@ pub enum Outbound {
         online_mode: bool,
     },
     ChatMark(Box<ChatMark>),
+    /// A dialog or chat `custom` click, encoded for whichever phase the
+    /// connection is in when it goes out.
+    CustomClick {
+        id: String,
+        payload: Option<simdnbt::owned::NbtTag>,
+    },
 }
 
 /// A `LastSeenMessagesTracker` update, recorded by the chat UI.
@@ -51,6 +57,10 @@ impl PacketSender {
 
     pub fn mark_chat(&self, mark: ChatMark) {
         self.queue(Outbound::ChatMark(Box::new(mark)));
+    }
+
+    pub fn send_custom_click(&self, id: String, payload: Option<simdnbt::owned::NbtTag>) {
+        self.queue(Outbound::CustomClick { id, payload });
     }
 
     fn queue(&self, out: Outbound) {

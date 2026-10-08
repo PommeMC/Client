@@ -89,10 +89,18 @@ pub enum ClickEvent {
     OpenUrl(String),
     RunCommand(String),
     SuggestCommand(String),
-    ShowDialog(Value),
+    ShowDialog(DialogHolder),
     ChangePage(i32),
     CopyToClipboard(String),
     Custom { id: String, payload: Option<NbtTag> },
+}
+
+/// A `show_dialog` click's `Holder<Dialog>`: the exact NBT when it was sent as
+/// NBT, since the JSON shape loses payload tag types and Java number text.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DialogHolder {
+    Json(Value),
+    Nbt(NbtTag),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -377,6 +385,35 @@ impl ResolvedStyle {
     }
 }
 
+/// `ListTag.WRAPPER_MARKER`.
+const WRAPPER_MARKER: &str = "";
+
+/// A list's elements as `ListTag.loadList` reads them. `ListTag.write` wraps
+/// each element of a mixed-type list in a single empty-key compound, and list
+/// elements are the only tags vanilla unwraps.
+pub(crate) fn list_elements(list: &NbtList) -> Vec<NbtTag> {
+    list.as_nbt_tags()
+        .into_iter()
+        .map(|tag| match tag {
+            NbtTag::Compound(mut compound) if compound.len() == 1 => {
+                match compound.remove(WRAPPER_MARKER) {
+                    Some(inner) => inner,
+                    None => NbtTag::Compound(compound),
+                }
+            }
+            tag => tag,
+        })
+        .collect()
+}
+
+/// The same wrapper on the JSON path, which legacy chat still uses.
+pub(crate) fn unwrap_json_marker(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(map) if map.len() == 1 => map.get(WRAPPER_MARKER),
+        _ => None,
+    }
+}
+
 /// NBT in the JSON shape the component codecs read. JSON has no NaN, so a
 /// non-finite float becomes Java's text for it.
 pub(crate) fn nbt_to_value(tag: &NbtTag) -> Value {
@@ -389,7 +426,7 @@ pub(crate) fn nbt_to_value(tag: &NbtTag) -> Value {
         NbtTag::Double(v) => float_value(*v),
         NbtTag::ByteArray(v) => v.iter().map(|&b| Value::from(b as i8)).collect(),
         NbtTag::String(v) => v.to_str().into_owned().into(),
-        NbtTag::List(list) => list.as_nbt_tags().iter().map(nbt_to_value).collect(),
+        NbtTag::List(list) => list_elements(list).iter().map(nbt_to_value).collect(),
         NbtTag::Compound(compound) => Value::Object(
             compound
                 .iter()
@@ -406,6 +443,11 @@ fn float_value(v: f64) -> Value {
         .map_or_else(|| java_decimal(format!("{v:e}")).into(), Value::Number)
 }
 
+/// `Float.toString`.
+pub(crate) fn java_float_text(value: f32) -> String {
+    java_decimal(format!("{value:e}"))
+}
+
 /// Java's `toString` of a boxed NBT number (vanilla `JavaOps`), or `None` for
 /// a non-numeric tag.
 fn java_number_text(tag: &NbtTag) -> Option<String> {
@@ -414,7 +456,7 @@ fn java_number_text(tag: &NbtTag) -> Option<String> {
         NbtTag::Short(v) => v.to_string(),
         NbtTag::Int(v) => v.to_string(),
         NbtTag::Long(v) => v.to_string(),
-        NbtTag::Float(v) => java_decimal(format!("{v:e}")),
+        NbtTag::Float(v) => java_float_text(*v),
         NbtTag::Double(v) => java_decimal(format!("{v:e}")),
         _ => return None,
     })
@@ -453,12 +495,9 @@ fn java_decimal(scientific: String) -> String {
 }
 
 fn parse_argument(value: &Value) -> Result<Argument, ComponentError> {
-    if let Value::Object(map) = value
-        && map.len() == 1
-        && let Some(wrapped) = map.get("")
+    if let Some(wrapped) = unwrap_json_marker(value)
         && !matches!(wrapped, Value::Array(_) | Value::Object(_))
     {
-        // NbtOps wraps primitives in heterogeneous lists as `{"": value}`.
         return parse_primitive_argument(wrapped);
     }
 
@@ -623,7 +662,7 @@ fn preserve_nbt_interactions(component: &mut Component, tag: &NbtTag) {
     match tag {
         NbtTag::Compound(compound) => preserve_compound_interactions(component, compound),
         NbtTag::List(list) => {
-            let tags = list.as_nbt_tags();
+            let tags = list_elements(list);
             let Some((first, rest)) = tags.split_first() else {
                 return;
             };
@@ -648,17 +687,11 @@ fn preserve_compound_interactions(component: &mut Component, compound: &NbtCompo
     match &mut component.content {
         Content::Translate { args, .. } => {
             if let Some(NbtTag::List(with)) = compound.get("with") {
-                for (argument, tag) in args.iter_mut().zip(with.as_nbt_tags().iter()) {
-                    let primitive = match tag {
-                        NbtTag::Compound(wrapped) if wrapped.len() == 1 => {
-                            wrapped.get("").unwrap_or(tag)
-                        }
-                        tag => tag,
-                    };
+                for (argument, tag) in args.iter_mut().zip(list_elements(with).iter()) {
                     match argument {
                         Argument::Component(component) => preserve_nbt_interactions(component, tag),
                         Argument::Number(text) => {
-                            if let Some(java) = java_number_text(primitive) {
+                            if let Some(java) = java_number_text(tag) {
                                 *text = java;
                             }
                         }
@@ -684,7 +717,7 @@ fn preserve_compound_interactions(component: &mut Component, compound: &NbtCompo
         for (sibling, sibling_tag) in component
             .siblings
             .iter_mut()
-            .zip(extra.as_nbt_tags().iter())
+            .zip(list_elements(extra).iter())
         {
             preserve_nbt_interactions(sibling, sibling_tag);
         }
@@ -699,10 +732,10 @@ fn preserve_style_interactions(style: &mut Style, compound: &NbtCompound) {
             .map(|event| (event, false))
             .or_else(|| compound.compound(legacy).map(|event| (event, true)))
     };
-    if let (Some(ClickEvent::Custom { payload, .. }), Some((click, _))) =
+    if let (Some(click_event), Some((click, _))) =
         (&mut style.click_event, event("click_event", "clickEvent"))
     {
-        *payload = click.get("payload").cloned();
+        preserve_click_event(click_event, click);
     }
     if let (Some(HoverEvent::Text(text)), Some((hover, legacy))) =
         (&mut style.hover_event, event("hover_event", "hoverEvent"))
@@ -722,7 +755,7 @@ fn component_extra_count(tag: &NbtTag) -> usize {
             _ => 0,
         },
         NbtTag::List(list) => {
-            let tags = list.as_nbt_tags();
+            let tags = list_elements(list);
             tags.first()
                 .map_or(0, |first| component_extra_count(first) + tags.len() - 1)
         }
@@ -787,7 +820,7 @@ pub(crate) fn parse_untrusted_url(raw: String) -> Result<String, ComponentError>
     Ok(raw)
 }
 
-fn json_payload_to_nbt(value: &Value) -> Result<NbtTag, ComponentError> {
+pub(crate) fn json_payload_to_nbt(value: &Value) -> Result<NbtTag, ComponentError> {
     match value {
         Value::Null => Err(ComponentError(
             "custom click NBT payload cannot be null".into(),
@@ -833,6 +866,37 @@ fn event_action<'a>(
 /// on click.
 fn parse_click_event(value: &Value, legacy: bool) -> Result<Option<ClickEvent>, ComponentError> {
     let (map, action) = event_action(value, "click")?;
+    parse_click_fields(map, action, legacy)
+}
+
+/// `ClickEvent.Action.valueCodec`, which a dialog's static action carries
+/// under its own `type` key.
+pub(crate) fn click_event_value(
+    action: &str,
+    map: &Map<String, Value>,
+) -> Result<ClickEvent, ComponentError> {
+    parse_click_fields(map, action, false)?
+        .ok_or_else(|| ComponentError(format!("unusable {action} click event")))
+}
+
+/// Restores the payload tags the JSON shape of a click event loses.
+pub(crate) fn preserve_click_event(event: &mut ClickEvent, fields: &NbtCompound) {
+    match event {
+        ClickEvent::Custom { payload, .. } => *payload = fields.get("payload").cloned(),
+        ClickEvent::ShowDialog(dialog) => {
+            if let Some(tag) = fields.get("dialog") {
+                *dialog = DialogHolder::Nbt(tag.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_click_fields(
+    map: &Map<String, Value>,
+    action: &str,
+    legacy: bool,
+) -> Result<Option<ClickEvent>, ComponentError> {
     // Legacy `clickEvent`s carry every payload in `value`.
     let field = |modern: &str| map.get(if legacy { "value" } else { modern });
     let missing = |modern: &str| ComponentError(format!("{action} click event has no `{modern}`"));
@@ -864,9 +928,9 @@ fn parse_click_event(value: &Value, legacy: bool) -> Result<Option<ClickEvent>, 
         "open_url" => checked(parse_untrusted_url(string("url")?).map(ClickEvent::OpenUrl)),
         "run_command" => Ok(Some(ClickEvent::RunCommand(chat_string("command")?))),
         "suggest_command" => Ok(Some(ClickEvent::SuggestCommand(chat_string("command")?))),
-        "show_dialog" => Ok(Some(ClickEvent::ShowDialog(
+        "show_dialog" => Ok(Some(ClickEvent::ShowDialog(DialogHolder::Json(
             field("dialog").cloned().ok_or_else(|| missing("dialog"))?,
-        ))),
+        )))),
         "change_page" => {
             let page = field("page").ok_or_else(|| missing("page"))?;
             // `Codec.INT` takes any number's `intValue`; legacy pages were
@@ -917,7 +981,7 @@ pub fn normalize_identifier(id: &str) -> String {
 }
 
 /// Vanilla `Identifier.parse` validity.
-fn valid_identifier(id: &str) -> bool {
+pub(crate) fn valid_identifier(id: &str) -> bool {
     let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
     namespace != ".." && identifier_chars(namespace, false) && identifier_chars(path, true)
 }
@@ -994,6 +1058,14 @@ fn parse_color(value: &Value) -> Option<u32> {
         "white" => 0xffffff,
         _ => return None,
     })
+}
+
+/// `ListTag`'s wrapper around an element of a mixed-type list.
+#[cfg(test)]
+pub(crate) fn wrapped(tag: NbtTag) -> NbtTag {
+    let mut wrapper = NbtCompound::new();
+    wrapper.insert(WRAPPER_MARKER, tag);
+    NbtTag::Compound(wrapper)
 }
 
 #[cfg(test)]
@@ -1088,13 +1160,9 @@ mod tests {
         payload.insert("longs", NbtTag::LongArray(vec![-4, 5, 6]));
         let expected = NbtTag::Compound(payload.clone());
 
-        let mut click = NbtCompound::new();
-        click.insert("action", "custom");
-        click.insert("id", "minecraft:test");
-        click.insert("payload", expected.clone());
         let mut root = NbtCompound::new();
         root.insert("text", "custom");
-        root.insert("click_event", NbtTag::Compound(click));
+        root.insert("click_event", custom_click(expected.clone()));
 
         let component = Component::from_nbt_tag(&NbtTag::Compound(root)).unwrap();
         let Some(ClickEvent::Custom { payload, .. }) = component.style.click_event else {
@@ -1221,7 +1289,10 @@ mod tests {
             "hover_event":{"action":"show_item","id":"minecraft:diamond","count":2}
         }))
         .unwrap();
-        assert_eq!(c.style.click_event, Some(ClickEvent::ShowDialog(dialog)));
+        assert_eq!(
+            c.style.click_event,
+            Some(ClickEvent::ShowDialog(DialogHolder::Json(dialog)))
+        );
         assert_eq!(
             c.style.hover_event,
             Some(HoverEvent::Item(serde_json::json!({
@@ -1253,6 +1324,60 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(component.plain_text(), "value=7");
+    }
+
+    /// A `custom` click event carrying `payload`.
+    fn custom_click(payload: NbtTag) -> NbtTag {
+        let mut click = NbtCompound::new();
+        click.insert("action", "custom");
+        click.insert("id", "minecraft:test");
+        click.insert("payload", payload);
+        NbtTag::Compound(click)
+    }
+
+    /// The `custom` click payload on the run that shows `text`.
+    fn run_payload(component: &Component, text: &str) -> Option<NbtTag> {
+        let runs = runs(component);
+        let (_, style) = runs
+            .iter()
+            .find(|(run, _)| run == text)
+            .expect("the run renders");
+        let Some(ClickEvent::Custom { payload, .. }) = &style.click_event else {
+            panic!("expected a custom click event, got {style:?}");
+        };
+        payload.clone()
+    }
+
+    #[test]
+    fn wrapped_nbt_root_is_rejected() {
+        let tag = wrapped(NbtTag::String("text".into()));
+        assert!(Component::from_nbt_tag(&tag).is_err());
+    }
+
+    #[test]
+    fn wrapped_nbt_list_elements_keep_their_exact_payload_tags() {
+        // JSON widens `Float(1.25)`, so only the tag-preserving pass restores
+        // it, and only if it unwraps list elements like `nbt_to_value` does.
+        let mut payload = NbtCompound::new();
+        payload.insert("float", NbtTag::Float(1.25));
+        let payload = NbtTag::Compound(payload);
+        let clickable = |text: &str| {
+            let mut component = NbtCompound::new();
+            component.insert("text", text);
+            component.insert("click_event", custom_click(payload.clone()));
+            NbtTag::List(NbtList::from(vec![wrapped(NbtTag::Compound(component))]))
+        };
+
+        let mut root = NbtCompound::new();
+        root.insert("translate", "fallback.key");
+        root.insert("fallback", "value=%s");
+        root.insert("with", clickable("arg"));
+        root.insert("extra", clickable("sib"));
+
+        let component = Component::from_nbt_tag(&NbtTag::Compound(root)).unwrap();
+        assert_eq!(component.plain_text(), "value=argsib");
+        assert_eq!(run_payload(&component, "arg"), Some(payload.clone()));
+        assert_eq!(run_payload(&component, "sib"), Some(payload));
     }
 
     #[test]
@@ -1402,18 +1527,16 @@ mod tests {
 
     #[test]
     fn nbt_number_arguments_format_like_java() {
-        let mut with = Vec::new();
-        for tag in [
+        let with: Vec<NbtTag> = [
             NbtTag::Int(5),
             NbtTag::Float(1.0),
             NbtTag::Double(1e7),
             NbtTag::Float(f32::NAN),
             NbtTag::Double(0.00125),
-        ] {
-            let mut wrapped = NbtCompound::new();
-            wrapped.insert("", tag);
-            with.push(wrapped);
-        }
+        ]
+        .into_iter()
+        .map(wrapped)
+        .collect();
         let mut root = NbtCompound::new();
         root.insert("translate", "missing.key");
         root.insert("fallback", "%s %s %s %s %s");
@@ -1426,12 +1549,8 @@ mod tests {
     fn nan_payloads_and_decoration_styles_keep_their_tags() {
         let mut payload = NbtCompound::new();
         payload.insert("nan", NbtTag::Float(f32::NAN));
-        let mut click = NbtCompound::new();
-        click.insert("action", "custom");
-        click.insert("id", "pomme:test");
-        click.insert("payload", NbtTag::Compound(payload));
         let mut style = NbtCompound::new();
-        style.insert("click_event", NbtTag::Compound(click));
+        style.insert("click_event", custom_click(NbtTag::Compound(payload)));
 
         let style = Style::from_nbt_tag(&NbtTag::Compound(style)).unwrap();
         let Some(ClickEvent::Custom {

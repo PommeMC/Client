@@ -239,6 +239,10 @@ mod tests {
         assert_eq!(t.version().protocol, 776);
         assert_eq!(t.id(Phase::Game, Direction::Serverbound, "attack"), Some(1));
         assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "bundle_item_selected"),
+            Some(3)
+        );
+        assert_eq!(
             t.id(Phase::Game, Direction::Serverbound, "pick_item_from_block"),
             Some(0x24)
         );
@@ -278,6 +282,28 @@ mod tests {
             t.id(Phase::Game, Direction::Clientbound, "update_advancements"),
             Some(130)
         );
+        // Dialogs, pinned in both phases (`ConfigurationProtocols.java`).
+        for (phase, links, clear, show, click) in [
+            (Phase::Configuration, 16, 17, 18, 8),
+            (Phase::Game, 137, 139, 140, 68),
+        ] {
+            assert_eq!(
+                t.id(phase, Direction::Clientbound, "server_links"),
+                Some(links)
+            );
+            assert_eq!(
+                t.id(phase, Direction::Clientbound, "clear_dialog"),
+                Some(clear)
+            );
+            assert_eq!(
+                t.id(phase, Direction::Clientbound, "show_dialog"),
+                Some(show)
+            );
+            assert_eq!(
+                t.id(phase, Direction::Serverbound, "custom_click_action"),
+                Some(click)
+            );
+        }
         assert_eq!(
             t.name_of(Phase::Game, Direction::Clientbound, 0),
             Some("bundle_delimiter")

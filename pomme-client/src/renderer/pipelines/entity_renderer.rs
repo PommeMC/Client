@@ -13,6 +13,7 @@ use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::BakedEntityModel;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, entity_model, shader, util};
+use crate::world::block::BedDirection;
 
 pub const MAX_OVERLAYS: usize = 4;
 
@@ -54,6 +55,11 @@ pub struct EntityRenderInfo {
     pub head_x_rot_deg: f32,
     pub head_y_rot_deg: f32,
     pub body_y_rot_deg: f32,
+    pub is_sleeping: bool,
+    /// The bed's facing; `None` when no bed can be resolved.
+    pub sleeping_direction: Option<BedDirection>,
+    /// Standing-pose eye height used by LivingEntityRenderer's sleeping offset.
+    pub sleeping_eye_height: f32,
     pub is_baby: bool,
     pub is_crouching: bool,
     pub walk_anim_pos: f32,
@@ -141,6 +147,9 @@ impl Default for EntityRenderInfo {
             head_x_rot_deg: 0.0,
             head_y_rot_deg: 0.0,
             body_y_rot_deg: 0.0,
+            is_sleeping: false,
+            sleeping_direction: None,
+            sleeping_eye_height: crate::player::STANDING_EYE_HEIGHT,
             is_baby: false,
             is_crouching: false,
             walk_anim_pos: 0.0,
@@ -1779,16 +1788,46 @@ impl EntityRenderer {
             // with the body like vanilla.
             body_y_rot_deg += (info.age_in_ticks.floor() * 3.25).cos() * std::f32::consts::PI * 0.4;
         }
-        let mut base = glam::Mat4::from_translation((*info.position - anchor).as_vec3())
-            * glam::Mat4::from_rotation_y((180.0 - body_y_rot_deg).to_radians());
+        let translation = glam::Mat4::from_translation((*info.position - anchor).as_vec3());
+        // Vanilla `LivingEntityRenderer.submit`'s bed offset, then
+        // `setupRotations`: death wins over the sleeping pose.
+        // TODO: vanilla keys these on `Pose.SLEEPING`; pomme on SLEEPING_POS,
+        // since the handler reduces the pose to crouching.
+        let bed = info.sleeping_direction.filter(|_| info.is_sleeping);
+        let mut base = translation;
+        if let Some(direction) = bed {
+            let head_offset = info.sleeping_eye_height - 0.1;
+            let (step_x, step_z) = direction.step();
+            base *= glam::Mat4::from_translation(glam::Vec3::new(
+                -step_x * head_offset,
+                0.0,
+                -step_z * head_offset,
+            ));
+        }
+        if !info.is_sleeping {
+            base *= glam::Mat4::from_rotation_y((180.0 - body_y_rot_deg).to_radians());
+        }
         if info.death_time > 0.0 {
             base *= glam::Mat4::from_rotation_z(
                 death_fall_degrees(info.death_time, info.entity_kind).to_radians(),
             );
+        } else if info.is_sleeping {
+            let angle = bed.map_or(body_y_rot_deg, BedDirection::render_yaw_deg);
+            base *= glam::Mat4::from_rotation_y(angle.to_radians())
+                * glam::Mat4::from_rotation_z(flip_degrees(info.entity_kind).to_radians())
+                * glam::Mat4::from_rotation_y(270.0_f32.to_radians());
         }
         // body_transform sits before the parts (whose root transforms carry
         // the convention's X flip), matching vanilla's setupRotations order.
-        info.body_transform.map_or(base, |m| base * m)
+        let base = info.body_transform.map_or(base, |m| base * m);
+        // AvatarRenderer applies its fixed player scale after setupRotations and
+        // before the model's -1.501 Y translation. Pomme's part transforms own
+        // that rebase, so the scale belongs immediately before the parts here.
+        if info.entity_kind == EntityKind::Player {
+            base * glam::Mat4::from_scale(glam::Vec3::splat(PLAYER_MODEL_SCALE))
+        } else {
+            base
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2235,6 +2274,18 @@ fn hurt_color(info: &EntityRenderInfo) -> [f32; 4] {
 }
 
 const ANIM_MARGIN: f32 = 0.5;
+/// Vanilla `AvatarRenderer.scale`: players render at 15/16 model scale.
+const PLAYER_MODEL_SCALE: f32 = 0.9375;
+
+/// Standing eye height, which positions a sleeper on its bed.
+pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
+    match kind {
+        EntityKind::Player => crate::player::STANDING_EYE_HEIGHT,
+        EntityKind::Villager if is_baby => 0.63,
+        EntityKind::Villager => 1.62,
+        _ => entity_bounds(kind, is_baby).1 * 0.85,
+    }
+}
 
 /// Vanilla (width, height) hitbox per supported mob, scaled for babies; used to
 /// build the cull bounding sphere.
@@ -2798,6 +2849,145 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
+    use azalea_registry::builtin::EntityKind;
+
+    use super::{EntityRenderInfo, EntityRenderer, PLAYER_MODEL_SCALE};
+
+    #[test]
+    fn player_matrix_applies_vanilla_avatar_scale() {
+        let player = EntityRenderInfo {
+            entity_kind: EntityKind::Player,
+            ..Default::default()
+        };
+        let player_matrix = EntityRenderer::entity_matrix(&player, glam::DVec3::ZERO);
+        assert!((player_matrix.x_axis.truncate().length() - PLAYER_MODEL_SCALE).abs() < 1e-6);
+        assert!((player_matrix.y_axis.truncate().length() - PLAYER_MODEL_SCALE).abs() < 1e-6);
+        assert!((player_matrix.z_axis.truncate().length() - PLAYER_MODEL_SCALE).abs() < 1e-6);
+
+        let zombie = EntityRenderInfo {
+            entity_kind: EntityKind::Zombie,
+            ..Default::default()
+        };
+        let zombie_matrix = EntityRenderer::entity_matrix(&zombie, glam::DVec3::ZERO);
+        assert!((zombie_matrix.x_axis.truncate().length() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sleeping_player_matrix_uses_bed_facing_and_standing_eye_offset() {
+        use crate::entity::components::Position;
+        use crate::world::block::BedDirection;
+
+        let cases = [
+            BedDirection::North,
+            BedDirection::South,
+            BedDirection::West,
+            BedDirection::East,
+        ];
+        for direction in cases {
+            let info = EntityRenderInfo {
+                position: Position::new(10.0, 64.6875, -4.5),
+                is_sleeping: true,
+                sleeping_direction: Some(direction),
+                sleeping_eye_height: 1.62,
+                entity_kind: EntityKind::Player,
+                ..Default::default()
+            };
+            let matrix = EntityRenderer::entity_matrix(&info, glam::DVec3::ZERO);
+            let (step_x, step_z) = direction.step();
+            let translation = matrix.w_axis.truncate();
+            let expected_translation =
+                glam::Vec3::new(10.0 - step_x * 1.52, 64.6875, -4.5 - step_z * 1.52);
+            assert!(
+                translation.abs_diff_eq(expected_translation, 1e-5),
+                "sleeping translation mismatch for {direction:?}: {translation:?} != {expected_translation:?}"
+            );
+
+            let model_up = matrix.y_axis.truncate().normalize();
+            let expected_axis = glam::Vec3::new(step_x, 0.0, step_z);
+            assert!(
+                model_up.abs_diff_eq(expected_axis, 1e-5),
+                "sleeping body axis mismatch for {direction:?}: {model_up:?} != {expected_axis:?}"
+            );
+        }
+
+        let baby_villager = EntityRenderInfo {
+            position: Position::new(0.5, 64.6875, 0.5),
+            is_sleeping: true,
+            sleeping_direction: Some(BedDirection::South),
+            sleeping_eye_height: 0.63,
+            entity_kind: EntityKind::Villager,
+            is_baby: true,
+            ..Default::default()
+        };
+        let matrix = EntityRenderer::entity_matrix(&baby_villager, glam::DVec3::ZERO);
+        assert!(
+            matrix
+                .w_axis
+                .truncate()
+                .abs_diff_eq(glam::Vec3::new(0.5, 64.6875, 0.5 - 0.53), 1e-5)
+        );
+    }
+
+    #[test]
+    fn dying_sleeper_takes_the_death_fall_not_the_bed_rotation() {
+        use crate::entity::components::Position;
+        use crate::world::block::BedDirection;
+
+        let info = EntityRenderInfo {
+            position: Position::new(2.0, 3.0, 4.0),
+            is_sleeping: true,
+            sleeping_direction: Some(BedDirection::North),
+            sleeping_eye_height: 1.62,
+            death_time: 5.0,
+            entity_kind: EntityKind::Player,
+            ..Default::default()
+        };
+        let actual = EntityRenderer::entity_matrix(&info, glam::DVec3::ZERO);
+        // The bed offset still applies (`submit`), then only the death fall.
+        let expected = glam::Mat4::from_translation(glam::Vec3::new(2.0, 3.0, 4.0 + 1.52))
+            * glam::Mat4::from_rotation_z(
+                crate::renderer::pipelines::entity_renderer::death_fall_degrees(
+                    5.0,
+                    EntityKind::Player,
+                )
+                .to_radians(),
+            )
+            * glam::Mat4::from_scale(glam::Vec3::splat(PLAYER_MODEL_SCALE));
+        for (a, b) in actual
+            .to_cols_array()
+            .into_iter()
+            .zip(expected.to_cols_array())
+        {
+            assert!((a - b).abs() < 1e-5, "{a} != {b}");
+        }
+    }
+
+    #[test]
+    fn sleeping_matrix_falls_back_to_body_yaw_without_bed_direction() {
+        use crate::entity::components::Position;
+
+        let info = EntityRenderInfo {
+            position: Position::new(2.0, 3.0, 4.0),
+            body_y_rot_deg: 37.0,
+            is_sleeping: true,
+            sleeping_direction: None,
+            entity_kind: EntityKind::Player,
+            ..Default::default()
+        };
+        let actual = EntityRenderer::entity_matrix(&info, glam::DVec3::ZERO);
+        let expected = glam::Mat4::from_translation(glam::Vec3::new(2.0, 3.0, 4.0))
+            * glam::Mat4::from_rotation_y(37.0_f32.to_radians())
+            * glam::Mat4::from_rotation_z(90.0_f32.to_radians())
+            * glam::Mat4::from_rotation_y(270.0_f32.to_radians())
+            * glam::Mat4::from_scale(glam::Vec3::splat(PLAYER_MODEL_SCALE));
+        for (a, b) in actual
+            .to_cols_array()
+            .into_iter()
+            .zip(expected.to_cols_array())
+        {
+            assert!((a - b).abs() < 1e-5, "{a} != {b}");
+        }
+    }
 
     #[test]
     fn death_fall_matches_vanilla_boundaries_and_flip_overrides() {
