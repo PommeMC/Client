@@ -18,25 +18,37 @@ impl DebugEntryList {
             Ok(json) => match serde_json::from_str(&json) {
                 Ok(profile) => profile,
                 Err(error) => {
-                    tracing::warn!("Failed to parse debug profile: {error}");
+                    tracing::error!("Failed to parse debug profile: {error}, resetting to default");
                     DebugScreenProfile::Default
                 }
             },
             Err(error) => {
-                tracing::warn!("Failed to read debug profile: {error}");
+                tracing::error!("Failed to read debug profile: {error}, resetting to default");
                 DebugScreenProfile::Default
             }
         };
 
-        let mut list = Self {
+        let mut slf = Self {
             is_overlay_visible: false,
             profile,
             debug_profile_file,
             currently_enabled: Vec::new(),
         };
 
-        list.rebuild_current_list();
-        list
+        slf.save();
+        slf.rebuild_current_list();
+        slf
+    }
+
+    pub fn save(&mut self) {
+        match serde_json::to_string_pretty(&self.profile) {
+            Ok(string) => {
+                if let Err(error) = std::fs::write(&self.debug_profile_file, string) {
+                    tracing::error!("Failed to save debug profile file: {error}");
+                }
+            }
+            Err(error) => tracing::error!("Failed to save debug profile file: {error}"),
+        }
     }
 
     pub fn get_currently_enabled(&self) -> &[DebugEntryId] {
