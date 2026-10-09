@@ -1,6 +1,7 @@
 use pyronyx::vk::PresentModeKHR;
 
 use crate::ui::components::debug::displayer::DebugScreenDisplayer;
+use crate::ui::components::debug::groups::DebugGroup;
 use crate::ui::menu::MAX_FRAMERATE_UNLIMITED;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -170,7 +171,7 @@ impl DebugEntryId {
             Self::GameVersion => {
                 displayer.add_priority_line(format!(
                     "Minecraft {} ({}/{})",
-                    info.game_version_name, info.game_version_string, info.client_mod_brand,
+                    info.game_version_name, info.game_version_string, info.client_brand,
                 ));
             }
             Self::Fps => {
@@ -203,8 +204,55 @@ impl DebugEntryId {
                     info.fps, framerate_limit, present_mode, refresh_rate
                 ));
             }
+            Self::Tps => {
+                let Some(tps) = &info.tps else {
+                    return;
+                };
 
-            // TODO
+                displayer.add_fact_to_group(DebugGroup::Misc, "Server", |fact| {
+                    let mut run_status = if tps.is_stepping_forward {
+                        "frozen - stepping"
+                    } else if tps.is_frozen {
+                        "frozen"
+                    } else {
+                        ""
+                    };
+
+                    if let Some(server) = &tps.integrated {
+                        if server.is_sprinting {
+                            run_status = "sprinting";
+                        }
+
+                        let tps_target = if server.is_sprinting {
+                            "-".to_string()
+                        } else {
+                            format!("{:.1}", tps.target_mspt)
+                        };
+
+                        fact.value("Integrated")
+                            .text(" @ ")
+                            .value(format!("{:.1}", server.smoothed_tick_ms))
+                            .text("/")
+                            .value(tps_target)
+                            .text(" ms");
+                    } else {
+                        fact.text("\"").value(tps.server_brand).text("\"");
+                    }
+
+                    if !run_status.is_empty() {
+                        fact.text(" (").value(run_status).text(")");
+                    }
+                });
+
+                displayer.add_fact_to_group(DebugGroup::Misc, "Packets", |fact| {
+                    fact.value(format!("{:.0}", tps.avg_sent_packets))
+                        .text(" tx, ")
+                        .value(format!("{:.0}", tps.avg_received_packets))
+                        .text(" rx");
+                });
+            }
+
+            // TODO(debug-overlay)
             _ => {}
         }
     }
@@ -213,12 +261,30 @@ impl DebugEntryId {
 pub struct DebugInfo<'a> {
     pub game_version_name: &'a str,
     pub game_version_string: &'a str,
-    pub client_mod_brand: &'a str,
+    pub client_brand: &'a str,
 
     pub fps: u32,
     pub framerate_limit: u32,
     pub present_mode: PresentModeKHR,
     pub refresh_rate_millihertz: Option<u32>,
+
+    pub tps: Option<TpsDebugInfo<'a>>,
+}
+
+pub struct TpsDebugInfo<'a> {
+    pub is_stepping_forward: bool,
+    pub is_frozen: bool,
+    pub target_mspt: f32,
+    /// `Some` when in singleplayers
+    pub integrated: Option<IntegratedServerInfo>,
+    pub server_brand: &'a str,
+    pub avg_sent_packets: f32,
+    pub avg_received_packets: f32,
+}
+
+pub struct IntegratedServerInfo {
+    pub is_sprinting: bool,
+    pub smoothed_tick_ms: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

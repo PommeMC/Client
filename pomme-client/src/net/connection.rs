@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use azalea_protocol::address::ServerAddr;
 use azalea_protocol::packets::ClientIntention;
 use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
@@ -19,6 +21,7 @@ use super::chat_security::{ChatSender, ProfileKeyPair};
 use super::conn::{Conn, MemoryEnd, RawWriter};
 use super::handler::{handle_game_packet, handle_raw_game_packet};
 use super::sender::{Outbound, PacketSender};
+use crate::net::conn::PacketStats;
 use crate::ui::server_dialog::DialogRegistry;
 
 #[derive(Error, Debug)]
@@ -87,6 +90,7 @@ pub struct ConnectionHandle {
     pub event_rx: crossbeam_channel::Receiver<NetworkEvent>,
     pub packet_tx: PacketSender,
     pub task: tokio::task::JoinHandle<()>,
+    pub packet_stats: Arc<PacketStats>,
 }
 
 impl Drop for ConnectionHandle {
@@ -105,8 +109,18 @@ pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> Conn
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<Outbound>();
     let game_packet_tx = packet_tx.clone();
     let packet_tx = PacketSender::new(packet_tx);
+    let stats = Arc::new(PacketStats::default());
+    let task_stats = stats.clone();
     let task = rt.spawn(async move {
-        if let Err(e) = connect_to_server(args, event_tx.clone(), game_packet_tx, packet_rx).await {
+        if let Err(e) = connect_to_server(
+            args,
+            event_tx.clone(),
+            game_packet_tx,
+            packet_rx,
+            task_stats,
+        )
+        .await
+        {
             tracing::error!("Network error: {e}");
             let reason = friendly_error_reason(&e);
             let _ = event_tx.try_send(NetworkEvent::Disconnected { reason });
@@ -116,6 +130,7 @@ pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> Conn
         event_rx,
         packet_tx,
         task,
+        packet_stats: stats,
     }
 }
 
@@ -124,6 +139,7 @@ pub async fn connect_to_server(
     event_tx: Sender<NetworkEvent>,
     game_packet_tx: mpsc::UnboundedSender<Outbound>,
     mut game_packet_rx: mpsc::UnboundedReceiver<Outbound>,
+    stats: Arc<PacketStats>,
 ) -> Result<(), ConnectionError> {
     let ConnectArgs {
         transport,
@@ -156,6 +172,8 @@ pub async fn connect_to_server(
             conn
         }
     };
+    conn.set_stats(stats.clone());
+    stats.on_sent(); // handshake intention
 
     let hello = ServerboundLoginPacket::Hello(ServerboundHello {
         name: username.clone(),
@@ -909,6 +927,7 @@ async fn game_loop(
         );
         write_game_frame(&mut conn.writer, translation, serialize_frame(&brand)?).await?;
     }
+    let stats = conn.stats().clone();
     loop {
         let raw = if let Some(raw) = deferred_login.take() {
             Ok(raw)
@@ -968,6 +987,9 @@ async fn game_loop(
         }
         match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
             Ok(mut packet) => {
+                if matches!(packet, ClientboundGamePacket::BundleDelimiter(_)) {
+                    stats.toggle_bundle();
+                }
                 if matches!(packet, ClientboundGamePacket::StartConfiguration(_)) {
                     // Vanilla clears the client level before acknowledging
                     // (ClientPacketListener.handleConfigurationStart); chat
@@ -1289,6 +1311,7 @@ mod tests {
             event_tx,
             packet_tx,
             packet_rx,
+            Arc::default(),
         ));
 
         assert!(matches!(

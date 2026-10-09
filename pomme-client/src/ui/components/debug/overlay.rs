@@ -65,7 +65,7 @@ impl DebugScreenOverlay {
         }
 
         let mut groups = displayer.groups;
-        // TODO: add custom renderers
+        // TODO(debug-overlay): add custom renderers
         groups.retain(|_, c| !c.lines.is_empty() || !c.facts.is_empty());
 
         // Groups stay in the column they were in last frame.

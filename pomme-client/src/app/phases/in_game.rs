@@ -37,7 +37,9 @@ use crate::renderer::pipelines::entity_renderer::{
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
+use crate::singleplayer::World;
 use crate::ui::chat::{ChatState, ChatUiAction};
+use crate::ui::components::debug::entries::{IntegratedServerInfo, TpsDebugInfo};
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{self, common, hud};
@@ -2026,6 +2028,7 @@ pub fn update_game(
     gfx: &mut Gfx,
     connection: &ConnectionHandle,
     game: &mut GameState,
+    world: Option<&mut World>,
 ) -> GameUpdateResult {
     // Snapshot last frame's phase timings before this frame overwrites them: they
     // align with `raw_dt`, which measures the previous frame's full duration.
@@ -2168,6 +2171,9 @@ pub fn update_game(
             // prioritized while the screen is open.
             game.xp_display_start_tick = game.tick_count as i64;
         }
+
+        connection.packet_stats.tick();
+
         AppCore::send_client_tick_end(connection);
         core.tick_accumulator -= TICK_RATE;
     }
@@ -2439,15 +2445,28 @@ pub fn update_game(
     let debug_info = ui::components::debug::entries::DebugInfo {
         game_version_name: &core.version,
         game_version_string: &core.version,
-        client_mod_brand: "vanilla",
+        client_brand: "vanilla",
 
         fps: gfx.fps_counter.display_fps(),
         framerate_limit: core.menu.max_framerate,
-        present_mode: pyronyx::vk::PresentModeKHR::Immediate, // TODO
+        present_mode: pyronyx::vk::PresentModeKHR::Immediate, // TODO(debug-overlay)
         refresh_rate_millihertz: gfx
             .window
             .current_monitor()
             .and_then(|monitor| monitor.refresh_rate_millihertz()),
+
+        tps: Some(TpsDebugInfo {
+            is_stepping_forward: false, // TODO(debug-overlay)
+            is_frozen: false,           // TODO(debug-overlay)
+            target_mspt: 50.0,          // TODO(debug-overlay)
+            integrated: world.map(|_| IntegratedServerInfo {
+                is_sprinting: false,   // TODO(debug-overlay)
+                smoothed_tick_ms: 0.0, // TODO(debug-overlay)
+            }),
+            server_brand: "vanilla", // TODO(debug-overlay)
+            avg_sent_packets: connection.packet_stats.avg_sent(),
+            avg_received_packets: connection.packet_stats.avg_received(),
+        }),
     };
 
     // The chunk-load benchmark renders a clean top-down view: only terrain, no HUD,

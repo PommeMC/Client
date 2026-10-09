@@ -169,7 +169,7 @@ impl DebugGroupContents {
             }
         }
 
-        // TODO: custom renderers
+        // TODO(debug-overlay): custom renderers
 
         let left = match side {
             DebugColumnSide::Left => Self::MARGIN_LEFT * gs,
@@ -184,7 +184,7 @@ impl DebugGroupContents {
                 y - 1.0 * gs,
                 left + full_width + 1.0 * gs,
                 y + line_h - 1.0 * gs,
-                [0.1882353, 0.1882353, 0.1882353, 0.56], // rgba(48, 48, 48, 0.56)
+                [0.1882, 0.1882, 0.1882, 0.56], // rgba(48, 48, 48, 0.56)
             ));
             elements.push(MenuElement::McText {
                 x: left + Self::TITLE_LEFT_PADDING * gs,
@@ -202,7 +202,7 @@ impl DebugGroupContents {
             y - 1.0 * gs,
             left + full_width + 1.0 * gs,
             top + full_height + 1.0 * gs,
-            [0.3137255, 0.3137255, 0.3137255, 0.56], // rgba(80, 80, 80, 0.56)
+            [0.3137, 0.3137, 0.3137, 0.56], // rgba(80, 80, 80, 0.56)
         ));
 
         for (name, fact) in &self.facts {
@@ -242,7 +242,7 @@ impl DebugGroupContents {
                     y,
                     spans: vec![TextSpan::new(
                         line.clone(),
-                        [0.8784314, 0.8784314, 0.8784314, 1.0], // rgba(224, 224, 224, 1.00)
+                        [0.8784, 0.8784, 0.8784, 1.0], // rgba(224, 224, 224, 1.00)
                     )],
                     scale: font_size,
                     centered: false,
@@ -252,7 +252,7 @@ impl DebugGroupContents {
             y += line_h;
         }
 
-        // TODO: custom renderers
+        // TODO(debug-overlay): custom renderers
 
         if let Some(mut accent_color) = self.group.accent_color() {
             accent_color[3] = 1.0;
