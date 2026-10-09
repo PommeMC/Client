@@ -1,6 +1,7 @@
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::ui::common::{FONT_SIZE, TextWidthFn, WHITE};
 use crate::ui::components::debug::column::DebugColumnSide;
+use crate::ui::components::debug::displayer::{DebugFact, FACT_NAME_COLOR};
 use crate::ui::text::TextSpan;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -101,6 +102,7 @@ fn corner_rect(x1: f32, y1: f32, x2: f32, y2: f32, color: [f32; 4]) -> MenuEleme
 pub struct DebugGroupContents {
     pub group: DebugGroup,
     pub lines: Vec<String>,
+    pub facts: Vec<(String, DebugFact)>,
 }
 
 #[allow(dead_code)]
@@ -115,6 +117,7 @@ impl DebugGroupContents {
         Self {
             group,
             lines: Vec::new(),
+            facts: Vec::new(),
         }
     }
 
@@ -145,12 +148,27 @@ impl DebugGroupContents {
             full_width = title_width + Self::TITLE_LEFT_PADDING * gs;
         }
 
-        let mut full_height = self.lines.len() as f32 * line_h;
+        let mut full_height = (self.lines.len() + self.facts.len()) as f32 * line_h;
         if title_width > 0.0 {
             full_height += line_h;
         }
 
-        // TODO: facts
+        let fact_name_width = self
+            .facts
+            .iter()
+            .map(|(name, _)| text_width(name, font_size))
+            .reduce(f32::max)
+            .unwrap_or(0.0);
+
+        for (_, fact) in &self.facts {
+            let width = fact_name_width
+                + Self::FACT_NAME_VALUE_PADDING * gs
+                + fact.width(text_width, font_size);
+            if width > full_width {
+                full_width = width;
+            }
+        }
+
         // TODO: custom renderers
 
         let left = match side {
@@ -187,7 +205,35 @@ impl DebugGroupContents {
             [0.3137255, 0.3137255, 0.3137255, 0.56], // rgba(80, 80, 80, 0.56)
         ));
 
-        // TODO: facts
+        for (name, fact) in &self.facts {
+            // Names are right-aligned within the name column.
+            let name_x = left + (fact_name_width - text_width(name, font_size));
+            elements.push(MenuElement::McText {
+                x: name_x,
+                y,
+                spans: vec![TextSpan::new(format!("{name}:"), FACT_NAME_COLOR)],
+                scale: font_size,
+                centered: false,
+                shadow: false,
+            });
+            elements.push(MenuElement::McText {
+                x: left + fact_name_width + Self::FACT_NAME_VALUE_PADDING * gs,
+                y,
+                spans: fact.spans(),
+                scale: font_size,
+                centered: false,
+                shadow: false,
+            });
+            y += line_h;
+        }
+
+        if !self.facts.is_empty() && !self.lines.is_empty() {
+            // NOTE: vanilla does not include this gap in `full_height`, so the
+            // background ends 2 px short and the last line can poke past the bottom
+            // edge. This looks like a bug that Mojang may fix in a future
+            // version.
+            y += 2.0 * gs;
+        }
 
         for line in &self.lines {
             if !line.is_empty() {
