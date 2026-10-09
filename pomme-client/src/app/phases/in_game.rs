@@ -39,7 +39,7 @@ use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
 use crate::singleplayer::World;
 use crate::ui::chat::{ChatState, ChatUiAction};
-use crate::ui::components::debug::entries::{IntegratedServerInfo, TpsDebugInfo};
+use crate::ui::components::debug::entries::TpsDebugInfo;
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{self, common, hud};
@@ -2440,33 +2440,6 @@ pub fn update_game(
         None
     };
 
-    let debug_info = ui::components::debug::entries::DebugInfo {
-        game_version_name: &core.version,
-        game_version_string: &core.version,
-        client_brand: "vanilla",
-
-        fps: gfx.fps_counter.display_fps(),
-        framerate_limit: core.menu.max_framerate,
-        present_mode: pyronyx::vk::PresentModeKHR::Immediate, // TODO(debug-overlay)
-        refresh_rate_millihertz: gfx
-            .window
-            .current_monitor()
-            .and_then(|monitor| monitor.refresh_rate_millihertz()),
-
-        tps: Some(TpsDebugInfo {
-            is_stepping_forward: false, // TODO(debug-overlay)
-            is_frozen: false,           // TODO(debug-overlay)
-            target_mspt: 50.0,          // TODO(debug-overlay)
-            integrated: world.map(|_| IntegratedServerInfo {
-                is_sprinting: false,   // TODO(debug-overlay)
-                smoothed_tick_ms: 0.0, // TODO(debug-overlay)
-            }),
-            server_brand: "vanilla", // TODO(debug-overlay)
-            avg_sent_packets: connection.packet_stats.avg_sent(),
-            avg_received_packets: connection.packet_stats.avg_received(),
-        }),
-    };
-
     // The chunk-load benchmark renders a clean top-down view: only terrain, no HUD,
     // entities/player, held item, clouds, or weather — and skipping them also keeps
     // the measured frame times honest.
@@ -2489,17 +2462,7 @@ pub fn update_game(
             game.player.look_dir.x_rot_deg(),
         );
     }
-    if !benchmark_running && game.hide_gui {
-        // F1: vanilla still renders the debug overlay with the GUI hidden.
-        core.menu.debug_overlay.build(
-            &mut elements,
-            gs,
-            &|t, s| gfx.renderer.menu_text_width(t, s),
-            sw,
-            sh,
-            &debug_info,
-        );
-    } else if !benchmark_running {
+    if !benchmark_running {
         // Vanilla Hud.extractCameraOverlays: vignette, pumpkin, and portal
         // draw under everything else in the HUD.
         let portal_intensity = game
@@ -2679,15 +2642,6 @@ pub fn update_game(
             gs,
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
-        );
-
-        core.menu.debug_overlay.build(
-            &mut elements,
-            gs,
-            &|t, s| gfx.renderer.menu_text_width(t, s),
-            sw,
-            sh,
-            &debug_info,
         );
     }
 
@@ -3395,6 +3349,20 @@ pub fn update_game(
             }
         }
     }
+
+    // Debug overlay is drawn above everything, except subtitles
+    core.menu.debug_overlay.build(
+        &mut elements,
+        gs,
+        &|t, s| gfx.renderer.menu_text_width(t, s),
+        sw,
+        sh,
+        &ui::components::debug::entries::DebugInfo::new(
+            core,
+            gfx,
+            Some(TpsDebugInfo::new(connection, world)),
+        ),
+    );
 
     // Subtitles draw above chat and the tab list; toasts stay on top
     // (vanilla extract order). The queue is empty while the option is off.

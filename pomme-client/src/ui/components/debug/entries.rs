@@ -1,5 +1,9 @@
 use pyronyx::vk::PresentModeKHR;
 
+use crate::app::core::AppCore;
+use crate::app::phases::Gfx;
+use crate::net::connection::ConnectionHandle;
+use crate::singleplayer::World;
 use crate::ui::components::debug::displayer::DebugScreenDisplayer;
 use crate::ui::components::debug::groups::DebugGroup;
 use crate::ui::menu::MAX_FRAMERATE_UNLIMITED;
@@ -259,8 +263,8 @@ impl DebugEntryId {
 }
 
 pub struct DebugInfo<'a> {
-    pub game_version_name: &'a str,
-    pub game_version_string: &'a str,
+    pub game_version_name: String,
+    pub game_version_string: String,
     pub client_brand: &'a str,
 
     pub fps: u32,
@@ -269,6 +273,26 @@ pub struct DebugInfo<'a> {
     pub refresh_rate_millihertz: Option<u32>,
 
     pub tps: Option<TpsDebugInfo<'a>>,
+}
+
+impl<'a> DebugInfo<'a> {
+    pub fn new(core: &'_ AppCore, gfx: &'_ Gfx, tps: Option<TpsDebugInfo<'a>>) -> Self {
+        DebugInfo {
+            game_version_name: core.version.to_owned(),
+            game_version_string: core.version.to_owned(),
+            client_brand: "vanilla",
+
+            fps: gfx.fps_counter.display_fps(),
+            framerate_limit: core.menu.max_framerate,
+            present_mode: pyronyx::vk::PresentModeKHR::Immediate, // TODO(debug-overlay)
+            refresh_rate_millihertz: gfx
+                .window
+                .current_monitor()
+                .and_then(|monitor| monitor.refresh_rate_millihertz()),
+
+            tps,
+        }
+    }
 }
 
 pub struct TpsDebugInfo<'a> {
@@ -285,6 +309,23 @@ pub struct TpsDebugInfo<'a> {
 pub struct IntegratedServerInfo {
     pub is_sprinting: bool,
     pub smoothed_tick_ms: f32,
+}
+
+impl<'a> TpsDebugInfo<'a> {
+    pub fn new(connection: &'_ ConnectionHandle, world: Option<&'_ mut World>) -> Self {
+        TpsDebugInfo {
+            is_stepping_forward: false, // TODO(debug-overlay)
+            is_frozen: false,           // TODO(debug-overlay)
+            target_mspt: 50.0,          // TODO(debug-overlay)
+            integrated: world.map(|_| IntegratedServerInfo {
+                is_sprinting: false,   // TODO(debug-overlay)
+                smoothed_tick_ms: 0.0, // TODO(debug-overlay)
+            }),
+            server_brand: "vanilla", // TODO(debug-overlay)
+            avg_sent_packets: connection.packet_stats.avg_sent(),
+            avg_received_packets: connection.packet_stats.avg_received(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
