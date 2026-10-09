@@ -24,6 +24,7 @@ use crate::renderer::pipelines::menu_overlay::{
     TooltipLine,
 };
 use crate::ui::chat::ChatOptions;
+use crate::ui::components::debug::overlay::DebugScreenOverlay;
 use crate::ui::font::FontOptions;
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
@@ -667,6 +668,8 @@ pub struct MainMenu {
     /// Set by a Font Settings toggle, applied by `AppCore::apply_font_options`.
     pub reload_fonts: bool,
     pack_search: TextFieldState,
+
+    pub debug_overlay: DebugScreenOverlay,
 }
 
 /// Vanilla EditBox max lengths (UTF-16 units): server name uses the EditBox
@@ -799,6 +802,8 @@ impl MainMenu {
             reload_assets: false,
             reload_fonts: false,
             pack_search: TextFieldState::new(MAX_SEARCH),
+
+            debug_overlay: DebugScreenOverlay::new(game_dir),
         }
     }
 

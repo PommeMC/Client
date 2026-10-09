@@ -3,6 +3,7 @@ pub mod boss_bar;
 pub mod chat;
 pub mod chest;
 pub mod common;
+pub mod components;
 pub mod container;
 pub mod crafting_table;
 pub mod creative_inventory;

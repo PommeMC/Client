@@ -40,7 +40,7 @@ use crate::resource_pack::ResourcePackManager;
 use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
-use crate::ui::{common, hud};
+use crate::ui::{self, common, hud};
 use crate::world::block::model::CardinalLightType;
 use crate::world::block::{BedDirection, bed_direction};
 use crate::world::block_entity_anim::BlockEntityAnimStore;
@@ -2435,6 +2435,21 @@ pub fn update_game(
     } else {
         None
     };
+
+    let debug_info = ui::components::debug::entries::DebugInfo {
+        game_version_name: &core.version,
+        game_version_string: &core.version,
+        client_mod_brand: "vanilla",
+
+        fps: gfx.fps_counter.display_fps(),
+        framerate_limit: core.menu.max_framerate,
+        present_mode: pyronyx::vk::PresentModeKHR::Immediate, // TODO
+        refresh_rate_millihertz: gfx
+            .window
+            .current_monitor()
+            .and_then(|monitor| monitor.refresh_rate_millihertz()),
+    };
+
     // The chunk-load benchmark renders a clean top-down view: only terrain, no HUD,
     // entities/player, held item, clouds, or weather — and skipping them also keeps
     // the measured frame times honest.
@@ -2459,11 +2474,14 @@ pub fn update_game(
     }
     if !benchmark_running && game.hide_gui {
         // F1: vanilla still renders the debug overlay with the GUI hidden.
-        if let Some(info) = debug.as_ref() {
-            hud::build_debug_overlay(&mut elements, info, gs, &|t, s| {
-                gfx.renderer.menu_text_width(t, s)
-            });
-        }
+        core.menu.debug_overlay.build(
+            &mut elements,
+            gs,
+            &|t, s| gfx.renderer.menu_text_width(t, s),
+            sw,
+            sh,
+            &debug_info,
+        );
     } else if !benchmark_running {
         // Vanilla Hud.extractCameraOverlays: vignette, pumpkin, and portal
         // draw under everything else in the HUD.
@@ -2645,6 +2663,15 @@ pub fn update_game(
             gs,
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
+        );
+
+        core.menu.debug_overlay.build(
+            &mut elements,
+            gs,
+            &|t, s| gfx.renderer.menu_text_width(t, s),
+            sw,
+            sh,
+            &debug_info,
         );
     }
 

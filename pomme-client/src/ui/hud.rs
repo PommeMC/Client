@@ -540,10 +540,6 @@ pub fn build_hud(
         build_crosshair(elements, cx, cy, gs, attack);
     }
 
-    if let Some(info) = debug {
-        build_debug_overlay(elements, info, gs, text_width_fn);
-    }
-
     // The bar geometry also anchors the status rows and XP bar below.
     let hotbar_w = HOTBAR_W * gs;
     let hotbar_h = HOTBAR_H * gs;

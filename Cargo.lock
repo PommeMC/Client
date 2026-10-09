@@ -5206,6 +5206,7 @@ dependencies = [
  "gilrs",
  "glam 0.34.1",
  "image",
+ "indexmap 2.14.0",
  "libloading 0.9.0",
  "md-5 0.11.0",
  "mimalloc",
