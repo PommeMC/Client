@@ -215,7 +215,6 @@ pub struct GameState {
     pub vignette_brightness: f32,
     pub interaction: InteractionState,
     pub sky_state: crate::renderer::SkyState,
-    pub show_debug: bool,
     pub show_chunk_borders: bool,
     pub advanced_item_tooltips: bool,
     /// F1 (vanilla `hideGui`): the HUD, chat, and overlays don't render.
@@ -442,7 +441,6 @@ impl GameState {
             vignette_brightness: 1.0,
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
-            show_debug: false,
             show_chunk_borders: false,
             advanced_item_tooltips: false,
             hide_gui: false,
@@ -869,7 +867,7 @@ impl GameState {
     /// Vanilla toggles the debug overlay when F3 is released, unless a chord
     /// key consumed it as a modifier while held (KeyboardHandler.keyPress).
     /// An open game-mode switcher applies its selection instead.
-    pub fn handle_f3_release(&mut self, connection: &ConnectionHandle) {
+    pub fn handle_f3_release(&mut self, core: &mut AppCore, connection: &ConnectionHandle) {
         if let Some(switcher) = self.game_mode_switcher.take() {
             use azalea_core::game_type::GameMode;
             if switcher.selected != self.player.game_mode
@@ -889,7 +887,7 @@ impl GameState {
         if self.f3_chord_consumed {
             self.f3_chord_consumed = false;
         } else {
-            self.show_debug = !self.show_debug;
+            core.menu.toggle_debug_overlay();
         }
     }
 
@@ -2383,7 +2381,7 @@ pub fn update_game(
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
-    let debug = if game.show_debug {
+    let debug = if false {
         Some(hud::DebugInfo {
             fps: gfx.fps_counter.display_fps(),
             position: *game.player.position,
@@ -2678,7 +2676,6 @@ pub fn update_game(
             &game.player.effects,
             &game.boss_bars,
             gfx.renderer.is_first_person(),
-            debug.as_ref(),
             gs,
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),

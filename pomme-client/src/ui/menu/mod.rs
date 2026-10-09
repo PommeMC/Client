@@ -807,6 +807,10 @@ impl MainMenu {
         }
     }
 
+    pub fn toggle_debug_overlay(&mut self) {
+        self.debug_overlay.toggle_overlay();
+    }
+
     /// Chat Settings opened from chat; leaving them leaves the menu, back to
     /// the chat screen that opened them.
     pub fn open_chat_settings(&mut self) {

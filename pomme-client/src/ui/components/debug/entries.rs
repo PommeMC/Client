@@ -275,7 +275,7 @@ pub struct TpsDebugInfo<'a> {
     pub is_stepping_forward: bool,
     pub is_frozen: bool,
     pub target_mspt: f32,
-    /// `Some` when in singleplayers
+    /// `Some` when in singleplayer
     pub integrated: Option<IntegratedServerInfo>,
     pub server_brand: &'a str,
     pub avg_sent_packets: f32,

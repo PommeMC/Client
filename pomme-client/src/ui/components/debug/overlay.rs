@@ -23,6 +23,10 @@ impl DebugScreenOverlay {
         }
     }
 
+    pub fn toggle_overlay(&mut self) {
+        self.debug_entry_list.toggle_overlay();
+    }
+
     pub fn build(
         &mut self,
         elements: &mut Vec<MenuElement>,

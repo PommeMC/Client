@@ -26,11 +26,6 @@ impl DebugColumn {
         self.height_so_far = Self::TOP_PADDING * gui_scale;
     }
 
-    pub fn clear(&mut self) {
-        self.groups.clear();
-        self.previous_groups.clear();
-    }
-
     pub fn is_full(&self, screen_height: f32) -> bool {
         self.height_so_far > screen_height
     }
@@ -61,10 +56,6 @@ impl DebugColumn {
         );
         self.height_so_far += rect[3] + 9.0 * gui_scale;
         self.groups.push(contents.group);
-    }
-
-    pub fn previous_groups_mut(&mut self) -> &mut Vec<DebugGroup> {
-        &mut self.previous_groups
     }
 }
 

@@ -29,7 +29,7 @@ impl DebugEntryList {
         };
 
         let mut list = Self {
-            is_overlay_visible: true,
+            is_overlay_visible: false,
             profile,
             debug_profile_file,
             currently_enabled: Vec::new(),
@@ -54,5 +54,10 @@ impl DebugEntryList {
             })
             .collect();
         self.currently_enabled.sort_by_key(|id| id.name());
+    }
+
+    pub fn toggle_overlay(&mut self) {
+        self.is_overlay_visible = !self.is_overlay_visible;
+        self.rebuild_current_list();
     }
 }

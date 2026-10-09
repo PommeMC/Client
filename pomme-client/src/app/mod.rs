@@ -580,7 +580,7 @@ impl ApplicationHandler for App {
                             {
                                 // Overlay toggles on F3 release, unless a chord
                                 // consumed it; runs in every in-game sub-state.
-                                game.handle_f3_release(&connection);
+                                game.handle_f3_release(&mut self.core, &connection);
                             }
 
                             AppPhase::InGame {
