@@ -12,7 +12,7 @@ pub struct DebugEntryList {
 
 impl DebugEntryList {
     pub fn new(game_dir: &Path) -> Self {
-        let debug_profile_file = game_dir.join("debug-profile.json");
+        let debug_profile_file = game_dir.join("debug_profile.json");
 
         let profile = match std::fs::read_to_string(&debug_profile_file) {
             Ok(json) => match serde_json::from_str(&json) {

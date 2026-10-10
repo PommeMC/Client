@@ -36,9 +36,15 @@ impl DebugScreenProfile {
 
             Self::Performance => match identifier {
                 DId::Fps => DebugEntryStatus::AlwaysOn,
-                DId::Tps | DId::GpuUtilization | DId::Memory | DId::SimplePerformanceImpactors => {
-                    DebugEntryStatus::InOverlay
-                }
+                DId::Tps
+                | DId::GpuUtilization
+                | DId::Memory
+                | DId::SimplePerformanceImpactors
+
+                // Custom
+                | DId::FrameTimings
+                => DebugEntryStatus::InOverlay,
+
                 _ => DebugEntryStatus::Never,
             },
 
