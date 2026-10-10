@@ -14,6 +14,8 @@ pub struct LauncherSettings {
     pub language: String,
     pub keep_launcher_open: bool,
     pub launch_with_console: bool,
+    #[serde(default)]
+    pub selected_account_uuid: Option<String>,
 }
 
 impl Default for LauncherSettings {
@@ -22,6 +24,7 @@ impl Default for LauncherSettings {
             language: "English".into(),
             keep_launcher_open: true,
             launch_with_console: false,
+            selected_account_uuid: None,
         }
     }
 }
@@ -66,12 +69,9 @@ impl LauncherSettings {
     where
         F: FnOnce(&mut LauncherSettings),
     {
-        let cloned = {
-            let mut settings = LAUNCHER_SETTINGS.write().await;
-            f(&mut settings);
-            settings.clone()
-        };
-
-        cloned.save().await
+        // Saving under the lock keeps concurrent updates from landing out of order.
+        let mut settings = LAUNCHER_SETTINGS.write().await;
+        f(&mut settings);
+        settings.save().await
     }
 }

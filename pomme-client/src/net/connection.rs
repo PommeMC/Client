@@ -95,6 +95,7 @@ impl Drop for ConnectionHandle {
         // The session is over: restore the launched version's wire protocol
         // and block table so nothing stale leaks into the next one.
         crate::version::clear_session_protocol();
+        crate::world::block::clear_block_tags();
         crate::world::block::set_active_protocol(crate::version::selected_protocol());
     }
 }
@@ -327,9 +328,10 @@ async fn negotiate_wire_version(
     Ok(())
 }
 
-/// Speaks `wire` for the rest of the session. The translation layer and the
-/// block-state tables both key off it, so they always move together.
+/// Speaks `wire` for the rest of the session. The translation layer, block
+/// tags and block-state tables all key off it, so they always move together.
 fn adopt_wire_protocol(wire: i32) {
+    crate::world::block::clear_block_tags();
     crate::version::set_session_protocol(wire);
     crate::world::block::set_active_protocol(wire);
 }
@@ -587,6 +589,7 @@ async fn config_sequence(
                 if let Some(tags) = dialog_tags(&p.tags) {
                     received_dialog_tags = Some(tags);
                 }
+                forward_block_tags(event_tx, &p.tags);
             }
             ClientboundConfigPacket::SelectKnownPacks(p) => {
                 // Vanilla `handleSelectKnownPacks`: claim the offered packs we
@@ -607,6 +610,13 @@ async fn config_sequence(
                     ServerboundConfigPacket::KeepAlive(s_keep_alive::ServerboundKeepAlive {
                         id: p.id,
                     }),
+                )
+                .await?;
+            }
+            ClientboundConfigPacket::Ping(p) => {
+                write_config_packet(
+                    conn,
+                    ServerboundConfigPacket::Pong(s_pong::ServerboundPong { id: p.id }),
                 )
                 .await?;
             }
@@ -820,6 +830,23 @@ fn dialog_tags(
     )
 }
 
+/// Forwards the `minecraft:block` tags of an `update_tags` packet, if it has
+/// any.
+fn forward_block_tags(
+    event_tx: &Sender<NetworkEvent>,
+    tags: &azalea_protocol::common::tags::TagMap,
+) {
+    let key: azalea_registry::identifier::Identifier = "minecraft:block".into();
+    let Some(tags) = tags.0.get(&key) else {
+        return;
+    };
+    let tags = tags
+        .iter()
+        .map(|tag| (tag.name.to_string(), tag.elements.clone()))
+        .collect();
+    let _ = event_tx.try_send(NetworkEvent::BlockTags { tags });
+}
+
 fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -> Option<String> {
     compound.get(key).and_then(|v| match v {
         simdnbt::owned::NbtTag::String(s) => Some(s.to_string()),
@@ -950,10 +977,12 @@ async fn game_loop(
                 if matches!(packet, ClientboundGamePacket::StartConfiguration(_)) {
                     // Vanilla clears the client level before acknowledging
                     // (ClientPacketListener.handleConfigurationStart); chat
-                    // survives the transition. Whatever the game queued goes
-                    // first, then the pending chat acknowledgement.
+                    // survives the transition, block tags don't. Whatever the
+                    // game queued goes first, then the pending chat
+                    // acknowledgement.
                     // TODO: chat events still in flight to the game thread
                     // miss this ack; the next login resets the tracker anyway.
+                    crate::world::block::clear_block_tags();
                     let _ = event_tx.try_send(NetworkEvent::Reconfiguring);
                     while let Ok(out) = outbound_rx.try_recv() {
                         if let Some(frame) =
@@ -998,12 +1027,14 @@ async fn game_loop(
                 {
                     continue;
                 }
-                if let ClientboundGamePacket::UpdateTags(p) = &packet
-                    && let Some(tags) = dialog_tags(&p.tags)
-                {
-                    configured.dialogs = std::sync::Arc::new(configured.dialogs.with_tags(tags));
-                    let _ =
-                        event_tx.try_send(NetworkEvent::DialogRegistry(configured.dialogs.clone()));
+                if let ClientboundGamePacket::UpdateTags(p) = &packet {
+                    if let Some(tags) = dialog_tags(&p.tags) {
+                        configured.dialogs =
+                            std::sync::Arc::new(configured.dialogs.with_tags(tags));
+                        let _ = event_tx
+                            .try_send(NetworkEvent::DialogRegistry(configured.dialogs.clone()));
+                    }
+                    forward_block_tags(event_tx, &p.tags);
                 }
                 if let ClientboundGamePacket::Login(login) = &mut packet {
                     inbound_chat.reset();
@@ -1034,8 +1065,9 @@ fn outbound_frame(
 ) -> Result<Option<Vec<u8>>, ConnectionError> {
     Ok(match out {
         Outbound::Packet(mut packet) => {
-            if let Some(t) = translation {
-                t.remap_outbound(&mut packet);
+            match translation {
+                Some(t) => t.remap_outbound(&mut packet),
+                None => super::bundle_codec::encode_native_outbound(&mut packet),
             }
             Some(serialize_frame(&*packet)?)
         }

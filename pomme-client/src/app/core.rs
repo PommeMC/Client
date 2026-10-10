@@ -20,6 +20,7 @@ use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx};
 use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
 use crate::assets::AssetIndex;
+use crate::attribute::{AttributeInstance, AttributeKind, AttributeMap};
 use crate::dirs::DataDirs;
 use crate::discord::DiscordPresence;
 use crate::entity::components::{LookDirection, Position, Velocity};
@@ -174,6 +175,15 @@ fn apply_server_block(
     );
 }
 
+/// The local player's box as a push target, gated on `LivingEntity.isPushable`
+/// and `EntitySelector.NO_SPECTATORS`.
+fn local_push_box(game: &GameState) -> Option<crate::physics::aabb::Aabb> {
+    (game.player.health > 0.0
+        && !crate::player::is_spectator(game.player.game_mode)
+        && !movement::on_climbable(&game.player, &game.chunk_store))
+    .then(|| game.player.bounding_box())
+}
+
 /// Starts an entity's hurt animation, with a direction for the packets that
 /// carry one. The local player lives outside the entity store.
 fn hurt_entity(game: &mut GameState, id: i32, dir: Option<f32>) {
@@ -310,7 +320,7 @@ pub struct PlayerInputState {
 fn player_input_state(
     input: &InputState,
     analog_move: glam::Vec2,
-    sprinting: bool,
+    sprint_key_down: bool,
 ) -> PlayerInputState {
     PlayerInputState {
         forward: input.key_pressed(KEY_FORWARD) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
@@ -319,8 +329,92 @@ fn player_input_state(
         right: input.key_pressed(KEY_RIGHT) || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
         jump: input.performing_action(Action::Jump),
         shift: input.performing_action(Action::Sneak),
-        sprint: sprinting,
+        sprint: sprint_key_down,
     }
+}
+
+/// `base + value` for a relative field, `value` for an absolute one.
+fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
+    if is_relative { base + value } else { value }
+}
+
+fn resolve_corrected_look(
+    current: LookDirection,
+    y_rot: f32,
+    x_rot: f32,
+    relative_y: bool,
+    relative_x: bool,
+) -> LookDirection {
+    // Vanilla `PositionMoveRotation.calculateAbsolute` clamps pitch before
+    // `Entity.setXRot` applies its own modulo and clamp.
+    LookDirection::new(
+        resolve(current.y_rot_deg(), relative_y, y_rot),
+        resolve(current.x_rot_deg(), relative_x, x_rot).clamp(-90.0, 90.0),
+    )
+}
+
+struct ResolvedPlayerCorrection {
+    position: Position,
+    prev_position: Position,
+    velocity: Velocity,
+    look_dir: LookDirection,
+    prev_look_dir: LookDirection,
+}
+
+fn resolve_player_position_correction(
+    player: &LocalPlayer,
+    change: &azalea_protocol::common::movements::PositionMoveRotation,
+    relative: &azalea_protocol::common::movements::RelativeMovements,
+    is_passenger: bool,
+) -> Option<ResolvedPlayerCorrection> {
+    if is_passenger {
+        return None;
+    }
+
+    // Vanilla `setValuesFromPositionPacket` resolves the old pose through the
+    // same `calculateAbsolute`.
+    let resolve_position = |base: Position| {
+        Position::new(
+            resolve(base.x, relative.x, change.pos.x),
+            resolve(base.y, relative.y, change.pos.y),
+            resolve(base.z, relative.z, change.pos.z),
+        )
+    };
+    let resolve_look = |base| {
+        resolve_corrected_look(
+            base,
+            change.look_direction.y_rot(),
+            change.look_direction.x_rot(),
+            relative.y_rot,
+            relative.x_rot,
+        )
+    };
+    let position = resolve_position(player.position);
+    let prev_position = resolve_position(player.prev_position);
+    let look_dir = resolve_look(player.look_dir);
+    let prev_look_dir = resolve_look(player.prev_look_dir);
+
+    let mut velocity = player.velocity;
+    if relative.rotate_delta {
+        let x_rot_delta = player.look_dir.x_rot_deg() - look_dir.x_rot_deg();
+        let y_rot_delta = player.look_dir.y_rot_deg() - look_dir.y_rot_deg();
+        velocity = velocity
+            .x_rot(x_rot_delta.to_radians() as f64)
+            .y_rot(y_rot_delta.to_radians() as f64);
+    }
+    velocity = Velocity::new(
+        resolve(velocity.x, relative.delta_x, change.delta.x),
+        resolve(velocity.y, relative.delta_y, change.delta.y),
+        resolve(velocity.z, relative.delta_z, change.delta.z),
+    );
+
+    Some(ResolvedPlayerCorrection {
+        position,
+        prev_position,
+        velocity,
+        look_dir,
+        prev_look_dir,
+    })
 }
 
 fn serverbound_player_input(state: &PlayerInputState) -> ServerboundPlayerInput {
@@ -332,6 +426,42 @@ fn serverbound_player_input(state: &PlayerInputState) -> ServerboundPlayerInput 
         jump: state.jump,
         shift: state.shift,
         sprint: state.sprint,
+    }
+}
+
+// GLFW's key-repeat shape, so a held DPad steps like a held arrow key
+// instead of once per rendered frame.
+const MENU_REPEAT_DELAY: f32 = 0.4;
+const MENU_REPEAT_INTERVAL: f32 = 1.0 / 30.0;
+
+/// Edge-plus-repeat stepping for a held direction. The gamepad exposes level
+/// state only, which would step once per frame and tie the rate to the
+/// framerate.
+#[derive(Default)]
+struct RepeatStepper {
+    dir: i32,
+    countdown: f32,
+}
+
+impl RepeatStepper {
+    fn step(&mut self, dir: i32, dt: f32) -> i32 {
+        if dir != self.dir {
+            self.dir = dir;
+            self.countdown = MENU_REPEAT_DELAY;
+            // The press edge steps immediately; a release returns 0.
+            return dir;
+        }
+        if dir == 0 {
+            return 0;
+        }
+        self.countdown -= dt;
+        let mut steps = 0;
+        // `dt` is clamped against stalls by the app loop, so this is bounded.
+        while self.countdown <= 0.0 {
+            self.countdown += MENU_REPEAT_INTERVAL;
+            steps += 1;
+        }
+        steps * dir
     }
 }
 
@@ -350,6 +480,7 @@ pub struct AppCore {
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
     pub time_tick_accumulator: f32,
+    menu_dpad: RepeatStepper,
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
     pub unfocused_since: Option<Instant>,
@@ -498,6 +629,7 @@ impl AppCore {
             audio,
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
+            menu_dpad: RepeatStepper::default(),
             unfocused_since: None,
             mouse_grabbed: false,
             os_grab_stale: false,
@@ -519,6 +651,9 @@ impl AppCore {
     pub fn build_menu_input(&mut self, dt: f32) -> MenuInput {
         let credits_keys_down = credits_key_mask(|code| self.input.key_pressed(code));
         let credits_keys_pressed = credits_key_mask(|code| self.input.key_just_pressed(code));
+        let dpad_dir = i32::from(self.input.gamepad_button_down(gilrs::Button::DPadRight))
+            - i32::from(self.input.gamepad_button_down(gilrs::Button::DPadLeft));
+        let gamepad_steps = self.menu_dpad.step(dpad_dir, dt);
         MenuInput {
             cursor: self.input.cursor_pos(),
             clicked: self.input.left_just_pressed(),
@@ -529,6 +664,7 @@ impl AppCore {
             escape: self.input.escape_pressed(),
             tab: self.input.tab_pressed(),
             f5: self.input.f5_pressed(),
+            gamepad_steps,
             scroll_delta: self.input.consume_menu_scroll(),
             dt,
             credits_keys_down,
@@ -1053,17 +1189,30 @@ impl AppCore {
     /// Rebuilds every asset a pack can override. Only call this once the
     /// active stack has really changed: it waits for device idle, drops the
     /// block cache and rebuilds the texture atlas. Clearing
-    /// `menu.reload_assets` is safe here because the pending local-pack toggle
-    /// it stands for is covered by the reload we just did.
-    fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
+    /// `menu.reload_assets` and `menu.reload_fonts` is safe here because the
+    /// pending toggles they stand for are covered by the reload we just did.
+    pub(crate) fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
         self.menu.active_packs = self.resource_packs.active_pack_info();
-        renderer.reload_assets(&self.data_dirs.game_dir, &self.resource_packs);
+        renderer.reload_assets(
+            &self.data_dirs.game_dir,
+            &self.resource_packs,
+            self.menu.font_options(),
+        );
         self.audio.reload_assets(&self.resource_packs);
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects
             .retain(|_, entry| matches!(entry.content, InlineObjectContent::Head { .. }));
         self.game_dynamic_atlas_keys.clear();
         self.menu.reload_assets = false;
+        self.menu.reload_fonts = false;
+    }
+
+    /// Vanilla `Options.updateFontOptions`: a Font Settings toggle applies at
+    /// once, from the title screen or in game.
+    pub fn apply_font_options(&mut self, renderer: &mut Renderer) {
+        if std::mem::take(&mut self.menu.reload_fonts) {
+            renderer.reload_fonts(&self.resource_packs, self.menu.font_options());
+        }
     }
 
     pub fn drain_network_events(
@@ -1083,18 +1232,17 @@ impl AppCore {
         // chunks stream in, instead of starving behind the load backlog.
         let mut priority_remesh: Vec<(azalea_core::position::ChunkPos, i32)> = Vec::new();
         let mut disconnect_reason: Option<String> = None;
-        let mut processed = 0u32;
         self.drain_player_skin_results(renderer);
 
+        // Vanilla `PacketProcessor.processQueuedPackets`: drain everything
+        // before this frame's ticks.
         while let Ok(event) = rx.try_recv() {
-            processed += 1;
-            if processed > 4096 {
-                break;
-            }
             match event {
                 NetworkEvent::Connected => {
                     if let Some(state) = connect_phase.as_deref_mut() {
                         tracing::info!("Connected to server");
+                        // Ticks restart from zero with the play state.
+                        self.tick_accumulator = 0.0;
                         *state = ConnectionPhase::Loading;
                     } else {
                         tracing::warn!("Unexpected NetworkEvent::Connected, skipping");
@@ -1195,96 +1343,87 @@ impl AppCore {
                     game.chunk_store
                         .set_center(azalea_core::position::ChunkPos::new(x, z));
                 }
+                NetworkEvent::Ping { id } => {
+                    connection.packet_tx.send(ServerboundGamePacket::Pong(
+                        azalea_protocol::packets::game::s_pong::ServerboundPong { id },
+                    ));
+                }
                 NetworkEvent::PlayerPosition {
                     id,
                     change,
                     relative,
                 } => {
-                    fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
-                        if is_relative { base + value } else { value }
-                    }
+                    let is_passenger = game.riding_vehicle_id.is_some();
+                    if let Some(correction) = resolve_player_position_correction(
+                        &game.player,
+                        &change,
+                        &relative,
+                        is_passenger,
+                    ) {
+                        game.player.position = correction.position;
+                        game.player.prev_position = correction.prev_position;
+                        game.player.velocity = correction.velocity;
+                        game.player.look_dir = correction.look_dir;
+                        game.player.prev_look_dir = correction.prev_look_dir;
 
-                    let new_position = Position::new(
-                        resolve(game.player.position.x, relative.x, change.pos.x),
-                        resolve(game.player.position.y, relative.y, change.pos.y),
-                        resolve(game.player.position.z, relative.z, change.pos.z),
-                    );
+                        let to_chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
+                        game.chunk_store
+                            .set_center(azalea_core::position::ChunkPos::new(
+                                to_chunk_coord(correction.position.x),
+                                to_chunk_coord(correction.position.z),
+                            ));
+                        // The camera is the eye, as `sync_camera_pos` keeps it
+                        // every frame; the feet would seed it a block and a half
+                        // low until the first in-game frame.
+                        renderer.reset_camera(game.player.eye_pos(), correction.look_dir);
 
-                    let new_look_dir = LookDirection::new(
-                        resolve(
-                            game.player.look_dir.y_rot_deg(),
-                            relative.y_rot,
-                            change.look_direction.y_rot(),
-                        ),
-                        resolve(
-                            game.player.look_dir.x_rot_deg(),
-                            relative.x_rot,
-                            change.look_direction.x_rot(),
-                        ),
-                    );
-
-                    let new_velocity = {
-                        let mut new_velocity = game.player.velocity;
-                        if relative.rotate_delta {
-                            let x_rot_delta =
-                                game.player.look_dir.x_rot_deg() - new_look_dir.x_rot_deg();
-                            let y_rot_delta =
-                                game.player.look_dir.y_rot_deg() - new_look_dir.y_rot_deg();
-
-                            new_velocity = new_velocity
-                                .x_rot(x_rot_delta.to_radians() as f64)
-                                .y_rot(y_rot_delta.to_radians() as f64);
+                        if !game.position_set {
+                            game.position_set = true;
+                            tracing::info!(
+                                "Player position set to ({:.1}, {:.1}, {:.1})",
+                                correction.position.x,
+                                correction.position.y,
+                                correction.position.z
+                            );
                         }
-                        Velocity::new(
-                            resolve(new_velocity.x, relative.delta_x, change.delta.x),
-                            resolve(new_velocity.y, relative.delta_y, change.delta.y),
-                            resolve(new_velocity.z, relative.delta_z, change.delta.z),
-                        )
-                    };
-
-                    game.player.position = new_position;
-                    game.player.prev_position = game.player.position;
-                    game.player.velocity = new_velocity;
-                    game.player.look_dir = new_look_dir;
-                    game.player.prev_look_dir = game.player.look_dir;
-                    game.interaction.on_teleport();
-
-                    let to_chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
-                    game.chunk_store
-                        .set_center(azalea_core::position::ChunkPos::new(
-                            to_chunk_coord(new_position.x),
-                            to_chunk_coord(new_position.z),
-                        ));
-
-                    // The camera is the eye, as `sync_camera_pos` keeps it
-                    // every frame; the feet would seed it a block and a half
-                    // low until the first in-game frame.
-                    renderer.reset_camera(game.player.eye_pos(), new_look_dir);
-
-                    if !game.position_set {
-                        game.position_set = true;
-                        tracing::info!(
-                            "Player position set to ({:.1}, {:.1}, {:.1})",
-                            new_position.x,
-                            new_position.y,
-                            new_position.z
-                        );
                     }
 
-                    // Vanilla `handleMovePlayer` sends the acknowledgement and
-                    // this echo back to back once the pose is applied (a 26.3
-                    // wire folds the two).
+                    // Vanilla `handleMovePlayer` acks and echoes the pose even
+                    // when mounted (a 26.3 wire folds the two).
                     connection.packet_tx.send(ServerboundGamePacket::AcceptTeleportation(
                         azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation { id },
                     ));
                     connection.packet_tx.send(ServerboundGamePacket::MovePlayerPosRot(
                         azalea_protocol::packets::game::s_move_player_pos_rot::ServerboundMovePlayerPosRot {
-                            pos: new_position.into(),
+                            pos: game.player.position.into(),
+                            look_direction: game.player.look_dir.into(),
+                            flags: Default::default(),
+                        },
+                    ));
+                    game.interaction.on_teleport();
+                }
+                NetworkEvent::PlayerRotation {
+                    y_rot,
+                    relative_y,
+                    x_rot,
+                    relative_x,
+                } => {
+                    let new_look_dir = resolve_corrected_look(
+                        game.player.look_dir,
+                        y_rot,
+                        x_rot,
+                        relative_y,
+                        relative_x,
+                    );
+
+                    // Vanilla `handleRotatePlayer`: set, `setOldRot`, then ack.
+                    game.player.look_dir = new_look_dir;
+                    game.player.prev_look_dir = new_look_dir;
+                    renderer.reset_camera(game.player.eye_pos(), new_look_dir);
+                    connection.packet_tx.send(ServerboundGamePacket::MovePlayerRot(
+                        azalea_protocol::packets::game::s_move_player_rot::ServerboundMovePlayerRot {
                             look_direction: new_look_dir.into(),
-                            flags: azalea_protocol::common::movements::MoveFlags {
-                                on_ground: false,
-                                horizontal_collision: false,
-                            },
+                            flags: Default::default(),
                         },
                     ));
                 }
@@ -1359,9 +1498,34 @@ impl AppCore {
                 } => {
                     game.waypoints.apply(operation, waypoint);
                 }
-                NetworkEvent::EntityArmorUpdate { entity_id, armor } => {
+                NetworkEvent::EntityAttributesUpdate {
+                    entity_id,
+                    snapshots,
+                } => {
+                    let dirty = |kind| snapshots.iter().any(|snapshot| snapshot.attribute == kind);
                     if entity_id == game.player.entity_id {
-                        game.player.armor = armor;
+                        for snapshot in &snapshots {
+                            if !game.player.attributes.apply_snapshot(snapshot) {
+                                tracing::warn!(
+                                    "Server tried to update unsupported player attribute {:?}",
+                                    snapshot.attribute
+                                );
+                            }
+                        }
+                        sync_player_attribute_mirrors(&mut game.player, dirty);
+                    }
+
+                    if let Some(entity) = game.entity_store.living.get_mut(&entity_id) {
+                        for snapshot in &snapshots {
+                            entity.attributes.apply_snapshot_or_insert(snapshot);
+                        }
+                        sync_living_attribute_mirrors(
+                            &entity.attributes,
+                            &mut entity.health,
+                            &mut entity.max_health,
+                            &mut entity.camera_distance,
+                            dirty,
+                        );
                     }
                 }
                 NetworkEvent::UpdateMobEffect { entity_id, effect } => {
@@ -1380,23 +1544,13 @@ impl AppCore {
                 NetworkEvent::ClearMobEffects => {
                     game.player.effects.clear();
                 }
-                NetworkEvent::EntityMaxHealthUpdate {
-                    entity_id,
-                    max_health,
-                } => {
-                    if entity_id == game.player.entity_id {
-                        game.player.max_health = max_health;
-                    }
-                    if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
-                        e.max_health = max_health;
-                    }
-                }
                 NetworkEvent::ContainerContent {
                     container_id,
                     items,
                     carried,
                     state_id,
                 } => {
+                    game.drop_bundle_selection(container_id, None);
                     // State ids are per-menu (vanilla scopes them to the menu
                     // the packet addresses); the rendered carried stack is the
                     // open menu's, so an inventory sync must not clobber it.
@@ -1424,22 +1578,32 @@ impl AppCore {
                 NetworkEvent::DialogRegistry(registry) => {
                     game.dialog_registry = registry;
                 }
+                NetworkEvent::BlockTags { tags } => {
+                    crate::world::block::replace_block_tags(tags);
+                }
                 NetworkEvent::ContainerSlot {
                     container_id,
                     index,
                     item,
                     state_id,
                 } => {
-                    // Direct inventory updates (-2) carry no menu state id.
-                    if container_id == 0 || container_id == -2 {
+                    game.drop_bundle_selection(container_id, Some(index));
+                    if container_id == 0 {
                         game.player.inventory.set_slot(index as usize, item);
                         game.sync_container_from_inventory();
-                        if container_id == 0 {
-                            game.inventory_state_id = state_id;
-                        }
+                        game.inventory_state_id = state_id;
                     } else if game.open_menu_id() == Some(container_id) {
                         game.set_menu_slot(index as usize, item);
                         game.set_container_state_id(state_id);
+                    }
+                }
+                NetworkEvent::PlayerInventorySlot { index, item } => {
+                    if let Some(slot) =
+                        crate::player::inventory::menu_slot_for_inventory_index(index)
+                    {
+                        game.drop_bundle_selection(0, Some(slot as u16));
+                        game.player.inventory.set_slot(slot, item);
+                        game.sync_container_from_inventory();
                     }
                 }
                 NetworkEvent::HeldSlot { slot } => {
@@ -1677,6 +1841,7 @@ impl AppCore {
                     suffix,
                     color,
                     fill_color,
+                    collision_rule,
                     members,
                 } => {
                     game.scoreboard.set_team(
@@ -1686,6 +1851,7 @@ impl AppCore {
                         suffix,
                         color,
                         fill_color,
+                        collision_rule,
                         members,
                     );
                 }
@@ -1923,18 +2089,15 @@ impl AppCore {
                     game.entity_positions.insert(id, position);
                     game.silent_entities.remove(&id);
                     if crate::entity::is_living_mob(&entity_type) {
-                        let player_uuid = (entity_type
-                            == azalea_registry::builtin::EntityKind::Player)
-                            .then_some(uuid);
                         game.entity_store.spawn_living(
                             id,
                             entity_type,
                             position,
                             LookDirection::new(head_y_rot_deg, x_rot_deg),
                             y_rot_deg,
-                            player_uuid,
+                            uuid,
                         );
-                        if let Some(uuid) = player_uuid {
+                        if entity_type == azalea_registry::builtin::EntityKind::Player {
                             let textures = game
                                 .tab_list
                                 .players
@@ -1991,8 +2154,18 @@ impl AppCore {
                         .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
                 }
                 NetworkEvent::EntityMotion { id, velocity } => {
-                    game.item_entity_store.set_motion(id, velocity);
-                    game.entity_store.set_living_motion(id, velocity);
+                    // Vanilla `Entity.lerpMotion` sets velocity; the local
+                    // player lives outside the entity stores.
+                    if id == game.player.entity_id {
+                        game.player.velocity = velocity.into();
+                    } else {
+                        game.item_entity_store.set_motion(id, velocity);
+                        game.entity_store.set_living_motion(id, velocity);
+                    }
+                }
+                NetworkEvent::PlayerKnockback { delta } => {
+                    // Vanilla `handleExplosion`: `LocalPlayer.addDeltaMovement`.
+                    *game.player.velocity += delta;
                 }
                 NetworkEvent::EntityTeleported {
                     id,
@@ -2096,12 +2269,6 @@ impl AppCore {
                         .set_item_data(id, item_name, item_id, damage, count, stack);
                 }
                 NetworkEvent::EntityData { id, index, value } => {
-                    if id == game.player.entity_id
-                        && index == 8
-                        && let crate::entity::MetaValue::Byte(flags) = value
-                    {
-                        game.interaction.sync_using_item_flag(flags & 1 != 0);
-                    }
                     if index == 4
                         && let crate::entity::MetaValue::Bool(silent) = &value
                     {
@@ -2112,18 +2279,30 @@ impl AppCore {
                             game.silent_entities.remove(&id);
                         }
                     }
+                    if id == game.player.entity_id
+                        && let crate::entity::MetaValue::Byte(flags) = value
+                    {
+                        match index {
+                            0 => game.player.sync_shared_flags(flags),
+                            8 => game.interaction.sync_using_item_flag(flags & 1 != 0),
+                            _ => {}
+                        }
+                    }
                     game.entity_store.apply_entity_data(id, index, value);
                 }
                 NetworkEvent::EntityPose { id, is_crouching } => {
                     game.entity_store.set_crouching(id, is_crouching);
                 }
-                // TODO: remote players' sleeping pose rendering.
                 NetworkEvent::EntitySleepingPos { id, pos } => {
+                    game.entity_store.set_sleeping_pos(id, pos);
                     if id == game.player.entity_id {
-                        game.player.sleeping_pos = pos;
+                        game.player.set_sleeping_pos(pos);
                     }
                 }
                 NetworkEvent::EntityWakeUp { id } => {
+                    // TODO: vanilla `stopSleeping` also stands a remote sleeper
+                    // up beside the bed, facing it, with pitch 0.
+                    game.entity_store.set_sleeping_pos(id, None);
                     if id == game.player.entity_id {
                         game.player.wake_up();
                     }
@@ -2239,6 +2418,9 @@ impl AppCore {
                     game.player.entity_id = entity_id;
                     game.hardcore = hardcore;
                     game.show_death_screen = show_death_screen;
+                    // The fresh LocalPlayer starts from supplier defaults.
+                    game.player.attributes = AttributeMap::player();
+                    sync_player_attribute_mirrors(&mut game.player, |_| false);
                     // Vanilla `handleLogin` builds a new LocalPlayer on slot 0,
                     // with the server's SetHeldSlot to follow. Ours lives in the
                     // app-wide input state, so a reconnect would otherwise
@@ -2274,15 +2456,12 @@ impl AppCore {
                     if !keep_entity_data {
                         game.player.absorption = 0.0;
                     }
-                    // Vanilla always copies attribute base values to the fresh
-                    // player; bit 1 controls extra values/modifiers. Pomme only
-                    // models the max-health base, so it remains unchanged here.
-                    let _ = keep_attribute_modifiers;
                     game.dead = false;
                     // `startWaitingForNewLevel` replaces an open dialog here too.
                     game.server_dialog = None;
                     game.start_level_load();
                     game.player.reset_for_respawn(keep_entity_data);
+                    sync_respawn_attributes(&mut game.player, keep_attribute_modifiers);
                     game.interaction.reset_player_transients_for_respawn();
                     // A fresh LocalPlayer gets a fresh KeyboardInput and packet
                     // baselines even when bit 2 keeps its entity data, so a kept
@@ -2352,6 +2531,7 @@ impl AppCore {
                     // links carry over.
                     game.server_dialog = None;
                     game.configuring = true;
+                    game.reset_sleep_for_level_teardown();
                     self.clear_server_ui(game, renderer);
                     self.apply_cursor_grab(window, Some(game));
                 }
@@ -2536,6 +2716,55 @@ impl AppCore {
         connection: &ConnectionHandle,
         game: &mut GameState,
     ) {
+        // `handleLogin` adds the local player before any remote entity, so
+        // `ClientLevel.tickEntities` ticks it first and pushes land in next
+        // tick's travel.
+        // TODO: a same-dimension `handleRespawn` re-adds it after them.
+        self.tick_local_player(renderer, connection, game);
+        self.tick_remote_entities(game);
+    }
+
+    /// `LivingEntity.pushEntities` from every remote living entity's tick,
+    /// filtered by `EntitySelector.pushableBy` with the local player as target.
+    fn tick_remote_entities(&self, game: &mut GameState) {
+        let push_box = local_push_box(game);
+        let local_name = self.user.username.as_str();
+        let vehicle = game.riding_vehicle_id;
+        let (scoreboard, tab_list) = (&game.scoreboard, &game.tab_list);
+        let pusher_allowed = |id: i32, entity: &crate::entity::LivingEntity| {
+            // `isPassengerOfSameVehicle`. TODO: co-passengers.
+            if Some(id) == vehicle {
+                return false;
+            }
+            let pusher_name = match entity.player_uuid {
+                Some(uuid) => match tab_list.players.get(&uuid) {
+                    // `Player.tick` sets `noPhysics` for spectators, so
+                    // `Entity.push` returns before any impulse.
+                    Some(info) if crate::player::is_spectator(info.game_mode) => return false,
+                    Some(info) => info.name.clone(),
+                    // TODO: keep the spawn-time profile name; a player
+                    // dropped from the tab list falls back to no team.
+                    None => return true,
+                },
+                None => entity.uuid.to_string(),
+            };
+            scoreboard.pushable_by(&pusher_name, local_name)
+        };
+        *game.player.velocity += game.entity_store.tick_living(
+            &game.chunk_store,
+            game.player.position,
+            push_box,
+            pusher_allowed,
+            game.server_simulation_distance,
+        );
+    }
+
+    fn tick_local_player(
+        &mut self,
+        renderer: &mut Renderer,
+        connection: &ConnectionHandle,
+        game: &mut GameState,
+    ) {
         if game.death_screen_open {
             if game.death_confirm {
                 game.death_confirm_ticks = game.death_confirm_ticks.saturating_add(1);
@@ -2554,14 +2783,6 @@ impl AppCore {
         } else {
             1.0
         });
-
-        // Vanilla ClientLevel keeps ticking other entities while the local
-        // player is dead.
-        game.entity_store.tick_living(
-            &game.chunk_store,
-            game.player.position,
-            game.server_simulation_distance,
-        );
 
         // Vanilla `LocalPlayer.tick` returns immediately until the client has
         // loaded: no physics, no interaction, and no input, sprint or movement
@@ -2590,8 +2811,9 @@ impl AppCore {
                 .inventory
                 .held_stack(self.input.selected_slot())
                 .cloned();
-            game.interaction.tick_dead_living_state(
+            game.interaction.tick_using_item(
                 held_stack.as_ref(),
+                &connection.packet_tx,
                 &self.audio,
                 &game.chunk_store,
                 game.player.position.into(),
@@ -2609,7 +2831,12 @@ impl AppCore {
             // LocalPlayer.tick still executes its post-super player state and
             // input/position packet tail once.
             if !removed_this_tick {
-                movement::tick_dead(&mut game.player, &game.chunk_store);
+                movement::tick_dead(
+                    &mut game.player,
+                    &game.chunk_store,
+                    &game.block_entity_anim,
+                    game.riding_vehicle_id.is_some(),
+                );
                 crate::entity::stop_walk_animation(
                     &mut game.player_walk_pos,
                     &mut game.player_walk_speed,
@@ -2732,52 +2959,53 @@ impl AppCore {
             game.player.jump_riding_scale = 0.0;
         }
 
-        game.player.look_dir = renderer.camera_look_dir();
+        let camera_look = renderer.camera_look_dir();
+        game.player.look_dir = if game.player.is_sleeping() {
+            // `LivingEntity.tick` forces xRot to 0 while sleeping.
+            LookDirection::new(camera_look.y_rot_deg(), 0.0)
+        } else {
+            camera_look
+        };
 
-        if game.chunk_load_bench.is_some() {
-            game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
-        }
-        movement::tick(
-            &mut game.player,
-            input,
-            &game.chunk_store,
-            game.interaction.use_speed_multiplier(),
-            game.interaction.slow_due_to_using_item(),
-        );
-        let dx = game.player.position.x - game.player.prev_position.x;
-        let dz = game.player.position.z - game.player.prev_position.z;
-        crate::entity::update_walk_animation(
-            dx,
-            dz,
-            &mut game.player_walk_pos,
-            &mut game.player_walk_speed,
-            &mut game.player_prev_walk_speed,
-        );
-        game.player.tick_bob(dx, dz, false);
-
-        Self::send_abilities_packet(connection, game);
-        Self::send_input_packet(input, connection, game);
-        self.send_sprint_command(connection, game);
-        self.send_position_packet(connection, game);
-
-        let eye_pos = game.player.eye_pos();
+        // Vanilla `Minecraft.tick`: pick and keybinds run before the entity
+        // tick, so interaction packets precede the movement packet.
+        let held_stack = game
+            .player
+            .inventory
+            .held_stack(input.selected_slot())
+            .cloned();
+        let held_item = held_stack
+            .as_ref()
+            .map(|data| crate::player::inventory::item_resource_name(data.kind));
         game.interaction.update_target(
-            eye_pos,
+            game.player.eye_pos(),
             game.player.look_dir,
             &game.chunk_store,
             &game.entity_store,
+            &game.player.attributes,
             crate::player::is_creative(game.player.game_mode),
+            held_item.as_deref(),
         );
-
-        let held_stack = game.player.inventory.held_stack(input.selected_slot());
-        let place_block = held_stack.and_then(|data| {
-            let name = crate::player::inventory::item_resource_name(data.kind);
-            renderer.registry().placeable_block_for_item(&name)
-        });
+        let legacy_mining = crate::tool::legacy_mining(
+            held_stack.as_ref(),
+            game.player
+                .inventory
+                .armor_slots()
+                .iter()
+                .filter_map(|stack| stack.as_present()),
+            crate::version::session_protocol(),
+        );
+        let place_block = held_item
+            .as_deref()
+            .and_then(|name| renderer.registry().placeable_block_for_item(name));
         let hands_empty = held_stack.is_none() && game.player.inventory.offhand().is_empty();
-
         let player_aabb = game.player.bounding_box();
-        let dirty = game.interaction.tick(
+        let mut effects = crate::player::interaction::BreakEffects {
+            particles: &mut game.particle_store,
+            registry: renderer.registry(),
+            biome_climate: &game.biome_climate,
+        };
+        let dirty = game.interaction.tick_actions(
             input,
             &game.chunk_store,
             &connection.packet_tx,
@@ -2790,15 +3018,59 @@ impl AppCore {
             crate::player::is_creative(game.player.game_mode),
             game.player.food,
             input.selected_slot(),
-            held_stack,
+            held_stack.as_ref(),
+            &game.player.attributes,
+            &game.player.effects,
+            game.player.eyes_in_water,
+            legacy_mining,
             place_block,
             hands_empty,
-            &mut crate::player::interaction::BreakEffects {
-                particles: &mut game.particle_store,
-                registry: renderer.registry(),
-                biome_climate: &game.biome_climate,
-            },
+            &mut effects,
         );
+        game.interaction.tick_using_item(
+            held_stack.as_ref(),
+            &connection.packet_tx,
+            &self.audio,
+            &game.chunk_store,
+            game.player.position.into(),
+            game.player.eye_pos().into(),
+            game.player.look_dir,
+            &mut effects,
+        );
+
+        if game.chunk_load_bench.is_some() {
+            game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
+        }
+        let vehicle = game.riding_vehicle_id.map(|_| movement::Vehicle {
+            jumpable: game.riding_jumpable_vehicle(),
+        });
+        movement::tick(
+            &mut game.player,
+            input,
+            &game.chunk_store,
+            &game.block_entity_anim,
+            game.interaction.use_speed_multiplier(),
+            game.interaction.slow_due_to_using_item(),
+            vehicle,
+        );
+        let dx = game.player.position.x - game.player.prev_position.x;
+        let dz = game.player.position.z - game.player.prev_position.z;
+        crate::entity::update_walk_animation(
+            dx,
+            dz,
+            &mut game.player_walk_pos,
+            &mut game.player_walk_speed,
+            &mut game.player_prev_walk_speed,
+        );
+        game.player.tick_bob(dx, dz, false);
+
+        game.interaction
+            .tick_player_state(input.is_cursor_captured(), held_stack.as_ref());
+
+        Self::send_abilities_packet(connection, game);
+        Self::send_input_packet(input, connection, game);
+        self.send_sprint_command(connection, game);
+        self.send_position_packet(connection, game);
         if !dirty.is_empty() {
             let min_y = game.chunk_store.min_y();
             let n = game.chunk_store.section_count();
@@ -2858,7 +3130,8 @@ impl AppCore {
             .get_gamepad_movement_axes()
             .unwrap_or(glam::Vec2::ZERO);
 
-        let current = player_input_state(input, analog_move, game.player.sprinting);
+        let current =
+            player_input_state(input, analog_move, input.performing_action(Action::Sprint));
 
         if current != game.last_sent_input {
             sender.send(ServerboundGamePacket::PlayerInput(
@@ -2868,16 +3141,18 @@ impl AppCore {
         }
     }
 
+    /// `ServerboundPlayerCommandPacket(player, action)`.
     fn send_player_command(
         &self,
         connection: &ConnectionHandle,
+        game: &GameState,
         action: azalea_protocol::packets::game::s_player_command::Action,
     ) {
         connection
             .packet_tx
             .send(ServerboundGamePacket::PlayerCommand(
                 azalea_protocol::packets::game::s_player_command::ServerboundPlayerCommand {
-                    id: azalea_core::entity_id::MinecraftEntityId(0),
+                    id: azalea_core::entity_id::MinecraftEntityId(game.player.entity_id),
                     action,
                     data: 0,
                 },
@@ -2892,15 +3167,16 @@ impl AppCore {
             } else {
                 azalea_protocol::packets::game::s_player_command::Action::StopSprinting
             };
-            self.send_player_command(connection, action);
+            self.send_player_command(connection, game, action);
             game.was_sprinting = sprinting;
         }
     }
 
     /// Vanilla InBedChatScreen: leaving bed sends PlayerCommand STOP_SLEEPING.
-    pub fn send_stop_sleeping(&self, connection: &ConnectionHandle) {
+    pub fn send_stop_sleeping(&self, connection: &ConnectionHandle, game: &GameState) {
         self.send_player_command(
             connection,
+            game,
             azalea_protocol::packets::game::s_player_command::Action::StopSleeping,
         );
     }
@@ -3011,6 +3287,70 @@ pub(crate) fn accepted_player_chat_tag(
     })
 }
 
+fn sync_respawn_attributes(player: &mut LocalPlayer, keep_attribute_modifiers: bool) {
+    if keep_attribute_modifiers {
+        // `assignAllValues` dirties every instance.
+        sync_player_attribute_mirrors(player, |_| true);
+    } else {
+        // Vanilla constructs a fresh player attribute map, then copies only
+        // old base values into it; only a base that differs from the
+        // supplier default dirties its instance.
+        player.attributes.clear_modifiers();
+        let dirty: Vec<AttributeKind> = AttributeKind::ALL
+            .into_iter()
+            .filter(|&kind| {
+                player
+                    .attributes
+                    .instance(kind)
+                    .map(AttributeInstance::base_value)
+                    != kind.player_base_value()
+            })
+            .collect();
+        sync_player_attribute_mirrors(player, |kind| dirty.contains(&kind));
+    }
+}
+
+/// Refresh the fields current consumers read from an attribute map. `dirty`
+/// gates vanilla `LivingEntity.onAttributeUpdated`'s clamps, which only run
+/// for instances that changed.
+fn sync_living_attribute_mirrors(
+    attributes: &AttributeMap,
+    health: &mut f32,
+    max_health: &mut f32,
+    camera_distance: &mut f32,
+    dirty: impl Fn(AttributeKind) -> bool,
+) {
+    if let Some(value) = attributes.value(AttributeKind::MaxHealth) {
+        *max_health = value as f32;
+        if dirty(AttributeKind::MaxHealth) {
+            *health = health.min(*max_health);
+        }
+    }
+    if let Some(value) = attributes.value(AttributeKind::CameraDistance) {
+        *camera_distance = value as f32;
+    }
+    // TODO: SCALE refreshes dimensions in vanilla once Pomme consumes it.
+}
+
+fn sync_player_attribute_mirrors(player: &mut LocalPlayer, dirty: impl Fn(AttributeKind) -> bool) {
+    let attributes = &player.attributes;
+    sync_living_attribute_mirrors(
+        attributes,
+        &mut player.health,
+        &mut player.max_health,
+        &mut player.camera_distance,
+        &dirty,
+    );
+    if let Some(value) = attributes.value(AttributeKind::Armor) {
+        player.armor = value.floor() as u32;
+    }
+    if dirty(AttributeKind::MaxAbsorption)
+        && let Some(value) = attributes.value(AttributeKind::MaxAbsorption)
+    {
+        player.absorption = player.absorption.min(value as f32);
+    }
+}
+
 /// New `server_render_distance` for a server view-distance announcement, or
 /// `None` to keep the current one. Some servers announce min(our request,
 /// server max); an echo of our own request carries no cap information and
@@ -3061,14 +3401,21 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CursorOp, DeathRoute, HeadProfile, accepted_player_chat_tag, cursor_step, death_route,
-        player_input_state, resolve_head_profile, server_view_distance_update,
-        serverbound_player_input,
+        CursorOp, DeathRoute, HeadProfile, MENU_REPEAT_DELAY, MENU_REPEAT_INTERVAL, RepeatStepper,
+        accepted_player_chat_tag, cursor_step, death_route, player_input_state,
+        resolve_corrected_look, resolve_head_profile, resolve_player_position_correction,
+        server_view_distance_update, serverbound_player_input, sync_living_attribute_mirrors,
+        sync_player_attribute_mirrors, sync_respawn_attributes,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
+    use crate::attribute::{
+        AttributeKind, AttributeMap, AttributeModifier, AttributeModifierOperation,
+        AttributeSnapshot,
+    };
+    use crate::entity::components::{LookDirection, Position, Velocity};
     use crate::net::chat_security::SignedChatBody;
     use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry, TabList};
-    use crate::player::valid_player_name;
+    use crate::player::{LocalPlayer, valid_player_name};
     use crate::ui::chat::ChatMessageTag;
 
     fn tab_list_with(uuid: uuid::Uuid, name: &str, textures: Option<&str>) -> TabList {
@@ -3164,6 +3511,55 @@ mod tests {
             }
             .is_static()
         );
+    }
+
+    /// Total steps from holding `dir` for `seconds` at a fixed frame time.
+    fn held_steps(dir: i32, seconds: f32, dt: f32) -> i32 {
+        let mut stepper = RepeatStepper::default();
+        let mut total = 0;
+        let mut elapsed = 0.0;
+        while elapsed < seconds {
+            total += stepper.step(dir, dt);
+            elapsed += dt;
+        }
+        total
+    }
+
+    #[test]
+    fn dpad_press_steps_once_then_waits_for_the_repeat_delay() {
+        let dt = 1.0 / 60.0;
+        // Only the press itself until the delay is up, then repeats.
+        assert_eq!(held_steps(1, MENU_REPEAT_DELAY - dt, dt), 1);
+        assert!(held_steps(1, MENU_REPEAT_DELAY + MENU_REPEAT_INTERVAL * 2.0, dt) > 1);
+    }
+
+    /// The regression this guards: reading the DPad as level state stepped
+    /// once per rendered frame, so a second of holding gave 60 steps at 60fps
+    /// and 300 at 300fps. Sampling a fixed repeat at different frame times
+    /// still lands a step either side of a boundary, hence the tolerance.
+    #[test]
+    fn dpad_repeat_rate_does_not_depend_on_the_framerate() {
+        // One press plus a second minus the delay, repeating at the interval.
+        let expected = 1 + ((1.0 - MENU_REPEAT_DELAY) / MENU_REPEAT_INTERVAL) as i32;
+        for dt in [1.0 / 30.0, 1.0 / 60.0, 1.0 / 144.0, 1.0 / 300.0] {
+            let steps = held_steps(1, 1.0, dt);
+            assert!(
+                (steps - expected).abs() <= 1,
+                "{steps} steps in a second at dt {dt}, expected about {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn releasing_re_arms_the_delay_and_a_flip_steps_immediately() {
+        let dt = 1.0 / 60.0;
+        let mut stepper = RepeatStepper::default();
+        assert_eq!(stepper.step(1, dt), 1);
+        assert_eq!(stepper.step(0, dt), 0);
+        assert_eq!(stepper.step(1, dt), 1);
+        // Right to Left with no neutral frame between.
+        assert_eq!(stepper.step(-1, dt), -1);
+        assert_eq!(stepper.step(-1, dt), 0);
     }
 
     #[test]
@@ -3293,6 +3689,59 @@ mod tests {
     }
 
     #[test]
+    fn correction_pitch_clamps_before_entity_setter_modulo() {
+        let current = LookDirection::new(30.0, 80.0);
+
+        let absolute = resolve_corrected_look(current, 720.0, 360.0, false, false);
+        assert_eq!(absolute.y_rot_deg(), 720.0);
+        assert_eq!(absolute.x_rot_deg(), 90.0);
+
+        let relative = resolve_corrected_look(current, 400.0, 50.0, true, true);
+        assert_eq!(relative.y_rot_deg(), 430.0);
+        assert_eq!(relative.x_rot_deg(), 90.0);
+    }
+
+    #[test]
+    fn mounted_player_position_correction_is_acknowledged_without_local_application() {
+        use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+
+        let mut player = LocalPlayer::new();
+        player.position = Position::new(1.0, 2.0, 3.0);
+        player.prev_position = Position::new(0.5, 1.5, 2.5);
+        player.velocity = Velocity::new(0.1, 0.2, 0.3);
+        player.look_dir = LookDirection::new(10.0, 20.0);
+        player.prev_look_dir = LookDirection::new(5.0, 15.0);
+
+        let change = PositionMoveRotation {
+            pos: azalea_core::position::Vec3::new(100.0, 200.0, 300.0),
+            delta: azalea_core::position::Vec3::new(1.0, 2.0, 3.0),
+            look_direction: azalea_entity::LookDirection::new(90.0, 45.0),
+        };
+        let relative = RelativeMovements::all_absolute();
+
+        let unmounted = resolve_player_position_correction(&player, &change, &relative, false)
+            .expect("unmounted correction applies");
+        assert_eq!(unmounted.position, Position::new(100.0, 200.0, 300.0));
+        assert_eq!(unmounted.velocity, Velocity::new(1.0, 2.0, 3.0));
+        assert_eq!(unmounted.look_dir, LookDirection::new(90.0, 45.0));
+
+        assert!(
+            resolve_player_position_correction(&player, &change, &relative, true).is_none(),
+            "vanilla mounted clients acknowledge the teleport but keep current local PosRot"
+        );
+    }
+
+    #[test]
+    fn player_input_packet_uses_physical_sprint_key_state() {
+        let input = InputState::released();
+        let pressed = serverbound_player_input(&player_input_state(&input, glam::Vec2::ZERO, true));
+        let released =
+            serverbound_player_input(&player_input_state(&input, glam::Vec2::ZERO, false));
+        assert!(pressed.sprint);
+        assert!(!released.sprint);
+    }
+
+    #[test]
     fn server_view_distance_updates() {
         // Echo of our own request carries no cap information.
         assert_eq!(server_view_distance_update(12, 12), None);
@@ -3304,5 +3753,79 @@ mod tests {
         assert_eq!(server_view_distance_update(20, 12), Some(20));
         // Wire values past the chunk grid's extent clamp to it.
         assert_eq!(server_view_distance_update(300, 12), Some(128));
+    }
+
+    #[test]
+    fn max_health_updates_clamp_current_health() {
+        let mut attributes = AttributeMap::player();
+        let (mut health, mut max_health, mut camera_distance) = (18.0, 20.0, 4.0);
+        let mut set_max_health = |base, dirty: bool| {
+            assert!(attributes.apply_snapshot(&AttributeSnapshot {
+                attribute: AttributeKind::MaxHealth,
+                base,
+                modifiers: vec![],
+            }));
+            sync_living_attribute_mirrors(
+                &attributes,
+                &mut health,
+                &mut max_health,
+                &mut camera_distance,
+                |_| dirty,
+            );
+            (health, max_health)
+        };
+        assert_eq!(set_max_health(10.0, false), (18.0, 10.0));
+        assert_eq!(set_max_health(10.0, true), (10.0, 10.0));
+        assert_eq!(set_max_health(30.0, true), (10.0, 30.0));
+    }
+
+    #[test]
+    fn respawn_sync_applies_attributes_after_player_reset() {
+        let mut player = LocalPlayer::new();
+        assert!(player.attributes.apply_snapshot(&AttributeSnapshot {
+            attribute: AttributeKind::Armor,
+            base: 6.0,
+            modifiers: vec![AttributeModifier {
+                id: "minecraft:test_armor".into(),
+                amount: 2.0,
+                operation: AttributeModifierOperation::Value,
+            }],
+        }));
+        assert!(player.attributes.apply_snapshot(&AttributeSnapshot {
+            attribute: AttributeKind::MaxHealth,
+            base: 10.0,
+            modifiers: vec![AttributeModifier {
+                id: "minecraft:test_health".into(),
+                amount: 4.0,
+                operation: AttributeModifierOperation::Value,
+            }],
+        }));
+
+        player.reset_for_respawn(false);
+        sync_respawn_attributes(&mut player, true);
+        assert_eq!(player.armor, 8);
+        assert_eq!(player.max_health, 14.0);
+        assert_eq!(player.health, 14.0);
+
+        player.reset_for_respawn(false);
+        sync_respawn_attributes(&mut player, false);
+        assert_eq!(player.armor, 6);
+        assert_eq!(player.max_health, 10.0);
+        assert_eq!(player.health, 10.0);
+    }
+
+    #[test]
+    fn max_absorption_update_clamps_absorption() {
+        let mut player = LocalPlayer::new();
+        player.absorption = 8.0;
+        assert!(player.attributes.apply_snapshot(&AttributeSnapshot {
+            attribute: AttributeKind::MaxAbsorption,
+            base: 4.0,
+            modifiers: vec![],
+        }));
+        sync_player_attribute_mirrors(&mut player, |_| false);
+        assert_eq!(player.absorption, 8.0);
+        sync_player_attribute_mirrors(&mut player, |kind| kind == AttributeKind::MaxAbsorption);
+        assert_eq!(player.absorption, 4.0);
     }
 }

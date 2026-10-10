@@ -620,6 +620,12 @@ pub async fn set_launch_with_console(launch: bool) -> Result<(), String> {
 
 #[tauri::command]
 #[specta::specta]
+pub async fn set_selected_account_uuid(uuid: Option<String>) -> Result<(), String> {
+    LauncherSettings::update(|s| s.selected_account_uuid = uuid).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn ping_server(address: String) -> crate::ping::ServerStatus {
     crate::ping::ping_server(&address).await
 }

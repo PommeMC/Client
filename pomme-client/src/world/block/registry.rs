@@ -88,6 +88,7 @@ pub struct BlockRegistry {
     item_models: HashMap<String, BakedModel>,
     flat_item_textures: std::collections::HashSet<String>,
     flat_item_texture_keys: HashMap<String, Vec<String>>,
+    item_gui_transforms: HashMap<String, model::DisplayTransform>,
     item_ground_transforms: HashMap<String, glam::Mat4>,
     item_tint_sources: HashMap<String, Vec<model::ItemTintSource>>,
     /// Block name -> its single `BlockState`, for one-state blocks (see
@@ -138,6 +139,7 @@ impl BlockRegistry {
         let item_models = baked_items.models;
         let flat_item_textures = baked_items.generated_textures;
         let flat_item_texture_keys = baked_items.flat_texture_keys;
+        let item_gui_transforms = baked_items.gui_transforms;
         let item_ground_transforms = baked_items.ground_transforms;
         let item_tint_sources = baked_items.tint_sources;
 
@@ -148,6 +150,7 @@ impl BlockRegistry {
             item_models,
             flat_item_textures,
             flat_item_texture_keys,
+            item_gui_transforms,
             item_ground_transforms,
             item_tint_sources,
             placeable_blocks: build_placeable_blocks(),
@@ -205,6 +208,13 @@ impl BlockRegistry {
         self.item_tint_sources.get(name).map_or(0, Vec::len)
     }
 
+    pub(crate) fn get_item_gui_transform(&self, name: &str) -> model::DisplayTransform {
+        self.item_gui_transforms
+            .get(name)
+            .copied()
+            .unwrap_or(model::DisplayTransform::IDENTITY)
+    }
+
     pub fn get_item_ground_transform(&self, name: &str) -> Option<glam::Mat4> {
         self.item_ground_transforms.get(name).copied()
     }
@@ -248,22 +258,14 @@ impl BlockRegistry {
         if quads.is_empty() { None } else { Some(quads) }
     }
 
-    fn baked_model_flag(&self, state: BlockState, f: impl Fn(&BakedModel) -> bool) -> bool {
-        if super::is_air(state) {
-            return false;
-        }
-        self.get_baked_model(state).map(f).unwrap_or(false)
-    }
-
     pub fn is_opaque_full_cube(&self, state: BlockState) -> bool {
-        self.baked_model_flag(state, |m| m.is_full_cube)
+        !super::is_air(state) && self.get_baked_model(state).is_some_and(|m| m.is_full_cube)
     }
 
-    /// Whether `state` culls a neighbor's adjacent face. Unlike
-    /// [`Self::is_opaque_full_cube`], non-occluding blocks like leaves return
-    /// false even though they bake as full cubes.
+    /// Whether `state` culls a neighbor's adjacent face: a full cube that can
+    /// occlude, so `noOcclusion` cubes like glass and leaves don't.
     pub fn occludes_neighbor(&self, state: BlockState) -> bool {
-        self.baked_model_flag(state, |m| m.occludes)
+        self.is_opaque_full_cube(state) && super::light_props(state).can_occlude
     }
 
     pub fn texture_names(&self) -> impl Iterator<Item = &str> + '_ {

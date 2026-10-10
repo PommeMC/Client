@@ -13,6 +13,7 @@ use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::{CUBE_FACE_DIRS, cube_face_geometry};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::world::block::block_position_offset;
 use crate::world::block::model::{BakedQuad, Direction, direction_from_positions};
 use crate::world::block::registry::BlockRegistry;
 
@@ -325,6 +326,16 @@ impl BlockOverlayPipeline {
     }
 }
 
+/// Anchor-relative (see Camera::anchor) model origin, including the block's
+/// position offset like `LevelRenderer`'s breaking pass. Crack UVs project from
+/// block-local coordinates, so neither shift touches the texture.
+fn overlay_origin(state: BlockState, pos: &BlockPos, anchor: glam::DVec3) -> [f32; 3] {
+    let model_offset = block_position_offset(state, pos.x, pos.z);
+    (glam::DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64) + model_offset - anchor)
+        .as_vec3()
+        .to_array()
+}
+
 /// Builds the crumbling overlay for a block by re-tessellating its model with
 /// vanilla's per-face crack projection (`SheetedDecalTextureGenerator`). There
 /// is no geometry inflation: the overlay sits exactly on the block and relies
@@ -335,11 +346,7 @@ fn build_overlay_vertices(
     pos: &BlockPos,
     anchor: glam::DVec3,
 ) -> Vec<OverlayVertex> {
-    // Anchor-relative (see Camera::anchor); the crack UVs are projected from
-    // block-local coordinates, so the rebase never touches the texture.
-    let origin = (glam::DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64) - anchor)
-        .as_vec3()
-        .to_array();
+    let origin = overlay_origin(state, pos, anchor);
     let mut verts = Vec::new();
 
     if let Some(model) = registry.get_baked_model(state) {
@@ -630,6 +637,19 @@ fn create_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn randomized_model_offset_moves_destroy_overlay_with_bamboo() {
+        crate::world::block::init("26.2");
+        let bamboo = crate::world::block::find_state("bamboo", &[]);
+        let pos = BlockPos::new(5, 64, -7);
+        let origin = overlay_origin(bamboo, &pos, glam::DVec3::ZERO);
+        let offset = block_position_offset(bamboo, pos.x, pos.z);
+
+        assert_ne!(offset, glam::DVec3::ZERO);
+        let block = glam::DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64);
+        assert_eq!(origin, (block + offset).as_vec3().to_array());
+    }
 
     /// Each axis-aligned cube face must project to exactly one crack tile: its
     /// four corners span 1.0 in both texture axes (no axis collapse, scale 1).

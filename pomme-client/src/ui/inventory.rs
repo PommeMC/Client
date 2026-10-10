@@ -34,6 +34,7 @@ pub struct InventoryResult {
     /// release emits a start/add.../end sequence).
     pub ops: Vec<ClickOperation>,
     pub player_preview: PlayerPreview,
+    pub hovered: Option<u16>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -132,6 +133,7 @@ pub fn build_inventory(
     InventoryResult {
         clicked_outside,
         ops,
+        hovered,
         player_preview: PlayerPreview {
             rect: [
                 panel.ox + 26.0 * panel.scale,

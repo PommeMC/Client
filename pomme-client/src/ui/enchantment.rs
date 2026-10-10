@@ -316,6 +316,7 @@ pub fn build_enchantment(
             clicked_outside,
             ops,
             button,
+            hovered,
         },
         book: BookPreview {
             rect: [
