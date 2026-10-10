@@ -4,6 +4,7 @@ use crate::ui::components::debug::column::DebugColumnSide;
 use crate::ui::components::debug::displayer::{DebugFact, FACT_NAME_COLOR};
 use crate::ui::text::TextSpan;
 
+#[allow(unused)] // TODO(debug-overlay)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DebugGroup {
     Help,

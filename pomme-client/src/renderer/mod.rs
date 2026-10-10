@@ -1001,6 +1001,7 @@ impl Renderer {
     /// Sections actually drawn after frustum culling (lags a few frames). The
     /// graph's occluded sections are omitted before the cull, so this also
     /// drops when occlusion hides geometry — useful for the F3 overlay.
+    #[allow(unused)] // TODO(debug-overlay)
     pub fn sections_drawn(&self) -> u32 {
         self.chunk_buffers.sections_drawn()
     }

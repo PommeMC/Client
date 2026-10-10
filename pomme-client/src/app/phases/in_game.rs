@@ -2381,65 +2381,6 @@ pub fn update_game(
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
-    let debug = if false {
-        Some(hud::DebugInfo {
-            fps: gfx.fps_counter.display_fps(),
-            position: *game.player.position,
-            y_rot_deg: gfx.renderer.camera_look_dir().y_rot_deg(),
-            x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
-            target_block: game.interaction.target.and_then(|t| {
-                let HitResult::Block(t) = t else {
-                    return None;
-                };
-                let state =
-                    game.chunk_store
-                        .get_block_state(t.block_pos.x, t.block_pos.y, t.block_pos.z);
-                let props = crate::world::block::block_properties(state)
-                    .entries()
-                    .map(|(k, v)| format!("{k}: {v}"))
-                    .collect();
-                Some((
-                    t.block_pos,
-                    t.face,
-                    crate::world::block::block_id(state).to_string(),
-                    props,
-                ))
-            }),
-            chunk_count: gfx.renderer.loaded_chunk_count(),
-            sections_drawn: gfx.renderer.sections_drawn(),
-            occlusion_on: game.chunk_occlusion_enabled,
-            mesh_gate: game.vis_valid.then(|| {
-                // Among in-frustum columns: sections we mesh vs sections skipped as
-                // occluded (the per-section occlusion win). Middle slot unused.
-                let n = game.chunk_store.section_count() as u32;
-                let mut visible = 0u32;
-                let mut hidden = 0u32;
-                for (pos, &mask) in &game.vis_mask {
-                    if game.vis_tiers.get(pos).copied().unwrap_or(0) == 0 {
-                        let v = mask.count_ones();
-                        visible += v;
-                        hidden += n.saturating_sub(v);
-                    }
-                }
-                (visible, 0, hidden)
-            }),
-            gpu_name: gfx.renderer.gpu_name(),
-            vulkan_version: gfx.renderer.vulkan_version(),
-            screen_w: gfx.renderer.screen_width(),
-            screen_h: gfx.renderer.screen_height(),
-            timings: Some(hud::FrameTimings {
-                frame_ms: gfx.renderer.last_timings().frame_ms,
-                fence_ms: gfx.renderer.last_timings().fence_ms,
-                acquire_ms: gfx.renderer.last_timings().acquire_ms,
-                cull_ms: gfx.renderer.last_timings().cull_ms,
-                draw_ms: gfx.renderer.last_timings().draw_ms,
-                present_ms: gfx.renderer.last_timings().present_ms,
-            }),
-        })
-    } else {
-        None
-    };
-
     // The chunk-load benchmark renders a clean top-down view: only terrain, no HUD,
     // entities/player, held item, clouds, or weather — and skipping them also keeps
     // the measured frame times honest.

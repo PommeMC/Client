@@ -1,8 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use azalea_core::position::BlockPos;
 use azalea_inventory::ItemStack;
-use glam::DVec3;
 
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
 use crate::mob_effect::ActiveMobEffects;
@@ -24,15 +22,6 @@ pub enum ContextualBarKind<'a> {
     JumpableVehicle {
         charge: f32,
     },
-}
-
-pub struct FrameTimings {
-    pub frame_ms: f32,
-    pub fence_ms: f32,
-    pub acquire_ms: f32,
-    pub cull_ms: f32,
-    pub draw_ms: f32,
-    pub present_ms: f32,
 }
 
 type ScoreKey = (String, String);
@@ -299,31 +288,6 @@ impl Scoreboard {
         }
         line
     }
-}
-
-pub struct DebugInfo<'a> {
-    pub fps: u32,
-    pub position: DVec3,
-    pub y_rot_deg: f32,
-    pub x_rot_deg: f32,
-    pub target_block: Option<(
-        BlockPos,
-        azalea_core::direction::Direction,
-        String,
-        Vec<String>,
-    )>,
-    pub chunk_count: u32,
-    pub sections_drawn: u32,
-    pub occlusion_on: bool,
-    /// Mesh-scheduling tiers (visible, margin, hidden) of loaded columns when
-    /// the visibility gate is active; `None` while it falls back to meshing
-    /// all.
-    pub mesh_gate: Option<(u32, u32, u32)>,
-    pub gpu_name: &'a str,
-    pub vulkan_version: &'a str,
-    pub screen_w: u32,
-    pub screen_h: u32,
-    pub timings: Option<FrameTimings>,
 }
 
 /// Vanilla `AttackIndicatorStatus`; the u8 values are its ordinals.
