@@ -39,7 +39,7 @@ use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
 use crate::singleplayer::World;
 use crate::ui::chat::{ChatState, ChatUiAction};
-use crate::ui::components::debug::entries::TpsDebugInfo;
+use crate::ui::components::debug::entries::{SystemSpecsInfo, TpsDebugInfo};
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{self, common, hud};
@@ -3361,6 +3361,7 @@ pub fn update_game(
             core,
             gfx,
             Some(TpsDebugInfo::new(connection, world)),
+            SystemSpecsInfo::new(&gfx.window, &gfx.renderer),
         ),
     );
 
