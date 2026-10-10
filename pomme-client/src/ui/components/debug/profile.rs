@@ -25,7 +25,12 @@ impl DebugScreenProfile {
                 | DId::SystemSpecs
                 | DId::PlayerPosition
                 | DId::PlayerSectionPosition
-                | DId::SimplePerformanceImpactors => DebugEntryStatus::InOverlay,
+                | DId::SimplePerformanceImpactors
+
+                // Custom
+                | DId::FrameTimings
+                => DebugEntryStatus::InOverlay,
+
                 _ => DebugEntryStatus::Never,
             },
 

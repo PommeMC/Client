@@ -21,6 +21,9 @@ pub enum DebugGroup {
     HeightMap,
     ChunkGeneration,
     SpawnCounts,
+
+    // Custom
+    FrameTimings,
 }
 
 impl DebugGroup {
@@ -41,6 +44,9 @@ impl DebugGroup {
             DebugGroup::HeightMap => "Heightmap",
             DebugGroup::ChunkGeneration => "Chunk Generation",
             DebugGroup::SpawnCounts => "Entity Spawn Counts",
+
+            // Custom
+            DebugGroup::FrameTimings => "Frame Timings",
         }
     }
 
@@ -62,6 +68,9 @@ impl DebugGroup {
             DebugGroup::HeightMap => Some([0.0, 0.6667, 1.0, 0.0]), // rgba(0, 170, 255, 0.00)
             DebugGroup::ChunkGeneration => Some([0.6, 1.0, 0.6667, 0.0]), // rgba(153, 255, 170, 0.00)
             DebugGroup::SpawnCounts => Some([1.0, 0.2667, 0.2667, 0.0]), // rgba(255, 68, 68, 0.00)
+
+            // Custom
+            DebugGroup::FrameTimings => Some([0.4, 0.8, 1.0, 0.0]),
         }
     }
 
@@ -82,6 +91,9 @@ impl DebugGroup {
             DebugGroup::HeightMap => None,
             DebugGroup::ChunkGeneration => None,
             DebugGroup::SpawnCounts => None,
+
+            // Custom
+            DebugGroup::FrameTimings => Some(DebugColumnSide::Right),
         }
     }
 }

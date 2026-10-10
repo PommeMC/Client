@@ -68,6 +68,9 @@ pub enum DebugEntryId {
     VisualizeChunksOnServer,
     VisualizeSkyLightSections,
     ChunkSectionVisibility,
+
+    // Custom
+    FrameTimings,
 }
 
 impl DebugEntryId {
@@ -121,6 +124,8 @@ impl DebugEntryId {
         Self::VisualizeChunksOnServer,
         Self::VisualizeSkyLightSections,
         Self::ChunkSectionVisibility,
+        // Custom
+        Self::FrameTimings,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -174,6 +179,8 @@ impl DebugEntryId {
             Self::VisualizeChunksOnServer => "visualize_chunks_on_server",
             Self::VisualizeSkyLightSections => "visualize_sky_light_sections",
             Self::ChunkSectionVisibility => "chunk_section_visibility",
+            // Custom
+            Self::FrameTimings => "frame_timings",
         }
     }
 
@@ -405,6 +412,24 @@ impl DebugEntryId {
             }
 
             // TODO(debug-overlay)
+
+            // Custom
+            Self::FrameTimings => {
+                let t = info.frame_timings;
+                let rows = [
+                    ("Frame", t.frame_ms),
+                    ("Fence", t.fence_ms),
+                    ("Acquire", t.acquire_ms),
+                    ("Cull", t.cull_ms),
+                    ("Draw", t.draw_ms),
+                    ("Present", t.present_ms),
+                ];
+                for (name, ms) in rows {
+                    displayer.add_fact_to_group(DebugGroup::FrameTimings, name, |f| {
+                        f.value(format!("{ms:.2}")).text("ms");
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -427,6 +452,8 @@ pub struct DebugInfo<'a> {
     pub system: SystemSpecsInfo<'a>,
 
     pub position: Option<PositionDebugInfo<'a>>,
+
+    pub frame_timings: FrameTimings,
 }
 
 impl<'a> DebugInfo<'a> {
@@ -457,6 +484,15 @@ impl<'a> DebugInfo<'a> {
             system,
 
             position: game.map(|game| PositionDebugInfo::new(game, gfx)),
+
+            frame_timings: FrameTimings {
+                frame_ms: gfx.renderer.last_timings().frame_ms,
+                fence_ms: gfx.renderer.last_timings().fence_ms,
+                acquire_ms: gfx.renderer.last_timings().acquire_ms,
+                cull_ms: gfx.renderer.last_timings().cull_ms,
+                draw_ms: gfx.renderer.last_timings().draw_ms,
+                present_ms: gfx.renderer.last_timings().present_ms,
+            },
         }
     }
 }
@@ -578,6 +614,16 @@ impl<'a> PositionDebugInfo<'a> {
             force_loaded_chunks: 0, // TODO(debug-overlay)
         }
     }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct FrameTimings {
+    pub frame_ms: f32,
+    pub fence_ms: f32,
+    pub acquire_ms: f32,
+    pub cull_ms: f32,
+    pub draw_ms: f32,
+    pub present_ms: f32,
 }
 
 fn first_line(s: &str) -> &str {
