@@ -252,7 +252,7 @@ pub enum NetworkEvent {
         prefix: Vec<crate::ui::text::TextSpan>,
         suffix: Vec<crate::ui::text::TextSpan>,
         color: [f32; 4],
-        fill_color: Option<[f32; 4]>,
+        fill_color: Option<u32>,
         collision_rule: crate::ui::hud::CollisionRule,
         members: Option<Vec<String>>,
     },

@@ -84,7 +84,7 @@ pub(crate) struct ScoreboardTeam {
     color: [f32; 4],
     /// None for RESET / non-color formatting (no icon fill in the spectator
     /// menu), like vanilla's `PlayerTeam.getColor()` Optional.
-    pub(crate) fill_color: Option<[f32; 4]>,
+    pub(crate) fill_color: Option<u32>,
     collision_rule: CollisionRule,
     pub(crate) members: HashSet<String>,
 }
@@ -162,7 +162,7 @@ impl Scoreboard {
         prefix: Vec<TextSpan>,
         suffix: Vec<TextSpan>,
         color: [f32; 4],
-        fill_color: Option<[f32; 4]>,
+        fill_color: Option<u32>,
         collision_rule: CollisionRule,
         members: Option<Vec<String>>,
     ) {
@@ -272,13 +272,10 @@ impl Scoreboard {
     /// Vanilla `TeamColor`: a real team chat color if the member belongs to a
     /// team whose formatting carries one, otherwise no owner-derived color.
     pub fn member_team_color(&self, member: &str) -> Option<u32> {
-        let color = self
-            .teams
+        self.teams
             .values()
             .find(|team| team.members.contains(member))?
-            .fill_color?;
-        let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
-        Some((channel(color[0]) << 16) | (channel(color[1]) << 8) | channel(color[2]))
+            .fill_color
     }
 
     fn line(&self, owner: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
@@ -1749,7 +1746,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             WHITE,
-            fill.map(crate::ui::common::rgb),
+            fill,
             CollisionRule::Always,
             Some(vec!["Player".into()]),
         );

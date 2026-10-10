@@ -2755,7 +2755,7 @@ fn translate_set_player_team_764() {
                     .collect::<String>(),
                 "[R] "
             );
-            assert_eq!(fill_color, Some(crate::ui::common::rgb(0xFF5555)));
+            assert_eq!(fill_color, Some(0xFF5555));
             assert_eq!(members, Some(vec!["bob".to_string()]));
         }
         _ => panic!("wrong packet"),

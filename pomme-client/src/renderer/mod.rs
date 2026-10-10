@@ -1450,17 +1450,11 @@ impl Renderer {
             );
             true
         } else {
-            let texture_keys = self
-                .registry
-                .get_flat_item_texture_keys(name)
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| vec![format!("item/{name}")]);
             self.item_entity_pipeline.ensure_flat_mesh(
                 &self.ctx.device,
                 &self.ctx.allocator,
                 name,
-                &texture_keys,
-                self.registry.item_tint_count(name),
+                &self.registry.flat_item_layers(name),
                 &self.atlas.uv_map,
             );
             false
@@ -1898,7 +1892,6 @@ impl Renderer {
                     cmd,
                     frame,
                     item_entities,
-                    &self.registry,
                 );
 
                 // Break particles draw after entities but before translucent
@@ -2205,16 +2198,11 @@ fn warm_item_meshes(
         if let Some(model) = registry.get_item_model(name) {
             item_entity_pipeline.ensure_mesh(device, allocator, name, model, uv_map);
         } else {
-            let texture_keys = registry
-                .get_flat_item_texture_keys(name)
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| vec![format!("item/{name}")]);
             item_entity_pipeline.ensure_flat_mesh(
                 device,
                 allocator,
                 name,
-                &texture_keys,
-                registry.item_tint_count(name),
+                &registry.flat_item_layers(name),
                 uv_map,
             );
         }

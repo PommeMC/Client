@@ -84,7 +84,8 @@ fn pack_normal(normal: glam::Vec3) -> [i8; 4] {
 
 pub struct ItemRenderInfo {
     pub item_name: String,
-    pub item_stack: Option<azalea_inventory::ItemStackData>,
+    /// Evaluated tint palette, shared by every copy of one dropped stack.
+    pub tints: Arc<[u32]>,
     pub model_matrix: Mat4,
     pub light: f32,
     pub nether_lighting: bool,
@@ -524,7 +525,7 @@ pub(super) fn push_model_light(
     let tint_range = [item_tints.base, item_tints.count];
     cmd.push_constants(
         layout,
-        vk::ShaderStageFlags::Vertex,
+        vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
         72,
         bytemuck::bytes_of(&tint_range),
     );
@@ -661,8 +662,7 @@ impl ItemEntityPipeline {
         device: &vk::Device,
         allocator: &Arc<Mutex<Allocator>>,
         name: &str,
-        texture_keys: &[String],
-        tint_count: usize,
+        layers: &[Option<String>],
         uv_map: &AtlasUVMap,
     ) {
         if self.meshes.contains_key(name) {
@@ -671,13 +671,18 @@ impl ItemEntityPipeline {
 
         let mut vertices = Vec::new();
         let mut translucent = false;
-        for (layer, texture_key) in texture_keys.iter().enumerate() {
+        for (layer, texture_key) in layers.iter().enumerate() {
+            let Some(texture_key) = texture_key.as_deref() else {
+                continue;
+            };
             if !uv_map.has_region(texture_key) {
                 continue;
             }
             let region = uv_map.get_region(texture_key);
             translucent |= region.translucent;
-            let tint_index = (layer < tint_count).then_some(layer as u32);
+            // Vanilla gives layerN tintindex N; the shader leaves indices past
+            // the palette untinted.
+            let tint_index = Some(layer as u32);
             let mut layer_vertices = uv_map
                 .sprite_alpha_mask(texture_key)
                 .map(|mask| build_extruded_item_mask(mask, region, tint_index))
@@ -698,24 +703,17 @@ impl ItemEntityPipeline {
         cmd: vk::CommandBuffer,
         frame: usize,
         items: &[ItemRenderInfo],
-        registry: &crate::world::block::registry::BlockRegistry,
     ) {
         if items.is_empty() {
             return;
         }
 
-        // Dropped item entities are not LivingEntity owners in vanilla, so a
-        // `team` tint source falls back to the JSON default here.
-        let palettes: Vec<Vec<u32>> = items
-            .iter()
-            .map(|item| registry.item_tint_palette(&item.item_name, item.item_stack.as_ref(), None))
-            .collect();
-        let required_colors = palettes.iter().map(Vec::len).sum();
+        let required_colors = items.iter().map(|item| item.tints.len()).sum();
         self.shared
             .begin_tint_frame(device, allocator, frame, required_colors);
-        let tint_ranges: Vec<_> = palettes
+        let tint_ranges: Vec<_> = items
             .iter()
-            .map(|palette| self.shared.push_tints(frame, palette))
+            .map(|item| self.shared.push_tints(frame, &item.tints))
             .collect();
 
         for (pipeline, translucent) in [(self.cutout, false), (self.translucent, true)] {

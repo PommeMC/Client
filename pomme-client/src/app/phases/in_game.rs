@@ -4040,6 +4040,7 @@ fn dropped_item_geometry(renderer: &Renderer, item_name: &str) -> (glam::Mat4, f
 #[allow(clippy::too_many_arguments)]
 fn emit_item_copies(
     infos: &mut Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo>,
+    registry: &crate::world::block::registry::BlockRegistry,
     item_name: &str,
     item_id: u32,
     damage: i32,
@@ -4065,10 +4066,15 @@ fn emit_item_copies(
 
     let base = glam::Mat4::from_translation(anchor_rel_pos + glam::Vec3::new(0.0, hover_y, 0.0))
         * glam::Mat4::from_rotation_y(spin);
+    // Dropped item entities are not LivingEntity owners in vanilla, so a
+    // `team` tint source falls back to the JSON default here.
+    let tints: std::sync::Arc<[u32]> = registry
+        .item_tint_palette(item_name, item_stack, None)
+        .into();
     let mut push = |copy_offset: glam::Mat4| {
         infos.push(ItemRenderInfo {
             item_name: item_name.to_string(),
-            item_stack: item_stack.cloned(),
+            tints: tints.clone(),
             model_matrix: base * copy_offset * ground_transform,
             light,
             nether_lighting,
@@ -4117,6 +4123,7 @@ fn build_item_render_infos(
         let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &item.item_name);
         emit_item_copies(
             &mut infos,
+            renderer.registry(),
             &item.item_name,
             item.item_id,
             item.damage,
@@ -4141,6 +4148,7 @@ fn build_item_render_infos(
         let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &pickup.item_name);
         emit_item_copies(
             &mut infos,
+            renderer.registry(),
             &pickup.item_name,
             pickup.item_id,
             pickup.damage,

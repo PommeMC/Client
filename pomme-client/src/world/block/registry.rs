@@ -87,7 +87,7 @@ pub struct BlockRegistry {
     multipart: HashMap<String, Vec<model::MultipartEntry>>,
     item_models: HashMap<String, BakedModel>,
     flat_item_textures: std::collections::HashSet<String>,
-    flat_item_texture_keys: HashMap<String, Vec<String>>,
+    flat_item_texture_keys: HashMap<String, Vec<Option<String>>>,
     item_gui_transforms: HashMap<String, model::DisplayTransform>,
     item_ground_transforms: HashMap<String, glam::Mat4>,
     item_tint_sources: HashMap<String, Vec<model::ItemTintSource>>,
@@ -180,8 +180,13 @@ impl BlockRegistry {
         self.flat_item_textures.iter().map(String::as_str)
     }
 
-    pub fn get_flat_item_texture_keys(&self, name: &str) -> Option<&[String]> {
-        self.flat_item_texture_keys.get(name).map(Vec::as_slice)
+    /// A flat item's layer textures indexed by layer (`None` = unresolvable),
+    /// defaulting to the item's own sprite.
+    pub fn flat_item_layers(&self, name: &str) -> Vec<Option<String>> {
+        self.flat_item_texture_keys
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| vec![Some(format!("item/{name}"))])
     }
 
     /// Evaluate the selected item model's tint-source list for this stack.
@@ -202,10 +207,6 @@ impl BlockRegistry {
                     .collect()
             })
             .unwrap_or_default()
-    }
-
-    pub fn item_tint_count(&self, name: &str) -> usize {
-        self.item_tint_sources.get(name).map_or(0, Vec::len)
     }
 
     pub(crate) fn get_item_gui_transform(&self, name: &str) -> model::DisplayTransform {

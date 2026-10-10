@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use super::registry::{FaceTextures, Tint};
 use crate::assets::{AssetId, AssetIndex, resolve_asset_path_with_packs};
+use crate::renderer::chunk::mesher::Colormap;
 
 #[derive(Deserialize)]
 struct BlockstateFile {
@@ -506,7 +507,7 @@ pub fn bake_all_models(
 pub struct BakedItemModels {
     pub models: HashMap<String, BakedModel>,
     pub generated_textures: HashSet<String>,
-    pub flat_texture_keys: HashMap<String, Vec<String>>,
+    pub flat_texture_keys: HashMap<String, Vec<Option<String>>>,
     pub(crate) gui_transforms: HashMap<String, DisplayTransform>,
     pub ground_transforms: HashMap<String, Mat4>,
     pub tint_sources: HashMap<String, Vec<ItemTintSource>>,
@@ -552,36 +553,6 @@ fn item_definition_names(
                 .map(str::to_owned)
         })
         .collect()
-}
-
-fn load_grass_colormap(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-) -> Option<Vec<[u8; 3]>> {
-    let path = resolve_asset_path_with_packs(
-        jar_assets_dir,
-        asset_index,
-        "minecraft/textures/colormap/grass.png",
-        packs,
-    );
-    crate::renderer::util::load_png(&path).map(|(data, _, _)| {
-        data.chunks(4)
-            .take(256 * 256)
-            .map(|pixel| [pixel[0], pixel[1], pixel[2]])
-            .collect()
-    })
-}
-
-fn grass_color(colormap: Option<&[[u8; 3]]>, temperature: f32, downfall: f32) -> u32 {
-    let temperature = temperature.clamp(0.0, 1.0);
-    let downfall = downfall.clamp(0.0, 1.0) * temperature;
-    let x = ((1.0 - temperature) * 255.0) as usize;
-    let y = ((1.0 - downfall) * 255.0) as usize;
-    let Some(pixel) = colormap.and_then(|pixels| pixels.get(y * 256 + x)) else {
-        return 0x91BD59;
-    };
-    ((pixel[0] as u32) << 16) | ((pixel[1] as u32) << 8) | pixel[2] as u32
 }
 
 fn opaque(color: u32) -> u32 {
@@ -636,7 +607,7 @@ fn required_unit_float(value: &serde_json::Value, field: &str) -> Result<f32, St
 
 fn parse_item_tint_sources(
     values: &[serde_json::Value],
-    grass_colormap: Option<&[[u8; 3]]>,
+    grass_colormap: &Colormap,
 ) -> Result<Vec<ItemTintSource>, String> {
     values
         .iter()
@@ -651,8 +622,7 @@ fn parse_item_tint_sources(
                     value, "value",
                 )?))),
                 "grass" => Ok(ItemTintSource::Grass {
-                    color: opaque(grass_color(
-                        grass_colormap,
+                    color: opaque(grass_colormap.rgb(
                         required_unit_float(value, "temperature")?,
                         required_unit_float(value, "downfall")?,
                     )),
@@ -701,11 +671,16 @@ pub fn bake_item_models(
 ) -> BakedItemModels {
     let mut item_models: HashMap<String, BakedModel> = HashMap::new();
     let mut flat_item_textures: HashSet<String> = HashSet::new();
-    let mut flat_keys: HashMap<String, Vec<String>> = HashMap::new();
+    let mut flat_keys: HashMap<String, Vec<Option<String>>> = HashMap::new();
     let mut gui_transforms: HashMap<String, DisplayTransform> = HashMap::new();
     let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut tint_sources: HashMap<String, Vec<ItemTintSource>> = HashMap::new();
-    let grass_colormap = load_grass_colormap(jar_assets_dir, asset_index, packs);
+    let grass_colormap = Colormap::load(
+        jar_assets_dir,
+        asset_index,
+        "minecraft/textures/colormap/grass.png",
+        packs,
+    );
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
 
     let mut bake = |name: &str, parts: &[ModelPart]| {
@@ -750,7 +725,7 @@ pub fn bake_item_models(
                     part.path
                 ),
             }
-            let part_tints = match parse_item_tint_sources(&part.tints, grass_colormap.as_deref()) {
+            let part_tints = match parse_item_tint_sources(&part.tints, &grass_colormap) {
                 Ok(tints) => tints,
                 Err(error) => {
                     tracing::error!("Couldn't parse item model '{name}': {error}");
@@ -762,17 +737,19 @@ pub fn bake_item_models(
             // tint index N to layerN, so keep every layer in order instead of
             // collapsing the item to layer0.
             if parts.len() == 1 && resolved.elements.is_empty() {
+                // Unresolvable layers stay as `None` so position == layer.
                 let mut keys = Vec::new();
                 for layer in 0..5 {
                     let Some(value) = resolved.textures.get(&format!("layer{layer}")) else {
                         break;
                     };
-                    if let Some(key) = texture_to_name(value) {
+                    let key = texture_to_name(value);
+                    if let Some(key) = &key {
                         flat_item_textures.insert(key.clone());
-                        keys.push(key);
                     }
+                    keys.push(key);
                 }
-                if !keys.is_empty() {
+                if keys.iter().any(Option::is_some) {
                     flat_keys.insert(name.to_string(), keys);
                 }
                 item_tints.extend(part_tints);
@@ -1135,8 +1112,10 @@ fn collect_model_parts(json: &serde_json::Value) -> Vec<ModelPart> {
     if let Some(node) = json.get("model") {
         collect_parts_from_node(node, None, &mut parts);
     }
-    if parts.is_empty()
-        && let Some(node) = find_first_item_model_node(json)
+    if !parts.is_empty() {
+        return parts;
+    }
+    if let Some(node) = find_first_item_model_node(json)
         && let Some(path) = node.get("model").and_then(|value| value.as_str())
     {
         parts.push(ModelPart {
@@ -1147,6 +1126,13 @@ fn collect_model_parts(json: &serde_json::Value) -> Vec<ModelPart> {
                 .and_then(|value| value.as_array())
                 .cloned()
                 .unwrap_or_default(),
+        });
+    } else if let Some(path) = first_item_model_ref(json) {
+        // A special renderer's `base` carries its transforms but no tints.
+        parts.push(ModelPart {
+            path,
+            transform: None,
+            tints: Vec::new(),
         });
     }
     parts
@@ -2429,6 +2415,22 @@ mod tests {
     }
 
     #[test]
+    fn special_model_falls_back_to_its_base() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"model":{
+                "type":"minecraft:special",
+                "base":"minecraft:item/template_shulker_box",
+                "model":{"type":"minecraft:shulker_box"}
+            }}"#,
+        )
+        .unwrap();
+        let parts = collect_model_parts(&json);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].path, "item/template_shulker_box");
+        assert!(parts[0].tints.is_empty());
+    }
+
+    #[test]
     fn vanilla_block_tint_sources_match_26_2_registration() {
         assert_eq!(determine_tint("fern", 0), Tint::Grass);
         assert_eq!(determine_tint("bush", 0), Tint::Grass);
@@ -2500,7 +2502,7 @@ mod tests {
         let parts = collect_model_parts(&json);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].path, "item/tinted");
-        let tints = parse_item_tint_sources(&parts[0].tints, None).unwrap();
+        let tints = parse_item_tint_sources(&parts[0].tints, &Colormap::fallback()).unwrap();
         assert_eq!(
             tints,
             vec![
@@ -2525,7 +2527,7 @@ mod tests {
             }),
             serde_json::json!({"type": "minecraft:team", "default": 0x616263}),
         ];
-        let tints = parse_item_tint_sources(&values, None).unwrap();
+        let tints = parse_item_tint_sources(&values, &Colormap::fallback()).unwrap();
         assert_eq!(tints.len(), values.len());
         assert_eq!(
             tints[5],
@@ -2555,7 +2557,7 @@ mod tests {
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].path, "item/plain");
         assert_eq!(
-            parse_item_tint_sources(&parts[0].tints, None).unwrap(),
+            parse_item_tint_sources(&parts[0].tints, &Colormap::fallback()).unwrap(),
             vec![ItemTintSource::Constant(0xFFABCDEF)]
         );
     }
@@ -2570,7 +2572,7 @@ mod tests {
                 "temperature": 0.5,
                 "downfall": 1.0
             })],
-            Some(&colormap),
+            &Colormap::from_pixels(colormap),
         )
         .unwrap();
         assert_eq!(tint, vec![ItemTintSource::Grass { color: 0xFF91BD59 }]);
@@ -2591,8 +2593,11 @@ mod tests {
     #[test]
     fn item_tint_parser_rejects_missing_required_fields_and_invalid_ranges() {
         assert!(
-            parse_item_tint_sources(&[serde_json::json!({"type": "minecraft:dye"})], None,)
-                .is_err()
+            parse_item_tint_sources(
+                &[serde_json::json!({"type": "minecraft:dye"})],
+                &Colormap::fallback(),
+            )
+            .is_err()
         );
         assert!(
             parse_item_tint_sources(
@@ -2601,7 +2606,7 @@ mod tests {
                     "temperature": 1.1,
                     "downfall": 1.0
                 })],
-                None,
+                &Colormap::fallback(),
             )
             .is_err()
         );
@@ -2612,7 +2617,7 @@ mod tests {
                     "index": -1,
                     "default": 0xffffff
                 })],
-                None,
+                &Colormap::fallback(),
             )
             .is_err()
         );
@@ -2681,7 +2686,7 @@ mod tests {
     use crate::test_util::test_temp_dir;
 
     #[test]
-    fn generated_item_layers_stop_at_first_missing_layer() {
+    fn generated_item_layers_keep_their_layer_positions() {
         let root = test_temp_dir("generated_layer_gap");
         let jar = root.join("jar");
         let items = jar.join("minecraft/items");
@@ -2704,12 +2709,41 @@ mod tests {
             }"#,
         )
         .unwrap();
+        // An unresolvable layer keeps its slot so layer2 still gets tintindex 2.
+        std::fs::write(
+            items.join("unresolved.json"),
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:item/unresolved"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            models.join("unresolved.json"),
+            r##"{
+                "parent":"minecraft:item/generated",
+                "textures":{
+                    "layer0":"minecraft:item/zero",
+                    "layer1":"#missing",
+                    "layer2":"minecraft:item/two"
+                }
+            }"##,
+        )
+        .unwrap();
         std::fs::write(models.join("generated.json"), r#"{}"#).unwrap();
 
         let baked = bake_item_models(&jar, &None, None);
         assert_eq!(
             baked.flat_texture_keys.get("holey").map(Vec::as_slice),
-            Some(["item/zero".to_string()].as_slice())
+            Some([Some("item/zero".to_string())].as_slice())
+        );
+        assert_eq!(
+            baked.flat_texture_keys.get("unresolved").map(Vec::as_slice),
+            Some(
+                [
+                    Some("item/zero".to_string()),
+                    None,
+                    Some("item/two".to_string()),
+                ]
+                .as_slice()
+            )
         );
 
         std::fs::remove_dir_all(root).unwrap();
@@ -2794,11 +2828,11 @@ mod tests {
         let baked = bake_item_models(&jar, &None, Some(&packs));
         assert_eq!(
             baked.flat_texture_keys.get("test_item").map(Vec::as_slice),
-            Some(["other:item/replacement".to_string()].as_slice())
+            Some([Some("other:item/replacement".to_string())].as_slice())
         );
         assert_eq!(
             baked.flat_texture_keys.get("pack_only").map(Vec::as_slice),
-            Some(["other:item/replacement".to_string()].as_slice())
+            Some([Some("other:item/replacement".to_string())].as_slice())
         );
         assert_eq!(
             baked.gui_transforms["test_item"],

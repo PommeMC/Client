@@ -353,18 +353,38 @@ impl Colormap {
                     .map(|c| [c[0], c[1], c[2]])
                     .collect()
             })
-            .unwrap_or_else(|| vec![[145, 189, 89]; 256 * 256]);
+            .unwrap_or_else(|| Self::fallback().pixels);
         Self { pixels }
     }
 
-    fn lookup(&self, temperature: f32, downfall: f32) -> [f32; 3] {
+    /// A map filled with vanilla's default grass color, used when the PNG
+    /// can't be loaded.
+    pub(crate) fn fallback() -> Self {
+        Self::from_pixels(vec![[145, 189, 89]; 256 * 256])
+    }
+
+    pub(crate) fn from_pixels(pixels: Vec<[u8; 3]>) -> Self {
+        Self { pixels }
+    }
+
+    fn pixel(&self, temperature: f32, downfall: f32) -> [u8; 3] {
         let t = temperature.clamp(0.0, 1.0);
         let d = (downfall.clamp(0.0, 1.0)) * t;
         let x = ((1.0 - t) * 255.0) as usize;
         let y = ((1.0 - d) * 255.0) as usize;
         let idx = (y * 256 + x).min(256 * 256 - 1);
-        let [r, g, b] = self.pixels[idx];
-        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
+        self.pixels[idx]
+    }
+
+    fn lookup(&self, temperature: f32, downfall: f32) -> [f32; 3] {
+        self.pixel(temperature, downfall)
+            .map(|channel| channel as f32 / 255.0)
+    }
+
+    /// Vanilla `GrassColor.get` as packed `0xRRGGBB`.
+    pub(crate) fn rgb(&self, temperature: f32, downfall: f32) -> u32 {
+        let [r, g, b] = self.pixel(temperature, downfall);
+        u32::from_be_bytes([0, r, g, b])
     }
 }
 

@@ -1401,11 +1401,6 @@ pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bo
     true
 }
 
-const TEAM_COLOR_RGB: [u32; 16] = [
-    0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xFFAA00, 0xAAAAAA, 0x555555,
-    0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
-];
-
 /// Pomme-native decoder for Vanilla 26.2 `ClientboundSetPlayerTeamPacket`.
 /// Azalea's pinned packet type still expects the old ChatFormatting color and
 /// cannot represent the native `Optional<TeamColor>` field.
@@ -1429,8 +1424,11 @@ fn handle_raw_player_team(
             let collision_rule =
                 collision_rule(read_varint_req(raw, pos, "set_player_team.collision_rule")?);
             let fill_color = if read_bool(raw, pos)? {
-                let id = read_varint_req(raw, pos, "set_player_team.color")? as usize;
-                Some(*TEAM_COLOR_RGB.get(id).unwrap_or(&TEAM_COLOR_RGB[0]))
+                Some(team_color(read_varint_req(
+                    raw,
+                    pos,
+                    "set_player_team.color",
+                )?))
             } else {
                 None
             };
@@ -1447,7 +1445,7 @@ fn handle_raw_player_team(
                 prefix: format_component_spans(&player_prefix, color),
                 suffix: format_component_spans(&player_suffix, color),
                 color,
-                fill_color: fill_color.map(crate::ui::common::rgb),
+                fill_color,
                 collision_rule,
                 members,
             });
@@ -1473,6 +1471,17 @@ fn handle_raw_player_team(
         ));
     }
     Ok(())
+}
+
+/// Vanilla `TeamColor` id N is the legacy formatting code for hex digit N;
+/// out-of-range ids fall back to BLACK (`ByIdMap` ZERO).
+fn team_color(id: u32) -> u32 {
+    use azalea_chat::style::ChatFormatting;
+
+    char::from_digit(id, 16)
+        .and_then(ChatFormatting::from_code)
+        .and_then(|format| format.color())
+        .unwrap_or(0x000000)
 }
 
 /// `Team.CollisionRule` by id; out-of-range ids fall back to ALWAYS.
@@ -2027,11 +2036,24 @@ mod tests {
             } => {
                 assert_eq!(name, "crew");
                 assert_eq!(color, crate::ui::common::rgb(0xFF5555));
-                assert_eq!(fill_color, Some(crate::ui::common::rgb(0xFF5555)));
+                assert_eq!(fill_color, Some(0xFF5555));
                 assert_eq!(members, Some(vec!["Player".to_string()]));
             }
             _ => panic!("expected ScoreboardTeam"),
         }
+    }
+
+    #[test]
+    fn team_color_and_collision_rule_follow_vanilla_ids() {
+        use crate::ui::hud::CollisionRule;
+
+        assert_eq!(team_color(0), 0x000000);
+        assert_eq!(team_color(12), 0xFF5555);
+        assert_eq!(team_color(15), 0xFFFFFF);
+        assert_eq!(team_color(16), 0x000000);
+        assert_eq!(collision_rule(1), CollisionRule::Never);
+        assert_eq!(collision_rule(3), CollisionRule::PushOwnTeam);
+        assert_eq!(collision_rule(4), CollisionRule::Always);
     }
 
     #[test]
