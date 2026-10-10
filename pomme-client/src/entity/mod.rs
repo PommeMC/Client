@@ -821,6 +821,7 @@ pub struct ItemEntity {
     /// Vanilla `ItemStack.getDamageValue()` — the other seed component.
     pub damage: i32,
     pub count: i32,
+    pub stack: Option<azalea_inventory::ItemStackData>,
     pub age: u32,
     pub bob_offset: f32,
     velocity: DVec3,
@@ -834,6 +835,7 @@ struct PickupAnimation {
     item_id: u32,
     damage: i32,
     count: i32,
+    stack: Option<azalea_inventory::ItemStackData>,
     start_pos: Position,
     target_pos: Position,
     bob_offset: f32,
@@ -846,6 +848,7 @@ pub struct PickupRenderInfo {
     pub item_id: u32,
     pub damage: i32,
     pub count: i32,
+    pub stack: Option<azalea_inventory::ItemStackData>,
     pub position: Position,
     pub bob_offset: f32,
     pub age: u32,
@@ -878,6 +881,7 @@ impl ItemEntityStore {
                 item_id: 0,
                 damage: 0,
                 count: 1,
+                stack: None,
                 age: 0,
                 bob_offset,
                 velocity,
@@ -894,12 +898,14 @@ impl ItemEntityStore {
         item_id: u32,
         damage: i32,
         count: i32,
+        stack: azalea_inventory::ItemStackData,
     ) {
         if let Some(entity) = self.items.get_mut(&id) {
             entity.item_name = item_name;
             entity.item_id = item_id;
             entity.damage = damage;
             entity.count = count;
+            entity.stack = Some(stack);
         }
     }
 
@@ -960,6 +966,7 @@ impl ItemEntityStore {
             item_id: entity.item_id,
             damage: entity.damage,
             count: entity.count,
+            stack: entity.stack.clone(),
             start_pos,
             target_pos,
             bob_offset: entity.bob_offset,
@@ -1015,6 +1022,7 @@ impl ItemEntityStore {
                     item_id: p.item_id,
                     damage: p.damage,
                     count: p.count,
+                    stack: p.stack.clone(),
                     position: pos,
                     bob_offset: p.bob_offset,
                     age: p.age,

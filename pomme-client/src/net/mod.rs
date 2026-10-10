@@ -252,7 +252,7 @@ pub enum NetworkEvent {
         prefix: Vec<crate::ui::text::TextSpan>,
         suffix: Vec<crate::ui::text::TextSpan>,
         color: [f32; 4],
-        fill_color: Option<[f32; 4]>,
+        fill_color: Option<u32>,
         collision_rule: crate::ui::hud::CollisionRule,
         members: Option<Vec<String>>,
     },
@@ -425,6 +425,7 @@ pub enum NetworkEvent {
         item_id: u32,
         damage: i32,
         count: i32,
+        stack: azalea_inventory::ItemStackData,
     },
     EntityHeadRotation {
         id: i32,

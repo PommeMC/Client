@@ -243,24 +243,35 @@ pub fn push_selected_icon(elements: &mut Vec<MenuElement>, data: &ItemStackData,
     else {
         return;
     };
-    let Some(&MenuElement::ItemIcon { x, y, w, h, .. }) = elements.get(index) else {
+    let Some(&MenuElement::ItemIcon {
+        x,
+        y,
+        w,
+        h,
+        use_player_team,
+        ..
+    }) = elements.get(index)
+    else {
         return;
     };
     let bundle = item_resource_name(data.kind);
-    let icon = |item_name| MenuElement::ItemIcon {
+    let icon = |item_name, item_stack| MenuElement::ItemIcon {
         x,
         y,
         w,
         h,
         item_name,
+        item_stack,
+        use_player_team,
+        item_tints: Vec::new(),
         tint: [1.0; 4],
     };
     elements.splice(
         index..=index,
         [
-            icon(selected_bundle_layer_key(&bundle, false)),
-            icon(item_resource_name(selected.kind)),
-            icon(selected_bundle_layer_key(&bundle, true)),
+            icon(selected_bundle_layer_key(&bundle, false), None),
+            icon(item_resource_name(selected.kind), Some(selected)),
+            icon(selected_bundle_layer_key(&bundle, true), None),
         ],
     );
 }
@@ -298,6 +309,7 @@ pub fn push_tooltip(
             y,
             title,
             items,
+            item_tints: Vec::new(),
             selected,
             weight,
             scale,

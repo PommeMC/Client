@@ -3662,7 +3662,7 @@ pub fn update_game(
                 (name != "air").then(|| {
                     let light =
                         get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
-                    (name, light)
+                    (name, light, data.clone())
                 })
             }
             _ => None,
@@ -3692,6 +3692,7 @@ pub fn update_game(
         swing_progress,
         use_anim,
         held_item,
+        game.scoreboard.member_team_color(&core.user.username),
         !game.player.is_sleeping(),
         destroy_info,
         game.show_chunk_borders,
@@ -4039,10 +4040,12 @@ fn dropped_item_geometry(renderer: &Renderer, item_name: &str) -> (glam::Mat4, f
 #[allow(clippy::too_many_arguments)]
 fn emit_item_copies(
     infos: &mut Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo>,
+    registry: &crate::world::block::registry::BlockRegistry,
     item_name: &str,
     item_id: u32,
     damage: i32,
     count: i32,
+    item_stack: Option<&azalea_inventory::ItemStackData>,
     anchor_rel_pos: glam::Vec3,
     age_f: f32,
     bob_offset: f32,
@@ -4063,9 +4066,15 @@ fn emit_item_copies(
 
     let base = glam::Mat4::from_translation(anchor_rel_pos + glam::Vec3::new(0.0, hover_y, 0.0))
         * glam::Mat4::from_rotation_y(spin);
+    // Dropped item entities are not LivingEntity owners in vanilla, so a
+    // `team` tint source falls back to the JSON default here.
+    let tints: std::sync::Arc<[u32]> = registry
+        .item_tint_palette(item_name, item_stack, None)
+        .into();
     let mut push = |copy_offset: glam::Mat4| {
         infos.push(ItemRenderInfo {
             item_name: item_name.to_string(),
+            tints: tints.clone(),
             model_matrix: base * copy_offset * ground_transform,
             light,
             nether_lighting,
@@ -4114,10 +4123,12 @@ fn build_item_render_infos(
         let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &item.item_name);
         emit_item_copies(
             &mut infos,
+            renderer.registry(),
             &item.item_name,
             item.item_id,
             item.damage,
             item.count,
+            item.stack.as_ref(),
             (*lerped - anchor).as_vec3(),
             age_f,
             item.bob_offset,
@@ -4137,10 +4148,12 @@ fn build_item_render_infos(
         let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &pickup.item_name);
         emit_item_copies(
             &mut infos,
+            renderer.registry(),
             &pickup.item_name,
             pickup.item_id,
             pickup.damage,
             pickup.count,
+            pickup.stack.as_ref(),
             (*pickup.position - anchor).as_vec3(),
             age_f,
             pickup.bob_offset,

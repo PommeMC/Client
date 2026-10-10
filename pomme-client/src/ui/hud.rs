@@ -84,7 +84,7 @@ pub(crate) struct ScoreboardTeam {
     color: [f32; 4],
     /// None for RESET / non-color formatting (no icon fill in the spectator
     /// menu), like vanilla's `PlayerTeam.getColor()` Optional.
-    pub(crate) fill_color: Option<[f32; 4]>,
+    pub(crate) fill_color: Option<u32>,
     collision_rule: CollisionRule,
     pub(crate) members: HashSet<String>,
 }
@@ -162,7 +162,7 @@ impl Scoreboard {
         prefix: Vec<TextSpan>,
         suffix: Vec<TextSpan>,
         color: [f32; 4],
-        fill_color: Option<[f32; 4]>,
+        fill_color: Option<u32>,
         collision_rule: CollisionRule,
         members: Option<Vec<String>>,
     ) {
@@ -267,6 +267,15 @@ impl Scoreboard {
         }
         own_rule != CollisionRule::PushOtherTeams && their_rule != CollisionRule::PushOtherTeams
             || same_team
+    }
+
+    /// Vanilla `TeamColor`: a real team chat color if the member belongs to a
+    /// team whose formatting carries one, otherwise no owner-derived color.
+    pub fn member_team_color(&self, member: &str) -> Option<u32> {
+        self.teams
+            .values()
+            .find(|team| team.members.contains(member))?
+            .fill_color
     }
 
     fn line(&self, owner: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
@@ -1728,5 +1737,49 @@ mod tests {
         let mut scoreboard = Scoreboard::default();
         add_team(&mut scoreboard, "a", PushOtherTeams, &["pusher"]);
         assert!(!scoreboard.pushable_by("pusher", "target"));
+    }
+
+    fn add_colored_team(scoreboard: &mut Scoreboard, name: &str, fill: Option<u32>) {
+        scoreboard.set_team(
+            name.into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            WHITE,
+            fill,
+            CollisionRule::Always,
+            Some(vec!["Player".into()]),
+        );
+    }
+
+    #[test]
+    fn member_team_color_matches_scoreboard_team_chat_color() {
+        let mut scoreboard = Scoreboard::default();
+        add_colored_team(&mut scoreboard, "red", Some(0xAA0000));
+        assert_eq!(scoreboard.member_team_color("Player"), Some(0xAA0000));
+        assert_eq!(scoreboard.member_team_color("Other"), None);
+    }
+
+    #[test]
+    fn member_team_color_is_none_for_reset_or_non_color_formatting() {
+        let mut scoreboard = Scoreboard::default();
+        add_colored_team(&mut scoreboard, "reset", None);
+        assert_eq!(scoreboard.member_team_color("Player"), None);
+    }
+
+    #[test]
+    fn member_team_color_tracks_membership_and_team_lifecycle() {
+        let mut scoreboard = Scoreboard::default();
+        add_colored_team(&mut scoreboard, "red", Some(0xFF5555));
+        assert_eq!(scoreboard.member_team_color("Player"), Some(0xFF5555));
+
+        scoreboard.update_team_members("red", vec!["Player".into()], false);
+        assert_eq!(scoreboard.member_team_color("Player"), None);
+
+        scoreboard.update_team_members("red", vec!["Player".into()], true);
+        assert_eq!(scoreboard.member_team_color("Player"), Some(0xFF5555));
+
+        scoreboard.remove_team("red");
+        assert_eq!(scoreboard.member_team_color("Player"), None);
     }
 }

@@ -944,9 +944,12 @@ impl MenuOverlayPipeline {
                     w,
                     h,
                     item_name,
+                    item_tints,
                     tint,
+                    ..
                 } => {
-                    if let Some(uv) = item_atlas_uvs.get(item_name) {
+                    let atlas_key = item_icon_atlas_key(item_name, item_tints);
+                    if let Some(uv) = item_atlas_uvs.get(&atlas_key) {
                         push_quad(
                             &mut vertices,
                             *x,
@@ -1175,6 +1178,7 @@ impl MenuOverlayPipeline {
                 y,
                 title,
                 items,
+                item_tints,
                 selected,
                 weight,
                 scale,
@@ -1198,6 +1202,7 @@ impl MenuOverlayPipeline {
                     BundleImage {
                         title,
                         items,
+                        item_tints,
                         selected: *selected,
                         weight: *weight,
                     },
@@ -1753,6 +1758,7 @@ impl MenuOverlayPipeline {
                             obfuscation_rng,
                             item_atlas_uvs,
                             data,
+                            image.item_tints.get(visual).map_or(&[], Vec::as_slice),
                             (x + 4.0 * px, y + 4.0 * px),
                             scale,
                             px,
@@ -1862,12 +1868,13 @@ impl MenuOverlayPipeline {
         obfuscation_rng: &mut ObfuscationRng,
         item_atlas_uvs: &HashMap<String, [f32; 4]>,
         data: &azalea_inventory::ItemStackData,
+        item_tints: &[u32],
         (x, y): (f32, f32),
         scale: f32,
         px: f32,
     ) {
         let name = crate::player::inventory::item_resource_name(data.kind);
-        if let Some(uv) = item_atlas_uvs.get(&name) {
+        if let Some(uv) = item_atlas_uvs.get(&item_icon_atlas_key(&name, item_tints)) {
             push_quad(
                 vertices,
                 x,
@@ -2077,6 +2084,16 @@ impl TooltipLine {
     }
 }
 
+pub fn item_icon_atlas_key(item_name: &str, item_tints: &[u32]) -> String {
+    use std::fmt::Write as _;
+
+    let mut key = format!("{item_name}#");
+    for color in item_tints {
+        let _ = write!(key, "{color:06x}-");
+    }
+    key
+}
+
 #[allow(dead_code)]
 pub enum MenuElement {
     ScissorPush {
@@ -2155,6 +2172,11 @@ pub enum MenuElement {
         w: f32,
         h: f32,
         item_name: String,
+        item_stack: Option<azalea_inventory::ItemStackData>,
+        /// Vanilla GUI `item(...)` supplies the local LivingEntity owner;
+        /// `fakeItem(...)` supplies none. Team tint evaluation depends on this.
+        use_player_team: bool,
+        item_tints: Vec<u32>,
         tint: [f32; 4],
     },
     McText {
@@ -2209,6 +2231,8 @@ pub enum MenuElement {
         y: f32,
         title: Vec<TextSpan>,
         items: Vec<azalea_inventory::ItemStack>,
+        /// Per-item tint palettes, parallel to `items`; filled by the renderer.
+        item_tints: Vec<Vec<u32>>,
         selected: i32,
         weight: crate::ui::bundle::Frac,
         scale: f32,
@@ -4573,6 +4597,7 @@ struct TooltipBox {
 struct BundleImage<'a> {
     title: &'a [TextSpan],
     items: &'a [azalea_inventory::ItemStack],
+    item_tints: &'a [Vec<u32>],
     selected: i32,
     weight: crate::ui::bundle::Frac,
 }

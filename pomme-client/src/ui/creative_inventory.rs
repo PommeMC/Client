@@ -728,6 +728,9 @@ fn draw_tabs(
             w: icon_size,
             h: icon_size,
             item_name: meta.icon.into(),
+            item_stack: None,
+            use_player_team: true,
+            item_tints: Vec::new(),
             tint: WHITE,
         });
     }

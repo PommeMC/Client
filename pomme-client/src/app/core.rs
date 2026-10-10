@@ -2262,10 +2262,11 @@ impl AppCore {
                     item_id,
                     damage,
                     count,
+                    stack,
                 } => {
                     renderer.ensure_item_mesh(&item_name);
                     game.item_entity_store
-                        .set_item_data(id, item_name, item_id, damage, count);
+                        .set_item_data(id, item_name, item_id, damage, count, stack);
                 }
                 NetworkEvent::EntityData { id, index, value } => {
                     if index == 4
