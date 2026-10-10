@@ -26,6 +26,7 @@ pub struct Swapchain {
     pub framebuffers: Vec<vk::Framebuffer>,
     pub framebuffers_scene: Vec<vk::Framebuffer>,
     pub framebuffers_load: Vec<vk::Framebuffer>,
+    pub present_mode: vk::PresentModeKHR,
 }
 
 impl Swapchain {
@@ -182,6 +183,7 @@ impl Swapchain {
             framebuffers,
             framebuffers_scene,
             framebuffers_load,
+            present_mode,
         })
     }
 

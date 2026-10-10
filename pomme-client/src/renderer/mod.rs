@@ -41,7 +41,7 @@ use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
 use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
-use pyronyx::vk;
+use pyronyx::vk::{self, PresentModeKHR};
 use swapchain::Swapchain;
 use thiserror::Error;
 use winit::dpi::PhysicalSize;
@@ -82,6 +82,15 @@ pub struct BookPreview {
     pub gui_scale: f32,
     pub open: f32,
     pub flip: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuType {
+    Other,
+    Integrated,
+    Discrete,
+    Virtual,
+    Cpu,
 }
 
 /// A GUI preview box's `[x, y, w, h]` clamped to the swapchain, as the scissor
@@ -965,8 +974,24 @@ impl Renderer {
         &self.ctx.gpu_name
     }
 
+    pub fn gpu_type(&self) -> GpuType {
+        self.ctx.gpu_type
+    }
+
+    pub fn gpu_vendor_id(&self) -> u32 {
+        self.ctx.gpu_vendor_id
+    }
+
     pub fn vulkan_version(&self) -> &str {
         &self.ctx.vulkan_version
+    }
+
+    pub fn driver_info(&self) -> Option<&str> {
+        self.ctx.driver_info.as_deref()
+    }
+
+    pub fn present_mode(&self) -> PresentModeKHR {
+        self.swapchain.present_mode
     }
 
     pub fn loaded_chunk_count(&self) -> u32 {
@@ -976,6 +1001,7 @@ impl Renderer {
     /// Sections actually drawn after frustum culling (lags a few frames). The
     /// graph's occluded sections are omitted before the cull, so this also
     /// drops when occlusion hides geometry — useful for the F3 overlay.
+    #[allow(unused)] // TODO(debug-overlay)
     pub fn sections_drawn(&self) -> u32 {
         self.chunk_buffers.sections_drawn()
     }

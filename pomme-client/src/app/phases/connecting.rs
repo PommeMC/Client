@@ -70,6 +70,7 @@ pub fn update_connecting(
                     // unspent so it plays out there.
                     return ConnectingUpdateResult::JoinGame;
                 }
+                connection.packet_stats.tick();
                 AppCore::send_client_tick_end(connection);
                 core.tick_accumulator -= TICK_RATE;
             }

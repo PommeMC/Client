@@ -580,7 +580,7 @@ impl ApplicationHandler for App {
                             {
                                 // Overlay toggles on F3 release, unless a chord
                                 // consumed it; runs in every in-game sub-state.
-                                game.handle_f3_release(&connection);
+                                game.handle_f3_release(&mut self.core, &connection);
                             }
 
                             AppPhase::InGame {
@@ -840,7 +840,15 @@ impl ApplicationHandler for App {
                     } => {
                         let update_result = match world.as_mut().map(World::poll) {
                             Some(Err(reason)) => GameUpdateResult::Disconnected { reason },
-                            _ => update_game(core, dt, raw_dt, &mut gfx, &connection, &mut game),
+                            _ => update_game(
+                                core,
+                                dt,
+                                raw_dt,
+                                &mut gfx,
+                                &connection,
+                                &mut game,
+                                world.as_mut(),
+                            ),
                         };
 
                         match update_result {

@@ -37,10 +37,12 @@ use crate::renderer::pipelines::entity_renderer::{
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
+use crate::singleplayer::World;
 use crate::ui::chat::{ChatState, ChatUiAction};
+use crate::ui::components::debug::entries::{SystemSpecsInfo, TpsDebugInfo};
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
-use crate::ui::{common, hud};
+use crate::ui::{self, common, hud};
 use crate::world::block::model::CardinalLightType;
 use crate::world::block::{BedDirection, bed_direction};
 use crate::world::block_entity_anim::BlockEntityAnimStore;
@@ -213,7 +215,6 @@ pub struct GameState {
     pub vignette_brightness: f32,
     pub interaction: InteractionState,
     pub sky_state: crate::renderer::SkyState,
-    pub show_debug: bool,
     pub show_chunk_borders: bool,
     pub advanced_item_tooltips: bool,
     /// F1 (vanilla `hideGui`): the HUD, chat, and overlays don't render.
@@ -440,7 +441,6 @@ impl GameState {
             vignette_brightness: 1.0,
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
-            show_debug: false,
             show_chunk_borders: false,
             advanced_item_tooltips: false,
             hide_gui: false,
@@ -867,7 +867,7 @@ impl GameState {
     /// Vanilla toggles the debug overlay when F3 is released, unless a chord
     /// key consumed it as a modifier while held (KeyboardHandler.keyPress).
     /// An open game-mode switcher applies its selection instead.
-    pub fn handle_f3_release(&mut self, connection: &ConnectionHandle) {
+    pub fn handle_f3_release(&mut self, core: &mut AppCore, connection: &ConnectionHandle) {
         if let Some(switcher) = self.game_mode_switcher.take() {
             use azalea_core::game_type::GameMode;
             if switcher.selected != self.player.game_mode
@@ -887,7 +887,7 @@ impl GameState {
         if self.f3_chord_consumed {
             self.f3_chord_consumed = false;
         } else {
-            self.show_debug = !self.show_debug;
+            core.menu.toggle_debug_overlay();
         }
     }
 
@@ -2026,6 +2026,7 @@ pub fn update_game(
     gfx: &mut Gfx,
     connection: &ConnectionHandle,
     game: &mut GameState,
+    world: Option<&mut World>,
 ) -> GameUpdateResult {
     // Snapshot last frame's phase timings before this frame overwrites them: they
     // align with `raw_dt`, which measures the previous frame's full duration.
@@ -2168,6 +2169,9 @@ pub fn update_game(
             // prioritized while the screen is open.
             game.xp_display_start_tick = game.tick_count as i64;
         }
+
+        connection.packet_stats.tick();
+
         AppCore::send_client_tick_end(connection);
         core.tick_accumulator -= TICK_RATE;
     }
@@ -2377,64 +2381,6 @@ pub fn update_game(
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
-    let debug = if game.show_debug {
-        Some(hud::DebugInfo {
-            fps: gfx.fps_counter.display_fps(),
-            position: *game.player.position,
-            y_rot_deg: gfx.renderer.camera_look_dir().y_rot_deg(),
-            x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
-            target_block: game.interaction.target.and_then(|t| {
-                let HitResult::Block(t) = t else {
-                    return None;
-                };
-                let state =
-                    game.chunk_store
-                        .get_block_state(t.block_pos.x, t.block_pos.y, t.block_pos.z);
-                let props = crate::world::block::block_properties(state)
-                    .entries()
-                    .map(|(k, v)| format!("{k}: {v}"))
-                    .collect();
-                Some((
-                    t.block_pos,
-                    t.face,
-                    crate::world::block::block_id(state).to_string(),
-                    props,
-                ))
-            }),
-            chunk_count: gfx.renderer.loaded_chunk_count(),
-            sections_drawn: gfx.renderer.sections_drawn(),
-            occlusion_on: game.chunk_occlusion_enabled,
-            mesh_gate: game.vis_valid.then(|| {
-                // Among in-frustum columns: sections we mesh vs sections skipped as
-                // occluded (the per-section occlusion win). Middle slot unused.
-                let n = game.chunk_store.section_count() as u32;
-                let mut visible = 0u32;
-                let mut hidden = 0u32;
-                for (pos, &mask) in &game.vis_mask {
-                    if game.vis_tiers.get(pos).copied().unwrap_or(0) == 0 {
-                        let v = mask.count_ones();
-                        visible += v;
-                        hidden += n.saturating_sub(v);
-                    }
-                }
-                (visible, 0, hidden)
-            }),
-            gpu_name: gfx.renderer.gpu_name(),
-            vulkan_version: gfx.renderer.vulkan_version(),
-            screen_w: gfx.renderer.screen_width(),
-            screen_h: gfx.renderer.screen_height(),
-            timings: Some(hud::FrameTimings {
-                frame_ms: gfx.renderer.last_timings().frame_ms,
-                fence_ms: gfx.renderer.last_timings().fence_ms,
-                acquire_ms: gfx.renderer.last_timings().acquire_ms,
-                cull_ms: gfx.renderer.last_timings().cull_ms,
-                draw_ms: gfx.renderer.last_timings().draw_ms,
-                present_ms: gfx.renderer.last_timings().present_ms,
-            }),
-        })
-    } else {
-        None
-    };
     // The chunk-load benchmark renders a clean top-down view: only terrain, no HUD,
     // entities/player, held item, clouds, or weather — and skipping them also keeps
     // the measured frame times honest.
@@ -2457,14 +2403,7 @@ pub fn update_game(
             game.player.look_dir.x_rot_deg(),
         );
     }
-    if !benchmark_running && game.hide_gui {
-        // F1: vanilla still renders the debug overlay with the GUI hidden.
-        if let Some(info) = debug.as_ref() {
-            hud::build_debug_overlay(&mut elements, info, gs, &|t, s| {
-                gfx.renderer.menu_text_width(t, s)
-            });
-        }
-    } else if !benchmark_running {
+    if !benchmark_running {
         // Vanilla Hud.extractCameraOverlays: vignette, pumpkin, and portal
         // draw under everything else in the HUD.
         let portal_intensity = game
@@ -2641,7 +2580,6 @@ pub fn update_game(
             &game.player.effects,
             &game.boss_bars,
             gfx.renderer.is_first_person(),
-            debug.as_ref(),
             gs,
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
@@ -3352,6 +3290,22 @@ pub fn update_game(
             }
         }
     }
+
+    // Debug overlay is drawn above everything, except subtitles
+    core.menu.debug_overlay.build(
+        &mut elements,
+        gs,
+        &|t, s| gfx.renderer.menu_text_width(t, s),
+        sw,
+        sh,
+        &ui::components::debug::entries::DebugInfo::new(
+            core,
+            gfx,
+            Some(TpsDebugInfo::new(connection, world)),
+            SystemSpecsInfo::new(&gfx.window, &gfx.renderer),
+            Some(game),
+        ),
+    );
 
     // Subtitles draw above chat and the tab list; toasts stay on top
     // (vanilla extract order). The queue is empty while the option is off.

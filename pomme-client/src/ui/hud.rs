@@ -1,8 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use azalea_core::position::BlockPos;
 use azalea_inventory::ItemStack;
-use glam::DVec3;
 
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
 use crate::mob_effect::ActiveMobEffects;
@@ -24,15 +22,6 @@ pub enum ContextualBarKind<'a> {
     JumpableVehicle {
         charge: f32,
     },
-}
-
-pub struct FrameTimings {
-    pub frame_ms: f32,
-    pub fence_ms: f32,
-    pub acquire_ms: f32,
-    pub cull_ms: f32,
-    pub draw_ms: f32,
-    pub present_ms: f32,
 }
 
 type ScoreKey = (String, String);
@@ -301,31 +290,6 @@ impl Scoreboard {
     }
 }
 
-pub struct DebugInfo<'a> {
-    pub fps: u32,
-    pub position: DVec3,
-    pub y_rot_deg: f32,
-    pub x_rot_deg: f32,
-    pub target_block: Option<(
-        BlockPos,
-        azalea_core::direction::Direction,
-        String,
-        Vec<String>,
-    )>,
-    pub chunk_count: u32,
-    pub sections_drawn: u32,
-    pub occlusion_on: bool,
-    /// Mesh-scheduling tiers (visible, margin, hidden) of loaded columns when
-    /// the visibility gate is active; `None` while it falls back to meshing
-    /// all.
-    pub mesh_gate: Option<(u32, u32, u32)>,
-    pub gpu_name: &'a str,
-    pub vulkan_version: &'a str,
-    pub screen_w: u32,
-    pub screen_h: u32,
-    pub timings: Option<FrameTimings>,
-}
-
 /// Vanilla `AttackIndicatorStatus`; the u8 values are its ordinals.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum AttackIndicatorMode {
@@ -525,7 +489,6 @@ pub fn build_hud(
     effects: &ActiveMobEffects,
     boss_bars: &BossBarState,
     first_person: bool,
-    debug: Option<&DebugInfo<'_>>,
     gs: f32,
     attack: &AttackIndicatorState,
     text_width_fn: TextWidthFn,
@@ -538,10 +501,6 @@ pub fn build_hud(
     // exists here yet.
     if first_person && game_mode != 3 {
         build_crosshair(elements, cx, cy, gs, attack);
-    }
-
-    if let Some(info) = debug {
-        build_debug_overlay(elements, info, gs, text_width_fn);
     }
 
     // The bar geometry also anchors the status rows and XP bar below.
@@ -1530,135 +1489,6 @@ fn build_vehicle_hearts(
         }
         row_y -= 10.0 * gs;
         base_health += 20;
-    }
-}
-
-pub fn build_debug_overlay(
-    elements: &mut Vec<MenuElement>,
-    info: &DebugInfo<'_>,
-    gs: f32,
-    text_width_fn: TextWidthFn,
-) {
-    let fs = super::common::FONT_SIZE * gs;
-    let pad = 4.0 * gs;
-
-    let pos = info.position;
-    let bx = pos.x.floor() as i32;
-    let by = pos.y.floor() as i32;
-    let bz = pos.z.floor() as i32;
-    let cx = bx.div_euclid(16);
-    let cz = bz.div_euclid(16);
-    let facing = facing_name(info.y_rot_deg);
-    let y_rot_deg = info.y_rot_deg;
-    let x_rot_deg = info.x_rot_deg;
-
-    let mut left_lines: Vec<String> = vec![
-        format!("Pomme ({}fps)", info.fps),
-        String::new(),
-        format!("XYZ: {:.3} / {:.5} / {:.3}", pos.x, pos.y, pos.z),
-        format!("Block: {} {} {}", bx, by, bz),
-        format!(
-            "Chunk: {} {} in [{}, {}]",
-            bx.rem_euclid(16),
-            bz.rem_euclid(16),
-            cx,
-            cz
-        ),
-        format!("Facing: {} ({:.1} / {:.1})", facing, y_rot_deg, x_rot_deg),
-        String::new(),
-        format!("Chunks: {} loaded", info.chunk_count),
-        format!(
-            "Sections drawn: {} (occlusion {})",
-            info.sections_drawn,
-            if info.occlusion_on { "on" } else { "off" }
-        ),
-        match info.mesh_gate {
-            Some((vis, margin, hidden)) => {
-                format!("Mesh gate: vis {vis} / margin {margin} / hidden {hidden}")
-            }
-            None => "Mesh gate: off (meshing all)".to_string(),
-        },
-    ];
-
-    if let Some((target, face, name, props)) = &info.target_block {
-        left_lines.push(String::new());
-        left_lines.push(format!(
-            "Targeted Block: {}, {}, {}",
-            target.x, target.y, target.z
-        ));
-        left_lines.push(format!("minecraft:{name}"));
-        left_lines.extend(props.iter().cloned());
-        left_lines.push(format!("Face: {:?}", face));
-    }
-
-    push_debug_lines(elements, &left_lines, pad, pad, fs, true, text_width_fn);
-
-    let mut right_lines: Vec<String> = vec![
-        info.vulkan_version.to_string(),
-        format!("GPU: {}", info.gpu_name),
-        format!("Display: {}x{}", info.screen_w, info.screen_h),
-    ];
-
-    if let Some(t) = &info.timings {
-        right_lines.push(String::new());
-        right_lines.push(format!("Frame: {:.2}ms", t.frame_ms));
-        right_lines.push(format!("  Fence: {:.2}ms", t.fence_ms));
-        right_lines.push(format!("  Acquire: {:.2}ms", t.acquire_ms));
-        right_lines.push(format!("  Cull: {:.2}ms", t.cull_ms));
-        right_lines.push(format!("  Draw: {:.2}ms", t.draw_ms));
-        right_lines.push(format!("  Present: {:.2}ms", t.present_ms));
-    }
-    let right_x = info.screen_w as f32 - pad;
-    push_debug_lines(
-        elements,
-        &right_lines,
-        right_x,
-        pad,
-        fs,
-        false,
-        text_width_fn,
-    );
-}
-
-fn push_debug_lines(
-    elements: &mut Vec<MenuElement>,
-    lines: &[String],
-    x: f32,
-    start_y: f32,
-    fs: f32,
-    left_align: bool,
-    text_width_fn: TextWidthFn,
-) {
-    let line_h = fs * 1.25;
-    for (i, line) in lines.iter().enumerate() {
-        if line.is_empty() {
-            continue;
-        }
-        let y = start_y + i as f32 * line_h;
-        let tx = if left_align {
-            x
-        } else {
-            x - text_width_fn(line, fs)
-        };
-        elements.push(MenuElement::Text {
-            x: tx,
-            y,
-            text: line.clone(),
-            scale: fs,
-            color: WHITE,
-            centered: false,
-        });
-    }
-}
-
-fn facing_name(y_rot_deg: f32) -> &'static str {
-    let deg = y_rot_deg.rem_euclid(360.0) as u32;
-    match deg {
-        315..=359 | 0..=44 => "South (+Z)",
-        45..=134 => "West (-X)",
-        135..=224 => "North (-Z)",
-        225..=314 => "East (+X)",
-        _ => "South (+Z)",
     }
 }
 
