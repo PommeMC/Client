@@ -737,7 +737,6 @@ pub fn bake_item_models(
             // tint index N to layerN, so keep every layer in order instead of
             // collapsing the item to layer0.
             if parts.len() == 1 && resolved.elements.is_empty() {
-                // Unresolvable layers stay as `None` so position == layer.
                 let mut keys = Vec::new();
                 for layer in 0..5 {
                     let Some(value) = resolved.textures.get(&format!("layer{layer}")) else {
@@ -2042,6 +2041,10 @@ fn determine_tint(block_name: &str, tint_index: u32) -> Tint {
 mod tests {
     use super::*;
 
+    fn parse_tints(values: &[serde_json::Value]) -> Result<Vec<ItemTintSource>, String> {
+        parse_item_tint_sources(values, &Colormap::fallback())
+    }
+
     const DIRS: [Direction; 6] = [
         Direction::Down,
         Direction::Up,
@@ -2502,7 +2505,7 @@ mod tests {
         let parts = collect_model_parts(&json);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].path, "item/tinted");
-        let tints = parse_item_tint_sources(&parts[0].tints, &Colormap::fallback()).unwrap();
+        let tints = parse_tints(&parts[0].tints).unwrap();
         assert_eq!(
             tints,
             vec![
@@ -2527,7 +2530,7 @@ mod tests {
             }),
             serde_json::json!({"type": "minecraft:team", "default": 0x616263}),
         ];
-        let tints = parse_item_tint_sources(&values, &Colormap::fallback()).unwrap();
+        let tints = parse_tints(&values).unwrap();
         assert_eq!(tints.len(), values.len());
         assert_eq!(
             tints[5],
@@ -2557,7 +2560,7 @@ mod tests {
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].path, "item/plain");
         assert_eq!(
-            parse_item_tint_sources(&parts[0].tints, &Colormap::fallback()).unwrap(),
+            parse_tints(&parts[0].tints).unwrap(),
             vec![ItemTintSource::Constant(0xFFABCDEF)]
         );
     }
@@ -2592,33 +2595,21 @@ mod tests {
 
     #[test]
     fn item_tint_parser_rejects_missing_required_fields_and_invalid_ranges() {
+        assert!(parse_tints(&[serde_json::json!({"type": "minecraft:dye"})]).is_err());
         assert!(
-            parse_item_tint_sources(
-                &[serde_json::json!({"type": "minecraft:dye"})],
-                &Colormap::fallback(),
-            )
+            parse_tints(&[serde_json::json!({
+                "type": "minecraft:grass",
+                "temperature": 1.1,
+                "downfall": 1.0
+            })])
             .is_err()
         );
         assert!(
-            parse_item_tint_sources(
-                &[serde_json::json!({
-                    "type": "minecraft:grass",
-                    "temperature": 1.1,
-                    "downfall": 1.0
-                })],
-                &Colormap::fallback(),
-            )
-            .is_err()
-        );
-        assert!(
-            parse_item_tint_sources(
-                &[serde_json::json!({
-                    "type": "minecraft:custom_model_data",
-                    "index": -1,
-                    "default": 0xffffff
-                })],
-                &Colormap::fallback(),
-            )
+            parse_tints(&[serde_json::json!({
+                "type": "minecraft:custom_model_data",
+                "index": -1,
+                "default": 0xffffff
+            })])
             .is_err()
         );
     }
@@ -2709,7 +2700,6 @@ mod tests {
             }"#,
         )
         .unwrap();
-        // An unresolvable layer keeps its slot so layer2 still gets tintindex 2.
         std::fs::write(
             items.join("unresolved.json"),
             r#"{"model":{"type":"minecraft:model","model":"minecraft:item/unresolved"}}"#,

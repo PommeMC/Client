@@ -1613,6 +1613,12 @@ impl Renderer {
             RenderMode::World { overlay, .. } => overlay.as_mut_slice(),
             RenderMode::MainMenu { elements, .. } => elements.as_mut_slice(),
         };
+        let mut unique_items: HashMap<String, (String, Vec<u32>)> = HashMap::new();
+        let mut add_item = |name: &str, tints: &[u32]| {
+            unique_items
+                .entry(pipelines::menu_overlay::item_icon_atlas_key(name, tints))
+                .or_insert_with(|| (name.to_owned(), tints.to_vec()));
+        };
         for elem in menu_elements.iter_mut() {
             match elem {
                 MenuElement::ItemIcon {
@@ -1632,6 +1638,7 @@ impl Renderer {
                         item_stack.as_ref(),
                         owner_team_color,
                     );
+                    add_item(item_name, item_tints);
                 }
                 // Vanilla `ClientBundleTooltip` draws its contents with the
                 // player as owner.
@@ -1640,15 +1647,18 @@ impl Renderer {
                 } => {
                     *item_tints = items
                         .iter()
-                        .map(|item| match item {
-                            azalea_inventory::ItemStack::Present(data) => {
-                                self.registry.item_tint_palette(
-                                    &crate::player::inventory::item_resource_name(data.kind),
-                                    Some(data),
-                                    player_team_color,
-                                )
-                            }
-                            azalea_inventory::ItemStack::Empty => Vec::new(),
+                        .map(|item| {
+                            let azalea_inventory::ItemStack::Present(data) = item else {
+                                return Vec::new();
+                            };
+                            let name = crate::player::inventory::item_resource_name(data.kind);
+                            let tints = self.registry.item_tint_palette(
+                                &name,
+                                Some(data),
+                                player_team_color,
+                            );
+                            add_item(&name, &tints);
+                            tints
                         })
                         .collect();
                 }
@@ -1682,34 +1692,6 @@ impl Renderer {
                 .set_atlas_px(self.gui_item_atlas.atlas_px());
         }
 
-        let mut unique_items: HashMap<String, (String, Vec<u32>)> = HashMap::new();
-        let mut add_item = |name: &str, tints: &[u32]| {
-            unique_items
-                .entry(pipelines::menu_overlay::item_icon_atlas_key(name, tints))
-                .or_insert_with(|| (name.to_owned(), tints.to_vec()));
-        };
-        for elem in menu_elements.iter() {
-            match elem {
-                MenuElement::ItemIcon {
-                    item_name,
-                    item_tints,
-                    ..
-                } => add_item(item_name, item_tints),
-                MenuElement::BundleTooltip {
-                    items, item_tints, ..
-                } => {
-                    for (item, tints) in items.iter().zip(item_tints) {
-                        if let azalea_inventory::ItemStack::Present(data) = item {
-                            add_item(
-                                &crate::player::inventory::item_resource_name(data.kind),
-                                tints,
-                            );
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
         let unique_keys: HashSet<String> = unique_items.keys().cloned().collect();
         if !self.gui_item_atlas.has_space_for_all(&unique_keys)
             && !self.gui_item_atlas.reclaim_space_for(&unique_keys)

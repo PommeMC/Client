@@ -680,8 +680,7 @@ impl ItemEntityPipeline {
             }
             let region = uv_map.get_region(texture_key);
             translucent |= region.translucent;
-            // Vanilla gives layerN tintindex N; the shader leaves indices past
-            // the palette untinted.
+            // layerN is tintindex N; the shader leaves ones past the palette untinted.
             let tint_index = Some(layer as u32);
             let mut layer_vertices = uv_map
                 .sprite_alpha_mask(texture_key)
