@@ -902,6 +902,8 @@ impl ApplicationHandler for App {
                         gfx.window.set_visible(true);
                     }
                     gfx.window.request_redraw();
+                    // Paced here so input arriving during the wait is pumped before the next frame.
+                    gfx.renderer.pace_frame();
                 }
                 if let Some(fps) = limit {
                     self.fps_limiter.limit_display_fps(fps);

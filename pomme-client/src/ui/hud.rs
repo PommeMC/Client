@@ -27,6 +27,7 @@ pub enum ContextualBarKind<'a> {
 }
 
 pub struct FrameTimings {
+    pub pace_ms: f32,
     pub frame_ms: f32,
     pub fence_ms: f32,
     pub acquire_ms: f32,
@@ -1601,6 +1602,7 @@ pub fn build_debug_overlay(
 
     if let Some(t) = &info.timings {
         right_lines.push(String::new());
+        right_lines.push(format!("Pace: {:.2}ms", t.pace_ms));
         right_lines.push(format!("Frame: {:.2}ms", t.frame_ms));
         right_lines.push(format!("  Fence: {:.2}ms", t.fence_ms));
         right_lines.push(format!("  Acquire: {:.2}ms", t.acquire_ms));
