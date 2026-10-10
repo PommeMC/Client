@@ -2096,6 +2096,8 @@ pub fn update_game(
     // Menus never pause the simulation; tick_physics substitutes neutral input.
     core.tick_accumulator += dt;
     while core.tick_accumulator >= TICK_RATE {
+        core.plugins.fire_client_tick_start();
+
         game.tick_count = game.tick_count.wrapping_add(1);
         // Vanilla `Minecraft.tick` order: `gameMode.tick` drives the connection
         // tick (and so the level load tracker) before the level's entities,
@@ -2170,6 +2172,8 @@ pub fn update_game(
         }
         AppCore::send_client_tick_end(connection);
         core.tick_accumulator -= TICK_RATE;
+
+        core.plugins.fire_client_tick_end();
     }
 
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`

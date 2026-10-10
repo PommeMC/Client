@@ -22,6 +22,7 @@ openal:
     "$python" tools/fetch_openal.py target/debug target/release
 
 client-dev *args: openal
+    @cargo build -p plugin-example
     @cargo run -p pomme-client {{ args }}
 
 # Optimized release client for accurate benchmarking (supplies the launch token the guard needs).

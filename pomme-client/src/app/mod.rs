@@ -219,6 +219,10 @@ impl ApplicationHandler for App {
                     Ok(w) => Arc::new(w),
                     Err(e) => {
                         tracing::error!("Failed to create window: {e}");
+
+                        tracing::info!("Stopping!");
+                        self.core.plugins.fire_client_stopping();
+
                         event_loop.exit();
                         return AppPhase::Setup {
                             quick_access_multiplayer,
@@ -242,6 +246,10 @@ impl ApplicationHandler for App {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::error!("Failed to create renderer: {e}");
+
+                        tracing::info!("Stopping!");
+                        self.core.plugins.fire_client_stopping();
+
                         event_loop.exit();
                         return AppPhase::Setup {
                             quick_access_multiplayer,
@@ -259,6 +267,7 @@ impl ApplicationHandler for App {
                 }
 
                 self.core.apply_cursor_grab(&window, None);
+                self.core.plugins.fire_client_started();
 
                 if let Some(server_ip) = quick_access_multiplayer {
                     let connection = spawn_connection(
@@ -327,6 +336,9 @@ impl ApplicationHandler for App {
     ) {
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
+                tracing::info!("Stopping!");
+                self.core.plugins.fire_client_stopping();
+
                 // A world saves on the way out, so the window stays up for it
                 // rather than vanishing while the process finishes writing.
                 self.phase.transition(|app| match app {
@@ -375,8 +387,8 @@ impl ApplicationHandler for App {
                 });
             }
             WindowEvent::Resized(new_size) => {
-                if let Some(app_rt) = self.phase.gfx_mut() {
-                    app_rt.renderer.resize(new_size);
+                if let Some(gfx) = self.phase.gfx_mut() {
+                    gfx.renderer.resize(new_size);
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
@@ -757,6 +769,9 @@ impl ApplicationHandler for App {
                                 }
                             }
                             MenuUpdateResult::Quit => {
+                                tracing::info!("Stopping!");
+                                core.plugins.fire_client_stopping();
+
                                 event_loop.exit();
                                 AppPhase::InMenu { gfx, panorama }
                             }

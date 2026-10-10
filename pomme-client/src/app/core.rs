@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Add;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -8,6 +9,7 @@ use azalea_protocol::packets::game::{
     ServerboundClientCommand, ServerboundGamePacket, s_client_command, s_client_tick_end,
 };
 use glam::{FloatExt, dvec3};
+use plugin_loader::Plugins;
 use winit::keyboard::KeyCode;
 use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Fullscreen, Window};
@@ -480,6 +482,7 @@ pub struct AppCore {
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
     pub time_tick_accumulator: f32,
+    pub plugins: Plugins,
     menu_dpad: RepeatStepper,
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
@@ -614,6 +617,11 @@ impl AppCore {
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
         let (head_tx, head_rx) = crossbeam_channel::unbounded();
 
+        let plugins = Plugins::load(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../target/debug/"
+        )));
+
         Self {
             user,
             presence,
@@ -629,6 +637,7 @@ impl AppCore {
             audio,
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
+            plugins,
             menu_dpad: RepeatStepper::default(),
             unfocused_since: None,
             mouse_grabbed: false,
