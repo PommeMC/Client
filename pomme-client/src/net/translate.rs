@@ -1384,9 +1384,18 @@ impl Translation {
                 true
             }
             ClientboundGamePacket::SetEntityData(p) => {
-                for item in &mut p.packed_items.0 {
-                    if let azalea_entity::EntityDataValue::ItemStack(stack) = &mut item.value {
-                        remap_stack(self.to_native, stack);
+                // `translate_entity_data` already remaps item-stack values
+                // while rewriting serializer ids, except on 1.21.5 wires where
+                // `translate_item_765` leaves the wire id for this pass.
+                let needs_remap = self
+                    .game_ids
+                    .as_ref()
+                    .is_none_or(|g| g.v765.is_some());
+                if needs_remap {
+                    for item in &mut p.packed_items.0 {
+                        if let azalea_entity::EntityDataValue::ItemStack(stack) = &mut item.value {
+                            remap_stack(self.to_native, stack);
+                        }
                     }
                 }
                 true
