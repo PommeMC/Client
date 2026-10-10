@@ -2,6 +2,7 @@ use pyronyx::vk::PresentModeKHR;
 
 use crate::app::core::AppCore;
 use crate::app::phases::Gfx;
+use crate::memory::MemoryStats;
 use crate::net::connection::ConnectionHandle;
 use crate::singleplayer::World;
 use crate::ui::components::debug::displayer::DebugScreenDisplayer;
@@ -255,6 +256,36 @@ impl DebugEntryId {
                         .text(" rx");
                 });
             }
+            Self::Memory => {
+                let m = info.memory;
+                let mib = |b: u64| b / 1024 / 1024;
+                let percent = (m.live_bytes * 100).checked_div(m.max).unwrap_or(0);
+
+                displayer.add_fact_to_group(DebugGroup::Memory, "Used", |f| {
+                    f.value(format!("{percent:>2}"))
+                        .text("% ")
+                        .value(format!("{:03}", mib(m.live_bytes)))
+                        .text("/")
+                        .value(format!("{:03}", mib(m.max)))
+                        .text("MiB");
+                });
+            }
+            Self::DetailedMemory => {
+                let m = info.memory;
+                let mib = |b: u64| b / 1024 / 1024;
+
+                displayer.add_fact_to_group(DebugGroup::Memory, "Allocs", |f| {
+                    f.value(m.live_allocs);
+                });
+                displayer.add_fact_to_group(DebugGroup::Memory, "Alloc rate", |f| {
+                    f.value(format!("{:03}", mib(m.alloc_bytes_per_sec)))
+                        .text("MiB/s");
+                });
+                displayer.add_fact_to_group(DebugGroup::Memory, "Dealloc rate", |f| {
+                    f.value(format!("{:03}", mib(m.free_bytes_per_sec)))
+                        .text("MiB/s");
+                });
+            }
 
             // TODO(debug-overlay)
             _ => {}
@@ -273,6 +304,8 @@ pub struct DebugInfo<'a> {
     pub refresh_rate_millihertz: Option<u32>,
 
     pub tps: Option<TpsDebugInfo<'a>>,
+
+    pub memory: MemoryStats,
 }
 
 impl<'a> DebugInfo<'a> {
@@ -291,6 +324,8 @@ impl<'a> DebugInfo<'a> {
                 .and_then(|monitor| monitor.refresh_rate_millihertz()),
 
             tps,
+
+            memory: MemoryStats::sample(),
         }
     }
 }
