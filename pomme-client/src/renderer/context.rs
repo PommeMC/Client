@@ -46,6 +46,9 @@ const DEVICE_EXTENSIONS: &[&CStr] = &[
     khr::portability_subset::NAME,
 ];
 
+/// Optional, enabled only when the device supports both.
+const PRESENT_WAIT_EXTENSIONS: &[&CStr] = &[khr::present_id::NAME, khr::present_wait::NAME];
+
 pub struct VulkanContext {
     pub instance: vk::Instance,
     pub surface: vk::SurfaceKHR,
@@ -65,6 +68,7 @@ pub struct VulkanContext {
     pub image_available_semaphores: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT],
     pub in_flight_fences: [vk::Fence; MAX_FRAMES_IN_FLIGHT],
     pub frame_index: usize,
+    pub present_wait: bool,
 
     #[cfg(debug_assertions)]
     debug_messenger: vk::DebugUtilsMessengerEXT,
@@ -203,10 +207,30 @@ impl VulkanContext {
             ..Default::default()
         };
 
-        let device_extension_names: Vec<*const c_char> =
-            DEVICE_EXTENSIONS.iter().map(|ext| ext.as_ptr()).collect();
+        let present_wait = supports_present_wait(&physical_device);
+        tracing::info!("VK_KHR_present_wait: {present_wait}");
 
-        let device_info = vk::DeviceCreateInfo {
+        let optional_extensions = if present_wait {
+            PRESENT_WAIT_EXTENSIONS
+        } else {
+            &[]
+        };
+        let device_extension_names: Vec<*const c_char> = DEVICE_EXTENSIONS
+            .iter()
+            .chain(optional_extensions)
+            .map(|ext| ext.as_ptr())
+            .collect();
+
+        let mut present_id_features = vk::PhysicalDevicePresentIdFeaturesKHR {
+            present_id: vk::TRUE,
+            ..Default::default()
+        };
+        let mut present_wait_features = vk::PhysicalDevicePresentWaitFeaturesKHR {
+            present_wait: vk::TRUE,
+            ..Default::default()
+        };
+
+        let mut device_info = vk::DeviceCreateInfo {
             queue_create_info_count: queue_create_infos.len() as u32,
             queue_create_infos: queue_create_infos.as_ptr(),
             enabled_extension_count: device_extension_names.len() as u32,
@@ -214,6 +238,11 @@ impl VulkanContext {
             ..Default::default()
         }
         .next(&mut vk12_features);
+        if present_wait {
+            device_info = device_info
+                .next(&mut present_id_features)
+                .next(&mut present_wait_features);
+        }
 
         let device = unsafe { physical_device.create_device(&device_info, None, &instance)? };
 
@@ -275,6 +304,7 @@ impl VulkanContext {
             image_available_semaphores,
             in_flight_fences,
             frame_index: 0,
+            present_wait,
             #[cfg(debug_assertions)]
             debug_messenger,
             gpu_name,
@@ -327,7 +357,7 @@ fn pick_physical_device(
         .into_iter()
         .filter_map(|pd| {
             let (gf, pf) = find_queue_families(&pd, surface)?;
-            if !supports_required_extensions(&pd) {
+            if !supports_extensions(&pd, DEVICE_EXTENSIONS) {
                 return None;
             }
             let props = pd.get_properties();
@@ -349,15 +379,32 @@ fn pick_physical_device(
         .ok_or(ContextError::NoSuitableGpu)
 }
 
-fn supports_required_extensions(device: &vk::PhysicalDevice) -> bool {
+fn supports_extensions(device: &vk::PhysicalDevice, names: &[&CStr]) -> bool {
     let available = device
         .enumerate_device_extension_properties(None)
         .unwrap_or_default();
-    DEVICE_EXTENSIONS.iter().all(|&required| {
+    names.iter().all(|&required| {
         available
             .iter()
             .any(|ext| unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) == required })
     })
+}
+
+fn supports_present_wait(device: &vk::PhysicalDevice) -> bool {
+    if !supports_extensions(device, PRESENT_WAIT_EXTENSIONS) {
+        return false;
+    }
+    let Some(get_features2) = device.fns().v1_1.get_physical_device_features2 else {
+        return false;
+    };
+    let mut present_id = vk::PhysicalDevicePresentIdFeaturesKHR::default();
+    let mut present_wait = vk::PhysicalDevicePresentWaitFeaturesKHR::default();
+    // pyronyx's `get_features2` can't carry a pNext chain, so call it raw.
+    let mut features = vk::PhysicalDeviceFeatures2::default()
+        .next(&mut present_id)
+        .next(&mut present_wait);
+    unsafe { get_features2(device.handle(), &mut features) };
+    present_id.present_id == vk::TRUE && present_wait.present_wait == vk::TRUE
 }
 
 fn find_queue_families(device: &vk::PhysicalDevice, surface: vk::SurfaceKHR) -> Option<(u32, u32)> {

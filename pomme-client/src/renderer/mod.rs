@@ -40,6 +40,7 @@ pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
+use pyronyx::khr::present_wait::PresentWaitDevice;
 use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
 use pyronyx::vk;
 use swapchain::Swapchain;
@@ -134,6 +135,7 @@ enum RenderMode<'a> {
 
 #[derive(Default, Clone)]
 pub struct RenderTimings {
+    pub pace_ms: f32,
     pub frame_ms: f32,
     pub fence_ms: f32,
     pub acquire_ms: f32,
@@ -179,6 +181,8 @@ pub struct Renderer {
     render_finished_per_image: Vec<vk::Semaphore>,
     screenshot: screenshot::ScreenshotCapture,
     swapchain_dirty: bool,
+    /// Id of the last present tagged via `VK_KHR_present_id`; per swapchain.
+    present_id: u64,
     vsync: bool,
     width: u32,
     height: u32,
@@ -501,6 +505,7 @@ impl Renderer {
             render_finished_per_image,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
             swapchain_dirty: false,
+            present_id: 0,
             vsync,
             width: swapchain_extent.width,
             height: swapchain_extent.height,
@@ -682,6 +687,41 @@ impl Renderer {
         }
     }
 
+    /// Under FIFO, blocks until at most one frame is queued for display so the
+    /// next frame's input isn't sampled ahead of a full queue.
+    pub fn pace_frame(&mut self) {
+        // Bounded so a minimized/occluded window can't stall the loop.
+        const PACE_TIMEOUT_NS: u64 = 100_000_000;
+
+        self.last_timings.pace_ms = 0.0;
+        if self.swapchain_dirty || self.swapchain.present_mode != vk::PresentModeKHR::Fifo {
+            return;
+        }
+        let t_pace = std::time::Instant::now();
+        if self.ctx.present_wait {
+            if self.present_id < 2 {
+                return;
+            }
+            // Timeouts and surface loss resurface at acquire/present.
+            if let Err(vk::Error::OutOfDateKHR) = self.ctx.device.wait_for_present(
+                self.swapchain.handle,
+                self.present_id - 1,
+                PACE_TIMEOUT_NS,
+            ) {
+                self.swapchain_dirty = true;
+            }
+        } else {
+            // Fallback: GPU completion of the previous frame.
+            let prev = (self.ctx.frame_index + MAX_FRAMES_IN_FLIGHT - 1) % MAX_FRAMES_IN_FLIGHT;
+            let _ = self.ctx.device.wait_for_fences(
+                &[self.ctx.in_flight_fences[prev]],
+                true,
+                PACE_TIMEOUT_NS,
+            );
+        }
+        self.last_timings.pace_ms = t_pace.elapsed().as_secs_f32() * 1000.0;
+    }
+
     fn recreate_swapchain(&mut self) -> Result<(), RendererError> {
         let _ = self.ctx.device.wait_idle();
 
@@ -701,6 +741,7 @@ impl Renderer {
         )?;
         std::mem::swap(&mut self.swapchain, &mut old_swapchain);
         old_swapchain.destroy(&self.ctx.device, &self.ctx.allocator);
+        self.present_id = 0;
 
         // Adopt the swapchain's actual extent (may differ from the requested
         // window size, e.g. macOS fullscreen) so the viewport, menu layout, blur,
@@ -2009,7 +2050,7 @@ impl Renderer {
 
         self.ctx.graphics_queue.submit(&[submit_info], fence)?;
 
-        let present_info = vk::PresentInfoKHR {
+        let mut present_info = vk::PresentInfoKHR {
             wait_semaphore_count: 1,
             wait_semaphores: &render_finished,
             swapchain_count: 1,
@@ -2017,6 +2058,15 @@ impl Renderer {
             image_indices: &image_index,
             ..Default::default()
         };
+        self.present_id += 1;
+        let mut present_id = vk::PresentIdKHR {
+            swapchain_count: 1,
+            present_ids: &self.present_id,
+            ..Default::default()
+        };
+        if self.ctx.present_wait {
+            present_info = present_info.next(&mut present_id);
+        }
 
         let t_present = std::time::Instant::now();
         match self.ctx.present_queue.present(&present_info) {
