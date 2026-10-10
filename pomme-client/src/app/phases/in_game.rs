@@ -3362,6 +3362,7 @@ pub fn update_game(
             gfx,
             Some(TpsDebugInfo::new(connection, world)),
             SystemSpecsInfo::new(&gfx.window, &gfx.renderer),
+            Some(game),
         ),
     );
 
