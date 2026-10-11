@@ -33,6 +33,7 @@ impl<'a> DebugInfo<'a> {
             system,
             position: game.map(|game| PositionDebugInfo::new(game, gfx)),
             frame_timings: FrameTimings {
+                pace_ms: t.pace_ms,
                 frame_ms: t.frame_ms,
                 fence_ms: t.fence_ms,
                 acquire_ms: t.acquire_ms,

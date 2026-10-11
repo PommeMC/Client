@@ -7,6 +7,7 @@ pub struct FrameTimingsDebugEntry;
 
 #[derive(Clone, Copy, Default)]
 pub struct FrameTimings {
+    pub pace_ms: f32,
     pub frame_ms: f32,
     pub fence_ms: f32,
     pub acquire_ms: f32,
@@ -19,6 +20,7 @@ impl DebugEntry for FrameTimingsDebugEntry {
     fn display(&mut self, displayer: &mut DebugScreenDisplayer, info: &DebugInfo) {
         let t = info.frame_timings;
         let rows = [
+            ("Pace", t.pace_ms),
             ("Frame", t.frame_ms),
             ("Fence", t.fence_ms),
             ("Acquire", t.acquire_ms),

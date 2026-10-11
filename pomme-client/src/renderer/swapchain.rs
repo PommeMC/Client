@@ -17,6 +17,7 @@ pub struct Swapchain {
     pub image_views: Vec<vk::ImageView>,
     pub format: vk::SurfaceFormatKHR,
     pub extent: vk::Extent2D,
+    pub present_mode: vk::PresentModeKHR,
     pub depth_image: vk::Image,
     pub depth_view: vk::ImageView,
     pub depth_allocation: Option<Allocation>,
@@ -26,7 +27,6 @@ pub struct Swapchain {
     pub framebuffers: Vec<vk::Framebuffer>,
     pub framebuffers_scene: Vec<vk::Framebuffer>,
     pub framebuffers_load: Vec<vk::Framebuffer>,
-    pub present_mode: vk::PresentModeKHR,
 }
 
 impl Swapchain {
@@ -174,6 +174,7 @@ impl Swapchain {
             image_views,
             format,
             extent,
+            present_mode,
             depth_image,
             depth_view,
             depth_allocation: Some(depth_allocation),
@@ -183,7 +184,6 @@ impl Swapchain {
             framebuffers,
             framebuffers_scene,
             framebuffers_load,
-            present_mode,
         })
     }
 
