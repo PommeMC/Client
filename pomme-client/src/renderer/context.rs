@@ -394,16 +394,17 @@ fn supports_present_wait(device: &vk::PhysicalDevice) -> bool {
     if !supports_extensions(device, PRESENT_WAIT_EXTENSIONS) {
         return false;
     }
-    let Some(get_features2) = device.fns().v1_1.get_physical_device_features2 else {
+    if device.fns().v1_1.get_physical_device_features2.is_none() {
         return false;
-    };
+    }
+
     let mut present_id = vk::PhysicalDevicePresentIdFeaturesKHR::default();
     let mut present_wait = vk::PhysicalDevicePresentWaitFeaturesKHR::default();
-    // pyronyx's `get_features2` can't carry a pNext chain, so call it raw.
     let mut features = vk::PhysicalDeviceFeatures2::default()
         .next(&mut present_id)
         .next(&mut present_wait);
-    unsafe { get_features2(device.handle(), &mut features) };
+    device.get_features2(&mut features);
+
     present_id.present_id == vk::TRUE && present_wait.present_wait == vk::TRUE
 }
 
