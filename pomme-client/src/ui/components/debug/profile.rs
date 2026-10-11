@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ui::components::debug::entry_id::DebugEntryId;
-use crate::ui::components::debug::entry_status::DebugEntryStatus;
+use crate::ui::components::debug::entries::DebugEntryId;
+use crate::ui::components::debug::entry::DebugEntryStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "profile", content = "entries", rename_all = "snake_case")]

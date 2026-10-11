@@ -1,8 +1,8 @@
 use std::ops::{Index, IndexMut};
 
 use crate::ui::components::debug::displayer::DebugScreenDisplayer;
+use crate::ui::components::debug::entries::DebugEntryId;
 use crate::ui::components::debug::entry::DebugEntry;
-use crate::ui::components::debug::entry_id::DebugEntryId;
 use crate::ui::components::debug::info::DebugInfo;
 
 pub struct DebugEntries {

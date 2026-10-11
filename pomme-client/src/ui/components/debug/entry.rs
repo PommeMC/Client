@@ -9,12 +9,22 @@ pub trait DebugEntry {
         !reduced_debug_info
     }
 
+    #[allow(unused)] // TODO(debug-overlay)
     fn category(&self) -> DebugEntryCategory {
         DebugEntryCategory::Text
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugEntryCategory {
     Text,
     Renderer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugEntryStatus {
+    Never,
+    InOverlay,
+    AlwaysOn,
 }

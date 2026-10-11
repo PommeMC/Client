@@ -1,33 +1,96 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::ui::common::TextWidthFn;
 use crate::ui::components::debug::column::{DebugColumn, DebugColumnSide};
 use crate::ui::components::debug::displayer::DebugScreenDisplayer;
-use crate::ui::components::debug::entry_list::DebugEntryList;
+use crate::ui::components::debug::entries::DebugEntryId;
+use crate::ui::components::debug::entry::DebugEntryStatus;
 use crate::ui::components::debug::groups::DebugGroup;
 use crate::ui::components::debug::info::DebugInfo;
+use crate::ui::components::debug::profile::DebugScreenProfile;
 use crate::ui::components::debug::registry::DebugEntries;
 
 pub struct DebugScreenOverlay {
-    debug_entry_list: DebugEntryList,
+    is_overlay_visible: bool,
+    profile: DebugScreenProfile,
+    debug_profile_file: PathBuf,
+
     entries: DebugEntries,
+    currently_enabled: Vec<DebugEntryId>,
+
     left_column: DebugColumn,
     right_column: DebugColumn,
 }
 
 impl DebugScreenOverlay {
     pub fn new(game_dir: &Path) -> Self {
-        Self {
-            debug_entry_list: DebugEntryList::new(game_dir),
+        let debug_profile_file = game_dir.join("debug_profile.json");
+
+        let profile = match std::fs::read_to_string(&debug_profile_file) {
+            Ok(json) => match serde_json::from_str(&json) {
+                Ok(profile) => profile,
+                Err(error) => {
+                    tracing::error!("Failed to parse debug profile: {error}, resetting to default");
+                    DebugScreenProfile::Default
+                }
+            },
+            Err(error) => {
+                tracing::error!("Failed to read debug profile: {error}, resetting to default");
+                DebugScreenProfile::Default
+            }
+        };
+
+        let mut slf = Self {
+            is_overlay_visible: false,
+            profile,
+            debug_profile_file,
             entries: DebugEntries::new(),
+            currently_enabled: Vec::new(),
             left_column: DebugColumn::new(DebugColumnSide::Left),
             right_column: DebugColumn::new(DebugColumnSide::Right),
-        }
+        };
+
+        slf.save_profile();
+        slf.rebuild_current_list();
+        slf
     }
 
     pub fn toggle_overlay(&mut self) {
-        self.debug_entry_list.toggle_overlay();
+        self.is_overlay_visible = !self.is_overlay_visible;
+        self.rebuild_current_list();
+    }
+
+    pub fn save_profile(&mut self) {
+        match serde_json::to_string_pretty(&self.profile) {
+            Ok(string) => {
+                if let Err(error) = std::fs::write(&self.debug_profile_file, string) {
+                    tracing::error!("Failed to write debug profile file: {error}");
+                }
+            }
+            Err(error) => tracing::error!("Failed to serialize debug profile: {error}"),
+        }
+    }
+
+    pub fn rebuild_current_list(&mut self) {
+        let reduced_debug_info = false; // TODO(debug-overlay)
+
+        self.currently_enabled = DebugEntryId::ALL
+            .iter()
+            .copied()
+            .filter(|entry| {
+                let status = self.profile.status(entry);
+
+                let is_enabled = status == DebugEntryStatus::AlwaysOn
+                    || (self.is_overlay_visible && status == DebugEntryStatus::InOverlay);
+
+                is_enabled && self.entries.is_allowed(*entry, reduced_debug_info)
+            })
+            .collect();
+
+        self.currently_enabled.sort_by_key(|id| id.name());
+        // TODO(debug-overlay): DebugColumn caching
+        // self.currently_enabled_version += 1;
     }
 
     pub fn build(
@@ -43,7 +106,7 @@ impl DebugScreenOverlay {
         self.right_column.new_frame(gui_scale);
 
         let mut displayer = DebugScreenDisplayer::new();
-        for &id in self.debug_entry_list.get_currently_enabled() {
+        for &id in &self.currently_enabled {
             self.entries.display(id, &mut displayer, &info);
         }
 
