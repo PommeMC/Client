@@ -63,4 +63,8 @@ impl DebugEntry for FpsDebugEntry {
             f.fps, framerate_limit, present_mode, refresh_rate
         ));
     }
+
+    fn is_allowed(&self, _reduced_debug_info: bool) -> bool {
+        true
+    }
 }

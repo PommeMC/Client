@@ -84,4 +84,8 @@ impl DebugEntry for TpsDebugEntry {
                 .text(" rx");
         });
     }
+
+    fn is_allowed(&self, _reduced_debug_info: bool) -> bool {
+        true
+    }
 }

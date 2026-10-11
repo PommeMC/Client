@@ -34,4 +34,8 @@ impl DebugEntry for FrameTimingsDebugEntry {
             });
         }
     }
+
+    fn is_allowed(&self, _reduced_debug_info: bool) -> bool {
+        true
+    }
 }

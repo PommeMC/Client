@@ -24,6 +24,10 @@ impl DebugEntry for MemoryDebugEntry {
                 .text("MiB");
         });
     }
+
+    fn is_allowed(&self, _reduced_debug_info: bool) -> bool {
+        true
+    }
 }
 
 pub struct DetailedMemoryDebugEntry;
@@ -43,5 +47,9 @@ impl DebugEntry for DetailedMemoryDebugEntry {
             f.value(format!("{:03}", mib(m.free_bytes_per_sec)))
                 .text("MiB/s");
         });
+    }
+
+    fn is_allowed(&self, _reduced_debug_info: bool) -> bool {
+        true
     }
 }

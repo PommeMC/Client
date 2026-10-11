@@ -120,4 +120,9 @@ impl DebugEntry for SectionPositionDebugEntry {
             f.value(format!("{:02} {:02} {:02}", bx & 15, by & 15, bz & 15));
         });
     }
+
+    // NOTE: is this a mojang's bug?
+    fn is_allowed(&self, _reduced_debug_info: bool) -> bool {
+        true
+    }
 }

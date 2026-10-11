@@ -36,4 +36,8 @@ impl DebugEntry for GameVersionDebugEntry {
             info.game_version_name, info.game_version_string, info.client_brand,
         ));
     }
+
+    fn is_allowed(&self, _reduced_debug_info: bool) -> bool {
+        true
+    }
 }
