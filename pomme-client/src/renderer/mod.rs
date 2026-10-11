@@ -40,6 +40,7 @@ pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
+use pyronyx::khr::present_wait::PresentWaitDevice;
 use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
 use pyronyx::vk;
 use swapchain::Swapchain;
@@ -52,7 +53,7 @@ use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
-use crate::ui::font::FontSources;
+use crate::ui::font::{FontOptions, FontSources};
 use crate::world::block::registry::BlockRegistry;
 
 #[derive(Error, Debug)]
@@ -112,6 +113,8 @@ enum RenderMode<'a> {
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
         held_item: Option<pipelines::held_item::HeldItemInfo>,
+        player_team_color: Option<u32>,
+        render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
@@ -137,6 +140,7 @@ enum RenderMode<'a> {
 
 #[derive(Default, Clone)]
 pub struct RenderTimings {
+    pub pace_ms: f32,
     pub frame_ms: f32,
     pub fence_ms: f32,
     pub acquire_ms: f32,
@@ -171,6 +175,9 @@ pub struct Renderer {
     cloud_pipeline: CloudPipeline,
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
     gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
+    /// Force Unicode Font also evens the Auto GUI scale the item atlas is sized
+    /// for.
+    font_options: FontOptions,
 
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
@@ -179,6 +186,8 @@ pub struct Renderer {
     render_finished_per_image: Vec<vk::Semaphore>,
     screenshot: screenshot::ScreenshotCapture,
     swapchain_dirty: bool,
+    /// Id of the last present tagged via `VK_KHR_present_id`; per swapchain.
+    present_id: u64,
     vsync: bool,
     width: u32,
     height: u32,
@@ -197,6 +206,7 @@ impl Renderer {
             jar_assets_dir,
             asset_index,
             packs,
+            options: font_options,
         } = font_sources;
         let size = window.inner_size();
 
@@ -443,7 +453,7 @@ impl Renderer {
         splash(&mut menu_pipeline, 0.95, "Caching item meshes...");
 
         let initial_slot_px =
-            pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(sw, sh, 0));
+            pipelines::gui_item_atlas::slot_px_for_screen(sw, sh, font_options.uniform);
         let gui_item_atlas = build_gui_item_atlas(
             &ctx.device,
             &ctx.allocator,
@@ -496,10 +506,12 @@ impl Renderer {
             cloud_pipeline,
             gui_item_pipeline,
             gui_item_atlas,
+            font_options,
             chunk_buffers,
             render_finished_per_image,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
             swapchain_dirty: false,
+            present_id: 0,
             vsync,
             width: swapchain_extent.width,
             height: swapchain_extent.height,
@@ -681,6 +693,41 @@ impl Renderer {
         }
     }
 
+    /// Under FIFO, blocks until at most one frame is queued for display so the
+    /// next frame's input isn't sampled ahead of a full queue.
+    pub fn pace_frame(&mut self) {
+        // Bounded so a minimized/occluded window can't stall the loop.
+        const PACE_TIMEOUT_NS: u64 = 100_000_000;
+
+        self.last_timings.pace_ms = 0.0;
+        if self.swapchain_dirty || self.swapchain.present_mode != vk::PresentModeKHR::Fifo {
+            return;
+        }
+        let t_pace = std::time::Instant::now();
+        if self.ctx.present_wait {
+            if self.present_id < 2 {
+                return;
+            }
+            // Timeouts and surface loss resurface at acquire/present.
+            if let Err(vk::Error::OutOfDateKHR) = self.ctx.device.wait_for_present(
+                self.swapchain.handle,
+                self.present_id - 1,
+                PACE_TIMEOUT_NS,
+            ) {
+                self.swapchain_dirty = true;
+            }
+        } else {
+            // Fallback: GPU completion of the previous frame.
+            let prev = (self.ctx.frame_index + MAX_FRAMES_IN_FLIGHT - 1) % MAX_FRAMES_IN_FLIGHT;
+            let _ = self.ctx.device.wait_for_fences(
+                &[self.ctx.in_flight_fences[prev]],
+                true,
+                PACE_TIMEOUT_NS,
+            );
+        }
+        self.last_timings.pace_ms = t_pace.elapsed().as_secs_f32() * 1000.0;
+    }
+
     fn recreate_swapchain(&mut self) -> Result<(), RendererError> {
         let _ = self.ctx.device.wait_idle();
 
@@ -700,6 +747,7 @@ impl Renderer {
         )?;
         std::mem::swap(&mut self.swapchain, &mut old_swapchain);
         old_swapchain.destroy(&self.ctx.device, &self.ctx.allocator);
+        self.present_id = 0;
 
         // Adopt the swapchain's actual extent (may differ from the requested
         // window size, e.g. macOS fullscreen) so the viewport, menu layout, blur,
@@ -790,6 +838,10 @@ impl Renderer {
         self.camera.sync_pos(position);
     }
 
+    pub fn set_sleeping_camera_look(&mut self, yaw_deg: Option<f32>) {
+        self.camera.set_sleeping_look(yaw_deg);
+    }
+
     pub fn set_view_bob(&mut self, walk_dist: f32, bob: f32, enabled: bool) {
         self.camera.set_view_bob(walk_dist, bob, enabled);
     }
@@ -815,11 +867,15 @@ impl Renderer {
         &mut self,
         eye_pos: Position,
         chunks: &crate::world::chunk::ChunkStore,
+        max_distance: f32,
     ) {
         if self.camera.mode == camera::CameraMode::FirstPerson || self.camera.top_down().is_some() {
             return;
         }
-        let max = camera::THIRD_PERSON_DISTANCE as f64;
+        // TODO: vanilla `Camera.getMaxZoom` clips 8 rays offset by 0.1 against
+        // visual shapes with no minimum; this marches 0.2 steps against full
+        // cubes with a 0.4 pad and a 0.5 floor, so a distance of 0 sits 0.5 back.
+        let max = max_distance as f64;
         let fwd = self.camera.look_dir.as_vec().as_dvec3();
         let dir = if self.camera.mode == camera::CameraMode::ThirdPersonFront {
             fwd
@@ -1083,7 +1139,9 @@ impl Renderer {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
-        held_item: Option<(String, f32)>,
+        held_item: Option<(String, f32, azalea_inventory::ItemStackData)>,
+        player_team_color: Option<u32>,
+        render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
@@ -1100,11 +1158,15 @@ impl Renderer {
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
         self.camera.set_render_distance(render_distance);
-        let held_item = held_item.map(|(name, light)| {
+        let held_item = held_item.map(|(name, light, stack)| {
+            let item_tints =
+                self.registry
+                    .item_tint_palette(&name, Some(&stack), player_team_color);
             let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
             pipelines::held_item::HeldItemInfo {
                 name,
                 light,
+                item_tints,
                 has_3d_model,
             }
         });
@@ -1126,6 +1188,8 @@ impl Renderer {
                 swing_progress,
                 use_anim,
                 held_item,
+                player_team_color,
+                render_first_person_hand,
                 destroy_info,
                 show_chunk_borders,
                 sky,
@@ -1170,6 +1234,7 @@ impl Renderer {
         &mut self,
         game_dir: &Path,
         packs: &crate::resource_pack::ResourcePackManager,
+        font_options: FontOptions,
     ) {
         self.ctx.device.wait_idle().unwrap();
 
@@ -1228,19 +1293,7 @@ impl Renderer {
             packs,
         );
 
-        if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
-            &self.ctx.device,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            &self.ctx.allocator,
-            FontSources {
-                jar_assets_dir: &self.jar_assets_dir,
-                asset_index: &self.asset_index,
-                packs,
-            },
-        ) {
-            tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
-        }
+        self.reload_fonts(packs, font_options);
 
         warm_item_meshes(
             &self.ctx.device,
@@ -1255,6 +1308,30 @@ impl Renderer {
         self.gui_item_atlas.invalidate_all();
 
         tracing::info!("Assets reloaded");
+    }
+
+    /// Vanilla `FontManager.updateOptions`: only the font sets change.
+    pub fn reload_fonts(
+        &mut self,
+        packs: &crate::resource_pack::ResourcePackManager,
+        font_options: FontOptions,
+    ) {
+        self.font_options = font_options;
+        self.ctx.device.wait_idle().unwrap();
+        if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            FontSources {
+                jar_assets_dir: &self.jar_assets_dir,
+                asset_index: &self.asset_index,
+                packs,
+                options: font_options,
+            },
+        ) {
+            tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
+        }
     }
 
     pub fn reload_panorama(&mut self, panorama_dir: &Path) {
@@ -1388,16 +1465,11 @@ impl Renderer {
             );
             true
         } else {
-            let texture_key = self
-                .registry
-                .get_flat_item_texture_key(name)
-                .map(String::from)
-                .unwrap_or_else(|| format!("item/{name}"));
             self.item_entity_pipeline.ensure_flat_mesh(
                 &self.ctx.device,
                 &self.ctx.allocator,
                 name,
-                &texture_key,
+                &self.registry.flat_item_layers(name),
                 &self.atlas.uv_map,
             );
             false
@@ -1426,7 +1498,7 @@ impl Renderer {
         window: &Window,
         hide_cursor: bool,
         clear_color: [f32; 4],
-        mode: RenderMode<'_>,
+        mut mode: RenderMode<'_>,
     ) -> Result<(), RendererError> {
         if self.swapchain_dirty {
             self.recreate_swapchain()?;
@@ -1546,17 +1618,74 @@ impl Renderer {
             },
         ];
 
-        let menu_elements: &[MenuElement] = match &mode {
-            RenderMode::World { overlay, .. } => overlay.as_slice(),
-            RenderMode::MainMenu { elements, .. } => elements.as_slice(),
+        let player_team_color = match &mode {
+            RenderMode::World {
+                player_team_color, ..
+            } => *player_team_color,
+            RenderMode::MainMenu { .. } => None,
         };
+        let menu_elements: &mut [MenuElement] = match &mut mode {
+            RenderMode::World { overlay, .. } => overlay.as_mut_slice(),
+            RenderMode::MainMenu { elements, .. } => elements.as_mut_slice(),
+        };
+        let mut unique_items: HashMap<String, (String, Vec<u32>)> = HashMap::new();
+        let mut add_item = |name: &str, tints: &[u32]| {
+            unique_items
+                .entry(pipelines::menu_overlay::item_icon_atlas_key(name, tints))
+                .or_insert_with(|| (name.to_owned(), tints.to_vec()));
+        };
+        for elem in menu_elements.iter_mut() {
+            match elem {
+                MenuElement::ItemIcon {
+                    item_name,
+                    item_stack,
+                    use_player_team,
+                    item_tints,
+                    ..
+                } => {
+                    let owner_team_color = if *use_player_team {
+                        player_team_color
+                    } else {
+                        None
+                    };
+                    *item_tints = self.registry.item_tint_palette(
+                        item_name,
+                        item_stack.as_ref(),
+                        owner_team_color,
+                    );
+                    add_item(item_name, item_tints);
+                }
+                // Vanilla `ClientBundleTooltip` draws its contents with the
+                // player as owner.
+                MenuElement::BundleTooltip {
+                    items, item_tints, ..
+                } => {
+                    *item_tints = items
+                        .iter()
+                        .map(|item| {
+                            let azalea_inventory::ItemStack::Present(data) = item else {
+                                return Vec::new();
+                            };
+                            let name = crate::player::inventory::item_resource_name(data.kind);
+                            let tints = self.registry.item_tint_palette(
+                                &name,
+                                Some(data),
+                                player_team_color,
+                            );
+                            add_item(&name, &tints);
+                            tints
+                        })
+                        .collect();
+                }
+                _ => {}
+            }
+        }
 
-        let target_slot_px =
-            pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(
-                self.swapchain.extent.width as f32,
-                self.swapchain.extent.height as f32,
-                0,
-            ));
+        let target_slot_px = pipelines::gui_item_atlas::slot_px_for_screen(
+            self.swapchain.extent.width as f32,
+            self.swapchain.extent.height as f32,
+            self.font_options.uniform,
+        );
         if target_slot_px != self.gui_item_atlas.slot_px() {
             // Mid-cmd-recording wait_idle: this cmd buffer is unsubmitted so
             // holds no in-flight references, and `submit_one_time` inside the
@@ -1578,36 +1707,33 @@ impl Renderer {
                 .set_atlas_px(self.gui_item_atlas.atlas_px());
         }
 
-        let mut unique_names: HashSet<String> = HashSet::new();
-        for elem in menu_elements {
-            if let MenuElement::ItemIcon { item_name, .. } = elem {
-                unique_names.insert(item_name.clone());
-            }
-        }
-        if !self.gui_item_atlas.has_space_for_all(&unique_names)
-            && !self.gui_item_atlas.reclaim_space_for(&unique_names)
+        let unique_keys: HashSet<String> = unique_items.keys().cloned().collect();
+        if !self.gui_item_atlas.has_space_for_all(&unique_keys)
+            && !self.gui_item_atlas.reclaim_space_for(&unique_keys)
         {
             tracing::warn!(
                 "gui_item_atlas: out of slots for {} unique items; some icons will not render",
-                unique_names.len()
+                unique_items.len()
             );
         }
         let mut item_atlas_uvs: HashMap<String, [f32; 4]> = HashMap::new();
         struct BakeJob {
             slot: pipelines::gui_item_atlas::Slot,
             name: String,
+            item_tints: Vec<u32>,
             display: crate::world::block::model::DisplayTransform,
             needs_clear: bool,
         }
         let mut bake_list: Vec<BakeJob> = Vec::new();
-        for name in &unique_names {
+        for (key, (name, item_tints)) in &unique_items {
             let discard = pipelines::gui_item_atlas::is_animated_item(name);
-            if let Some((slot, state)) = self.gui_item_atlas.get_or_allocate(name, discard) {
-                item_atlas_uvs.insert(name.clone(), self.gui_item_atlas.slot_uv(&slot));
+            if let Some((slot, state)) = self.gui_item_atlas.get_or_allocate(key, discard) {
+                item_atlas_uvs.insert(key.clone(), self.gui_item_atlas.slot_uv(&slot));
                 if !matches!(state, pipelines::gui_item_atlas::SlotState::Ready) {
                     bake_list.push(BakeJob {
                         slot,
                         name: name.clone(),
+                        item_tints: item_tints.clone(),
                         display: self.registry.get_item_gui_transform(name),
                         needs_clear: matches!(state, pipelines::gui_item_atlas::SlotState::Stale),
                     });
@@ -1616,7 +1742,14 @@ impl Renderer {
         }
         if !bake_list.is_empty() {
             self.gui_item_atlas.begin_bake_pass(cmd);
-            self.gui_item_pipeline.bind_for_bake_pass(cmd);
+            let required_tint_colors = bake_list.iter().map(|job| job.item_tints.len()).sum();
+            self.gui_item_pipeline.bind_for_bake_pass(
+                &self.ctx.device,
+                &self.ctx.allocator,
+                cmd,
+                frame,
+                required_tint_colors,
+            );
             for job in &bake_list {
                 if job.needs_clear {
                     self.gui_item_atlas.clear_slot_color(cmd, &job.slot);
@@ -1625,12 +1758,14 @@ impl Renderer {
                 let (sx, sy) = self.gui_item_atlas.slot_origin_pixels(&job.slot);
                 self.gui_item_pipeline.bake_to_slot(
                     cmd,
+                    frame,
                     &self.item_entity_pipeline,
                     sx,
                     sy,
                     self.gui_item_atlas.slot_px(),
                     &job.name,
                     job.display,
+                    &job.item_tints,
                 );
             }
             self.gui_item_atlas.end_bake_pass(cmd);
@@ -1678,6 +1813,8 @@ impl Renderer {
                 swing_progress,
                 use_anim,
                 held_item,
+                player_team_color: _,
+                render_first_person_hand,
                 destroy_info,
                 show_chunk_borders,
                 sky,
@@ -1746,7 +1883,13 @@ impl Renderer {
                 self.block_entity_pipeline
                     .draw(cmd, frame, anchor, block_entities);
 
-                self.item_entity_pipeline.draw(cmd, frame, item_entities);
+                self.item_entity_pipeline.draw(
+                    &self.ctx.device,
+                    &self.ctx.allocator,
+                    cmd,
+                    frame,
+                    item_entities,
+                );
 
                 // Break particles draw after entities but before translucent
                 // water: they write depth, and pomme's water doesn't, so this
@@ -1802,7 +1945,8 @@ impl Renderer {
                 };
                 cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
 
-                if self.camera.mode == camera::CameraMode::FirstPerson
+                if *render_first_person_hand
+                    && self.camera.mode == camera::CameraMode::FirstPerson
                     && self.camera.top_down().is_none()
                 {
                     let aspect = sw / sh.max(1.0);
@@ -1814,6 +1958,8 @@ impl Renderer {
                     // hand; a held item renders alone.
                     match held_item {
                         Some(item) => self.held_item_pipeline.update_and_draw(
+                            &self.ctx.device,
+                            &self.ctx.allocator,
                             cmd,
                             frame,
                             aspect,
@@ -1984,7 +2130,7 @@ impl Renderer {
 
         self.ctx.graphics_queue.submit(&[submit_info], fence)?;
 
-        let present_info = vk::PresentInfoKHR {
+        let mut present_info = vk::PresentInfoKHR {
             wait_semaphore_count: 1,
             wait_semaphores: &render_finished,
             swapchain_count: 1,
@@ -1992,6 +2138,15 @@ impl Renderer {
             image_indices: &image_index,
             ..Default::default()
         };
+        self.present_id += 1;
+        let mut present_id = vk::PresentIdKHR {
+            swapchain_count: 1,
+            present_ids: &self.present_id,
+            ..Default::default()
+        };
+        if self.ctx.present_wait {
+            present_info = present_info.next(&mut present_id);
+        }
 
         let t_present = std::time::Instant::now();
         match self.ctx.present_queue.present(&present_info) {
@@ -2041,11 +2196,13 @@ fn warm_item_meshes(
         if let Some(model) = registry.get_item_model(name) {
             item_entity_pipeline.ensure_mesh(device, allocator, name, model, uv_map);
         } else {
-            let texture_key = registry
-                .get_flat_item_texture_key(name)
-                .map(String::from)
-                .unwrap_or_else(|| format!("item/{name}"));
-            item_entity_pipeline.ensure_flat_mesh(device, allocator, name, &texture_key, uv_map);
+            item_entity_pipeline.ensure_flat_mesh(
+                device,
+                allocator,
+                name,
+                &registry.flat_item_layers(name),
+                uv_map,
+            );
         }
     }
 }
@@ -2122,6 +2279,7 @@ pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<SkinData, String> {
         .properties
         .iter()
         .find(|p| p.name.as_deref() == Some("textures"))
+        // TODO: authlib reads only the `textures` property; drop this fallback.
         .or_else(|| profile.properties.first())
         .ok_or("No properties")?
         .value;
@@ -2147,19 +2305,48 @@ fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String>
     struct TexturesPayload {
         textures: Textures,
     }
+    struct Textures(Vec<(String, Texture)>);
     #[derive(serde::Deserialize)]
-    struct Textures {
-        #[serde(rename = "SKIN")]
-        skin: Option<SkinTexture>,
-    }
-    #[derive(serde::Deserialize)]
-    struct SkinTexture {
-        url: String,
+    struct Texture {
+        url: Option<String>,
         metadata: Option<SkinMetadata>,
     }
     #[derive(serde::Deserialize)]
     struct SkinMetadata {
         model: Option<String>,
+    }
+
+    /// Gson's map adapter fails on a repeated key. Keys are authlib's texture
+    /// `Type`, so unknown names all collide as `null`.
+    impl<'de> serde::Deserialize<'de> for Textures {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = Textures;
+
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a textures map")
+                }
+
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<Textures, A::Error> {
+                    fn slot(key: &str) -> Option<&str> {
+                        matches!(key, "SKIN" | "CAPE" | "ELYTRA").then_some(key)
+                    }
+                    let mut entries: Vec<(String, Texture)> = Vec::new();
+                    while let Some((key, texture)) = map.next_entry::<String, Texture>()? {
+                        if entries.iter().any(|(k, _)| slot(k) == slot(&key)) {
+                            return Err(serde::de::Error::custom(format!("duplicate key: {key}")));
+                        }
+                        entries.push((key, texture));
+                    }
+                    Ok(Textures(entries))
+                }
+            }
+            deserializer.deserialize_map(Visitor)
+        }
     }
 
     use base64::Engine;
@@ -2169,14 +2356,44 @@ fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String>
         .map_err(error_chain)?;
     let payload: TexturesPayload = serde_json::from_slice(&decoded).map_err(error_chain)?;
 
-    payload
-        .textures
-        .skin
-        .map(|s| {
-            let slim = s.metadata.as_ref().and_then(|m| m.model.as_deref()) == Some("slim");
-            (s.url, slim)
-        })
-        .ok_or_else(|| "No skin texture".to_string())
+    // authlib `unpackTextures`: one bad url empties the whole payload.
+    // TODO: vanilla also shows the default skin for other players whose
+    // textures property isn't SIGNED (`PlayerInfo.createSkinLookup`); pomme
+    // doesn't verify the signature yet.
+    let mut skin = None;
+    for (key, texture) in payload.textures.0 {
+        match texture.url {
+            Some(url) if is_allowed_texture_url(&url) => {
+                if key == "SKIN" {
+                    let slim = texture.metadata.and_then(|m| m.model).as_deref() == Some("slim");
+                    skin = Some((url, slim));
+                }
+            }
+            url => return Err(format!("texture url not allowed: {url:?}")),
+        }
+    }
+    skin.ok_or_else(|| "No skin texture".to_string())
+}
+
+/// authlib's `TextureUrlChecker.isAllowedTextureDomain`: a `java.net.URI`
+/// (`parse_untrusted_url`'s rules) with a case-sensitive http(s) scheme and a
+/// host of exactly `textures.minecraft.net`.
+fn is_allowed_texture_url(url: &str) -> bool {
+    const HOST: &str = "textures.minecraft.net";
+    if crate::chat_component::parse_untrusted_url(url.to_owned()).is_err() {
+        return false;
+    }
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let (host, port) = host_port.split_once(':').unwrap_or((host_port, ""));
+    // `URI` scans the port as digits, then `Integer.parseInt`; an overflow
+    // leaves no host.
+    let port_ok = port.is_empty()
+        || (port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<i32>().is_ok());
+    matches!(scheme, "http" | "https") && host == HOST && port_ok
 }
 
 /// Error message including the source chain (`reqwest` hides the detail there).
@@ -2367,53 +2584,77 @@ mod tests {
 
     #[test]
     fn decodes_skin_url_from_textures_property() {
-        use base64::Engine;
-
-        let payload =
-            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin"}}}"#;
-        let value = base64::engine::general_purpose::STANDARD.encode(payload);
-
-        assert_eq!(
-            skin_url_from_texture_property(&value).unwrap(),
-            (
-                "https://textures.minecraft.net/texture/testskin".into(),
-                false
-            )
+        let classic = textures_property(
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin"}}}"#,
         );
+        let slim = textures_property(
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin","metadata":{"model":"slim"}}}}"#,
+        );
+        for (value, is_slim) in [
+            (classic.as_str(), false),
+            (classic.trim_end_matches('='), false),
+            (slim.as_str(), true),
+        ] {
+            assert_eq!(
+                skin_url_from_texture_property(value).unwrap(),
+                (
+                    "https://textures.minecraft.net/texture/testskin".to_owned(),
+                    is_slim
+                ),
+                "{value}"
+            );
+        }
+    }
+
+    fn textures_property(payload: &str) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(payload)
     }
 
     #[test]
-    fn decodes_unpadded_skin_url_from_textures_property() {
-        use base64::Engine;
-
-        let payload =
-            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin"}}}"#;
-        let value = base64::engine::general_purpose::STANDARD.encode(payload);
-        let value = value.trim_end_matches('=');
-
-        assert_eq!(
-            skin_url_from_texture_property(value).unwrap(),
-            (
-                "https://textures.minecraft.net/texture/testskin".into(),
-                false
-            )
-        );
+    fn texture_urls_follow_authlib_allow_list() {
+        for ok in [
+            "https://textures.minecraft.net/texture/abc",
+            "http://textures.minecraft.net/texture/abc",
+            "https://textures.minecraft.net:443/texture/abc",
+        ] {
+            assert!(is_allowed_texture_url(ok), "{ok}");
+        }
+        for bad in [
+            "https://example.com/texture/abc",
+            "https://textures.minecraft.net.evil.com/abc",
+            "https://evil.com/textures.minecraft.net",
+            "https://textures.minecraft.net@evil.com/abc",
+            "https://evil.com#@textures.minecraft.net",
+            "https://TEXTURES.minecraft.net/texture/abc",
+            "HTTPS://textures.minecraft.net/texture/abc",
+            "ftp://textures.minecraft.net/texture/abc",
+            "file:///etc/passwd",
+            "http://192.168.0.1/skin.png",
+            "https://textures.minecraft.net/texture/a b",
+            "https://textures.minecraft.net/texture/a|b",
+            r"https://textures.minecraft.net\@evil.com/abc",
+            "https://textures.minecraft.net:abc/texture/abc",
+            "https://textures.minecraft.net:99999999999/texture/abc",
+            "not a url",
+            "",
+        ] {
+            assert!(!is_allowed_texture_url(bad), "{bad}");
+        }
     }
 
     #[test]
-    fn decodes_slim_model_from_textures_property() {
-        use base64::Engine;
-
-        let payload = r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin","metadata":{"model":"slim"}}}}"#;
-        let value = base64::engine::general_purpose::STANDARD.encode(payload);
-
-        assert_eq!(
-            skin_url_from_texture_property(&value).unwrap(),
-            (
-                "https://textures.minecraft.net/texture/testskin".into(),
-                true
-            )
-        );
+    fn foreign_urls_and_duplicate_keys_reject_the_whole_payload() {
+        for payload in [
+            r#"{"textures":{"SKIN":{"url":"http://192.168.0.1/skin.png"}}}"#,
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/a"},"CAPE":{"url":"http://192.168.0.1/cape.png"}}}"#,
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/a"},"ELYTRA":{}}}"#,
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/a"},"SKIN":{"url":"https://textures.minecraft.net/texture/b"}}}"#,
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/a"},"FOO":{"url":"https://textures.minecraft.net/texture/b"},"BAR":{"url":"https://textures.minecraft.net/texture/c"}}}"#,
+        ] {
+            let value = textures_property(payload);
+            assert!(skin_url_from_texture_property(&value).is_err(), "{payload}");
+        }
     }
 
     fn set_px(img: &mut [u8], x: u32, y: u32, rgba: [u8; 4]) {

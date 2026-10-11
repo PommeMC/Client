@@ -11,7 +11,7 @@ use super::container::{
 use crate::player::inventory::{self, Inventory};
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::PlayerPreview;
-use crate::renderer::pipelines::entity_renderer::{ArmorRenderInfo, armor_render_infos};
+use crate::renderer::pipelines::entity_renderer::armor_render_infos;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
 // Vanilla player-menu slot indices, as u16 for click ops.
@@ -21,11 +21,6 @@ const SLOT_ARMOR_BASE: u16 = inventory::ARMOR_START as u16;
 const SLOT_MAIN_BASE: u16 = inventory::MAIN_START as u16;
 const SLOT_HOTBAR_BASE: u16 = inventory::HOTBAR_START as u16;
 const SLOT_OFFHAND: u16 = inventory::OFFHAND as u16;
-
-pub(crate) fn player_preview_armor(inventory: &Inventory) -> [Option<ArmorRenderInfo>; 4] {
-    let armor = inventory.armor_slots();
-    armor_render_infos([armor.first(), armor.get(1), armor.get(2), armor.get(3)])
-}
 
 const ARMOR_EMPTY_SPRITES: [SpriteId; 4] = [
     SpriteId::EmptyHelmet,
@@ -40,6 +35,7 @@ pub struct InventoryResult {
     /// release emits a start/add.../end sequence).
     pub ops: Vec<ClickOperation>,
     pub player_preview: PlayerPreview,
+    pub hovered: Option<u16>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -103,7 +99,7 @@ pub fn build_inventory(
         }
     }
 
-    ctx.slot(
+    ctx.fake_slot(
         154.0,
         28.0,
         inventory.craft_output(),
@@ -138,6 +134,7 @@ pub fn build_inventory(
     InventoryResult {
         clicked_outside,
         ops,
+        hovered,
         player_preview: PlayerPreview {
             rect: [
                 panel.ox + 26.0 * panel.scale,
@@ -148,7 +145,7 @@ pub fn build_inventory(
             gui_scale: panel.scale,
             model_scale: 30.0,
             cursor,
-            armor: player_preview_armor(inventory),
+            armor: armor_render_infos(inventory.armor_slots()),
         },
     }
 }

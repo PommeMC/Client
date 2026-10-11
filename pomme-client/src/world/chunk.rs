@@ -337,6 +337,21 @@ pub fn block_state_from_section(chunk: &Chunk, x: i32, y: i32, z: i32, min_y: i3
 }
 
 #[cfg(test)]
+impl ChunkStore {
+    /// A 26.2 store with an empty chunk (0, 0) loaded.
+    pub(crate) fn with_origin_chunk() -> Self {
+        crate::world::block::init("26.2");
+        let mut chunks = Self::new(2);
+        chunks.partial_storage.set(
+            &ChunkPos::new(0, 0),
+            Some(Chunk::default()),
+            &mut chunks.chunk_storage,
+        );
+        chunks
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

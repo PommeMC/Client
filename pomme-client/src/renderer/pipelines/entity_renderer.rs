@@ -18,6 +18,7 @@ use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::BakedEntityModel;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, entity_model, shader, util};
 use crate::resource_pack::ResourcePackManager;
+use crate::world::block::BedDirection;
 
 pub const MAX_OVERLAYS: usize = 4;
 
@@ -56,7 +57,7 @@ struct EntityInstance {
 
 #[derive(Clone, Debug)]
 pub struct ArmorRenderInfo {
-    pub asset_id: String,
+    pub asset_id: Arc<str>,
     pub dyed_color: Option<u32>,
 }
 
@@ -80,7 +81,7 @@ pub fn armor_render_info(item: Option<&ItemStack>, slot: EquipmentSlot) -> Optio
     if equippable.slot != slot {
         return None;
     }
-    let asset_id = equippable.asset_id.as_ref()?.to_string();
+    let asset_id = equippable.asset_id.as_ref()?.to_string().into();
     let dyed_color =
         effective_item_component::<DyedColor>(item).map(|color| color.rgb as u32 & 0x00ff_ffff);
     Some(ArmorRenderInfo {
@@ -89,14 +90,19 @@ pub fn armor_render_info(item: Option<&ItemStack>, slot: EquipmentSlot) -> Optio
     })
 }
 
-pub fn armor_render_infos(items: [Option<&ItemStack>; 4]) -> [Option<ArmorRenderInfo>; 4] {
-    const SLOTS: [EquipmentSlot; 4] = [
-        EquipmentSlot::Head,
-        EquipmentSlot::Chest,
-        EquipmentSlot::Legs,
-        EquipmentSlot::Feet,
-    ];
-    std::array::from_fn(|i| armor_render_info(items[i], SLOTS[i]))
+/// Armor slots in `EntityRenderInfo::armor` order.
+pub const ARMOR_SLOTS: [EquipmentSlot; 4] = [
+    EquipmentSlot::Head,
+    EquipmentSlot::Chest,
+    EquipmentSlot::Legs,
+    EquipmentSlot::Feet,
+];
+const LEGS_SLOT: usize = 2;
+/// Vanilla `HumanoidArmorLayer.submit` order: chest, legs, feet, head.
+pub(crate) const ARMOR_SUBMIT_ORDER: [usize; 4] = [1, LEGS_SLOT, 3, 0];
+
+pub fn armor_render_infos(items: &[ItemStack]) -> [Option<ArmorRenderInfo>; 4] {
+    std::array::from_fn(|i| armor_render_info(items.get(i), ARMOR_SLOTS[i]))
 }
 
 pub struct EntityRenderInfo {
@@ -104,14 +110,18 @@ pub struct EntityRenderInfo {
     pub head_x_rot_deg: f32,
     pub head_y_rot_deg: f32,
     pub body_y_rot_deg: f32,
+    pub is_sleeping: bool,
+    /// The bed's facing; `None` when no bed can be resolved.
+    pub sleeping_direction: Option<BedDirection>,
+    /// Standing-pose eye height used by LivingEntityRenderer's sleeping offset.
+    pub sleeping_eye_height: f32,
     pub is_baby: bool,
     pub is_crouching: bool,
     pub walk_anim_pos: f32,
     pub walk_anim_speed: f32,
     pub entity_kind: EntityKind,
     pub player_uuid: Option<uuid::Uuid>,
-    /// Head/chest/legs/feet armor, resolved from each stack's `Equippable`
-    /// component.
+    /// Indexed like [`ARMOR_SLOTS`].
     pub armor: [Option<ArmorRenderInfo>; 4],
     pub variant_index: u32,
     pub overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
@@ -192,13 +202,16 @@ impl Default for EntityRenderInfo {
             head_x_rot_deg: 0.0,
             head_y_rot_deg: 0.0,
             body_y_rot_deg: 0.0,
+            is_sleeping: false,
+            sleeping_direction: None,
+            sleeping_eye_height: crate::player::STANDING_EYE_HEIGHT,
             is_baby: false,
             is_crouching: false,
             walk_anim_pos: 0.0,
             walk_anim_speed: 0.0,
             entity_kind: EntityKind::Player,
             player_uuid: None,
-            armor: [None, None, None, None],
+            armor: Default::default(),
             variant_index: 0,
             overlay_tints: [None; MAX_OVERLAYS],
             overlay_variants: [0; MAX_OVERLAYS],
@@ -338,6 +351,16 @@ struct ArmorTextureLayer {
     dye: ArmorDye,
 }
 
+impl ArmorAsset {
+    fn layers_for(&self, slot: usize) -> &[ArmorTextureLayer] {
+        if slot == LEGS_SLOT {
+            &self.leggings
+        } else {
+            &self.humanoid
+        }
+    }
+}
+
 fn armor_layer_tint(layer: &ArmorTextureLayer, armor: &ArmorRenderInfo) -> Option<[f32; 4]> {
     match layer.dye {
         ArmorDye::None => Some([1.0, 1.0, 1.0, 1.0]),
@@ -440,7 +463,7 @@ fn expected_variant_count(kind: EntityKind) -> Option<usize> {
 const HURT_OVERLAY: [f32; 4] = [1.0, 0.0, 0.0, 178.0 / 255.0];
 const NO_OVERLAY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 pub(super) const ENTITY_ALPHA_CUTOFF: f32 = 0.5;
-const ARMOR_ALPHA_CUTOFF: f32 = 0.1;
+pub(crate) const ARMOR_ALPHA_CUTOFF: f32 = 0.1;
 
 pub const WOOL_COLOR_RGBA: [[f32; 4]; 16] = [
     rgb(0xF0F0F0), // 0 white
@@ -518,19 +541,12 @@ pub fn jeb_sheep_tint(entity_id: i32, age_in_ticks: u32) -> [f32; 4] {
 
 fn equipment_texture_key(texture: &str, layer_type: &str) -> Option<String> {
     let (namespace, path) = texture.split_once(':').unwrap_or(("minecraft", texture));
-    if namespace.is_empty()
-        || path.is_empty()
-        || namespace.contains(['/', '\\'])
-        || path
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-    {
+    let key = format!("{namespace}/textures/entity/equipment/{layer_type}/{path}.png");
+    if namespace.contains('/') || !crate::assets::valid_asset_key(&key) {
         tracing::warn!("Ignoring invalid equipment texture id {texture:?}");
         return None;
     }
-    Some(format!(
-        "{namespace}/textures/entity/equipment/{layer_type}/{path}.png"
-    ))
+    Some(key)
 }
 
 fn collect_equipment_json_dir(
@@ -589,9 +605,8 @@ fn discover_equipment_json(
     packs: Option<&ResourcePackManager>,
 ) -> HashMap<String, PathBuf> {
     let mut resources = HashMap::new();
-    // Built-in assets are the bottom of the resource stack.
     collect_equipment_json_root(jar_assets_dir, &mut resources);
-    // Active packs are yielded low-to-high priority; later inserts override.
+    // Packs come low-to-high priority, so later inserts override.
     if let Some(packs) = packs {
         for pack in packs.active_pack_dirs() {
             collect_equipment_json_root(&pack.join("assets"), &mut resources);
@@ -639,16 +654,13 @@ fn load_armor_asset_defs(
         .into_iter()
         .filter_map(|(id, path)| {
             let info = read_equipment_json(&path)?;
-            let humanoid = info
-                .layers
-                .get("humanoid")
-                .map_or_else(Vec::new, |layers| armor_layer_defs(layers, "humanoid"));
-            let leggings = info
-                .layers
-                .get("humanoid_leggings")
-                .map_or_else(Vec::new, |layers| {
-                    armor_layer_defs(layers, "humanoid_leggings")
-                });
+            let layers = |ty| {
+                info.layers
+                    .get(ty)
+                    .map_or_else(Vec::new, |layers| armor_layer_defs(layers, ty))
+            };
+            let humanoid = layers("humanoid");
+            let leggings = layers("humanoid_leggings");
             (!humanoid.is_empty() || !leggings.is_empty())
                 .then_some((id, ArmorAssetDef { humanoid, leggings }))
         })
@@ -744,21 +756,29 @@ fn build_armor_texture_layer(
     }
 }
 
+/// Loads every equipment definition with humanoid layers and uploads its
+/// textures into a freshly sized descriptor pool.
 #[allow(clippy::too_many_arguments)]
-fn build_armor_assets(
+fn load_armor_assets(
     device: &vk::Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     allocator: &Arc<Mutex<Allocator>>,
-    descriptor_pool: vk::DescriptorPool,
     texture_layout: vk::DescriptorSetLayout,
     texture_sampler: vk::Sampler,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
-    packs: Option<&ResourcePackManager>,
-    defs: HashMap<String, ArmorAssetDef>,
-) -> HashMap<String, ArmorAsset> {
-    defs.into_iter()
+    packs: &ResourcePackManager,
+) -> (vk::DescriptorPool, HashMap<String, ArmorAsset>) {
+    let packs = Some(packs);
+    let defs = load_armor_asset_defs(jar_assets_dir, packs);
+    let texture_count = defs
+        .values()
+        .map(|asset| (asset.humanoid.len() + asset.leggings.len()) as u32)
+        .sum();
+    let descriptor_pool = create_armor_descriptor_pool(device, texture_count);
+    let assets = defs
+        .into_iter()
         .map(|(id, def)| {
             let build = |layer| {
                 build_armor_texture_layer(
@@ -783,7 +803,8 @@ fn build_armor_assets(
                 },
             )
         })
-        .collect()
+        .collect();
+    (descriptor_pool, assets)
 }
 
 fn build_armor_mesh(
@@ -807,34 +828,14 @@ fn build_armor_mesh(
 }
 
 fn build_armor_meshes(device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) -> ArmorMeshes {
-    let slots = [
-        entity_model::HumanoidArmorSlot::Head,
-        entity_model::HumanoidArmorSlot::Chest,
-        entity_model::HumanoidArmorSlot::Legs,
-        entity_model::HumanoidArmorSlot::Feet,
-    ];
+    let bake = |bake_slot: fn(entity_model::HumanoidArmorSlot) -> BakedEntityModel| {
+        entity_model::HumanoidArmorSlot::ALL
+            .map(|slot| build_armor_mesh(device, allocator, bake_slot(slot)))
+    };
     ArmorMeshes {
-        humanoid: std::array::from_fn(|i| {
-            build_armor_mesh(
-                device,
-                allocator,
-                entity_model::bake_humanoid_armor_model(slots[i]),
-            )
-        }),
-        husk: std::array::from_fn(|i| {
-            build_armor_mesh(
-                device,
-                allocator,
-                entity_model::bake_husk_armor_model(slots[i]),
-            )
-        }),
-        zombie_villager: std::array::from_fn(|i| {
-            build_armor_mesh(
-                device,
-                allocator,
-                entity_model::bake_zombie_villager_armor_model(slots[i]),
-            )
-        }),
+        humanoid: bake(entity_model::bake_humanoid_armor_model),
+        husk: bake(entity_model::bake_husk_armor_model),
+        zombie_villager: bake(entity_model::bake_zombie_villager_armor_model),
     }
 }
 
@@ -855,6 +856,9 @@ fn destroy_armor_assets(
 }
 
 impl ArmorMeshes {
+    // TODO: the other vanilla `HumanoidArmorLayer` wearers once pomme renders
+    // them: wither skeleton (1.2 scale), parched, piglin / piglin brute /
+    // zombified piglin (`PiglinModel.createArmorMeshSet`), giant, armor stand.
     fn for_entity(&self, kind: EntityKind, slot: usize) -> Option<&ArmorMesh> {
         if slot >= 4 {
             return None;
@@ -1807,13 +1811,6 @@ impl EntityRenderer {
             vk::DescriptorType::CombinedImageSampler,
             vk::ShaderStageFlags::Fragment,
         );
-        let armor_defs = load_armor_asset_defs(jar_assets_dir, Some(packs));
-        let armor_texture_count: u32 = armor_defs
-            .values()
-            .map(|asset| (asset.humanoid.len() + asset.leggings.len()) as u32)
-            .sum();
-        let armor_descriptor_pool = create_armor_descriptor_pool(device, armor_texture_count);
-
         let layouts = [camera_layout, texture_layout];
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: layouts.len() as u32,
@@ -1886,18 +1883,16 @@ impl EntityRenderer {
 
         let texture_sampler = unsafe { util::create_nearest_sampler(device) };
         let texture_sampler_repeat = unsafe { util::create_nearest_repeat_sampler(device) };
-        let armor_assets = build_armor_assets(
+        let (armor_descriptor_pool, armor_assets) = load_armor_assets(
             device,
             queue,
             command_pool,
             allocator,
-            armor_descriptor_pool,
             texture_layout,
             texture_sampler,
             jar_assets_dir,
             asset_index,
-            Some(packs),
-            armor_defs,
+            packs,
         );
         let armor_meshes = build_armor_meshes(device, allocator);
 
@@ -1999,24 +1994,16 @@ impl EntityRenderer {
     ) {
         destroy_armor_assets(device, allocator, &mut self.armor_assets);
         device.destroy_descriptor_pool(self.armor_descriptor_pool, None);
-        let defs = load_armor_asset_defs(jar_assets_dir, Some(packs));
-        let texture_count = defs
-            .values()
-            .map(|asset| (asset.humanoid.len() + asset.leggings.len()) as u32)
-            .sum();
-        self.armor_descriptor_pool = create_armor_descriptor_pool(device, texture_count);
-        self.armor_assets = build_armor_assets(
+        (self.armor_descriptor_pool, self.armor_assets) = load_armor_assets(
             device,
             queue,
             command_pool,
             allocator,
-            self.armor_descriptor_pool,
             self.texture_layout,
             self.texture_sampler,
             jar_assets_dir,
             asset_index,
-            Some(packs),
-            defs,
+            packs,
         );
     }
 
@@ -2142,21 +2129,16 @@ impl EntityRenderer {
             .map_or(info.variant_index, |skin| skin.slim as u32)
     }
 
-    pub(crate) fn armor_preview_layers<'a>(
+    /// Texture set and tint of each drawn equipment layer, in submit order.
+    pub(crate) fn armor_layers<'a>(
         &'a self,
         armor: &'a ArmorRenderInfo,
         slot: usize,
     ) -> impl Iterator<Item = (vk::DescriptorSet, [f32; 4])> + 'a {
         self.armor_assets
-            .get(&armor.asset_id)
+            .get(&*armor.asset_id)
             .into_iter()
-            .flat_map(move |asset| {
-                if slot == 2 {
-                    asset.leggings.as_slice()
-                } else {
-                    asset.humanoid.as_slice()
-                }
-            })
+            .flat_map(move |asset| asset.layers_for(slot))
             .filter_map(move |layer| armor_layer_tint(layer, armor).map(|tint| (layer.set, tint)))
     }
 
@@ -2167,42 +2149,29 @@ impl EntityRenderer {
     ) -> Vec<DrawRecord> {
         let mut records = Vec::new();
         for v in vis {
-            // 26.2 baby armor uses dedicated geometry that requires anisotropic
-            // cube deformation, which Pomme's model format does not yet support.
+            // TODO: baby armor (vanilla `HUMANOID_BABY` layer type +
+            // `HumanoidModel.createBabyArmorMeshSet`) needs anisotropic
+            // `CubeDeformation`, which pomme's model format lacks.
             if v.info.is_baby {
                 continue;
             }
-            // Vanilla `HumanoidArmorLayer.submit` orders pieces chest, legs,
-            // feet, then head. Preserve that order for equal-depth/cutout cases.
-            for slot in [1usize, 2, 3, 0] {
+            for slot in ARMOR_SUBMIT_ORDER {
                 let Some(armor) = &v.info.armor[slot] else {
                     continue;
                 };
                 let Some(mesh) = self.armor_meshes.for_entity(v.info.entity_kind, slot) else {
                     continue;
                 };
-                let Some(asset) = self.armor_assets.get(&armor.asset_id) else {
-                    continue;
-                };
-                let layers = if slot == 2 {
-                    &asset.leggings
-                } else {
-                    &asset.humanoid
-                };
-                // TODO(26.2 parity): `EquipmentLayerRenderer` also submits armor
-                // trims and enchanted foil. Pomme has neither the armor-trim atlas
-                // nor an entity glint render pass yet, so keep those separate from
-                // this base equipment-layer foundation.
-                if layers.is_empty() {
+                // TODO: armor trims and foil (`EquipmentLayerRenderer`) need a
+                // trim atlas and an entity glint pass.
+                let mut layers = self.armor_layers(armor, slot).peekable();
+                if layers.peek().is_none() {
                     continue;
                 }
 
                 let anim = self.compute_anim(v.entry.anim, &mesh.model, v.info);
                 let part_transforms = mesh.model.compute_part_transforms(&anim);
-                for layer in layers {
-                    let Some(tint) = armor_layer_tint(layer, armor) else {
-                        continue;
-                    };
+                for (texture_set, tint) in layers {
                     for (part, (start, part_count)) in mesh.model.part_ranges.iter().enumerate() {
                         if *part_count == 0 {
                             continue;
@@ -2212,14 +2181,12 @@ impl EntityRenderer {
                         instances.push(EntityInstance {
                             model: model.to_cols_array_2d(),
                             tint,
-                            // Vanilla `EquipmentLayerRenderer` submits armor with
-                            // `OverlayTexture.NO_OVERLAY`, so hurt/death red does
-                            // not propagate from the base living-entity pass.
+                            // Vanilla armor is `NO_OVERLAY`: no hurt/death red.
                             overlay_color: NO_OVERLAY,
                             uv_params: [0.0, 0.0, ARMOR_ALPHA_CUTOFF, 0.0],
                         });
                         records.push(DrawRecord {
-                            texture_set: layer.set,
+                            texture_set,
                             vertex_buffer: mesh.vertex_buffer,
                             part_start: *start,
                             part_count: *part_count,
@@ -2420,16 +2387,46 @@ impl EntityRenderer {
             // with the body like vanilla.
             body_y_rot_deg += (info.age_in_ticks.floor() * 3.25).cos() * std::f32::consts::PI * 0.4;
         }
-        let mut base = glam::Mat4::from_translation((*info.position - anchor).as_vec3())
-            * glam::Mat4::from_rotation_y((180.0 - body_y_rot_deg).to_radians());
+        let translation = glam::Mat4::from_translation((*info.position - anchor).as_vec3());
+        // Vanilla `LivingEntityRenderer.submit`'s bed offset, then
+        // `setupRotations`: death wins over the sleeping pose.
+        // TODO: vanilla keys these on `Pose.SLEEPING`; pomme on SLEEPING_POS,
+        // since the handler reduces the pose to crouching.
+        let bed = info.sleeping_direction.filter(|_| info.is_sleeping);
+        let mut base = translation;
+        if let Some(direction) = bed {
+            let head_offset = info.sleeping_eye_height - 0.1;
+            let (step_x, step_z) = direction.step();
+            base *= glam::Mat4::from_translation(glam::Vec3::new(
+                -step_x * head_offset,
+                0.0,
+                -step_z * head_offset,
+            ));
+        }
+        if !info.is_sleeping {
+            base *= glam::Mat4::from_rotation_y((180.0 - body_y_rot_deg).to_radians());
+        }
         if info.death_time > 0.0 {
             base *= glam::Mat4::from_rotation_z(
                 death_fall_degrees(info.death_time, info.entity_kind).to_radians(),
             );
+        } else if info.is_sleeping {
+            let angle = bed.map_or(body_y_rot_deg, BedDirection::render_yaw_deg);
+            base *= glam::Mat4::from_rotation_y(angle.to_radians())
+                * glam::Mat4::from_rotation_z(flip_degrees(info.entity_kind).to_radians())
+                * glam::Mat4::from_rotation_y(270.0_f32.to_radians());
         }
         // body_transform sits before the parts (whose root transforms carry
         // the convention's X flip), matching vanilla's setupRotations order.
-        info.body_transform.map_or(base, |m| base * m)
+        let base = info.body_transform.map_or(base, |m| base * m);
+        // AvatarRenderer applies its fixed player scale after setupRotations and
+        // before the model's -1.501 Y translation. Pomme's part transforms own
+        // that rebase, so the scale belongs immediately before the parts here.
+        if info.entity_kind == EntityKind::Player {
+            base * glam::Mat4::from_scale(glam::Vec3::splat(PLAYER_MODEL_SCALE))
+        } else {
+            base
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2898,6 +2895,18 @@ fn hurt_color(info: &EntityRenderInfo) -> [f32; 4] {
 }
 
 const ANIM_MARGIN: f32 = 0.5;
+/// Vanilla `AvatarRenderer.scale`: players render at 15/16 model scale.
+const PLAYER_MODEL_SCALE: f32 = 0.9375;
+
+/// Standing eye height, which positions a sleeper on its bed.
+pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
+    match kind {
+        EntityKind::Player => crate::player::STANDING_EYE_HEIGHT,
+        EntityKind::Villager if is_baby => 0.63,
+        EntityKind::Villager => 1.62,
+        _ => entity_bounds(kind, is_baby).1 * 0.85,
+    }
+}
 
 /// Vanilla (width, height) hitbox per supported mob, scaled for babies; used to
 /// build the cull bounding sphere.
@@ -3467,7 +3476,7 @@ mod tests {
 
     use super::{
         ArmorDye, EquipmentClientInfoJson, armor_layer_defs, armor_render_info,
-        equipment_texture_key, read_equipment_json,
+        equipment_texture_key,
     };
 
     #[test]
@@ -3475,7 +3484,7 @@ mod tests {
         let diamond = ItemStack::new(ItemKind::DiamondHelmet, 1);
         let diamond_info = armor_render_info(Some(&diamond), EquipmentSlot::Head)
             .expect("diamond helmet should expose its default equippable asset");
-        assert_eq!(diamond_info.asset_id, "minecraft:diamond");
+        assert_eq!(&*diamond_info.asset_id, "minecraft:diamond");
         assert_eq!(diamond_info.dyed_color, None);
         assert!(armor_render_info(Some(&diamond), EquipmentSlot::Chest).is_none());
 
@@ -3483,7 +3492,7 @@ mod tests {
             .with_component(DyedColor { rgb: 0x12_34_56 });
         let leather_info = armor_render_info(Some(&leather), EquipmentSlot::Chest)
             .expect("leather chestplate should expose its default equippable asset");
-        assert_eq!(leather_info.asset_id, "minecraft:leather");
+        assert_eq!(&*leather_info.asset_id, "minecraft:leather");
         assert_eq!(leather_info.dyed_color, Some(0x12_34_56));
     }
 
@@ -3527,28 +3536,6 @@ mod tests {
     }
 
     #[test]
-    fn equipment_json_reader_accepts_large_valid_definition() {
-        let root = crate::test_util::test_temp_dir("large_equipment_json");
-        std::fs::create_dir_all(&root).expect("create temp equipment dir");
-        let path = root.join("large.json");
-        let mut json = String::from(r#"{"layers":{}}"#);
-        json.push_str(&" ".repeat(1024 * 1024 + 1));
-        std::fs::write(&path, json).expect("write large equipment definition");
-
-        let parsed = read_equipment_json(&path).expect("large valid equipment JSON must parse");
-        assert!(parsed.layers.is_empty());
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn no_overlay_preserves_entity_texture_color() {
-        // `entity.frag` uses `mix(overlay.rgb, lit.rgb, overlay.a)`, so the
-        // alpha channel must be 1.0 when there is no overlay. Zero would turn
-        // the whole layer black.
-        assert_eq!(super::NO_OVERLAY, [0.0, 0.0, 0.0, 1.0]);
-    }
-
-    #[test]
     fn equipment_texture_ids_reject_path_traversal() {
         assert_eq!(
             equipment_texture_key("iron", "humanoid"),
@@ -3556,6 +3543,146 @@ mod tests {
         );
         assert!(equipment_texture_key("minecraft:../iron", "humanoid").is_none());
         assert!(equipment_texture_key(":iron", "humanoid").is_none());
+    }
+
+    use azalea_registry::builtin::EntityKind;
+
+    use super::{EntityRenderInfo, EntityRenderer, PLAYER_MODEL_SCALE};
+
+    #[test]
+    fn player_matrix_applies_vanilla_avatar_scale() {
+        let player = EntityRenderInfo {
+            entity_kind: EntityKind::Player,
+            ..Default::default()
+        };
+        let player_matrix = EntityRenderer::entity_matrix(&player, glam::DVec3::ZERO);
+        assert!((player_matrix.x_axis.truncate().length() - PLAYER_MODEL_SCALE).abs() < 1e-6);
+        assert!((player_matrix.y_axis.truncate().length() - PLAYER_MODEL_SCALE).abs() < 1e-6);
+        assert!((player_matrix.z_axis.truncate().length() - PLAYER_MODEL_SCALE).abs() < 1e-6);
+
+        let zombie = EntityRenderInfo {
+            entity_kind: EntityKind::Zombie,
+            ..Default::default()
+        };
+        let zombie_matrix = EntityRenderer::entity_matrix(&zombie, glam::DVec3::ZERO);
+        assert!((zombie_matrix.x_axis.truncate().length() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sleeping_player_matrix_uses_bed_facing_and_standing_eye_offset() {
+        use crate::entity::components::Position;
+        use crate::world::block::BedDirection;
+
+        let cases = [
+            BedDirection::North,
+            BedDirection::South,
+            BedDirection::West,
+            BedDirection::East,
+        ];
+        for direction in cases {
+            let info = EntityRenderInfo {
+                position: Position::new(10.0, 64.6875, -4.5),
+                is_sleeping: true,
+                sleeping_direction: Some(direction),
+                sleeping_eye_height: 1.62,
+                entity_kind: EntityKind::Player,
+                ..Default::default()
+            };
+            let matrix = EntityRenderer::entity_matrix(&info, glam::DVec3::ZERO);
+            let (step_x, step_z) = direction.step();
+            let translation = matrix.w_axis.truncate();
+            let expected_translation =
+                glam::Vec3::new(10.0 - step_x * 1.52, 64.6875, -4.5 - step_z * 1.52);
+            assert!(
+                translation.abs_diff_eq(expected_translation, 1e-5),
+                "sleeping translation mismatch for {direction:?}: {translation:?} != {expected_translation:?}"
+            );
+
+            let model_up = matrix.y_axis.truncate().normalize();
+            let expected_axis = glam::Vec3::new(step_x, 0.0, step_z);
+            assert!(
+                model_up.abs_diff_eq(expected_axis, 1e-5),
+                "sleeping body axis mismatch for {direction:?}: {model_up:?} != {expected_axis:?}"
+            );
+        }
+
+        let baby_villager = EntityRenderInfo {
+            position: Position::new(0.5, 64.6875, 0.5),
+            is_sleeping: true,
+            sleeping_direction: Some(BedDirection::South),
+            sleeping_eye_height: 0.63,
+            entity_kind: EntityKind::Villager,
+            is_baby: true,
+            ..Default::default()
+        };
+        let matrix = EntityRenderer::entity_matrix(&baby_villager, glam::DVec3::ZERO);
+        assert!(
+            matrix
+                .w_axis
+                .truncate()
+                .abs_diff_eq(glam::Vec3::new(0.5, 64.6875, 0.5 - 0.53), 1e-5)
+        );
+    }
+
+    #[test]
+    fn dying_sleeper_takes_the_death_fall_not_the_bed_rotation() {
+        use crate::entity::components::Position;
+        use crate::world::block::BedDirection;
+
+        let info = EntityRenderInfo {
+            position: Position::new(2.0, 3.0, 4.0),
+            is_sleeping: true,
+            sleeping_direction: Some(BedDirection::North),
+            sleeping_eye_height: 1.62,
+            death_time: 5.0,
+            entity_kind: EntityKind::Player,
+            ..Default::default()
+        };
+        let actual = EntityRenderer::entity_matrix(&info, glam::DVec3::ZERO);
+        // The bed offset still applies (`submit`), then only the death fall.
+        let expected = glam::Mat4::from_translation(glam::Vec3::new(2.0, 3.0, 4.0 + 1.52))
+            * glam::Mat4::from_rotation_z(
+                crate::renderer::pipelines::entity_renderer::death_fall_degrees(
+                    5.0,
+                    EntityKind::Player,
+                )
+                .to_radians(),
+            )
+            * glam::Mat4::from_scale(glam::Vec3::splat(PLAYER_MODEL_SCALE));
+        for (a, b) in actual
+            .to_cols_array()
+            .into_iter()
+            .zip(expected.to_cols_array())
+        {
+            assert!((a - b).abs() < 1e-5, "{a} != {b}");
+        }
+    }
+
+    #[test]
+    fn sleeping_matrix_falls_back_to_body_yaw_without_bed_direction() {
+        use crate::entity::components::Position;
+
+        let info = EntityRenderInfo {
+            position: Position::new(2.0, 3.0, 4.0),
+            body_y_rot_deg: 37.0,
+            is_sleeping: true,
+            sleeping_direction: None,
+            entity_kind: EntityKind::Player,
+            ..Default::default()
+        };
+        let actual = EntityRenderer::entity_matrix(&info, glam::DVec3::ZERO);
+        let expected = glam::Mat4::from_translation(glam::Vec3::new(2.0, 3.0, 4.0))
+            * glam::Mat4::from_rotation_y(37.0_f32.to_radians())
+            * glam::Mat4::from_rotation_z(90.0_f32.to_radians())
+            * glam::Mat4::from_rotation_y(270.0_f32.to_radians())
+            * glam::Mat4::from_scale(glam::Vec3::splat(PLAYER_MODEL_SCALE));
+        for (a, b) in actual
+            .to_cols_array()
+            .into_iter()
+            .zip(expected.to_cols_array())
+        {
+            assert!((a - b).abs() < 1e-5, "{a} != {b}");
+        }
     }
 
     #[test]

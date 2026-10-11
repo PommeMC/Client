@@ -601,6 +601,42 @@ pub enum HumanoidArmorSlot {
     Feet,
 }
 
+impl HumanoidArmorSlot {
+    /// Head/chest/legs/feet, matching `EntityRenderInfo::armor` order.
+    pub const ALL: [Self; 4] = [Self::Head, Self::Chest, Self::Legs, Self::Feet];
+}
+
+/// Vanilla `createArmorMeshSet`: the humanoid mesh inflated by the slot's
+/// deformation (inner 0.5 for legs, outer 1.0 otherwise). Parts outside the
+/// slot keep their place with no cubes, so the base model's animation applies.
+fn armor_parts(slot: HumanoidArmorSlot, right_leg_x: f32, leg_extend: f32) -> Vec<EntityPart> {
+    let arm = ModelCube {
+        origin: Vec3::new(-3.0, -2.0, -2.0),
+        size: Vec3::new(4.0, 12.0, 4.0),
+        tex_offset: (40, 16),
+        deformation: 0.0,
+        mirror: false,
+    };
+    let leg = ModelCube {
+        origin: Vec3::new(-2.0, 0.0, -2.0),
+        size: Vec3::new(4.0, 12.0, 4.0),
+        tex_offset: (0, 16),
+        deformation: leg_extend,
+        mirror: false,
+    };
+    let mut parts = humanoid_parts(arm, leg, right_leg_x);
+    inflate(
+        &mut parts,
+        if slot == HumanoidArmorSlot::Legs {
+            0.5
+        } else {
+            1.0
+        },
+    );
+    retain_humanoid_armor_slot(&mut parts, slot);
+    parts
+}
+
 fn retain_humanoid_armor_slot(parts: &mut [EntityPart], slot: HumanoidArmorSlot) {
     for part in parts {
         let visible = match slot {
@@ -619,100 +655,35 @@ fn retain_humanoid_armor_slot(parts: &mut [EntityPart], slot: HumanoidArmorSlot)
     }
 }
 
-/// Vanilla 26.2 adult `HumanoidModel.createArmorMeshSet` geometry.
-///
-/// The model keeps the normal six humanoid parts in a stable order, but cubes
-/// outside the requested equipment slot are empty. Keeping the part layout
-/// stable lets Pomme drive armor with the same animation inputs as the base
-/// humanoid while retaining vanilla's slot-specific geometry.
+/// Vanilla `HumanoidModel.createArmorMeshSet`.
 pub(crate) fn humanoid_armor_parts(slot: HumanoidArmorSlot) -> Vec<EntityPart> {
-    let g = if slot == HumanoidArmorSlot::Legs {
-        0.5
-    } else {
-        1.0
-    };
-    let arm = ModelCube {
-        origin: Vec3::new(-3.0, -2.0, -2.0),
-        size: Vec3::new(4.0, 12.0, 4.0),
-        tex_offset: (40, 16),
-        deformation: g,
-        mirror: false,
-    };
-    let leg = ModelCube {
-        origin: Vec3::new(-2.0, 0.0, -2.0),
-        size: Vec3::new(4.0, 12.0, 4.0),
-        tex_offset: (0, 16),
-        deformation: g - 0.1,
-        mirror: false,
-    };
-    let mut parts = humanoid_parts(arm, leg, 1.9);
-    // `humanoid_parts` includes the HumanoidModel head/hat pair and body with
-    // their normal deformations. Armor inflates those from the base mesh by g.
-    if let Some(head) = parts.iter_mut().find(|part| part.name == "head") {
-        if let Some(head_cube) = head.cubes.get_mut(0) {
-            head_cube.deformation = g;
-        }
-        if let Some(hat_cube) = head.cubes.get_mut(1) {
-            hat_cube.deformation = g + 0.5;
-        }
-    }
-    if let Some(body) = parts.iter_mut().find(|part| part.name == "body")
-        && let Some(cube) = body.cubes.get_mut(0)
-    {
-        cube.deformation = g;
-    }
-    retain_humanoid_armor_slot(&mut parts, slot);
-    parts
+    armor_parts(slot, 1.9, -0.1)
 }
 
 pub fn bake_humanoid_armor_model(slot: HumanoidArmorSlot) -> BakedEntityModel {
     bake_model(humanoid_armor_parts(slot), 64, 32)
 }
 
-/// Vanilla `ModelLayers.HUSK_ARMOR`: adult humanoid armor under the same
-/// 1.0625 root scaling used by the adult husk body.
+/// Vanilla `ModelLayers.HUSK_ARMOR`: humanoid armor at the husk's 1.0625 scale.
 pub fn bake_husk_armor_model(slot: HumanoidArmorSlot) -> BakedEntityModel {
     bake_scaled(humanoid_armor_parts(slot), 1.0625, 32)
 }
 
-/// Vanilla 26.2 `ZombieVillagerModel.createArmorLayerSet` geometry. Its head,
-/// torso and legs intentionally differ from the ordinary humanoid armor mesh.
+/// Vanilla `ZombieVillagerModel.createArmorLayerSet`: head lowered to y -10,
+/// body and legs extended by 0.1.
 pub fn bake_zombie_villager_armor_model(slot: HumanoidArmorSlot) -> BakedEntityModel {
-    let g = if slot == HumanoidArmorSlot::Legs {
-        0.5
-    } else {
-        1.0
-    };
-    let arm = ModelCube {
-        origin: Vec3::new(-3.0, -2.0, -2.0),
-        size: Vec3::new(4.0, 12.0, 4.0),
-        tex_offset: (40, 16),
-        deformation: g,
-        mirror: false,
-    };
-    let leg = ModelCube {
-        origin: Vec3::new(-2.0, 0.0, -2.0),
-        size: Vec3::new(4.0, 12.0, 4.0),
-        tex_offset: (0, 16),
-        deformation: g + 0.1,
-        mirror: false,
-    };
-    let mut parts = humanoid_parts(arm, leg, 2.0);
-    if let Some(head) = parts.iter_mut().find(|part| part.name == "head") {
-        if let Some(head_cube) = head.cubes.get_mut(0) {
-            head_cube.origin = Vec3::new(-4.0, -10.0, -4.0);
-            head_cube.deformation = g;
-        }
-        if let Some(hat_cube) = head.cubes.get_mut(1) {
-            hat_cube.deformation = g + 0.5;
+    let mut parts = armor_parts(slot, 2.0, 0.1);
+    for part in &mut parts {
+        match part.name.as_str() {
+            "head" => {
+                if let Some(head) = part.cubes.first_mut() {
+                    head.origin.y = -10.0;
+                }
+            }
+            "body" => inflate(std::slice::from_mut(part), 0.1),
+            _ => {}
         }
     }
-    if let Some(body) = parts.iter_mut().find(|part| part.name == "body")
-        && let Some(cube) = body.cubes.get_mut(0)
-    {
-        cube.deformation = g + 0.1;
-    }
-    retain_humanoid_armor_slot(&mut parts, slot);
     bake_model(parts, 64, 32)
 }
 

@@ -21,10 +21,10 @@ use super::creative_tab_data::{
 use crate::lang::item_display_name;
 use crate::player::inventory::{Inventory, item_resource_name};
 use crate::renderer::PlayerPreview;
+use crate::renderer::pipelines::entity_renderer::armor_render_infos;
 use crate::renderer::pipelines::menu_overlay::{
     CREATIVE_TAB_SPRITES, MenuElement, SpriteId, TooltipLine,
 };
-use crate::ui::inventory::player_preview_armor;
 
 const TEX_W: f32 = 195.0;
 const TEX_H: f32 = 136.0;
@@ -325,6 +325,16 @@ pub enum CreativeAction {
     SetSlots(Vec<(u16, ItemStack)>),
 }
 
+/// Panel scale and top-left origin, centered on screen.
+fn panel_layout(screen_w: f32, screen_h: f32, gs: f32) -> (f32, f32, f32) {
+    let scale = gs.min(screen_w / TEX_W).min(screen_h / TEX_H);
+    (
+        scale,
+        (screen_w - TEX_W * scale) / 2.0,
+        (screen_h - TEX_H * scale) / 2.0,
+    )
+}
+
 pub fn player_preview(
     state: &CreativeState,
     screen_w: f32,
@@ -337,9 +347,7 @@ pub fn player_preview(
         return None;
     }
 
-    let scale = gs.min(screen_w / TEX_W).min(screen_h / TEX_H);
-    let ox = (screen_w - TEX_W * scale) / 2.0;
-    let oy = (screen_h - TEX_H * scale) / 2.0;
+    let (scale, ox, oy) = panel_layout(screen_w, screen_h, gs);
     Some(PlayerPreview {
         // Vanilla CreativeModeInventoryScreen inventory-tab bounds:
         // left+73, top+6 through left+105, top+49, with entity size 20.
@@ -352,7 +360,7 @@ pub fn player_preview(
         gui_scale: scale,
         model_scale: 20.0,
         cursor,
-        armor: player_preview_armor(inventory),
+        armor: armor_render_infos(inventory.armor_slots()),
     })
 }
 
@@ -401,11 +409,9 @@ pub fn build_creative_inventory(
     };
     let mut swap_consumed_digit = false;
 
-    let scale = gs.min(screen_w / TEX_W).min(screen_h / TEX_H);
+    let (scale, ox, oy) = panel_layout(screen_w, screen_h, gs);
     let inv_w = TEX_W * scale;
     let inv_h = TEX_H * scale;
-    let ox = (screen_w - inv_w) / 2.0;
-    let oy = (screen_h - inv_h) / 2.0;
 
     common::push_overlay(elements, screen_w, screen_h, 0.5);
 
@@ -761,6 +767,9 @@ fn draw_tabs(
             w: icon_size,
             h: icon_size,
             item_name: meta.icon.into(),
+            item_stack: None,
+            use_player_team: true,
+            item_tints: Vec::new(),
             tint: WHITE,
         });
     }

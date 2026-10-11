@@ -122,6 +122,7 @@ pub fn build_furnace(
         clicked_outside,
         ops,
         button: None,
+        hovered,
     }
 }
 

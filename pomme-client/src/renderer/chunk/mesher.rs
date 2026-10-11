@@ -9,11 +9,11 @@ use pyronyx::vk;
 use super::greedy;
 use super::occlusion_graph::{VisibilitySet, compute_visibility};
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
-use crate::world::block::is_air;
 use crate::world::block::model::{
     BakedModel, CardinalLighting, Direction, face_positions, face_uvs,
 };
 use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
+use crate::world::block::{FluidKind, block_outline, fluid, is_air, legacy_solid, light_props};
 use crate::world::chunk;
 use crate::world::chunk::ChunkStore;
 
@@ -273,6 +273,7 @@ pub struct BiomeClimate {
     pub grass_color_modifier: GrassColorModifier,
     pub foliage_color_override: Option<[f32; 3]>,
     pub dry_foliage_color_override: Option<[f32; 3]>,
+    pub water_color: [f32; 3],
 }
 
 impl Default for BiomeClimate {
@@ -284,28 +285,41 @@ impl Default for BiomeClimate {
             grass_color_modifier: GrassColorModifier::None,
             foliage_color_override: None,
             dry_foliage_color_override: None,
+            water_color: int_to_rgb(0x3F76E4),
         }
     }
 }
 
-/// For paths `Tint::Redstone` can't reach (redstone wire always has multipart
-/// quads): greedy meshing and plain cubes.
-const NO_REDSTONE: fn() -> [f32; 3] = || [1.0; 3];
+pub(crate) fn tint_sample_y(tint: Tint, state: BlockState, y: i32) -> i32 {
+    if tint == Tint::DoubleGrass
+        && crate::world::block::block_properties(state).get("half") == Some("upper")
+    {
+        y - 1
+    } else {
+        y
+    }
+}
 
 fn tint_color(
     tint: Tint,
-    grass: [f32; 3],
-    foliage: [f32; 3],
-    dry_foliage: [f32; 3],
-    redstone: impl FnOnce() -> [f32; 3],
+    snapshot: &ChunkStoreSnapshot,
+    state: BlockState,
+    x: i32,
+    y: i32,
+    z: i32,
 ) -> u32 {
-    match tint {
-        Tint::None => PACKED_WHITE_SHIFTED,
-        Tint::Grass => pack_tint_shifted(grass),
-        Tint::Foliage => pack_tint_shifted(foliage),
-        Tint::DryFoliage => pack_tint_shifted(dry_foliage),
-        Tint::Redstone => pack_tint_shifted(redstone()),
-    }
+    let sample_y = tint_sample_y(tint, state, y);
+    let color = match tint {
+        Tint::None => return PACKED_WHITE_SHIFTED,
+        Tint::Grass | Tint::DoubleGrass => snapshot.grass_tint(x, sample_y, z),
+        Tint::Foliage => snapshot.foliage_tint(x, sample_y, z),
+        Tint::DryFoliage => snapshot.dry_foliage_tint(x, sample_y, z),
+        Tint::Water => snapshot.water_tint(x, sample_y, z),
+        Tint::Constant(color) => int_to_rgb(color as i32),
+        Tint::Redstone => crate::world::block::redstone_wire_rgb(state),
+        Tint::Stem => crate::world::block::stem_rgb(state),
+    };
+    pack_tint_shifted(color)
 }
 
 const MAX_MESH_UPLOADS_PER_FRAME: usize = 32;
@@ -339,18 +353,38 @@ impl Colormap {
                     .map(|c| [c[0], c[1], c[2]])
                     .collect()
             })
-            .unwrap_or_else(|| vec![[145, 189, 89]; 256 * 256]);
+            .unwrap_or_else(|| Self::fallback().pixels);
         Self { pixels }
     }
 
-    fn lookup(&self, temperature: f32, downfall: f32) -> [f32; 3] {
+    /// A map filled with vanilla's default grass color, used when the PNG
+    /// can't be loaded.
+    pub(crate) fn fallback() -> Self {
+        Self::from_pixels(vec![[145, 189, 89]; 256 * 256])
+    }
+
+    pub(crate) fn from_pixels(pixels: Vec<[u8; 3]>) -> Self {
+        Self { pixels }
+    }
+
+    fn pixel(&self, temperature: f32, downfall: f32) -> [u8; 3] {
         let t = temperature.clamp(0.0, 1.0);
         let d = (downfall.clamp(0.0, 1.0)) * t;
         let x = ((1.0 - t) * 255.0) as usize;
         let y = ((1.0 - d) * 255.0) as usize;
         let idx = (y * 256 + x).min(256 * 256 - 1);
-        let [r, g, b] = self.pixels[idx];
-        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
+        self.pixels[idx]
+    }
+
+    fn lookup(&self, temperature: f32, downfall: f32) -> [f32; 3] {
+        self.pixel(temperature, downfall)
+            .map(|channel| channel as f32 / 255.0)
+    }
+
+    /// Vanilla `GrassColor.get` as packed `0xRRGGBB`.
+    pub(crate) fn rgb(&self, temperature: f32, downfall: f32) -> u32 {
+        let [r, g, b] = self.pixel(temperature, downfall);
+        u32::from_be_bytes([0, r, g, b])
     }
 }
 
@@ -373,21 +407,33 @@ pub fn dry_foliage_color(climate: &BiomeClimate, colormap: &Colormap) -> [f32; 3
         .unwrap_or_else(|| colormap.lookup(climate.temperature, climate.downfall))
 }
 
-/// Average a biome color over the vanilla 5x5 horizontal blend
-/// (`BiomeColors` with the default blend radius of 2).
-pub fn blend_color(x: i32, z: i32, mut color_at: impl FnMut(i32, i32) -> [f32; 3]) -> [f32; 3] {
-    const RADIUS: i32 = 2;
-    const COUNT: f32 = ((RADIUS * 2 + 1) * (RADIUS * 2 + 1)) as f32;
-    let mut sum = [0.0f32; 3];
-    for dz in -RADIUS..=RADIUS {
-        for dx in -RADIUS..=RADIUS {
-            let c = color_at(x + dx, z + dz);
-            for (s, v) in sum.iter_mut().zip(c) {
-                *s += v;
+/// Vanilla's default biome-blend radius. Pomme does not expose the graphics
+/// option yet, so tint rendering uses the vanilla default while matching
+/// `ClientLevel.calculateBlockTint`'s integer-channel averaging exactly.
+pub const DEFAULT_BIOME_BLEND_RADIUS: i32 = 2;
+
+pub fn blend_color(x: i32, z: i32, color_at: impl FnMut(i32, i32) -> [f32; 3]) -> [f32; 3] {
+    blend_color_with_radius(x, z, DEFAULT_BIOME_BLEND_RADIUS, color_at)
+}
+
+fn blend_color_with_radius(
+    x: i32,
+    z: i32,
+    radius: i32,
+    mut color_at: impl FnMut(i32, i32) -> [f32; 3],
+) -> [f32; 3] {
+    let radius = radius.max(0);
+    let count = ((radius * 2 + 1) * (radius * 2 + 1)) as u32;
+    let mut sum = [0_u32; 3];
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            let color = color_at(x + dx, z + dz);
+            for (total, channel) in sum.iter_mut().zip(color) {
+                *total += u32::from(to_u8(channel));
             }
         }
     }
-    sum.map(|s| s / COUNT)
+    sum.map(|total| (total / count) as f32 / 255.0)
 }
 
 fn apply_grass_modifier(modifier: GrassColorModifier, base: [f32; 3], x: i32, z: i32) -> [f32; 3] {
@@ -1210,6 +1256,10 @@ impl ChunkStoreSnapshot {
         dry_foliage_color(&self.climate_at(x, y, z), &self.dry_foliage_colormap)
     }
 
+    fn water_color_at(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
+        self.climate_at(x, y, z).water_color
+    }
+
     fn grass_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
         blend_color(x, z, |bx, bz| self.grass_color_at(bx, y, bz))
     }
@@ -1220,6 +1270,10 @@ impl ChunkStoreSnapshot {
 
     fn dry_foliage_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
         blend_color(x, z, |bx, bz| self.dry_foliage_color_at(bx, y, bz))
+    }
+
+    fn water_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
+        blend_color(x, z, |bx, bz| self.water_color_at(bx, y, bz))
     }
 
     fn get_light(&self, x: i32, y: i32, z: i32) -> f32 {
@@ -1396,12 +1450,14 @@ fn greedy_mesh_section(
             let [x0, _, z0] = verts_uvs[0].0;
             let block_x = x0 as i32 + world_x;
             let block_z = z0 as i32 + world_z;
+            let state = snapshot.get_block_state(block_x, section_y, block_z);
             let tint = tint_color(
                 info.textures.tint,
-                snapshot.grass_tint(block_x, section_y, block_z),
-                snapshot.foliage_tint(block_x, section_y, block_z),
-                snapshot.dry_foliage_tint(block_x, section_y, block_z),
-                NO_REDSTONE,
+                snapshot,
+                state,
+                block_x,
+                section_y,
+                block_z,
             );
 
             let ao = quad.ao_levels();
@@ -1569,6 +1625,8 @@ fn mesh_chunk_snapshot(
                     (by - (min_y + s as i32 * 16)) as f32,
                     (bz - world_z) as f32,
                 ];
+                let model_offset = crate::world::block::block_position_offset(state, bx, bz);
+                let model_pos = (glam::Vec3::from(block_pos) + model_offset.as_vec3()).to_array();
 
                 if lod > 0 {
                     emit_lod_cube(
@@ -1580,22 +1638,22 @@ fn mesh_chunk_snapshot(
                     );
                 } else if let Some(baked) = registry.get_baked_model(state) {
                     emit_baked_model(
-                        sink, block_pos, state, baked, snapshot, registry, uv_map, bx, by, bz,
+                        sink, model_pos, state, baked, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else if let Some(quads) = registry.get_multipart_quads(state) {
                     emit_multipart(
-                        sink, block_pos, state, &quads, snapshot, registry, uv_map, bx, by, bz,
+                        sink, model_pos, state, &quads, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else if let Some(textures) = registry.get_textures(state) {
                     emit_cube_faces(
-                        sink, block_pos, textures, snapshot, registry, uv_map, bx, by, bz,
+                        sink, model_pos, state, textures, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else {
                     let id = crate::world::block::block_id(state);
                     if logged_missing.insert(id) {
                         tracing::warn!("Missing model: {id}");
                     }
-                    emit_missing_cube(sink, block_pos, snapshot, registry, uv_map, bx, by, bz);
+                    emit_missing_cube(sink, model_pos, snapshot, registry, uv_map, bx, by, bz);
                 }
                 by += step;
             }
@@ -1669,13 +1727,7 @@ fn emit_baked_model(
         }
 
         let region = uv_map.get_region(&quad.texture);
-        let tint = tint_color(
-            quad.tint,
-            snapshot.grass_tint(bx, by, bz),
-            snapshot.foliage_tint(bx, by, bz),
-            snapshot.dry_foliage_tint(bx, by, bz),
-            || crate::world::block::redstone_wire_rgb(state),
-        );
+        let tint = tint_color(quad.tint, snapshot, state, bx, by, bz);
         let lights = if let Some(dir) = quad.cullface {
             compute_face_ao(snapshot, registry, bx, by, bz, dir, quad.shade_face)
         } else {
@@ -1697,6 +1749,7 @@ fn emit_baked_model(
 fn emit_cube_faces(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
+    state: BlockState,
     textures: &crate::world::block::registry::FaceTextures,
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
@@ -1705,13 +1758,7 @@ fn emit_cube_faces(
     by: i32,
     bz: i32,
 ) {
-    let tint = tint_color(
-        textures.tint,
-        snapshot.grass_tint(bx, by, bz),
-        snapshot.foliage_tint(bx, by, bz),
-        snapshot.dry_foliage_tint(bx, by, bz),
-        NO_REDSTONE,
-    );
+    let tint = tint_color(textures.tint, snapshot, state, bx, by, bz);
 
     for (i, dir) in CUBE_FACE_DIRS.iter().enumerate() {
         let offset = dir.offset();
@@ -1790,11 +1837,131 @@ fn classify_block(state: azalea_block::BlockState) -> BlockKind {
 }
 
 // TODO: biome-based water color
-// TODO: per-corner height averaging for smooth water surfaces
 // TODO: flowing water texture (water_flow) with direction-based rotation
-// TODO: per-level height for flowing water (level / 9.0 per corner)
 
-const FLUID_MAX_HEIGHT: f32 = 8.0 / 9.0;
+const MAX_FLUID_HEIGHT: f32 = 8.0 / 9.0;
+/// `FluidRenderer`'s `offs` anti-z-fighting inset.
+const FLUID_INSET: f32 = 0.001;
+
+fn same_fluid(state: azalea_block::BlockState, kind: FluidKind) -> bool {
+    fluid(state).kind == kind
+}
+
+/// Vanilla `FluidRenderer.isFaceOccludedByState` over the generated 16x16
+/// face masks; on side faces the fluid box covers rows `0..height`.
+fn fluid_face_occluded_by_state(
+    state: azalea_block::BlockState,
+    direction: Direction,
+    height: f32,
+) -> bool {
+    let props = light_props(state);
+    if !props.can_occlude {
+        return false;
+    }
+    let full_row = |v: usize| match props.face_occlusion {
+        Some(masks) => masks[direction.opposite() as usize][v] == 0xFFFF,
+        // TODO: masks are only dumped for useShapeForLightOcclusion states, so
+        // other partial occlusion shapes (fence posts, chests) count as empty.
+        None => block_outline(state).is_none(),
+    };
+    let rows = match direction {
+        // `Shapes.blockOccludes` needs the fluid box to reach the top boundary.
+        Direction::Up if (height - 1.0).abs() > 1.0e-7 => return false,
+        Direction::Up | Direction::Down => 16,
+        _ => ((height.clamp(0.0, 1.0) * 16.0).ceil() as usize).min(16),
+    };
+    (0..rows).all(full_row)
+}
+
+fn fluid_face_occluded_by_self(state: azalea_block::BlockState, direction: Direction) -> bool {
+    fluid_face_occluded_by_state(state, direction.opposite(), 1.0)
+}
+
+fn fluid_render_height(
+    snapshot: &ChunkStoreSnapshot,
+    kind: FluidKind,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> f32 {
+    let state = snapshot.get_block_state(x, y, z);
+    let state_fluid = fluid(state);
+    if state_fluid.kind == kind {
+        if same_fluid(snapshot.get_block_state(x, y + 1, z), kind) {
+            1.0
+        } else {
+            state_fluid.height()
+        }
+    } else if !legacy_solid(state) {
+        0.0
+    } else {
+        -1.0
+    }
+}
+
+fn add_weighted_fluid_height(sum: &mut f32, weight: &mut f32, height: f32) {
+    if height >= 0.8 {
+        *sum += height * 10.0;
+        *weight += 10.0;
+    } else if height >= 0.0 {
+        *sum += height;
+        *weight += 1.0;
+    }
+}
+
+/// `FluidRenderer.calculateAverageHeight`; `corner` is only sampled when a
+/// side neighbor holds fluid.
+fn average_fluid_corner_height(
+    height_self: f32,
+    height2: f32,
+    height1: f32,
+    corner: impl FnOnce() -> f32,
+) -> f32 {
+    if height1 >= 1.0 || height2 >= 1.0 {
+        return 1.0;
+    }
+    let mut sum = 0.0;
+    let mut weight = 0.0;
+    if height1 > 0.0 || height2 > 0.0 {
+        let corner = corner();
+        if corner >= 1.0 {
+            return 1.0;
+        }
+        add_weighted_fluid_height(&mut sum, &mut weight, corner);
+    }
+    add_weighted_fluid_height(&mut sum, &mut weight, height_self);
+    add_weighted_fluid_height(&mut sum, &mut weight, height1);
+    add_weighted_fluid_height(&mut sum, &mut weight, height2);
+    debug_assert!(weight > 0.0);
+    sum / weight
+}
+
+/// Corner heights in `FluidRenderer` order (north-west, south-west,
+/// south-east, north-east), before [`FLUID_INSET`].
+fn fluid_corner_heights(
+    snapshot: &ChunkStoreSnapshot,
+    kind: FluidKind,
+    bx: i32,
+    by: i32,
+    bz: i32,
+) -> [f32; 4] {
+    let height = |x, z| fluid_render_height(snapshot, kind, x, by, z);
+    let self_height = height(bx, bz);
+    if self_height >= 1.0 {
+        return [1.0; 4];
+    }
+    let (north, south) = (height(bx, bz - 1), height(bx, bz + 1));
+    let (west, east) = (height(bx - 1, bz), height(bx + 1, bz));
+    [
+        (north, west, -1, -1),
+        (south, west, -1, 1),
+        (south, east, 1, 1),
+        (north, east, 1, -1),
+    ]
+    .map(|(height2, height1, dx, dz)| {
+        average_fluid_corner_height(self_height, height2, height1, || height(bx + dx, bz + dz))
+    })
+}
 
 #[allow(clippy::too_many_arguments)]
 fn block_face_tex_tint(
@@ -1810,18 +1977,12 @@ fn block_face_tex_tint(
     match classify_block(state) {
         BlockKind::Water => (
             uv_map.get_region("water_still"),
-            pack_tint_shifted([0.247, 0.463, 0.894]),
+            pack_tint_shifted(snapshot.water_tint(bx, by, bz)),
         ),
         BlockKind::Lava => (uv_map.get_region("lava_still"), PACKED_WHITE_SHIFTED),
         _ => {
             if let Some(textures) = registry.get_textures(state) {
-                let tint = tint_color(
-                    textures.tint,
-                    snapshot.grass_tint(bx, by, bz),
-                    snapshot.foliage_tint(bx, by, bz),
-                    snapshot.dry_foliage_tint(bx, by, bz),
-                    NO_REDSTONE,
-                );
+                let tint = tint_color(textures.tint, snapshot, state, bx, by, bz);
                 let tex_name = match dir {
                     Direction::Up => &textures.top,
                     Direction::Down => &textures.bottom,
@@ -1867,45 +2028,96 @@ fn emit_fluid(
         solid
     };
 
+    let fluid_kind = fluid(state).kind;
+    debug_assert!(matches!(fluid_kind, FluidKind::Water | FluidKind::Lava));
+    let above = snapshot.get_block_state(bx, by + 1, bz);
+    let below = snapshot.get_block_state(bx, by - 1, bz);
+
+    // The occlusion test sees the surface before the top face's inset.
+    let mut heights = fluid_corner_heights(snapshot, fluid_kind, bx, by, bz);
+    let min_top = heights.iter().copied().fold(1.0_f32, f32::min);
+    let render_up = !same_fluid(above, fluid_kind)
+        && !fluid_face_occluded_by_state(above, Direction::Up, min_top);
+    let render_down = !same_fluid(below, fluid_kind)
+        && !fluid_face_occluded_by_self(state, Direction::Down)
+        && !fluid_face_occluded_by_state(below, Direction::Down, MAX_FLUID_HEIGHT);
+    let bottom_offset = if render_down { FLUID_INSET } else { 0.0 };
+
+    if render_up {
+        for height in &mut heights {
+            *height -= FLUID_INSET;
+        }
+    }
+    let [north_west, south_west, south_east, north_east] = heights;
+
     for dir in &CUBE_FACE_DIRS {
         let offset = dir.offset();
         let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
 
-        if matches!(classify_block(neighbor), BlockKind::Water | BlockKind::Lava)
-            || registry.occludes_neighbor(neighbor)
-        {
+        if same_fluid(neighbor, fluid_kind) {
             continue;
         }
 
         let (mut positions, uvs) = cube_face_geometry(*dir);
         let light = snapshot.cardinal_lighting.by_face(*dir);
+        match dir {
+            Direction::Up => {
+                if !render_up {
+                    continue;
+                }
+                positions[0][1] = north_west;
+                positions[1][1] = south_west;
+                positions[2][1] = south_east;
+                positions[3][1] = north_east;
 
-        if matches!(dir, Direction::Up) {
-            // A water/lava block above would have culled this face already, so
-            // the surface always sits at the lowered fluid height.
-            for p in &mut positions {
-                p[1] = FLUID_MAX_HEIGHT;
+                emit_face_into(
+                    vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
+                );
+
+                // TODO: gate on `FluidState.shouldRenderBackwardUpFace`.
+                let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
+                let rev_uvs = [uvs[0], uvs[3], uvs[2], uvs[1]];
+                emit_face_into(
+                    vertices,
+                    indices,
+                    block_pos,
+                    &rev_positions,
+                    &rev_uvs,
+                    [light; 4],
+                    region,
+                    tint,
+                );
+                continue;
             }
-
-            emit_face_into(
-                vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
-            );
-
-            // Vanilla's backward up-face: the surface seen from below (underwater
-            // looking up). Reversed winding so it survives back-face culling.
-            let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
-            let rev_uvs = [uvs[0], uvs[3], uvs[2], uvs[1]];
-            emit_face_into(
-                vertices,
-                indices,
-                block_pos,
-                &rev_positions,
-                &rev_uvs,
-                [light; 4],
-                region,
-                tint,
-            );
-            continue;
+            Direction::Down => {
+                if !render_down {
+                    continue;
+                }
+                for p in &mut positions {
+                    p[1] = bottom_offset;
+                }
+            }
+            _ => {
+                // (top of vertex 0, top of vertex 3, inset axis, inset plane)
+                let (top0, top3, axis, plane) = match dir {
+                    Direction::North => (north_east, north_west, 2, FLUID_INSET),
+                    Direction::South => (south_west, south_east, 2, 1.0 - FLUID_INSET),
+                    Direction::West => (north_west, south_west, 0, FLUID_INSET),
+                    _ => (south_east, north_east, 0, 1.0 - FLUID_INSET),
+                };
+                if fluid_face_occluded_by_self(state, *dir)
+                    || fluid_face_occluded_by_state(neighbor, *dir, top0.max(top3))
+                {
+                    continue;
+                }
+                positions[0][1] = top0;
+                positions[1][1] = bottom_offset;
+                positions[2][1] = bottom_offset;
+                positions[3][1] = top3;
+                for p in &mut positions {
+                    p[axis] = plane;
+                }
+            }
         }
 
         emit_face_into(
@@ -1937,13 +2149,7 @@ fn emit_multipart(
         }
 
         let region = uv_map.get_region(&quad.texture);
-        let tint = tint_color(
-            quad.tint,
-            snapshot.grass_tint(bx, by, bz),
-            snapshot.foliage_tint(bx, by, bz),
-            snapshot.dry_foliage_tint(bx, by, bz),
-            || crate::world::block::redstone_wire_rgb(state),
-        );
+        let tint = tint_color(quad.tint, snapshot, state, bx, by, bz);
         emit_face(
             sink,
             block_pos,
@@ -1972,11 +2178,12 @@ fn emit_lod_cube(
     let is_fluid = matches!(classify_block(state), BlockKind::Water | BlockKind::Lava);
     // We have to do this otherwise there becomes a visible seam at the LOD border
     let fluid_top = if is_fluid {
+        let state_fluid = fluid(state);
         let above = snapshot.get_block_state(bx, by + 1, bz);
-        if matches!(classify_block(above), BlockKind::Water | BlockKind::Lava) {
+        if same_fluid(above, state_fluid.kind) {
             1.0
         } else {
-            FLUID_MAX_HEIGHT
+            state_fluid.height()
         }
     } else {
         1.0
@@ -2249,6 +2456,73 @@ pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4
 }
 
 #[cfg(test)]
+mod fluid_height_tests {
+    use super::{
+        average_fluid_corner_height, fluid_face_occluded_by_self, fluid_face_occluded_by_state,
+    };
+    use crate::world::block::find_state;
+    use crate::world::block::model::Direction;
+
+    #[test]
+    fn fluid_corner_averaging_matches_vanilla_weighting() {
+        let unsampled = || unreachable!("corner sampled without a fluid side");
+        let low = 1.0_f32 / 9.0;
+        let source = 8.0_f32 / 9.0;
+        let isolated = average_fluid_corner_height(low, 0.0, 0.0, unsampled);
+        assert!((isolated - low / 3.0).abs() < 1e-7);
+        let flat = average_fluid_corner_height(low, low, low, || low);
+        assert!((flat - low).abs() < 1e-7);
+        let weighted = average_fluid_corner_height(source, source, source, || source);
+        assert!((weighted - source).abs() < 1e-7);
+
+        assert_eq!(average_fluid_corner_height(low, 1.0, 0.0, unsampled), 1.0);
+        assert_eq!(average_fluid_corner_height(low, low, low, || 1.0), 1.0);
+    }
+
+    #[test]
+    fn fluid_face_occlusion_matches_vanilla_height_aware_slab_rules() {
+        crate::world::block::init("26.2");
+        let stone = find_state("stone", &[]);
+        let bottom = find_state("oak_slab", &[("type", "bottom"), ("waterlogged", "false")]);
+        let top = find_state("oak_slab", &[("type", "top"), ("waterlogged", "false")]);
+        let occluded = fluid_face_occluded_by_state;
+
+        // Full blocks hide side faces at any height; a bottom slab only the
+        // lower half.
+        assert!(occluded(stone, Direction::North, 1.0 / 9.0));
+        assert!(occluded(bottom, Direction::North, 0.5));
+        assert!(!occluded(bottom, Direction::North, 0.75));
+        assert!(!occluded(top, Direction::North, 0.5));
+
+        // The surface is only hidden once the fluid reaches y=1.
+        assert!(!occluded(stone, Direction::Up, 8.0 / 9.0));
+        assert!(occluded(stone, Direction::Up, 1.0));
+
+        // The bottom face tests the below neighbor's top face.
+        assert!(occluded(top, Direction::Down, 8.0 / 9.0));
+        assert!(!occluded(bottom, Direction::Down, 8.0 / 9.0));
+    }
+
+    #[test]
+    fn partial_occluders_without_face_masks_keep_fluid_faces() {
+        crate::world::block::init("26.2");
+        for name in ["oak_fence", "cobblestone_wall", "chest"] {
+            let state = find_state(name, &[("waterlogged", "true")]);
+            for dir in [Direction::North, Direction::South, Direction::Down] {
+                assert!(
+                    !fluid_face_occluded_by_self(state, dir),
+                    "{name} hides its own {dir:?} water face"
+                );
+                assert!(
+                    !fluid_face_occluded_by_state(state, dir, 8.0 / 9.0),
+                    "{name} hides a neighbor's {dir:?} water face"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod terrain_uv_tests {
     use super::{pack_sprite_uv, unpack_sprite_uv};
 
@@ -2277,5 +2551,30 @@ mod terrain_uv_tests {
         let a = unpack_sprite_uv(pack_sprite_uv(0.25));
         let b = unpack_sprite_uv(pack_sprite_uv(1.25));
         assert!((wrapped(a) - wrapped(b)).abs() <= 1.0 / 4095.0);
+    }
+}
+
+#[cfg(test)]
+mod tint_tests {
+    use super::{blend_color_with_radius, tint_sample_y};
+    use crate::world::block::registry::Tint;
+
+    #[test]
+    fn biome_blend_matches_vanilla_integer_channel_division() {
+        let color = blend_color_with_radius(0, 0, 1, |x, z| {
+            let red = if x == 0 && z == 0 { 16 } else { 17 };
+            [red as f32 / 255.0, 0.0, 0.0]
+        });
+        assert_eq!(color, [16.0 / 255.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn double_grass_upper_half_samples_the_lower_block_y() {
+        crate::world::block::init("26.2");
+        let lower = crate::world::block::find_state("tall_grass", &[("half", "lower")]);
+        let upper = crate::world::block::find_state("tall_grass", &[("half", "upper")]);
+        assert_eq!(tint_sample_y(Tint::DoubleGrass, lower, 64), 64);
+        assert_eq!(tint_sample_y(Tint::DoubleGrass, upper, 64), 63);
+        assert_eq!(tint_sample_y(Tint::Grass, upper, 64), 64);
     }
 }

@@ -12,9 +12,10 @@ use glam::{Mat4, Vec3, Vec4};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
+use super::entity_renderer::WHITE_TINT;
 use super::skin_preview::{
-    PREVIEW_ALPHA_CUTOFF, Uniform, Vertex, WHITE_TINT, create_pipeline,
-    preview_push_constant_range, push_preview_style, write_uniform,
+    PREVIEW_ALPHA_CUTOFF, Uniform, Vertex, create_pipeline, preview_push_constant_range,
+    push_preview_style, write_uniform,
 };
 use crate::assets::{AssetIndex, load_image, resolve_asset_path};
 use crate::renderer::{BookPreview, MAX_FRAMES_IN_FLIGHT, util};

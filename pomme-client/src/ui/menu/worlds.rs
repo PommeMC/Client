@@ -48,7 +48,7 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
         let gap = BTN_GAP * gs;
@@ -594,7 +594,7 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
         let field_h = FIELD_H * gs;
@@ -1026,7 +1026,7 @@ impl MainMenu {
             return empty_result(2.0);
         };
 
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
         let form_w = FORM_W * gs;
         let btn_h = common::BTN_H * gs;
