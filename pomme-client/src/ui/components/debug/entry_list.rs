@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::ui::components::debug::entries::{DebugEntryId, DebugEntryStatus};
+use crate::ui::components::debug::entry_id::DebugEntryId;
+use crate::ui::components::debug::entry_status::DebugEntryStatus;
 use crate::ui::components::debug::profile::DebugScreenProfile;
 
 pub struct DebugEntryList {

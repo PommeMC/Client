@@ -4,12 +4,14 @@ use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::ui::common::TextWidthFn;
 use crate::ui::components::debug::column::{DebugColumn, DebugColumnSide};
 use crate::ui::components::debug::displayer::DebugScreenDisplayer;
-use crate::ui::components::debug::entries::DebugInfo;
 use crate::ui::components::debug::entry_list::DebugEntryList;
 use crate::ui::components::debug::groups::DebugGroup;
+use crate::ui::components::debug::info::DebugInfo;
+use crate::ui::components::debug::registry::DebugEntries;
 
 pub struct DebugScreenOverlay {
     debug_entry_list: DebugEntryList,
+    entries: DebugEntries,
     left_column: DebugColumn,
     right_column: DebugColumn,
 }
@@ -18,6 +20,7 @@ impl DebugScreenOverlay {
     pub fn new(game_dir: &Path) -> Self {
         Self {
             debug_entry_list: DebugEntryList::new(game_dir),
+            entries: DebugEntries::new(),
             left_column: DebugColumn::new(DebugColumnSide::Left),
             right_column: DebugColumn::new(DebugColumnSide::Right),
         }
@@ -34,14 +37,14 @@ impl DebugScreenOverlay {
         text_width: TextWidthFn,
         screen_width: f32,
         screen_height: f32,
-        info: &DebugInfo,
+        info: DebugInfo,
     ) {
         self.left_column.new_frame(gui_scale);
         self.right_column.new_frame(gui_scale);
 
         let mut displayer = DebugScreenDisplayer::new();
-        for entry in self.debug_entry_list.get_currently_enabled() {
-            entry.display(&mut displayer, info);
+        for &id in self.debug_entry_list.get_currently_enabled() {
+            self.entries.display(id, &mut displayer, &info);
         }
 
         // Vanilla moves MISC to the end.
