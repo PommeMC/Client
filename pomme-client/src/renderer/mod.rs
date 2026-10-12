@@ -32,7 +32,7 @@ use pipelines::blur::BlurPipeline;
 use pipelines::book_preview::BookPreviewPipeline;
 use pipelines::chunk::ChunkPipeline;
 use pipelines::clouds::CloudPipeline;
-use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
+use pipelines::entity_renderer::{ArmorRenderInfo, EntityRenderInfo, EntityRenderer};
 use pipelines::hand::HandPipeline;
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
 use pipelines::panorama::PanoramaPipeline;
@@ -68,11 +68,15 @@ pub enum RendererError {
     Font(String),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PlayerPreview {
     pub rect: [f32; 4],
     pub gui_scale: f32,
+    /// Vanilla inventory entity-render size (30 normal inventory, 20 creative
+    /// inventory tab).
+    pub model_scale: f32,
     pub cursor: (f32, f32),
+    pub armor: [Option<ArmorRenderInfo>; 4],
 }
 
 /// The enchanting table's 3D book box: where to draw it and the
@@ -118,6 +122,7 @@ enum RenderMode<'a> {
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
         held_item: Option<pipelines::held_item::HeldItemInfo>,
+        player_team_color: Option<u32>,
         render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
@@ -209,8 +214,8 @@ impl Renderer {
         let FontSources {
             jar_assets_dir,
             asset_index,
+            packs,
             options: font_options,
-            ..
         } = font_sources;
         let size = window.inner_size();
 
@@ -413,6 +418,7 @@ impl Renderer {
             &ctx.allocator,
             jar_assets_dir,
             asset_index,
+            packs,
         );
 
         let block_entity_pipeline = BlockEntityPipeline::new(
@@ -1159,7 +1165,8 @@ impl Renderer {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
-        held_item: Option<(String, f32)>,
+        held_item: Option<(String, f32, azalea_inventory::ItemStackData)>,
+        player_team_color: Option<u32>,
         render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
@@ -1177,11 +1184,15 @@ impl Renderer {
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
         self.camera.set_render_distance(render_distance);
-        let held_item = held_item.map(|(name, light)| {
+        let held_item = held_item.map(|(name, light, stack)| {
+            let item_tints =
+                self.registry
+                    .item_tint_palette(&name, Some(&stack), player_team_color);
             let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
             pipelines::held_item::HeldItemInfo {
                 name,
                 light,
+                item_tints,
                 has_3d_model,
             }
         });
@@ -1203,6 +1214,7 @@ impl Renderer {
                 swing_progress,
                 use_anim,
                 held_item,
+                player_team_color,
                 render_first_person_hand,
                 destroy_info,
                 show_chunk_borders,
@@ -1297,6 +1309,16 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
+        self.entity_renderer.reload_armor_assets(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            &self.jar_assets_dir,
+            &self.asset_index,
+            packs,
+        );
+
         self.reload_fonts(packs, font_options);
 
         warm_item_meshes(
@@ -1469,16 +1491,11 @@ impl Renderer {
             );
             true
         } else {
-            let texture_key = self
-                .registry
-                .get_flat_item_texture_key(name)
-                .map(String::from)
-                .unwrap_or_else(|| format!("item/{name}"));
             self.item_entity_pipeline.ensure_flat_mesh(
                 &self.ctx.device,
                 &self.ctx.allocator,
                 name,
-                &texture_key,
+                &self.registry.flat_item_layers(name),
                 &self.atlas.uv_map,
             );
             false
@@ -1507,7 +1524,7 @@ impl Renderer {
         window: &Window,
         hide_cursor: bool,
         clear_color: [f32; 4],
-        mode: RenderMode<'_>,
+        mut mode: RenderMode<'_>,
     ) -> Result<(), RendererError> {
         if self.swapchain_dirty {
             self.recreate_swapchain()?;
@@ -1627,10 +1644,68 @@ impl Renderer {
             },
         ];
 
-        let menu_elements: &[MenuElement] = match &mode {
-            RenderMode::World { overlay, .. } => overlay.as_slice(),
-            RenderMode::MainMenu { elements, .. } => elements.as_slice(),
+        let player_team_color = match &mode {
+            RenderMode::World {
+                player_team_color, ..
+            } => *player_team_color,
+            RenderMode::MainMenu { .. } => None,
         };
+        let menu_elements: &mut [MenuElement] = match &mut mode {
+            RenderMode::World { overlay, .. } => overlay.as_mut_slice(),
+            RenderMode::MainMenu { elements, .. } => elements.as_mut_slice(),
+        };
+        let mut unique_items: HashMap<String, (String, Vec<u32>)> = HashMap::new();
+        let mut add_item = |name: &str, tints: &[u32]| {
+            unique_items
+                .entry(pipelines::menu_overlay::item_icon_atlas_key(name, tints))
+                .or_insert_with(|| (name.to_owned(), tints.to_vec()));
+        };
+        for elem in menu_elements.iter_mut() {
+            match elem {
+                MenuElement::ItemIcon {
+                    item_name,
+                    item_stack,
+                    use_player_team,
+                    item_tints,
+                    ..
+                } => {
+                    let owner_team_color = if *use_player_team {
+                        player_team_color
+                    } else {
+                        None
+                    };
+                    *item_tints = self.registry.item_tint_palette(
+                        item_name,
+                        item_stack.as_ref(),
+                        owner_team_color,
+                    );
+                    add_item(item_name, item_tints);
+                }
+                // Vanilla `ClientBundleTooltip` draws its contents with the
+                // player as owner.
+                MenuElement::BundleTooltip {
+                    items, item_tints, ..
+                } => {
+                    *item_tints = items
+                        .iter()
+                        .map(|item| {
+                            let azalea_inventory::ItemStack::Present(data) = item else {
+                                return Vec::new();
+                            };
+                            let name = crate::player::inventory::item_resource_name(data.kind);
+                            let tints = self.registry.item_tint_palette(
+                                &name,
+                                Some(data),
+                                player_team_color,
+                            );
+                            add_item(&name, &tints);
+                            tints
+                        })
+                        .collect();
+                }
+                _ => {}
+            }
+        }
 
         let target_slot_px = pipelines::gui_item_atlas::slot_px_for_screen(
             self.swapchain.extent.width as f32,
@@ -1658,47 +1733,33 @@ impl Renderer {
                 .set_atlas_px(self.gui_item_atlas.atlas_px());
         }
 
-        let mut unique_names: HashSet<String> = HashSet::new();
-        for elem in menu_elements {
-            match elem {
-                MenuElement::ItemIcon { item_name, .. } => {
-                    unique_names.insert(item_name.clone());
-                }
-                MenuElement::BundleTooltip { items, .. } => {
-                    for item in items {
-                        if let azalea_inventory::ItemStack::Present(data) = item {
-                            unique_names
-                                .insert(crate::player::inventory::item_resource_name(data.kind));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        if !self.gui_item_atlas.has_space_for_all(&unique_names)
-            && !self.gui_item_atlas.reclaim_space_for(&unique_names)
+        let unique_keys: HashSet<String> = unique_items.keys().cloned().collect();
+        if !self.gui_item_atlas.has_space_for_all(&unique_keys)
+            && !self.gui_item_atlas.reclaim_space_for(&unique_keys)
         {
             tracing::warn!(
                 "gui_item_atlas: out of slots for {} unique items; some icons will not render",
-                unique_names.len()
+                unique_items.len()
             );
         }
         let mut item_atlas_uvs: HashMap<String, [f32; 4]> = HashMap::new();
         struct BakeJob {
             slot: pipelines::gui_item_atlas::Slot,
             name: String,
+            item_tints: Vec<u32>,
             display: crate::world::block::model::DisplayTransform,
             needs_clear: bool,
         }
         let mut bake_list: Vec<BakeJob> = Vec::new();
-        for name in &unique_names {
+        for (key, (name, item_tints)) in &unique_items {
             let discard = pipelines::gui_item_atlas::is_animated_item(name);
-            if let Some((slot, state)) = self.gui_item_atlas.get_or_allocate(name, discard) {
-                item_atlas_uvs.insert(name.clone(), self.gui_item_atlas.slot_uv(&slot));
+            if let Some((slot, state)) = self.gui_item_atlas.get_or_allocate(key, discard) {
+                item_atlas_uvs.insert(key.clone(), self.gui_item_atlas.slot_uv(&slot));
                 if !matches!(state, pipelines::gui_item_atlas::SlotState::Ready) {
                     bake_list.push(BakeJob {
                         slot,
                         name: name.clone(),
+                        item_tints: item_tints.clone(),
                         display: self.registry.get_item_gui_transform(name),
                         needs_clear: matches!(state, pipelines::gui_item_atlas::SlotState::Stale),
                     });
@@ -1707,7 +1768,14 @@ impl Renderer {
         }
         if !bake_list.is_empty() {
             self.gui_item_atlas.begin_bake_pass(cmd);
-            self.gui_item_pipeline.bind_for_bake_pass(cmd);
+            let required_tint_colors = bake_list.iter().map(|job| job.item_tints.len()).sum();
+            self.gui_item_pipeline.bind_for_bake_pass(
+                &self.ctx.device,
+                &self.ctx.allocator,
+                cmd,
+                frame,
+                required_tint_colors,
+            );
             for job in &bake_list {
                 if job.needs_clear {
                     self.gui_item_atlas.clear_slot_color(cmd, &job.slot);
@@ -1716,12 +1784,14 @@ impl Renderer {
                 let (sx, sy) = self.gui_item_atlas.slot_origin_pixels(&job.slot);
                 self.gui_item_pipeline.bake_to_slot(
                     cmd,
+                    frame,
                     &self.item_entity_pipeline,
                     sx,
                     sy,
                     self.gui_item_atlas.slot_px(),
                     &job.name,
                     job.display,
+                    &job.item_tints,
                 );
             }
             self.gui_item_atlas.end_bake_pass(cmd);
@@ -1769,6 +1839,7 @@ impl Renderer {
                 swing_progress,
                 use_anim,
                 held_item,
+                player_team_color: _,
                 render_first_person_hand,
                 destroy_info,
                 show_chunk_borders,
@@ -1838,7 +1909,13 @@ impl Renderer {
                 self.block_entity_pipeline
                     .draw(cmd, frame, anchor, block_entities);
 
-                self.item_entity_pipeline.draw(cmd, frame, item_entities);
+                self.item_entity_pipeline.draw(
+                    &self.ctx.device,
+                    &self.ctx.allocator,
+                    cmd,
+                    frame,
+                    item_entities,
+                );
 
                 // Break particles draw after entities but before translucent
                 // water: they write depth, and pomme's water doesn't, so this
@@ -1907,6 +1984,8 @@ impl Renderer {
                     // hand; a held item renders alone.
                     match held_item {
                         Some(item) => self.held_item_pipeline.update_and_draw(
+                            &self.ctx.device,
+                            &self.ctx.allocator,
                             cmd,
                             frame,
                             aspect,
@@ -1943,7 +2022,8 @@ impl Renderer {
                     };
                     cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
                     cmd.set_scissor(0, &[rect]);
-                    self.skin_preview.draw_in_box(cmd, frame, *p, sw, sh);
+                    self.skin_preview
+                        .draw_in_box(cmd, frame, p, sw, sh, &self.entity_renderer);
                     cmd.set_scissor(0, &[scissor]);
                 }
 
@@ -2142,11 +2222,13 @@ fn warm_item_meshes(
         if let Some(model) = registry.get_item_model(name) {
             item_entity_pipeline.ensure_mesh(device, allocator, name, model, uv_map);
         } else {
-            let texture_key = registry
-                .get_flat_item_texture_key(name)
-                .map(String::from)
-                .unwrap_or_else(|| format!("item/{name}"));
-            item_entity_pipeline.ensure_flat_mesh(device, allocator, name, &texture_key, uv_map);
+            item_entity_pipeline.ensure_flat_mesh(
+                device,
+                allocator,
+                name,
+                &registry.flat_item_layers(name),
+                uv_map,
+            );
         }
     }
 }

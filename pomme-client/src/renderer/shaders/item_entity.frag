@@ -10,7 +10,7 @@ layout(push_constant) uniform PushConstants {
 
 layout(location = 0) in vec2 v_tex_coords;
 layout(location = 1) in float v_light;
-layout(location = 2) in vec3 v_tint;
+layout(location = 2) in vec4 v_tint;
 layout(location = 3) in float v_fog;
 layout(location = 4) in vec3 v_fog_color;
 
@@ -20,7 +20,11 @@ void main() {
     vec4 color = texture(atlas_texture, v_tex_coords);
     // Vanilla ITEM_CUTOUT and ITEM_TRANSLUCENT both use ALPHA_CUTOUT=0.1.
     if (color.a < 0.1) discard;
-    vec3 tinted = color.rgb * v_tint * (world_light * v_light);
-    tinted = apply_fog(tinted, v_fog, v_fog_color);
-    out_color = vec4(tinted, color.a);
+    // Vanilla's item shader multiplies the sampled texture by the normalized
+    // vertex color directly. Decoding the tint a second time makes grayscale
+    // tint-mask textures such as bush substantially too dark.
+    vec4 tinted = color * v_tint;
+    tinted.rgb *= world_light * v_light;
+    tinted.rgb = apply_fog(tinted.rgb, v_fog, v_fog_color);
+    out_color = tinted;
 }
