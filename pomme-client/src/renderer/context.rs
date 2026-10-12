@@ -183,30 +183,29 @@ impl VulkanContext {
 
         let gpu_vendor_id = props.vendor_id;
         let driver_info = {
-            // TODO(debug-overlay): replace with proper pyronyx wrappers
-            let mut driver = vk::PhysicalDeviceDriverProperties::default();
-            let mut props2 = vk::PhysicalDeviceProperties2::default().next(&mut driver);
+            if v >= vk::make_api_version(0, 1, 2, 0) {
+                let mut driver = vk::PhysicalDeviceDriverProperties::default();
+                let mut props2 = vk::PhysicalDeviceProperties2::default().next(&mut driver);
 
-            let call = physical_device
-                .fns()
-                .v1_1
-                .get_physical_device_properties2
-                .expect("Vulkan 1.1 properties2 function unavailable");
-            unsafe { call(physical_device.handle(), &mut props2) };
+                physical_device.get_properties2(&mut props2);
 
-            let text = |raw: &[c_char]| {
-                unsafe { CStr::from_ptr(raw.as_ptr()) }
-                    .to_string_lossy()
-                    .trim()
-                    .to_owned()
-            };
-            let name = text(&driver.driver_name);
-            let info = text(&driver.driver_info);
+                let text = |raw: &[c_char]| unsafe {
+                    CStr::from_ptr(raw.as_ptr())
+                        .to_string_lossy()
+                        .trim()
+                        .to_owned()
+                };
 
-            if name.is_empty() || info.is_empty() {
-                None
+                let name = text(&driver.driver_name);
+                let info = text(&driver.driver_info);
+
+                if name.is_empty() || info.is_empty() {
+                    None
+                } else {
+                    Some(format!("{name} {info}"))
+                }
             } else {
-                Some(format!("{name} {info}"))
+                None
             }
         };
 
