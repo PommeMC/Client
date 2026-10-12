@@ -2296,62 +2296,94 @@ fn translate_entity_data_765() {
     ));
 }
 
-/// `translate_entity_data` already remaps item-stack values while rewriting
-/// serializer ids, so `remap_inbound` must not remap them a second time: 26.3
-/// `oak_log` (163) reaches the entity as native `oak_log` (161), not the
-/// `waxed_weathered_cut_copper_slab` a double remap would decode.
-#[test]
-fn entity_data_item_remaps_once_777() {
+/// Translates a `set_entity_data` frame for entity 9 carrying `values` (the
+/// entry list without its terminator) and returns the decoded entries.
+fn entity_data_entries(protocol: i32, values: &[u8]) -> Vec<azalea_entity::EntityDataItem> {
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
-        old_id(777, Direction::Clientbound, "set_entity_data"),
+        old_id(protocol, Direction::Clientbound, "set_entity_data"),
     );
     wire::write_varint(&mut old, 9); // entity id
-    old.extend_from_slice(&[8, 7]); // index 8, item_stack serializer
-    wire::write_varint(&mut old, 1); // count
-    wire::write_varint(&mut old, 163); // 26.3 oak_log
-    old.extend_from_slice(&[0, 0]); // empty component patch
+    old.extend_from_slice(values);
     old.push(0xFF);
-
-    let ClientboundGamePacket::SetEntityData(p) = translate_decode_and_remap(777, old) else {
+    let ClientboundGamePacket::SetEntityData(p) = translate_decode_and_remap(protocol, old) else {
         panic!("wrong packet");
     };
-    let azalea_entity::EntityDataValue::ItemStack(stack) = &p.packed_items.0[0].value else {
+    p.packed_items.0
+}
+
+fn entity_data_stack(entry: &azalea_entity::EntityDataItem) -> &azalea_inventory::ItemStack {
+    let azalea_entity::EntityDataValue::ItemStack(stack) = &entry.value else {
         panic!("wrong value");
     };
-    let azalea_inventory::ItemStack::Present(data) = stack else {
+    stack
+}
+
+fn entity_data_item(entry: &azalea_entity::EntityDataItem) -> azalea_registry::builtin::ItemKind {
+    let azalea_inventory::ItemStack::Present(data) = entity_data_stack(entry) else {
         panic!("empty stack");
     };
-    assert_eq!(data.kind, azalea_registry::builtin::ItemKind::OakLog);
+    data.kind
+}
+
+/// `translate_entity_data` already remaps item stacks, so `remap_inbound` must
+/// not remap them again: 26.3 `oak_log` (163) lands as native `oak_log` (161).
+#[test]
+fn entity_data_item_remaps_once_777() {
+    // index 8, item_stack serializer, count 1, 26.3 oak_log (varint 163),
+    // empty patch
+    let entries = entity_data_entries(777, &[8, 7, 1, 0xA3, 1, 0, 0]);
+    assert_eq!(
+        entity_data_item(&entries[0]),
+        azalea_registry::builtin::ItemKind::OakLog
+    );
+}
+
+/// A component the stack walker can't size (`damage`, id 3 in both 26.3 and
+/// 26.2) takes the verbatim-tail fallback, which must still remap the item.
+#[test]
+fn entity_data_item_with_components_remaps_once_777() {
+    // oak_log with one added component (damage 5), none removed
+    let entries = entity_data_entries(777, &[8, 7, 1, 0xA3, 1, 1, 0, 3, 5]);
+    assert_eq!(
+        entity_data_item(&entries[0]),
+        azalea_registry::builtin::ItemKind::OakLog
+    );
+}
+
+/// An item 26.2 lacks (26.3 `poplar_log`, 172) empties the stack; a walkable
+/// one keeps the entries after it.
+#[test]
+fn entity_data_unmapped_item_empties_777() {
+    // poplar_log (varint 172), empty patch; then index 9, int serializer, 7
+    let entries = entity_data_entries(777, &[8, 7, 1, 0xAC, 1, 0, 0, 9, 1, 7]);
+    assert!(matches!(
+        entity_data_stack(&entries[0]),
+        azalea_inventory::ItemStack::Empty
+    ));
+    assert_eq!(entries.len(), 2);
+}
+
+/// On the verbatim-tail fallback an unmapped item can't be skipped, so the
+/// stack empties and the list ends there.
+#[test]
+fn entity_data_unmapped_item_with_components_ends_list_777() {
+    let entries = entity_data_entries(777, &[8, 7, 1, 0xAC, 1, 1, 0, 3, 5, 9, 1, 7]);
+    assert!(matches!(
+        entity_data_stack(&entries[0]),
+        azalea_inventory::ItemStack::Empty
+    ));
+    assert_eq!(entries.len(), 1);
 }
 
 /// `translate_item_765` leaves the wire item id for the typed pass, so
 /// `remap_inbound` must still remap `set_entity_data` stacks on 765 wires.
 #[test]
 fn entity_data_item_remaps_765() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(765, Direction::Clientbound, "set_entity_data"),
-    );
-    wire::write_varint(&mut old, 9); // entity id
-    old.extend_from_slice(&[8, 7]); // index 8, item_stack serializer
-    old.extend_from_slice(&[1]); // stack present
-    wire::write_varint(&mut old, u32::from(SHIFTED_ITEM)); // 765 item id
-    old.extend_from_slice(&[1, 0x0A, 0x00]); // count 1, empty NBT compound
-    old.push(0xFF);
-
-    let ClientboundGamePacket::SetEntityData(p) = translate_decode_and_remap(765, old) else {
-        panic!("wrong packet");
-    };
-    let azalea_entity::EntityDataValue::ItemStack(stack) = &p.packed_items.0[0].value else {
-        panic!("wrong value");
-    };
-    let azalea_inventory::ItemStack::Present(data) = stack else {
-        panic!("empty stack");
-    };
-    assert_eq!(data.kind, SHIFTED_ITEM_KIND);
+    // index 8, item_stack serializer, present, 765 item id, count 1, empty NBT
+    let entries = entity_data_entries(765, &[8, 7, 1, SHIFTED_ITEM, 1, 0x0A, 0x00]);
+    assert_eq!(entity_data_item(&entries[0]), SHIFTED_ITEM_KIND);
 }
 
 /// `container_set_slot`'s -1/-2 sentinels split like 767's, but with the

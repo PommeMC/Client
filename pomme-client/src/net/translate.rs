@@ -1385,12 +1385,9 @@ impl Translation {
             }
             ClientboundGamePacket::SetEntityData(p) => {
                 // `translate_entity_data` already remaps item-stack values
-                // while rewriting serializer ids, except on 1.21.5 wires where
-                // `translate_item_765` leaves the wire id for this pass.
-                let needs_remap = self
-                    .game_ids
-                    .as_ref()
-                    .is_none_or(|g| g.v765.is_some());
+                // while rewriting serializer ids, except on pre-1.20.5 wires
+                // where `translate_item_765` leaves the wire id for this pass.
+                let needs_remap = self.game_ids.as_ref().is_none_or(|g| g.v765.is_some());
                 if needs_remap {
                     for item in &mut p.packed_items.0 {
                         if let azalea_entity::EntityDataValue::ItemStack(stack) = &mut item.value {
@@ -3409,18 +3406,18 @@ fn translate_entity_data(
             continue;
         }
         if new == 7 {
-            let mut stack = Vec::new();
-            let translated = if ids.v765.is_some() {
-                translate_item_765(&mut cur, &mut stack, ids.v763.is_some())
+            let walked = if ids.v765.is_some() {
+                translate_item_765(&mut cur, &mut out, ids.v763.is_some()).map(|()| true)
             } else {
-                translate_item_stack(&mut cur, &mut stack, remaps, ids.v772.is_some())
+                translate_item_stack(&mut cur, &mut out, remaps, ids.v772.is_some())
             };
-            if translated.is_some() {
-                out.extend_from_slice(&stack);
+            if walked == Some(true) {
                 continue;
             }
             tracing::debug!("Copying entity data tail verbatim past an item stack");
-            out.extend_from_slice(&payload[value_at..]);
+            if walked.is_none() {
+                out.extend_from_slice(&payload[value_at..]);
+            }
             return Some(out);
         }
         if new == 16 || new == 17 {
@@ -3448,24 +3445,56 @@ pub(crate) const COMPONENT_MAP_ID: u32 = 46;
 pub(crate) const COMPONENT_PROFILE: u32 = 70;
 
 /// Remaps one entity-data item stack (count, item id, component patch) into
-/// the native registry space. `old_profile` marks the pre-1.21.9 `profile`
-/// component layout (see [`translate_old_profile`]). `None` means a
-/// component payload the walker doesn't know (or a malformed stack); the
-/// caller falls back to the verbatim-tail copy.
+/// the native registry space; an item the native version lacks becomes an
+/// empty stack. `Some(false)` means a patch [`translate_component_patch`]
+/// can't walk: it and the rest of the list copy verbatim after the remapped
+/// head, or the list ends at the emptied stack. `None` means a malformed
+/// head; nothing is written.
+/// TODO: the verbatim patch keeps wire-space component-type ids.
 fn translate_item_stack(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
     remaps: &RegistryRemaps,
     old_profile: bool,
-) -> Option<()> {
+) -> Option<bool> {
     let count_at = cur.position() as usize;
     let count = i32::azalea_read_var(cur).ok()?;
-    out.extend_from_slice(&cur.get_ref()[count_at..cur.position() as usize]);
+    let count_end = cur.position() as usize;
     if count <= 0 {
-        return Some(());
+        out.extend_from_slice(&cur.get_ref()[count_at..count_end]);
+        return Some(true);
     }
     let item = u32::azalea_read_var(cur).ok()?;
-    wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
+    let patch_at = cur.position() as usize;
+    let mut patch = Vec::new();
+    let walked = translate_component_patch(cur, &mut patch, remaps, old_profile).is_some();
+    let Some(native) = remaps.remap(ClientRegistry::Item, item) else {
+        wire::write_varint(out, 0);
+        if !walked {
+            out.push(0xFF);
+        }
+        return Some(walked);
+    };
+    out.extend_from_slice(&cur.get_ref()[count_at..count_end]);
+    wire::write_varint(out, native);
+    if walked {
+        out.extend_from_slice(&patch);
+    } else {
+        out.extend_from_slice(&cur.get_ref()[patch_at..]);
+    }
+    Some(walked)
+}
+
+/// Remaps an item stack's component patch into the native registry space.
+/// `old_profile` marks the pre-1.21.9 `profile` component layout (see
+/// [`translate_old_profile`]). `None` means a component payload the walker
+/// doesn't know (or a malformed patch).
+fn translate_component_patch(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+    old_profile: bool,
+) -> Option<()> {
     let added_at = cur.position() as usize;
     let added = u32::azalea_read_var(cur).ok()?;
     out.extend_from_slice(&cur.get_ref()[added_at..cur.position() as usize]);
