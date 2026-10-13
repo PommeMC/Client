@@ -8,11 +8,11 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::physics::block_shape::outline_shape;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::pipelines::entity_renderer::EntityRenderInfo;
 use crate::renderer::pipelines::item_entity::ItemRenderInfo;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
-use crate::world::block::block_shape;
 use crate::world::chunk::ChunkStore;
 
 /// Per-vertex data for shadow quads.
@@ -442,10 +442,12 @@ fn extract_shadow_quads(
                     continue;
                 }
 
-                // Collision shape check
-                let Some(boxes) = block_shape(block_below) else {
+                // Block outline/collision shape check (full cube blocks return FULL_CUBE_SHAPE
+                // [[0,0,0,1,1,1]])
+                let boxes = outline_shape(block_below);
+                if boxes.is_empty() {
                     continue;
-                };
+                }
 
                 let bounds = match calculate_box_bounds(boxes) {
                     Some(b) => b,
