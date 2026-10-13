@@ -33,6 +33,7 @@ use pipelines::book_preview::BookPreviewPipeline;
 use pipelines::chunk::ChunkPipeline;
 use pipelines::clouds::CloudPipeline;
 use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
+use pipelines::entity_shadow::EntityShadowPipeline;
 use pipelines::hand::HandPipeline;
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
 use pipelines::panorama::PanoramaPipeline;
@@ -112,6 +113,8 @@ enum RenderMode<'a> {
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
+        chunk_store: Option<&'a crate::world::chunk::ChunkStore>,
+        entity_shadows: bool,
         entities: &'a [EntityRenderInfo],
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
         block_entities: &'a [BlockEntityRenderInfo],
@@ -174,6 +177,7 @@ pub struct Renderer {
 
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
+    entity_shadow_pipeline: EntityShadowPipeline,
     block_entity_pipeline: BlockEntityPipeline,
     chunk_buffers: ChunkBufferStore,
     render_finished_per_image: Vec<vk::Semaphore>,
@@ -402,6 +406,16 @@ impl Renderer {
             asset_index,
         );
 
+        let entity_shadow_pipeline = EntityShadowPipeline::new(
+            &ctx.device,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            jar_assets_dir,
+            asset_index,
+        );
+
         let block_entity_pipeline = BlockEntityPipeline::new(
             &ctx.device,
             ctx.graphics_queue,
@@ -487,6 +501,7 @@ impl Renderer {
             skin_preview,
             book_preview,
             entity_renderer,
+            entity_shadow_pipeline,
             block_entity_pipeline,
             chunk_border_pipeline,
             item_entity_pipeline,
@@ -732,6 +747,8 @@ impl Renderer {
         self.book_preview
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.entity_renderer
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.entity_shadow_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.block_entity_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
@@ -1097,6 +1114,8 @@ impl Renderer {
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
+        chunk_store: Option<&crate::world::chunk::ChunkStore>,
+        entity_shadows: bool,
         entities: &[EntityRenderInfo],
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
         block_entities: &[BlockEntityRenderInfo],
@@ -1140,6 +1159,8 @@ impl Renderer {
                 destroy_info,
                 show_chunk_borders,
                 sky,
+                chunk_store,
+                entity_shadows,
                 entities,
                 item_entities,
                 block_entities,
@@ -1498,6 +1519,7 @@ impl Renderer {
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
+            self.entity_shadow_pipeline.update_camera(frame, &uniform);
             self.block_entity_pipeline.update_camera(frame, &uniform);
             self.chunk_border_pipeline.update_camera(frame, &uniform);
             self.item_entity_pipeline.update_camera(frame, &uniform);
@@ -1706,6 +1728,8 @@ impl Renderer {
                 destroy_info,
                 show_chunk_borders,
                 sky,
+                chunk_store,
+                entity_shadows,
                 entities,
                 item_entities,
                 block_entities,
@@ -1758,6 +1782,20 @@ impl Renderer {
                 // Entities aren't sent beyond the server's tracking range; a
                 // generous render-distance cap just trims anything stray.
                 let ent_cull_dist = (*render_distance * 16) as f32 + 16.0;
+
+                if *entity_shadows && let Some(chunks) = chunk_store {
+                    self.entity_shadow_pipeline.draw(
+                        cmd,
+                        frame,
+                        chunks,
+                        entities,
+                        item_entities,
+                        anchor,
+                        eye,
+                        ent_cull_dist,
+                    );
+                }
+
                 self.entity_renderer.draw(
                     cmd,
                     frame,
