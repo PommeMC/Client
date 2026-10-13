@@ -231,27 +231,37 @@ impl Camera {
             * Mat4::from_rotation_x(pitch_deg.to_radians())
     }
 
-    pub fn update_look(&mut self, input: &mut InputState, dt: f32, sensitivity: f32) {
+    pub fn update_look(
+        &mut self,
+        input: &mut InputState,
+        dt: f32,
+        sensitivity: f32,
+        invert_x: bool,
+        invert_y: bool,
+    ) {
         if let Some(look_vec) = input.get_gamepad_right_analog() {
-            self.update_gamepad_look(look_vec, dt, false);
+            self.update_gamepad_look(look_vec, dt, invert_x, invert_y);
         }
 
         if input.is_cursor_captured() {
             let (dx, dy) = input.consume_mouse_delta();
             let mouse_sensitivity = mouse_sensitivity_multiplier(sensitivity);
-            self.turn(dx as f32 * mouse_sensitivity, dy as f32 * mouse_sensitivity);
+            let x_sign = if invert_x { -1.0 } else { 1.0 };
+            let y_sign = if invert_y { -1.0 } else { 1.0 };
+            self.turn(
+                dx as f32 * mouse_sensitivity * x_sign,
+                dy as f32 * mouse_sensitivity * y_sign,
+            );
         }
     }
 
     /// gilrs reports stick-up as `+y` and `x_rot` is positive downwards, so
-    /// the un-inverted case negates.
-    ///
-    /// TODO: nothing passes `invert_y: true` yet — there is no invert
-    /// preference.
-    fn update_gamepad_look(&mut self, look_vec: Vec2, dt: f32, invert_y: bool) {
+    /// the un-inverted case negates pitch.
+    fn update_gamepad_look(&mut self, look_vec: Vec2, dt: f32, invert_x: bool, invert_y: bool) {
         let step = CONTROLLER_SENSITIVITY * dt;
+        let yaw_sign = if invert_x { -1.0 } else { 1.0 };
         let pitch_sign = if invert_y { 1.0 } else { -1.0 };
-        self.turn(look_vec.x * step, look_vec.y * pitch_sign * step);
+        self.turn(look_vec.x * yaw_sign * step, look_vec.y * pitch_sign * step);
     }
 
     /// Vanilla `Entity.turn`: add the already-scaled deltas, clamping pitch
@@ -798,7 +808,7 @@ mod tests {
     fn gamepad_invert_y_flips_pitch_without_touching_yaw() {
         for (invert_y, expected_pitch) in [(false, -15.0), (true, 15.0)] {
             let mut camera = Camera::new(16.0 / 9.0);
-            camera.update_gamepad_look(Vec2::new(0.2, 0.1), 1.0, invert_y);
+            camera.update_gamepad_look(Vec2::new(0.2, 0.1), 1.0, false, invert_y);
             assert!(
                 (camera.look_dir.x_rot_deg() - expected_pitch).abs() < 1e-5,
                 "invert_y={invert_y} gave pitch {}, expected {expected_pitch}",
@@ -808,6 +818,24 @@ mod tests {
                 (camera.look_dir.y_rot_deg() - 30.0).abs() < 1e-5,
                 "invert_y={invert_y} changed yaw to {}",
                 camera.look_dir.y_rot_deg()
+            );
+        }
+    }
+
+    #[test]
+    fn gamepad_invert_x_flips_yaw_without_touching_pitch() {
+        for (invert_x, expected_yaw) in [(false, 30.0), (true, -30.0)] {
+            let mut camera = Camera::new(16.0 / 9.0);
+            camera.update_gamepad_look(Vec2::new(0.2, 0.1), 1.0, invert_x, false);
+            assert!(
+                (camera.look_dir.y_rot_deg() - expected_yaw).abs() < 1e-5,
+                "invert_x={invert_x} gave yaw {}, expected {expected_yaw}",
+                camera.look_dir.y_rot_deg()
+            );
+            assert!(
+                (camera.look_dir.x_rot_deg() - (-15.0)).abs() < 1e-5,
+                "invert_x={invert_x} changed pitch to {}",
+                camera.look_dir.x_rot_deg()
             );
         }
     }

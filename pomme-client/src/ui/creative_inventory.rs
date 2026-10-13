@@ -374,7 +374,13 @@ pub fn build_creative_inventory(
     let ox = (screen_w - inv_w) / 2.0;
     let oy = (screen_h - inv_h) / 2.0;
 
-    common::push_overlay(elements, screen_w, screen_h, 0.5);
+    common::push_gradient_overlay(
+        elements,
+        screen_w,
+        screen_h,
+        [0.0, 0.0, 0.0, 0.45],
+        [0.0, 0.0, 0.0, 0.50],
+    );
 
     draw_tabs(elements, state, ox, oy, scale, false);
 
