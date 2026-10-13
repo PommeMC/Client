@@ -76,9 +76,6 @@ pub struct BlockRegistry {
     flat_item_texture_keys: HashMap<String, String>,
     item_gui_transforms: HashMap<String, model::DisplayTransform>,
     item_ground_transforms: HashMap<String, glam::Mat4>,
-    /// Block name -> its single `BlockState`, for one-state blocks (see
-    /// `placeable_block_for_item`).
-    placeable_blocks: HashMap<&'static str, BlockState>,
 }
 
 impl BlockRegistry {
@@ -136,15 +133,15 @@ impl BlockRegistry {
             flat_item_texture_keys,
             item_gui_transforms,
             item_ground_transforms,
-            placeable_blocks: build_placeable_blocks(),
         }
     }
 
     /// Resolves a held item's registry name (unprefixed, e.g. `"stone"`) to the
-    /// `BlockState` to predict on placement, or `None` if the item is not a
-    /// single-state block. Item and block share a registry name for this set.
+    /// `BlockState` to predict on placement in the active protocol's state space,
+    /// or `None` if the item is not a single-state block. Item and block share
+    /// a registry name for this set.
     pub fn placeable_block_for_item(&self, item_name: &str) -> Option<BlockState> {
-        self.placeable_blocks.get(item_name).copied()
+        super::placeable_block_for_item(item_name)
     }
 
     pub fn get_item_model(&self, name: &str) -> Option<&BakedModel> {
@@ -269,19 +266,7 @@ impl BlockRegistry {
     }
 }
 
-/// Builds the block-name -> single-`BlockState` map from the block table,
-/// keeping only names that map to exactly one state.
-fn build_placeable_blocks() -> HashMap<&'static str, BlockState> {
-    let mut seen: HashMap<&'static str, Option<BlockState>> = HashMap::new();
-    for (state, data) in super::all_states() {
-        seen.entry(data.id)
-            .and_modify(|v| *v = None)
-            .or_insert(Some(state));
-    }
-    seen.into_iter()
-        .filter_map(|(name, state)| state.map(|s| (name, s)))
-        .collect()
-}
+
 
 /// Whether every `key=value` constraint holds for `props`. A value may list
 /// alternatives separated by `|`, as vanilla multipart `when` clauses do.
