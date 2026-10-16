@@ -11,6 +11,7 @@ use super::container::{
 use crate::player::inventory::{self, Inventory};
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::PlayerPreview;
+use crate::renderer::pipelines::entity_renderer::armor_render_infos;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
 // Vanilla player-menu slot indices, as u16 for click ops.
@@ -98,7 +99,7 @@ pub fn build_inventory(
         }
     }
 
-    ctx.slot(
+    ctx.fake_slot(
         154.0,
         28.0,
         inventory.craft_output(),
@@ -142,7 +143,9 @@ pub fn build_inventory(
                 70.0 * panel.scale,
             ],
             gui_scale: panel.scale,
+            model_scale: 30.0,
             cursor,
+            armor: armor_render_infos(inventory.armor_slots()),
         },
     }
 }

@@ -58,6 +58,11 @@ The Rust toolchain is pinned in `rust-toolchain.toml`; rustup picks it up.
 Requires the [Vulkan SDK](https://vulkan.lunarg.com/) and Python (to stage
 OpenAL Soft next to the binary; without it the client runs with audio disabled).
 
+On Linux, source the Vulkan SDK's `setup-env.sh` into the current Bash shell
+before running client builds or `just client-pre-pr`.
+For builds run from an editor or agent, launch it from the configured environment
+so its build processes inherit the SDK variables.
+
 Clone with submodules, since singleplayer builds SteelMC by default:
 
 ```bash

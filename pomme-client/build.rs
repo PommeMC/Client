@@ -48,7 +48,12 @@ fn main() {
             content,
         })
     });
-    for include in ["fog.glsl", "camera_ubo.glsl", "atlas_sprite.glsl"] {
+    for include in [
+        "fog.glsl",
+        "camera_ubo.glsl",
+        "atlas_sprite.glsl",
+        "item_tint.glsl",
+    ] {
         println!(
             "cargo:rerun-if-changed={}",
             shader_dir.join(include).display()
@@ -67,6 +72,7 @@ fn main() {
         ("panorama.frag", shaderc::ShaderKind::Fragment),
         ("hand.vert", shaderc::ShaderKind::Vertex),
         ("hand.frag", shaderc::ShaderKind::Fragment),
+        ("preview.frag", shaderc::ShaderKind::Fragment),
         ("menu_overlay.vert", shaderc::ShaderKind::Vertex),
         ("menu_overlay.frag", shaderc::ShaderKind::Fragment),
         ("block_overlay.vert", shaderc::ShaderKind::Vertex),

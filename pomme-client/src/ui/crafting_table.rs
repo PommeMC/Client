@@ -70,7 +70,7 @@ pub fn build_crafting_table(
     }
 
     let result = slots.get(SLOT_RESULT as usize).unwrap_or(&ItemStack::Empty);
-    ctx.slot(124.0, 35.0, result, None, SLOT_RESULT);
+    ctx.fake_slot(124.0, 35.0, result, None, SLOT_RESULT);
 
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
 

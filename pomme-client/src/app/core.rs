@@ -649,6 +649,17 @@ impl AppCore {
     }
 
     pub fn build_menu_input(&mut self, dt: f32) -> MenuInput {
+        if self.input.binding_capture_active() {
+            self.menu_dpad.step(0, dt);
+            return MenuInput {
+                cursor: self.input.cursor_pos(),
+                scroll_delta: self.input.consume_menu_scroll(),
+                dt,
+                binding_capture: true,
+                binding_presses: self.input.take_binding_presses(),
+                ..MenuInput::default()
+            };
+        }
         let credits_keys_down = credits_key_mask(|code| self.input.key_pressed(code));
         let credits_keys_pressed = credits_key_mask(|code| self.input.key_just_pressed(code));
         let dpad_dir = i32::from(self.input.gamepad_button_down(gilrs::Button::DPadRight))
@@ -669,6 +680,7 @@ impl AppCore {
             dt,
             credits_keys_down,
             credits_keys_pressed,
+            ..MenuInput::default()
         }
     }
 
@@ -1473,9 +1485,11 @@ impl AppCore {
                         }
                     }
                 }
-                NetworkEvent::EntitySaddle { entity_id, saddled } => {
+                NetworkEvent::EntityEquipment { entity_id, slots } => {
                     if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
-                        e.saddled = saddled;
+                        for (slot, item) in slots {
+                            e.set_equipment(slot, item);
+                        }
                     }
                 }
                 NetworkEvent::PlayerExperience { progress, level } => {
@@ -2262,10 +2276,11 @@ impl AppCore {
                     item_id,
                     damage,
                     count,
+                    stack,
                 } => {
                     renderer.ensure_item_mesh(&item_name);
                     game.item_entity_store
-                        .set_item_data(id, item_name, item_id, damage, count);
+                        .set_item_data(id, item_name, item_id, damage, count, stack);
                 }
                 NetworkEvent::EntityData { id, index, value } => {
                     if index == 4
@@ -2981,8 +2996,18 @@ impl AppCore {
             game.player.look_dir,
             &game.chunk_store,
             &game.entity_store,
+            &game.player.attributes,
             crate::player::is_creative(game.player.game_mode),
             held_item.as_deref(),
+        );
+        let legacy_mining = crate::tool::legacy_mining(
+            held_stack.as_ref(),
+            game.player
+                .inventory
+                .armor_slots()
+                .iter()
+                .filter_map(|stack| stack.as_present()),
+            crate::version::session_protocol(),
         );
         let place_block = held_item
             .as_deref()
@@ -3008,6 +3033,10 @@ impl AppCore {
             game.player.food,
             input.selected_slot(),
             held_stack.as_ref(),
+            &game.player.attributes,
+            &game.player.effects,
+            game.player.eyes_in_water,
+            legacy_mining,
             place_block,
             hands_empty,
             &mut effects,
