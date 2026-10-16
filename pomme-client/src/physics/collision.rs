@@ -56,6 +56,31 @@ impl CollisionWorld<'_> {
         ))
     }
 
+    fn moving_piston(&self, state: BlockState, pos: BlockPos) -> Option<Vec<Aabb>> {
+        if special_collision(state) != SpecialCollision::MovingPiston {
+            return None;
+        }
+        let anim = self.block_entity_anim?.moving_piston(&pos)?;
+        if anim.moved_state.is_air() {
+            return Some(Vec::new());
+        }
+        let offset = anim.offset(1.0).as_dvec3();
+        let base_pos = glam::DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64) + offset;
+        let local_boxes = block_shape::collision_shape(
+            anim.moved_state,
+            pos.y,
+            &CollisionContext::position(pos.y as f64),
+        );
+        let boxes = match local_boxes {
+            Some(locals) => locals
+                .iter()
+                .map(|&b| Aabb::from_local(b, base_pos))
+                .collect(),
+            None => vec![Aabb::new(base_pos, base_pos + glam::DVec3::splat(1.0))],
+        };
+        Some(boxes)
+    }
+
     fn for_each_block_collision(
         &self,
         region: &Aabb,
@@ -67,6 +92,7 @@ impl CollisionWorld<'_> {
             ctx,
             |x, y, z| self.chunks.get_block_state(x, y, z),
             |state, pos| self.shulker_lid(state, pos),
+            |state, pos| self.moving_piston(state, pos),
             visit,
         );
     }
@@ -81,6 +107,7 @@ fn for_each_block_collision(
     ctx: &CollisionContext,
     state_at: impl Fn(i32, i32, i32) -> BlockState,
     shulker_lid: impl Fn(BlockState, BlockPos) -> Option<Aabb>,
+    moving_piston: impl Fn(BlockState, BlockPos) -> Option<Vec<Aabb>>,
     mut visit: impl FnMut(BlockPos, &[Aabb]),
 ) {
     let lo = |v: f64| (v - 1.0e-7).floor() as i32 - 1;
@@ -109,6 +136,8 @@ fn for_each_block_collision(
                 boxes.clear();
                 if let Some(lid) = shulker_lid(state, pos) {
                     boxes.push(lid);
+                } else if let Some(piston_boxes) = moving_piston(state, pos) {
+                    boxes.extend(piston_boxes);
                 } else {
                     match block_shape::collision_shape(state, by, ctx) {
                         Some(local) => {
@@ -323,6 +352,7 @@ mod tests {
                     BlockState::AIR
                 }
             },
+            |_, _| None,
             |_, _| None,
             |_, boxes| aabbs.extend_from_slice(boxes),
         );

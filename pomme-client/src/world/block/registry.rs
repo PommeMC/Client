@@ -244,6 +244,25 @@ impl BlockRegistry {
             .or_else(|| variants.values().next())
     }
 
+    pub fn get_all_baked_variants(&self, block_id: &str) -> Option<&HashMap<String, BakedModel>> {
+        self.baked.get(block_id)
+    }
+
+    pub fn get_baked_variant_key(&self, state: BlockState) -> Option<&str> {
+        let variants = self.baked.get(super::block_id(state))?;
+        if variants.len() == 1 {
+            return variants.keys().next().map(|s| s.as_str());
+        }
+        let props = super::block_properties(state);
+        variants
+            .iter()
+            .find(|(key, _)| {
+                constraints_match(props, key.split(',').filter_map(|p| p.split_once('=')))
+            })
+            .map(|(key, _)| key.as_str())
+            .or_else(|| variants.keys().next().map(|s| s.as_str()))
+    }
+
     pub fn get_multipart_quads(&self, state: BlockState) -> Option<Vec<&model::BakedQuad>> {
         let entries = self.multipart.get(super::block_id(state))?;
         let props = super::block_properties(state);
