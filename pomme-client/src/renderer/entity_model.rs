@@ -593,6 +593,100 @@ pub fn bake_zombie_model() -> BakedEntityModel {
     bake_model(zombie_parts(), 64, 64)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HumanoidArmorSlot {
+    Head,
+    Chest,
+    Legs,
+    Feet,
+}
+
+impl HumanoidArmorSlot {
+    /// Head/chest/legs/feet, matching `EntityRenderInfo::armor` order.
+    pub const ALL: [Self; 4] = [Self::Head, Self::Chest, Self::Legs, Self::Feet];
+}
+
+/// Vanilla `createArmorMeshSet`: the humanoid mesh inflated by the slot's
+/// deformation (inner 0.5 for legs, outer 1.0 otherwise). Parts outside the
+/// slot keep their place with no cubes, so the base model's animation applies.
+fn armor_parts(slot: HumanoidArmorSlot, right_leg_x: f32, leg_extend: f32) -> Vec<EntityPart> {
+    let arm = ModelCube {
+        origin: Vec3::new(-3.0, -2.0, -2.0),
+        size: Vec3::new(4.0, 12.0, 4.0),
+        tex_offset: (40, 16),
+        deformation: 0.0,
+        mirror: false,
+    };
+    let leg = ModelCube {
+        origin: Vec3::new(-2.0, 0.0, -2.0),
+        size: Vec3::new(4.0, 12.0, 4.0),
+        tex_offset: (0, 16),
+        deformation: leg_extend,
+        mirror: false,
+    };
+    let mut parts = humanoid_parts(arm, leg, right_leg_x);
+    inflate(
+        &mut parts,
+        if slot == HumanoidArmorSlot::Legs {
+            0.5
+        } else {
+            1.0
+        },
+    );
+    retain_humanoid_armor_slot(&mut parts, slot);
+    parts
+}
+
+fn retain_humanoid_armor_slot(parts: &mut [EntityPart], slot: HumanoidArmorSlot) {
+    for part in parts {
+        let visible = match slot {
+            HumanoidArmorSlot::Head => part.name == "head",
+            HumanoidArmorSlot::Chest => {
+                matches!(part.name.as_str(), "body" | "right_arm" | "left_arm")
+            }
+            HumanoidArmorSlot::Legs => {
+                matches!(part.name.as_str(), "body" | "right_leg" | "left_leg")
+            }
+            HumanoidArmorSlot::Feet => matches!(part.name.as_str(), "right_leg" | "left_leg"),
+        };
+        if !visible {
+            part.cubes.clear();
+        }
+    }
+}
+
+/// Vanilla `HumanoidModel.createArmorMeshSet`.
+pub(crate) fn humanoid_armor_parts(slot: HumanoidArmorSlot) -> Vec<EntityPart> {
+    armor_parts(slot, 1.9, -0.1)
+}
+
+pub fn bake_humanoid_armor_model(slot: HumanoidArmorSlot) -> BakedEntityModel {
+    bake_model(humanoid_armor_parts(slot), 64, 32)
+}
+
+/// Vanilla `ModelLayers.HUSK_ARMOR`: humanoid armor at the husk's 1.0625 scale.
+pub fn bake_husk_armor_model(slot: HumanoidArmorSlot) -> BakedEntityModel {
+    bake_scaled(humanoid_armor_parts(slot), 1.0625, 32)
+}
+
+/// Vanilla `ZombieVillagerModel.createArmorLayerSet`: head lowered to y -10,
+/// body and legs extended by 0.1.
+pub fn bake_zombie_villager_armor_model(slot: HumanoidArmorSlot) -> BakedEntityModel {
+    let mut parts = armor_parts(slot, 2.0, 0.1);
+    for part in &mut parts {
+        match part.name.as_str() {
+            "head" => {
+                if let Some(head) = part.cubes.first_mut() {
+                    head.origin.y = -10.0;
+                }
+            }
+            "body" => inflate(std::slice::from_mut(part), 0.1),
+            _ => {}
+        }
+    }
+    bake_model(parts, 64, 32)
+}
+
 /// Vanilla `CubeDeformation` inflate applied mesh-wide (vanilla rebuilds
 /// layer meshes at `createMesh(g)`): every cube grows by `g` on top of its
 /// own deformation.
@@ -5206,7 +5300,7 @@ pub fn compute_fish_anim(
 /// vanilla NORTH, SOUTH, DOWN, UP, WEST, EAST. `mirror` swaps the minX/maxX
 /// corner labels (vanilla's UV-only mirror; `push_face` also reverses the
 /// quad).
-fn cube_face_positions(cube: &ModelCube, y_down: bool) -> [[[f32; 3]; 4]; 6] {
+pub(crate) fn cube_face_positions(cube: &ModelCube, y_down: bool) -> [[[f32; 3]; 4]; 6] {
     let inf = cube.deformation;
     let mut x0 = (cube.origin.x - inf) / 16.0;
     let mut x1 = (cube.origin.x + cube.size.x + inf) / 16.0;
@@ -5236,6 +5330,24 @@ fn cube_face_positions(cube: &ModelCube, y_down: bool) -> [[[f32; 3]; 4]; 6] {
         [t2, t3, l3, l2],
         [t0, l0, l3, t3],
         [l1, t1, t2, l2],
+    ]
+}
+
+/// Vanilla box-unwrap UV rectangles for [`ModelCube`], in the same face
+/// order as [`cube_face_positions`]. The maxY face intentionally reverses V.
+pub(crate) fn cube_face_uvs(cube: &ModelCube) -> [[f32; 4]; 6] {
+    let u = cube.tex_offset.0 as f32;
+    let v = cube.tex_offset.1 as f32;
+    let w = cube.size.x;
+    let h = cube.size.y;
+    let d = cube.size.z;
+    [
+        [u + d, v + d, u + d + w, v + d + h],
+        [u + 2.0 * d + w, v + d, u + 2.0 * d + 2.0 * w, v + d + h],
+        [u + d, v, u + d + w, v + d],
+        [u + d + w, v + d, u + d + 2.0 * w, v],
+        [u, v + d, u + d, v + d + h],
+        [u + d + w, v + d, u + 2.0 * d + w, v + d + h],
     ]
 }
 
@@ -5295,25 +5407,7 @@ pub(crate) fn generate_cube_vertices(
 ) {
     let tw = tex_w as f32;
     let th = tex_h as f32;
-    let u = cube.tex_offset.0 as f32;
-    let v = cube.tex_offset.1 as f32;
-    let w = cube.size.x;
-    let h = cube.size.y;
-    let d = cube.size.z;
-
-    // Vanilla box-unwrap rects (`ModelPart.Cube`), face order matching
-    // `cube_face_positions`, as `(u0, v0, u1, v1)` polygon params: the maxY
-    // face's V runs reversed, and its right edge is `u+d+2w`, not `u+2d+w`
-    // (they differ whenever w != d).
-    let face_uv = [
-        [u + d, v + d, u + d + w, v + d + h],
-        [u + 2.0 * d + w, v + d, u + 2.0 * d + 2.0 * w, v + d + h],
-        [u + d, v, u + d + w, v + d],
-        [u + d + w, v + d, u + d + 2.0 * w, v],
-        [u, v + d, u + d, v + d + h],
-        [u + d + w, v + d, u + 2.0 * d + w, v + d + h],
-    ];
-
+    let face_uv = cube_face_uvs(cube);
     let positions = cube_face_positions(cube, y_down);
 
     // Vanilla samplers REPEAT while pomme's vertex format clamps UVs to the

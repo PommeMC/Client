@@ -643,6 +643,8 @@ fn visit_translation(
 /// Vanilla `KeyMapping.createNameSupplier`: the bound key's name, or the
 /// translated id for an unknown mapping.
 fn keybind_display_name(key: &str) -> String {
+    // TODO: Use a shared binding resolver to resolve configured KeyBindings and
+    // defaults for chat keybind components, instead of these static default labels.
     match crate::app::input::keybind_label(key) {
         Some((translation, fallback)) => crate::lang::translate(translation).unwrap_or(fallback),
         None => crate::lang::translate(key).unwrap_or(key),

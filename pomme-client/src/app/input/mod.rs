@@ -1,3 +1,9 @@
+//! Physical input state, logical action metadata, and persistent key bindings.
+//!
+//! Key bindings serialize action IDs to arrays of physical input IDs, for
+//! example `"key.jump": ["key.keyboard.space", "key.gamepad.south"]`.
+//! The Key Binds screen edits these settings using limited input capture;
+//! live gameplay still uses the existing hardcoded mappings.
 use std::collections::{HashMap, HashSet};
 
 use gilrs::ff::{BaseEffect, Effect, EffectBuilder, Repeat, Replay};
@@ -8,6 +14,17 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use crate::app::TICK_RATE_MS;
 use crate::app::phases::AppPhase;
 use crate::app::state_slot::StateSlot;
+
+pub mod action;
+
+pub mod input_key;
+pub mod key_bindings;
+mod metadata;
+
+pub use action::Action;
+pub use input_key::InputKey;
+pub use key_bindings::KeyBindings;
+pub use metadata::{ActionId, BindingMetadata, DisplayText, NOT_BOUND, StringId};
 
 /// Left-stick deflection past which a direction counts as a digital press.
 pub const STICK_MOVEMENT_THRESHOLD: f32 = 0.25;
@@ -22,48 +39,10 @@ pub(crate) fn gamepad_movement_axes(analog: glam::Vec2) -> glam::Vec2 {
 /// an "instant".
 pub const SHORT_RUMBLE_TIME: u32 = 5;
 
-#[derive(Hash, PartialEq, Eq, Clone)]
-pub enum Action {
-    Jump,
-    Sneak,
-    Sprint,
-    Destroy,
-    Use,
-    ToggleInventory,
-    OpenMenu,
-    ViewPlayerList,
-    ChangePerspective,
-    OpenChat,
-    OpenCommands,
-    Close,
-    DropItem,
-    SwapOffhand,
-    SpectatorHotbar,
-}
-
 pub const KEY_FORWARD: KeyCode = KeyCode::KeyW;
 pub const KEY_LEFT: KeyCode = KeyCode::KeyA;
 pub const KEY_BACK: KeyCode = KeyCode::KeyS;
 pub const KEY_RIGHT: KeyCode = KeyCode::KeyD;
-
-impl Action {
-    pub const fn default_key(self) -> Option<KeyCode> {
-        match self {
-            Self::Jump => Some(KeyCode::Space),
-            Self::Sneak => Some(KeyCode::ShiftLeft),
-            Self::Sprint => Some(KeyCode::ControlLeft),
-            Self::ToggleInventory => Some(KeyCode::KeyE),
-            Self::OpenMenu => Some(KeyCode::Escape),
-            Self::ViewPlayerList => Some(KeyCode::Tab),
-            Self::ChangePerspective => Some(KeyCode::F5),
-            Self::OpenChat => Some(KeyCode::KeyT),
-            Self::OpenCommands => Some(KeyCode::Slash),
-            Self::DropItem => Some(KeyCode::KeyQ),
-            Self::SwapOffhand => Some(KeyCode::KeyF),
-            Self::Destroy | Self::Use | Self::Close | Self::SpectatorHotbar => None,
-        }
-    }
-}
 
 /// Label of key mapping `key`: Pomme's binding for the actions it has, else
 /// vanilla's default (`Options` key mappings). A lang key and its en_us
@@ -186,6 +165,12 @@ pub struct InputState {
     /// `keyPressed` + `charTyped` callback pair. Drained once per frame by
     /// whichever screen owns the focused field.
     text_events: Vec<crate::ui::text_edit::TextInputEvent>,
+    binding_capture: bool,
+    binding_presses: Vec<InputKey>,
+    // Keep captured keys/buttons suppressed until release, even if capture
+    // ended on the preceding frame (notably F3's release-triggered shortcut).
+    binding_keys_down: HashSet<KeyCode>,
+    binding_gamepad_buttons_down: HashSet<(gilrs::GamepadId, Button)>,
     enter_pressed: bool,
     escape_pressed: bool,
     tab_pressed: bool,
@@ -268,6 +253,10 @@ impl InputState {
             just_pressed: HashSet::new(),
             click_counts: HashMap::new(),
             text_events: Vec::new(),
+            binding_capture: false,
+            binding_presses: Vec::new(),
+            binding_keys_down: HashSet::new(),
+            binding_gamepad_buttons_down: HashSet::new(),
             enter_pressed: false,
             escape_pressed: false,
             tab_pressed: false,
@@ -291,6 +280,10 @@ impl InputState {
         };
         for event in &events {
             self.on_gamepad_event(event);
+        }
+
+        if self.binding_capture {
+            return false;
         }
 
         let mut should_apply_cursor_grab = false;
@@ -439,6 +432,12 @@ impl InputState {
     }
 
     pub fn gamepad_button_down(&self, button: Button) -> bool {
+        if self
+            .active_gamepad_id
+            .is_some_and(|id| self.binding_gamepad_buttons_down.contains(&(id, button)))
+        {
+            return false;
+        }
         if let Some(gamepad) = self.get_active_gamepad() {
             return gamepad
                 .button_data(button)
@@ -451,6 +450,27 @@ impl InputState {
 
     pub fn on_gamepad_event(&mut self, event: &gilrs::Event) {
         self.active_gamepad_id = Some(event.id);
+
+        if let gilrs::EventType::ButtonReleased(button, _) = event.event {
+            self.binding_gamepad_buttons_down
+                .remove(&(event.id, button));
+        } else if self.binding_capture {
+            // DualSense triggers can emit an unmapped digital ButtonPressed(Unknown)
+            // before the mapped analog trigger crosses gilrs's press threshold and
+            // emits ButtonPressed(RightTrigger2). Capture accepts the first press,
+            // so ignore Unknown rather than letting the duplicate signal win.
+            // Unknown also cannot distinguish different unmapped physical buttons.
+            if let gilrs::EventType::ButtonPressed(button, _) = event.event
+                && button != Button::Unknown
+                && self.binding_gamepad_buttons_down.insert((event.id, button))
+            {
+                let input = InputKey::Controller(button);
+                if input.metadata().is_some() {
+                    self.binding_presses.push(input);
+                }
+            }
+            return;
+        }
 
         match event.event {
             gilrs::EventType::ButtonPressed(button, _) => match button {
@@ -685,6 +705,10 @@ impl InputState {
 
     pub fn on_key_event(&mut self, event: &winit::event::KeyEvent) {
         if let PhysicalKey::Code(code) = event.physical_key {
+            if self.captures_key_event(event) {
+                self.capture_keyboard_input(code, event.state, event.repeat);
+                return;
+            }
             match event.state {
                 ElementState::Pressed => {
                     self.pressed.insert(code);
@@ -734,12 +758,64 @@ impl InputState {
         }
     }
 
+    pub fn binding_capture_active(&self) -> bool {
+        self.binding_capture
+    }
+
+    /// Binding editing only: do not turn the press that opened the editor into
+    /// a binding, or replay pending menu input after capture ends.
+    pub fn set_binding_capture(&mut self, active: bool) {
+        if self.binding_capture == active {
+            return;
+        }
+        self.binding_capture = active;
+        self.binding_presses.clear();
+        if active {
+            self.clear_just_pressed_actions();
+            self.clear_click_counts();
+            self.just_pressed.clear();
+            self.text_events.clear();
+            self.enter_pressed = false;
+            self.escape_pressed = false;
+            self.tab_pressed = false;
+            self.f5_pressed = false;
+            self.up_pressed = false;
+            self.down_pressed = false;
+            self.page_up_pressed = false;
+            self.page_down_pressed = false;
+        }
+    }
+
+    pub fn captures_key_event(&self, event: &winit::event::KeyEvent) -> bool {
+        self.binding_capture
+            || matches!(event.physical_key, PhysicalKey::Code(code) if self.binding_keys_down.contains(&code))
+    }
+
+    fn capture_keyboard_input(&mut self, code: KeyCode, state: ElementState, repeat: bool) {
+        if state.is_pressed() {
+            let new_press = self.binding_keys_down.insert(code);
+            if self.binding_capture && new_press && !repeat {
+                let input = InputKey::Keyboard(code);
+                if input.metadata().is_some() {
+                    self.binding_presses.push(input);
+                }
+            }
+        } else {
+            self.binding_keys_down.remove(&code);
+            self.pressed.remove(&code);
+        }
+    }
+
+    pub fn take_binding_presses(&mut self) -> Vec<InputKey> {
+        std::mem::take(&mut self.binding_presses)
+    }
+
     pub fn set_modifiers(&mut self, modifiers: Modifiers) {
         self.modifiers = modifiers;
     }
 
     pub fn on_menu_key_event(&mut self, event: &winit::event::KeyEvent) {
-        if !event.state.is_pressed() {
+        if self.captures_key_event(event) || !event.state.is_pressed() {
             return;
         }
 
@@ -886,6 +962,13 @@ impl InputState {
     }
 
     pub fn on_mouse_button(&mut self, button: MouseButton, state: ElementState) {
+        if self.binding_capture && state.is_pressed() {
+            let input = InputKey::Mouse(button);
+            if input.metadata().is_some() {
+                self.binding_presses.push(input);
+            }
+            return;
+        }
         let was_pressed = match state {
             ElementState::Pressed => true,
             ElementState::Released => false,
@@ -1016,4 +1099,55 @@ fn build_rumble_effect(
         .finish(manager)
         .map_err(|e| tracing::warn!("Failed to create rumble effect: {e}"))
         .ok()
+}
+
+#[cfg(test)]
+mod binding_capture_tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_capture_suppresses_repeats_until_release() {
+        let mut input = InputState::released();
+        input.set_binding_capture(true);
+        input.capture_keyboard_input(KeyCode::F3, ElementState::Pressed, false);
+        input.capture_keyboard_input(KeyCode::F3, ElementState::Pressed, true);
+        let presses = input.take_binding_presses();
+        assert_eq!(presses.len(), 1);
+        assert!(matches!(presses[0], InputKey::Keyboard(KeyCode::F3)));
+        assert!(!input.key_pressed(KeyCode::F3));
+        assert!(!input.key_just_pressed(KeyCode::F3));
+
+        input.set_binding_capture(false);
+        assert!(input.binding_keys_down.contains(&KeyCode::F3));
+        input.capture_keyboard_input(KeyCode::F3, ElementState::Pressed, true);
+        assert!(input.take_binding_presses().is_empty());
+        input.capture_keyboard_input(KeyCode::F3, ElementState::Released, false);
+        assert!(!input.binding_keys_down.contains(&KeyCode::F3));
+    }
+
+    #[test]
+    fn mouse_capture_has_no_normal_clicks_and_cancellation_discards_presses() {
+        let mut input = InputState::released();
+        input.set_binding_capture(true);
+        for button in [
+            MouseButton::Left,
+            MouseButton::Middle,
+            MouseButton::Other(7),
+        ] {
+            input.on_mouse_button(button, ElementState::Pressed);
+        }
+        let presses = input.take_binding_presses();
+        assert_eq!(presses.len(), 3);
+        assert!(matches!(presses[2], InputKey::Mouse(MouseButton::Other(7))));
+        assert!(!input.left_just_pressed());
+        assert!(!input.left_held());
+        assert!(!input.middle_just_pressed());
+        assert!(input.recent_actions.is_empty());
+
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        input.set_binding_capture(false);
+        assert!(input.take_binding_presses().is_empty());
+        input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+        assert!(input.left_just_pressed());
+    }
 }

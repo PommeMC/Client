@@ -1,5 +1,8 @@
 use super::*;
+use crate::app::input::{InputKey, NOT_BOUND};
 use crate::resource_pack::PackCompat;
+use crate::ui::common::BTN_H;
+use crate::ui::text::TextSpan;
 
 /// A row in a vanilla-style options list: 25px pitch, a 310px `Big` widget, or
 /// two 150px widgets per `Pair` (`PairLeft` for an odd trailing widget).
@@ -356,7 +359,6 @@ impl MainMenu {
             "Invert Mouse:",
             "Auto-Jump:",
             "Operator Items Tab:",
-            "Key Binds...",
             "Mouse Settings...",
             "Sneak:",
             "Sprint:",
@@ -375,6 +377,242 @@ impl MainMenu {
             &[],
             text_width_fn,
         )
+    }
+
+    pub(super) fn build_options_keybinds(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+    ) -> MainMenuResult {
+        let capturing = input.binding_capture || self.action_binding.is_some();
+        if let Some(action) = self.action_binding
+            && let Some(&pressed) = input.binding_presses.first()
+        {
+            // KeyBindsScreen.keyPressed: Escape unbinds.
+            let inputs = if pressed == InputKey::Keyboard(winit::keyboard::KeyCode::Escape) {
+                Vec::new()
+            } else {
+                vec![pressed]
+            };
+            self.key_bindings.set(action, inputs);
+            self.end_binding_capture();
+            self.save_settings();
+        }
+        // The accepting press must not also activate a widget or navigate back;
+        // scrolling still works, as in vanilla.
+        let neutral_input = MenuInput {
+            cursor: input.cursor,
+            dt: input.dt,
+            scroll_delta: input.scroll_delta,
+            ..MenuInput::default()
+        };
+        let input = if capturing { &neutral_input } else { input };
+
+        if input.escape {
+            self.set_screen(Screen::OptionsControls);
+            return empty_result(1.0);
+        }
+
+        let gs = self.gui_scale(sw, sh);
+        let fs = common::FONT_SIZE * gs;
+        let btn_h = BTN_H * gs;
+        let mut any_hovered = false;
+        let mut any_clicked = false;
+        let mut elements = Vec::new();
+
+        self.focus_advance(input);
+        let ctx = &mut self.make_focus_ctx(input);
+
+        let mut entries: Vec<_> = self
+            .key_bindings
+            .iter()
+            .filter(|binding| binding.action.listed())
+            .map(|binding| {
+                let action = binding.action;
+                (
+                    action,
+                    binding.inputs.first().copied(),
+                    self.key_bindings.is_default(action),
+                )
+            })
+            .collect();
+        entries.sort_by(|(left, ..), (right, ..)| left.compare_ui(*right));
+        let categories: Vec<_> = entries
+            .chunk_by(|(left, ..), (right, ..)| left.category() == right.category())
+            .collect();
+
+        let chrome = push_screen_chrome(&mut elements, sw, sh, gs, "Key Binds");
+
+        // KeyBindsList: 20-high entries in a 340-wide row over the content
+        // area, the first 2 below its top, plus 4 of content padding.
+        let list_y = chrome.content_top;
+        let list_h = chrome.content_bottom - list_y;
+        let list_rect = [0.0, list_y, sw, list_h];
+        let rows = entries.len() + categories.len();
+        let total_h = rows as f32 * btn_h + 4.0 * gs;
+        let in_list = common::hit_test(input.cursor, list_rect);
+        if in_list {
+            self.scroll_offset -= input.scroll_delta * btn_h / 2.0;
+        }
+        self.scroll_offset = self.scroll_offset.clamp(0.0, (total_h - list_h).max(0.0));
+
+        let cx = sw / 2.0;
+        let label_x = cx - 168.0 * gs;
+        let scrollbar_x = cx + 178.0 * gs;
+        let reset_w = 50.0 * gs;
+        let reset_x = scrollbar_x - reset_w - 10.0 * gs;
+        let change_w = 75.0 * gs;
+        let change_x = reset_x - 5.0 * gs - change_w;
+        // Entries only take the mouse inside the list (getEntryAtPosition).
+        let row_cursor = if in_list { input.cursor } else { (-1.0, -1.0) };
+        let row_clicked = in_list && input.clicked;
+        let label_scroll = common::LabelScroll {
+            text_width_fn,
+            time_secs: self.created.elapsed().as_secs_f64(),
+        };
+        // Names sit level with the button labels; category names a pixel higher.
+        let text_dy = (btn_h - fs) / 2.0 + 1.0;
+
+        push_scrollbar(
+            &mut elements,
+            scrollbar_x,
+            list_y,
+            list_h,
+            total_h,
+            self.scroll_offset,
+            gs,
+            32.0 * gs,
+        );
+        elements.push(MenuElement::ScissorPush {
+            x: 0.0,
+            y: list_y,
+            w: sw,
+            h: list_h,
+        });
+        let mut y = list_y + 2.0 * gs - self.scroll_offset;
+        for category in categories {
+            elements.push(MenuElement::Text {
+                x: cx,
+                y: y + text_dy - gs,
+                text: category[0].0.category().display_name().into_owned(),
+                scale: fs,
+                color: WHITE,
+                centered: true,
+            });
+            y += btn_h;
+
+            for &(action, bound, is_default) in category {
+                elements.push(MenuElement::Text {
+                    x: label_x,
+                    y: y + text_dy,
+                    text: action.display_name().into_owned(),
+                    scale: fs,
+                    color: WHITE,
+                    centered: false,
+                });
+
+                // TODO: Display and edit more than the first input per action.
+                let name = bound.map_or_else(|| NOT_BOUND.resolve(), |input| input.display_name());
+                let mut name = TextSpan::new(name.into_owned(), WHITE);
+                let spans = if self.action_binding == Some(action) {
+                    name.underline = true;
+                    let yellow = common::rgb(0xffff55);
+                    vec![
+                        TextSpan::new("> ".into(), yellow),
+                        name,
+                        TextSpan::new(" <".into(), yellow),
+                    ]
+                } else {
+                    vec![name]
+                };
+                if push_button_label_f(
+                    &mut elements,
+                    ctx,
+                    &mut any_hovered,
+                    row_cursor,
+                    row_clicked,
+                    change_x,
+                    y,
+                    change_w,
+                    btn_h,
+                    gs,
+                    common::WidgetLabel::Spans(spans),
+                    true,
+                    Some(&label_scroll),
+                ) {
+                    self.action_binding = Some(action);
+                    any_clicked = true;
+                }
+
+                if push_button_f(
+                    &mut elements,
+                    ctx,
+                    &mut any_hovered,
+                    row_cursor,
+                    row_clicked,
+                    reset_x,
+                    y,
+                    reset_w,
+                    btn_h,
+                    gs,
+                    "Reset",
+                    !is_default,
+                ) {
+                    self.key_bindings.reset(action);
+                    self.save_settings();
+                    any_clicked = true;
+                }
+                y += btn_h;
+            }
+        }
+        elements.push(MenuElement::ScissorPop);
+
+        let footer_w = FOOTER_PAIR_W * gs;
+        let gap = FOOTER_PAIR_GAP * gs;
+        if push_footer_button(
+            &mut elements,
+            ctx,
+            &mut any_hovered,
+            input,
+            &chrome,
+            cx - footer_w - gap / 2.0,
+            footer_w,
+            gs,
+            "Reset Keys",
+            !self.key_bindings.all_default(),
+        ) {
+            self.key_bindings.reset_all();
+            self.save_settings();
+            any_clicked = true;
+        }
+
+        if push_footer_button(
+            &mut elements,
+            ctx,
+            &mut any_hovered,
+            input,
+            &chrome,
+            cx + gap / 2.0,
+            footer_w,
+            gs,
+            "Done",
+            true,
+        ) {
+            self.set_screen(Screen::OptionsControls);
+            let mut result = empty_result(1.0);
+            result.clicked_button = true;
+            return result;
+        }
+
+        MainMenuResult {
+            elements,
+            action: MenuAction::None,
+            cursor_pointer: any_hovered,
+            blur: 2.0,
+            clicked_button: any_clicked,
+        }
     }
 
     pub(super) fn build_options_chat(
@@ -822,46 +1060,10 @@ impl MainMenu {
         let (content_top, content_bottom, done_y);
 
         if header_footer {
-            let header_h = HEADER_FOOTER_H * gs;
-            let footer_h = HEADER_FOOTER_H * gs;
-            let sep_h = 2.0 * gs;
-            content_top = header_h + sep_h;
-            content_bottom = sh - footer_h - sep_h;
-            done_y = sh - footer_h + (footer_h - btn_h) / 2.0;
-
-            push_menu_backdrop(
-                &mut elements,
-                0.0,
-                content_top,
-                sw,
-                content_bottom - content_top,
-                gs,
-            );
-
-            elements.push(MenuElement::Text {
-                x: cx,
-                y: (header_h - fs) / 2.0,
-                text: title.into(),
-                scale: fs,
-                color: WHITE,
-                centered: true,
-            });
-            elements.push(MenuElement::Image {
-                x: 0.0,
-                y: header_h,
-                w: sw,
-                h: sep_h,
-                sprite: SpriteId::HeaderSeparator,
-                tint: WHITE,
-            });
-            elements.push(MenuElement::Image {
-                x: 0.0,
-                y: content_bottom,
-                w: sw,
-                h: sep_h,
-                sprite: SpriteId::FooterSeparator,
-                tint: WHITE,
-            });
+            let chrome = push_screen_chrome(&mut elements, sw, sh, gs, title);
+            content_top = chrome.content_top;
+            content_bottom = chrome.content_bottom;
+            done_y = chrome.done_y;
         } else {
             let title_y = 15.0 * gs;
             let done_pad = 8.0 * gs;
@@ -1621,8 +1823,8 @@ impl MainMenu {
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
         let done = if let Some((label, target)) = footer_nav {
-            // Vanilla `LanguageSelectScreen`: two default-width buttons, 8 apart.
-            let (w, gap) = (150.0 * gs, 8.0 * gs);
+            // Vanilla `LanguageSelectScreen`: two buttons in the footer.
+            let (w, gap) = (FOOTER_PAIR_W * gs, FOOTER_PAIR_GAP * gs);
             let x = cx - w - gap / 2.0;
             let mut push = |x, label| {
                 push_footer_button(
@@ -1635,6 +1837,7 @@ impl MainMenu {
                     w,
                     gs,
                     label,
+                    true,
                 )
             };
             if push(x, label) {
@@ -1823,6 +2026,120 @@ mod tests {
         );
         menu.gui_scale_setting = 1;
         menu
+    }
+
+    #[test]
+    fn binding_capture_replaces_all_inputs_without_activating_done() {
+        let mut menu = test_menu("pomme-keybind-capture-test");
+        menu.set_screen(Screen::OptionsKeybinds);
+        menu.action_binding = Some(Action::Jump);
+        menu.build_options_keybinds(
+            800.0,
+            600.0,
+            &MenuInput {
+                binding_capture: true,
+                binding_presses: vec![
+                    InputKey::Mouse(winit::event::MouseButton::Left),
+                    InputKey::Keyboard(winit::keyboard::KeyCode::KeyW),
+                ],
+                cursor: (400.0, 575.0),
+                clicked: true,
+                enter: true,
+                ..MenuInput::default()
+            },
+            &|_, _| 0.0,
+        );
+        assert!(matches!(menu.screen, Screen::OptionsKeybinds));
+        assert!(menu.action_binding.is_none());
+        let entry = menu
+            .key_bindings
+            .iter()
+            .find(|entry| entry.action == Action::Jump)
+            .unwrap();
+        assert!(matches!(
+            entry.inputs,
+            [InputKey::Mouse(winit::event::MouseButton::Left)]
+        ));
+    }
+
+    #[test]
+    fn escape_capture_unbinds_instead_of_navigating_back() {
+        let mut menu = test_menu("pomme-keybind-unbind-test");
+        menu.set_screen(Screen::OptionsKeybinds);
+        menu.action_binding = Some(Action::Jump);
+        menu.build_options_keybinds(
+            800.0,
+            600.0,
+            &MenuInput {
+                binding_capture: true,
+                binding_presses: vec![InputKey::Keyboard(winit::keyboard::KeyCode::Escape)],
+                escape: true,
+                ..MenuInput::default()
+            },
+            &|_, _| 0.0,
+        );
+        assert!(matches!(menu.screen, Screen::OptionsKeybinds));
+        assert!(menu.action_binding.is_none());
+        assert!(
+            menu.key_bindings
+                .iter()
+                .find(|entry| entry.action == Action::Jump)
+                .unwrap()
+                .inputs
+                .is_empty()
+        );
+        menu.build_options_keybinds(
+            800.0,
+            600.0,
+            &MenuInput {
+                escape: true,
+                ..MenuInput::default()
+            },
+            &|_, _| 0.0,
+        );
+        assert!(matches!(menu.screen, Screen::OptionsControls));
+    }
+
+    /// Clicks `cursor` on an 800-wide Key Binds screen at GUI scale 1.
+    fn click_keybinds(menu: &mut MainMenu, sh: f32, cursor: (f32, f32)) {
+        menu.build_options_keybinds(
+            800.0,
+            sh,
+            &MenuInput {
+                cursor,
+                clicked: true,
+                ..MenuInput::default()
+            },
+            &|_, _| 0.0,
+        );
+    }
+
+    #[test]
+    fn reset_buttons_restore_defaults() {
+        let mut menu = test_menu("pomme-keybind-reset-test");
+        menu.set_screen(Screen::OptionsKeybinds);
+        menu.key_bindings.set(Action::Jump, Vec::new());
+        menu.key_bindings.set(Action::DropItem, Vec::new());
+        // Jump is the first Movement entry: list top 33, + 2, + a category row.
+        click_keybinds(&mut menu, 600.0, (540.0, 65.0));
+        assert!(menu.key_bindings.is_default(Action::Jump));
+        assert!(!menu.key_bindings.all_default());
+        // Reset Keys, left of centre in the footer.
+        click_keybinds(&mut menu, 600.0, (300.0, 575.0));
+        assert!(menu.key_bindings.all_default());
+    }
+
+    #[test]
+    fn rows_scrolled_under_the_header_ignore_clicks() {
+        let mut menu = test_menu("pomme-keybind-hidden-row-test");
+        menu.set_screen(Screen::OptionsKeybinds);
+        menu.key_bindings.set(Action::Jump, Vec::new());
+        menu.scroll_offset = 40.0;
+        // Jump's Reset now sits at y 15..35, under the header.
+        click_keybinds(&mut menu, 200.0, (540.0, 20.0));
+        assert!(!menu.key_bindings.is_default(Action::Jump));
+        click_keybinds(&mut menu, 200.0, (540.0, 34.0));
+        assert!(menu.key_bindings.is_default(Action::Jump));
     }
 
     /// A grid of one `Pair` row at 800x600: the left widget spans x 245..395

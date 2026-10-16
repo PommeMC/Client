@@ -237,10 +237,44 @@ pub(super) fn push_button_f(
     label: &str,
     enabled: bool,
 ) -> bool {
+    push_button_label_f(
+        elements,
+        ctx,
+        any_hovered,
+        cursor,
+        clicked,
+        x,
+        y,
+        w,
+        h,
+        gs,
+        common::WidgetLabel::Text(label, common::WHITE),
+        enabled,
+        None,
+    )
+}
+
+/// [`push_button_f`] with any label, scrolled when `scroll` is given.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_button_label_f(
+    elements: &mut Vec<MenuElement>,
+    ctx: &mut FocusCtx,
+    any_hovered: &mut bool,
+    cursor: (f32, f32),
+    clicked: bool,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    gs: f32,
+    label: common::WidgetLabel<'_>,
+    enabled: bool,
+    scroll: Option<&common::LabelScroll<'_>>,
+) -> bool {
     let real_hovered = enabled && common::hit_test(cursor, [x, y, w, h]);
     let focused = ctx.focused(enabled, real_hovered);
     let draw_cursor = focus_cursor(focused, real_hovered, x, y, w, h, cursor);
-    common::push_button(
+    common::push_button_label(
         elements,
         draw_cursor,
         x,
@@ -251,6 +285,7 @@ pub(super) fn push_button_f(
         common::FONT_SIZE * gs,
         label,
         enabled,
+        scroll,
     );
     *any_hovered |= real_hovered;
     let keyboard = focused && ctx.activate;
@@ -789,8 +824,8 @@ pub(super) struct ChromeLayout {
     pub done_y: f32,
 }
 
-/// Draws the shared header/footer frame: a dimmed tiled background between two
-/// separators, with the title centered in the header.
+/// Draws the shared header/footer frame: a dimmed tiled background over the
+/// content area, a separator on each edge of it, and the centered title.
 pub(super) fn push_screen_chrome(
     elements: &mut Vec<MenuElement>,
     sw: f32,
@@ -803,8 +838,8 @@ pub(super) fn push_screen_chrome(
     let header_h = HEADER_FOOTER_H * gs;
     let footer_h = HEADER_FOOTER_H * gs;
     let sep_h = 2.0 * gs;
-    let content_top = header_h + sep_h;
-    let content_bottom = sh - footer_h - sep_h;
+    let content_top = header_h;
+    let content_bottom = sh - footer_h;
 
     push_menu_backdrop(
         elements,
@@ -824,7 +859,7 @@ pub(super) fn push_screen_chrome(
     });
     elements.push(MenuElement::Image {
         x: 0.0,
-        y: header_h,
+        y: content_top - sep_h,
         w: sw,
         h: sep_h,
         sprite: SpriteId::HeaderSeparator,
@@ -867,8 +902,14 @@ pub(super) fn push_done_button(
         w,
         gs,
         "Done",
+        true,
     )
 }
+
+/// Vanilla's default button width, and the spacing of a footer's
+/// `LinearLayout` when it holds two of them.
+pub(super) const FOOTER_PAIR_W: f32 = 150.0;
+pub(super) const FOOTER_PAIR_GAP: f32 = 8.0;
 
 /// A button on a header/footer screen's footer row.
 #[allow(clippy::too_many_arguments)]
@@ -882,6 +923,7 @@ pub(super) fn push_footer_button(
     w: f32,
     gs: f32,
     label: &str,
+    enabled: bool,
 ) -> bool {
     push_button_f(
         elements,
@@ -895,7 +937,7 @@ pub(super) fn push_footer_button(
         common::BTN_H * gs,
         gs,
         label,
-        true,
+        enabled,
     )
 }
 

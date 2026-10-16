@@ -6,10 +6,16 @@ use glam::{Mat4, Vec3};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::renderer::entity_model::{
+    HumanoidArmorSlot, ModelCube, cube_face_positions, cube_face_uvs, humanoid_armor_parts,
+};
+use crate::renderer::pipelines::entity_renderer::{
+    ARMOR_ALPHA_CUTOFF, ARMOR_SUBMIT_ORDER, EntityRenderer, WHITE_TINT,
+};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, PlayerPreview, shader, util};
 
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct Vertex {
     pub(crate) position: [f32; 3],
     pub(crate) uv: [f32; 2],
@@ -21,8 +27,50 @@ pub(crate) struct Uniform {
     mvp: [[f32; 4]; 4],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct PreviewPush {
+    tint: [f32; 4],
+    alpha_cutoff: f32,
+}
+
+pub(crate) const PREVIEW_ALPHA_CUTOFF: f32 = 0.5;
+
+pub(crate) fn preview_push_constant_range() -> vk::PushConstantRange {
+    vk::PushConstantRange {
+        stage_flags: vk::ShaderStageFlags::Fragment,
+        offset: 0,
+        size: std::mem::size_of::<PreviewPush>() as u32,
+    }
+}
+
+pub(crate) fn push_preview_style(
+    cmd: vk::CommandBuffer,
+    layout: vk::PipelineLayout,
+    tint: [f32; 4],
+    alpha_cutoff: f32,
+) {
+    let push = PreviewPush { tint, alpha_cutoff };
+    cmd.push_constants(
+        layout,
+        vk::ShaderStageFlags::Fragment,
+        0,
+        bytemuck::bytes_of(&push),
+    );
+}
+
+/// `(first, count)` vertex ranges drawn with the body, head and arm MVPs.
+type ArmorRanges = [(u32, u32); 3];
+
+struct PreviewArmorMesh {
+    buffer: vk::Buffer,
+    allocation: Allocation,
+    ranges: ArmorRanges,
+}
+
 pub struct SkinPreviewPipeline {
     pipeline: vk::Pipeline,
+    armor_pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
     mvp_layout: vk::DescriptorSetLayout,
     tex_layout: vk::DescriptorSetLayout,
@@ -46,6 +94,7 @@ pub struct SkinPreviewPipeline {
     arm_mvp_sets: Vec<vk::DescriptorSet>,
     arm_mvp_buffers: Vec<vk::Buffer>,
     arm_mvp_allocations: Vec<Allocation>,
+    armor_meshes: [PreviewArmorMesh; 4],
     swing_start: Option<std::time::Instant>,
 }
 
@@ -70,9 +119,12 @@ impl SkinPreviewPipeline {
         );
 
         let layouts = [mvp_layout, tex_layout];
+        let push_range = preview_push_constant_range();
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: layouts.len() as u32,
             set_layouts: layouts.as_ptr(),
+            push_constant_range_count: 1,
+            push_constant_ranges: &push_range,
             ..Default::default()
         };
         let pipeline_layout = device
@@ -80,6 +132,7 @@ impl SkinPreviewPipeline {
             .expect("failed to create skin preview pipeline layout");
 
         let pipeline = create_pipeline(device, render_pass, pipeline_layout);
+        let armor_pipeline = create_armor_pipeline(device, render_pass, pipeline_layout);
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -270,8 +323,25 @@ impl SkinPreviewPipeline {
             "skin_head",
         );
 
+        let armor_meshes = std::array::from_fn(|i| {
+            let (vertices, ranges) = build_armor_preview_mesh(HumanoidArmorSlot::ALL[i]);
+            let (buffer, allocation) = util::create_mapped_buffer(
+                device,
+                allocator,
+                bytemuck::cast_slice(&vertices),
+                vk::BufferUsageFlags::VertexBuffer,
+                "skin_preview_armor",
+            );
+            PreviewArmorMesh {
+                buffer,
+                allocation,
+                ranges,
+            }
+        });
+
         Self {
             pipeline,
+            armor_pipeline,
             pipeline_layout,
             mvp_layout,
             tex_layout,
@@ -289,6 +359,7 @@ impl SkinPreviewPipeline {
             arm_mvp_sets,
             arm_mvp_buffers,
             arm_mvp_allocations,
+            armor_meshes,
             swing_start: None,
             body_buffer,
             body_allocation,
@@ -354,9 +425,10 @@ impl SkinPreviewPipeline {
         &mut self,
         cmd: vk::CommandBuffer,
         frame: usize,
-        p: crate::renderer::PlayerPreview,
+        p: &PlayerPreview,
         sw: f32,
         sh: f32,
+        entity_renderer: &EntityRenderer,
     ) {
         let cx = p.rect[0] + p.rect[2] / 2.0;
         let cy = p.rect[1] + p.rect[3] / 2.0;
@@ -366,7 +438,7 @@ impl SkinPreviewPipeline {
         let head_yaw_rad = std::f32::consts::PI + (xa * 40.0).to_radians();
         let head_pitch_rad = (ya * 20.0).to_radians();
 
-        let units_to_px = 30.0 * p.gui_scale;
+        let units_to_px = p.model_scale * p.gui_scale;
         let half_w = sw / (2.0 * units_to_px);
         let half_h = sh / (2.0 * units_to_px);
         let mut proj = proj::directx::orthographic(-half_w, half_w, -half_h, half_h, 0.1, 100.0);
@@ -387,6 +459,46 @@ impl SkinPreviewPipeline {
             head_yaw_rad,
             head_pitch_rad,
         );
+        self.draw_armor(cmd, frame, p, entity_renderer);
+    }
+
+    fn draw_armor(
+        &self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        p: &PlayerPreview,
+        entity_renderer: &EntityRenderer,
+    ) {
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.armor_pipeline);
+        let mvp_sets = [
+            self.mvp_sets[frame],
+            self.head_mvp_sets[frame],
+            self.arm_mvp_sets[frame],
+        ];
+        for slot in ARMOR_SUBMIT_ORDER {
+            let Some(armor) = &p.armor[slot] else {
+                continue;
+            };
+            let mesh = &self.armor_meshes[slot];
+            for (texture_set, tint) in entity_renderer.armor_layers(armor, slot) {
+                push_preview_style(cmd, self.pipeline_layout, tint, ARMOR_ALPHA_CUTOFF);
+                cmd.bind_vertex_buffers(0, &[mesh.buffer], &[0]);
+                for (mvp_set, (first, count)) in mvp_sets.into_iter().zip(mesh.ranges) {
+                    if count == 0 {
+                        continue;
+                    }
+                    // Entity texture sets are layout-compatible with set 1 here.
+                    cmd.bind_descriptor_sets(
+                        vk::PipelineBindPoint::Graphics,
+                        self.pipeline_layout,
+                        0,
+                        &[mvp_set, texture_set],
+                        &[],
+                    );
+                    cmd.draw(count, 1, first, 0);
+                }
+            }
+        }
     }
 
     fn record(
@@ -431,6 +543,7 @@ impl SkinPreviewPipeline {
         write_uniform(&mut self.arm_mvp_allocations[frame], &arm_mvp);
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+        push_preview_style(cmd, self.pipeline_layout, WHITE_TINT, PREVIEW_ALPHA_CUTOFF);
 
         cmd.bind_descriptor_sets(
             vk::PipelineBindPoint::Graphics,
@@ -465,7 +578,9 @@ impl SkinPreviewPipeline {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.armor_pipeline, None);
         self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
+        self.armor_pipeline = create_armor_pipeline(device, render_pass, self.pipeline_layout);
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -496,6 +611,14 @@ impl SkinPreviewPipeline {
         device.destroy_buffer(self.body_buffer, None);
         device.destroy_buffer(self.head_buffer, None);
         device.destroy_buffer(self.arm_buffer, None);
+        for mesh in &mut self.armor_meshes {
+            device.destroy_buffer(mesh.buffer, None);
+            alloc
+                .free(std::mem::replace(&mut mesh.allocation, unsafe {
+                    std::mem::zeroed()
+                }))
+                .ok();
+        }
 
         alloc
             .free(std::mem::replace(&mut self.body_allocation, unsafe {
@@ -515,6 +638,7 @@ impl SkinPreviewPipeline {
         drop(alloc);
 
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.armor_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.mvp_layout, None);
@@ -534,6 +658,26 @@ pub(crate) fn write_uniform(alloc: &mut Allocation, mvp: &Mat4) {
     alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
 }
 
+#[derive(Clone, Copy)]
+struct PreviewPipelineState {
+    cull_mode: vk::CullModeFlags,
+    blend_enable: vk::Bool32,
+    depth_compare_op: vk::CompareOp,
+}
+
+const TEXTURED_PREVIEW_STATE: PreviewPipelineState = PreviewPipelineState {
+    cull_mode: vk::CullModeFlags::Front,
+    blend_enable: vk::TRUE,
+    depth_compare_op: vk::CompareOp::Less,
+};
+// Vanilla `ARMOR_CUTOUT_NO_CULL`; LEQUAL lets stacked layers (leather, then
+// leather_overlay) draw over each other.
+const ARMOR_PREVIEW_STATE: PreviewPipelineState = PreviewPipelineState {
+    cull_mode: vk::CullModeFlags::empty(),
+    blend_enable: vk::FALSE,
+    depth_compare_op: vk::CompareOp::LessOrEqual,
+};
+
 /// The textured-model preview pipeline, shared with the enchanting book
 /// preview. Vanilla's GL-CCW front faces come out clockwise in Vulkan's
 /// y-down framebuffer coords, so this culls the CCW set.
@@ -542,8 +686,25 @@ pub(crate) fn create_pipeline(
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
 ) -> vk::Pipeline {
+    create_pipeline_with_state(device, render_pass, layout, TEXTURED_PREVIEW_STATE)
+}
+
+fn create_armor_pipeline(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+) -> vk::Pipeline {
+    create_pipeline_with_state(device, render_pass, layout, ARMOR_PREVIEW_STATE)
+}
+
+fn create_pipeline_with_state(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+    state: PreviewPipelineState,
+) -> vk::Pipeline {
     let vert_spv = shader::include_spirv!("hand.vert.spv");
-    let frag_spv = shader::include_spirv!("hand.frag.spv");
+    let frag_spv = shader::include_spirv!("preview.frag.spv");
     let vert_mod = shader::create_shader_module(device, vert_spv);
     let frag_mod = shader::create_shader_module(device, frag_spv);
 
@@ -600,7 +761,7 @@ pub(crate) fn create_pipeline(
     };
     let rasterizer = vk::PipelineRasterizationStateCreateInfo {
         polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeFlags::Front,
+        cull_mode: state.cull_mode,
         front_face: vk::FrontFace::CounterClockwise,
         line_width: 1.0,
         ..Default::default()
@@ -612,11 +773,11 @@ pub(crate) fn create_pipeline(
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
         depth_write_enable: vk::TRUE,
-        depth_compare_op: vk::CompareOp::Less,
+        depth_compare_op: state.depth_compare_op,
         ..Default::default()
     };
     let blend_attachment = vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::TRUE,
+        blend_enable: state.blend_enable,
         src_color_blend_factor: vk::BlendFactor::SrcAlpha,
         dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
         color_blend_op: vk::BlendOp::Add,
@@ -693,6 +854,58 @@ fn quad(verts: &mut Vec<Vertex>, pos: [[f32; 3]; 4], uvs: [[f32; 2]; 4]) {
             uv: uvs[i as usize],
         });
     }
+}
+
+fn add_model_cube(verts: &mut Vec<Vertex>, part_offset: Vec3, cube: &ModelCube) {
+    let mut translated = *cube;
+    translated.origin += part_offset;
+    let positions = cube_face_positions(&translated, true);
+    let face_uvs = cube_face_uvs(&translated);
+
+    for (positions, uv) in positions.iter().zip(face_uvs) {
+        let reflect = |p: [f32; 3]| [p[0], p[1], -p[2]];
+        let mut corners = [
+            (reflect(positions[0]), [uv[2] / 64.0, uv[1] / 32.0]),
+            (reflect(positions[1]), [uv[0] / 64.0, uv[1] / 32.0]),
+            (reflect(positions[2]), [uv[0] / 64.0, uv[3] / 32.0]),
+            (reflect(positions[3]), [uv[2] / 64.0, uv[3] / 32.0]),
+        ];
+        // `cube_face_positions` + this corner order already reproduce vanilla
+        // mirror semantics. Z reflection reverses winding once more; cancel it
+        // here so the preview pipeline's front-face culling matches the skin.
+        if !cube.mirror {
+            corners.reverse();
+        }
+        for &i in &[0usize, 1, 2, 0, 2, 3] {
+            verts.push(Vertex {
+                position: corners[i].0,
+                uv: corners[i].1,
+            });
+        }
+    }
+}
+
+/// Splits the slot's armor cubes by the preview transform they ride: body
+/// (also left arm and legs), head, right arm.
+fn build_armor_preview_mesh(slot: HumanoidArmorSlot) -> (Vec<Vertex>, ArmorRanges) {
+    let mut groups: [Vec<Vertex>; 3] = Default::default();
+    for part in humanoid_armor_parts(slot) {
+        let group = match part.name.as_str() {
+            "head" => 1,
+            "right_arm" => 2,
+            _ => 0,
+        };
+        for cube in &part.cubes {
+            add_model_cube(&mut groups[group], part.offset, cube);
+        }
+    }
+    let mut ranges = ArmorRanges::default();
+    let mut vertices = Vec::new();
+    for (range, group) in ranges.iter_mut().zip(groups) {
+        *range = (vertices.len() as u32, group.len() as u32);
+        vertices.extend(group);
+    }
+    (vertices, ranges)
 }
 
 // addBox(ox, oy, oz, w, h, d) at pivot (px, py, pz) with UV origin (tx, ty)
@@ -921,4 +1134,81 @@ fn build_right_arm_mesh(slim: bool) -> Vec<Vertex> {
         4,
     );
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_cube_bridge_matches_existing_reflected_preview_box() {
+        let cube = ModelCube {
+            origin: Vec3::new(-4.0, 0.0, -2.0),
+            size: Vec3::new(8.0, 12.0, 4.0),
+            tex_offset: (16, 16),
+            deformation: 0.0,
+            mirror: false,
+        };
+        let mut actual = Vec::new();
+        add_model_cube(&mut actual, Vec3::ZERO, &cube);
+
+        let mut expected = Vec::new();
+        add_box(
+            &mut expected,
+            0.0,
+            0.0,
+            0.0,
+            -4.0,
+            0.0,
+            -2.0,
+            8.0,
+            12.0,
+            4.0,
+            16,
+            16,
+            8,
+            12,
+            4,
+        );
+        // `add_box` targets a 64x64 skin while equipment textures are 64x32.
+        for vertex in &mut expected {
+            vertex.uv[1] *= 2.0;
+        }
+
+        assert_eq!(actual.len(), expected.len());
+        for vertex in &actual {
+            assert_eq!(
+                actual
+                    .iter()
+                    .filter(|candidate| *candidate == vertex)
+                    .count(),
+                expected
+                    .iter()
+                    .filter(|candidate| *candidate == vertex)
+                    .count(),
+                "preview bridge changed vertex/UV mapping for {vertex:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn armor_preview_pipeline_matches_cutout_no_cull_state() {
+        assert_eq!(ARMOR_PREVIEW_STATE.cull_mode, vk::CullModeFlags::empty());
+        assert_eq!(ARMOR_PREVIEW_STATE.blend_enable, vk::FALSE);
+        assert_eq!(
+            ARMOR_PREVIEW_STATE.depth_compare_op,
+            vk::CompareOp::LessOrEqual
+        );
+        assert_eq!(TEXTURED_PREVIEW_STATE.cull_mode, vk::CullModeFlags::Front);
+        assert_eq!(TEXTURED_PREVIEW_STATE.blend_enable, vk::TRUE);
+    }
+
+    #[test]
+    fn armor_preview_meshes_split_slot_parts_by_preview_transform() {
+        let drawn = |slot| build_armor_preview_mesh(slot).1.map(|(_, count)| count > 0);
+        assert_eq!(drawn(HumanoidArmorSlot::Head), [false, true, false]);
+        assert_eq!(drawn(HumanoidArmorSlot::Chest), [true, false, true]);
+        assert_eq!(drawn(HumanoidArmorSlot::Legs), [true, false, false]);
+        assert_eq!(drawn(HumanoidArmorSlot::Feet), [true, false, false]);
+    }
 }

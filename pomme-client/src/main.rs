@@ -26,6 +26,7 @@ mod resource_pack;
 mod singleplayer;
 #[cfg(test)]
 mod test_util;
+mod tool;
 mod ui;
 mod user;
 mod util;

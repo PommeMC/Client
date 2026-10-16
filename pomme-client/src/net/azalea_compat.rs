@@ -205,6 +205,17 @@ fn packet_ids_match_azalea() {
         table_id(Phase::Game, Direction::Clientbound, "boss_event")
     );
 
+    let team = ClientboundGamePacket::SetPlayerTeam(
+        azalea_protocol::packets::game::c_set_player_team::ClientboundSetPlayerTeam {
+            name: String::new(),
+            method: azalea_protocol::packets::game::c_set_player_team::Method::Remove,
+        },
+    );
+    assert_eq!(
+        team.id(),
+        table_id(Phase::Game, Direction::Clientbound, "set_player_team")
+    );
+
     let advancements = ClientboundGamePacket::UpdateAdvancements(
         azalea_protocol::packets::game::c_update_advancements::ClientboundUpdateAdvancements {
             reset: false,
@@ -595,12 +606,9 @@ fn translate_game_login_26_1() {
 /// 26.1's team `Parameters` order is `displayName, options, visibility,
 /// collision, color, prefix, suffix` with color as a `ChatFormatting`
 /// ordinal; 26.2 reordered to `displayName, prefix, suffix, visibility,
-/// collision, color, options` (`ClientboundSetPlayerTeamPacket.Parameters`
-/// in both references). Vanilla 26.2 also changed color to
-/// `Optional<TeamColor>`, but azalea (ffedf17) still decodes a plain
-/// `ChatFormatting` ordinal, so these frames target azalea's layout — the
-/// ordinal is copied through unchanged. Teams on native 26.2 servers
-/// misdecode until azalea catches up.
+/// collision, color, options` and changed color to `Optional<TeamColor>`.
+/// Pomme owns the native team decoder, so translation targets the real 26.2
+/// layout rather than Azalea's stale packet type.
 #[test]
 fn translate_set_player_team_26_1() {
     let team_id = table_id(Phase::Game, Direction::Clientbound, "set_player_team");
@@ -634,14 +642,14 @@ fn translate_set_player_team_26_1() {
     expected.extend_from_slice(suffix);
     expected.push(0); // visibility
     expected.push(1); // collision
-    expected.push(5);
+    expected.push(1); // team color present
+    expected.push(5); // TeamColor DARK_PURPLE
     expected.push(3); // options
     assert_eq!(&translated[..], &expected[..]);
 }
 
-/// RESET (ChatFormatting ordinal 21) passes through as-is — azalea's enum
-/// has all 22 formatting variants; the method-0 player list is copied
-/// verbatim.
+/// RESET (ChatFormatting ordinal 21) has no 26.2 `TeamColor`, so translation
+/// emits an absent optional; the method-0 player list is copied verbatim.
 #[test]
 fn translate_set_player_team_26_1_reset_color() {
     let team_id = table_id(Phase::Game, Direction::Clientbound, "set_player_team");
@@ -673,7 +681,7 @@ fn translate_set_player_team_26_1_reset_color() {
     expected.extend_from_slice(component);
     expected.push(0); // visibility
     expected.push(0); // collision
-    expected.push(21);
+    expected.push(0); // no TeamColor
     expected.push(0); // options
     expected.extend_from_slice(&[1, 3, b'b', b'o', b'b']);
     assert_eq!(&translated[..], &expected[..]);
@@ -1569,20 +1577,25 @@ fn translate_set_player_team_769() {
     old.extend_from_slice(&nbt_str("p")); // prefix
     old.extend_from_slice(&nbt_str("s")); // suffix
 
-    let ClientboundGamePacket::SetPlayerTeam(p) = translate_and_decode(769, old) else {
-        panic!("wrong packet");
-    };
-    use azalea_protocol::packets::game::c_set_player_team::{
-        CollisionRule, Method, NameTagVisibility,
-    };
-    let Method::Change(params) = p.method else {
-        panic!("wrong method");
-    };
-    assert!(matches!(
-        params.nametag_visibility,
-        NameTagVisibility::HideForOtherTeams
-    ));
-    assert!(matches!(params.collision_rule, CollisionRule::PushOwnTeam));
+    let translated = translation_for(769)
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    let mut expected = Vec::new();
+    wire::write_varint(
+        &mut expected,
+        table_id(Phase::Game, Direction::Clientbound, "set_player_team"),
+    );
+    expected.extend_from_slice(&utf("crew"));
+    expected.push(2);
+    expected.extend_from_slice(&nbt_str("c"));
+    expected.extend_from_slice(&nbt_str("p"));
+    expected.extend_from_slice(&nbt_str("s"));
+    expected.push(2); // visibility: hideForOtherTeams
+    expected.push(3); // collision: pushOwnTeam
+    expected.push(1); // TeamColor present
+    expected.push(5); // DARK_PURPLE
+    expected.push(3); // options
+    assert_eq!(&translated[..], &expected[..]);
 }
 
 /// The pre-1.21.5 NBT heightmap compound becomes the packed list, on top
@@ -2296,6 +2309,96 @@ fn translate_entity_data_765() {
     ));
 }
 
+/// Translates a `set_entity_data` frame for entity 9 carrying `values` (the
+/// entry list without its terminator) and returns the decoded entries.
+fn entity_data_entries(protocol: i32, values: &[u8]) -> Vec<azalea_entity::EntityDataItem> {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(protocol, Direction::Clientbound, "set_entity_data"),
+    );
+    wire::write_varint(&mut old, 9); // entity id
+    old.extend_from_slice(values);
+    old.push(0xFF);
+    let ClientboundGamePacket::SetEntityData(p) = translate_decode_and_remap(protocol, old) else {
+        panic!("wrong packet");
+    };
+    p.packed_items.0
+}
+
+fn entity_data_stack(entry: &azalea_entity::EntityDataItem) -> &azalea_inventory::ItemStack {
+    let azalea_entity::EntityDataValue::ItemStack(stack) = &entry.value else {
+        panic!("wrong value");
+    };
+    stack
+}
+
+fn entity_data_item(entry: &azalea_entity::EntityDataItem) -> azalea_registry::builtin::ItemKind {
+    let azalea_inventory::ItemStack::Present(data) = entity_data_stack(entry) else {
+        panic!("empty stack");
+    };
+    data.kind
+}
+
+/// `translate_entity_data` already remaps item stacks, so `remap_inbound` must
+/// not remap them again: 26.3 `oak_log` (163) lands as native `oak_log` (161).
+#[test]
+fn entity_data_item_remaps_once_777() {
+    // index 8, item_stack serializer, count 1, 26.3 oak_log (varint 163),
+    // empty patch
+    let entries = entity_data_entries(777, &[8, 7, 1, 0xA3, 1, 0, 0]);
+    assert_eq!(
+        entity_data_item(&entries[0]),
+        azalea_registry::builtin::ItemKind::OakLog
+    );
+}
+
+/// A component the stack walker can't size (`damage`, id 3 in both 26.3 and
+/// 26.2) takes the verbatim-tail fallback, which must still remap the item.
+#[test]
+fn entity_data_item_with_components_remaps_once_777() {
+    // oak_log with one added component (damage 5), none removed
+    let entries = entity_data_entries(777, &[8, 7, 1, 0xA3, 1, 1, 0, 3, 5]);
+    assert_eq!(
+        entity_data_item(&entries[0]),
+        azalea_registry::builtin::ItemKind::OakLog
+    );
+}
+
+/// An item 26.2 lacks (26.3 `poplar_log`, 172) empties the stack; a walkable
+/// one keeps the entries after it.
+#[test]
+fn entity_data_unmapped_item_empties_777() {
+    // poplar_log (varint 172), empty patch; then index 9, int serializer, 7
+    let entries = entity_data_entries(777, &[8, 7, 1, 0xAC, 1, 0, 0, 9, 1, 7]);
+    assert!(matches!(
+        entity_data_stack(&entries[0]),
+        azalea_inventory::ItemStack::Empty
+    ));
+    assert_eq!(entries.len(), 2);
+}
+
+/// On the verbatim-tail fallback an unmapped item can't be skipped, so the
+/// stack empties and the list ends there.
+#[test]
+fn entity_data_unmapped_item_with_components_ends_list_777() {
+    let entries = entity_data_entries(777, &[8, 7, 1, 0xAC, 1, 1, 0, 3, 5, 9, 1, 7]);
+    assert!(matches!(
+        entity_data_stack(&entries[0]),
+        azalea_inventory::ItemStack::Empty
+    ));
+    assert_eq!(entries.len(), 1);
+}
+
+/// `translate_item_765` leaves the wire item id for the typed pass, so
+/// `remap_inbound` must still remap `set_entity_data` stacks on 765 wires.
+#[test]
+fn entity_data_item_remaps_765() {
+    // index 8, item_stack serializer, present, 765 item id, count 1, empty NBT
+    let entries = entity_data_entries(765, &[8, 7, 1, SHIFTED_ITEM, 1, 0x0A, 0x00]);
+    assert_eq!(entity_data_item(&entries[0]), SHIFTED_ITEM_KIND);
+}
+
 /// `container_set_slot`'s -1/-2 sentinels split like 767's, but with the
 /// old-form item body.
 #[test]
@@ -2712,17 +2815,41 @@ fn translate_set_player_team_764() {
     wire::write_varint(&mut old, 1); // one player
     old.extend_from_slice(&[3, b'b', b'o', b'b']);
 
-    let ClientboundGamePacket::SetPlayerTeam(p) = translate_and_decode(764, old) else {
-        panic!("wrong packet");
-    };
-    let azalea_protocol::packets::game::c_set_player_team::Method::Add((parameters, players)) =
-        p.method
-    else {
-        panic!("wrong method");
-    };
-    assert_eq!(parameters.display_name.to_string(), "Reds");
-    assert_eq!(parameters.player_prefix.to_string(), "[R] ");
-    assert_eq!(players, vec!["bob".to_string()]);
+    let translated = translation_for(764)
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    assert!(crate::net::handler::handle_raw_game_packet(
+        &translated,
+        &tx
+    ));
+    match rx.recv().unwrap() {
+        crate::net::NetworkEvent::ScoreboardTeam {
+            display_name,
+            prefix,
+            fill_color,
+            members,
+            ..
+        } => {
+            assert_eq!(
+                display_name
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect::<String>(),
+                "Reds"
+            );
+            assert_eq!(
+                prefix
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect::<String>(),
+                "[R] "
+            );
+            assert_eq!(fill_color, Some(0xFF5555));
+            assert_eq!(members, Some(vec!["bob".to_string()]));
+        }
+        _ => panic!("wrong packet"),
+    }
 }
 
 /// The full `player_chat` walk: nullable unsigned content transcodes and

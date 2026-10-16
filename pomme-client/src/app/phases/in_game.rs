@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use azalea_core::position::{BlockPos, ChunkPos};
+use azalea_inventory::components::EquipmentSlot;
 use azalea_protocol::packets::game::{
     ServerboundClientInformation, ServerboundCommandSuggestion, ServerboundGamePacket,
 };
@@ -31,7 +32,7 @@ use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::entity_model::triangle_wave;
 use crate::renderer::pipelines::block_entity;
 use crate::renderer::pipelines::entity_renderer::{
-    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, dye_color_tint, jeb_sheep_tint,
+    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, armor_render_infos, dye_color_tint, jeb_sheep_tint,
     standing_eye_height, wool_color_tint,
 };
 use crate::renderer::pipelines::menu_overlay::MenuElement;
@@ -490,7 +491,10 @@ impl GameState {
     pub fn riding_jumpable_vehicle(&self) -> bool {
         self.controlled_vehicle_id
             .and_then(|id| self.entity_store.living.get(&id))
-            .is_some_and(|e| crate::entity::is_equine(&e.entity_type) && e.saddled)
+            .is_some_and(|e| {
+                crate::entity::is_equine(&e.entity_type)
+                    && e.equipment(EquipmentSlot::Saddle).is_some()
+            })
     }
 
     /// The ridden vehicle when it is living; the living-store lookup is
@@ -2424,6 +2428,7 @@ pub fn update_game(
             screen_w: gfx.renderer.screen_width(),
             screen_h: gfx.renderer.screen_height(),
             timings: Some(hud::FrameTimings {
+                pace_ms: gfx.renderer.last_timings().pace_ms,
                 frame_ms: gfx.renderer.last_timings().frame_ms,
                 fence_ms: gfx.renderer.last_timings().fence_ms,
                 acquire_ms: gfx.renderer.last_timings().acquire_ms,
@@ -2586,8 +2591,7 @@ pub fn update_game(
         // full charge, and the weapon is slow enough to matter (delay > 5).
         // TODO: vanilla also skips it when the active item's ATTACK_RANGE
         // component says the hit is out of range (spears).
-        let held = game.player.inventory.held_stack(core.input.selected_slot());
-        let delay = crate::player::interaction::attack_strength_delay(held);
+        let delay = crate::player::interaction::attack_strength_delay(&game.player.attributes);
         let scale = game.interaction.attack_strength_scale(delay);
         let show_full = scale >= 1.0
             && delay > 5.0
@@ -2923,8 +2927,10 @@ pub fn update_game(
         core.menu.server_render_distance = game.server_render_distance;
         let mut menu_input = core.build_menu_input(dt);
         // Chat consumed the enter/tab latches earlier this frame; hand them on.
-        menu_input.enter = enter;
-        menu_input.tab = tab;
+        if !menu_input.binding_capture {
+            menu_input.enter = enter;
+            menu_input.tab = tab;
+        }
         let r = &gfx.renderer;
         let result = core
             .menu
@@ -3269,6 +3275,14 @@ pub fn update_game(
             core.input.right_held(),
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
+        player_preview = crate::ui::creative_inventory::player_preview(
+            &game.creative_state,
+            sw,
+            sh,
+            cursor,
+            &game.player.inventory,
+            gs,
+        );
         use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
         let mut set_creative_slot = |slot_num: u16, item: azalea_inventory::ItemStack| {
             if crate::player::is_creative(game.player.game_mode) {
@@ -3464,6 +3478,7 @@ pub fn update_game(
                     walk_anim_speed: e.walk_speed(partial_tick),
                     entity_kind: e.entity_type,
                     player_uuid: e.player_uuid,
+                    armor: e.armor.clone(),
                     variant_index: extras.variant_index,
                     overlay_tints: extras.overlay_tints,
                     overlay_variants: extras.overlay_variants,
@@ -3477,9 +3492,7 @@ pub fn update_game(
                     flap_speed: extras.flap_speed,
                     is_creepy: e.is_creepy,
                     is_converting: e.is_converting,
-                    // TODO: derive from the main-hand item (vanilla
-                    // `isHoldingItem`) once mob equipment tracking lands.
-                    is_holding_item: e.witch_drinking,
+                    is_holding_item: e.equipment(EquipmentSlot::Mainhand).is_some(),
                     nose_wobble_speed: extras.nose_wobble_speed,
                     is_sitting: e.is_sitting,
                     is_sprinting: e.is_sprinting,
@@ -3546,6 +3559,7 @@ pub fn update_game(
                 .min(1.0),
             entity_kind: EntityKind::Player,
             player_uuid: Some(core.user.uuid),
+            armor: armor_render_infos(game.player.inventory.armor_slots()),
             has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),
             death_time: render_death_time(game.player.death_time, partial_tick),
             skip_cull: true,
@@ -3662,7 +3676,7 @@ pub fn update_game(
                 (name != "air").then(|| {
                     let light =
                         get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
-                    (name, light)
+                    (name, light, data.clone())
                 })
             }
             _ => None,
@@ -3692,6 +3706,7 @@ pub fn update_game(
         swing_progress,
         use_anim,
         held_item,
+        game.scoreboard.member_team_color(&core.user.username),
         !game.player.is_sleeping(),
         destroy_info,
         game.show_chunk_borders,
@@ -4039,10 +4054,12 @@ fn dropped_item_geometry(renderer: &Renderer, item_name: &str) -> (glam::Mat4, f
 #[allow(clippy::too_many_arguments)]
 fn emit_item_copies(
     infos: &mut Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo>,
+    registry: &crate::world::block::registry::BlockRegistry,
     item_name: &str,
     item_id: u32,
     damage: i32,
     count: i32,
+    item_stack: Option<&azalea_inventory::ItemStackData>,
     anchor_rel_pos: glam::Vec3,
     age_f: f32,
     bob_offset: f32,
@@ -4063,9 +4080,15 @@ fn emit_item_copies(
 
     let base = glam::Mat4::from_translation(anchor_rel_pos + glam::Vec3::new(0.0, hover_y, 0.0))
         * glam::Mat4::from_rotation_y(spin);
+    // Dropped item entities are not LivingEntity owners in vanilla, so a
+    // `team` tint source falls back to the JSON default here.
+    let tints: std::sync::Arc<[u32]> = registry
+        .item_tint_palette(item_name, item_stack, None)
+        .into();
     let mut push = |copy_offset: glam::Mat4| {
         infos.push(ItemRenderInfo {
             item_name: item_name.to_string(),
+            tints: tints.clone(),
             model_matrix: base * copy_offset * ground_transform,
             light,
             nether_lighting,
@@ -4114,10 +4137,12 @@ fn build_item_render_infos(
         let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &item.item_name);
         emit_item_copies(
             &mut infos,
+            renderer.registry(),
             &item.item_name,
             item.item_id,
             item.damage,
             item.count,
+            item.stack.as_ref(),
             (*lerped - anchor).as_vec3(),
             age_f,
             item.bob_offset,
@@ -4137,10 +4162,12 @@ fn build_item_render_infos(
         let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &pickup.item_name);
         emit_item_copies(
             &mut infos,
+            renderer.registry(),
             &pickup.item_name,
             pickup.item_id,
             pickup.damage,
             pickup.count,
+            pickup.stack.as_ref(),
             (*pickup.position - anchor).as_vec3(),
             age_f,
             pickup.bob_offset,

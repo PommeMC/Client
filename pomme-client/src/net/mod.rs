@@ -21,6 +21,7 @@ use azalea_block::BlockState;
 use azalea_core::heightmap_kind::HeightmapKind;
 use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_inventory::ItemStack;
+use azalea_inventory::components::EquipmentSlot;
 use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::DVec3;
 use simdnbt::owned::NbtCompound;
@@ -133,9 +134,9 @@ pub enum NetworkEvent {
         vehicle: i32,
         passengers: Vec<i32>,
     },
-    EntitySaddle {
+    EntityEquipment {
         entity_id: i32,
-        saddled: bool,
+        slots: Vec<(EquipmentSlot, ItemStack)>,
     },
     Waypoint {
         operation: azalea_protocol::packets::game::c_waypoint::WaypointOperation,
@@ -252,7 +253,7 @@ pub enum NetworkEvent {
         prefix: Vec<crate::ui::text::TextSpan>,
         suffix: Vec<crate::ui::text::TextSpan>,
         color: [f32; 4],
-        fill_color: Option<[f32; 4]>,
+        fill_color: Option<u32>,
         collision_rule: crate::ui::hud::CollisionRule,
         members: Option<Vec<String>>,
     },
@@ -425,6 +426,7 @@ pub enum NetworkEvent {
         item_id: u32,
         damage: i32,
         count: i32,
+        stack: azalea_inventory::ItemStackData,
     },
     EntityHeadRotation {
         id: i32,

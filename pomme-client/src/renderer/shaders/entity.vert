@@ -23,6 +23,7 @@ layout(location = 1) out vec4 v_tint;
 layout(location = 2) out float v_fog;
 layout(location = 3) out vec3 v_fog_color;
 layout(location = 4) out vec4 v_overlay;
+layout(location = 5) out float v_alpha_cutoff;
 
 void main() {
     mat4 model = mat4(i_model_0, i_model_1, i_model_2, i_model_3);
@@ -32,6 +33,7 @@ void main() {
     v_tex_coords = tex_coords + i_uv.xy;
     v_tint = i_tint;
     v_overlay = i_overlay;
+    v_alpha_cutoff = i_uv.z;
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;
 }
