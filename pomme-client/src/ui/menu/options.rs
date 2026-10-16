@@ -351,12 +351,7 @@ impl MainMenu {
             ("Mouse Settings...", Screen::OptionsMouse),
             ("Key Binds...", Screen::OptionsKeybinds),
         ];
-        let disabled = &[
-            "Sneak:",
-            "Sprint:",
-            "Auto-Jump:",
-            "Operator Items Tab:",
-        ];
+        let disabled = &["Sneak:", "Sprint:", "Auto-Jump:", "Operator Items Tab:"];
         self.build_options_grid(
             sw,
             sh,
