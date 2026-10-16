@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use winit::keyboard::KeyCode;
 
 use crate::app::core::DisplayMode;
+use crate::app::input::{Action, KeyBindings};
 use crate::audio::SoundCategory;
 use crate::renderer::CloudMode;
 use crate::renderer::pipelines::menu_overlay::{
@@ -29,6 +30,8 @@ use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
 #[derive(Serialize, Deserialize)]
 struct Settings {
+    #[serde(default)]
+    key_bindings: KeyBindings,
     gui_scale: u32,
     render_distance: u32,
     #[serde(default = "default_chunk_detail")]
@@ -182,6 +185,7 @@ fn default_volume() -> f32 {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            key_bindings: KeyBindings::default(),
             gui_scale: 0,
             render_distance: 12,
             chunk_detail: 8,
@@ -336,6 +340,10 @@ pub struct MainMenuResult {
 
 #[derive(Default)]
 pub struct MenuInput {
+    /// Dedicated Key Binds capture; ordinary menu input is neutral in this
+    /// mode.
+    pub binding_capture: bool,
+    pub binding_presses: Vec<crate::app::input::InputKey>,
     pub cursor: (f32, f32),
     pub clicked: bool,
     pub mouse_held: bool,
@@ -378,6 +386,8 @@ impl MenuInput {
     /// click or key state.
     pub fn backdrop() -> Self {
         Self {
+            binding_capture: false,
+            binding_presses: Vec::new(),
             cursor: (-1.0, -1.0),
             clicked: false,
             mouse_held: false,
@@ -545,6 +555,8 @@ fn atlas_dirty(count: usize, last: &mut usize, since: &mut Option<Instant>) -> b
 }
 
 pub struct MainMenu {
+    pub key_bindings: KeyBindings,
+    action_binding: Option<Action>,
     username: String,
     version: String,
     screen: Screen,
@@ -702,6 +714,8 @@ impl MainMenu {
         let ping_results: PingResults = Default::default();
         let settings = load_settings(game_dir);
         Self {
+            key_bindings: settings.key_bindings,
+            action_binding: None,
             username,
             version,
             screen: Screen::Main,
@@ -821,9 +835,25 @@ impl MainMenu {
         self.set_screen(Screen::OptionsChatSettings);
     }
 
+    pub fn binding_capture_active(&self) -> bool {
+        matches!(self.screen, Screen::OptionsKeybinds) && self.action_binding.is_some()
+    }
+
+    pub fn end_binding_capture(&mut self) {
+        self.action_binding = None;
+    }
+
     fn set_screen(&mut self, screen: Screen) {
         self.flush_settings();
+        // Vanilla opens Key Binds with a fresh list and returns to Controls's
+        // own; neither should inherit the other's offset.
+        if matches!(screen, Screen::OptionsKeybinds)
+            || matches!(self.screen, Screen::OptionsKeybinds)
+        {
+            self.scroll_offset = 0.0;
+        }
         self.screen = screen;
+        self.end_binding_capture();
         self.focused_field = None;
         self.focus = None;
         self.screen_gen += 1;
@@ -894,6 +924,7 @@ impl MainMenu {
         self.settings_dirty = save_settings(
             &self.settings_dir,
             &Settings {
+                key_bindings: self.key_bindings.clone(),
                 gui_scale: self.gui_scale_setting,
                 render_distance: self.render_distance,
                 chunk_detail: self.chunk_detail,
@@ -1211,14 +1242,9 @@ impl MainMenu {
             Screen::OptionsMouse => {
                 self.build_options_mouse(screen_w, screen_h, input, &text_width_fn)
             }
-            Screen::OptionsKeybinds => self.build_options_stub(
-                screen_w,
-                screen_h,
-                input,
-                "Keybinds",
-                Screen::OptionsControls,
-                None,
-            ),
+            Screen::OptionsKeybinds => {
+                self.build_options_keybinds(screen_w, screen_h, input, &text_width_fn)
+            }
             Screen::OptionsLanguage => {
                 let back = self.settings_back.clone_screen();
                 self.build_options_stub(

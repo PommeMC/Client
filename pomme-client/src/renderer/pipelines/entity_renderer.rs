@@ -1,18 +1,23 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::slice;
 use std::sync::{Arc, Mutex};
 
+use azalea_inventory::ItemStack;
+use azalea_inventory::components::{DataComponentTrait, DyedColor, EquipmentSlot, Equippable};
 use azalea_registry::builtin::EntityKind;
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
+use serde::Deserialize;
 
-use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::assets::{AssetIndex, resolve_asset_path, resolve_asset_path_with_packs};
 use crate::entity::components::Position;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::BakedEntityModel;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, entity_model, shader, util};
+use crate::resource_pack::ResourcePackManager;
 use crate::world::block::BedDirection;
 
 pub const MAX_OVERLAYS: usize = 4;
@@ -50,6 +55,56 @@ struct EntityInstance {
     uv_params: [f32; 4],
 }
 
+#[derive(Clone, Debug)]
+pub struct ArmorRenderInfo {
+    pub asset_id: Arc<str>,
+    pub dyed_color: Option<u32>,
+}
+
+fn effective_item_component<'a, T: DataComponentTrait>(item: &'a ItemStack) -> Option<Cow<'a, T>> {
+    // Azalea's `get_component` currently falls back to the item default when
+    // the patch entry is an explicit removal (`kind -> None`). Vanilla's
+    // PatchedDataComponentMap keeps that state distinct from an absent patch.
+    if item
+        .component_patch()
+        .iter()
+        .any(|(kind, value)| kind == T::KIND && value.is_none())
+    {
+        return None;
+    }
+    item.get_component::<T>()
+}
+
+pub fn armor_render_info(item: Option<&ItemStack>, slot: EquipmentSlot) -> Option<ArmorRenderInfo> {
+    let item = item?;
+    let equippable = effective_item_component::<Equippable>(item)?;
+    if equippable.slot != slot {
+        return None;
+    }
+    let asset_id = equippable.asset_id.as_ref()?.to_string().into();
+    let dyed_color =
+        effective_item_component::<DyedColor>(item).map(|color| color.rgb as u32 & 0x00ff_ffff);
+    Some(ArmorRenderInfo {
+        asset_id,
+        dyed_color,
+    })
+}
+
+/// Armor slots in `EntityRenderInfo::armor` order.
+pub const ARMOR_SLOTS: [EquipmentSlot; 4] = [
+    EquipmentSlot::Head,
+    EquipmentSlot::Chest,
+    EquipmentSlot::Legs,
+    EquipmentSlot::Feet,
+];
+const LEGS_SLOT: usize = 2;
+/// Vanilla `HumanoidArmorLayer.submit` order: chest, legs, feet, head.
+pub(crate) const ARMOR_SUBMIT_ORDER: [usize; 4] = [1, LEGS_SLOT, 3, 0];
+
+pub fn armor_render_infos(items: &[ItemStack]) -> [Option<ArmorRenderInfo>; 4] {
+    std::array::from_fn(|i| armor_render_info(items.get(i), ARMOR_SLOTS[i]))
+}
+
 pub struct EntityRenderInfo {
     pub position: Position,
     pub head_x_rot_deg: f32,
@@ -66,6 +121,8 @@ pub struct EntityRenderInfo {
     pub walk_anim_speed: f32,
     pub entity_kind: EntityKind,
     pub player_uuid: Option<uuid::Uuid>,
+    /// Indexed like [`ARMOR_SLOTS`].
+    pub armor: [Option<ArmorRenderInfo>; 4],
     pub variant_index: u32,
     pub overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
     /// Per-slot overlay texture variant (villager type/profession/level).
@@ -85,9 +142,7 @@ pub struct EntityRenderInfo {
     pub is_creepy: bool,
     /// Zombie-family conversion — shakes the whole body.
     pub is_converting: bool,
-    /// Witch drinking. Driven by the using-item metadata flag rather than
-    /// vanilla's `isHoldingItem` (main-hand item check) — pomme tracks no
-    /// mob equipment; the two only diverge for command-equipped witches.
+    /// Witch main-hand occupancy; swings the nose down toward the held item.
     pub is_holding_item: bool,
     /// Witch per-entity nose-wobble rate, resolved from the entity id.
     pub nose_wobble_speed: f32,
@@ -156,6 +211,7 @@ impl Default for EntityRenderInfo {
             walk_anim_speed: 0.0,
             entity_kind: EntityKind::Player,
             player_uuid: None,
+            armor: Default::default(),
             variant_index: 0,
             overlay_tints: [None; MAX_OVERLAYS],
             overlay_variants: [0; MAX_OVERLAYS],
@@ -251,6 +307,93 @@ struct PlayerSkinTexture {
     slim: bool,
 }
 
+#[derive(Deserialize)]
+struct EquipmentClientInfoJson {
+    #[serde(default)]
+    layers: HashMap<String, Vec<EquipmentLayerJson>>,
+}
+
+#[derive(Deserialize)]
+struct EquipmentLayerJson {
+    texture: String,
+    #[serde(default)]
+    dyeable: Option<EquipmentDyeableJson>,
+}
+
+#[derive(Deserialize)]
+struct EquipmentDyeableJson {
+    #[serde(default)]
+    color_when_undyed: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArmorDye {
+    None,
+    Dyeable { color_when_undyed: Option<u32> },
+}
+
+struct ArmorLayerDef {
+    texture_key: String,
+    dye: ArmorDye,
+}
+
+#[derive(Default)]
+struct ArmorAssetDef {
+    humanoid: Vec<ArmorLayerDef>,
+    leggings: Vec<ArmorLayerDef>,
+}
+
+struct ArmorTextureLayer {
+    image: vk::Image,
+    view: vk::ImageView,
+    allocation: Allocation,
+    set: vk::DescriptorSet,
+    dye: ArmorDye,
+}
+
+impl ArmorAsset {
+    fn layers_for(&self, slot: usize) -> &[ArmorTextureLayer] {
+        if slot == LEGS_SLOT {
+            &self.leggings
+        } else {
+            &self.humanoid
+        }
+    }
+}
+
+fn armor_layer_tint(layer: &ArmorTextureLayer, armor: &ArmorRenderInfo) -> Option<[f32; 4]> {
+    match layer.dye {
+        ArmorDye::None => Some([1.0, 1.0, 1.0, 1.0]),
+        ArmorDye::Dyeable { color_when_undyed } => {
+            let rgb = armor.dyed_color.or(color_when_undyed)?;
+            Some([
+                ((rgb >> 16) & 0xff) as f32 / 255.0,
+                ((rgb >> 8) & 0xff) as f32 / 255.0,
+                (rgb & 0xff) as f32 / 255.0,
+                1.0,
+            ])
+        }
+    }
+}
+
+#[derive(Default)]
+struct ArmorAsset {
+    humanoid: Vec<ArmorTextureLayer>,
+    leggings: Vec<ArmorTextureLayer>,
+}
+
+struct ArmorMesh {
+    model: BakedEntityModel,
+    vertex_buffer: vk::Buffer,
+    vertex_allocation: Allocation,
+}
+
+struct ArmorMeshes {
+    humanoid: [ArmorMesh; 4],
+    husk: [ArmorMesh; 4],
+    zombie_villager: [ArmorMesh; 4],
+}
+
 impl MobEntry {
     fn base_variant(&self, is_baby: bool, variant_index: u32) -> &MobVariant {
         let pool = if is_baby {
@@ -319,6 +462,8 @@ fn expected_variant_count(kind: EntityKind) -> Option<usize> {
 /// color, `a` is how much of the base color survives the mix.
 const HURT_OVERLAY: [f32; 4] = [1.0, 0.0, 0.0, 178.0 / 255.0];
 const NO_OVERLAY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+pub(super) const ENTITY_ALPHA_CUTOFF: f32 = 0.5;
+pub(crate) const ARMOR_ALPHA_CUTOFF: f32 = 0.1;
 
 pub const WOOL_COLOR_RGBA: [[f32; 4]; 16] = [
     rgb(0xF0F0F0), // 0 white
@@ -394,6 +539,344 @@ pub fn jeb_sheep_tint(entity_id: i32, age_in_ticks: u32) -> [f32; 4] {
     ]
 }
 
+fn equipment_texture_key(texture: &str, layer_type: &str) -> Option<String> {
+    let (namespace, path) = texture.split_once(':').unwrap_or(("minecraft", texture));
+    let key = format!("{namespace}/textures/entity/equipment/{layer_type}/{path}.png");
+    if namespace.contains('/') || !crate::assets::valid_asset_key(&key) {
+        tracing::warn!("Ignoring invalid equipment texture id {texture:?}");
+        return None;
+    }
+    Some(key)
+}
+
+fn collect_equipment_json_dir(
+    dir: &Path,
+    base: &Path,
+    namespace: &str,
+    out: &mut HashMap<String, PathBuf>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_equipment_json_dir(&path, base, namespace, out);
+            continue;
+        }
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(base) else {
+            continue;
+        };
+        let mut resource_path = relative
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/");
+        while resource_path.starts_with('/') {
+            resource_path.remove(0);
+        }
+        if !resource_path.is_empty() {
+            out.insert(format!("{namespace}:{resource_path}"), path);
+        }
+    }
+}
+
+fn collect_equipment_json_root(root: &Path, out: &mut HashMap<String, PathBuf>) {
+    let Ok(namespaces) = std::fs::read_dir(root) else {
+        return;
+    };
+    for namespace in namespaces.flatten() {
+        let ns_path = namespace.path();
+        if !ns_path.is_dir() {
+            continue;
+        }
+        let ns = namespace.file_name().to_string_lossy().to_string();
+        let equipment = ns_path.join("equipment");
+        if equipment.is_dir() {
+            collect_equipment_json_dir(&equipment, &equipment, &ns, out);
+        }
+    }
+}
+
+fn discover_equipment_json(
+    jar_assets_dir: &Path,
+    packs: Option<&ResourcePackManager>,
+) -> HashMap<String, PathBuf> {
+    let mut resources = HashMap::new();
+    collect_equipment_json_root(jar_assets_dir, &mut resources);
+    // Packs come low-to-high priority, so later inserts override.
+    if let Some(packs) = packs {
+        for pack in packs.active_pack_dirs() {
+            collect_equipment_json_root(&pack.join("assets"), &mut resources);
+        }
+    }
+    resources
+}
+
+fn read_equipment_json(path: &Path) -> Option<EquipmentClientInfoJson> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| {
+            tracing::warn!(
+                "Failed to parse equipment definition {}: {error}",
+                path.display()
+            );
+            error
+        })
+        .ok()
+}
+
+fn armor_layer_defs(layers: &[EquipmentLayerJson], layer_type: &str) -> Vec<ArmorLayerDef> {
+    layers
+        .iter()
+        .filter_map(|layer| {
+            let texture_key = equipment_texture_key(&layer.texture, layer_type)?;
+            let dye = layer
+                .dyeable
+                .as_ref()
+                .map_or(ArmorDye::None, |dyeable| ArmorDye::Dyeable {
+                    color_when_undyed: dyeable
+                        .color_when_undyed
+                        .map(|color| color as u32 & 0x00ff_ffff),
+                });
+            Some(ArmorLayerDef { texture_key, dye })
+        })
+        .collect()
+}
+
+fn load_armor_asset_defs(
+    jar_assets_dir: &Path,
+    packs: Option<&ResourcePackManager>,
+) -> HashMap<String, ArmorAssetDef> {
+    discover_equipment_json(jar_assets_dir, packs)
+        .into_iter()
+        .filter_map(|(id, path)| {
+            let info = read_equipment_json(&path)?;
+            let layers = |ty| {
+                info.layers
+                    .get(ty)
+                    .map_or_else(Vec::new, |layers| armor_layer_defs(layers, ty))
+            };
+            let humanoid = layers("humanoid");
+            let leggings = layers("humanoid_leggings");
+            (!humanoid.is_empty() || !leggings.is_empty())
+                .then_some((id, ArmorAssetDef { humanoid, leggings }))
+        })
+        .collect()
+}
+
+fn create_armor_descriptor_pool(device: &vk::Device, texture_count: u32) -> vk::DescriptorPool {
+    let texture_count = texture_count.max(1);
+    let pool_size = vk::DescriptorPoolSize {
+        ty: vk::DescriptorType::CombinedImageSampler,
+        descriptor_count: texture_count,
+    };
+    let info = vk::DescriptorPoolCreateInfo {
+        max_sets: texture_count,
+        pool_size_count: 1,
+        pool_sizes: &pool_size,
+        ..Default::default()
+    };
+    device
+        .create_descriptor_pool(&info, None)
+        .expect("failed to create armor descriptor pool")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_armor_texture_layer(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    allocator: &Arc<Mutex<Allocator>>,
+    descriptor_pool: vk::DescriptorPool,
+    texture_layout: vk::DescriptorSetLayout,
+    texture_sampler: vk::Sampler,
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    packs: Option<&ResourcePackManager>,
+    def: ArmorLayerDef,
+) -> ArmorTextureLayer {
+    let path = resolve_asset_path_with_packs(jar_assets_dir, asset_index, &def.texture_key, packs);
+    let (pixels, width, height) = util::load_png(&path).unwrap_or_else(|| {
+        tracing::warn!(
+            "Failed to load equipment texture {}, using fallback",
+            def.texture_key
+        );
+        fallback_texture(64)
+    });
+    let (image, view, allocation) =
+        util::create_gpu_image(device, allocator, width, height, "armor_texture");
+    let (staging_buf, staging_alloc) =
+        util::create_staging_buffer(device, allocator, &pixels, "armor_texture_staging");
+    util::upload_image(
+        device,
+        queue,
+        command_pool,
+        staging_buf,
+        image,
+        width,
+        height,
+    );
+    device.destroy_buffer(staging_buf, None);
+    allocator.lock().unwrap().free(staging_alloc).ok();
+
+    let alloc_info = vk::DescriptorSetAllocateInfo {
+        descriptor_pool,
+        descriptor_set_count: 1,
+        set_layouts: &texture_layout,
+        ..Default::default()
+    };
+    let mut set = vk::DescriptorSet::null();
+    device
+        .allocate_descriptor_sets(&alloc_info, slice::from_mut(&mut set))
+        .expect("failed to allocate armor texture descriptor set");
+    let image_info = vk::DescriptorImageInfo {
+        sampler: texture_sampler,
+        image_view: view,
+        image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+    };
+    let write = vk::WriteDescriptorSet {
+        dst_set: set,
+        dst_binding: 0,
+        descriptor_type: vk::DescriptorType::CombinedImageSampler,
+        descriptor_count: 1,
+        image_info: &image_info,
+        ..Default::default()
+    };
+    device.update_descriptor_sets(&[write], &[]);
+
+    ArmorTextureLayer {
+        image,
+        view,
+        allocation,
+        set,
+        dye: def.dye,
+    }
+}
+
+/// Loads every equipment definition with humanoid layers and uploads its
+/// textures into a freshly sized descriptor pool.
+#[allow(clippy::too_many_arguments)]
+fn load_armor_assets(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    allocator: &Arc<Mutex<Allocator>>,
+    texture_layout: vk::DescriptorSetLayout,
+    texture_sampler: vk::Sampler,
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    packs: &ResourcePackManager,
+) -> (vk::DescriptorPool, HashMap<String, ArmorAsset>) {
+    let packs = Some(packs);
+    let defs = load_armor_asset_defs(jar_assets_dir, packs);
+    let texture_count = defs
+        .values()
+        .map(|asset| (asset.humanoid.len() + asset.leggings.len()) as u32)
+        .sum();
+    let descriptor_pool = create_armor_descriptor_pool(device, texture_count);
+    let assets = defs
+        .into_iter()
+        .map(|(id, def)| {
+            let build = |layer| {
+                build_armor_texture_layer(
+                    device,
+                    queue,
+                    command_pool,
+                    allocator,
+                    descriptor_pool,
+                    texture_layout,
+                    texture_sampler,
+                    jar_assets_dir,
+                    asset_index,
+                    packs,
+                    layer,
+                )
+            };
+            (
+                id,
+                ArmorAsset {
+                    humanoid: def.humanoid.into_iter().map(build).collect(),
+                    leggings: def.leggings.into_iter().map(build).collect(),
+                },
+            )
+        })
+        .collect();
+    (descriptor_pool, assets)
+}
+
+fn build_armor_mesh(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    model: BakedEntityModel,
+) -> ArmorMesh {
+    let bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&model.vertices);
+    let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
+        device,
+        allocator,
+        bytes,
+        vk::BufferUsageFlags::VertexBuffer,
+        "armor_vertices",
+    );
+    ArmorMesh {
+        model,
+        vertex_buffer,
+        vertex_allocation,
+    }
+}
+
+fn build_armor_meshes(device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) -> ArmorMeshes {
+    let bake = |bake_slot: fn(entity_model::HumanoidArmorSlot) -> BakedEntityModel| {
+        entity_model::HumanoidArmorSlot::ALL
+            .map(|slot| build_armor_mesh(device, allocator, bake_slot(slot)))
+    };
+    ArmorMeshes {
+        humanoid: bake(entity_model::bake_humanoid_armor_model),
+        husk: bake(entity_model::bake_husk_armor_model),
+        zombie_villager: bake(entity_model::bake_zombie_villager_armor_model),
+    }
+}
+
+fn destroy_armor_assets(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    assets: &mut HashMap<String, ArmorAsset>,
+) {
+    let mut alloc = allocator.lock().unwrap();
+    for layer in assets
+        .drain()
+        .flat_map(|(_, asset)| asset.humanoid.into_iter().chain(asset.leggings))
+    {
+        device.destroy_image_view(layer.view, None);
+        device.destroy_image(layer.image, None);
+        alloc.free(layer.allocation).ok();
+    }
+}
+
+impl ArmorMeshes {
+    // TODO: the other vanilla `HumanoidArmorLayer` wearers once pomme renders
+    // them: wither skeleton (1.2 scale), parched, piglin / piglin brute /
+    // zombified piglin (`PiglinModel.createArmorMeshSet`), giant, armor stand.
+    fn for_entity(&self, kind: EntityKind, slot: usize) -> Option<&ArmorMesh> {
+        if slot >= 4 {
+            return None;
+        }
+        match kind {
+            EntityKind::ZombieVillager => Some(&self.zombie_villager[slot]),
+            EntityKind::Husk => Some(&self.husk[slot]),
+            EntityKind::Player
+            | EntityKind::Zombie
+            | EntityKind::Drowned
+            | EntityKind::Skeleton
+            | EntityKind::Stray
+            | EntityKind::Bogged => Some(&self.humanoid[slot]),
+            _ => None,
+        }
+    }
+}
+
 pub struct EntityRenderer {
     pipeline: vk::Pipeline,
     /// Opaque with backface culling — bat wings.
@@ -419,6 +902,9 @@ pub struct EntityRenderer {
     /// REPEAT-wrap sampler for the scrolling swirl overlay.
     texture_sampler_repeat: vk::Sampler,
     mobs: HashMap<EntityKind, MobEntry>,
+    armor_descriptor_pool: vk::DescriptorPool,
+    armor_assets: HashMap<String, ArmorAsset>,
+    armor_meshes: ArmorMeshes,
     player_skins: HashMap<uuid::Uuid, PlayerSkinTexture>,
 }
 
@@ -1313,6 +1799,7 @@ impl EntityRenderer {
         allocator: &Arc<Mutex<Allocator>>,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
+        packs: &ResourcePackManager,
     ) -> Self {
         let camera_layout = util::create_descriptor_set_layout(
             device,
@@ -1396,6 +1883,18 @@ impl EntityRenderer {
 
         let texture_sampler = unsafe { util::create_nearest_sampler(device) };
         let texture_sampler_repeat = unsafe { util::create_nearest_repeat_sampler(device) };
+        let (armor_descriptor_pool, armor_assets) = load_armor_assets(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            texture_layout,
+            texture_sampler,
+            jar_assets_dir,
+            asset_index,
+            packs,
+        );
+        let armor_meshes = build_armor_meshes(device, allocator);
 
         let mut mobs = HashMap::new();
 
@@ -1475,8 +1974,37 @@ impl EntityRenderer {
             texture_sampler,
             texture_sampler_repeat,
             mobs,
+            armor_descriptor_pool,
+            armor_assets,
+            armor_meshes,
             player_skins: HashMap::new(),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reload_armor_assets(
+        &mut self,
+        device: &vk::Device,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        allocator: &Arc<Mutex<Allocator>>,
+        jar_assets_dir: &Path,
+        asset_index: &Option<AssetIndex>,
+        packs: &ResourcePackManager,
+    ) {
+        destroy_armor_assets(device, allocator, &mut self.armor_assets);
+        device.destroy_descriptor_pool(self.armor_descriptor_pool, None);
+        (self.armor_descriptor_pool, self.armor_assets) = load_armor_assets(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            self.texture_layout,
+            self.texture_sampler,
+            jar_assets_dir,
+            asset_index,
+            packs,
+        );
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
@@ -1599,6 +2127,77 @@ impl EntityRenderer {
     fn effective_variant_index(&self, info: &EntityRenderInfo) -> u32 {
         self.player_skin(info)
             .map_or(info.variant_index, |skin| skin.slim as u32)
+    }
+
+    /// Texture set and tint of each drawn equipment layer, in submit order.
+    pub(crate) fn armor_layers<'a>(
+        &'a self,
+        armor: &'a ArmorRenderInfo,
+        slot: usize,
+    ) -> impl Iterator<Item = (vk::DescriptorSet, [f32; 4])> + 'a {
+        self.armor_assets
+            .get(&*armor.asset_id)
+            .into_iter()
+            .flat_map(move |asset| asset.layers_for(slot))
+            .filter_map(move |layer| armor_layer_tint(layer, armor).map(|tint| (layer.set, tint)))
+    }
+
+    fn collect_armor_draws(
+        &self,
+        vis: &[VisEntity<'_>],
+        instances: &mut Vec<EntityInstance>,
+    ) -> Vec<DrawRecord> {
+        let mut records = Vec::new();
+        for v in vis {
+            // TODO: baby armor (vanilla `HUMANOID_BABY` layer type +
+            // `HumanoidModel.createBabyArmorMeshSet`) needs anisotropic
+            // `CubeDeformation`, which pomme's model format lacks.
+            if v.info.is_baby {
+                continue;
+            }
+            for slot in ARMOR_SUBMIT_ORDER {
+                let Some(armor) = &v.info.armor[slot] else {
+                    continue;
+                };
+                let Some(mesh) = self.armor_meshes.for_entity(v.info.entity_kind, slot) else {
+                    continue;
+                };
+                // TODO: armor trims and foil (`EquipmentLayerRenderer`) need a
+                // trim atlas and an entity glint pass.
+                let mut layers = self.armor_layers(armor, slot).peekable();
+                if layers.peek().is_none() {
+                    continue;
+                }
+
+                let anim = self.compute_anim(v.entry.anim, &mesh.model, v.info);
+                let part_transforms = mesh.model.compute_part_transforms(&anim);
+                for (texture_set, tint) in layers {
+                    for (part, (start, part_count)) in mesh.model.part_ranges.iter().enumerate() {
+                        if *part_count == 0 {
+                            continue;
+                        }
+                        let first_instance = instances.len() as u32;
+                        let model = v.entity_mat * part_transforms[part];
+                        instances.push(EntityInstance {
+                            model: model.to_cols_array_2d(),
+                            tint,
+                            // Vanilla armor is `NO_OVERLAY`: no hurt/death red.
+                            overlay_color: NO_OVERLAY,
+                            uv_params: [0.0, 0.0, ARMOR_ALPHA_CUTOFF, 0.0],
+                        });
+                        records.push(DrawRecord {
+                            texture_set,
+                            vertex_buffer: mesh.vertex_buffer,
+                            part_start: *start,
+                            part_count: *part_count,
+                            first_instance,
+                            instance_count: 1,
+                        });
+                    }
+                }
+            }
+        }
+        records
     }
 
     fn compute_anim(
@@ -1850,7 +2449,7 @@ impl EntityRenderer {
         // part) becomes a single instanced draw. `vis`/`groups` borrow self.mobs
         // and are dropped at the end of this block, before the buffer write below.
         let mut instances: Vec<EntityInstance> = Vec::new();
-        let (opaque, culled, body, eyes, swirl) = {
+        let (opaque, armor, culled, body, eyes, swirl) = {
             let mut vis: Vec<VisEntity> = Vec::new();
             for info in entities {
                 let Some(entry) = self.mobs.get(&info.entity_kind) else {
@@ -1930,8 +2529,11 @@ impl EntityRenderer {
             let eyes = collect_overlays(&vis, OverlayKind::EyesTranslucent);
             let swirl = collect_overlays(&vis, OverlayKind::SwirlAdditive);
 
+            let opaque = opaque.emit(&vis, &mut instances);
+            let armor = self.collect_armor_draws(&vis, &mut instances);
             (
-                opaque.emit(&vis, &mut instances),
+                opaque,
+                armor,
                 culled.emit(&vis, &mut instances),
                 body.emit(&vis, &mut instances),
                 eyes.emit(&vis, &mut instances),
@@ -1954,6 +2556,7 @@ impl EntityRenderer {
             .copy_from_slice(bytes);
 
         self.record_pass(cmd, frame, self.pipeline, &opaque, count);
+        self.record_pass(cmd, frame, self.pipeline, &armor, count);
         self.record_pass(cmd, frame, self.culled_pipeline, &culled, count);
         self.record_pass(cmd, frame, self.body_translucent_pipeline, &body, count);
         self.record_pass(cmd, frame, self.eyes_pipeline, &eyes, count);
@@ -2018,6 +2621,9 @@ impl EntityRenderer {
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        destroy_armor_assets(device, allocator, &mut self.armor_assets);
+        device.destroy_descriptor_pool(self.armor_descriptor_pool, None);
+
         let mut alloc = allocator.lock().unwrap();
         for i in 0..MAX_FRAMES_IN_FLIGHT {
             device.destroy_buffer(self.camera_buffers[i], None);
@@ -2032,6 +2638,21 @@ impl EntityRenderer {
                     &mut self.instance_allocations[i],
                     unsafe { std::mem::zeroed() },
                 ))
+                .ok();
+        }
+
+        for mesh in self
+            .armor_meshes
+            .humanoid
+            .iter_mut()
+            .chain(self.armor_meshes.husk.iter_mut())
+            .chain(self.armor_meshes.zombie_villager.iter_mut())
+        {
+            device.destroy_buffer(mesh.vertex_buffer, None);
+            alloc
+                .free(std::mem::replace(&mut mesh.vertex_allocation, unsafe {
+                    std::mem::zeroed()
+                }))
                 .ok();
         }
 
@@ -2215,7 +2836,7 @@ impl<'a> VariantGroups<'a> {
                         model: model.to_cols_array_2d(),
                         tint: *tint,
                         overlay_color: *overlay,
-                        uv_params: [uv[0], uv[1], 0.0, 0.0],
+                        uv_params: [uv[0], uv[1], ENTITY_ALPHA_CUTOFF, 0.0],
                     });
                 }
                 records.push(DrawRecord {
@@ -2849,6 +3470,81 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
+    use azalea_inventory::ItemStack;
+    use azalea_inventory::components::{DyedColor, EquipmentSlot, Equippable};
+    use azalea_registry::builtin::ItemKind;
+
+    use super::{
+        ArmorDye, EquipmentClientInfoJson, armor_layer_defs, armor_render_info,
+        equipment_texture_key,
+    };
+
+    #[test]
+    fn armor_render_info_uses_equippable_slot_asset_and_dye() {
+        let diamond = ItemStack::new(ItemKind::DiamondHelmet, 1);
+        let diamond_info = armor_render_info(Some(&diamond), EquipmentSlot::Head)
+            .expect("diamond helmet should expose its default equippable asset");
+        assert_eq!(&*diamond_info.asset_id, "minecraft:diamond");
+        assert_eq!(diamond_info.dyed_color, None);
+        assert!(armor_render_info(Some(&diamond), EquipmentSlot::Chest).is_none());
+
+        let leather = ItemStack::new(ItemKind::LeatherChestplate, 1)
+            .with_component(DyedColor { rgb: 0x12_34_56 });
+        let leather_info = armor_render_info(Some(&leather), EquipmentSlot::Chest)
+            .expect("leather chestplate should expose its default equippable asset");
+        assert_eq!(&*leather_info.asset_id, "minecraft:leather");
+        assert_eq!(leather_info.dyed_color, Some(0x12_34_56));
+    }
+
+    #[test]
+    fn armor_render_info_respects_explicit_equippable_removal() {
+        let stripped =
+            ItemStack::new(ItemKind::DiamondHelmet, 1).with_component::<Equippable>(None);
+        assert!(armor_render_info(Some(&stripped), EquipmentSlot::Head).is_none());
+    }
+
+    #[test]
+    fn equipment_layers_preserve_order_dye_defaults_and_resource_ids() {
+        let info: EquipmentClientInfoJson = serde_json::from_str(
+            r#"{
+                "layers": {
+                    "humanoid": [
+                        {"texture":"minecraft:leather","dyeable":{"color_when_undyed":10511680}},
+                        {"texture":"example:overlay"}
+                    ]
+                }
+            }"#,
+        )
+        .expect("valid equipment fixture");
+        let layers = armor_layer_defs(&info.layers["humanoid"], "humanoid");
+        assert_eq!(layers.len(), 2);
+        assert_eq!(
+            layers[0].texture_key,
+            "minecraft/textures/entity/equipment/humanoid/leather.png"
+        );
+        assert_eq!(
+            layers[0].dye,
+            ArmorDye::Dyeable {
+                color_when_undyed: Some(0xA0_65_40)
+            }
+        );
+        assert_eq!(
+            layers[1].texture_key,
+            "example/textures/entity/equipment/humanoid/overlay.png"
+        );
+        assert_eq!(layers[1].dye, ArmorDye::None);
+    }
+
+    #[test]
+    fn equipment_texture_ids_reject_path_traversal() {
+        assert_eq!(
+            equipment_texture_key("iron", "humanoid"),
+            Some("minecraft/textures/entity/equipment/humanoid/iron.png".into())
+        );
+        assert!(equipment_texture_key("minecraft:../iron", "humanoid").is_none());
+        assert!(equipment_texture_key(":iron", "humanoid").is_none());
+    }
+
     use azalea_registry::builtin::EntityKind;
 
     use super::{EntityRenderInfo, EntityRenderer, PLAYER_MODEL_SCALE};

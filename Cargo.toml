@@ -26,10 +26,10 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["json"] }
 # Shared by pomme-client and pomme-protocol; the versions must agree so
 # glam types unify across the crate boundary.
-glam = "0.33"
+glam = "0.34"
 
 # client
-pyronyx = "=0.4.0"
+pyronyx = "=0.5.0"
 regex = "1"
 # Secure chat. rsa, sha1 and sha2 match the versions azalea-crypto pins.
 chrono = { version = "0.4.44", features = ["serde"] }

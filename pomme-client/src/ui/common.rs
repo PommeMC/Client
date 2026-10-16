@@ -399,6 +399,31 @@ pub fn push_slot(
     item: &ItemStack,
     empty_sprite: Option<SpriteId>,
 ) -> bool {
+    push_slot_with_owner(
+        elements,
+        x,
+        y,
+        size,
+        scale,
+        cursor,
+        item,
+        empty_sprite,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_slot_with_owner(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    size: f32,
+    scale: f32,
+    cursor: (f32, f32),
+    item: &ItemStack,
+    empty_sprite: Option<SpriteId>,
+    use_player_team: bool,
+) -> bool {
     let hovered = hit_test(cursor, [x, y, size, size]);
     let highlight = |sprite| MenuElement::Image {
         x: x - 4.0 * scale,
@@ -424,7 +449,9 @@ pub fn push_slot(
                 });
             }
         }
-        ItemStack::Present(data) => push_item_icon(elements, x, y, size, scale, data),
+        ItemStack::Present(data) => {
+            push_item_icon_with_owner(elements, x, y, size, scale, data, use_player_team)
+        }
     }
     if hovered {
         elements.push(highlight(SpriteId::SlotHighlightFront));
@@ -441,12 +468,27 @@ pub fn push_item_icon(
     scale: f32,
     data: &ItemStackData,
 ) {
+    push_item_icon_with_owner(elements, x, y, size, scale, data, true);
+}
+
+pub(crate) fn push_item_icon_with_owner(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    size: f32,
+    scale: f32,
+    data: &ItemStackData,
+    use_player_team: bool,
+) {
     elements.push(MenuElement::ItemIcon {
         x,
         y,
         w: size,
         h: size,
         item_name: item_resource_name(data.kind),
+        item_stack: Some(data.clone()),
+        use_player_team,
+        item_tints: Vec::new(),
         tint: WHITE,
     });
     push_item_bar(elements, x, y, scale, data);
@@ -572,6 +614,57 @@ pub struct LabelScroll<'a> {
     pub time_secs: f64,
 }
 
+/// A widget label: plain text in one color, or styled spans.
+pub enum WidgetLabel<'a> {
+    Text(&'a str, [f32; 4]),
+    Spans(Vec<crate::ui::text::TextSpan>),
+}
+
+impl WidgetLabel<'_> {
+    /// Recolored to the inactive text color, keeping span formatting.
+    fn disabled(self) -> Self {
+        match self {
+            Self::Text(text, _) => Self::Text(text, COL_DISABLED),
+            Self::Spans(mut spans) => {
+                for span in &mut spans {
+                    span.color = COL_DISABLED;
+                }
+                Self::Spans(spans)
+            }
+        }
+    }
+
+    fn width(&self, text_width_fn: TextWidthFn<'_>, fs: f32) -> f32 {
+        match self {
+            Self::Text(text, _) => text_width_fn(text, fs),
+            Self::Spans(spans) => {
+                let text: String = spans.iter().map(|span| span.text.as_str()).collect();
+                text_width_fn(&text, fs)
+            }
+        }
+    }
+
+    fn into_element(self, x: f32, y: f32, fs: f32, centered: bool) -> MenuElement {
+        match self {
+            Self::Text(text, color) => MenuElement::Text {
+                x,
+                y,
+                text: text.into(),
+                scale: fs,
+                color,
+                centered,
+            },
+            Self::Spans(spans) => MenuElement::TextSpans {
+                x,
+                y,
+                spans,
+                scale: fs,
+                centered,
+            },
+        }
+    }
+}
+
 /// Widget label: centered when it fits, otherwise (with `scroll`) clipped and
 /// oscillated like vanilla's ActiveTextCollector.defaultScrollingHelper.
 #[allow(clippy::too_many_arguments)]
@@ -583,15 +676,14 @@ fn push_widget_label(
     h: f32,
     gs: f32,
     fs: f32,
-    label: &str,
-    color: [f32; 4],
+    label: WidgetLabel<'_>,
     scroll: Option<&LabelScroll<'_>>,
 ) {
     let ty = y + (h - fs) / 2.0 + 1.0;
     if let Some(s) = scroll {
         let margin = 2.0 * gs;
         let avail = w - 2.0 * margin;
-        let lw = (s.text_width_fn)(label, fs);
+        let lw = label.width(s.text_width_fn, fs);
         if lw > avail {
             let max_pos = lw - avail;
             let period = ((max_pos / gs) as f64 * 0.5).max(3.0);
@@ -607,26 +699,12 @@ fn push_widget_label(
                 w: avail,
                 h,
             });
-            elements.push(MenuElement::Text {
-                x: x + margin - pos,
-                y: ty,
-                text: label.into(),
-                scale: fs,
-                color,
-                centered: false,
-            });
+            elements.push(label.into_element(x + margin - pos, ty, fs, false));
             elements.push(MenuElement::ScissorPop);
             return;
         }
     }
-    elements.push(MenuElement::Text {
-        x: x + w / 2.0,
-        y: ty,
-        text: label.into(),
-        scale: fs,
-        color,
-        centered: true,
-    });
+    elements.push(label.into_element(x + w / 2.0, ty, fs, true));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -642,7 +720,19 @@ pub fn push_button(
     label: &str,
     enabled: bool,
 ) -> bool {
-    push_button_inner(elements, cursor, x, y, w, h, gs, fs, label, enabled, None)
+    push_button_label(
+        elements,
+        cursor,
+        x,
+        y,
+        w,
+        h,
+        gs,
+        fs,
+        WidgetLabel::Text(label, WHITE),
+        enabled,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -659,7 +749,7 @@ pub fn push_button_scrolling(
     enabled: bool,
     scroll: &LabelScroll<'_>,
 ) -> bool {
-    push_button_inner(
+    push_button_label(
         elements,
         cursor,
         x,
@@ -668,14 +758,15 @@ pub fn push_button_scrolling(
         h,
         gs,
         fs,
-        label,
+        WidgetLabel::Text(label, WHITE),
         enabled,
         Some(scroll),
     )
 }
 
+/// A button with any label, scrolled when `scroll` is given and it overflows.
 #[allow(clippy::too_many_arguments)]
-fn push_button_inner(
+pub fn push_button_label(
     elements: &mut Vec<MenuElement>,
     cursor: (f32, f32),
     x: f32,
@@ -684,18 +775,18 @@ fn push_button_inner(
     h: f32,
     gs: f32,
     fs: f32,
-    label: &str,
+    label: WidgetLabel<'_>,
     enabled: bool,
     scroll: Option<&LabelScroll<'_>>,
 ) -> bool {
     let hovered = enabled && hit_test(cursor, [x, y, w, h]);
 
-    let (sprite, text_col) = if !enabled {
-        (SpriteId::ButtonDisabled, COL_DISABLED)
+    let sprite = if !enabled {
+        SpriteId::ButtonDisabled
     } else if hovered {
-        (SpriteId::ButtonHover, WHITE)
+        SpriteId::ButtonHover
     } else {
-        (SpriteId::ButtonNormal, WHITE)
+        SpriteId::ButtonNormal
     };
 
     let border = if enabled { BTN_BORDER } else { 1.0 };
@@ -709,7 +800,8 @@ fn push_button_inner(
         tint: WHITE,
     });
 
-    push_widget_label(elements, x, y, w, h, gs, fs, label, text_col, scroll);
+    let label = if enabled { label } else { label.disabled() };
+    push_widget_label(elements, x, y, w, h, gs, fs, label, scroll);
 
     hovered
 }
@@ -784,7 +876,17 @@ pub fn push_slider(
     });
 
     let text_col = if enabled { WHITE } else { COL_DISABLED };
-    push_widget_label(elements, x, y, w, h, gs, fs, label, text_col, Some(scroll));
+    push_widget_label(
+        elements,
+        x,
+        y,
+        w,
+        h,
+        gs,
+        fs,
+        WidgetLabel::Text(label, text_col),
+        Some(scroll),
+    );
 
     SliderResult {
         hovered,
@@ -807,7 +909,7 @@ mod tests {
 
     use super::{
         BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, MenuElement, item_bar, push_item_count,
-        push_item_icon,
+        push_item_icon, push_slot_with_owner,
     };
 
     fn present(stack: ItemStack) -> ItemStackData {
@@ -939,5 +1041,29 @@ mod tests {
                 .with_component(Damage { amount: 5 }),
         );
         assert!(item_bar(&damaged_empty).is_none());
+    }
+
+    #[test]
+    fn fake_item_icon_does_not_use_player_team_owner() {
+        let item = ItemStack::from(ItemKind::Stone);
+        let mut elements = Vec::new();
+        push_slot_with_owner(
+            &mut elements,
+            0.0,
+            0.0,
+            18.0,
+            1.0,
+            (-1.0, -1.0),
+            &item,
+            None,
+            false,
+        );
+        assert!(elements.iter().any(|element| matches!(
+            element,
+            MenuElement::ItemIcon {
+                use_player_team: false,
+                ..
+            }
+        )));
     }
 }
