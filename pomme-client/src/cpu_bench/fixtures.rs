@@ -13,7 +13,7 @@ use crate::dirs::DataDirs;
 use crate::renderer::chunk::atlas::{AtlasUVMap, TextureAtlas, atlas_texture_names};
 use crate::world::block::find_state;
 use crate::world::block::registry::BlockRegistry;
-use crate::world::chunk::ChunkStore;
+use crate::world::chunk::{ChunkLightData, ChunkStore};
 
 pub struct Assets {
     pub jar_assets_dir: PathBuf,
@@ -142,19 +142,13 @@ impl States {
 }
 
 /// Builds `scene` from a fixed seed, so runs compare like for like.
-// TODO: run the light engine over the scene; with no light data the mesher
-// treats every block as light level 15, which skips realistic light lookups.
 pub fn build_world(scene: Scene) -> ChunkStore {
     let s = States::lookup();
     let mut store = ChunkStore::new(8);
-    for cx in -1..=1 {
-        for cz in -1..=1 {
-            store.partial_storage.set(
-                &ChunkPos::new(cx, cz),
-                Some(Chunk::default()),
-                &mut store.chunk_storage,
-            );
-        }
+    for pos in columns_within(1) {
+        store
+            .partial_storage
+            .set(&pos, Some(Chunk::default()), &mut store.chunk_storage);
     }
     let min_y = store.min_y();
     let mut rng = fastrand::Rng::with_seed(0x0050_4F4D_4D45);
@@ -230,5 +224,38 @@ pub fn build_world(scene: Scene) -> ChunkStore {
             }
         }
     }
+    add_sky_light(&mut store);
     store
+}
+
+/// Sky light 15 above each column's highest block and 0 below, no block
+/// light: the light reads a real world pays, without running the engine.
+// TODO: run the light engine for propagated light under overhangs and caves.
+fn add_sky_light(store: &mut ChunkStore) {
+    let min_y = store.min_y();
+    let top_y = min_y + store.height() as i32;
+    let layer_count = store.section_count() as usize + 2;
+    for pos in columns_within(1) {
+        let mut light = ChunkLightData {
+            sky_sections: vec![Some(Box::new([0; 2048])); layer_count],
+            block_sections: vec![None; layer_count],
+            min_y,
+            has_sky: true,
+            sky_top_section: Some(layer_count as i32),
+        };
+        for x in pos.x * 16..pos.x * 16 + 16 {
+            for z in pos.z * 16..pos.z * 16 + 16 {
+                let surface = (min_y..top_y)
+                    .rev()
+                    .find(|&y| !crate::world::block::is_air(store.get_block_state(x, y, z)))
+                    .unwrap_or(min_y - 1);
+                for y in surface + 1..top_y {
+                    light.set_sky_light(x, y, z, 15);
+                }
+            }
+        }
+        store
+            .light_data
+            .insert((pos.x, pos.z), std::sync::Arc::new(light));
+    }
 }

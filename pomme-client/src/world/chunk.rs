@@ -73,7 +73,7 @@ impl ChunkLightData {
         let Some(top) = self.sky_top_section else {
             return 15;
         };
-        let mut index = (y - self.min_y).div_euclid(16) + 1;
+        let mut index = self.layer_index(y);
         if index >= top {
             return 15;
         }
@@ -97,7 +97,7 @@ impl ChunkLightData {
     }
 
     pub fn get_block_light(&self, x: i32, y: i32, z: i32) -> u8 {
-        let index = (y - self.min_y).div_euclid(16) + 1;
+        let index = self.layer_index(y);
         match usize::try_from(index)
             .ok()
             .and_then(|i| self.block_sections.get(i))
@@ -108,10 +108,33 @@ impl ChunkLightData {
         }
     }
 
+    /// The layer holding world `y`: index 0 is the section below the world.
+    fn layer_index(&self, y: i32) -> i32 {
+        (y - self.min_y).div_euclid(16) + 1
+    }
+
+    /// The nibble index of a block in a 16³ light layer (vanilla
+    /// `DataLayer.getIndex`); even indices are a byte's low nibble.
+    fn nibble_index(x: i32, local_y: i32, z: i32) -> usize {
+        local_y as usize * 256 + z.rem_euclid(16) as usize * 16 + x.rem_euclid(16) as usize
+    }
+
+    /// Stores a sky light level, allocating its layer if needed.
+    #[cfg(feature = "cpu-bench")]
+    pub(crate) fn set_sky_light(&mut self, x: i32, y: i32, z: i32, level: u8) {
+        let i = Self::nibble_index(x, (y - self.min_y).rem_euclid(16), z);
+        let layer_index = self.layer_index(y) as usize;
+        let layer = self.sky_sections[layer_index].get_or_insert_with(|| Box::new([0; 2048]));
+        let (keep, shift) = if i.is_multiple_of(2) {
+            (0xF0, 0)
+        } else {
+            (0x0F, 4)
+        };
+        layer[i / 2] = (layer[i / 2] & keep) | (level & 0x0F) << shift;
+    }
+
     fn nibble(data: &[u8; 2048], x: i32, local_y: i32, z: i32) -> u8 {
-        let lx = x.rem_euclid(16) as usize;
-        let lz = z.rem_euclid(16) as usize;
-        let idx = local_y as usize * 256 + lz * 16 + lx;
+        let idx = Self::nibble_index(x, local_y, z);
         let byte = data[idx / 2];
         if idx.is_multiple_of(2) {
             byte & 0x0F

@@ -903,6 +903,7 @@ impl MeshDispatcher {
             height: chunk_store.height(),
             blocks: None,
             climates: None,
+            light_levels: None,
         }
     }
 
@@ -1217,6 +1218,8 @@ struct ChunkStoreSnapshot {
     blocks: Option<BlockSlice>,
     /// The meshed span's biome climates, filled as tints sample them.
     climates: Option<ClimateCache>,
+    /// The meshed span's light levels, filled as faces sample them.
+    light_levels: Option<LazyGrid<u8>>,
 }
 
 /// An axis-aligned box of grid cells, laid out X-major then Z, Y innermost
@@ -1227,6 +1230,14 @@ struct GridBox {
 }
 
 impl GridBox {
+    /// The meshed span `ys` of column `pos`, plus a one-block border.
+    fn bordered_column(pos: ChunkPos, ys: std::ops::Range<i32>) -> Self {
+        Self::spanning(
+            [pos.x * 16 - 1, ys.start - 1, pos.z * 16 - 1],
+            [pos.x * 16 + 16, ys.end, pos.z * 16 + 16],
+        )
+    }
+
     fn spanning(min: [i32; 3], max_inclusive: [i32; 3]) -> Self {
         let size = std::array::from_fn(|i| max_inclusive[i] - min[i] + 1);
         Self { min, size }
@@ -1245,13 +1256,38 @@ impl GridBox {
     }
 }
 
+/// A [`GridBox`] of values computed on first read.
+struct LazyGrid<T: Copy> {
+    cells: GridBox,
+    slots: Vec<std::cell::Cell<Option<T>>>,
+}
+
+impl<T: Copy> LazyGrid<T> {
+    fn new(cells: GridBox) -> Self {
+        Self {
+            slots: vec![std::cell::Cell::new(None); cells.len()],
+            cells,
+        }
+    }
+
+    /// The cached value at `cell`, computing it with `f` on first read, or
+    /// `None` outside the grid.
+    fn get_or_insert_with(&self, cell: [i32; 3], f: impl FnOnce() -> T) -> Option<T> {
+        let slot = &self.slots[self.cells.index(cell)?];
+        Some(slot.get().unwrap_or_else(|| {
+            let value = f();
+            slot.set(Some(value));
+            value
+        }))
+    }
+}
+
 /// Biome climate per biome cell (4 blocks in X/Z, exact Y) over the meshed
 /// span plus the tint blend radius: each tinted face blends 25 samples, and
 /// neighbouring faces share nearly all of them.
 struct ClimateCache {
-    cells: GridBox,
-    /// Per cell, 1 + its index into `climates`, or 0 before first use.
-    slots: Vec<std::cell::Cell<u16>>,
+    /// Per cell, its index into `climates`.
+    indices: LazyGrid<u16>,
     /// Distinct `(biome id, climate)` pairs seen so far.
     climates: std::cell::RefCell<Vec<(u32, BiomeClimate)>>,
 }
@@ -1261,23 +1297,17 @@ impl ClimateCache {
         // A tint samples its block's Y or one off it (`tint_sample_y`), blended
         // over the X/Z radius around blocks up to one outside the column.
         let reach = 1 + DEFAULT_BIOME_BLEND_RADIUS;
-        let cells = GridBox::spanning(
-            Self::cell([pos.x * 16 - reach, ys.start - 2, pos.z * 16 - reach]),
-            Self::cell([pos.x * 16 + 15 + reach, ys.end + 1, pos.z * 16 + 15 + reach]),
-        );
         Self {
-            slots: vec![std::cell::Cell::new(0); cells.len()],
-            cells,
+            indices: LazyGrid::new(GridBox::spanning(
+                Self::cell([pos.x * 16 - reach, ys.start - 2, pos.z * 16 - reach]),
+                Self::cell([pos.x * 16 + 15 + reach, ys.end + 1, pos.z * 16 + 15 + reach]),
+            )),
             climates: Default::default(),
         }
     }
 
     fn cell([x, y, z]: [i32; 3]) -> [i32; 3] {
         [x.div_euclid(4), y, z.div_euclid(4)]
-    }
-
-    fn slot(&self, x: i32, y: i32, z: i32) -> Option<&std::cell::Cell<u16>> {
-        Some(&self.slots[self.cells.index(Self::cell([x, y, z]))?])
     }
 }
 
@@ -1300,10 +1330,7 @@ impl BlockSlice {
         min_y: i32,
         ys: std::ops::Range<i32>,
     ) -> Self {
-        let blocks = GridBox::spanning(
-            [pos.x * 16 - 1, ys.start - 1, pos.z * 16 - 1],
-            [pos.x * 16 + 16, ys.end, pos.z * 16 + 16],
-        );
+        let blocks = GridBox::bordered_column(pos, ys);
         let mut states = vec![azalea_block::BlockState::AIR; blocks.len()];
         let [min_x, min_y_box, min_z] = blocks.min;
         let [size_x, size_y, size_z] = blocks.size;
@@ -1397,26 +1424,27 @@ impl ChunkStoreSnapshot {
 
     fn climate_at(&self, x: i32, y: i32, z: i32) -> BiomeClimate {
         let biome = || u32::from(self.get_biome(x, y, z));
-        let Some((cache, slot)) = self
-            .climates
-            .as_ref()
-            .and_then(|cache| Some((cache, cache.slot(x, y, z)?)))
-        else {
+        let Some(cache) = &self.climates else {
             return self.biome_climate_of(biome());
         };
-        let mut climates = cache.climates.borrow_mut();
-        if slot.get() == 0 {
-            let biome = biome();
-            let i = climates
-                .iter()
-                .position(|&(b, _)| b == biome)
-                .unwrap_or_else(|| {
-                    climates.push((biome, self.biome_climate_of(biome)));
-                    climates.len() - 1
-                });
-            slot.set(i as u16 + 1);
+        let index = cache
+            .indices
+            .get_or_insert_with(ClimateCache::cell([x, y, z]), || {
+                let biome = biome();
+                let mut climates = cache.climates.borrow_mut();
+                let i = climates
+                    .iter()
+                    .position(|&(b, _)| b == biome)
+                    .unwrap_or_else(|| {
+                        climates.push((biome, self.biome_climate_of(biome)));
+                        climates.len() - 1
+                    });
+                i as u16
+            });
+        match index {
+            Some(i) => cache.climates.borrow()[i as usize].1,
+            None => self.biome_climate_of(biome()),
         }
-        climates[slot.get() as usize - 1].1
     }
 
     fn biome_climate_of(&self, biome: u32) -> BiomeClimate {
@@ -1456,17 +1484,21 @@ impl ChunkStoreSnapshot {
     }
 
     fn get_light(&self, x: i32, y: i32, z: i32) -> f32 {
-        let cx = x.div_euclid(16);
-        let cz = z.div_euclid(16);
-        let lx = x.rem_euclid(16);
-        let lz = z.rem_euclid(16);
-        let level = if let Some(light) = self.light.get(&(cx, cz)) {
-            light
-                .get_sky_light(lx, y, lz)
-                .max(light.get_block_light(lx, y, lz))
-        } else {
-            15
+        let level = || {
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            match self.light.get(&(x.div_euclid(16), z.div_euclid(16))) {
+                Some(light) => light
+                    .get_sky_light(lx, y, lz)
+                    .max(light.get_block_light(lx, y, lz)),
+                None => 15,
+            }
         };
+        let level = self
+            .light_levels
+            .as_ref()
+            .and_then(|levels| levels.get_or_insert_with([x, y, z], level))
+            .unwrap_or_else(level);
         LIGHT_TABLE[level as usize]
     }
 }
@@ -1548,6 +1580,10 @@ fn mesh_chunk_snapshot(
         by_start..by_end,
     ));
     snapshot.climates = Some(ClimateCache::new(pos, by_start..by_end));
+    snapshot.light_levels = Some(LazyGrid::new(GridBox::bordered_column(
+        pos,
+        by_start..by_end,
+    )));
     let snapshot = &*snapshot;
 
     let mut visibility = Vec::with_capacity(range.len());
@@ -2379,13 +2415,38 @@ fn compute_face_ao(
     dir: Direction,
     shade_face: Option<Direction>,
 ) -> [f32; 4] {
-    let s = |[dx, dy, dz]: [i32; 3]| -> f32 {
-        shade_brightness(
-            snapshot.get_block_state(bx + dx, by + dy, bz + dz),
-            registry,
-        )
+    // Every sample lies in the face's 3×3 neighbour plane (`n` plus in-plane
+    // offsets), so read each of its cells once.
+    let n = dir.offset();
+    let normal_axis = n.iter().position(|&c| c != 0).expect("unit offset");
+    let [a, b] = match normal_axis {
+        0 => [1, 2],
+        1 => [0, 2],
+        _ => [0, 1],
     };
-    let l = |[dx, dy, dz]: [i32; 3]| -> f32 { snapshot.get_light(bx + dx, by + dy, bz + dz) };
+    let cell = |o: [i32; 3]| ((o[a] + 1) * 3 + o[b] + 1) as usize;
+    let offset = |i: usize| {
+        let mut o = n;
+        o[a] = i as i32 / 3 - 1;
+        o[b] = i as i32 % 3 - 1;
+        o
+    };
+    let at = |[dx, dy, dz]: [i32; 3]| [bx + dx, by + dy, bz + dz];
+    let shades: [f32; 9] = std::array::from_fn(|i| {
+        let [x, y, z] = at(offset(i));
+        // The centre (`n` itself) never feeds AO.
+        if i == 4 {
+            1.0
+        } else {
+            shade_brightness(snapshot.get_block_state(x, y, z), registry)
+        }
+    });
+    let lights: [f32; 9] = std::array::from_fn(|i| {
+        let [x, y, z] = at(offset(i));
+        snapshot.get_light(x, y, z)
+    });
+    let s = |o: [i32; 3]| shades[cell(o)];
+    let l = |o: [i32; 3]| lights[cell(o)];
 
     let shade0 = s(corners0_offset(dir));
 
@@ -2430,7 +2491,6 @@ fn compute_face_ao(
         ],
     };
 
-    let n = dir.offset();
     let dir_shade = snapshot.shade(shade_face);
     rows.map(|[side1, side2, corner]| {
         let ao = super::block_ao::vertex_brightness(s(side1), s(side2), s(corner), shade0);
