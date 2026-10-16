@@ -323,6 +323,15 @@ pub enum CreativeAction {
     SetSlot(u16, ItemStack),
     /// Set several slots at once (drag distribution).
     SetSlots(Vec<(u16, ItemStack)>),
+    /// Drop an item stack into the world (creative mode drop via slot -1).
+    DropItem(ItemStack),
+    /// Drop from a real inventory slot: updates the slot and drops the stack
+    /// into the world.
+    DropSlot {
+        slot: u16,
+        dropped: ItemStack,
+        remaining: ItemStack,
+    },
 }
 
 /// Panel scale and top-left origin, centered on screen.
@@ -379,6 +388,8 @@ pub fn build_creative_inventory(
     chat_key: bool,
     hotbar_swap: Option<u8>,
     swap_offhand: bool,
+    drop_key: bool,
+    drop_all: bool,
     inventory: &Inventory,
     gs: f32,
     advanced_tooltips: bool,
@@ -408,6 +419,7 @@ pub fn build_creative_inventory(
         }
     };
     let mut swap_consumed_digit = false;
+    let mut drop_consumed_q = false;
 
     let (scale, ox, oy) = panel_layout(screen_w, screen_h, gs);
     let inv_w = TEX_W * scale;
@@ -529,6 +541,18 @@ pub fn build_creative_inventory(
                             stack_with_count(data, data.kind.max_stack_size()),
                         );
                         swap_consumed_digit = hotbar_swap.is_some();
+                    } else if drop_key
+                        && matches!(action, CreativeAction::None)
+                        && state.cursor_item.is_empty()
+                        && let ItemStack::Present(data) = &item
+                    {
+                        let count = if drop_all {
+                            data.kind.max_stack_size()
+                        } else {
+                            1
+                        };
+                        action = CreativeAction::DropItem(stack_with_count(data, count));
+                        drop_consumed_q = true;
                     } else if middle_clicked
                         && state.cursor_item.is_empty()
                         && let ItemStack::Present(data) = &item
@@ -637,8 +661,32 @@ pub fn build_creative_inventory(
         }
     }
 
-    // TODO: Q over a hovered item should drop it into the world (vanilla
-    // sends SetCreativeModeSlot with slot -1 via handleCreativeModeItemDrop).
+    // Drop item from a hovered real slot (vanilla sends SetCreativeModeSlot with
+    // slot -1 via handleCreativeModeItemDrop).
+    if drop_key
+        && matches!(action, CreativeAction::None)
+        && state.drag.is_none()
+        && state.cursor_item.is_empty()
+        && let Some(hit) = &real_hit
+        && hit.slot != SLOT_TRASH
+    {
+        let hovered_item = inventory.slot(hit.slot as usize);
+        if let ItemStack::Present(data) = hovered_item {
+            let (dropped, remaining) = if drop_all || data.count <= 1 {
+                (ItemStack::Present(data.clone()), ItemStack::Empty)
+            } else {
+                let mut rem = data.clone();
+                rem.count -= 1;
+                (stack_with_count(data, 1), ItemStack::Present(rem))
+            };
+            action = CreativeAction::DropSlot {
+                slot: hit.slot,
+                dropped,
+                remaining,
+            };
+            drop_consumed_q = true;
+        }
+    }
 
     // Keyboard hotbar swap on a hovered real slot (vanilla routes it through
     // AbstractContainerScreen.checkHotbarKeyPressed → inventoryMenu SWAP).
@@ -673,7 +721,7 @@ pub fn build_creative_inventory(
         let wf = |t: &str| text_width_fn(t, fs);
         for ev in events {
             if let crate::ui::text_edit::TextInputEvent::Char(c) = ev
-                && Some(*c) == skip_digit
+                && (Some(*c) == skip_digit || (drop_consumed_q && (*c == 'q' || *c == 'Q')))
             {
                 continue;
             }
@@ -684,11 +732,28 @@ pub fn build_creative_inventory(
     push_tab_tooltip(elements, ox, oy, scale, &tt);
 
     let outside = !hit_test(cursor, [ox, oy, inv_w, inv_h]);
-    if clicked && outside && tab_hit.is_none() && matches!(action, CreativeAction::None) {
-        if state.cursor_item.is_present() {
-            // TODO: drop the carried item into the world; for now just discard it.
-            state.cursor_item = ItemStack::Empty;
-        } else {
+    if (clicked || right_clicked)
+        && outside
+        && tab_hit.is_none()
+        && matches!(action, CreativeAction::None)
+    {
+        if let ItemStack::Present(carried) = &state.cursor_item {
+            let (dropped, remaining) = if clicked {
+                (state.cursor_item.clone(), ItemStack::Empty)
+            } else {
+                let mut rem = carried.clone();
+                rem.count -= 1;
+                let single = stack_with_count(carried, 1);
+                let remaining = if rem.count > 0 {
+                    ItemStack::Present(rem)
+                } else {
+                    ItemStack::Empty
+                };
+                (single, remaining)
+            };
+            state.cursor_item = remaining;
+            action = CreativeAction::DropItem(dropped);
+        } else if clicked {
             action = CreativeAction::Close;
         }
     }
@@ -1559,5 +1624,277 @@ mod tests {
         assert!(
             player_preview(&state, 390.0, 272.0, (200.0, 100.0), &Inventory::new(), 2.0,).is_none()
         );
+    }
+
+    #[test]
+    fn drop_from_real_slot_single_and_all() {
+        let mut state = CreativeState::new();
+        let mut inv = Inventory::new();
+        inv.set_slot(36, ItemStack::new(ItemKind::Stone, 5));
+
+        let (scale, ox, oy) = panel_layout(390.0, 272.0, 2.0);
+        let (slot_x, slot_y) = slot_xy(
+            ox,
+            oy,
+            scale,
+            GRID_ORIGIN_X + 0.5 * SLOT_STRIDE,
+            HOTBAR_Y + 0.5 * SLOT_STRIDE,
+        );
+        let cursor = (slot_x, slot_y);
+
+        // Drop single item (Q without ctrl)
+        let mut elements = Vec::new();
+        let action = build_creative_inventory(
+            &mut elements,
+            &mut state,
+            390.0,
+            272.0,
+            cursor,
+            false,
+            false,
+            false,
+            0.0,
+            &[],
+            false,
+            None,
+            false,
+            true,
+            false,
+            &inv,
+            2.0,
+            false,
+            false,
+            false,
+            &|_, _| 0.0,
+        );
+
+        match action {
+            CreativeAction::DropSlot {
+                slot,
+                dropped,
+                remaining,
+            } => {
+                assert_eq!(slot, 36);
+                assert_eq!(dropped.count(), 1);
+                assert_eq!(remaining.count(), 4);
+            }
+            _ => panic!(
+                "expected DropSlot action, got {:?}",
+                std::mem::discriminant(&action)
+            ),
+        }
+
+        // Drop whole stack (Ctrl+Q)
+        let mut elements = Vec::new();
+        let action_all = build_creative_inventory(
+            &mut elements,
+            &mut state,
+            390.0,
+            272.0,
+            cursor,
+            false,
+            false,
+            false,
+            0.0,
+            &[],
+            false,
+            None,
+            false,
+            true,
+            true,
+            &inv,
+            2.0,
+            false,
+            false,
+            false,
+            &|_, _| 0.0,
+        );
+
+        match action_all {
+            CreativeAction::DropSlot {
+                slot,
+                dropped,
+                remaining,
+            } => {
+                assert_eq!(slot, 36);
+                assert_eq!(dropped.count(), 5);
+                assert!(remaining.is_empty());
+            }
+            _ => panic!(
+                "expected DropSlot action, got {:?}",
+                std::mem::discriminant(&action_all)
+            ),
+        }
+    }
+
+    #[test]
+    fn drop_from_catalog_grid() {
+        let mut state = CreativeState::new();
+        let inv = Inventory::new();
+
+        let (scale, ox, oy) = panel_layout(390.0, 272.0, 2.0);
+        let (slot_x, slot_y) = slot_xy(
+            ox,
+            oy,
+            scale,
+            GRID_ORIGIN_X + 0.5 * SLOT_STRIDE,
+            GRID_ORIGIN_Y + 0.5 * SLOT_STRIDE,
+        );
+        let cursor = (slot_x, slot_y);
+
+        // Single drop from catalog
+        let mut elements = Vec::new();
+        let action = build_creative_inventory(
+            &mut elements,
+            &mut state,
+            390.0,
+            272.0,
+            cursor,
+            false,
+            false,
+            false,
+            0.0,
+            &[],
+            false,
+            None,
+            false,
+            true,
+            false,
+            &inv,
+            2.0,
+            false,
+            false,
+            false,
+            &|_, _| 0.0,
+        );
+
+        match action {
+            CreativeAction::DropItem(dropped) => {
+                assert_eq!(dropped.count(), 1);
+            }
+            _ => panic!(
+                "expected DropItem action, got {:?}",
+                std::mem::discriminant(&action)
+            ),
+        }
+
+        // Full stack drop from catalog (Ctrl+Q)
+        let mut elements = Vec::new();
+        let action_all = build_creative_inventory(
+            &mut elements,
+            &mut state,
+            390.0,
+            272.0,
+            cursor,
+            false,
+            false,
+            false,
+            0.0,
+            &[],
+            false,
+            None,
+            false,
+            true,
+            true,
+            &inv,
+            2.0,
+            false,
+            false,
+            false,
+            &|_, _| 0.0,
+        );
+
+        match action_all {
+            CreativeAction::DropItem(dropped) => {
+                assert_eq!(dropped.count(), 64);
+            }
+            _ => panic!(
+                "expected DropItem action, got {:?}",
+                std::mem::discriminant(&action_all)
+            ),
+        }
+    }
+
+    #[test]
+    fn drop_carried_item_clicking_outside() {
+        let mut state = CreativeState::new();
+        state.cursor_item = ItemStack::new(ItemKind::Stone, 5);
+        let inv = Inventory::new();
+        let cursor = (10.0, 10.0); // Outside the centered panel on 800x600 screen
+
+        // Left-click outside: drops entire stack
+        let mut elements = Vec::new();
+        let action = build_creative_inventory(
+            &mut elements,
+            &mut state,
+            800.0,
+            600.0,
+            cursor,
+            true,
+            false,
+            false,
+            0.0,
+            &[],
+            false,
+            None,
+            false,
+            false,
+            false,
+            &inv,
+            2.0,
+            false,
+            false,
+            false,
+            &|_, _| 0.0,
+        );
+
+        match action {
+            CreativeAction::DropItem(dropped) => {
+                assert_eq!(dropped.count(), 5);
+                assert!(state.cursor_item.is_empty());
+            }
+            _ => panic!(
+                "expected DropItem action, got {:?}",
+                std::mem::discriminant(&action)
+            ),
+        }
+
+        // Right-click outside: drops 1 item, retains remainder
+        state.cursor_item = ItemStack::new(ItemKind::Stone, 5);
+        let mut elements = Vec::new();
+        let action_right = build_creative_inventory(
+            &mut elements,
+            &mut state,
+            800.0,
+            600.0,
+            cursor,
+            false,
+            false,
+            true,
+            0.0,
+            &[],
+            false,
+            None,
+            false,
+            false,
+            false,
+            &inv,
+            2.0,
+            false,
+            false,
+            false,
+            &|_, _| 0.0,
+        );
+
+        match action_right {
+            CreativeAction::DropItem(dropped) => {
+                assert_eq!(dropped.count(), 1);
+                assert_eq!(state.cursor_item.count(), 4);
+            }
+            _ => panic!(
+                "expected DropItem action, got {:?}",
+                std::mem::discriminant(&action_right)
+            ),
+        }
     }
 }
