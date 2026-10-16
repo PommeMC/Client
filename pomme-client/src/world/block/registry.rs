@@ -154,9 +154,9 @@ impl BlockRegistry {
     }
 
     /// Resolves a held item's registry name (unprefixed, e.g. `"stone"`) to the
-    /// `BlockState` to predict on placement in the active protocol's state space,
-    /// or `None` if the item is not a single-state block. Item and block share
-    /// a registry name for this set.
+    /// `BlockState` to predict on placement in the active protocol's state
+    /// space, or `None` if the item is not a single-state block. Item and
+    /// block share a registry name for this set.
     pub fn placeable_block_for_item(&self, item_name: &str) -> Option<BlockState> {
         super::placeable_block_for_item(item_name)
     }

@@ -925,9 +925,9 @@ fn all_states() -> impl Iterator<Item = (BlockState, &'static BlockData)> {
     })
 }
 
-/// Resolves a held item's registry name to the `BlockState` to predict on placement
-/// in the currently active protocol's state space, or `None` if the item is not a
-/// single-state block.
+/// Resolves a held item's registry name to the `BlockState` to predict on
+/// placement in the currently active protocol's state space, or `None` if the
+/// item is not a single-state block.
 pub fn placeable_block_for_item(item_name: &str) -> Option<BlockState> {
     let slot = ACTIVE_TABLE.load(std::sync::atomic::Ordering::Acquire);
     let map = PLACEABLE_BLOCKS[slot].get_or_init(|| {
@@ -1854,16 +1854,21 @@ mod tests {
 
     #[test]
     fn placeable_block_tracks_active_protocol() {
-        // Test that placeable_block_for_item returns the state ID matching the active protocol.
+        // Test that placeable_block_for_item returns the state ID matching the active
+        // protocol.
         set_active_protocol(777); // 26.3
-        let obsidian_26_3 = placeable_block_for_item("obsidian").expect("obsidian should be placeable");
-        let blackstone_26_3 = placeable_block_for_item("blackstone").expect("blackstone should be placeable");
+        let obsidian_26_3 =
+            placeable_block_for_item("obsidian").expect("obsidian should be placeable");
+        let blackstone_26_3 =
+            placeable_block_for_item("blackstone").expect("blackstone should be placeable");
         assert_eq!(block_id(obsidian_26_3), "obsidian");
         assert_eq!(block_id(blackstone_26_3), "blackstone");
 
         set_active_protocol(pomme_protocol::version::NATIVE.protocol); // 26.2
-        let obsidian_26_2 = placeable_block_for_item("obsidian").expect("obsidian should be placeable");
-        let blackstone_26_2 = placeable_block_for_item("blackstone").expect("blackstone should be placeable");
+        let obsidian_26_2 =
+            placeable_block_for_item("obsidian").expect("obsidian should be placeable");
+        let blackstone_26_2 =
+            placeable_block_for_item("blackstone").expect("blackstone should be placeable");
         assert_eq!(block_id(obsidian_26_2), "obsidian");
         assert_eq!(block_id(blackstone_26_2), "blackstone");
 
