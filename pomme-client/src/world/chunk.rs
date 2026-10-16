@@ -317,19 +317,24 @@ impl ChunkStore {
     }
 }
 
+/// The section holding world `y`, or `None` outside the chunk's height.
+pub fn section_at(chunk: &Chunk, y: i32, min_y: i32) -> Option<&azalea_world::chunk::Section> {
+    // div_euclid so below-world y maps out of range instead of truncating
+    // into section 0; vanilla getSectionIndex floors.
+    let section_idx = usize::try_from((y - min_y).div_euclid(16)).ok()?;
+    chunk.sections.get(section_idx)
+}
+
 pub fn block_state_from_section(chunk: &Chunk, x: i32, y: i32, z: i32, min_y: i32) -> BlockState {
-    // div_euclid so below-world y maps out of range (-> AIR) instead of
-    // truncating into section 0; vanilla getSectionIndex floors.
-    let section_idx = (y - min_y).div_euclid(16) as usize;
-    if section_idx >= chunk.sections.len() {
+    let Some(section) = section_at(chunk, y, min_y) else {
         return BlockState::AIR;
-    }
+    };
 
     let local_x = x.rem_euclid(16) as u8;
     let local_y = (y - min_y).rem_euclid(16) as u8;
     let local_z = z.rem_euclid(16) as u8;
 
-    chunk.sections[section_idx].get_block_state(azalea_core::position::ChunkSectionBlockPos {
+    section.get_block_state(azalea_core::position::ChunkSectionBlockPos {
         x: local_x,
         y: local_y,
         z: local_z,
