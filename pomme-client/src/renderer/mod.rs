@@ -1077,6 +1077,11 @@ impl Renderer {
         self.chunk_buffers.clear();
     }
 
+    /// Rebuild state caches after the server protocol switches the block table.
+    pub fn rebuild_block_state_tables(&mut self) {
+        self.registry.build_state_tables();
+    }
+
     pub fn registry(&self) -> &BlockRegistry {
         &self.registry
     }

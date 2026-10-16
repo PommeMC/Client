@@ -1642,7 +1642,7 @@ fn mesh_chunk_snapshot(
                     );
                 } else if let Some(quads) = registry.get_multipart_quads(state) {
                     emit_multipart(
-                        sink, model_pos, state, &quads, snapshot, registry, uv_map, bx, by, bz,
+                        sink, model_pos, state, quads, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else if let Some(textures) = registry.get_textures(state) {
                     emit_cube_faces(
@@ -2131,7 +2131,7 @@ fn emit_multipart(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
     state: azalea_block::BlockState,
-    quads: &[&crate::world::block::model::BakedQuad],
+    quads: &[crate::world::block::model::BakedQuad],
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
     uv_map: &AtlasUVMap,

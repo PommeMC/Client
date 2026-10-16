@@ -1303,6 +1303,8 @@ impl AppCore {
                     game.section_vis_epoch.clear();
                     game.meshed.clear();
                     game.compiled.clear();
+                    // Rebuild before the dispatcher clones the registry for this world.
+                    renderer.rebuild_block_state_tables();
                     game.mesh_dispatcher = renderer.create_mesh_dispatcher(
                         Arc::clone(&game.biome_climate),
                         None,
