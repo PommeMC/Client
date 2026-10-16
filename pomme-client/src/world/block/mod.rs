@@ -1861,19 +1861,26 @@ mod tests {
             placeable_block_for_item("obsidian").expect("obsidian should be placeable");
         let blackstone_26_3 =
             placeable_block_for_item("blackstone").expect("blackstone should be placeable");
+        let redstone_block_26_3 =
+            placeable_block_for_item("redstone_block").expect("redstone_block should be placeable");
         assert_eq!(block_id(obsidian_26_3), "obsidian");
         assert_eq!(block_id(blackstone_26_3), "blackstone");
+        assert_eq!(block_id(redstone_block_26_3), "redstone_block");
 
         set_active_protocol(pomme_protocol::version::NATIVE.protocol); // 26.2
         let obsidian_26_2 =
             placeable_block_for_item("obsidian").expect("obsidian should be placeable");
         let blackstone_26_2 =
             placeable_block_for_item("blackstone").expect("blackstone should be placeable");
+        let redstone_block_26_2 =
+            placeable_block_for_item("redstone_block").expect("redstone_block should be placeable");
         assert_eq!(block_id(obsidian_26_2), "obsidian");
         assert_eq!(block_id(blackstone_26_2), "blackstone");
+        assert_eq!(block_id(redstone_block_26_2), "redstone_block");
 
         // The state IDs in 26.3 and 26.2 differ due to protocol shifts.
         assert_ne!(obsidian_26_3, obsidian_26_2);
         assert_ne!(blackstone_26_3, blackstone_26_2);
+        assert_ne!(redstone_block_26_3, redstone_block_26_2);
     }
 }
