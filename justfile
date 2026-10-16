@@ -29,6 +29,11 @@ client-release *args: openal
     #!/usr/bin/env bash
     cargo run --release -p pomme-client -- --launch-token "$(mktemp)" {{ args }}
 
+# Headless CPU benchmarks (mesher, fade rebuild, occlusion), no window or GPU.
+# An optional filter runs only matching benches, e.g. `just bench mesh`.
+bench *args:
+    @cargo run --release -p pomme-client --features cpu-bench -- --cpu-bench {{ args }}
+
 client-build *args: openal
     @cargo build -p pomme-client {{ args }}
 

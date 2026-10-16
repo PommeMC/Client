@@ -265,12 +265,7 @@ impl Renderer {
 
         splash(&mut menu_pipeline, 0.2, "Building texture atlas...");
 
-        let generated_item_textures: HashSet<&str> = registry.flat_item_textures().collect();
-        let texture_names: HashSet<&str> = registry
-            .texture_names()
-            .chain(generated_item_textures.iter().copied())
-            .chain(crate::particle::END_ROD_SPRITES)
-            .collect();
+        let (texture_names, generated_item_textures) = chunk::atlas::atlas_texture_names(&registry);
         let atlas = TextureAtlas::build(
             &ctx.device,
             ctx.graphics_queue,
@@ -1093,30 +1088,12 @@ impl Renderer {
         packs: Option<&crate::resource_pack::ResourcePackManager>,
         cardinal_light: crate::world::block::model::CardinalLightType,
     ) -> MeshDispatcher {
-        let grass_colormap = crate::renderer::chunk::mesher::Colormap::load(
-            &self.jar_assets_dir,
-            &self.asset_index,
-            "minecraft/textures/colormap/grass.png",
-            packs,
-        );
-        let foliage_colormap = crate::renderer::chunk::mesher::Colormap::load(
-            &self.jar_assets_dir,
-            &self.asset_index,
-            "minecraft/textures/colormap/foliage.png",
-            packs,
-        );
-        let dry_foliage_colormap = crate::renderer::chunk::mesher::Colormap::load(
-            &self.jar_assets_dir,
-            &self.asset_index,
-            "minecraft/textures/colormap/dry_foliage.png",
-            packs,
-        );
-        MeshDispatcher::new(
+        MeshDispatcher::load(
             self.registry.clone(),
             self.atlas.uv_map.clone(),
-            grass_colormap,
-            foliage_colormap,
-            dry_foliage_colormap,
+            &self.jar_assets_dir,
+            &self.asset_index,
+            packs,
             biome_climate,
             cardinal_light.table(),
         )
@@ -1252,14 +1229,8 @@ impl Renderer {
         self.item_entity_pipeline
             .clear_meshes(&self.ctx.device, &self.ctx.allocator);
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
-        let generated_item_textures: std::collections::HashSet<&str> =
-            self.registry.flat_item_textures().collect();
-        let texture_names: std::collections::HashSet<&str> = self
-            .registry
-            .texture_names()
-            .chain(generated_item_textures.iter().copied())
-            .chain(crate::particle::END_ROD_SPRITES)
-            .collect();
+        let (texture_names, generated_item_textures) =
+            chunk::atlas::atlas_texture_names(&self.registry);
         self.atlas = TextureAtlas::build(
             &self.ctx.device,
             self.ctx.graphics_queue,

@@ -12,8 +12,8 @@ use thiserror::Error;
 
 use super::block_entity::StoredBlockEntity;
 
-const OVERWORLD_HEIGHT: u32 = 384;
-const OVERWORLD_MIN_Y: i32 = -64;
+pub(crate) const OVERWORLD_HEIGHT: u32 = 384;
+pub(crate) const OVERWORLD_MIN_Y: i32 = -64;
 
 /// `pos` and its four axis-neighbor chunks. This is both the neighborhood a
 /// chunk's mesh samples (see `MeshDispatcher::enqueue`) and, by symmetry, the

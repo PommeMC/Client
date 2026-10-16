@@ -11,6 +11,8 @@ mod attribute;
 mod audio;
 mod benchmark;
 mod chat_component;
+#[cfg(feature = "cpu-bench")]
+mod cpu_bench;
 mod dirs;
 mod discord;
 mod entity;
@@ -44,6 +46,14 @@ use crate::user::UserData;
 
 fn main() {
     let args = args::LaunchArgs::parse();
+
+    // Ahead of the launch-token guard, which bench builds have no launcher for.
+    #[cfg(feature = "cpu-bench")]
+    if let Some(filter) = &args.cpu_bench {
+        let version = args.version.as_deref().unwrap_or(NATIVE.name);
+        let data_dirs = args.data_dirs(version);
+        std::process::exit(cpu_bench::run(version, &data_dirs, filter.as_deref()));
+    }
 
     #[cfg(not(debug_assertions))]
     {
@@ -87,12 +97,7 @@ fn main() {
         }
     }
 
-    let data_dirs = dirs::DataDirs::resolve(
-        version,
-        args.assets_dir.as_deref(),
-        args.versions_dir.as_deref(),
-        args.game_dir.as_deref(),
-    );
+    let data_dirs = args.data_dirs(version);
 
     let log_dir = data_dirs.game_dir.join("logs");
     std::fs::create_dir_all(&log_dir).unwrap();

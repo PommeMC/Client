@@ -705,6 +705,36 @@ pub struct MeshDispatcher {
 }
 
 impl MeshDispatcher {
+    /// [`Self::new`] with the grass, foliage and dry-foliage colormaps loaded
+    /// from the assets (and resource packs).
+    pub fn load(
+        registry: BlockRegistry,
+        uv_map: AtlasUVMap,
+        jar_assets_dir: &std::path::Path,
+        asset_index: &Option<crate::assets::AssetIndex>,
+        packs: Option<&crate::resource_pack::ResourcePackManager>,
+        biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+        cardinal_lighting: CardinalLighting,
+    ) -> Self {
+        let colormap = |name| {
+            Colormap::load(
+                jar_assets_dir,
+                asset_index,
+                &format!("minecraft/textures/colormap/{name}.png"),
+                packs,
+            )
+        };
+        Self::new(
+            registry,
+            uv_map,
+            colormap("grass"),
+            colormap("foliage"),
+            colormap("dry_foliage"),
+            biome_climate,
+            cardinal_lighting,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: BlockRegistry,
