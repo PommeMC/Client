@@ -277,11 +277,12 @@ pub struct GameState {
     /// `content_gen` outruns what was last enqueued, regardless of visibility,
     /// so an edit to a deferred/hidden column can never be lost.
     pub content_gen: HashMap<ChunkPos, u64>,
-    /// What was most recently meshed for each column: the LOD, the column
-    /// `content_gen`, and the bitmask of section indices already meshed. The
-    /// re-scan meshes only sections newly made visible (or re-meshes all on a
-    /// lod/content change), so hidden sections never mesh.
-    pub meshed: HashMap<ChunkPos, MeshedCol>,
+    /// Atomic-style section dirtiness represented compactly per column. The
+    /// rescan snapshots and sorts only columns with pending bits.
+    pub dirty_sections: HashMap<ChunkPos, u32>,
+    /// Detail level used when the dirty set was last scheduled. Changing it
+    /// invalidates every loaded column's mesh LOD.
+    pub last_mesh_detail: Option<u32>,
     /// Per-column bitmask of currently-visible section indices (bit `si` set =
     /// section is in-frustum and not occluded). Computed in
     /// `update_visibility`.
@@ -319,15 +320,6 @@ pub struct GameState {
     /// off, only frustum culling applies (full masks pushed to the
     /// renderer).
     pub chunk_occlusion_enabled: bool,
-}
-
-/// What a column was last meshed as: LOD, content generation, and the set of
-/// section indices (bitmask) that have been meshed so far.
-#[derive(Clone, Copy)]
-pub struct MeshedCol {
-    pub lod: u32,
-    pub content_gen: u64,
-    pub mask: u32,
 }
 
 impl GameState {
@@ -470,7 +462,8 @@ impl GameState {
             chunk_load_upload: None,
             last_update_phases: crate::benchmark::UpdatePhases::default(),
             content_gen: HashMap::new(),
-            meshed: HashMap::new(),
+            dirty_sections: HashMap::new(),
+            last_mesh_detail: None,
             vis_mask: HashMap::new(),
             section_gen: HashMap::new(),
             next_section_gen: 0,
@@ -957,6 +950,10 @@ impl GameState {
     pub fn bump_content_gen(&mut self, pos: ChunkPos) -> u64 {
         let g = self.content_gen.entry(pos).or_insert(0);
         *g += 1;
+        self.dirty_sections
+            .entry(pos)
+            .and_modify(|mask| *mask |= section_mask(self.chunk_store.section_count()))
+            .or_insert_with(|| section_mask(self.chunk_store.section_count()));
         *g
     }
 
@@ -1054,6 +1051,10 @@ impl GameState {
         self.next_section_gen += 1;
         for si in sections {
             self.section_gen.insert((col, si), self.next_section_gen);
+            self.dirty_sections
+                .entry(col)
+                .and_modify(|mask| *mask |= section_bit(si))
+                .or_insert_with(|| section_bit(si));
         }
         self.next_section_gen
     }
@@ -1169,21 +1170,29 @@ impl GameState {
                 self.section_vis.insert((pos, si), vis);
             }
         }
+        let remaining = self.dirty_sections.get(&pos).copied().unwrap_or(0)
+            & !section_bits(mesh.replaced.clone());
+        if remaining == 0 {
+            self.dirty_sections.remove(&pos);
+        } else {
+            self.dirty_sections.insert(pos, remaining);
+        }
         *self.compiled.entry(pos).or_default() |= section_bits(mesh.replaced.clone());
     }
 
-    /// Sections dropped on pool exhaustion were retired from the buffer; clear
-    /// their meshed bit so the next rescan re-enqueues them, and their compiled
-    /// bit, since nothing of them reached the GPU.
+    /// Sections dropped on pool exhaustion were retired from the buffer; put
+    /// their bits back in the dirty set, and clear their compiled bit since
+    /// nothing reached the GPU.
     fn clear_dropped_meshed(&mut self, dropped: Vec<(ChunkPos, Vec<i32>)>) {
         for (pos, sections) in dropped {
             let retired = section_bits(sections);
-            if let Some(m) = self.meshed.get_mut(&pos) {
-                m.mask &= !retired;
-            }
             if let Some(mask) = self.compiled.get_mut(&pos) {
                 *mask &= !retired;
             }
+            self.dirty_sections
+                .entry(pos)
+                .and_modify(|mask| *mask |= retired)
+                .or_insert(retired);
         }
     }
 
@@ -1315,50 +1324,55 @@ impl GameState {
         renderer.set_chunk_visibility(masks);
     }
 
-    /// Enqueue every loaded column's not-yet-meshed sections (re-meshing the
-    /// whole column on a lod/content change). Like vanilla, every section in
-    /// render distance meshes regardless of visibility — occlusion gates only
-    /// drawing — and the queue orders the backlog nearest-first. Runs every
-    /// frame to drain it.
+    /// Enqueue dirty sections nearest-first. The dirty bitset is the sole
+    /// pending-work state; `compiled` only records readiness for the load gate.
+    /// Every loaded section is meshed regardless of occlusion, which only gates
+    /// drawing.
     pub fn rescan_mesh_jobs(&mut self, player_chunk: ChunkPos, chunk_detail: u32) {
         let n = self.chunk_store.section_count();
         let full = section_mask(n);
-        for pos in self.chunk_store.loaded_positions() {
+        if self.last_mesh_detail != Some(chunk_detail) {
+            self.last_mesh_detail = Some(chunk_detail);
+            for pos in self.chunk_store.loaded_positions() {
+                self.dirty_sections.insert(pos, full);
+            }
+        }
+        let mut active: Vec<(ChunkPos, u32)> = self
+            .chunk_store
+            .loaded_positions()
+            .filter_map(|pos| {
+                self.dirty_sections
+                    .get(&pos)
+                    .copied()
+                    .filter(|&mask| mask != 0)
+                    .map(|mask| (pos, mask))
+            })
+            .collect();
+        active.sort_by_key(|(pos, _)| {
+            let dx = pos.x - player_chunk.x;
+            let dz = pos.z - player_chunk.z;
+            dx * dx + dz * dz
+        });
+
+        let mut requests = Vec::new();
+        for (pos, dirty_mask) in active {
+            if self.chunk_store.get_chunk(&pos).is_none() {
+                self.dirty_sections.remove(&pos);
+                continue;
+            }
             let lod = crate::app::core::chunk_lod(pos, player_chunk, chunk_detail);
             let content_gen = self.content_gen.get(&pos).copied().unwrap_or(0);
-            // Mesh the whole column once, then nothing until a lod/content change.
-            // Occlusion gates drawing, not meshing, so off-screen and hidden
-            // sections still mesh (the queue orders the backlog nearest-first).
             // TODO: vanilla won't schedule a section's first compile until its
             // 3x3 column neighbourhood is loaded and lit
             // (`LevelExtractor.java:155` / `SectionUpdateTracker.hasAllNeighbors`);
             // we mesh against missing neighbours as air and repair the borders
             // when their light bumps `content_gen`.
-            let to_mesh = match self.meshed.get(&pos) {
-                Some(m) if m.lod == lod && m.content_gen == content_gen => full & !m.mask,
-                _ => full,
-            };
-            if to_mesh != 0 {
-                for (start, end) in contiguous_runs(to_mesh) {
-                    self.mesh_dispatcher.enqueue(
-                        &self.chunk_store,
-                        pos,
-                        lod,
-                        false,
-                        content_gen,
-                        start..end,
-                    );
-                }
+            for (start, end) in contiguous_runs(dirty_mask) {
+                requests.push((pos, lod, content_gen, start..end));
             }
-            self.meshed.insert(
-                pos,
-                MeshedCol {
-                    lod,
-                    content_gen,
-                    mask: full,
-                },
-            );
         }
+        self.mesh_dispatcher
+            .enqueue_bulk(&self.chunk_store, requests);
     }
 }
 
@@ -2227,7 +2241,8 @@ pub fn update_game(
     // F3+A: drop every mesh and re-enqueue all loaded columns.
     if game.pending_chunk_reload {
         game.pending_chunk_reload = false;
-        game.meshed.clear();
+        game.dirty_sections.clear();
+        game.last_mesh_detail = None;
         gfx.renderer.clear_chunk_meshes();
         game.vis_valid = false;
         game.pending_load_rescan = true;

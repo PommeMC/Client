@@ -1164,7 +1164,6 @@ impl AppCore {
             dry_foliage,
         );
 
-        game.meshed.clear();
         game.section_vis.clear();
         game.section_vis_epoch.clear();
         game.vis_mask.clear();
@@ -1301,8 +1300,9 @@ impl AppCore {
                     // already meshed.
                     game.section_vis.clear();
                     game.section_vis_epoch.clear();
-                    game.meshed.clear();
                     game.compiled.clear();
+                    game.dirty_sections.clear();
+                    game.last_mesh_detail = None;
                     // Rebuild before the dispatcher clones the registry for this world.
                     renderer.rebuild_block_state_tables();
                     game.mesh_dispatcher = renderer.create_mesh_dispatcher(
@@ -1342,7 +1342,6 @@ impl AppCore {
                         });
                     game.block_entity_anim.drop_chunk(pos.x, pos.z);
                     game.content_gen.remove(&pos);
-                    game.meshed.remove(&pos);
                     game.compiled.remove(&pos);
                     game.vis_mask.remove(&pos);
                     game.vis_tiers.remove(&pos);

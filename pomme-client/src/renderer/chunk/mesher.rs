@@ -1,9 +1,10 @@
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use azalea_block::BlockState;
 use azalea_core::position::ChunkPos;
+use crossbeam_epoch as epoch;
 use pyronyx::vk;
 
 use super::greedy;
@@ -802,7 +803,7 @@ impl MeshDispatcher {
         let enqueued_at = std::time::Instant::now();
         let upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
 
-        self.queue.push(PendingJob {
+        let job = PendingJob {
             pos,
             lod,
             content_gen,
@@ -816,7 +817,39 @@ impl MeshDispatcher {
             uv_map: Arc::clone(&self.uv_map),
             tx,
             pool: Arc::clone(&self.pool),
-        });
+        };
+        if priority {
+            self.queue.push(job);
+        } else {
+            self.queue.send(vec![job]);
+        }
+    }
+
+    pub fn enqueue_bulk(
+        &self,
+        chunk_store: &ChunkStore,
+        requests: Vec<(ChunkPos, u32, u64, std::ops::Range<i32>)>,
+    ) {
+        let jobs: Vec<PendingJob> = requests
+            .into_iter()
+            .map(|(pos, lod, content_gen, sections)| PendingJob {
+                pos,
+                lod,
+                content_gen,
+                upload_epoch: self.next_epoch.fetch_add(1, Ordering::Relaxed),
+                sections,
+                is_recompile: false,
+                enqueued_at: std::time::Instant::now(),
+                snapshot: self.build_snapshot(chunk_store, pos),
+                registry: Arc::clone(&self.registry),
+                uv_map: Arc::clone(&self.uv_map),
+                tx: self.result_tx.clone(),
+                pool: Arc::clone(&self.pool),
+            })
+            .collect();
+        if !jobs.is_empty() {
+            self.queue.send(jobs);
+        }
     }
 
     /// Vanilla `compileSync` (`PrioritizeChunkUpdates.PLAYER_AFFECTED`): mesh
@@ -854,7 +887,16 @@ impl MeshDispatcher {
         ChunkStoreSnapshot {
             chunks: chunks_needed
                 .iter()
-                .map(|p| (*p, chunk_store.get_chunk(p)))
+                .map(|p| {
+                    let chunk = chunk_store.get_chunk(p).map(|lock| {
+                        let chunk = lock.read();
+                        Arc::new(azalea_world::Chunk {
+                            sections: chunk.sections.iter().cloned().collect(),
+                            heightmaps: chunk.heightmaps.clone(),
+                        })
+                    });
+                    (*p, chunk)
+                })
                 .collect(),
             light: chunks_needed
                 .iter()
@@ -906,6 +948,7 @@ const MAX_RECOMPILE_QUOTA: i32 = 2;
 /// A pending chunk-mesh job: a point-in-time snapshot of the neighbourhood plus
 /// everything `mesh_chunk_snapshot` needs. Gathered on the calling thread
 /// (chunk data isn't shareable across threads), then meshed by a worker.
+#[derive(Clone)]
 struct PendingJob {
     pos: ChunkPos,
     lod: u32,
@@ -926,7 +969,7 @@ impl PendingJob {
         (self.pos, self.sections.start, self.sections.end)
     }
 
-    fn run(self) {
+    fn run_with_queue_ms(self, queue_ms: f32) {
         let started_at = std::time::Instant::now();
         let mut mesh = mesh_chunk_snapshot(
             &self.snapshot,
@@ -940,7 +983,7 @@ impl PendingJob {
         let meshed_at = std::time::Instant::now();
         mesh.content_gen = self.content_gen;
         mesh.upload_epoch = self.upload_epoch;
-        mesh.queue_ms = (started_at - self.enqueued_at).as_secs_f32() * 1000.0;
+        mesh.queue_ms = queue_ms.max((started_at - self.enqueued_at).as_secs_f32() * 1000.0);
         mesh.mesh_ms = (meshed_at - started_at).as_secs_f32() * 1000.0;
         if self.is_recompile {
             mesh.timing = Some(RemeshTiming {
@@ -950,6 +993,11 @@ impl PendingJob {
             });
         }
         let _ = self.tx.send(mesh);
+    }
+
+    fn run(self) {
+        let queue_ms = self.enqueued_at.elapsed().as_secs_f32() * 1000.0;
+        self.run_with_queue_ms(queue_ms);
     }
 }
 
@@ -1013,12 +1061,103 @@ struct QueueState {
 /// best task is chosen at poll time rather than fixed at submission, so a
 /// freshly enqueued edit is taken before the already-queued chunk-load backlog.
 struct MeshQueue {
+    state: epoch::Atomic<SwapQueueState>,
+    available: Condvar,
+    priority: Mutex<VecDeque<PendingJob>>,
+    closed: AtomicBool,
+}
+
+struct SwapQueueState {
+    jobs: Box<[PendingJob]>,
+    head: AtomicU64,
+    created_at: std::time::Instant,
+}
+
+impl MeshQueue {
+    fn new() -> Self {
+        Self {
+            state: epoch::Atomic::init(SwapQueueState {
+                jobs: Box::new([]),
+                head: AtomicU64::new(0),
+                created_at: std::time::Instant::now(),
+            }),
+            available: Condvar::new(),
+            priority: Mutex::new(VecDeque::new()),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn push(&self, job: PendingJob) {
+        self.priority.lock().unwrap().push_back(job);
+        self.available.notify_one();
+    }
+
+    fn send(&self, jobs: Vec<PendingJob>) {
+        let next = SwapQueueState {
+            jobs: jobs.into_boxed_slice(),
+            head: AtomicU64::new(0),
+            created_at: std::time::Instant::now(),
+        };
+        let guard = epoch::pin();
+        let old = self
+            .state
+            .swap(epoch::Owned::new(next), Ordering::AcqRel, &guard);
+        if !old.is_null() {
+            unsafe { guard.defer_destroy(old) };
+        }
+        self.available.notify_all();
+    }
+
+    fn set_camera(&self, _camera: glam::DVec3) {}
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.available.notify_all();
+    }
+
+    fn run_worker(&self) {
+        loop {
+            if self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            let guard = epoch::pin();
+            let state = unsafe { self.state.load(Ordering::Acquire, &guard).as_ref() };
+            let priority = self.priority.lock().unwrap().pop_front();
+            let (job, queue_ms) = if let Some(job) = priority {
+                (Some(job), 0.0)
+            } else if let Some(state) = state {
+                let index = state.head.fetch_add(1, Ordering::AcqRel) as usize;
+                let queue_ms = state.created_at.elapsed().as_secs_f32() * 1000.0;
+                (state.jobs.get(index).cloned(), queue_ms)
+            } else {
+                (None, 0.0)
+            };
+            drop(guard);
+            let Some(job) = job else {
+                let lock = Mutex::new(());
+                let _ = self
+                    .available
+                    .wait_timeout(lock.lock().unwrap(), std::time::Duration::from_millis(1));
+                continue;
+            };
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                job.run_with_queue_ms(queue_ms)
+            }))
+            .is_err()
+            {
+                tracing::error!("chunk mesh job panicked; worker continuing");
+            }
+        }
+    }
+}
+
+struct LegacyMeshQueue {
     state: Mutex<QueueState>,
     available: Condvar,
     closed: AtomicBool,
 }
 
-impl MeshQueue {
+impl LegacyMeshQueue {
     fn new() -> Self {
         Self {
             state: Mutex::new(QueueState {
@@ -1169,11 +1308,9 @@ fn lower_current_thread_priority() {
     // TODO: lower priority on non-Windows (libc::nice / pthread_setschedparam).
 }
 
+#[derive(Clone)]
 struct ChunkStoreSnapshot {
-    chunks: Vec<(
-        ChunkPos,
-        Option<Arc<parking_lot::RwLock<azalea_world::Chunk>>>,
-    )>,
+    chunks: Vec<(ChunkPos, Option<Arc<azalea_world::Chunk>>)>,
     light: std::collections::HashMap<(i32, i32), Arc<crate::world::chunk::ChunkLightData>>,
     grass_colormap: Arc<Colormap>,
     foliage_colormap: Arc<Colormap>,
@@ -1205,8 +1342,7 @@ impl ChunkStoreSnapshot {
             return azalea_block::BlockState::AIR;
         };
 
-        let c: parking_lot::RwLockReadGuard<'_, azalea_world::Chunk> = chunk_lock.read();
-        chunk::block_state_from_section(&c, x, y, z, self.min_y)
+        chunk::block_state_from_section(chunk_lock, x, y, z, self.min_y)
     }
 
     fn min_y(&self) -> i32 {
@@ -1227,13 +1363,14 @@ impl ChunkStoreSnapshot {
         let Some(chunk_lock) = chunk_lock else {
             return azalea_registry::data::Biome::default();
         };
-        let c = chunk_lock.read();
         let biome_pos = azalea_core::position::ChunkBiomePos {
             x: (x.rem_euclid(16) / 4) as u8,
             y,
             z: (z.rem_euclid(16) / 4) as u8,
         };
-        c.get_biome(biome_pos, self.min_y).unwrap_or_default()
+        chunk_lock
+            .get_biome(biome_pos, self.min_y)
+            .unwrap_or_default()
     }
 
     fn climate_at(&self, x: i32, y: i32, z: i32) -> BiomeClimate {
