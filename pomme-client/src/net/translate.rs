@@ -355,6 +355,8 @@ use pomme_protocol::{
     ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, RegistryTable, wire,
 };
 
+use crate::recipe::MAX_SLOT_DISPLAY_DEPTH;
+
 pub struct Translation {
     to_native: &'static RegistryRemaps,
     from_native: &'static RegistryRemaps,
@@ -378,8 +380,8 @@ pub struct Translation {
     recipe_book_add_id: u32,
     update_recipes_id: u32,
     place_ghost_recipe_id: u32,
-    recipe_display_protocol: bool,
-    recipe_old_profile: bool,
+    /// Recipe frame layout from 1.21.2 (768) on; `None` before display ids.
+    recipe_layout: Option<RecipeLayout>,
     /// Game-phase packet-id translation and the rewrites tied to it; `None`
     /// when the wire version's ids match the native (26.1).
     game_ids: Option<GameIds>,
@@ -881,8 +883,11 @@ impl Translation {
             recipe_book_add_id: id(Phase::Game, "recipe_book_add"),
             update_recipes_id: id(Phase::Game, "update_recipes"),
             place_ghost_recipe_id: id(Phase::Game, "place_ghost_recipe"),
-            recipe_display_protocol: protocol >= 768,
-            recipe_old_profile: protocol <= 772,
+            recipe_layout: (protocol >= 768).then_some(RecipeLayout {
+                old_profile: protocol <= 772,
+                item_stack_count_first: protocol <= 774,
+                trim_pattern_display: protocol <= 769,
+            }),
             game_ids: GameIds::build(protocol, table, native),
             config_ids: ConfigIds::build(protocol, table, native),
             no_config_phase: table
@@ -1145,13 +1150,18 @@ impl Translation {
             }
         } else if v775.is_some_and(|v| id == v.set_player_team_id) {
             translate_team(id, payload, v769)
-        } else if v777.is_none() && self.recipe_display_protocol && id == self.recipe_book_add_id {
-            translate_recipe_book_add(id, payload, self.to_native, self.recipe_old_profile)
-        } else if v777.is_none() && self.recipe_display_protocol && id == self.update_recipes_id {
-            translate_update_recipes(id, payload, self.to_native, self.recipe_old_profile)
-        } else if v777.is_none() && self.recipe_display_protocol && id == self.place_ghost_recipe_id
+        } else if v777.is_none()
+            && let Some(layout) = self.recipe_layout
+            && let Some(translate) = self.recipe_translator(id)
         {
-            translate_place_ghost_recipe(id, payload, self.to_native, self.recipe_old_profile)
+            translate(
+                id,
+                payload,
+                RecipeCtx {
+                    remaps: self.to_native,
+                    layout,
+                },
+            )
         } else if let Some(ids) = &self.game_ids {
             // Pre-1.20.2 wire NBT carries an empty root name the native
             // version's readers don't expect.
@@ -3509,21 +3519,25 @@ fn translate_item_stack(
     Some(walked)
 }
 
-/// Recipe displays use `ItemStackTemplate`, whose wire order is item id,
-/// count, component patch (unlike normal `ItemStack`, which starts with the
-/// count sentinel).
+/// An `item_stack` display's stack, written as 26.2's `ItemStackTemplate`
+/// (item id, count, patch). Through 1.21.11 the display wrapped a non-empty
+/// `ItemStack`, which leads with the count instead.
 fn translate_item_stack_template(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
-    remaps: &RegistryRemaps,
-    old_profile: bool,
+    ctx: RecipeCtx<'_>,
 ) -> Option<()> {
-    let item = u32::azalea_read_var(cur).ok()?;
-    wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
-    let count_at = cur.position() as usize;
-    i32::azalea_read_var(cur).ok()?;
-    out.extend_from_slice(&cur.get_ref()[count_at..cur.position() as usize]);
-    translate_component_patch(cur, out, remaps, old_profile)
+    let (item, count) = if ctx.layout.item_stack_count_first {
+        let count = i32::azalea_read_var(cur).ok()?;
+        (u32::azalea_read_var(cur).ok()?, count)
+    } else {
+        let item = u32::azalea_read_var(cur).ok()?;
+        (item, i32::azalea_read_var(cur).ok()?)
+    };
+    let count = u32::try_from(count).ok().filter(|&count| count > 0)?;
+    wire::write_varint(out, ctx.remaps.remap(ClientRegistry::Item, item)?);
+    wire::write_varint(out, count);
+    translate_component_patch(cur, out, ctx.remaps, ctx.layout.old_profile)
 }
 
 /// Remaps an item stack's component patch into the native registry space.
@@ -4246,12 +4260,43 @@ fn translate_explode(
 /// stable across these versions, but slot-display, item and component ids
 /// are not (1.21.11's `item` slot is id 2; 26.2 id 2 means
 /// `with_any_potion`).
-fn translate_recipe_book_add(
-    id: u32,
-    payload: &[u8],
-    remaps: &RegistryRemaps,
+/// How a pre-26.2 recipe frame's slot displays differ from 26.2's, beyond
+/// the registry remap (decompiled 1.21.4 / 1.21.5 / 1.21.11 `SlotDisplay`).
+#[derive(Clone, Copy)]
+struct RecipeLayout {
+    /// Pre-1.21.9 `profile` component layout.
     old_profile: bool,
-) -> Option<Vec<u8>> {
+    /// Through 1.21.11 an `item_stack` display wraps a non-empty `ItemStack`
+    /// (count, item, patch) rather than 26.1's `ItemStackTemplate`.
+    item_stack_count_first: bool,
+    /// Through 1.21.4 `smithing_trim`'s pattern is a `SlotDisplay` (the
+    /// template item), not a `Holder<TrimPattern>`.
+    trim_pattern_display: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RecipeCtx<'a> {
+    remaps: &'a RegistryRemaps,
+    layout: RecipeLayout,
+}
+
+type RecipeTranslator = fn(u32, &[u8], RecipeCtx<'_>) -> Option<Vec<u8>>;
+
+impl Translation {
+    fn recipe_translator(&self, id: u32) -> Option<RecipeTranslator> {
+        if id == self.recipe_book_add_id {
+            Some(translate_recipe_book_add)
+        } else if id == self.update_recipes_id {
+            Some(translate_update_recipes)
+        } else if id == self.place_ghost_recipe_id {
+            Some(translate_place_ghost_recipe)
+        } else {
+            None
+        }
+    }
+}
+
+fn translate_recipe_book_add(id: u32, payload: &[u8], ctx: RecipeCtx<'_>) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     let mut out = Vec::with_capacity(payload.len() + 8);
     wire::write_varint(&mut out, id);
@@ -4259,13 +4304,13 @@ fn translate_recipe_book_add(
     let entries = copy_varint(&mut cur, &mut out)?;
     for _ in 0..entries {
         copy_varint(&mut cur, &mut out)?; // RecipeDisplayId
-        translate_recipe_display(&mut cur, &mut out, remaps, old_profile)?;
+        translate_recipe_display(&mut cur, &mut out, ctx)?;
         copy_varint(&mut cur, &mut out)?; // OptionalInt wire sentinel
         copy_varint(&mut cur, &mut out)?; // RecipeBookCategory
         copy_optional(&mut cur, &mut out, |cur, out| {
             let requirements = copy_varint(cur, out)?;
             for _ in 0..requirements {
-                translate_recipe_ingredient(cur, out, remaps)?;
+                translate_item_holder_set(cur, out, ctx.remaps)?;
             }
             Some(())
         })?;
@@ -4276,12 +4321,7 @@ fn translate_recipe_book_add(
 }
 
 /// Normalizes the post-1.21.2 recipe property sets and stonecutter entries.
-fn translate_update_recipes(
-    id: u32,
-    payload: &[u8],
-    remaps: &RegistryRemaps,
-    old_profile: bool,
-) -> Option<Vec<u8>> {
+fn translate_update_recipes(id: u32, payload: &[u8], ctx: RecipeCtx<'_>) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     let mut out = Vec::with_capacity(payload.len() + 8);
     wire::write_varint(&mut out, id);
@@ -4292,78 +4332,61 @@ fn translate_update_recipes(
         let items = copy_varint(&mut cur, &mut out)?;
         for _ in 0..items {
             let item = u32::azalea_read_var(&mut cur).ok()?;
-            wire::write_varint(&mut out, remaps.remap(ClientRegistry::Item, item)?);
+            wire::write_varint(&mut out, ctx.remaps.remap(ClientRegistry::Item, item)?);
         }
     }
 
     let stonecutter = copy_varint(&mut cur, &mut out)?;
     for _ in 0..stonecutter {
-        translate_recipe_ingredient(&mut cur, &mut out, remaps)?;
-        translate_slot_display(&mut cur, &mut out, remaps, old_profile)?;
+        translate_item_holder_set(&mut cur, &mut out, ctx.remaps)?;
+        translate_slot_display(&mut cur, &mut out, ctx, MAX_SLOT_DISPLAY_DEPTH)?;
     }
     (cur.position() as usize == payload.len()).then_some(out)
 }
 
-fn translate_place_ghost_recipe(
-    id: u32,
-    payload: &[u8],
-    remaps: &RegistryRemaps,
-    old_profile: bool,
-) -> Option<Vec<u8>> {
+fn translate_place_ghost_recipe(id: u32, payload: &[u8], ctx: RecipeCtx<'_>) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     let mut out = Vec::with_capacity(payload.len() + 8);
     wire::write_varint(&mut out, id);
     copy_varint(&mut cur, &mut out)?; // container id
-    translate_recipe_display(&mut cur, &mut out, remaps, old_profile)?;
+    translate_recipe_display(&mut cur, &mut out, ctx)?;
     (cur.position() as usize == payload.len()).then_some(out)
 }
 
 fn translate_recipe_display(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
-    remaps: &RegistryRemaps,
-    old_profile: bool,
+    ctx: RecipeCtx<'_>,
 ) -> Option<()> {
     let source = u32::azalea_read_var(cur).ok()?;
-    let display = remaps.remap(ClientRegistry::RecipeDisplay, source)?;
+    let display = ctx.remaps.remap(ClientRegistry::RecipeDisplay, source)?;
     wire::write_varint(out, display);
+    let slots = |cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: usize| {
+        (0..n).try_for_each(|_| translate_slot_display(cur, out, ctx, MAX_SLOT_DISPLAY_DEPTH))
+    };
     match display {
         0 => {
             // Shapeless: ingredient displays, result, crafting station.
-            translate_slot_display_vec(cur, out, remaps, old_profile)?;
-            translate_slot_display(cur, out, remaps, old_profile)?;
-            translate_slot_display(cur, out, remaps, old_profile)
+            translate_slot_display_vec(cur, out, ctx, MAX_SLOT_DISPLAY_DEPTH)?;
+            slots(cur, out, 2)
         }
         1 => {
             // Shaped: width, height, ingredient displays, result, station.
             copy_varint(cur, out)?;
             copy_varint(cur, out)?;
-            translate_slot_display_vec(cur, out, remaps, old_profile)?;
-            translate_slot_display(cur, out, remaps, old_profile)?;
-            translate_slot_display(cur, out, remaps, old_profile)
+            translate_slot_display_vec(cur, out, ctx, MAX_SLOT_DISPLAY_DEPTH)?;
+            slots(cur, out, 2)
         }
         2 => {
             // Furnace: ingredient, fuel, result, station, duration, xp.
-            for _ in 0..4 {
-                translate_slot_display(cur, out, remaps, old_profile)?;
-            }
+            slots(cur, out, 4)?;
             copy_varint(cur, out)?;
             copy_bytes(cur, out, 4)
         }
-        3 => {
-            // Stonecutter: input, result, station.
-            for _ in 0..3 {
-                translate_slot_display(cur, out, remaps, old_profile)?;
-            }
-            Some(())
-        }
-        4 => {
-            // Smithing: template, base, addition, result, station.
-            for _ in 0..5 {
-                translate_slot_display(cur, out, remaps, old_profile)?;
-            }
-            Some(())
-        }
+        // Stonecutter: input, result, station.
+        3 => slots(cur, out, 3),
+        // Smithing: template, base, addition, result, station.
+        4 => slots(cur, out, 5),
         _ => None,
     }
 }
@@ -4371,69 +4394,75 @@ fn translate_recipe_display(
 fn translate_slot_display_vec(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
-    remaps: &RegistryRemaps,
-    old_profile: bool,
+    ctx: RecipeCtx<'_>,
+    depth: usize,
 ) -> Option<()> {
     let len = copy_varint(cur, out)?;
-    for _ in 0..len {
-        translate_slot_display(cur, out, remaps, old_profile)?;
-    }
-    Some(())
+    (0..len).try_for_each(|_| translate_slot_display(cur, out, ctx, depth))
 }
 
+/// One slot display, `depth` levels of nesting allowed below it.
 fn translate_slot_display(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
-    remaps: &RegistryRemaps,
-    old_profile: bool,
+    ctx: RecipeCtx<'_>,
+    depth: usize,
 ) -> Option<()> {
+    let depth = depth.checked_sub(1)?;
+    let nested =
+        |cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>| translate_slot_display(cur, out, ctx, depth);
     let source = u32::azalea_read_var(cur).ok()?;
-    let display = remaps.remap(ClientRegistry::SlotDisplay, source)?;
+    let display = ctx.remaps.remap(ClientRegistry::SlotDisplay, source)?;
+    if display == SMITHING_TRIM_DISPLAY && ctx.layout.trim_pattern_display {
+        // 26.2 can't name a trim pattern by its template item, so keep the
+        // untrimmed base: the nearest display it can carry.
+        nested(cur, out)?;
+        let mut discarded = Vec::new();
+        nested(cur, &mut discarded)?; // material
+        return nested(cur, &mut discarded); // pattern
+    }
     wire::write_varint(out, display);
     match display {
-        0 | 1 => Some(()),                                          // empty, any_fuel
-        2 => translate_slot_display(cur, out, remaps, old_profile), // with_any_potion
+        0 | 1 => Some(()),     // empty, any_fuel
+        2 => nested(cur, out), // with_any_potion
         3 => {
             // only_with_component
-            translate_slot_display(cur, out, remaps, old_profile)?;
+            nested(cur, out)?;
             let component = u32::azalea_read_var(cur).ok()?;
             wire::write_varint(
                 out,
-                remaps.remap(ClientRegistry::DataComponentType, component)?,
+                ctx.remaps
+                    .remap(ClientRegistry::DataComponentType, component)?,
             );
             Some(())
         }
         4 => {
             let item = u32::azalea_read_var(cur).ok()?;
-            wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
+            wire::write_varint(out, ctx.remaps.remap(ClientRegistry::Item, item)?);
             Some(())
         }
-        5 => {
-            // Recipe displays carry ItemStackTemplate (item, count, patch),
-            // not normal ItemStack (count, item, patch).
-            translate_item_stack_template(cur, out, remaps, old_profile)
-        }
+        5 => translate_item_stack_template(cur, out, ctx),
         6 => copy_utf(cur, out), // tag resource location
-        7 => {
-            translate_slot_display(cur, out, remaps, old_profile)?;
-            translate_slot_display(cur, out, remaps, old_profile)
+        7 | 9 => {
+            // dyed (dye, target), with_remainder (input, remainder)
+            nested(cur, out)?;
+            nested(cur, out)
         }
-        8 => {
-            translate_slot_display(cur, out, remaps, old_profile)?;
-            translate_slot_display(cur, out, remaps, old_profile)?;
+        SMITHING_TRIM_DISPLAY => {
+            nested(cur, out)?;
+            nested(cur, out)?;
             translate_trim_pattern_holder(cur, out)
         }
-        9 => {
-            translate_slot_display(cur, out, remaps, old_profile)?;
-            translate_slot_display(cur, out, remaps, old_profile)
-        }
-        10 => translate_slot_display_vec(cur, out, remaps, old_profile),
+        10 => translate_slot_display_vec(cur, out, ctx, depth),
         _ => None,
     }
 }
 
-/// One recipe `HolderSet<Item>`: zero means a named item tag; otherwise the
-/// wire value is direct-count + 1, followed by that many item registry ids.
+/// Native `smithing_trim` slot-display id.
+const SMITHING_TRIM_DISPLAY: u32 = 8;
+
+/// One `Holder<TrimPattern>`: a registry id + 1, or 0 and an inline pattern
+/// (asset id, description, decal).
 fn translate_trim_pattern_holder(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
     let holder = u32::azalea_read_var(cur).ok()?;
     wire::write_varint(out, holder);
@@ -4448,23 +4477,6 @@ fn translate_trim_pattern_holder(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> 
     azalea_chat::FormattedText::azalea_read(cur).ok()?;
     out.extend_from_slice(&cur.get_ref()[description_at..cur.position() as usize]);
     copy_bytes(cur, out, 1) // decal
-}
-
-fn translate_recipe_ingredient(
-    cur: &mut Cursor<&[u8]>,
-    out: &mut Vec<u8>,
-    remaps: &RegistryRemaps,
-) -> Option<()> {
-    let encoded = u32::azalea_read_var(cur).ok()?;
-    wire::write_varint(out, encoded);
-    if encoded == 0 {
-        return copy_utf(cur, out);
-    }
-    for _ in 0..encoded - 1 {
-        let item = u32::azalea_read_var(cur).ok()?;
-        wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
-    }
-    Some(())
 }
 
 fn remap_with<T: Registry>(remaps: &RegistryRemaps, reg: ClientRegistry, value: &mut T) -> bool {
@@ -5142,8 +5154,10 @@ fn copy_slot_display_777(
     out: &mut Vec<u8>,
     wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
+    depth: usize,
 ) -> Option<()> {
     use ClientRegistry::SlotDisplay;
+    let depth = depth.checked_sub(1)?;
     let kind = u32::azalea_read_var(cur).ok()?;
     let name = wire_registries.name_of(SlotDisplay, kind)?;
     if name == "tag" {
@@ -5170,7 +5184,7 @@ fn copy_slot_display_777(
         _ => 0,
     };
     for _ in 0..nested {
-        copy_slot_display_777(cur, out, wire_registries, remaps)?;
+        copy_slot_display_777(cur, out, wire_registries, remaps, depth)?;
     }
     match name {
         "empty" | "any_fuel" | "with_any_potion" | "dyed" | "with_remainder" | "composite" => {}
@@ -5215,7 +5229,9 @@ fn copy_recipe_display_777(
     let name = wire_registries.name_of(ClientRegistry::RecipeDisplay, kind)?;
     wire::write_varint(out, remaps.remap(ClientRegistry::RecipeDisplay, kind)?);
     let slots = |cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: u32| {
-        (0..n).try_for_each(|_| copy_slot_display_777(cur, out, wire_registries, remaps))
+        (0..n).try_for_each(|_| {
+            copy_slot_display_777(cur, out, wire_registries, remaps, MAX_SLOT_DISPLAY_DEPTH)
+        })
     };
     match name {
         // Ingredients, then the result and crafting station.
@@ -5303,7 +5319,13 @@ fn translate_update_recipes_777(
     }
     for _ in 0..copy_varint(&mut cur, &mut out)? {
         translate_item_holder_set(&mut cur, &mut out, remaps)?;
-        copy_slot_display_777(&mut cur, &mut out, v.wire_registries, remaps)?;
+        copy_slot_display_777(
+            &mut cur,
+            &mut out,
+            v.wire_registries,
+            remaps,
+            MAX_SLOT_DISPLAY_DEPTH,
+        )?;
     }
     (cur.position() as usize == payload.len()).then_some(out)
 }
@@ -5395,9 +5417,108 @@ fn skip_nbt_payload(cur: &mut Cursor<&[u8]>, tag: u8, depth: u32) -> Option<()> 
 mod recipe_translation_tests {
     use super::*;
 
+    /// The recipe context the live translator uses for `protocol`.
+    fn recipe_ctx(protocol: i32) -> (Translation, RecipeLayout) {
+        let translation = Translation::for_protocol(protocol).expect("translated protocol");
+        let layout = translation.recipe_layout.expect("recipe display protocol");
+        (translation, layout)
+    }
+
+    /// Translates one `recipe_book_add` entry around `display` (a recipe
+    /// display's bytes) for `protocol`; returns the translated display bytes.
+    fn translate_display(protocol: i32, display: &[u8]) -> Option<Vec<u8>> {
+        let (translation, layout) = recipe_ctx(protocol);
+        let ctx = RecipeCtx {
+            remaps: translation.to_native,
+            layout,
+        };
+        let id = required_id(
+            PacketTable::native(),
+            Phase::Game,
+            Direction::Clientbound,
+            "recipe_book_add",
+        );
+        let mut payload = vec![1, 5];
+        payload.extend_from_slice(display);
+        payload.extend_from_slice(&[0, 0, 0, 0, 0]); // group, category, reqs, flags, replace
+        let out = translate_recipe_book_add(id, &payload, ctx)?;
+        let mut pos = 0;
+        wire::read_varint(&out, &mut pos)?;
+        let body = &out[pos..];
+        // Strip the entry header (count, id) and trailer added above.
+        Some(body[2..body.len() - 5].to_vec())
+    }
+
+    #[test]
+    fn item_stack_display_reads_count_first_through_1_21_11() {
+        // 1.21.11 shapeless display: ingredient item(dripstone 26), result
+        // item_stack wrapping ItemStack.STREAM_CODEC (count 4, item 26,
+        // empty patch), empty station. 1.21.x slot-display ids: item 2,
+        // item_stack 3; 26.2: item 4, item_stack 5, dripstone 53.
+        let display = [0, 1, 2, 26, 3, 4, 26, 0, 0, 0];
+        assert_eq!(
+            translate_display(774, &display).unwrap(),
+            [0, 1, 4, 53, 5, 53, 4, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn item_stack_display_rejects_an_empty_stack() {
+        let display = [0, 0, 3, 0, 0];
+        assert_eq!(translate_display(774, &display), None);
+    }
+
+    #[test]
+    fn smithing_trim_keeps_the_pattern_holder_from_1_21_5() {
+        // 1.21.11 smithing display (template, base, addition, result,
+        // station); result is smithing_trim(5): base item 26, material
+        // item 26, pattern registry reference 3 (wire value 4).
+        let display = [4, 0, 0, 0, 5, 2, 26, 2, 26, 4, 0];
+        assert_eq!(
+            translate_display(774, &display).unwrap(),
+            [4, 0, 0, 0, 8, 4, 53, 4, 53, 4, 0]
+        );
+    }
+
+    #[test]
+    fn smithing_trim_pattern_display_through_1_21_4_keeps_the_base() {
+        // 1.21.4's pattern is a SlotDisplay (here item 26): 26.2 carries no
+        // equivalent, so the result keeps just the untrimmed base.
+        let display = [4, 0, 0, 0, 5, 2, 26, 2, 26, 2, 26, 0];
+        assert_eq!(
+            translate_display(769, &display).unwrap(),
+            [4, 0, 0, 0, 4, 53, 0]
+        );
+    }
+
+    #[test]
+    fn nested_slot_displays_past_the_depth_cap_are_rejected() {
+        // 26.1 stonecutter display (input, result, station) whose input is
+        // `wrappers` with_any_potion (2) levels around an empty display.
+        let stonecutter = |wrappers: usize| {
+            let mut display = vec![3];
+            display.extend(std::iter::repeat_n(2, wrappers));
+            display.extend_from_slice(&[0, 0, 0]);
+            display
+        };
+        let at_cap = stonecutter(MAX_SLOT_DISPLAY_DEPTH - 1);
+        assert_eq!(
+            translate_display(775, &at_cap).as_deref(),
+            Some(&at_cap[..])
+        );
+        assert_eq!(
+            translate_display(775, &stonecutter(MAX_SLOT_DISPLAY_DEPTH)),
+            None
+        );
+    }
+
     #[test]
     fn recipe_book_add_remaps_1_21_11_slot_and_item_ids() {
-        let remaps = RegistryRemaps::to_native(774).expect("1.21.11 registry remap");
+        let (translation, layout) = recipe_ctx(774);
+        let ctx = RecipeCtx {
+            remaps: translation.to_native,
+            layout,
+        };
         let id = required_id(
             PacketTable::native(),
             Phase::Game,
@@ -5422,7 +5543,7 @@ mod recipe_translation_tests {
             0,  // replace = false
         ];
 
-        let translated = translate_recipe_book_add(id, &payload, remaps, false).unwrap();
+        let translated = translate_recipe_book_add(id, &payload, ctx).unwrap();
         let mut pos = 0;
         assert_eq!(wire::read_varint(&translated, &mut pos), Some(id));
         assert_eq!(

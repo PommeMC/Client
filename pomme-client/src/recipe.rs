@@ -65,6 +65,11 @@ pub enum TrimPatternHolder {
     },
 }
 
+/// Deepest `SlotDisplay` nesting any reader or resolver follows. Vanilla
+/// recurses unbounded; a hostile server's deeply nested display would
+/// otherwise overflow the stack and abort the process.
+pub const MAX_SLOT_DISPLAY_DEPTH: usize = 64;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum SlotDisplay {
     Empty,
