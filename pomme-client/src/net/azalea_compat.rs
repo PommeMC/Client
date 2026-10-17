@@ -241,6 +241,7 @@ fn packet_ids_match_azalea() {
         table_id(Phase::Game, Direction::Clientbound, "recipe_book_add")
     );
 
+    recipe_packet_ids_match_azalea();
     dialog_packet_ids_match_azalea();
 
     // `net::chat` decodes and encodes these itself; only the ids are shared.
@@ -4552,6 +4553,125 @@ fn translate_game_event_777() {
 }
 
 /// The dialog packets pomme dispatches on, in both phases.
+/// `net::recipe_wire` and `wire.rs` decode and encode these themselves; only
+/// the ids are shared. azalea's place-recipe and seen-recipe packets still
+/// carry a resource location where 26.2 sends a `RecipeDisplayId`, so only the
+/// settings encoder round-trips through azalea.
+fn recipe_packet_ids_match_azalea() {
+    use azalea_buf::{AzBuf, AzBufVar};
+    use azalea_protocol::common::recipe::{
+        RecipeDisplayData, SlotDisplayData, StonecutterRecipeDisplay,
+    };
+    use azalea_protocol::packets::game::{
+        c_place_ghost_recipe, c_recipe_book_remove, c_recipe_book_settings, c_update_recipes,
+        s_place_recipe, s_recipe_book_change_settings, s_recipe_book_seen_recipe,
+    };
+
+    let clientbound = [
+        (
+            ClientboundGamePacket::RecipeBookRemove(
+                c_recipe_book_remove::ClientboundRecipeBookRemove {
+                    recipes: Vec::new(),
+                },
+            ),
+            "recipe_book_remove",
+        ),
+        (
+            ClientboundGamePacket::RecipeBookSettings(
+                c_recipe_book_settings::ClientboundRecipeBookSettings {
+                    book_settings: c_recipe_book_settings::RecipeBookSettings {
+                        gui_open: false,
+                        filtering_craftable: false,
+                        furnace_gui_open: false,
+                        furnace_filtering_craftable: false,
+                        blast_furnace_gui_open: false,
+                        blast_furnace_filtering_craftable: false,
+                        smoker_gui_open: false,
+                        smoker_filtering_craftable: false,
+                    },
+                },
+            ),
+            "recipe_book_settings",
+        ),
+        (
+            ClientboundGamePacket::UpdateRecipes(c_update_recipes::ClientboundUpdateRecipes {
+                item_sets: Default::default(),
+                stonecutter_recipes: Vec::new(),
+            }),
+            "update_recipes",
+        ),
+        (
+            ClientboundGamePacket::PlaceGhostRecipe(
+                c_place_ghost_recipe::ClientboundPlaceGhostRecipe {
+                    container_id: 0,
+                    recipe: RecipeDisplayData::Stonecutter(StonecutterRecipeDisplay {
+                        input: SlotDisplayData::Empty,
+                        result: SlotDisplayData::Empty,
+                        crafting_station: SlotDisplayData::Empty,
+                    }),
+                },
+            ),
+            "place_ghost_recipe",
+        ),
+    ];
+    for (packet, name) in clientbound {
+        assert_eq!(
+            packet.id(),
+            table_id(Phase::Game, Direction::Clientbound, name),
+            "{name}"
+        );
+    }
+
+    let recipe: Identifier = "minecraft:stick".into();
+    let place = ServerboundGamePacket::PlaceRecipe(s_place_recipe::ServerboundPlaceRecipe {
+        container_id: 0,
+        recipe: recipe.clone(),
+        shift_down: false,
+    });
+    assert_eq!(
+        place.id(),
+        table_id(Phase::Game, Direction::Serverbound, "place_recipe")
+    );
+    let seen = ServerboundGamePacket::RecipeBookSeenRecipe(
+        s_recipe_book_seen_recipe::ServerboundRecipeBookSeenRecipe { recipe },
+    );
+    assert_eq!(
+        seen.id(),
+        table_id(
+            Phase::Game,
+            Direction::Serverbound,
+            "recipe_book_seen_recipe"
+        )
+    );
+
+    let encoded = pomme_protocol::wire::encode_recipe_book_change_settings(
+        pomme_protocol::wire::RecipeBookType::BlastFurnace,
+        true,
+        false,
+    );
+    let mut cur = std::io::Cursor::new(encoded.as_slice());
+    assert_eq!(
+        u32::azalea_read_var(&mut cur).unwrap(),
+        table_id(
+            Phase::Game,
+            Direction::Serverbound,
+            "recipe_book_change_settings"
+        )
+    );
+    let decoded =
+        s_recipe_book_change_settings::ServerboundRecipeBookChangeSettings::azalea_read(&mut cur)
+            .unwrap();
+    assert_eq!(
+        decoded,
+        s_recipe_book_change_settings::ServerboundRecipeBookChangeSettings {
+            book_type: s_recipe_book_change_settings::RecipeBookType::BlastFurnace,
+            is_open: true,
+            is_filtering: false,
+        }
+    );
+    assert_eq!(cur.position() as usize, encoded.len());
+}
+
 fn dialog_packet_ids_match_azalea() {
     use azalea_protocol::packets::config::{
         ClientboundConfigPacket, ServerboundConfigPacket, c_clear_dialog as cfg_clear,

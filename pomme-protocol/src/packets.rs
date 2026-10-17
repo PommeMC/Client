@@ -274,10 +274,32 @@ mod tests {
             t.id(Phase::Game, Direction::Clientbound, "boss_event"),
             Some(9)
         );
-        assert_eq!(
-            t.id(Phase::Game, Direction::Clientbound, "recipe_book_add"),
-            Some(74)
-        );
+        // Recipe book (`GameProtocols.java`; clientbound counts from the
+        // bundle delimiter at id 0).
+        for (name, id) in [
+            ("recipe_book_add", 74),
+            ("recipe_book_remove", 75),
+            ("recipe_book_settings", 76),
+            ("place_ghost_recipe", 63),
+            ("update_recipes", 133),
+        ] {
+            assert_eq!(
+                t.id(Phase::Game, Direction::Clientbound, name),
+                Some(id),
+                "{name}"
+            );
+        }
+        for (name, id) in [
+            ("place_recipe", 39),
+            ("recipe_book_change_settings", 46),
+            ("recipe_book_seen_recipe", 47),
+        ] {
+            assert_eq!(
+                t.id(Phase::Game, Direction::Serverbound, name),
+                Some(id),
+                "{name}"
+            );
+        }
         assert_eq!(
             t.id(Phase::Game, Direction::Clientbound, "update_advancements"),
             Some(130)
