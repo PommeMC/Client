@@ -1939,6 +1939,11 @@ impl VanillaDemoRandom {
     }
 }
 
+/// Most stacks one slot display resolves to. Vanilla has no limit, but its
+/// data never comes close; nested `with_any_potion` multiplies by every
+/// potion per level, so hostile data would otherwise exhaust memory.
+const MAX_RESOLVED_STACKS: usize = 4096;
+
 fn slot_stacks(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<ResolvedSlotStack> {
     let basic = |id: u32| {
         ItemKind::from_u32(id).map(|kind| ResolvedSlotStack::plain(ItemStackData::new(kind, 1)))
@@ -1971,14 +1976,17 @@ fn slot_stacks(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<ResolvedSlotSt
         SlotDisplay::Composite(parts) => parts
             .iter()
             .flat_map(|part| slot_stacks(part, book))
+            .take(MAX_RESOLVED_STACKS)
             .collect(),
         SlotDisplay::WithRemainder { input, .. } => slot_stacks(input, book),
         SlotDisplay::WithAnyPotion(inner) => {
             let base = slot_stacks(inner, book);
             let mut out = Vec::new();
-            let mut id = 0;
-            while let Some(potion) = Potion::from_u32(id) {
+            'potions: for potion in (0..).map_while(Potion::from_u32) {
                 for stack in &base {
+                    if out.len() == MAX_RESOLVED_STACKS {
+                        break 'potions;
+                    }
                     let mut stack = stack.clone();
                     stack.stack = with_component(
                         stack.stack,
@@ -1989,7 +1997,6 @@ fn slot_stacks(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<ResolvedSlotSt
                     );
                     out.push(stack);
                 }
-                id += 1;
             }
             out
         }
@@ -3419,6 +3426,16 @@ mod tests {
         assert!(state.tab_animation_started.is_empty());
         assert!(state.tab_animation_highlights.is_empty());
         assert!(book.ghost_recipe.is_none());
+    }
+
+    #[test]
+    fn nested_potion_fan_out_stops_at_the_resolved_stack_cap() {
+        let book = RecipeBookState::default();
+        let mut slot = SlotDisplay::Item(ItemKind::Potion.to_u32());
+        for _ in 0..4 {
+            slot = SlotDisplay::WithAnyPotion(Box::new(slot));
+        }
+        assert_eq!(slot_stacks(&slot, &book).len(), MAX_RESOLVED_STACKS);
     }
 
     #[test]

@@ -12,9 +12,9 @@ use pomme_protocol::{Direction, PacketTable, Phase};
 use crate::net::NetworkEvent;
 use crate::player::inventory::item_resource_name;
 use crate::recipe::{
-    GhostRecipe, Ingredient, ItemStackTemplate, ItemTags, RecipeBookAddEntry, RecipeBookEntry,
-    RecipeBookSettings, RecipeBookTypeSettings, RecipeData, RecipeDisplay, SlotDisplay,
-    StonecutterRecipe, TrimPatternHolder,
+    GhostRecipe, Ingredient, ItemStackTemplate, ItemTags, MAX_SLOT_DISPLAY_DEPTH,
+    RecipeBookAddEntry, RecipeBookEntry, RecipeBookSettings, RecipeBookTypeSettings, RecipeData,
+    RecipeDisplay, SlotDisplay, StonecutterRecipe, TrimPatternHolder,
 };
 use crate::ui::toast::RecipeToastEntry;
 
@@ -140,26 +140,19 @@ pub fn handle_raw_recipe_packet(
 }
 
 fn parse_add(cur: &mut Cursor<&[u8]>) -> Result<(Vec<RecipeBookAddEntry>, bool), String> {
-    let len = read_len(cur)?;
-    let mut entries = Vec::with_capacity(len);
-    for _ in 0..len {
+    let entries = read_list(cur, |cur| {
         let id = read_var_u32(cur)?;
         let display = parse_recipe_display(cur)?;
         let group_wire = read_var_u32(cur)?;
         let group = group_wire.checked_sub(1);
         let category = read_var_u32(cur)?;
         let crafting_requirements = if read_bool(cur)? {
-            let count = read_len(cur)?;
-            let mut requirements = Vec::with_capacity(count);
-            for _ in 0..count {
-                requirements.push(parse_ingredient(cur)?);
-            }
-            Some(requirements)
+            Some(read_list(cur, parse_ingredient)?)
         } else {
             None
         };
         let flags = read_u8(cur)?;
-        entries.push(RecipeBookAddEntry {
+        Ok(RecipeBookAddEntry {
             contents: RecipeBookEntry {
                 id,
                 display,
@@ -169,14 +162,13 @@ fn parse_add(cur: &mut Cursor<&[u8]>) -> Result<(Vec<RecipeBookAddEntry>, bool),
             },
             notification: flags & 1 != 0,
             highlight: flags & 2 != 0,
-        });
-    }
+        })
+    })?;
     Ok((entries, read_bool(cur)?))
 }
 
 fn parse_remove(cur: &mut Cursor<&[u8]>) -> Result<Vec<u32>, String> {
-    let len = read_len(cur)?;
-    (0..len).map(|_| read_var_u32(cur)).collect()
+    read_list(cur, read_var_u32)
 }
 
 fn parse_settings(cur: &mut Cursor<&[u8]>) -> Result<RecipeBookSettings, String> {
@@ -195,26 +187,17 @@ fn parse_settings(cur: &mut Cursor<&[u8]>) -> Result<RecipeBookSettings, String>
 }
 
 fn parse_update(cur: &mut Cursor<&[u8]>) -> Result<RecipeData, String> {
-    let item_set_count = read_len(cur)?;
-    let mut item_sets = std::collections::HashMap::with_capacity(item_set_count);
-    for _ in 0..item_set_count {
-        let name = read_identifier(cur)?;
-        let item_count = read_len(cur)?;
-        let mut items = Vec::with_capacity(item_count);
-        for _ in 0..item_count {
-            items.push(read_item_id(cur)?);
-        }
-        item_sets.insert(name, items);
-    }
-
-    let stonecutter_count = read_len(cur)?;
-    let mut stonecutter_recipes = Vec::with_capacity(stonecutter_count);
-    for _ in 0..stonecutter_count {
-        stonecutter_recipes.push(StonecutterRecipe {
+    let item_sets = read_list(cur, |cur| {
+        Ok((read_identifier(cur)?, read_list(cur, read_item_id)?))
+    })?
+    .into_iter()
+    .collect();
+    let stonecutter_recipes = read_list(cur, |cur| {
+        Ok(StonecutterRecipe {
             input: parse_ingredient(cur)?,
-            option_display: parse_slot_display(cur)?,
-        });
-    }
+            option_display: parse_slot_display(cur, MAX_SLOT_DISPLAY_DEPTH)?,
+        })
+    })?;
     Ok(RecipeData {
         item_sets,
         stonecutter_recipes,
@@ -229,76 +212,79 @@ fn parse_ghost(cur: &mut Cursor<&[u8]>) -> Result<GhostRecipe, String> {
 }
 
 fn parse_recipe_display(cur: &mut Cursor<&[u8]>) -> Result<RecipeDisplay, String> {
+    let slot = |cur: &mut Cursor<&[u8]>| parse_slot_display(cur, MAX_SLOT_DISPLAY_DEPTH);
     match read_var_u32(cur)? {
         0 => Ok(RecipeDisplay::Shapeless {
-            ingredients: parse_slot_vec(cur)?,
-            result: parse_slot_display(cur)?,
-            crafting_station: parse_slot_display(cur)?,
+            ingredients: parse_slot_vec(cur, MAX_SLOT_DISPLAY_DEPTH)?,
+            result: slot(cur)?,
+            crafting_station: slot(cur)?,
         }),
         1 => Ok(RecipeDisplay::Shaped {
             width: read_var_u32(cur)?,
             height: read_var_u32(cur)?,
-            ingredients: parse_slot_vec(cur)?,
-            result: parse_slot_display(cur)?,
-            crafting_station: parse_slot_display(cur)?,
+            ingredients: parse_slot_vec(cur, MAX_SLOT_DISPLAY_DEPTH)?,
+            result: slot(cur)?,
+            crafting_station: slot(cur)?,
         }),
         2 => Ok(RecipeDisplay::Furnace {
-            ingredient: parse_slot_display(cur)?,
-            fuel: parse_slot_display(cur)?,
-            result: parse_slot_display(cur)?,
-            crafting_station: parse_slot_display(cur)?,
+            ingredient: slot(cur)?,
+            fuel: slot(cur)?,
+            result: slot(cur)?,
+            crafting_station: slot(cur)?,
             duration: read_var_u32(cur)?,
             experience: f32::azalea_read(cur).map_err(buf_err)?,
         }),
         3 => Ok(RecipeDisplay::Stonecutter {
-            input: parse_slot_display(cur)?,
-            result: parse_slot_display(cur)?,
-            crafting_station: parse_slot_display(cur)?,
+            input: slot(cur)?,
+            result: slot(cur)?,
+            crafting_station: slot(cur)?,
         }),
         4 => Ok(RecipeDisplay::Smithing {
-            template: parse_slot_display(cur)?,
-            base: parse_slot_display(cur)?,
-            addition: parse_slot_display(cur)?,
-            result: parse_slot_display(cur)?,
-            crafting_station: parse_slot_display(cur)?,
+            template: slot(cur)?,
+            base: slot(cur)?,
+            addition: slot(cur)?,
+            result: slot(cur)?,
+            crafting_station: slot(cur)?,
         }),
         id => Err(format!("unknown recipe_display registry id {id}")),
     }
 }
 
-fn parse_slot_vec(cur: &mut Cursor<&[u8]>) -> Result<Vec<SlotDisplay>, String> {
-    let len = read_len(cur)?;
-    (0..len).map(|_| parse_slot_display(cur)).collect()
+fn parse_slot_vec(cur: &mut Cursor<&[u8]>, depth: usize) -> Result<Vec<SlotDisplay>, String> {
+    read_list(cur, |cur| parse_slot_display(cur, depth))
 }
 
-fn parse_slot_display(cur: &mut Cursor<&[u8]>) -> Result<SlotDisplay, String> {
+/// One slot display, `depth` levels of nesting allowed below it.
+fn parse_slot_display(cur: &mut Cursor<&[u8]>, depth: usize) -> Result<SlotDisplay, String> {
+    let depth = depth
+        .checked_sub(1)
+        .ok_or_else(|| format!("slot display nested deeper than {MAX_SLOT_DISPLAY_DEPTH}"))?;
+    let nested = |cur: &mut Cursor<&[u8]>| parse_slot_display(cur, depth).map(Box::new);
     match read_var_u32(cur)? {
         0 => Ok(SlotDisplay::Empty),
         1 => Ok(SlotDisplay::AnyFuel),
-        2 => Ok(SlotDisplay::WithAnyPotion(Box::new(parse_slot_display(
-            cur,
-        )?))),
+        2 => Ok(SlotDisplay::WithAnyPotion(nested(cur)?)),
         3 => Ok(SlotDisplay::OnlyWithComponent {
-            contents: Box::new(parse_slot_display(cur)?),
+            contents: nested(cur)?,
             component: read_component_id(cur)?,
         }),
         4 => Ok(SlotDisplay::Item(read_item_id(cur)?)),
         5 => Ok(SlotDisplay::ItemStack(parse_item_stack_template(cur)?)),
         6 => Ok(SlotDisplay::Tag(read_identifier(cur)?)),
         7 => Ok(SlotDisplay::Dyed {
-            dye: Box::new(parse_slot_display(cur)?),
-            target: Box::new(parse_slot_display(cur)?),
+            dye: nested(cur)?,
+            target: nested(cur)?,
         }),
         8 => Ok(SlotDisplay::SmithingTrim {
-            base: Box::new(parse_slot_display(cur)?),
-            material: Box::new(parse_slot_display(cur)?),
+            base: nested(cur)?,
+            material: nested(cur)?,
             trim_pattern: parse_trim_pattern(cur)?,
         }),
         9 => Ok(SlotDisplay::WithRemainder {
-            input: Box::new(parse_slot_display(cur)?),
-            remainder: Box::new(parse_slot_display(cur)?),
+            input: nested(cur)?,
+            remainder: nested(cur)?,
         }),
-        10 => Ok(SlotDisplay::Composite(parse_slot_vec(cur)?)),
+        10 => Ok(SlotDisplay::Composite(parse_slot_vec(cur, depth)?)),
         id => Err(format!("unknown slot_display registry id {id}")),
     }
 }
@@ -340,9 +326,13 @@ fn parse_ingredient(cur: &mut Cursor<&[u8]>) -> Result<Ingredient, String> {
             "ingredient item count {count} exceeds {MAX_COLLECTION}"
         ));
     }
-    let mut items = Vec::with_capacity(count);
-    for _ in 0..count {
-        items.push(read_item_id(cur)?);
+    let items = read_n(cur, count, read_item_id)?;
+    // Vanilla `Ingredient`'s constructor rejects both.
+    if items.is_empty() {
+        return Err("ingredient can't be empty".to_owned());
+    }
+    if items.contains(&ItemKind::Air.to_u32()) {
+        return Err("ingredient can't contain air".to_owned());
     }
     Ok(Ingredient::Items(items))
 }
@@ -395,6 +385,31 @@ fn slot_first_item(slot: &SlotDisplay) -> Option<String> {
         SlotDisplay::Composite(contents) => return contents.iter().find_map(slot_first_item),
     };
     azalea_registry::builtin::ItemKind::from_u32(id).map(item_resource_name)
+}
+
+/// A length-prefixed list of `read` elements.
+fn read_list<T>(
+    cur: &mut Cursor<&[u8]>,
+    read: impl FnMut(&mut Cursor<&[u8]>) -> Result<T, String>,
+) -> Result<Vec<T>, String> {
+    let len = read_len(cur)?;
+    read_n(cur, len, read)
+}
+
+/// `len` elements. Every element takes at least one byte, so the up-front
+/// allocation is capped by what's left of the frame: a forged length can't
+/// reserve more than the packet could fill.
+fn read_n<T>(
+    cur: &mut Cursor<&[u8]>,
+    len: usize,
+    mut read: impl FnMut(&mut Cursor<&[u8]>) -> Result<T, String>,
+) -> Result<Vec<T>, String> {
+    let remaining = cur.get_ref().len().saturating_sub(cur.position() as usize);
+    let mut out = Vec::with_capacity(len.min(remaining));
+    for _ in 0..len {
+        out.push(read(cur)?);
+    }
+    Ok(out)
 }
 
 fn read_len(cur: &mut Cursor<&[u8]>) -> Result<usize, String> {
@@ -466,6 +481,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slot_displays_nested_past_the_depth_cap_are_rejected() {
+        // `wrappers` with_any_potion (2) levels around an empty display.
+        let nested = |wrappers: usize| {
+            let mut bytes = vec![2; wrappers];
+            bytes.push(0);
+            bytes
+        };
+        let at_cap = nested(MAX_SLOT_DISPLAY_DEPTH - 1);
+        let mut cur = Cursor::new(at_cap.as_slice());
+        assert!(parse_slot_display(&mut cur, MAX_SLOT_DISPLAY_DEPTH).is_ok());
+        let past_cap = nested(MAX_SLOT_DISPLAY_DEPTH);
+        let mut cur = Cursor::new(past_cap.as_slice());
+        assert_eq!(
+            parse_slot_display(&mut cur, MAX_SLOT_DISPLAY_DEPTH).unwrap_err(),
+            format!("slot display nested deeper than {MAX_SLOT_DISPLAY_DEPTH}")
+        );
+    }
+
+    #[test]
+    fn forged_list_length_fails_on_missing_elements() {
+        let mut bytes = Vec::new();
+        wire::write_varint(&mut bytes, MAX_COLLECTION as u32);
+        bytes.push(0);
+        let mut cur = Cursor::new(bytes.as_slice());
+        assert!(read_list(&mut cur, read_var_u32).is_err());
+    }
+
+    #[test]
+    fn direct_ingredients_must_be_non_empty_and_air_free() {
+        for (items, error) in [
+            (vec![], "ingredient can't be empty"),
+            (
+                vec![ItemKind::Diamond.to_u32(), ItemKind::Air.to_u32()],
+                "ingredient can't contain air",
+            ),
+        ] {
+            let mut bytes = Vec::new();
+            wire::write_varint(&mut bytes, items.len() as u32 + 1);
+            for item in items {
+                wire::write_varint(&mut bytes, item);
+            }
+            let mut cur = Cursor::new(bytes.as_slice());
+            assert_eq!(parse_ingredient(&mut cur).unwrap_err(), error);
+        }
+    }
+
+    #[test]
     fn item_stack_template_is_item_then_count_not_item_stack_order() {
         let mut bytes = Vec::new();
         wire::write_varint(&mut bytes, 53); // native dripstone_block
@@ -510,7 +572,7 @@ mod tests {
         wire::write_varint(&mut component, u32::MAX);
         let mut cur = Cursor::new(component.as_slice());
         assert_eq!(
-            parse_slot_display(&mut cur).unwrap_err(),
+            parse_slot_display(&mut cur, MAX_SLOT_DISPLAY_DEPTH).unwrap_err(),
             format!("unknown data component registry id {}", u32::MAX)
         );
     }

@@ -3527,16 +3527,19 @@ fn translate_item_stack_template(
     out: &mut Vec<u8>,
     ctx: RecipeCtx<'_>,
 ) -> Option<()> {
+    // A non-empty `ItemStack` has a positive count; a template only rejects 0.
     let (item, count) = if ctx.layout.item_stack_count_first {
-        let count = i32::azalea_read_var(cur).ok()?;
+        let count = i32::azalea_read_var(cur).ok().filter(|&count| count > 0)?;
         (u32::azalea_read_var(cur).ok()?, count)
     } else {
         let item = u32::azalea_read_var(cur).ok()?;
-        (item, i32::azalea_read_var(cur).ok()?)
+        (
+            item,
+            i32::azalea_read_var(cur).ok().filter(|&count| count != 0)?,
+        )
     };
-    let count = u32::try_from(count).ok().filter(|&count| count > 0)?;
     wire::write_varint(out, ctx.remaps.remap(ClientRegistry::Item, item)?);
-    wire::write_varint(out, count);
+    wire::write_varint(out, count as u32);
     translate_component_patch(cur, out, ctx.remaps, ctx.layout.old_profile)
 }
 
