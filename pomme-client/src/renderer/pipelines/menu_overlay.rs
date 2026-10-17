@@ -3767,103 +3767,103 @@ fn build_sprite_atlas(
     ));
 
     // Container backgrounds live in a 256x256 atlas; crop out the used region
-    // starting at texture row `src_y`.
-    for (id, path, src_y, max_w, max_h) in [
+    // from texel `src` (vanilla's blit `u`, `v`).
+    for (id, path, src, max_w, max_h) in [
         (
             SpriteId::RecipeBookBackground,
             "minecraft/textures/gui/recipe_book.png",
-            0,
+            (1, 1),
             147,
             166,
         ),
         (
             SpriteId::InventoryBackground,
             "minecraft/textures/gui/container/inventory.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::CraftingTableBackground,
             "minecraft/textures/gui/container/crafting_table.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::FurnaceBackground,
             "minecraft/textures/gui/container/furnace.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::BlastFurnaceBackground,
             "minecraft/textures/gui/container/blast_furnace.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::SmokerBackground,
             "minecraft/textures/gui/container/smoker.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::Generic54Top,
             "minecraft/textures/gui/container/generic_54.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             125,
         ),
         (
             SpriteId::Generic54Bottom,
             "minecraft/textures/gui/container/generic_54.png",
-            126,
+            (0, 126),
             INV_TEX_W,
             96,
         ),
         (
             SpriteId::ShulkerBoxBackground,
             "minecraft/textures/gui/container/shulker_box.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             167,
         ),
         (
             SpriteId::AnvilBackground,
             "minecraft/textures/gui/container/anvil.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::EnchantingTableBackground,
             "minecraft/textures/gui/container/enchanting_table.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::CreativeItemsBackground,
             "minecraft/textures/gui/container/creative_inventory/tab_items.png",
-            0,
+            (0, 0),
             195,
             136,
         ),
         (
             SpriteId::CreativeSearchBackground,
             "minecraft/textures/gui/container/creative_inventory/tab_item_search.png",
-            0,
+            (0, 0),
             195,
             136,
         ),
         (
             SpriteId::CreativeInventoryBackground,
             "minecraft/textures/gui/container/creative_inventory/tab_inventory.png",
-            0,
+            (0, 0),
             195,
             136,
         ),
@@ -3872,7 +3872,7 @@ fn build_sprite_atlas(
         (
             SpriteId::NetherPortal,
             "minecraft/textures/block/nether_portal.png",
-            0,
+            (0, 0),
             16,
             16,
         ),
@@ -3881,12 +3881,13 @@ fn build_sprite_atlas(
         match crate::assets::load_image(&path) {
             Ok(img) => {
                 let rgba = img.to_rgba8();
+                let (src_x, src_y) = src;
                 let full_w = rgba.width();
-                let crop_w = max_w.min(full_w);
+                let crop_w = max_w.min(full_w.saturating_sub(src_x));
                 let crop_h = max_h.min(rgba.height().saturating_sub(src_y));
                 let mut cropped = vec![0u8; (crop_w * crop_h * 4) as usize];
                 for y in 0..crop_h {
-                    let src_off = ((src_y + y) * full_w * 4) as usize;
+                    let src_off = (((src_y + y) * full_w + src_x) * 4) as usize;
                     let dst_off = (y * crop_w * 4) as usize;
                     let row_bytes = (crop_w * 4) as usize;
                     cropped[dst_off..dst_off + row_bytes]

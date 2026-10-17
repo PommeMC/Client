@@ -69,7 +69,6 @@ impl PacketSender {
     /// Older supported protocols use resource-location recipe ids instead of
     /// `RecipeDisplayId`; Pomme intentionally does not synthesize a mapping
     /// for recipe data it cannot receive yet.
-    #[allow(dead_code)]
     pub fn place_recipe(
         &self,
         container_id: i32,
@@ -91,7 +90,6 @@ impl PacketSender {
         true
     }
 
-    #[allow(dead_code)]
     pub fn recipe_book_change_settings(
         &self,
         kind: RecipeBookType,
@@ -110,7 +108,6 @@ impl PacketSender {
         true
     }
 
-    #[allow(dead_code)]
     pub fn recipe_book_seen_recipe(&self, recipe_display_id: RecipeDisplayId) -> bool {
         if crate::version::session_protocol() < 768 {
             tracing::warn!(

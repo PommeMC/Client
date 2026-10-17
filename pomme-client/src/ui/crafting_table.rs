@@ -7,8 +7,8 @@ use azalea_inventory::ItemStack;
 
 use super::common::SLOT_STRIDE;
 use super::container::{
-    ContainerInput, ContainerResult, DragState, SlotCtx, push_cursor_stack, push_panel_offset,
-    resolve_gesture,
+    ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_cursor_stack,
+    push_panel_offset, resolve_gesture,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -17,6 +17,26 @@ const SLOT_RESULT: u16 = 0;
 const SLOT_GRID_BASE: u16 = 1;
 const SLOT_MAIN_BASE: u16 = 10;
 const SLOT_HOTBAR_BASE: u16 = 37;
+
+/// Vanilla `CraftingScreen.extractBackground`, all a narrow screen shows
+/// behind the open recipe book.
+pub fn push_crafting_table_background(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    x_offset: f32,
+) -> Panel {
+    push_panel_offset(
+        elements,
+        screen_w,
+        screen_h,
+        gs,
+        166.0,
+        SpriteId::CraftingTableBackground,
+        x_offset,
+    )
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_crafting_table(
@@ -34,15 +54,7 @@ pub fn build_crafting_table(
     x_offset: f32,
     deferred_cursor: Option<&mut ItemStack>,
 ) -> ContainerResult {
-    let panel = push_panel_offset(
-        elements,
-        screen_w,
-        screen_h,
-        gs,
-        166.0,
-        SpriteId::CraftingTableBackground,
-        x_offset,
-    );
+    let panel = push_crafting_table_background(elements, screen_w, screen_h, gs, x_offset);
     panel.label(elements, 29.0, 6.0, title);
     panel.label(elements, 8.0, 72.0, "Inventory");
 

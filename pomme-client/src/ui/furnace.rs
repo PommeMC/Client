@@ -66,6 +66,25 @@ impl FurnaceVariant {
     }
 }
 
+/// Vanilla `AbstractFurnaceScreen.extractBackground`: the panel with its fuel
+/// and cook progress, all a narrow screen shows behind the open recipe book.
+pub fn push_furnace_background(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    variant: FurnaceVariant,
+    data: &[i16],
+    x_offset: f32,
+) -> Panel {
+    let (background, lit_sprite, burn_sprite) = variant.sprites();
+    let panel = push_panel_offset(
+        elements, screen_w, screen_h, gs, 166.0, background, x_offset,
+    );
+    push_progress_overlays(elements, &panel, lit_sprite, burn_sprite, data);
+    panel
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_furnace(
     elements: &mut Vec<MenuElement>,
@@ -85,16 +104,11 @@ pub fn build_furnace(
     deferred_cursor: Option<&mut ItemStack>,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> ContainerResult {
-    let (background, lit_sprite, burn_sprite) = variant.sprites();
-    let panel = push_panel_offset(
-        elements, screen_w, screen_h, gs, 166.0, background, x_offset,
-    );
+    let panel = push_furnace_background(elements, screen_w, screen_h, gs, variant, data, x_offset);
     // Vanilla centers the furnace title: (imageWidth - font.width(title)) / 2.
     let title_x = ((176.0 - text_width_fn(title, FONT_SIZE)) / 2.0).floor();
     panel.label(elements, title_x, 6.0, title);
     panel.label(elements, 8.0, 72.0, "Inventory");
-
-    push_progress_overlays(elements, &panel, lit_sprite, burn_sprite, data);
 
     let mut ctx = SlotCtx::new(
         elements,

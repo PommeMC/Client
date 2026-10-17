@@ -3040,7 +3040,7 @@ pub fn update_game(
                     _ => None,
                 })
         };
-        if recipe_context.is_none() {
+        if recipe_context.is_none() && game.recipe_book_ui.has_screen() {
             game.recipe_book_ui
                 .reset_for_closed_screen(&mut game.recipe_book);
         }
@@ -3123,6 +3123,44 @@ pub fn update_game(
         let hide_main_for_book = recipe_frame.is_some_and(|frame| frame.visible && frame.narrow);
         let mut deferred_recipe_cursor = azalea_inventory::ItemStack::Empty;
         let (clicked_outside, ops, hovered) = if hide_main_for_book {
+            // `AbstractRecipeBookScreen`: a narrow screen with the book open
+            // shows only the screen's background behind it, and the book
+            // takes every click.
+            let cursor = core.input.cursor_pos();
+            match game.open_container.as_ref().map(|c| (c.screen, &c.data)) {
+                Some((ContainerScreen::CraftingTable, _)) => {
+                    crate::ui::crafting_table::push_crafting_table_background(
+                        &mut elements,
+                        sw,
+                        sh,
+                        gs,
+                        0.0,
+                    );
+                }
+                Some((ContainerScreen::Furnace(variant), data)) => {
+                    crate::ui::furnace::push_furnace_background(
+                        &mut elements,
+                        sw,
+                        sh,
+                        gs,
+                        variant,
+                        data,
+                        0.0,
+                    );
+                }
+                _ => {
+                    let (_, preview) = crate::ui::inventory::push_inventory_background(
+                        &mut elements,
+                        sw,
+                        sh,
+                        gs,
+                        0.0,
+                        cursor,
+                        &game.player.inventory,
+                    );
+                    player_preview = Some(preview);
+                }
+            }
             (false, Vec::new(), None)
         } else if let Some(container) = &game.open_container {
             let result = match container.screen {
@@ -3274,24 +3312,21 @@ pub fn update_game(
                 .crafting_slot_clicked(&mut game.recipe_book);
         }
 
-        if let (Some((spec, slots)), Some(frame)) = (recipe_context.as_ref(), recipe_frame) {
+        if let (Some((spec, _)), Some(frame)) = (recipe_context.as_ref(), recipe_frame) {
             crate::ui::recipe_book::render(
                 &mut elements,
                 &mut game.recipe_book_ui,
-                &mut game.recipe_book,
-                &connection.packet_tx,
+                &game.recipe_book,
                 *spec,
                 frame,
                 sw,
                 sh,
                 gs,
                 cursor,
-                slots,
                 core.input.ctrl_held(),
                 &|t, s| gfx.renderer.menu_text_width(t, s),
             );
             if frame.visible {
-                let cursor_scale = gs.min(sw / 176.0).min(sh / 166.0);
                 let shown_cursor = if hide_main_for_book {
                     &game.cursor_item
                 } else {
@@ -3300,7 +3335,7 @@ pub fn update_game(
                 crate::ui::container::push_cursor_stack(
                     &mut elements,
                     cursor,
-                    cursor_scale,
+                    frame.panel_scale,
                     shown_cursor,
                 );
             }

@@ -131,7 +131,6 @@ pub struct RecipeBookSettings {
     pub smoker: RecipeBookTypeSettings,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecipeBookType {
     Crafting,
@@ -140,7 +139,6 @@ pub enum RecipeBookType {
     Smoker,
 }
 
-#[allow(dead_code)]
 impl RecipeBookSettings {
     pub fn get(self, kind: RecipeBookType) -> RecipeBookTypeSettings {
         match kind {
@@ -187,7 +185,6 @@ pub struct ItemTags {
     ordered: HashMap<String, Vec<u32>>,
 }
 
-#[allow(dead_code)]
 impl ItemTags {
     pub fn from_entries(entries: impl IntoIterator<Item = (String, Vec<u32>)>) -> Self {
         let mut tags = HashMap::new();
@@ -206,26 +203,12 @@ impl ItemTags {
         Self { tags, ordered }
     }
 
-    pub fn contains(&self, tag: &str, item: u32) -> bool {
-        self.tags
-            .get(tag)
-            .is_some_and(|items| items.contains(&item))
-    }
-
     pub fn get(&self, tag: &str) -> Option<&HashSet<u32>> {
         self.tags.get(tag)
     }
 
     pub fn ordered(&self, tag: &str) -> Option<&[u32]> {
         self.ordered.get(tag).map(Vec::as_slice)
-    }
-
-    pub fn len(&self) -> usize {
-        self.tags.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.tags.is_empty()
     }
 }
 
@@ -246,12 +229,47 @@ pub struct RecipeBookState {
     pub highlight: HashSet<RecipeDisplayId>,
     pub settings: RecipeBookSettings,
     pub data: RecipeData,
-    pub item_tags: ItemTags,
+    item_tags: ItemTags,
     pub ghost_recipe: Option<GhostRecipe>,
+    /// Bumped whenever vanilla would run `recipesUpdated` or the tags that
+    /// resolve ingredients change, so the UI knows to rebuild collections.
+    revision: u64,
 }
 
 impl RecipeBookState {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn item_tags(&self) -> &ItemTags {
+        &self.item_tags
+    }
+
+    pub fn set_item_tags(&mut self, tags: ItemTags) {
+        self.item_tags = tags;
+        self.revision += 1;
+    }
+
+    /// The server's book settings (`handleRecipeBookSettings`).
+    pub fn apply_settings(&mut self, settings: RecipeBookSettings) {
+        self.settings = settings;
+        self.revision += 1;
+    }
+
+    /// Vanilla `handleLogin` gives the new player a fresh `ClientRecipeBook`.
+    /// Tags (sent during configuration) and the server's recipe data carry
+    /// over.
+    pub fn reset_for_login(&mut self) {
+        *self = Self {
+            data: std::mem::take(&mut self.data),
+            item_tags: std::mem::take(&mut self.item_tags),
+            revision: self.revision + 1,
+            ..Self::default()
+        };
+    }
+
     pub fn apply_add(&mut self, entries: Vec<RecipeBookAddEntry>, replace: bool) {
+        self.revision += 1;
         if replace {
             self.known.clear();
             self.known_insertion_order.clear();
@@ -278,11 +296,14 @@ impl RecipeBookState {
     }
 
     pub fn remove(&mut self, ids: impl IntoIterator<Item = RecipeDisplayId>) {
-        for id in ids {
-            self.known.remove(&id);
-            self.highlight.remove(&id);
-            self.known_insertion_order.retain(|known| *known != id);
+        self.revision += 1;
+        let ids: HashSet<RecipeDisplayId> = ids.into_iter().collect();
+        for id in &ids {
+            self.known.remove(id);
+            self.highlight.remove(id);
         }
+        self.known_insertion_order
+            .retain(|known| !ids.contains(known));
     }
 
     /// Entries in the order vanilla's `HashMap<RecipeDisplayId, ...>.values()`
@@ -307,7 +328,6 @@ impl RecipeBookState {
         buckets.into_iter().flatten().collect()
     }
 
-    #[allow(dead_code)]
     pub fn mark_seen(&mut self, id: RecipeDisplayId) {
         self.highlight.remove(&id);
     }
@@ -425,10 +445,7 @@ mod tests {
     #[test]
     fn item_tags_are_resolved_sets() {
         let tags = ItemTags::from_entries([("minecraft:planks".into(), vec![2, 1, 2])]);
-        assert_eq!(tags.len(), 1);
-        assert!(tags.contains("minecraft:planks", 1));
-        assert!(tags.contains("minecraft:planks", 2));
-        assert!(!tags.contains("minecraft:planks", 3));
+        assert_eq!(tags.get("minecraft:planks"), Some(&HashSet::from([1, 2])));
         assert_eq!(tags.ordered("minecraft:planks"), Some(&[2, 1][..]));
     }
 }

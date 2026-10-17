@@ -394,10 +394,7 @@ impl InputState {
                         &game.recipe_book,
                         game.recipe_book_screen_active(),
                     ) {
-                        // Vanilla routes the chat binding to recipe search while
-                        // an open recipe book owns the container screen. Pomme's
-                        // text queue did not own this key press yet, so there is
-                        // no matching `t` character to suppress here.
+                        // Vanilla `keyChat` focuses an open recipe book's search.
                         self.text_capture = true;
                     } else if !game.paused
                         && !game.death_screen_open

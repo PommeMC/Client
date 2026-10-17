@@ -1593,7 +1593,7 @@ impl AppCore {
                     game.dialog_registry = registry;
                 }
                 NetworkEvent::ItemTags(tags) => {
-                    game.recipe_book.item_tags = tags;
+                    game.recipe_book.set_item_tags(tags);
                 }
                 NetworkEvent::BlockTags { tags } => {
                     crate::world::block::replace_block_tags(tags);
@@ -1820,7 +1820,7 @@ impl AppCore {
                     game.recipe_book.remove(ids);
                 }
                 NetworkEvent::RecipeBookSettings(settings) => {
-                    game.recipe_book.settings = settings;
+                    game.recipe_book.apply_settings(settings);
                 }
                 NetworkEvent::RecipeData(data) => {
                     game.recipe_book.data = data;
@@ -2470,6 +2470,9 @@ impl AppCore {
                     online_mode,
                 } => {
                     connection.packet_tx.chat_login(online_mode);
+                    game.recipe_book_ui
+                        .reset_for_closed_screen(&mut game.recipe_book);
+                    game.recipe_book.reset_for_login();
                     game.player.entity_id = entity_id;
                     game.hardcore = hardcore;
                     game.show_death_screen = show_death_screen;

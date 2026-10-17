@@ -5,7 +5,8 @@ use azalea_inventory::operations::ClickOperation;
 
 use super::common::SLOT_STRIDE;
 use super::container::{
-    ContainerInput, DragState, SlotCtx, push_cursor_stack, push_panel_offset, resolve_gesture,
+    ContainerInput, DragState, Panel, SlotCtx, push_cursor_stack, push_panel_offset,
+    resolve_gesture,
 };
 use crate::player::inventory::{self, Inventory};
 use crate::player::menu_click::ContainerKind;
@@ -37,6 +38,41 @@ pub struct InventoryResult {
     pub hovered: Option<u16>,
 }
 
+/// Vanilla `InventoryScreen.extractBackground`: the panel and the player
+/// model, all a narrow screen shows behind the open recipe book.
+pub fn push_inventory_background(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    x_offset: f32,
+    cursor: (f32, f32),
+    inventory: &Inventory,
+) -> (Panel, PlayerPreview) {
+    let panel = push_panel_offset(
+        elements,
+        screen_w,
+        screen_h,
+        gs,
+        166.0,
+        SpriteId::InventoryBackground,
+        x_offset,
+    );
+    let preview = PlayerPreview {
+        rect: [
+            panel.ox + 26.0 * panel.scale,
+            panel.oy + 8.0 * panel.scale,
+            49.0 * panel.scale,
+            70.0 * panel.scale,
+        ],
+        gui_scale: panel.scale,
+        model_scale: 30.0,
+        cursor,
+        armor: armor_render_infos(inventory.armor_slots()),
+    };
+    (panel, preview)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_inventory(
     elements: &mut Vec<MenuElement>,
@@ -52,14 +88,8 @@ pub fn build_inventory(
     x_offset: f32,
     deferred_cursor: Option<&mut ItemStack>,
 ) -> InventoryResult {
-    let panel = push_panel_offset(
-        elements,
-        screen_w,
-        screen_h,
-        gs,
-        166.0,
-        SpriteId::InventoryBackground,
-        x_offset,
+    let (panel, player_preview) = push_inventory_background(
+        elements, screen_w, screen_h, gs, x_offset, cursor, inventory,
     );
     panel.label(elements, 97.0, 6.0, "Crafting");
 
@@ -140,17 +170,6 @@ pub fn build_inventory(
         clicked_outside,
         ops,
         hovered,
-        player_preview: PlayerPreview {
-            rect: [
-                panel.ox + 26.0 * panel.scale,
-                panel.oy + 8.0 * panel.scale,
-                49.0 * panel.scale,
-                70.0 * panel.scale,
-            ],
-            gui_scale: panel.scale,
-            model_scale: 30.0,
-            cursor,
-            armor: armor_render_infos(inventory.armor_slots()),
-        },
+        player_preview,
     }
 }

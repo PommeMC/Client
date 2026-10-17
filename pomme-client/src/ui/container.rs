@@ -99,6 +99,11 @@ impl Panel {
     }
 }
 
+/// The GUI scale a `panel_w`×`panel_h` panel draws at: `gs`, shrunk to fit.
+pub fn panel_scale(screen_w: f32, screen_h: f32, gs: f32, panel_w: f32, panel_h: f32) -> f32 {
+    gs.min(screen_w / panel_w).min(screen_h / panel_h)
+}
+
 /// The dimmed backdrop and the centered panel placement for a `panel_w` x
 /// `panel_h` (GUI units) container, without a background sprite.
 pub fn push_backdrop(
@@ -109,7 +114,7 @@ pub fn push_backdrop(
     panel_w: f32,
     panel_h: f32,
 ) -> Panel {
-    let scale = gs.min(screen_w / panel_w).min(screen_h / panel_h);
+    let scale = panel_scale(screen_w, screen_h, gs, panel_w, panel_h);
     let w = panel_w * scale;
     let h = panel_h * scale;
     let ox = (screen_w - w) / 2.0;
