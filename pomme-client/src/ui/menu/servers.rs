@@ -7,6 +7,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gs = self.gui_scale(screen_w, screen_h);
         let header_h = HEADER_FOOTER_H * gs;
@@ -34,7 +35,7 @@ impl MainMenu {
             self.refresh_servers();
         }
         if input.escape {
-            self.set_screen(Screen::Main);
+            self.set_screen(Screen::Main, key_bindings);
             return MainMenuResult {
                 elements: Vec::new(),
                 action: MenuAction::None,
@@ -387,7 +388,7 @@ impl MainMenu {
         ) {
             self.edit_address
                 .set_value(&self.last_mp_ip, form_inner, &wf);
-            self.set_screen(Screen::DirectConnect);
+            self.set_screen(Screen::DirectConnect, key_bindings);
             self.focused_field = Some(0);
             self.edit_address.set_focused(true);
         }
@@ -407,7 +408,7 @@ impl MainMenu {
         ) {
             self.edit_name.clear();
             self.edit_address.clear();
-            self.set_screen(Screen::AddServer);
+            self.set_screen(Screen::AddServer, key_bindings);
             self.focused_field = Some(0);
             self.edit_name.set_focused(true);
         }
@@ -435,7 +436,7 @@ impl MainMenu {
             self.edit_name.set_value(&server.name, form_inner, &wf);
             self.edit_address
                 .set_value(&server.address, form_inner, &wf);
-            self.set_screen(Screen::EditServer(idx));
+            self.set_screen(Screen::EditServer(idx), key_bindings);
             self.focused_field = Some(0);
             self.edit_name.set_focused(true);
         }
@@ -454,7 +455,7 @@ impl MainMenu {
             has_sel,
         ) && let Some(idx) = self.selected_server
         {
-            self.set_screen(Screen::ConfirmDelete(idx));
+            self.set_screen(Screen::ConfirmDelete(idx), key_bindings);
         }
         if push_button_f(
             &mut elements,
@@ -486,7 +487,7 @@ impl MainMenu {
             "Back",
             true,
         ) {
-            self.set_screen(Screen::Main);
+            self.set_screen(Screen::Main, key_bindings);
         }
 
         self.finish_focus(&ctx);
@@ -514,6 +515,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let Screen::ConfirmDelete(idx) = self.screen else {
             return empty_result(2.0);
@@ -538,7 +540,7 @@ impl MainMenu {
             self.selected_server = None;
         }
         if choice.is_some() {
-            self.set_screen(Screen::ServerList);
+            self.set_screen(Screen::ServerList, key_bindings);
         }
         result
     }
@@ -549,6 +551,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
@@ -560,7 +563,7 @@ impl MainMenu {
         let clicked = input.clicked;
 
         if input.escape {
-            self.set_screen(Screen::ServerList);
+            self.set_screen(Screen::ServerList, key_bindings);
             return empty_result(2.0);
         }
 
@@ -654,7 +657,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
-            self.set_screen(Screen::ServerList);
+            self.set_screen(Screen::ServerList, key_bindings);
         }
 
         push_bottom_text(
@@ -680,6 +683,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
@@ -691,7 +695,7 @@ impl MainMenu {
         let clicked = input.clicked;
 
         if input.escape {
-            self.set_screen(Screen::ServerList);
+            self.set_screen(Screen::ServerList, key_bindings);
             return empty_result(2.0);
         }
 
@@ -804,7 +808,7 @@ impl MainMenu {
                 self.server_list.add(entry);
             }
             // Absent from the results map, so it pings on draw back on the list.
-            self.set_screen(Screen::ServerList);
+            self.set_screen(Screen::ServerList, key_bindings);
         }
         y += btn_h + gap;
         if push_button(
@@ -820,7 +824,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
-            self.set_screen(Screen::ServerList);
+            self.set_screen(Screen::ServerList, key_bindings);
         }
 
         push_bottom_text(
@@ -1036,6 +1040,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         _text_width_fn: &dyn Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let reason = match &self.screen {
             Screen::Disconnected(r) => r.clone(),
@@ -1091,7 +1096,7 @@ impl MainMenu {
             "Back to Menu",
             true,
         ) {
-            self.set_screen(Screen::Main);
+            self.set_screen(Screen::Main, key_bindings);
         }
         self.finish_focus(&ctx);
 

@@ -11,6 +11,7 @@ use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::FloatExt as _;
 
 use crate::app::core::{AppCore, PlayerInputState};
+use crate::app::input::{Action, InputKey, KeyBindings};
 use crate::app::level_load::LevelLoadTracker;
 use crate::app::phases::Gfx;
 use crate::app::{TICK_RATE, input};
@@ -222,6 +223,9 @@ pub struct GameState {
     /// A chord fired while F3 was held, so releasing F3 must not toggle the
     /// overlay (vanilla `usedDebugKeyAsModifier`).
     pub f3_chord_consumed: bool,
+    /// An overlay input was released while another debug modifier remained
+    /// held.
+    pub debug_overlay_pending: bool,
     /// Set by F3+A; consumed by `update_game` to re-mesh every loaded chunk.
     pub pending_chunk_reload: bool,
     /// Game mode before the last change (vanilla `previousLocalPlayerMode`),
@@ -446,6 +450,7 @@ impl GameState {
             advanced_item_tooltips: false,
             hide_gui: false,
             f3_chord_consumed: false,
+            debug_overlay_pending: false,
             pending_chunk_reload: false,
             previous_game_mode: None,
             dimension: String::new(),
@@ -721,10 +726,13 @@ impl GameState {
         &mut self,
         code: winit::keyboard::KeyCode,
         f3_held: bool,
+        bindings: &KeyBindings,
         connection: &ConnectionHandle,
     ) -> bool {
-        use winit::keyboard::KeyCode;
-        if code == KeyCode::F3 {
+        let input = InputKey::Keyboard(code);
+        if bindings.matches(Action::DebugModifier, &input)
+            || bindings.matches(Action::ToggleOverlay, &input)
+        {
             // Consumed, but acts on release so chords can suppress it.
             return true;
         }
@@ -732,13 +740,13 @@ impl GameState {
             return false;
         }
         let handled = match code {
-            KeyCode::KeyA => {
+            _ if bindings.matches(Action::DebugReloadChunks, &input) => {
                 self.pending_chunk_reload = true;
                 self.debug_feedback("Reloading all chunks");
                 true
             }
             // TODO: F3+B show hitboxes (no entity hitbox renderer yet)
-            KeyCode::KeyC => {
+            _ if bindings.matches(Action::DebugCopyLocation, &input) => {
                 // Vanilla also crashes the game when held for 10s; not ported.
                 let p = &self.player;
                 let cmd = format!(
@@ -755,11 +763,11 @@ impl GameState {
                 }
                 true
             }
-            KeyCode::KeyD => {
+            _ if bindings.matches(Action::DebugClearChat, &input) => {
                 self.chat.clear_messages();
                 true
             }
-            KeyCode::KeyG => {
+            _ if bindings.matches(Action::DebugChunkBorders, &input) => {
                 self.show_chunk_borders = !self.show_chunk_borders;
                 self.debug_feedback(if self.show_chunk_borders {
                     "Chunk borders: shown"
@@ -768,7 +776,7 @@ impl GameState {
                 });
                 true
             }
-            KeyCode::KeyH => {
+            _ if bindings.matches(Action::DebugAdvancedTooltips, &input) => {
                 self.advanced_item_tooltips = !self.advanced_item_tooltips;
                 self.debug_feedback(if self.advanced_item_tooltips {
                     "Advanced tooltips: shown"
@@ -777,7 +785,7 @@ impl GameState {
                 });
                 true
             }
-            KeyCode::KeyI => {
+            _ if bindings.matches(Action::DebugCopyData, &input) => {
                 // TODO: entity variant and server-side NBT query (vanilla
                 // copyRecreateCommand with addNbt/pullFromServer)
                 if let Some(HitResult::Block(t)) = self.interaction.target {
@@ -807,7 +815,7 @@ impl GameState {
                 }
                 true
             }
-            KeyCode::F4 => {
+            _ if bindings.matches(Action::DebugGameModeSwitcher, &input) => {
                 if let Some(switcher) = &mut self.game_mode_switcher {
                     switcher.cycle();
                 } else if self.input_live() {
@@ -823,7 +831,7 @@ impl GameState {
                 }
                 true
             }
-            KeyCode::KeyN => {
+            _ if bindings.matches(Action::DebugSpectate, &input) => {
                 // Sent unconditionally; the server refuses without permission.
                 use azalea_core::game_type::GameMode;
                 let target = if self.player.game_mode != 3 {
@@ -842,7 +850,7 @@ impl GameState {
                 ));
                 true
             }
-            KeyCode::KeyO => {
+            _ if bindings.matches(Action::DebugChunkOcclusion, &input) => {
                 // Pomme-specific: chunk occlusion culling toggle.
                 self.chunk_occlusion_enabled = !self.chunk_occlusion_enabled;
                 // Force the throttled recompute to run next frame so the
@@ -851,7 +859,7 @@ impl GameState {
                 tracing::info!("Chunk occlusion: {}", self.chunk_occlusion_enabled);
                 true
             }
-            KeyCode::KeyV => {
+            _ if bindings.matches(Action::DebugDumpVersion, &input) => {
                 self.debug_feedback("Client version info:");
                 self.chat.push_message(vec![crate::ui::text::TextSpan::new(
                     format!("Pomme Client {}", env!("CARGO_PKG_VERSION")),
@@ -868,11 +876,21 @@ impl GameState {
         handled
     }
 
-    /// Vanilla toggles the debug overlay when F3 is released, unless a chord
-    /// key consumed it as a modifier while held (KeyboardHandler.keyPress).
-    /// An open game-mode switcher applies its selection instead.
-    pub fn handle_f3_release(&mut self, connection: &ConnectionHandle) {
-        if let Some(switcher) = self.game_mode_switcher.take() {
+    /// Settle debug releases once all modifiers are up. Chords suppress the
+    /// overlay toggle; releasing a modifier applies an open game-mode switcher.
+    pub fn handle_f3_release(
+        &mut self,
+        overlay: bool,
+        modifier: bool,
+        modifier_held: bool,
+        connection: &ConnectionHandle,
+    ) {
+        let Some(overlay) =
+            debug_overlay_release(&mut self.debug_overlay_pending, overlay, modifier_held)
+        else {
+            return;
+        };
+        if modifier && let Some(switcher) = self.game_mode_switcher.take() {
             use azalea_core::game_type::GameMode;
             if switcher.selected != self.player.game_mode
                 && let Some(mode) = GameMode::from_id(switcher.selected)
@@ -888,10 +906,11 @@ impl GameState {
             self.f3_chord_consumed = false;
             return;
         }
-        if self.f3_chord_consumed {
-            self.f3_chord_consumed = false;
-        } else {
+        if overlay && !self.f3_chord_consumed {
             self.show_debug = !self.show_debug;
+        }
+        if modifier {
+            self.f3_chord_consumed = false;
         }
     }
 
@@ -1473,7 +1492,7 @@ fn handle_chat_ui_action(
         }
         ChatUiAction::OpenChatSettings => {
             game.chat.close_for_settings();
-            core.menu.open_chat_settings();
+            core.menu.open_chat_settings(&core.input.key_bindings);
             game.options_from_game = true;
             game.paused = true;
         }
@@ -1675,7 +1694,11 @@ pub(crate) fn server_dialog_key(
     if game.chat.has_pending_modal_prompt() {
         // `ConfirmScreen` answers Escape with `accept(false)`, which returns
         // to the screen under it.
-        if code == KeyCode::Escape {
+        if core
+            .input
+            .key_bindings
+            .matches(Action::Close, &InputKey::Keyboard(code))
+        {
             game.escape_chat();
             core.input.clear_action(input::Action::OpenMenu);
             core.apply_cursor_grab(window, Some(game));
@@ -1685,7 +1708,11 @@ pub(crate) fn server_dialog_key(
         return;
     }
     match code {
-        KeyCode::Escape => {
+        _ if core
+            .input
+            .key_bindings
+            .matches(Action::Close, &InputKey::Keyboard(code)) =>
+        {
             let action = game
                 .server_dialog
                 .as_mut()
@@ -2181,7 +2208,13 @@ pub fn update_game(
     game.update_light(core.menu.chunk_detail);
 
     // F1 (vanilla keyToggleGui); only while no screen or chat is open.
-    if core.input.key_just_pressed(winit::keyboard::KeyCode::F1) && game.input_live() {
+    if core
+        .input
+        .key_bindings
+        .inputs_for_action(Action::ToggleGui)
+        .any(|key| core.input.input_just_pressed(key))
+        && game.input_live()
+    {
         game.hide_gui = !game.hide_gui;
     }
     if std::mem::take(&mut game.stop_sleeping_requested) {
@@ -2934,7 +2967,9 @@ pub fn update_game(
         let r = &gfx.renderer;
         let result = core
             .menu
-            .build(sw, sh, &menu_input, |t, s| r.menu_text_width(t, s));
+            .build(sw, sh, &menu_input, &mut core.input.key_bindings, |t, s| {
+                r.menu_text_width(t, s)
+            });
         elements.extend(result.elements);
         core.input.clear_just_pressed_actions();
         core.sync_display_mode(&gfx.window);
@@ -2996,15 +3031,32 @@ pub fn update_game(
         let input = crate::ui::container::ContainerInput {
             left_pressed: core.input.left_just_pressed(),
             right_pressed: core.input.right_just_pressed(),
-            middle_pressed: core.input.middle_just_pressed(),
+            middle_pressed: core
+                .input
+                .key_bindings
+                .inputs_for_action(Action::PickBlock)
+                .any(|key| {
+                    (keys_live || !matches!(key, InputKey::Keyboard(_)))
+                        && core.input.input_just_pressed(key)
+                }),
             left_held: core.input.left_held(),
             right_held: core.input.right_held(),
             shift: core.input.shift_held(),
             hotbar_swap: keys_live
                 .then(|| core.input.hotbar_key_just_pressed())
                 .flatten(),
-            swap_offhand: keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyF),
-            throw: keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyQ),
+            swap_offhand: keys_live
+                && core
+                    .input
+                    .key_bindings
+                    .inputs_for_action(Action::SwapOffhand)
+                    .any(|key| core.input.input_just_pressed(key)),
+            throw: keys_live
+                && core
+                    .input
+                    .key_bindings
+                    .inputs_for_action(Action::DropItem)
+                    .any(|key| core.input.input_just_pressed(key)),
             throw_all: core.input.ctrl_held(),
         };
         // The anvil rename field consumes this frame's typing; a changed
@@ -3249,7 +3301,14 @@ pub fn update_game(
     if game.creative_inventory_open && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
-        let middle_clicked = core.input.middle_just_pressed();
+        let middle_clicked = core
+            .input
+            .key_bindings
+            .inputs_for_action(Action::PickBlock)
+            .any(|key| {
+                (!game.wants_text_input() || !matches!(key, InputKey::Keyboard(_)))
+                    && core.input.input_just_pressed(key)
+            });
         let right_clicked = core.input.right_just_pressed();
         let scroll_delta = core.input.consume_menu_scroll();
         // `typed`/`backspace` come from the frame's single drain up top; a
@@ -3265,9 +3324,15 @@ pub fn update_game(
             right_clicked,
             scroll_delta,
             &text_events,
-            core.input.key_just_pressed(winit::keyboard::KeyCode::KeyT),
+            core.input
+                .key_bindings
+                .inputs_for_action(Action::OpenChat)
+                .any(|key| core.input.input_just_pressed(key)),
             core.input.hotbar_key_just_pressed(),
-            core.input.key_just_pressed(winit::keyboard::KeyCode::KeyF),
+            core.input
+                .key_bindings
+                .inputs_for_action(Action::SwapOffhand)
+                .any(|key| core.input.input_just_pressed(key)),
             &game.player.inventory,
             gs,
             game.advanced_item_tooltips,
@@ -3780,7 +3845,7 @@ pub fn update_game(
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
         PauseAction::Options => {
-            core.menu.open_options();
+            core.menu.open_options(&core.input.key_bindings);
             game.options_from_game = true;
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
@@ -4712,5 +4777,54 @@ mod tests {
         assert!(has_red_overlay(1, 0));
         assert!(has_red_overlay(0, 1));
         assert!(!has_red_overlay(0, 0));
+    }
+}
+
+/// Retain overlay releases until all debug modifiers are up; `None` defers
+/// settlement.
+fn debug_overlay_release(pending: &mut bool, overlay: bool, modifier_held: bool) -> Option<bool> {
+    *pending |= overlay;
+    if modifier_held {
+        None
+    } else {
+        Some(std::mem::take(pending))
+    }
+}
+
+#[cfg(test)]
+mod debug_release_tests {
+    use winit::keyboard::KeyCode;
+
+    use super::*;
+    use crate::app::input::{InputState, KeyBindings};
+
+    #[test]
+    fn overlay_release_survives_both_modifier_release_orders() {
+        let f3 = InputKey::Keyboard(KeyCode::F3);
+        let f6 = InputKey::Keyboard(KeyCode::F6);
+        let mut bindings = KeyBindings::default();
+        bindings.set(Action::DebugModifier, vec![f3, f6]);
+        for order in [[KeyCode::F3, KeyCode::F6], [KeyCode::F6, KeyCode::F3]] {
+            let mut input = InputState::released();
+            input.set_key_pressed_for_test(KeyCode::F3, true);
+            input.set_key_pressed_for_test(KeyCode::F6, true);
+            let mut pending = false;
+            for (index, code) in order.into_iter().enumerate() {
+                input.set_key_pressed_for_test(code, false);
+                let result = debug_overlay_release(
+                    &mut pending,
+                    bindings.matches(Action::ToggleOverlay, &InputKey::Keyboard(code)),
+                    bindings
+                        .inputs_for_action(Action::DebugModifier)
+                        .any(|key| input.input_pressed(key)),
+                );
+                assert_eq!(result, if index == 0 { None } else { Some(true) });
+            }
+            assert!(!pending);
+            assert_eq!(
+                debug_overlay_release(&mut pending, false, false),
+                Some(false)
+            );
+        }
     }
 }

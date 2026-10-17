@@ -56,6 +56,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: impl Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gs = self.gui_scale(screen_w, screen_h);
         let cursor = input.cursor;
@@ -122,9 +123,9 @@ impl MainMenu {
                 any_clicked = true;
                 match *label {
                     "Singleplayer" => {
-                        self.open_world_list(gs, &|t: &str| text_width_fn(t, fs));
+                        self.open_world_list(gs, &|t: &str| text_width_fn(t, fs), key_bindings);
                     }
-                    "Multiplayer" => self.set_screen(Screen::ServerList),
+                    "Multiplayer" => self.set_screen(Screen::ServerList, key_bindings),
                     _ => {}
                 }
             }
@@ -174,10 +175,10 @@ impl MainMenu {
             ) {
                 any_clicked = true;
                 match sprite {
-                    SpriteId::IconFriends => self.open_friends(),
+                    SpriteId::IconFriends => self.open_friends(key_bindings),
                     SpriteId::IconAccessibility => {
                         self.settings_back = Screen::Main;
-                        self.set_screen(Screen::OptionsAccessibility);
+                        self.set_screen(Screen::OptionsAccessibility, key_bindings);
                     }
                     _ => {}
                 }
@@ -201,7 +202,7 @@ impl MainMenu {
             true,
         ) {
             any_clicked = true;
-            self.open_options();
+            self.open_options(key_bindings);
         }
         if push_button_f(
             &mut elements,
@@ -291,7 +292,7 @@ impl MainMenu {
             if clicked {
                 any_clicked = true;
                 self.settings_back = Screen::Main;
-                self.set_screen(Screen::OptionsCredits);
+                self.set_screen(Screen::OptionsCredits, key_bindings);
             }
         }
 
@@ -367,39 +368,4 @@ impl MainMenu {
             shadow: true,
         });
     }
-}
-
-/// An icon button in the vanilla frame, wired into the Tab ring. Returns
-/// whether it was activated: clicked, or Enter/Space while focused.
-#[allow(clippy::too_many_arguments)]
-fn push_icon_button(
-    elements: &mut Vec<MenuElement>,
-    ctx: &mut FocusCtx,
-    any_hovered: &mut bool,
-    cursor: (f32, f32),
-    clicked: bool,
-    x: f32,
-    y: f32,
-    size: f32,
-    gs: f32,
-    face: IconFace,
-    enabled: bool,
-    screen_w: f32,
-    screen_h: f32,
-    tooltip: &str,
-) -> bool {
-    let hit = common::hit_test(cursor, [x, y, size, size]);
-    let focused = ctx.focused(enabled, hit);
-    let hovered = enabled && hit;
-    push_icon_widget(elements, x, y, size, gs, face, enabled, hovered || focused);
-    *any_hovered |= hovered;
-    let keyboard = focused && ctx.activate;
-    if keyboard {
-        ctx.fired = true;
-    }
-    // Vanilla keys tooltips off `isHovered`, which ignores `active`.
-    if hit {
-        common::push_tooltip(elements, cursor, screen_w, screen_h, gs, tooltip);
-    }
-    (hovered && clicked) || keyboard
 }

@@ -48,9 +48,11 @@ pub fn update_menu(
 
     let menu_input = core.build_menu_input(dt);
 
-    let result = core.menu.build(sw, sh, &menu_input, |t, s| {
-        gfx.renderer.menu_text_width(t, s)
-    });
+    let result = core
+        .menu
+        .build(sw, sh, &menu_input, &mut core.input.key_bindings, |t, s| {
+            gfx.renderer.menu_text_width(t, s)
+        });
     core.audio.set_volumes(core.menu.category_volumes());
     let action = result.action;
 
@@ -157,7 +159,7 @@ pub fn update_menu(
                 }
                 Err(reason) => {
                     tracing::error!("Failed to open {folder}: {reason}");
-                    core.menu.show_disconnect(reason);
+                    core.menu.show_disconnect(reason, &core.input.key_bindings);
                 }
             }
         }

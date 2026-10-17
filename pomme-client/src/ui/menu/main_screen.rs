@@ -11,11 +11,14 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: impl Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         match self.theme {
-            PanoramaTheme::Pomme => self.build_main_pomme(screen_w, screen_h, input, text_width_fn),
+            PanoramaTheme::Pomme => {
+                self.build_main_pomme(screen_w, screen_h, input, text_width_fn, key_bindings)
+            }
             PanoramaTheme::Default => {
-                self.build_main_vanilla(screen_w, screen_h, input, text_width_fn)
+                self.build_main_vanilla(screen_w, screen_h, input, text_width_fn, key_bindings)
             }
         }
     }
@@ -27,6 +30,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: impl Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gs = self.gui_scale(screen_w, screen_h);
         let cursor = input.cursor;
@@ -280,12 +284,14 @@ impl MainMenu {
                 } else {
                     match def.id {
                         0 => {
-                            self.open_world_list(gs, &|t: &str| {
-                                text_width_fn(t, common::FONT_SIZE * gs)
-                            });
+                            self.open_world_list(
+                                gs,
+                                &|t: &str| text_width_fn(t, common::FONT_SIZE * gs),
+                                key_bindings,
+                            );
                         }
                         1 => {
-                            self.set_screen(Screen::ServerList);
+                            self.set_screen(Screen::ServerList, key_bindings);
                             self.scroll_offset = 0.0;
                             self.selected_server = None;
                         }
@@ -350,7 +356,7 @@ impl MainMenu {
                 match icon {
                     ICON_LINK => self.toggle_links(),
                     ICON_GEAR => {
-                        self.open_options();
+                        self.open_options(key_bindings);
                     }
                     ICON_PAINTBRUSH => self.toggle_theme(),
                     _ => {}
@@ -395,14 +401,14 @@ impl MainMenu {
             if enabled && clicked && hovered {
                 any_clicked = true;
                 match icon {
-                    ICON_USERS => self.open_friends(),
+                    ICON_USERS => self.open_friends(key_bindings),
                     ICON_LANGUAGE => {
                         self.settings_back = Screen::Main;
-                        self.set_screen(Screen::OptionsLanguage);
+                        self.set_screen(Screen::OptionsLanguage, key_bindings);
                     }
                     ICON_UNIVERSAL_ACCESS => {
                         self.settings_back = Screen::Main;
-                        self.set_screen(Screen::OptionsAccessibility);
+                        self.set_screen(Screen::OptionsAccessibility, key_bindings);
                     }
                     _ => {}
                 }

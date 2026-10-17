@@ -12,9 +12,7 @@ use winit::keyboard::KeyCode;
 use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Fullscreen, Window};
 
-use crate::app::input::{
-    Action, InputState, KEY_BACK, KEY_FORWARD, KEY_LEFT, KEY_RIGHT, STICK_MOVEMENT_THRESHOLD,
-};
+use crate::app::input::{Action, InputState, STICK_MOVEMENT_THRESHOLD};
 use crate::app::level_load::ReadyInputs;
 use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx};
@@ -323,10 +321,26 @@ fn player_input_state(
     sprint_key_down: bool,
 ) -> PlayerInputState {
     PlayerInputState {
-        forward: input.key_pressed(KEY_FORWARD) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
-        backward: input.key_pressed(KEY_BACK) || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
-        left: input.key_pressed(KEY_LEFT) || analog_move.x > STICK_MOVEMENT_THRESHOLD,
-        right: input.key_pressed(KEY_RIGHT) || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
+        forward: input
+            .key_bindings
+            .inputs_for_action(Action::Forward)
+            .any(|key| input.input_pressed(key))
+            || analog_move.y > STICK_MOVEMENT_THRESHOLD,
+        backward: input
+            .key_bindings
+            .inputs_for_action(Action::Backward)
+            .any(|key| input.input_pressed(key))
+            || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
+        left: input
+            .key_bindings
+            .inputs_for_action(Action::StrafeLeft)
+            .any(|key| input.input_pressed(key))
+            || analog_move.x > STICK_MOVEMENT_THRESHOLD,
+        right: input
+            .key_bindings
+            .inputs_for_action(Action::StrafeRight)
+            .any(|key| input.input_pressed(key))
+            || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
         jump: input.performing_action(Action::Jump),
         shift: input.performing_action(Action::Sneak),
         sprint: sprint_key_down,
@@ -590,12 +604,14 @@ impl AppCore {
     ) -> Self {
         let resource_packs = ResourcePackManager::new(&data_dirs.game_dir);
 
+        let mut input = InputState::new();
         let mut menu = MainMenu::new(
             &data_dirs.game_dir,
             Arc::clone(&tokio_rt),
             user.username.clone(),
             version.clone(),
             user.access_token.clone(),
+            &mut input.key_bindings,
         );
 
         let display_mode = menu.display_mode;
@@ -618,7 +634,7 @@ impl AppCore {
             user,
             presence,
             display_mode,
-            input: InputState::new(),
+            input,
             menu,
             tokio_rt,
             data_dirs,
@@ -792,7 +808,7 @@ impl AppCore {
         // runs the options screen's removed() and saves.
         game.paused = false;
         game.options_from_game = false;
-        self.menu.flush_settings();
+        self.menu.flush_settings(&self.input.key_bindings);
         game.close_menu();
         game.close_creative_inventory();
         game.chat
