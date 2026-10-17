@@ -953,15 +953,14 @@ pub fn render(
 ) {
     state.update_cycle_time(ctrl_held || !frame.visible);
     let main = main_panel(spec, screen_w, screen_h, gs, frame.main_x_offset);
-    if !frame.visible {
+    // A narrow screen's open book hides the screen; otherwise the ghost and
+    // the toggle (a screen widget) draw below the book's stratum.
+    if !(frame.visible && frame.narrow) {
         render_ghost_recipe(elements, state, &main, cursor, screen_w, screen_h);
         render_toggle(elements, spec, &main, cursor);
-        return;
     }
-    if !frame.narrow {
-        render_ghost_recipe(elements, state, &main, cursor, screen_w, screen_h);
-        // The toggle is a screen widget, drawn below the book's stratum.
-        render_toggle(elements, spec, &main, cursor);
+    if !frame.visible {
+        return;
     }
 
     let layout = BookLayout::new(screen_w, screen_h, gs, frame.narrow);
@@ -2411,18 +2410,15 @@ fn collection_search_text(collection: &Collection, book: &RecipeBookState) -> Ve
             path: crate::player::inventory::item_resource_name(stack.stack.kind).to_lowercase(),
             lines: stack_tooltip_lines(&stack)
                 .into_iter()
-                .map(|line| {
-                    let text = line
-                        .spans
-                        .into_iter()
-                        .map(|span| span.text)
-                        .collect::<String>();
-                    strip_formatting(&text).trim().to_lowercase()
-                })
+                .map(|line| strip_formatting(&line_text(line)).trim().to_lowercase())
                 .filter(|line| !line.is_empty())
                 .collect(),
         })
         .collect()
+}
+
+fn line_text(line: TooltipLine) -> String {
+    line.spans.into_iter().map(|span| span.text).collect()
 }
 
 /// Vanilla `ChatFormatting.stripFormatting`: drops `§` codes.
@@ -2532,9 +2528,10 @@ fn resolve_ghost_slots(
     match (display, spec.kind) {
         (
             RecipeDisplay::Shaped {
-                width,
-                height,
-                ingredients,
+                result: result_display,
+                ..
+            }
+            | RecipeDisplay::Shapeless {
                 result: result_display,
                 ..
             },
@@ -2542,39 +2539,11 @@ fn resolve_ghost_slots(
         ) => {
             let (grid_x, grid_y, result_x, result_y) = crafting_geometry(spec);
             out.push(slot((result_x, result_y), result, result_display));
-            for (grid_index, ingredient) in centered_shaped_slots(
-                spec.grid_width,
-                spec.grid_height,
-                *width as usize,
-                *height as usize,
-                ingredients,
-            ) {
+            for (grid_index, ingredient) in
+                crafting_grid_slots(display, spec.grid_width, spec.grid_height)
+            {
                 let col = (grid_index % spec.grid_width) as f32;
                 let row = (grid_index / spec.grid_width) as f32;
-                out.push(slot(
-                    (grid_x + col * 18.0, grid_y + row * 18.0),
-                    GhostSlotRole::Ingredient,
-                    ingredient,
-                ));
-            }
-        }
-        (
-            RecipeDisplay::Shapeless {
-                ingredients,
-                result: result_display,
-                ..
-            },
-            RecipeBookType::Crafting,
-        ) => {
-            let (grid_x, grid_y, result_x, result_y) = crafting_geometry(spec);
-            out.push(slot((result_x, result_y), result, result_display));
-            for (index, ingredient) in ingredients
-                .iter()
-                .take(spec.grid_width * spec.grid_height)
-                .enumerate()
-            {
-                let col = (index % spec.grid_width) as f32;
-                let row = (index / spec.grid_width) as f32;
                 out.push(slot(
                     (grid_x + col * 18.0, grid_y + row * 18.0),
                     GhostSlotRole::Ingredient,
@@ -2952,22 +2921,39 @@ fn render_overlay(
 
 /// A recipe's ingredient displays on the popup's 3×3 grid.
 fn overlay_ingredients(display: &RecipeDisplay) -> Vec<((usize, usize), &SlotDisplay)> {
+    if let RecipeDisplay::Furnace { ingredient, .. } = display {
+        return vec![((1, 1), ingredient)];
+    }
+    crafting_grid_slots(display, 3, 3)
+        .into_iter()
+        .map(|(grid_index, ingredient)| ((grid_index % 3, grid_index / 3), ingredient))
+        .collect()
+}
+
+/// A crafting recipe's ingredients by index on a `width`×`height` grid:
+/// shaped recipes centered (`PlaceRecipeHelper`), shapeless in order.
+fn crafting_grid_slots(
+    display: &RecipeDisplay,
+    width: usize,
+    height: usize,
+) -> Vec<(usize, &SlotDisplay)> {
     match display {
-        RecipeDisplay::Furnace { ingredient, .. } => vec![((1, 1), ingredient)],
         RecipeDisplay::Shaped {
-            width,
-            height,
+            width: recipe_width,
+            height: recipe_height,
             ingredients,
             ..
-        } => centered_shaped_slots(3, 3, *width as usize, *height as usize, ingredients)
-            .into_iter()
-            .map(|(grid_index, ingredient)| ((grid_index % 3, grid_index / 3), ingredient))
-            .collect(),
+        } => centered_shaped_slots(
+            width,
+            height,
+            *recipe_width as usize,
+            *recipe_height as usize,
+            ingredients,
+        ),
         RecipeDisplay::Shapeless { ingredients, .. } => ingredients
             .iter()
-            .take(9)
+            .take(width * height)
             .enumerate()
-            .map(|(index, ingredient)| ((index % 3, index / 3), ingredient))
             .collect(),
         _ => Vec::new(),
     }
@@ -3745,11 +3731,10 @@ mod tests {
         );
     }
 
-    /// Joined text of each tooltip line.
     fn tooltip_text(stack: &ResolvedSlotStack) -> Vec<String> {
         stack_tooltip_lines(stack)
             .into_iter()
-            .map(|line| line.spans.into_iter().map(|span| span.text).collect())
+            .map(line_text)
             .collect()
     }
 
