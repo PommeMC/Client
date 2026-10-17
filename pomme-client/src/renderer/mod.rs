@@ -2205,6 +2205,15 @@ fn warm_item_meshes(
             );
         }
     }
+
+    for block_name in ["piston_head", "piston", "sticky_piston"] {
+        if let Some(variants) = registry.get_all_baked_variants(block_name) {
+            for (variant_key, model) in variants {
+                let key = format!("{block_name}:{variant_key}");
+                item_entity_pipeline.ensure_mesh(device, allocator, &key, model, uv_map);
+            }
+        }
+    }
 }
 
 /// Decoded skin ready for upload: always a 64x64 RGBA sheet (legacy 64x32

@@ -1437,7 +1437,13 @@ fn resolve_blockstates_dir(
 
 fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<ModelRef> {
     if let Some(variants) = &blockstate.variants {
-        let entry = variants.get("").or_else(|| variants.values().next())?;
+        let entry = variants.get("").or_else(|| {
+            variants.get("inverted=false").or_else(|| {
+                let mut keys: Vec<&String> = variants.keys().collect();
+                keys.sort();
+                keys.first().and_then(|k| variants.get(*k))
+            })
+        })?;
         let r = entry.first()?;
         Some(ModelRef {
             model: r.model.clone(),

@@ -176,6 +176,8 @@ pub fn tick(
 
     travel(player, input, world, forward, strafe, sin_y_rot, cos_y_rot);
 
+    push_player_by_moving_pistons(player, block_entity_anim);
+
     player.tick_air_supply();
     stop_flying_on_ground(player);
 
@@ -1175,6 +1177,87 @@ fn mth_cos(angle: f32) -> f32 {
 fn vanilla_yaw_sin_cos(yaw_degrees: f32) -> (f32, f32) {
     let angle = yaw_degrees * DEG_TO_RAD;
     (mth_sin(angle), mth_cos(angle))
+}
+
+fn push_player_by_moving_pistons(player: &mut LocalPlayer, anim_store: &BlockEntityAnimStore) {
+    let player_box = player.bounding_box();
+    for (pos, anim) in anim_store.moving_pistons() {
+        let block_pos = dvec3(pos.x as f64, pos.y as f64, pos.z as f64);
+        let (dx, dy, dz) = match anim.facing {
+            crate::world::block::model::Direction::Down => (0.0, -1.0, 0.0),
+            crate::world::block::model::Direction::Up => (0.0, 1.0, 0.0),
+            crate::world::block::model::Direction::North => (0.0, 0.0, -1.0),
+            crate::world::block::model::Direction::South => (0.0, 0.0, 1.0),
+            crate::world::block::model::Direction::West => (-1.0, 0.0, 0.0),
+            crate::world::block::model::Direction::East => (1.0, 0.0, 0.0),
+        };
+
+        if anim.extending {
+            let offset = anim.offset(1.0).as_dvec3();
+            let piston_box = Aabb::new(
+                block_pos + offset,
+                block_pos + offset + dvec3(1.0, 1.0, 1.0),
+            );
+            if piston_box.intersects(&player_box) {
+                let push_dist = match anim.facing {
+                    crate::world::block::model::Direction::East => {
+                        (piston_box.max.x - player_box.min.x).max(0.0)
+                    }
+                    crate::world::block::model::Direction::West => {
+                        (player_box.max.x - piston_box.min.x).max(0.0)
+                    }
+                    crate::world::block::model::Direction::South => {
+                        (piston_box.max.z - player_box.min.z).max(0.0)
+                    }
+                    crate::world::block::model::Direction::North => {
+                        (player_box.max.z - piston_box.min.z).max(0.0)
+                    }
+                    crate::world::block::model::Direction::Up => {
+                        (piston_box.max.y - player_box.min.y).max(0.0)
+                    }
+                    crate::world::block::model::Direction::Down => {
+                        (player_box.max.y - piston_box.min.y).max(0.0)
+                    }
+                };
+                if push_dist > 0.0 && push_dist <= 1.05 {
+                    player.position.x += dx * push_dist;
+                    player.position.y += dy * push_dist;
+                    player.position.z += dz * push_dist;
+                }
+            }
+        } else if anim.source {
+            // Retracting source piston: eject player from base block along facing into the
+            // arm opening
+            let base_box = Aabb::new(block_pos, block_pos + dvec3(1.0, 1.0, 1.0));
+            if base_box.intersects(&player_box) {
+                let push_dist = match anim.facing {
+                    crate::world::block::model::Direction::East => {
+                        (base_box.max.x - player_box.min.x).max(0.0)
+                    }
+                    crate::world::block::model::Direction::West => {
+                        (player_box.max.x - base_box.min.x).max(0.0)
+                    }
+                    crate::world::block::model::Direction::South => {
+                        (base_box.max.z - player_box.min.z).max(0.0)
+                    }
+                    crate::world::block::model::Direction::North => {
+                        (player_box.max.z - base_box.min.z).max(0.0)
+                    }
+                    crate::world::block::model::Direction::Up => {
+                        (base_box.max.y - player_box.min.y).max(0.0)
+                    }
+                    crate::world::block::model::Direction::Down => {
+                        (player_box.max.y - base_box.min.y).max(0.0)
+                    }
+                };
+                if push_dist > 0.0 && push_dist <= 1.05 {
+                    player.position.x += dx * push_dist;
+                    player.position.y += dy * push_dist;
+                    player.position.z += dz * push_dist;
+                }
+            }
+        }
+    }
 }
 
 fn vanilla_look_y(pitch_degrees: f32) -> f64 {
