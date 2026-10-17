@@ -55,6 +55,8 @@ const ONLY_SHOW_SECURE_CHAT: &str = "Only Show Secure Chat:";
 const SAVE_CHAT_DRAFTS: &str = "Save Unsent Chats:";
 const FORCE_UNICODE_FONT: &str = "Force Unicode Font:";
 const JAPANESE_GLYPH_VARIANTS: &str = "Japanese Glyph Variants:";
+const INVERT_MOUSE_X: &str = "Invert Mouse X:";
+const INVERT_MOUSE_Y: &str = "Invert Mouse Y:";
 
 /// The `chatDelay` slider's `IntRange(0, 60)`, in tenths of a second.
 const CHAT_DELAY_MAX_TENTHS: i32 = 60;
@@ -340,29 +342,16 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
-        let sensitivity_label = if self.sensitivity <= 0.0 {
-            "Sensitivity: *yawn*".to_string()
-        } else if self.sensitivity >= 1.0 {
-            "Sensitivity: HYPERSPEED!!!".to_string()
-        } else {
-            format!("Sensitivity: {}%", (self.sensitivity * 200.0) as u32)
-        };
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair(&sensitivity_label, "Invert Mouse: OFF"),
-            OptRow::Pair("Auto-Jump: ON", "Operator Items Tab: OFF"),
-            OptRow::Pair("Key Binds...", "Mouse Settings..."),
+            OptRow::Pair("Mouse Settings...", "Key Binds..."),
             OptRow::Pair("Sneak: Toggle", "Sprint: Hold"),
+            OptRow::Pair("Auto-Jump: ON", "Operator Items Tab: OFF"),
         ];
-        let nav: &[(&str, Screen)] = &[("Key Binds...", Screen::OptionsKeybinds)];
-        let sliders: &[(&str, f32)] = &[("Sensitivity:", self.sensitivity)];
-        let disabled = &[
-            "Invert Mouse:",
-            "Auto-Jump:",
-            "Operator Items Tab:",
-            "Mouse Settings...",
-            "Sneak:",
-            "Sprint:",
+        let nav: &[(&str, Screen)] = &[
+            ("Mouse Settings...", Screen::OptionsMouse),
+            ("Key Binds...", Screen::OptionsKeybinds),
         ];
+        let disabled = &["Sneak:", "Sprint:", "Auto-Jump:", "Operator Items Tab:"];
         self.build_options_grid(
             sw,
             sh,
@@ -371,6 +360,51 @@ impl MainMenu {
             Screen::Options,
             &rows,
             nav,
+            &[],
+            disabled,
+            true,
+            &[],
+            text_width_fn,
+        )
+    }
+
+    pub(super) fn build_options_mouse(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+    ) -> MainMenuResult {
+        let sensitivity_label = if self.sensitivity <= 0.0 {
+            "Sensitivity: *yawn*".to_string()
+        } else if self.sensitivity >= 1.0 {
+            "Sensitivity: HYPERSPEED!!!".to_string()
+        } else {
+            format!("Sensitivity: {}%", (self.sensitivity * 200.0) as u32)
+        };
+        let invert_x_label = format!("{INVERT_MOUSE_X} {}", on_off(self.invert_mouse_x));
+        let invert_y_label = format!("{INVERT_MOUSE_Y} {}", on_off(self.invert_mouse_y));
+        let rows: Vec<OptRow> = vec![
+            OptRow::PairLeft(&sensitivity_label),
+            OptRow::Pair(&invert_x_label, &invert_y_label),
+            OptRow::Pair("Mouse Wheel Sensitivity: 100%", "Discrete Scrolling: OFF"),
+            OptRow::Pair("Allow Cursor Changes: ON", "Raw Mouse Input: ON"),
+        ];
+        let sliders: &[(&str, f32)] = &[("Sensitivity:", self.sensitivity)];
+        let disabled = &[
+            "Mouse Wheel Sensitivity:",
+            "Discrete Scrolling:",
+            "Allow Cursor Changes:",
+            "Raw Mouse Input:",
+        ];
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            "Mouse Settings",
+            Screen::OptionsControls,
+            &rows,
+            &[],
             sliders,
             disabled,
             true,
@@ -1301,6 +1335,14 @@ impl MainMenu {
                     if label.starts_with(JAPANESE_GLYPH_VARIANTS) {
                         self.japanese_glyph_variants = !self.japanese_glyph_variants;
                         self.reload_fonts = true;
+                        self.save_settings();
+                    }
+                    if label.starts_with(INVERT_MOUSE_X) {
+                        self.invert_mouse_x = !self.invert_mouse_x;
+                        self.save_settings();
+                    }
+                    if label.starts_with(INVERT_MOUSE_Y) {
+                        self.invert_mouse_y = !self.invert_mouse_y;
                         self.save_settings();
                     }
                     if label.starts_with("Vignette:") {
@@ -2386,6 +2428,7 @@ mod tests {
         menu.build_options(sw, sh, &input, tw);
         menu.build_options_video(sw, sh, &input, tw);
         menu.build_options_controls(sw, sh, &input, tw);
+        menu.build_options_mouse(sw, sh, &input, tw);
         menu.build_options_chat(sw, sh, &input, tw);
         menu.build_options_accessibility(sw, sh, &input, tw);
         menu.build_options_music(sw, sh, &input, tw);

@@ -2093,8 +2093,13 @@ pub fn update_game(
     }
 
     if game.input_live() && game.chunk_load_bench.is_none() {
-        gfx.renderer
-            .update_camera(&mut core.input, dt, core.menu.sensitivity);
+        gfx.renderer.update_camera(
+            &mut core.input,
+            dt,
+            core.menu.sensitivity,
+            core.menu.invert_mouse_x,
+            core.menu.invert_mouse_y,
+        );
     }
 
     // Menus never pause the simulation; tick_physics substitutes neutral input.

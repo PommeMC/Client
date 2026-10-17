@@ -45,6 +45,10 @@ struct Settings {
     damage_tilt_strength: f32,
     #[serde(default = "default_sensitivity")]
     sensitivity: f32,
+    #[serde(default)]
+    invert_mouse_x: bool,
+    #[serde(default)]
+    invert_mouse_y: bool,
     #[serde(default = "default_true")]
     view_bobbing: bool,
     #[serde(default)]
@@ -190,6 +194,8 @@ impl Default for Settings {
             fov_effect_scale: 1.0,
             damage_tilt_strength: 1.0,
             sensitivity: 0.5,
+            invert_mouse_x: false,
+            invert_mouse_y: false,
             view_bobbing: true,
             show_subtitles: false,
             show_autosave_indicator: true,
@@ -482,6 +488,7 @@ enum Screen {
     OptionsSkinCustomization,
     OptionsMusicSounds,
     OptionsControls,
+    OptionsMouse,
     OptionsKeybinds,
     OptionsLanguage,
     OptionsFontSettings,
@@ -504,6 +511,7 @@ impl Screen {
             Self::OptionsSkinCustomization => Self::OptionsSkinCustomization,
             Self::OptionsMusicSounds => Self::OptionsMusicSounds,
             Self::OptionsControls => Self::OptionsControls,
+            Self::OptionsMouse => Self::OptionsMouse,
             Self::OptionsKeybinds => Self::OptionsKeybinds,
             Self::OptionsLanguage => Self::OptionsLanguage,
             Self::OptionsFontSettings => Self::OptionsFontSettings,
@@ -624,6 +632,8 @@ pub struct MainMenu {
     pub fov_effect_scale: f32,
     pub damage_tilt_strength: f32,
     pub sensitivity: f32,
+    pub invert_mouse_x: bool,
+    pub invert_mouse_y: bool,
     pub view_bobbing: bool,
     pub show_subtitles: bool,
     pub show_autosave_indicator: bool,
@@ -762,6 +772,8 @@ impl MainMenu {
             // Cubed by the look curve, so an out-of-range value reaches
             // infinity and leaves the look direction NaN for good.
             sensitivity: unit_range(settings.sensitivity),
+            invert_mouse_x: settings.invert_mouse_x,
+            invert_mouse_y: settings.invert_mouse_y,
             view_bobbing: settings.view_bobbing,
             show_subtitles: settings.show_subtitles,
             show_autosave_indicator: settings.show_autosave_indicator,
@@ -921,6 +933,8 @@ impl MainMenu {
                 fov_effect_scale: self.fov_effect_scale,
                 damage_tilt_strength: self.damage_tilt_strength,
                 sensitivity: self.sensitivity,
+                invert_mouse_x: self.invert_mouse_x,
+                invert_mouse_y: self.invert_mouse_y,
                 view_bobbing: self.view_bobbing,
                 show_subtitles: self.show_subtitles,
                 show_autosave_indicator: self.show_autosave_indicator,
@@ -995,6 +1009,7 @@ impl MainMenu {
                 | Screen::OptionsSkinCustomization
                 | Screen::OptionsMusicSounds
                 | Screen::OptionsControls
+                | Screen::OptionsMouse
                 | Screen::OptionsKeybinds
                 | Screen::OptionsLanguage
                 | Screen::OptionsFontSettings
@@ -1224,6 +1239,9 @@ impl MainMenu {
             Screen::OptionsControls => {
                 self.build_options_controls(screen_w, screen_h, input, &text_width_fn)
             }
+            Screen::OptionsMouse => {
+                self.build_options_mouse(screen_w, screen_h, input, &text_width_fn)
+            }
             Screen::OptionsKeybinds => {
                 self.build_options_keybinds(screen_w, screen_h, input, &text_width_fn)
             }
@@ -1346,6 +1364,19 @@ mod tests {
             };
             assert_eq!(chat.sanitized().delay_secs, secs, "delay {secs}");
         }
+    }
+
+    #[test]
+    fn mouse_settings_round_trip() {
+        let settings = Settings {
+            invert_mouse_x: true,
+            invert_mouse_y: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert!(loaded.invert_mouse_x);
+        assert!(loaded.invert_mouse_y);
     }
 
     #[test]
