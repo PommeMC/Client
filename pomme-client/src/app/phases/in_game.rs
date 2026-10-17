@@ -3254,6 +3254,9 @@ pub fn update_game(
         let scroll_delta = core.input.consume_menu_scroll();
         // `typed`/`backspace` come from the frame's single drain up top; a
         // second drain here would always read empty.
+        let keys_live = !game.wants_text_input() || core.input.ctrl_held();
+        let drop_key = keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyQ);
+        let drop_all = core.input.ctrl_held();
         let action = crate::ui::creative_inventory::build_creative_inventory(
             &mut elements,
             &mut game.creative_state,
@@ -3268,6 +3271,8 @@ pub fn update_game(
             core.input.key_just_pressed(winit::keyboard::KeyCode::KeyT),
             core.input.hotbar_key_just_pressed(),
             core.input.key_just_pressed(winit::keyboard::KeyCode::KeyF),
+            drop_key,
+            drop_all,
             &game.player.inventory,
             gs,
             game.advanced_item_tooltips,
@@ -3284,18 +3289,20 @@ pub fn update_game(
             gs,
         );
         use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
-        let mut set_creative_slot = |slot_num: u16, item: azalea_inventory::ItemStack| {
+        let mut set_creative_slot = |slot_num: i16, item: azalea_inventory::ItemStack| {
             if crate::player::is_creative(game.player.game_mode) {
                 connection
                     .packet_tx
                     .send(ServerboundGamePacket::SetCreativeModeSlot(
                         ServerboundSetCreativeModeSlot {
-                            slot_num,
+                            slot_num: slot_num as u16,
                             item_stack: item.clone(),
                         },
                     ));
                 // Optimistic local update; the server echoes via ContainerSetSlot.
-                game.player.inventory.set_slot(slot_num as usize, item);
+                if slot_num >= 0 {
+                    game.player.inventory.set_slot(slot_num as usize, item);
+                }
             }
         };
         match action {
@@ -3303,12 +3310,25 @@ pub fn update_game(
                 close_inventory = true;
             }
             crate::ui::creative_inventory::CreativeAction::SetSlot(slot_num, item) => {
-                set_creative_slot(slot_num, item);
+                set_creative_slot(slot_num as i16, item);
             }
             crate::ui::creative_inventory::CreativeAction::SetSlots(items) => {
                 for (slot_num, item) in items {
-                    set_creative_slot(slot_num, item);
+                    set_creative_slot(slot_num as i16, item);
                 }
+            }
+            crate::ui::creative_inventory::CreativeAction::DropItem(item) => {
+                set_creative_slot(-1, item);
+                crate::player::interaction::send_use_swing(&connection.packet_tx);
+            }
+            crate::ui::creative_inventory::CreativeAction::DropSlot {
+                slot,
+                dropped,
+                remaining,
+            } => {
+                set_creative_slot(slot as i16, remaining);
+                set_creative_slot(-1, dropped);
+                crate::player::interaction::send_use_swing(&connection.packet_tx);
             }
             crate::ui::creative_inventory::CreativeAction::None => {}
         }
