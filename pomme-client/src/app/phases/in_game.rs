@@ -42,6 +42,7 @@ use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
+use crate::util::ChunkRing;
 use crate::world::block::model::CardinalLightType;
 use crate::world::block::{BedDirection, bed_direction};
 use crate::world::block_entity_anim::BlockEntityAnimStore;
@@ -272,14 +273,11 @@ pub struct GameState {
     /// Last frame's `update_game` CPU phase timings, for the chunk-load
     /// benchmark's worst-frame breakdown.
     pub last_update_phases: crate::benchmark::UpdatePhases,
-    /// Monotonic content generation per column, bumped on every edit (and chunk
-    /// load). This is the dirty marker: a column needs (re)meshing whenever its
-    /// `content_gen` outruns what was last enqueued, regardless of visibility,
-    /// so an edit to a deferred/hidden column can never be lost.
-    pub content_gen: HashMap<ChunkPos, u64>,
-    /// Atomic-style section dirtiness represented compactly per column. The
-    /// rescan snapshots and sorts only columns with pending bits.
-    pub dirty_sections: HashMap<ChunkPos, u32>,
+    /// Main-thread scheduling metadata in a render-distance-sized coordinate
+    /// ring. Generation zero means that the slot has no occupant.
+    chunk_meta: ChunkRing<ChunkMeta>,
+    /// Source of globally unique, nonzero chunk-incarnation/content tokens.
+    next_chunk_generation: u64,
     /// Detail level used when the dirty set was last scheduled. Changing it
     /// invalidates every loaded column's mesh LOD.
     pub last_mesh_detail: Option<u32>,
@@ -287,15 +285,8 @@ pub struct GameState {
     /// section is in-frustum and not occluded). Computed in
     /// `update_visibility`.
     pub vis_mask: HashMap<ChunkPos, u32>,
-    /// Per-section generation for edits only (bulk uses the column
-    /// `content_gen` above). Bumped per edited section so a result is
-    /// dropped only when *that* section was edited again — editing one
-    /// section never invalidates a sibling section's in-flight result.
-    /// Sections meshed together as one edit span share one gen value.
-    pub section_gen: HashMap<(ChunkPos, i32), u64>,
-    pub next_section_gen: u64,
-    /// Per-section cave-cull visibility (vanilla `VisibilitySet`), keyed like
-    /// `section_gen`. Fed by mesh results; consumed by the occlusion walk.
+    /// Per-section cave-cull visibility fed by mesh results and consumed by the
+    /// occlusion walk.
     pub section_vis: HashMap<(ChunkPos, i32), VisibilitySet>,
     /// Per-column bitmask of sections whose mesh is finished and, if it had
     /// any geometry, uploaded — vanilla's "not `UNCOMPILED`", where an empty
@@ -320,6 +311,14 @@ pub struct GameState {
     /// off, only frustum culling applies (full masks pushed to the
     /// renderer).
     pub chunk_occlusion_enabled: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ChunkMeta {
+    pos: ChunkPos,
+    incarnation: u64,
+    generation: u64,
+    dirty_sections: u32,
 }
 
 impl GameState {
@@ -461,12 +460,10 @@ impl GameState {
             chunk_load_abort: false,
             chunk_load_upload: None,
             last_update_phases: crate::benchmark::UpdatePhases::default(),
-            content_gen: HashMap::new(),
-            dirty_sections: HashMap::new(),
+            chunk_meta: ChunkRing::from_fn(|_, _| ChunkMeta::default()),
+            next_chunk_generation: 0,
             last_mesh_detail: None,
             vis_mask: HashMap::new(),
-            section_gen: HashMap::new(),
-            next_section_gen: 0,
             section_vis: HashMap::new(),
             compiled: HashMap::new(),
             section_vis_epoch: HashMap::new(),
@@ -943,18 +940,55 @@ impl GameState {
             ));
     }
 
-    /// Mark a column dirty by advancing its content generation, returning the
-    /// new value. Any in-flight mesh built from an older generation is
-    /// dropped on arrival, so a deferred column always remeshes with the
-    /// latest blocks.
+    fn next_chunk_generation(&mut self) -> u64 {
+        self.next_chunk_generation = self
+            .next_chunk_generation
+            .checked_add(1)
+            .expect("chunk mesh generation overflow");
+        self.next_chunk_generation
+    }
+
+    fn mark_chunk_dirty(&mut self, pos: ChunkPos, sections: u32) -> u64 {
+        let generation = self.next_chunk_generation();
+        let meta = self.chunk_meta.get_mut(pos);
+        if meta.generation == 0 || meta.pos != pos {
+            *meta = ChunkMeta {
+                pos,
+                incarnation: generation,
+                generation,
+                dirty_sections: sections,
+            };
+        } else {
+            meta.generation = generation;
+            meta.dirty_sections |= sections;
+        }
+        generation
+    }
+
+    fn chunk_incarnation(&self, pos: ChunkPos) -> Option<u64> {
+        let meta = self.chunk_meta.get(pos);
+        (meta.generation != 0 && meta.pos == pos).then_some(meta.incarnation)
+    }
+
+    /// Invalidate this incarnation without waiting for a queued/running mesh.
+    pub fn unload_mesh_column(&mut self, pos: ChunkPos) {
+        let canceled_at = self.next_chunk_generation();
+        let meta = self.chunk_meta.get_mut(pos);
+        if meta.generation != 0 && meta.pos == pos {
+            *meta = ChunkMeta::default();
+            self.mesh_dispatcher.cancel(pos, canceled_at);
+        }
+    }
+
+    pub fn reset_mesh_columns(&mut self) {
+        self.chunk_meta = ChunkRing::from_fn(|_, _| ChunkMeta::default());
+        self.last_mesh_detail = None;
+    }
+
+    /// Mark a column dirty with a fresh globally unique generation. Any result
+    /// from an older incarnation or snapshot is rejected on arrival.
     pub fn bump_content_gen(&mut self, pos: ChunkPos) -> u64 {
-        let g = self.content_gen.entry(pos).or_insert(0);
-        *g += 1;
-        self.dirty_sections
-            .entry(pos)
-            .and_modify(|mask| *mask |= section_mask(self.chunk_store.section_count()))
-            .or_insert_with(|| section_mask(self.chunk_store.section_count()));
-        *g
+        self.mark_chunk_dirty(pos, section_mask(self.chunk_store.section_count()))
     }
 
     /// The chunk column the player stands in.
@@ -968,10 +1002,9 @@ impl GameState {
     /// Runs one light update (vanilla `ClientLevel.update`, called per frame
     /// from `Minecraft.runTick`: drain queued light tasks, then
     /// `runLightUpdates`) and turns the resulting dirty scope into remesh
-    /// work: columns whose chunk-load light applied go through the
-    /// content-gen path like chunk loads (the visibility rescan enqueues
-    /// them tier-gated), individual lit sections remesh on the priority lane.
-    pub fn update_light(&mut self, chunk_detail: u32) {
+    /// work. Whole-column and individual-section changes both merge into the
+    /// same per-column metadata and are claimed by the normal scheduler.
+    pub fn update_light(&mut self) {
         let mut dirty = crate::world::light::LightDirty::default();
         self.light_engine
             .poll_and_run(&mut self.chunk_store, &mut dirty);
@@ -992,7 +1025,6 @@ impl GameState {
         if !bumped.is_empty() {
             self.pending_load_rescan = true;
         }
-        let player_chunk = self.player_chunk();
         let min_section_y = self.chunk_store.min_y() >> 4;
         let section_count = self.chunk_store.section_count();
         for key in &dirty.sections {
@@ -1006,21 +1038,13 @@ impl GameState {
             if self.chunk_store.get_chunk(&col).is_none() {
                 continue;
             }
-            self.enqueue_section_edit(
-                col,
-                si,
-                crate::app::core::chunk_lod(col, player_chunk, chunk_detail),
-            );
+            self.mark_chunk_dirty(col, section_bit(si));
         }
     }
 
-    /// Mesh a single edited section now on the priority lane, ungated by
-    /// visibility. Bumps that section's generation so the result is dropped
-    /// only if the same section is edited again before it lands.
-    pub fn enqueue_section_edit(&mut self, col: ChunkPos, si: i32, lod: u32) {
-        let g = self.bump_section_gen(col, si..si + 1);
-        self.mesh_dispatcher
-            .enqueue(&self.chunk_store, col, lod, true, g, si..si + 1);
+    /// Mark an asynchronously changed section for the normal scheduler.
+    pub fn enqueue_section_edit(&mut self, col: ChunkPos, si: i32) {
+        self.mark_chunk_dirty(col, section_bit(si));
     }
 
     /// Vanilla `compileSync` under `PrioritizeChunkUpdates.PLAYER_AFFECTED`:
@@ -1034,29 +1058,10 @@ impl GameState {
         col: ChunkPos,
         sections: std::ops::Range<i32>,
     ) {
-        // The gen bump drops any in-flight priority result for these
-        // sections at drain time; stale bulk results are rejected by the
-        // buffer's per-section epoch gate (`ChunkMeshData::upload_epoch`).
-        let g = self.bump_section_gen(col, sections.clone());
         let mesh = self
             .mesh_dispatcher
-            .mesh_sections_now(&self.chunk_store, col, sections, g);
+            .mesh_sections_now(&self.chunk_store, col, sections, 0);
         self.apply_mesh_upload(renderer, mesh);
-    }
-
-    /// One gen for the whole span: the drain stale-check compares every
-    /// section in a mesh's `replaced` range against its single
-    /// `content_gen`, so grouped sections must share a value.
-    fn bump_section_gen(&mut self, col: ChunkPos, sections: std::ops::Range<i32>) -> u64 {
-        self.next_section_gen += 1;
-        for si in sections {
-            self.section_gen.insert((col, si), self.next_section_gen);
-            self.dirty_sections
-                .entry(col)
-                .and_modify(|mask| *mask |= section_bit(si))
-                .or_insert_with(|| section_bit(si));
-        }
-        self.next_section_gen
     }
 
     /// Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
@@ -1074,33 +1079,13 @@ impl GameState {
                 bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
             }
             // Drop a mesh built from an out-of-date snapshot. A mesh for a chunk
-            // that has since unloaded is always stale (uploading it would resurrect
-            // a column nothing cleans up). Edits (priority lane, single section)
-            // are keyed per section so editing one section never drops a sibling's
-            // in-flight result; bulk loads keep the column key.
+            // that has since unloaded is always stale (uploading it would
+            // resurrect a column nothing cleans up).
             let stale = self.chunk_store.get_chunk(&mesh.pos).is_none()
-                || if mesh.timing.is_some() {
-                    mesh.replaced.clone().any(|si| {
-                        self.section_gen.get(&(mesh.pos, si)).copied() != Some(mesh.content_gen)
-                    })
-                } else {
-                    mesh.content_gen < self.content_gen.get(&mesh.pos).copied().unwrap_or(0)
-                };
+                || self.chunk_incarnation(mesh.pos) != Some(mesh.incarnation);
             if stale {
                 self.mesh_dispatcher.recycle(mesh);
                 continue;
-            }
-            if let Some(t) = &mesh.timing {
-                let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
-                tracing::debug!(
-                    "edit remesh [{}, {}]: queue {:.1}ms + mesh {:.1}ms + drain {:.1}ms = {:.1}ms",
-                    mesh.pos.x,
-                    mesh.pos.z,
-                    ms(t.started_at - t.enqueued_at),
-                    ms(t.meshed_at - t.started_at),
-                    ms(t.meshed_at.elapsed()),
-                    ms(t.enqueued_at.elapsed()),
-                );
             }
             // Taken before the upload so the mesh can move into the batch; the
             // upload reports back what it had to drop.
@@ -1170,12 +1155,9 @@ impl GameState {
                 self.section_vis.insert((pos, si), vis);
             }
         }
-        let remaining = self.dirty_sections.get(&pos).copied().unwrap_or(0)
-            & !section_bits(mesh.replaced.clone());
-        if remaining == 0 {
-            self.dirty_sections.remove(&pos);
-        } else {
-            self.dirty_sections.insert(pos, remaining);
+        let meta = self.chunk_meta.get_mut(pos);
+        if meta.generation == mesh.content_gen && meta.pos == pos {
+            meta.dirty_sections &= !section_bits(mesh.replaced.clone());
         }
         *self.compiled.entry(pos).or_default() |= section_bits(mesh.replaced.clone());
     }
@@ -1189,10 +1171,7 @@ impl GameState {
             if let Some(mask) = self.compiled.get_mut(&pos) {
                 *mask &= !retired;
             }
-            self.dirty_sections
-                .entry(pos)
-                .and_modify(|mask| *mask |= retired)
-                .or_insert(retired);
+            self.mark_chunk_dirty(pos, retired);
         }
     }
 
@@ -1333,46 +1312,56 @@ impl GameState {
         let full = section_mask(n);
         if self.last_mesh_detail != Some(chunk_detail) {
             self.last_mesh_detail = Some(chunk_detail);
-            for pos in self.chunk_store.loaded_positions() {
-                self.dirty_sections.insert(pos, full);
+            let loaded: Vec<_> = self.chunk_store.loaded_positions().collect();
+            for pos in loaded {
+                self.mark_chunk_dirty(pos, full);
             }
         }
-        let mut active: Vec<(ChunkPos, u32)> = self
-            .chunk_store
-            .loaded_positions()
-            .filter_map(|pos| {
-                self.dirty_sections
-                    .get(&pos)
-                    .copied()
-                    .filter(|&mask| mask != 0)
-                    .map(|mask| (pos, mask))
-            })
-            .collect();
-        active.sort_by_key(|(pos, _)| {
+        let loaded: Vec<_> = self.chunk_store.loaded_positions().collect();
+        let mut active: Vec<ChunkPos> = Vec::new();
+        for pos in loaded {
+            let claimed = self.mesh_dispatcher.claimed_generation(pos);
+            let meta = self.chunk_meta.get_mut(pos);
+            if meta.generation == 0 || meta.pos != pos {
+                continue;
+            }
+            if claimed < meta.generation && meta.dirty_sections != 0 {
+                active.push(pos);
+            }
+        }
+        active.sort_by_key(|pos| {
             let dx = pos.x - player_chunk.x;
             let dz = pos.z - player_chunk.z;
             dx * dx + dz * dz
         });
 
         let mut requests = Vec::new();
-        for (pos, dirty_mask) in active {
+        for pos in active {
             if self.chunk_store.get_chunk(&pos).is_none() {
-                self.dirty_sections.remove(&pos);
+                self.unload_mesh_column(pos);
                 continue;
             }
             let lod = crate::app::core::chunk_lod(pos, player_chunk, chunk_detail);
-            let content_gen = self.content_gen.get(&pos).copied().unwrap_or(0);
+            let meta = self.chunk_meta.get_mut(pos);
+            if meta.generation == 0 || meta.pos != pos || meta.dirty_sections == 0 {
+                continue;
+            }
+            let content_gen = meta.generation;
+            let incarnation = meta.incarnation;
+            let dirty_mask = meta.dirty_sections;
             // TODO: vanilla won't schedule a section's first compile until its
             // 3x3 column neighbourhood is loaded and lit
             // (`LevelExtractor.java:155` / `SectionUpdateTracker.hasAllNeighbors`);
             // we mesh against missing neighbours as air and repair the borders
             // when their light bumps `content_gen`.
-            for (start, end) in contiguous_runs(dirty_mask) {
-                requests.push((pos, lod, content_gen, start..end));
-            }
+            // One job per column is the scheduling unit. A sparse mask may
+            // mesh clean sections between its first and last dirty bit, but it
+            // cannot create overlapping jobs for the same column.
+            let start = dirty_mask.trailing_zeros() as i32;
+            let end = 32 - dirty_mask.leading_zeros() as i32;
+            requests.push((pos, lod, incarnation, content_gen, start..end));
         }
-        self.mesh_dispatcher
-            .enqueue_bulk(&self.chunk_store, requests);
+        self.mesh_dispatcher.enqueue(&self.chunk_store, requests);
     }
 }
 
@@ -1423,25 +1412,6 @@ fn section_bits(indices: impl IntoIterator<Item = i32>) -> u32 {
 /// Full mask for an `n`-section column (bits `0..n` set).
 fn section_mask(n: i32) -> u32 {
     if n >= 32 { u32::MAX } else { (1u32 << n) - 1 }
-}
-
-/// Contiguous `(start, end)` index runs of set bits in `mask`, so a (usually
-/// contiguous) visible set enqueues as a few range jobs — one gather per run.
-fn contiguous_runs(mask: u32) -> Vec<(i32, i32)> {
-    let mut runs = Vec::new();
-    let mut i = 0i32;
-    while i < 32 {
-        if mask & (1u32 << i) != 0 {
-            let start = i;
-            while i < 32 && mask & (1u32 << i) != 0 {
-                i += 1;
-            }
-            runs.push((start, i));
-        } else {
-            i += 1;
-        }
-    }
-    runs
 }
 
 /// Conservative AABB-vs-frustum test (the dominant-corner max-dot used by
@@ -2192,7 +2162,7 @@ pub fn update_game(
 
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
     // calls `level.update()`.
-    game.update_light(core.menu.chunk_detail);
+    game.update_light();
 
     // F1 (vanilla keyToggleGui); only while no screen or chat is open.
     if core.input.key_just_pressed(winit::keyboard::KeyCode::F1) && game.input_live() {
@@ -2241,7 +2211,6 @@ pub fn update_game(
     // F3+A: drop every mesh and re-enqueue all loaded columns.
     if game.pending_chunk_reload {
         game.pending_chunk_reload = false;
-        game.dirty_sections.clear();
         game.last_mesh_detail = None;
         gfx.renderer.clear_chunk_meshes();
         game.vis_valid = false;
