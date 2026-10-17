@@ -24,10 +24,8 @@ pub enum Command {
     OpenInventory,
     /// Closes the open menu, as the inventory key does.
     CloseMenu,
-    Click {
-        slot: u16,
-        op: ClickKind,
-    },
+    Click(Click),
+    CreativeSetSlot(CreativeSetSlot),
     Inventory,
     Entities,
     Advancements,
@@ -36,6 +34,20 @@ pub enum Command {
     Screenshot {
         path: PathBuf,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+pub struct Click {
+    pub slot: u16,
+    pub op: ClickKind,
+}
+
+/// Sets inventory slot `slot` to a copy of slot `from`'s stack, as the
+/// creative screen places a cloned stack. Creative mode only.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+pub struct CreativeSetSlot {
+    pub slot: u16,
+    pub from: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -50,16 +62,19 @@ pub enum ClickKind {
     },
 }
 
-impl ClickKind {
-    pub fn operation(self, slot: u16) -> azalea_inventory::operations::ClickOperation {
+impl Click {
+    pub fn operation(self) -> azalea_inventory::operations::ClickOperation {
         use azalea_inventory::operations::{
             ClickOperation, PickupClick, QuickMoveClick, SwapClick,
         };
-        match self {
-            Self::PickupLeft => ClickOperation::Pickup(PickupClick::Left { slot: Some(slot) }),
-            Self::PickupRight => ClickOperation::Pickup(PickupClick::Right { slot: Some(slot) }),
-            Self::QuickMove => QuickMoveClick::Left { slot }.into(),
-            Self::Swap { hotbar } => SwapClick {
+        let slot = self.slot;
+        match self.op {
+            ClickKind::PickupLeft => ClickOperation::Pickup(PickupClick::Left { slot: Some(slot) }),
+            ClickKind::PickupRight => {
+                ClickOperation::Pickup(PickupClick::Right { slot: Some(slot) })
+            }
+            ClickKind::QuickMove => QuickMoveClick::Left { slot }.into(),
+            ClickKind::Swap { hotbar } => SwapClick {
                 source_slot: slot,
                 target_slot: hotbar,
             }
@@ -225,10 +240,10 @@ mod tests {
         );
         assert_eq!(
             parse(r#"{"cmd":"click","slot":9,"op":{"swap":{"hotbar":40}}}"#),
-            Command::Click {
+            Command::Click(Click {
                 slot: 9,
                 op: ClickKind::Swap { hotbar: 40 }
-            }
+            })
         );
         assert!(serde_json::from_str::<Command>(r#"{"cmd":"click","slot":9}"#).is_err());
     }

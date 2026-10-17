@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::protocol::{self, Command};
+use super::protocol::{self, Command, CreativeSetSlot};
 use crate::app::core::AppCore;
 use crate::app::phases::AppPhase;
 
@@ -47,7 +47,7 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
             core.apply_cursor_grab(&gfx.window, Some(game));
             Ok(Value::Null)
         }
-        Command::Click { slot, op } => {
+        Command::Click(click) => {
             if game.open_menu_id().is_none() {
                 Err("no menu open".into())
             } else {
@@ -55,9 +55,17 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
                     game,
                     connection,
                     &core.audio,
-                    vec![op.operation(*slot)],
+                    vec![click.operation()],
                 );
                 Ok(Value::Null)
+            }
+        }
+        Command::CreativeSetSlot(CreativeSetSlot { slot, from }) => {
+            let stack = game.player.inventory.slot(usize::from(*from)).clone();
+            if crate::app::phases::in_game::set_creative_slot(game, connection, *slot, stack) {
+                Ok(Value::Null)
+            } else {
+                Err("not in creative mode".into())
             }
         }
         Command::Inventory => to_value(protocol::inventory(game)),

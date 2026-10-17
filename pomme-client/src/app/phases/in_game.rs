@@ -1844,6 +1844,33 @@ fn send_bundle_selection(sender: &crate::net::sender::PacketSender, slot: u16, s
     ));
 }
 
+/// Vanilla `MultiPlayerGameMode.handleCreativeModeItemAdd`: the creative
+/// screen sets an inventory slot directly. Returns whether it was sent, which
+/// it never is outside creative.
+pub(crate) fn set_creative_slot(
+    game: &mut GameState,
+    connection: &ConnectionHandle,
+    slot_num: u16,
+    item: azalea_inventory::ItemStack,
+) -> bool {
+    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+
+    if !crate::player::is_creative(game.player.game_mode) {
+        return false;
+    }
+    connection
+        .packet_tx
+        .send(ServerboundGamePacket::SetCreativeModeSlot(
+            ServerboundSetCreativeModeSlot {
+                slot_num,
+                item_stack: item.clone(),
+            },
+        ));
+    // Optimistic local update; the server echoes via ContainerSetSlot.
+    game.player.inventory.set_slot(slot_num as usize, item);
+    true
+}
+
 /// Predict each container click locally (instant UI + drag preview), then send
 /// the predicted diff as `HashedStack`es so the server suppresses corrections
 /// when the prediction is right (vanilla lockstep).
@@ -3487,31 +3514,16 @@ pub fn update_game(
             &game.player.inventory,
             gs,
         );
-        use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
-        let mut set_creative_slot = |slot_num: u16, item: azalea_inventory::ItemStack| {
-            if crate::player::is_creative(game.player.game_mode) {
-                connection
-                    .packet_tx
-                    .send(ServerboundGamePacket::SetCreativeModeSlot(
-                        ServerboundSetCreativeModeSlot {
-                            slot_num,
-                            item_stack: item.clone(),
-                        },
-                    ));
-                // Optimistic local update; the server echoes via ContainerSetSlot.
-                game.player.inventory.set_slot(slot_num as usize, item);
-            }
-        };
         match action {
             crate::ui::creative_inventory::CreativeAction::Close => {
                 close_inventory = true;
             }
             crate::ui::creative_inventory::CreativeAction::SetSlot(slot_num, item) => {
-                set_creative_slot(slot_num, item);
+                set_creative_slot(game, connection, slot_num, item);
             }
             crate::ui::creative_inventory::CreativeAction::SetSlots(items) => {
                 for (slot_num, item) in items {
-                    set_creative_slot(slot_num, item);
+                    set_creative_slot(game, connection, slot_num, item);
                 }
             }
             crate::ui::creative_inventory::CreativeAction::None => {}

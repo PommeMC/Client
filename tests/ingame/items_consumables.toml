@@ -1,0 +1,29 @@
+# Consumable components, including effects and a use remainder (a nested
+# item template).
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = '/give @s minecraft:apple[minecraft:consumable={consume_seconds:3.0,animation:"drink",has_consume_particles:false,on_consume_effects:[{type:"minecraft:apply_effects",effects:[{id:"minecraft:speed",duration:100}]}]},minecraft:food={nutrition:2,saturation:1.0}]'
+
+[[step]]
+expect = { slot = 36, item = "apple", components = ["consumable", "food"] }
+
+[[step]]
+chat = '/give @s minecraft:potion[minecraft:potion_contents={potion:"minecraft:swiftness"}]'
+
+[[step]]
+expect = { slot = 37, item = "potion", components = ["potion_contents"] }
+
+[[step]]
+chat = '/give @s minecraft:apple[minecraft:use_remainder={id:"minecraft:bowl",count:1}]'
+
+[[step]]
+expect = { slot = 38, item = "apple", components = ["use_remainder"] }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+screenshot = "inventory"

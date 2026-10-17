@@ -58,6 +58,9 @@ open_inventory = true                         # or close_menu = true
 click = { slot = 36, op = "quick_move" }      # pickup_left, pickup_right,
                                               # quick_move, { swap = { hotbar = 0 } }
 [[step]]
+creative_set_slot = { slot = 37, from = 36 }  # creative mode: copy a stack, as
+                                              # the creative screen places one
+[[step]]
 wait_ms = 1000
 
 [[step]]
@@ -72,7 +75,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 
 | Check | Fields |
 |---|---|
-| A menu slot | `slot`, `item`, optional `count` and `components` (component types present) |
+| A menu slot | `slot`, `item`, optional `count`, `components` (types present) and `absent` (types not present) |
 | A living entity | `entity` (kind), optional `variant` (asset name, e.g. `cold`) |
 | A dropped item | `item_entity`, optional `count` |
 | An advancement | `advancement` (id) |
@@ -98,5 +101,5 @@ echo '{"cmd":"inventory"}' | nc 127.0.0.1 25599
 ```
 
 The commands are `status`, `chat` (`text`), `open_inventory`, `close_menu`,
-`click` (`slot`, `op`), `inventory`, `entities`, `advancements`, `chat_log`
-and `screenshot` (`path`).
+`click` (`slot`, `op`), `creative_set_slot` (`slot`, `from`), `inventory`,
+`entities`, `advancements`, `chat_log` and `screenshot` (`path`).

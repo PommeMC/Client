@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::exec::{self, Outcome};
-use super::protocol::{self, ClickKind, Command};
+use super::protocol::{self, Click, Command, CreativeSetSlot};
 use crate::app::core::AppCore;
 use crate::app::phases::AppPhase;
 
@@ -30,18 +30,12 @@ struct StepFile {
     chat: Option<String>,
     open_inventory: Option<bool>,
     close_menu: Option<bool>,
-    click: Option<ClickStep>,
+    click: Option<Click>,
+    creative_set_slot: Option<CreativeSetSlot>,
     wait_ms: Option<u64>,
     screenshot: Option<String>,
     expect: Option<Expect>,
     timeout_ms: Option<u64>,
-}
-
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ClickStep {
-    slot: u16,
-    op: ClickKind,
 }
 
 /// What an `expect` step waits for, told apart by its fields.
@@ -63,6 +57,9 @@ struct SlotExpect {
     count: Option<i32>,
     #[serde(default)]
     components: Vec<String>,
+    /// Component types the stack must not carry.
+    #[serde(default)]
+    absent: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -112,8 +109,11 @@ impl StepFile {
         if self.close_menu == Some(true) {
             steps.push(Step::Run(Command::CloseMenu));
         }
-        if let Some(ClickStep { slot, op }) = self.click {
-            steps.push(Step::Run(Command::Click { slot, op }));
+        if let Some(click) = self.click {
+            steps.push(Step::Run(Command::Click(click)));
+        }
+        if let Some(set) = self.creative_set_slot {
+            steps.push(Step::Run(Command::CreativeSetSlot(set)));
         }
         if let Some(ms) = self.wait_ms {
             steps.push(Step::Wait(Duration::from_millis(ms)));
@@ -300,6 +300,7 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
             item,
             count,
             components,
+            absent,
         }) => {
             let inventory = protocol::inventory(game);
             let Some(found) = inventory.slots.iter().find(|s| s.slot == *slot) else {
@@ -309,7 +310,8 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
             ensure(
                 stack.item == *item
                     && count.is_none_or(|n| stack.count == n)
-                    && components.iter().all(|c| stack.components.contains(c)),
+                    && components.iter().all(|c| stack.components.contains(c))
+                    && !absent.iter().any(|c| stack.components.contains(c)),
                 || format!("slot {slot} holds {stack:?}"),
             )
         }
@@ -352,6 +354,7 @@ fn ensure(holds: bool, seen: impl FnOnce() -> String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::protocol::ClickKind;
 
     #[test]
     fn parses_every_step_kind() {
@@ -382,23 +385,38 @@ mod tests {
             expect = { chat = "Gave" }
             [[step]]
             close_menu = true
+            [[step]]
+            creative_set_slot = { slot = 37, from = 36 }
+            [[step]]
+            expect = { slot = 36, item = "stone", absent = ["can_break"] }
             "#,
         )
         .unwrap();
-        assert_eq!(steps.len(), 12);
+        assert_eq!(steps.len(), 14);
+        assert_eq!(
+            steps[12],
+            Step::Run(Command::CreativeSetSlot(CreativeSetSlot {
+                slot: 37,
+                from: 36
+            }))
+        );
+        assert!(matches!(
+            &steps[13],
+            Step::Expect(Expect::Slot(SlotExpect { absent, .. }), _) if absent == &["can_break"]
+        ));
         assert_eq!(
             steps[2],
-            Step::Run(Command::Click {
+            Step::Run(Command::Click(Click {
                 slot: 36,
                 op: ClickKind::QuickMove
-            })
+            }))
         );
         assert_eq!(
             steps[3],
-            Step::Run(Command::Click {
+            Step::Run(Command::Click(Click {
                 slot: 9,
                 op: ClickKind::Swap { hotbar: 2 }
-            })
+            }))
         );
         assert!(matches!(
             &steps[6],
