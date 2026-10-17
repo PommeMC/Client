@@ -157,7 +157,8 @@ fn extract_all(zip_bytes: &[u8], dir: &Path) -> Result<(), String> {
         if entry.is_dir() {
             continue;
         }
-        let base = entry.name().rsplit('/').next().unwrap_or_default();
+        let name = entry.name().map_err(|e| e.to_string())?.into_owned();
+        let base = name.rsplit('/').next().unwrap_or_default();
         if base.is_empty() {
             continue;
         }
