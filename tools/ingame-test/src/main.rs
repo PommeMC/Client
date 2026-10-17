@@ -330,7 +330,11 @@ impl Server {
         ] {
             let _ = std::fs::remove_file(players.join(file));
         }
-        self.command("kill @e[type=!player]");
+        // Twice: the first kill makes mobs drop loot and orbs, which the next
+        // player would otherwise pick up.
+        for _ in 0..2 {
+            self.command("kill @e[type=!player]");
+        }
         Ok(())
     }
 
