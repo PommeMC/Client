@@ -4,6 +4,50 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use azalea_core::position::ChunkPos;
+
+/// Largest supported server view distance. A `(2 * MAX_RD + 1)` ring gives
+/// every simultaneously loaded column a distinct slot.
+pub const MAX_RD: u32 = 128;
+const CHUNK_RING_SIDE: usize = (MAX_RD * 2 + 1) as usize;
+const CHUNK_RING_LEN: usize = CHUNK_RING_SIDE * CHUNK_RING_SIDE;
+
+/// Fixed-size storage indexed by world chunk coordinates.
+pub struct ChunkRing<T> {
+    pub buf: Box<[T]>,
+}
+
+impl<T> ChunkRing<T> {
+    pub fn from_fn(mut init: impl FnMut(usize, usize) -> T) -> Self {
+        let mut values = Vec::with_capacity(CHUNK_RING_LEN);
+        for x in 0..CHUNK_RING_SIDE {
+            for z in 0..CHUNK_RING_SIDE {
+                values.push(init(x, z));
+            }
+        }
+        Self {
+            buf: values.into_boxed_slice(),
+        }
+    }
+
+    #[inline]
+    fn index(pos: ChunkPos) -> usize {
+        let x = pos.x.rem_euclid(CHUNK_RING_SIDE as i32) as usize;
+        let z = pos.z.rem_euclid(CHUNK_RING_SIDE as i32) as usize;
+        x * CHUNK_RING_SIDE + z
+    }
+
+    #[inline]
+    pub fn get(&self, pos: ChunkPos) -> &T {
+        &self.buf[Self::index(pos)]
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, pos: ChunkPos) -> &mut T {
+        &mut self.buf[Self::index(pos)]
+    }
+}
+
 /// Java `java.util.Random` (`LegacyRandomSource`) reimplementation: a 48-bit
 /// LCG matching the JVM bit-for-bit so seeded sequences line up with vanilla.
 ///
@@ -94,6 +138,20 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::test_util::test_temp_dir;
+
+    #[test]
+    fn chunk_ring_handles_zero_negative_and_wrapped_positions() {
+        let mut ring = ChunkRing::from_fn(|_, _| 0u32);
+        let zero = ChunkPos::new(0, 0);
+        let negative = ChunkPos::new(-1, -1);
+        *ring.get_mut(zero) = 1;
+        *ring.get_mut(negative) = 2;
+        assert_eq!(*ring.get(zero), 1);
+        assert_eq!(*ring.get(negative), 2);
+
+        let wrapped = ChunkPos::new(CHUNK_RING_SIDE as i32, 0);
+        assert_eq!(*ring.get(wrapped), 1);
+    }
 
     fn entries(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir)

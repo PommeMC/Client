@@ -1164,7 +1164,6 @@ impl AppCore {
             dry_foliage,
         );
 
-        game.meshed.clear();
         game.section_vis.clear();
         game.section_vis_epoch.clear();
         game.vis_mask.clear();
@@ -1240,8 +1239,8 @@ impl AppCore {
         // Phase timers for the chunk-load benchmark's worst-frame breakdown.
         let t_net = std::time::Instant::now();
 
-        // Block edits go on the priority lane so they apply instantly even while
-        // chunks stream in, instead of starving behind the load backlog.
+        // Collect block edits into the same per-column dirty metadata used by
+        // chunk loads and lighting.
         let mut priority_remesh: Vec<(azalea_core::position::ChunkPos, i32)> = Vec::new();
         let mut disconnect_reason: Option<String> = None;
         self.drain_player_skin_results(renderer);
@@ -1301,8 +1300,10 @@ impl AppCore {
                     // already meshed.
                     game.section_vis.clear();
                     game.section_vis_epoch.clear();
-                    game.meshed.clear();
                     game.compiled.clear();
+                    game.reset_mesh_columns();
+                    // Rebuild before the dispatcher clones the registry for this world.
+                    renderer.rebuild_block_state_tables();
                     game.mesh_dispatcher = renderer.create_mesh_dispatcher(
                         Arc::clone(&game.biome_climate),
                         None,
@@ -1339,12 +1340,10 @@ impl AppCore {
                             pos: (pos.x, pos.z),
                         });
                     game.block_entity_anim.drop_chunk(pos.x, pos.z);
-                    game.content_gen.remove(&pos);
-                    game.meshed.remove(&pos);
+                    game.unload_mesh_column(pos);
                     game.compiled.remove(&pos);
                     game.vis_mask.remove(&pos);
                     game.vis_tiers.remove(&pos);
-                    game.section_gen.retain(|(p, _), _| *p != pos);
                     game.section_vis.retain(|(p, _), _| *p != pos);
                     game.section_vis_epoch.retain(|(p, _), _| *p != pos);
 
@@ -2629,14 +2628,9 @@ impl AppCore {
         }
 
         let player_chunk = game.player_chunk();
-        // Edits mesh the affected section(s) immediately on the priority lane,
-        // ungated by visibility.
+        // Merge edited sections into the normal column scheduler.
         for &(col, si) in &priority_remesh {
-            game.enqueue_section_edit(
-                col,
-                si,
-                chunk_lod(col, player_chunk, self.menu.chunk_detail),
-            );
+            game.enqueue_section_edit(col, si);
         }
 
         // Refresh the frustum tiers (throttled to camera movement / new loads),

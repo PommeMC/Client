@@ -5197,6 +5197,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossbeam-channel",
+ "crossbeam-epoch",
  "directories",
  "discord-rich-presence",
  "fastrand",

@@ -888,6 +888,15 @@ pub(crate) fn replace_block_tags_for_test(entries: &[(&str, &[&str])]) {
     *BLOCK_TAGS.write().expect("block tag lock poisoned") = block_tags_for_test(entries);
 }
 
+/// Identity of the active block table, for caches keyed by its state IDs.
+pub fn table_id() -> usize {
+    std::ptr::from_ref(table()) as usize
+}
+
+pub fn state_count() -> usize {
+    table().len()
+}
+
 fn block_data(state: BlockState) -> &'static BlockData {
     static UNKNOWN: std::sync::LazyLock<BlockData> = std::sync::LazyLock::new(|| BlockData {
         id: "unknown",
