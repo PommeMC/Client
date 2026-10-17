@@ -1381,6 +1381,10 @@ impl Translation {
                 remap_stack(self.to_native, &mut p.contents);
                 true
             }
+            ClientboundGamePacket::SetPlayerInventory(p) => {
+                remap_stack(self.to_native, &mut p.contents);
+                true
+            }
             ClientboundGamePacket::SetEntityData(p) => {
                 // `translate_entity_data` already remaps item-stack values
                 // while rewriting serializer ids, except on pre-1.20.5 wires

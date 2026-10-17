@@ -2390,6 +2390,32 @@ fn entity_data_unmapped_item_with_components_ends_list_777() {
     assert_eq!(entries.len(), 1);
 }
 
+/// Hotbar sync arrives via `set_player_inventory`, so its stack must take the
+/// same `remap_inbound` pass as container packets: unremapped, 26.3 `oak_log`
+/// (163) decodes through the native table as `birch_log` and a held
+/// `iron_shovel` as `milk_bucket` (no `Tool` default, so tools mine at hand
+/// speed).
+#[test]
+fn player_inventory_item_remaps_777() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(777, Direction::Clientbound, "set_player_inventory"),
+    );
+    wire::write_varint(&mut old, 36); // slot
+    wire::write_varint(&mut old, 1); // count
+    wire::write_varint(&mut old, 163); // 26.3 oak_log
+    old.extend_from_slice(&[0, 0]); // empty component patch
+
+    let ClientboundGamePacket::SetPlayerInventory(p) = translate_decode_and_remap(777, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = p.contents else {
+        panic!("empty stack");
+    };
+    assert_eq!(data.kind, azalea_registry::builtin::ItemKind::OakLog);
+}
+
 /// `translate_item_765` leaves the wire item id for the typed pass, so
 /// `remap_inbound` must still remap `set_entity_data` stacks on 765 wires.
 #[test]
