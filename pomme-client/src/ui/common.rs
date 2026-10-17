@@ -9,6 +9,7 @@ use crate::ui::bundle::Frac;
 use crate::ui::text_edit::TextFieldRenderInfo;
 
 pub const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+pub const YELLOW: [f32; 4] = [1.0, 1.0, 85.0 / 255.0, 1.0];
 pub const FONT_SIZE: f32 = 8.0;
 pub const BTN_H: f32 = 20.0;
 /// Vanilla's inactive-widget text colour, `0xA0A0A0`

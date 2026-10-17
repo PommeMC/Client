@@ -982,6 +982,7 @@ pub(super) fn push_icon_widget(
         border: border * gs,
         tint: WHITE,
     });
+    let icon_color = if enabled { WHITE } else { common::COL_DISABLED };
     match face {
         IconFace::Sprite { id, w, h } => {
             // `CenteredIcon` centres in integer GUI units.
@@ -994,7 +995,7 @@ pub(super) fn push_icon_widget(
                 w: w * gs,
                 h: h * gs,
                 sprite: id,
-                tint: WHITE,
+                tint: icon_color,
             });
         }
         IconFace::Glyph(icon) => elements.push(MenuElement::Icon {
@@ -1002,9 +1003,45 @@ pub(super) fn push_icon_widget(
             y: y + size / 2.0,
             icon,
             scale: GLYPH_ICON_SIZE * gs,
-            color: WHITE,
+            color: icon_color,
         }),
     }
+}
+
+/// A square icon button in the vanilla frame, wired into the Tab ring.
+/// Returns whether it was clicked or activated with Enter/Space while focused.
+/// Disabled buttons still show their tooltip, but cannot focus or activate.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_icon_button(
+    elements: &mut Vec<MenuElement>,
+    ctx: &mut FocusCtx,
+    any_hovered: &mut bool,
+    cursor: (f32, f32),
+    clicked: bool,
+    x: f32,
+    y: f32,
+    size: f32,
+    gs: f32,
+    face: IconFace,
+    enabled: bool,
+    screen_w: f32,
+    screen_h: f32,
+    tooltip: &str,
+) -> bool {
+    let hit = common::hit_test(cursor, [x, y, size, size]);
+    let focused = ctx.focused(enabled, hit);
+    let hovered = enabled && hit;
+    push_icon_widget(elements, x, y, size, gs, face, enabled, hovered || focused);
+    *any_hovered |= hovered;
+    let keyboard = focused && ctx.activate;
+    if keyboard {
+        ctx.fired = true;
+    }
+    // Vanilla keys tooltips off `isHovered`, which ignores `active`.
+    if hit {
+        common::push_tooltip(elements, cursor, screen_w, screen_h, gs, tooltip);
+    }
+    (hovered && clicked) || keyboard
 }
 
 const DROP_TEXT: [f32; 4] = [0.89, 0.90, 0.96, 0.85];

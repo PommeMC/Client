@@ -180,8 +180,26 @@ pub fn try_create_mapped_buffer(
     usage: vk::BufferUsageFlags,
     name: &str,
 ) -> Result<(vk::Buffer, Allocation), String> {
+    let (buffer, mut allocation) =
+        try_create_host_buffer(device, allocator, data.len() as u64, usage, name)?;
+    allocation
+        .mapped_slice_mut()
+        .expect("host buffer mapping was validated at creation")[..data.len()]
+        .copy_from_slice(data);
+    Ok((buffer, allocation))
+}
+
+pub fn try_create_host_buffer(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    size: u64,
+    usage: vk::BufferUsageFlags,
+    name: &str,
+) -> Result<(vk::Buffer, Allocation), String> {
+    let mapped_size = usize::try_from(size)
+        .map_err(|error| format!("buffer {name} size {size} does not fit usize: {error}"))?;
     let buffer_info = vk::BufferCreateInfo {
-        size: data.len() as u64,
+        size,
         usage,
         sharing_mode: vk::SharingMode::Exclusive,
         ..Default::default()
@@ -189,7 +207,7 @@ pub fn try_create_mapped_buffer(
     let buffer = device
         .create_buffer(&buffer_info, None)
         .map_err(|error| format!("failed to create buffer {name}: {error}"))?;
-    let mut allocation = match lock_allocator(allocator).allocate(&AllocationCreateDesc {
+    let allocation = match lock_allocator(allocator).allocate(&AllocationCreateDesc {
         name,
         requirements: device.get_buffer_memory_requirements(buffer),
         location: MemoryLocation::CpuToGpu,
@@ -204,19 +222,24 @@ pub fn try_create_mapped_buffer(
             ));
         }
     };
-    let filled =
+    let validated =
         unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }
             .map_err(|error| format!("failed to bind buffer memory for {name}: {error}"))
             .and_then(|()| {
                 let mapped = allocation
-                    .mapped_slice_mut()
+                    .mapped_slice()
                     .ok_or_else(|| format!("buffer {name} is not host-mapped"))?;
-                mapped[..data.len()].copy_from_slice(data);
+                if mapped.len() < mapped_size {
+                    return Err(format!(
+                        "buffer {name} mapped length {} is smaller than requested size {size}",
+                        mapped.len()
+                    ));
+                }
                 Ok(())
             });
-    if let Err(error) = filled {
-        let _ = lock_allocator(allocator).free(allocation);
+    if let Err(error) = validated {
         device.destroy_buffer(buffer, None);
+        let _ = lock_allocator(allocator).free(allocation);
         return Err(error);
     }
     Ok((buffer, allocation))

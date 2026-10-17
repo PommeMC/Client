@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
+use std::ops::Range;
 use std::path::Path;
 use std::slice;
 use std::sync::{Arc, Mutex};
@@ -8,7 +10,8 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::{packing, shader, util};
+use crate::renderer::buffer_pool::BufferPool;
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, packing, shader, util};
 use crate::ui::font::{FontSources, GLYPH_ATLAS_SIZE, GlyphAtlasPixels, GlyphInfo, GlyphMap};
 use crate::ui::text::{InlineObject, TextSpan};
 
@@ -28,6 +31,7 @@ pub const ICON_CHECK: char = '\u{f00c}';
 pub const ICON_USERS: char = '\u{f0c0}';
 pub const ICON_LANGUAGE: char = '\u{f1ab}';
 pub const ICON_UNIVERSAL_ACCESS: char = '\u{f29a}';
+pub const ICON_RECYCLE: char = '\u{267a}';
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -40,7 +44,7 @@ struct Vertex {
     corner_radius: f32,
 }
 
-const MAX_VERTICES: usize = 16384;
+const INITIAL_VERTEX_CAPACITY: usize = 16384;
 const VERTEX_SIZE: usize = size_of::<Vertex>();
 
 struct DrawOp {
@@ -48,6 +52,60 @@ struct DrawOp {
     count: u32,
     scissor: Option<[f32; 4]>,
     invert: bool,
+}
+
+fn vertex_byte_range(first_vertex: usize, vertex_count: usize) -> Result<Range<usize>, String> {
+    let start = first_vertex
+        .checked_mul(VERTEX_SIZE)
+        .ok_or_else(|| "menu vertex byte offset overflow".to_owned())?;
+    let length = vertex_count
+        .checked_mul(VERTEX_SIZE)
+        .ok_or_else(|| "menu vertex byte size overflow".to_owned())?;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| "menu vertex byte range overflow".to_owned())?;
+    Ok(start..end)
+}
+
+struct MenuVertexBuffer {
+    buffer: vk::Buffer,
+    allocation: Allocation,
+}
+
+impl MenuVertexBuffer {
+    fn new(
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        capacity: usize,
+    ) -> Result<Self, String> {
+        let size = u64::try_from(vertex_byte_range(0, capacity)?.end)
+            .map_err(|_| "menu vertex buffer size exceeds Vulkan's range".to_owned())?;
+        let (buffer, allocation) = util::try_create_host_buffer(
+            device,
+            allocator,
+            size,
+            vk::BufferUsageFlags::VertexBuffer,
+            "menu_vertices",
+        )?;
+        Ok(Self { buffer, allocation })
+    }
+
+    fn upload(&mut self, first_vertex: usize, vertices: &[Vertex]) -> Result<u64, String> {
+        let range = vertex_byte_range(first_vertex, vertices.len())?;
+        let offset = u64::try_from(range.start)
+            .map_err(|_| "menu vertex offset exceeds Vulkan's range".to_owned())?;
+        self.allocation
+            .mapped_slice_mut()
+            .and_then(|mapped| mapped.get_mut(range))
+            .ok_or_else(|| "menu vertex reservation is not fully host-mapped".to_owned())?
+            .copy_from_slice(bytemuck::cast_slice(vertices));
+        Ok(offset)
+    }
+
+    fn destroy(self, device: &vk::Device, allocator: &mut Allocator) {
+        device.destroy_buffer(self.buffer, None);
+        allocator.free(self.allocation).ok();
+    }
 }
 
 /// Ends the current batch (if non-empty) as a `DrawOp` and starts the next
@@ -109,6 +167,7 @@ fn build_font_atlas() -> FontAtlas {
         ICON_USERS,
         ICON_LANGUAGE,
         ICON_UNIVERSAL_ACCESS,
+        ICON_RECYCLE,
     ]
     .iter()
     .map(|&ch| (ch, &icon_font))
@@ -235,8 +294,7 @@ pub struct MenuOverlayPipeline {
     font_layer_limit: u32,
     mc_glyph_map: Option<GlyphMap>,
     obfuscation_rng: ObfuscationRng,
-    vertex_buffer: vk::Buffer,
-    vertex_allocation: Option<Allocation>,
+    vertex_pools: [BufferPool<MenuVertexBuffer>; MAX_FRAMES_IN_FLIGHT],
     atlas: FontAtlas,
     favicon_image: vk::Image,
     favicon_view: vk::ImageView,
@@ -567,14 +625,6 @@ impl MenuOverlayPipeline {
             .collect();
         device.update_descriptor_sets(&writes, &[]);
 
-        let (vertex_buffer, vertex_allocation) = util::create_host_buffer(
-            device,
-            allocator,
-            (MAX_VERTICES * VERTEX_SIZE) as u64,
-            vk::BufferUsageFlags::VertexBuffer,
-            "menu_vertices",
-        );
-
         let obfuscation_seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -610,8 +660,9 @@ impl MenuOverlayPipeline {
             font_layer_limit,
             mc_glyph_map,
             obfuscation_rng: ObfuscationRng::new(obfuscation_seed),
-            vertex_buffer,
-            vertex_allocation: Some(vertex_allocation),
+            vertex_pools: std::array::from_fn(|_| {
+                BufferPool::new(NonZeroUsize::new(INITIAL_VERTEX_CAPACITY).unwrap())
+            }),
             atlas,
             favicon_image,
             favicon_view,
@@ -674,30 +725,38 @@ impl MenuOverlayPipeline {
         Ok(())
     }
 
-    pub fn draw(
+    /// Reset only after this frame slot's fence signals and its command buffer
+    /// is reset. Other slots and earlier draws in the new frame remain
+    /// untouched.
+    pub fn begin_frame(
         &mut self,
-        cmd: vk::CommandBuffer,
-        screen_w: f32,
-        screen_h: f32,
-        elements: &[MenuElement],
-        item_atlas_uvs: &HashMap<String, [f32; 4]>,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        frame: usize,
     ) {
-        self.draw_from(cmd, screen_w, screen_h, elements, item_atlas_uvs, 0);
+        let retired = self.vertex_pools[frame].reset_after_completion();
+        if !retired.is_empty() {
+            let mut allocator = allocator.lock().unwrap();
+            for buffer in retired {
+                buffer.destroy(device, &mut allocator);
+            }
+        }
     }
 
-    /// Like [`draw`], but writes vertices starting at `vertex_base` in the
-    /// shared vertex buffer and returns the next free index, so it can be
-    /// called more than once per frame (e.g. a backdrop before the blur and
-    /// a dialog after).
-    pub fn draw_from(
+    /// Append a contiguous vertex reservation for each call, preserving earlier
+    /// draws in this frame (including the backdrop before a blur pass).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(
         &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
         cmd: vk::CommandBuffer,
+        frame: usize,
         screen_w: f32,
         screen_h: f32,
         elements: &[MenuElement],
         item_atlas_uvs: &HashMap<String, [f32; 4]>,
-        vertex_base: u32,
-    ) -> u32 {
+    ) -> Result<(), String> {
         let globals: [f32; 2] = [screen_w, screen_h];
         self.globals_allocation
             .as_mut()
@@ -1270,24 +1329,20 @@ impl MenuOverlayPipeline {
         );
 
         if draw_ops.is_empty() {
-            return vertex_base;
+            return Ok(());
         }
-
-        let written = if vertices.is_empty() {
-            0
-        } else {
-            let avail = MAX_VERTICES.saturating_sub(vertex_base as usize);
-            let count = vertices.len().min(avail);
-            let byte_data = bytemuck::cast_slice(&vertices[..count]);
-            let byte_off = vertex_base as usize * VERTEX_SIZE;
-            self.vertex_allocation
-                .as_mut()
-                .unwrap()
-                .mapped_slice_mut()
-                .unwrap()[byte_off..byte_off + byte_data.len()]
-                .copy_from_slice(byte_data);
-            count
-        };
+        u32::try_from(vertices.len())
+            .map_err(|_| "menu vertex batch exceeds Vulkan's draw range".to_owned())?;
+        let reservation = self.vertex_pools[frame]
+            .reserve(vertices.len(), |capacity| {
+                MenuVertexBuffer::new(device, allocator, capacity)
+            })
+            .map_err(|error| format!("failed to reserve menu vertices: {error:?}"))?;
+        let vertex_offset = reservation.buffer.upload(
+            reservation.first_element,
+            &vertices[..reservation.element_count],
+        )?;
+        let vertex_buffer = reservation.buffer.buffer;
 
         let default_scissor = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
@@ -1307,7 +1362,7 @@ impl MenuOverlayPipeline {
                 &[self.globals_set, self.tex_set],
                 &[],
             );
-            cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+            cmd.bind_vertex_buffers(0, &[vertex_buffer], &[vertex_offset]);
         }
         let mut bound_invert: Option<bool> = None;
         for op in &draw_ops {
@@ -1337,12 +1392,10 @@ impl MenuOverlayPipeline {
                 default_scissor
             };
             cmd.set_scissor(0, &[rect]);
-            // TODO: clamp to `written`; past MAX_VERTICES this draws vertices
-            // that were never uploaded.
-            cmd.draw(op.count, 1, vertex_base + op.start, 0);
+            cmd.draw(op.count, 1, op.start, 0);
         }
         cmd.set_scissor(0, &[default_scissor]);
-        vertex_base + written as u32
+        Ok(())
     }
 
     pub fn set_item_atlas(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
@@ -1988,9 +2041,10 @@ impl MenuOverlayPipeline {
             alloc.free(a).ok();
         }
 
-        device.destroy_buffer(self.vertex_buffer, None);
-        if let Some(a) = self.vertex_allocation.take() {
-            alloc.free(a).ok();
+        for pool in &mut self.vertex_pools {
+            for buffer in pool.clear_after_completion() {
+                buffer.destroy(device, &mut alloc);
+            }
         }
 
         destroy_texture_resources(
@@ -2498,6 +2552,7 @@ pub enum SpriteId {
     IconFriends,
     IconLanguage,
     IconAccessibility,
+    IconReset,
     FriendsBackground,
     FriendsTab,
     FriendsTabDisabled,
@@ -3793,6 +3848,18 @@ fn build_sprite_atlas(
             ));
         }
         Err(e) => tracing::warn!("Failed to load pomme logo: {e}"),
+    }
+
+    match image::load_from_memory(crate::assets::RESET_ICON_PNG) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            images.push((SpriteId::IconReset, rgba.into_raw(), w, h, 0.0));
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load reset icon: {e}");
+            images.push((SpriteId::IconReset, vec![255, 0, 255, 255], 1, 1, 0.0));
+        }
     }
 
     let sizes: Vec<(u32, u32)> = images.iter().map(|sprite| (sprite.2, sprite.3)).collect();
@@ -5152,6 +5219,19 @@ fn create_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vertex_upload_ranges_support_large_batches_and_nonzero_reservations() {
+        let large = INITIAL_VERTEX_CAPACITY + 6;
+        assert_eq!(vertex_byte_range(0, large).unwrap(), 0..large * VERTEX_SIZE);
+        assert_eq!(
+            vertex_byte_range(large, 12).unwrap(),
+            large * VERTEX_SIZE..(large + 12) * VERTEX_SIZE
+        );
+        assert!(vertex_byte_range(usize::MAX, 1).is_err());
+        assert!(vertex_byte_range(0, usize::MAX).is_err());
+        assert!(vertex_byte_range(usize::MAX / VERTEX_SIZE, 1).is_err());
+    }
 
     /// A tooltip at gui scale 1, where one gui unit is one framebuffer pixel.
     fn unscaled_tooltip(x: f32, y: f32) -> McTooltipDraw {

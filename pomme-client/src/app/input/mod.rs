@@ -96,6 +96,7 @@ pub fn keybind_label(key: &str) -> Option<(&'static str, &'static str)> {
         "key.debug.copyRecreateCommand" => ("key.keyboard.i", "I"),
         "key.debug.spectate" => ("key.keyboard.n", "N"),
         "key.debug.switchGameMode" => ("key.keyboard.f4", "F4"),
+        "key.debug.chunkOcclusion" => action_label(Action::DebugChunkOcclusion)?,
         "key.debug.debugOptions" => ("key.keyboard.f6", "F6"),
         "key.debug.focusPause" => ("key.keyboard.p", "P"),
         "key.debug.dumpDynamicTextures" => ("key.keyboard.s", "S"),
@@ -116,6 +117,16 @@ fn action_label(action: Action) -> Option<(&'static str, &'static str)> {
 
 fn keycode_translation(key: KeyCode) -> Option<(&'static str, &'static str)> {
     match key {
+        KeyCode::KeyA => Some(("key.keyboard.a", "A")),
+        KeyCode::KeyC => Some(("key.keyboard.c", "C")),
+        KeyCode::KeyD => Some(("key.keyboard.d", "D")),
+        KeyCode::KeyG => Some(("key.keyboard.g", "G")),
+        KeyCode::KeyH => Some(("key.keyboard.h", "H")),
+        KeyCode::KeyI => Some(("key.keyboard.i", "I")),
+        KeyCode::KeyN => Some(("key.keyboard.n", "N")),
+        KeyCode::KeyO => Some(("key.keyboard.o", "O")),
+        KeyCode::KeyV => Some(("key.keyboard.v", "V")),
+        KeyCode::F4 => Some(("key.keyboard.f4", "F4")),
         KeyCode::Space => Some(("key.keyboard.space", "Space")),
         KeyCode::ShiftLeft => Some(("key.keyboard.left.shift", "Left Shift")),
         KeyCode::ControlLeft => Some(("key.keyboard.left.control", "Left Control")),
@@ -561,7 +572,9 @@ impl InputState {
                     || self.gamepad_button_down(Button::North)
             }
             Action::OpenMenu => {
-                self.default_key_pressed(action) || self.gamepad_button_down(Button::Start)
+                // Preserve the legacy Escape path while catalog/UI assignments
+                // are prepared independently of live binding integration.
+                self.key_pressed(KeyCode::Escape) || self.gamepad_button_down(Button::Start)
             }
             Action::ViewPlayerList => {
                 self.default_key_pressed(action) || self.gamepad_button_down(Button::Select)
@@ -579,6 +592,9 @@ impl InputState {
             Action::DropItem | Action::SwapOffhand => self.default_key_pressed(action),
             // Vanilla `key.spectatorHotbar` default: middle mouse.
             Action::SpectatorHotbar => self.middle_click.held,
+            // Newly cataloged actions still use their existing hard-coded call
+            // sites until binding-aware input behavior is implemented.
+            _ => false,
         }
     }
 
@@ -1099,6 +1115,22 @@ fn build_rumble_effect(
         .finish(manager)
         .map_err(|e| tracing::warn!("Failed to create rumble effect: {e}"))
         .ok()
+}
+
+#[cfg(test)]
+mod legacy_input_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_catalog_escape_preserves_legacy_pause_routing() {
+        assert_eq!(Action::OpenMenu.default_key(), None);
+        let mut input = InputState::released();
+        input.set_key_pressed_for_test(KeyCode::Escape, true);
+        assert!(input.performing_action(Action::OpenMenu));
+        assert!(!input.performing_action(Action::Close));
+        input.set_key_pressed_for_test(KeyCode::Escape, false);
+        assert!(!input.performing_action(Action::OpenMenu));
+    }
 }
 
 #[cfg(test)]

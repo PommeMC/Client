@@ -69,6 +69,11 @@ pub(crate) fn valid_asset_key(asset_key: &str) -> bool {
 pub const POMME_ICON_PNG: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"));
 
+pub const RESET_ICON_PNG: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/gui/icons/reset.png"
+));
+
 pub fn load_image(path: &Path) -> Result<image::DynamicImage, image::ImageError> {
     image::open(path).or_else(|_| {
         let data = std::fs::read(path).map_err(image::ImageError::IoError)?;

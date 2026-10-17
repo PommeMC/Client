@@ -14,7 +14,9 @@ pub struct ActionBindingsRef<'a> {
 /// Persistent action-to-input mappings. The settings field `key_bindings`
 /// serializes as `"key_bindings": { "key.jump": ["key.keyboard.space", ...] }`.
 /// Missing actions use defaults; saved arrays replace those defaults, and an
-/// empty array explicitly unbinds an action. Vector order is preserved.
+/// empty array explicitly unbinds its editable inputs. Vector order is
+/// preserved. Fixed catalog assignments remain active and are never saved here.
+/// Inputs reserved by fixed assignments are ignored in editable bindings.
 #[derive(Clone)]
 pub struct KeyBindings(HashMap<Action, Vec<InputKey>>);
 
@@ -94,13 +96,16 @@ impl<'de> Deserialize<'de> for KeyBindings {
 }
 
 impl KeyBindings {
-    /// Replace all inputs for an action; an empty vector explicitly unbinds it.
-    pub fn set(&mut self, action: Action, inputs: Vec<InputKey>) {
+    /// Replace editable inputs; an empty vector leaves only fixed assignments.
+    pub fn set(&mut self, action: Action, mut inputs: Vec<InputKey>) {
+        // Fixed inputs are reserved across actions. In particular, saved Escape
+        // assignments must not repurpose the screen/capture cancellation key.
+        inputs.retain(|input| {
+            !Action::ALL
+                .iter()
+                .any(|action| action.fixed_inputs().contains(input))
+        });
         self.0.insert(action, inputs);
-    }
-
-    pub fn reset(&mut self, action: Action) {
-        self.set(action, action.defaults().to_vec());
     }
 
     pub fn reset_all(&mut self) {
@@ -117,6 +122,16 @@ impl KeyBindings {
         Action::ALL.iter().all(|&action| self.is_default(action))
     }
 
+    /// Effective bindings: configured and fixed assignments, once per action.
+    pub fn actions_for_input<'a>(
+        &'a self,
+        input: &'a InputKey,
+    ) -> impl Iterator<Item = &'a Action> {
+        self.0.iter().filter_map(move |(action, inputs)| {
+            (inputs.contains(input) || action.fixed_inputs().contains(input)).then_some(action)
+        })
+    }
+
     /// Configured bindings; callers choose the UI's category and display order.
     pub fn iter(&self) -> impl Iterator<Item = ActionBindingsRef<'_>> {
         self.0.iter().map(|(&action, inputs)| ActionBindingsRef {
@@ -128,6 +143,8 @@ impl KeyBindings {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use winit::keyboard::KeyCode;
 
     use super::*;
@@ -141,6 +158,90 @@ mod tests {
             .iter()
             .filter_map(|input| input.input_id().map(|id| id.into_owned()))
             .collect()
+    }
+
+    #[test]
+    fn fixed_catalog_inputs_survive_editing_and_reset_without_duplicates() {
+        let escape = InputKey::Keyboard(KeyCode::Escape);
+        let replacement = InputKey::Keyboard(KeyCode::KeyC);
+        assert_eq!(Action::Close.fixed_inputs(), &[escape]);
+        assert_eq!(Action::OpenMenu.fixed_inputs(), &[escape]);
+        assert_eq!(Action::OpenMenu.id().as_str(), "key.menu");
+        assert_eq!(Action::OpenMenu.display_name(), "Open Pause Menu");
+        assert!(Action::OpenMenu.listed());
+        assert_eq!(Action::Close.id().as_str(), "key.close");
+        assert_eq!(Action::Close.display_name(), "Cancel/Close");
+        let mut bindings = KeyBindings::default();
+        for inputs in [vec![replacement], vec![], vec![escape, escape]] {
+            bindings.set(Action::Close, inputs.clone());
+            bindings.set(Action::OpenMenu, inputs);
+            assert_eq!(
+                bindings
+                    .actions_for_input(&escape)
+                    .copied()
+                    .collect::<HashSet<_>>(),
+                HashSet::from([Action::Close, Action::OpenMenu])
+            );
+            assert!(!bindings.0[&Action::Close].contains(&escape));
+            assert!(!bindings.0[&Action::OpenMenu].contains(&escape));
+        }
+        bindings.set(Action::Close, vec![replacement]);
+        assert!(
+            bindings
+                .actions_for_input(&replacement)
+                .any(|action| *action == Action::Close)
+        );
+        bindings.reset_all();
+        assert!(bindings.all_default());
+        assert_eq!(inputs(&bindings, Action::OpenMenu), ["key.gamepad.start"]);
+        assert_eq!(inputs(&bindings, Action::Close), ["key.gamepad.east"]);
+        assert_eq!(
+            bindings
+                .actions_for_input(&escape)
+                .copied()
+                .collect::<HashSet<_>>(),
+            HashSet::from([Action::Close, Action::OpenMenu])
+        );
+        for action in Action::ALL {
+            let fixed = action.fixed_inputs();
+            assert!(fixed.iter().enumerate().all(|(index, input)| {
+                !fixed[..index].contains(input) && !action.defaults().contains(input)
+            }));
+        }
+    }
+
+    #[test]
+    fn fixed_assignments_are_reserved_and_not_serialized_as_editable_bindings() {
+        let bindings = load(
+            r#"{
+                "key.close": ["key.keyboard.escape", "key.keyboard.c"],
+                "key.menu": ["key.keyboard.escape", "key.gamepad.start"],
+                "key.jump": ["key.keyboard.escape", "key.keyboard.j"]
+            }"#,
+        );
+        assert_eq!(inputs(&bindings, Action::Close), ["key.keyboard.c"]);
+        assert_eq!(inputs(&bindings, Action::Jump), ["key.keyboard.j"]);
+        assert_eq!(inputs(&bindings, Action::OpenMenu), ["key.gamepad.start"]);
+        let escape = InputKey::Keyboard(KeyCode::Escape);
+        assert_eq!(
+            bindings
+                .actions_for_input(&escape)
+                .copied()
+                .collect::<HashSet<_>>(),
+            HashSet::from([Action::Close, Action::OpenMenu])
+        );
+        let json = serde_json::to_string(&bindings).unwrap();
+        assert!(!json.contains("key.keyboard.escape"));
+        let loaded = load(&json);
+        assert_eq!(inputs(&loaded, Action::Close), ["key.keyboard.c"]);
+        assert_eq!(inputs(&loaded, Action::OpenMenu), ["key.gamepad.start"]);
+        assert_eq!(
+            loaded
+                .actions_for_input(&escape)
+                .copied()
+                .collect::<HashSet<_>>(),
+            HashSet::from([Action::Close, Action::OpenMenu])
+        );
     }
 
     #[test]
@@ -190,13 +291,12 @@ mod tests {
     }
 
     #[test]
-    fn reset_restores_defaults() {
+    fn reset_all_restores_defaults() {
         let mut bindings = KeyBindings::default();
         bindings.set(Action::Jump, Vec::new());
         bindings.set(Action::DropItem, Vec::new());
         assert!(!bindings.all_default());
-        bindings.reset(Action::Jump);
-        assert!(bindings.is_default(Action::Jump));
+
         bindings.reset_all();
         assert!(bindings.all_default());
     }
