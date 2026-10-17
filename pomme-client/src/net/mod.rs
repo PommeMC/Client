@@ -1,3 +1,4 @@
+mod advancement_wire;
 #[cfg(test)]
 mod azalea_compat;
 pub(crate) mod chat;
@@ -7,6 +8,7 @@ pub mod commands;
 pub mod conn;
 pub mod connection;
 mod dialog;
+mod entity_data;
 pub mod handler;
 pub mod item_codec;
 pub mod known_packs;

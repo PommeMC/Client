@@ -143,6 +143,12 @@ pub fn write_varint(buf: &mut Vec<u8>, mut v: u32) {
     }
 }
 
+/// Vanilla `Utf8String.write`: a varint byte length, then UTF-8.
+pub fn write_utf(buf: &mut Vec<u8>, s: &str) {
+    write_varint(buf, s.len() as u32);
+    buf.extend_from_slice(s.as_bytes());
+}
+
 /// Vanilla `LpVec3.write`: a low-precision vec3. Each component is quantized
 /// to 15 bits of the fraction `component / scale`, packed with the scale's low
 /// 2 bits (plus a continuation flag and varint for larger scales) into 6

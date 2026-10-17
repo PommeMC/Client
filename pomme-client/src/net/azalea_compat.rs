@@ -2822,6 +2822,7 @@ fn translate_set_player_team_764() {
     let (tx, rx) = crossbeam_channel::bounded(1);
     assert!(crate::net::handler::handle_raw_game_packet(
         &translated,
+        &Default::default(),
         &tx
     ));
     match rx.recv().unwrap() {
@@ -4818,7 +4819,7 @@ fn sample_component(
             out.push(arms.len() as u8 - 1);
             deeper(&arms[arms.len() - 1], out);
         }
-        ByRegistry(registry, arms) => {
+        ByRegistry(registry, arms) | ByRegistryOr(registry, arms, _) => {
             let id = PacketTable::native().version().protocol;
             let table = pomme_protocol::RegistryTable::for_protocol(id).unwrap();
             let (name, arm) = &arms[0];
@@ -4879,5 +4880,195 @@ fn azalea_reads_every_kept_component_exactly() {
                 "{name} reads fine; no need to drop it"
             );
         }
+    }
+}
+
+/// A game frame: the native packet id, then `payload`.
+fn game_frame(name: &str, payload: &[u8]) -> Vec<u8> {
+    let mut raw = Vec::new();
+    wire::write_varint(
+        &mut raw,
+        table_id(Phase::Game, Direction::Clientbound, name),
+    );
+    raw.extend_from_slice(payload);
+    raw
+}
+
+/// pomme's entity data grammar and azalea's read the same frame identically,
+/// for every serializer but the particle ones (azalea's 26.2 `Particle` wire
+/// enum is out of sync).
+#[test]
+fn entity_data_matches_azalea() {
+    use azalea_entity::EntityDataValue;
+    use pomme_protocol::entity_data::Value;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let stone = registry_id(RegistryTable::native(), ClientRegistry::Item, "stone") as u8;
+    let text: &[u8] = &[8, 0, 2, b'h', b'i'];
+    let mut global_pos = vec![1];
+    wire::write_utf(&mut global_pos, "minecraft:overworld");
+    global_pos.extend([0; 8]);
+    let entries: [(u32, Vec<u8>); 41] = [
+        (0, vec![5]),
+        (1, vec![0xAC, 0x02]),
+        (2, vec![0x7F]),
+        (3, 1.5f32.to_be_bytes().into()),
+        (4, vec![2, b'h', b'i']),
+        (5, text.into()),
+        (6, [&[1], text].concat()),
+        (7, vec![2, stone, 0, 0]),
+        (8, vec![1]),
+        (9, vec![0; 12]),
+        (10, vec![0, 0, 0, 0, 0, 0, 0x10, 0x05]),
+        (11, vec![1, 0, 0, 0, 0, 0, 0, 0x10, 0x05]),
+        (12, vec![2]),
+        (13, [&[1u8][..], &[7; 16]].concat()),
+        (14, vec![1]),
+        (15, vec![0]),
+        (18, vec![1, 2, 3]),
+        (19, vec![4]),
+        (20, vec![5]),
+        (21, vec![0]),
+        (22, vec![0]),
+        (23, vec![1]),
+        (24, vec![0]),
+        (25, vec![1]),
+        (26, vec![0]),
+        (27, vec![0]),
+        (28, vec![0]),
+        (29, vec![0]),
+        (30, vec![1]),
+        (31, vec![0]),
+        (32, vec![0]),
+        (33, global_pos),
+        (34, vec![1]),
+        (35, vec![1]),
+        (36, vec![1]),
+        (37, vec![1]),
+        (38, vec![1]),
+        (39, vec![0; 12]),
+        (40, vec![0; 16]),
+        (41, vec![0; 8]),
+        (42, vec![1]),
+    ];
+    let mut payload = vec![42];
+    for (index, (serializer, value)) in entries.iter().enumerate() {
+        payload.push(index as u8);
+        wire::write_varint(&mut payload, *serializer);
+        payload.extend(value);
+    }
+    payload.push(0xFF);
+
+    let raw = game_frame("set_entity_data", &payload);
+    let mut cur = std::io::Cursor::new(&raw[..]);
+    let Ok(ClientboundGamePacket::SetEntityData(azalea)) =
+        azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(&mut cur)
+    else {
+        panic!("azalea reads the frame");
+    };
+    assert_eq!(cur.position() as usize, raw.len());
+
+    let mut r = pomme_protocol::codec::Reader::new(&payload[1..]);
+    let pomme = crate::net::item_codec::native()
+        .read_entity_data(&mut r)
+        .unwrap();
+    r.ensure_eof().unwrap();
+
+    assert_eq!(pomme.len(), azalea.packed_items.len());
+    for (ours, theirs) in pomme.iter().zip(azalea.packed_items.iter()) {
+        assert_eq!(ours.index, theirs.index);
+        match (&ours.value, &theirs.value) {
+            (Value::Item(Some(stack)), EntityDataValue::ItemStack(az)) => {
+                assert_eq!(&crate::net::item_codec::to_azalea(stack), az);
+            }
+            // azalea re-encodes text as a compound; compare what it says.
+            (Value::OptionalComponent(Some(nbt)), EntityDataValue::OptionalFormattedText(az)) => {
+                let text = crate::net::chat::read_component(nbt, &mut 0).unwrap();
+                assert_eq!(text.plain_text(), az.as_ref().unwrap().to_string());
+            }
+            (ours, theirs) => assert_eq!(
+                Some(ours),
+                super::entity_data::from_azalea(theirs)
+                    .as_ref()
+                    .or(Some(&Value::Other)),
+                "{theirs:?}"
+            ),
+        }
+    }
+}
+
+/// pomme's `update_advancements` decode agrees with azalea's on every field
+/// the client reads.
+#[test]
+fn advancements_match_azalea() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let stone = registry_id(RegistryTable::native(), ClientRegistry::Item, "stone");
+    let mut p = vec![1, 1];
+    wire::write_utf(&mut p, "minecraft:story/root");
+    p.extend([0, 1]);
+    p.extend([8, 0, 2, b'h', b'i', 8, 0, 0]);
+    wire::write_varint(&mut p, stone);
+    p.extend([1, 0, 0, 2]);
+    p.extend(3i32.to_be_bytes());
+    wire::write_utf(&mut p, "minecraft:block/stone");
+    p.extend([0; 8]);
+    p.extend([1, 1]);
+    wire::write_utf(&mut p, "a");
+    p.extend([0, 1]);
+    wire::write_utf(&mut p, "minecraft:old");
+    p.push(1);
+    wire::write_utf(&mut p, "minecraft:story/root");
+    p.push(2);
+    wire::write_utf(&mut p, "a");
+    p.push(1);
+    p.extend(5i64.to_be_bytes());
+    wire::write_utf(&mut p, "b");
+    p.extend([0, 1]);
+
+    let raw = game_frame("update_advancements", &p);
+    let Ok(ClientboundGamePacket::UpdateAdvancements(azalea)) =
+        azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut std::io::Cursor::new(&raw[..]),
+        )
+    else {
+        panic!("azalea reads the frame");
+    };
+    let ours = super::advancement_wire::read_update(&p).unwrap();
+
+    assert_eq!(ours.reset, azalea.reset);
+    assert_eq!(ours.show_advancements, azalea.show_advancements);
+    assert_eq!(ours.removed, ["minecraft:old"]);
+    assert_eq!(azalea.removed[0].to_string(), "minecraft:old");
+    let (id, data) = &ours.added[0];
+    let theirs = &azalea.added[0];
+    assert_eq!(*id, theirs.id.to_string());
+    assert_eq!(data.requirements, theirs.value.requirements);
+    let display = data.display.as_ref().unwrap();
+    let their_display = theirs.value.display.as_ref().unwrap();
+    assert_eq!(display.show_toast, their_display.show_toast);
+    assert!(matches!(
+        display.frame,
+        crate::ui::toast::AdvancementFrame::Goal
+    ));
+    assert!(matches!(
+        their_display.frame,
+        azalea_protocol::packets::game::c_update_advancements::FrameType::Goal
+    ));
+    let azalea_inventory::ItemStack::Present(icon) = &their_display.icon else {
+        panic!("azalea reads the icon");
+    };
+    assert_eq!(
+        display.icon_item.as_deref(),
+        Some(&*crate::player::inventory::item_resource_name(icon.kind))
+    );
+    let (progress_id, criteria) = &ours.progress[0];
+    let their_criteria = &azalea.progress[0];
+    assert_eq!(
+        *progress_id,
+        azalea.progress.keys().next().unwrap().to_string()
+    );
+    for (name, obtained) in criteria {
+        assert_eq!(*obtained, their_criteria[name].date.is_some(), "{name}");
     }
 }

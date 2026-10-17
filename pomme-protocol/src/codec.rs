@@ -149,6 +149,17 @@ impl<'a> Reader<'a> {
         Ok(n)
     }
 
+    /// `ByteBufCodecs.list(max)` / `collection`: a [`Reader::len`], then
+    /// that many elements.
+    pub fn list<T>(
+        &mut self,
+        max: usize,
+        mut read: impl FnMut(&mut Self) -> DecodeResult<T>,
+    ) -> DecodeResult<Vec<T>> {
+        let n = self.len(max)?;
+        (0..n).map(|_| read(self)).collect()
+    }
+
     /// A count read some other way, checked against the remaining bytes as
     /// [`Reader::len`] does.
     pub fn len_of(&self, n: usize) -> DecodeResult<usize> {
@@ -186,6 +197,17 @@ impl<'a> Reader<'a> {
     /// Vanilla `UUIDUtil.STREAM_CODEC`: two big-endian longs.
     pub fn uuid(&mut self) -> DecodeResult<u128> {
         Ok(u128::from_be_bytes(self.array()?))
+    }
+
+    /// `BlockPos.STREAM_CODEC`: x, y and z packed into a long
+    /// (`BlockPos.getX`/`getY`/`getZ`).
+    pub fn block_pos(&mut self) -> DecodeResult<(i32, i32, i32)> {
+        let packed = self.i64()?;
+        Ok((
+            (packed >> 38) as i32,
+            (packed << 52 >> 52) as i32,
+            (packed << 26 >> 38) as i32,
+        ))
     }
 
     /// One network-NBT value (type byte + unnamed payload), returned as its

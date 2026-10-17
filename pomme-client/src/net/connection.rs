@@ -966,7 +966,7 @@ async fn game_loop(
             None => {}
         }
         if super::dialog::handle_raw_dialog_packet(Phase::Game, &raw, event_tx)
-            || handle_raw_game_packet(&raw, event_tx)
+            || handle_raw_game_packet(&raw, &configured.registries, event_tx)
         {
             continue;
         }

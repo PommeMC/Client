@@ -20,7 +20,6 @@ use crate::attribute::{
     AttributeModifierOperation as ClientAttributeModifierOperation,
     AttributeSnapshot as ClientAttributeSnapshot,
 };
-use crate::entity::MetaValue;
 use crate::entity::components::Position;
 use crate::net::chunk_batch::ChunkBatchSizeCalculator;
 use crate::player::inventory::item_resource_name;
@@ -804,157 +803,7 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::SetEntityData(p) => {
-            // Avatar's absorption/score sit at 17/18 since 1.21.9 (773);
-            // 15/16 on older wire versions (main hand moved to 15, pushing
-            // them up).
-            let (absorption_idx, score_idx) = if crate::version::session_protocol() <= 772 {
-                (15, 16)
-            } else {
-                (17, 18)
-            };
-            for item in p.packed_items.iter() {
-                // index 8 = item stack data for item entities
-                if item.index == 8
-                    && let azalea_entity::EntityDataValue::ItemStack(
-                        azalea_inventory::ItemStack::Present(data),
-                    ) = &item.value
-                {
-                    let name = crate::player::inventory::item_resource_name(data.kind);
-                    let damage = data
-                        .get_component::<azalea_inventory::components::Damage>()
-                        .map(|component| component.amount)
-                        .unwrap_or(0);
-                    let _ = event_tx.try_send(NetworkEvent::EntityItemData {
-                        id: p.id.0,
-                        item_name: name,
-                        item_id: data.kind.to_u32(),
-                        damage,
-                        count: data.count,
-                        stack: data.clone(),
-                    });
-                }
-                // Index 6 = entity pose
-                if item.index == 6
-                    && let azalea_entity::EntityDataValue::Pose(pose) = &item.value
-                {
-                    let _ = event_tx.try_send(NetworkEvent::EntityPose {
-                        id: p.id.0,
-                        is_crouching: matches!(pose, azalea_entity::Pose::Crouching),
-                    });
-                }
-                // Index 14 = LivingEntity SLEEPING_POS (OptionalBlockPos).
-                if item.index == 14
-                    && let azalea_entity::EntityDataValue::OptionalBlockPos(pos) = &item.value
-                {
-                    let _ = event_tx.try_send(NetworkEvent::EntitySleepingPos {
-                        id: p.id.0,
-                        pos: *pos,
-                    });
-                }
-                // Scalar values are forwarded raw; the store resolves their
-                // meaning per (kind, index) like vanilla `onSyncedDataUpdated`
-                // (`EntityStore::apply_entity_data`).
-                let scalar = match &item.value {
-                    azalea_entity::EntityDataValue::Boolean(v) => Some(MetaValue::Bool(*v)),
-                    azalea_entity::EntityDataValue::Int(v) => Some(MetaValue::Int(*v)),
-                    azalea_entity::EntityDataValue::Byte(v) => Some(MetaValue::Byte(*v)),
-                    azalea_entity::EntityDataValue::Float(v) => Some(MetaValue::Float(*v)),
-                    azalea_entity::EntityDataValue::Long(v) => Some(MetaValue::Long(*v)),
-                    _ => None,
-                };
-                if let Some(value) = scalar {
-                    let _ = event_tx.try_send(NetworkEvent::EntityData {
-                        id: p.id.0,
-                        index: item.index,
-                        value,
-                    });
-                }
-                // Player score (Int; index gated per wire version above).
-                // Kind-blind; the consumer applies it only to the local
-                // player.
-                if item.index == score_idx
-                    && let azalea_entity::EntityDataValue::Int(score) = &item.value
-                {
-                    let _ = event_tx.try_send(NetworkEvent::PlayerScore {
-                        entity_id: p.id.0,
-                        score: *score,
-                    });
-                }
-                // Player absorption (Float, Player.DATA_PLAYER_ABSORPTION_ID;
-                // index gated per wire version above). Kind-blind; the
-                // consumer applies it only to the local player.
-                if item.index == absorption_idx
-                    && let azalea_entity::EntityDataValue::Float(absorption) = &item.value
-                {
-                    let _ = event_tx.try_send(NetworkEvent::PlayerAbsorption {
-                        entity_id: p.id.0,
-                        absorption: *absorption,
-                    });
-                }
-                // Index 2 = custom name (Optional<Component>); needed for jeb_ sheep detection.
-                if item.index == 2
-                    && let azalea_entity::EntityDataValue::OptionalFormattedText(opt) = &item.value
-                {
-                    let name = opt.as_ref().map(|c| c.to_string());
-                    let _ = event_tx.try_send(NetworkEvent::EntityCustomName { id: p.id.0, name });
-                }
-                // Index 18 on cows = CowVariant Holder.
-                if item.index == 18
-                    && let azalea_entity::EntityDataValue::CowVariant(variant) = &item.value
-                {
-                    let _ = event_tx.try_send(variant_event(
-                        registry_holder,
-                        p.id.0,
-                        EntityKind::Cow,
-                        variant,
-                    ));
-                }
-                // Index 18 on chickens = ChickenVariant Holder.
-                if item.index == 18
-                    && let azalea_entity::EntityDataValue::ChickenVariant(variant) = &item.value
-                {
-                    let _ = event_tx.try_send(variant_event(
-                        registry_holder,
-                        p.id.0,
-                        EntityKind::Chicken,
-                        variant,
-                    ));
-                }
-                // Cat / wolf variant Holders: 20 / 23 on 26.x, one lower on
-                // 1.21.9-1.21.11 (no AgeableMob age-locked slot).
-                if (item.index == 19 || item.index == 20)
-                    && let azalea_entity::EntityDataValue::CatVariant(variant) = &item.value
-                {
-                    let _ = event_tx.try_send(variant_event(
-                        registry_holder,
-                        p.id.0,
-                        EntityKind::Cat,
-                        variant,
-                    ));
-                }
-                if (item.index == 22 || item.index == 23)
-                    && let azalea_entity::EntityDataValue::WolfVariant(variant) = &item.value
-                {
-                    let _ = event_tx.try_send(variant_event(
-                        registry_holder,
-                        p.id.0,
-                        EntityKind::Wolf,
-                        variant,
-                    ));
-                }
-                // VillagerData (type/profession/level): villagers at 19 (18
-                // on 1.21.9-1.21.11), zombie villagers at 20.
-                if (18..=20).contains(&item.index)
-                    && let azalea_entity::EntityDataValue::VillagerData(data) = &item.value
-                {
-                    let _ = event_tx.try_send(NetworkEvent::VillagerData {
-                        id: p.id.0,
-                        kind: data.kind.into(),
-                        profession: data.profession.into(),
-                        level: data.level,
-                    });
-                }
-            }
+            super::entity_data::handle_typed_entity_data(p, registry_holder, event_tx);
         }
         // Event id 3 = living entity death.
         // TODO: event 60 (`makePoofParticles`) when a mob's death clock hits 20.
@@ -1230,7 +1079,11 @@ fn styled_color(style: &simdnbt::owned::Nbt) -> Option<[f32; 4]> {
 /// id: a known `asset_id` picks the exact slot, else the `model` field picks
 /// the mesh (its values name slots; absent means "normal" = slot 0), else the
 /// registry path as a last resort for entries synced without NBT.
-fn variant_index(registry_holder: &RegistryHolder, kind: EntityKind, protocol_id: u32) -> u32 {
+pub(super) fn variant_index(
+    registry_holder: &RegistryHolder,
+    kind: EntityKind,
+    protocol_id: u32,
+) -> u32 {
     // (registry, pool order, asset prefix, vanilla's default texture variant).
     let (registry, order, asset_prefix, default) = match kind {
         EntityKind::Cow => (
@@ -1290,20 +1143,6 @@ fn variant_index(registry_holder: &RegistryHolder, kind: EntityKind, protocol_id
     order_pos(ident.path()).unwrap_or(fallback)
 }
 
-/// The kind-tagged variant event for a synced-registry holder value.
-fn variant_event(
-    registry_holder: &RegistryHolder,
-    id: i32,
-    kind: EntityKind,
-    holder: &impl azalea_registry::DataRegistry,
-) -> NetworkEvent {
-    NetworkEvent::EntityVariant {
-        id,
-        kind,
-        variant: variant_index(registry_holder, kind, holder.protocol_id()),
-    }
-}
-
 fn lp_to_dvec3(v: &azalea_core::delta::LpVec3) -> glam::DVec3 {
     let v = v.to_vec3();
     glam::DVec3::new(v.x, v.y, v.z)
@@ -1326,28 +1165,35 @@ fn send_entity_moved(
 
 /// Consume packets that azalea's 26.2 codecs cannot represent correctly
 /// before the typed decode runs. Returns whether the packet was consumed.
-pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bool {
+pub fn handle_raw_game_packet(
+    raw: &[u8],
+    registry_holder: &RegistryHolder,
+    event_tx: &Sender<NetworkEvent>,
+) -> bool {
     let mut cur = std::io::Cursor::new(raw);
     let Ok(packet_id) = u32::azalea_read_var(&mut cur) else {
         return false;
     };
 
-    if let Some(result) =
-        super::recipe_wire::handle_raw_recipe_packet(packet_id, &mut cur, event_tx)
-    {
-        if let Err(e) = result {
-            tracing::warn!("Skipping malformed recipe packet: {e}");
-        }
+    if took(
+        super::recipe_wire::handle_raw_recipe_packet(packet_id, &mut cur, event_tx),
+        "recipe",
+    ) {
         return true;
     }
 
     let pos = cur.position() as usize;
-    if let Some(result) =
-        super::item_codec::handle_raw_item_packet(packet_id, &raw[pos..], event_tx)
-    {
-        if let Err(e) = result {
-            tracing::warn!("Skipping malformed item packet: {e}");
-        }
+    let payload = &raw[pos..];
+    if took(
+        super::item_codec::handle_raw_item_packet(packet_id, payload, event_tx),
+        "item",
+    ) || took(
+        super::entity_data::handle_raw_entity_data(packet_id, payload, registry_holder, event_tx),
+        "set_entity_data",
+    ) || took(
+        super::advancement_wire::handle_raw_advancements(packet_id, payload, event_tx),
+        "update_advancements",
+    ) {
         return true;
     }
 
@@ -1509,6 +1355,14 @@ fn read_team_u8(raw: &[u8], pos: &mut usize, field: &str) -> Result<u8, String> 
         .ok_or_else(|| format!("truncated {field}"))?;
     *pos += 1;
     Ok(value)
+}
+
+/// Whether a raw decoder took the packet, logging it when malformed.
+fn took<E: std::fmt::Display>(result: Option<Result<(), E>>, packet: &str) -> bool {
+    if let Some(Err(e)) = &result {
+        tracing::warn!("Skipping malformed {packet} packet: {e}");
+    }
+    result.is_some()
 }
 
 fn set_player_team_packet_id() -> u32 {
@@ -1744,6 +1598,10 @@ mod tests {
 
     use super::*;
 
+    fn handle_raw(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bool {
+        handle_raw_game_packet(raw, &RegistryHolder::default(), event_tx)
+    }
+
     /// Runs `packet` through [`handle_game_packet`], returning what it sent.
     fn handle(
         packet: ClientboundGamePacket,
@@ -1873,12 +1731,7 @@ mod tests {
     fn explosion_knockback_backpressures_instead_of_being_dropped() {
         let expected = glam::DVec3::new(0.25, 0.5, -0.125);
         assert_event_backpressures(
-            move |event_tx| {
-                assert!(handle_raw_game_packet(
-                    &explosion_prefix(Some(expected)),
-                    &event_tx
-                ))
-            },
+            move |event_tx| assert!(handle_raw(&explosion_prefix(Some(expected)), &event_tx)),
             |event| {
                 assert!(matches!(
                     event,
@@ -1976,7 +1829,7 @@ mod tests {
         "Player".to_string().azalea_write(&mut raw).unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(handle_raw(&raw, &tx));
         match rx.recv().unwrap() {
             NetworkEvent::ScoreboardTeam {
                 name,
@@ -2022,7 +1875,7 @@ mod tests {
         0_u8.azalea_write(&mut raw).unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(handle_raw(&raw, &tx));
         match rx.recv().unwrap() {
             NetworkEvent::ScoreboardTeam {
                 color, fill_color, ..
@@ -2059,7 +1912,7 @@ mod tests {
         raw.extend_from_slice(&[0xff, 0x80]);
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(handle_raw(&raw, &tx));
         assert!(matches!(
             rx.recv().unwrap(),
             NetworkEvent::PlayerKnockback { delta } if delta == expected
@@ -2072,7 +1925,7 @@ mod tests {
         raw.push(0xff);
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(handle_raw(&raw, &tx));
         assert!(matches!(
             rx.try_recv(),
             Err(crossbeam_channel::TryRecvError::Empty)
@@ -2100,7 +1953,7 @@ mod tests {
         7_u64.azalea_write(&mut raw).unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(handle_raw(&raw, &tx));
         match rx.recv().unwrap() {
             NetworkEvent::PlaySound { category, pos, .. } => {
                 assert_eq!(category, 10);
@@ -2122,7 +1975,7 @@ mod tests {
         9_u64.azalea_write(&mut raw).unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(handle_raw(&raw, &tx));
         match rx.recv().unwrap() {
             NetworkEvent::PlayEntitySound {
                 category,
@@ -2178,7 +2031,7 @@ mod tests {
             .unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(handle_raw(&raw, &tx));
         match rx.recv().unwrap() {
             NetworkEvent::StopSound { sound_id, category } => {
                 assert_eq!(category, Some(10));

@@ -61,16 +61,26 @@ pub fn read_stack(r: &mut Reader) -> DecodeResult<ItemStack> {
         .map_or(ItemStack::Empty, |stack| to_azalea(&stack)))
 }
 
+/// Whether this session speaks the native protocol, the only one pomme's
+/// item grammar decodes; translated sessions keep azalea's decode, which
+/// their id remaps run after.
+pub(super) fn native_session() -> bool {
+    crate::version::session_protocol() == NATIVE.protocol
+}
+
+/// The native clientbound packets that carry items.
 #[derive(Clone, Copy)]
-struct ItemPacketIds {
+pub(super) struct ItemPacketIds {
     container_set_content: u32,
     container_set_slot: u32,
     set_cursor_item: u32,
     set_player_inventory: u32,
     set_equipment: u32,
+    pub set_entity_data: u32,
+    pub update_advancements: u32,
 }
 
-fn item_packet_ids() -> ItemPacketIds {
+pub(super) fn item_packet_ids() -> ItemPacketIds {
     static IDS: OnceLock<ItemPacketIds> = OnceLock::new();
     *IDS.get_or_init(|| {
         let table = PacketTable::native();
@@ -85,19 +95,20 @@ fn item_packet_ids() -> ItemPacketIds {
             set_cursor_item: id("set_cursor_item"),
             set_player_inventory: id("set_player_inventory"),
             set_equipment: id("set_equipment"),
+            set_entity_data: id("set_entity_data"),
+            update_advancements: id("update_advancements"),
         }
     })
 }
 
 /// Decodes the native inventory packets with pomme's item grammar; `None`
-/// for any other packet. Translated sessions keep azalea's decode, which
-/// their id remaps run after.
+/// for any other packet or a translated session.
 pub fn handle_raw_item_packet(
     packet_id: u32,
     payload: &[u8],
     event_tx: &Sender<NetworkEvent>,
 ) -> Option<DecodeResult<()>> {
-    if crate::version::session_protocol() != NATIVE.protocol {
+    if !native_session() {
         return None;
     }
     let mut r = Reader::new(payload);
@@ -115,9 +126,7 @@ fn read_item_packet(packet_id: u32, r: &mut Reader) -> DecodeResult<Option<Netwo
         // ClientboundContainerSetContentPacket.java:18
         let container_id = r.var_i32()?;
         let state_id = r.varint()?;
-        let items = (0..r.len(usize::MAX)?)
-            .map(|_| read_stack(r))
-            .collect::<DecodeResult<_>>()?;
+        let items = r.list(usize::MAX, read_stack)?;
         NetworkEvent::ContainerContent {
             container_id,
             items,

@@ -9,6 +9,7 @@
 use std::sync::OnceLock;
 
 use crate::codec::{DecodeResult, MAX_STRING_LENGTH, Reader};
+use crate::entity_data::{SERIALIZERS_26_2, Serializer};
 use crate::registries::{ClientRegistry, RegistryTable};
 use crate::version::EMBEDDED;
 use crate::wire::write_varint;
@@ -59,6 +60,12 @@ pub enum Shape {
     ById(&'static [Shape]),
     /// `ByteBufCodecs.registry(..).dispatch`, by entry name.
     ByRegistry(ClientRegistry, &'static [(&'static str, Shape)]),
+    /// [`Shape::ByRegistry`] where every unlisted entry shares the last shape.
+    ByRegistryOr(
+        ClientRegistry,
+        &'static [(&'static str, Shape)],
+        &'static Shape,
+    ),
     /// `ItemStackTemplate.STREAM_CODEC`.
     ItemTemplate,
     /// `TypedDataComponent.STREAM_CODEC`: a component id and its value.
@@ -135,7 +142,7 @@ static PROFILE_PROPERTIES: Shape = List(16, &Struct(&[Utf(64), Utf(32767), Optio
 
 /// `ResolvableProfile.STREAM_CODEC`: a full `GAME_PROFILE` or a `Partial`,
 /// then `PlayerSkin.Patch.STREAM_CODEC`.
-static RESOLVABLE_PROFILE: Shape = Struct(&[
+pub static RESOLVABLE_PROFILE: Shape = Struct(&[
     Either(
         &Struct(&[Uuid, Utf(16), Ref(&PROFILE_PROPERTIES)]),
         &Struct(&[
@@ -173,6 +180,66 @@ static TYPED_ENTITY_DATA: Shape = Struct(&[VarInt, Compound]);
 
 /// `KineticWeapon.Condition.STREAM_CODEC`.
 static KINETIC_CONDITION: Shape = Struct(&[VarInt, Float, Float]);
+
+/// `BlockParticleOption.streamCodec`: a block state id.
+const BLOCK_STATE: Shape = VarInt;
+
+/// `ParticleTypes.STREAM_CODEC` in 26.2: the options of each particle type
+/// that has any; the rest are `SimpleParticleType`s with none.
+pub static PARTICLE: Shape = ByRegistryOr(
+    ClientRegistry::ParticleType,
+    &[
+        ("block", BLOCK_STATE),
+        ("block_marker", BLOCK_STATE),
+        // GeyserParticleOptions.java:31
+        ("geyser", Int),
+        ("geyser_plume", Int),
+        // GeyserBaseParticleOptions.java:33
+        ("geyser_base", Struct(&[Int, Float])),
+        ("geyser_poof", Struct(&[Int, Float])),
+        // PowerParticleOption.java:29
+        ("dragon_breath", Float),
+        // DustParticleOptions.java:32
+        ("dust", Struct(&[Int, Float])),
+        // DustColorTransitionOptions.java:32
+        ("dust_color_transition", Struct(&[Int, Int, Float])),
+        // SpellParticleOption.java:38
+        ("effect", Struct(&[Int, Float])),
+        ("instant_effect", Struct(&[Int, Float])),
+        // ColorParticleOption.java:29
+        ("entity_effect", Int),
+        ("tinted_leaves", Int),
+        ("flash", Int),
+        ("falling_dust", BLOCK_STATE),
+        // SculkChargeParticleOptions.java:28
+        ("sculk_charge", Float),
+        // ItemParticleOption.java:27
+        ("item", ItemTemplate),
+        // VibrationParticleOption.java:33: a `PositionSource`, then ticks.
+        (
+            "vibration",
+            Struct(&[
+                ByRegistry(
+                    ClientRegistry::PositionSourceType,
+                    &[
+                        // BlockPositionSource.java:29
+                        ("block", Long),
+                        // EntityPositionSource.java:38
+                        ("entity", Struct(&[VarInt, Float])),
+                    ],
+                ),
+                VarInt,
+            ]),
+        ),
+        // TrailParticleOption.java:28: a `Vec3`, colour and duration.
+        ("trail", Struct(&[Double, Double, Double, Int, VarInt])),
+        // ShriekParticleOption.java:28
+        ("shriek", VarInt),
+        ("dust_pillar", BLOCK_STATE),
+        ("block_crumble", BLOCK_STATE),
+    ],
+    &Unit,
+);
 
 /// The 26.2 value layout of each `DataComponents` entry, by registry name.
 /// Components without a network codec fall back to their persistent Codec as
@@ -507,6 +574,7 @@ impl ComponentPatch {
 pub struct ItemCodec {
     registries: &'static RegistryTable,
     components: Vec<&'static Shape>,
+    entity_data: &'static [Serializer],
     air: u32,
 }
 
@@ -520,16 +588,20 @@ impl ItemCodec {
             .position(|e| e.version.protocol == protocol)?;
         CODECS[index]
             .get_or_init(|| {
-                let shapes = match EMBEDDED[index].version.name {
-                    "26.2" => COMPONENTS_26_2,
+                let (shapes, entity_data) = match EMBEDDED[index].version.name {
+                    "26.2" => (COMPONENTS_26_2, SERIALIZERS_26_2),
                     _ => return None,
                 };
-                Self::new(RegistryTable::for_protocol(protocol)?, shapes)
+                Self::new(RegistryTable::for_protocol(protocol)?, shapes, entity_data)
             })
             .as_ref()
     }
 
-    fn new(registries: &'static RegistryTable, shapes: &'static [(&str, Shape)]) -> Option<Self> {
+    fn new(
+        registries: &'static RegistryTable,
+        shapes: &'static [(&str, Shape)],
+        entity_data: &'static [Serializer],
+    ) -> Option<Self> {
         let components = registries
             .names(ClientRegistry::DataComponentType)
             .iter()
@@ -539,6 +611,7 @@ impl ItemCodec {
         Some(Self {
             registries,
             components,
+            entity_data,
             air,
         })
     }
@@ -550,6 +623,10 @@ impl ItemCodec {
 
     pub fn registries(&self) -> &'static RegistryTable {
         self.registries
+    }
+
+    pub(crate) fn entity_data_serializers(&self) -> &'static [Serializer] {
+        self.entity_data
     }
 
     /// `ItemStack.OPTIONAL_STREAM_CODEC`: a count (empty when not positive),
@@ -718,16 +795,16 @@ impl ItemCodec {
                 self.walk(r, arms.get(id).unwrap_or(&arms[0]), depth)?;
             }
             ByRegistry(registry, arms) => {
-                let id = r.varint()?;
-                let name = self
-                    .registries
-                    .name_of(*registry, id)
-                    .ok_or_else(|| r.error("unknown dispatch type"))?;
-                let (_, inner) = arms
-                    .iter()
-                    .find(|(arm, _)| *arm == name)
-                    .ok_or_else(|| r.error("unported dispatch type"))?;
-                self.walk(r, inner, depth)?;
+                let inner = self.dispatch(r, *registry, arms)?;
+                self.walk(
+                    r,
+                    inner.ok_or_else(|| r.error("unported dispatch type"))?,
+                    depth,
+                )?;
+            }
+            ByRegistryOr(registry, arms, rest) => {
+                let inner = self.dispatch(r, *registry, arms)?;
+                self.walk(r, inner.unwrap_or(rest), depth)?;
             }
             ItemTemplate => {
                 self.read_template_at(r, depth)?;
@@ -738,6 +815,21 @@ impl ItemCodec {
             }
         }
         Ok(())
+    }
+
+    /// Reads a registry dispatch's type id and finds its arm, if listed.
+    fn dispatch(
+        &self,
+        r: &mut Reader,
+        registry: ClientRegistry,
+        arms: &'static [(&'static str, Shape)],
+    ) -> DecodeResult<Option<&'static Shape>> {
+        let id = r.varint()?;
+        let name = self
+            .registries
+            .name_of(registry, id)
+            .ok_or_else(|| r.error("unknown dispatch type"))?;
+        Ok(arms.iter().find(|(arm, _)| *arm == name).map(|(_, s)| s))
     }
 }
 
@@ -777,16 +869,16 @@ pub fn write_patch(buf: &mut Vec<u8>, patch: &ComponentPatch, delimited: bool) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const PROTOCOL_26_2: i32 = 776;
 
-    fn codec() -> &'static ItemCodec {
+    pub(crate) fn codec() -> &'static ItemCodec {
         ItemCodec::for_protocol(PROTOCOL_26_2).expect("26.2 item grammar")
     }
 
-    fn id(registry: ClientRegistry, name: &str) -> u32 {
+    pub(crate) fn id(registry: ClientRegistry, name: &str) -> u32 {
         codec()
             .registries()
             .id_of(registry, name)
@@ -826,10 +918,9 @@ mod tests {
             self.0.extend(v.to_be_bytes());
             self
         }
-        fn str(self, s: &str) -> Self {
-            let mut w = self.var(s.len() as u32);
-            w.0.extend(s.as_bytes());
-            w
+        fn str(mut self, s: &str) -> Self {
+            crate::wire::write_utf(&mut self.0, s);
+            self
         }
         fn bytes(mut self, b: &[u8]) -> Self {
             self.0.extend(b);
@@ -874,6 +965,36 @@ mod tests {
                 "{name} isn't a 26.2 component"
             );
         }
+    }
+
+    #[test]
+    fn particle_options_name_26_2_particle_types() {
+        let ByRegistryOr(registry, arms, _) = &PARTICLE else {
+            unreachable!()
+        };
+        let names = codec().registries().names(*registry);
+        assert_eq!(names.len(), 125);
+        for (name, _) in *arms {
+            assert!(
+                names.iter().any(|n| n == name),
+                "{name} isn't a 26.2 particle type"
+            );
+        }
+    }
+
+    #[test]
+    fn item_particles_carry_a_template() {
+        let mut bytes = Wire::default()
+            .var(id(ClientRegistry::ParticleType, "item"))
+            .var(item("stick"))
+            .var(1)
+            .var(0)
+            .var(0)
+            .0;
+        bytes.push(0xEE);
+        let mut r = Reader::new(&bytes);
+        codec().skip(&mut r, &PARTICLE).expect("item particle");
+        assert_eq!(r.u8(), Ok(0xEE));
     }
 
     #[test]
