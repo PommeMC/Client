@@ -15,6 +15,9 @@ ttf-fonts = ["dep:freetype-rs"]
 # Headless CPU benchmarks (`just bench`): `--cpu-bench [filter]` runs criterion
 # over the mesher, fade rebuild and occlusion walk, then exits.
 cpu-bench = ["dep:criterion"]
+# Debug test harness (`just ingame-test`, tests/ingame/README.md): drives the client
+# from scripts or a localhost socket. Never enabled in release builds.
+test-harness = ["dep:toml"]
 
 [build-dependencies]
 shaderc = "0.10"
@@ -73,6 +76,7 @@ uuid = { version = "1", features = ["v4"] }
 md-5 = "0.11"
 crossbeam-channel = "0.5"
 png = "0.17"
+toml = { version = "1", optional = true }
 image = "0.25"
 fontdue = "0.9.3"
 freetype-rs = { version = "0.38", optional = true }

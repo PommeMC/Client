@@ -484,6 +484,8 @@ pub struct AppCore {
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
     pub unfocused_since: Option<Instant>,
+    /// Vanilla `options.pauseOnLostFocus`.
+    pub pause_on_lost_focus: bool,
     /// Vanilla `MouseHandler.mouseGrabbed`.
     mouse_grabbed: bool,
     /// The OS grab may no longer match `mouse_grabbed` (the window manager
@@ -631,6 +633,7 @@ impl AppCore {
             time_tick_accumulator: 0.0,
             menu_dpad: RepeatStepper::default(),
             unfocused_since: None,
+            pause_on_lost_focus: true,
             mouse_grabbed: false,
             os_grab_stale: false,
             player_skin_tx,

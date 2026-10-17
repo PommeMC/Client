@@ -882,6 +882,11 @@ pub struct ItemEntityStore {
 }
 
 impl ItemEntityStore {
+    #[cfg(feature = "test-harness")]
+    pub fn items(&self) -> impl Iterator<Item = (i32, &ItemEntity)> {
+        self.items.iter().map(|(id, item)| (*id, item))
+    }
+
     pub fn new() -> Self {
         Self {
             items: HashMap::new(),

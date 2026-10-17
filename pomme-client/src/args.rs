@@ -37,6 +37,21 @@ pub struct LaunchArgs {
     #[cfg(feature = "cpu-bench")]
     #[arg(long, value_name = "FILTER")]
     pub cpu_bench: Option<Option<String>>,
+
+    /// Serves the test harness on this localhost port.
+    #[cfg(feature = "test-harness")]
+    #[arg(long, value_name = "PORT")]
+    pub harness_port: Option<u16>,
+
+    /// Runs a test-harness script, then exits with its result.
+    #[cfg(feature = "test-harness")]
+    #[arg(long, value_name = "FILE")]
+    pub harness_script: Option<std::path::PathBuf>,
+
+    /// Where a harness script writes its report and screenshots.
+    #[cfg(feature = "test-harness")]
+    #[arg(long, value_name = "DIR")]
+    pub harness_out: Option<std::path::PathBuf>,
 }
 
 impl LaunchArgs {

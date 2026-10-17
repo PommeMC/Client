@@ -19,12 +19,15 @@ struct PendingCapture {
     width: u32,
     height: u32,
     bgra: bool,
+    target: Option<PathBuf>,
 }
 
 /// Vanilla F2 (`Screenshot.grab`): copies the presented swapchain image into a
 /// host buffer, then encodes a PNG off-thread.
 pub struct ScreenshotCapture {
     armed: bool,
+    /// Where the armed capture goes instead of `screenshots/<timestamp>.png`.
+    target: Option<PathBuf>,
     pending: Vec<PendingCapture>,
     /// Encodes spawned but not yet drained from `result_rx`.
     in_flight: u32,
@@ -38,6 +41,7 @@ impl ScreenshotCapture {
         let (result_tx, result_rx) = channel();
         Self {
             armed: false,
+            target: None,
             pending: Vec::new(),
             in_flight: 0,
             game_dir,
@@ -49,6 +53,13 @@ impl ScreenshotCapture {
     /// Arm a one-shot capture; recorded on the next presented frame.
     pub fn arm(&mut self) {
         self.armed = true;
+    }
+
+    /// [`ScreenshotCapture::arm`], writing the PNG to `path`.
+    #[cfg(feature = "test-harness")]
+    pub fn arm_to(&mut self, path: PathBuf) {
+        self.armed = true;
+        self.target = Some(path);
     }
 
     /// A capture is somewhere between armed and written to disk; drives the
@@ -169,6 +180,7 @@ impl ScreenshotCapture {
             width: extent.width,
             height: extent.height,
             bgra: is_bgra(format),
+            target: self.target.take(),
         });
     }
 
@@ -218,8 +230,9 @@ impl ScreenshotCapture {
         let tx = self.result_tx.clone();
         let (w, h, bgra) = (cap.width, cap.height, cap.bgra);
         let dir = self.game_dir.join("screenshots");
+        let target = cap.target;
         std::thread::spawn(move || {
-            let _ = tx.send(encode_and_write(&pixels, w, h, bgra, &dir));
+            let _ = tx.send(encode_and_write(&pixels, w, h, bgra, &dir, target));
         });
     }
 
@@ -243,6 +256,7 @@ fn encode_and_write(
     height: u32,
     bgra: bool,
     dir: &Path,
+    target: Option<PathBuf>,
 ) -> Result<String, String> {
     // Vanilla screenshots are opaque RGB; drop alpha and reorder BGRA if needed.
     let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
@@ -254,7 +268,13 @@ fn encode_and_write(
         }
     }
 
-    let (path, name) = next_filename(dir)?;
+    let (path, name) = match target {
+        Some(path) => {
+            let name = path.display().to_string();
+            (path, name)
+        }
+        None => next_filename(dir)?,
+    };
     write_png(&path, &rgb, width, height)?;
     Ok(name)
 }

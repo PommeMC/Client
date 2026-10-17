@@ -1,0 +1,19 @@
+# Nested item components: a shulker box holding a bundle that holds diamonds.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = '/give @s minecraft:shulker_box[minecraft:container=[{slot:0,item:{id:"minecraft:bundle",count:1,components:{"minecraft:bundle_contents":[{id:"minecraft:diamond",count:2}]}}}]]'
+
+[[step]]
+expect = { chat = "Gave" }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { slot = 36, item = "shulker_box", components = ["container"] }
+
+[[step]]
+screenshot = "inventory"

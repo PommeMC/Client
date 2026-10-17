@@ -36,6 +36,10 @@ real SteelMC server and writes a world to the temp dir, so it takes a minute.
 CI additionally runs the client's clippy and tests with `--no-default-features`,
 which the recipe does not.
 
+For changes you'd otherwise check in game (items, inventory, entities,
+advancements), `just ingame-test` runs scripted tests against a local vanilla
+server. See [tests/ingame/README.md](tests/ingame/README.md).
+
 ## Development Guidelines
 
 - **The toolchain is pinned** in `rust-toolchain.toml` (a nightly: rustfmt's

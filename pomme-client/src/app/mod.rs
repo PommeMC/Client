@@ -50,6 +50,8 @@ pub struct App {
     core: AppCore,
     occluded: bool,
     fps_limiter: FramerateLimiter,
+    #[cfg(feature = "test-harness")]
+    harness: Option<crate::harness::Harness>,
 }
 
 /// Port of vanilla `FramerateLimiter`: paces to a target fps by sleeping most
@@ -158,7 +160,25 @@ impl App {
             core: AppCore::new(version, data_dirs, tokio_rt, presence, user),
             occluded: false,
             fps_limiter: FramerateLimiter::new(),
+            #[cfg(feature = "test-harness")]
+            harness: None,
         }
+    }
+
+    #[cfg(feature = "test-harness")]
+    pub fn with_harness(mut self, harness: Option<crate::harness::Harness>) -> Self {
+        // A test window rarely has focus, so it must not pause on losing it.
+        if harness.is_some() {
+            self.core.pause_on_lost_focus = false;
+        }
+        self.harness = harness;
+        self
+    }
+
+    /// The test-harness script's exit code, once it has finished.
+    #[cfg(feature = "test-harness")]
+    pub fn harness_exit_code(&self) -> Option<i32> {
+        self.harness.as_ref()?.exit_code()
     }
 
     pub fn run(&mut self) -> Result<(), WindowError> {
@@ -912,6 +932,14 @@ impl ApplicationHandler for App {
                         }
                     }
                 });
+
+                #[cfg(feature = "test-harness")]
+                if let Some(harness) = &mut self.harness {
+                    harness.tick(core, self.phase.get_mut());
+                    if harness.exit_code().is_some() {
+                        event_loop.exit();
+                    }
+                }
 
                 core.input.end_frame();
 

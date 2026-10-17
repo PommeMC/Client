@@ -600,6 +600,24 @@ impl GameState {
         }
     }
 
+    /// Opens the player's inventory, the creative one in creative mode.
+    pub fn open_inventory(&mut self) {
+        if crate::player::is_creative(self.player.game_mode) {
+            self.creative_inventory_open = true;
+        } else {
+            self.inventory_open = true;
+        }
+    }
+
+    /// Closes whichever inventory or container menu is open.
+    pub fn close_inventory(&mut self) {
+        if self.creative_inventory_open {
+            self.close_creative_inventory();
+        } else {
+            self.close_menu();
+        }
+    }
+
     pub fn close_creative_inventory(&mut self) {
         self.creative_inventory_open = false;
         self.creative_state.reset_interaction();
@@ -1829,7 +1847,7 @@ fn send_bundle_selection(sender: &crate::net::sender::PacketSender, slot: u16, s
 /// Predict each container click locally (instant UI + drag preview), then send
 /// the predicted diff as `HashedStack`es so the server suppresses corrections
 /// when the prediction is right (vanilla lockstep).
-fn send_container_clicks(
+pub(crate) fn send_container_clicks(
     game: &mut GameState,
     connection: &ConnectionHandle,
     audio: &crate::audio::AudioEngine,
@@ -2079,9 +2097,10 @@ pub fn update_game(
     // with no screen open pauses the game, which also releases the cursor
     // (otherwise a system overlay like Win-key search opens over a still
     // captured cursor). TODO: F3+P toggle (options.pauseOnLostFocus).
-    if core
-        .unfocused_since
-        .is_some_and(|t| t.elapsed().as_millis() > 500)
+    if core.pause_on_lost_focus
+        && core
+            .unfocused_since
+            .is_some_and(|t| t.elapsed().as_millis() > 500)
         && game.input_live()
         && !game.dead
     {

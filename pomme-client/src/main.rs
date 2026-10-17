@@ -16,6 +16,8 @@ mod cpu_bench;
 mod dirs;
 mod discord;
 mod entity;
+#[cfg(feature = "test-harness")]
+mod harness;
 mod lang;
 mod logging;
 mod mob_effect;
@@ -138,17 +140,33 @@ fn main() {
         .inspect_err(|e| tracing::warn!("Discord rich presence unavailable: {e}"))
         .ok();
 
-    if let Err(e) = App::new(
+    let mut app = App::new(
         version.to_owned(),
         data_dirs,
         rt,
         presence,
         user,
         args.quick_access_multiplayer,
-    )
-    .run()
+    );
+    #[cfg(feature = "test-harness")]
     {
+        let harness = crate::harness::Harness::from_args(
+            args.harness_port,
+            args.harness_script,
+            args.harness_out,
+        )
+        .unwrap_or_else(|e| {
+            tracing::error!("{e}");
+            std::process::exit(2);
+        });
+        app = app.with_harness(harness);
+    }
+    if let Err(e) = app.run() {
         tracing::error!("Fatal: {e}");
         std::process::exit(1);
+    }
+    #[cfg(feature = "test-harness")]
+    if let Some(code) = app.harness_exit_code() {
+        std::process::exit(code);
     }
 }

@@ -594,6 +594,14 @@ pub struct ChatState {
 }
 
 impl ChatState {
+    /// Each received line's plain text, oldest first.
+    #[cfg(feature = "test-harness")]
+    pub fn message_texts(&self) -> impl Iterator<Item = String> + '_ {
+        self.messages
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.text.as_str()).collect())
+    }
+
     pub fn new() -> Self {
         Self {
             options: ChatOptions::default(),

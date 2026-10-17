@@ -8,6 +8,7 @@ members = [
     "pomme-protocol",
     "pomme-singleplayer",
     "tools/blockgen",
+    "tools/ingame-test",
     "tools/protogen"
 ]
 # Steel is its own workspace; pomme-singleplayer reaches into it by path.

@@ -1,0 +1,20 @@
+# Item components survive the trip from the server: a /give with several
+# components lands in the first hotbar slot (menu slot 36) with all of them.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = '/give @s minecraft:diamond_sword[minecraft:enchantments={sharpness:3},minecraft:custom_name="Blade",minecraft:damage=10]'
+
+[[step]]
+expect = { chat = "Gave" }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { slot = 36, item = "diamond_sword", components = ["enchantments", "custom_name", "damage"] }
+
+[[step]]
+screenshot = "inventory"

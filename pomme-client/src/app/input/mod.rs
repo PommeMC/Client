@@ -299,11 +299,11 @@ impl InputState {
                 // A dialog (or the confirm screen over it) is a screen, and
                 // vanilla runs no key mapping while one is up.
                 if self.action_just_pressed(Action::ToggleInventory) && !game.dialog_open() {
-                    if game.creative_inventory_open {
-                        game.close_creative_inventory();
-                        should_apply_cursor_grab = true;
-                    } else if game.open_container.is_some() || game.inventory_open {
-                        game.close_menu();
+                    if game.creative_inventory_open
+                        || game.open_container.is_some()
+                        || game.inventory_open
+                    {
+                        game.close_inventory();
                         should_apply_cursor_grab = true;
                     } else if !game.paused
                         && !game.dead
@@ -312,11 +312,7 @@ impl InputState {
                         && !game.chat.is_open()
                         && game.game_mode_switcher.is_none()
                     {
-                        if crate::player::is_creative(game.player.game_mode) {
-                            game.creative_inventory_open = true;
-                        } else {
-                            game.inventory_open = !game.inventory_open;
-                        }
+                        game.open_inventory();
                         should_apply_cursor_grab = true;
                     }
 

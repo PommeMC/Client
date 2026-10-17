@@ -37,6 +37,15 @@ bench *args:
 client-build *args: openal
     @cargo build -p pomme-client {{ args }}
 
+# In-game test scripts (tests/ingame/README.md) against a local vanilla
+# 26.2 server, e.g. `just ingame-test inventory_armor_equip`; no name runs them all.
+ingame-test *scripts: openal
+    @cargo run -p ingame-test -- {{ scripts }}
+
+# Just the local test server, for driving a client over the harness socket.
+ingame-server:
+    @cargo run -p ingame-test -- --server-only
+
 # TODO: CI also runs the client's clippy and tests with --no-default-features; mirror it here.
 
 client-pre-pr:

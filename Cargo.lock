@@ -3531,6 +3531,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ingame-test"
+version = "0.1.0"
+dependencies = [
+ "md-5 0.11.0",
+ "reqwest",
+ "serde_json",
+ "sha1_smol",
+ "uuid 1.28.0",
+]
+
+[[package]]
 name = "inotify"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5333,6 +5344,7 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "tokio",
+ "toml 1.1.6+spec-1.1.0",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

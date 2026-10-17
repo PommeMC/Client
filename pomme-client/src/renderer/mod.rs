@@ -1033,6 +1033,12 @@ impl Renderer {
         self.screenshot.arm();
     }
 
+    /// [`Renderer::request_screenshot`], saved to `path`.
+    #[cfg(feature = "test-harness")]
+    pub fn request_screenshot_to(&mut self, path: std::path::PathBuf) {
+        self.screenshot.arm_to(path);
+    }
+
     /// Drain finished screenshots: `Ok(relative filename)` or `Err(message)`.
     /// The caller turns each into a chat line.
     pub fn take_screenshot_messages(&mut self) -> Vec<Result<String, String>> {
