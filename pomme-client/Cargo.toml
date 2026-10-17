@@ -81,3 +81,6 @@ libloading = "0.9"
 symphonia = { version = "0.5.5", default-features = false, features = ["ogg", "vorbis"] }
 fastrand = "2"
 gilrs = "0.11.2"
+indexmap = "2"
+
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }

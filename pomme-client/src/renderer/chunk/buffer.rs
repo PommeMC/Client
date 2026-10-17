@@ -767,6 +767,7 @@ impl ChunkBufferStore {
 
     /// Sections drawn last time this frame slot ran (post frustum + occlusion
     /// cull). Read back from the GPU count buffer, so it lags a few frames.
+    #[allow(unused)] // TODO(debug-overlay)
     pub fn sections_drawn(&self) -> u32 {
         self.last_draw_count
     }

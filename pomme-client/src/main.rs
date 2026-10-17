@@ -2,7 +2,8 @@
 // pool's cross-thread Vec churn from serializing on the system heap's global
 // lock and stalling the main thread.
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: memory::CountingAllocator<mimalloc::MiMalloc> =
+    memory::CountingAllocator::new(mimalloc::MiMalloc);
 
 mod app;
 mod args;
@@ -16,6 +17,7 @@ mod discord;
 mod entity;
 mod lang;
 mod logging;
+mod memory;
 mod mob_effect;
 mod net;
 mod particle;
