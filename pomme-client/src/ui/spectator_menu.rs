@@ -55,7 +55,7 @@ enum Item {
     },
     Team {
         display: Vec<TextSpan>,
-        fill_color: Option<[f32; 4]>,
+        fill_color: Option<u32>,
         /// Random member whose face becomes the icon, picked once at open.
         face_uuid: Uuid,
         players: Vec<Item>,
@@ -424,7 +424,7 @@ pub fn build_spectator_menu(
                 face_uuid,
                 ..
             }) => {
-                if let Some([r, g, bl, _]) = fill_color {
+                if let Some([r, g, bl, _]) = fill_color.map(crate::ui::common::rgb) {
                     // Vanilla team icon: the color fill dims but never fades.
                     elements.push(MenuElement::Rect {
                         x: icon_x + 1.0 * gs,

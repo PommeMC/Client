@@ -10,17 +10,17 @@ use azalea_core::position::BlockPos;
 use glam::{DVec3, dvec3};
 
 use crate::physics::aabb::Aabb;
-use crate::physics::block_shape::{self, LocalBox};
+use crate::physics::block_shape::{self, CollisionContext, LocalBox};
 use crate::physics::collision::resolve_collision;
 use crate::renderer::ParticleQuad;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::renderer::chunk::mesher::{
     BiomeClimate, Colormap, blend_color, dry_foliage_color, foliage_color, grass_color,
-    world_brightness,
+    tint_sample_y, world_brightness,
 };
 use crate::renderer::pipelines::particle::MAX_PARTICLE_QUADS as MAX_PARTICLES;
 use crate::world::block::registry::{BlockRegistry, Tint};
-use crate::world::block::{block_id, is_air};
+use crate::world::block::{block_id, is_air, outline_shape_position};
 use crate::world::chunk::ChunkStore;
 
 /// Vanilla `ParticleGroup.RESERVOIR_START` — above this, new particles are
@@ -221,7 +221,14 @@ impl Particle {
         let mut delta = orig;
         if delta != DVec3::ZERO && delta.length_squared() < MAX_COLLISION_VELOCITY_SQ {
             let aabb = Aabb::from_center(self.pos, HALF_WIDTH, HALF_WIDTH);
-            (delta, _) = resolve_collision(chunks, aabb, orig.into(), 0.0);
+            (delta, _) = resolve_collision(
+                chunks.into(),
+                aabb,
+                orig.into(),
+                0.0,
+                false,
+                &CollisionContext::position(self.pos.y),
+            );
         }
         self.pos += delta;
         if orig.y.abs() >= 1e-5 && delta.y.abs() < 1e-5 {
@@ -340,10 +347,11 @@ impl ParticleStore {
             && faces.tint != Tint::None
             && block_id != "grass_block"
         {
-            let tint = if faces.tint == Tint::Redstone {
-                crate::world::block::redstone_wire_rgb(state)
-            } else {
-                self.blend_tint(faces.tint, pos, chunks, biome_climate)
+            let tint = match faces.tint {
+                Tint::Redstone => crate::world::block::redstone_wire_rgb(state),
+                Tint::Stem => crate::world::block::stem_rgb(state),
+                Tint::Constant(color) => crate::renderer::chunk::mesher::int_to_rgb(color as i32),
+                _ => self.blend_tint(faces.tint, state, pos, chunks, biome_climate),
             };
             for (c, t) in color.iter_mut().zip(tint) {
                 *c *= t;
@@ -362,6 +370,7 @@ impl ParticleStore {
         // Vanilla `ParticleEngine.destroy` scatters over the outline shape's
         // boxes, so a block with an empty outline emits nothing.
         let boxes: &[LocalBox] = block_shape::outline_shape(state);
+        let shape_origin = outline_shape_position(state, pos.x, pos.y, pos.z);
 
         for b in boxes {
             let width_x = (b[3] - b[0]).min(1.0);
@@ -377,9 +386,9 @@ impl ParticleStore {
                         let rel_y = (yy as f64 + 0.5) / count_y as f64;
                         let rel_z = (zz as f64 + 0.5) / count_z as f64;
                         let spawn = DVec3::new(
-                            pos.x as f64 + rel_x * width_x + b[0],
-                            pos.y as f64 + rel_y * width_y + b[1],
-                            pos.z as f64 + rel_z * width_z + b[2],
+                            shape_origin.x + rel_x * width_x + b[0],
+                            shape_origin.y + rel_y * width_y + b[1],
+                            shape_origin.z + rel_z * width_z + b[2],
                         );
                         self.push(Particle::terrain(
                             spawn,
@@ -492,25 +501,30 @@ impl ParticleStore {
         }
     }
 
-    /// The block's biome tint averaged over the vanilla 5x5 biome blend.
+    /// The block's biome tint using vanilla's default blend radius.
     fn blend_tint(
         &self,
         tint: Tint,
+        state: BlockState,
         pos: BlockPos,
         chunks: &ChunkStore,
         biome_climate: &HashMap<u32, BiomeClimate>,
     ) -> [f32; 3] {
+        let sample_y = tint_sample_y(tint, state, pos.y);
         blend_color(pos.x, pos.z, |x, z| {
             let climate = biome_climate
-                .get(&chunks.biome_id(x, pos.y, z))
+                .get(&chunks.biome_id(x, sample_y, z))
                 .copied()
                 .unwrap_or_default();
             match tint {
-                Tint::Grass => grass_color(&climate, &self.grass_colormap, x, z),
+                Tint::Grass | Tint::DoubleGrass => {
+                    grass_color(&climate, &self.grass_colormap, x, z)
+                }
                 Tint::Foliage => foliage_color(&climate, &self.foliage_colormap),
                 Tint::DryFoliage => dry_foliage_color(&climate, &self.dry_foliage_colormap),
-                // Redstone is state-derived, resolved by the caller.
-                Tint::None | Tint::Redstone => [1.0; 3],
+                Tint::Water => climate.water_color,
+                // State/fixed colors are resolved by the caller.
+                Tint::None | Tint::Constant(_) | Tint::Redstone | Tint::Stem => [1.0; 3],
             }
         })
     }

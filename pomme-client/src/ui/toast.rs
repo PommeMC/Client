@@ -664,6 +664,9 @@ fn push_item(elements: &mut Vec<MenuElement>, item: Option<&String>, x: f32, y: 
             w: size,
             h: size,
             item_name: item.clone(),
+            item_stack: None,
+            use_player_team: false,
+            item_tints: Vec::new(),
             tint: [1.0; 4],
         });
     }

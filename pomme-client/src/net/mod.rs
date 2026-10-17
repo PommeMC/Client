@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod azalea_compat;
+mod bundle_codec;
 pub(crate) mod chat;
 pub(crate) mod chat_security;
 pub mod chunk_batch;
@@ -21,6 +22,7 @@ use azalea_block::BlockState;
 use azalea_core::heightmap_kind::HeightmapKind;
 use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_inventory::ItemStack;
+use azalea_inventory::components::EquipmentSlot;
 use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::DVec3;
 use simdnbt::owned::NbtCompound;
@@ -65,6 +67,9 @@ pub enum NetworkEvent {
     /// and again whenever a tag update replaces the dialog tags.
     DialogRegistry(Arc<crate::ui::server_dialog::DialogRegistry>),
     ItemTags(crate::recipe::ItemTags),
+    BlockTags {
+        tags: Vec<(String, Vec<i32>)>,
+    },
     BiomeColors {
         colors: std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
     },
@@ -94,11 +99,20 @@ pub enum NetworkEvent {
         x: i32,
         z: i32,
     },
+    Ping {
+        id: u32,
+    },
     PlayerPosition {
         /// Teleport id to acknowledge.
         id: u32,
         change: azalea_protocol::common::movements::PositionMoveRotation,
         relative: azalea_protocol::common::movements::RelativeMovements,
+    },
+    PlayerRotation {
+        y_rot: f32,
+        relative_y: bool,
+        x_rot: f32,
+        relative_x: bool,
     },
     PlayerHealth {
         health: f32,
@@ -122,21 +136,17 @@ pub enum NetworkEvent {
         vehicle: i32,
         passengers: Vec<i32>,
     },
-    EntitySaddle {
+    EntityEquipment {
         entity_id: i32,
-        saddled: bool,
+        slots: Vec<(EquipmentSlot, ItemStack)>,
     },
     Waypoint {
         operation: azalea_protocol::packets::game::c_waypoint::WaypointOperation,
         waypoint: azalea_protocol::packets::game::c_waypoint::TrackedWaypoint,
     },
-    EntityArmorUpdate {
+    EntityAttributesUpdate {
         entity_id: i32,
-        armor: u32,
-    },
-    EntityMaxHealthUpdate {
-        entity_id: i32,
-        max_health: f32,
+        snapshots: Vec<crate::attribute::AttributeSnapshot>,
     },
     ContainerContent {
         container_id: i32,
@@ -149,6 +159,11 @@ pub enum NetworkEvent {
         index: u16,
         item: ItemStack,
         state_id: u32,
+    },
+    /// `SetPlayerInventory`, indexed by vanilla `Inventory` slot.
+    PlayerInventorySlot {
+        index: u32,
+        item: ItemStack,
     },
     HeldSlot {
         slot: u8,
@@ -250,7 +265,8 @@ pub enum NetworkEvent {
         prefix: Vec<crate::ui::text::TextSpan>,
         suffix: Vec<crate::ui::text::TextSpan>,
         color: [f32; 4],
-        fill_color: Option<[f32; 4]>,
+        fill_color: Option<u32>,
+        collision_rule: crate::ui::hud::CollisionRule,
         members: Option<Vec<String>>,
     },
     ScoreboardTeamMembers {
@@ -381,6 +397,9 @@ pub enum NetworkEvent {
         id: i32,
         velocity: DVec3,
     },
+    PlayerKnockback {
+        delta: DVec3,
+    },
     EntityTeleported {
         id: i32,
         position: Position,
@@ -419,6 +438,7 @@ pub enum NetworkEvent {
         item_id: u32,
         damage: i32,
         count: i32,
+        stack: azalea_inventory::ItemStackData,
     },
     EntityHeadRotation {
         id: i32,

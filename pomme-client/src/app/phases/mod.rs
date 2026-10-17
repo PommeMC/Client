@@ -11,7 +11,7 @@ use crate::net::connection::ConnectionHandle;
 use crate::renderer::Renderer;
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::singleplayer::World;
-use crate::ui::{common, hud};
+use crate::ui::common;
 
 pub mod connecting;
 pub mod in_game;
@@ -177,7 +177,7 @@ pub fn draw_status(
 
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
-    let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
+    let gs = core.menu.gui_scale(sw, sh);
     let fs = common::FONT_SIZE * gs;
     let cx = sw / 2.0;
     let cy = sh / 2.0;

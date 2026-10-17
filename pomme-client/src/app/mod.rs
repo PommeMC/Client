@@ -233,6 +233,7 @@ impl ApplicationHandler for App {
                         jar_assets_dir: &self.core.data_dirs.jar_assets_dir,
                         asset_index: &self.core.asset_index,
                         packs: &self.core.resource_packs,
+                        options: self.core.menu.font_options(),
                     },
                     &self.core.data_dirs.game_dir,
                     self.core.menu.vsync,
@@ -324,6 +325,14 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        let binding_capture = self.core.menu.binding_capture_active()
+            && self.core.unfocused_since.is_none()
+            && match self.phase.get() {
+                AppPhase::InMenu { .. } => true,
+                AppPhase::InGame { game, .. } => game.options_from_game && !game.dialog_open(),
+                _ => false,
+            };
+        self.core.input.set_binding_capture(binding_capture);
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                 // A world saves on the way out, so the window stays up for it
@@ -384,6 +393,10 @@ impl ApplicationHandler for App {
             // TODO: Migrate _fully_ to Action system
             WindowEvent::KeyboardInput { event, .. } => {
                 self.phase.transition(|mut app| {
+                    if self.core.input.captures_key_event(&event) {
+                        self.core.input.on_key_event(&event);
+                        return app;
+                    }
                     // F3 held suppresses global keys (vanilla
                     // handleGlobalKeyPress); press only, no repeat.
                     if let Some(Gfx { window, .. }) = app.gfx_mut()
@@ -498,7 +511,7 @@ impl ApplicationHandler for App {
                                 } else if game.chat.is_open() {
                                     match code {
                                         KeyCode::Escape => {
-                                            let closed = game.chat.handle_escape();
+                                            let closed = game.escape_chat();
                                             self.core
                                                 .input
                                                 .clear_action(crate::app::input::Action::OpenMenu);
@@ -594,25 +607,28 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                let scroll = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                let (scroll_x, scroll_y) = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x, y),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
                 };
+                let scroll = scroll_y;
                 match self.phase.get_mut() {
                     AppPhase::InMenu { .. } | AppPhase::Connecting { .. } => {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(scroll_x, scroll_y);
                     }
                     AppPhase::InGame { game, .. }
                         if game.dialog_open()
                             || game.options_from_game
-                            || game.creative_inventory_open =>
+                            || game.creative_inventory_open
+                            || game.inventory_open
+                            || game.open_container.is_some() =>
                     {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(scroll_x, scroll_y);
                     }
                     // Queued raw: ChatScreen routes it to the completion popup
                     // or the backlog, with Shift's slower multiplier.
                     AppPhase::InGame { game, .. } if game.chat.is_open() => {
-                        self.core.input.on_menu_scroll(scroll);
+                        self.core.input.on_menu_scroll_xy(0.0, scroll);
                     }
                     // Vanilla MouseHandler: a spectator's wheel moves the menu
                     // selection (sign-inverted) while it is open, and adjusts
@@ -654,6 +670,9 @@ impl ApplicationHandler for App {
                 ) || matches!(self.phase.get(), AppPhase::InGame { game, .. } if game.paused || game.gui_open())
                     || self.core.input.is_cursor_captured() =>
             {
+                // TODO: Investigate controller touchpad clicks arriving as mouse
+                // input (DualShock/DualSense), including whether a separate gamepad
+                // event is available and whether the pointer source can be identified.
                 self.core.input.on_mouse_button(button, state);
             }
 
@@ -662,6 +681,10 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Focused(focused) => {
+                if !focused {
+                    self.core.menu.end_binding_capture();
+                    self.core.input.set_binding_capture(false);
+                }
                 self.core.unfocused_since = (!focused).then(Instant::now);
                 // The window manager may silently drop a cursor lock on focus
                 // change, so a quick refocus (under the pause-on-lost-focus
@@ -898,6 +921,8 @@ impl ApplicationHandler for App {
                         gfx.window.set_visible(true);
                     }
                     gfx.window.request_redraw();
+                    // Paced here so input arriving during the wait is pumped before the next frame.
+                    gfx.renderer.pace_frame();
                 }
                 if let Some(fps) = limit {
                     self.fps_limiter.limit_display_fps(fps);

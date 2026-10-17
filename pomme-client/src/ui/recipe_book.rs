@@ -11,7 +11,10 @@ use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::builtin::{DataComponentKind, ItemKind, Potion};
 use azalea_registry::{DataRegistry, DataRegistryKey, Holder, Registry};
 
-use super::common::{FONT_SIZE, WHITE, hit_test, push_tooltip, push_tooltip_lines};
+use super::common::{
+    FONT_SIZE, WHITE, hit_test, push_item_decorations, push_item_glyph, push_tooltip,
+    push_tooltip_lines,
+};
 use super::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 use crate::net::sender::PacketSender;
 use crate::recipe::{
@@ -2089,7 +2092,9 @@ fn render_ghost_recipe(
                 main.0 + result_x * scale,
                 main.1 + result_y * scale,
                 scale,
-                spec.big_result_slot,
+                GhostSlotRole::Result {
+                    big: spec.big_result_slot,
+                },
                 cursor,
                 screen_w,
                 screen_h,
@@ -2111,7 +2116,7 @@ fn render_ghost_recipe(
                     main.0 + (grid_x + col as f32 * 18.0) * scale,
                     main.1 + (grid_y + row as f32 * 18.0) * scale,
                     scale,
-                    false,
+                    GhostSlotRole::Ingredient,
                     cursor,
                     screen_w,
                     screen_h,
@@ -2135,7 +2140,9 @@ fn render_ghost_recipe(
                 main.0 + result_x * scale,
                 main.1 + result_y * scale,
                 scale,
-                spec.big_result_slot,
+                GhostSlotRole::Result {
+                    big: spec.big_result_slot,
+                },
                 cursor,
                 screen_w,
                 screen_h,
@@ -2155,7 +2162,7 @@ fn render_ghost_recipe(
                     main.0 + (grid_x + col as f32 * 18.0) * scale,
                     main.1 + (grid_y + row as f32 * 18.0) * scale,
                     scale,
-                    false,
+                    GhostSlotRole::Ingredient,
                     cursor,
                     screen_w,
                     screen_h,
@@ -2179,7 +2186,9 @@ fn render_ghost_recipe(
                 main.0 + 116.0 * scale,
                 main.1 + 35.0 * scale,
                 scale,
-                spec.big_result_slot,
+                GhostSlotRole::Result {
+                    big: spec.big_result_slot,
+                },
                 cursor,
                 screen_w,
                 screen_h,
@@ -2192,7 +2201,7 @@ fn render_ghost_recipe(
                 main.0 + 56.0 * scale,
                 main.1 + 17.0 * scale,
                 scale,
-                false,
+                GhostSlotRole::Ingredient,
                 cursor,
                 screen_w,
                 screen_h,
@@ -2206,7 +2215,7 @@ fn render_ghost_recipe(
                     main.0 + 56.0 * scale,
                     main.1 + 53.0 * scale,
                     scale,
-                    false,
+                    GhostSlotRole::Ingredient,
                     cursor,
                     screen_w,
                     screen_h,
@@ -2281,6 +2290,15 @@ fn ghost_highlight_rect(x: f32, y: f32, scale: f32, big_result: bool) -> [f32; 4
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GhostSlotRole {
+    Ingredient,
+    /// `big` is the 24px result box of crafting screens (`isResultSlotBig`).
+    Result {
+        big: bool,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_ghost_slot(
     elements: &mut Vec<MenuElement>,
@@ -2290,7 +2308,7 @@ fn render_ghost_slot(
     x: f32,
     y: f32,
     scale: f32,
-    big_result: bool,
+    role: GhostSlotRole,
     cursor: (f32, f32),
     screen_w: f32,
     screen_h: f32,
@@ -2300,7 +2318,7 @@ fn render_ghost_slot(
         return;
     }
     let item = &items[cycle % items.len()];
-    let red = ghost_highlight_rect(x, y, scale, big_result);
+    let red = ghost_highlight_rect(x, y, scale, role == GhostSlotRole::Result { big: true });
     elements.push(MenuElement::Rect {
         x: red[0],
         y: red[1],
@@ -2318,6 +2336,9 @@ fn render_ghost_slot(
         corner_radius: 0.0,
         color: [1.0, 1.0, 1.0, 0.19],
     });
+    if matches!(role, GhostSlotRole::Result { .. }) {
+        push_item_decorations(elements, x, y, 16.0 * scale, scale, &item.stack);
+    }
     if hit_test(cursor, [x, y, 16.0 * scale, 16.0 * scale]) {
         push_tooltip_lines(
             elements,
@@ -2455,14 +2476,19 @@ fn push_book_stack(
     size: f32,
     stack: &ResolvedSlotStack,
 ) {
-    elements.push(MenuElement::ItemIcon {
-        x,
-        y,
-        w: size,
-        h: size,
-        item_name: crate::player::inventory::item_resource_name(stack.stack.kind),
-        tint: WHITE,
-    });
+    push_item_glyph(
+        elements,
+        [x, y, size, size],
+        crate::player::inventory::item_resource_name(stack.stack.kind),
+        Some(&stack.stack),
+        true,
+    );
+}
+
+/// A tab icon (vanilla `fakeItem` of the icon's default stack).
+fn push_tab_icon(elements: &mut Vec<MenuElement>, rect: [f32; 4], icon: &str) {
+    let name = icon.strip_prefix("minecraft:").unwrap_or(icon).to_owned();
+    push_item_glyph(elements, rect, name, None, true);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2642,40 +2668,12 @@ fn render_tabs(
         let icon_offset = if selected { -2.0 } else { 0.0 };
         let icon_y = pivot_y + (y + 5.0 * scale - pivot_y) * squeeze;
         let icon_h = 16.0 * scale * squeeze;
+        let icon_rect = |x: f32| [bx + (x + icon_offset) * scale, icon_y, 16.0 * scale, icon_h];
         if let Some(icon_b) = tab.icon_b {
-            elements.push(MenuElement::ItemIcon {
-                x: bx + (-27.0 + icon_offset) * scale,
-                y: icon_y,
-                w: 16.0 * scale,
-                h: icon_h,
-                item_name: tab
-                    .icon_a
-                    .strip_prefix("minecraft:")
-                    .unwrap_or(tab.icon_a)
-                    .into(),
-                tint: WHITE,
-            });
-            elements.push(MenuElement::ItemIcon {
-                x: bx + (-16.0 + icon_offset) * scale,
-                y: icon_y,
-                w: 16.0 * scale,
-                h: icon_h,
-                item_name: icon_b.strip_prefix("minecraft:").unwrap_or(icon_b).into(),
-                tint: WHITE,
-            });
+            push_tab_icon(elements, icon_rect(-27.0), tab.icon_a);
+            push_tab_icon(elements, icon_rect(-16.0), icon_b);
         } else {
-            elements.push(MenuElement::ItemIcon {
-                x: bx + (-21.0 + icon_offset) * scale,
-                y: icon_y,
-                w: 16.0 * scale,
-                h: icon_h,
-                item_name: tab
-                    .icon_a
-                    .strip_prefix("minecraft:")
-                    .unwrap_or(tab.icon_a)
-                    .into(),
-                tint: WHITE,
-            });
+            push_tab_icon(elements, icon_rect(-21.0), tab.icon_a);
         }
         y += 27.0 * scale;
     }
