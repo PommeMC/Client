@@ -91,9 +91,6 @@ pub struct BlockRegistry {
     item_gui_transforms: HashMap<String, model::DisplayTransform>,
     item_ground_transforms: HashMap<String, glam::Mat4>,
     item_tint_sources: HashMap<String, Vec<model::ItemTintSource>>,
-    /// Block name -> its single `BlockState`, for one-state blocks (see
-    /// `placeable_block_for_item`).
-    placeable_blocks: HashMap<&'static str, BlockState>,
 }
 
 impl BlockRegistry {
@@ -153,15 +150,15 @@ impl BlockRegistry {
             item_gui_transforms,
             item_ground_transforms,
             item_tint_sources,
-            placeable_blocks: build_placeable_blocks(),
         }
     }
 
     /// Resolves a held item's registry name (unprefixed, e.g. `"stone"`) to the
-    /// `BlockState` to predict on placement, or `None` if the item is not a
-    /// single-state block. Item and block share a registry name for this set.
+    /// `BlockState` to predict on placement in the active protocol's state
+    /// space, or `None` if the item is not a single-state block. Item and
+    /// block share a registry name for this set.
     pub fn placeable_block_for_item(&self, item_name: &str) -> Option<BlockState> {
-        self.placeable_blocks.get(item_name).copied()
+        super::placeable_block_for_item(item_name)
     }
 
     pub fn get_item_model(&self, name: &str) -> Option<&BakedModel> {
@@ -448,20 +445,6 @@ fn potion_effect_colors(potion: Potion, out: &mut Vec<(u32, u32)>) {
 
 fn mob_effect_color(effect: MobEffect) -> u32 {
     crate::mob_effect::info(effect.to_u32()).map_or(0xFFFFFF, |info| info.color)
-}
-
-/// Builds the block-name -> single-`BlockState` map from the block table,
-/// keeping only names that map to exactly one state.
-fn build_placeable_blocks() -> HashMap<&'static str, BlockState> {
-    let mut seen: HashMap<&'static str, Option<BlockState>> = HashMap::new();
-    for (state, data) in super::all_states() {
-        seen.entry(data.id)
-            .and_modify(|v| *v = None)
-            .or_insert(Some(state));
-    }
-    seen.into_iter()
-        .filter_map(|(name, state)| state.map(|s| (name, s)))
-        .collect()
 }
 
 /// Whether every `key=value` constraint holds for `props`. A value may list
