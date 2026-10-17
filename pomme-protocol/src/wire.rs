@@ -106,6 +106,17 @@ pub fn encode_recipe_book_seen_recipe(recipe_display_id: u32) -> Vec<u8> {
     buf
 }
 
+/// Vanilla 26.2 `ServerboundSetCreativeModeSlotPacket`: the slot, then
+/// `ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`, whose patch length-prefixes
+/// each component value.
+pub fn encode_set_creative_mode_slot(slot: i16, stack: Option<&crate::item::ItemStack>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_varint(&mut buf, game_serverbound_id("set_creative_mode_slot"));
+    buf.extend(slot.to_be_bytes());
+    crate::item::write_stack(&mut buf, stack, true);
+    buf
+}
+
 /// Reads one varint, advancing `pos`; `None` on truncation or overlong data.
 pub fn read_varint(bytes: &[u8], pos: &mut usize) -> Option<u32> {
     let mut v = 0u32;

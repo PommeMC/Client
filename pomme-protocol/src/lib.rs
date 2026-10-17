@@ -6,6 +6,8 @@
 //! or newer, can be supported by translation. Depends on no azalea crates by
 //! design — azalea cross-checks live in pomme-client's tests.
 
+pub mod codec;
+pub mod item;
 pub mod known_packs;
 pub mod packets;
 pub mod registries;

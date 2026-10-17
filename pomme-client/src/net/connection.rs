@@ -1065,7 +1065,11 @@ fn outbound_frame(
         Outbound::Packet(mut packet) => {
             match translation {
                 Some(t) => t.remap_outbound(&mut packet),
-                None => super::bundle_codec::encode_native_outbound(&mut packet),
+                None => {
+                    if let ServerboundGamePacket::SetCreativeModeSlot(p) = &*packet {
+                        return Ok(Some(super::item_codec::creative_slot_frame(p)));
+                    }
+                }
             }
             Some(serialize_frame(&*packet)?)
         }

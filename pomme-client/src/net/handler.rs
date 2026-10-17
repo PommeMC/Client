@@ -347,32 +347,28 @@ pub fn handle_game_packet(
         ClientboundGamePacket::ContainerSetContent(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerContent {
                 container_id: p.container_id,
-                items: p
-                    .items
-                    .iter()
-                    .map(super::bundle_codec::normalized)
-                    .collect(),
-                carried: super::bundle_codec::normalized(&p.carried_item),
+                items: p.items.clone(),
+                carried: p.carried_item.clone(),
                 state_id: p.state_id,
             });
         }
         ClientboundGamePacket::SetCursorItem(p) => {
             let _ = event_tx.try_send(NetworkEvent::CursorItem {
-                item: super::bundle_codec::normalized(&p.contents),
+                item: p.contents.clone(),
             });
         }
         ClientboundGamePacket::ContainerSetSlot(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerSlot {
                 container_id: p.container_id,
                 index: p.slot,
-                item: super::bundle_codec::normalized(&p.item_stack),
+                item: p.item_stack.clone(),
                 state_id: p.state_id,
             });
         }
         ClientboundGamePacket::SetPlayerInventory(p) => {
             let _ = event_tx.try_send(NetworkEvent::PlayerInventorySlot {
                 index: p.slot,
-                item: super::bundle_codec::normalized(&p.contents),
+                item: p.contents.clone(),
             });
         }
         ClientboundGamePacket::SetHeldSlot(p) if (0..9).contains(&p.slot) => {
@@ -1345,8 +1341,18 @@ pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bo
         return true;
     }
 
+    let pos = cur.position() as usize;
+    if let Some(result) =
+        super::item_codec::handle_raw_item_packet(packet_id, &raw[pos..], event_tx)
+    {
+        if let Err(e) = result {
+            tracing::warn!("Skipping malformed item packet: {e}");
+        }
+        return true;
+    }
+
     if packet_id == set_player_team_packet_id() {
-        let mut pos = cur.position() as usize;
+        let mut pos = pos;
         if let Err(error) = handle_raw_player_team(raw, &mut pos, event_tx) {
             tracing::warn!("Skipping malformed set_player_team packet: {error}");
         }

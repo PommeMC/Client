@@ -334,7 +334,8 @@
 //! versions unless the matching rewrite lands at the same time. Each site
 //! carries a `TODO` pointing here.
 //! - outbound `set_creative_mode_slot` leaves component values undelimited,
-//!   which is 1.21.4's layout rather than 26.2's
+//!   which is 1.21.4's layout rather than 26.2's (native sessions encode it
+//!   with pomme's item grammar instead; see `net::item_codec`)
 //! - inbound `cooldown` carries an item registry id, where 26.2 names a
 //!   cooldown group
 
@@ -5363,57 +5364,10 @@ fn read_i32(cur: &mut Cursor<&[u8]>) -> Option<i32> {
     Some(i32::from_be_bytes(b))
 }
 
-/// Skips one NBT payload of the given tag type (vanilla `TagTypes` wire
-/// layout). Named tags only appear inside compounds; the depth cap matches
-/// vanilla's nesting limit.
+/// Skips one NBT payload of the given tag type; see
+/// [`pomme_protocol::codec::Reader::skip_nbt_payload`].
 fn skip_nbt_payload(cur: &mut Cursor<&[u8]>, tag: u8, depth: u32) -> Option<()> {
-    const MAX_DEPTH: u32 = 512;
-    if depth > MAX_DEPTH {
-        return None;
-    }
-    match tag {
-        0 => Some(()),        // End (empty root / list of End)
-        1 => advance(cur, 1), // Byte
-        2 => advance(cur, 2), // Short
-        3 => advance(cur, 4), // Int
-        4 => advance(cur, 8), // Long
-        5 => advance(cur, 4), // Float
-        6 => advance(cur, 8), // Double
-        7 => {
-            let n = read_i32(cur)?;
-            advance(cur, usize::try_from(n).ok()?)
-        }
-        8 => {
-            let n = read_u16(cur)?;
-            advance(cur, n as usize)
-        }
-        9 => {
-            let elem = read_u8(cur)?;
-            let n = read_i32(cur)?;
-            for _ in 0..n.max(0) {
-                skip_nbt_payload(cur, elem, depth + 1)?;
-            }
-            Some(())
-        }
-        10 => loop {
-            let elem = read_u8(cur)?;
-            if elem == 0 {
-                return Some(());
-            }
-            let name_len = read_u16(cur)?;
-            advance(cur, name_len as usize)?;
-            skip_nbt_payload(cur, elem, depth + 1)?;
-        },
-        11 => {
-            let n = read_i32(cur)?;
-            advance(cur, usize::try_from(n).ok()?.checked_mul(4)?)
-        }
-        12 => {
-            let n = read_i32(cur)?;
-            advance(cur, usize::try_from(n).ok()?.checked_mul(8)?)
-        }
-        _ => None,
-    }
+    pomme_protocol::codec::Reader::on_cursor(cur, |r| r.skip_nbt_payload(tag, depth)).ok()
 }
 
 #[cfg(test)]

@@ -290,16 +290,14 @@ fn parse_slot_display(cur: &mut Cursor<&[u8]>, depth: usize) -> Result<SlotDispl
 }
 
 fn parse_item_stack_template(cur: &mut Cursor<&[u8]>) -> Result<ItemStackTemplate, String> {
-    let item = read_item_id(cur)?;
-    let count = read_var_i32(cur)?;
-    let components = azalea_inventory::DataComponentPatch::azalea_read(cur).map_err(buf_err)?;
-    if count == 0 || item == ItemKind::Air.to_u32() {
-        return Err("item stack template must be non-empty".to_owned());
-    }
+    let template = pomme_protocol::codec::Reader::on_cursor(cur, |r| {
+        super::item_codec::native().read_template(r)
+    })
+    .map_err(|e| format!("item stack template: {e}"))?;
     Ok(ItemStackTemplate {
-        item,
-        count,
-        components,
+        item: template.item,
+        count: template.count,
+        components: super::item_codec::azalea_patch(&template.patch),
     })
 }
 
@@ -548,10 +546,8 @@ mod tests {
             wire::write_varint(&mut bytes, count);
             bytes.extend_from_slice(&[0, 0]);
             let mut cur = Cursor::new(bytes.as_slice());
-            assert_eq!(
-                parse_item_stack_template(&mut cur).unwrap_err(),
-                "item stack template must be non-empty"
-            );
+            let err = parse_item_stack_template(&mut cur).unwrap_err();
+            assert!(err.contains("empty item template"), "{err}");
         }
     }
 

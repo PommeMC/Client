@@ -4761,3 +4761,123 @@ fn dialog_packet_ids_match_azalea() {
         )
     );
 }
+
+/// A sample value of `shape`: non-empty lists, present optionals (to a
+/// depth), holders inline or by reference, and the first dispatch arm.
+fn sample_component(
+    shape: &pomme_protocol::item::Shape,
+    inline: bool,
+    depth: u32,
+    out: &mut Vec<u8>,
+) {
+    use pomme_protocol::item::Shape::*;
+
+    let deeper = |shape, out: &mut Vec<u8>| sample_component(shape, inline, depth + 1, out);
+    match shape {
+        Unit => {}
+        Bool => out.push(1),
+        Int | Float => out.extend(1i32.to_be_bytes()),
+        Long | Double => out.extend(1i64.to_be_bytes()),
+        VarInt => out.push(1),
+        Utf(_) => out.extend([1, b'a']),
+        Uuid => out.extend([0; 16]),
+        Nbt => out.extend([8, 0, 1, b'a']),
+        Compound => out.extend([10, 0]),
+        Optional(inner) => {
+            let present = depth < 3;
+            out.push(present as u8);
+            if present {
+                deeper(inner, out);
+            }
+        }
+        List(_, inner) => {
+            out.push(1);
+            deeper(inner, out);
+        }
+        Map(key, value) => {
+            out.push(1);
+            deeper(key, out);
+            deeper(value, out);
+        }
+        Either(left, _) => {
+            out.push(1);
+            deeper(left, out);
+        }
+        Struct(fields) => fields.iter().for_each(|f| deeper(f, out)),
+        Ref(inner) => deeper(inner, out),
+        Holder(direct) => {
+            if inline {
+                out.push(0);
+                deeper(direct, out);
+            } else {
+                out.push(2);
+            }
+        }
+        HolderSet => out.extend([2, 1]),
+        ById(arms) => {
+            out.push(arms.len() as u8 - 1);
+            deeper(&arms[arms.len() - 1], out);
+        }
+        ByRegistry(registry, arms) => {
+            let id = PacketTable::native().version().protocol;
+            let table = pomme_protocol::RegistryTable::for_protocol(id).unwrap();
+            let (name, arm) = &arms[0];
+            out.push(table.id_of(*registry, name).unwrap() as u8);
+            deeper(arm, out);
+        }
+        // Stone x1 with an empty patch.
+        ItemTemplate => out.extend([1, 1, 0, 0]),
+        // Damage 1.
+        TypedComponent => out.extend([3, 1]),
+    }
+}
+
+/// Every component pomme hands to azalea must read back to exactly its
+/// vanilla span; a shared-layout claim that's wrong fails here.
+#[test]
+fn azalea_reads_every_kept_component_exactly() {
+    use pomme_protocol::ClientRegistry;
+    use pomme_protocol::codec::Reader;
+
+    use super::item_codec::{DROPPED, native, transcode_to_azalea};
+
+    // Holders azalea keeps as plain ids, so inline values can't cross.
+    const PLAIN_HOLDERS: &[&str] = &["equippable", "consumable", "death_protection", "trim"];
+    // Dropped for wrong values rather than a wrong layout.
+    const SAME_BYTES: &[&str] = &[
+        "block_entity_data",
+        "tropical_fish/pattern",
+        "rabbit/variant",
+    ];
+
+    let codec = native();
+    let names = codec.registries().names(ClientRegistry::DataComponentType);
+    for (id, name) in names.iter().enumerate() {
+        let name = name.as_str();
+        let shape = codec.component_shape(id as u32).unwrap();
+        let mut reads = Vec::new();
+        for inline in [false, true] {
+            let mut value = Vec::new();
+            sample_component(shape, inline, 0, &mut value);
+            let mut r = Reader::new(&value);
+            codec
+                .read_component(&mut r, id as u32)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(r.remaining(), 0, "{name} sample");
+            if !(inline && PLAIN_HOLDERS.contains(&name)) {
+                reads.push(transcode_to_azalea(id as u32, &value).is_some());
+            }
+        }
+        if !DROPPED.contains(&name) {
+            assert!(
+                reads.iter().all(|&r| r),
+                "{name} doesn't read through azalea"
+            );
+        } else if !SAME_BYTES.contains(&name) {
+            assert!(
+                !reads.iter().all(|&r| r),
+                "{name} reads fine; no need to drop it"
+            );
+        }
+    }
+}

@@ -258,6 +258,17 @@ mod tests {
             t.id(Phase::Game, Direction::Clientbound, "level_particles"),
             Some(47)
         );
+        // Item-bearing packets decoded by pomme's item grammar.
+        for (dir, name, id) in [
+            (Direction::Clientbound, "container_set_content", 18),
+            (Direction::Clientbound, "container_set_slot", 20),
+            (Direction::Clientbound, "set_cursor_item", 96),
+            (Direction::Clientbound, "set_equipment", 102),
+            (Direction::Clientbound, "set_player_inventory", 108),
+            (Direction::Serverbound, "set_creative_mode_slot", 56),
+        ] {
+            assert_eq!(t.id(Phase::Game, dir, name), Some(id), "{name}");
+        }
         assert_eq!(
             t.id(Phase::Game, Direction::Clientbound, "hurt_animation"),
             Some(42)
