@@ -548,7 +548,7 @@ fn atlas_dirty(count: usize, last: &mut usize, since: &mut Option<Instant>) -> b
 
 pub struct MainMenu {
     pub key_bindings: KeyBindings,
-    action_binding: Option<Action>,
+    action_binding: Option<(Action, usize)>,
     username: String,
     version: String,
     screen: Screen,

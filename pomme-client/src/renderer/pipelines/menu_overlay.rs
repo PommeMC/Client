@@ -28,6 +28,7 @@ pub const ICON_CHECK: char = '\u{f00c}';
 pub const ICON_USERS: char = '\u{f0c0}';
 pub const ICON_LANGUAGE: char = '\u{f1ab}';
 pub const ICON_UNIVERSAL_ACCESS: char = '\u{f29a}';
+pub const ICON_RECYCLE: char = '\u{267a}';
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -109,6 +110,7 @@ fn build_font_atlas() -> FontAtlas {
         ICON_USERS,
         ICON_LANGUAGE,
         ICON_UNIVERSAL_ACCESS,
+        ICON_RECYCLE,
     ]
     .iter()
     .map(|&ch| (ch, &icon_font))
@@ -2498,6 +2500,7 @@ pub enum SpriteId {
     IconFriends,
     IconLanguage,
     IconAccessibility,
+    IconReset,
     FriendsBackground,
     FriendsTab,
     FriendsTabDisabled,
@@ -3793,6 +3796,18 @@ fn build_sprite_atlas(
             ));
         }
         Err(e) => tracing::warn!("Failed to load pomme logo: {e}"),
+    }
+
+    match image::load_from_memory(crate::assets::RESET_ICON_PNG) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            images.push((SpriteId::IconReset, rgba.into_raw(), w, h, 0.0));
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load reset icon: {e}");
+            images.push((SpriteId::IconReset, vec![255, 0, 255, 255], 1, 1, 0.0));
+        }
     }
 
     let sizes: Vec<(u32, u32)> = images.iter().map(|sprite| (sprite.2, sprite.3)).collect();

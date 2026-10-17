@@ -387,15 +387,27 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
         let capturing = input.binding_capture || self.action_binding.is_some();
-        if let Some(action) = self.action_binding
+        if let Some((action, binding_index)) = self.action_binding
             && let Some(&pressed) = input.binding_presses.first()
         {
-            // KeyBindsScreen.keyPressed: Escape unbinds.
-            let inputs = if pressed == InputKey::Keyboard(winit::keyboard::KeyCode::Escape) {
-                Vec::new()
+            let mut inputs = self
+                .key_bindings
+                .iter()
+                .find(|entry| entry.action == action)
+                .map(|entry| entry.inputs.to_vec())
+                .unwrap_or_default();
+            if matches!(
+                pressed,
+                InputKey::Keyboard(winit::keyboard::KeyCode::Escape)
+            ) {
+                if binding_index < inputs.len() {
+                    inputs.remove(binding_index);
+                }
+            } else if binding_index < inputs.len() {
+                inputs[binding_index] = pressed;
             } else {
-                vec![pressed]
-            };
+                inputs.push(pressed);
+            }
             self.key_bindings.set(action, inputs);
             self.end_binding_capture();
             self.save_settings();
@@ -410,164 +422,314 @@ impl MainMenu {
         };
         let input = if capturing { &neutral_input } else { input };
 
+        // Early-out input handling
         if input.escape {
+            // TODO: Hardcoded, not using the settings_back functionality for now
             self.set_screen(Screen::OptionsControls);
             return empty_result(1.0);
         }
 
         let gs = self.gui_scale(sw, sh);
         let fs = common::FONT_SIZE * gs;
-        let btn_h = BTN_H * gs;
         let mut any_hovered = false;
         let mut any_clicked = false;
         let mut elements = Vec::new();
 
+        // The focus context
         self.focus_advance(input);
         let ctx = &mut self.make_focus_ctx(input);
 
-        let mut entries: Vec<_> = self
-            .key_bindings
-            .iter()
-            .filter(|binding| binding.action.listed())
-            .map(|binding| {
-                let action = binding.action;
-                (
-                    action,
-                    binding.inputs.first().copied(),
-                    self.key_bindings.is_default(action),
-                )
-            })
-            .collect();
-        entries.sort_by(|(left, ..), (right, ..)| left.compare_ui(*right));
-        let categories: Vec<_> = entries
-            .chunk_by(|(left, ..), (right, ..)| left.category() == right.category())
-            .collect();
-
-        let chrome = push_screen_chrome(&mut elements, sw, sh, gs, "Key Binds");
-
-        // KeyBindsList: 20-high entries in a 340-wide row over the content
-        // area, the first 2 below its top, plus 4 of content padding.
-        let list_y = chrome.content_top;
-        let list_h = chrome.content_bottom - list_y;
-        let list_rect = [0.0, list_y, sw, list_h];
-        let rows = entries.len() + categories.len();
-        let total_h = rows as f32 * btn_h + 4.0 * gs;
-        let in_list = common::hit_test(input.cursor, list_rect);
-        if in_list {
-            self.scroll_offset -= input.scroll_delta * btn_h / 2.0;
-        }
-        self.scroll_offset = self.scroll_offset.clamp(0.0, (total_h - list_h).max(0.0));
-
-        let cx = sw / 2.0;
-        let label_x = cx - 168.0 * gs;
-        let scrollbar_x = cx + 178.0 * gs;
-        let reset_w = 50.0 * gs;
-        let reset_x = scrollbar_x - reset_w - 10.0 * gs;
-        let change_w = 75.0 * gs;
-        let change_x = reset_x - 5.0 * gs - change_w;
-        // Entries only take the mouse inside the list (getEntryAtPosition).
-        let row_cursor = if in_list { input.cursor } else { (-1.0, -1.0) };
-        let row_clicked = in_list && input.clicked;
+        let mut pending_bindings_change = None;
+        // An appended binding has no stored input until capture completes.
+        let binding_capture = self.action_binding;
         let label_scroll = common::LabelScroll {
             text_width_fn,
             time_secs: self.created.elapsed().as_secs_f64(),
         };
-        // Names sit level with the button labels; category names a pixel higher.
-        let text_dy = (btn_h - fs) / 2.0 + 1.0;
+        let row_count = |action: Action, input_count: usize| {
+            let adding = binding_capture.is_some_and(|(capturing_action, index)| {
+                capturing_action == action && index == input_count
+            });
+            (input_count + usize::from(adding)).max(1)
+        };
+        let mut bindings: Vec<_> = self
+            .key_bindings
+            .iter()
+            .filter(|entry| entry.action.listed())
+            .collect();
+        bindings.sort_by(|left, right| left.action.compare_ui(right.action));
 
-        push_scrollbar(
-            &mut elements,
-            scrollbar_x,
-            list_y,
-            list_h,
-            total_h,
-            self.scroll_offset,
-            gs,
-            32.0 * gs,
-        );
+        //
+        // Draw the chrome (header with text plus space for footer)
+        //
+        let chrome = push_screen_chrome(&mut elements, sw, sh, gs, "Key Binds");
+
+        //
+        // Draw the categories and items
+        //
+        let cx = sw / 2.0; // This is in screen coordinates already (premultiplied by gs)
+        let side_padding = 45.0 * gs;
+        let right_side_additional_padding = 6.0 * gs;
+        let preferred_width = 400.0 * gs;
+
+        let available_width = (sw - 2.0 * side_padding).max(0.0);
+        let content_width = preferred_width.min(available_width);
+
+        let button_h = BTN_H * gs;
+        let content_left = (sw - content_width) / 2.0;
+        let content_right = content_left + content_width;
+        let scrollbar_right = content_right + 18.0 * gs;
+
+        let binding_button_width = 75.0 * gs;
+        let icon_button_width = BTN_H * gs;
+        let button_padding_width = 5.0 * gs;
+        let buttons_left = content_right
+            - (binding_button_width
+                + button_padding_width
+                + icon_button_width
+                + button_padding_width
+                + icon_button_width
+                + right_side_additional_padding);
+
+        let category_gap = 8.0 * gs;
+
+        //
+        // We need to know the vertical layout of the content before we can calculate
+        // the scrolling
+        //
+        let content_h = chrome.content_bottom - chrome.content_top; // The total visible area we can place content in
+        let mut total_height = 0.0;
+        for category_bindings in
+            bindings.chunk_by(|left, right| left.action.category() == right.action.category())
+        {
+            // Gap
+            total_height += category_gap;
+
+            // Category heading
+            total_height += fs;
+
+            // Gap
+            total_height += category_gap;
+
+            total_height += category_bindings
+                .iter()
+                .map(|entry| row_count(entry.action, entry.inputs.len()))
+                .sum::<usize>() as f32
+                * button_h;
+        }
+
+        let max_scroll_offset = (total_height - content_h).max(0.0); // The amount the content exceeds the visible area
+        let in_list = common::hit_test(input.cursor, [0.0, chrome.content_top, sw, content_h]);
+        let row_cursor = if in_list { input.cursor } else { (-1.0, -1.0) };
+        let row_clicked = in_list && input.clicked;
+        if in_list {
+            self.scroll_offset -= input.scroll_delta * 20.0 * gs;
+        }
+
+        self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll_offset);
+        let mut line_y = chrome.content_top - self.scroll_offset; // The offset biases our drawing to start above the header, which is outside the clip range
+
+        //
+        // Show the scrollbar, if needed
+        //
+        if max_scroll_offset > 0.0 {
+            push_list_scrollbar(
+                &mut elements,
+                scrollbar_right,
+                chrome.content_top,
+                content_h,
+                total_height,
+                self.scroll_offset,
+                gs,
+            );
+        }
+
         elements.push(MenuElement::ScissorPush {
             x: 0.0,
-            y: list_y,
+            y: chrome.content_top,
             w: sw,
-            h: list_h,
+            h: content_h,
         });
-        let mut y = list_y + 2.0 * gs - self.scroll_offset;
-        for category in categories {
-            elements.push(MenuElement::Text {
+
+        //
+        // Now do the actual drawing
+        for category_bindings in
+            bindings.chunk_by(|left, right| left.action.category() == right.action.category())
+        {
+            let category = category_bindings[0].action.category();
+            line_y += category_gap;
+
+            //
+            // Draw the category heading
+            //
+            let mut heading = TextSpan::new(category.display_name().into_owned(), common::WHITE);
+            heading.bold = true;
+            heading.underline = true;
+
+            elements.push(MenuElement::TextSpans {
                 x: cx,
-                y: y + text_dy - gs,
-                text: category[0].0.category().display_name().into_owned(),
-                scale: fs,
-                color: WHITE,
+                y: line_y,
+                spans: vec![heading],
+                scale: common::FONT_SIZE * gs,
                 centered: true,
             });
-            y += btn_h;
 
-            for &(action, bound, is_default) in category {
-                elements.push(MenuElement::Text {
-                    x: label_x,
-                    y: y + text_dy,
-                    text: action.display_name().into_owned(),
-                    scale: fs,
-                    color: WHITE,
-                    centered: false,
-                });
+            line_y = line_y + fs + category_gap;
 
-                // TODO: Display and edit more than the first input per action.
-                let name = bound.map_or_else(|| NOT_BOUND.resolve(), |input| input.display_name());
-                let mut name = TextSpan::new(name.into_owned(), WHITE);
-                let spans = if self.action_binding == Some(action) {
-                    name.underline = true;
-                    let yellow = common::rgb(0xffff55);
-                    vec![
-                        TextSpan::new("> ".into(), yellow),
-                        name,
-                        TextSpan::new(" <".into(), yellow),
-                    ]
-                } else {
-                    vec![name]
-                };
-                if push_button_label_f(
-                    &mut elements,
-                    ctx,
-                    &mut any_hovered,
-                    row_cursor,
-                    row_clicked,
-                    change_x,
-                    y,
-                    change_w,
-                    btn_h,
-                    gs,
-                    common::WidgetLabel::Spans(spans),
-                    true,
-                    Some(&label_scroll),
-                ) {
-                    self.action_binding = Some(action);
-                    any_clicked = true;
+            //
+            // Draw the category keybinds
+            //
+            for entry in category_bindings {
+                for binding_index in 0..row_count(entry.action, entry.inputs.len()) {
+                    let binding = entry
+                        .inputs
+                        .get(binding_index)
+                        .map(|input| input.display_name())
+                        .unwrap_or_else(|| NOT_BOUND.resolve());
+                    let text_y = line_y + (button_h - fs) / 2.0 + 1.0;
+
+                    //
+                    // Binding label
+                    //
+                    if binding_index == 0 {
+                        elements.push(MenuElement::Text {
+                            x: content_left,
+                            y: text_y,
+                            text: entry.action.display_name().into_owned(),
+                            scale: fs,
+                            color: WHITE,
+                            centered: false,
+                        });
+                    }
+
+                    //
+                    // Binding Button
+                    //
+                    let selected = self.action_binding.is_some_and(|(action, index)| {
+                        action == entry.action && index == binding_index
+                    });
+                    let mut binding_span = TextSpan::new(binding.into_owned(), WHITE);
+                    binding_span.underline = selected;
+                    let spans = if selected {
+                        let yellow = common::rgb(0xffff55);
+                        vec![
+                            TextSpan::new("> ".into(), yellow),
+                            binding_span,
+                            TextSpan::new(" <".into(), yellow),
+                        ]
+                    } else {
+                        vec![binding_span]
+                    };
+                    let binding_clicked = push_button_label_f(
+                        &mut elements,
+                        ctx,
+                        &mut any_hovered,
+                        row_cursor,
+                        row_clicked,
+                        buttons_left,
+                        line_y,
+                        binding_button_width,
+                        BTN_H * gs,
+                        gs,
+                        common::WidgetLabel::Spans(spans),
+                        true,
+                        Some(&label_scroll),
+                    );
+                    if binding_clicked {
+                        self.action_binding = if selected {
+                            None
+                        } else {
+                            Some((entry.action, binding_index))
+                        };
+                        any_clicked = true;
+                    }
+
+                    //
+                    // Reset Button
+                    //
+
+                    let default_input = entry.action.defaults().get(binding_index);
+                    let reset_enabled = entry.inputs.get(binding_index) != default_input;
+                    let reset_clicked = push_icon_button(
+                        &mut elements,
+                        ctx,
+                        &mut any_hovered,
+                        row_cursor,
+                        row_clicked,
+                        buttons_left + binding_button_width + button_padding_width,
+                        line_y,
+                        icon_button_width,
+                        gs,
+                        IconFace::Sprite {
+                            id: SpriteId::IconReset,
+                            w: 15.0,
+                            h: 15.0,
+                        },
+                        reset_enabled,
+                        sw,
+                        sh,
+                        "Reset to defaults",
+                    );
+                    if reset_clicked {
+                        let mut inputs = entry.inputs.to_vec();
+                        match default_input {
+                            Some(default) if binding_index < inputs.len() => {
+                                inputs[binding_index] = *default;
+                            }
+                            Some(default) => inputs.push(*default),
+                            None => {
+                                inputs.remove(binding_index);
+                            }
+                        }
+                        pending_bindings_change = Some((entry.action, inputs));
+                        any_clicked = true;
+                    }
+
+                    //
+                    // Add / Remove Button
+                    //
+                    let first_binding = binding_index == 0;
+                    let change_clicked = push_button_f(
+                        &mut elements,
+                        ctx,
+                        &mut any_hovered,
+                        row_cursor,
+                        row_clicked,
+                        buttons_left
+                            + binding_button_width
+                            + button_padding_width
+                            + icon_button_width
+                            + button_padding_width,
+                        line_y,
+                        icon_button_width,
+                        BTN_H * gs,
+                        gs,
+                        if first_binding { "+" } else { "-" },
+                        first_binding || binding_index < entry.inputs.len(),
+                    );
+                    if change_clicked {
+                        if first_binding {
+                            self.action_binding = Some((entry.action, entry.inputs.len()));
+                        } else {
+                            let mut inputs = entry.inputs.to_vec();
+                            inputs.remove(binding_index);
+                            pending_bindings_change = Some((entry.action, inputs));
+                        }
+                        any_clicked = true;
+                    }
+
+                    line_y += BTN_H * gs;
                 }
-
-                if push_button_f(
-                    &mut elements,
-                    ctx,
-                    &mut any_hovered,
-                    row_cursor,
-                    row_clicked,
-                    reset_x,
-                    y,
-                    reset_w,
-                    btn_h,
-                    gs,
-                    "Reset",
-                    !is_default,
-                ) {
-                    self.key_bindings.reset(action);
-                    self.save_settings();
-                    any_clicked = true;
-                }
-                y += btn_h;
             }
         }
+
         elements.push(MenuElement::ScissorPop);
+
+        if let Some((action, inputs)) = pending_bindings_change {
+            self.key_bindings.set(action, inputs);
+            self.end_binding_capture();
+            self.save_settings();
+        }
 
         let footer_w = FOOTER_PAIR_W * gs;
         let gap = FOOTER_PAIR_GAP * gs;
@@ -584,6 +746,7 @@ impl MainMenu {
             !self.key_bindings.all_default(),
         ) {
             self.key_bindings.reset_all();
+            self.end_binding_capture();
             self.save_settings();
             any_clicked = true;
         }
@@ -2010,7 +2173,7 @@ mod tests {
     }
 
     /// `dir` must not exist: settings and the server list fall back to
-    /// defaults, and a settings save silently fails instead of writing.
+    /// defaults, and a failed settings save stays dirty for a later retry.
     fn test_menu(dir: &str) -> MainMenu {
         let rt = std::sync::Arc::new(
             tokio::runtime::Builder::new_current_thread()
@@ -2028,14 +2191,465 @@ mod tests {
         menu
     }
 
+    fn render_keybinds(menu: &mut MainMenu, input: &MenuInput) -> MainMenuResult {
+        menu.build_options_keybinds(800.0, 600.0, input, &|_, _| 0.0)
+    }
+
+    fn jump_inputs(menu: &MainMenu) -> &[InputKey] {
+        menu.key_bindings
+            .iter()
+            .find(|entry| entry.action == Action::Jump)
+            .unwrap()
+            .inputs
+    }
+
+    fn jump_elements(result: &MainMenuResult) -> &[MenuElement] {
+        let label = result
+            .elements
+            .iter()
+            .position(|element| {
+                matches!(element, MenuElement::Text { text, .. }
+                if text == Action::Jump.display_name().as_ref())
+            })
+            .expect("Jump label");
+        let end = result.elements[label + 1..]
+            .iter()
+            .position(|element| {
+                matches!(
+                    element,
+                    MenuElement::Text {
+                        centered: false,
+                        ..
+                    } | MenuElement::ScissorPop
+                )
+            })
+            .expect("end of Jump group")
+            + label
+            + 1;
+        &result.elements[label..end]
+    }
+
+    fn jump_button_at(
+        result: &MainMenuResult,
+        binding_index: usize,
+        column: usize,
+    ) -> (SpriteId, (f32, f32)) {
+        assert!(column < 3);
+        match jump_elements(result)
+            .iter()
+            .filter(|element| matches!(element, MenuElement::NineSlice { .. }))
+            .nth(binding_index * 3 + column)
+            .expect("Jump button frame")
+        {
+            MenuElement::NineSlice {
+                sprite, x, y, w, h, ..
+            } => (*sprite, (*x + *w / 2.0, *y + *h / 2.0)),
+            _ => unreachable!(),
+        }
+    }
+
+    fn jump_reset_button_at(
+        result: &MainMenuResult,
+        binding_index: usize,
+    ) -> (SpriteId, (f32, f32)) {
+        jump_button_at(result, binding_index, 1)
+    }
+
+    fn click_jump_add(menu: &mut MainMenu) {
+        let result = render_keybinds(menu, &MenuInput::default());
+        let (_, cursor) = jump_button_at(&result, 0, 2);
+        let result = render_keybinds(
+            menu,
+            &MenuInput {
+                cursor,
+                clicked: true,
+                ..MenuInput::default()
+            },
+        );
+        assert!(result.clicked_button);
+        assert!(menu.binding_capture_active());
+    }
+
     #[test]
-    fn binding_capture_replaces_all_inputs_without_activating_done() {
+    fn add_binding_opens_selected_row_and_appends_accepted_input() {
+        let mut menu = test_menu("pomme-keybind-add-test");
+        menu.set_screen(Screen::OptionsKeybinds);
+        click_jump_add(&mut menu);
+        assert!(matches!(menu.action_binding, Some((Action::Jump, 2))));
+        let result = render_keybinds(&mut menu, &MenuInput::default());
+        let (_, second) = jump_reset_button_at(&result, 1);
+        let (_, added) = jump_reset_button_at(&result, 2);
+        assert_eq!(added.1 - second.1, BTN_H);
+        assert!(result.elements.iter().any(|element| {
+            matches!(element, MenuElement::TextSpans { spans, .. }
+                if spans.len() == 3 && spans[0].text == "> " && spans[1].underline && spans[2].text == " <")
+        }));
+        assert_eq!(jump_inputs(&menu).len(), 2);
+        render_keybinds(
+            &mut menu,
+            &MenuInput {
+                binding_capture: true,
+                binding_presses: vec![InputKey::Keyboard(winit::keyboard::KeyCode::KeyJ)],
+                clicked: true,
+                enter: true,
+                ..MenuInput::default()
+            },
+        );
+        let inputs = jump_inputs(&menu);
+        assert_eq!(
+            inputs,
+            &[
+                InputKey::Keyboard(winit::keyboard::KeyCode::Space),
+                InputKey::Controller(gilrs::Button::South),
+                InputKey::Keyboard(winit::keyboard::KeyCode::KeyJ),
+            ]
+        );
+        assert!(menu.action_binding.is_none());
+        assert!(matches!(menu.screen, Screen::OptionsKeybinds));
+        assert!(menu.settings_dirty);
+    }
+
+    #[test]
+    fn escape_cancels_added_binding_without_changing_existing_inputs() {
+        let mut menu = test_menu("pomme-keybind-add-cancel-test");
+        menu.set_screen(Screen::OptionsKeybinds);
+        click_jump_add(&mut menu);
+        render_keybinds(
+            &mut menu,
+            &MenuInput {
+                binding_capture: true,
+                binding_presses: vec![InputKey::Keyboard(winit::keyboard::KeyCode::Escape)],
+                escape: true,
+                ..MenuInput::default()
+            },
+        );
+        assert!(menu.action_binding.is_none());
+        let inputs = jump_inputs(&menu);
+        assert_eq!(
+            inputs,
+            &[
+                InputKey::Keyboard(winit::keyboard::KeyCode::Space),
+                InputKey::Controller(gilrs::Button::South),
+            ]
+        );
+        let result = render_keybinds(&mut menu, &MenuInput::default());
+        let icons = result
+            .elements
+            .iter()
+            .filter(|element| {
+                matches!(
+                    element,
+                    MenuElement::Image {
+                        sprite: SpriteId::IconReset,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            icons,
+            menu.key_bindings
+                .iter()
+                .filter(|entry| entry.action.listed())
+                .map(|entry| entry.inputs.len().max(1))
+                .sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn add_binding_to_unbound_action_captures_its_first_input() {
+        let mut menu = test_menu("pomme-keybind-add-unbound-test");
+        menu.set_screen(Screen::OptionsKeybinds);
+        menu.key_bindings.set(Action::Jump, Vec::new());
+        click_jump_add(&mut menu);
+        assert!(matches!(menu.action_binding, Some((Action::Jump, 0))));
+        render_keybinds(
+            &mut menu,
+            &MenuInput {
+                binding_capture: true,
+                binding_presses: vec![InputKey::Keyboard(winit::keyboard::KeyCode::KeyJ)],
+                ..MenuInput::default()
+            },
+        );
+        let inputs = jump_inputs(&menu);
+        assert_eq!(
+            inputs,
+            &[InputKey::Keyboard(winit::keyboard::KeyCode::KeyJ)]
+        );
+    }
+
+    #[test]
+    fn remove_binding_compacts_the_vector_and_preserves_other_inputs() {
+        let first = InputKey::Keyboard(winit::keyboard::KeyCode::Space);
+        let second = InputKey::Controller(gilrs::Button::South);
+        let third = InputKey::Keyboard(winit::keyboard::KeyCode::KeyJ);
+        let fourth = InputKey::Keyboard(winit::keyboard::KeyCode::KeyK);
+        for (name, initial, index, expected) in [
+            (
+                "middle",
+                vec![first, second, third, fourth],
+                1,
+                vec![first, third, fourth],
+            ),
+            ("last", vec![first, second], 1, vec![first]),
+        ] {
+            let mut menu = test_menu("pomme-keybind-remove-test");
+            menu.set_screen(Screen::OptionsKeybinds);
+            menu.key_bindings.set(Action::Jump, initial);
+            let result = render_keybinds(&mut menu, &MenuInput::default());
+            let (_, cursor) = jump_button_at(&result, index, 2);
+            let result = render_keybinds(
+                &mut menu,
+                &MenuInput {
+                    cursor,
+                    clicked: true,
+                    ..MenuInput::default()
+                },
+            );
+            assert!(result.clicked_button, "{name}");
+            assert!(menu.settings_dirty, "{name}");
+            assert!(menu.action_binding.is_none(), "{name}");
+            assert_eq!(jump_inputs(&menu), expected, "{name}");
+            let result = render_keybinds(&mut menu, &MenuInput::default());
+            for index in 1..expected.len() {
+                let (_, previous) = jump_reset_button_at(&result, index - 1);
+                let (_, current) = jump_reset_button_at(&result, index);
+                assert_eq!(current.1 - previous.1, BTN_H, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn multiple_bindings_render_consecutive_rows_with_one_label_and_add_button() {
+        let mut menu = test_menu("pomme-keybind-multiple-layout-test");
+        menu.set_screen(Screen::OptionsKeybinds);
+        let result = render_keybinds(&mut menu, &MenuInput::default());
+        let (_, first) = jump_reset_button_at(&result, 0);
+        let (_, second) = jump_reset_button_at(&result, 1);
+        assert_eq!(first.0, second.0);
+        assert_eq!(second.1 - first.1, BTN_H);
+        let changes: Vec<_> = jump_elements(&result)
+            .iter()
+            .filter_map(|element| match element {
+                MenuElement::Text {
+                    text,
+                    y,
+                    centered: true,
+                    ..
+                } if matches!(text.as_str(), "+" | "-") => Some((text.as_str(), *y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].0, "+");
+        assert_eq!(changes[1].0, "-");
+        assert_eq!(changes[1].1 - changes[0].1, BTN_H);
+        for (index, reset) in [first, second].into_iter().enumerate() {
+            let (_, binding) = jump_button_at(&result, index, 0);
+            let (_, change) = jump_button_at(&result, index, 2);
+            assert_eq!(binding.1, reset.1);
+            assert_eq!(change.1, reset.1);
+            assert!(binding.0 < reset.0 && reset.0 < change.0);
+        }
+        assert_eq!(result.elements.iter().filter(|element| {
+            matches!(element, MenuElement::Text { text, .. } if text == Action::Jump.display_name().as_ref())
+        }).count(), 1);
+        let add_labels = result.elements.iter().filter(|element| {
+            matches!(element, MenuElement::Text { text, centered: true, .. } if text == "+")
+        }).count();
+        assert_eq!(
+            add_labels,
+            menu.key_bindings
+                .iter()
+                .filter(|entry| entry.action.listed())
+                .count()
+        );
+        let remove_labels = result.elements.iter().filter(|element| {
+            matches!(element, MenuElement::Text { text, centered: true, .. } if text == "-")
+        }).count();
+        assert_eq!(
+            remove_labels,
+            menu.key_bindings
+                .iter()
+                .filter(|entry| entry.action.listed())
+                .map(|entry| entry.inputs.len().saturating_sub(1))
+                .sum::<usize>()
+        );
+        let reset_icons = result
+            .elements
+            .iter()
+            .filter(|element| {
+                matches!(
+                    element,
+                    MenuElement::Image {
+                        sprite: SpriteId::IconReset,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            reset_icons,
+            menu.key_bindings
+                .iter()
+                .filter(|entry| entry.action.listed())
+                .map(|entry| entry.inputs.len().max(1))
+                .sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn additional_binding_can_be_selected_and_edited_independently() {
+        let mut menu = test_menu("pomme-keybind-multiple-edit-test");
+        menu.set_screen(Screen::OptionsKeybinds);
+        let result = render_keybinds(&mut menu, &MenuInput::default());
+        let (_, cursor) = jump_button_at(&result, 1, 0);
+        render_keybinds(
+            &mut menu,
+            &MenuInput {
+                cursor,
+                clicked: true,
+                ..MenuInput::default()
+            },
+        );
+        assert!(matches!(menu.action_binding, Some((Action::Jump, 1))));
+        render_keybinds(
+            &mut menu,
+            &MenuInput {
+                binding_capture: true,
+                binding_presses: vec![InputKey::Keyboard(winit::keyboard::KeyCode::KeyJ)],
+                ..MenuInput::default()
+            },
+        );
+        let inputs = jump_inputs(&menu);
+        assert_eq!(
+            inputs,
+            &[
+                InputKey::Keyboard(winit::keyboard::KeyCode::Space),
+                InputKey::Keyboard(winit::keyboard::KeyCode::KeyJ)
+            ]
+        );
+        assert!(menu.action_binding.is_none());
+    }
+
+    #[test]
+    fn keybind_reset_changes_only_the_displayed_vector_index() {
+        let first = InputKey::Keyboard(winit::keyboard::KeyCode::Space);
+        let second = InputKey::Controller(gilrs::Button::South);
+        let changed = InputKey::Keyboard(winit::keyboard::KeyCode::KeyJ);
+        let secondary = InputKey::Keyboard(winit::keyboard::KeyCode::KeyK);
+        for (name, initial, index, enabled, expected) in [
+            (
+                "first preserves secondary",
+                vec![changed, secondary],
+                0,
+                true,
+                vec![first, secondary],
+            ),
+            (
+                "second uses own default",
+                vec![first, changed],
+                1,
+                true,
+                vec![first, second],
+            ),
+            (
+                "unchanged first is a no-op",
+                vec![first, changed],
+                0,
+                false,
+                vec![first, changed],
+            ),
+            ("unbound restores first", vec![], 0, true, vec![first]),
+            (
+                "extra has no default",
+                vec![first, second, changed],
+                2,
+                true,
+                vec![first, second],
+            ),
+        ] {
+            let mut menu = test_menu("pomme-keybind-reset-test");
+            menu.set_screen(Screen::OptionsKeybinds);
+            menu.key_bindings.set(Action::Jump, initial);
+            let result = render_keybinds(&mut menu, &MenuInput::default());
+            let (sprite, cursor) = jump_reset_button_at(&result, index);
+            assert_eq!(
+                sprite,
+                if enabled {
+                    SpriteId::ButtonNormal
+                } else {
+                    SpriteId::ButtonDisabled
+                },
+                "{name}"
+            );
+            let result = render_keybinds(
+                &mut menu,
+                &MenuInput {
+                    cursor,
+                    clicked: true,
+                    ..MenuInput::default()
+                },
+            );
+            assert_eq!(result.clicked_button, enabled, "{name}");
+            assert_eq!(menu.settings_dirty, enabled, "{name}");
+            assert!(menu.action_binding.is_none(), "{name}");
+            assert_eq!(jump_inputs(&menu), expected, "{name}");
+            let result = render_keybinds(&mut menu, &MenuInput::default());
+            if index < expected.len() {
+                assert_eq!(
+                    jump_reset_button_at(&result, index).0,
+                    SpriteId::ButtonDisabled,
+                    "{name}"
+                );
+            } else {
+                assert_eq!(
+                    jump_elements(&result)
+                        .iter()
+                        .filter(|element| {
+                            matches!(
+                                element,
+                                MenuElement::Image {
+                                    sprite: SpriteId::IconReset,
+                                    ..
+                                }
+                            )
+                        })
+                        .count(),
+                    expected.len(),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn escape_capture_removes_only_the_selected_additional_binding() {
+        let mut menu = test_menu("pomme-keybind-multiple-unbind-test");
+        menu.set_screen(Screen::OptionsKeybinds);
+        menu.action_binding = Some((Action::Jump, 1));
+        render_keybinds(
+            &mut menu,
+            &MenuInput {
+                binding_capture: true,
+                binding_presses: vec![InputKey::Keyboard(winit::keyboard::KeyCode::Escape)],
+                ..MenuInput::default()
+            },
+        );
+        let inputs = jump_inputs(&menu);
+        assert_eq!(
+            inputs,
+            &[InputKey::Keyboard(winit::keyboard::KeyCode::Space)]
+        );
+    }
+
+    #[test]
+    fn binding_capture_replaces_selected_input_without_activating_done() {
         let mut menu = test_menu("pomme-keybind-capture-test");
         menu.set_screen(Screen::OptionsKeybinds);
-        menu.action_binding = Some(Action::Jump);
-        menu.build_options_keybinds(
-            800.0,
-            600.0,
+        menu.action_binding = Some((Action::Jump, 0));
+        render_keybinds(
+            &mut menu,
             &MenuInput {
                 binding_capture: true,
                 binding_presses: vec![
@@ -2047,18 +2661,16 @@ mod tests {
                 enter: true,
                 ..MenuInput::default()
             },
-            &|_, _| 0.0,
         );
         assert!(matches!(menu.screen, Screen::OptionsKeybinds));
         assert!(menu.action_binding.is_none());
-        let entry = menu
-            .key_bindings
-            .iter()
-            .find(|entry| entry.action == Action::Jump)
-            .unwrap();
+
         assert!(matches!(
-            entry.inputs,
-            [InputKey::Mouse(winit::event::MouseButton::Left)]
+            jump_inputs(&menu),
+            [
+                InputKey::Mouse(winit::event::MouseButton::Left),
+                InputKey::Controller(gilrs::Button::South)
+            ]
         ));
     }
 
@@ -2066,36 +2678,29 @@ mod tests {
     fn escape_capture_unbinds_instead_of_navigating_back() {
         let mut menu = test_menu("pomme-keybind-unbind-test");
         menu.set_screen(Screen::OptionsKeybinds);
-        menu.action_binding = Some(Action::Jump);
-        menu.build_options_keybinds(
-            800.0,
-            600.0,
+        menu.key_bindings.set(
+            Action::Jump,
+            vec![InputKey::Keyboard(winit::keyboard::KeyCode::Space)],
+        );
+        menu.action_binding = Some((Action::Jump, 0));
+        render_keybinds(
+            &mut menu,
             &MenuInput {
                 binding_capture: true,
                 binding_presses: vec![InputKey::Keyboard(winit::keyboard::KeyCode::Escape)],
                 escape: true,
                 ..MenuInput::default()
             },
-            &|_, _| 0.0,
         );
         assert!(matches!(menu.screen, Screen::OptionsKeybinds));
         assert!(menu.action_binding.is_none());
-        assert!(
-            menu.key_bindings
-                .iter()
-                .find(|entry| entry.action == Action::Jump)
-                .unwrap()
-                .inputs
-                .is_empty()
-        );
-        menu.build_options_keybinds(
-            800.0,
-            600.0,
+        assert!(jump_inputs(&menu).is_empty());
+        render_keybinds(
+            &mut menu,
             &MenuInput {
                 escape: true,
                 ..MenuInput::default()
             },
-            &|_, _| 0.0,
         );
         assert!(matches!(menu.screen, Screen::OptionsControls));
     }
@@ -2118,28 +2723,122 @@ mod tests {
     fn reset_buttons_restore_defaults() {
         let mut menu = test_menu("pomme-keybind-reset-test");
         menu.set_screen(Screen::OptionsKeybinds);
+        let reset_cursor = (300.0, 575.0);
+        let result = render_keybinds(&mut menu, &MenuInput::default());
+        let reset_sprite = |result: &MainMenuResult| {
+            result
+                .elements
+                .iter()
+                .find_map(|element| match element {
+                    MenuElement::NineSlice {
+                        sprite, x, y, w, h, ..
+                    } if common::hit_test(reset_cursor, [*x, *y, *w, *h]) => Some(*sprite),
+                    _ => None,
+                })
+                .expect("Reset Keys frame")
+        };
+        assert_eq!(reset_sprite(&result), SpriteId::ButtonDisabled);
+        click_keybinds(&mut menu, 600.0, reset_cursor);
+        assert!(!menu.settings_dirty);
+
         menu.key_bindings.set(Action::Jump, Vec::new());
         menu.key_bindings.set(Action::DropItem, Vec::new());
-        // Jump is the first Movement entry: list top 33, + 2, + a category row.
-        click_keybinds(&mut menu, 600.0, (540.0, 65.0));
-        assert!(menu.key_bindings.is_default(Action::Jump));
+        let result = render_keybinds(&mut menu, &MenuInput::default());
+        assert_eq!(reset_sprite(&result), SpriteId::ButtonNormal);
+        let (_, cursor) = jump_reset_button_at(&result, 0);
+        click_keybinds(&mut menu, 600.0, cursor);
+        assert_eq!(jump_inputs(&menu), &Action::Jump.defaults()[..1]);
         assert!(!menu.key_bindings.all_default());
-        // Reset Keys, left of centre in the footer.
-        click_keybinds(&mut menu, 600.0, (300.0, 575.0));
+        click_keybinds(&mut menu, 600.0, reset_cursor);
         assert!(menu.key_bindings.all_default());
+        assert!(menu.settings_dirty);
+        assert!(menu.action_binding.is_none());
+        let result = render_keybinds(&mut menu, &MenuInput::default());
+        assert_eq!(reset_sprite(&result), SpriteId::ButtonDisabled);
     }
 
     #[test]
-    fn rows_scrolled_under_the_header_ignore_clicks() {
-        let mut menu = test_menu("pomme-keybind-hidden-row-test");
+    fn keybind_scrolling_requires_the_viewport_and_still_works_during_capture() {
+        let mut menu = test_menu("pomme-keybind-scroll-test");
         menu.set_screen(Screen::OptionsKeybinds);
-        menu.key_bindings.set(Action::Jump, Vec::new());
-        menu.scroll_offset = 40.0;
-        // Jump's Reset now sits at y 15..35, under the header.
-        click_keybinds(&mut menu, 200.0, (540.0, 20.0));
-        assert!(!menu.key_bindings.is_default(Action::Jump));
-        click_keybinds(&mut menu, 200.0, (540.0, 34.0));
-        assert!(menu.key_bindings.is_default(Action::Jump));
+        for y in [HEADER_FOOTER_H - 1.0, 200.0 - HEADER_FOOTER_H + 1.0] {
+            menu.build_options_keybinds(
+                800.0,
+                200.0,
+                &MenuInput {
+                    cursor: (400.0, y),
+                    scroll_delta: -1.0,
+                    ..MenuInput::default()
+                },
+                &|_, _| 0.0,
+            );
+            assert_eq!(menu.scroll_offset, 0.0);
+        }
+        menu.action_binding = Some((Action::Jump, 1));
+        menu.build_options_keybinds(
+            800.0,
+            200.0,
+            &MenuInput {
+                cursor: (400.0, HEADER_FOOTER_H + 1.0),
+                binding_capture: true,
+                binding_presses: vec![InputKey::Keyboard(KeyCode::KeyJ)],
+                scroll_delta: -1.0,
+                clicked: true,
+                escape: true,
+                ..MenuInput::default()
+            },
+            &|_, _| 0.0,
+        );
+        assert_eq!(menu.scroll_offset, 20.0);
+        assert!(matches!(menu.screen, Screen::OptionsKeybinds));
+        assert!(menu.action_binding.is_none());
+        assert_eq!(jump_inputs(&menu)[1], InputKey::Keyboard(KeyCode::KeyJ));
+    }
+
+    #[test]
+    fn rows_outside_the_viewport_ignore_clicks() {
+        for (name, index, hidden_y, visible_y) in [
+            ("header", 1, HEADER_FOOTER_H - 5.0, HEADER_FOOTER_H + 1.0),
+            (
+                "footer",
+                6,
+                200.0 - HEADER_FOOTER_H + 5.0,
+                200.0 - HEADER_FOOTER_H - 1.0,
+            ),
+        ] {
+            for column in 0..3 {
+                let mut menu = test_menu("pomme-keybind-hidden-row-test");
+                menu.set_screen(Screen::OptionsKeybinds);
+                let initial = vec![InputKey::Keyboard(KeyCode::KeyJ); 8];
+                menu.key_bindings.set(Action::Jump, initial.clone());
+                let result = render_keybinds(&mut menu, &MenuInput::default());
+                let (_, cursor) = jump_button_at(&result, index, column);
+                menu.scroll_offset = cursor.1 - hidden_y;
+                click_keybinds(&mut menu, 200.0, (cursor.0, hidden_y));
+                assert_eq!(jump_inputs(&menu), initial, "{name}, column {column}");
+                assert!(menu.action_binding.is_none(), "{name}, column {column}");
+                assert!(!menu.settings_dirty, "{name}, column {column}");
+
+                // The binding column can legitimately activate Done in the footer.
+                menu.set_screen(Screen::OptionsKeybinds);
+                menu.scroll_offset = cursor.1 - hidden_y;
+                click_keybinds(&mut menu, 200.0, (cursor.0, visible_y));
+                match column {
+                    0 => assert_eq!(menu.action_binding, Some((Action::Jump, index))),
+                    1 => {
+                        let mut expected = initial;
+                        if let Some(&default) = Action::Jump.defaults().get(index) {
+                            expected[index] = default;
+                        } else {
+                            expected.remove(index);
+                        }
+                        assert_eq!(jump_inputs(&menu), expected, "{name}");
+                    }
+                    2 => assert_eq!(jump_inputs(&menu).len(), initial.len() - 1, "{name}"),
+                    _ => unreachable!(),
+                }
+            }
+        }
     }
 
     /// A grid of one `Pair` row at 800x600: the left widget spans x 245..395

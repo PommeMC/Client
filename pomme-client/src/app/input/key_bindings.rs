@@ -99,10 +99,6 @@ impl KeyBindings {
         self.0.insert(action, inputs);
     }
 
-    pub fn reset(&mut self, action: Action) {
-        self.set(action, action.defaults().to_vec());
-    }
-
     pub fn reset_all(&mut self) {
         *self = Self::default();
     }
@@ -190,13 +186,12 @@ mod tests {
     }
 
     #[test]
-    fn reset_restores_defaults() {
+    fn reset_all_restores_defaults() {
         let mut bindings = KeyBindings::default();
         bindings.set(Action::Jump, Vec::new());
         bindings.set(Action::DropItem, Vec::new());
         assert!(!bindings.all_default());
-        bindings.reset(Action::Jump);
-        assert!(bindings.is_default(Action::Jump));
+
         bindings.reset_all();
         assert!(bindings.all_default());
     }
