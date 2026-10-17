@@ -50,6 +50,7 @@ pub struct App {
     core: AppCore,
     occluded: bool,
     fps_limiter: FramerateLimiter,
+    initial_window_size: winit::dpi::LogicalSize<u32>,
 }
 
 /// Port of vanilla `FramerateLimiter`: paces to a target fps by sleeping most
@@ -149,6 +150,7 @@ impl App {
         presence: Option<crate::discord::DiscordPresence>,
         user: UserData,
         quick_access_multiplayer: Option<String>,
+        initial_window_size: winit::dpi::LogicalSize<u32>,
     ) -> Self {
         Self {
             phase: StateSlot::new(AppPhase::Setup {
@@ -158,6 +160,7 @@ impl App {
             core: AppCore::new(version, data_dirs, tokio_rt, presence, user),
             occluded: false,
             fps_limiter: FramerateLimiter::new(),
+            initial_window_size,
         }
     }
 
@@ -210,7 +213,7 @@ impl ApplicationHandler for App {
                     .or_else(|| event_loop.available_monitors().next());
                 let window_attrs = Window::default_attributes()
                     .with_title("Pomme")
-                    .with_inner_size(winit::dpi::LogicalSize::new(854, 480))
+                    .with_inner_size(self.initial_window_size)
                     .with_fullscreen(self.core.display_mode.fullscreen_for(monitor))
                     .with_visible(false)
                     .with_window_icon(window_icon);

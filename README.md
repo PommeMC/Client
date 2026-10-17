@@ -137,6 +137,13 @@ Running the standalone client requires minecraft assets, for which you have 2 op
      --game-dir $PWD/reference/game-dir
    ```
 
+The initial window size can be set with --width and --height, for example:
+
+    just client-dev -- --width 1280 --height 720
+
+Dimensions are positive integers in logical pixels and default independently to
+854 × 480. These options do not change saved settings or override fullscreen mode.
+
 ## Development commands
 
 Run `just` with no arguments to list every recipe. The common ones:

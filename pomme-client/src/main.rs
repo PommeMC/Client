@@ -139,6 +139,7 @@ fn main() {
         presence,
         user,
         args.quick_access_multiplayer,
+        winit::dpi::LogicalSize::new(args.width, args.height),
     )
     .run()
     {
