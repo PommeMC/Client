@@ -3711,6 +3711,8 @@ pub fn update_game(
         destroy_info,
         game.show_chunk_borders,
         sky,
+        Some(&game.chunk_store),
+        core.menu.entity_shadows,
         &entity_renders,
         &item_renders,
         &block_entity_renders,
