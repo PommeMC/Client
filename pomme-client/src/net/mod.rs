@@ -9,6 +9,7 @@ pub mod conn;
 pub mod connection;
 mod dialog;
 mod entity_data;
+mod entity_wire;
 pub mod handler;
 pub mod item_codec;
 pub mod known_packs;

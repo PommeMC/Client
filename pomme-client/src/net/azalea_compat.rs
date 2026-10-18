@@ -712,33 +712,21 @@ fn registry_table_matches_azalea() {
     );
 }
 
-/// A 26.1 `add_entity` decoded with the 26.2 enum comes out as the wrong
-/// kind (ids past the sulfur_cube insertion shift by one); the remap fixes
-/// it in place.
+/// A 26.1 `add_entity`'s type id comes out as the wrong kind in 26.2's
+/// numbering (ids past the sulfur_cube insertion shift by one); the remap
+/// the raw path applies fixes it.
 #[test]
 fn remap_add_entity_26_1() {
-    use azalea_protocol::packets::game::ClientboundGamePacket;
-    use azalea_protocol::packets::game::c_add_entity::ClientboundAddEntity;
     use azalea_registry::Registry;
     use azalea_registry::builtin::EntityKind;
 
-    // 26.1 tadpole is id 130, which the 26.2 enum decodes as sulfur_cube.
-    let mut packet = ClientboundGamePacket::AddEntity(ClientboundAddEntity {
-        id: MinecraftEntityId(1),
-        uuid: uuid::Uuid::nil(),
-        entity_type: EntityKind::from_u32(130).unwrap(),
-        position: Default::default(),
-        movement: Default::default(),
-        x_rot: 0,
-        y_rot: 0,
-        y_head_rot: 0,
-        data: 0,
-    });
-    assert!(translation_for(775).remap_inbound(&mut packet));
-    let ClientboundGamePacket::AddEntity(p) = &packet else {
-        unreachable!()
-    };
-    assert_eq!(p.entity_type, EntityKind::Tadpole);
+    // 26.1 tadpole is id 130, which 26.2 numbers as sulfur_cube.
+    assert_eq!(EntityKind::from_u32(130), Some(EntityKind::SulfurCube));
+    let native = translation_for(775).remap_entity_type_to_native(130);
+    assert_eq!(
+        native.and_then(EntityKind::from_u32),
+        Some(EntityKind::Tadpole)
+    );
 }
 
 /// azalea's typed encoder always writes 26.2 component-type ids, so a
@@ -3392,17 +3380,45 @@ fn translate_add_player_763() {
     old.push(20); // yaw, ahead of pitch at 763
     old.push(10); // pitch
 
-    let ClientboundGamePacket::AddEntity(p) = translate_decode_and_remap(763, old) else {
+    let translation = translation_for(763);
+    let translated = translation
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    let mut r = pomme_protocol::codec::Reader::new(&translated);
+    assert_eq!(
+        r.varint(),
+        Ok(table_id(Phase::Game, Direction::Clientbound, "add_entity"))
+    );
+    let Some(Ok(pomme_protocol::entity::EntityPacket::Add {
+        id,
+        uuid: wire_uuid,
+        entity_type,
+        position,
+        x_rot,
+        y_rot,
+        y_head_rot,
+        data,
+        ..
+    })) = pomme_protocol::entity::read("add_entity", &mut r)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.id, MinecraftEntityId(42));
-    assert_eq!(p.uuid, uuid);
-    assert_eq!(p.entity_type, azalea_registry::builtin::EntityKind::Player);
-    assert_eq!(p.position.x, 1.5);
-    assert_eq!(p.position.y, 64.0);
-    assert_eq!(p.position.z, -2.5);
-    assert_eq!((p.x_rot, p.y_rot, p.y_head_rot), (10, 20, 20));
-    assert_eq!(p.data, 0);
+    assert_eq!(id, 42);
+    assert_eq!(wire_uuid, uuid.as_u128());
+    let native = translation.remap_entity_type_to_native(entity_type);
+    assert_eq!(
+        native.and_then(
+            <azalea_registry::builtin::EntityKind as azalea_registry::Registry>::from_u32
+        ),
+        Some(azalea_registry::builtin::EntityKind::Player)
+    );
+    assert_eq!(position, glam::DVec3::new(1.5, 64.0, -2.5));
+    let angle = pomme_protocol::entity::unpack_degrees;
+    assert_eq!(
+        (x_rot, y_rot, y_head_rot),
+        (angle(10), angle(20), angle(20))
+    );
+    assert_eq!(data, 0);
 }
 
 /// 1.20.2 made the serverbound login hello's profile id mandatory; 763 wraps
@@ -5071,4 +5087,312 @@ fn advancements_match_azalea() {
     for (name, obtained) in criteria {
         assert_eq!(*obtained, their_criteria[name].date.is_some(), "{name}");
     }
+}
+
+/// Every entity packet azalea encodes reads back through pomme's layouts
+/// with the same values, so the raw path changes nothing for valid input.
+#[test]
+fn entity_packets_match_azalea() {
+    use azalea_core::delta::{LpVec3, PositionDelta8};
+    use azalea_core::entity_id::OptionalEntityId;
+    use azalea_core::position::Vec3;
+    use azalea_entity::LookDirection;
+    use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+    use azalea_protocol::packets::game::c_animate::AnimationAction;
+    use azalea_protocol::packets::game::c_move_entity_pos_rot::CompactLookDirection;
+    use azalea_protocol::packets::game::*;
+    use pomme_protocol::entity::{self, EntityPacket};
+
+    let decode = |name: &str, packet: ClientboundGamePacket| {
+        let raw = azalea_protocol::write::serialize_packet(&packet).unwrap();
+        let mut r = pomme_protocol::codec::Reader::new(&raw);
+        assert_eq!(
+            r.varint(),
+            Ok(table_id(Phase::Game, Direction::Clientbound, name))
+        );
+        let decoded = entity::read(name, &mut r).unwrap().unwrap();
+        r.ensure_eof().unwrap();
+        decoded
+    };
+    let id = MinecraftEntityId(7);
+    let angle = entity::unpack_degrees;
+    let dvec = |v: Vec3| DVec3::new(v.x, v.y, v.z);
+    let position = Vec3::new(1.5, -60.0, 3.25);
+    let movement = Vec3::new(0.5, 0.25, -0.75);
+    let change = PositionMoveRotation {
+        pos: position,
+        delta: movement,
+        look_direction: LookDirection::new(45.0, -10.0),
+    };
+
+    let EntityPacket::Add {
+        id: 7,
+        uuid,
+        entity_type,
+        position: p,
+        movement: m,
+        x_rot,
+        y_rot,
+        y_head_rot,
+        data: 5,
+    } = decode(
+        "add_entity",
+        ClientboundGamePacket::AddEntity(c_add_entity::ClientboundAddEntity {
+            id,
+            uuid: uuid::Uuid::from_u128(42),
+            entity_type: azalea_registry::builtin::EntityKind::Zombie,
+            position,
+            movement: LpVec3::from(movement),
+            x_rot: -64,
+            y_rot: 32,
+            y_head_rot: 16,
+            data: 5,
+        }),
+    )
+    else {
+        panic!("add_entity");
+    };
+    assert_eq!(uuid, 42);
+    assert_eq!(
+        <azalea_registry::builtin::EntityKind as azalea_registry::Registry>::from_u32(entity_type),
+        Some(azalea_registry::builtin::EntityKind::Zombie)
+    );
+    assert_eq!(p, dvec(position));
+    assert!((m - dvec(movement)).abs().max_element() < 1e-3);
+    assert_eq!(
+        (x_rot, y_rot, y_head_rot),
+        (angle(-64), angle(32), angle(16))
+    );
+
+    let delta = PositionDelta8 {
+        xa: 4096,
+        ya: -2048,
+        za: 1,
+    };
+    let look = CompactLookDirection {
+        y_rot: 64,
+        x_rot: -32,
+    };
+    let delta_vec = Some(DVec3::new(1.0, -0.5, 1.0 / 4096.0));
+    let rotation = Some((angle(64), angle(-32)));
+    let cases = [
+        (
+            "move_entity_pos",
+            ClientboundGamePacket::MoveEntityPos(c_move_entity_pos::ClientboundMoveEntityPos {
+                entity_id: id,
+                delta,
+                on_ground: true,
+            }),
+            EntityPacket::Move {
+                id: 7,
+                delta: delta_vec,
+                rotation: None,
+                on_ground: true,
+            },
+        ),
+        (
+            "move_entity_pos_rot",
+            ClientboundGamePacket::MoveEntityPosRot(
+                c_move_entity_pos_rot::ClientboundMoveEntityPosRot {
+                    entity_id: id,
+                    delta,
+                    look_direction: look,
+                    on_ground: false,
+                },
+            ),
+            EntityPacket::Move {
+                id: 7,
+                delta: delta_vec,
+                rotation,
+                on_ground: false,
+            },
+        ),
+        (
+            "move_entity_rot",
+            ClientboundGamePacket::MoveEntityRot(c_move_entity_rot::ClientboundMoveEntityRot {
+                entity_id: id,
+                look_direction: look,
+                on_ground: true,
+            }),
+            EntityPacket::Move {
+                id: 7,
+                delta: None,
+                rotation,
+                on_ground: true,
+            },
+        ),
+        (
+            "entity_position_sync",
+            ClientboundGamePacket::EntityPositionSync(
+                c_entity_position_sync::ClientboundEntityPositionSync {
+                    id,
+                    values: change.clone(),
+                    on_ground: true,
+                },
+            ),
+            EntityPacket::PositionSync {
+                id: 7,
+                values: entity::PositionMoveRotation {
+                    position: dvec(position),
+                    delta: dvec(movement),
+                    y_rot: 45.0,
+                    x_rot: -10.0,
+                },
+                on_ground: true,
+            },
+        ),
+        (
+            "teleport_entity",
+            ClientboundGamePacket::TeleportEntity(c_teleport_entity::ClientboundTeleportEntity {
+                id,
+                change,
+                // azalea writes the flags byte-swapped; see the test below.
+                relative: RelativeMovements::default(),
+                on_ground: false,
+            }),
+            EntityPacket::Teleport {
+                id: 7,
+                change: entity::PositionMoveRotation {
+                    position: dvec(position),
+                    delta: dvec(movement),
+                    y_rot: 45.0,
+                    x_rot: -10.0,
+                },
+                relative: 0,
+                on_ground: false,
+            },
+        ),
+        (
+            "rotate_head",
+            ClientboundGamePacket::RotateHead(c_rotate_head::ClientboundRotateHead {
+                entity_id: id,
+                y_head_rot: -96,
+            }),
+            EntityPacket::RotateHead {
+                id: 7,
+                y_head_rot: angle(-96),
+            },
+        ),
+        (
+            "animate",
+            ClientboundGamePacket::Animate(c_animate::ClientboundAnimate {
+                id,
+                action: AnimationAction::WakeUp,
+            }),
+            EntityPacket::Animate { id: 7, action: 2 },
+        ),
+        (
+            "entity_event",
+            ClientboundGamePacket::EntityEvent(c_entity_event::ClientboundEntityEvent {
+                entity_id: MinecraftEntityId(300),
+                event_id: 34,
+            }),
+            EntityPacket::Event { id: 300, event: 34 },
+        ),
+        (
+            "hurt_animation",
+            ClientboundGamePacket::HurtAnimation(c_hurt_animation::ClientboundHurtAnimation {
+                id,
+                yaw: 135.0,
+            }),
+            EntityPacket::HurtAnimation { id: 7, yaw: 135.0 },
+        ),
+        (
+            "damage_event",
+            ClientboundGamePacket::DamageEvent(c_damage_event::ClientboundDamageEvent {
+                entity_id: id,
+                source_type_id: 12,
+                source_cause_id: OptionalEntityId(Some(MinecraftEntityId(3))),
+                source_direct_id: OptionalEntityId(None),
+                source_position: Some(position),
+            }),
+            EntityPacket::Damage {
+                id: 7,
+                damage_type: 12,
+                cause: Some(3),
+                direct: None,
+                position: Some(dvec(position)),
+            },
+        ),
+        (
+            "take_item_entity",
+            ClientboundGamePacket::TakeItemEntity(c_take_item_entity::ClientboundTakeItemEntity {
+                item_id: 9,
+                player_id: MinecraftEntityId(1),
+                amount: 3,
+            }),
+            EntityPacket::TakeItem {
+                item: 9,
+                collector: 1,
+                amount: 3,
+            },
+        ),
+        (
+            "set_passengers",
+            ClientboundGamePacket::SetPassengers(c_set_passengers::ClientboundSetPassengers {
+                vehicle: id,
+                passengers: vec![MinecraftEntityId(8), MinecraftEntityId(9)],
+            }),
+            EntityPacket::Passengers {
+                vehicle: 7,
+                passengers: vec![8, 9],
+            },
+        ),
+        (
+            "remove_entities",
+            ClientboundGamePacket::RemoveEntities(c_remove_entities::ClientboundRemoveEntities {
+                entity_ids: vec![MinecraftEntityId(5), id],
+            }),
+            EntityPacket::Remove { ids: vec![5, 7] },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+
+    let EntityPacket::Motion { id: 7, velocity } = decode(
+        "set_entity_motion",
+        ClientboundGamePacket::SetEntityMotion(c_set_entity_motion::ClientboundSetEntityMotion {
+            id,
+            delta: LpVec3::from(Vec3::new(6.0, -1.0, 0.0)),
+        }),
+    ) else {
+        panic!("set_entity_motion");
+    };
+    assert!((velocity - DVec3::new(6.0, -1.0, 0.0)).abs().max_element() < 1e-3);
+}
+
+/// Teleport relative flags are `ByteBufCodecs.INT` (big-endian) with each
+/// `Relative` ordinal as a bit. azalea reads them that way but writes them
+/// byte-swapped, so this builds the vanilla bytes by hand: pomme and azalea's
+/// reader agree on X and Y_ROT.
+#[test]
+fn teleport_relative_flags_are_a_big_endian_int() {
+    use pomme_protocol::entity::{self, EntityPacket};
+
+    let mut raw = Vec::new();
+    wire::write_varint(
+        &mut raw,
+        table_id(Phase::Game, Direction::Clientbound, "teleport_entity"),
+    );
+    raw.push(7);
+    raw.extend([0u8; 56]);
+    raw.extend(0b1001i32.to_be_bytes());
+    raw.push(0);
+
+    let Ok(ClientboundGamePacket::TeleportEntity(azalea)) =
+        azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut std::io::Cursor::new(&raw[..]),
+        )
+    else {
+        panic!("azalea reads the frame");
+    };
+    assert!(azalea.relative.x && azalea.relative.y_rot && !azalea.relative.y);
+
+    let mut r = pomme_protocol::codec::Reader::new(&raw[1..]);
+    let Some(Ok(EntityPacket::Teleport { relative, .. })) = entity::read("teleport_entity", &mut r)
+    else {
+        panic!("pomme reads the frame");
+    };
+    assert_eq!(relative, 0b1001);
 }

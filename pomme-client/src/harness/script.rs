@@ -45,6 +45,8 @@ enum Expect {
     Slot(SlotExpect),
     Entity(EntityExpect),
     ItemEntity(ItemEntityExpect),
+    Gone(GoneExpect),
+    Riding(RidingExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
 }
@@ -66,6 +68,10 @@ struct SlotExpect {
 #[serde(deny_unknown_fields)]
 struct EntityExpect {
     entity: String,
+    /// Within half a block.
+    at: Option<[f64; 3]>,
+    /// Body yaw, within a degree.
+    y_rot: Option<f32>,
     variant: Option<String>,
     name: Option<String>,
     baby: Option<bool>,
@@ -79,6 +85,20 @@ struct EntityExpect {
 struct ItemEntityExpect {
     item_entity: String,
     count: Option<i32>,
+}
+
+/// No living entity of this kind, or dropped item of this name, is left.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoneExpect {
+    gone: String,
+}
+
+/// Whether the player is riding a vehicle.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RidingExpect {
+    riding: bool,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -322,6 +342,8 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
         }
         Expect::Entity(EntityExpect {
             entity,
+            at,
+            y_rot,
             variant,
             name,
             baby,
@@ -338,6 +360,10 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
             ensure(
                 living.iter().any(|e| {
                     e.kind == *entity
+                        && at.is_none_or(|at| {
+                            e.position.iter().zip(at).all(|(p, a)| (p - a).abs() <= 0.5)
+                        })
+                        && y_rot.is_none_or(|y| angle_between(e.y_rot, y) <= 1.0)
                         && variant.as_deref().is_none_or(|v| e.variant_name == Some(v))
                         && name
                             .as_deref()
@@ -358,6 +384,19 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                 || format!("no matching item entity among {items:?}"),
             )
         }
+        Expect::Gone(GoneExpect { gone }) => {
+            let entities = protocol::entities(game);
+            ensure(
+                !entities.living.iter().any(|e| e.kind == *gone)
+                    && !entities.items.iter().any(|e| e.item == *gone),
+                || format!("{gone} is still there"),
+            )
+        }
+        Expect::Riding(RidingExpect { riding }) => {
+            ensure(game.riding_vehicle_id.is_some() == *riding, || {
+                format!("riding: {:?}", game.riding_vehicle_id)
+            })
+        }
         Expect::Advancement(AdvancementExpect { advancement }) => ensure(
             game.toasts.advancement_ids().any(|id| id == advancement),
             || format!("{advancement} not received"),
@@ -369,6 +408,12 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
             || format!("no chat line containing {chat:?}"),
         ),
     }
+}
+
+/// The smaller angle between two headings, in degrees.
+fn angle_between(a: f32, b: f32) -> f32 {
+    let d = (a - b).rem_euclid(360.0);
+    d.min(360.0 - d)
 }
 
 fn ensure(holds: bool, seen: impl FnOnce() -> String) -> Result<(), String> {

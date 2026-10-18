@@ -4,6 +4,8 @@
 
 use std::fmt;
 
+use glam::DVec3;
+
 /// Vanilla `NbtAccounter`'s nesting limit.
 const MAX_NBT_DEPTH: u32 = 512;
 
@@ -82,8 +84,16 @@ impl<'a> Reader<'a> {
         Ok(self.array::<1>()?[0])
     }
 
+    pub fn i8(&mut self) -> DecodeResult<i8> {
+        Ok(self.u8()? as i8)
+    }
+
     pub fn u16(&mut self) -> DecodeResult<u16> {
         Ok(u16::from_be_bytes(self.array()?))
+    }
+
+    pub fn i16(&mut self) -> DecodeResult<i16> {
+        Ok(i16::from_be_bytes(self.array()?))
     }
 
     pub fn i32(&mut self) -> DecodeResult<i32> {
@@ -192,6 +202,20 @@ impl<'a> Reader<'a> {
 
     pub fn identifier(&mut self) -> DecodeResult<&'a str> {
         self.utf(MAX_STRING_LENGTH)
+    }
+
+    /// Vanilla `Vec3.STREAM_CODEC`: three doubles.
+    pub fn vec3(&mut self) -> DecodeResult<DVec3> {
+        Ok(DVec3::new(self.f64()?, self.f64()?, self.f64()?))
+    }
+
+    /// Vanilla `Vec3.LP_STREAM_CODEC` ([`crate::wire::read_lp_vec3`]).
+    pub fn lp_vec3(&mut self) -> DecodeResult<DVec3> {
+        let mut pos = self.pos;
+        let v = crate::wire::read_lp_vec3(self.bytes, &mut pos)
+            .ok_or_else(|| self.error("truncated"))?;
+        self.pos = pos;
+        Ok(v)
     }
 
     /// Vanilla `UUIDUtil.STREAM_CODEC`: two big-endian longs.

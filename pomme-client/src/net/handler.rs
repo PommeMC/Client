@@ -71,7 +71,7 @@ fn dimension_info(
 /// full. Blocking stalls this connection's reads and writes until the game
 /// thread drains, so on a multi-thread runtime the worker's other tasks are
 /// handed off first.
-fn send_ordered(event_tx: &Sender<NetworkEvent>, event: NetworkEvent) {
+pub(super) fn send_ordered(event_tx: &Sender<NetworkEvent>, event: NetworkEvent) {
     if let Err(TrySendError::Full(event)) = event_tx.try_send(event) {
         let block = || {
             let _ = event_tx.send(event);
@@ -693,107 +693,11 @@ pub fn handle_game_packet(
                 reason: format!("{}", p.reason),
             });
         }
-        ClientboundGamePacket::AddEntity(p) => {
-            let y_rot_deg = (p.y_rot as f32) * 360.0 / 256.0;
-            let x_rot_deg = (p.x_rot as f32) * 360.0 / 256.0;
-            let head_y_rot_deg = (p.y_head_rot as f32) * 360.0 / 256.0;
-            let _ = event_tx.try_send(NetworkEvent::EntitySpawned {
-                id: p.id.0,
-                uuid: p.uuid,
-                entity_type: p.entity_type,
-                position: p.position.into(),
-                velocity: lp_to_dvec3(&p.movement),
-                y_rot_deg,
-                x_rot_deg,
-                head_y_rot_deg,
-            });
-        }
-        ClientboundGamePacket::DamageEvent(p) => {
-            let _ = event_tx.try_send(NetworkEvent::EntityDamaged { id: p.entity_id.0 });
-        }
-        ClientboundGamePacket::HurtAnimation(p) => {
-            let _ = event_tx.try_send(NetworkEvent::HurtAnimation {
-                id: p.id.0,
-                yaw: p.yaw,
-            });
-        }
-        ClientboundGamePacket::RotateHead(p) => {
-            let head_y_rot_deg = (p.y_head_rot as f32) * 360.0 / 256.0;
-            let _ = event_tx.try_send(NetworkEvent::EntityHeadRotation {
-                id: p.entity_id.0,
-                head_y_rot_deg,
-            });
-        }
-        ClientboundGamePacket::MoveEntityPos(p) => {
-            send_entity_moved(event_tx, p.entity_id.0, &p.delta, p.on_ground);
-        }
-        ClientboundGamePacket::MoveEntityPosRot(p) => {
-            use azalea_core::delta::PositionDeltaTrait;
-            let look: azalea_entity::LookDirection = p.look_direction.into();
-            let _ = event_tx.try_send(NetworkEvent::EntityMovedRotated {
-                id: p.entity_id.0,
-                dx: p.delta.x(),
-                dy: p.delta.y(),
-                dz: p.delta.z(),
-                y_rot_deg: look.y_rot(),
-                x_rot_deg: look.x_rot(),
-                on_ground: p.on_ground,
-            });
-        }
-        ClientboundGamePacket::MoveEntityRot(p) => {
-            let look: azalea_entity::LookDirection = p.look_direction.into();
-            let _ = event_tx.try_send(NetworkEvent::EntityRotated {
-                id: p.entity_id.0,
-                y_rot_deg: look.y_rot(),
-                x_rot_deg: look.x_rot(),
-                on_ground: p.on_ground,
-            });
-        }
-        ClientboundGamePacket::TeleportEntity(p) => {
-            let delta = p.change.delta;
-            let _ = event_tx.try_send(NetworkEvent::EntityTeleported {
-                id: p.id.0,
-                position: p.change.pos.into(),
-                velocity: Some(glam::DVec3::new(delta.x, delta.y, delta.z)),
-                y_rot_deg: p.change.look_direction.y_rot(),
-                x_rot_deg: p.change.look_direction.x_rot(),
-                on_ground: p.on_ground,
-            });
-        }
-        ClientboundGamePacket::EntityPositionSync(p) => {
-            let _ = event_tx.try_send(NetworkEvent::EntityTeleported {
-                id: p.id.0,
-                position: p.values.pos.into(),
-                velocity: None,
-                y_rot_deg: p.values.look_direction.y_rot(),
-                x_rot_deg: p.values.look_direction.x_rot(),
-                on_ground: p.on_ground,
-            });
-        }
-        ClientboundGamePacket::SetEntityMotion(p) => {
-            send_ordered(
-                event_tx,
-                NetworkEvent::EntityMotion {
-                    id: p.id.0,
-                    velocity: lp_to_dvec3(&p.delta),
-                },
-            );
-        }
         ClientboundGamePacket::LevelEvent(p) => {
             let _ = event_tx.try_send(NetworkEvent::LevelEvent {
                 event_type: p.event_type,
                 pos: p.pos,
                 data: p.data,
-            });
-        }
-        ClientboundGamePacket::RemoveEntities(p) => {
-            let ids: Vec<i32> = p.entity_ids.iter().map(|id| id.0).collect();
-            let _ = event_tx.try_send(NetworkEvent::EntitiesRemoved { ids });
-        }
-        ClientboundGamePacket::SetPassengers(p) => {
-            let _ = event_tx.try_send(NetworkEvent::SetPassengers {
-                vehicle: p.vehicle.0,
-                passengers: p.passengers.iter().map(|id| id.0).collect(),
             });
         }
         ClientboundGamePacket::SetEquipment(p) => {
@@ -804,84 +708,6 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::SetEntityData(p) => {
             super::entity_data::handle_typed_entity_data(p, registry_holder, event_tx);
-        }
-        // Event id 3 = living entity death.
-        // TODO: event 60 (`makePoofParticles`) when a mob's death clock hits 20.
-        ClientboundGamePacket::EntityEvent(p) if p.event_id == 3 => {
-            let _ = event_tx.try_send(NetworkEvent::EntityDied { id: p.entity_id.0 });
-        }
-        // Event id 9 = finished using an item (vanilla `completeUsingItem`).
-        ClientboundGamePacket::EntityEvent(p) if p.event_id == 9 => {
-            let _ = event_tx.try_send(NetworkEvent::FinishUseItem { id: p.entity_id.0 });
-        }
-        // Event id 10 = sheep eat-grass animation start (40-tick head-dip).
-        ClientboundGamePacket::EntityEvent(p) if p.event_id == 10 => {
-            let _ = event_tx.try_send(NetworkEvent::SheepEatStart { id: p.entity_id.0 });
-        }
-        // Event id 1 = rabbit jump start (15-tick hop).
-        ClientboundGamePacket::EntityEvent(p) if p.event_id == 1 => {
-            let _ = event_tx.try_send(NetworkEvent::RabbitJump { id: p.entity_id.0 });
-        }
-        // Event id 19 = squid tentacle-clock rollover.
-        ClientboundGamePacket::EntityEvent(p) if p.event_id == 19 => {
-            let _ = event_tx.try_send(NetworkEvent::SquidTentacleReset { id: p.entity_id.0 });
-        }
-        // Event id 4 = iron golem punch (10-tick swing).
-        ClientboundGamePacket::EntityEvent(p) if p.event_id == 4 => {
-            let _ = event_tx.try_send(NetworkEvent::GolemPunch { id: p.entity_id.0 });
-        }
-        // Events 11 / 34 = iron golem flower offer start / stop.
-        ClientboundGamePacket::EntityEvent(p) if p.event_id == 11 => {
-            let _ = event_tx.try_send(NetworkEvent::GolemOfferFlower {
-                id: p.entity_id.0,
-                offering: true,
-            });
-        }
-        ClientboundGamePacket::EntityEvent(p) if p.event_id == 34 => {
-            let _ = event_tx.try_send(NetworkEvent::GolemOfferFlower {
-                id: p.entity_id.0,
-                offering: false,
-            });
-        }
-        // Events 8 / 56 = wolf wet-shake start / cancel.
-        ClientboundGamePacket::EntityEvent(p) if p.event_id == 8 => {
-            let _ = event_tx.try_send(NetworkEvent::WolfShaking {
-                id: p.entity_id.0,
-                shaking: true,
-            });
-        }
-        ClientboundGamePacket::EntityEvent(p) if p.event_id == 56 => {
-            let _ = event_tx.try_send(NetworkEvent::WolfShaking {
-                id: p.entity_id.0,
-                shaking: false,
-            });
-        }
-        // Arm-swing animation drives the zombie attack swing (skeleton aim uses the
-        // aggressive flag instead). Both hands trigger the same swing timer.
-        ClientboundGamePacket::Animate(p)
-            if matches!(
-                p.action,
-                azalea_protocol::packets::game::c_animate::AnimationAction::SwingMainHand
-                    | azalea_protocol::packets::game::c_animate::AnimationAction::SwingOffHand
-            ) =>
-        {
-            let _ = event_tx.try_send(NetworkEvent::EntitySwing { id: p.id.0 });
-        }
-        // Vanilla handleAnimate action 2 -> stopSleepInBed(false, false).
-        ClientboundGamePacket::Animate(p)
-            if matches!(
-                p.action,
-                azalea_protocol::packets::game::c_animate::AnimationAction::WakeUp
-            ) =>
-        {
-            let _ = event_tx.try_send(NetworkEvent::EntityWakeUp { id: p.id.0 });
-        }
-        ClientboundGamePacket::TakeItemEntity(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ItemPickedUp {
-                item_id: p.item_id as i32,
-                collector_id: p.player_id.0,
-                amount: p.amount as i32,
-            });
         }
         ClientboundGamePacket::Respawn(p) => {
             let _ = event_tx.try_send(NetworkEvent::PlayerRespawned {
@@ -1143,26 +969,6 @@ pub(super) fn variant_index(
     order_pos(ident.path()).unwrap_or(fallback)
 }
 
-fn lp_to_dvec3(v: &azalea_core::delta::LpVec3) -> glam::DVec3 {
-    let v = v.to_vec3();
-    glam::DVec3::new(v.x, v.y, v.z)
-}
-
-fn send_entity_moved(
-    event_tx: &Sender<NetworkEvent>,
-    id: i32,
-    delta: &azalea_core::delta::PositionDelta8,
-    on_ground: bool,
-) {
-    let _ = event_tx.try_send(NetworkEvent::EntityMoved {
-        id,
-        dx: delta.xa as f64 / 4096.0,
-        dy: delta.ya as f64 / 4096.0,
-        dz: delta.za as f64 / 4096.0,
-        on_ground,
-    });
-}
-
 /// Consume packets that azalea's 26.2 codecs cannot represent correctly
 /// before the typed decode runs. Returns whether the packet was consumed.
 pub fn handle_raw_game_packet(
@@ -1193,6 +999,9 @@ pub fn handle_raw_game_packet(
     ) || took(
         super::advancement_wire::handle_raw_advancements(packet_id, payload, event_tx),
         "update_advancements",
+    ) || took(
+        super::entity_wire::handle_raw_entity_packet(packet_id, payload, event_tx),
+        "entity",
     ) {
         return true;
     }

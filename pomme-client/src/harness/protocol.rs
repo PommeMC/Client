@@ -153,6 +153,9 @@ pub fn inventory(game: &GameState) -> InventoryInfo {
 pub struct LivingInfo {
     pub id: i32,
     pub kind: String,
+    pub position: [f64; 3],
+    /// Body yaw in degrees.
+    pub y_rot: f32,
     pub variant: u32,
     /// The variant's asset name, for the kinds with a texture pool.
     pub variant_name: Option<&'static str>,
@@ -212,6 +215,8 @@ pub fn entities(game: &GameState) -> EntitiesInfo {
             LivingInfo {
                 id: *id,
                 kind: bare(&entity.entity_type.to_string()),
+                position: glam::DVec3::from(entity.position).to_array(),
+                y_rot: entity.look_dir.y_rot_deg(),
                 variant: entity.variant,
                 variant_name: order.get(entity.variant as usize).copied(),
                 baby: entity.is_baby,

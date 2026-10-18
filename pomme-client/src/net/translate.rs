@@ -1371,6 +1371,12 @@ impl Translation {
         self.to_native.remap(ClientRegistry::ParticleType, id)
     }
 
+    /// Native-version entity type id for a source-version one, for the raw
+    /// `add_entity` path; `None` drops the entity.
+    pub fn remap_entity_type_to_native(&self, id: u32) -> Option<u32> {
+        self.to_native.remap(ClientRegistry::EntityType, id)
+    }
+
     /// Native-version item id for a source-version item id. Used by decoded
     /// configuration/game tag payloads, whose element ids are not covered by
     /// the packet-id translation layer.
@@ -1384,9 +1390,6 @@ impl Translation {
     pub fn remap_inbound(&self, packet: &mut ClientboundGamePacket) -> bool {
         use ClientRegistry as R;
         match packet {
-            ClientboundGamePacket::AddEntity(p) => {
-                remap_with(self.to_native, R::EntityType, &mut p.entity_type)
-            }
             ClientboundGamePacket::Sound(p) => self.remap_sound(&mut p.sound),
             ClientboundGamePacket::SoundEntity(p) => self.remap_sound(&mut p.sound),
             ClientboundGamePacket::UpdateAttributes(p) => {
@@ -2040,7 +2043,12 @@ fn translate_teleport_entity_767(v: &Ids767, payload: &[u8]) -> Option<Vec<u8>> 
     let mut out = Vec::with_capacity(72);
     wire::write_varint(&mut out, v.entity_position_sync_id);
     wire::write_varint(&mut out, entity);
-    write_position_move_rotation(&mut out, pos, unpack_degrees(y_rot), unpack_degrees(x_rot));
+    write_position_move_rotation(
+        &mut out,
+        pos,
+        pomme_protocol::entity::unpack_degrees(y_rot),
+        pomme_protocol::entity::unpack_degrees(x_rot),
+    );
     out.push(on_ground);
     Some(out)
 }
@@ -2051,11 +2059,6 @@ fn write_position_move_rotation(out: &mut Vec<u8>, pos: &[u8], y_rot: f32, x_rot
     out.extend_from_slice(&[0; 24]); // zero delta movement
     out.extend_from_slice(&y_rot.to_be_bytes());
     out.extend_from_slice(&x_rot.to_be_bytes());
-}
-
-/// Vanilla `Mth.unpackDegrees`: a packed rotation byte to float degrees.
-fn unpack_degrees(b: i8) -> f32 {
-    f32::from(b) * 360.0 / 256.0
 }
 
 /// Inserts the `seaLevel` varint 1.21.2 appended to CommonPlayerSpawnInfo,
