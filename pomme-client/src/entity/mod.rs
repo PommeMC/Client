@@ -122,6 +122,9 @@ fn within_simulation_distance(entity: Position, player: Position, distance: u32)
     entity_x.abs_diff(player_x).max(entity_z.abs_diff(player_z)) <= distance
 }
 
+/// `black`'s slot in `CAT_VARIANT_ORDER`.
+const CAT_DEFAULT_VARIANT: u32 = 1;
+
 #[allow(dead_code)]
 pub struct LivingEntity {
     pub position: Position,
@@ -373,12 +376,13 @@ impl LivingEntity {
             on_ground: true,
             wool_color: None,
             is_sheared: false,
-            // Vanilla salmon default is MEDIUM (id 1); non-default-only
-            // metadata means the size may never be synced.
-            variant: if entity_type == EntityKind::Salmon {
-                1
-            } else {
-                0
+            // Non-default-only metadata means these may never be synced:
+            // vanilla salmon default is MEDIUM (id 1), and `Cat.DEFAULT_VARIANT`
+            // is BLACK.
+            variant: match entity_type {
+                EntityKind::Salmon => 1,
+                EntityKind::Cat => CAT_DEFAULT_VARIANT,
+                _ => 0,
             },
             flap: 0.0,
             prev_flap: 0.0,
@@ -1642,6 +1646,15 @@ mod tests {
     fn spawn(store: &mut EntityStore, id: i32, kind: EntityKind, position: Position) {
         let uuid = uuid::Uuid::from_u128(id as u128);
         store.spawn_living(id, kind, position, LookDirection::default(), 0.0, uuid);
+    }
+
+    #[test]
+    fn unsynced_cats_are_black() {
+        let order = crate::renderer::pipelines::entity_renderer::CAT_VARIANT_ORDER;
+        assert_eq!(order[CAT_DEFAULT_VARIANT as usize], "black");
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::Cat, Position::default());
+        assert_eq!(store.living[&1].variant, CAT_DEFAULT_VARIANT);
     }
 
     fn tick(store: &mut EntityStore) {

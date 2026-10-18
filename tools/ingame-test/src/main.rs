@@ -287,6 +287,9 @@ impl Server {
             dir: dir.to_owned(),
         };
         server.wait_for("Done (", SERVER_START_TIMEOUT)?;
+        // Spawn chunks unload once the player leaves, taking their entities
+        // out of the reset's reach; keep the area around spawn loaded.
+        server.command("forceload add -48 -48 47 47");
         Ok(server)
     }
 

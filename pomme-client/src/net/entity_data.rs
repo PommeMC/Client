@@ -8,7 +8,7 @@ use azalea_core::registry_holder::RegistryHolder;
 use azalea_entity::EntityDataValue;
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_protocol::packets::game::c_set_entity_data::ClientboundSetEntityData;
-use azalea_registry::builtin::{EntityKind, VillagerKind, VillagerProfession};
+use azalea_registry::builtin::EntityKind;
 use azalea_registry::{DataRegistry, Registry};
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::{DecodeResult, Reader};
@@ -17,6 +17,7 @@ use pomme_protocol::entity_data::{DataValue, Value, Variant};
 use super::handler::variant_index;
 use super::{NetworkEvent, item_codec};
 use crate::entity::MetaValue;
+use crate::entity::villager::{VillagerKind, VillagerProfession};
 
 /// `ItemEntity.DATA_ITEM`.
 const ITEM_INDEX: u8 = 8;
@@ -170,15 +171,15 @@ fn send_data_value(
             },
         ) => {
             let (Some(kind), Some(profession)) = (
-                VillagerKind::from_u32(*kind),
-                VillagerProfession::from_u32(*profession),
+                VillagerKind::from_id(*kind),
+                VillagerProfession::from_id(*profession),
             ) else {
                 return;
             };
             NetworkEvent::VillagerData {
                 id,
-                kind: kind.into(),
-                profession: profession.into(),
+                kind,
+                profession,
                 level: *level,
             }
         }

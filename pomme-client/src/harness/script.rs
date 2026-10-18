@@ -67,6 +67,11 @@ struct SlotExpect {
 struct EntityExpect {
     entity: String,
     variant: Option<String>,
+    name: Option<String>,
+    baby: Option<bool>,
+    /// A villager's type, e.g. `desert`.
+    villager_type: Option<String>,
+    profession: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -315,12 +320,31 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                 || format!("slot {slot} holds {stack:?}"),
             )
         }
-        Expect::Entity(EntityExpect { entity, variant }) => {
+        Expect::Entity(EntityExpect {
+            entity,
+            variant,
+            name,
+            baby,
+            villager_type,
+            profession,
+        }) => {
             let living = protocol::entities(game).living;
+            let villager = |e: &protocol::LivingInfo,
+                            want: &Option<String>,
+                            field: fn(&protocol::VillagerInfo) -> &str| {
+                want.as_deref()
+                    .is_none_or(|w| e.villager.as_ref().is_some_and(|v| field(v) == w))
+            };
             ensure(
                 living.iter().any(|e| {
                     e.kind == *entity
                         && variant.as_deref().is_none_or(|v| e.variant_name == Some(v))
+                        && name
+                            .as_deref()
+                            .is_none_or(|n| e.custom_name.as_deref() == Some(n))
+                        && baby.is_none_or(|b| e.baby == b)
+                        && villager(e, villager_type, |v| &v.kind)
+                        && villager(e, profession, |v| &v.profession)
                 }),
                 || format!("no matching {entity} among {living:?}"),
             )

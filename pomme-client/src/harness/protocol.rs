@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::phases::in_game::GameState;
 use crate::renderer::pipelines::entity_renderer::{
-    CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER,
+    CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -159,7 +159,17 @@ pub struct LivingInfo {
     pub baby: bool,
     pub crouching: bool,
     pub sleeping: bool,
+    pub custom_name: Option<String>,
+    /// Villagers' and zombie villagers' type, profession and level.
+    pub villager: Option<VillagerInfo>,
     pub equipment: Vec<(String, StackInfo)>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VillagerInfo {
+    pub kind: String,
+    pub profession: String,
+    pub level: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,8 +197,18 @@ pub fn entities(game: &GameState) -> EntitiesInfo {
                 EntityKind::Cow => COW_VARIANT_ORDER,
                 EntityKind::Chicken => CHICKEN_VARIANT_ORDER,
                 EntityKind::Cat => CAT_VARIANT_ORDER,
+                EntityKind::Wolf => WOLF_VARIANT_ORDER,
                 _ => &[],
             };
+            let villager = matches!(
+                entity.entity_type,
+                EntityKind::Villager | EntityKind::ZombieVillager
+            )
+            .then(|| VillagerInfo {
+                kind: format!("{:?}", entity.villager_kind).to_lowercase(),
+                profession: format!("{:?}", entity.villager_profession).to_lowercase(),
+                level: entity.villager_level,
+            });
             LivingInfo {
                 id: *id,
                 kind: bare(&entity.entity_type.to_string()),
@@ -197,6 +217,8 @@ pub fn entities(game: &GameState) -> EntitiesInfo {
                 baby: entity.is_baby,
                 crouching: entity.is_crouching,
                 sleeping: entity.sleeping_pos.is_some(),
+                custom_name: entity.custom_name.clone(),
+                villager,
                 equipment: entity
                     .equipment
                     .iter()

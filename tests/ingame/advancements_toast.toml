@@ -12,6 +12,10 @@ expect = { chat = "Stone Age" }
 [[step]]
 expect = { advancement = "minecraft:story/mine_stone" }
 
+# A tab root, which carries a background.
+[[step]]
+expect = { advancement = "minecraft:story/root" }
+
 # Let the toast slide in (vanilla ToastManager's 600 ms animation).
 [[step]]
 wait_ms = 1000
