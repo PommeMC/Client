@@ -31,7 +31,7 @@ where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
     #[cfg(target_os = "android")]
-    return paranoid_android::layer("pomme");
+    return paranoid_android::layer("pomme").with_ansi(false);
     #[cfg(not(target_os = "android"))]
     fmt::layer().with_writer(std::io::stdout)
 }

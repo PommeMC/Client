@@ -54,7 +54,9 @@ impl ClipboardAccess for SystemClipboard {
     fn get(&mut self) -> String {
         // TODO: Android's clipboard is a Java service (ClipboardManager), via JNI.
         #[cfg(target_os = "android")]
-        return String::new();
+        {
+            String::new()
+        }
         #[cfg(not(target_os = "android"))]
         arboard::Clipboard::new()
             .and_then(|mut cb| cb.get_text())

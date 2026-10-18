@@ -552,6 +552,15 @@ impl GameState {
         self.server_dialog.is_some() || self.chat.has_pending_modal_prompt()
     }
 
+    /// The world, not a screen, chat or the pause menu, takes pointer input.
+    pub fn world_has_pointer(&self) -> bool {
+        !self.paused
+            && !self.dead
+            && !self.death_screen_open
+            && !self.gui_open()
+            && !self.chat.is_open()
+    }
+
     pub fn gui_open(&self) -> bool {
         self.inventory_open
             || self.creative_inventory_open
@@ -2786,7 +2795,7 @@ pub fn update_game(
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
-        if core.input.touch().seen() && !game.gui_open() && !game.chat.is_open() {
+        if core.input.touch().seen() && game.world_has_pointer() {
             let layout = input::touch::TouchLayout {
                 width: sw,
                 height: sh,

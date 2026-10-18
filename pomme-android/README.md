@@ -30,15 +30,16 @@ emulator -avd pomme -gpu host &           # or a phone with USB debugging on
 just ingame-server                         # prints the port; offline mode
 just android-install                       # builds the APK and installs it
 just android-push-assets                   # once: assets and the 26.2 version files
-just android-config --username Tester --quick-access-multiplayer 10.0.2.2:<port>
+just android-config --version 26.2 --username Tester \
+    --quick-access-multiplayer 10.0.2.2:<port>
 just android-run
 just android-log                           # logcat, filtered to pomme
 ```
 
 `10.0.2.2` is the Mac as seen from the emulator. `launch.txt` (what
-`android-config` writes) holds the same flags the desktop client takes,
-in the app's files directory, `/sdcard/Android/data/com.pommemc.client/files`.
-The game directory (`options.json`, logs, screenshots) is `.pomme` under it.
+`android-config` writes) holds the same flags the desktop client takes. It
+and `.pomme` (assets, versions and the game directory) live in the app's
+internal storage, reached with `adb shell run-as com.pommemc.client`.
 
 ## Controls
 
@@ -51,6 +52,9 @@ selects it. On any screen, a touch is the mouse pointer.
 
 - No audio: OpenAL isn't bundled yet.
 - Offline-mode servers only: no Microsoft login on the device.
+- No HTTPS (skins, profile keys): rustls-platform-verifier needs its Java half
+  in the APK and a JNI init, so those requests' threads panic and the game
+  carries on.
 - No singleplayer: the embedded server is off on Android.
 - No soft keyboard, so no chat or typing; the server comes from `launch.txt`.
 - The emulator's Vulkan is translated to the Mac's GPU, so rendering bugs

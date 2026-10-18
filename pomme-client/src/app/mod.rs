@@ -228,9 +228,8 @@ impl App {
         Ok(())
     }
 
-    /// The world, not a screen, chat or the pause menu, takes pointer motion.
     fn world_has_pointer(&self) -> bool {
-        matches!(self.phase.get(), AppPhase::InGame { game, .. } if !game.paused && !game.dead && !game.death_screen_open && !game.gui_open() && !game.chat.is_open())
+        matches!(self.phase.get(), AppPhase::InGame { game, .. } if game.world_has_pointer())
     }
 
     /// The effective framerate cap, or `None` for uncapped, matching vanilla

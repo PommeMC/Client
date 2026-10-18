@@ -35,6 +35,23 @@ fn choose_composite_alpha(supported: vk::CompositeAlphaFlagsKHR) -> vk::Composit
     .unwrap_or(vk::CompositeAlphaFlagsKHR::Opaque)
 }
 
+/// Identity, so the compositor rotates for a phone held sideways from its
+/// natural orientation; `current_transform` would claim the image is already
+/// rotated.
+///
+/// TODO: pre-rotate (render rotated and pass `current_transform`) to skip the
+/// compositor's rotation pass.
+fn choose_pre_transform(caps: &vk::SurfaceCapabilitiesKHR) -> vk::SurfaceTransformFlagsKHR {
+    if caps
+        .supported_transforms
+        .contains(vk::SurfaceTransformFlagsKHR::Identity)
+    {
+        vk::SurfaceTransformFlagsKHR::Identity
+    } else {
+        caps.current_transform
+    }
+}
+
 #[allow(dead_code)]
 pub struct Swapchain {
     pub handle: vk::SwapchainKHR,
@@ -131,7 +148,7 @@ impl Swapchain {
             image_sharing_mode: sharing_mode,
             queue_family_index_count: queue_families.len() as u32,
             queue_family_indices: queue_families.as_ptr(),
-            pre_transform: caps.current_transform,
+            pre_transform: choose_pre_transform(&caps),
             composite_alpha: choose_composite_alpha(caps.supported_composite_alpha),
             present_mode,
             clipped: vk::TRUE,

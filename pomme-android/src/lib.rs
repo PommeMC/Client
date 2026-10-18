@@ -8,12 +8,16 @@ use pomme_client::{AndroidApp, LaunchArgs, Platform};
 /// The launch arguments, as on a command line (`just android-config`).
 const LAUNCH_FILE: &str = "launch.txt";
 
+// TODO: `rustls_platform_verifier::android::init_hosted`, with the verifier's
+// Java classes in the APK, so HTTPS (skins, profile keys) works.
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
     std::panic::set_hook(Box::new(|info| tracing::error!("{info}")));
+    // Internal storage, which the app owns; `adb push` into the external
+    // directory leaves files the app can't write to.
     let files = app
-        .external_data_path()
-        .expect("the app has no external files directory");
+        .internal_data_path()
+        .expect("the app has no internal files directory");
     let text = std::fs::read_to_string(files.join(LAUNCH_FILE)).unwrap_or_default();
     let args = LaunchArgs::from_words(&text).unwrap_or_else(|e| {
         tracing::error!("{LAUNCH_FILE}: {e}");

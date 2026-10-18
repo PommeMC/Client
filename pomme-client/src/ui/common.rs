@@ -280,7 +280,7 @@ pub(crate) fn set_clipboard(text: &str) -> bool {
     #[cfg(target_os = "android")]
     {
         let _ = text;
-        return false;
+        false
     }
     #[cfg(not(target_os = "android"))]
     match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {

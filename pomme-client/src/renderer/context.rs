@@ -6,9 +6,12 @@ use pomme_gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 #[cfg(debug_assertions)]
 use pyronyx::ext::debug_utils::DebugUtilsInstance;
 use pyronyx::khr::surface::{SurfaceInstance, SurfacePhysicalDevice};
+#[cfg(not(target_os = "android"))]
 use pyronyx::raw_window_handle::{create_surface, get_required_extensions};
 use pyronyx::{khr, vk};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+#[cfg(not(target_os = "android"))]
+use raw_window_handle::HasDisplayHandle;
+use raw_window_handle::HasWindowHandle;
 use thiserror::Error;
 use winit::window::Window;
 
@@ -90,10 +93,15 @@ pub struct VulkanContext {
 
 impl VulkanContext {
     pub fn new(window: &Window) -> Result<Self, ContextError> {
-        let display_handle = window.display_handle()?.as_raw();
-
+        #[cfg(target_os = "android")]
+        let required = [
+            khr::surface::NAME.as_ptr(),
+            khr::android_surface::NAME.as_ptr(),
+        ];
+        #[cfg(not(target_os = "android"))]
+        let required = get_required_extensions(window.display_handle()?.as_raw())?;
         #[allow(unused_mut)]
-        let mut extensions = get_required_extensions(display_handle)?.to_vec();
+        let mut extensions = required.to_vec();
 
         #[cfg(target_os = "macos")]
         extensions.push(khr::portability_enumeration::NAME.as_ptr());
@@ -429,9 +437,28 @@ fn window_surface(
     instance: &vk::Instance,
     window: &Window,
 ) -> Result<vk::SurfaceKHR, ContextError> {
-    let display_handle = window.display_handle()?.as_raw();
     let window_handle = window.window_handle()?.as_raw();
-    Ok(create_surface(instance, display_handle, window_handle)?)
+    // TODO: pyronyx 0.5.0's Android arm of `create_surface` doesn't compile
+    // (it passes the `c_void` window where `ANativeWindow` is expected), so
+    // Android builds its surface here, without pyronyx's `rwh_06` feature.
+    #[cfg(target_os = "android")]
+    {
+        use pyronyx::khr::android_surface::AndroidSurfaceInstance;
+        let raw_window_handle::RawWindowHandle::AndroidNdk(handle) = window_handle else {
+            return Err(raw_window_handle::HandleError::NotSupported.into());
+        };
+        let create_info = vk::AndroidSurfaceCreateInfoKHR {
+            window: handle.a_native_window.as_ptr().cast(),
+            ..Default::default()
+        };
+        Ok(instance.create_android_surface(&create_info, None)?)
+    }
+    #[cfg(not(target_os = "android"))]
+    Ok(create_surface(
+        instance,
+        window.display_handle()?.as_raw(),
+        window_handle,
+    )?)
 }
 
 fn supports_draw_indirect_count(device: &vk::PhysicalDevice) -> bool {
