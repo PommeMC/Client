@@ -509,4 +509,22 @@ mod tests {
         let err = read("entity_event", &mut Reader::new(&[0, 0])).unwrap();
         assert_eq!(err.map_err(|e| e.what), Err("truncated"));
     }
+
+    /// Vanilla's own encoding (`CodecOracle.lifecycle`), whose relative set
+    /// is a big-endian int.
+    #[test]
+    fn teleport_matches_vanilla_encoder() {
+        use crate::vanilla_fixtures::{case, teleport};
+
+        let (change, relative) = teleport();
+        assert_eq!(
+            decode("teleport_entity", &case("teleport_entity/mixed_relative")),
+            EntityPacket::Teleport {
+                id: 9,
+                change,
+                relative,
+                on_ground: true,
+            }
+        );
+    }
 }

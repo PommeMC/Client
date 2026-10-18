@@ -31,6 +31,19 @@ const SCRIPT_DIR: &str = "tests/ingame";
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Just the verified server jar, for tools that run vanilla's code.
+    if take_flag(&mut args, "--fetch-server") {
+        return match server_jar(&Path::new(OUT_DIR).join("server")) {
+            Ok(jar) => {
+                println!("{}", jar.display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("ingame-test: {e}");
+                ExitCode::from(2)
+            }
+        };
+    }
     let server_only = take_flag(&mut args, "--server-only");
     match run(server_only, &args) {
         Ok(true) => ExitCode::SUCCESS,

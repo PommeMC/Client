@@ -178,10 +178,7 @@ fn spawn_info(r: &mut Reader) -> DecodeResult<SpawnInfo> {
 
 #[cfg(test)]
 mod tests {
-    use glam::DVec3;
-
     use super::*;
-    use crate::wire::{write_utf, write_varint};
 
     fn decode(name: &str, bytes: &[u8]) -> LifecyclePacket {
         let mut r = Reader::new(bytes);
@@ -190,157 +187,110 @@ mod tests {
         packet
     }
 
-    fn utf(s: &str) -> Vec<u8> {
-        let mut out = Vec::new();
-        write_utf(&mut out, s);
-        out
-    }
-
-    fn var(v: u32) -> Vec<u8> {
-        let mut out = Vec::new();
-        write_varint(&mut out, v);
-        out
-    }
-
-    /// Dimension type 2 in the overworld, creative after no previous mode,
-    /// with `last_death` and sea level 63.
-    fn spawn_bytes(last_death: bool) -> Vec<u8> {
-        let mut out = [
-            var(2),
-            utf("minecraft:overworld"),
-            9i64.to_be_bytes().to_vec(),
-        ]
-        .concat();
-        out.extend([1, 0xFF, 0, 1]);
-        if last_death {
-            out.push(1);
-            out.extend(utf("minecraft:the_nether"));
-            out.extend(((5i64 << 38) | (-3i64 & 0x3FF_FFFF) << 12 | 70).to_be_bytes());
-        } else {
-            out.push(0);
-        }
-        out.extend([var(4), var(63)].concat());
-        out
-    }
-
-    fn spawn(last_death: Option<(String, (i32, i32, i32))>) -> SpawnInfo {
-        SpawnInfo {
-            dimension_type: 2,
-            dimension: "minecraft:overworld".into(),
-            seed: 9,
-            game_type: 1,
-            previous_game_type: None,
-            is_debug: false,
-            is_flat: true,
-            last_death,
-            portal_cooldown: 4,
-            sea_level: 63,
-        }
-    }
-
     #[test]
     fn other_packets_are_not_read() {
         assert!(read("block_update", &mut Reader::new(&[])).is_none());
     }
 
+    /// Each case decodes vanilla's own encoding of the packet the oracle
+    /// built (`CodecOracle.lifecycle`) to exactly its values.
     #[test]
-    fn login() {
-        let bytes = [
-            &7i32.to_be_bytes()[..],
-            &[1],
-            &var(2),
-            &utf("minecraft:overworld"),
-            &utf("minecraft:the_nether"),
-            &[20, 10, 8, 0, 1, 0],
-            &spawn_bytes(true),
-            &[1, 0],
-        ]
-        .concat();
+    fn matches_vanilla_encoder() {
+        use crate::vanilla_fixtures::{case, registry_id};
+
+        let vanilla = |name: &str| {
+            let packet = name.split('/').next().unwrap();
+            decode(packet, &case(name))
+        };
+        let spawn = SpawnInfo {
+            dimension_type: registry_id("dimension_type", "minecraft:overworld"),
+            dimension: "minecraft:overworld".into(),
+            seed: 42,
+            game_type: 1,
+            previous_game_type: None,
+            is_debug: false,
+            is_flat: true,
+            last_death: None,
+            portal_cooldown: 4,
+            sea_level: 63,
+        };
+        let died = SpawnInfo {
+            dimension_type: registry_id("dimension_type", "minecraft:the_nether"),
+            dimension: "minecraft:the_nether".into(),
+            seed: -7,
+            game_type: 0,
+            previous_game_type: Some(2),
+            is_debug: true,
+            is_flat: false,
+            last_death: Some(("minecraft:the_nether".into(), (5, 70, -3))),
+            portal_cooldown: 0,
+            sea_level: 32,
+        };
         assert_eq!(
-            decode("login", &bytes),
+            vanilla("login/fresh"),
             LifecyclePacket::Login(Login {
                 player_id: 7,
-                hardcore: true,
-                levels: vec!["minecraft:overworld".into(), "minecraft:the_nether".into()],
+                hardcore: false,
+                levels: vec![
+                    "minecraft:overworld".into(),
+                    "minecraft:the_nether".into(),
+                    "minecraft:the_end".into(),
+                ],
                 max_players: 20,
                 chunk_radius: 10,
                 simulation_distance: 8,
                 reduced_debug_info: false,
                 show_death_screen: true,
                 do_limited_crafting: false,
-                spawn: spawn(Some(("minecraft:the_nether".into(), (5, 70, -3)))),
+                spawn,
                 online_mode: true,
                 enforces_secure_chat: false,
             })
         );
-    }
-
-    #[test]
-    fn respawn_with_no_previous_game_type() {
-        let bytes = [spawn_bytes(false), vec![3]].concat();
         assert_eq!(
-            decode("respawn", &bytes),
+            vanilla("login/after_death"),
+            LifecyclePacket::Login(Login {
+                player_id: -1,
+                hardcore: true,
+                levels: vec!["minecraft:the_nether".into()],
+                max_players: 0,
+                chunk_radius: 2,
+                simulation_distance: 2,
+                reduced_debug_info: true,
+                show_death_screen: false,
+                do_limited_crafting: true,
+                spawn: died.clone(),
+                online_mode: false,
+                enforces_secure_chat: true,
+            })
+        );
+        assert_eq!(
+            vanilla("respawn/keep_all"),
             LifecyclePacket::Respawn {
-                spawn: spawn(None),
+                spawn: died,
                 data_to_keep: 3,
             }
         );
-    }
-
-    #[test]
-    fn keep_alive_ping_and_disconnect() {
         assert_eq!(
-            decode("keep_alive", &(-2i64).to_be_bytes()),
+            vanilla("keep_alive/negative"),
             LifecyclePacket::KeepAlive(-2)
         );
+        assert_eq!(vanilla("ping/negative"), LifecyclePacket::Ping(-5));
         assert_eq!(
-            decode("ping", &5i32.to_be_bytes()),
-            LifecyclePacket::Ping(5)
+            vanilla("disconnect/styled"),
+            LifecyclePacket::Disconnect(case("disconnect/styled").into())
         );
-        let reason = [8, 0, 3, b'b', b'y', b'e'];
+        let (change, relative) = crate::vanilla_fixtures::teleport();
         assert_eq!(
-            decode("disconnect", &reason),
-            LifecyclePacket::Disconnect(reason.into())
-        );
-    }
-
-    #[test]
-    fn player_position_and_rotation() {
-        let mut bytes = var(3);
-        for v in [1.5f64, 64.0, -2.0, 0.0, 0.5, 0.0] {
-            bytes.extend(v.to_be_bytes());
-        }
-        bytes.extend(90f32.to_be_bytes());
-        bytes.extend(10f32.to_be_bytes());
-        // Y, X_ROT and ROTATE_DELTA relative.
-        bytes.extend((0b1_0001_0010i32).to_be_bytes());
-        assert_eq!(
-            decode("player_position", &bytes),
+            vanilla("player_position/mixed_relative"),
             LifecyclePacket::PlayerPosition {
                 id: 3,
-                change: PositionMoveRotation {
-                    position: DVec3::new(1.5, 64.0, -2.0),
-                    delta: DVec3::new(0.0, 0.5, 0.0),
-                    y_rot: 90.0,
-                    x_rot: 10.0,
-                },
-                relative: Relative {
-                    y: true,
-                    x_rot: true,
-                    rotate_delta: true,
-                    ..Default::default()
-                },
+                change,
+                relative,
             }
         );
-        let rotation = [
-            &45f32.to_be_bytes()[..],
-            &[1],
-            &(-30f32).to_be_bytes(),
-            &[0],
-        ]
-        .concat();
         assert_eq!(
-            decode("player_rotation", &rotation),
+            vanilla("player_rotation/relative_yaw"),
             LifecyclePacket::PlayerRotation {
                 y_rot: 45.0,
                 relative_y: true,
@@ -348,32 +298,32 @@ mod tests {
                 relative_x: false,
             }
         );
-    }
-
-    #[test]
-    fn set_time_with_two_clocks() {
-        let mut bytes = 100i64.to_be_bytes().to_vec();
-        bytes.extend(var(2));
-        for (id, ticks) in [(0u32, 6000u32), (1, 300)] {
-            bytes.extend(var(id));
-            bytes.extend(var(ticks));
-            bytes.extend(0.5f32.to_be_bytes());
-            bytes.extend(1f32.to_be_bytes());
-        }
-        let state = |total_ticks| ClockState {
-            total_ticks,
-            partial_tick: 0.5,
-            rate: 1.0,
-        };
         assert_eq!(
-            decode("set_time", &bytes),
+            vanilla("set_time/two_clocks"),
             LifecyclePacket::SetTime {
-                game_time: 100,
-                clocks: vec![(0, state(6000)), (1, state(300))],
+                game_time: 12000,
+                clocks: vec![
+                    (
+                        registry_id("world_clock", "minecraft:overworld"),
+                        ClockState {
+                            total_ticks: 6000,
+                            partial_tick: 0.5,
+                            rate: 1.0,
+                        },
+                    ),
+                    (
+                        registry_id("world_clock", "minecraft:the_end"),
+                        ClockState {
+                            total_ticks: 300,
+                            partial_tick: 0.0,
+                            rate: 0.0,
+                        },
+                    ),
+                ],
             }
         );
         assert_eq!(
-            decode("set_simulation_distance", &[12]),
+            vanilla("set_simulation_distance/twelve"),
             LifecyclePacket::SimulationDistance(12)
         );
     }
