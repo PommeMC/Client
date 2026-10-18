@@ -29,8 +29,13 @@ pub struct LaunchArgs {
     #[arg(long)]
     pub game_dir: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, conflicts_with = "quick_access_singleplayer")]
     pub quick_access_multiplayer: Option<String>,
+
+    /// Opens the singleplayer world in this save folder (vanilla
+    /// `--quickPlaySingleplayer`).
+    #[arg(long)]
+    pub quick_access_singleplayer: Option<String>,
 
     /// Runs the headless CPU benchmarks (optionally only those whose id
     /// contains the filter) and exits.

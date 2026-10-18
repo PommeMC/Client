@@ -13,7 +13,33 @@ pub enum MenuUpdateResult {
     Quit,
 }
 
-fn connect_args(core: &AppCore, transport: Transport, username: String) -> ConnectArgs {
+/// Starts the integrated server for save folder `folder` and connects to it;
+/// on failure the menu shows why.
+pub fn open_world(core: &mut AppCore, folder: &str) -> MenuUpdateResult {
+    // Vanilla `quickplay.error.invalid_identifier`.
+    let opened = core
+        .menu
+        .world_to_launch(folder)
+        .ok_or_else(|| "Could not find a world with the provided identifier".to_owned())
+        .and_then(|(summary, dir)| singleplayer::open(&summary, &dir, core.view_distance()));
+    let (world, client_end) = match opened {
+        Ok(opened) => opened,
+        Err(reason) => {
+            tracing::error!("Failed to open {folder}: {reason}");
+            core.menu.show_disconnect(reason);
+            return MenuUpdateResult::None;
+        }
+    };
+    core.menu.world_played(folder);
+    core.audio.stop_menu_music();
+    let username = core.user.username.clone();
+    MenuUpdateResult::Connect {
+        connect_args: connect_args(core, Transport::Memory(client_end), username),
+        world: Some(world),
+    }
+}
+
+pub fn connect_args(core: &AppCore, transport: Transport, username: String) -> ConnectArgs {
     ConnectArgs {
         transport,
         username,
@@ -139,28 +165,7 @@ pub fn update_menu(
                 world: None,
             };
         }
-        MenuAction::PlayWorld { folder } => {
-            let Some((summary, dir)) = core.menu.world_to_launch(&folder) else {
-                return MenuUpdateResult::None;
-            };
-
-            match singleplayer::open(&summary, &dir, core.view_distance()) {
-                Ok((world, client_end)) => {
-                    core.menu.world_played(&folder);
-                    core.audio.stop_menu_music();
-
-                    let username = core.user.username.clone();
-                    return MenuUpdateResult::Connect {
-                        connect_args: connect_args(core, Transport::Memory(client_end), username),
-                        world: Some(world),
-                    };
-                }
-                Err(reason) => {
-                    tracing::error!("Failed to open {folder}: {reason}");
-                    core.menu.show_disconnect(reason);
-                }
-            }
-        }
+        MenuAction::PlayWorld { folder } => return open_world(core, &folder),
         MenuAction::ChangeTheme(theme) => {
             gfx.renderer
                 .reload_panorama(&theme.panorama_dir(&core.data_dirs));

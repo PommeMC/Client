@@ -146,7 +146,11 @@ fn main() {
         rt,
         presence,
         user,
-        args.quick_access_multiplayer,
+        args.quick_access_multiplayer
+            .map(app::QuickPlay::Multiplayer)
+            .or(args
+                .quick_access_singleplayer
+                .map(app::QuickPlay::Singleplayer)),
     );
     #[cfg(feature = "test-harness")]
     {

@@ -18,7 +18,7 @@ use winit::window::{Window, WindowId};
 use crate::app::core::AppCore;
 use crate::app::phases::connecting::{ConnectingUpdateResult, update_connecting};
 use crate::app::phases::in_game::{GameState, GameUpdateResult, update_game};
-use crate::app::phases::in_menu::{MenuUpdateResult, update_menu};
+use crate::app::phases::in_menu::{MenuUpdateResult, connect_args, open_world, update_menu};
 use crate::app::phases::saving::update_saving;
 use crate::app::phases::{AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
 use crate::app::state_slot::StateSlot;
@@ -143,6 +143,47 @@ fn leave_world(
     }
 }
 
+/// A launch straight into a world (vanilla `--quickPlay*`), skipping the
+/// title screen.
+pub enum QuickPlay {
+    Multiplayer(String),
+    /// A save folder name.
+    Singleplayer(String),
+}
+
+/// Connects with `connect_args`; `world` is the integrated server for a
+/// singleplayer launch.
+fn start_connecting(
+    core: &mut AppCore,
+    gfx: Gfx,
+    panorama: Panorama,
+    connect_args: ConnectArgs,
+    world: Option<World>,
+) -> AppPhase {
+    let connect_phase = if world.is_some() {
+        ConnectionPhase::StartingWorld
+    } else {
+        ConnectionPhase::Connecting
+    };
+    let connection = spawn_connection(&core.tokio_rt, connect_args);
+    let game = GameState::new(
+        &gfx.renderer,
+        &core.resource_packs,
+        core.menu.render_distance,
+        world.is_some(),
+        core.menu.chat_options,
+    );
+    core.apply_cursor_grab(&gfx.window, None);
+    AppPhase::Connecting {
+        gfx,
+        panorama,
+        connect_phase,
+        connection,
+        game,
+        world,
+    }
+}
+
 impl App {
     pub fn new(
         version: String,
@@ -150,11 +191,11 @@ impl App {
         tokio_rt: Arc<tokio::runtime::Runtime>,
         presence: Option<crate::discord::DiscordPresence>,
         user: UserData,
-        quick_access_multiplayer: Option<String>,
+        quick_play: Option<QuickPlay>,
     ) -> Self {
         Self {
             phase: StateSlot::new(AppPhase::Setup {
-                quick_access_multiplayer,
+                quick_play,
                 pending_skin_uuid: user.has_profile.then_some(user.uuid),
             }),
             core: AppCore::new(version, data_dirs, tokio_rt, presence, user),
@@ -211,7 +252,7 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.phase.transition(|app| match app {
             AppPhase::Setup {
-                quick_access_multiplayer,
+                quick_play,
                 mut pending_skin_uuid,
             } => {
                 let window_icon = {
@@ -241,7 +282,7 @@ impl ApplicationHandler for App {
                         tracing::error!("Failed to create window: {e}");
                         event_loop.exit();
                         return AppPhase::Setup {
-                            quick_access_multiplayer,
+                            quick_play,
                             pending_skin_uuid,
                         };
                     }
@@ -264,7 +305,7 @@ impl ApplicationHandler for App {
                         tracing::error!("Failed to create renderer: {e}");
                         event_loop.exit();
                         return AppPhase::Setup {
-                            quick_access_multiplayer,
+                            quick_play,
                             pending_skin_uuid,
                         };
                     }
@@ -280,59 +321,36 @@ impl ApplicationHandler for App {
 
                 self.core.apply_cursor_grab(&window, None);
 
-                if let Some(server_ip) = quick_access_multiplayer {
-                    let connection = spawn_connection(
-                        &self.core.tokio_rt,
-                        ConnectArgs {
-                            // TODO: read the saved server list's protocol for
-                            // this address to skip the join-time probe.
-                            transport: Transport::Remote {
-                                server: server_ip,
+                let gfx = Gfx {
+                    renderer: ManuallyDrop::new(renderer),
+                    window,
+                    last_frame: Instant::now(),
+                    fps_counter: FpsCounter::new(),
+                };
+                let panorama = Panorama::new();
+                let launch = match quick_play {
+                    Some(QuickPlay::Multiplayer(server)) => MenuUpdateResult::Connect {
+                        // TODO: read the saved server list's protocol for
+                        // this address to skip the join-time probe.
+                        connect_args: connect_args(
+                            &self.core,
+                            Transport::Remote {
+                                server,
                                 protocol: None,
                             },
-                            username: self.core.user.username.clone(),
-                            uuid: self.core.user.uuid,
-                            access_token: self.core.user.access_token.clone(),
-                            view_distance: self.core.view_distance(),
-                            chat_options: self.core.menu.chat_options,
-                        },
-                    );
-
-                    let game = GameState::new(
-                        &renderer,
-                        &self.core.resource_packs,
-                        self.core.menu.render_distance,
-                        false,
-                        self.core.menu.chat_options,
-                    );
-
-                    let gfx = Gfx {
-                        renderer: ManuallyDrop::new(renderer),
-                        window,
-                        last_frame: Instant::now(),
-                        fps_counter: FpsCounter::new(),
-                    };
-
-                    AppPhase::Connecting {
-                        gfx,
-                        panorama: Panorama::new(),
-                        connect_phase: ConnectionPhase::Connecting,
-                        connection,
-                        game,
+                            self.core.user.username.clone(),
+                        ),
                         world: None,
-                    }
-                } else {
-                    let gfx = Gfx {
-                        renderer: ManuallyDrop::new(renderer),
-                        window,
-                        last_frame: Instant::now(),
-                        fps_counter: FpsCounter::new(),
-                    };
-
-                    AppPhase::InMenu {
-                        gfx,
-                        panorama: Panorama::new(),
-                    }
+                    },
+                    Some(QuickPlay::Singleplayer(folder)) => open_world(&mut self.core, &folder),
+                    None => MenuUpdateResult::None,
+                };
+                match launch {
+                    MenuUpdateResult::Connect {
+                        connect_args,
+                        world,
+                    } => start_connecting(&mut self.core, gfx, panorama, connect_args, world),
+                    _ => AppPhase::InMenu { gfx, panorama },
                 }
             }
             _ => app,
@@ -769,32 +787,7 @@ impl ApplicationHandler for App {
                             MenuUpdateResult::Connect {
                                 connect_args,
                                 world,
-                            } => {
-                                let connect_phase = if world.is_some() {
-                                    ConnectionPhase::StartingWorld
-                                } else {
-                                    ConnectionPhase::Connecting
-                                };
-                                let connection = spawn_connection(&core.tokio_rt, connect_args);
-
-                                let game = GameState::new(
-                                    &gfx.renderer,
-                                    &core.resource_packs,
-                                    core.menu.render_distance,
-                                    world.is_some(),
-                                    core.menu.chat_options,
-                                );
-                                core.apply_cursor_grab(&gfx.window, None);
-
-                                AppPhase::Connecting {
-                                    gfx,
-                                    panorama,
-                                    connect_phase,
-                                    connection,
-                                    game,
-                                    world,
-                                }
-                            }
+                            } => start_connecting(core, gfx, panorama, connect_args, world),
                             MenuUpdateResult::Quit => {
                                 event_loop.exit();
                                 AppPhase::InMenu { gfx, panorama }
