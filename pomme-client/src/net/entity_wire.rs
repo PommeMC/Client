@@ -2,15 +2,11 @@
 //! every session: translated frames already carry the native layout, and
 //! only `add_entity`'s entity type needs a registry remap.
 
-use std::collections::HashMap;
-use std::sync::OnceLock;
-
 use azalea_registry::Registry;
 use azalea_registry::builtin::EntityKind;
 use crossbeam_channel::Sender;
-use pomme_protocol::codec::{DecodeResult, Reader};
+use pomme_protocol::codec::DecodeResult;
 use pomme_protocol::entity::{self, EntityPacket};
-use pomme_protocol::{Direction, PacketTable, Phase};
 
 use super::NetworkEvent;
 use super::handler::send_ordered;
@@ -20,44 +16,22 @@ const SWING_MAIN_HAND: u8 = 0;
 const WAKE_UP: u8 = 2;
 const SWING_OFF_HAND: u8 = 3;
 
-fn packet_names() -> &'static HashMap<u32, &'static str> {
-    static NAMES: OnceLock<HashMap<u32, &'static str>> = OnceLock::new();
-    NAMES.get_or_init(|| {
-        let table = PacketTable::native();
-        entity::PACKETS
-            .iter()
-            .map(|name| {
-                let id = table
-                    .id(Phase::Game, Direction::Clientbound, name)
-                    .unwrap_or_else(|| panic!("{name} in packet table"));
-                (id, *name)
-            })
-            .collect()
-    })
-}
-
 /// Decodes an entity packet; `None` for any other packet.
 pub(super) fn handle_raw_entity_packet(
     packet_id: u32,
     payload: &[u8],
     event_tx: &Sender<NetworkEvent>,
 ) -> Option<DecodeResult<()>> {
-    let name = packet_names().get(&packet_id)?;
-    let mut r = Reader::new(payload);
     Some(
-        entity::read(name, &mut r)
-            .expect("names come from entity::PACKETS")
-            .and_then(|packet| {
-                r.ensure_eof()?;
-                if let Some(event) = event(packet) {
-                    if matches!(event, NetworkEvent::EntityMotion { .. }) {
-                        send_ordered(event_tx, event);
-                    } else {
-                        let _ = event_tx.try_send(event);
-                    }
+        super::read_raw_packet(packet_id, payload, entity::read)?.map(|packet| {
+            if let Some(event) = event(packet) {
+                if matches!(event, NetworkEvent::EntityMotion { .. }) {
+                    send_ordered(event_tx, event);
+                } else {
+                    let _ = event_tx.try_send(event);
                 }
-                Ok(())
-            }),
+            }
+        }),
     )
 }
 

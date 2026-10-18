@@ -70,6 +70,7 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         }
         Command::Inventory => to_value(protocol::inventory(game)),
         Command::Entities => to_value(protocol::entities(game)),
+        Command::Player => to_value(protocol::player(game)),
         Command::Advancements => Ok(json!(game.toasts.advancement_ids().collect::<Vec<_>>())),
         Command::ChatLog => Ok(json!(game.chat.message_texts().collect::<Vec<_>>())),
         Command::Screenshot { path } => {

@@ -1392,11 +1392,6 @@ impl Translation {
         match packet {
             ClientboundGamePacket::Sound(p) => self.remap_sound(&mut p.sound),
             ClientboundGamePacket::SoundEntity(p) => self.remap_sound(&mut p.sound),
-            ClientboundGamePacket::UpdateAttributes(p) => {
-                p.values
-                    .retain_mut(|v| remap_with(self.to_native, R::Attribute, &mut v.attribute));
-                true
-            }
             ClientboundGamePacket::BlockEntityData(p) => {
                 remap_with(self.to_native, R::BlockEntityType, &mut p.block_entity_type)
             }

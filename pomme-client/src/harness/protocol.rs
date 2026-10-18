@@ -29,6 +29,7 @@ pub enum Command {
     Inventory,
     Entities,
     Advancements,
+    Player,
     ChatLog,
     /// A PNG of the next presented frame, written to `path`.
     Screenshot {
@@ -244,6 +245,32 @@ pub fn entities(game: &GameState) -> EntitiesInfo {
         })
         .collect();
     EntitiesInfo { living, items }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlayerInfo {
+    pub health: f32,
+    pub food: u32,
+    pub level: i32,
+    pub game_mode: u8,
+    pub effects: Vec<&'static str>,
+    pub max_health: Option<f64>,
+    pub raining: bool,
+}
+
+pub fn player(game: &GameState) -> PlayerInfo {
+    let player = &game.player;
+    PlayerInfo {
+        health: player.health,
+        food: player.food,
+        level: player.experience_level,
+        game_mode: player.game_mode,
+        effects: player.effects.names().collect(),
+        max_health: player
+            .attributes
+            .value(crate::attribute::AttributeKind::MaxHealth),
+        raining: game.sky_state.rain_level > 0.0,
+    }
 }
 
 /// A registry name without the `minecraft:` namespace.

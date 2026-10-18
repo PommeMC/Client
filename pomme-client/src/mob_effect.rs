@@ -139,6 +139,14 @@ impl ActiveMobEffects {
         self.0.is_empty()
     }
 
+    /// The active effects' registry paths.
+    #[cfg(feature = "test-harness")]
+    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.0
+            .iter()
+            .filter_map(|e| info(e.effect_id).map(|i| i.name))
+    }
+
     /// Vanilla `hasEffect`, by registry path.
     pub fn has(&self, name: &str) -> bool {
         self.0

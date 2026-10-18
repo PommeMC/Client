@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use azalea_buf::{AzBuf, AzBufVar};
 use azalea_core::bitset::FixedBitSet;
 use azalea_core::position::ChunkPos;
@@ -15,11 +13,6 @@ use super::NetworkEvent;
 use super::chat_security::ProfileKeyServices;
 use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
-use crate::attribute::{
-    AttributeKind, AttributeModifier as ClientAttributeModifier,
-    AttributeModifierOperation as ClientAttributeModifierOperation,
-    AttributeSnapshot as ClientAttributeSnapshot,
-};
 use crate::entity::components::Position;
 use crate::net::chunk_batch::ChunkBatchSizeCalculator;
 use crate::player::inventory::item_resource_name;
@@ -83,90 +76,6 @@ pub(super) fn send_ordered(event_tx: &Sender<NetworkEvent>, event: NetworkEvent)
             _ => block(),
         }
     }
-}
-
-fn client_attribute_kind(attribute: azalea_registry::builtin::Attribute) -> AttributeKind {
-    use azalea_registry::builtin::Attribute as Wire;
-    match attribute {
-        Wire::AirDragModifier => AttributeKind::AirDragModifier,
-        Wire::Armor => AttributeKind::Armor,
-        Wire::ArmorToughness => AttributeKind::ArmorToughness,
-        Wire::AttackDamage => AttributeKind::AttackDamage,
-        Wire::AttackKnockback => AttributeKind::AttackKnockback,
-        Wire::AttackSpeed => AttributeKind::AttackSpeed,
-        Wire::BelowNameDistance => AttributeKind::BelowNameDistance,
-        Wire::BlockBreakSpeed => AttributeKind::BlockBreakSpeed,
-        Wire::BlockInteractionRange => AttributeKind::BlockInteractionRange,
-        Wire::Bounciness => AttributeKind::Bounciness,
-        Wire::BurningTime => AttributeKind::BurningTime,
-        Wire::CameraDistance => AttributeKind::CameraDistance,
-        Wire::ExplosionKnockbackResistance => AttributeKind::ExplosionKnockbackResistance,
-        Wire::EntityInteractionRange => AttributeKind::EntityInteractionRange,
-        Wire::FallDamageMultiplier => AttributeKind::FallDamageMultiplier,
-        Wire::FlyingSpeed => AttributeKind::FlyingSpeed,
-        Wire::FollowRange => AttributeKind::FollowRange,
-        Wire::FrictionModifier => AttributeKind::FrictionModifier,
-        Wire::Gravity => AttributeKind::Gravity,
-        Wire::JumpStrength => AttributeKind::JumpStrength,
-        Wire::KnockbackResistance => AttributeKind::KnockbackResistance,
-        Wire::Luck => AttributeKind::Luck,
-        Wire::MaxAbsorption => AttributeKind::MaxAbsorption,
-        Wire::MaxHealth => AttributeKind::MaxHealth,
-        Wire::MiningEfficiency => AttributeKind::MiningEfficiency,
-        Wire::MovementEfficiency => AttributeKind::MovementEfficiency,
-        Wire::MovementSpeed => AttributeKind::MovementSpeed,
-        Wire::NameTagDistance => AttributeKind::NameTagDistance,
-        Wire::OxygenBonus => AttributeKind::OxygenBonus,
-        Wire::SafeFallDistance => AttributeKind::SafeFallDistance,
-        Wire::Scale => AttributeKind::Scale,
-        Wire::SneakingSpeed => AttributeKind::SneakingSpeed,
-        Wire::SpawnReinforcements => AttributeKind::SpawnReinforcements,
-        Wire::StepHeight => AttributeKind::StepHeight,
-        Wire::SubmergedMiningSpeed => AttributeKind::SubmergedMiningSpeed,
-        Wire::SweepingDamageRatio => AttributeKind::SweepingDamageRatio,
-        Wire::TemptRange => AttributeKind::TemptRange,
-        Wire::WaterMovementEfficiency => AttributeKind::WaterMovementEfficiency,
-        Wire::WaypointTransmitRange => AttributeKind::WaypointTransmitRange,
-        Wire::WaypointReceiveRange => AttributeKind::WaypointReceiveRange,
-    }
-}
-
-fn client_attribute_operation(
-    operation: azalea_core::attribute_modifier_operation::AttributeModifierOperation,
-) -> ClientAttributeModifierOperation {
-    use azalea_core::attribute_modifier_operation::AttributeModifierOperation as Wire;
-    match operation {
-        Wire::AddValue => ClientAttributeModifierOperation::Value,
-        Wire::AddMultipliedBase => ClientAttributeModifierOperation::MultipliedBase,
-        Wire::AddMultipliedTotal => ClientAttributeModifierOperation::MultipliedTotal,
-    }
-}
-
-fn client_attribute_snapshot(
-    snapshot: &azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot,
-) -> Option<ClientAttributeSnapshot> {
-    let attribute = client_attribute_kind(snapshot.attribute);
-    let mut seen = HashSet::with_capacity(snapshot.modifiers.len());
-    let mut modifiers = Vec::with_capacity(snapshot.modifiers.len());
-    for modifier in &snapshot.modifiers {
-        let id = modifier.id.to_string();
-        if !seen.insert(id.clone()) {
-            tracing::warn!(
-                "Ignoring malformed {attribute:?} snapshot with duplicate modifier {id}"
-            );
-            return None;
-        }
-        modifiers.push(ClientAttributeModifier {
-            id,
-            amount: modifier.amount,
-            operation: client_attribute_operation(modifier.operation),
-        });
-    }
-    Some(ClientAttributeSnapshot {
-        attribute,
-        base: snapshot.base,
-        modifiers,
-    })
 }
 
 pub fn handle_game_packet(
@@ -370,9 +279,6 @@ pub fn handle_game_packet(
                 item: p.contents.clone(),
             });
         }
-        ClientboundGamePacket::SetHeldSlot(p) if (0..9).contains(&p.slot) => {
-            let _ = event_tx.try_send(NetworkEvent::HeldSlot { slot: p.slot as u8 });
-        }
         ClientboundGamePacket::ContainerSetData(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerData {
                 container_id: p.container_id,
@@ -390,67 +296,10 @@ pub fn handle_game_packet(
         ClientboundGamePacket::ContainerClose(_) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerClosed);
         }
-        ClientboundGamePacket::SetHealth(p) => {
-            let _ = event_tx.try_send(NetworkEvent::PlayerHealth {
-                health: p.health,
-                food: p.food,
-                saturation: p.saturation,
-            });
-        }
-        ClientboundGamePacket::SetExperience(p) => {
-            let _ = event_tx.try_send(NetworkEvent::PlayerExperience {
-                progress: p.experience_progress,
-                level: p.experience_level as i32,
-            });
-        }
-        ClientboundGamePacket::UpdateMobEffect(p) => {
-            let _ = event_tx.try_send(NetworkEvent::UpdateMobEffect {
-                entity_id: p.entity_id.0,
-                effect: crate::mob_effect::MobEffectInstance {
-                    effect_id: p.mob_effect.to_u32(),
-                    amplifier: p.data.amplifier,
-                    duration: p.data.duration,
-                    ambient: p.data.flags.ambient,
-                    show_icon: p.data.flags.show_icon,
-                },
-            });
-        }
-        ClientboundGamePacket::RemoveMobEffect(p) => {
-            let _ = event_tx.try_send(NetworkEvent::RemoveMobEffect {
-                entity_id: p.entity_id.0,
-                effect_id: p.effect.to_u32(),
-            });
-        }
         ClientboundGamePacket::Waypoint(p) => {
             let _ = event_tx.try_send(NetworkEvent::Waypoint {
                 operation: p.operation,
                 waypoint: p.waypoint.clone(),
-            });
-        }
-        ClientboundGamePacket::UpdateAttributes(p) => {
-            // TODO: a duplicate modifier id makes vanilla's `addModifier` throw
-            // after earlier snapshots applied, and `onPacketError` disconnects;
-            // Pomme has no packet-error disconnect yet, so it drops the packet.
-            let Some(snapshots) = p
-                .values
-                .iter()
-                .map(client_attribute_snapshot)
-                .collect::<Option<Vec<_>>>()
-            else {
-                return;
-            };
-            let _ = event_tx.try_send(NetworkEvent::EntityAttributesUpdate {
-                entity_id: p.entity_id.0,
-                snapshots,
-            });
-        }
-        ClientboundGamePacket::PlayerAbilities(p) => {
-            // TODO: invulnerable and instant_break flags
-            let _ = event_tx.try_send(NetworkEvent::PlayerAbilitiesChanged {
-                flying: p.flags.flying,
-                can_fly: p.flags.can_fly,
-                flying_speed: p.flying_speed,
-                walking_speed: p.walking_speed,
             });
         }
         ClientboundGamePacket::BossEvent(p) => {
@@ -663,30 +512,6 @@ pub fn handle_game_packet(
                 distance: p.simulation_distance,
             });
         }
-        ClientboundGamePacket::GameEvent(p) => {
-            use azalea_protocol::packets::game::c_game_event::EventType;
-            match p.event {
-                EventType::ChangeGameMode => {
-                    let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
-                        game_mode: p.param as u8,
-                        previous: None,
-                    });
-                }
-                EventType::WaitForLevelChunks => {
-                    let _ = event_tx.try_send(NetworkEvent::LevelChunksLoadStart);
-                }
-                EventType::StartRaining
-                | EventType::StopRaining
-                | EventType::RainLevelChange
-                | EventType::ThunderLevelChange => {
-                    let _ = event_tx.try_send(NetworkEvent::WeatherUpdate {
-                        event: p.event,
-                        param: p.param,
-                    });
-                }
-                _ => {}
-            }
-        }
         ClientboundGamePacket::Disconnect(p) => {
             tracing::warn!("Disconnected: {}", p.reason);
             let _ = event_tx.try_send(NetworkEvent::Disconnected {
@@ -727,13 +552,6 @@ pub fn handle_game_packet(
             // Vanilla recreates the player on respawn; the server re-sends any
             // effects kept across it.
             let _ = event_tx.try_send(NetworkEvent::ClearMobEffects);
-        }
-        ClientboundGamePacket::PlayerCombatKill(p) => {
-            tracing::info!("Player died: {}", p.message);
-            let _ = event_tx.try_send(NetworkEvent::PlayerDied {
-                player_id: p.player_id.0,
-                message: p.message.to_string(),
-            });
         }
         ClientboundGamePacket::ResourcePackPush(p) => {
             tracing::info!(
@@ -1002,6 +820,9 @@ pub fn handle_raw_game_packet(
     ) || took(
         super::entity_wire::handle_raw_entity_packet(packet_id, payload, event_tx),
         "entity",
+    ) || took(
+        super::player_wire::handle_raw_player_packet(packet_id, payload, event_tx),
+        "player",
     ) {
         return true;
     }
@@ -1401,7 +1222,6 @@ mod tests {
     use azalea_protocol::packets::game::c_block_changed_ack::ClientboundBlockChangedAck;
     use azalea_protocol::packets::game::c_ping::ClientboundPing;
     use azalea_protocol::packets::game::c_player_rotation::ClientboundPlayerRotation;
-    use azalea_protocol::packets::game::c_set_held_slot::ClientboundSetHeldSlot;
     use parking_lot::Mutex;
     use pomme_protocol::wire;
 
@@ -1583,20 +1403,19 @@ mod tests {
 
     #[test]
     fn set_held_slot_emits_authoritative_hotbar_selection() {
-        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
-        let sender = PacketSender::new(out_tx);
+        use pomme_protocol::{Direction, PacketTable, Phase};
+
         let (event_tx, event_rx) = crossbeam_channel::bounded(1);
-        let registries = RegistryHolder::default();
-        let command_tree = Arc::new(Mutex::new(None));
         let receive = |slot| {
-            handle_game_packet(
-                &ClientboundGamePacket::SetHeldSlot(ClientboundSetHeldSlot { slot }),
-                &sender,
-                &event_tx,
-                &registries,
-                &command_tree,
-                &mut ChunkBatchSizeCalculator::default(),
+            let mut raw = Vec::new();
+            wire::write_varint(
+                &mut raw,
+                PacketTable::native()
+                    .id(Phase::Game, Direction::Clientbound, "set_held_slot")
+                    .unwrap(),
             );
+            wire::write_varint(&mut raw, slot);
+            assert!(handle_raw(&raw, &event_tx));
         };
 
         receive(5);
@@ -1796,34 +1615,6 @@ mod tests {
             }
             _ => panic!("expected PlayEntitySound"),
         }
-    }
-
-    #[test]
-    fn duplicate_attribute_modifier_ids_reject_snapshot() {
-        use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
-        use azalea_inventory::components::AttributeModifier;
-        use azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot;
-        use azalea_registry::builtin::Attribute;
-
-        let duplicate = Identifier::new("minecraft:test_duplicate");
-        let snapshot = AttributeSnapshot {
-            attribute: Attribute::AttackSpeed,
-            base: 4.0,
-            modifiers: vec![
-                AttributeModifier {
-                    id: duplicate.clone(),
-                    amount: 1.0,
-                    operation: AttributeModifierOperation::AddValue,
-                },
-                AttributeModifier {
-                    id: duplicate,
-                    amount: 2.0,
-                    operation: AttributeModifierOperation::AddValue,
-                },
-            ],
-        };
-
-        assert!(client_attribute_snapshot(&snapshot).is_none());
     }
 
     #[test]

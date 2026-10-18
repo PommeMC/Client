@@ -5,25 +5,6 @@ use glam::DVec3;
 
 use crate::codec::{DecodeResult, Reader};
 
-/// The packets [`read`] decodes, by protocol name.
-pub const PACKETS: &[&str] = &[
-    "add_entity",
-    "remove_entities",
-    "move_entity_pos",
-    "move_entity_pos_rot",
-    "move_entity_rot",
-    "entity_position_sync",
-    "teleport_entity",
-    "set_entity_motion",
-    "rotate_head",
-    "animate",
-    "entity_event",
-    "hurt_animation",
-    "damage_event",
-    "take_item_entity",
-    "set_passengers",
-];
-
 /// `PositionMoveRotation.STREAM_CODEC`: absolute position and motion, then
 /// the rotation in degrees.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,7 +89,7 @@ pub enum EntityPacket {
     },
 }
 
-/// Decodes packet `name` (one of [`PACKETS`]), or `None` for any other.
+/// Decodes packet `name`, or `None` if it isn't an entity packet.
 pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<EntityPacket>> {
     let read: fn(&mut Reader) -> DecodeResult<EntityPacket> = match name {
         // ClientboundAddEntityPacket.java:63-75: rotations as x, y, then head.
@@ -483,13 +464,6 @@ mod tests {
             decode("hurt_animation", &hurt),
             EntityPacket::HurtAnimation { id: 1, yaw: 90.0 }
         );
-    }
-
-    #[test]
-    fn every_listed_packet_decodes() {
-        for name in PACKETS {
-            assert!(read(name, &mut Reader::new(&[])).is_some(), "{name}");
-        }
     }
 
     #[test]

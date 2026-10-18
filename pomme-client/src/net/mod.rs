@@ -13,6 +13,7 @@ mod entity_wire;
 pub mod handler;
 pub mod item_codec;
 pub mod known_packs;
+mod player_wire;
 mod recipe_wire;
 pub mod resolve;
 pub mod sender;
@@ -61,6 +62,35 @@ impl From<&azalea_protocol::packets::game::c_light_update::ClientboundLightUpdat
             empty_block_y_mask: data.empty_block_y_mask.clone(),
         }
     }
+}
+
+/// Decodes a native game packet with `read`, which returns `None` for the
+/// packets it doesn't own; a frame with bytes left over is malformed.
+fn read_raw_packet<P>(
+    packet_id: u32,
+    payload: &[u8],
+    read: fn(
+        &str,
+        &mut pomme_protocol::codec::Reader,
+    ) -> Option<pomme_protocol::codec::DecodeResult<P>>,
+) -> Option<pomme_protocol::codec::DecodeResult<P>> {
+    use pomme_protocol::{Direction, PacketTable, Phase};
+
+    let name = PacketTable::native().name_of(Phase::Game, Direction::Clientbound, packet_id)?;
+    let mut r = pomme_protocol::codec::Reader::new(payload);
+    Some(read(name, &mut r)?.and_then(|packet| {
+        r.ensure_eof()?;
+        Ok(packet)
+    }))
+}
+
+/// `ClientboundGameEventPacket`'s weather changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Weather {
+    StartRaining,
+    StopRaining,
+    RainLevel(f32),
+    ThunderLevel(f32),
 }
 
 pub enum NetworkEvent {
@@ -338,10 +368,7 @@ pub enum NetworkEvent {
         game_time: u64,
         day_time: Option<u64>,
     },
-    WeatherUpdate {
-        event: azalea_protocol::packets::game::c_game_event::EventType,
-        param: f32,
-    },
+    WeatherUpdate(Weather),
     GameModeChanged {
         game_mode: u8,
         /// `Some` = authoritative previous mode from login/respawn (which may

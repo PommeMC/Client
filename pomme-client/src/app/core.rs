@@ -2122,16 +2122,15 @@ impl AppCore {
                         game.sky_state.day_time = dt;
                     }
                 }
-                NetworkEvent::WeatherUpdate { event, param } => {
+                NetworkEvent::WeatherUpdate(weather) => {
                     // Mirrors vanilla ClientPacketListener.handleGameEvent: the
                     // server drives the level, the client just applies it.
-                    use azalea_protocol::packets::game::c_game_event::EventType;
-                    match event {
-                        EventType::StartRaining => game.sky_state.rain_level = 0.0,
-                        EventType::StopRaining => game.sky_state.rain_level = 1.0,
-                        EventType::RainLevelChange => game.sky_state.rain_level = param,
-                        EventType::ThunderLevelChange => game.sky_state.thunder_level = param,
-                        _ => {}
+                    use crate::net::Weather;
+                    match weather {
+                        Weather::StartRaining => game.sky_state.rain_level = 0.0,
+                        Weather::StopRaining => game.sky_state.rain_level = 1.0,
+                        Weather::RainLevel(level) => game.sky_state.rain_level = level,
+                        Weather::ThunderLevel(level) => game.sky_state.thunder_level = level,
                     }
                 }
                 NetworkEvent::EntitySpawned {

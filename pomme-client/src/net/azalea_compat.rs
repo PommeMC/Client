@@ -3145,12 +3145,13 @@ fn translate_entity_data_764() {
 }
 
 /// `update_attributes` names its attribute by registry id, and those shift
-/// between versions (1.21.2 also dropped the category prefixes), so each is
-/// remapped into the native space. Unremapped, an old `max_health` decodes as
-/// whatever attribute holds that id in 26.2.
+/// between versions (1.21.2 also dropped the category prefixes), so the frame
+/// rewrite remaps each into the native space, once: the raw decode after it
+/// must not remap again. Unremapped, an old `max_health` decodes as whatever
+/// attribute holds that id in 26.2.
 #[test]
 fn translate_update_attributes_old_versions() {
-    use azalea_registry::builtin::Attribute;
+    use pomme_protocol::player::PlayerPacket;
     use pomme_protocol::{ClientRegistry, RegistryTable};
 
     for protocol in [775, 774, 773, 772, 771, 770, 769, 768, 767] {
@@ -3177,12 +3178,24 @@ fn translate_update_attributes_old_versions() {
         old.extend_from_slice(&4.0f64.to_be_bytes()); // amount
         wire::write_varint(&mut old, 0); // operation
 
-        let ClientboundGamePacket::UpdateAttributes(p) = translate_and_decode(protocol, old) else {
+        let translated = translation_for(protocol)
+            .translate_game_frame(old.into_boxed_slice())
+            .unwrap();
+        let mut r = pomme_protocol::codec::Reader::new(&translated);
+        r.varint().unwrap();
+        let Some(Ok(PlayerPacket::Attributes { snapshots, .. })) =
+            pomme_protocol::player::read("update_attributes", &mut r)
+        else {
             panic!("wrong packet for {protocol}");
         };
-        assert_eq!(p.values[0].attribute, Attribute::MaxHealth, "{protocol}");
-        assert_eq!(p.values[0].base, 20.0, "{protocol}");
-        assert_eq!(p.values[0].modifiers[0].amount, 4.0, "{protocol}");
+        let attribute = crate::attribute::AttributeKind::from_id(snapshots[0].attribute);
+        assert_eq!(
+            attribute,
+            Some(crate::attribute::AttributeKind::MaxHealth),
+            "{protocol}"
+        );
+        assert_eq!(snapshots[0].base, 20.0, "{protocol}");
+        assert_eq!(snapshots[0].modifiers[0].amount, 4.0, "{protocol}");
     }
 }
 
@@ -5395,4 +5408,202 @@ fn teleport_relative_flags_are_a_big_endian_int() {
         panic!("pomme reads the frame");
     };
     assert_eq!(relative, 0b1001);
+}
+
+/// Every player-state packet azalea encodes reads back through pomme's
+/// layouts with the same values.
+#[test]
+fn player_packets_match_azalea() {
+    use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
+    use azalea_inventory::components::AttributeModifier;
+    use azalea_protocol::packets::game::c_game_event::EventType;
+    use azalea_protocol::packets::game::c_player_abilities::PlayerAbilitiesFlags;
+    use azalea_protocol::packets::game::*;
+    use azalea_registry::Registry;
+    use azalea_registry::builtin::{Attribute, MobEffect};
+    use pomme_protocol::player::{self, AttributeSnapshot, PlayerPacket};
+
+    let decode = |name: &str, packet: ClientboundGamePacket| {
+        let raw = azalea_protocol::write::serialize_packet(&packet).unwrap();
+        let mut r = pomme_protocol::codec::Reader::new(&raw);
+        assert_eq!(
+            r.varint(),
+            Ok(table_id(Phase::Game, Direction::Clientbound, name))
+        );
+        let decoded = player::read(name, &mut r).unwrap().unwrap();
+        r.ensure_eof().unwrap();
+        decoded
+    };
+    let cases = [
+        (
+            "set_health",
+            ClientboundGamePacket::SetHealth(c_set_health::ClientboundSetHealth {
+                health: 15.5,
+                food: 18,
+                saturation: 2.0,
+            }),
+            PlayerPacket::Health {
+                health: 15.5,
+                food: 18,
+                saturation: 2.0,
+            },
+        ),
+        (
+            "set_experience",
+            ClientboundGamePacket::SetExperience(c_set_experience::ClientboundSetExperience {
+                experience_progress: 0.25,
+                experience_level: 30,
+                total_experience: 1395,
+            }),
+            PlayerPacket::Experience {
+                progress: 0.25,
+                level: 30,
+                total: 1395,
+            },
+        ),
+        (
+            "update_attributes",
+            ClientboundGamePacket::UpdateAttributes(
+                c_update_attributes::ClientboundUpdateAttributes {
+                    entity_id: MinecraftEntityId(9),
+                    values: vec![c_update_attributes::AttributeSnapshot {
+                        attribute: Attribute::MaxHealth,
+                        base: 20.0,
+                        modifiers: vec![AttributeModifier {
+                            id: Identifier::new("minecraft:test"),
+                            amount: 4.0,
+                            operation: AttributeModifierOperation::AddMultipliedTotal,
+                        }],
+                    }],
+                },
+            ),
+            PlayerPacket::Attributes {
+                entity: 9,
+                snapshots: vec![AttributeSnapshot {
+                    attribute: Attribute::MaxHealth.to_u32(),
+                    base: 20.0,
+                    modifiers: vec![player::AttributeModifier {
+                        id: "minecraft:test".into(),
+                        amount: 4.0,
+                        operation: 2,
+                    }],
+                }],
+            },
+        ),
+        (
+            "remove_mob_effect",
+            ClientboundGamePacket::RemoveMobEffect(
+                c_remove_mob_effect::ClientboundRemoveMobEffect {
+                    entity_id: MinecraftEntityId(1),
+                    effect: MobEffect::Speed,
+                },
+            ),
+            PlayerPacket::RemoveEffect {
+                entity: 1,
+                effect: MobEffect::Speed.to_u32(),
+            },
+        ),
+        (
+            "set_held_slot",
+            ClientboundGamePacket::SetHeldSlot(c_set_held_slot::ClientboundSetHeldSlot { slot: 4 }),
+            PlayerPacket::HeldSlot { slot: 4 },
+        ),
+        (
+            "player_abilities",
+            ClientboundGamePacket::PlayerAbilities(
+                c_player_abilities::ClientboundPlayerAbilities {
+                    flags: PlayerAbilitiesFlags {
+                        invulnerable: false,
+                        flying: true,
+                        can_fly: true,
+                        instant_break: false,
+                    },
+                    flying_speed: 0.05,
+                    walking_speed: 0.1,
+                },
+            ),
+            PlayerPacket::Abilities {
+                flags: player::ABILITY_FLYING | player::ABILITY_CAN_FLY,
+                flying_speed: 0.05,
+                walking_speed: 0.1,
+            },
+        ),
+        (
+            "game_event",
+            ClientboundGamePacket::GameEvent(c_game_event::ClientboundGameEvent {
+                event: EventType::ThunderLevelChange,
+                param: 0.5,
+            }),
+            PlayerPacket::GameEvent {
+                event: 8,
+                param: 0.5,
+            },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+
+    // azalea keeps its effect flags type private, so read the same vanilla
+    // bytes with both: amplifier 1, 200 ticks, ambient + icon.
+    let mut raw = Vec::new();
+    wire::write_varint(
+        &mut raw,
+        table_id(Phase::Game, Direction::Clientbound, "update_mob_effect"),
+    );
+    wire::write_varint(&mut raw, 1);
+    wire::write_varint(&mut raw, MobEffect::Speed.to_u32());
+    raw.extend([
+        1,
+        0xC8,
+        0x01,
+        player::EFFECT_AMBIENT | player::EFFECT_SHOW_ICON,
+    ]);
+    let Ok(ClientboundGamePacket::UpdateMobEffect(azalea)) =
+        azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut std::io::Cursor::new(&raw[..]),
+        )
+    else {
+        panic!("azalea reads update_mob_effect");
+    };
+    let mut r = pomme_protocol::codec::Reader::new(&raw);
+    r.varint().unwrap();
+    let Some(Ok(PlayerPacket::UpdateEffect {
+        entity,
+        effect,
+        amplifier,
+        duration,
+        flags,
+    })) = player::read("update_mob_effect", &mut r)
+    else {
+        panic!("pomme reads update_mob_effect");
+    };
+    assert_eq!(entity, azalea.entity_id.0);
+    assert_eq!(effect, azalea.mob_effect.to_u32());
+    assert_eq!(
+        (amplifier, duration),
+        (azalea.data.amplifier, azalea.data.duration)
+    );
+    assert_eq!(
+        flags & player::EFFECT_AMBIENT != 0,
+        azalea.data.flags.ambient
+    );
+    assert_eq!(
+        flags & player::EFFECT_SHOW_ICON != 0,
+        azalea.data.flags.show_icon
+    );
+
+    let PlayerPacket::CombatKill { player: 3, message } = decode(
+        "player_combat_kill",
+        ClientboundGamePacket::PlayerCombatKill(
+            c_player_combat_kill::ClientboundPlayerCombatKill {
+                player_id: MinecraftEntityId(3),
+                message: "Tester fell".into(),
+            },
+        ),
+    ) else {
+        panic!("player_combat_kill");
+    };
+    let text = crate::net::chat::read_component(&message, &mut 0).unwrap();
+    assert_eq!(text.plain_text(), "Tester fell");
 }

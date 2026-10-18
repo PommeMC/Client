@@ -47,6 +47,7 @@ enum Expect {
     ItemEntity(ItemEntityExpect),
     Gone(GoneExpect),
     Riding(RidingExpect),
+    Player(PlayerExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
 }
@@ -99,6 +100,29 @@ struct GoneExpect {
 #[serde(deny_unknown_fields)]
 struct RidingExpect {
     riding: bool,
+}
+
+/// The local player's state; each field is checked when given.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerExpect {
+    player: PlayerFields,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerFields {
+    /// Within half a health point.
+    health: Option<f32>,
+    food: Option<u32>,
+    level: Option<i32>,
+    game_mode: Option<u8>,
+    /// An active effect, by registry path.
+    effect: Option<String>,
+    /// An effect that must not be active.
+    no_effect: Option<String>,
+    max_health: Option<f64>,
+    raining: Option<bool>,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -396,6 +420,21 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
             ensure(game.riding_vehicle_id.is_some() == *riding, || {
                 format!("riding: {:?}", game.riding_vehicle_id)
             })
+        }
+        Expect::Player(PlayerExpect { player: want }) => {
+            let seen = protocol::player(game);
+            let has = |name: &str| seen.effects.contains(&name);
+            ensure(
+                want.health.is_none_or(|h| (seen.health - h).abs() <= 0.5)
+                    && want.food.is_none_or(|f| seen.food == f)
+                    && want.level.is_none_or(|l| seen.level == l)
+                    && want.game_mode.is_none_or(|m| seen.game_mode == m)
+                    && want.effect.as_deref().is_none_or(has)
+                    && !want.no_effect.as_deref().is_some_and(has)
+                    && want.max_health.is_none_or(|m| seen.max_health == Some(m))
+                    && want.raining.is_none_or(|r| seen.raining == r),
+                || format!("player is {seen:?}"),
+            )
         }
         Expect::Advancement(AdvancementExpect { advancement }) => ensure(
             game.toasts.advancement_ids().any(|id| id == advancement),
