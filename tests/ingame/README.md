@@ -87,6 +87,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | An advancement | `advancement` (id) |
 | A chat line | `chat` (text it contains) |
 | A block | `block` (state name, e.g. `air`), `at`, optional `block_entity` (type) |
+| The local player | `player = { ... }` with any of `health`, `food`, `level`, `game_mode`, `effect`, `no_effect`, `max_health`, `raining` and `hand` |
 
 Slots are menu slots. In the player inventory, 5-8 are armor (head to feet),
 9-35 the main inventory, 36-44 the hotbar and 45 the offhand. `/give` fills

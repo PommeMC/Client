@@ -2004,6 +2004,20 @@ fn sleeping_head_pitch_deg(is_sleeping: bool, head_x_rot_deg: f32) -> f32 {
     if is_sleeping { 0.0 } else { head_x_rot_deg }
 }
 
+/// Vanilla `GameRenderer.renderItemInHand`: not while asleep, with the HUD
+/// hidden (F1), or in spectator.
+pub(crate) fn renders_first_person_hand(game: &GameState) -> bool {
+    hand_visible(
+        game.player.is_sleeping(),
+        game.hide_gui,
+        game.player.game_mode,
+    )
+}
+
+fn hand_visible(sleeping: bool, hide_gui: bool, game_mode: u8) -> bool {
+    !sleeping && !hide_gui && game_mode != 3
+}
+
 fn should_render_local_player(
     benchmark_running: bool,
     first_person: bool,
@@ -3923,7 +3937,7 @@ pub fn update_game(
         use_anim,
         held_item,
         game.scoreboard.member_team_color(&core.user.username),
-        !game.player.is_sleeping(),
+        renders_first_person_hand(game),
         destroy_info,
         game.show_chunk_borders,
         sky,
@@ -4188,8 +4202,8 @@ mod dropped_item_tests {
     use azalea_registry::builtin::EntityKind;
 
     use super::{
-        item_stack_seed, should_render_local_player, sleeping_head_pitch_deg, standing_eye_height,
-        transform_item_bounds,
+        hand_visible, item_stack_seed, should_render_local_player, sleeping_head_pitch_deg,
+        standing_eye_height, transform_item_bounds,
     };
 
     #[test]
@@ -4213,6 +4227,15 @@ mod dropped_item_tests {
         assert!(should_render_local_player(false, false, false, false));
         assert!(!should_render_local_player(true, false, true, false));
         assert!(!should_render_local_player(false, false, true, true));
+    }
+
+    #[test]
+    fn hand_hides_asleep_with_f1_and_in_spectator() {
+        assert!(hand_visible(false, false, 0));
+        assert!(hand_visible(false, false, 1));
+        assert!(!hand_visible(true, false, 0));
+        assert!(!hand_visible(false, true, 0));
+        assert!(!hand_visible(false, false, 3));
     }
 
     #[test]

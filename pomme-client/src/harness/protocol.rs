@@ -288,6 +288,8 @@ pub struct PlayerInfo {
     pub effects: Vec<&'static str>,
     pub max_health: Option<f64>,
     pub raining: bool,
+    /// Whether the first-person hand is drawn.
+    pub hand: bool,
 }
 
 pub fn player(game: &GameState) -> PlayerInfo {
@@ -302,6 +304,7 @@ pub fn player(game: &GameState) -> PlayerInfo {
             .attributes
             .value(crate::attribute::AttributeKind::MaxHealth),
         raining: game.sky_state.rain_level > 0.0,
+        hand: crate::app::phases::in_game::renders_first_person_hand(game),
     }
 }
 

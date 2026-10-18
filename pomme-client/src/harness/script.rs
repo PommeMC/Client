@@ -127,6 +127,7 @@ struct PlayerFields {
     no_effect: Option<String>,
     max_health: Option<f64>,
     raining: Option<bool>,
+    hand: Option<bool>,
 }
 
 /// The block state name the client holds at `at`, e.g. `air`.
@@ -455,7 +456,8 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                     && want.effect.as_deref().is_none_or(has)
                     && !want.no_effect.as_deref().is_some_and(has)
                     && want.max_health.is_none_or(|m| seen.max_health == Some(m))
-                    && want.raining.is_none_or(|r| seen.raining == r),
+                    && want.raining.is_none_or(|r| seen.raining == r)
+                    && want.hand.is_none_or(|h| seen.hand == h),
                 || format!("player is {seen:?}"),
             )
         }
