@@ -877,6 +877,12 @@ impl MainMenu {
         self.fov_effect_scale * self.fov_effect_scale
     }
 
+    /// A form's text field has keyboard focus.
+    #[cfg(target_os = "android")]
+    pub(crate) fn text_field_focused(&self) -> bool {
+        self.focused_field.is_some()
+    }
+
     pub(crate) fn gui_scale(&self, screen_w: f32, screen_h: f32) -> f32 {
         crate::ui::hud::gui_scale(
             screen_w,

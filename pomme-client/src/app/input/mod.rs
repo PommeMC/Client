@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use gilrs::ff::{BaseEffect, Effect, EffectBuilder, Repeat, Replay};
 use gilrs::{Button, GamepadId, Gilrs};
-use winit::event::{ElementState, Modifiers, MouseButton, Touch};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, Touch};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 
 use self::touch::{TouchControls, TouchLayout, TouchOutput};
 use crate::app::TICK_RATE_MS;
@@ -752,8 +752,8 @@ impl InputState {
             .map_or(Ok(()), Effect::play)
     }
 
-    pub fn on_key_event(&mut self, event: &winit::event::KeyEvent) {
-        if let PhysicalKey::Code(code) = event.physical_key {
+    pub fn on_key_event(&mut self, event: &KeyEvent) {
+        if let Some(code) = key_code(event) {
             self.on_key(code, event.state, event.repeat);
         }
     }
@@ -852,9 +852,8 @@ impl InputState {
         }
     }
 
-    pub fn captures_key_event(&self, event: &winit::event::KeyEvent) -> bool {
-        matches!(event.physical_key, PhysicalKey::Code(code) if self.captures_key(code))
-            || self.binding_capture
+    pub fn captures_key_event(&self, event: &KeyEvent) -> bool {
+        key_code(event).is_some_and(|code| self.captures_key(code)) || self.binding_capture
     }
 
     fn captures_key(&self, code: KeyCode) -> bool {
@@ -892,7 +891,7 @@ impl InputState {
         // The ordered event stream for caret-editing text fields. Chars are
         // suppressed while the edit modifier is held, like GLFW's char
         // callback for Ctrl (Cmd) chords.
-        if let PhysicalKey::Code(code) = event.physical_key {
+        if let Some(code) = key_code(event) {
             self.text_events
                 .push(crate::ui::text_edit::TextInputEvent::Key {
                     code,
@@ -912,7 +911,7 @@ impl InputState {
             }
         }
 
-        if let PhysicalKey::Code(code) = event.physical_key {
+        if let Some(code) = key_code(event) {
             match code {
                 KeyCode::Enter | KeyCode::NumpadEnter => self.enter_pressed = true,
                 KeyCode::Escape => self.escape_pressed = true,
@@ -1171,6 +1170,20 @@ impl InputState {
     }
 }
 
+/// The key's code, with Android's Back as Escape: it arrives with no physical
+/// code, and closes screens and chat as Escape does.
+pub fn key_code(event: &KeyEvent) -> Option<KeyCode> {
+    key_code_of(&event.physical_key, &event.logical_key)
+}
+
+fn key_code_of(physical: &PhysicalKey, logical: &Key) -> Option<KeyCode> {
+    match (physical, logical) {
+        (PhysicalKey::Code(code), _) => Some(*code),
+        (_, Key::Named(NamedKey::BrowserBack)) => Some(KeyCode::Escape),
+        _ => None,
+    }
+}
+
 fn hotbar_slot(code: KeyCode) -> Option<u8> {
     match code {
         KeyCode::Digit1 => Some(0),
@@ -1269,5 +1282,32 @@ mod binding_capture_tests {
         assert!(input.take_binding_presses().is_empty());
         input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
         assert!(input.left_just_pressed());
+    }
+}
+
+#[cfg(test)]
+mod key_code_tests {
+    use winit::keyboard::{Key, KeyCode, NamedKey, NativeKey, NativeKeyCode, PhysicalKey};
+
+    use super::key_code_of;
+
+    #[test]
+    fn android_back_is_escape() {
+        let unidentified = PhysicalKey::Unidentified(NativeKeyCode::Android(4));
+        assert_eq!(
+            key_code_of(
+                &PhysicalKey::Code(KeyCode::KeyT),
+                &Key::Character("t".into())
+            ),
+            Some(KeyCode::KeyT)
+        );
+        assert_eq!(
+            key_code_of(&unidentified, &Key::Named(NamedKey::BrowserBack)),
+            Some(KeyCode::Escape)
+        );
+        assert_eq!(
+            key_code_of(&unidentified, &Key::Unidentified(NativeKey::Android(4))),
+            None
+        );
     }
 }

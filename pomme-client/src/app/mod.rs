@@ -12,7 +12,7 @@ use thiserror::Error;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::KeyCode;
 use winit::window::{Window, WindowId};
 
 use crate::app::core::AppCore;
@@ -51,6 +51,9 @@ pub struct App {
     core: AppCore,
     occluded: bool,
     fps_limiter: FramerateLimiter,
+    /// Whether Android's soft keyboard was last asked for.
+    #[cfg(target_os = "android")]
+    soft_keyboard: bool,
     #[cfg(feature = "test-harness")]
     harness: Option<crate::harness::Harness>,
 }
@@ -201,6 +204,8 @@ impl App {
             }),
             core: AppCore::new(version, data_dirs, tokio_rt, presence, user),
             occluded: false,
+            #[cfg(target_os = "android")]
+            soft_keyboard: false,
             fps_limiter: FramerateLimiter::new(),
             #[cfg(feature = "test-harness")]
             harness: None,
@@ -226,6 +231,16 @@ impl App {
     pub fn run(&mut self, event_loop: EventLoop<()>) -> Result<(), WindowError> {
         event_loop.run_app(self)?;
         Ok(())
+    }
+
+    /// A text field has keyboard focus: chat and the in-game fields, or a
+    /// menu form's.
+    #[cfg(target_os = "android")]
+    fn wants_text_input(&self) -> bool {
+        match self.phase.get() {
+            AppPhase::InGame { game, .. } if !game.paused => self.core.input.text_capture,
+            _ => self.core.menu.text_field_focused(),
+        }
     }
 
     fn world_has_pointer(&self) -> bool {
@@ -448,6 +463,7 @@ impl ApplicationHandler for App {
             }
             // TODO: Migrate _fully_ to Action system
             WindowEvent::KeyboardInput { event, .. } => {
+                let key = input::key_code(&event);
                 self.phase.transition(|mut app| {
                     if self.core.input.captures_key_event(&event) {
                         self.core.input.on_key_event(&event);
@@ -459,7 +475,7 @@ impl ApplicationHandler for App {
                         && event.state.is_pressed()
                         && !event.repeat
                         && !self.core.input.key_pressed(KeyCode::F3)
-                        && let PhysicalKey::Code(KeyCode::F11) = event.physical_key
+                        && key == Some(KeyCode::F11)
                     {
                         let display_mode = self.core.display_mode.cycle();
                         self.core.menu.set_display_mode(display_mode);
@@ -471,7 +487,7 @@ impl ApplicationHandler for App {
                         && event.state.is_pressed()
                         && !event.repeat
                         && !self.core.input.key_pressed(KeyCode::F3)
-                        && let PhysicalKey::Code(KeyCode::F2) = event.physical_key
+                        && key == Some(KeyCode::F2)
                     {
                         renderer.request_screenshot();
                     }
@@ -495,7 +511,7 @@ impl ApplicationHandler for App {
                             // A configuration-phase dialog replaces the
                             // connect screen and takes its keys.
                             if event.state.is_pressed()
-                                && let PhysicalKey::Code(code) = event.physical_key
+                                && let Some(code) = key
                                 && game.dialog_open()
                             {
                                 crate::app::phases::in_game::server_dialog_key(
@@ -514,9 +530,7 @@ impl ApplicationHandler for App {
                                     game,
                                     world,
                                 }
-                            } else if event.state.is_pressed()
-                                && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
-                            {
+                            } else if event.state.is_pressed() && key == Some(KeyCode::Escape) {
                                 leave_world(
                                     &mut self.core,
                                     gfx,
@@ -545,7 +559,7 @@ impl ApplicationHandler for App {
                             // No repeat filter: vanilla dispatches GLFW repeats
                             // to screens and debug chords alike.
                             if event.state.is_pressed()
-                                && let PhysicalKey::Code(code) = event.physical_key
+                                && let Some(code) = key
                             {
                                 if game.options_from_game {
                                     let f3_held = self.core.input.key_pressed(KeyCode::F3);
@@ -643,9 +657,7 @@ impl ApplicationHandler for App {
                                         }
                                     }
                                 }
-                            } else if !event.state.is_pressed()
-                                && matches!(event.physical_key, PhysicalKey::Code(KeyCode::F3))
-                            {
+                            } else if !event.state.is_pressed() && key == Some(KeyCode::F3) {
                                 // Overlay toggles on F3 release, unless a chord
                                 // consumed it; runs in every in-game sub-state.
                                 game.handle_f3_release(&connection);
@@ -966,6 +978,19 @@ impl ApplicationHandler for App {
                 }
 
                 core.input.end_frame();
+
+                // Desktop is left alone: allowing IME there moves typing from
+                // key events to IME events.
+                #[cfg(target_os = "android")]
+                {
+                    let wanted = self.wants_text_input();
+                    if wanted != self.soft_keyboard
+                        && let Some(gfx) = self.phase.gfx_mut()
+                    {
+                        gfx.window.set_ime_allowed(wanted);
+                        self.soft_keyboard = wanted;
+                    }
+                }
 
                 let limit = self.effective_framerate_limit();
                 if let Some(gfx) = self.phase.gfx_mut() {

@@ -36,16 +36,18 @@ pub struct TouchLayout {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TouchButton {
     Jump,
+    Chat,
     Inventory,
     Pause,
 }
 
 impl TouchButton {
-    pub const ALL: [Self; 3] = [Self::Jump, Self::Inventory, Self::Pause];
+    pub const ALL: [Self; 4] = [Self::Jump, Self::Chat, Self::Inventory, Self::Pause];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Jump => "Jump",
+            Self::Chat => "Chat",
             Self::Inventory => "Inv",
             Self::Pause => "| |",
         }
@@ -58,6 +60,7 @@ impl TouchLayout {
         let inset = 2.0 * BUTTON_RADIUS * self.gs;
         match button {
             TouchButton::Jump => Vec2::new(self.width - inset, self.height - 1.5 * inset),
+            TouchButton::Chat => Vec2::new(self.width - 4.0 * inset, inset),
             TouchButton::Inventory => Vec2::new(self.width - 2.5 * inset, inset),
             TouchButton::Pause => Vec2::new(self.width - inset, inset),
         }
@@ -165,6 +168,7 @@ impl TouchControls {
         } else if let Some(button) = layout.button_at(p) {
             match button {
                 TouchButton::Jump => (Role::Jump, Vec::new()),
+                TouchButton::Chat => (Role::Spent, vec![TouchOutput::Tap(Action::OpenChat)]),
                 TouchButton::Inventory => {
                     (Role::Spent, vec![TouchOutput::Tap(Action::ToggleInventory)])
                 }
@@ -401,6 +405,16 @@ mod tests {
             [TouchOutput::Tap(Action::OpenMenu)]
         );
         assert!(touch(&mut c, 1, TouchPhase::Ended, pause, t).is_empty());
+        assert_eq!(
+            touch(
+                &mut c,
+                4,
+                TouchPhase::Started,
+                LAYOUT.button_centre(TouchButton::Chat),
+                t
+            ),
+            [TouchOutput::Tap(Action::OpenChat)]
+        );
 
         touch(
             &mut c,

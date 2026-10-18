@@ -46,14 +46,16 @@ internal storage, reached with `adb shell run-as com.pommemc.client`.
 
 In the world: drag on the left to move (the stick appears where you press),
 drag elsewhere to look, tap to use or place, hold still to break. Buttons:
-jump (bottom right), inventory and pause (top right), and tapping a hotbar slot
-selects it. On any screen, a touch is the mouse pointer.
+jump (bottom right), chat, inventory and pause (top right), and tapping a
+hotbar slot selects it. On any screen, a touch is the mouse pointer. The
+keyboard opens while a text field has focus, and Back works as Escape.
 
 ## Limitations
 
 - Offline-mode servers only: no Microsoft login on the device.
 - No singleplayer: the embedded server is off on Android.
-- No soft keyboard, so no chat or typing; the server comes from `launch.txt`.
+- The keyboard can cover the field being typed in: NativeActivity doesn't
+  resize the window for it.
 - The emulator's Vulkan is translated to the Mac's GPU, so rendering bugs
   seen there may not be real, and its performance says nothing about phones.
   Untested on real devices.
