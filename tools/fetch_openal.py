@@ -82,11 +82,15 @@ def host_classifier():
 
 def fetch_jar(version, classifier, expected_sha256):
     """Downloads the jar unless a verified copy is already cached."""
-    cached = CACHE_DIR / f"lwjgl-openal-{version}-{classifier}.jar"
+    name = f"lwjgl-openal-{version}-{classifier}.jar"
+    return download_verified(f"{BASE_URL}/{version}/{name}", expected_sha256, CACHE_DIR / name)
+
+
+def download_verified(url, expected_sha256, cached):
+    """Downloads `url` to `cached` unless a verified copy is already there."""
     if cached.is_file() and sha256(cached.read_bytes()) == expected_sha256:
         return cached
 
-    url = f"{BASE_URL}/{version}/lwjgl-openal-{version}-{classifier}.jar"
     print(f"downloading {url}")
     try:
         with urllib.request.urlopen(url) as response:
@@ -97,7 +101,7 @@ def fetch_jar(version, classifier, expected_sha256):
     actual = sha256(payload)
     if actual != expected_sha256:
         raise SystemExit(f"{url}: sha256 {actual} does not match the pinned {expected_sha256}")
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cached.parent.mkdir(parents=True, exist_ok=True)
     cached.write_bytes(payload)
     return cached
 

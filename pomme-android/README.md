@@ -22,8 +22,7 @@ avdmanager create avd -n pomme -k "system-images;android-35;google_apis;arm64-v8
 
 Gradle needs JDK 17; the Android Gradle plugin doesn't run on newer ones.
 `cmake` is for `aws-lc-rs`, which rustls builds from C, and for OpenAL Soft,
-which the first `android-build` compiles from source (LWJGL ships no Android
-build of it).
+which the first `android-build` compiles from source.
 
 ## Running
 

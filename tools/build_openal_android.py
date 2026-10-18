@@ -17,10 +17,9 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import urllib.request
 from pathlib import Path
 
-from fetch_openal import REPO_ROOT, read_manifest, sha256
+from fetch_openal import REPO_ROOT, Unreachable, download_verified, read_manifest
 
 CMAKE_VERSION = "3.22.1"
 ABI = "arm64-v8a"
@@ -43,15 +42,10 @@ def fetch_source(tag, expected_sha256):
     if source.is_dir():
         return source
     url = f"https://github.com/kcat/openal-soft/archive/refs/tags/{tag}.tar.gz"
-    print(f"downloading {url}")
-    with urllib.request.urlopen(url) as response:
-        payload = response.read()
-    actual = sha256(payload)
-    if actual != expected_sha256:
-        raise SystemExit(f"{url}: sha256 {actual} does not match the pinned {expected_sha256}")
-    WORK_DIR.mkdir(parents=True, exist_ok=True)
-    archive = WORK_DIR / f"openal-soft-{tag}.tar.gz"
-    archive.write_bytes(payload)
+    try:
+        archive = download_verified(url, expected_sha256, WORK_DIR / f"openal-soft-{tag}.tar.gz")
+    except Unreachable as e:
+        raise SystemExit(str(e)) from e
     with tarfile.open(archive) as tar:
         # The data filter (Python 3.12+, and backports) refuses paths that
         # escape the target directory.
