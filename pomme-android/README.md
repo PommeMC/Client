@@ -21,7 +21,9 @@ avdmanager create avd -n pomme -k "system-images;android-35;google_apis;arm64-v8
 ```
 
 Gradle needs JDK 17; the Android Gradle plugin doesn't run on newer ones.
-`cmake` is for `aws-lc-rs`, which rustls builds from C.
+`cmake` is for `aws-lc-rs`, which rustls builds from C, and for OpenAL Soft,
+which the first `android-build` compiles from source (LWJGL ships no Android
+build of it).
 
 ## Running
 
@@ -50,7 +52,6 @@ selects it. On any screen, a touch is the mouse pointer.
 
 ## Limitations
 
-- No audio: OpenAL isn't bundled yet.
 - Offline-mode servers only: no Microsoft login on the device.
 - No singleplayer: the embedded server is off on Android.
 - No soft keyboard, so no chat or typing; the server comes from `launch.txt`.

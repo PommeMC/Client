@@ -50,6 +50,7 @@ ingame-server:
 android_app := "com.pommemc.client"
 
 android-build:
+    @python3 tools/build_openal_android.py pomme-android/app/src/main/jniLibs/arm64-v8a
     @cargo ndk -t arm64-v8a -o pomme-android/app/src/main/jniLibs build -p pomme-android
     @cd pomme-android && ./gradlew -q assembleDebug
 

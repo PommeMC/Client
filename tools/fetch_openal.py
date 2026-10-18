@@ -39,9 +39,10 @@ class Native:
 
 
 def read_manifest():
-    """Returns (version, {classifier: Native})."""
+    """Returns (version, {classifier: Native}, (android tag, sha256) or None)."""
     version = None
     natives = {}
+    android_source = None
     for lineno, raw in enumerate(MANIFEST.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -49,13 +50,15 @@ def read_manifest():
         fields = line.split()
         if fields[0] == "version" and len(fields) == 2:
             version = fields[1]
+        elif fields[0] == "android-source" and len(fields) == 3:
+            android_source = (fields[1], fields[2])
         elif len(fields) == 4:
             natives[fields[0]] = Native(fields[1], fields[2], fields[3])
         else:
             raise SystemExit(f"{MANIFEST}:{lineno}: cannot parse {raw!r}")
     if version is None:
         raise SystemExit(f"{MANIFEST}: no version line")
-    return version, natives
+    return version, natives, android_source
 
 
 def host_classifier():
@@ -115,7 +118,7 @@ def main():
     )
     args = parser.parse_args()
 
-    version, natives = read_manifest()
+    version, natives, _ = read_manifest()
     classifier = args.classifier or host_classifier()
     native = natives.get(classifier) if classifier else None
     if native is None:
