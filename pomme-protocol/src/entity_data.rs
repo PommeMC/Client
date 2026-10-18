@@ -186,19 +186,13 @@ impl ItemCodec {
             S::Long => Value::Long(r.varlong()? as i64),
             S::Float => Value::Float(r.f32()?),
             S::Bool => Value::Bool(r.bool()?),
-            S::OptionalComponent => Value::OptionalComponent(if r.bool()? {
+            S::OptionalComponent => Value::OptionalComponent(r.optional(|r| {
                 let start = r.pos();
                 self.skip(r, &TEXT)?;
-                Some(r.since(start).into())
-            } else {
-                None
-            }),
+                Ok(r.since(start).into())
+            })?),
             S::ItemStack => Value::Item(self.read_stack(r)?),
-            S::OptionalBlockPos => Value::OptionalBlockPos(if r.bool()? {
-                Some(r.block_pos()?)
-            } else {
-                None
-            }),
+            S::OptionalBlockPos => Value::OptionalBlockPos(r.optional(Reader::block_pos)?),
             S::VillagerData => Value::VillagerData {
                 kind: r.varint()?,
                 profession: r.varint()?,

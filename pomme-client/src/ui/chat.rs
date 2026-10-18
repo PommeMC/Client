@@ -3108,7 +3108,12 @@ fn slice_spans(spans: &[TextSpan], start: usize, end: usize) -> Vec<TextSpan> {
 }
 
 fn legacy_color(code: char) -> Option<[f32; 4]> {
-    let rgb = match code.to_ascii_lowercase() {
+    legacy_rgb(code).map(common::rgb)
+}
+
+/// The color of legacy formatting code `code` (`ChatFormatting`'s `0`-`f`).
+pub(crate) fn legacy_rgb(code: char) -> Option<u32> {
+    Some(match code.to_ascii_lowercase() {
         '0' => 0x000000,
         '1' => 0x0000aa,
         '2' => 0x00aa00,
@@ -3126,8 +3131,7 @@ fn legacy_color(code: char) -> Option<[f32; 4]> {
         'e' => 0xffff55,
         'f' => 0xffffff,
         _ => return None,
-    };
-    Some(common::rgb(rgb))
+    })
 }
 
 /// Vanilla `StringDecomposer.iterateFormatted` over each span: legacy codes

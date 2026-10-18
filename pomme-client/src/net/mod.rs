@@ -20,6 +20,7 @@ pub mod known_packs;
 mod player_wire;
 mod recipe_wire;
 pub mod resolve;
+mod scoreboard_wire;
 pub mod sender;
 pub mod stream;
 pub mod translate;

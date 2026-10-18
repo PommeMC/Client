@@ -19,7 +19,7 @@ use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
 use crate::ui::server_dialog::DialogReference;
-use crate::ui::text::{format_component_spans, format_text_spans};
+use crate::ui::text::format_text_spans;
 use crate::world::block::model::CardinalLightType;
 
 fn dialog_holder_reference(
@@ -233,63 +233,6 @@ pub fn handle_game_packet(
                 },
             )));
         }
-        ClientboundGamePacket::SetObjective(p) => {
-            use azalea_protocol::packets::game::c_set_objective::Method;
-            let (display, number_format) = match &p.method {
-                Method::Add {
-                    display_name,
-                    number_format,
-                    ..
-                }
-                | Method::Change {
-                    display_name,
-                    number_format,
-                    ..
-                } => (
-                    Some(format_text_spans(display_name, [1.0; 4])),
-                    objective_number_format(number_format),
-                ),
-                Method::Remove => (None, None),
-            };
-            let _ = event_tx.try_send(NetworkEvent::ScoreboardObjective {
-                name: p.objective_name.clone(),
-                display,
-                number_format,
-            });
-        }
-        // TODO: track the other display slots too — vanilla prefers the
-        // local team's `sidebar.team.<color>` slot over SIDEBAR, and LIST
-        // drives the tab-overlay score column.
-        ClientboundGamePacket::SetDisplayObjective(p)
-            if matches!(
-                p.slot,
-                azalea_protocol::packets::game::c_set_display_objective::DisplaySlot::Sidebar
-            ) =>
-        {
-            let _ = event_tx.try_send(NetworkEvent::ScoreboardDisplay {
-                name: (!p.objective_name.is_empty()).then(|| p.objective_name.clone()),
-            });
-        }
-        ClientboundGamePacket::SetScore(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ScoreboardScore {
-                owner: p.owner.clone(),
-                objective: p.objective_name.clone(),
-                // Wire scores are signed varints; azalea models the field
-                // unsigned.
-                score: p.score as i32,
-                display: p
-                    .display
-                    .as_ref()
-                    .map(|text| format_text_spans(text, [1.0; 4])),
-                number_format: p.number_format.as_ref().map(score_number_format),
-            });
-        }
-        ClientboundGamePacket::ResetScore(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ScoreboardReset {
-                owner: p.owner.clone(),
-                objective: p.objective_name.clone(),
-            });
-        }
         ClientboundGamePacket::SetTime(p) => {
             let day_time = p.clock_updates.values().next().map(|c| c.total_ticks);
             let _ = event_tx.try_send(NetworkEvent::TimeUpdate {
@@ -448,47 +391,6 @@ pub fn handle_game_packet(
     }
 }
 
-fn score_number_format(
-    format: &azalea_chat::numbers::NumberFormat,
-) -> crate::ui::hud::ScoreNumberFormat {
-    use azalea_chat::numbers::NumberFormat;
-
-    use crate::ui::hud::ScoreNumberFormat as F;
-    match format {
-        NumberFormat::Blank => F::Blank,
-        // Vanilla applies the style to the plain number; only the color
-        // matters for rendering, an unstyled number stays white.
-        NumberFormat::Styled { style } => F::Styled(styled_color(style).unwrap_or([1.0; 4])),
-        NumberFormat::Fixed { value } => F::Fixed(format_text_spans(value, [1.0; 4])),
-    }
-}
-
-/// azalea's `SetObjective` reads the number format without vanilla's
-/// `Optional` bool, so the decode lands shifted: vanilla `None` (the common
-/// case) arrives as `Blank`, vanilla `Blank` arrives as `Styled` with empty
-/// NBT, and real styled/fixed formats fail to decode the whole packet. Undo
-/// the shift for the two recoverable cases.
-fn objective_number_format(
-    format: &azalea_chat::numbers::NumberFormat,
-) -> Option<crate::ui::hud::ScoreNumberFormat> {
-    use azalea_chat::numbers::NumberFormat;
-    match format {
-        NumberFormat::Blank => None,
-        NumberFormat::Styled { style } if style.is_none() => {
-            Some(crate::ui::hud::ScoreNumberFormat::Blank)
-        }
-        other => Some(score_number_format(other)),
-    }
-}
-
-fn styled_color(style: &simdnbt::owned::Nbt) -> Option<[f32; 4]> {
-    let color = style
-        .iter()
-        .find_map(|(key, value)| (key.to_str() == "color").then(|| value.string()).flatten())?;
-    let value = azalea_chat::style::TextColor::parse(&color.to_str())?.value;
-    Some(crate::ui::common::rgb(value))
-}
-
 /// Resolves a variant registry holder id to the mob's renderer pool slot.
 /// Matches vanilla, which reads the entry's synced NBT and never the registry
 /// id: a known `asset_id` picks the exact slot, else the `model` field picks
@@ -588,6 +490,9 @@ pub fn handle_raw_game_packet(
         super::hud_wire::handle_raw_hud_packet(packet_id, payload, event_tx),
         "hud",
     ) || took(
+        super::scoreboard_wire::handle_raw_scoreboard_packet(packet_id, payload, event_tx),
+        "scoreboard",
+    ) || took(
         super::entity_data::handle_raw_entity_data(packet_id, payload, registry_holder, event_tx),
         "set_entity_data",
     ) || took(
@@ -612,14 +517,6 @@ pub fn handle_raw_game_packet(
         ),
         "chunk",
     ) {
-        return true;
-    }
-
-    if packet_id == set_player_team_packet_id() {
-        let mut pos = pos;
-        if let Err(error) = handle_raw_player_team(raw, &mut pos, event_tx) {
-            tracing::warn!("Skipping malformed set_player_team packet: {error}");
-        }
         return true;
     }
 
@@ -663,118 +560,6 @@ pub fn handle_raw_game_packet(
     true
 }
 
-/// Pomme-native decoder for Vanilla 26.2 `ClientboundSetPlayerTeamPacket`.
-/// Azalea's pinned packet type still expects the old ChatFormatting color and
-/// cannot represent the native `Optional<TeamColor>` field.
-fn handle_raw_player_team(
-    raw: &[u8],
-    pos: &mut usize,
-    event_tx: &Sender<NetworkEvent>,
-) -> Result<(), String> {
-    use super::chat::{read_bool, read_component, read_string, read_varint_req};
-
-    let name = read_string(raw, pos, 32767, "set_player_team.name")?;
-    let method = read_team_u8(raw, pos, "set_player_team.method")?;
-
-    match method {
-        0 | 2 => {
-            let display_name = read_component(raw, pos)?;
-            let player_prefix = read_component(raw, pos)?;
-            let player_suffix = read_component(raw, pos)?;
-            let _name_tag_visibility =
-                read_varint_req(raw, pos, "set_player_team.name_tag_visibility")?;
-            let collision_rule =
-                collision_rule(read_varint_req(raw, pos, "set_player_team.collision_rule")?);
-            let fill_color = if read_bool(raw, pos)? {
-                Some(team_color(read_varint_req(
-                    raw,
-                    pos,
-                    "set_player_team.color",
-                )?))
-            } else {
-                None
-            };
-            let _options = read_team_u8(raw, pos, "set_player_team.options")?;
-            let members = if method == 0 {
-                Some(read_team_members(raw, pos)?)
-            } else {
-                None
-            };
-            let color = crate::ui::common::rgb(fill_color.unwrap_or(0xFFFFFF));
-            let _ = event_tx.try_send(NetworkEvent::ScoreboardTeam {
-                name,
-                display_name: format_component_spans(&display_name, [1.0; 4]),
-                prefix: format_component_spans(&player_prefix, color),
-                suffix: format_component_spans(&player_suffix, color),
-                color,
-                fill_color,
-                collision_rule,
-                members,
-            });
-        }
-        1 => {
-            let _ = event_tx.try_send(NetworkEvent::ScoreboardTeamRemoved { name });
-        }
-        3 | 4 => {
-            let members = read_team_members(raw, pos)?;
-            let _ = event_tx.try_send(NetworkEvent::ScoreboardTeamMembers {
-                name,
-                members,
-                join: method == 3,
-            });
-        }
-        _ => return Err(format!("unknown set_player_team method {method}")),
-    }
-
-    if *pos != raw.len() {
-        return Err(format!(
-            "set_player_team has {} trailing bytes",
-            raw.len() - *pos
-        ));
-    }
-    Ok(())
-}
-
-/// Vanilla `TeamColor` id N is the legacy formatting code for hex digit N;
-/// out-of-range ids fall back to BLACK (`ByIdMap` ZERO).
-fn team_color(id: u32) -> u32 {
-    use azalea_chat::style::ChatFormatting;
-
-    char::from_digit(id, 16)
-        .and_then(ChatFormatting::from_code)
-        .and_then(|format| format.color())
-        .unwrap_or(0x000000)
-}
-
-/// `Team.CollisionRule` by id; out-of-range ids fall back to ALWAYS.
-fn collision_rule(id: u32) -> crate::ui::hud::CollisionRule {
-    use crate::ui::hud::CollisionRule;
-    match id {
-        1 => CollisionRule::Never,
-        2 => CollisionRule::PushOtherTeams,
-        3 => CollisionRule::PushOwnTeam,
-        _ => CollisionRule::Always,
-    }
-}
-
-fn read_team_members(raw: &[u8], pos: &mut usize) -> Result<Vec<String>, String> {
-    use super::chat::{read_string, read_varint_req};
-
-    let count = read_varint_req(raw, pos, "set_player_team.members.count")? as usize;
-    (0..count)
-        .map(|_| read_string(raw, pos, 32767, "set_player_team.member"))
-        .collect()
-}
-
-fn read_team_u8(raw: &[u8], pos: &mut usize, field: &str) -> Result<u8, String> {
-    let value = raw
-        .get(*pos)
-        .copied()
-        .ok_or_else(|| format!("truncated {field}"))?;
-    *pos += 1;
-    Ok(value)
-}
-
 /// Whether a raw decoder took the packet, logging it when malformed.
 fn took<E: std::fmt::Display>(result: Option<Result<(), E>>, packet: &str) -> bool {
     if let Some(Err(e)) = &result {
@@ -802,17 +587,6 @@ pub(crate) fn handle_raw_for_test(
         event_tx,
     );
     (took, out_rx)
-}
-
-fn set_player_team_packet_id() -> u32 {
-    use pomme_protocol::{Direction, PacketTable, Phase};
-
-    static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *ID.get_or_init(|| {
-        PacketTable::native()
-            .id(Phase::Game, Direction::Clientbound, "set_player_team")
-            .expect("set_player_team in packet table")
-    })
 }
 
 /// Vanilla 26.2 `ClientboundExplodePacket` starts with the center, radius,
@@ -1252,88 +1026,6 @@ mod tests {
                 event_rx.try_recv(),
                 Err(crossbeam_channel::TryRecvError::Empty)
             ));
-        }
-    }
-
-    fn write_team_component(raw: &mut Vec<u8>, text: &str) {
-        azalea_chat::FormattedText::from(text)
-            .azalea_write(raw)
-            .unwrap();
-    }
-
-    #[test]
-    fn raw_player_team_decodes_native_optional_team_color() {
-        let mut raw = Vec::new();
-        wire::write_varint(&mut raw, set_player_team_packet_id());
-        "crew".to_string().azalea_write(&mut raw).unwrap();
-        0_u8.azalea_write(&mut raw).unwrap(); // add
-        write_team_component(&mut raw, "Crew");
-        write_team_component(&mut raw, "[");
-        write_team_component(&mut raw, "]");
-        wire::write_varint(&mut raw, 0); // visibility: always
-        wire::write_varint(&mut raw, 0); // collision: always
-        true.azalea_write(&mut raw).unwrap();
-        wire::write_varint(&mut raw, 12); // TeamColor RED
-        0_u8.azalea_write(&mut raw).unwrap(); // options
-        wire::write_varint(&mut raw, 1);
-        "Player".to_string().azalea_write(&mut raw).unwrap();
-
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw(&raw, &tx));
-        match rx.recv().unwrap() {
-            NetworkEvent::ScoreboardTeam {
-                name,
-                color,
-                fill_color,
-                members,
-                ..
-            } => {
-                assert_eq!(name, "crew");
-                assert_eq!(color, crate::ui::common::rgb(0xFF5555));
-                assert_eq!(fill_color, Some(0xFF5555));
-                assert_eq!(members, Some(vec!["Player".to_string()]));
-            }
-            _ => panic!("expected ScoreboardTeam"),
-        }
-    }
-
-    #[test]
-    fn team_color_and_collision_rule_follow_vanilla_ids() {
-        use crate::ui::hud::CollisionRule;
-
-        assert_eq!(team_color(0), 0x000000);
-        assert_eq!(team_color(12), 0xFF5555);
-        assert_eq!(team_color(15), 0xFFFFFF);
-        assert_eq!(team_color(16), 0x000000);
-        assert_eq!(collision_rule(1), CollisionRule::Never);
-        assert_eq!(collision_rule(3), CollisionRule::PushOwnTeam);
-        assert_eq!(collision_rule(4), CollisionRule::Always);
-    }
-
-    #[test]
-    fn raw_player_team_absent_color_uses_no_fill_color() {
-        let mut raw = Vec::new();
-        wire::write_varint(&mut raw, set_player_team_packet_id());
-        "crew".to_string().azalea_write(&mut raw).unwrap();
-        2_u8.azalea_write(&mut raw).unwrap(); // change
-        write_team_component(&mut raw, "Crew");
-        write_team_component(&mut raw, "");
-        write_team_component(&mut raw, "");
-        wire::write_varint(&mut raw, 0);
-        wire::write_varint(&mut raw, 0);
-        false.azalea_write(&mut raw).unwrap();
-        0_u8.azalea_write(&mut raw).unwrap();
-
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw(&raw, &tx));
-        match rx.recv().unwrap() {
-            NetworkEvent::ScoreboardTeam {
-                color, fill_color, ..
-            } => {
-                assert_eq!(color, [1.0; 4]);
-                assert_eq!(fill_color, None);
-            }
-            _ => panic!("expected ScoreboardTeam"),
         }
     }
 

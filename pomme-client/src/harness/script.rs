@@ -130,6 +130,10 @@ struct HudFields {
     subtitle: Option<String>,
     /// Every boss bar's name, top to bottom.
     boss_bars: Option<Vec<String>>,
+    /// The sidebar objective's title; `""` when none is shown.
+    sidebar_title: Option<String>,
+    /// Every sidebar row, top to bottom, as the `hud` command reports it.
+    sidebar: Option<Vec<String>>,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -499,7 +503,12 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                         .subtitle
                         .as_ref()
                         .is_none_or(|t| *t == shown(&seen.subtitle))
-                    && want.boss_bars.as_ref().is_none_or(|b| *b == bars),
+                    && want.boss_bars.as_ref().is_none_or(|b| *b == bars)
+                    && want
+                        .sidebar_title
+                        .as_ref()
+                        .is_none_or(|t| *t == shown(&seen.sidebar_title))
+                    && want.sidebar.as_ref().is_none_or(|s| *s == seen.sidebar),
                 || format!("hud is {seen:?}"),
             )
         }

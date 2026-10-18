@@ -403,6 +403,14 @@ mod tests {
             t.id(Phase::Game, Direction::Clientbound, "tab_list"),
             Some(122)
         );
+        for (name, id) in [
+            ("reset_score", 79),
+            ("set_display_objective", 98),
+            ("set_objective", 106),
+            ("set_score", 110),
+        ] {
+            assert_eq!(t.id(Phase::Game, Direction::Clientbound, name), Some(id));
+        }
         assert_eq!(
             t.id(Phase::Game, Direction::Clientbound, "sound_entity"),
             Some(116)

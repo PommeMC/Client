@@ -17,6 +17,7 @@ use pomme_protocol::chunk::{self, ChunkPacket};
 use pomme_protocol::container::{self, ContainerPacket};
 use pomme_protocol::hud::{self, BossFlags, BossOp, HudPacket};
 use pomme_protocol::packets::{Direction, PacketTable, Phase};
+use pomme_protocol::scoreboard::{self, NumberFormat, ObjectiveMethod, ScoreboardPacket};
 use pomme_protocol::wire;
 
 fn table_id(phase: Phase, dir: Direction, name: &str) -> u32 {
@@ -3096,28 +3097,31 @@ fn translate_set_score_764() {
         old
     };
 
-    let ClientboundGamePacket::SetScore(p) = translate_and_decode(764, build(0, b"obj", true))
-    else {
-        panic!("wrong packet for change");
-    };
-    assert_eq!(p.owner, "bob");
-    assert_eq!(p.objective_name, "obj");
-    assert_eq!(p.score, 42);
-    assert!(p.display.is_none());
-    assert!(p.number_format.is_none());
-
-    let ClientboundGamePacket::ResetScore(p) = translate_and_decode(764, build(1, b"obj", false))
-    else {
-        panic!("wrong packet for remove");
-    };
-    assert_eq!(p.owner, "bob");
-    assert_eq!(p.objective_name.as_deref(), Some("obj"));
-
-    let ClientboundGamePacket::ResetScore(p) = translate_and_decode(764, build(1, b"", false))
-    else {
-        panic!("wrong packet for remove-all");
-    };
-    assert!(p.objective_name.is_none());
+    let read = |name, old| translate_and_read(764, old, name, scoreboard::read);
+    assert_eq!(
+        read("set_score", build(0, b"obj", true)),
+        ScoreboardPacket::Score {
+            owner: "bob".into(),
+            objective: "obj".into(),
+            score: 42,
+            display: None,
+            number_format: None,
+        }
+    );
+    assert_eq!(
+        read("reset_score", build(1, b"obj", false)),
+        ScoreboardPacket::ResetScore {
+            owner: "bob".into(),
+            objective: Some("obj".into()),
+        }
+    );
+    assert_eq!(
+        read("reset_score", build(1, b"", false)),
+        ScoreboardPacket::ResetScore {
+            owner: "bob".into(),
+            objective: None,
+        }
+    );
 }
 
 /// The 1.20.2 `set_objective` ends at the render type; the display
@@ -3134,19 +3138,16 @@ fn translate_set_objective_764() {
     write_json(&mut old, r#"{"text":"Deaths"}"#);
     wire::write_varint(&mut old, 1); // render type: hearts
 
-    let ClientboundGamePacket::SetObjective(p) = translate_and_decode(764, old) else {
+    let ScoreboardPacket::Objective {
+        method: ObjectiveMethod::Add(parameters),
+        ..
+    } = translate_and_read(764, old, "set_objective", scoreboard::read)
+    else {
         panic!("wrong packet");
     };
-    let azalea_protocol::packets::game::c_set_objective::Method::Add {
-        display_name,
-        number_format,
-        ..
-    } = p.method
-    else {
-        panic!("wrong method");
-    };
-    assert_eq!(display_name.to_string(), "Deaths");
-    assert_eq!(number_format, azalea_chat::numbers::NumberFormat::Blank);
+    assert_eq!(plain(&parameters.display_name), "Deaths");
+    assert_eq!(parameters.render_type, 1);
+    assert_eq!(parameters.number_format, None);
 }
 
 /// The unsplit 1.20.2 `resource_pack` maps to `resource_pack_push` with a
@@ -6281,4 +6282,101 @@ fn hud_packets_match_azalea() {
         panic!("boss_event name");
     };
     assert_eq!(plain(&name), "Renamed");
+}
+
+/// azalea writes `set_objective`'s add and change without the number
+/// format's presence bool, so only its remove is compared here; azalea's
+/// team packet predates 26.2's `Optional<TeamColor>`.
+#[test]
+fn scoreboard_packets_match_azalea() {
+    use azalea_chat::numbers::NumberFormat as AzaleaFormat;
+    use azalea_protocol::packets::game::c_set_display_objective::DisplaySlot;
+    use azalea_protocol::packets::game::*;
+
+    let decode = |name, packet| decode_azalea(name, packet, scoreboard::read);
+    let score = |number_format| {
+        ClientboundGamePacket::SetScore(c_set_score::ClientboundSetScore {
+            owner: "Bob".into(),
+            objective_name: "kills".into(),
+            score: 9,
+            display: None,
+            number_format,
+        })
+    };
+    let pomme_score = |number_format| ScoreboardPacket::Score {
+        owner: "Bob".into(),
+        objective: "kills".into(),
+        score: 9,
+        display: None,
+        number_format,
+    };
+
+    let cases = [
+        (
+            "set_objective",
+            ClientboundGamePacket::SetObjective(c_set_objective::ClientboundSetObjective {
+                objective_name: "kills".into(),
+                method: c_set_objective::Method::Remove,
+            }),
+            ScoreboardPacket::Objective {
+                name: "kills".into(),
+                method: ObjectiveMethod::Remove,
+            },
+        ),
+        (
+            "set_display_objective",
+            ClientboundGamePacket::SetDisplayObjective(
+                c_set_display_objective::ClientboundSetDisplayObjective {
+                    slot: DisplaySlot::Sidebar,
+                    objective_name: "kills".into(),
+                },
+            ),
+            ScoreboardPacket::Display {
+                slot: 1,
+                objective: "kills".into(),
+            },
+        ),
+        ("set_score", score(None), pomme_score(None)),
+        (
+            "set_score",
+            score(Some(AzaleaFormat::Blank)),
+            pomme_score(Some(NumberFormat::Blank)),
+        ),
+        (
+            "reset_score",
+            ClientboundGamePacket::ResetScore(c_reset_score::ClientboundResetScore {
+                owner: "Bob".into(),
+                objective_name: None,
+            }),
+            ScoreboardPacket::ResetScore {
+                owner: "Bob".into(),
+                objective: None,
+            },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+
+    let ScoreboardPacket::Score {
+        display: Some(display),
+        number_format: Some(NumberFormat::Fixed(fixed)),
+        ..
+    } = decode(
+        "set_score",
+        ClientboundGamePacket::SetScore(c_set_score::ClientboundSetScore {
+            owner: "Bob".into(),
+            objective_name: "kills".into(),
+            score: 5,
+            display: Some("Hero".into()),
+            number_format: Some(AzaleaFormat::Fixed { value: "x".into() }),
+        }),
+    )
+    else {
+        panic!("set_score with display");
+    };
+    assert_eq!(
+        (plain(&display), plain(&fixed)),
+        ("Hero".into(), "x".into())
+    );
 }

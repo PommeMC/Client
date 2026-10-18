@@ -170,6 +170,19 @@ impl<'a> Reader<'a> {
         (0..n).map(|_| read(self)).collect()
     }
 
+    /// `ByteBufCodecs.optional` / `readNullable`: a presence bool, then the
+    /// value.
+    pub fn optional<T>(
+        &mut self,
+        read: impl FnOnce(&mut Self) -> DecodeResult<T>,
+    ) -> DecodeResult<Option<T>> {
+        if self.bool()? {
+            read(self).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// `FriendlyByteBuf.readLongArray`: a varint count of at most one long
     /// per 8 remaining bytes, then big-endian longs. BitSets use this too.
     pub fn long_array(&mut self) -> DecodeResult<Vec<u64>> {

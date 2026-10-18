@@ -323,6 +323,9 @@ pub struct HudInfo {
     pub boss_bars: Vec<BossBarInfo>,
     pub tab_header: Option<String>,
     pub tab_footer: Option<String>,
+    pub sidebar_title: Option<String>,
+    /// Each row's name, then its number text after a space when it has one.
+    pub sidebar: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -335,6 +338,7 @@ pub fn hud(game: &GameState) -> HudInfo {
     use crate::ui::text::span_text;
 
     let shown = game.title.shown();
+    let sidebar = game.scoreboard.sidebar();
     HudInfo {
         title: shown.map(|(title, _)| span_text(title)),
         subtitle: shown.and_then(|(_, subtitle)| subtitle).map(span_text),
@@ -348,6 +352,19 @@ pub fn hud(game: &GameState) -> HudInfo {
             .collect(),
         tab_header: game.tab_list.header.as_deref().map(span_text),
         tab_footer: game.tab_list.footer.as_deref().map(span_text),
+        sidebar_title: sidebar.as_ref().map(|(title, _)| span_text(title)),
+        sidebar: sidebar
+            .into_iter()
+            .flat_map(|(_, rows)| rows)
+            .map(|(name, number)| {
+                let (name, number) = (span_text(&name), span_text(&number));
+                if number.is_empty() {
+                    name
+                } else {
+                    format!("{name} {number}")
+                }
+            })
+            .collect(),
     }
 }
 

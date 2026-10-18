@@ -170,7 +170,7 @@ pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<EntityPacket>> {
                 damage_type: r.varint()?,
                 cause: optional_entity_id(r)?,
                 direct: optional_entity_id(r)?,
-                position: if r.bool()? { Some(r.vec3()?) } else { None },
+                position: r.optional(Reader::vec3)?,
             })
         },
         // ClientboundTakeItemEntityPacket.java:26-29

@@ -18,6 +18,7 @@ pub mod known_packs;
 pub mod packets;
 pub mod player;
 pub mod registries;
+pub mod scoreboard;
 pub mod version;
 pub mod wire;
 
