@@ -12,7 +12,7 @@ Thanks for your interest in contributing to Pomme!
    cd Client
    ```
 
-   SteelMC is a submodule; see [Building](./README.md#building) for the
+   SteelMC is a submodule; see [BUILDING.md](./BUILDING.md) for the
    submodule, first-build, and skip notes.
 
 3. Build and run:
@@ -73,8 +73,8 @@ For bug fixes, also include:
 
 ## Project Structure
 
-The workspace crates are listed under [Architecture](./README.md#architecture)
-in the README. Inside the two apps:
+The workspace crates are listed under [Layout](./BUILDING.md#layout)
+in BUILDING.md. Inside the two apps:
 
 ### Pomme client
 
