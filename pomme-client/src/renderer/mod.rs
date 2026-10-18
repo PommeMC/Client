@@ -186,6 +186,9 @@ pub struct Renderer {
     render_finished_per_image: Vec<vk::Semaphore>,
     screenshot: screenshot::ScreenshotCapture,
     swapchain_dirty: bool,
+    /// The native window is gone (Android backgrounded the app), and with it
+    /// the surface and swapchain; nothing renders until `resume`.
+    suspended: bool,
     /// Id of the last present tagged via `VK_KHR_present_id`; per swapchain.
     present_id: u64,
     vsync: bool,
@@ -429,6 +432,7 @@ impl Renderer {
             ctx.physical_device,
             ctx.graphics_family,
             &ctx.allocator,
+            ctx.indirect_draw,
         );
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
@@ -507,6 +511,7 @@ impl Renderer {
             render_finished_per_image,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
             swapchain_dirty: false,
+            suspended: false,
             present_id: 0,
             vsync,
             width: swapchain_extent.width,
@@ -682,6 +687,25 @@ impl Renderer {
             .set_aspect_ratio(new_size.width as f32 / new_size.height as f32);
     }
 
+    /// Drops the surface and swapchain when Android takes the native window,
+    /// keeping the device and every other resource.
+    pub fn suspend(&mut self) {
+        let _ = self.ctx.device.wait_idle();
+        self.swapchain.release_surface(&self.ctx.device);
+        self.ctx.destroy_surface();
+        self.suspended = true;
+    }
+
+    /// Rebuilds the surface and swapchain for the window Android hands back.
+    pub fn resume(&mut self, window: &Window) -> Result<(), RendererError> {
+        if !self.suspended {
+            return Ok(());
+        }
+        self.ctx.recreate_surface(window)?;
+        self.suspended = false;
+        self.recreate_swapchain()
+    }
+
     pub fn set_vsync(&mut self, vsync: bool) {
         if self.vsync != vsync {
             self.vsync = vsync;
@@ -696,7 +720,10 @@ impl Renderer {
         const PACE_TIMEOUT_NS: u64 = 100_000_000;
 
         self.last_timings.pace_ms = 0.0;
-        if self.swapchain_dirty || self.swapchain.present_mode != vk::PresentModeKHR::Fifo {
+        if self.suspended
+            || self.swapchain_dirty
+            || self.swapchain.present_mode != vk::PresentModeKHR::Fifo
+        {
             return;
         }
         let t_pace = std::time::Instant::now();
@@ -1477,6 +1504,9 @@ impl Renderer {
         clear_color: [f32; 4],
         mut mode: RenderMode<'_>,
     ) -> Result<(), RendererError> {
+        if self.suspended {
+            return Ok(());
+        }
         if self.swapchain_dirty {
             self.recreate_swapchain()?;
         }

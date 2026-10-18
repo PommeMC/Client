@@ -1,0 +1,58 @@
+# Android
+
+An early port: the client builds as an arm64 APK, joins an offline-mode
+server and plays with touch controls. There is no login or asset download on
+the device yet, so the assets come from a desktop install over `adb`.
+
+## Setup (macOS)
+
+```sh
+brew install --cask android-commandlinetools
+brew install openjdk@17 gradle
+rustup target add aarch64-linux-android
+cargo install cargo-ndk
+
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
+sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0" \
+    "ndk;27.2.12479018" "cmake;3.22.1" "emulator" \
+    "system-images;android-35;google_apis;arm64-v8a"
+avdmanager create avd -n pomme -k "system-images;android-35;google_apis;arm64-v8a" -d pixel_7
+```
+
+Gradle needs JDK 17; the Android Gradle plugin doesn't run on newer ones.
+`cmake` is for `aws-lc-rs`, which rustls builds from C.
+
+## Running
+
+```sh
+emulator -avd pomme -gpu host &           # or a phone with USB debugging on
+just ingame-server                         # prints the port; offline mode
+just android-install                       # builds the APK and installs it
+just android-push-assets                   # once: assets and the 26.2 version files
+just android-config --username Tester --quick-access-multiplayer 10.0.2.2:<port>
+just android-run
+just android-log                           # logcat, filtered to pomme
+```
+
+`10.0.2.2` is the Mac as seen from the emulator. `launch.txt` (what
+`android-config` writes) holds the same flags the desktop client takes,
+in the app's files directory, `/sdcard/Android/data/com.pommemc.client/files`.
+The game directory (`options.json`, logs, screenshots) is `.pomme` under it.
+
+## Controls
+
+In the world: drag on the left to move (the stick appears where you press),
+drag elsewhere to look, tap to use or place, hold still to break. Buttons:
+jump (bottom right), inventory and pause (top right), and tapping a hotbar slot
+selects it. On any screen, a touch is the mouse pointer.
+
+## Limitations
+
+- No audio: OpenAL isn't bundled yet.
+- Offline-mode servers only: no Microsoft login on the device.
+- No singleplayer: the embedded server is off on Android.
+- No soft keyboard, so no chat or typing; the server comes from `launch.txt`.
+- The emulator's Vulkan is translated to the Mac's GPU, so rendering bugs
+  seen there may not be real, and its performance says nothing about phones.
+  Untested on real devices.

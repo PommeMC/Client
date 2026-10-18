@@ -8,9 +8,10 @@ use std::collections::{HashMap, HashSet};
 
 use gilrs::ff::{BaseEffect, Effect, EffectBuilder, Repeat, Replay};
 use gilrs::{Button, GamepadId, Gilrs};
-use winit::event::{ElementState, Modifiers, MouseButton};
+use winit::event::{ElementState, Modifiers, MouseButton, Touch};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
+use self::touch::{TouchControls, TouchLayout, TouchOutput};
 use crate::app::TICK_RATE_MS;
 use crate::app::phases::AppPhase;
 use crate::app::state_slot::StateSlot;
@@ -20,6 +21,7 @@ pub mod action;
 pub mod input_key;
 pub mod key_bindings;
 mod metadata;
+pub mod touch;
 
 pub use action::Action;
 pub use input_key::InputKey;
@@ -146,6 +148,7 @@ pub struct InputState {
     harness_press: Option<(KeyCode, bool)>,
     mouse_delta: (f64, f64),
     cursor_captured: bool,
+    touch: TouchControls,
     selected_slot: u8,
     left_click: ClickState,
     right_click: ClickState,
@@ -253,6 +256,7 @@ impl InputState {
             harness_press: None,
             mouse_delta: (0.0, 0.0),
             cursor_captured: true,
+            touch: TouchControls::default(),
             selected_slot: 0,
             left_click: ClickState::default(),
             right_click: ClickState::default(),
@@ -296,6 +300,8 @@ impl InputState {
         for event in &events {
             self.on_gamepad_event(event);
         }
+        let held = self.touch.tick(std::time::Instant::now());
+        self.apply_touch(held);
 
         if self.binding_capture {
             return false;
@@ -568,7 +574,9 @@ impl InputState {
     pub fn performing_action(&self, action: Action) -> bool {
         match action {
             Action::Jump => {
-                self.default_key_pressed(action) || self.gamepad_button_down(Button::South)
+                self.default_key_pressed(action)
+                    || self.gamepad_button_down(Button::South)
+                    || self.touch.jump_held()
             }
             Action::Sneak => {
                 self.default_key_pressed(action) || self.gamepad_button_down(Button::LeftThumb)
@@ -649,8 +657,12 @@ impl InputState {
         self.gamepad_stick(gilrs::Axis::LeftStickX, gilrs::Axis::LeftStickY)
     }
 
-    pub fn get_gamepad_movement_axes(&self) -> Option<glam::Vec2> {
-        self.get_gamepad_left_analog().map(gamepad_movement_axes)
+    /// The touch stick's or gamepad left stick's movement, touch first.
+    pub fn analog_movement_axes(&self) -> Option<glam::Vec2> {
+        self.touch
+            .stick()
+            .or_else(|| self.get_gamepad_left_analog())
+            .map(gamepad_movement_axes)
     }
 
     pub fn get_gamepad_right_analog(&self) -> Option<glam::Vec2> {
@@ -1009,6 +1021,52 @@ impl InputState {
             self.selected_slot = (self.selected_slot + 8) % 9;
         } else if delta < 0.0 {
             self.selected_slot = (self.selected_slot + 1) % 9;
+        }
+    }
+
+    /// `gameplay`: the world has the input (no screen, chat or pause menu).
+    pub fn on_touch(&mut self, touch: &Touch, gameplay: bool, layout: &TouchLayout) {
+        let p = glam::vec2(touch.location.x as f32, touch.location.y as f32);
+        let out = self.touch.on_touch(
+            touch.id,
+            touch.phase,
+            p,
+            gameplay,
+            layout,
+            std::time::Instant::now(),
+        );
+        self.apply_touch(out);
+    }
+
+    pub fn touch(&self) -> &TouchControls {
+        &self.touch
+    }
+
+    /// Plays touch gestures through the mouse and key paths, so everything
+    /// downstream treats them as clicks, drags and key presses.
+    fn apply_touch(&mut self, out: Vec<TouchOutput>) {
+        for output in out {
+            match output {
+                TouchOutput::Look(delta) => self.on_mouse_motion((delta.x.into(), delta.y.into())),
+                TouchOutput::DestroyStart | TouchOutput::PointerDown => {
+                    self.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+                }
+                TouchOutput::DestroyEnd | TouchOutput::PointerUp => {
+                    self.on_mouse_button(MouseButton::Left, ElementState::Released);
+                }
+                TouchOutput::Use => {
+                    self.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+                    self.on_mouse_button(MouseButton::Right, ElementState::Released);
+                }
+                TouchOutput::Tap(action) => {
+                    if let Some(key) = action.default_key() {
+                        self.on_key(key, ElementState::Pressed, false);
+                        self.on_key(key, ElementState::Released, false);
+                    }
+                }
+                TouchOutput::Hotbar(slot) => self.selected_slot = slot,
+                TouchOutput::PointerMove(p) => self.on_cursor_moved(p.x, p.y),
+            }
         }
     }
 

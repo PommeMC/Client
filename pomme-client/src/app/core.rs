@@ -3193,9 +3193,7 @@ impl AppCore {
     fn send_input_packet(input: &InputState, connection: &ConnectionHandle, game: &mut GameState) {
         let sender = &connection.packet_tx;
 
-        let analog_move = input
-            .get_gamepad_movement_axes()
-            .unwrap_or(glam::Vec2::ZERO);
+        let analog_move = input.analog_movement_axes().unwrap_or(glam::Vec2::ZERO);
 
         let current =
             player_input_state(input, analog_move, input.performing_action(Action::Sprint));

@@ -60,6 +60,12 @@ pub struct LaunchArgs {
 }
 
 impl LaunchArgs {
+    /// Arguments written out as on a command line, whitespace-separated, for
+    /// platforms (Android) that start without an argv.
+    pub fn from_words(text: &str) -> Result<Self, clap::Error> {
+        Self::try_parse_from(std::iter::once("pomme").chain(text.split_whitespace()))
+    }
+
     pub fn data_dirs(&self, version: &str) -> DataDirs {
         DataDirs::resolve(
             version,
@@ -73,5 +79,25 @@ impl LaunchArgs {
     /// them, and an older one still uses the old layout.
     pub fn owns_data_folder(&self) -> bool {
         self.assets_dir.is_none() && self.versions_dir.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LaunchArgs;
+
+    #[test]
+    fn launch_words_parse_like_argv() {
+        let args = LaunchArgs::from_words(
+            "--username Tester\n--quick-access-multiplayer 10.0.2.2:25565\n",
+        )
+        .unwrap();
+        assert_eq!(args.username.as_deref(), Some("Tester"));
+        assert_eq!(
+            args.quick_access_multiplayer.as_deref(),
+            Some("10.0.2.2:25565")
+        );
+        assert!(LaunchArgs::from_words("").unwrap().username.is_none());
+        assert!(LaunchArgs::from_words("--no-such-flag").is_err());
     }
 }

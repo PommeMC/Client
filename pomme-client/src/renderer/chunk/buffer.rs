@@ -7,6 +7,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use super::mesher::{ChunkAABB, ChunkMeshData, PackedVertex, SectionMesh};
+use crate::renderer::context::IndirectDrawFeatures;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const BUCKET_VERTICES: u32 = 32768;
@@ -416,6 +417,7 @@ impl ChunkAlloc {
 }
 
 pub struct ChunkBufferStore {
+    indirect_draw: IndirectDrawFeatures,
     /// Capacity (in draws) of the per-frame meta/indirect buffers. Grown on
     /// demand because per-section packing yields many more draws than buckets.
     max_meta: usize,
@@ -496,6 +498,7 @@ impl ChunkBufferStore {
         physical_device: vk::PhysicalDevice,
         graphics_family: u32,
         allocator: &Arc<Mutex<Allocator>>,
+        indirect_draw: IndirectDrawFeatures,
     ) -> Self {
         let total_buckets = compute_bucket_count(physical_device);
         let vertex_size = total_buckets as u64 * BUCKET_VERTICES as u64 * VERTEX_SIZE;
@@ -819,6 +822,7 @@ impl ChunkBufferStore {
         }
 
         Self {
+            indirect_draw,
             max_meta,
             vertex_buffer,
             vertex_alloc,
@@ -1486,14 +1490,15 @@ impl ChunkBufferStore {
                 + read_and_clear(&mut self.count_cutout_allocs[frame]);
         }
 
-        // macOS draws the whole indirect buffer (no drawIndirectCount), so slots
+        // Without drawIndirectCount the whole indirect buffer is drawn, so slots
         // the cull shader leaves unfilled must read as no-op draws, not stale data.
-        #[cfg(target_os = "macos")]
-        for a in [
-            &mut self.indirect_allocs[frame],
-            &mut self.indirect_cutout_allocs[frame],
-        ] {
-            a.mapped_slice_mut().unwrap().fill(0);
+        if !self.indirect_draw.count {
+            for a in [
+                &mut self.indirect_allocs[frame],
+                &mut self.indirect_cutout_allocs[frame],
+            ] {
+                a.mapped_slice_mut().unwrap().fill(0);
+            }
         }
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Compute, self.compute_pipeline);
@@ -1552,17 +1557,15 @@ impl ChunkBufferStore {
         // instance for the section origin + fade (indexed by `first_instance`).
         cmd.bind_vertex_buffers(0, &[self.vertex_buffer, self.meta_buffers[frame]], &[0, 0]);
         cmd.bind_index_buffer(self.index_buffer, 0, vk::IndexType::Uint32);
-        if cfg!(target_os = "macos") {
-            cmd.draw_indexed_indirect(indirect, 0, max_draws, size_of::<DrawCommand>() as u32);
+        let stride = size_of::<DrawCommand>() as u32;
+        if self.indirect_draw.count {
+            cmd.draw_indexed_indirect_count(indirect, 0, count, 0, max_draws, stride);
+        } else if self.indirect_draw.multi_draw {
+            cmd.draw_indexed_indirect(indirect, 0, max_draws, stride);
         } else {
-            cmd.draw_indexed_indirect_count(
-                indirect,
-                0,
-                count,
-                0,
-                max_draws,
-                size_of::<DrawCommand>() as u32,
-            );
+            for i in 0..max_draws {
+                cmd.draw_indexed_indirect(indirect, (i * stride) as u64, 1, stride);
+            }
         }
     }
 

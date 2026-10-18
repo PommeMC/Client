@@ -10,6 +10,31 @@ use super::context::ContextError;
 use super::util;
 use crate::renderer::context::VulkanContext;
 
+/// An 8-bit sRGB format: BGRA (desktop drivers) or RGBA (Android), else the
+/// first one offered.
+fn choose_format(formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
+    [vk::Format::B8G8R8A8Srgb, vk::Format::R8G8B8A8Srgb]
+        .into_iter()
+        .find_map(|want| {
+            formats
+                .iter()
+                .copied()
+                .find(|f| f.format == want && f.color_space == vk::ColorSpaceKHR::SrgbNonlinear)
+        })
+        .unwrap_or(formats[0])
+}
+
+/// Opaque when the surface allows it; some Android surfaces offer only Inherit.
+fn choose_composite_alpha(supported: vk::CompositeAlphaFlagsKHR) -> vk::CompositeAlphaFlagsKHR {
+    [
+        vk::CompositeAlphaFlagsKHR::Opaque,
+        vk::CompositeAlphaFlagsKHR::Inherit,
+    ]
+    .into_iter()
+    .find(|&alpha| supported.contains(alpha))
+    .unwrap_or(vk::CompositeAlphaFlagsKHR::Opaque)
+}
+
 #[allow(dead_code)]
 pub struct Swapchain {
     pub handle: vk::SwapchainKHR,
@@ -41,14 +66,7 @@ impl Swapchain {
         let formats = ctx.physical_device.get_surface_formats(ctx.surface)?;
         let present_modes = ctx.physical_device.get_surface_present_modes(ctx.surface)?;
 
-        let format = formats
-            .iter()
-            .find(|f| {
-                f.format == vk::Format::B8G8R8A8Srgb
-                    && f.color_space == vk::ColorSpaceKHR::SrgbNonlinear
-            })
-            .copied()
-            .unwrap_or(formats[0]);
+        let format = choose_format(&formats);
 
         let present_mode = if vsync {
             vk::PresentModeKHR::Fifo
@@ -114,7 +132,7 @@ impl Swapchain {
             queue_family_index_count: queue_families.len() as u32,
             queue_family_indices: queue_families.as_ptr(),
             pre_transform: caps.current_transform,
-            composite_alpha: vk::CompositeAlphaFlagsKHR::Opaque,
+            composite_alpha: choose_composite_alpha(caps.supported_composite_alpha),
             present_mode,
             clipped: vk::TRUE,
             old_swapchain,
@@ -187,9 +205,9 @@ impl Swapchain {
         })
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let _ = device.wait_idle();
-
+    /// Destroys what depends on the surface: the framebuffers, the image
+    /// views and the swapchain. `destroy` then skips them.
+    pub fn release_surface(&mut self, device: &vk::Device) {
         for fbs in [
             &mut self.framebuffers,
             &mut self.framebuffers_scene,
@@ -200,6 +218,20 @@ impl Swapchain {
             }
             fbs.clear();
         }
+
+        for &view in &self.image_views {
+            device.destroy_image_view(view, None);
+        }
+        self.image_views.clear();
+
+        device.destroy_swapchain(self.handle, None);
+        self.handle = vk::SwapchainKHR::null();
+    }
+
+    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        let _ = device.wait_idle();
+
+        self.release_surface(device);
 
         for &rp in &[
             self.render_pass,
@@ -214,13 +246,6 @@ impl Swapchain {
             allocator.lock().unwrap().free(alloc).ok();
         }
         device.destroy_image(self.depth_image, None);
-
-        for &view in &self.image_views {
-            device.destroy_image_view(view, None);
-        }
-        self.image_views.clear();
-
-        device.destroy_swapchain(self.handle, None);
     }
 
     pub fn aspect_ratio(&self) -> f32 {
@@ -447,4 +472,50 @@ fn create_render_pass_variant(
     };
 
     device.create_render_pass(&info, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use pyronyx::vk;
+
+    use super::{choose_composite_alpha, choose_format};
+
+    fn format(format: vk::Format) -> vk::SurfaceFormatKHR {
+        vk::SurfaceFormatKHR {
+            format,
+            color_space: vk::ColorSpaceKHR::SrgbNonlinear,
+        }
+    }
+
+    #[test]
+    fn prefers_an_srgb_format_in_either_channel_order() {
+        let desktop = [
+            format(vk::Format::B8G8R8A8Unorm),
+            format(vk::Format::B8G8R8A8Srgb),
+        ];
+        assert_eq!(choose_format(&desktop).format, vk::Format::B8G8R8A8Srgb);
+        let android = [
+            format(vk::Format::R8G8B8A8Unorm),
+            format(vk::Format::R8G8B8A8Srgb),
+        ];
+        assert_eq!(choose_format(&android).format, vk::Format::R8G8B8A8Srgb);
+        let neither = [format(vk::Format::R5G6B5UnormPack16)];
+        assert_eq!(
+            choose_format(&neither).format,
+            vk::Format::R5G6B5UnormPack16
+        );
+    }
+
+    #[test]
+    fn composite_alpha_falls_back_to_inherit() {
+        let both = vk::CompositeAlphaFlagsKHR::Opaque | vk::CompositeAlphaFlagsKHR::Inherit;
+        assert_eq!(
+            choose_composite_alpha(both),
+            vk::CompositeAlphaFlagsKHR::Opaque
+        );
+        assert_eq!(
+            choose_composite_alpha(vk::CompositeAlphaFlagsKHR::Inherit),
+            vk::CompositeAlphaFlagsKHR::Inherit
+        );
+    }
 }

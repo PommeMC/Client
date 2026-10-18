@@ -129,19 +129,30 @@ impl Layout {
     }
 }
 
+static ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Replaces the per-user root, for platforms (Android) whose app storage
+/// `directories` doesn't know. Call it before anything uses [`layout`].
+pub fn set_root(root: PathBuf) {
+    let _ = ROOT.set(root);
+}
+
 /// The per-user layout: `%LOCALAPPDATA%\Pomme`,
-/// `~/Library/Application Support/Pomme` or `~/.local/share/pomme`.
+/// `~/Library/Application Support/Pomme` or `~/.local/share/pomme`, unless
+/// [`set_root`] named another.
 pub fn layout() -> &'static Layout {
     static LAYOUT: OnceLock<Layout> = OnceLock::new();
     LAYOUT.get_or_init(|| {
-        let name = if cfg!(target_os = "linux") {
-            "pomme"
-        } else {
-            "Pomme"
-        };
-        let root = directories::BaseDirs::new()
-            .map(|dirs| dirs.data_local_dir().join(name))
-            .unwrap_or_else(|| PathBuf::from(name));
+        let root = ROOT.get().cloned().unwrap_or_else(|| {
+            let name = if cfg!(target_os = "linux") {
+                "pomme"
+            } else {
+                "Pomme"
+            };
+            directories::BaseDirs::new()
+                .map(|dirs| dirs.data_local_dir().join(name))
+                .unwrap_or_else(|| PathBuf::from(name))
+        });
         Layout::new(root)
     })
 }

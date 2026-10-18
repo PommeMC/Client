@@ -277,6 +277,12 @@ pub fn push_results_overlay(
 
 /// Copy `text` to the system clipboard, returning whether it succeeded.
 pub(crate) fn set_clipboard(text: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        let _ = text;
+        return false;
+    }
+    #[cfg(not(target_os = "android"))]
     match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
         Ok(()) => true,
         Err(err) => {

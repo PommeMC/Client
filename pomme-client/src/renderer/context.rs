@@ -46,6 +46,16 @@ const DEVICE_EXTENSIONS: &[&CStr] = &[
     khr::portability_subset::NAME,
 ];
 
+/// The optional features behind the chunk pass's indirect draws.
+#[derive(Clone, Copy, Debug)]
+pub struct IndirectDrawFeatures {
+    /// `vkCmdDrawIndexedIndirectCount` (core in 1.2). Without it the whole
+    /// draw list is drawn, its unfilled slots zeroed into no-op draws.
+    pub count: bool,
+    /// `multiDrawIndirect`. Without it each draw-list slot is its own call.
+    pub multi_draw: bool,
+}
+
 /// Optional, enabled only when the device supports both.
 const PRESENT_WAIT_EXTENSIONS: &[&CStr] = &[khr::present_id::NAME, khr::present_wait::NAME];
 
@@ -69,6 +79,7 @@ pub struct VulkanContext {
     pub in_flight_fences: [vk::Fence; MAX_FRAMES_IN_FLIGHT],
     pub frame_index: usize,
     pub present_wait: bool,
+    pub indirect_draw: IndirectDrawFeatures,
 
     #[cfg(debug_assertions)]
     debug_messenger: vk::DebugUtilsMessengerEXT,
@@ -80,7 +91,6 @@ pub struct VulkanContext {
 impl VulkanContext {
     pub fn new(window: &Window) -> Result<Self, ContextError> {
         let display_handle = window.display_handle()?.as_raw();
-        let window_handle = window.window_handle()?.as_raw();
 
         #[allow(unused_mut)]
         let mut extensions = get_required_extensions(display_handle)?.to_vec();
@@ -150,7 +160,7 @@ impl VulkanContext {
             vk::DebugUtilsMessengerEXT::null()
         };
 
-        let surface = create_surface(&instance, display_handle, window_handle)?;
+        let surface = window_surface(&instance, window)?;
 
         let (physical_device, graphics_family, present_family) =
             pick_physical_device(&instance, surface)?;
@@ -197,13 +207,18 @@ impl VulkanContext {
             ]
         };
 
+        let indirect_draw = IndirectDrawFeatures {
+            count: supports_draw_indirect_count(&physical_device),
+            multi_draw: physical_device.get_features().multi_draw_indirect == vk::TRUE,
+        };
+        tracing::info!("Indirect draws: {indirect_draw:?}");
+        let enabled_features = vk::PhysicalDeviceFeatures {
+            multi_draw_indirect: indirect_draw.multi_draw.into(),
+            draw_indirect_first_instance: vk::TRUE,
+            ..Default::default()
+        };
         let mut vk12_features = vk::PhysicalDeviceVulkan12Features {
-            // MoltenVK lacks drawIndirectCount; the chunk renderer has a macOS fallback.
-            draw_indirect_count: if cfg!(target_os = "macos") {
-                vk::FALSE
-            } else {
-                vk::TRUE
-            },
+            draw_indirect_count: vk::TRUE,
             ..Default::default()
         };
 
@@ -235,9 +250,13 @@ impl VulkanContext {
             queue_create_infos: queue_create_infos.as_ptr(),
             enabled_extension_count: device_extension_names.len() as u32,
             enabled_extension_names: device_extension_names.as_ptr(),
+            enabled_features: &enabled_features,
             ..Default::default()
+        };
+        // Only a 1.2 device takes the struct, so it's chained only with the count.
+        if indirect_draw.count {
+            device_info = device_info.next(&mut vk12_features);
         }
-        .next(&mut vk12_features);
         if present_wait {
             device_info = device_info
                 .next(&mut present_id_features)
@@ -305,11 +324,24 @@ impl VulkanContext {
             in_flight_fences,
             frame_index: 0,
             present_wait,
+            indirect_draw,
             #[cfg(debug_assertions)]
             debug_messenger,
             gpu_name,
             vulkan_version,
         })
+    }
+
+    /// Destroys the surface while Android has taken the native window away.
+    pub fn destroy_surface(&mut self) {
+        self.instance.destroy_surface(self.surface, None);
+        self.surface = vk::SurfaceKHR::null();
+    }
+
+    /// A surface for the native window Android hands back on resume.
+    pub fn recreate_surface(&mut self, window: &Window) -> Result<(), ContextError> {
+        self.surface = window_surface(&self.instance, window)?;
+        Ok(())
     }
 
     pub fn advance_frame(&mut self) {
@@ -357,7 +389,10 @@ fn pick_physical_device(
         .into_iter()
         .filter_map(|pd| {
             let (gf, pf) = find_queue_families(&pd, surface)?;
-            if !supports_extensions(&pd, DEVICE_EXTENSIONS) {
+            // The chunk pass indexes each section's meta by `firstInstance`.
+            if !supports_extensions(&pd, DEVICE_EXTENSIONS)
+                || pd.get_features().draw_indirect_first_instance != vk::TRUE
+            {
                 return None;
             }
             let props = pd.get_properties();
@@ -388,6 +423,25 @@ fn supports_extensions(device: &vk::PhysicalDevice, names: &[&CStr]) -> bool {
             .iter()
             .any(|ext| unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) == required })
     })
+}
+
+fn window_surface(
+    instance: &vk::Instance,
+    window: &Window,
+) -> Result<vk::SurfaceKHR, ContextError> {
+    let display_handle = window.display_handle()?.as_raw();
+    let window_handle = window.window_handle()?.as_raw();
+    Ok(create_surface(instance, display_handle, window_handle)?)
+}
+
+fn supports_draw_indirect_count(device: &vk::PhysicalDevice) -> bool {
+    if device.get_properties().api_version < vk::API_VERSION_1_2 {
+        return false;
+    }
+    let mut vk12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default().next(&mut vk12);
+    device.get_features2(&mut features);
+    vk12.draw_indirect_count == vk::TRUE
 }
 
 fn supports_present_wait(device: &vk::PhysicalDevice) -> bool {

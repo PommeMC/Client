@@ -19,14 +19,21 @@ pub fn init(log_dir: &Path) -> WorkerGuard {
                 .with_writer(non_blocking)
                 .with_filter(file_filter),
         )
-        .with(
-            fmt::layer()
-                .with_writer(std::io::stdout)
-                .with_filter(stdout_filter),
-        )
+        .with(console_layer().with_filter(stdout_filter))
         .init();
 
     guard
+}
+
+/// Stdout, or logcat on Android, which drops stdout.
+fn console_layer<S>() -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    #[cfg(target_os = "android")]
+    return paranoid_android::layer("pomme");
+    #[cfg(not(target_os = "android"))]
+    fmt::layer().with_writer(std::io::stdout)
 }
 
 const MAX_LOG_FILES: usize = 5;

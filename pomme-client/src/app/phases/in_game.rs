@@ -2786,6 +2786,18 @@ pub fn update_game(
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
+        if core.input.touch().seen() && !game.gui_open() && !game.chat.is_open() {
+            let layout = input::touch::TouchLayout {
+                width: sw,
+                height: sh,
+                gs,
+            };
+            crate::ui::touch_controls::build_touch_controls(
+                &mut elements,
+                &layout,
+                core.input.touch(),
+            );
+        }
     }
 
     // Vanilla Hud.extractSleepOverlay sits outside the isHidden gate: above

@@ -448,6 +448,25 @@ const ICON_STRIDE: f32 = 8.0;
 const XP_BAR_W: f32 = 182.0;
 const XP_BAR_H: f32 = 5.0;
 
+/// The hotbar sprite's top-left corner.
+fn hotbar_origin(screen_w: f32, screen_h: f32, gs: f32) -> (f32, f32) {
+    (
+        (screen_w / 2.0 - HOTBAR_W * gs / 2.0).round(),
+        (screen_h - HOTBAR_H * gs).round(),
+    )
+}
+
+/// The hotbar slot under `(x, y)`, for touch selection.
+pub fn hotbar_slot_at(screen_w: f32, screen_h: f32, gs: f32, (x, y): (f32, f32)) -> Option<u8> {
+    let (hotbar_x, hotbar_y) = hotbar_origin(screen_w, screen_h, gs);
+    if y < hotbar_y {
+        return None;
+    }
+    // A 1-unit border, then nine 20-unit slots.
+    let slot = ((x - hotbar_x - gs) / (SLOT_STRIDE * gs)).floor();
+    (0.0..9.0).contains(&slot).then_some(slot as u8)
+}
+
 /// Vanilla `Window.calculateScale`: the largest scale that keeps the screen at
 /// least 320x240, capped by `setting` (0 is Auto), then made even while Force
 /// Unicode Font is on.
@@ -604,8 +623,7 @@ pub fn build_hud(
     // The bar geometry also anchors the status rows and XP bar below.
     let hotbar_w = HOTBAR_W * gs;
     let hotbar_h = HOTBAR_H * gs;
-    let hotbar_x = (cx - hotbar_w / 2.0).round();
-    let hotbar_y = (screen_h - hotbar_h).round();
+    let (hotbar_x, hotbar_y) = hotbar_origin(screen_w, screen_h, gs);
 
     // Vanilla `Hud.extractHotbarAndDecorations`: spectators get the spectator
     // command bar (pushed by the caller) instead of the item hotbar.

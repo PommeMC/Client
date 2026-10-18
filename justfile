@@ -46,6 +46,40 @@ ingame-test *scripts: openal
 ingame-server:
     @cargo run -p ingame-test -- --server-only
 
+# Android (pomme-android/README.md): the arm64 debug APK.
+android_files := "/sdcard/Android/data/com.pommemc.client/files"
+
+android-build:
+    @cargo ndk -t arm64-v8a -o pomme-android/app/src/main/jniLibs build -p pomme-android
+    @cd pomme-android && ./gradlew -q assembleDebug
+
+android-install: android-build
+    @adb install -r pomme-android/app/build/outputs/apk/debug/app-debug.apk
+
+android-run:
+    @adb shell am start -n com.pommemc.client/android.app.NativeActivity
+
+# Copies an install's assets and version files (the launcher's, by default)
+# onto the device.
+android-push-assets src=(home_directory() / "Library/Application Support/.pomme"):
+    #!/usr/bin/env bash
+    set -e
+    adb shell mkdir -p "{{ android_files }}/.pomme/versions"
+    adb push "{{ src }}/assets" "{{ android_files }}/.pomme/"
+    adb push "{{ src }}/versions/26.2" "{{ android_files }}/.pomme/versions/"
+
+# The launch arguments, as on a command line, e.g.
+# `just android-config --username Tester --quick-access-multiplayer 10.0.2.2:25565`.
+android-config *args:
+    #!/usr/bin/env bash
+    set -e
+    file=$(mktemp)
+    echo "{{ args }}" > "$file"
+    adb push "$file" "{{ android_files }}/launch.txt"
+
+android-log:
+    @adb logcat -s pomme:V RustStdoutStderr:V AndroidRuntime:E DEBUG:V
+
 # TODO: CI also runs the client's clippy and tests with --no-default-features; mirror it here.
 
 client-pre-pr:

@@ -4,6 +4,7 @@
 
 ```bash
 pomme-client/         # Minecraft client (Rust, Vulkan)
+pomme-android/        # Android entry point and APK project (see its README)
 pomme-launcher/       # Launcher app (Tauri, React, TypeScript)
 pomme-protocol/       # Per-version protocol data and wire encoding
 pomme-dirs/           # The data folder layout the client and launcher share
@@ -120,6 +121,11 @@ profiles/<name>/      options, servers, saves, screenshots, logs, mods, packs
 cache/<version>/      rebuildable; safe to delete
 launcher/             launcher-only settings, installations and client builds
 ```
+
+### Android
+
+An early arm64 build with touch controls; setup and limitations are in
+[`pomme-android/README.md`](pomme-android/README.md).
 
 ## Development commands
 

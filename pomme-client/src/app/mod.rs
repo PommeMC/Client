@@ -16,6 +16,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::app::core::AppCore;
+use crate::app::input::touch::TouchLayout;
 use crate::app::phases::connecting::{ConnectingUpdateResult, update_connecting};
 use crate::app::phases::in_game::{GameState, GameUpdateResult, update_game};
 use crate::app::phases::in_menu::{MenuUpdateResult, connect_args, open_world, update_menu};
@@ -222,10 +223,14 @@ impl App {
         self.harness.as_ref()?.exit_code()
     }
 
-    pub fn run(&mut self) -> Result<(), WindowError> {
-        let event_loop = EventLoop::new()?;
+    pub fn run(&mut self, event_loop: EventLoop<()>) -> Result<(), WindowError> {
         event_loop.run_app(self)?;
         Ok(())
+    }
+
+    /// The world, not a screen, chat or the pause menu, takes pointer motion.
+    fn world_has_pointer(&self) -> bool {
+        matches!(self.phase.get(), AppPhase::InGame { game, .. } if !game.paused && !game.dead && !game.death_screen_open && !game.gui_open() && !game.chat.is_open())
     }
 
     /// The effective framerate cap, or `None` for uncapped, matching vanilla
@@ -249,7 +254,20 @@ impl ApplicationHandler for App {
         self.core.menu.flush_settings();
     }
 
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(gfx) = self.phase.gfx_mut() {
+            gfx.renderer.suspend();
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(gfx) = self.phase.gfx_mut() {
+            if let Err(e) = gfx.renderer.resume(&gfx.window) {
+                tracing::error!("Failed to resume the renderer: {e}");
+                event_loop.exit();
+            }
+            return;
+        }
         self.phase.transition(|app| match app {
             AppPhase::Setup {
                 quick_play,
@@ -697,6 +715,19 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
             }
+            WindowEvent::Touch(touch) => {
+                let gameplay = self.world_has_pointer();
+                if let Some(gfx) = self.phase.gfx_mut() {
+                    let width = gfx.renderer.screen_width() as f32;
+                    let height = gfx.renderer.screen_height() as f32;
+                    let layout = TouchLayout {
+                        width,
+                        height,
+                        gs: self.core.menu.gui_scale(width, height),
+                    };
+                    self.core.input.on_touch(&touch, gameplay, &layout);
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.core
                     .input
@@ -962,7 +993,7 @@ impl ApplicationHandler for App {
     ) {
         if let DeviceEvent::MouseMotion { delta } = event
             && self.core.input.is_cursor_captured()
-            && matches!(self.phase.get(), AppPhase::InGame { game,.. } if !game.paused && !game.dead && !game.death_screen_open && !game.gui_open() && !game.chat.is_open())
+            && self.world_has_pointer()
         {
             self.core.input.on_mouse_motion(delta);
         }
