@@ -127,6 +127,27 @@ pub fn push_overlay(elements: &mut Vec<MenuElement>, screen_w: f32, screen_h: f3
     });
 }
 
+/// Vanilla blends its GUI fills in a gamma-space framebuffer; Pomme's sRGB
+/// target blends in linear space, where the same fill looks lighter. Converts
+/// a vanilla `0xAARRGGBB` fill to the colour that blends the same here.
+pub fn vanilla_fill(argb: u32) -> [f32; 4] {
+    vanilla_fill_rgba(crate::ui::text::argb32(argb))
+}
+
+/// [`vanilla_fill`] for a straight gamma-space colour. As with the sleep
+/// overlay, the dst factor `1 - a` becomes `1 - (1 - a)^2.2` and the
+/// premultiplied src `c * a` becomes `(c * a)^2.2`, divided back out of the
+/// fill's own premultiply.
+pub fn vanilla_fill_rgba([r, g, b, a]: [f32; 4]) -> [f32; 4] {
+    let a = a.clamp(0.0, 1.0);
+    let linear_a = 1.0 - (1.0 - a).powf(2.2);
+    if linear_a <= 0.0 {
+        return [0.0; 4];
+    }
+    let [r, g, b] = [r, g, b].map(|c| (c * a).powf(2.2) / linear_a);
+    [r, g, b, linear_a]
+}
+
 pub fn push_gradient_overlay(
     elements: &mut Vec<MenuElement>,
     screen_w: f32,
@@ -938,7 +959,7 @@ mod tests {
 
     use super::{
         BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, MenuElement, item_bar, push_item_count,
-        push_item_icon, push_slot_with_owner,
+        push_item_icon, push_slot_with_owner, vanilla_fill,
     };
 
     fn present(stack: ItemStack) -> ItemStackData {
@@ -1094,5 +1115,33 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// A vanilla `argb` fill over a gamma-space `bg`: pomme's linear blend of
+    /// `vanilla_fill(argb)`, and vanilla's gamma-space blend.
+    fn blends(argb: u32, bg: f32) -> (f32, f32) {
+        let [r, _, _, a] = vanilla_fill(argb);
+        let ours = (r * a + (1.0 - a) * bg.powf(2.2)).powf(1.0 / 2.2);
+        let [c, _, _, va] = crate::ui::text::argb32(argb);
+        (ours, (1.0 - va) * bg + va * c)
+    }
+
+    #[test]
+    fn vanilla_fill_darkens_like_a_gamma_space_blend() {
+        for bg in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let (ours, vanilla) = blends(0xC000_0000, bg);
+            assert!(
+                (ours - vanilla).abs() < 1e-4,
+                "black over {bg}: {ours} vs {vanilla}"
+            );
+            // A coloured fill is exact only over a black background.
+            let (ours, vanilla) = blends(0xC010_1010, bg);
+            assert!(
+                (ours - vanilla).abs() < 0.05,
+                "0x101010 over {bg}: {ours} vs {vanilla}"
+            );
+        }
+        let (ours, vanilla) = blends(0xC010_1010, 0.0);
+        assert!((ours - vanilla).abs() < 1e-4);
     }
 }

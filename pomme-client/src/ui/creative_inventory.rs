@@ -424,13 +424,7 @@ pub fn build_creative_inventory(
     let inv_w = TEX_W * scale;
     let inv_h = TEX_H * scale;
 
-    common::push_gradient_overlay(
-        elements,
-        screen_w,
-        screen_h,
-        [0.0, 0.0, 0.0, 0.45],
-        [0.0, 0.0, 0.0, 0.50],
-    );
+    super::container::push_transparent_background(elements, screen_w, screen_h);
 
     draw_tabs(elements, state, ox, oy, scale, false);
 

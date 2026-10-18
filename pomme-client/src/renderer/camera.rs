@@ -36,11 +36,16 @@ fn death_fov_divisor(death_time: f32) -> f32 {
 /// Vanilla mouse sensitivity curve from `MouseHandler.turnPlayer`, including
 /// the 0.15 turn scale applied by `Entity.turn`.
 ///
-/// TODO: `turnPlayer`'s other branches are unmodelled — `smoothCamera`,
-/// scoping (`sensitivityMod` without the `* 8.0`), and `invertMouseX`/`Y`.
+/// TODO: `turnPlayer`'s other branches are unmodelled — `smoothCamera` and
+/// scoping (`sensitivityMod` without the `* 8.0`).
 fn mouse_sensitivity_multiplier(sensitivity: f32) -> f32 {
     let scaled = sensitivity * 0.6 + 0.2;
     scaled * scaled * scaled * 8.0 * 0.15
+}
+
+/// `turnPlayer`'s `invertMouseX`/`Y` negation.
+fn invert_sign(invert: bool) -> f32 {
+    if invert { -1.0 } else { 1.0 }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -246,11 +251,9 @@ impl Camera {
         if input.is_cursor_captured() {
             let (dx, dy) = input.consume_mouse_delta();
             let mouse_sensitivity = mouse_sensitivity_multiplier(sensitivity);
-            let x_sign = if invert_x { -1.0 } else { 1.0 };
-            let y_sign = if invert_y { -1.0 } else { 1.0 };
             self.turn(
-                dx as f32 * mouse_sensitivity * x_sign,
-                dy as f32 * mouse_sensitivity * y_sign,
+                dx as f32 * mouse_sensitivity * invert_sign(invert_x),
+                dy as f32 * mouse_sensitivity * invert_sign(invert_y),
             );
         }
     }
@@ -259,9 +262,10 @@ impl Camera {
     /// the un-inverted case negates pitch.
     fn update_gamepad_look(&mut self, look_vec: Vec2, dt: f32, invert_x: bool, invert_y: bool) {
         let step = CONTROLLER_SENSITIVITY * dt;
-        let yaw_sign = if invert_x { -1.0 } else { 1.0 };
-        let pitch_sign = if invert_y { 1.0 } else { -1.0 };
-        self.turn(look_vec.x * yaw_sign * step, look_vec.y * pitch_sign * step);
+        self.turn(
+            look_vec.x * invert_sign(invert_x) * step,
+            -look_vec.y * invert_sign(invert_y) * step,
+        );
     }
 
     /// Vanilla `Entity.turn`: add the already-scaled deltas, clamping pitch

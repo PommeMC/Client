@@ -12,7 +12,7 @@ use azalea_inventory::operations::{
 
 use super::common::{
     FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_gradient_overlay,
-    push_item_icon,
+    push_item_icon, vanilla_fill,
 };
 use crate::player::menu_click::{self, ContainerKind};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -104,6 +104,18 @@ pub fn panel_scale(screen_w: f32, screen_h: f32, gs: f32, panel_w: f32, panel_h:
     gs.min(screen_w / panel_w).min(screen_h / panel_h)
 }
 
+/// Vanilla `Screen.extractTransparentBackground`, the dimming behind in-game
+/// screens.
+pub fn push_transparent_background(elements: &mut Vec<MenuElement>, screen_w: f32, screen_h: f32) {
+    push_gradient_overlay(
+        elements,
+        screen_w,
+        screen_h,
+        vanilla_fill(0xC010_1010),
+        vanilla_fill(0xD010_1010),
+    );
+}
+
 /// The dimmed backdrop and the centered panel placement for a `panel_w` x
 /// `panel_h` (GUI units) container, without a background sprite.
 pub fn push_backdrop(
@@ -120,13 +132,7 @@ pub fn push_backdrop(
     let ox = (screen_w - w) / 2.0;
     let oy = (screen_h - h) / 2.0;
 
-    push_gradient_overlay(
-        elements,
-        screen_w,
-        screen_h,
-        [0.0, 0.0, 0.0, 0.45],
-        [0.0, 0.0, 0.0, 0.50],
-    );
+    push_transparent_background(elements, screen_w, screen_h);
 
     Panel {
         scale,

@@ -344,14 +344,24 @@ impl MainMenu {
     ) -> MainMenuResult {
         let rows: Vec<OptRow> = vec![
             OptRow::Pair("Mouse Settings...", "Key Binds..."),
-            OptRow::Pair("Sneak: Toggle", "Sprint: Hold"),
-            OptRow::Pair("Auto-Jump: ON", "Operator Items Tab: OFF"),
+            OptRow::Pair("Sneak: Hold", "Sprint: Hold"),
+            OptRow::Pair("Attack/Destroy: Hold", "Use Item/Place Block: Hold"),
+            OptRow::Pair("Auto-Jump: OFF", "Sprint Window: 7"),
+            OptRow::PairLeft("Operator Items Tab: OFF"),
         ];
         let nav: &[(&str, Screen)] = &[
             ("Mouse Settings...", Screen::OptionsMouse),
             ("Key Binds...", Screen::OptionsKeybinds),
         ];
-        let disabled = &["Sneak:", "Sprint:", "Auto-Jump:", "Operator Items Tab:"];
+        let disabled = &[
+            "Sneak:",
+            "Sprint:",
+            "Attack/Destroy:",
+            "Use Item/Place Block:",
+            "Auto-Jump:",
+            "Sprint Window:",
+            "Operator Items Tab:",
+        ];
         self.build_options_grid(
             sw,
             sh,
@@ -385,17 +395,17 @@ impl MainMenu {
         let invert_x_label = format!("{INVERT_MOUSE_X} {}", on_off(self.invert_mouse_x));
         let invert_y_label = format!("{INVERT_MOUSE_Y} {}", on_off(self.invert_mouse_y));
         let rows: Vec<OptRow> = vec![
-            OptRow::PairLeft(&sensitivity_label),
-            OptRow::Pair(&invert_x_label, &invert_y_label),
-            OptRow::Pair("Mouse Wheel Sensitivity: 100%", "Discrete Scrolling: OFF"),
-            OptRow::Pair("Allow Cursor Changes: ON", "Raw Mouse Input: ON"),
+            OptRow::Pair(&sensitivity_label, "Scroll Sensitivity: 1.00"),
+            OptRow::Pair("Discrete Scrolling: OFF", &invert_x_label),
+            OptRow::Pair(&invert_y_label, "Allow Cursor Changes: ON"),
+            OptRow::PairLeft("Raw Input: ON"),
         ];
         let sliders: &[(&str, f32)] = &[("Sensitivity:", self.sensitivity)];
         let disabled = &[
-            "Mouse Wheel Sensitivity:",
+            "Scroll Sensitivity:",
             "Discrete Scrolling:",
             "Allow Cursor Changes:",
-            "Raw Mouse Input:",
+            "Raw Input:",
         ];
         self.build_options_grid(
             sw,

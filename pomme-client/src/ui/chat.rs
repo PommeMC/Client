@@ -44,12 +44,8 @@ const SUGGEST_ROW_H: f32 = 12.0;
 const MAX_SUGGESTION_ROWS: usize = 10;
 const SUGGEST_BG_ALPHA: f32 = 208.0 / 255.0;
 
-/// Vanilla blends its black GUI fills in a gamma-space framebuffer; Pomme's
-/// sRGB target blends in linear space, where the same alpha looks lighter.
-/// Converts to the equivalent linear alpha (the vignette's 2.2 approximation).
 fn vanilla_black_fill(alpha: f32) -> [f32; 4] {
-    let alpha = alpha.clamp(0.0, 1.0);
-    [0.0, 0.0, 0.0, 1.0 - (1.0 - alpha).powf(2.2)]
+    common::vanilla_fill_rgba([0.0, 0.0, 0.0, alpha])
 }
 
 fn push_fill(elements: &mut Vec<MenuElement>, [x, y, w, h]: [f32; 4], color: [f32; 4]) {
