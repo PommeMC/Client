@@ -52,6 +52,16 @@ impl TouchButton {
             Self::Pause => "| |",
         }
     }
+
+    /// The action a tap presses; Jump is held instead.
+    fn tapped_action(self) -> Option<Action> {
+        match self {
+            Self::Jump => None,
+            Self::Chat => Some(Action::OpenChat),
+            Self::Inventory => Some(Action::ToggleInventory),
+            Self::Pause => Some(Action::OpenMenu),
+        }
+    }
 }
 
 impl TouchLayout {
@@ -166,13 +176,9 @@ impl TouchControls {
                 vec![TouchOutput::PointerMove(p), TouchOutput::PointerDown],
             )
         } else if let Some(button) = layout.button_at(p) {
-            match button {
-                TouchButton::Jump => (Role::Jump, Vec::new()),
-                TouchButton::Chat => (Role::Spent, vec![TouchOutput::Tap(Action::OpenChat)]),
-                TouchButton::Inventory => {
-                    (Role::Spent, vec![TouchOutput::Tap(Action::ToggleInventory)])
-                }
-                TouchButton::Pause => (Role::Spent, vec![TouchOutput::Tap(Action::OpenMenu)]),
+            match button.tapped_action() {
+                Some(action) => (Role::Spent, vec![TouchOutput::Tap(action)]),
+                None => (Role::Jump, Vec::new()),
             }
         } else if let Some(slot) = layout.hotbar_slot_at(p) {
             (Role::Spent, vec![TouchOutput::Hotbar(slot)])
