@@ -1,0 +1,19 @@
+# Entity data reaches the client: a cow's variant and a dropped stack.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = '/summon minecraft:cow ~ ~ ~3 {variant:"minecraft:cold",NoAI:1b}'
+
+[[step]]
+expect = { entity = "cow", variant = "cold" }
+
+[[step]]
+chat = '/summon minecraft:item ~ ~1 ~2 {Item:{id:"minecraft:diamond",count:3},PickupDelay:32767}'
+
+[[step]]
+expect = { item_entity = "diamond", count = 3 }
+
+[[step]]
+screenshot = "entities"

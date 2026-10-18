@@ -7,6 +7,7 @@ use pyronyx::vk;
 
 use crate::assets::{AssetId, AssetIndex};
 use crate::renderer::util;
+use crate::world::block::registry::BlockRegistry;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AtlasRegion {
@@ -459,6 +460,28 @@ fn load_source(
     }
 }
 
+/// Every texture the block atlas packs for `registry`, and the flat-generated
+/// item textures among them.
+pub(crate) fn atlas_texture_names(registry: &BlockRegistry) -> (HashSet<&str>, HashSet<&str>) {
+    let generated_item_textures: HashSet<&str> = registry.flat_item_textures().collect();
+    let texture_names = registry
+        .texture_names()
+        .chain(generated_item_textures.iter().copied())
+        .chain(crate::particle::END_ROD_SPRITES)
+        .collect();
+    (texture_names, generated_item_textures)
+}
+
+/// [`TextureAtlas::build_cpu`]'s output: everything the GPU upload consumes.
+pub(crate) struct AtlasCpu {
+    pub uv_map: AtlasUVMap,
+    atlas_pixels: Vec<u8>,
+    atlas_size: u32,
+    mip_level: u32,
+    sources: Vec<Source>,
+    placements: HashMap<String, Option<(u32, u32)>>,
+}
+
 impl TextureAtlas {
     #[allow(clippy::too_many_arguments)]
     pub fn build(
@@ -472,6 +495,84 @@ impl TextureAtlas {
         generated_item_textures: &HashSet<&str>,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
     ) -> Result<Self, vk::Error> {
+        let AtlasCpu {
+            uv_map,
+            atlas_pixels,
+            atlas_size,
+            mip_level,
+            sources,
+            placements,
+        } = Self::build_cpu(
+            jar_assets_dir,
+            asset_index,
+            texture_names,
+            generated_item_textures,
+            packs,
+        );
+
+        let (sprite_rects, sprite_rects_allocation) = util::create_mapped_buffer(
+            device,
+            allocator,
+            bytemuck::cast_slice(&uv_map.rects),
+            vk::BufferUsageFlags::StorageBuffer,
+            "atlas_sprite_rects",
+        );
+
+        let staging_pixels =
+            build_mip_chain(atlas_pixels, atlas_size, mip_level, &sources, &placements);
+
+        let (image, view, allocation, mip_levels) = util::create_gpu_image_mipmapped(
+            device,
+            allocator,
+            atlas_size,
+            atlas_size,
+            mip_level + 1,
+            "atlas_image",
+        );
+        let (staging_buffer, staging_allocation) =
+            util::create_staging_buffer(device, allocator, &staging_pixels, "atlas_staging");
+
+        util::upload_image_mipmapped(
+            device,
+            queue,
+            command_pool,
+            staging_buffer,
+            staging_pixels.len() as u64,
+            image,
+            atlas_size,
+            atlas_size,
+            mip_levels,
+        );
+
+        let sampler = unsafe { util::create_nearest_sampler_mipmapped(device, mip_levels) };
+
+        tracing::info!(
+            "Atlas built: {atlas_size}x{atlas_size}, mip level {mip_level}, {} regions",
+            uv_map.regions.len()
+        );
+
+        Ok(Self {
+            image,
+            view,
+            sampler,
+            sprite_rects,
+            uv_map,
+            allocation: Some(allocation),
+            sprite_rects_allocation: Some(sprite_rects_allocation),
+            staging_buffer,
+            staging_allocation: Some(staging_allocation),
+        })
+    }
+
+    /// The CPU half of [`Self::build`]: loads and packs every sprite into the
+    /// level-0 atlas pixels and UV map, with no GPU work.
+    pub(crate) fn build_cpu(
+        jar_assets_dir: &Path,
+        asset_index: &Option<AssetIndex>,
+        texture_names: &HashSet<&str>,
+        generated_item_textures: &HashSet<&str>,
+        packs: Option<&crate::resource_pack::ResourcePackManager>,
+    ) -> AtlasCpu {
         let mut sources: Vec<Source> = Vec::with_capacity(texture_names.len());
         for &name in texture_names {
             sources.push(load_source(
@@ -555,14 +656,6 @@ impl TextureAtlas {
             }
         }
 
-        let (sprite_rects, sprite_rects_allocation) = util::create_mapped_buffer(
-            device,
-            allocator,
-            bytemuck::cast_slice(&rects),
-            vk::BufferUsageFlags::StorageBuffer,
-            "atlas_sprite_rects",
-        );
-
         let uv_map = AtlasUVMap {
             regions,
             sprite_alpha_masks,
@@ -570,50 +663,14 @@ impl TextureAtlas {
             missing: missing_region,
         };
 
-        let staging_pixels =
-            build_mip_chain(atlas_pixels, atlas_size, mip_level, &sources, &placements);
-
-        let (image, view, allocation, mip_levels) = util::create_gpu_image_mipmapped(
-            device,
-            allocator,
-            atlas_size,
-            atlas_size,
-            mip_level + 1,
-            "atlas_image",
-        );
-        let (staging_buffer, staging_allocation) =
-            util::create_staging_buffer(device, allocator, &staging_pixels, "atlas_staging");
-
-        util::upload_image_mipmapped(
-            device,
-            queue,
-            command_pool,
-            staging_buffer,
-            staging_pixels.len() as u64,
-            image,
-            atlas_size,
-            atlas_size,
-            mip_levels,
-        );
-
-        let sampler = unsafe { util::create_nearest_sampler_mipmapped(device, mip_levels) };
-
-        tracing::info!(
-            "Atlas built: {atlas_size}x{atlas_size}, mip level {mip_level}, {} regions",
-            uv_map.regions.len()
-        );
-
-        Ok(Self {
-            image,
-            view,
-            sampler,
-            sprite_rects,
+        AtlasCpu {
             uv_map,
-            allocation: Some(allocation),
-            sprite_rects_allocation: Some(sprite_rects_allocation),
-            staging_buffer,
-            staging_allocation: Some(staging_allocation),
-        })
+            atlas_pixels,
+            atlas_size,
+            mip_level,
+            sources,
+            placements,
+        }
     }
 
     /// Byte size of `sprite_rects`, for its descriptor range.

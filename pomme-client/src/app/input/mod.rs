@@ -24,6 +24,11 @@ mod metadata;
 pub use action::Action;
 pub use input_key::InputKey;
 pub use key_bindings::KeyBindings;
+
+/// The drop key, in the world and in inventory screens alike.
+// TODO: resolve `Action::DropItem` through the configured KeyBindings once
+// gameplay reads them; both drops then follow a rebind.
+const DROP_KEY: KeyCode = KeyCode::KeyQ;
 pub use metadata::{ActionId, BindingMetadata, DisplayText, NOT_BOUND, StringId};
 
 /// Left-stick deflection past which a direction counts as a digital press.
@@ -133,6 +138,12 @@ fn keycode_translation(key: KeyCode) -> Option<(&'static str, &'static str)> {
 pub struct InputState {
     pressed: HashSet<KeyCode>,
     modifiers: Modifiers,
+    /// Ctrl held by a harness `press`, for one frame.
+    #[cfg(feature = "test-harness")]
+    harness_ctrl: bool,
+    /// A harness `press` waiting for the next frame.
+    #[cfg(feature = "test-harness")]
+    harness_press: Option<(KeyCode, bool)>,
     mouse_delta: (f64, f64),
     cursor_captured: bool,
     selected_slot: u8,
@@ -236,6 +247,10 @@ impl InputState {
         Self {
             pressed: HashSet::new(),
             modifiers: Modifiers::default(),
+            #[cfg(feature = "test-harness")]
+            harness_ctrl: false,
+            #[cfg(feature = "test-harness")]
+            harness_press: None,
             mouse_delta: (0.0, 0.0),
             cursor_captured: true,
             selected_slot: 0,
@@ -291,7 +306,7 @@ impl InputState {
         phase.transition(|mut app| {
             if let AppPhase::InGame {
                 gfx,
-                connection: _connection,
+                connection,
                 game,
                 ..
             } = &mut app
@@ -299,11 +314,11 @@ impl InputState {
                 // A dialog (or the confirm screen over it) is a screen, and
                 // vanilla runs no key mapping while one is up.
                 if self.action_just_pressed(Action::ToggleInventory) && !game.dialog_open() {
-                    if game.creative_inventory_open {
-                        game.close_creative_inventory();
-                        should_apply_cursor_grab = true;
-                    } else if game.open_container.is_some() {
-                        game.close_menu();
+                    if game.creative_inventory_open
+                        || game.open_container.is_some()
+                        || game.inventory_open
+                    {
+                        game.close_inventory();
                         should_apply_cursor_grab = true;
                     } else if !game.paused
                         && !game.dead
@@ -312,11 +327,7 @@ impl InputState {
                         && !game.chat.is_open()
                         && game.game_mode_switcher.is_none()
                     {
-                        if crate::player::is_creative(game.player.game_mode) {
-                            game.creative_inventory_open = true;
-                        } else {
-                            game.inventory_open = !game.inventory_open;
-                        }
+                        game.open_inventory();
                         should_apply_cursor_grab = true;
                     }
 
@@ -340,7 +351,12 @@ impl InputState {
                     } else if !game.dead && !game.death_screen_open && !game.options_from_game {
                         use crate::ui::pause::PauseScreen;
                         if game.inventory_open || game.open_container.is_some() {
-                            game.close_menu();
+                            if !game
+                                .recipe_book_ui
+                                .close_for_escape(&mut game.recipe_book, &connection.packet_tx)
+                            {
+                                game.close_menu();
+                            }
                         } else if game.paused {
                             // Step back through the benchmark sub-screens; close
                             // the menu from the main screen.
@@ -385,7 +401,13 @@ impl InputState {
                     self.recent_actions.remove(&Action::ChangePerspective);
                 }
                 if self.action_just_pressed(Action::OpenChat) {
-                    if !game.paused
+                    if game.recipe_book_ui.focus_search_from_chat_key(
+                        &game.recipe_book,
+                        game.recipe_book_screen_active(),
+                    ) {
+                        // Vanilla `keyChat` focuses an open recipe book's search.
+                        self.text_capture = true;
+                    } else if !game.paused
                         && !game.death_screen_open
                         && !game.gui_open()
                         && !game.chat.is_open()
@@ -650,6 +672,12 @@ impl InputState {
 
     /// Pressed since the last `end_frame`, OS key repeats included (vanilla
     /// screens and debug chords receive GLFW repeat events).
+    /// The drop key this frame, for screens that throw items themselves
+    /// (vanilla `AbstractContainerScreen.keyPressed`'s `keyDrop`).
+    pub fn drop_key_just_pressed(&self) -> bool {
+        self.key_just_pressed(DROP_KEY)
+    }
+
     pub fn key_just_pressed(&self, key: KeyCode) -> bool {
         self.just_pressed.contains(&key)
     }
@@ -684,6 +712,15 @@ impl InputState {
     /// latch set outside its consumer's screen can't fire later.
     pub fn end_frame(&mut self) {
         self.just_pressed.clear();
+        #[cfg(feature = "test-harness")]
+        {
+            self.harness_ctrl = false;
+            if let Some((code, ctrl)) = self.harness_press.take() {
+                self.harness_ctrl = ctrl;
+                self.on_key(code, ElementState::Pressed, false);
+                self.on_key(code, ElementState::Released, false);
+            }
+        }
         self.up_pressed = false;
         self.down_pressed = false;
         self.page_up_pressed = false;
@@ -705,55 +742,72 @@ impl InputState {
 
     pub fn on_key_event(&mut self, event: &winit::event::KeyEvent) {
         if let PhysicalKey::Code(code) = event.physical_key {
-            if self.captures_key_event(event) {
-                self.capture_keyboard_input(code, event.state, event.repeat);
-                return;
-            }
-            match event.state {
-                ElementState::Pressed => {
-                    self.pressed.insert(code);
-                    self.just_pressed.insert(code);
-                    if !self.text_capture
-                        && !self.menu_capture
-                        && let Some(slot) = hotbar_slot(code)
-                    {
-                        // Vanilla handleKeybinds: spectator digits drive the
-                        // spectator menu and never touch the carried slot.
-                        if self.spectator {
-                            self.spectator_slot_presses.push(slot);
-                        } else {
-                            self.selected_slot = slot;
-                        }
-                    }
-                    match code {
-                        KeyCode::KeyE if !self.text_capture => {
-                            self.recent_actions.insert(Action::ToggleInventory, true);
-                        }
-                        KeyCode::KeyQ if !self.text_capture && !self.menu_capture => {
-                            *self.click_counts.entry(Action::DropItem).or_insert(0) += 1;
-                        }
-                        KeyCode::KeyF if !self.text_capture && !self.menu_capture => {
-                            *self.click_counts.entry(Action::SwapOffhand).or_insert(0) += 1;
-                        }
-                        KeyCode::Escape => {
-                            self.recent_actions.insert(Action::OpenMenu, true);
-                        }
-                        KeyCode::F5 => {
-                            self.recent_actions.insert(Action::ChangePerspective, true);
-                        }
-                        KeyCode::KeyT => {
-                            self.recent_actions.insert(Action::OpenChat, true);
-                        }
-                        KeyCode::Slash => {
-                            self.recent_actions.insert(Action::OpenCommands, true);
-                        }
+            self.on_key(code, event.state, event.repeat);
+        }
+    }
 
-                        _ => {}
+    /// Presses and releases `action`'s default key for the next frame, as a
+    /// real key event arriving between frames would, with Ctrl held for that
+    /// frame when `ctrl` is set. The harness runs after the frame's update, so
+    /// pressing now would be cleared before anything read it.
+    #[cfg(feature = "test-harness")]
+    pub fn press_action(&mut self, action: Action, ctrl: bool) -> Result<(), String> {
+        let Some(InputKey::Keyboard(code)) = action.defaults().first() else {
+            return Err(format!("{action:?} has no default key"));
+        };
+        self.harness_press = Some((*code, ctrl));
+        Ok(())
+    }
+
+    fn on_key(&mut self, code: KeyCode, state: ElementState, repeat: bool) {
+        if self.captures_key(code) {
+            self.capture_keyboard_input(code, state, repeat);
+            return;
+        }
+        match state {
+            ElementState::Pressed => {
+                self.pressed.insert(code);
+                self.just_pressed.insert(code);
+                if !self.text_capture
+                    && !self.menu_capture
+                    && let Some(slot) = hotbar_slot(code)
+                {
+                    // Vanilla handleKeybinds: spectator digits drive the
+                    // spectator menu and never touch the carried slot.
+                    if self.spectator {
+                        self.spectator_slot_presses.push(slot);
+                    } else {
+                        self.selected_slot = slot;
                     }
                 }
-                ElementState::Released => {
-                    self.pressed.remove(&code);
+                match code {
+                    KeyCode::KeyE if !self.text_capture => {
+                        self.recent_actions.insert(Action::ToggleInventory, true);
+                    }
+                    DROP_KEY if !self.text_capture && !self.menu_capture => {
+                        *self.click_counts.entry(Action::DropItem).or_insert(0) += 1;
+                    }
+                    KeyCode::KeyF if !self.text_capture && !self.menu_capture => {
+                        *self.click_counts.entry(Action::SwapOffhand).or_insert(0) += 1;
+                    }
+                    KeyCode::Escape => {
+                        self.recent_actions.insert(Action::OpenMenu, true);
+                    }
+                    KeyCode::F5 => {
+                        self.recent_actions.insert(Action::ChangePerspective, true);
+                    }
+                    KeyCode::KeyT => {
+                        self.recent_actions.insert(Action::OpenChat, true);
+                    }
+                    KeyCode::Slash => {
+                        self.recent_actions.insert(Action::OpenCommands, true);
+                    }
+
+                    _ => {}
                 }
+            }
+            ElementState::Released => {
+                self.pressed.remove(&code);
             }
         }
     }
@@ -787,8 +841,12 @@ impl InputState {
     }
 
     pub fn captures_key_event(&self, event: &winit::event::KeyEvent) -> bool {
-        self.binding_capture
-            || matches!(event.physical_key, PhysicalKey::Code(code) if self.binding_keys_down.contains(&code))
+        matches!(event.physical_key, PhysicalKey::Code(code) if self.captures_key(code))
+            || self.binding_capture
+    }
+
+    fn captures_key(&self, code: KeyCode) -> bool {
+        self.binding_capture || self.binding_keys_down.contains(&code)
     }
 
     fn capture_keyboard_input(&mut self, code: KeyCode, state: ElementState, repeat: bool) {
@@ -906,6 +964,10 @@ impl InputState {
     }
 
     pub fn ctrl_held(&self) -> bool {
+        #[cfg(feature = "test-harness")]
+        if self.harness_ctrl {
+            return true;
+        }
         self.modifiers.state().control_key()
     }
 

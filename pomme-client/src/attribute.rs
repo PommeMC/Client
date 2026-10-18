@@ -118,6 +118,11 @@ impl AttributeKind {
         ]
     };
 
+    /// The `attribute` registry id's attribute; `ALL` is in registry order.
+    pub fn from_id(id: u32) -> Option<Self> {
+        Self::ALL.get(id as usize).copied()
+    }
+
     /// Vanilla 26.2 `Attributes` defaults and `RangedAttribute` bounds.
     pub const fn definition(self) -> AttributeDefinition {
         use AttributeKind::*;
@@ -184,6 +189,18 @@ pub enum AttributeModifierOperation {
     Value,
     MultipliedBase,
     MultipliedTotal,
+}
+
+impl AttributeModifierOperation {
+    /// `AttributeModifier.Operation.BY_ID`, out-of-range ids falling back to
+    /// the first (`OutOfBoundsStrategy.ZERO`).
+    pub fn from_id(id: u32) -> Self {
+        match id {
+            1 => Self::MultipliedBase,
+            2 => Self::MultipliedTotal,
+            _ => Self::Value,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -315,6 +332,25 @@ impl AttributeMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_is_in_26_2_registry_order() {
+        let table = pomme_protocol::RegistryTable::for_protocol(776).unwrap();
+        let names = table.names(pomme_protocol::ClientRegistry::Attribute);
+        assert_eq!(names.len(), AttributeKind::ALL.len());
+        for (id, name) in names.iter().enumerate() {
+            let kind = AttributeKind::from_id(id as u32).unwrap();
+            let snake: String = format!("{kind:?}")
+                .chars()
+                .enumerate()
+                .flat_map(|(i, c)| {
+                    let sep = (i > 0 && c.is_uppercase()).then_some('_');
+                    sep.into_iter().chain(c.to_lowercase())
+                })
+                .collect();
+            assert_eq!(&snake, name);
+        }
+    }
 
     fn modifier(id: &str, amount: f64, operation: AttributeModifierOperation) -> AttributeModifier {
         AttributeModifier {

@@ -1,0 +1,32 @@
+# Each mob kind's variant arrives in its own entity-data slot, and the baby
+# flag as a plain boolean.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = '/summon minecraft:cat ~ ~ ~3 {variant:"minecraft:black",NoAI:1b}'
+
+[[step]]
+expect = { entity = "cat", variant = "black" }
+
+[[step]]
+chat = '/summon minecraft:wolf ~2 ~ ~3 {variant:"minecraft:snowy",NoAI:1b}'
+
+[[step]]
+expect = { entity = "wolf", variant = "snowy" }
+
+[[step]]
+chat = '/summon minecraft:chicken ~-2 ~ ~3 {variant:"minecraft:warm",NoAI:1b}'
+
+[[step]]
+expect = { entity = "chicken", variant = "warm" }
+
+[[step]]
+chat = '/summon minecraft:cow ~ ~ ~5 {Age:-24000,NoAI:1b}'
+
+[[step]]
+expect = { entity = "cow", baby = true }
+
+[[step]]
+screenshot = "variants"

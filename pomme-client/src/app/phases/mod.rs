@@ -105,7 +105,7 @@ pub enum ConnectionPhase {
 
 pub enum AppPhase {
     Setup {
-        quick_access_multiplayer: Option<String>,
+        quick_play: Option<crate::app::QuickPlay>,
         pending_skin_uuid: Option<uuid::Uuid>,
     },
     InMenu {

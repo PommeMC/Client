@@ -18,7 +18,7 @@ use crate::chat_component::{
 };
 use crate::net::chat_security::{LastSeenUpdate, SignedChatBody};
 use crate::ui::chat::{ChatMessageSource, ChatMessageTag};
-use crate::ui::text::format_component_spans;
+use crate::ui::text::{TextSpan, format_component_spans};
 
 const BAD_CHAT_INDEX: &str = "multiplayer.disconnect.bad_chat_index";
 const INVALID_PACKET: &str = "multiplayer.disconnect.invalid_packet";
@@ -723,6 +723,22 @@ fn component_has_non_default_font(component: &Component) -> bool {
 pub(super) fn read_component(raw: &[u8], pos: &mut usize) -> Result<Component, String> {
     let tag = read_nbt_tag(raw, pos)?;
     Component::from_nbt_tag(&tag).map_err(|e| format!("invalid text component: {e}"))
+}
+
+/// A component's spans; `None`, logged, when it's unreadable.
+pub(super) fn component_spans(nbt: &[u8]) -> Option<Vec<TextSpan>> {
+    component_spans_over(nbt, [1.0; 4])
+}
+
+/// [`component_spans`] with unstyled text in `base`.
+pub(super) fn component_spans_over(nbt: &[u8], base: [f32; 4]) -> Option<Vec<TextSpan>> {
+    match read_component(nbt, &mut 0) {
+        Ok(text) => Some(format_component_spans(&text, base)),
+        Err(e) => {
+            tracing::debug!("Ignoring a packet with unreadable text: {e}");
+            None
+        }
+    }
 }
 
 pub(super) fn read_nbt_tag(raw: &[u8], pos: &mut usize) -> Result<NbtTag, String> {

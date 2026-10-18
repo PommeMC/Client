@@ -1,0 +1,59 @@
+# Titles and a boss bar arrive from the server, update and clear.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/title @a times 10 400 10"
+
+[[step]]
+chat = "/title @a subtitle \"sub\""
+
+[[step]]
+chat = "/title @a title \"Hello\""
+
+[[step]]
+expect = { hud = { title = "Hello", subtitle = "sub" } }
+
+[[step]]
+chat = "/bossbar add pomme:test \"Test Bar\""
+
+[[step]]
+chat = "/bossbar set pomme:test players @a"
+
+[[step]]
+chat = "/bossbar set pomme:test value 50"
+
+[[step]]
+expect = { hud = { boss_bars = ["Test Bar"] } }
+
+# Past the title's fade-in and the bar's progress lerp.
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "title_and_boss_bar"
+
+[[step]]
+chat = "/bossbar set pomme:test name \"Renamed\""
+
+[[step]]
+expect = { hud = { boss_bars = ["Renamed"] } }
+
+[[step]]
+chat = "/title @a clear"
+
+[[step]]
+expect = { hud = { title = "" } }
+
+[[step]]
+screenshot = "renamed_boss_bar"
+
+[[step]]
+chat = "/bossbar remove pomme:test"
+
+[[step]]
+expect = { hud = { boss_bars = [] } }
+
+[[step]]
+chat = "/title @a reset"

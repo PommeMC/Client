@@ -1,0 +1,75 @@
+# A sidebar objective with scores, number formats, display names and a team
+# prefix, updated and removed by the server.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/scoreboard objectives add kills dummy \"Kills\""
+
+[[step]]
+chat = "/scoreboard objectives setdisplay sidebar kills"
+
+[[step]]
+chat = "/scoreboard players set Tester kills 5"
+
+[[step]]
+chat = "/scoreboard players set Bob kills 9"
+
+[[step]]
+expect = { hud = { sidebar_title = "Kills", sidebar = ["Bob 9", "Tester 5"] } }
+
+[[step]]
+screenshot = "sidebar"
+
+# An objective-wide number format.
+[[step]]
+chat = "/scoreboard objectives modify kills numberformat fixed \"x\""
+
+[[step]]
+expect = { hud = { sidebar = ["Bob x", "Tester x"] } }
+
+[[step]]
+chat = "/scoreboard players display numberformat Bob kills blank"
+
+[[step]]
+chat = "/scoreboard players display name Tester kills \"Hero\""
+
+[[step]]
+expect = { hud = { sidebar = ["Bob", "Hero x"] } }
+
+[[step]]
+chat = "/scoreboard objectives modify kills displayname \"Renamed\""
+
+[[step]]
+expect = { hud = { sidebar_title = "Renamed" } }
+
+[[step]]
+chat = "/scoreboard players reset Bob kills"
+
+[[step]]
+expect = { hud = { sidebar = ["Hero x"] } }
+
+[[step]]
+chat = "/team add reds \"Reds\""
+
+[[step]]
+chat = "/team modify reds prefix \"[R] \""
+
+[[step]]
+chat = "/team join reds Tester"
+
+[[step]]
+expect = { hud = { sidebar = ["[R] Hero x"] } }
+
+[[step]]
+screenshot = "formats_and_team"
+
+[[step]]
+chat = "/team remove reds"
+
+[[step]]
+chat = "/scoreboard objectives remove kills"
+
+[[step]]
+expect = { hud = { sidebar_title = "", sidebar = [] } }
