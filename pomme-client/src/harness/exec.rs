@@ -71,6 +71,24 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         Command::Inventory => to_value(protocol::inventory(game)),
         Command::Entities => to_value(protocol::entities(game)),
         Command::Player => to_value(protocol::player(game)),
+        Command::Block { at } => Ok(json!(protocol::block(game, *at))),
+        Command::LookAt { at } => {
+            let eye = game.player.eye_pos();
+            let (y_rot, x_rot) = protocol::look_angles(eye.into(), glam::DVec3::from_array(*at));
+            let look = crate::entity::components::LookDirection::new(y_rot, x_rot);
+            game.player.look_dir = look;
+            gfx.renderer.reset_camera(eye, look);
+            Ok(Value::Null)
+        }
+        Command::MouseDown { button } | Command::MouseUp { button } => {
+            let state = if matches!(command, Command::MouseDown { .. }) {
+                winit::event::ElementState::Pressed
+            } else {
+                winit::event::ElementState::Released
+            };
+            core.input.on_mouse_button((*button).into(), state);
+            Ok(Value::Null)
+        }
         Command::Advancements => Ok(json!(game.toasts.advancement_ids().collect::<Vec<_>>())),
         Command::ChatLog => Ok(json!(game.chat.message_texts().collect::<Vec<_>>())),
         Command::Screenshot { path } => {

@@ -1950,23 +1950,18 @@ impl AppCore {
                         );
                     }
                 }
-                NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => match nbt {
-                    Some(nbt) => {
-                        let chunk_pos = azalea_core::position::ChunkPos::new(
-                            pos.x.div_euclid(16),
-                            pos.z.div_euclid(16),
+                NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => {
+                    let chunk_pos = azalea_core::position::ChunkPos::new(
+                        pos.x.div_euclid(16),
+                        pos.z.div_euclid(16),
+                    );
+                    if game.chunk_store.get_chunk(&chunk_pos).is_some() {
+                        game.chunk_store.block_entities.insert(
+                            pos,
+                            crate::world::block_entity::StoredBlockEntity { kind, nbt },
                         );
-                        if game.chunk_store.get_chunk(&chunk_pos).is_some() {
-                            game.chunk_store.block_entities.insert(
-                                pos,
-                                crate::world::block_entity::StoredBlockEntity { kind, nbt },
-                            );
-                        }
                     }
-                    None => {
-                        game.chunk_store.block_entities.remove(&pos);
-                    }
-                },
+                }
                 NetworkEvent::BlockEvent {
                     pos,
                     action_id,

@@ -722,7 +722,8 @@ fn remap_add_entity_26_1() {
 
     // 26.1 tadpole is id 130, which 26.2 numbers as sulfur_cube.
     assert_eq!(EntityKind::from_u32(130), Some(EntityKind::SulfurCube));
-    let native = translation_for(775).remap_entity_type_to_native(130);
+    let native =
+        translation_for(775).remap_to_native(pomme_protocol::ClientRegistry::EntityType, 130);
     assert_eq!(
         native.and_then(EntityKind::from_u32),
         Some(EntityKind::Tadpole)
@@ -3418,7 +3419,8 @@ fn translate_add_player_763() {
     };
     assert_eq!(id, 42);
     assert_eq!(wire_uuid, uuid.as_u128());
-    let native = translation.remap_entity_type_to_native(entity_type);
+    let native =
+        translation.remap_to_native(pomme_protocol::ClientRegistry::EntityType, entity_type);
     assert_eq!(
         native.and_then(
             <azalea_registry::builtin::EntityKind as azalea_registry::Registry>::from_u32
@@ -3547,13 +3549,52 @@ fn translate_block_entity_data_763() {
     wire::write_varint(&mut old, 0); // block entity type
     write_named_nbt_d5(&mut old);
 
-    let ClientboundGamePacket::BlockEntityData(p) = translate_and_decode(763, old) else {
+    let translated = translation_for(763)
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    let mut r = pomme_protocol::codec::Reader::new(&translated);
+    r.varint().unwrap();
+    let Some(Ok(pomme_protocol::block::BlockPacket::EntityData { tag, .. })) =
+        pomme_protocol::block::read("block_entity_data", &mut r)
+    else {
         panic!("wrong packet");
     };
-    let simdnbt::owned::Nbt::Some(tag) = p.tag else {
-        panic!("tag dropped");
+    r.ensure_eof().unwrap();
+    let tag = crate::net::chat::read_nbt_tag(&tag, &mut 0).unwrap();
+    assert_eq!(tag.compound().and_then(|c| c.int("d")), Some(5));
+}
+
+/// Old block entity type ids reach the raw `block_entity_data` path in the
+/// wire version's numbering.
+#[test]
+fn remap_block_entity_type_old_versions() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let native = RegistryTable::for_protocol(776).unwrap();
+    let id_in = |table: &RegistryTable, name: &str| {
+        table
+            .names(ClientRegistry::BlockEntityType)
+            .iter()
+            .position(|n| n == name)
+            .map(|i| i as u32)
     };
-    assert_eq!(tag.as_compound().int("d"), Some(5));
+    for protocol in [775, 774, 773, 772, 771, 770, 769, 768, 767] {
+        let table = RegistryTable::for_protocol(protocol).unwrap();
+        let translation = translation_for(protocol);
+        let sign = id_in(table, "sign").unwrap();
+        assert_eq!(
+            translation.remap_to_native(ClientRegistry::BlockEntityType, sign),
+            id_in(native, "sign"),
+            "{protocol}"
+        );
+        if let Some(bed) = id_in(table, "bed") {
+            assert_eq!(
+                translation.remap_to_native(ClientRegistry::BlockEntityType, bed),
+                id_in(native, "bed"),
+                "{protocol}"
+            );
+        }
+    }
 }
 
 /// `tag_query` carries the same named root after its transaction id.
@@ -5116,17 +5157,7 @@ fn entity_packets_match_azalea() {
     use azalea_protocol::packets::game::*;
     use pomme_protocol::entity::{self, EntityPacket};
 
-    let decode = |name: &str, packet: ClientboundGamePacket| {
-        let raw = azalea_protocol::write::serialize_packet(&packet).unwrap();
-        let mut r = pomme_protocol::codec::Reader::new(&raw);
-        assert_eq!(
-            r.varint(),
-            Ok(table_id(Phase::Game, Direction::Clientbound, name))
-        );
-        let decoded = entity::read(name, &mut r).unwrap().unwrap();
-        r.ensure_eof().unwrap();
-        decoded
-    };
+    let decode = |name, packet| decode_azalea(name, packet, entity::read);
     let id = MinecraftEntityId(7);
     let angle = entity::unpack_degrees;
     let dvec = |v: Vec3| DVec3::new(v.x, v.y, v.z);
@@ -5423,17 +5454,7 @@ fn player_packets_match_azalea() {
     use azalea_registry::builtin::{Attribute, MobEffect};
     use pomme_protocol::player::{self, AttributeSnapshot, PlayerPacket};
 
-    let decode = |name: &str, packet: ClientboundGamePacket| {
-        let raw = azalea_protocol::write::serialize_packet(&packet).unwrap();
-        let mut r = pomme_protocol::codec::Reader::new(&raw);
-        assert_eq!(
-            r.varint(),
-            Ok(table_id(Phase::Game, Direction::Clientbound, name))
-        );
-        let decoded = player::read(name, &mut r).unwrap().unwrap();
-        r.ensure_eof().unwrap();
-        decoded
-    };
+    let decode = |name, packet| decode_azalea(name, packet, player::read);
     let cases = [
         (
             "set_health",
@@ -5606,4 +5627,123 @@ fn player_packets_match_azalea() {
     };
     let text = crate::net::chat::read_component(&message, &mut 0).unwrap();
     assert_eq!(text.plain_text(), "Tester fell");
+}
+
+/// `packet` as azalea encodes it, decoded by pomme's `read` for `name`.
+fn decode_azalea<P>(
+    name: &str,
+    packet: ClientboundGamePacket,
+    read: fn(
+        &str,
+        &mut pomme_protocol::codec::Reader,
+    ) -> Option<pomme_protocol::codec::DecodeResult<P>>,
+) -> P {
+    let raw = azalea_protocol::write::serialize_packet(&packet).unwrap();
+    let mut r = pomme_protocol::codec::Reader::new(&raw);
+    assert_eq!(
+        r.varint(),
+        Ok(table_id(Phase::Game, Direction::Clientbound, name))
+    );
+    let decoded = read(name, &mut r).unwrap().unwrap();
+    r.ensure_eof().unwrap();
+    decoded
+}
+
+#[test]
+fn block_packets_match_azalea() {
+    use azalea_block::BlockState;
+    use azalea_core::position::{BlockPos, ChunkSectionBlockPos, ChunkSectionPos};
+    use azalea_protocol::packets::game::*;
+    use azalea_registry::Registry;
+    use azalea_registry::builtin::{BlockEntityKind, BlockKind};
+    use pomme_protocol::block::{self, BlockPacket};
+
+    let decode = |name, packet| decode_azalea(name, packet, block::read);
+    let pos = BlockPos::new(-3, -60, 4);
+    let state = BlockState::try_from(129u32).unwrap();
+    let mut compound = simdnbt::owned::NbtCompound::new();
+    compound.insert("d", 5);
+    let cases = [
+        (
+            "block_update",
+            ClientboundGamePacket::BlockUpdate(c_block_update::ClientboundBlockUpdate {
+                pos,
+                block_state: state,
+            }),
+            BlockPacket::Update {
+                pos: (-3, -60, 4),
+                state: 129,
+            },
+        ),
+        (
+            "section_blocks_update",
+            ClientboundGamePacket::SectionBlocksUpdate(
+                c_section_blocks_update::ClientboundSectionBlocksUpdate {
+                    section_pos: ChunkSectionPos::new(-1, -4, 2),
+                    states: vec![c_section_blocks_update::BlockStateWithPosition {
+                        pos: ChunkSectionBlockPos::new(15, 3, 0),
+                        state,
+                    }],
+                },
+            ),
+            BlockPacket::SectionUpdate {
+                updates: vec![((-1, -61, 32), 129)],
+            },
+        ),
+        (
+            "block_changed_ack",
+            ClientboundGamePacket::BlockChangedAck(
+                c_block_changed_ack::ClientboundBlockChangedAck { seq: 17 },
+            ),
+            BlockPacket::ChangedAck { seq: 17 },
+        ),
+        (
+            "block_event",
+            ClientboundGamePacket::BlockEvent(c_block_event::ClientboundBlockEvent {
+                pos,
+                action_id: 1,
+                action_parameter: 2,
+                block: BlockKind::Chest,
+            }),
+            BlockPacket::Event {
+                pos: (-3, -60, 4),
+                action: 1,
+                param: 2,
+                block: BlockKind::Chest.to_u32(),
+            },
+        ),
+        (
+            "block_entity_data",
+            ClientboundGamePacket::BlockEntityData(
+                c_block_entity_data::ClientboundBlockEntityData {
+                    pos,
+                    block_entity_type: BlockEntityKind::Sign,
+                    tag: simdnbt::owned::Nbt::Some(simdnbt::owned::BaseNbt::new("", compound)),
+                },
+            ),
+            BlockPacket::EntityData {
+                pos: (-3, -60, 4),
+                kind: BlockEntityKind::Sign.to_u32(),
+                tag: [10, 3, 0, 1, b'd', 0, 0, 0, 5, 0].into(),
+            },
+        ),
+        (
+            "level_event",
+            ClientboundGamePacket::LevelEvent(c_level_event::ClientboundLevelEvent {
+                event_type: 2001,
+                pos,
+                data: 129,
+                global_event: true,
+            }),
+            BlockPacket::LevelEvent {
+                event: 2001,
+                pos: (-3, -60, 4),
+                data: 129,
+                global: true,
+            },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
 }

@@ -234,6 +234,17 @@ impl<'a> Reader<'a> {
         ))
     }
 
+    /// `SectionPos.STREAM_CODEC`: x, y and z packed into a long
+    /// (`SectionPos.x`/`y`/`z`).
+    pub fn section_pos(&mut self) -> DecodeResult<(i32, i32, i32)> {
+        let packed = self.i64()?;
+        Ok((
+            (packed >> 42) as i32,
+            (packed << 44 >> 44) as i32,
+            (packed << 22 >> 42) as i32,
+        ))
+    }
+
     /// One network-NBT value (type byte + unnamed payload), returned as its
     /// exact bytes.
     pub fn nbt(&mut self) -> DecodeResult<&'a [u8]> {

@@ -149,13 +149,6 @@ pub fn handle_game_packet(
                 .collect();
             let _ = event_tx.try_send(NetworkEvent::BlockEntitySync { chunk_pos, entries });
         }
-        ClientboundGamePacket::BlockEvent(p) => {
-            let _ = event_tx.try_send(NetworkEvent::BlockEvent {
-                pos: p.pos,
-                action_id: p.action_id,
-                action_parameter: p.action_parameter,
-            });
-        }
         ClientboundGamePacket::Sound(p) => {
             // Coordinates are fixed-point: block position times 8.
             let _ = event_tx.try_send(NetworkEvent::PlaySound {
@@ -181,17 +174,6 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::StopSound {
                 sound_id: p.name.as_ref().map(ToString::to_string),
                 category: p.source.map(|source| source as u8),
-            });
-        }
-        ClientboundGamePacket::BlockEntityData(p) => {
-            let nbt = match &p.tag {
-                simdnbt::owned::Nbt::Some(base) => Some(base.clone().as_compound()),
-                simdnbt::owned::Nbt::None => None,
-            };
-            let _ = event_tx.try_send(NetworkEvent::BlockEntityUpdate {
-                pos: p.pos,
-                kind: p.block_entity_type,
-                nbt,
             });
         }
         ClientboundGamePacket::LightUpdate(p) => {
@@ -470,33 +452,6 @@ pub fn handle_game_packet(
                 objective: p.objective_name.clone(),
             });
         }
-        ClientboundGamePacket::BlockUpdate(p) => {
-            send_ordered(
-                event_tx,
-                NetworkEvent::BlockUpdate {
-                    pos: p.pos,
-                    state: p.block_state,
-                },
-            );
-        }
-        ClientboundGamePacket::SectionBlocksUpdate(p) => {
-            let updates: Vec<_> = p
-                .states
-                .iter()
-                .map(|s| {
-                    let block_pos = azalea_core::position::BlockPos {
-                        x: p.section_pos.x * 16 + s.pos.x as i32,
-                        y: p.section_pos.y * 16 + s.pos.y as i32,
-                        z: p.section_pos.z * 16 + s.pos.z as i32,
-                    };
-                    (block_pos, s.state)
-                })
-                .collect();
-            send_ordered(event_tx, NetworkEvent::SectionBlocksUpdate { updates });
-        }
-        ClientboundGamePacket::BlockChangedAck(p) => {
-            send_ordered(event_tx, NetworkEvent::BlockChangedAck { seq: p.seq });
-        }
         ClientboundGamePacket::SetTime(p) => {
             let day_time = p.clock_updates.values().next().map(|c| c.total_ticks);
             let _ = event_tx.try_send(NetworkEvent::TimeUpdate {
@@ -516,13 +471,6 @@ pub fn handle_game_packet(
             tracing::warn!("Disconnected: {}", p.reason);
             let _ = event_tx.try_send(NetworkEvent::Disconnected {
                 reason: format!("{}", p.reason),
-            });
-        }
-        ClientboundGamePacket::LevelEvent(p) => {
-            let _ = event_tx.try_send(NetworkEvent::LevelEvent {
-                event_type: p.event_type,
-                pos: p.pos,
-                data: p.data,
             });
         }
         ClientboundGamePacket::SetEquipment(p) => {
@@ -823,6 +771,9 @@ pub fn handle_raw_game_packet(
     ) || took(
         super::player_wire::handle_raw_player_packet(packet_id, payload, event_tx),
         "player",
+    ) || took(
+        super::block_wire::handle_raw_block_packet(packet_id, payload, event_tx),
+        "block",
     ) {
         return true;
     }
@@ -1219,7 +1170,6 @@ mod tests {
     use std::sync::{Arc, Barrier, mpsc as std_mpsc};
     use std::time::Duration;
 
-    use azalea_protocol::packets::game::c_block_changed_ack::ClientboundBlockChangedAck;
     use azalea_protocol::packets::game::c_ping::ClientboundPing;
     use azalea_protocol::packets::game::c_player_rotation::ClientboundPlayerRotation;
     use parking_lot::Mutex;
@@ -1229,6 +1179,16 @@ mod tests {
 
     fn handle_raw(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bool {
         handle_raw_game_packet(raw, &RegistryHolder::default(), event_tx)
+    }
+
+    /// A frame holding just the native id of clientbound packet `name`.
+    fn native_frame(name: &str) -> Vec<u8> {
+        use pomme_protocol::{Direction, PacketTable, Phase};
+
+        let mut raw = Vec::new();
+        let id = PacketTable::native().id(Phase::Game, Direction::Clientbound, name);
+        wire::write_varint(&mut raw, id.unwrap());
+        raw
     }
 
     /// Runs `packet` through [`handle_game_packet`], returning what it sent.
@@ -1374,10 +1334,9 @@ mod tests {
     fn block_change_ack_backpressures_instead_of_being_dropped() {
         assert_event_backpressures(
             |event_tx| {
-                handle(
-                    ClientboundGamePacket::BlockChangedAck(ClientboundBlockChangedAck { seq: 17 }),
-                    &event_tx,
-                );
+                let mut raw = native_frame("block_changed_ack");
+                wire::write_varint(&mut raw, 17);
+                assert!(handle_raw(&raw, &event_tx));
             },
             |event| assert!(matches!(event, NetworkEvent::BlockChangedAck { seq: 17 })),
         );
@@ -1403,17 +1362,9 @@ mod tests {
 
     #[test]
     fn set_held_slot_emits_authoritative_hotbar_selection() {
-        use pomme_protocol::{Direction, PacketTable, Phase};
-
         let (event_tx, event_rx) = crossbeam_channel::bounded(1);
         let receive = |slot| {
-            let mut raw = Vec::new();
-            wire::write_varint(
-                &mut raw,
-                PacketTable::native()
-                    .id(Phase::Game, Direction::Clientbound, "set_held_slot")
-                    .unwrap(),
-            );
+            let mut raw = native_frame("set_held_slot");
             wire::write_varint(&mut raw, slot);
             assert!(handle_raw(&raw, &event_tx));
         };

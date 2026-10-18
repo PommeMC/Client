@@ -291,6 +291,12 @@ mod tests {
             (Direction::Clientbound, "set_equipment", 102),
             (Direction::Clientbound, "set_player_inventory", 108),
             (Direction::Clientbound, "update_advancements", 130),
+            (Direction::Clientbound, "block_update", 8),
+            (Direction::Clientbound, "section_blocks_update", 84),
+            (Direction::Clientbound, "block_changed_ack", 4),
+            (Direction::Clientbound, "block_event", 7),
+            (Direction::Clientbound, "block_entity_data", 6),
+            (Direction::Clientbound, "level_event", 46),
             (Direction::Serverbound, "set_creative_mode_slot", 56),
         ] {
             assert_eq!(t.id(Phase::Game, dir, name), Some(id), "{name}");

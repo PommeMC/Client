@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::exec::{self, Outcome};
-use super::protocol::{self, Click, Command, CreativeSetSlot};
+use super::protocol::{self, Click, Command, CreativeSetSlot, Mouse};
 use crate::app::core::AppCore;
 use crate::app::phases::AppPhase;
 
@@ -32,6 +32,9 @@ struct StepFile {
     close_menu: Option<bool>,
     click: Option<Click>,
     creative_set_slot: Option<CreativeSetSlot>,
+    look_at: Option<[f64; 3]>,
+    mouse_down: Option<Mouse>,
+    mouse_up: Option<Mouse>,
     wait_ms: Option<u64>,
     screenshot: Option<String>,
     expect: Option<Expect>,
@@ -48,6 +51,7 @@ enum Expect {
     Gone(GoneExpect),
     Riding(RidingExpect),
     Player(PlayerExpect),
+    Block(BlockExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
 }
@@ -125,6 +129,16 @@ struct PlayerFields {
     raining: Option<bool>,
 }
 
+/// The block state name the client holds at `at`, e.g. `air`.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlockExpect {
+    block: String,
+    at: [i32; 3],
+    /// The stored block entity's type, e.g. `sign`.
+    block_entity: Option<String>,
+}
+
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AdvancementExpect {
@@ -163,6 +177,15 @@ impl StepFile {
         }
         if let Some(set) = self.creative_set_slot {
             steps.push(Step::Run(Command::CreativeSetSlot(set)));
+        }
+        if let Some(at) = self.look_at {
+            steps.push(Step::Run(Command::LookAt { at }));
+        }
+        if let Some(button) = self.mouse_down {
+            steps.push(Step::Run(Command::MouseDown { button }));
+        }
+        if let Some(button) = self.mouse_up {
+            steps.push(Step::Run(Command::MouseUp { button }));
         }
         if let Some(ms) = self.wait_ms {
             steps.push(Step::Wait(Duration::from_millis(ms)));
@@ -436,6 +459,21 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                 || format!("player is {seen:?}"),
             )
         }
+        Expect::Block(BlockExpect {
+            block,
+            at,
+            block_entity,
+        }) => {
+            let seen = protocol::block(game, *at);
+            let entity = protocol::block_entity(game, *at);
+            ensure(
+                seen == *block
+                    && block_entity
+                        .as_ref()
+                        .is_none_or(|kind| entity.as_ref() == Some(kind)),
+                || format!("{at:?} holds {seen} with block entity {entity:?}"),
+            )
+        }
         Expect::Advancement(AdvancementExpect { advancement }) => ensure(
             game.toasts.advancement_ids().any(|id| id == advancement),
             || format!("{advancement} not received"),
@@ -497,10 +535,32 @@ mod tests {
             creative_set_slot = { slot = 37, from = 36 }
             [[step]]
             expect = { slot = 36, item = "stone", absent = ["can_break"] }
+            [[step]]
+            look_at = [0.5, -58.5, 4.5]
+            [[step]]
+            mouse_down = "left"
+            [[step]]
+            expect = { block = "air", at = [0, -59, 4] }
             "#,
         )
         .unwrap();
-        assert_eq!(steps.len(), 14);
+        assert_eq!(steps.len(), 17);
+        assert_eq!(
+            steps[15],
+            Step::Run(Command::MouseDown {
+                button: Mouse::Left
+            })
+        );
+        assert!(matches!(
+            &steps[16],
+            Step::Expect(
+                Expect::Block(BlockExpect {
+                    at: [0, -59, 4],
+                    ..
+                }),
+                _
+            )
+        ));
         assert_eq!(
             steps[12],
             Step::Run(Command::CreativeSetSlot(CreativeSetSlot {

@@ -822,6 +822,15 @@ pub fn joinable(protocol: i32) -> bool {
     protocol == NATIVE.protocol || TRANSLATED.contains(&protocol)
 }
 
+/// A wire id in `registry` as the native version numbers it: remapped for a
+/// translated session, unchanged for a native one.
+pub fn native_id(registry: ClientRegistry, id: u32) -> Option<u32> {
+    match active() {
+        Some(t) => t.remap_to_native(registry, id),
+        None => Some(id),
+    }
+}
+
 /// The translation for the wire version negotiated with the current server,
 /// or `None` for the native version.
 pub fn active() -> Option<&'static Translation> {
@@ -1371,10 +1380,10 @@ impl Translation {
         self.to_native.remap(ClientRegistry::ParticleType, id)
     }
 
-    /// Native-version entity type id for a source-version one, for the raw
-    /// `add_entity` path; `None` drops the entity.
-    pub fn remap_entity_type_to_native(&self, id: u32) -> Option<u32> {
-        self.to_native.remap(ClientRegistry::EntityType, id)
+    /// The native-version id in `registry` for a source-version one, for the
+    /// raw decode paths; `None` drops what carries it.
+    pub fn remap_to_native(&self, registry: ClientRegistry, id: u32) -> Option<u32> {
+        self.to_native.remap(registry, id)
     }
 
     /// Native-version item id for a source-version item id. Used by decoded
@@ -1392,9 +1401,6 @@ impl Translation {
         match packet {
             ClientboundGamePacket::Sound(p) => self.remap_sound(&mut p.sound),
             ClientboundGamePacket::SoundEntity(p) => self.remap_sound(&mut p.sound),
-            ClientboundGamePacket::BlockEntityData(p) => {
-                remap_with(self.to_native, R::BlockEntityType, &mut p.block_entity_type)
-            }
             ClientboundGamePacket::LevelChunkWithLight(p) => {
                 p.chunk_data
                     .block_entities

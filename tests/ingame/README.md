@@ -61,6 +61,12 @@ click = { slot = 36, op = "quick_move" }      # pickup_left, pickup_right,
 creative_set_slot = { slot = 37, from = 36 }  # creative mode: copy a stack, as
                                               # the creative screen places one
 [[step]]
+look_at = [0.5, -58.5, 4.0]                   # turn to face a point
+
+[[step]]
+mouse_down = "left"                           # or mouse_up; left, right, middle
+
+[[step]]
 wait_ms = 1000
 
 [[step]]
@@ -80,6 +86,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | A dropped item | `item_entity`, optional `count` |
 | An advancement | `advancement` (id) |
 | A chat line | `chat` (text it contains) |
+| A block | `block` (state name, e.g. `air`), `at`, optional `block_entity` (type) |
 
 Slots are menu slots. In the player inventory, 5-8 are armor (head to feet),
 9-35 the main inventory, 36-44 the hotbar and 45 the offhand. `/give` fills
@@ -102,4 +109,5 @@ echo '{"cmd":"inventory"}' | nc 127.0.0.1 25599
 
 The commands are `status`, `chat` (`text`), `open_inventory`, `close_menu`,
 `click` (`slot`, `op`), `creative_set_slot` (`slot`, `from`), `inventory`,
-`entities`, `advancements`, `chat_log` and `screenshot` (`path`).
+`entities`, `advancements`, `player`, `block` (`at`), `look_at` (`at`),
+`mouse_down` and `mouse_up` (`button`), `chat_log` and `screenshot` (`path`).

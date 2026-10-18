@@ -1,6 +1,7 @@
 mod advancement_wire;
 #[cfg(test)]
 mod azalea_compat;
+mod block_wire;
 pub(crate) mod chat;
 pub(crate) mod chat_security;
 pub mod chunk_batch;
@@ -337,7 +338,7 @@ pub enum NetworkEvent {
     BlockEntityUpdate {
         pos: BlockPos,
         kind: BlockEntityKind,
-        nbt: Option<NbtCompound>,
+        nbt: NbtCompound,
     },
     BlockEvent {
         pos: BlockPos,

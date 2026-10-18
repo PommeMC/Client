@@ -181,9 +181,8 @@ fn entity_event(id: i32, event: i8) -> Option<NetworkEvent> {
 /// The wire entity type in the native registry; translated sessions remap
 /// it from their version's ids.
 fn native_entity_type(id: u32) -> Option<EntityKind> {
-    let native = match super::translate::active() {
-        Some(t) => t.remap_entity_type_to_native(id)?,
-        None => id,
-    };
-    EntityKind::from_u32(native)
+    EntityKind::from_u32(super::translate::native_id(
+        pomme_protocol::ClientRegistry::EntityType,
+        id,
+    )?)
 }

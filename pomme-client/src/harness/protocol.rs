@@ -30,11 +30,43 @@ pub enum Command {
     Entities,
     Advancements,
     Player,
+    /// The block state the client holds at `at`.
+    Block {
+        at: [i32; 3],
+    },
+    /// Turns the player to face `at`, as a mouse look would.
+    LookAt {
+        at: [f64; 3],
+    },
+    MouseDown {
+        button: Mouse,
+    },
+    MouseUp {
+        button: Mouse,
+    },
     ChatLog,
     /// A PNG of the next presented frame, written to `path`.
     Screenshot {
         path: PathBuf,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mouse {
+    Left,
+    Right,
+    Middle,
+}
+
+impl From<Mouse> for winit::event::MouseButton {
+    fn from(button: Mouse) -> Self {
+        match button {
+            Mouse::Left => Self::Left,
+            Mouse::Right => Self::Right,
+            Mouse::Middle => Self::Middle,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -271,6 +303,32 @@ pub fn player(game: &GameState) -> PlayerInfo {
             .value(crate::attribute::AttributeKind::MaxHealth),
         raining: game.sky_state.rain_level > 0.0,
     }
+}
+
+/// The block state name at `at`, e.g. `stone`; air when its chunk isn't
+/// loaded.
+pub fn block(game: &GameState, [x, y, z]: [i32; 3]) -> String {
+    bare(crate::world::block::block_id(
+        game.chunk_store.get_block_state(x, y, z),
+    ))
+}
+
+/// The type of the block entity the client stores at `at`, e.g. `sign`.
+pub fn block_entity(game: &GameState, [x, y, z]: [i32; 3]) -> Option<String> {
+    let stored = game
+        .chunk_store
+        .block_entities
+        .get(&azalea_core::position::BlockPos { x, y, z })?;
+    Some(bare(&stored.kind.to_string()))
+}
+
+/// Vanilla `Entity.lookAt`'s yaw and pitch from `eye` to `at`, in degrees.
+pub fn look_angles(eye: glam::DVec3, at: glam::DVec3) -> (f32, f32) {
+    let d = at - eye;
+    let horizontal = d.x.hypot(d.z);
+    let y_rot = d.z.atan2(d.x).to_degrees() as f32 - 90.0;
+    let x_rot = -d.y.atan2(horizontal).to_degrees() as f32;
+    (y_rot, x_rot)
 }
 
 /// A registry name without the `minecraft:` namespace.
