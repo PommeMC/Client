@@ -388,8 +388,8 @@ pub fn build_creative_inventory(
     chat_key: bool,
     hotbar_swap: Option<u8>,
     swap_offhand: bool,
-    drop_key: bool,
-    drop_all: bool,
+    drop: Option<bool>,
+    can_drop: bool,
     inventory: &Inventory,
     gs: f32,
     advanced_tooltips: bool,
@@ -419,7 +419,6 @@ pub fn build_creative_inventory(
         }
     };
     let mut swap_consumed_digit = false;
-    let mut drop_consumed_q = false;
 
     let (scale, ox, oy) = panel_layout(screen_w, screen_h, gs);
     let inv_w = TEX_W * scale;
@@ -541,18 +540,18 @@ pub fn build_creative_inventory(
                             stack_with_count(data, data.kind.max_stack_size()),
                         );
                         swap_consumed_digit = hotbar_swap.is_some();
-                    } else if drop_key
+                    } else if let Some(whole_stack) = drop
+                        && can_drop
                         && matches!(action, CreativeAction::None)
                         && state.cursor_item.is_empty()
                         && let ItemStack::Present(data) = &item
                     {
-                        let count = if drop_all {
+                        let count = if whole_stack {
                             data.kind.max_stack_size()
                         } else {
                             1
                         };
                         action = CreativeAction::DropItem(stack_with_count(data, count));
-                        drop_consumed_q = true;
                     } else if middle_clicked
                         && state.cursor_item.is_empty()
                         && let ItemStack::Present(data) = &item
@@ -663,7 +662,8 @@ pub fn build_creative_inventory(
 
     // Drop item from a hovered real slot (vanilla sends SetCreativeModeSlot with
     // slot -1 via handleCreativeModeItemDrop).
-    if drop_key
+    if let Some(whole_stack) = drop
+        && can_drop
         && matches!(action, CreativeAction::None)
         && state.drag.is_none()
         && state.cursor_item.is_empty()
@@ -672,19 +672,12 @@ pub fn build_creative_inventory(
     {
         let hovered_item = inventory.slot(hit.slot as usize);
         if let ItemStack::Present(data) = hovered_item {
-            let (dropped, remaining) = if drop_all || data.count <= 1 {
-                (ItemStack::Present(data.clone()), ItemStack::Empty)
-            } else {
-                let mut rem = data.clone();
-                rem.count -= 1;
-                (stack_with_count(data, 1), ItemStack::Present(rem))
-            };
+            let (dropped, remaining) = split_for_drop(data, whole_stack);
             action = CreativeAction::DropSlot {
                 slot: hit.slot,
                 dropped,
                 remaining,
             };
-            drop_consumed_q = true;
         }
     }
 
@@ -721,7 +714,7 @@ pub fn build_creative_inventory(
         let wf = |t: &str| text_width_fn(t, fs);
         for ev in events {
             if let crate::ui::text_edit::TextInputEvent::Char(c) = ev
-                && (Some(*c) == skip_digit || (drop_consumed_q && (*c == 'q' || *c == 'Q')))
+                && Some(*c) == skip_digit
             {
                 continue;
             }
@@ -738,21 +731,15 @@ pub fn build_creative_inventory(
         && matches!(action, CreativeAction::None)
     {
         if let ItemStack::Present(carried) = &state.cursor_item {
-            let (dropped, remaining) = if clicked {
-                (state.cursor_item.clone(), ItemStack::Empty)
-            } else {
-                let mut rem = carried.clone();
-                rem.count -= 1;
-                let single = stack_with_count(carried, 1);
-                let remaining = if rem.count > 0 {
-                    ItemStack::Present(rem)
-                } else {
-                    ItemStack::Empty
-                };
-                (single, remaining)
-            };
-            state.cursor_item = remaining;
-            action = CreativeAction::DropItem(dropped);
+            if can_drop {
+                // The survival-inventory tab throws the whole carried stack for
+                // either button; the item tabs split one off on a right click
+                // (`slotClicked`'s INVENTORY branch vs its outside-click tail).
+                let whole_stack = clicked || matches!(state.tab, CreativeTab::SurvivalInventory);
+                let (dropped, remaining) = split_for_drop(carried, whole_stack);
+                state.cursor_item = remaining;
+                action = CreativeAction::DropItem(dropped);
+            }
         } else if clicked {
             action = CreativeAction::Close;
         }
@@ -777,6 +764,58 @@ pub fn build_creative_inventory(
     }
 
     action
+}
+
+/// The stack a drop throws and what stays behind: all of it, or one.
+fn split_for_drop(stack: &ItemStackData, whole_stack: bool) -> (ItemStack, ItemStack) {
+    if whole_stack || stack.count <= 1 {
+        return (ItemStack::Present(stack.clone()), ItemStack::Empty);
+    }
+    let mut remaining = stack.clone();
+    remaining.count -= 1;
+    (stack_with_count(stack, 1), ItemStack::Present(remaining))
+}
+
+/// A cell the harness can hover in an item tab: a hotbar slot (36-44) or a
+/// catalog cell, counted from the top-left at the current scroll.
+#[cfg(any(test, feature = "test-harness"))]
+pub enum HoverTarget {
+    Hotbar(u16),
+    Catalog(usize),
+}
+
+/// The screen centre of `target`, laid out as `build_creative_inventory`
+/// draws it.
+#[cfg(any(test, feature = "test-harness"))]
+pub fn slot_center(
+    state: &CreativeState,
+    target: HoverTarget,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+) -> Result<(f32, f32), String> {
+    if state.tab.is_inventory_tab() {
+        return Err("hover only knows the item tabs' layout".into());
+    }
+    let (x, y) = match target {
+        HoverTarget::Hotbar(slot @ 36..=44) => {
+            (GRID_ORIGIN_X + f32::from(slot - 36) * SLOT_STRIDE, HOTBAR_Y)
+        }
+        HoverTarget::Hotbar(slot) => return Err(format!("slot {slot} isn't a hotbar slot")),
+        HoverTarget::Catalog(cell) if cell < GRID_COLS * GRID_ROWS => (
+            GRID_ORIGIN_X + (cell % GRID_COLS) as f32 * SLOT_STRIDE,
+            GRID_ORIGIN_Y + (cell / GRID_COLS) as f32 * SLOT_STRIDE,
+        ),
+        HoverTarget::Catalog(cell) => return Err(format!("catalog cell {cell} isn't on screen")),
+    };
+    let (scale, ox, oy) = panel_layout(screen_w, screen_h, gs);
+    Ok(slot_xy(
+        ox,
+        oy,
+        scale,
+        x + 0.5 * SLOT_STRIDE,
+        y + 0.5 * SLOT_STRIDE,
+    ))
 }
 
 fn tab_sprite(row: Row, col: u8, selected: bool) -> SpriteId {
@@ -1626,275 +1665,178 @@ mod tests {
         );
     }
 
-    #[test]
-    fn drop_from_real_slot_single_and_all() {
-        let mut state = CreativeState::new();
-        let mut inv = Inventory::new();
-        inv.set_slot(36, ItemStack::new(ItemKind::Stone, 5));
+    /// Inputs one creative frame can carry for the drop tests.
+    #[derive(Default)]
+    struct Frame {
+        cursor: (f32, f32),
+        clicked: bool,
+        right_clicked: bool,
+        /// The drop key, with Ctrl held when `Some(true)`.
+        drop: Option<bool>,
+        throttled: bool,
+    }
 
-        let (scale, ox, oy) = panel_layout(390.0, 272.0, 2.0);
-        let (slot_x, slot_y) = slot_xy(
-            ox,
-            oy,
-            scale,
-            GRID_ORIGIN_X + 0.5 * SLOT_STRIDE,
-            HOTBAR_Y + 0.5 * SLOT_STRIDE,
-        );
-        let cursor = (slot_x, slot_y);
+    const SCREEN: (f32, f32) = (390.0, 272.0);
+    /// Off the panel, which spans nearly all of `SCREEN`.
+    const OUTSIDE: (f32, f32) = (-50.0, -50.0);
 
-        // Drop single item (Q without ctrl)
-        let mut elements = Vec::new();
-        let action = build_creative_inventory(
-            &mut elements,
-            &mut state,
-            390.0,
-            272.0,
-            cursor,
+    fn run(state: &mut CreativeState, inventory: &Inventory, frame: Frame) -> CreativeAction {
+        build_creative_inventory(
+            &mut Vec::new(),
+            state,
+            SCREEN.0,
+            SCREEN.1,
+            frame.cursor,
+            frame.clicked,
             false,
-            false,
-            false,
+            frame.right_clicked,
             0.0,
             &[],
             false,
             None,
             false,
-            true,
-            false,
-            &inv,
+            frame.drop,
+            !frame.throttled,
+            inventory,
             2.0,
             false,
             false,
             false,
             &|_, _| 0.0,
-        );
+        )
+    }
 
+    fn centre(target: HoverTarget) -> (f32, f32) {
+        slot_center(&CreativeState::new(), target, SCREEN.0, SCREEN.1, 2.0).unwrap()
+    }
+
+    fn dropped_count(action: CreativeAction) -> i32 {
         match action {
-            CreativeAction::DropSlot {
-                slot,
-                dropped,
-                remaining,
-            } => {
-                assert_eq!(slot, 36);
-                assert_eq!(dropped.count(), 1);
-                assert_eq!(remaining.count(), 4);
+            CreativeAction::DropItem(dropped) | CreativeAction::DropSlot { dropped, .. } => {
+                dropped.count()
             }
-            _ => panic!(
-                "expected DropSlot action, got {:?}",
-                std::mem::discriminant(&action)
-            ),
-        }
-
-        // Drop whole stack (Ctrl+Q)
-        let mut elements = Vec::new();
-        let action_all = build_creative_inventory(
-            &mut elements,
-            &mut state,
-            390.0,
-            272.0,
-            cursor,
-            false,
-            false,
-            false,
-            0.0,
-            &[],
-            false,
-            None,
-            false,
-            true,
-            true,
-            &inv,
-            2.0,
-            false,
-            false,
-            false,
-            &|_, _| 0.0,
-        );
-
-        match action_all {
-            CreativeAction::DropSlot {
-                slot,
-                dropped,
-                remaining,
-            } => {
-                assert_eq!(slot, 36);
-                assert_eq!(dropped.count(), 5);
-                assert!(remaining.is_empty());
-            }
-            _ => panic!(
-                "expected DropSlot action, got {:?}",
-                std::mem::discriminant(&action_all)
-            ),
+            _ => panic!("expected a drop"),
         }
     }
 
     #[test]
-    fn drop_from_catalog_grid() {
+    fn drop_key_on_a_real_slot_drops_one_or_the_stack() {
         let mut state = CreativeState::new();
-        let inv = Inventory::new();
+        let mut inventory = Inventory::new();
+        inventory.set_slot(36, ItemStack::new(ItemKind::Stone, 5));
+        let hotbar = centre(HoverTarget::Hotbar(36));
 
-        let (scale, ox, oy) = panel_layout(390.0, 272.0, 2.0);
-        let (slot_x, slot_y) = slot_xy(
-            ox,
-            oy,
-            scale,
-            GRID_ORIGIN_X + 0.5 * SLOT_STRIDE,
-            GRID_ORIGIN_Y + 0.5 * SLOT_STRIDE,
-        );
-        let cursor = (slot_x, slot_y);
-
-        // Single drop from catalog
-        let mut elements = Vec::new();
-        let action = build_creative_inventory(
-            &mut elements,
-            &mut state,
-            390.0,
-            272.0,
-            cursor,
-            false,
-            false,
-            false,
-            0.0,
-            &[],
-            false,
-            None,
-            false,
-            true,
-            false,
-            &inv,
-            2.0,
-            false,
-            false,
-            false,
-            &|_, _| 0.0,
-        );
-
-        match action {
-            CreativeAction::DropItem(dropped) => {
-                assert_eq!(dropped.count(), 1);
-            }
-            _ => panic!(
-                "expected DropItem action, got {:?}",
-                std::mem::discriminant(&action)
-            ),
-        }
-
-        // Full stack drop from catalog (Ctrl+Q)
-        let mut elements = Vec::new();
-        let action_all = build_creative_inventory(
-            &mut elements,
-            &mut state,
-            390.0,
-            272.0,
-            cursor,
-            false,
-            false,
-            false,
-            0.0,
-            &[],
-            false,
-            None,
-            false,
-            true,
-            true,
-            &inv,
-            2.0,
-            false,
-            false,
-            false,
-            &|_, _| 0.0,
-        );
-
-        match action_all {
-            CreativeAction::DropItem(dropped) => {
-                assert_eq!(dropped.count(), 64);
-            }
-            _ => panic!(
-                "expected DropItem action, got {:?}",
-                std::mem::discriminant(&action_all)
-            ),
+        for (whole_stack, dropped, left) in [(false, 1, 4), (true, 5, 0)] {
+            let action = run(
+                &mut state,
+                &inventory,
+                Frame {
+                    cursor: hotbar,
+                    drop: Some(whole_stack),
+                    ..Default::default()
+                },
+            );
+            let CreativeAction::DropSlot {
+                slot,
+                dropped: stack,
+                remaining,
+            } = action
+            else {
+                panic!("expected DropSlot");
+            };
+            assert_eq!(
+                (slot, stack.count(), remaining.count()),
+                (36, dropped, left)
+            );
         }
     }
 
     #[test]
-    fn drop_carried_item_clicking_outside() {
+    fn drop_key_on_the_catalog_drops_one_or_a_full_stack() {
         let mut state = CreativeState::new();
-        state.cursor_item = ItemStack::new(ItemKind::Stone, 5);
-        let inv = Inventory::new();
-        let cursor = (10.0, 10.0); // Outside the centered panel on 800x600 screen
-
-        // Left-click outside: drops entire stack
-        let mut elements = Vec::new();
-        let action = build_creative_inventory(
-            &mut elements,
-            &mut state,
-            800.0,
-            600.0,
-            cursor,
-            true,
-            false,
-            false,
-            0.0,
-            &[],
-            false,
-            None,
-            false,
-            false,
-            false,
-            &inv,
-            2.0,
-            false,
-            false,
-            false,
-            &|_, _| 0.0,
-        );
-
-        match action {
-            CreativeAction::DropItem(dropped) => {
-                assert_eq!(dropped.count(), 5);
-                assert!(state.cursor_item.is_empty());
-            }
-            _ => panic!(
-                "expected DropItem action, got {:?}",
-                std::mem::discriminant(&action)
-            ),
+        let grid = centre(HoverTarget::Catalog(0));
+        for (whole_stack, count) in [(false, 1), (true, 64)] {
+            let frame = Frame {
+                cursor: grid,
+                drop: Some(whole_stack),
+                ..Default::default()
+            };
+            assert_eq!(
+                dropped_count(run(&mut state, &Inventory::new(), frame)),
+                count
+            );
         }
+    }
 
-        // Right-click outside: drops 1 item, retains remainder
-        state.cursor_item = ItemStack::new(ItemKind::Stone, 5);
-        let mut elements = Vec::new();
-        let action_right = build_creative_inventory(
-            &mut elements,
-            &mut state,
-            800.0,
-            600.0,
-            cursor,
-            false,
-            false,
-            true,
-            0.0,
-            &[],
-            false,
-            None,
-            false,
-            false,
-            false,
-            &inv,
-            2.0,
-            false,
-            false,
-            false,
-            &|_, _| 0.0,
+    #[test]
+    fn clicking_outside_drops_the_carried_stack() {
+        let carrying = |tab| {
+            let mut state = CreativeState::new();
+            state.select_tab(tab);
+            state.cursor_item = ItemStack::new(ItemKind::Stone, 5);
+            state
+        };
+        let left = || Frame {
+            cursor: OUTSIDE,
+            clicked: true,
+            ..Default::default()
+        };
+        let right = || Frame {
+            cursor: OUTSIDE,
+            right_clicked: true,
+            ..Default::default()
+        };
+
+        let mut state = carrying(CreativeTab::BuildingBlocks);
+        assert_eq!(dropped_count(run(&mut state, &Inventory::new(), left())), 5);
+        assert!(state.cursor_item.is_empty());
+
+        // An item tab splits one off a right click.
+        let mut state = carrying(CreativeTab::BuildingBlocks);
+        assert_eq!(
+            dropped_count(run(&mut state, &Inventory::new(), right())),
+            1
         );
+        assert_eq!(state.cursor_item.count(), 4);
 
-        match action_right {
-            CreativeAction::DropItem(dropped) => {
-                assert_eq!(dropped.count(), 1);
-                assert_eq!(state.cursor_item.count(), 4);
-            }
-            _ => panic!(
-                "expected DropItem action, got {:?}",
-                std::mem::discriminant(&action_right)
-            ),
-        }
+        // The survival-inventory tab throws it all for either button.
+        let mut state = carrying(CreativeTab::SurvivalInventory);
+        assert_eq!(
+            dropped_count(run(&mut state, &Inventory::new(), right())),
+            5
+        );
+        assert!(state.cursor_item.is_empty());
+    }
+
+    #[test]
+    fn throttled_drops_change_nothing() {
+        let mut state = CreativeState::new();
+        let mut inventory = Inventory::new();
+        inventory.set_slot(36, ItemStack::new(ItemKind::Stone, 5));
+        let action = run(
+            &mut state,
+            &inventory,
+            Frame {
+                cursor: centre(HoverTarget::Hotbar(36)),
+                drop: Some(false),
+                throttled: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(action, CreativeAction::None));
+
+        state.cursor_item = ItemStack::new(ItemKind::Stone, 5);
+        let action = run(
+            &mut state,
+            &inventory,
+            Frame {
+                cursor: OUTSIDE,
+                clicked: true,
+                throttled: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(action, CreativeAction::None));
+        assert_eq!(state.cursor_item.count(), 5, "the carried stack stays");
     }
 }

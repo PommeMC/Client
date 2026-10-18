@@ -35,6 +35,8 @@ struct StepFile {
     look_at: Option<[f64; 3]>,
     mouse_down: Option<Mouse>,
     mouse_up: Option<Mouse>,
+    press: Option<protocol::Press>,
+    hover: Option<protocol::Hover>,
     wait_ms: Option<u64>,
     screenshot: Option<String>,
     expect: Option<Expect>,
@@ -244,6 +246,12 @@ impl StepFile {
         if let Some(button) = self.mouse_up {
             steps.push(Step::Run(Command::MouseUp { button }));
         }
+        if let Some(press) = self.press {
+            steps.push(Step::Run(Command::Press(press)));
+        }
+        if let Some(hover) = self.hover {
+            steps.push(Step::Run(Command::Hover(hover)));
+        }
         if let Some(ms) = self.wait_ms {
             steps.push(Step::Wait(Duration::from_millis(ms)));
         }
@@ -433,7 +441,7 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
         }) => {
             let inventory = protocol::inventory(game);
             let Some(found) = inventory.slots.iter().find(|s| s.slot == *slot) else {
-                return Err(format!("slot {slot} is empty"));
+                return ensure(item == "air", || format!("slot {slot} is empty"));
             };
             let stack = &found.stack;
             ensure(

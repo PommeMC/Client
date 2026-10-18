@@ -45,6 +45,10 @@ pub enum Command {
     MouseDown {
         button: Mouse,
     },
+    /// Presses a key binding's default key once, e.g. `key.drop`.
+    Press(Press),
+    /// Moves the cursor over a creative-inventory cell.
+    Hover(Hover),
     MouseUp {
         button: Mouse,
     },
@@ -77,6 +81,23 @@ impl From<Mouse> for winit::event::MouseButton {
 pub struct Click {
     pub slot: u16,
     pub op: ClickKind,
+}
+
+/// A key binding's default key, pressed once, optionally with Ctrl held.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Press {
+    pub action: String,
+    #[serde(default)]
+    pub ctrl: bool,
+}
+
+/// A creative item-tab cell: one of `slot` (hotbar, 36-44) or `catalog`.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hover {
+    pub slot: Option<u16>,
+    pub catalog: Option<usize>,
 }
 
 /// Sets inventory slot `slot` to a copy of slot `from`'s stack, as the

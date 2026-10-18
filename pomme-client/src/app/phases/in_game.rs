@@ -1883,11 +1883,15 @@ pub(crate) fn set_creative_slot(
 /// Vanilla `MultiPlayerGameMode.handleCreativeModeItemDrop`: the creative
 /// screen drops a stack into the world through slot -1.
 pub(crate) fn drop_creative_item(
-    game: &GameState,
+    game: &mut GameState,
     connection: &ConnectionHandle,
     item: azalea_inventory::ItemStack,
 ) -> bool {
-    send_creative_slot(game, connection, u16::MAX, item)
+    let sent = send_creative_slot(game, connection, u16::MAX, item);
+    if sent {
+        game.player.drop_spam.increment();
+    }
+    sent
 }
 
 /// `ServerboundSetCreativeModeSlotPacket` for `slot_num`, only in creative;
@@ -3542,9 +3546,9 @@ pub fn update_game(
         let scroll_delta = core.input.consume_menu_scroll();
         // `typed`/`backspace` come from the frame's single drain up top; a
         // second drain here would always read empty.
-        let keys_live = !game.wants_text_input() || core.input.ctrl_held();
-        let drop_key = keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyQ);
-        let drop_all = core.input.ctrl_held();
+        // Vanilla's focused search box takes every key, the drop key included.
+        let drop = (!game.wants_text_input() && core.input.drop_key_just_pressed())
+            .then(|| core.input.ctrl_held());
         let action = crate::ui::creative_inventory::build_creative_inventory(
             &mut elements,
             &mut game.creative_state,
@@ -3559,8 +3563,8 @@ pub fn update_game(
             core.input.key_just_pressed(winit::keyboard::KeyCode::KeyT),
             core.input.hotbar_key_just_pressed(),
             core.input.key_just_pressed(winit::keyboard::KeyCode::KeyF),
-            drop_key,
-            drop_all,
+            drop,
+            game.player.drop_spam.can_drop(),
             &game.player.inventory,
             gs,
             game.advanced_item_tooltips,
@@ -3588,6 +3592,8 @@ pub fn update_game(
                     set_creative_slot(game, connection, slot_num, item);
                 }
             }
+            // TODO: vanilla's client `LivingEntity.drop` also starts the local
+            // arm swing; only the packet is sent here, as for the world drop.
             crate::ui::creative_inventory::CreativeAction::DropItem(item) => {
                 drop_creative_item(game, connection, item);
                 crate::player::interaction::send_use_swing(&connection.packet_tx);

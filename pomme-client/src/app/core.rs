@@ -3133,6 +3133,7 @@ impl AppCore {
             &mut game.player_prev_walk_speed,
         );
         game.player.tick_bob(dx, dz, false);
+        game.player.drop_spam.tick();
 
         game.interaction
             .tick_player_state(input.is_cursor_captured(), held_stack.as_ref());

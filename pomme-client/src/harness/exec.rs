@@ -74,6 +74,8 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         Command::Hud => to_value(protocol::hud(game)),
         Command::Sounds => to_value(&game.recent_sounds),
         Command::Block { at } => Ok(json!(protocol::block(game, *at))),
+        Command::Press(press) => press_key(core, press),
+        Command::Hover(target) => hover(core, gfx, game, target),
         Command::LookAt { at } => {
             let eye = game.player.eye_pos();
             let (y_rot, x_rot) = protocol::look_angles(eye.into(), glam::DVec3::from_array(*at));
@@ -134,4 +136,42 @@ pub fn phase_name(phase: &AppPhase) -> &'static str {
         AppPhase::InGame { .. } => "in_game",
         AppPhase::SavingWorld { .. } => "saving",
     }
+}
+
+/// A key binding's default key through the real key path.
+fn press_key(core: &mut AppCore, press: &protocol::Press) -> Result<Value, String> {
+    let action = crate::app::input::Action::from_id(&press.action)
+        .ok_or_else(|| format!("no key binding {}", press.action))?;
+    core.input.press_action(action, press.ctrl)?;
+    Ok(Value::Null)
+}
+
+/// The cursor over a creative item-tab cell, where the screen hit-tests it.
+fn hover(
+    core: &mut AppCore,
+    gfx: &crate::app::phases::Gfx,
+    game: &crate::app::phases::in_game::GameState,
+    target: &protocol::Hover,
+) -> Result<Value, String> {
+    use crate::ui::creative_inventory::{HoverTarget, slot_center};
+
+    if !game.creative_inventory_open {
+        return Err("hover needs the creative inventory open".into());
+    }
+    let target = match (target.slot, target.catalog) {
+        (Some(slot), None) => HoverTarget::Hotbar(slot),
+        (None, Some(cell)) => HoverTarget::Catalog(cell),
+        _ => return Err("hover takes one of slot or catalog".into()),
+    };
+    let w = gfx.renderer.screen_width() as f32;
+    let h = gfx.renderer.screen_height() as f32;
+    let (x, y) = slot_center(
+        &game.creative_state,
+        target,
+        w,
+        h,
+        core.menu.gui_scale(w, h),
+    )?;
+    core.input.on_cursor_moved(x, y);
+    Ok(Value::Null)
 }
