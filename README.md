@@ -16,6 +16,8 @@
 
 Pomme contains no Mojang code, and joins vanilla servers from 1.20 through 26.3.
 
+https://github.com/user-attachments/assets/0bc2379f-322b-4566-a9d0-935d72cedf0d
+
 <p align="center">
   <img width="1920" height="1080" alt="The Pomme launcher" src="https://github.com/user-attachments/assets/b8353f51-a23b-45c5-9f3d-457e498a5253" />
 </p>
