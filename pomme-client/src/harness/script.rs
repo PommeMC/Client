@@ -51,6 +51,7 @@ enum Expect {
     Gone(GoneExpect),
     Riding(RidingExpect),
     Player(PlayerExpect),
+    Hud(HudExpect),
     Block(BlockExpect),
     Menu(MenuExpect),
     Advancement(AdvancementExpect),
@@ -112,6 +113,23 @@ struct RidingExpect {
 #[serde(deny_unknown_fields)]
 struct PlayerExpect {
     player: PlayerFields,
+}
+
+/// The HUD text; each field is checked when given.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HudExpect {
+    hud: HudFields,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HudFields {
+    /// The title on screen; `""` when none is.
+    title: Option<String>,
+    subtitle: Option<String>,
+    /// Every boss bar's name, top to bottom.
+    boss_bars: Option<Vec<String>>,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -469,6 +487,20 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                     && want.raining.is_none_or(|r| seen.raining == r)
                     && want.hand.is_none_or(|h| seen.hand == h),
                 || format!("player is {seen:?}"),
+            )
+        }
+        Expect::Hud(HudExpect { hud: want }) => {
+            let seen = protocol::hud(game);
+            let shown = |text: &Option<String>| text.as_deref().unwrap_or("").to_owned();
+            let bars: Vec<&str> = seen.boss_bars.iter().map(|b| b.name.as_str()).collect();
+            ensure(
+                want.title.as_ref().is_none_or(|t| *t == shown(&seen.title))
+                    && want
+                        .subtitle
+                        .as_ref()
+                        .is_none_or(|t| *t == shown(&seen.subtitle))
+                    && want.boss_bars.as_ref().is_none_or(|b| *b == bars),
+                || format!("hud is {seen:?}"),
             )
         }
         Expect::Block(BlockExpect {

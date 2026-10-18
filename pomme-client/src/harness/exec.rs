@@ -71,6 +71,7 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         Command::Inventory => to_value(protocol::inventory(game)),
         Command::Entities => to_value(protocol::entities(game)),
         Command::Player => to_value(protocol::player(game)),
+        Command::Hud => to_value(protocol::hud(game)),
         Command::Block { at } => Ok(json!(protocol::block(game, *at))),
         Command::LookAt { at } => {
             let eye = game.player.eye_pos();

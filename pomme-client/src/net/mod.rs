@@ -14,6 +14,7 @@ mod dialog;
 mod entity_data;
 mod entity_wire;
 pub mod handler;
+mod hud_wire;
 pub mod item_codec;
 pub mod known_packs;
 mod player_wire;

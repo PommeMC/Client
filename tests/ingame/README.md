@@ -89,6 +89,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | A block | `block` (state name, e.g. `air`), `at`, optional `block_entity` (type) |
 | The local player | `player = { ... }` with any of `health`, `food`, `level`, `game_mode`, `effect`, `no_effect`, `max_health`, `raining` and `hand` |
 | The open menu | `menu` (a container's menu type, e.g. `generic_9x3`, or `inventory`, `creative`, `none`), optional `title` |
+| The HUD text | `hud = { ... }` with any of `title` and `subtitle` (`""` when none is shown) and `boss_bars` (every name, top to bottom) |
 
 Slots are menu slots. In the player inventory, 5-8 are armor (head to feet),
 9-35 the main inventory, 36-44 the hotbar and 45 the offhand. `/give` fills
@@ -111,5 +112,5 @@ echo '{"cmd":"inventory"}' | nc 127.0.0.1 25599
 
 The commands are `status`, `chat` (`text`), `open_inventory`, `close_menu`,
 `click` (`slot`, `op`), `creative_set_slot` (`slot`, `from`), `inventory`,
-`entities`, `advancements`, `player`, `block` (`at`), `look_at` (`at`),
+`entities`, `advancements`, `player`, `hud`, `block` (`at`), `look_at` (`at`),
 `mouse_down` and `mouse_up` (`button`), `chat_log` and `screenshot` (`path`).

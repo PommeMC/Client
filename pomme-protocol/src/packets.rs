@@ -400,6 +400,10 @@ mod tests {
             Some(115)
         );
         assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "tab_list"),
+            Some(122)
+        );
+        assert_eq!(
             t.id(Phase::Game, Direction::Clientbound, "sound_entity"),
             Some(116)
         );

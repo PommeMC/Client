@@ -177,37 +177,6 @@ pub fn handle_game_packet(
                 waypoint: p.waypoint.clone(),
             });
         }
-        ClientboundGamePacket::BossEvent(p) => {
-            use azalea_protocol::packets::game::c_boss_event::Operation;
-
-            use crate::ui::boss_bar::BossBarOp;
-            let op = match &p.operation {
-                Operation::Add(add) => BossBarOp::Add {
-                    name: format_text_spans(&add.name, [1.0; 4]),
-                    progress: add.progress,
-                    color: add.style.color as u8,
-                    overlay: add.style.overlay as u8,
-                    darken_screen: add.properties.darken_screen,
-                    play_music: add.properties.play_music,
-                    create_world_fog: add.properties.create_world_fog,
-                },
-                Operation::Remove => BossBarOp::Remove,
-                Operation::UpdateProgress(progress) => BossBarOp::UpdateProgress(*progress),
-                Operation::UpdateName(name) => {
-                    BossBarOp::UpdateName(format_text_spans(name, [1.0; 4]))
-                }
-                Operation::UpdateStyle(style) => BossBarOp::UpdateStyle {
-                    color: style.color as u8,
-                    overlay: style.overlay as u8,
-                },
-                Operation::UpdateProperties(props) => BossBarOp::UpdateProperties {
-                    darken_screen: props.darken_screen,
-                    play_music: props.play_music,
-                    create_world_fog: props.create_world_fog,
-                },
-            };
-            let _ = event_tx.try_send(NetworkEvent::BossBarUpdate { id: p.id, op });
-        }
         ClientboundGamePacket::UpdateAdvancements(p) => {
             use azalea_protocol::packets::game::c_update_advancements::FrameType;
 
@@ -263,30 +232,6 @@ pub fn handle_game_packet(
                     show_advancements: p.show_advancements,
                 },
             )));
-        }
-        ClientboundGamePacket::SetTitleText(p) => {
-            let _ = event_tx.try_send(NetworkEvent::TitleText {
-                spans: format_text_spans(&p.text, [1.0; 4]),
-            });
-        }
-        ClientboundGamePacket::SetSubtitleText(p) => {
-            let _ = event_tx.try_send(NetworkEvent::SubtitleText {
-                spans: format_text_spans(&p.text, [1.0; 4]),
-            });
-        }
-        ClientboundGamePacket::SetTitlesAnimation(p) => {
-            // azalea decodes the fields as u32; vanilla reads signed ints and
-            // ignores negatives, so restore the sign before forwarding.
-            let _ = event_tx.try_send(NetworkEvent::TitlesAnimation {
-                fade_in: p.fade_in as i32,
-                stay: p.stay as i32,
-                fade_out: p.fade_out as i32,
-            });
-        }
-        ClientboundGamePacket::ClearTitles(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ClearTitles {
-                reset_times: p.reset_times,
-            });
         }
         ClientboundGamePacket::SetObjective(p) => {
             use azalea_protocol::packets::game::c_set_objective::Method;
@@ -474,12 +419,6 @@ pub fn handle_game_packet(
                 uuids: p.profile_ids.clone(),
             });
         }
-        ClientboundGamePacket::TabList(p) => {
-            let _ = event_tx.try_send(NetworkEvent::TabListHeaderFooter {
-                header: crate::ui::text::format_text_spans(&p.header, [1.0, 1.0, 1.0, 1.0]),
-                footer: crate::ui::text::format_text_spans(&p.footer, [1.0, 1.0, 1.0, 1.0]),
-            });
-        }
         ClientboundGamePacket::Commands(p) => {
             let tree = std::sync::Arc::new(CommandTree::from_packet(p));
             tracing::info!(
@@ -645,6 +584,9 @@ pub fn handle_raw_game_packet(
     if took(
         super::container_wire::handle_raw_container_packet(packet_id, payload, event_tx),
         "container",
+    ) || took(
+        super::hud_wire::handle_raw_hud_packet(packet_id, payload, event_tx),
+        "hud",
     ) || took(
         super::entity_data::handle_raw_entity_data(packet_id, payload, registry_holder, event_tx),
         "set_entity_data",

@@ -30,6 +30,8 @@ pub enum Command {
     Entities,
     Advancements,
     Player,
+    /// The title, boss bars and tab list text on screen.
+    Hud,
     /// The block state the client holds at `at`.
     Block {
         at: [i32; 3],
@@ -311,6 +313,41 @@ pub fn player(game: &GameState) -> PlayerInfo {
             .value(crate::attribute::AttributeKind::MaxHealth),
         raining: game.sky_state.rain_level > 0.0,
         hand: crate::app::phases::in_game::renders_first_person_hand(game),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct HudInfo {
+    pub title: Option<String>,
+    pub subtitle: Option<String>,
+    pub boss_bars: Vec<BossBarInfo>,
+    pub tab_header: Option<String>,
+    pub tab_footer: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BossBarInfo {
+    pub name: String,
+    pub progress: f32,
+}
+
+pub fn hud(game: &GameState) -> HudInfo {
+    use crate::ui::text::span_text;
+
+    let shown = game.title.shown();
+    HudInfo {
+        title: shown.map(|(title, _)| span_text(title)),
+        subtitle: shown.and_then(|(_, subtitle)| subtitle).map(span_text),
+        boss_bars: game
+            .boss_bars
+            .iter()
+            .map(|bar| BossBarInfo {
+                name: span_text(&bar.name),
+                progress: bar.progress(),
+            })
+            .collect(),
+        tab_header: game.tab_list.header.as_deref().map(span_text),
+        tab_footer: game.tab_list.footer.as_deref().map(span_text),
     }
 }
 

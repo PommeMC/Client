@@ -15,6 +15,7 @@ use azalea_registry::identifier::Identifier;
 use glam::DVec3;
 use pomme_protocol::chunk::{self, ChunkPacket};
 use pomme_protocol::container::{self, ContainerPacket};
+use pomme_protocol::hud::{self, BossFlags, BossOp, HudPacket};
 use pomme_protocol::packets::{Direction, PacketTable, Phase};
 use pomme_protocol::wire;
 
@@ -2846,11 +2847,37 @@ fn translate_tab_list_764() {
     write_json(&mut old, r#"{"text":"head"}"#);
     write_json(&mut old, r#""foot""#); // bare JSON literal
 
-    let ClientboundGamePacket::TabList(p) = translate_and_decode(764, old) else {
+    let HudPacket::TabList { header, footer } = translate_and_read(764, old, "tab_list", hud::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.header.to_string(), "head");
-    assert_eq!(p.footer.to_string(), "foot");
+    assert_eq!(
+        (plain(&header), plain(&footer)),
+        ("head".into(), "foot".into())
+    );
+}
+
+/// `set_title_text`'s single component.
+#[test]
+fn translate_set_title_text_764() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(764, Direction::Clientbound, "set_title_text"),
+    );
+    write_json(&mut old, r#"{"text":"hello"}"#);
+
+    let HudPacket::Title(text) = translate_and_read(764, old, "set_title_text", hud::read) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(plain(&text), "hello");
+}
+
+/// A text component's plain text.
+fn plain(nbt: &[u8]) -> String {
+    crate::net::chat::read_component(nbt, &mut 0)
+        .unwrap()
+        .plain_text()
 }
 
 /// `player_combat_kill`'s trailing component.
@@ -2884,14 +2911,15 @@ fn translate_boss_event_764() {
     wire::write_varint(&mut old, 0); // overlay
     old.push(0); // flags
 
-    let ClientboundGamePacket::BossEvent(p) = translate_and_decode(764, old) else {
+    let HudPacket::BossEvent {
+        op: BossOp::Add { name, progress, .. },
+        ..
+    } = translate_and_read(764, old, "boss_event", hud::read)
+    else {
         panic!("wrong packet");
     };
-    let azalea_protocol::packets::game::c_boss_event::Operation::Add(add) = p.operation else {
-        panic!("wrong operation");
-    };
-    assert_eq!(add.name.to_string(), "boss");
-    assert_eq!(add.progress, 0.5);
+    assert_eq!(plain(&name), "boss");
+    assert_eq!(progress, 0.5);
 }
 
 /// The 764 team parameters (JSON components in the 767-era order) convert,
@@ -5155,8 +5183,7 @@ fn entity_data_matches_azalea() {
             }
             // azalea re-encodes text as a compound; compare what it says.
             (Value::OptionalComponent(Some(nbt)), EntityDataValue::OptionalFormattedText(az)) => {
-                let text = crate::net::chat::read_component(nbt, &mut 0).unwrap();
-                assert_eq!(text.plain_text(), az.as_ref().unwrap().to_string());
+                assert_eq!(plain(nbt), az.as_ref().unwrap().to_string());
             }
             (ours, theirs) => assert_eq!(
                 Some(ours),
@@ -5727,8 +5754,7 @@ fn player_packets_match_azalea() {
     ) else {
         panic!("player_combat_kill");
     };
-    let text = crate::net::chat::read_component(&message, &mut 0).unwrap();
-    assert_eq!(text.plain_text(), "Tester fell");
+    assert_eq!(plain(&message), "Tester fell");
 }
 
 /// `packet` as azalea encodes it, decoded by pomme's `read` for `name`.
@@ -6097,6 +6123,162 @@ fn container_packets_match_azalea() {
         panic!("open_screen");
     };
     assert_eq!((container_id, menu), (3, MenuKind::Generic9x3.to_u32()));
-    let title = crate::net::chat::read_component(&title, &mut 0).unwrap();
-    assert_eq!(title.plain_text(), "Chest");
+    assert_eq!(plain(&title), "Chest");
+}
+
+#[test]
+fn hud_packets_match_azalea() {
+    use azalea_protocol::packets::game::c_boss_event::{
+        AddOperation, BossBarColor, BossBarOverlay, ClientboundBossEvent, Operation, Properties,
+        Style,
+    };
+    use azalea_protocol::packets::game::*;
+
+    let decode = |name, packet| decode_azalea(name, packet, hud::read);
+    let boss = |operation| {
+        ClientboundGamePacket::BossEvent(ClientboundBossEvent {
+            id: uuid::Uuid::from_u128(7),
+            operation,
+        })
+    };
+    let style = Style {
+        color: BossBarColor::Red,
+        overlay: BossBarOverlay::Notched10,
+    };
+    let properties = Properties {
+        darken_screen: true,
+        play_music: false,
+        create_world_fog: true,
+    };
+    let flags = BossFlags {
+        darken_screen: true,
+        play_music: false,
+        create_world_fog: true,
+    };
+
+    let cases = [
+        (
+            "set_titles_animation",
+            ClientboundGamePacket::SetTitlesAnimation(
+                c_set_titles_animation::ClientboundSetTitlesAnimation {
+                    fade_in: 10,
+                    stay: 70,
+                    fade_out: 20,
+                },
+            ),
+            HudPacket::TitlesAnimation {
+                fade_in: 10,
+                stay: 70,
+                fade_out: 20,
+            },
+        ),
+        (
+            "clear_titles",
+            ClientboundGamePacket::ClearTitles(c_clear_titles::ClientboundClearTitles {
+                reset_times: true,
+            }),
+            HudPacket::ClearTitles { reset_times: true },
+        ),
+        (
+            "boss_event",
+            boss(Operation::Remove),
+            HudPacket::BossEvent {
+                id: 7,
+                op: BossOp::Remove,
+            },
+        ),
+        (
+            "boss_event",
+            boss(Operation::UpdateProgress(0.25)),
+            HudPacket::BossEvent {
+                id: 7,
+                op: BossOp::Progress(0.25),
+            },
+        ),
+        (
+            "boss_event",
+            boss(Operation::UpdateStyle(style.clone())),
+            HudPacket::BossEvent {
+                id: 7,
+                op: BossOp::Style {
+                    color: 2,
+                    overlay: 2,
+                },
+            },
+        ),
+        (
+            "boss_event",
+            boss(Operation::UpdateProperties(properties.clone())),
+            HudPacket::BossEvent {
+                id: 7,
+                op: BossOp::Properties(flags),
+            },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+
+    let HudPacket::Title(title) = decode(
+        "set_title_text",
+        ClientboundGamePacket::SetTitleText(c_set_title_text::ClientboundSetTitleText {
+            text: "Hello".into(),
+        }),
+    ) else {
+        panic!("set_title_text");
+    };
+    assert_eq!(plain(&title), "Hello");
+    let HudPacket::Subtitle(subtitle) = decode(
+        "set_subtitle_text",
+        ClientboundGamePacket::SetSubtitleText(c_set_subtitle_text::ClientboundSetSubtitleText {
+            text: "sub".into(),
+        }),
+    ) else {
+        panic!("set_subtitle_text");
+    };
+    assert_eq!(plain(&subtitle), "sub");
+    let HudPacket::TabList { header, footer } = decode(
+        "tab_list",
+        ClientboundGamePacket::TabList(c_tab_list::ClientboundTabList {
+            header: "head".into(),
+            footer: "foot".into(),
+        }),
+    ) else {
+        panic!("tab_list");
+    };
+    assert_eq!(
+        (plain(&header), plain(&footer)),
+        ("head".into(), "foot".into())
+    );
+    let HudPacket::BossEvent {
+        id: 7,
+        op:
+            BossOp::Add {
+                name,
+                progress: 0.5,
+                color: 2,
+                overlay: 2,
+                flags: added,
+            },
+    } = decode(
+        "boss_event",
+        boss(Operation::Add(AddOperation {
+            name: "Boss".into(),
+            progress: 0.5,
+            style,
+            properties,
+        })),
+    )
+    else {
+        panic!("boss_event add");
+    };
+    assert_eq!((plain(&name), added), ("Boss".into(), flags));
+    let HudPacket::BossEvent {
+        op: BossOp::Name(name),
+        ..
+    } = decode("boss_event", boss(Operation::UpdateName("Renamed".into())))
+    else {
+        panic!("boss_event name");
+    };
+    assert_eq!(plain(&name), "Renamed");
 }
