@@ -241,6 +241,8 @@ pub struct GameState {
     /// Dimension-type `cardinal_light`, which picks the terrain shade table
     /// and the item entity light directions.
     pub cardinal_light: CardinalLightType,
+    /// The current dimension's `default_clock`, whose ticks are its day time.
+    pub default_clock: Option<String>,
     /// F3+F4 game-mode switcher overlay, while open.
     pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
     /// Spectator hotbar menu (vanilla `SpectatorGui`). Not a GUI screen: the
@@ -472,6 +474,7 @@ impl GameState {
             previous_game_mode: None,
             dimension: String::new(),
             cardinal_light: Default::default(),
+            default_clock: None,
             game_mode_switcher: None,
             spectator: Default::default(),
             switcher_was_open: false,

@@ -404,12 +404,21 @@ mod tests {
             Some(122)
         );
         for (name, id) in [
+            ("disconnect", 32),
+            ("keep_alive", 44),
+            ("login", 49),
+            ("ping", 61),
             ("player_info_remove", 69),
             ("player_info_update", 70),
+            ("player_position", 72),
+            ("player_rotation", 73),
             ("reset_score", 79),
+            ("respawn", 82),
             ("set_display_objective", 98),
             ("set_objective", 106),
             ("set_score", 110),
+            ("set_simulation_distance", 111),
+            ("set_time", 113),
         ] {
             assert_eq!(t.id(Phase::Game, Direction::Clientbound, name), Some(id));
         }

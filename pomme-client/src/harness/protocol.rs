@@ -300,6 +300,12 @@ pub struct PlayerInfo {
     pub raining: bool,
     /// Whether the first-person hand is drawn.
     pub hand: bool,
+    /// The dimension, e.g. `overworld`.
+    pub dimension: String,
+    pub day_time: u64,
+    pub position: [f64; 3],
+    /// Yaw and pitch, in degrees.
+    pub rotation: [f32; 2],
 }
 
 pub fn player(game: &GameState) -> PlayerInfo {
@@ -315,6 +321,10 @@ pub fn player(game: &GameState) -> PlayerInfo {
             .value(crate::attribute::AttributeKind::MaxHealth),
         raining: game.sky_state.rain_level > 0.0,
         hand: crate::app::phases::in_game::renders_first_person_hand(game),
+        dimension: bare(&game.dimension),
+        day_time: game.sky_state.day_time,
+        position: [player.position.x, player.position.y, player.position.z],
+        rotation: [player.look_dir.y_rot_deg(), player.look_dir.x_rot_deg()],
     }
 }
 

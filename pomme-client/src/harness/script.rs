@@ -169,6 +169,12 @@ struct PlayerFields {
     max_health: Option<f64>,
     raining: Option<bool>,
     hand: Option<bool>,
+    dimension: Option<String>,
+    day_time: Option<u64>,
+    /// Within 0.01 blocks.
+    position: Option<[f64; 3]>,
+    /// Yaw, within 0.01 degrees.
+    y_rot: Option<f32>,
 }
 
 /// The block state name the client holds at `at`, e.g. `air`.
@@ -507,7 +513,17 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                     && !want.no_effect.as_deref().is_some_and(has)
                     && want.max_health.is_none_or(|m| seen.max_health == Some(m))
                     && want.raining.is_none_or(|r| seen.raining == r)
-                    && want.hand.is_none_or(|h| seen.hand == h),
+                    && want.hand.is_none_or(|h| seen.hand == h)
+                    && want.dimension.as_ref().is_none_or(|d| seen.dimension == *d)
+                    && want.day_time.is_none_or(|t| seen.day_time == t)
+                    && want.position.is_none_or(|p| {
+                        p.iter()
+                            .zip(seen.position)
+                            .all(|(want, seen)| (want - seen).abs() <= 0.01)
+                    })
+                    && want
+                        .y_rot
+                        .is_none_or(|y| angle_between(seen.rotation[0], y) <= 0.01),
                 || format!("player is {seen:?}"),
             )
         }

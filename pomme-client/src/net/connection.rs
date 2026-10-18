@@ -259,10 +259,9 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
         // A server that turns the join away here does it with a play-phase
         // disconnect, the login phase having already ended.
         if let Some(raw) = translation.translate_game_frame(login)
-            && let Ok(ClientboundGamePacket::Disconnect(p)) =
-                deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw))
+            && let Some(reason) = super::lifecycle_wire::read_disconnect(&raw)
         {
-            return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
+            return Err(ConnectionError::Disconnected(reason));
         }
         return Err(ConnectionError::Disconnected(
             "could not read the registries from the login packet".into(),
@@ -966,6 +965,19 @@ async fn game_loop(
             Some(Ok(())) => continue,
             None => {}
         }
+        if let Some(login) = super::lifecycle_wire::read_login(&raw) {
+            match login {
+                Ok(mut login) => {
+                    inbound_chat.reset();
+                    if crate::version::session_protocol() < 776 {
+                        login.online_mode = conn.is_encrypted();
+                    }
+                    super::lifecycle_wire::login_events(&login, &configured.registries, event_tx);
+                }
+                Err(e) => tracing::warn!("Skipping malformed login packet: {e}"),
+            }
+            continue;
+        }
         if super::dialog::handle_raw_dialog_packet(Phase::Game, &raw, event_tx)
             || handle_raw_game_packet(
                 &raw,
@@ -1040,12 +1052,6 @@ async fn game_loop(
                             .try_send(NetworkEvent::DialogRegistry(configured.dialogs.clone()));
                     }
                     forward_tags(event_tx, &p.tags);
-                }
-                if let ClientboundGamePacket::Login(login) = &mut packet {
-                    inbound_chat.reset();
-                    if crate::version::session_protocol() < 776 {
-                        login.online_mode = conn.is_encrypted();
-                    }
                 }
                 handle_game_packet(
                     &packet,

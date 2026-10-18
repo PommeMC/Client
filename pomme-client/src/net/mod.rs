@@ -17,6 +17,7 @@ pub mod handler;
 mod hud_wire;
 pub mod item_codec;
 pub mod known_packs;
+mod lifecycle_wire;
 mod player_info_wire;
 mod player_wire;
 mod recipe_wire;
@@ -74,6 +75,12 @@ fn read_raw_packet<P>(
     }))
 }
 
+/// A `GameType` id as the client stores it; `GameType.byId` maps an unknown id
+/// to SURVIVAL.
+fn game_type(id: u32) -> u8 {
+    if id <= 3 { id as u8 } else { 0 }
+}
+
 /// An optional field converted with `convert`, which failing drops the
 /// packet.
 fn present<T, U>(value: Option<T>, convert: impl FnOnce(T) -> Option<U>) -> Option<Option<U>> {
@@ -112,6 +119,8 @@ pub enum NetworkEvent {
         min_y: i32,
         has_skylight: bool,
         cardinal_light: crate::world::block::model::CardinalLightType,
+        /// The `world_clock` driving this dimension's day time.
+        default_clock: Option<String>,
     },
     ChunkLoaded {
         pos: ChunkPos,
@@ -137,8 +146,8 @@ pub enum NetworkEvent {
     PlayerPosition {
         /// Teleport id to acknowledge.
         id: u32,
-        change: azalea_protocol::common::movements::PositionMoveRotation,
-        relative: azalea_protocol::common::movements::RelativeMovements,
+        change: pomme_protocol::entity::PositionMoveRotation,
+        relative: pomme_protocol::entity::Relative,
     },
     PlayerRotation {
         y_rot: f32,
@@ -365,7 +374,8 @@ pub enum NetworkEvent {
     },
     TimeUpdate {
         game_time: u64,
-        day_time: Option<u64>,
+        /// Every world clock by name, with its total ticks.
+        clocks: Vec<(String, u64)>,
     },
     WeatherUpdate(Weather),
     GameModeChanged {

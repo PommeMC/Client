@@ -16,6 +16,7 @@ use glam::DVec3;
 use pomme_protocol::chunk::{self, ChunkPacket};
 use pomme_protocol::container::{self, ContainerPacket};
 use pomme_protocol::hud::{self, BossFlags, BossOp, HudPacket};
+use pomme_protocol::lifecycle::{self, LifecyclePacket};
 use pomme_protocol::packets::{Direction, PacketTable, Phase};
 use pomme_protocol::player_info::{self, PlayerInfoPacket};
 use pomme_protocol::scoreboard::{self, NumberFormat, ObjectiveMethod, ScoreboardPacket};
@@ -969,13 +970,16 @@ fn translate_set_time_774() {
     old.extend_from_slice(&6000u64.to_be_bytes()); // day time
     old.push(1); // tickDayTime
 
-    let ClientboundGamePacket::SetTime(p) = translate_and_decode(774, old) else {
+    let LifecyclePacket::SetTime { game_time, clocks } =
+        translate_and_read(774, old, "set_time", lifecycle::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.game_time, 12000);
-    let clock = p.clock_updates.values().next().unwrap();
-    assert_eq!(clock.total_ticks, 6000);
-    assert_eq!(clock.rate, 1.0);
+    assert_eq!(game_time, 12000);
+    let [(_, clock)] = &clocks[..] else {
+        panic!("{clocks:?}");
+    };
+    assert_eq!((clock.total_ticks, clock.rate), (6000, 1.0));
 }
 
 /// Neither 1.21.11 nor 1.21.10 has a serverbound `attack`; the frame
@@ -1350,13 +1354,15 @@ fn translate_player_rotation_772() {
     old.extend_from_slice(&90.0f32.to_be_bytes()); // y rot
     old.extend_from_slice(&(-10.0f32).to_be_bytes()); // x rot
 
-    let ClientboundGamePacket::PlayerRotation(p) = translate_and_decode(772, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.y_rot, 90.0);
-    assert_eq!(p.x_rot, -10.0);
-    assert!(!p.relative_y);
-    assert!(!p.relative_x);
+    assert_eq!(
+        translate_and_read(772, old, "player_rotation", lifecycle::read),
+        LifecyclePacket::PlayerRotation {
+            y_rot: 90.0,
+            relative_y: false,
+            x_rot: -10.0,
+            relative_x: false,
+        }
+    );
 }
 
 /// `BlockPos + angle` -> `RespawnData` with a synthesized overworld
@@ -1842,33 +1848,45 @@ fn translate_player_position_767() {
         old
     };
 
-    let absolute = build(0b0001_1000); // relative: Y_ROT | X_ROT
-    let ClientboundGamePacket::PlayerPosition(p) = translate_and_decode(767, absolute) else {
+    let read = |old| translate_and_read(767, old, "player_position", lifecycle::read);
+    let LifecyclePacket::PlayerPosition {
+        id,
+        change,
+        relative,
+    } = read(build(0b0001_1000))
+    // relative: Y_ROT | X_ROT
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.id, 42);
-    assert_eq!(
-        (p.change.pos.x, p.change.pos.y, p.change.pos.z),
-        (100.5, 64.0, -20.25)
-    );
-    assert_eq!(
-        (p.change.delta.x, p.change.delta.y, p.change.delta.z),
-        (0.0, 0.0, 0.0)
-    );
-    assert_eq!(p.change.look_direction.y_rot(), 90.0);
-    assert_eq!(p.change.look_direction.x_rot(), -10.0);
-    assert!(p.relative.y_rot && p.relative.x_rot);
-    assert!(!p.relative.x && !p.relative.y && !p.relative.z);
+    assert_eq!(id, 42);
+    assert_eq!(change.position, DVec3::new(100.5, 64.0, -20.25));
+    assert_eq!(change.delta, DVec3::ZERO);
+    assert_eq!((change.y_rot, change.x_rot), (90.0, -10.0));
     // Absolute on every position axis, so the velocity zeroes as 1.21.1's did.
-    assert!(!p.relative.delta_x && !p.relative.delta_y && !p.relative.delta_z);
+    assert_eq!(
+        relative,
+        pomme_protocol::entity::Relative {
+            y_rot: true,
+            x_rot: true,
+            ..Default::default()
+        }
+    );
 
-    let relative_xz = build(0b0000_0101); // relative: X | Z
-    let ClientboundGamePacket::PlayerPosition(p) = translate_and_decode(767, relative_xz) else {
+    let LifecyclePacket::PlayerPosition { relative, .. } = read(build(0b0000_0101))
+    // relative: X | Z
+    else {
         panic!("wrong packet");
     };
-    assert!(p.relative.x && p.relative.z && !p.relative.y);
-    assert!(p.relative.delta_x && p.relative.delta_z && !p.relative.delta_y);
-    assert!(!p.relative.rotate_delta);
+    assert_eq!(
+        relative,
+        pomme_protocol::entity::Relative {
+            x: true,
+            z: true,
+            delta_x: true,
+            delta_z: true,
+            ..Default::default()
+        }
+    );
 }
 
 /// 1.21.1's `teleport_entity` only synced position and rotation, so it becomes
@@ -1912,13 +1930,16 @@ fn translate_set_time_767() {
     old.extend_from_slice(&12000u64.to_be_bytes()); // game time
     old.extend_from_slice(&(-6000i64).to_be_bytes()); // frozen day time
 
-    let ClientboundGamePacket::SetTime(p) = translate_and_decode(767, old) else {
+    let LifecyclePacket::SetTime { game_time, clocks } =
+        translate_and_read(767, old, "set_time", lifecycle::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.game_time, 12000);
-    let clock = p.clock_updates.values().next().unwrap();
-    assert_eq!(clock.total_ticks, 6000);
-    assert_eq!(clock.rate, 0.0);
+    assert_eq!(game_time, 12000);
+    let [(_, clock)] = &clocks[..] else {
+        panic!("{clocks:?}");
+    };
+    assert_eq!((clock.total_ticks, clock.rate), (6000, 0.0));
 }
 
 /// 767 `container_set_slot` sentinels: container -1 becomes
@@ -2526,7 +2547,6 @@ fn translate_container_set_slot_765() {
 fn translate_config_registry_data_765() {
     use azalea_buf::AzBuf;
     use azalea_protocol::packets::config::ClientboundConfigPacket;
-    use azalea_registry::DataRegistry;
     use simdnbt::owned::NbtTag;
 
     let root = dimension_registry_codec(&[
@@ -2564,13 +2584,16 @@ fn translate_config_registry_data_765() {
     write_spawn_info_765(&mut old, "minecraft:custom_end", "minecraft:overworld");
     old.push(3); // keep-data flags
 
-    let ClientboundGamePacket::Respawn(p) = translate_and_decode(765, old) else {
+    let LifecyclePacket::Respawn {
+        spawn,
+        data_to_keep,
+    } = translate_and_read(765, old, "respawn", lifecycle::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.common.dimension_type.protocol_id(), 1);
-    assert_eq!(p.common.dimension.to_string(), "minecraft:overworld");
-    assert_eq!(p.common.seed, 42);
-    assert_eq!(p.data_to_keep, 3);
+    assert_eq!(spawn.dimension_type, 1);
+    assert_eq!(spawn.dimension, "minecraft:overworld");
+    assert_eq!((spawn.seed, data_to_keep), (42, 3));
 }
 
 /// A 765 `CommonPlayerSpawnInfo`: dimension-type key, dimension name, then
@@ -2605,14 +2628,14 @@ fn translate_game_login_765() {
     old.extend_from_slice(&[0, 1, 0]); // reducedDebug, deathScreen, crafting
     write_spawn_info_765(&mut old, "minecraft:the_nether", "minecraft:the_nether");
 
-    let ClientboundGamePacket::Login(p) = translate_and_decode(765, old) else {
+    let LifecyclePacket::Login(p) = translate_and_read(765, old, "login", lifecycle::read) else {
         panic!("wrong packet");
     };
-    assert_eq!(p.player_id, MinecraftEntityId(7));
-    assert_eq!(p.levels, vec!["minecraft:the_nether".into()]);
+    assert_eq!(p.player_id, 7);
+    assert_eq!(p.levels, ["minecraft:the_nether"]);
     assert_eq!(p.max_players, 20);
     assert!(p.show_death_screen);
-    assert_eq!(p.common.dimension.to_string(), "minecraft:the_nether");
+    assert_eq!(p.spawn.dimension, "minecraft:the_nether");
     assert!(!p.enforces_secure_chat);
 }
 
@@ -3407,7 +3430,6 @@ fn write_login_763(old: &mut Vec<u8>, dimension_type: &str, dimensions: &[(&str,
 #[test]
 fn translate_login_registries_763() {
     use azalea_protocol::packets::config::ClientboundConfigPacket;
-    use azalea_registry::DataRegistry;
 
     let mut old = Vec::new();
     write_login_763(
@@ -3437,17 +3459,17 @@ fn translate_login_registries_763() {
 
     // The same frame then decodes as a game login, its dimension key resolved
     // against the order just captured.
-    let ClientboundGamePacket::Login(p) = translate_and_decode(763, old) else {
+    let LifecyclePacket::Login(p) = translate_and_read(763, old, "login", lifecycle::read) else {
         panic!("wrong packet");
     };
-    assert_eq!(p.player_id, MinecraftEntityId(7));
-    assert_eq!(p.levels, vec!["minecraft:overworld".into()]);
+    assert_eq!(p.player_id, 7);
+    assert_eq!(p.levels, ["minecraft:overworld"]);
     assert_eq!(p.max_players, 20);
     assert!(p.show_death_screen);
     assert!(!p.enforces_secure_chat);
-    assert_eq!(p.common.dimension_type.protocol_id(), 1);
-    assert_eq!(p.common.dimension.to_string(), "minecraft:overworld");
-    assert_eq!(p.common.seed, 42);
+    assert_eq!(p.spawn.dimension_type, 1);
+    assert_eq!(p.spawn.dimension, "minecraft:overworld");
+    assert_eq!(p.spawn.seed, 42);
 }
 
 /// 1.20.2 moved `dataToKeep` from the middle of the spawn info to the end.
@@ -3466,12 +3488,16 @@ fn translate_respawn_763() {
     old.push(0); // no death location
     wire::write_varint(&mut old, 8); // portal cooldown
 
-    let ClientboundGamePacket::Respawn(p) = translate_and_decode(763, old) else {
+    let LifecyclePacket::Respawn {
+        spawn,
+        data_to_keep,
+    } = translate_and_read(763, old, "respawn", lifecycle::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.data_to_keep, 3);
-    assert_eq!(p.common.dimension.to_string(), "minecraft:the_nether");
-    assert_eq!(p.common.seed, 42);
+    assert_eq!(data_to_keep, 3);
+    assert_eq!(spawn.dimension, "minecraft:the_nether");
+    assert_eq!(spawn.seed, 42);
 }
 
 /// 1.20.2 packed `forget_level_chunk`'s two ints into a ChunkPos long, whose
@@ -4053,29 +4079,36 @@ fn translate_explode_777() {
     assert_eq!(&translated[..], &expected[..]);
 }
 
-/// 26.3's `CommonPlayerSpawnInfo` sends `previousGameType` as an optional
-/// varint (0 = none, else id + 1) where 26.2 reads a signed byte; it sits
-/// a fixed distance from the end of `login` and `respawn`.
-#[test]
-fn translate_spawn_info_777() {
-    use azalea_core::game_type::{GameMode, OptionalGameType};
-    use azalea_protocol::packets::common::CommonPlayerSpawnInfo;
-    use azalea_protocol::packets::game::c_login::ClientboundLogin;
-    use azalea_protocol::packets::game::c_respawn::ClientboundRespawn;
+/// A survival overworld spawn (dimension type 0, seed 42, sea level 63) after
+/// `previous`, as azalea encodes it.
+fn azalea_spawn_info(
+    previous: Option<azalea_core::game_type::GameMode>,
+) -> azalea_protocol::packets::common::CommonPlayerSpawnInfo {
     use azalea_registry::DataRegistry;
 
-    let spawn_info = |previous| CommonPlayerSpawnInfo {
+    azalea_protocol::packets::common::CommonPlayerSpawnInfo {
         dimension_type: azalea_registry::data::DimensionKind::new_raw(0),
         dimension: "minecraft:overworld".into(),
         seed: 42,
-        game_type: GameMode::Survival,
-        previous_game_type: OptionalGameType(previous),
+        game_type: azalea_core::game_type::GameMode::Survival,
+        previous_game_type: azalea_core::game_type::OptionalGameType(previous),
         is_debug: false,
         is_flat: false,
         last_death_location: None,
         portal_cooldown: 0,
         sea_level: 63,
-    };
+    }
+}
+
+/// 26.3's `CommonPlayerSpawnInfo` sends `previousGameType` as an optional
+/// varint (0 = none, else id + 1) where 26.2 reads a signed byte; it sits
+/// a fixed distance from the end of `login` and `respawn`.
+#[test]
+fn translate_spawn_info_777() {
+    use azalea_core::game_type::GameMode;
+    use azalea_protocol::packets::game::c_login::ClientboundLogin;
+    use azalea_protocol::packets::game::c_respawn::ClientboundRespawn;
+
     // (previous game type, its 26.2 byte, its 26.3 byte)
     let cases = [
         (None, 0xFF, 0),
@@ -4093,12 +4126,12 @@ fn translate_spawn_info_777() {
             reduced_debug_info: false,
             show_death_screen: true,
             do_limited_crafting: false,
-            common: spawn_info(previous),
+            common: azalea_spawn_info(previous),
             online_mode: false,
             enforces_secure_chat: true,
         });
         let respawn = ClientboundGamePacket::Respawn(ClientboundRespawn {
-            common: spawn_info(previous),
+            common: azalea_spawn_info(previous),
             data_to_keep: 3,
         });
         // The byte precedes debug/flat/death/portal/sea level and the
@@ -5414,7 +5447,7 @@ fn entity_packets_match_azalea() {
                     y_rot: 45.0,
                     x_rot: -10.0,
                 },
-                relative: 0,
+                relative: entity::Relative::default(),
                 on_ground: false,
             },
         ),
@@ -5550,7 +5583,14 @@ fn teleport_relative_flags_are_a_big_endian_int() {
     else {
         panic!("pomme reads the frame");
     };
-    assert_eq!(relative, 0b1001);
+    assert_eq!(
+        relative,
+        entity::Relative {
+            x: true,
+            y_rot: true,
+            ..Default::default()
+        }
+    );
 }
 
 /// Every player-state packet azalea encodes reads back through pomme's
@@ -6591,4 +6631,173 @@ fn translate_sound_772() {
         translation_for(772).remap_to_native(ClientRegistry::SoundEvent, id),
         Some(native_explode)
     );
+}
+
+/// azalea writes `Relative` as a little-endian bitset where vanilla writes a
+/// big-endian int, so its teleports here are all absolute; `lifecycle.rs`'s
+/// fixtures cover mixed bits.
+#[test]
+fn lifecycle_packets_match_azalea() {
+    use azalea_core::game_type::GameMode;
+    use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+    use azalea_protocol::packets::game::*;
+    use azalea_registry::DataRegistry;
+    use pomme_protocol::lifecycle::{ClockState, Login, SpawnInfo};
+
+    let decode = |name, packet| decode_azalea(name, packet, lifecycle::read);
+    let spawn = SpawnInfo {
+        dimension_type: 0,
+        dimension: "minecraft:overworld".into(),
+        seed: 42,
+        game_type: 0,
+        previous_game_type: Some(1),
+        is_debug: false,
+        is_flat: false,
+        last_death: None,
+        portal_cooldown: 0,
+        sea_level: 63,
+    };
+    let cases = [
+        (
+            "login",
+            ClientboundGamePacket::Login(c_login::ClientboundLogin {
+                player_id: MinecraftEntityId(7),
+                hardcore: true,
+                levels: vec!["minecraft:overworld".into()],
+                max_players: 20,
+                chunk_radius: 12,
+                simulation_distance: 10,
+                reduced_debug_info: false,
+                show_death_screen: true,
+                do_limited_crafting: false,
+                common: azalea_spawn_info(Some(GameMode::Creative)),
+                online_mode: true,
+                enforces_secure_chat: false,
+            }),
+            LifecyclePacket::Login(Login {
+                player_id: 7,
+                hardcore: true,
+                levels: vec!["minecraft:overworld".into()],
+                max_players: 20,
+                chunk_radius: 12,
+                simulation_distance: 10,
+                reduced_debug_info: false,
+                show_death_screen: true,
+                do_limited_crafting: false,
+                spawn: spawn.clone(),
+                online_mode: true,
+                enforces_secure_chat: false,
+            }),
+        ),
+        (
+            "respawn",
+            ClientboundGamePacket::Respawn(c_respawn::ClientboundRespawn {
+                common: azalea_spawn_info(None),
+                data_to_keep: 3,
+            }),
+            LifecyclePacket::Respawn {
+                spawn: SpawnInfo {
+                    previous_game_type: None,
+                    ..spawn.clone()
+                },
+                data_to_keep: 3,
+            },
+        ),
+        (
+            "keep_alive",
+            ClientboundGamePacket::KeepAlive(c_keep_alive::ClientboundKeepAlive { id: 99 }),
+            LifecyclePacket::KeepAlive(99),
+        ),
+        (
+            "ping",
+            ClientboundGamePacket::Ping(c_ping::ClientboundPing { id: 5 }),
+            LifecyclePacket::Ping(5),
+        ),
+        (
+            "player_position",
+            ClientboundGamePacket::PlayerPosition(c_player_position::ClientboundPlayerPosition {
+                id: 3,
+                change: PositionMoveRotation {
+                    pos: azalea_core::position::Vec3::new(1.5, 64.0, -2.0),
+                    delta: azalea_core::position::Vec3::new(0.0, 0.5, 0.0),
+                    look_direction: azalea_entity::LookDirection::new(90.0, 10.0),
+                },
+                relative: RelativeMovements::default(),
+            }),
+            LifecyclePacket::PlayerPosition {
+                id: 3,
+                change: pomme_protocol::entity::PositionMoveRotation {
+                    position: DVec3::new(1.5, 64.0, -2.0),
+                    delta: DVec3::new(0.0, 0.5, 0.0),
+                    y_rot: 90.0,
+                    x_rot: 10.0,
+                },
+                relative: pomme_protocol::entity::Relative::default(),
+            },
+        ),
+        (
+            "player_rotation",
+            ClientboundGamePacket::PlayerRotation(c_player_rotation::ClientboundPlayerRotation {
+                y_rot: 45.0,
+                relative_y: true,
+                x_rot: -30.0,
+                relative_x: false,
+            }),
+            LifecyclePacket::PlayerRotation {
+                y_rot: 45.0,
+                relative_y: true,
+                x_rot: -30.0,
+                relative_x: false,
+            },
+        ),
+        (
+            "set_time",
+            ClientboundGamePacket::SetTime(c_set_time::ClientboundSetTime {
+                game_time: 100,
+                clock_updates: [(
+                    azalea_registry::data::WorldClock::new_raw(1),
+                    c_set_time::ClockState {
+                        total_ticks: 6000,
+                        partial_tick: 0.5,
+                        rate: 1.0,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+            LifecyclePacket::SetTime {
+                game_time: 100,
+                clocks: vec![(
+                    1,
+                    ClockState {
+                        total_ticks: 6000,
+                        partial_tick: 0.5,
+                        rate: 1.0,
+                    },
+                )],
+            },
+        ),
+        (
+            "set_simulation_distance",
+            ClientboundGamePacket::SetSimulationDistance(
+                c_set_simulation_distance::ClientboundSetSimulationDistance {
+                    simulation_distance: 8,
+                },
+            ),
+            LifecyclePacket::SimulationDistance(8),
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+
+    let LifecyclePacket::Disconnect(reason) = decode(
+        "disconnect",
+        ClientboundGamePacket::Disconnect(c_disconnect::ClientboundDisconnect {
+            reason: "bye".into(),
+        }),
+    ) else {
+        panic!("disconnect");
+    };
+    assert_eq!(plain(&reason), "bye");
 }

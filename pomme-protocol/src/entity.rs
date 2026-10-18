@@ -15,6 +15,40 @@ pub struct PositionMoveRotation {
     pub x_rot: f32,
 }
 
+/// `Relative.SET_STREAM_CODEC`: which parts of a teleport are relative to
+/// the current pose, packed as `Relative` ordinal bits (X = 0 .. ROTATE_DELTA
+/// = 8) in an int.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Relative {
+    pub x: bool,
+    pub y: bool,
+    pub z: bool,
+    pub y_rot: bool,
+    pub x_rot: bool,
+    pub delta_x: bool,
+    pub delta_y: bool,
+    pub delta_z: bool,
+    pub rotate_delta: bool,
+}
+
+impl Relative {
+    /// `Relative.unpack`.
+    pub fn from_bits(bits: i32) -> Self {
+        let bit = |n: u8| bits & (1 << n) != 0;
+        Self {
+            x: bit(0),
+            y: bit(1),
+            z: bit(2),
+            y_rot: bit(3),
+            x_rot: bit(4),
+            delta_x: bit(5),
+            delta_y: bit(6),
+            delta_z: bit(7),
+            rotate_delta: bit(8),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum EntityPacket {
     Add {
@@ -47,8 +81,7 @@ pub enum EntityPacket {
     Teleport {
         id: i32,
         change: PositionMoveRotation,
-        /// `Relative.SET_STREAM_CODEC` bits (X = 0 .. ROTATE_DELTA = 8).
-        relative: u32,
+        relative: Relative,
         on_ground: bool,
     },
     Motion {
@@ -124,7 +157,7 @@ pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<EntityPacket>> {
             Ok(EntityPacket::Teleport {
                 id: r.var_i32()?,
                 change: position_move_rotation(r)?,
-                relative: r.i32()? as u32,
+                relative: Relative::from_bits(r.i32()?),
                 on_ground: r.bool()?,
             })
         },
@@ -224,7 +257,7 @@ fn optional_entity_id(r: &mut Reader) -> DecodeResult<Option<i32>> {
     Ok(r.var_i32()?.checked_sub(1).filter(|id| *id >= 0))
 }
 
-fn position_move_rotation(r: &mut Reader) -> DecodeResult<PositionMoveRotation> {
+pub(crate) fn position_move_rotation(r: &mut Reader) -> DecodeResult<PositionMoveRotation> {
     Ok(PositionMoveRotation {
         position: r.vec3()?,
         delta: r.vec3()?,
@@ -367,7 +400,11 @@ mod tests {
             EntityPacket::Teleport {
                 id: 9,
                 change: values,
-                relative: 0b1001,
+                relative: Relative {
+                    x: true,
+                    y_rot: true,
+                    ..Default::default()
+                },
                 on_ground: false
             }
         );

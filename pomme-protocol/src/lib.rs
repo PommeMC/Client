@@ -15,6 +15,7 @@ pub mod entity_data;
 pub mod hud;
 pub mod item;
 pub mod known_packs;
+pub mod lifecycle;
 pub mod packets;
 pub mod player;
 pub mod player_info;

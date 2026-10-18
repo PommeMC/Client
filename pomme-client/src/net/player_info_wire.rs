@@ -53,12 +53,7 @@ fn entry(entry: Entry) -> Option<PlayerInfoEntry> {
             .find(|property| property.name == "textures")
             .map(|property| property.value),
         name: entry.name,
-        // `GameType.byId` maps an unknown id to SURVIVAL.
-        game_mode: if entry.game_mode <= 3 {
-            entry.game_mode as u8
-        } else {
-            0
-        },
+        game_mode: super::game_type(entry.game_mode),
         listed: entry.listed,
         latency: entry.latency,
         display_name: super::present(entry.display_name.as_deref(), component_spans)?,

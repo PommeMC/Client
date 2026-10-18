@@ -334,6 +334,16 @@ fn player_input_state(
 }
 
 /// `base + value` for a relative field, `value` for an absolute one.
+/// The ticks of the dimension's `default_clock`, which drives its day time;
+/// `None` for a dimension without one, which keeps the time it has.
+fn dimension_clock(clocks: &[(String, u64)], default_clock: Option<&str>) -> Option<u64> {
+    let clock = default_clock?;
+    clocks
+        .iter()
+        .find(|(name, _)| name == clock)
+        .map(|(_, ticks)| *ticks)
+}
+
 fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
     if is_relative { base + value } else { value }
 }
@@ -363,8 +373,8 @@ struct ResolvedPlayerCorrection {
 
 fn resolve_player_position_correction(
     player: &LocalPlayer,
-    change: &azalea_protocol::common::movements::PositionMoveRotation,
-    relative: &azalea_protocol::common::movements::RelativeMovements,
+    change: &pomme_protocol::entity::PositionMoveRotation,
+    relative: &pomme_protocol::entity::Relative,
     is_passenger: bool,
 ) -> Option<ResolvedPlayerCorrection> {
     if is_passenger {
@@ -375,16 +385,16 @@ fn resolve_player_position_correction(
     // same `calculateAbsolute`.
     let resolve_position = |base: Position| {
         Position::new(
-            resolve(base.x, relative.x, change.pos.x),
-            resolve(base.y, relative.y, change.pos.y),
-            resolve(base.z, relative.z, change.pos.z),
+            resolve(base.x, relative.x, change.position.x),
+            resolve(base.y, relative.y, change.position.y),
+            resolve(base.z, relative.z, change.position.z),
         )
     };
     let resolve_look = |base| {
         resolve_corrected_look(
             base,
-            change.look_direction.y_rot(),
-            change.look_direction.x_rot(),
+            change.y_rot,
+            change.x_rot,
             relative.y_rot,
             relative.x_rot,
         )
@@ -1279,11 +1289,13 @@ impl AppCore {
                     min_y,
                     has_skylight,
                     cardinal_light,
+                    default_clock,
                 } => {
                     tracing::info!(
                         "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}, cardinal_light={cardinal_light:?}"
                     );
                     game.cardinal_light = cardinal_light;
+                    game.default_clock = default_clock;
                     game.chunk_store =
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
                     game.light_engine =
@@ -2114,13 +2126,10 @@ impl AppCore {
                         dirty_sections_for_block(&mut priority_remesh, b.x, b.y, b.z, min_y, n);
                     }
                 }
-                NetworkEvent::TimeUpdate {
-                    game_time,
-                    day_time,
-                } => {
+                NetworkEvent::TimeUpdate { game_time, clocks } => {
                     game.sky_state.game_time = game_time;
-                    if let Some(dt) = day_time {
-                        game.sky_state.day_time = dt;
+                    if let Some(ticks) = dimension_clock(&clocks, game.default_clock.as_deref()) {
+                        game.sky_state.day_time = ticks;
                     }
                 }
                 NetworkEvent::WeatherUpdate(weather) => {
@@ -3463,7 +3472,7 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 mod tests {
     use super::{
         CursorOp, DeathRoute, HeadProfile, MENU_REPEAT_DELAY, MENU_REPEAT_INTERVAL, RepeatStepper,
-        accepted_player_chat_tag, cursor_step, death_route, player_input_state,
+        accepted_player_chat_tag, cursor_step, death_route, dimension_clock, player_input_state,
         resolve_corrected_look, resolve_head_profile, resolve_player_position_correction,
         server_view_distance_update, serverbound_player_input, sync_living_attribute_mirrors,
         sync_player_attribute_mirrors, sync_respawn_attributes,
@@ -3763,8 +3772,25 @@ mod tests {
     }
 
     #[test]
+    fn day_time_follows_the_dimension_clock() {
+        let clocks = [
+            ("minecraft:the_end".to_owned(), 300),
+            ("minecraft:overworld".to_owned(), 6000),
+        ];
+        assert_eq!(
+            dimension_clock(&clocks, Some("minecraft:overworld")),
+            Some(6000)
+        );
+        assert_eq!(
+            dimension_clock(&clocks, Some("minecraft:the_end")),
+            Some(300)
+        );
+        assert_eq!(dimension_clock(&clocks, None), None);
+    }
+
+    #[test]
     fn mounted_player_position_correction_is_acknowledged_without_local_application() {
-        use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+        use pomme_protocol::entity::{PositionMoveRotation, Relative};
 
         let mut player = LocalPlayer::new();
         player.position = Position::new(1.0, 2.0, 3.0);
@@ -3774,11 +3800,12 @@ mod tests {
         player.prev_look_dir = LookDirection::new(5.0, 15.0);
 
         let change = PositionMoveRotation {
-            pos: azalea_core::position::Vec3::new(100.0, 200.0, 300.0),
-            delta: azalea_core::position::Vec3::new(1.0, 2.0, 3.0),
-            look_direction: azalea_entity::LookDirection::new(90.0, 45.0),
+            position: glam::DVec3::new(100.0, 200.0, 300.0),
+            delta: glam::DVec3::new(1.0, 2.0, 3.0),
+            y_rot: 90.0,
+            x_rot: 45.0,
         };
-        let relative = RelativeMovements::all_absolute();
+        let relative = Relative::default();
 
         let unmounted = resolve_player_position_correction(&player, &change, &relative, false)
             .expect("unmounted correction applies");

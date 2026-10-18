@@ -6,7 +6,6 @@ use azalea_registry::builtin::EntityKind;
 use crossbeam_channel::{Sender, TrySendError};
 
 use super::NetworkEvent;
-use super::chat_security::ProfileKeyServices;
 use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::net::chunk_batch::ChunkBatchSizeCalculator;
@@ -16,7 +15,6 @@ use crate::renderer::pipelines::entity_renderer::{
 };
 use crate::ui::server_dialog::DialogReference;
 use crate::ui::text::format_text_spans;
-use crate::world::block::model::CardinalLightType;
 
 fn dialog_holder_reference(
     holder: &azalea_registry::Holder<azalea_registry::data::Dialog, simdnbt::owned::Nbt>,
@@ -24,34 +22,6 @@ fn dialog_holder_reference(
     match holder {
         azalea_registry::Holder::Reference(dialog) => DialogReference::ProtocolId(dialog.to_u32()),
         azalea_registry::Holder::Direct(nbt) => DialogReference::inline(nbt),
-    }
-}
-
-/// Dimension info from a login/respawn registry entry. Fields that Azalea does
-/// not model directly live in its flattened extras. Missing `has_skylight`
-/// defaults to true; missing `cardinal_light` defaults to vanilla's `default`.
-fn dimension_info(
-    dim: &azalea_core::registry_holder::dimension_type::DimensionKindElement,
-) -> NetworkEvent {
-    NetworkEvent::DimensionInfo {
-        height: dim.height,
-        min_y: dim.min_y,
-        has_skylight: dim
-            ._extra
-            .get("has_skylight")
-            .and_then(|tag| tag.byte())
-            .map(|b| b != 0)
-            .unwrap_or(true),
-        cardinal_light: match dim
-            ._extra
-            .get("cardinal_light")
-            .and_then(|tag| tag.string())
-            .map(|value| value.to_str())
-            .as_deref()
-        {
-            Some("nether") => CardinalLightType::Nether,
-            _ => CardinalLightType::Default,
-        },
     }
 }
 
@@ -81,65 +51,6 @@ pub fn handle_game_packet(
     shared_tree: &SharedCommandTree,
 ) {
     match packet {
-        ClientboundGamePacket::Login(p) => {
-            if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
-                let _ = event_tx.try_send(dimension_info(dim));
-            }
-            let _ = event_tx.try_send(NetworkEvent::DimensionName {
-                name: p.common.dimension.to_string(),
-            });
-            let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
-                game_mode: p.common.game_type as u8,
-                previous: Some(p.common.previous_game_type.0.map(|m| m.to_id())),
-            });
-            let _ = event_tx.try_send(NetworkEvent::ServerViewDistance {
-                distance: p.chunk_radius,
-            });
-            let _ = event_tx.try_send(NetworkEvent::ServerSimulationDistance {
-                distance: p.simulation_distance,
-            });
-            let _ = event_tx.try_send(NetworkEvent::PlayerLogin {
-                entity_id: p.player_id.0,
-                hardcore: p.hardcore,
-                show_death_screen: p.show_death_screen,
-                online_mode: p.online_mode,
-            });
-            let _ = event_tx.try_send(NetworkEvent::SecureChatEnforced {
-                enforced: ProfileKeyServices::get().is_some() && p.enforces_secure_chat,
-            });
-        }
-        ClientboundGamePacket::PlayerPosition(p) => {
-            // Acknowledged on the game thread once the correction is applied.
-            send_ordered(
-                event_tx,
-                NetworkEvent::PlayerPosition {
-                    id: p.id,
-                    change: p.change.clone(),
-                    relative: p.relative.clone(),
-                },
-            );
-        }
-        ClientboundGamePacket::PlayerRotation(p) => {
-            send_ordered(
-                event_tx,
-                NetworkEvent::PlayerRotation {
-                    y_rot: p.y_rot,
-                    relative_y: p.relative_y,
-                    x_rot: p.x_rot,
-                    relative_x: p.relative_x,
-                },
-            );
-        }
-        ClientboundGamePacket::KeepAlive(p) => {
-            sender.send(ServerboundGamePacket::KeepAlive(
-                azalea_protocol::packets::game::s_keep_alive::ServerboundKeepAlive { id: p.id },
-            ));
-        }
-        ClientboundGamePacket::Ping(p) => {
-            // Vanilla `handlePing` pongs from the main thread, in order with
-            // the other main-thread packets.
-            send_ordered(event_tx, NetworkEvent::Ping { id: p.id });
-        }
         ClientboundGamePacket::Waypoint(p) => {
             let _ = event_tx.try_send(NetworkEvent::Waypoint {
                 operation: p.operation,
@@ -202,45 +113,8 @@ pub fn handle_game_packet(
                 },
             )));
         }
-        ClientboundGamePacket::SetTime(p) => {
-            let day_time = p.clock_updates.values().next().map(|c| c.total_ticks);
-            let _ = event_tx.try_send(NetworkEvent::TimeUpdate {
-                game_time: p.game_time,
-                day_time,
-            });
-        }
-        ClientboundGamePacket::SetSimulationDistance(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ServerSimulationDistance {
-                distance: p.simulation_distance,
-            });
-        }
-        ClientboundGamePacket::Disconnect(p) => {
-            tracing::warn!("Disconnected: {}", p.reason);
-            let _ = event_tx.try_send(NetworkEvent::Disconnected {
-                reason: format!("{}", p.reason),
-            });
-        }
         ClientboundGamePacket::SetEntityData(p) => {
             super::entity_data::handle_typed_entity_data(p, registry_holder, event_tx);
-        }
-        ClientboundGamePacket::Respawn(p) => {
-            let _ = event_tx.try_send(NetworkEvent::PlayerRespawned {
-                keep_entity_data: p.data_to_keep & 2 != 0,
-                keep_attribute_modifiers: p.data_to_keep & 1 != 0,
-            });
-            if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
-                let _ = event_tx.try_send(dimension_info(dim));
-            }
-            let _ = event_tx.try_send(NetworkEvent::DimensionName {
-                name: p.common.dimension.to_string(),
-            });
-            let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
-                game_mode: p.common.game_type as u8,
-                previous: Some(p.common.previous_game_type.0.map(|m| m.to_id())),
-            });
-            // Vanilla recreates the player on respawn; the server re-sends any
-            // effects kept across it.
-            let _ = event_tx.try_send(NetworkEvent::ClearMobEffects);
         }
         ClientboundGamePacket::ResourcePackPush(p) => {
             tracing::info!(
@@ -401,6 +275,15 @@ pub fn handle_raw_game_packet(
     ) || took(
         super::sound_wire::handle_raw_sound_packet(packet_id, payload, event_tx),
         "sound",
+    ) || took(
+        super::lifecycle_wire::handle_raw_lifecycle_packet(
+            packet_id,
+            payload,
+            registry_holder,
+            sender,
+            event_tx,
+        ),
+        "lifecycle",
     ) || took(
         super::entity_data::handle_raw_entity_data(packet_id, payload, registry_holder, event_tx),
         "set_entity_data",
@@ -581,9 +464,6 @@ mod tests {
     use std::sync::{Arc, Barrier, mpsc as std_mpsc};
     use std::time::Duration;
 
-    use azalea_protocol::packets::game::c_ping::ClientboundPing;
-    use azalea_protocol::packets::game::c_player_rotation::ClientboundPlayerRotation;
-    use parking_lot::Mutex;
     use pomme_protocol::wire;
 
     use super::*;
@@ -600,22 +480,6 @@ mod tests {
         let id = PacketTable::native().id(Phase::Game, Direction::Clientbound, name);
         wire::write_varint(&mut raw, id.unwrap());
         raw
-    }
-
-    /// Runs `packet` through [`handle_game_packet`], returning what it sent.
-    fn handle(
-        packet: ClientboundGamePacket,
-        event_tx: &Sender<NetworkEvent>,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::net::sender::Outbound> {
-        let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
-        handle_game_packet(
-            &packet,
-            &PacketSender::new(out_tx),
-            event_tx,
-            &RegistryHolder::default(),
-            &Arc::new(Mutex::new(None)),
-        );
-        out_rx
     }
 
     fn assert_event_backpressures(
@@ -650,15 +514,12 @@ mod tests {
     fn forced_player_rotation_backpressures_instead_of_being_dropped() {
         assert_event_backpressures(
             |event_tx| {
-                handle(
-                    ClientboundGamePacket::PlayerRotation(ClientboundPlayerRotation {
-                        y_rot: 45.0,
-                        relative_y: false,
-                        x_rot: 20.0,
-                        relative_x: false,
-                    }),
-                    &event_tx,
-                );
+                let mut raw = native_frame("player_rotation");
+                raw.extend(45f32.to_be_bytes());
+                raw.push(0);
+                raw.extend(20f32.to_be_bytes());
+                raw.push(0);
+                assert!(handle_raw(&raw, &event_tx));
             },
             |event| {
                 assert!(matches!(
@@ -755,10 +616,10 @@ mod tests {
     #[test]
     fn play_ping_is_queued_for_ordered_app_thread_handling() {
         let (event_tx, event_rx) = crossbeam_channel::bounded(1);
-        let mut out_rx = handle(
-            ClientboundGamePacket::Ping(ClientboundPing { id: 0x1234_5678 }),
-            &event_tx,
-        );
+        let mut raw = native_frame("ping");
+        raw.extend(0x1234_5678i32.to_be_bytes());
+        let (took, mut out_rx) = handle_raw_for_test(&raw, &event_tx);
+        assert!(took);
 
         assert!(matches!(
             event_rx.recv().unwrap(),
@@ -851,67 +712,5 @@ mod tests {
             rx.try_recv(),
             Err(crossbeam_channel::TryRecvError::Empty)
         ));
-    }
-}
-
-#[cfg(test)]
-mod dimension_info_tests {
-    use std::collections::HashMap;
-
-    use simdnbt::owned::NbtTag;
-
-    use super::dimension_info;
-    use crate::net::NetworkEvent;
-    use crate::world::block::model::CardinalLightType;
-
-    #[test]
-    fn dimension_info_reads_vanilla_cardinal_light_type() {
-        let dim = azalea_core::registry_holder::dimension_type::DimensionKindElement {
-            height: 384,
-            min_y: -64,
-            ultrawarm: None,
-            _extra: HashMap::from([
-                ("has_skylight".to_string(), NbtTag::Byte(1)),
-                (
-                    "cardinal_light".to_string(),
-                    NbtTag::String("nether".into()),
-                ),
-            ]),
-        };
-
-        let NetworkEvent::DimensionInfo {
-            height,
-            min_y,
-            has_skylight,
-            cardinal_light,
-        } = dimension_info(&dim)
-        else {
-            panic!("dimension_info returned the wrong event variant");
-        };
-        assert_eq!(height, 384);
-        assert_eq!(min_y, -64);
-        assert!(has_skylight);
-        assert_eq!(cardinal_light, CardinalLightType::Nether);
-    }
-
-    #[test]
-    fn dimension_info_defaults_cardinal_light_to_vanilla_default() {
-        let dim = azalea_core::registry_holder::dimension_type::DimensionKindElement {
-            height: 384,
-            min_y: -64,
-            ultrawarm: None,
-            _extra: HashMap::new(),
-        };
-
-        let NetworkEvent::DimensionInfo {
-            has_skylight,
-            cardinal_light,
-            ..
-        } = dimension_info(&dim)
-        else {
-            panic!("dimension_info returned the wrong event variant");
-        };
-        assert!(has_skylight);
-        assert_eq!(cardinal_light, CardinalLightType::Default);
     }
 }
