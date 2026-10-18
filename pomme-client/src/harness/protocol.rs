@@ -32,6 +32,8 @@ pub enum Command {
     Player,
     /// The title, boss bars and tab list text on screen.
     Hud,
+    /// The sound events most recently played, oldest first.
+    Sounds,
     /// The block state the client holds at `at`.
     Block {
         at: [i32; 3],

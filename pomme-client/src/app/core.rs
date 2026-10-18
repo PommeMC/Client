@@ -1982,6 +1982,8 @@ impl AppCore {
                     pitch,
                     seed,
                 } => {
+                    #[cfg(feature = "test-harness")]
+                    game.record_sound(&sound);
                     self.audio
                         .play_world_sound(&sound, category, pos, volume, pitch, seed);
                 }
@@ -2001,6 +2003,8 @@ impl AppCore {
                         .or_else(|| game.entity_positions.get(&entity_id).copied());
 
                     if let Some(pos) = pos {
+                        #[cfg(feature = "test-harness")]
+                        game.record_sound(&sound);
                         self.audio.play_entity_sound(
                             &sound,
                             category,

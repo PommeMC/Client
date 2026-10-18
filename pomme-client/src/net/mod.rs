@@ -23,6 +23,7 @@ mod recipe_wire;
 pub mod resolve;
 mod scoreboard_wire;
 pub mod sender;
+mod sound_wire;
 pub mod stream;
 pub mod translate;
 

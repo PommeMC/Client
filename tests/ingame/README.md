@@ -90,6 +90,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | The local player | `player = { ... }` with any of `health`, `food`, `level`, `game_mode`, `effect`, `no_effect`, `max_health`, `raining` and `hand` |
 | The open menu | `menu` (a container's menu type, e.g. `generic_9x3`, or `inventory`, `creative`, `none`), optional `title` |
 | The HUD text | `hud = { ... }` with any of `title`, `subtitle` and `sidebar_title` (`""` when none is shown), `boss_bars` (every name, top to bottom), `sidebar` (every row as `"name number"`, top to bottom) and `tab_list` (every listed player as `{ name, game_mode? }`, in tab order) |
+| A played sound | `sound` (event name, e.g. `block.note_block.harp`), among the last 64 played |
 
 Slots are menu slots. In the player inventory, 5-8 are armor (head to feet),
 9-35 the main inventory, 36-44 the hotbar and 45 the offhand. `/give` fills
@@ -112,5 +113,5 @@ echo '{"cmd":"inventory"}' | nc 127.0.0.1 25599
 
 The commands are `status`, `chat` (`text`), `open_inventory`, `close_menu`,
 `click` (`slot`, `op`), `creative_set_slot` (`slot`, `from`), `inventory`,
-`entities`, `advancements`, `player`, `hud`, `block` (`at`), `look_at` (`at`),
+`entities`, `advancements`, `player`, `hud`, `sounds`, `block` (`at`), `look_at` (`at`),
 `mouse_down` and `mouse_up` (`button`), `chat_log` and `screenshot` (`path`).

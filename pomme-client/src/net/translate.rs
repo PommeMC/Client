@@ -343,13 +343,12 @@ use std::io::Cursor;
 use std::sync::Mutex;
 
 use azalea_buf::{AzBuf, AzBufVar};
-use azalea_core::sound::CustomSound;
 use azalea_inventory::components::{DataComponentUnion, Profile};
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_protocol::packets::game::s_container_click::HashedStack;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
-use azalea_registry::builtin::{DataComponentKind, SoundEvent};
-use azalea_registry::{Holder, Registry};
+use azalea_registry::Registry;
+use azalea_registry::builtin::DataComponentKind;
 use glam::DVec3;
 use pomme_protocol::version::NATIVE;
 use pomme_protocol::{
@@ -1399,8 +1398,6 @@ impl Translation {
     pub fn remap_inbound(&self, packet: &mut ClientboundGamePacket) -> bool {
         use ClientRegistry as R;
         match packet {
-            ClientboundGamePacket::Sound(p) => self.remap_sound(&mut p.sound),
-            ClientboundGamePacket::SoundEntity(p) => self.remap_sound(&mut p.sound),
             ClientboundGamePacket::SetEntityData(p) => {
                 // `translate_entity_data` already remaps item-stack values
                 // while rewriting serializer ids, except on pre-1.20.5 wires
@@ -1455,13 +1452,6 @@ impl Translation {
                 }
             }
             _ => {}
-        }
-    }
-
-    pub(super) fn remap_sound(&self, sound: &mut Holder<SoundEvent, CustomSound>) -> bool {
-        match sound {
-            Holder::Reference(kind) => remap_with(self.to_native, ClientRegistry::SoundEvent, kind),
-            Holder::Direct(_) => true,
         }
     }
 

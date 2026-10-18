@@ -52,6 +52,7 @@ enum Expect {
     Riding(RidingExpect),
     Player(PlayerExpect),
     Hud(HudExpect),
+    Sound(SoundExpect),
     Block(BlockExpect),
     Menu(MenuExpect),
     Advancement(AdvancementExpect),
@@ -113,6 +114,13 @@ struct RidingExpect {
 #[serde(deny_unknown_fields)]
 struct PlayerExpect {
     player: PlayerFields,
+}
+
+/// A sound event the client played recently, e.g. `block.note_block.harp`.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SoundExpect {
+    sound: String,
 }
 
 /// The HUD text; each field is checked when given.
@@ -503,6 +511,9 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                 || format!("player is {seen:?}"),
             )
         }
+        Expect::Sound(SoundExpect { sound }) => ensure(game.recent_sounds.contains(sound), || {
+            format!("{sound} not played; recent: {:?}", game.recent_sounds)
+        }),
         Expect::Hud(HudExpect { hud: want }) => {
             let seen = protocol::hud(game);
             let shown = |text: &Option<String>| text.as_deref().unwrap_or("").to_owned();

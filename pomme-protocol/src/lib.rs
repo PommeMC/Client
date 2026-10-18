@@ -20,6 +20,7 @@ pub mod player;
 pub mod player_info;
 pub mod registries;
 pub mod scoreboard;
+pub mod sound;
 pub mod version;
 pub mod wire;
 

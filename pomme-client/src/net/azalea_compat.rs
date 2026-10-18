@@ -19,6 +19,7 @@ use pomme_protocol::hud::{self, BossFlags, BossOp, HudPacket};
 use pomme_protocol::packets::{Direction, PacketTable, Phase};
 use pomme_protocol::player_info::{self, PlayerInfoPacket};
 use pomme_protocol::scoreboard::{self, NumberFormat, ObjectiveMethod, ScoreboardPacket};
+use pomme_protocol::sound::{self, SoundPacket};
 use pomme_protocol::wire;
 
 fn table_id(phase: Phase, dir: Direction, name: &str) -> u32 {
@@ -415,29 +416,6 @@ fn sound_holder() -> Holder<SoundEvent, CustomSound> {
         sound_id: Identifier::new("minecraft:test.sound"),
         range: None,
     })
-}
-
-/// Pins the azalea bug the raw sound path in `handler::handle_raw_game_packet`
-/// works around: azalea's `SoundSource` stops at `Voice = 9`, and the `AzBuf`
-/// derive decodes an unknown discriminant as the first variant rather than
-/// failing, so vanilla's `UI = 10` silently arrives as `Master`. When azalea
-/// gains the variant this fails, and the raw path can be deleted.
-#[test]
-fn azalea_sound_source_still_misdecodes_ui() {
-    use azalea_buf::AzBuf;
-    use azalea_protocol::packets::game::c_sound::SoundSource;
-
-    let mut ui = std::io::Cursor::new(&[10u8][..]);
-    assert_eq!(
-        SoundSource::azalea_read(&mut ui).unwrap(),
-        SoundSource::Master
-    );
-
-    let mut voice = std::io::Cursor::new(&[9u8][..]);
-    assert_eq!(
-        SoundSource::azalea_read(&mut voice).unwrap(),
-        SoundSource::Voice
-    );
 }
 
 /// Round-trip through azalea's `LpVec3` decoder to cross-check the port.
@@ -6498,5 +6476,119 @@ fn player_info_packets_match_azalea() {
             }),
         ),
         PlayerInfoPacket::Remove(vec![1, 2])
+    );
+}
+
+#[test]
+fn sound_packets_match_azalea() {
+    use azalea_protocol::packets::game::c_sound::SoundSource;
+    use azalea_protocol::packets::game::{c_sound, c_sound_entity, c_stop_sound};
+    use pomme_protocol::sound::SoundEvent as PommeSound;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let decode = |name, packet| decode_azalea(name, packet, sound::read);
+    let explode = registry_id(
+        RegistryTable::native(),
+        ClientRegistry::SoundEvent,
+        "entity.generic.explode",
+    );
+    let cases = [
+        (
+            "sound",
+            ClientboundGamePacket::Sound(c_sound::ClientboundSound {
+                sound: Holder::Reference(SoundEvent::EntityGenericExplode),
+                source: SoundSource::Blocks,
+                x: -8,
+                y: 520,
+                z: 16,
+                volume: 0.5,
+                pitch: 2.0,
+                seed: 7,
+            }),
+            SoundPacket::Sound {
+                sound: PommeSound::Registered(explode),
+                source: 4,
+                x: -8,
+                y: 520,
+                z: 16,
+                volume: 0.5,
+                pitch: 2.0,
+                seed: 7,
+            },
+        ),
+        (
+            "sound_entity",
+            ClientboundGamePacket::SoundEntity(c_sound_entity::ClientboundSoundEntity {
+                sound: sound_holder(),
+                source: SoundSource::Voice,
+                id: MinecraftEntityId(9),
+                volume: 1.0,
+                pitch: 1.0,
+                seed: 3,
+            }),
+            SoundPacket::Entity {
+                sound: PommeSound::Direct {
+                    location: "minecraft:test.sound".into(),
+                    fixed_range: None,
+                },
+                source: 9,
+                entity: 9,
+                volume: 1.0,
+                pitch: 1.0,
+                seed: 3,
+            },
+        ),
+        (
+            "stop_sound",
+            ClientboundGamePacket::StopSound(c_stop_sound::ClientboundStopSound {
+                source: Some(SoundSource::Music),
+                name: Some(Identifier::new("minecraft:music.game")),
+            }),
+            SoundPacket::Stop {
+                source: Some(1),
+                name: Some("minecraft:music.game".into()),
+            },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+}
+
+/// A 1.21.8 `sound` keeps its wire-space event id through translation; the
+/// raw decoder remaps it into 26.2's numbering.
+#[test]
+fn translate_sound_772() {
+    use pomme_protocol::sound::SoundEvent as PommeSound;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let sound_id = |table, name| registry_id(table, ClientRegistry::SoundEvent, name);
+    let old_table = RegistryTable::for_protocol(772).unwrap();
+    let old_explode = sound_id(old_table, "entity.generic.explode");
+    let native_explode = sound_id(RegistryTable::native(), "entity.generic.explode");
+    assert_ne!(old_explode, native_explode);
+
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(772, Direction::Clientbound, "sound"));
+    wire::write_varint(&mut old, old_explode + 1);
+    wire::write_varint(&mut old, 4); // blocks
+    for c in [8i32, 16, 24] {
+        old.extend_from_slice(&c.to_be_bytes());
+    }
+    old.extend_from_slice(&1f32.to_be_bytes());
+    old.extend_from_slice(&1f32.to_be_bytes());
+    old.extend_from_slice(&0i64.to_be_bytes());
+
+    let SoundPacket::Sound {
+        sound: PommeSound::Registered(id),
+        ..
+    } = translate_and_read(772, old, "sound", sound::read)
+    else {
+        panic!("wrong packet");
+    };
+    assert_eq!(id, old_explode);
+    assert_eq!(
+        translation_for(772).remap_to_native(ClientRegistry::SoundEvent, id),
+        Some(native_explode)
     );
 }
