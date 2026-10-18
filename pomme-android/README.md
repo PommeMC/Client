@@ -52,9 +52,6 @@ selects it. On any screen, a touch is the mouse pointer.
 
 - No audio: OpenAL isn't bundled yet.
 - Offline-mode servers only: no Microsoft login on the device.
-- No HTTPS (skins, profile keys): rustls-platform-verifier needs its Java half
-  in the APK and a JNI init, so those requests' threads panic and the game
-  carries on.
 - No singleplayer: the embedded server is off on Android.
 - No soft keyboard, so no chat or typing; the server comes from `launch.txt`.
 - The emulator's Vulkan is translated to the Mac's GPU, so rendering bugs

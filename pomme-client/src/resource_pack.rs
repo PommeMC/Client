@@ -108,7 +108,9 @@ impl ResourcePackManager {
     ) -> Result<PathBuf, PackError> {
         let dir = server_cache_dir.join(hash);
         if !dir.is_dir() {
-            let data = reqwest::blocking::get(url)
+            let data = crate::net::http::blocking_builder()
+                .build()
+                .and_then(|client| client.get(url).send())
                 .map_err(|e| PackError::Download(e.to_string()))?
                 .bytes()
                 .map_err(|e| PackError::Download(e.to_string()))?;

@@ -35,7 +35,7 @@ pub fn now_ms() -> u64 {
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    super::http::builder()
         .timeout(Duration::from_secs(8))
         .build()
         .map_err(|e| format!("could not build HTTP client: {e}"))

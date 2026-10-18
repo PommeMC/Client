@@ -2240,7 +2240,7 @@ pub(crate) async fn fetch_skin_texture_by_name(name: &str) -> Result<SkinData, S
         .map_err(|()| "profile url cannot take a path".to_owned())?
         .pop_if_empty()
         .push(name);
-    let response = reqwest::get(url).await.map_err(error_chain)?;
+    let response = crate::net::http::get(url).await.map_err(error_chain)?;
     if matches!(
         response.status(),
         reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::NOT_FOUND
@@ -2268,7 +2268,7 @@ pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<SkinData, String> {
     }
 
     let url = format!("https://sessionserver.mojang.com/session/minecraft/profile/{uuid}");
-    let response = reqwest::get(&url).await.map_err(error_chain)?;
+    let response = crate::net::http::get(&url).await.map_err(error_chain)?;
     if matches!(
         response.status(),
         reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::NOT_FOUND
@@ -2419,7 +2419,7 @@ fn error_chain(e: impl std::error::Error) -> String {
 }
 
 async fn fetch_skin_image(skin_url: &str) -> Result<(Vec<u8>, u32, u32), String> {
-    let skin_bytes = reqwest::get(skin_url)
+    let skin_bytes = crate::net::http::get(skin_url)
         .await
         .map_err(error_chain)?
         .error_for_status()

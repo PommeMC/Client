@@ -8,8 +8,6 @@ use pomme_client::{AndroidApp, LaunchArgs, Platform};
 /// The launch arguments, as on a command line (`just android-config`).
 const LAUNCH_FILE: &str = "launch.txt";
 
-// TODO: `rustls_platform_verifier::android::init_hosted`, with the verifier's
-// Java classes in the APK, so HTTPS (skins, profile keys) works.
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
     std::panic::set_hook(Box::new(|info| tracing::error!("{info}")));
