@@ -10,12 +10,13 @@ item in the right slot, drawn correctly. That used to need someone to check in
 game. These scripts do it against vanilla's own server, so the whole path is
 tested, and the screenshots catch what the checks miss.
 
-A full run takes under two minutes, server start included, and needs no one
+A full run takes about half a minute, server start included, and needs no one
 at the keyboard, so it's cheap to rerun on every change.
 
 ```sh
 just ingame-test                          # every script in this directory
 just ingame-test inventory_armor_equip    # one script
+just ingame-test --jobs 2                 # two at once (default 6)
 ```
 
 The runner (`tools/ingame-test`):
@@ -26,8 +27,12 @@ The runner (`tools/ingame-test`):
    `Tester` opped. This needs Java 25 (`JAVA_HOME` or `java` on `PATH`).
 3. Runs a debug client per script, then resets the player for the next one.
 
-Each script writes `report.json` and its screenshots to
-`target/ingame/<script>/`. The run fails if any script does.
+With `--jobs N`, N workers each start their own server and world under
+`target/ingame/workers/<n>/` and take scripts from a shared queue. Their
+clients use a game dir there too, so a run never touches your own options.
+
+Each script writes `report.json`, its screenshots and the client's output
+(`client.log`) to `target/ingame/<script>/`. The run fails if any script does.
 
 ## The harness
 

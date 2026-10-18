@@ -136,9 +136,18 @@ fn main() {
 
     let user = UserData::from_args(args.username, args.uuid, args.access_token);
 
-    let presence = crate::discord::DiscordPresence::start(version)
-        .inspect_err(|e| tracing::warn!("Discord rich presence unavailable: {e}"))
-        .ok();
+    // A harness script stays off the user's Discord profile.
+    #[cfg(feature = "test-harness")]
+    let discord = args.harness_script.is_none();
+    #[cfg(not(feature = "test-harness"))]
+    let discord = true;
+    let presence = discord
+        .then(|| {
+            crate::discord::DiscordPresence::start(version)
+                .inspect_err(|e| tracing::warn!("Discord rich presence unavailable: {e}"))
+                .ok()
+        })
+        .flatten();
 
     let mut app = App::new(
         version.to_owned(),

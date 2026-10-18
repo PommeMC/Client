@@ -2,13 +2,14 @@
 //! vanilla 26.2 server: downloads and verifies the server jar once, starts it
 //! offline with the test player opped, then runs a harness client per script.
 //!
-//! `ingame-test [scripts...]` runs the named scripts (all when none);
+//! `ingame-test [--jobs N] [scripts...]` runs the named scripts (all when
+//! none) on N workers, each with its own server and world;
 //! `ingame-test --server-only` starts the server for live socket sessions.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use md5::Digest as _;
@@ -25,6 +26,7 @@ const HOST: &str = "127.0.0.1";
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(180);
 const SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const PLAYER_LEAVE_TIMEOUT: Duration = Duration::from_secs(15);
+const DEFAULT_JOBS: usize = 6;
 
 const OUT_DIR: &str = "target/ingame";
 const SCRIPT_DIR: &str = "tests/ingame";
@@ -45,7 +47,15 @@ fn main() -> ExitCode {
         };
     }
     let server_only = take_flag(&mut args, "--server-only");
-    match run(server_only, &args) {
+    let jobs = match take_value(&mut args, "--jobs").map(|n| n.parse::<usize>()) {
+        None => DEFAULT_JOBS,
+        Some(Ok(n)) if n > 0 => n,
+        Some(_) => {
+            eprintln!("ingame-test: --jobs takes a positive number");
+            return ExitCode::from(2);
+        }
+    };
+    match run(server_only, jobs, &args) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(e) => {
@@ -61,34 +71,65 @@ fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
     args.len() != before
 }
 
+/// The value after `flag` (empty when missing), removing both.
+fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
+    let i = args.iter().position(|a| a == flag)?;
+    args.remove(i);
+    Some(if i < args.len() {
+        args.remove(i)
+    } else {
+        String::new()
+    })
+}
+
 /// Whether every script passed.
-fn run(server_only: bool, names: &[String]) -> Result<bool, String> {
+fn run(server_only: bool, jobs: usize, names: &[String]) -> Result<bool, String> {
     let scripts = scripts(names)?;
     let server_dir = Path::new(OUT_DIR).join("server");
     let jar = server_jar(&server_dir)?;
     let java = java()?;
-    let port = free_port()?;
-    prepare_server(&server_dir, port)?;
-    let mut server = Server::start(&java, &jar, &server_dir)?;
-    println!("Vanilla server ready on {HOST}:{port}");
 
     if server_only {
+        let mut server = Server::start(&java, &jar, &server_dir)?;
+        println!("Vanilla server ready on {HOST}:{}", server.port);
         println!(
             "Join with: just client-dev --features test-harness -- {} --harness-port <port>",
-            join_args(port).join(" ")
+            join_args(server.port).join(" ")
         );
         server.wait();
         return Ok(true);
     }
 
     build_client()?;
-    let mut failed = Vec::new();
-    for script in &scripts {
-        if !run_script(script, port)? {
-            failed.push(script.display().to_string());
-        }
-        server.reset_player()?;
-    }
+    let queue = Mutex::new(scripts.iter());
+    let failed = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..jobs.min(scripts.len()))
+            .map(|n| {
+                let (queue, failed, java, jar) = (&queue, &failed, &java, &jar);
+                scope.spawn(move || -> Result<(), String> {
+                    let dir = Path::new(OUT_DIR).join("workers").join(n.to_string());
+                    let mut server = Server::start(java, jar, &dir)?;
+                    let game_dir = dir.join("client");
+                    loop {
+                        let next = queue.lock().unwrap().next();
+                        let Some(script) = next else {
+                            return Ok(());
+                        };
+                        if !run_script(script, server.port, &game_dir)? {
+                            failed.lock().unwrap().push(script.display().to_string());
+                        }
+                        server.reset_player()?;
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .try_for_each(|worker| worker.join().expect("worker panicked"))
+    })?;
+    let mut failed = failed.into_inner().unwrap();
+    failed.sort();
     println!(
         "\n{} of {} scripts passed",
         scripts.len() - failed.len(),
@@ -227,21 +268,37 @@ fn build_client() -> Result<(), String> {
         .ok_or_else(|| "building the client failed".into())
 }
 
-/// Runs one script in a harness client; whether it passed.
-fn run_script(script: &Path, port: u16) -> Result<bool, String> {
+/// Runs one script in a harness client, logging to `client.log` in its
+/// output dir; whether it passed.
+fn run_script(script: &Path, port: u16, game_dir: &Path) -> Result<bool, String> {
     let name = script.file_stem().unwrap_or_default().to_string_lossy();
-    println!("\n== {name}");
+    let out = Path::new(OUT_DIR).join(&*name);
+    std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let log_path = out.join("client.log");
+    let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
     let client =
         Path::new("target/debug").join(format!("pomme-client{}", std::env::consts::EXE_SUFFIX));
+    let started = Instant::now();
     let status = Command::new(&client)
         .args(join_args(port))
+        .arg("--game-dir")
+        .arg(game_dir)
         .arg("--harness-script")
         .arg(script)
         .arg("--harness-out")
-        .arg(Path::new(OUT_DIR).join(&*name))
+        .arg(&out)
+        .stdout(log.try_clone().map_err(|e| e.to_string())?)
+        .stderr(log)
         .status()
         .map_err(|e| format!("starting {}: {e}", client.display()))?;
-    Ok(status.success())
+    let secs = started.elapsed().as_secs_f32();
+    let passed = status.success();
+    if passed {
+        println!("PASS {name} ({secs:.1}s)");
+    } else {
+        println!("FAIL {name} ({secs:.1}s), see {}", log_path.display());
+    }
+    Ok(passed)
 }
 
 /// The client flags that join the test server as the test player.
@@ -265,10 +322,15 @@ struct Server {
     /// Console lines not yet waited past.
     lines: mpsc::Receiver<String>,
     dir: PathBuf,
+    port: u16,
 }
 
 impl Server {
+    /// Starts the server in `dir` on a fresh world and a free port.
     fn start(java: &Path, jar: &Path, dir: &Path) -> Result<Self, String> {
+        let port = free_port()?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        prepare_server(dir, port)?;
         let jar = jar.canonicalize().map_err(|e| e.to_string())?;
         let mut child = Command::new(java)
             .args(["-Xmx2G", "-jar"])
@@ -298,6 +360,7 @@ impl Server {
             stdin,
             lines,
             dir: dir.to_owned(),
+            port,
         };
         server.wait_for("Done (", SERVER_START_TIMEOUT)?;
         // Spawn chunks unload once the player leaves, taking their entities
