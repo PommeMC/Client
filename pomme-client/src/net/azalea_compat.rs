@@ -17,6 +17,7 @@ use pomme_protocol::chunk::{self, ChunkPacket};
 use pomme_protocol::container::{self, ContainerPacket};
 use pomme_protocol::hud::{self, BossFlags, BossOp, HudPacket};
 use pomme_protocol::packets::{Direction, PacketTable, Phase};
+use pomme_protocol::player_info::{self, PlayerInfoPacket};
 use pomme_protocol::scoreboard::{self, NumberFormat, ObjectiveMethod, ScoreboardPacket};
 use pomme_protocol::wire;
 
@@ -1831,11 +1832,13 @@ fn player_info_passthrough_768() {
     old.extend_from_slice(&[9; 16]); // uuid
     wire::write_varint(&mut old, 5); // list order
 
-    let ClientboundGamePacket::PlayerInfoUpdate(p) = translate_and_decode(768, old) else {
+    let PlayerInfoPacket::Update { actions, entries } =
+        translate_and_read(768, old, "player_info_update", player_info::read)
+    else {
         panic!("wrong packet");
     };
-    assert!(p.actions.update_list_order);
-    assert_eq!(p.entries[0].list_order, 5);
+    assert!(actions.update_list_order && !actions.update_hat);
+    assert_eq!(entries[0].list_order, 5);
 }
 
 /// The 1.21.2 `player_position` rework (`PositionMoveRotation`): the 767
@@ -3046,14 +3049,15 @@ fn translate_player_info_764() {
     old.push(1); // display name present
     write_json(&mut old, r#"{"text":"Bob"}"#);
 
-    let ClientboundGamePacket::PlayerInfoUpdate(p) = translate_and_decode(764, old) else {
+    let PlayerInfoPacket::Update { actions, entries } =
+        translate_and_read(764, old, "player_info_update", player_info::read)
+    else {
         panic!("wrong packet");
     };
-    assert!(p.actions.add_player);
-    assert!(p.actions.update_display_name);
-    let entry = &p.entries[0];
-    assert_eq!(entry.profile.name, "bob");
-    assert_eq!(entry.display_name.as_ref().unwrap().to_string(), "Bob");
+    assert!(actions.add_player && actions.update_display_name);
+    let entry = &entries[0];
+    assert_eq!(entry.name, "bob");
+    assert_eq!(plain(entry.display_name.as_deref().unwrap()), "Bob");
 }
 
 /// `command_suggestions`: nullable tooltips inside the suggestion list.
@@ -6378,5 +6382,121 @@ fn scoreboard_packets_match_azalea() {
     assert_eq!(
         (plain(&display), plain(&fixed)),
         ("Hero".into(), "x".into())
+    );
+}
+
+/// azalea's writer sets the `update_list_order` and `update_hat` bits but
+/// never writes their payloads, so those two are covered by
+/// `player_info.rs`'s fixtures instead.
+#[test]
+fn player_info_packets_match_azalea() {
+    use std::sync::Arc;
+
+    use azalea_auth::game_profile::{GameProfile, GameProfileProperties, ProfilePropertyValue};
+    use azalea_core::game_type::GameMode;
+    use azalea_protocol::packets::game::c_player_info_remove::ClientboundPlayerInfoRemove;
+    use azalea_protocol::packets::game::c_player_info_update::{
+        ActionEnumSet, ClientboundPlayerInfoUpdate, PlayerInfoEntry,
+    };
+    use azalea_protocol::packets::game::s_chat_session_update::{
+        ProfilePublicKeyData, RemoteChatSessionData,
+    };
+    use pomme_protocol::player_info::{Actions, ChatSession, Property};
+    use uuid::Uuid;
+
+    let decode = |name, packet| decode_azalea(name, packet, player_info::read);
+    let mut profile = GameProfile::new(Uuid::from_u128(9), "bob".into());
+    let mut properties = GameProfileProperties::default();
+    properties.map.insert(
+        "textures".into(),
+        ProfilePropertyValue {
+            value: "abc".into(),
+            signature: Some("sig".into()),
+        },
+    );
+    profile.properties = Arc::new(properties);
+    let sent = ActionEnumSet {
+        add_player: true,
+        initialize_chat: true,
+        update_game_mode: true,
+        update_listed: true,
+        update_latency: true,
+        update_display_name: true,
+        update_list_order: false,
+        update_hat: false,
+    };
+    let PlayerInfoPacket::Update { actions, entries } = decode(
+        "player_info_update",
+        ClientboundGamePacket::PlayerInfoUpdate(ClientboundPlayerInfoUpdate {
+            actions: sent,
+            entries: vec![PlayerInfoEntry {
+                profile,
+                chat_session: Some(RemoteChatSessionData {
+                    session_id: Uuid::from_u128(7),
+                    profile_public_key: ProfilePublicKeyData {
+                        expires_at: 1000,
+                        key: vec![0xAA, 0xBB],
+                        key_signature: vec![0xCC],
+                    },
+                }),
+                game_mode: GameMode::Creative,
+                listed: true,
+                latency: 42,
+                display_name: Some(Box::new("Bob".into())),
+                ..Default::default()
+            }],
+        }),
+    ) else {
+        panic!("player_info_update");
+    };
+    assert_eq!(
+        actions,
+        Actions {
+            add_player: true,
+            initialize_chat: true,
+            update_game_mode: true,
+            update_listed: true,
+            update_latency: true,
+            update_display_name: true,
+            update_list_order: false,
+            update_hat: false,
+        }
+    );
+    let [entry] = &entries[..] else {
+        panic!("{entries:?}");
+    };
+    assert_eq!(entry.profile_id, 9);
+    assert_eq!(entry.name, "bob");
+    assert_eq!(
+        entry.properties,
+        [Property {
+            name: "textures".into(),
+            value: "abc".into(),
+            signature: Some("sig".into()),
+        }]
+    );
+    assert_eq!(
+        entry.chat_session,
+        Some(ChatSession {
+            session_id: 7,
+            expires_at: 1000,
+            key: [0xAA, 0xBB].into(),
+            key_signature: [0xCC].into(),
+        })
+    );
+    assert_eq!(
+        (entry.game_mode, entry.listed, entry.latency),
+        (1, true, 42)
+    );
+    assert_eq!(plain(entry.display_name.as_deref().unwrap()), "Bob");
+
+    assert_eq!(
+        decode(
+            "player_info_remove",
+            ClientboundGamePacket::PlayerInfoRemove(ClientboundPlayerInfoRemove {
+                profile_ids: vec![Uuid::from_u128(1), Uuid::from_u128(2)],
+            }),
+        ),
+        PlayerInfoPacket::Remove(vec![1, 2])
     );
 }

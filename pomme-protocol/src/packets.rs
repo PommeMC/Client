@@ -404,6 +404,8 @@ mod tests {
             Some(122)
         );
         for (name, id) in [
+            ("player_info_remove", 69),
+            ("player_info_update", 70),
             ("reset_score", 79),
             ("set_display_objective", 98),
             ("set_objective", 106),

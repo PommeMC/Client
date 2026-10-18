@@ -134,6 +134,16 @@ struct HudFields {
     sidebar_title: Option<String>,
     /// Every sidebar row, top to bottom, as the `hud` command reports it.
     sidebar: Option<Vec<String>>,
+    /// Every listed player, in the tab overlay's order.
+    tab_list: Option<Vec<TabEntryExpect>>,
+}
+
+/// A tab list player; `game_mode` is checked when given.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TabEntryExpect {
+    name: String,
+    game_mode: Option<u8>,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -508,7 +518,14 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                         .sidebar_title
                         .as_ref()
                         .is_none_or(|t| *t == shown(&seen.sidebar_title))
-                    && want.sidebar.as_ref().is_none_or(|s| *s == seen.sidebar),
+                    && want.sidebar.as_ref().is_none_or(|s| *s == seen.sidebar)
+                    && want.tab_list.as_ref().is_none_or(|want| {
+                        want.len() == seen.tab_list.len()
+                            && want.iter().zip(&seen.tab_list).all(|(want, seen)| {
+                                want.name == seen.name
+                                    && want.game_mode.is_none_or(|m| m == seen.game_mode)
+                            })
+                    }),
                 || format!("hud is {seen:?}"),
             )
         }

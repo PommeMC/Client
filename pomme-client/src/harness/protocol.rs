@@ -326,6 +326,15 @@ pub struct HudInfo {
     pub sidebar_title: Option<String>,
     /// Each row's name, then its number text after a space when it has one.
     pub sidebar: Vec<String>,
+    /// The listed players, in the tab overlay's order.
+    pub tab_list: Vec<TabEntryInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TabEntryInfo {
+    pub name: String,
+    pub game_mode: u8,
+    pub latency: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -363,6 +372,16 @@ pub fn hud(game: &GameState) -> HudInfo {
                 } else {
                     format!("{name} {number}")
                 }
+            })
+            .collect(),
+        tab_list: game
+            .tab_list
+            .sorted_listed(&game.scoreboard)
+            .into_iter()
+            .map(|player| TabEntryInfo {
+                name: player.name.clone(),
+                game_mode: player.game_mode,
+                latency: player.latency,
             })
             .collect(),
     }

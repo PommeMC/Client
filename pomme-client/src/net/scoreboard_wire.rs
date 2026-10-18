@@ -38,7 +38,7 @@ fn event(packet: ScoreboardPacket) -> Option<NetworkEvent> {
             let (display, number_format) = match method {
                 ObjectiveMethod::Add(parameters) | ObjectiveMethod::Change(parameters) => (
                     Some(component_spans(&parameters.display_name)?),
-                    present(parameters.number_format, number_format)?,
+                    super::present(parameters.number_format, number_format)?,
                 ),
                 ObjectiveMethod::Remove => (None, None),
             };
@@ -69,8 +69,8 @@ fn event(packet: ScoreboardPacket) -> Option<NetworkEvent> {
             owner,
             objective,
             score,
-            display: present(display.as_deref(), component_spans)?,
-            number_format: present(number_format, self::number_format)?,
+            display: super::present(display.as_deref(), component_spans)?,
+            number_format: super::present(number_format, self::number_format)?,
         },
         ScoreboardPacket::ResetScore { owner, objective } => {
             NetworkEvent::ScoreboardReset { owner, objective }
@@ -114,15 +114,6 @@ fn team(
         collision_rule: collision_rule(parameters.collision_rule),
         members,
     })
-}
-
-/// An optional field converted with `convert`, which failing drops the
-/// packet.
-fn present<T, U>(value: Option<T>, convert: impl FnOnce(T) -> Option<U>) -> Option<Option<U>> {
-    match value {
-        Some(value) => convert(value).map(Some),
-        None => Some(None),
-    }
 }
 
 fn number_format(format: NumberFormat) -> Option<ScoreNumberFormat> {

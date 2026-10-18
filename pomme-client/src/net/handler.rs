@@ -296,72 +296,6 @@ pub fn handle_game_packet(
             tracing::info!("Server popping resource pack {:?}", p.id);
             let _ = event_tx.try_send(NetworkEvent::ResourcePackPop { id: p.id });
         }
-        ClientboundGamePacket::PlayerInfoUpdate(p) => {
-            use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry};
-            let actions = PlayerInfoActions {
-                add_player: p.actions.add_player,
-                initialize_chat: p.actions.initialize_chat,
-                update_game_mode: p.actions.update_game_mode,
-                update_listed: p.actions.update_listed,
-                update_latency: p.actions.update_latency,
-                update_display_name: p.actions.update_display_name,
-                update_list_order: p.actions.update_list_order,
-            };
-            let entries = p
-                .entries
-                .iter()
-                .map(|e| PlayerInfoEntry {
-                    uuid: e.profile.uuid,
-                    name: e.profile.name.clone(),
-                    textures: e
-                        .profile
-                        .properties
-                        .map
-                        .get("textures")
-                        .map(|p| p.value.clone()),
-                    game_mode: e.game_mode.to_id(),
-                    listed: e.listed,
-                    latency: e.latency,
-                    display_name: e
-                        .display_name
-                        .as_ref()
-                        .map(|c| crate::ui::text::format_text_spans(c, [1.0, 1.0, 1.0, 1.0])),
-                    list_order: e.list_order,
-                    chat_session: if p.actions.initialize_chat {
-                        match (ProfileKeyServices::get(), e.chat_session.as_ref()) {
-                            (Some(services), Some(session)) => match services
-                                .validate_session(e.profile.uuid, session)
-                            {
-                                Ok(session) => Some(session),
-                                Err(error) => {
-                                    tracing::error!(
-                                        player = %e.profile.name,
-                                        "Failed to validate profile key: {error}"
-                                    );
-                                    None
-                                }
-                            },
-                            (None, Some(_)) => {
-                                tracing::warn!(
-                                    player = %e.profile.name,
-                                    "Ignoring chat session due to missing Mojang Services public key"
-                                );
-                                None
-                            }
-                            (_, None) => None,
-                        }
-                    } else {
-                        None
-                    },
-                })
-                .collect();
-            let _ = event_tx.try_send(NetworkEvent::PlayerInfoUpdate { actions, entries });
-        }
-        ClientboundGamePacket::PlayerInfoRemove(p) => {
-            let _ = event_tx.try_send(NetworkEvent::PlayerInfoRemove {
-                uuids: p.profile_ids.clone(),
-            });
-        }
         ClientboundGamePacket::Commands(p) => {
             let tree = std::sync::Arc::new(CommandTree::from_packet(p));
             tracing::info!(
@@ -492,6 +426,9 @@ pub fn handle_raw_game_packet(
     ) || took(
         super::scoreboard_wire::handle_raw_scoreboard_packet(packet_id, payload, event_tx),
         "scoreboard",
+    ) || took(
+        super::player_info_wire::handle_raw_player_info_packet(packet_id, payload, event_tx),
+        "player_info",
     ) || took(
         super::entity_data::handle_raw_entity_data(packet_id, payload, registry_holder, event_tx),
         "set_entity_data",

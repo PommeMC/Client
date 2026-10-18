@@ -17,6 +17,7 @@ pub mod item;
 pub mod known_packs;
 pub mod packets;
 pub mod player;
+pub mod player_info;
 pub mod registries;
 pub mod scoreboard;
 pub mod version;

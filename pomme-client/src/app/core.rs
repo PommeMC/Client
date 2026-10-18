@@ -3471,16 +3471,16 @@ mod tests {
     };
     use crate::entity::components::{LookDirection, Position, Velocity};
     use crate::net::chat_security::SignedChatBody;
-    use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry, TabList};
+    use crate::player::tab_list::{PlayerInfoEntry, TabList};
     use crate::player::{LocalPlayer, valid_player_name};
     use crate::ui::chat::ChatMessageTag;
 
     fn tab_list_with(uuid: uuid::Uuid, name: &str, textures: Option<&str>) -> TabList {
         let mut tab_list = TabList::new();
         tab_list.apply_update(
-            &PlayerInfoActions {
+            &pomme_protocol::player_info::Actions {
                 add_player: true,
-                ..PlayerInfoActions::default()
+                ..Default::default()
             },
             &[PlayerInfoEntry {
                 uuid,

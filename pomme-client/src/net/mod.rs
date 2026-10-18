@@ -17,6 +17,7 @@ pub mod handler;
 mod hud_wire;
 pub mod item_codec;
 pub mod known_packs;
+mod player_info_wire;
 mod player_wire;
 mod recipe_wire;
 pub mod resolve;
@@ -70,6 +71,15 @@ fn read_raw_packet<P>(
         r.ensure_eof()?;
         Ok(packet)
     }))
+}
+
+/// An optional field converted with `convert`, which failing drops the
+/// packet.
+fn present<T, U>(value: Option<T>, convert: impl FnOnce(T) -> Option<U>) -> Option<Option<U>> {
+    match value {
+        Some(value) => convert(value).map(Some),
+        None => Some(None),
+    }
 }
 
 /// `ClientboundGameEventPacket`'s weather changes.
@@ -589,7 +599,7 @@ pub enum NetworkEvent {
         reason: String,
     },
     PlayerInfoUpdate {
-        actions: crate::player::tab_list::PlayerInfoActions,
+        actions: pomme_protocol::player_info::Actions,
         entries: Vec<crate::player::tab_list::PlayerInfoEntry>,
     },
     PlayerInfoRemove {
