@@ -1401,12 +1401,6 @@ impl Translation {
         match packet {
             ClientboundGamePacket::Sound(p) => self.remap_sound(&mut p.sound),
             ClientboundGamePacket::SoundEntity(p) => self.remap_sound(&mut p.sound),
-            ClientboundGamePacket::LevelChunkWithLight(p) => {
-                p.chunk_data
-                    .block_entities
-                    .retain_mut(|be| remap_with(self.to_native, R::BlockEntityType, &mut be.kind));
-                true
-            }
             ClientboundGamePacket::ContainerSetContent(p) => {
                 for item in &mut p.items {
                     remap_stack(self.to_native, item);

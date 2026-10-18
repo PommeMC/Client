@@ -13,6 +13,7 @@ use azalea_registry::Holder;
 use azalea_registry::builtin::SoundEvent;
 use azalea_registry::identifier::Identifier;
 use glam::DVec3;
+use pomme_protocol::chunk::{self, ChunkPacket};
 use pomme_protocol::packets::{Direction, PacketTable, Phase};
 use pomme_protocol::wire;
 
@@ -491,6 +492,31 @@ fn translate_and_decode(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
     azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap()
 }
 
+/// Translates a hand-built old-version game frame and decodes the result
+/// with pomme's `read` for packet `name`, as the raw chain does.
+fn translate_and_read<P>(protocol: i32, old: Vec<u8>, name: &str, read: RawRead<P>) -> P {
+    let translated = translation_for(protocol)
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    read_native_frame(&translated, name, read)
+}
+
+/// A pomme-protocol decoder (`chunk::read`, `block::read`, …).
+type RawRead<P> =
+    fn(&str, &mut pomme_protocol::codec::Reader) -> Option<pomme_protocol::codec::DecodeResult<P>>;
+
+/// A native 26.2 game frame for packet `name`, decoded with `read`.
+fn read_native_frame<P>(frame: &[u8], name: &str, read: RawRead<P>) -> P {
+    let mut r = pomme_protocol::codec::Reader::new(frame);
+    assert_eq!(
+        r.varint(),
+        Ok(table_id(Phase::Game, Direction::Clientbound, name))
+    );
+    let decoded = read(name, &mut r).unwrap().unwrap();
+    r.ensure_eof().unwrap();
+    decoded
+}
+
 /// `translate_and_decode` plus the id remap the connection applies next, for
 /// packets whose frame rewrite leaves item ids in the wire version's space.
 fn translate_decode_and_remap(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
@@ -943,12 +969,13 @@ fn translate_chunk_774() {
     old.push(0); // no block entities
     old.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // empty light masks + lists
 
-    let ClientboundGamePacket::LevelChunkWithLight(p) = translate_and_decode(774, old) else {
+    let ChunkPacket::Level { x, z, sections, .. } =
+        translate_and_read(774, old, "level_chunk_with_light", chunk::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.x, 3);
-    assert_eq!(p.z, -2);
-    assert_eq!(p.chunk_data.data[..], [0, 1, 0, 0, 0, 5, 0, 0]);
+    assert_eq!((x, z), (3, -2));
+    assert_eq!(sections[..], [0, 1, 0, 0, 0, 5, 0, 0]);
 }
 
 /// The world-clock map synthesis (see `translate_set_time`).
@@ -1613,14 +1640,20 @@ fn translate_chunk_769() {
     old.push(0); // no block entities
     old.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // empty light masks + lists
 
-    let ClientboundGamePacket::LevelChunkWithLight(p) = translate_and_decode(769, old) else {
+    let ChunkPacket::Level {
+        x,
+        z,
+        heightmaps,
+        sections,
+        ..
+    } = translate_and_read(769, old, "level_chunk_with_light", chunk::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.x, 3);
-    assert_eq!(p.z, -2);
-    assert_eq!(p.chunk_data.heightmaps.len(), 1);
-    assert_eq!(&*p.chunk_data.heightmaps[0].1, &[7u64]);
-    assert_eq!(p.chunk_data.data[..], [0, 1, 0, 0, 0, 5, 0, 0]);
+    assert_eq!((x, z), (3, -2));
+    assert_eq!(heightmaps.len(), 1);
+    assert_eq!(&*heightmaps[0].1, &[7u64]);
+    assert_eq!(sections[..], [0, 1, 0, 0, 0, 5, 0, 0]);
 }
 
 /// A `player_chat` frame with everything but the chat type fixed: 765 sends a
@@ -2809,11 +2842,7 @@ fn translate_set_player_team_764() {
         .translate_game_frame(old.into_boxed_slice())
         .unwrap();
     let (tx, rx) = crossbeam_channel::bounded(1);
-    assert!(crate::net::handler::handle_raw_game_packet(
-        &translated,
-        &Default::default(),
-        &tx
-    ));
+    assert!(crate::net::handler::handle_raw_for_test(&translated, &tx).0);
     match rx.recv().unwrap() {
         crate::net::NetworkEvent::ScoreboardTeam {
             display_name,
@@ -3179,14 +3208,12 @@ fn translate_update_attributes_old_versions() {
         old.extend_from_slice(&4.0f64.to_be_bytes()); // amount
         wire::write_varint(&mut old, 0); // operation
 
-        let translated = translation_for(protocol)
-            .translate_game_frame(old.into_boxed_slice())
-            .unwrap();
-        let mut r = pomme_protocol::codec::Reader::new(&translated);
-        r.varint().unwrap();
-        let Some(Ok(PlayerPacket::Attributes { snapshots, .. })) =
-            pomme_protocol::player::read("update_attributes", &mut r)
-        else {
+        let PlayerPacket::Attributes { snapshots, .. } = translate_and_read(
+            protocol,
+            old,
+            "update_attributes",
+            pomme_protocol::player::read,
+        ) else {
             panic!("wrong packet for {protocol}");
         };
         let attribute = crate::attribute::AttributeKind::from_id(snapshots[0].attribute);
@@ -3371,11 +3398,10 @@ fn translate_forget_level_chunk_763() {
     old.extend_from_slice(&5i32.to_be_bytes()); // x
     old.extend_from_slice(&(-3i32).to_be_bytes()); // z
 
-    let ClientboundGamePacket::ForgetLevelChunk(p) = translate_and_decode(763, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.pos.x, 5);
-    assert_eq!(p.pos.z, -3);
+    assert_eq!(
+        translate_and_read(763, old, "forget_level_chunk", chunk::read),
+        ChunkPacket::Forget { x: 5, z: -3 }
+    );
 }
 
 /// 1.20.1 spawns other players with `add_player`, which 1.20.2 dropped for
@@ -3395,15 +3421,7 @@ fn translate_add_player_763() {
     old.push(10); // pitch
 
     let translation = translation_for(763);
-    let translated = translation
-        .translate_game_frame(old.into_boxed_slice())
-        .unwrap();
-    let mut r = pomme_protocol::codec::Reader::new(&translated);
-    assert_eq!(
-        r.varint(),
-        Ok(table_id(Phase::Game, Direction::Clientbound, "add_entity"))
-    );
-    let Some(Ok(pomme_protocol::entity::EntityPacket::Add {
+    let pomme_protocol::entity::EntityPacket::Add {
         id,
         uuid: wire_uuid,
         entity_type,
@@ -3413,7 +3431,7 @@ fn translate_add_player_763() {
         y_head_rot,
         data,
         ..
-    })) = pomme_protocol::entity::read("add_entity", &mut r)
+    } = translate_and_read(763, old, "add_entity", pomme_protocol::entity::read)
     else {
         panic!("wrong packet");
     };
@@ -3523,17 +3541,25 @@ fn translate_chunk_763() {
     write_named_nbt_d5(&mut old);
     old.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // empty light masks + lists
 
-    let ClientboundGamePacket::LevelChunkWithLight(p) = translate_and_decode(763, old) else {
+    let ChunkPacket::Level {
+        x,
+        z,
+        heightmaps,
+        block_entities,
+        ..
+    } = translate_and_read(763, old, "level_chunk_with_light", chunk::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.x, 3);
-    assert_eq!(p.z, -2);
-    assert_eq!(p.chunk_data.heightmaps.len(), 1);
-    assert_eq!(&*p.chunk_data.heightmaps[0].1, &[7u64]);
-    assert_eq!(p.chunk_data.block_entities.len(), 1);
-    let be = &p.chunk_data.block_entities[0];
+    assert_eq!((x, z), (3, -2));
+    assert_eq!(heightmaps.len(), 1);
+    assert_eq!(&*heightmaps[0].1, &[7u64]);
+    let [be] = &block_entities[..] else {
+        panic!("block entities: {block_entities:?}");
+    };
     assert_eq!(be.y, 64);
-    assert_eq!(be.data.int("d"), Some(5));
+    let tag = crate::net::chat::read_nbt_tag(be.tag.as_deref().unwrap(), &mut 0).unwrap();
+    assert_eq!(tag.compound().and_then(|c| c.int("d")), Some(5));
 }
 
 /// A standalone 763 `block_entity_data` names its tag's root too, where the
@@ -3549,17 +3575,11 @@ fn translate_block_entity_data_763() {
     wire::write_varint(&mut old, 0); // block entity type
     write_named_nbt_d5(&mut old);
 
-    let translated = translation_for(763)
-        .translate_game_frame(old.into_boxed_slice())
-        .unwrap();
-    let mut r = pomme_protocol::codec::Reader::new(&translated);
-    r.varint().unwrap();
-    let Some(Ok(pomme_protocol::block::BlockPacket::EntityData { tag, .. })) =
-        pomme_protocol::block::read("block_entity_data", &mut r)
+    let pomme_protocol::block::BlockPacket::EntityData { tag, .. } =
+        translate_and_read(763, old, "block_entity_data", pomme_protocol::block::read)
     else {
         panic!("wrong packet");
     };
-    r.ensure_eof().unwrap();
     let tag = crate::net::chat::read_nbt_tag(&tag, &mut 0).unwrap();
     assert_eq!(tag.compound().and_then(|c| c.int("d")), Some(5));
 }
@@ -4360,13 +4380,18 @@ fn translate_light_777() {
         false,
     );
     assert_eq!(&translated[..], &expected[..]);
-    let ClientboundGamePacket::LightUpdate(p) = translate_and_decode(
+    let ChunkPacket::Light {
+        light: light_data, ..
+    } = translate_and_read(
         777,
         update(old_id(777, Direction::Clientbound, "light_update"), true),
-    ) else {
+        "light_update",
+        chunk::read,
+    )
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.light_data.sky_updates.len(), 1);
+    assert_eq!(light_data.sky_updates.len(), 1);
 
     let chunk = |id, wire| {
         let mut out = Vec::new();
@@ -5630,23 +5655,12 @@ fn player_packets_match_azalea() {
 }
 
 /// `packet` as azalea encodes it, decoded by pomme's `read` for `name`.
-fn decode_azalea<P>(
-    name: &str,
-    packet: ClientboundGamePacket,
-    read: fn(
-        &str,
-        &mut pomme_protocol::codec::Reader,
-    ) -> Option<pomme_protocol::codec::DecodeResult<P>>,
-) -> P {
-    let raw = azalea_protocol::write::serialize_packet(&packet).unwrap();
-    let mut r = pomme_protocol::codec::Reader::new(&raw);
-    assert_eq!(
-        r.varint(),
-        Ok(table_id(Phase::Game, Direction::Clientbound, name))
-    );
-    let decoded = read(name, &mut r).unwrap().unwrap();
-    r.ensure_eof().unwrap();
-    decoded
+fn decode_azalea<P>(name: &str, packet: ClientboundGamePacket, read: RawRead<P>) -> P {
+    read_native_frame(
+        &azalea_protocol::write::serialize_packet(&packet).unwrap(),
+        name,
+        read,
+    )
 }
 
 #[test]
@@ -5741,6 +5755,129 @@ fn block_packets_match_azalea() {
                 data: 129,
                 global: true,
             },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+}
+
+#[test]
+fn chunk_packets_match_azalea() {
+    use std::sync::Arc;
+
+    use azalea_core::bitset::BitSet;
+    use azalea_core::heightmap_kind::HeightmapKind;
+    use azalea_core::position::ChunkPos;
+    use azalea_protocol::packets::game::*;
+    use azalea_registry::Registry;
+    use azalea_registry::builtin::BlockEntityKind;
+    use pomme_protocol::chunk::{BlockEntityInfo, LightData};
+
+    let decode = |name, packet| decode_azalea(name, packet, chunk::read);
+    let light_data = || c_light_update::ClientboundLightUpdatePacketData {
+        sky_y_mask: BitSet::from(vec![0b101u64, 1]),
+        block_y_mask: BitSet::from(vec![0b10u64]),
+        empty_sky_y_mask: BitSet::from(Vec::<u64>::new()),
+        empty_block_y_mask: BitSet::from(vec![1u64 << 40]),
+        sky_updates: Arc::new(vec![vec![7; 2048].into_boxed_slice()].into()),
+        block_updates: Arc::new(Box::new([])),
+    };
+    let light = LightData {
+        sky_y_mask: vec![0b101, 1],
+        block_y_mask: vec![0b10],
+        empty_sky_y_mask: vec![],
+        empty_block_y_mask: vec![1 << 40],
+        sky_updates: vec![vec![7; 2048].into()],
+        block_updates: vec![],
+    };
+    let mut compound = simdnbt::owned::NbtCompound::new();
+    compound.insert("d", 5);
+    let cases = [
+        (
+            "level_chunk_with_light",
+            ClientboundGamePacket::LevelChunkWithLight(
+                c_level_chunk_with_light::ClientboundLevelChunkWithLight {
+                    x: 3,
+                    z: -2,
+                    chunk_data: c_level_chunk_with_light::ClientboundLevelChunkPacketData {
+                        heightmaps: vec![
+                            (HeightmapKind::WorldSurface, vec![7].into()),
+                            (HeightmapKind::MotionBlocking, vec![8, 9].into()),
+                        ],
+                        data: Arc::new(vec![1, 2, 3].into()),
+                        block_entities: vec![c_level_chunk_with_light::BlockEntity {
+                            packed_xz: 0x59,
+                            y: (-64i16) as u16,
+                            kind: BlockEntityKind::Sign,
+                            data: simdnbt::owned::Nbt::Some(simdnbt::owned::BaseNbt::new(
+                                "", compound,
+                            )),
+                        }],
+                    },
+                    light_data: light_data(),
+                },
+            ),
+            ChunkPacket::Level {
+                x: 3,
+                z: -2,
+                heightmaps: vec![(1, vec![7].into()), (4, vec![8, 9].into())],
+                sections: vec![1, 2, 3].into(),
+                block_entities: vec![BlockEntityInfo {
+                    packed_xz: 0x59,
+                    y: -64,
+                    kind: BlockEntityKind::Sign.to_u32(),
+                    tag: Some([10, 3, 0, 1, b'd', 0, 0, 0, 5, 0].into()),
+                }],
+                light: light.clone(),
+            },
+        ),
+        (
+            "light_update",
+            ClientboundGamePacket::LightUpdate(c_light_update::ClientboundLightUpdate {
+                x: -5,
+                z: 6,
+                light_data: light_data(),
+            }),
+            ChunkPacket::Light { x: -5, z: 6, light },
+        ),
+        (
+            "forget_level_chunk",
+            ClientboundGamePacket::ForgetLevelChunk(
+                // A positive x: azalea's `ChunkPos` writer sign-extends x
+                // over the z half (vanilla masks it, `ChunkPos.pack`); its
+                // reader is right, and pomme's own fixture covers negatives.
+                c_forget_level_chunk::ClientboundForgetLevelChunk {
+                    pos: ChunkPos::new(3, -7),
+                },
+            ),
+            ChunkPacket::Forget { x: 3, z: -7 },
+        ),
+        (
+            "chunk_batch_start",
+            ClientboundGamePacket::ChunkBatchStart(c_chunk_batch_start::ClientboundChunkBatchStart),
+            ChunkPacket::BatchStart,
+        ),
+        (
+            "chunk_batch_finished",
+            ClientboundGamePacket::ChunkBatchFinished(
+                c_chunk_batch_finished::ClientboundChunkBatchFinished { batch_size: 64 },
+            ),
+            ChunkPacket::BatchFinished { size: 64 },
+        ),
+        (
+            "set_chunk_cache_center",
+            ClientboundGamePacket::SetChunkCacheCenter(
+                c_set_chunk_cache_center::ClientboundSetChunkCacheCenter { x: -1, z: 9 },
+            ),
+            ChunkPacket::CacheCenter { x: -1, z: 9 },
+        ),
+        (
+            "set_chunk_cache_radius",
+            ClientboundGamePacket::SetChunkCacheRadius(
+                c_set_chunk_cache_radius::ClientboundSetChunkCacheRadius { radius: 12 },
+            ),
+            ChunkPacket::CacheRadius { radius: 12 },
         ),
     ];
     for (name, packet, expected) in cases {

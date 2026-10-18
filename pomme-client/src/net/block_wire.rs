@@ -9,6 +9,7 @@ use azalea_registry::builtin::BlockEntityKind;
 use crossbeam_channel::Sender;
 use pomme_protocol::block::{self, BlockPacket};
 use pomme_protocol::codec::DecodeResult;
+use simdnbt::owned::NbtCompound;
 
 use super::NetworkEvent;
 use super::handler::send_ordered;
@@ -62,12 +63,8 @@ fn dispatch(packet: BlockPacket, event_tx: &Sender<NetworkEvent>) {
                 tracing::debug!("Dropping block entity data for unknown type {kind}");
                 return;
             };
-            let nbt = match super::chat::read_nbt_tag(&tag, &mut 0) {
-                Ok(tag) => tag.into_compound().unwrap_or_default(),
-                Err(e) => {
-                    tracing::debug!("Unreadable block entity data: {e}");
-                    return;
-                }
+            let Some(nbt) = block_entity_nbt(&tag) else {
+                return;
             };
             let _ = event_tx.try_send(NetworkEvent::BlockEntityUpdate {
                 pos: block_pos(pos),
@@ -99,9 +96,20 @@ fn state_of(id: u32) -> Option<BlockState> {
     state
 }
 
+/// A block entity's network-NBT tag as a compound; `None` if unreadable.
+pub(super) fn block_entity_nbt(tag: &[u8]) -> Option<NbtCompound> {
+    match super::chat::read_nbt_tag(tag, &mut 0) {
+        Ok(tag) => Some(tag.into_compound().unwrap_or_default()),
+        Err(e) => {
+            tracing::debug!("Unreadable block entity data: {e}");
+            None
+        }
+    }
+}
+
 /// The wire block entity type in the native registry; translated sessions
 /// remap it from their version's ids.
-fn native_block_entity_type(id: u32) -> Option<BlockEntityKind> {
+pub(super) fn native_block_entity_type(id: u32) -> Option<BlockEntityKind> {
     BlockEntityKind::from_u32(super::translate::native_id(
         pomme_protocol::ClientRegistry::BlockEntityType,
         id,

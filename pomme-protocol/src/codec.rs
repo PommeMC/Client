@@ -170,6 +170,26 @@ impl<'a> Reader<'a> {
         (0..n).map(|_| read(self)).collect()
     }
 
+    /// `FriendlyByteBuf.readLongArray`: a varint count of at most one long
+    /// per 8 remaining bytes, then big-endian longs. BitSets use this too.
+    pub fn long_array(&mut self) -> DecodeResult<Vec<u64>> {
+        let n = self.varint()? as usize;
+        if n > self.remaining() / 8 {
+            return Err(self.error("long array longer than the frame"));
+        }
+        (0..n).map(|_| Ok(self.i64()? as u64)).collect()
+    }
+
+    /// `ByteBufCodecs.byteArray(max)`: a varint length of at most `max`, then
+    /// the bytes.
+    pub fn byte_array(&mut self, max: usize) -> DecodeResult<&'a [u8]> {
+        let n = self.varint()? as usize;
+        if n > max {
+            return Err(self.error("byte array over its maximum"));
+        }
+        self.bytes(n)
+    }
+
     /// A count read some other way, checked against the remaining bytes as
     /// [`Reader::len`] does.
     pub fn len_of(&self, n: usize) -> DecodeResult<usize> {

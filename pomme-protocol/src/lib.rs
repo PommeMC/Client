@@ -7,6 +7,7 @@
 //! design — azalea cross-checks live in pomme-client's tests.
 
 pub mod block;
+pub mod chunk;
 pub mod codec;
 pub mod entity;
 pub mod entity_data;

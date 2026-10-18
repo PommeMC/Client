@@ -1,0 +1,72 @@
+# Blocks far from spawn arrive inside chunk packets, the chunk is forgotten
+# once the player leaves, and they come back when it's sent again.
+
+[[step]]
+wait_ms = 2000
+
+# Loaded on the server only for the edits; the client gets them later
+# inside the chunk packet.
+[[step]]
+chat = "/forceload add 200 200"
+
+[[step]]
+expect = { chat = "Marked chunk" }
+
+[[step]]
+chat = "/setblock 200 -60 200 minecraft:gold_block"
+
+[[step]]
+chat = "/setblock 201 -60 200 minecraft:oak_sign"
+
+[[step]]
+expect = { chat = "Changed the block at 201, -60, 200" }
+
+[[step]]
+chat = "/forceload remove 200 200"
+
+[[step]]
+chat = "/tp @s 200.5 -60 196.5 0 20"
+
+# The sign's block entity comes in the chunk's block entity list.
+[[step]]
+expect = { block = "gold_block", at = [200, -60, 200] }
+timeout_ms = 10000
+
+[[step]]
+expect = { block = "oak_sign", at = [201, -60, 200], block_entity = "sign" }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "loaded"
+
+# Out of view distance: the client drops the chunk.
+[[step]]
+chat = "/tp @s 0.5 -60 0.5"
+
+[[step]]
+expect = { block = "air", at = [200, -60, 200] }
+timeout_ms = 10000
+
+[[step]]
+chat = "/tp @s 200.5 -60 196.5 0 20"
+
+[[step]]
+expect = { block = "gold_block", at = [200, -60, 200] }
+timeout_ms = 10000
+
+[[step]]
+expect = { block = "oak_sign", at = [201, -60, 200], block_entity = "sign" }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "reloaded"
+
+[[step]]
+chat = "/fill 200 -60 200 201 -60 200 minecraft:air"
+
+[[step]]
+expect = { block = "air", at = [201, -60, 200] }

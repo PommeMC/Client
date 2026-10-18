@@ -966,7 +966,13 @@ async fn game_loop(
             None => {}
         }
         if super::dialog::handle_raw_dialog_packet(Phase::Game, &raw, event_tx)
-            || handle_raw_game_packet(&raw, &configured.registries, event_tx)
+            || handle_raw_game_packet(
+                &raw,
+                &configured.registries,
+                &sender,
+                &mut batch_size_calculator,
+                event_tx,
+            )
         {
             continue;
         }
@@ -1046,7 +1052,6 @@ async fn game_loop(
                     event_tx,
                     &configured.registries,
                     &shared_tree,
-                    &mut batch_size_calculator,
                 );
             }
             Err(e) => skip_malformed_packet(e)?,

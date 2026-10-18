@@ -1,6 +1,5 @@
 use azalea_buf::{AzBuf, AzBufVar};
 use azalea_core::bitset::FixedBitSet;
-use azalea_core::position::ChunkPos;
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_core::sound::CustomSound;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
@@ -84,7 +83,6 @@ pub fn handle_game_packet(
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
     shared_tree: &SharedCommandTree,
-    batch_size_calculator: &mut ChunkBatchSizeCalculator,
 ) {
     match packet {
         ClientboundGamePacket::Login(p) => {
@@ -114,41 +112,6 @@ pub fn handle_game_packet(
                 enforced: ProfileKeyServices::get().is_some() && p.enforces_secure_chat,
             });
         }
-        ClientboundGamePacket::LevelChunkWithLight(p) => {
-            tracing::trace!(
-                "Chunk [{}, {}] ({} block entities)",
-                p.x,
-                p.z,
-                p.chunk_data.block_entities.len()
-            );
-            let _ = event_tx.try_send(NetworkEvent::ChunkLoaded {
-                pos: ChunkPos::new(p.x, p.z),
-                data: p.chunk_data.data.clone(),
-                heightmaps: p.chunk_data.heightmaps.clone(),
-                light: (&p.light_data).into(),
-            });
-            let chunk_pos = ChunkPos::new(p.x, p.z);
-            let entries: Vec<_> = p
-                .chunk_data
-                .block_entities
-                .iter()
-                .map(|be| {
-                    let local_x = ((be.packed_xz >> 4) & 0x0F) as i32;
-                    let local_z = (be.packed_xz & 0x0F) as i32;
-                    let block_pos = azalea_core::position::BlockPos {
-                        x: chunk_pos.x * 16 + local_x,
-                        y: be.y as i16 as i32,
-                        z: chunk_pos.z * 16 + local_z,
-                    };
-                    let compound = match &be.data {
-                        simdnbt::owned::Nbt::Some(base) => base.clone().as_compound(),
-                        simdnbt::owned::Nbt::None => simdnbt::owned::NbtCompound::default(),
-                    };
-                    (block_pos, be.kind, compound)
-                })
-                .collect();
-            let _ = event_tx.try_send(NetworkEvent::BlockEntitySync { chunk_pos, entries });
-        }
         ClientboundGamePacket::Sound(p) => {
             // Coordinates are fixed-point: block position times 8.
             let _ = event_tx.try_send(NetworkEvent::PlaySound {
@@ -175,18 +138,6 @@ pub fn handle_game_packet(
                 sound_id: p.name.as_ref().map(ToString::to_string),
                 category: p.source.map(|source| source as u8),
             });
-        }
-        ClientboundGamePacket::LightUpdate(p) => {
-            let _ = event_tx.try_send(NetworkEvent::LightUpdate {
-                pos: ChunkPos::new(p.x, p.z),
-                light: (&p.light_data).into(),
-            });
-        }
-        ClientboundGamePacket::ForgetLevelChunk(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ChunkUnloaded { pos: p.pos });
-        }
-        ClientboundGamePacket::SetChunkCacheCenter(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ChunkCacheCenter { x: p.x, z: p.z });
         }
         ClientboundGamePacket::PlayerPosition(p) => {
             // Acknowledged on the game thread once the correction is applied.
@@ -219,20 +170,6 @@ pub fn handle_game_packet(
             // Vanilla `handlePing` pongs from the main thread, in order with
             // the other main-thread packets.
             send_ordered(event_tx, NetworkEvent::Ping { id: p.id });
-        }
-        ClientboundGamePacket::ChunkBatchStart(_) => {
-            batch_size_calculator.on_batch_start();
-        }
-        ClientboundGamePacket::ChunkBatchFinished(p) => {
-            // Answered on the network thread: vanilla's
-            // `handleChunkBatchFinished` is one of the few handlers it doesn't
-            // defer to the main thread.
-            batch_size_calculator.on_batch_finished(p.batch_size);
-            sender.send(ServerboundGamePacket::ChunkBatchReceived(
-                azalea_protocol::packets::game::s_chunk_batch_received::ServerboundChunkBatchReceived {
-                    desired_chunks_per_tick: batch_size_calculator.desired_chunks_per_tick(),
-                },
-            ));
         }
         ClientboundGamePacket::ContainerSetContent(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerContent {
@@ -458,9 +395,6 @@ pub fn handle_game_packet(
                 game_time: p.game_time,
                 day_time,
             });
-        }
-        ClientboundGamePacket::SetChunkCacheRadius(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ServerViewDistance { distance: p.radius });
         }
         ClientboundGamePacket::SetSimulationDistance(p) => {
             let _ = event_tx.try_send(NetworkEvent::ServerSimulationDistance {
@@ -740,6 +674,8 @@ pub(super) fn variant_index(
 pub fn handle_raw_game_packet(
     raw: &[u8],
     registry_holder: &RegistryHolder,
+    sender: &PacketSender,
+    batch_size_calculator: &mut ChunkBatchSizeCalculator,
     event_tx: &Sender<NetworkEvent>,
 ) -> bool {
     let mut cur = std::io::Cursor::new(raw);
@@ -774,6 +710,15 @@ pub fn handle_raw_game_packet(
     ) || took(
         super::block_wire::handle_raw_block_packet(packet_id, payload, event_tx),
         "block",
+    ) || took(
+        super::chunk_wire::handle_raw_chunk_packet(
+            packet_id,
+            payload,
+            sender,
+            batch_size_calculator,
+            event_tx,
+        ),
+        "chunk",
     ) {
         return true;
     }
@@ -944,6 +889,27 @@ fn took<E: std::fmt::Display>(result: Option<Result<(), E>>, packet: &str) -> bo
         tracing::warn!("Skipping malformed {packet} packet: {e}");
     }
     result.is_some()
+}
+
+/// Runs `raw` through [`handle_raw_game_packet`] with fresh connection
+/// state: whether a raw handler took it, and what it sent back.
+#[cfg(test)]
+pub(crate) fn handle_raw_for_test(
+    raw: &[u8],
+    event_tx: &Sender<NetworkEvent>,
+) -> (
+    bool,
+    tokio::sync::mpsc::UnboundedReceiver<crate::net::sender::Outbound>,
+) {
+    let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let took = handle_raw_game_packet(
+        raw,
+        &RegistryHolder::default(),
+        &PacketSender::new(out_tx),
+        &mut ChunkBatchSizeCalculator::default(),
+        event_tx,
+    );
+    (took, out_rx)
 }
 
 fn set_player_team_packet_id() -> u32 {
@@ -1178,7 +1144,7 @@ mod tests {
     use super::*;
 
     fn handle_raw(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bool {
-        handle_raw_game_packet(raw, &RegistryHolder::default(), event_tx)
+        handle_raw_for_test(raw, event_tx).0
     }
 
     /// A frame holding just the native id of clientbound packet `name`.
@@ -1203,7 +1169,6 @@ mod tests {
             event_tx,
             &RegistryHolder::default(),
             &Arc::new(Mutex::new(None)),
-            &mut ChunkBatchSizeCalculator::default(),
         );
         out_rx
     }
@@ -1358,6 +1323,20 @@ mod tests {
             out_rx.try_recv().is_err(),
             "network task must not pong immediately"
         );
+    }
+
+    #[test]
+    fn chunk_batch_finished_acks_on_the_network_thread() {
+        let (event_tx, _event_rx) = crossbeam_channel::bounded(1);
+        let mut raw = native_frame("chunk_batch_finished");
+        wire::write_varint(&mut raw, 16);
+        let (took, mut out_rx) = handle_raw_for_test(&raw, &event_tx);
+        assert!(took);
+        assert!(matches!(
+            out_rx.try_recv(),
+            Ok(crate::net::sender::Outbound::Packet(packet))
+                if matches!(*packet, ServerboundGamePacket::ChunkBatchReceived(_))
+        ));
     }
 
     #[test]

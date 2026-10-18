@@ -5,6 +5,7 @@ mod block_wire;
 pub(crate) mod chat;
 pub(crate) mod chat_security;
 pub mod chunk_batch;
+pub(crate) mod chunk_wire;
 pub mod commands;
 pub mod conn;
 pub mod connection;
@@ -46,23 +47,6 @@ pub struct PacketLightData {
     pub block_y_mask: azalea_core::bitset::BitSet,
     pub empty_sky_y_mask: azalea_core::bitset::BitSet,
     pub empty_block_y_mask: azalea_core::bitset::BitSet,
-}
-
-impl From<&azalea_protocol::packets::game::c_light_update::ClientboundLightUpdatePacketData>
-    for PacketLightData
-{
-    fn from(
-        data: &azalea_protocol::packets::game::c_light_update::ClientboundLightUpdatePacketData,
-    ) -> Self {
-        Self {
-            sky_updates: data.sky_updates.clone(),
-            block_updates: data.block_updates.clone(),
-            sky_y_mask: data.sky_y_mask.clone(),
-            block_y_mask: data.block_y_mask.clone(),
-            empty_sky_y_mask: data.empty_sky_y_mask.clone(),
-            empty_block_y_mask: data.empty_block_y_mask.clone(),
-        }
-    }
 }
 
 /// Decodes a native game packet with `read`, which returns `None` for the

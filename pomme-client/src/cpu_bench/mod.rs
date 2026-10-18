@@ -1,7 +1,9 @@
 //! Headless CPU benchmarks (`just bench [filter]`): the chunk mesher, the
-//! per-frame fade rebuild and cave culling, with no window or Vulkan device.
+//! per-frame fade rebuild, cave culling and chunk packet decoding, with no
+//! window or Vulkan device.
 //! Criterion reports each run's change against the last.
 
+mod chunk_decode;
 mod fade;
 mod fixtures;
 mod mesh;
@@ -39,6 +41,7 @@ pub fn run(version: &str, dirs: &DataDirs, filter: Option<&str>) -> i32 {
         mesh::bench(&mut c, &assets);
         occlusion::bench_sections(&mut c, &assets);
     }
+    chunk_decode::bench(&mut c);
     fade::bench(&mut c);
     occlusion::bench_walk(&mut c);
 

@@ -297,6 +297,13 @@ mod tests {
             (Direction::Clientbound, "block_event", 7),
             (Direction::Clientbound, "block_entity_data", 6),
             (Direction::Clientbound, "level_event", 46),
+            (Direction::Clientbound, "level_chunk_with_light", 45),
+            (Direction::Clientbound, "light_update", 48),
+            (Direction::Clientbound, "forget_level_chunk", 37),
+            (Direction::Clientbound, "chunk_batch_start", 12),
+            (Direction::Clientbound, "chunk_batch_finished", 11),
+            (Direction::Clientbound, "set_chunk_cache_center", 94),
+            (Direction::Clientbound, "set_chunk_cache_radius", 95),
             (Direction::Serverbound, "set_creative_mode_slot", 56),
         ] {
             assert_eq!(t.id(Phase::Game, dir, name), Some(id), "{name}");
