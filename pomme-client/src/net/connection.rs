@@ -70,8 +70,11 @@ pub enum Transport {
         protocol: Option<i32>,
     },
     /// An integrated server in this process, reached over an in-memory pipe.
-    #[allow(dead_code, reason = "only a singleplayer build opens a world")]
-    Memory(MemoryEnd),
+    Memory {
+        end: MemoryEnd,
+        /// The protocol that server speaks.
+        protocol: i32,
+    },
 }
 
 pub struct ConnectArgs {
@@ -143,13 +146,11 @@ pub async fn connect_to_server(
             negotiate_wire_version(&server_addr, protocol).await?;
             super::resolve::connect(&server_addr, ClientIntention::Login).await?
         }
-        Transport::Memory(end) => {
-            // The integrated server speaks the native protocol, so there is
-            // nothing to probe and translation stays inert for the session.
-            #[cfg(feature = "singleplayer")]
-            const _: () =
-                assert!(pomme_singleplayer::PROTOCOL == pomme_protocol::version::NATIVE.protocol);
-            adopt_wire_protocol(pomme_protocol::version::NATIVE.protocol);
+        Transport::Memory { end, protocol } => {
+            // The integrated server's protocol is known, so there is nothing
+            // to probe; one other than native is translated like a remote
+            // server's.
+            adopt_wire_protocol(protocol);
             let mut conn = Conn::from_memory(end);
             super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntention::Login)
                 .await?;
@@ -1220,6 +1221,13 @@ mod tests {
         assert_eq!(plains.downfall, 0.4);
     }
 
+    #[test]
+    fn integrated_server_is_joinable() {
+        assert!(crate::net::translate::joinable(
+            crate::singleplayer::PROTOCOL
+        ));
+    }
+
     /// 762 (1.19.4) is not a supported version at all, so it never gains a
     /// wire translation; 775 has one.
     #[test]
@@ -1292,7 +1300,10 @@ mod tests {
 
         let client = tokio::spawn(connect_to_server(
             ConnectArgs {
-                transport: Transport::Memory(client_end),
+                transport: Transport::Memory {
+                    end: client_end,
+                    protocol: NATIVE.protocol,
+                },
                 username: "Steve".to_owned(),
                 uuid: Uuid::nil(),
                 access_token: None,

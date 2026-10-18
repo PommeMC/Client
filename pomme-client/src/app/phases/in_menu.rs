@@ -34,7 +34,14 @@ pub fn open_world(core: &mut AppCore, folder: &str) -> MenuUpdateResult {
     core.audio.stop_menu_music();
     let username = core.user.username.clone();
     MenuUpdateResult::Connect {
-        connect_args: connect_args(core, Transport::Memory(client_end), username),
+        connect_args: connect_args(
+            core,
+            Transport::Memory {
+                end: client_end,
+                protocol: singleplayer::PROTOCOL,
+            },
+            username,
+        ),
         world: Some(world),
     }
 }
