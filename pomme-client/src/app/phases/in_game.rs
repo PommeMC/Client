@@ -76,6 +76,8 @@ impl ContainerScreen {
 pub struct OpenContainer {
     pub id: i32,
     pub title: String,
+    #[cfg(feature = "test-harness")]
+    pub menu: azalea_registry::builtin::MenuKind,
     pub screen: ContainerScreen,
     /// Menu slots in container indices; slots from `inv_start()` on are backed
     /// by the player inventory.

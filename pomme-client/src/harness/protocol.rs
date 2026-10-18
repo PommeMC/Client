@@ -151,6 +151,9 @@ pub struct SlotInfo {
 pub struct InventoryInfo {
     /// `inventory`, `creative`, a container id, or `none`.
     pub menu: String,
+    /// The open container's vanilla menu type, e.g. `generic_9x3`.
+    pub menu_type: Option<&'static str>,
+    pub title: Option<String>,
     pub slots: Vec<SlotInfo>,
     pub cursor: Option<StackInfo>,
 }
@@ -165,8 +168,11 @@ pub fn inventory(game: &GameState) -> InventoryInfo {
             None => "none".into(),
         }
     };
+    let container = game.open_container.as_ref();
     InventoryInfo {
         menu,
+        menu_type: container.map(|c| c.menu.to_str().trim_start_matches("minecraft:")),
+        title: container.map(|c| c.title.clone()),
         slots: game
             .menu_slots()
             .iter()

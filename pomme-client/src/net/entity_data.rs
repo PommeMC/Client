@@ -13,6 +13,7 @@ use azalea_registry::{DataRegistry, Registry};
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::entity_data::{DataValue, Value, Variant};
+use pomme_protocol::item::ItemCodec;
 
 use super::handler::variant_index;
 use super::{NetworkEvent, item_codec};
@@ -54,7 +55,7 @@ pub(super) fn handle_raw_entity_data(
 fn read_entity_data(payload: &[u8]) -> DecodeResult<(i32, Vec<DataValue>)> {
     let mut r = Reader::new(payload);
     let id = r.var_i32()?;
-    let values = item_codec::native().read_entity_data(&mut r)?;
+    let values = ItemCodec::native().read_entity_data(&mut r)?;
     r.ensure_eof()?;
     Ok((id, values))
 }
@@ -247,7 +248,7 @@ mod tests {
 
     #[test]
     fn native_entity_data_becomes_events() {
-        let stone = item_codec::native()
+        let stone = ItemCodec::native()
             .registries()
             .id_of(pomme_protocol::ClientRegistry::Item, "stone")
             .unwrap();

@@ -9,6 +9,7 @@ pub(crate) mod chunk_wire;
 pub mod commands;
 pub mod conn;
 pub mod connection;
+mod container_wire;
 mod dialog;
 mod entity_data;
 mod entity_wire;

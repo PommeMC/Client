@@ -171,50 +171,6 @@ pub fn handle_game_packet(
             // the other main-thread packets.
             send_ordered(event_tx, NetworkEvent::Ping { id: p.id });
         }
-        ClientboundGamePacket::ContainerSetContent(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ContainerContent {
-                container_id: p.container_id,
-                items: p.items.clone(),
-                carried: p.carried_item.clone(),
-                state_id: p.state_id,
-            });
-        }
-        ClientboundGamePacket::SetCursorItem(p) => {
-            let _ = event_tx.try_send(NetworkEvent::CursorItem {
-                item: p.contents.clone(),
-            });
-        }
-        ClientboundGamePacket::ContainerSetSlot(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ContainerSlot {
-                container_id: p.container_id,
-                index: p.slot,
-                item: p.item_stack.clone(),
-                state_id: p.state_id,
-            });
-        }
-        ClientboundGamePacket::SetPlayerInventory(p) => {
-            let _ = event_tx.try_send(NetworkEvent::PlayerInventorySlot {
-                index: p.slot,
-                item: p.contents.clone(),
-            });
-        }
-        ClientboundGamePacket::ContainerSetData(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ContainerData {
-                container_id: p.container_id,
-                id: p.id,
-                value: p.value,
-            });
-        }
-        ClientboundGamePacket::OpenScreen(p) => {
-            let _ = event_tx.try_send(NetworkEvent::OpenScreen {
-                container_id: p.container_id,
-                menu_type: p.menu_type,
-                title: p.title.to_string(),
-            });
-        }
-        ClientboundGamePacket::ContainerClose(_) => {
-            let _ = event_tx.try_send(NetworkEvent::ContainerClosed);
-        }
         ClientboundGamePacket::Waypoint(p) => {
             let _ = event_tx.try_send(NetworkEvent::Waypoint {
                 operation: p.operation,
@@ -405,12 +361,6 @@ pub fn handle_game_packet(
             tracing::warn!("Disconnected: {}", p.reason);
             let _ = event_tx.try_send(NetworkEvent::Disconnected {
                 reason: format!("{}", p.reason),
-            });
-        }
-        ClientboundGamePacket::SetEquipment(p) => {
-            let _ = event_tx.try_send(NetworkEvent::EntityEquipment {
-                entity_id: p.entity_id.0,
-                slots: p.slots.slots.clone(),
             });
         }
         ClientboundGamePacket::SetEntityData(p) => {
@@ -693,8 +643,8 @@ pub fn handle_raw_game_packet(
     let pos = cur.position() as usize;
     let payload = &raw[pos..];
     if took(
-        super::item_codec::handle_raw_item_packet(packet_id, payload, event_tx),
-        "item",
+        super::container_wire::handle_raw_container_packet(packet_id, payload, event_tx),
+        "container",
     ) || took(
         super::entity_data::handle_raw_entity_data(packet_id, payload, registry_holder, event_tx),
         "set_entity_data",

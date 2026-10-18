@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use crossbeam_channel::Sender;
 use pomme_protocol::ClientRegistry;
 use pomme_protocol::codec::{DecodeResult, MAX_STRING_LENGTH, Reader};
+use pomme_protocol::item::ItemCodec;
 
 use super::{NetworkEvent, item_codec};
 use crate::chat_component::Component;
@@ -75,7 +76,7 @@ fn read_advancement(r: &mut Reader) -> DecodeResult<AdvancementData> {
 fn read_display(r: &mut Reader) -> DecodeResult<AdvancementDisplay> {
     let title = read_text(r)?;
     read_text(r)?;
-    let icon = item_codec::native().read_template(r)?;
+    let icon = ItemCodec::native().read_template(r)?;
     let frame = match r.varint()? {
         0 => AdvancementFrame::Task,
         1 => AdvancementFrame::Challenge,
@@ -88,7 +89,7 @@ fn read_display(r: &mut Reader) -> DecodeResult<AdvancementDisplay> {
     }
     r.f32()?;
     r.f32()?;
-    let icon_item = item_codec::native()
+    let icon_item = ItemCodec::native()
         .registries()
         .name_of(ClientRegistry::Item, icon.item)
         .map(str::to_owned);
@@ -133,7 +134,7 @@ mod tests {
 
     /// One advancement with a display of `frame` and `flags`, no background.
     fn frame(frame: u8, flags: i32) -> Vec<u8> {
-        let stick = item_codec::native()
+        let stick = ItemCodec::native()
             .registries()
             .id_of(ClientRegistry::Item, "stick")
             .unwrap();

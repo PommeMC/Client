@@ -1686,6 +1686,8 @@ impl AppCore {
                         game.open_container = Some(crate::app::phases::in_game::OpenContainer {
                             id: container_id,
                             title,
+                            #[cfg(feature = "test-harness")]
+                            menu: menu_type,
                             screen,
                             slots: vec![ItemStack::Empty; screen.click_kind().slot_count()],
                             data: [0; 10],

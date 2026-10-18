@@ -579,6 +579,11 @@ pub struct ItemCodec {
 }
 
 impl ItemCodec {
+    /// The native version's grammar.
+    pub fn native() -> &'static ItemCodec {
+        Self::for_protocol(crate::version::NATIVE.protocol).expect("native item grammar")
+    }
+
     /// The grammar for `protocol`, when its component layouts are ported.
     pub fn for_protocol(protocol: i32) -> Option<&'static ItemCodec> {
         static CODECS: [OnceLock<Option<ItemCodec>>; EMBEDDED.len()] =

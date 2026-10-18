@@ -14,6 +14,7 @@ use azalea_registry::builtin::SoundEvent;
 use azalea_registry::identifier::Identifier;
 use glam::DVec3;
 use pomme_protocol::chunk::{self, ChunkPacket};
+use pomme_protocol::container::{self, ContainerPacket};
 use pomme_protocol::packets::{Direction, PacketTable, Phase};
 use pomme_protocol::wire;
 
@@ -1955,19 +1956,27 @@ fn translate_container_set_slot_767() {
         old
     };
 
-    let ClientboundGamePacket::SetCursorItem(_) = translate_and_decode(767, build(-1, 0)) else {
-        panic!("wrong packet for -1");
-    };
-    let ClientboundGamePacket::SetPlayerInventory(p) = translate_and_decode(767, build(-2, 7))
-    else {
-        panic!("wrong packet for -2");
-    };
-    assert_eq!(p.slot, 7);
-    let ClientboundGamePacket::ContainerSetSlot(p) = translate_and_decode(767, build(3, 1)) else {
-        panic!("wrong packet for plain");
-    };
-    assert_eq!(p.container_id, 3);
-    assert_eq!(p.slot, 1);
+    let read = |name, old| translate_and_read(767, old, name, container::read);
+    assert_eq!(
+        read("set_cursor_item", build(-1, 0)),
+        ContainerPacket::Cursor { item: None }
+    );
+    assert_eq!(
+        read("set_player_inventory", build(-2, 7)),
+        ContainerPacket::PlayerInventory {
+            slot: 7,
+            item: None
+        }
+    );
+    assert_eq!(
+        read("container_set_slot", build(3, 1)),
+        ContainerPacket::Slot {
+            container_id: 3,
+            state_id: 2,
+            slot: 1,
+            item: None
+        }
+    );
 }
 
 /// 767 `cooldown` item ids remap into the native registry space (azalea
@@ -2144,17 +2153,29 @@ fn translate_container_set_content_765() {
     old.extend_from_slice(&[10, 1, 0, 1, b'd', 5, 0]); // NBT {d: 5b}
     old.push(0); // carried: empty
 
-    let ClientboundGamePacket::ContainerSetContent(p) = translate_and_decode(765, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.container_id, 1);
-    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
-        panic!("empty stack");
-    };
-    assert_eq!(data.kind, azalea_registry::builtin::ItemKind::Stone);
-    assert_eq!(data.count, 3);
-    assert_eq!(data.component_patch.iter().count(), 0);
-    assert!(matches!(p.carried_item, azalea_inventory::ItemStack::Empty));
+    assert_eq!(
+        translate_and_read(765, old, "container_set_content", container::read),
+        ContainerPacket::Content {
+            container_id: 1,
+            state_id: 2,
+            items: vec![pomme_stack(azalea_registry::builtin::ItemKind::Stone, 3)],
+            carried: None,
+        }
+    );
+}
+
+/// `count` of `kind` with no components, as pomme decodes it.
+fn pomme_stack(
+    kind: azalea_registry::builtin::ItemKind,
+    count: i32,
+) -> Option<pomme_protocol::item::ItemStack> {
+    use azalea_registry::Registry;
+
+    Some(pomme_protocol::item::ItemStack {
+        item: kind.to_u32(),
+        count,
+        patch: Default::default(),
+    })
 }
 
 /// `set_equipment` slot/item pairs, high slot bit continuing the list.
@@ -2171,16 +2192,66 @@ fn translate_set_equipment_765() {
     old.push(0); // head
     old.push(0); // empty stack
 
-    let ClientboundGamePacket::SetEquipment(p) = translate_decode_and_remap(765, old) else {
+    let ContainerPacket::Equipment { entity, slots } =
+        translate_and_read(765, old, "set_equipment", container::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.entity_id, MinecraftEntityId(9));
-    assert_eq!(p.slots.slots.len(), 2);
-    let azalea_inventory::ItemStack::Present(data) = &p.slots.slots[0].1 else {
-        panic!("empty stack");
+    assert_eq!(entity, 9);
+    let [(5, Some(offhand)), (0, None)] = &slots[..] else {
+        panic!("slots: {slots:?}");
     };
-    assert_eq!(data.count, 1);
-    assert_eq!(data.kind, SHIFTED_ITEM_KIND);
+    assert_eq!(offhand.count, 1);
+    assert_eq!(native_item(765, offhand.item), Some(SHIFTED_ITEM_KIND));
+}
+
+/// A wire-version item id as the native item, as `container_wire` remaps it.
+fn native_item(protocol: i32, id: u32) -> Option<azalea_registry::builtin::ItemKind> {
+    use azalea_registry::Registry;
+
+    let native =
+        translation_for(protocol).remap_to_native(pomme_protocol::ClientRegistry::Item, id);
+    native.and_then(azalea_registry::builtin::ItemKind::from_u32)
+}
+
+/// The `-2` sentinel's stack, split into `set_player_inventory`, keeps its
+/// wire id until the raw path remaps it.
+#[test]
+fn translate_set_player_inventory_remaps_765() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(765, Direction::Clientbound, "container_set_slot"),
+    );
+    old.push(-2i8 as u8);
+    wire::write_varint(&mut old, 2); // state id
+    old.extend_from_slice(&7i16.to_be_bytes());
+    old.extend_from_slice(&[1, SHIFTED_ITEM, 1, 0]); // bare item, empty NBT
+    let ContainerPacket::PlayerInventory {
+        slot: 7,
+        item: Some(item),
+    } = translate_and_read(765, old, "set_player_inventory", container::read)
+    else {
+        panic!("wrong packet");
+    };
+    assert_eq!(native_item(765, item.item), Some(SHIFTED_ITEM_KIND));
+}
+
+/// 1.20.1's menu registry predates `crafter_3x3`, so its anvil is one id
+/// below the native one.
+#[test]
+fn remap_menu_763() {
+    use azalea_registry::Registry;
+    use azalea_registry::builtin::MenuKind;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let anvil = RegistryTable::for_protocol(763)
+        .unwrap()
+        .id_of(ClientRegistry::Menu, "anvil")
+        .unwrap();
+    assert_ne!(MenuKind::from_u32(anvil), Some(MenuKind::Anvil));
+    let native = translation_for(763).remap_to_native(ClientRegistry::Menu, anvil);
+    assert_eq!(native.and_then(MenuKind::from_u32), Some(MenuKind::Anvil));
 }
 
 /// `merchant_offers` costs were plain stacks before 1.20.5's `ItemCost`
@@ -2439,23 +2510,29 @@ fn translate_container_set_slot_765() {
         old
     };
 
-    let ClientboundGamePacket::SetCursorItem(_) = translate_and_decode(765, build(-1, 0)) else {
-        panic!("wrong packet for -1");
-    };
-    let ClientboundGamePacket::SetPlayerInventory(p) = translate_and_decode(765, build(-2, 7))
-    else {
-        panic!("wrong packet for -2");
-    };
-    assert_eq!(p.slot, 7);
-    let ClientboundGamePacket::ContainerSetSlot(p) = translate_and_decode(765, build(3, 1)) else {
-        panic!("wrong packet for plain");
-    };
-    assert_eq!(p.container_id, 3);
-    assert_eq!(p.slot, 1);
-    let azalea_inventory::ItemStack::Present(data) = &p.item_stack else {
-        panic!("empty stack");
-    };
-    assert_eq!(data.count, 2);
+    let read = |name, old| translate_and_read(765, old, name, container::read);
+    assert_eq!(
+        read("set_cursor_item", build(-1, 0)),
+        ContainerPacket::Cursor {
+            item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+        }
+    );
+    assert_eq!(
+        read("set_player_inventory", build(-2, 7)),
+        ContainerPacket::PlayerInventory {
+            slot: 7,
+            item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+        }
+    );
+    assert_eq!(
+        read("container_set_slot", build(3, 1)),
+        ContainerPacket::Slot {
+            container_id: 3,
+            state_id: 2,
+            slot: 1,
+            item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+        }
+    );
 }
 
 /// 765's single-NBT `registry_data` splits into per-registry frames whose
@@ -3500,16 +3577,15 @@ fn translate_container_set_content_763() {
     old.extend_from_slice(&[10, 0, 0, 1, 0, 1, b'd', 5, 0]); // named-root {d: 5b}
     old.push(0); // carried: empty
 
-    let ClientboundGamePacket::ContainerSetContent(p) = translate_and_decode(763, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.container_id, 1);
-    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
-        panic!("empty stack");
-    };
-    assert_eq!(data.kind, azalea_registry::builtin::ItemKind::Stone);
-    assert_eq!(data.count, 3);
-    assert!(matches!(p.carried_item, azalea_inventory::ItemStack::Empty));
+    assert_eq!(
+        translate_and_read(763, old, "container_set_content", container::read),
+        ContainerPacket::Content {
+            container_id: 1,
+            state_id: 2,
+            items: vec![pomme_stack(azalea_registry::builtin::ItemKind::Stone, 3)],
+            carried: None,
+        }
+    );
 }
 
 /// A 763 chunk names both its heightmap root and every block entity's tag.
@@ -4934,8 +5010,9 @@ fn sample_component(
 fn azalea_reads_every_kept_component_exactly() {
     use pomme_protocol::ClientRegistry;
     use pomme_protocol::codec::Reader;
+    use pomme_protocol::item::ItemCodec;
 
-    use super::item_codec::{DROPPED, native, transcode_to_azalea};
+    use super::item_codec::{DROPPED, transcode_to_azalea};
 
     // Holders azalea keeps as plain ids, so inline values can't cross.
     const PLAIN_HOLDERS: &[&str] = &["equippable", "consumable", "death_protection", "trim"];
@@ -4946,7 +5023,7 @@ fn azalea_reads_every_kept_component_exactly() {
         "rabbit/variant",
     ];
 
-    let codec = native();
+    let codec = ItemCodec::native();
     let names = codec.registries().names(ClientRegistry::DataComponentType);
     for (id, name) in names.iter().enumerate() {
         let name = name.as_str();
@@ -5064,7 +5141,7 @@ fn entity_data_matches_azalea() {
     assert_eq!(cur.position() as usize, raw.len());
 
     let mut r = pomme_protocol::codec::Reader::new(&payload[1..]);
-    let pomme = crate::net::item_codec::native()
+    let pomme = pomme_protocol::item::ItemCodec::native()
         .read_entity_data(&mut r)
         .unwrap();
     r.ensure_eof().unwrap();
@@ -5883,4 +5960,143 @@ fn chunk_packets_match_azalea() {
     for (name, packet, expected) in cases {
         assert_eq!(decode(name, packet), expected, "{name}");
     }
+}
+
+#[test]
+fn container_packets_match_azalea() {
+    use azalea_inventory::components::EquipmentSlot;
+    use azalea_inventory::{ItemStack, ItemStackData};
+    use azalea_protocol::packets::game::*;
+    use azalea_registry::Registry;
+    use azalea_registry::builtin::{ItemKind, MenuKind};
+
+    let decode = |name, packet| decode_azalea(name, packet, container::read);
+    let azalea_stack = |kind, count| {
+        ItemStack::Present(ItemStackData {
+            kind,
+            count,
+            component_patch: Default::default(),
+        })
+    };
+    let cases = [
+        (
+            "container_set_content",
+            ClientboundGamePacket::ContainerSetContent(
+                c_container_set_content::ClientboundContainerSetContent {
+                    container_id: 2,
+                    state_id: 7,
+                    items: vec![azalea_stack(ItemKind::Diamond, 3), ItemStack::Empty],
+                    carried_item: azalea_stack(ItemKind::Stone, 1),
+                },
+            ),
+            ContainerPacket::Content {
+                container_id: 2,
+                state_id: 7,
+                items: vec![pomme_stack(ItemKind::Diamond, 3), None],
+                carried: pomme_stack(ItemKind::Stone, 1),
+            },
+        ),
+        (
+            "container_set_slot",
+            ClientboundGamePacket::ContainerSetSlot(
+                c_container_set_slot::ClientboundContainerSetSlot {
+                    container_id: 0,
+                    state_id: 4,
+                    slot: 36,
+                    item_stack: azalea_stack(ItemKind::Bread, 2),
+                },
+            ),
+            ContainerPacket::Slot {
+                container_id: 0,
+                state_id: 4,
+                slot: 36,
+                item: pomme_stack(ItemKind::Bread, 2),
+            },
+        ),
+        (
+            "container_set_data",
+            ClientboundGamePacket::ContainerSetData(
+                c_container_set_data::ClientboundContainerSetData {
+                    container_id: 3,
+                    id: 1,
+                    value: 200,
+                },
+            ),
+            ContainerPacket::Data {
+                container_id: 3,
+                id: 1,
+                value: 200,
+            },
+        ),
+        (
+            "container_close",
+            ClientboundGamePacket::ContainerClose(c_container_close::ClientboundContainerClose {
+                container_id: 3,
+            }),
+            ContainerPacket::Close { container_id: 3 },
+        ),
+        (
+            "set_cursor_item",
+            ClientboundGamePacket::SetCursorItem(c_set_cursor_item::ClientboundSetCursorItem {
+                contents: azalea_stack(ItemKind::Stone, 64),
+            }),
+            ContainerPacket::Cursor {
+                item: pomme_stack(ItemKind::Stone, 64),
+            },
+        ),
+        (
+            "set_player_inventory",
+            ClientboundGamePacket::SetPlayerInventory(
+                c_set_player_inventory::ClientboundSetPlayerInventory {
+                    slot: 40,
+                    contents: azalea_stack(ItemKind::Shield, 1),
+                },
+            ),
+            ContainerPacket::PlayerInventory {
+                slot: 40,
+                item: pomme_stack(ItemKind::Shield, 1),
+            },
+        ),
+        (
+            "set_equipment",
+            ClientboundGamePacket::SetEquipment(c_set_equipment::ClientboundSetEquipment {
+                entity_id: MinecraftEntityId(9),
+                slots: c_set_equipment::EquipmentSlots {
+                    slots: vec![
+                        (
+                            EquipmentSlot::Mainhand,
+                            azalea_stack(ItemKind::StoneSword, 1),
+                        ),
+                        (EquipmentSlot::Head, ItemStack::Empty),
+                    ],
+                },
+            }),
+            ContainerPacket::Equipment {
+                entity: 9,
+                slots: vec![(0, pomme_stack(ItemKind::StoneSword, 1)), (5, None)],
+            },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+
+    let ContainerPacket::OpenScreen {
+        container_id,
+        menu,
+        title,
+    } = decode(
+        "open_screen",
+        ClientboundGamePacket::OpenScreen(c_open_screen::ClientboundOpenScreen {
+            container_id: 3,
+            menu_type: MenuKind::Generic9x3,
+            title: azalea_chat::FormattedText::from("Chest"),
+        }),
+    )
+    else {
+        panic!("open_screen");
+    };
+    assert_eq!((container_id, menu), (3, MenuKind::Generic9x3.to_u32()));
+    let title = crate::net::chat::read_component(&title, &mut 0).unwrap();
+    assert_eq!(title.plain_text(), "Chest");
 }

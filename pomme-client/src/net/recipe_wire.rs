@@ -7,6 +7,7 @@ use azalea_registry::Registry;
 use azalea_registry::builtin::{DataComponentKind, ItemKind};
 use azalea_registry::identifier::Identifier;
 use crossbeam_channel::Sender;
+use pomme_protocol::item::ItemCodec;
 use pomme_protocol::{Direction, PacketTable, Phase};
 
 use crate::net::NetworkEvent;
@@ -290,10 +291,9 @@ fn parse_slot_display(cur: &mut Cursor<&[u8]>, depth: usize) -> Result<SlotDispl
 }
 
 fn parse_item_stack_template(cur: &mut Cursor<&[u8]>) -> Result<ItemStackTemplate, String> {
-    let template = pomme_protocol::codec::Reader::on_cursor(cur, |r| {
-        super::item_codec::native().read_template(r)
-    })
-    .map_err(|e| format!("item stack template: {e}"))?;
+    let template =
+        pomme_protocol::codec::Reader::on_cursor(cur, |r| ItemCodec::native().read_template(r))
+            .map_err(|e| format!("item stack template: {e}"))?;
     Ok(ItemStackTemplate {
         item: template.item,
         count: template.count,

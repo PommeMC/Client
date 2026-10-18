@@ -1401,21 +1401,6 @@ impl Translation {
         match packet {
             ClientboundGamePacket::Sound(p) => self.remap_sound(&mut p.sound),
             ClientboundGamePacket::SoundEntity(p) => self.remap_sound(&mut p.sound),
-            ClientboundGamePacket::ContainerSetContent(p) => {
-                for item in &mut p.items {
-                    remap_stack(self.to_native, item);
-                }
-                remap_stack(self.to_native, &mut p.carried_item);
-                true
-            }
-            ClientboundGamePacket::ContainerSetSlot(p) => {
-                remap_stack(self.to_native, &mut p.item_stack);
-                true
-            }
-            ClientboundGamePacket::SetCursorItem(p) => {
-                remap_stack(self.to_native, &mut p.contents);
-                true
-            }
             ClientboundGamePacket::SetEntityData(p) => {
                 // `translate_entity_data` already remaps item-stack values
                 // while rewriting serializer ids, except on pre-1.20.5 wires
@@ -1427,12 +1412,6 @@ impl Translation {
                             remap_stack(self.to_native, stack);
                         }
                     }
-                }
-                true
-            }
-            ClientboundGamePacket::SetEquipment(p) => {
-                for (_, stack) in &mut p.slots.slots {
-                    remap_stack(self.to_native, stack);
                 }
                 true
             }

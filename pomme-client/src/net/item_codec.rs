@@ -12,21 +12,18 @@ use std::sync::OnceLock;
 
 use azalea_buf::AzBuf;
 use azalea_inventory::components::{
-    BundleContents, ChargedProjectiles, Container, DataComponentUnion, EquipmentSlot,
-    SulfurCubeContent, UseRemainder,
+    BundleContents, ChargedProjectiles, Container, DataComponentUnion, SulfurCubeContent,
+    UseRemainder,
 };
 use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
 use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
 use azalea_registry::Registry;
 use azalea_registry::builtin::{DataComponentKind, ItemKind};
-use crossbeam_channel::Sender;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::{self, ComponentPatch, ItemCodec, Shape};
 use pomme_protocol::version::NATIVE;
 use pomme_protocol::wire::write_varint;
 use pomme_protocol::{ClientRegistry, Direction, PacketTable, Phase};
-
-use super::NetworkEvent;
 
 /// Components azalea can't hold faithfully that pomme doesn't read; they're
 /// dropped rather than misdecoded.
@@ -50,17 +47,6 @@ pub(super) const DROPPED: &[&str] = &[
     "rabbit/variant",
 ];
 
-pub fn native() -> &'static ItemCodec {
-    ItemCodec::for_protocol(NATIVE.protocol).expect("native item grammar")
-}
-
-/// `ItemStack.OPTIONAL_STREAM_CODEC` into azalea's stack.
-pub fn read_stack(r: &mut Reader) -> DecodeResult<ItemStack> {
-    Ok(native()
-        .read_stack(r)?
-        .map_or(ItemStack::Empty, |stack| to_azalea(&stack)))
-}
-
 /// Whether this session speaks the native protocol, the only one pomme's
 /// item grammar decodes; translated sessions keep azalea's decode, which
 /// their id remaps run after.
@@ -68,14 +54,9 @@ pub(super) fn native_session() -> bool {
     crate::version::session_protocol() == NATIVE.protocol
 }
 
-/// The native clientbound packets that carry items.
+/// The native clientbound packets the item-gated raw handlers own.
 #[derive(Clone, Copy)]
 pub(super) struct ItemPacketIds {
-    container_set_content: u32,
-    container_set_slot: u32,
-    set_cursor_item: u32,
-    set_player_inventory: u32,
-    set_equipment: u32,
     pub set_entity_data: u32,
     pub update_advancements: u32,
 }
@@ -90,85 +71,10 @@ pub(super) fn item_packet_ids() -> ItemPacketIds {
                 .unwrap_or_else(|| panic!("{name} in packet table"))
         };
         ItemPacketIds {
-            container_set_content: id("container_set_content"),
-            container_set_slot: id("container_set_slot"),
-            set_cursor_item: id("set_cursor_item"),
-            set_player_inventory: id("set_player_inventory"),
-            set_equipment: id("set_equipment"),
             set_entity_data: id("set_entity_data"),
             update_advancements: id("update_advancements"),
         }
     })
-}
-
-/// Decodes the native inventory packets with pomme's item grammar; `None`
-/// for any other packet or a translated session.
-pub fn handle_raw_item_packet(
-    packet_id: u32,
-    payload: &[u8],
-    event_tx: &Sender<NetworkEvent>,
-) -> Option<DecodeResult<()>> {
-    if !native_session() {
-        return None;
-    }
-    let mut r = Reader::new(payload);
-    let event = read_item_packet(packet_id, &mut r).transpose()?;
-    Some(event.and_then(|event| {
-        r.ensure_eof()?;
-        let _ = event_tx.try_send(event);
-        Ok(())
-    }))
-}
-
-fn read_item_packet(packet_id: u32, r: &mut Reader) -> DecodeResult<Option<NetworkEvent>> {
-    let ids = item_packet_ids();
-    Ok(Some(if packet_id == ids.container_set_content {
-        // ClientboundContainerSetContentPacket.java:18
-        let container_id = r.var_i32()?;
-        let state_id = r.varint()?;
-        let items = r.list(usize::MAX, read_stack)?;
-        NetworkEvent::ContainerContent {
-            container_id,
-            items,
-            carried: read_stack(r)?,
-            state_id,
-        }
-    } else if packet_id == ids.container_set_slot {
-        // ClientboundContainerSetSlotPacket.java:30-40
-        NetworkEvent::ContainerSlot {
-            container_id: r.var_i32()?,
-            state_id: r.varint()?,
-            index: r.u16()?,
-            item: read_stack(r)?,
-        }
-    } else if packet_id == ids.set_cursor_item {
-        NetworkEvent::CursorItem {
-            item: read_stack(r)?,
-        }
-    } else if packet_id == ids.set_player_inventory {
-        // ClientboundSetPlayerInventoryPacket.java:17
-        NetworkEvent::PlayerInventorySlot {
-            index: r.varint()?,
-            item: read_stack(r)?,
-        }
-    } else if packet_id == ids.set_equipment {
-        // ClientboundSetEquipmentPacket.java:34-44: slot ordinals, the high
-        // bit marking another entry.
-        let entity_id = r.var_i32()?;
-        let mut slots = Vec::new();
-        loop {
-            let byte = r.u8()?;
-            let slot = EquipmentSlot::from_byte(byte & 0x7F)
-                .ok_or_else(|| r.error("unknown equipment slot"))?;
-            slots.push((slot, read_stack(r)?));
-            if byte & 0x80 == 0 {
-                break;
-            }
-        }
-        NetworkEvent::EntityEquipment { entity_id, slots }
-    } else {
-        return Ok(None);
-    }))
 }
 
 /// A native `set_creative_mode_slot` frame, with the stack in vanilla's
@@ -202,7 +108,7 @@ pub fn azalea_patch(patch: &ComponentPatch) -> DataComponentPatch {
 /// An azalea stack in vanilla's layout, for encoding; `None` when empty.
 pub fn from_azalea(stack: &ItemStack) -> Option<item::ItemStack> {
     let data = stack.as_present()?;
-    let codec = native();
+    let codec = ItemCodec::native();
     let mut patch = ComponentPatch::default();
     for (kind, value) in data.component_patch.iter() {
         let id = kind.to_u32();
@@ -230,7 +136,7 @@ pub fn from_azalea(stack: &ItemStack) -> Option<item::ItemStack> {
 }
 
 fn component_name(id: u32) -> Option<&'static str> {
-    native()
+    ItemCodec::native()
         .registries()
         .name_of(ClientRegistry::DataComponentType, id)
 }
@@ -318,7 +224,7 @@ pub(super) fn transcode_to_azalea(id: u32, value: &[u8]) -> Option<Vec<u8>> {
 /// A vanilla `ItemStackTemplate` (item, count, patch) as azalea's stack
 /// (count, item, patch).
 fn azalea_template(r: &mut Reader) -> DecodeResult<Vec<u8>> {
-    let template = native().read_template(r)?;
+    let template = ItemCodec::native().read_template(r)?;
     let mut out = Vec::new();
     write_varint(&mut out, template.count as u32);
     write_varint(&mut out, template.item);
@@ -435,7 +341,7 @@ fn transcode_equippable(r: &mut Reader, to_azalea: bool) -> DecodeResult<Option<
         }
     }
     if r.bool()? {
-        native().skip(r, &Shape::HolderSet)?;
+        ItemCodec::native().skip(r, &Shape::HolderSet)?;
     }
     r.bytes(5)?;
     out.extend_from_slice(r.since(start));
@@ -456,7 +362,7 @@ fn transcode_consumable(r: &mut Reader, to_azalea: bool) -> DecodeResult<Option<
     if r.varint()? >= AZALEA_USE_ANIMATIONS {
         return Ok(None);
     }
-    native().skip(r, &item::SOUND)?;
+    ItemCodec::native().skip(r, &item::SOUND)?;
     r.bool()?;
     let mut out = r.since(start).to_vec();
     let Some(effects) = transcode_effects(r, to_azalea)? else {
@@ -468,7 +374,7 @@ fn transcode_consumable(r: &mut Reader, to_azalea: bool) -> DecodeResult<Option<
 
 /// A list of `ConsumeEffect`s; only `play_sound`'s sound diverges.
 fn transcode_effects(r: &mut Reader, to_azalea: bool) -> DecodeResult<Option<Vec<u8>>> {
-    let codec = native();
+    let codec = ItemCodec::native();
     let registries = codec.registries();
     let mut out = Vec::new();
     let n = r.len(usize::MAX)?;
@@ -521,7 +427,7 @@ mod tests {
     use super::*;
 
     fn component(name: &str) -> u32 {
-        native()
+        ItemCodec::native()
             .registries()
             .id_of(ClientRegistry::DataComponentType, name)
             .unwrap()
@@ -545,9 +451,9 @@ mod tests {
 
     fn decode(bytes: &[u8]) -> ItemStack {
         let mut r = Reader::new(bytes);
-        let stack = read_stack(&mut r).unwrap();
+        let stack = ItemCodec::native().read_stack(&mut r).unwrap();
         r.ensure_eof().unwrap();
-        stack
+        stack.map_or(ItemStack::Empty, |stack| to_azalea(&stack))
     }
 
     /// One bread x2 as a vanilla `ItemStackTemplate`.
@@ -642,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn container_set_content_decodes_natively() {
+    fn container_set_content_decodes() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut payload = Vec::new();
         var(&mut payload, 1); // container id
@@ -653,9 +559,14 @@ mod tests {
         value.extend(BREAD_TEMPLATE);
         payload.extend(stack_with(ItemKind::Bundle, "bundle_contents", &value));
         payload.push(0); // empty carried item
-        let id = item_packet_ids().container_set_content;
-        handle_raw_item_packet(id, &payload, &tx).unwrap().unwrap();
-        let NetworkEvent::ContainerContent {
+        let id = PacketTable::native()
+            .id(Phase::Game, Direction::Clientbound, "container_set_content")
+            .unwrap();
+        let handle = |payload: &[u8]| {
+            crate::net::container_wire::handle_raw_container_packet(id, payload, &tx).unwrap()
+        };
+        handle(&payload).unwrap();
+        let crate::net::NetworkEvent::ContainerContent {
             container_id,
             items,
             carried,
@@ -669,6 +580,6 @@ mod tests {
         assert_eq!(items[1].kind(), ItemKind::Bundle);
 
         payload.push(0xEE);
-        assert!(handle_raw_item_packet(id, &payload, &tx).unwrap().is_err());
+        assert!(handle(&payload).is_err());
     }
 }

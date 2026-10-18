@@ -9,6 +9,7 @@
 pub mod block;
 pub mod chunk;
 pub mod codec;
+pub mod container;
 pub mod entity;
 pub mod entity_data;
 pub mod item;

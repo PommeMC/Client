@@ -52,6 +52,7 @@ enum Expect {
     Riding(RidingExpect),
     Player(PlayerExpect),
     Block(BlockExpect),
+    Menu(MenuExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
 }
@@ -138,6 +139,15 @@ struct BlockExpect {
     at: [i32; 3],
     /// The stored block entity's type, e.g. `sign`.
     block_entity: Option<String>,
+}
+
+/// The open menu: a container's menu type (`generic_9x3`), `inventory`,
+/// `creative` or `none`, and optionally its title.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MenuExpect {
+    menu: String,
+    title: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -474,6 +484,17 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                         .as_ref()
                         .is_none_or(|kind| entity.as_ref() == Some(kind)),
                 || format!("{at:?} holds {seen} with block entity {entity:?}"),
+            )
+        }
+        Expect::Menu(MenuExpect { menu, title }) => {
+            let seen = protocol::inventory(game);
+            let open = seen.menu_type.unwrap_or(&seen.menu);
+            ensure(
+                open == menu
+                    && title
+                        .as_ref()
+                        .is_none_or(|t| seen.title.as_ref() == Some(t)),
+                || format!("menu is {open} titled {:?}", seen.title),
             )
         }
         Expect::Advancement(AdvancementExpect { advancement }) => ensure(
