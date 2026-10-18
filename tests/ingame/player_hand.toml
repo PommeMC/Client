@@ -1,0 +1,25 @@
+# The first-person hand is drawn in survival and hidden in spectator.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+expect = { player = { hand = true } }
+
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+expect = { player = { game_mode = 3, hand = false } }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "spectator"
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+expect = { player = { game_mode = 0, hand = true } }

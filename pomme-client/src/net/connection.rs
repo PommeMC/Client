@@ -70,8 +70,11 @@ pub enum Transport {
         protocol: Option<i32>,
     },
     /// An integrated server in this process, reached over an in-memory pipe.
-    #[allow(dead_code, reason = "only a singleplayer build opens a world")]
-    Memory(MemoryEnd),
+    Memory {
+        end: MemoryEnd,
+        /// The protocol that server speaks.
+        protocol: i32,
+    },
 }
 
 pub struct ConnectArgs {
@@ -143,13 +146,11 @@ pub async fn connect_to_server(
             negotiate_wire_version(&server_addr, protocol).await?;
             super::resolve::connect(&server_addr, ClientIntention::Login).await?
         }
-        Transport::Memory(end) => {
-            // The integrated server speaks the native protocol, so there is
-            // nothing to probe and translation stays inert for the session.
-            #[cfg(feature = "singleplayer")]
-            const _: () =
-                assert!(pomme_singleplayer::PROTOCOL == pomme_protocol::version::NATIVE.protocol);
-            adopt_wire_protocol(pomme_protocol::version::NATIVE.protocol);
+        Transport::Memory { end, protocol } => {
+            // The integrated server's protocol is known, so there is nothing
+            // to probe; one other than native is translated like a remote
+            // server's.
+            adopt_wire_protocol(protocol);
             let mut conn = Conn::from_memory(end);
             super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntention::Login)
                 .await?;
@@ -258,10 +259,9 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
         // A server that turns the join away here does it with a play-phase
         // disconnect, the login phase having already ended.
         if let Some(raw) = translation.translate_game_frame(login)
-            && let Ok(ClientboundGamePacket::Disconnect(p)) =
-                deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw))
+            && let Some(reason) = super::lifecycle_wire::read_disconnect(&raw)
         {
-            return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
+            return Err(ConnectionError::Disconnected(reason));
         }
         return Err(ConnectionError::Disconnected(
             "could not read the registries from the login packet".into(),
@@ -589,7 +589,7 @@ async fn config_sequence(
                 if let Some(tags) = dialog_tags(&p.tags) {
                     received_dialog_tags = Some(tags);
                 }
-                forward_block_tags(event_tx, &p.tags);
+                forward_tags(event_tx, &p.tags);
             }
             ClientboundConfigPacket::SelectKnownPacks(p) => {
                 // Vanilla `handleSelectKnownPacks`: claim the offered packs we
@@ -832,10 +832,8 @@ fn dialog_tags(
 
 /// Forwards the `minecraft:block` tags of an `update_tags` packet, if it has
 /// any.
-fn forward_block_tags(
-    event_tx: &Sender<NetworkEvent>,
-    tags: &azalea_protocol::common::tags::TagMap,
-) {
+fn forward_tags(event_tx: &Sender<NetworkEvent>, tags: &azalea_protocol::common::tags::TagMap) {
+    let _ = event_tx.try_send(NetworkEvent::ItemTags(super::recipe_wire::item_tags(tags)));
     let key: azalea_registry::identifier::Identifier = "minecraft:block".into();
     let Some(tags) = tags.0.get(&key) else {
         return;
@@ -967,8 +965,27 @@ async fn game_loop(
             Some(Ok(())) => continue,
             None => {}
         }
+        if let Some(login) = super::lifecycle_wire::read_login(&raw) {
+            match login {
+                Ok(mut login) => {
+                    inbound_chat.reset();
+                    if crate::version::session_protocol() < 776 {
+                        login.online_mode = conn.is_encrypted();
+                    }
+                    super::lifecycle_wire::login_events(&login, &configured.registries, event_tx);
+                }
+                Err(e) => tracing::warn!("Skipping malformed login packet: {e}"),
+            }
+            continue;
+        }
         if super::dialog::handle_raw_dialog_packet(Phase::Game, &raw, event_tx)
-            || handle_raw_game_packet(&raw, event_tx)
+            || handle_raw_game_packet(
+                &raw,
+                &configured.registries,
+                &sender,
+                &mut batch_size_calculator,
+                event_tx,
+            )
         {
             continue;
         }
@@ -1034,13 +1051,7 @@ async fn game_loop(
                         let _ = event_tx
                             .try_send(NetworkEvent::DialogRegistry(configured.dialogs.clone()));
                     }
-                    forward_block_tags(event_tx, &p.tags);
-                }
-                if let ClientboundGamePacket::Login(login) = &mut packet {
-                    inbound_chat.reset();
-                    if crate::version::session_protocol() < 776 {
-                        login.online_mode = conn.is_encrypted();
-                    }
+                    forward_tags(event_tx, &p.tags);
                 }
                 handle_game_packet(
                     &packet,
@@ -1048,7 +1059,6 @@ async fn game_loop(
                     event_tx,
                     &configured.registries,
                     &shared_tree,
-                    &mut batch_size_calculator,
                 );
             }
             Err(e) => skip_malformed_packet(e)?,
@@ -1067,7 +1077,11 @@ fn outbound_frame(
         Outbound::Packet(mut packet) => {
             match translation {
                 Some(t) => t.remap_outbound(&mut packet),
-                None => super::bundle_codec::encode_native_outbound(&mut packet),
+                None => {
+                    if let ServerboundGamePacket::SetCreativeModeSlot(p) = &*packet {
+                        return Ok(Some(super::item_codec::creative_slot_frame(p)));
+                    }
+                }
             }
             Some(serialize_frame(&*packet)?)
         }
@@ -1213,6 +1227,13 @@ mod tests {
         assert_eq!(plains.downfall, 0.4);
     }
 
+    #[test]
+    fn integrated_server_is_joinable() {
+        assert!(crate::net::translate::joinable(
+            crate::singleplayer::PROTOCOL
+        ));
+    }
+
     /// 762 (1.19.4) is not a supported version at all, so it never gains a
     /// wire translation; 775 has one.
     #[test]
@@ -1285,7 +1306,10 @@ mod tests {
 
         let client = tokio::spawn(connect_to_server(
             ConnectArgs {
-                transport: Transport::Memory(client_end),
+                transport: Transport::Memory {
+                    end: client_end,
+                    protocol: NATIVE.protocol,
+                },
                 username: "Steve".to_owned(),
                 uuid: Uuid::nil(),
                 access_token: None,

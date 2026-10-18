@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use azalea_block::BlockState;
 use azalea_inventory::ItemStackData;
@@ -80,10 +81,22 @@ impl FaceTextures {
     }
 }
 
+/// A block state's model lookups, resolved once per state.
+struct StateRender {
+    model: Option<Arc<BakedModel>>,
+    opaque_full_cube: bool,
+    occludes: bool,
+    hidden_when_enclosed: bool,
+}
+
 #[derive(Clone)]
 pub struct BlockRegistry {
     textures: HashMap<String, FaceTextures>,
-    baked: HashMap<String, HashMap<String, BakedModel>>,
+    baked: HashMap<String, HashMap<String, Arc<BakedModel>>>,
+    /// Per block-state table slot, every state's resolved model lookups,
+    /// indexed by state id; built on first use of the slot. The mesher queries
+    /// these for every block and neighbour, so they must not hash or parse.
+    state_render: Arc<[OnceLock<Box<[StateRender]>>; super::TABLE_SLOTS]>,
     multipart: HashMap<String, Vec<model::MultipartEntry>>,
     item_models: HashMap<String, BakedModel>,
     flat_item_textures: std::collections::HashSet<String>,
@@ -135,6 +148,16 @@ impl BlockRegistry {
         });
 
         let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index, packs);
+        let baked = baked
+            .into_iter()
+            .map(|(block, variants)| {
+                let variants = variants
+                    .into_iter()
+                    .map(|(k, m)| (k, Arc::new(m)))
+                    .collect();
+                (block, variants)
+            })
+            .collect();
         let baked_items = model::bake_item_models(jar_assets_dir, asset_index, packs);
         let item_models = baked_items.models;
         let flat_item_textures = baked_items.generated_textures;
@@ -146,6 +169,7 @@ impl BlockRegistry {
         Self {
             textures,
             baked,
+            state_render: Arc::new([const { OnceLock::new() }; super::TABLE_SLOTS]),
             multipart,
             item_models,
             flat_item_textures,
@@ -225,7 +249,36 @@ impl BlockRegistry {
     }
 
     pub fn get_baked_model(&self, state: BlockState) -> Option<&BakedModel> {
-        let variants = self.baked.get(super::block_id(state))?;
+        self.state_render(state)?.model.as_deref()
+    }
+
+    fn state_render(&self, state: BlockState) -> Option<&StateRender> {
+        let slot = super::active_table_slot();
+        self.state_render[slot]
+            .get_or_init(|| {
+                super::states_in_slot(slot)
+                    .map(|info| {
+                        let model = self.resolve_model(info.id, info.properties).cloned();
+                        let opaque_full_cube =
+                            !info.is_air && model.as_ref().is_some_and(|m| m.is_full_cube);
+                        let occludes = opaque_full_cube && info.can_occlude;
+                        let all_quads_cull = model
+                            .as_ref()
+                            .is_some_and(|m| m.quads.iter().all(|q| q.cullface.is_some()));
+                        StateRender {
+                            model,
+                            opaque_full_cube,
+                            occludes,
+                            hidden_when_enclosed: occludes && all_quads_cull && !info.has_fluid,
+                        }
+                    })
+                    .collect()
+            })
+            .get(u32::from(state) as usize)
+    }
+
+    fn resolve_model(&self, block: &str, props: &super::PropMap) -> Option<&Arc<BakedModel>> {
+        let variants = self.baked.get(block)?;
 
         if variants.len() == 1 {
             return variants.values().next();
@@ -234,7 +287,6 @@ impl BlockRegistry {
         // Vanilla variant keys only list the properties that affect the model, so
         // match by subset rather than exact string equality (an empty key matches
         // any state, serving as the default variant).
-        let props = super::block_properties(state);
         variants
             .iter()
             .find(|(key, _)| {
@@ -260,13 +312,20 @@ impl BlockRegistry {
     }
 
     pub fn is_opaque_full_cube(&self, state: BlockState) -> bool {
-        !super::is_air(state) && self.get_baked_model(state).is_some_and(|m| m.is_full_cube)
+        self.state_render(state).is_some_and(|r| r.opaque_full_cube)
     }
 
     /// Whether `state` culls a neighbor's adjacent face: a full cube that can
     /// occlude, so `noOcclusion` cubes like glass and leaves don't.
     pub fn occludes_neighbor(&self, state: BlockState) -> bool {
-        self.is_opaque_full_cube(state) && super::light_props(state).can_occlude
+        self.state_render(state).is_some_and(|r| r.occludes)
+    }
+
+    /// Whether `state` emits no geometry once all six neighbours occlude: a
+    /// non-fluid occluder whose every quad has a cullface.
+    pub fn hidden_when_enclosed(&self, state: BlockState) -> bool {
+        self.state_render(state)
+            .is_some_and(|r| r.hidden_when_enclosed)
     }
 
     pub fn texture_names(&self) -> impl Iterator<Item = &str> + '_ {

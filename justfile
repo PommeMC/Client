@@ -29,8 +29,22 @@ client-release *args: openal
     #!/usr/bin/env bash
     cargo run --release -p pomme-client -- --launch-token "$(mktemp)" {{ args }}
 
+# Headless CPU benchmarks (mesher, fade rebuild, occlusion), no window or GPU.
+# An optional filter runs only matching benches, e.g. `just bench mesh`.
+bench *args:
+    @cargo run --release -p pomme-client --features cpu-bench -- --cpu-bench {{ args }}
+
 client-build *args: openal
     @cargo build -p pomme-client {{ args }}
+
+# In-game test scripts (tests/ingame/README.md) against a local vanilla
+# 26.2 server, e.g. `just ingame-test inventory_armor_equip`; no name runs them all.
+ingame-test *scripts: openal
+    @cargo run -p ingame-test -- {{ scripts }}
+
+# Just the local test server, for driving a client over the harness socket.
+ingame-server:
+    @cargo run -p ingame-test -- --server-only
 
 # TODO: CI also runs the client's clippy and tests with --no-default-features; mirror it here.
 
@@ -60,6 +74,24 @@ knownpackgen version="26.2":
 # Regenerate a version's block-state table from the data-generator report.
 blockgen version="26.2":
     @cargo run -p blockgen -- blocks reference/{{ version }}/generated/reports/blocks.json {{ version }} pomme-client/src/world/block/data/blocks-{{ version }}.json
+
+# Regenerate the vanilla codec fixtures: packets encoded by the 26.2 server's own
+# STREAM_CODECs (tools/codec-oracle/CodecOracle.java), which pomme-protocol's
+# decoders are tested against. Needs Java 25 on PATH or JAVA_HOME.
+codec-fixtures:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    jar=$(cargo run -q -p ingame-test -- --fetch-server)
+    out=target/codec-oracle
+    sep=":"; if [ "${OS:-}" = "Windows_NT" ]; then sep=";"; fi
+    bin=""; if [ -n "${JAVA_HOME:-}" ]; then bin="$JAVA_HOME/bin/"; fi
+    rm -rf "$out" && mkdir -p "$out/lib"
+    # This unzip build doesn't glob archive members; list them explicitly.
+    unzip -Z1 "$jar" | grep -E '^META-INF/(versions|libraries)/.*\.jar$' \
+        | xargs unzip -qn "$jar" -d "$out/lib"
+    cp=$(find "$out/lib" -name '*.jar' | tr '\n' "$sep")
+    "${bin}javac" --release 25 -nowarn -cp "$cp" -d "$out/classes" tools/codec-oracle/CodecOracle.java
+    "${bin}java" -cp "$cp$out/classes" CodecOracle pomme-protocol/src/data/codec-fixtures-26.2.json
 
 # JDK 25 bin dir for stategen; override with `just jdk=<path> stategen`.
 jdk := "C:/Program Files/Amazon Corretto/jdk25.0.2_10/bin"

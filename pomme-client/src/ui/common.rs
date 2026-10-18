@@ -480,17 +480,46 @@ pub(crate) fn push_item_icon_with_owner(
     data: &ItemStackData,
     use_player_team: bool,
 ) {
+    push_item_glyph(
+        elements,
+        [x, y, size, size],
+        item_resource_name(data.kind),
+        Some(data),
+        use_player_team,
+    );
+    push_item_decorations(elements, x, y, size, scale, data);
+}
+
+/// The item alone, with no count or bar (vanilla `GuiGraphics.fakeItem`).
+pub(crate) fn push_item_glyph(
+    elements: &mut Vec<MenuElement>,
+    [x, y, w, h]: [f32; 4],
+    item_name: String,
+    data: Option<&ItemStackData>,
+    use_player_team: bool,
+) {
     elements.push(MenuElement::ItemIcon {
         x,
         y,
-        w: size,
-        h: size,
-        item_name: item_resource_name(data.kind),
-        item_stack: Some(data.clone()),
+        w,
+        h,
+        item_name,
+        item_stack: data.cloned(),
         use_player_team,
         item_tints: Vec::new(),
         tint: WHITE,
     });
+}
+
+/// Vanilla `GuiGraphics.itemDecorations`: durability bar and stack count.
+pub(crate) fn push_item_decorations(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    size: f32,
+    scale: f32,
+    data: &ItemStackData,
+) {
     push_item_bar(elements, x, y, scale, data);
     // TODO: itemCooldown overlay once item cooldowns are tracked.
     if data.count > 1 {

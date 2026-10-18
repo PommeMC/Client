@@ -76,6 +76,8 @@ impl ContainerScreen {
 pub struct OpenContainer {
     pub id: i32,
     pub title: String,
+    #[cfg(feature = "test-harness")]
+    pub menu: azalea_registry::builtin::MenuKind,
     pub screen: ContainerScreen,
     /// Menu slots in container indices; slots from `inv_start()` on are backed
     /// by the player inventory.
@@ -170,6 +172,10 @@ pub struct GameState {
     pub bundle_scroll: (f32, f32),
     /// Server registries, for hashing predicted container clicks.
     pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
+    /// Per-session recipe book, recipe container, ghost placement, and item
+    /// tags.
+    pub recipe_book: crate::recipe::RecipeBookState,
+    pub recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState,
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
     pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
@@ -194,6 +200,9 @@ pub struct GameState {
     pub boss_bars: crate::ui::boss_bar::BossBarState,
     pub toasts: crate::ui::toast::ToastState,
     pub subtitles: crate::ui::subtitles::SubtitleOverlayState,
+    /// The sound events most recently played, oldest first.
+    #[cfg(feature = "test-harness")]
+    pub recent_sounds: std::collections::VecDeque<String>,
     /// Client tick counter (vanilla `player.tickCount`).
     pub tick_count: u64,
     /// Vanilla `Hud.autosaveIndicatorValue` / `lastAutosaveIndicatorValue`;
@@ -232,6 +241,8 @@ pub struct GameState {
     /// Dimension-type `cardinal_light`, which picks the terrain shade table
     /// and the item entity light directions.
     pub cardinal_light: CardinalLightType,
+    /// The current dimension's `default_clock`, whose ticks are its day time.
+    pub default_clock: Option<String>,
     /// F3+F4 game-mode switcher overlay, while open.
     pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
     /// Spectator hotbar menu (vanilla `SpectatorGui`). Not a GUI screen: the
@@ -331,6 +342,15 @@ pub struct MeshedCol {
 }
 
 impl GameState {
+    /// Notes a played sound for the harness, keeping the last 64.
+    #[cfg(feature = "test-harness")]
+    pub fn record_sound(&mut self, sound: &crate::audio::SoundRef) {
+        if self.recent_sounds.len() == 64 {
+            self.recent_sounds.pop_front();
+        }
+        self.recent_sounds.push_back(sound.event_name().to_owned());
+    }
+
     pub fn new(
         renderer: &Renderer,
         resource_packs: &ResourcePackManager,
@@ -410,6 +430,8 @@ impl GameState {
             bundle_hovered: None,
             bundle_scroll: (0.0, 0.0),
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
+            recipe_book: crate::recipe::RecipeBookState::default(),
+            recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState::new(),
             chat: {
                 let mut chat = ChatState::new();
                 chat.set_options(chat_options);
@@ -432,6 +454,8 @@ impl GameState {
             boss_bars: crate::ui::boss_bar::BossBarState::default(),
             toasts: crate::ui::toast::ToastState::default(),
             subtitles: crate::ui::subtitles::SubtitleOverlayState::default(),
+            #[cfg(feature = "test-harness")]
+            recent_sounds: std::collections::VecDeque::new(),
             tick_count: 0,
             saving_indicator_value: 0.0,
             last_saving_indicator_value: 0.0,
@@ -450,6 +474,7 @@ impl GameState {
             previous_game_mode: None,
             dimension: String::new(),
             cardinal_light: Default::default(),
+            default_clock: None,
             game_mode_switcher: None,
             spectator: Default::default(),
             switcher_was_open: false,
@@ -594,6 +619,24 @@ impl GameState {
         }
     }
 
+    /// Opens the player's inventory, the creative one in creative mode.
+    pub fn open_inventory(&mut self) {
+        if crate::player::is_creative(self.player.game_mode) {
+            self.creative_inventory_open = true;
+        } else {
+            self.inventory_open = true;
+        }
+    }
+
+    /// Closes whichever inventory or container menu is open.
+    pub fn close_inventory(&mut self) {
+        if self.creative_inventory_open {
+            self.close_creative_inventory();
+        } else {
+            self.close_menu();
+        }
+    }
+
     pub fn close_creative_inventory(&mut self) {
         self.creative_inventory_open = false;
         self.creative_state.reset_interaction();
@@ -612,6 +655,20 @@ impl GameState {
         self.bundle_selection = None;
         self.bundle_hovered = None;
         self.bundle_scroll = (0.0, 0.0);
+        self.recipe_book_ui
+            .reset_for_closed_screen(&mut self.recipe_book);
+    }
+
+    pub fn recipe_book_screen_active(&self) -> bool {
+        self.inventory_open
+            || matches!(
+                self.open_container.as_ref(),
+                Some(container)
+                    if matches!(
+                        container.screen,
+                        ContainerScreen::CraftingTable | ContainerScreen::Furnace(_)
+                    )
+            )
     }
 
     /// A server update replaced the stack in `slot` of `menu` (every slot when
@@ -661,6 +718,9 @@ impl GameState {
         }
         if self.creative_inventory_open {
             return self.creative_state.tab.captures_typing();
+        }
+        if self.recipe_book_screen_active() && self.recipe_book_ui.captures_typing() {
+            return true;
         }
         matches!(
             &self.open_container,
@@ -1803,10 +1863,61 @@ fn send_bundle_selection(sender: &crate::net::sender::PacketSender, slot: u16, s
     ));
 }
 
+/// Vanilla `MultiPlayerGameMode.handleCreativeModeItemAdd`: the creative
+/// screen sets an inventory slot directly. Returns whether it was sent, which
+/// it never is outside creative.
+pub(crate) fn set_creative_slot(
+    game: &mut GameState,
+    connection: &ConnectionHandle,
+    slot_num: u16,
+    item: azalea_inventory::ItemStack,
+) -> bool {
+    if !send_creative_slot(game, connection, slot_num, item.clone()) {
+        return false;
+    }
+    // Optimistic local update; the server echoes via ContainerSetSlot.
+    game.player.inventory.set_slot(slot_num as usize, item);
+    true
+}
+
+/// Vanilla `MultiPlayerGameMode.handleCreativeModeItemDrop`: the creative
+/// screen drops a stack into the world through slot -1.
+pub(crate) fn drop_creative_item(
+    game: &GameState,
+    connection: &ConnectionHandle,
+    item: azalea_inventory::ItemStack,
+) -> bool {
+    send_creative_slot(game, connection, u16::MAX, item)
+}
+
+/// `ServerboundSetCreativeModeSlotPacket` for `slot_num`, only in creative;
+/// the slot is a short on the wire, so `u16::MAX` is vanilla's -1.
+fn send_creative_slot(
+    game: &GameState,
+    connection: &ConnectionHandle,
+    slot_num: u16,
+    item: azalea_inventory::ItemStack,
+) -> bool {
+    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+
+    if !crate::player::is_creative(game.player.game_mode) {
+        return false;
+    }
+    connection
+        .packet_tx
+        .send(ServerboundGamePacket::SetCreativeModeSlot(
+            ServerboundSetCreativeModeSlot {
+                slot_num,
+                item_stack: item,
+            },
+        ));
+    true
+}
+
 /// Predict each container click locally (instant UI + drag preview), then send
 /// the predicted diff as `HashedStack`es so the server suppresses corrections
 /// when the prediction is right (vanilla lockstep).
-fn send_container_clicks(
+pub(crate) fn send_container_clicks(
     game: &mut GameState,
     connection: &ConnectionHandle,
     audio: &crate::audio::AudioEngine,
@@ -1936,6 +2047,20 @@ fn sleeping_head_pitch_deg(is_sleeping: bool, head_x_rot_deg: f32) -> f32 {
     if is_sleeping { 0.0 } else { head_x_rot_deg }
 }
 
+/// Vanilla `GameRenderer.renderItemInHand`: not while asleep, with the HUD
+/// hidden (F1), or in spectator.
+pub(crate) fn renders_first_person_hand(game: &GameState) -> bool {
+    hand_visible(
+        game.player.is_sleeping(),
+        game.hide_gui,
+        game.player.game_mode,
+    )
+}
+
+fn hand_visible(sleeping: bool, hide_gui: bool, game_mode: u8) -> bool {
+    !sleeping && !hide_gui && game_mode != 3
+}
+
 fn should_render_local_player(
     benchmark_running: bool,
     first_person: bool,
@@ -2056,9 +2181,10 @@ pub fn update_game(
     // with no screen open pauses the game, which also releases the cursor
     // (otherwise a system overlay like Win-key search opens over a still
     // captured cursor). TODO: F3+P toggle (options.pauseOnLostFocus).
-    if core
-        .unfocused_since
-        .is_some_and(|t| t.elapsed().as_millis() > 500)
+    if core.pause_on_lost_focus
+        && core
+            .unfocused_since
+            .is_some_and(|t| t.elapsed().as_millis() > 500)
         && game.input_live()
         && !game.dead
     {
@@ -2990,15 +3116,87 @@ pub fn update_game(
     let mut player_preview = None;
     let mut book_preview = None;
     if (game.inventory_open || game.open_container.is_some()) && !dialog_open {
-        // Key shortcuts stay quiet while a text field (anvil rename) types.
+        let cursor = core.input.cursor_pos();
+        let raw_left = core.input.left_just_pressed();
+        let raw_right = core.input.right_just_pressed();
+        let raw_middle = core.input.middle_just_pressed();
+        let recipe_context = if game.inventory_open {
+            Some((
+                crate::ui::recipe_book::RecipeBookScreenSpec::player(0),
+                game.player.inventory.slots().to_vec(),
+            ))
+        } else {
+            game.open_container
+                .as_ref()
+                .and_then(|container| match container.screen {
+                    ContainerScreen::CraftingTable => Some((
+                        crate::ui::recipe_book::RecipeBookScreenSpec::crafting_table(container.id),
+                        container.slots.clone(),
+                    )),
+                    ContainerScreen::Furnace(variant) => Some((
+                        crate::ui::recipe_book::RecipeBookScreenSpec::furnace(
+                            container.id,
+                            variant.recipe_book_type(),
+                        ),
+                        container.slots.clone(),
+                    )),
+                    _ => None,
+                })
+        };
+        if recipe_context.is_none() && game.recipe_book_ui.has_screen() {
+            game.recipe_book_ui
+                .reset_for_closed_screen(&mut game.recipe_book);
+        }
+        let recipe_selection_key = !game.recipe_book_ui.captures_typing()
+            && (core.input.key_just_pressed(winit::keyboard::KeyCode::Space)
+                || core.input.key_just_pressed(winit::keyboard::KeyCode::Enter)
+                || core
+                    .input
+                    .key_just_pressed(winit::keyboard::KeyCode::NumpadEnter));
+        let recipe_frame = recipe_context.as_ref().map(|(spec, slots)| {
+            crate::ui::recipe_book::handle_input(
+                &mut game.recipe_book_ui,
+                &mut game.recipe_book,
+                &connection.packet_tx,
+                *spec,
+                sw,
+                sh,
+                gs,
+                cursor,
+                raw_left,
+                raw_right,
+                core.input.shift_held(),
+                recipe_selection_key,
+                &text_events,
+                slots,
+                &|t, s| gfx.renderer.menu_text_width(t, s),
+            )
+        });
+        let book_blocks_pointer = recipe_context
+            .as_ref()
+            .zip(recipe_frame.as_ref())
+            .is_some_and(|((spec, _), frame)| {
+                frame.consumed_left_click
+                    || frame.consumed_right_click
+                    || crate::ui::recipe_book::click_hits_book(
+                        &game.recipe_book,
+                        spec.kind,
+                        sw,
+                        sh,
+                        gs,
+                        cursor,
+                    )
+            });
+        // Key shortcuts stay quiet while a text field (anvil rename or recipe
+        // search) types.
         let keys_live = !game.wants_text_input();
         let menu_scroll = core.input.consume_menu_scroll_xy();
         let input = crate::ui::container::ContainerInput {
-            left_pressed: core.input.left_just_pressed(),
-            right_pressed: core.input.right_just_pressed(),
-            middle_pressed: core.input.middle_just_pressed(),
-            left_held: core.input.left_held(),
-            right_held: core.input.right_held(),
+            left_pressed: raw_left && !book_blocks_pointer,
+            right_pressed: raw_right && !book_blocks_pointer,
+            middle_pressed: raw_middle && !book_blocks_pointer,
+            left_held: core.input.left_held() && !book_blocks_pointer,
+            right_held: core.input.right_held() && !book_blocks_pointer,
             shift: core.input.shift_held(),
             hotbar_swap: keys_live
                 .then(|| core.input.hotbar_key_just_pressed())
@@ -3023,7 +3221,51 @@ pub fn update_game(
                     name,
                 }));
         }
-        let (clicked_outside, ops, hovered) = if let Some(container) = &game.open_container {
+        let main_x_offset = recipe_frame.map_or(0.0, |frame| frame.main_x_offset);
+        let recipe_book_visible = recipe_frame.is_some_and(|frame| frame.visible);
+        let hide_main_for_book = recipe_frame.is_some_and(|frame| frame.visible && frame.narrow);
+        let mut deferred_recipe_cursor = azalea_inventory::ItemStack::Empty;
+        let (clicked_outside, ops, hovered) = if hide_main_for_book {
+            // `AbstractRecipeBookScreen`: a narrow screen with the book open
+            // shows only the screen's background behind it, and the book
+            // takes every click.
+            let cursor = core.input.cursor_pos();
+            match game.open_container.as_ref().map(|c| (c.screen, &c.data)) {
+                Some((ContainerScreen::CraftingTable, _)) => {
+                    crate::ui::crafting_table::push_crafting_table_background(
+                        &mut elements,
+                        sw,
+                        sh,
+                        gs,
+                        0.0,
+                    );
+                }
+                Some((ContainerScreen::Furnace(variant), data)) => {
+                    crate::ui::furnace::push_furnace_background(
+                        &mut elements,
+                        sw,
+                        sh,
+                        gs,
+                        variant,
+                        data,
+                        0.0,
+                    );
+                }
+                _ => {
+                    let (_, preview) = crate::ui::inventory::push_inventory_background(
+                        &mut elements,
+                        sw,
+                        sh,
+                        gs,
+                        0.0,
+                        cursor,
+                        &game.player.inventory,
+                    );
+                    player_preview = Some(preview);
+                }
+            }
+            (false, Vec::new(), None)
+        } else if let Some(container) = &game.open_container {
             let result = match container.screen {
                 ContainerScreen::CraftingTable => crate::ui::crafting_table::build_crafting_table(
                     &mut elements,
@@ -3037,6 +3279,8 @@ pub fn update_game(
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
                     gs,
+                    main_x_offset,
+                    recipe_book_visible.then_some(&mut deferred_recipe_cursor),
                 ),
                 ContainerScreen::Furnace(variant) => crate::ui::furnace::build_furnace(
                     &mut elements,
@@ -3052,6 +3296,8 @@ pub fn update_game(
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
                     gs,
+                    main_x_offset,
+                    recipe_book_visible.then_some(&mut deferred_recipe_cursor),
                     &|t, s| gfx.renderer.menu_text_width(t, s),
                 ),
                 ContainerScreen::Chest { rows } => crate::ui::chest::build_chest(
@@ -3152,10 +3398,52 @@ pub fn update_game(
                 &mut game.inv_drag,
                 &mut game.inv_last_click,
                 gs,
+                main_x_offset,
+                recipe_book_visible.then_some(&mut deferred_recipe_cursor),
             );
             player_preview = Some(result.player_preview);
             (result.clicked_outside, result.ops, result.hovered)
         };
+
+        if let Some((spec, _)) = recipe_context.as_ref()
+            && ops
+                .iter()
+                .filter_map(|op| op.slot_num())
+                .any(|slot| spec.crafting_slots.contains(&(slot as usize)))
+        {
+            game.recipe_book_ui
+                .crafting_slot_clicked(&mut game.recipe_book);
+        }
+
+        if let (Some((spec, _)), Some(frame)) = (recipe_context.as_ref(), recipe_frame) {
+            crate::ui::recipe_book::render(
+                &mut elements,
+                &mut game.recipe_book_ui,
+                &game.recipe_book,
+                *spec,
+                frame,
+                sw,
+                sh,
+                gs,
+                cursor,
+                core.input.ctrl_held(),
+                &|t, s| gfx.renderer.menu_text_width(t, s),
+            );
+            if frame.visible {
+                let shown_cursor = if hide_main_for_book {
+                    &game.cursor_item
+                } else {
+                    &deferred_recipe_cursor
+                };
+                crate::ui::container::push_cursor_stack(
+                    &mut elements,
+                    cursor,
+                    frame.panel_scale,
+                    shown_cursor,
+                );
+            }
+        }
+
         close_inventory = clicked_outside;
 
         let menu_id = game.open_container.as_ref().map_or(0, |c| c.id);
@@ -3288,37 +3576,20 @@ pub fn update_game(
             &game.player.inventory,
             gs,
         );
-        use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
-        let mut set_creative_slot = |slot_num: i16, item: azalea_inventory::ItemStack| {
-            if crate::player::is_creative(game.player.game_mode) {
-                connection
-                    .packet_tx
-                    .send(ServerboundGamePacket::SetCreativeModeSlot(
-                        ServerboundSetCreativeModeSlot {
-                            slot_num: slot_num as u16,
-                            item_stack: item.clone(),
-                        },
-                    ));
-                // Optimistic local update; the server echoes via ContainerSetSlot.
-                if slot_num >= 0 {
-                    game.player.inventory.set_slot(slot_num as usize, item);
-                }
-            }
-        };
         match action {
             crate::ui::creative_inventory::CreativeAction::Close => {
                 close_inventory = true;
             }
             crate::ui::creative_inventory::CreativeAction::SetSlot(slot_num, item) => {
-                set_creative_slot(slot_num as i16, item);
+                set_creative_slot(game, connection, slot_num, item);
             }
             crate::ui::creative_inventory::CreativeAction::SetSlots(items) => {
                 for (slot_num, item) in items {
-                    set_creative_slot(slot_num as i16, item);
+                    set_creative_slot(game, connection, slot_num, item);
                 }
             }
             crate::ui::creative_inventory::CreativeAction::DropItem(item) => {
-                set_creative_slot(-1, item);
+                drop_creative_item(game, connection, item);
                 crate::player::interaction::send_use_swing(&connection.packet_tx);
             }
             crate::ui::creative_inventory::CreativeAction::DropSlot {
@@ -3326,8 +3597,8 @@ pub fn update_game(
                 dropped,
                 remaining,
             } => {
-                set_creative_slot(slot as i16, remaining);
-                set_creative_slot(-1, dropped);
+                set_creative_slot(game, connection, slot, remaining);
+                drop_creative_item(game, connection, dropped);
                 crate::player::interaction::send_use_swing(&connection.packet_tx);
             }
             crate::ui::creative_inventory::CreativeAction::None => {}
@@ -3727,7 +3998,7 @@ pub fn update_game(
         use_anim,
         held_item,
         game.scoreboard.member_team_color(&core.user.username),
-        !game.player.is_sleeping(),
+        renders_first_person_hand(game),
         destroy_info,
         game.show_chunk_borders,
         sky,
@@ -3992,8 +4263,8 @@ mod dropped_item_tests {
     use azalea_registry::builtin::EntityKind;
 
     use super::{
-        item_stack_seed, should_render_local_player, sleeping_head_pitch_deg, standing_eye_height,
-        transform_item_bounds,
+        hand_visible, item_stack_seed, should_render_local_player, sleeping_head_pitch_deg,
+        standing_eye_height, transform_item_bounds,
     };
 
     #[test]
@@ -4017,6 +4288,15 @@ mod dropped_item_tests {
         assert!(should_render_local_player(false, false, false, false));
         assert!(!should_render_local_player(true, false, true, false));
         assert!(!should_render_local_player(false, false, true, true));
+    }
+
+    #[test]
+    fn hand_hides_asleep_with_f1_and_in_spectator() {
+        assert!(hand_visible(false, false, 0));
+        assert!(hand_visible(false, false, 1));
+        assert!(!hand_visible(true, false, 0));
+        assert!(!hand_visible(false, true, 0));
+        assert!(!hand_visible(false, false, 3));
     }
 
     #[test]

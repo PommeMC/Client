@@ -1,0 +1,61 @@
+# Block updates, block entity data and mining reach the client's world.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/tp @s 0.5 -60 0.5 0 10"
+
+# Over 1 block, so a `section_blocks_update`.
+[[step]]
+chat = "/fill -3 -60 4 3 -56 4 minecraft:stone"
+
+[[step]]
+expect = { block = "stone", at = [3, -56, 4] }
+
+# One block, so a `block_update`.
+[[step]]
+chat = "/setblock 0 -58 4 minecraft:air"
+
+[[step]]
+expect = { block = "air", at = [0, -58, 4] }
+
+[[step]]
+chat = "/setblock 2 -59 3 minecraft:oak_wall_sign[facing=north]{front_text:{messages:[\"pomme\",\"\",\"\",\"\"]}}"
+
+# Its text arrives as a `block_entity_data`.
+[[step]]
+expect = { block = "oak_wall_sign", at = [2, -59, 3], block_entity = "sign" }
+
+# Mined through the attack input, which predicts the break before the
+# server's ack.
+[[step]]
+look_at = [-1.5, -58.5, 4.0]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { block = "air", at = [-2, -59, 4] }
+
+[[step]]
+wait_ms = 1500
+
+# The wall around both holes still renders.
+[[step]]
+screenshot = "wall"
+
+[[step]]
+chat = "/fill -3 -60 3 3 -56 4 minecraft:air"
+
+[[step]]
+expect = { block = "air", at = [3, -56, 4] }

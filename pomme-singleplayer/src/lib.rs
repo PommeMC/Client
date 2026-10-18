@@ -330,7 +330,7 @@ fn worlds_config(options: &LaunchOptions) -> WorldsConfig {
         default_gamemode: Some(options.game_mode),
         difficulty: Some(options.difficulty),
         storage: Some(StorageSelection::default_world_disk()),
-        player_storage: Some(StorageSelection::default_player_file()),
+        player_storage: Some(StorageSelection::default_player_disk()),
         domains: BTreeMap::from([(
             "minecraft".to_owned(),
             DomainConfig {

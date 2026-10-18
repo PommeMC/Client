@@ -11,9 +11,13 @@ mod attribute;
 mod audio;
 mod benchmark;
 mod chat_component;
+#[cfg(feature = "cpu-bench")]
+mod cpu_bench;
 mod dirs;
 mod discord;
 mod entity;
+#[cfg(feature = "test-harness")]
+mod harness;
 mod lang;
 mod logging;
 mod mob_effect;
@@ -21,6 +25,7 @@ mod net;
 mod particle;
 mod physics;
 mod player;
+mod recipe;
 mod renderer;
 mod resource_pack;
 mod singleplayer;
@@ -44,6 +49,14 @@ use crate::user::UserData;
 
 fn main() {
     let args = args::LaunchArgs::parse();
+
+    // Ahead of the launch-token guard, which bench builds have no launcher for.
+    #[cfg(feature = "cpu-bench")]
+    if let Some(filter) = &args.cpu_bench {
+        let version = args.version.as_deref().unwrap_or(NATIVE.name);
+        let data_dirs = args.data_dirs(version);
+        std::process::exit(cpu_bench::run(version, &data_dirs, filter.as_deref()));
+    }
 
     #[cfg(not(debug_assertions))]
     {
@@ -87,12 +100,7 @@ fn main() {
         }
     }
 
-    let data_dirs = dirs::DataDirs::resolve(
-        version,
-        args.assets_dir.as_deref(),
-        args.versions_dir.as_deref(),
-        args.game_dir.as_deref(),
-    );
+    let data_dirs = args.data_dirs(version);
 
     let log_dir = data_dirs.game_dir.join("logs");
     std::fs::create_dir_all(&log_dir).unwrap();
@@ -132,17 +140,37 @@ fn main() {
         .inspect_err(|e| tracing::warn!("Discord rich presence unavailable: {e}"))
         .ok();
 
-    if let Err(e) = App::new(
+    let mut app = App::new(
         version.to_owned(),
         data_dirs,
         rt,
         presence,
         user,
-        args.quick_access_multiplayer,
-    )
-    .run()
+        args.quick_access_multiplayer
+            .map(app::QuickPlay::Multiplayer)
+            .or(args
+                .quick_access_singleplayer
+                .map(app::QuickPlay::Singleplayer)),
+    );
+    #[cfg(feature = "test-harness")]
     {
+        let harness = crate::harness::Harness::from_args(
+            args.harness_port,
+            args.harness_script,
+            args.harness_out,
+        )
+        .unwrap_or_else(|e| {
+            tracing::error!("{e}");
+            std::process::exit(2);
+        });
+        app = app.with_harness(harness);
+    }
+    if let Err(e) = app.run() {
         tracing::error!("Fatal: {e}");
         std::process::exit(1);
+    }
+    #[cfg(feature = "test-harness")]
+    if let Some(code) = app.harness_exit_code() {
+        std::process::exit(code);
     }
 }

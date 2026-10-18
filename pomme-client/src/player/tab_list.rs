@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use pomme_protocol::player_info::Actions;
 use uuid::Uuid;
 
 use crate::net::chat_security::{SignedChatBody, ValidatedChatSession, verify_player_message};
@@ -18,17 +19,6 @@ pub struct PlayerInfoEntry {
     pub display_name: Option<Vec<TextSpan>>,
     pub list_order: i32,
     pub chat_session: Option<ValidatedChatSession>,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct PlayerInfoActions {
-    pub add_player: bool,
-    pub initialize_chat: bool,
-    pub update_game_mode: bool,
-    pub update_listed: bool,
-    pub update_latency: bool,
-    pub update_display_name: bool,
-    pub update_list_order: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -111,7 +101,7 @@ impl TabList {
         self.footer = None;
     }
 
-    pub fn apply_update(&mut self, actions: &PlayerInfoActions, entries: &[PlayerInfoEntry]) {
+    pub fn apply_update(&mut self, actions: &Actions, entries: &[PlayerInfoEntry]) {
         for e in entries {
             if actions.add_player {
                 self.players.insert(

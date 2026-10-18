@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use azalea_protocol::packets::game::s_chat_session_update::RemoteChatSessionData;
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
@@ -640,24 +639,20 @@ impl ProfileKeyServices {
     pub fn validate_session(
         &self,
         profile_id: Uuid,
-        data: &RemoteChatSessionData,
+        data: &pomme_protocol::player_info::ChatSession,
     ) -> Result<ValidatedChatSession, String> {
-        let key = RsaPublicKey::from_public_key_der(&data.profile_public_key.key)
+        let key = RsaPublicKey::from_public_key_der(&data.key)
             .map_err(|e| format!("player profile public key is malformed: {e}"))?;
 
-        let mut payload = Vec::with_capacity(24 + data.profile_public_key.key.len());
+        let mut payload = Vec::with_capacity(24 + data.key.len());
         payload.extend_from_slice(profile_id.as_bytes());
-        payload.extend_from_slice(&data.profile_public_key.expires_at.to_be_bytes());
-        payload.extend_from_slice(&data.profile_public_key.key);
+        payload.extend_from_slice(&data.expires_at.to_be_bytes());
+        payload.extend_from_slice(&data.key);
 
         let digest = Sha1::digest(&payload);
         let valid = self.keys.iter().any(|service_key| {
             service_key
-                .verify(
-                    Pkcs1v15Sign::new::<Sha1>(),
-                    &digest,
-                    &data.profile_public_key.key_signature,
-                )
+                .verify(Pkcs1v15Sign::new::<Sha1>(), &digest, &data.key_signature)
                 .is_ok()
         });
         if !valid {
@@ -668,8 +663,8 @@ impl ProfileKeyServices {
         }
 
         Ok(ValidatedChatSession {
-            session_id: data.session_id,
-            expires_at_ms: data.profile_public_key.expires_at,
+            session_id: Uuid::from_u128(data.session_id),
+            expires_at_ms: data.expires_at as u64,
             public_key: key,
         })
     }

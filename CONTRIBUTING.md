@@ -12,7 +12,7 @@ Thanks for your interest in contributing to Pomme!
    cd Client
    ```
 
-   SteelMC is a submodule; see [Building](./README.md#building) for the
+   SteelMC is a submodule; see [BUILDING.md](./BUILDING.md) for the
    submodule, first-build, and skip notes.
 
 3. Build and run:
@@ -35,6 +35,10 @@ just launcher-pre-pr        # Launcher (Rust & TypeScript)
 real SteelMC server and writes a world to the temp dir, so it takes a minute.
 CI additionally runs the client's clippy and tests with `--no-default-features`,
 which the recipe does not.
+
+For changes you'd otherwise check in game (items, inventory, entities,
+advancements), `just ingame-test` runs scripted tests against a local vanilla
+server. See [tests/ingame/README.md](tests/ingame/README.md).
 
 ## Development Guidelines
 
@@ -69,8 +73,8 @@ For bug fixes, also include:
 
 ## Project Structure
 
-The workspace crates are listed under [Architecture](./README.md#architecture)
-in the README. Inside the two apps:
+The workspace crates are listed under [Layout](./BUILDING.md#layout)
+in BUILDING.md. Inside the two apps:
 
 ### Pomme client
 

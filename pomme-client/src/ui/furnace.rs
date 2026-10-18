@@ -10,7 +10,7 @@ use azalea_inventory::ItemStack;
 use super::common::FONT_SIZE;
 use super::container::{
     ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_clipped_sprite,
-    push_cursor_stack, push_panel, push_recipe_book_button, resolve_gesture,
+    push_cursor_stack, push_panel_offset, resolve_gesture,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -36,6 +36,14 @@ pub enum FurnaceVariant {
 }
 
 impl FurnaceVariant {
+    pub fn recipe_book_type(self) -> crate::recipe::RecipeBookType {
+        match self {
+            Self::Furnace => crate::recipe::RecipeBookType::Furnace,
+            Self::BlastFurnace => crate::recipe::RecipeBookType::BlastFurnace,
+            Self::Smoker => crate::recipe::RecipeBookType::Smoker,
+        }
+    }
+
     /// This variant's (background, lit progress, burn progress) sprites.
     fn sprites(self) -> (SpriteId, SpriteId, SpriteId) {
         match self {
@@ -58,6 +66,25 @@ impl FurnaceVariant {
     }
 }
 
+/// Vanilla `AbstractFurnaceScreen.extractBackground`: the panel with its fuel
+/// and cook progress, all a narrow screen shows behind the open recipe book.
+pub fn push_furnace_background(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    variant: FurnaceVariant,
+    data: &[i16],
+    x_offset: f32,
+) -> Panel {
+    let (background, lit_sprite, burn_sprite) = variant.sprites();
+    let panel = push_panel_offset(
+        elements, screen_w, screen_h, gs, 166.0, background, x_offset,
+    );
+    push_progress_overlays(elements, &panel, lit_sprite, burn_sprite, data);
+    panel
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_furnace(
     elements: &mut Vec<MenuElement>,
@@ -73,16 +100,15 @@ pub fn build_furnace(
     drag: &mut Option<DragState>,
     last_click: &mut Option<(u16, Instant)>,
     gs: f32,
+    x_offset: f32,
+    deferred_cursor: Option<&mut ItemStack>,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> ContainerResult {
-    let (background, lit_sprite, burn_sprite) = variant.sprites();
-    let panel = push_panel(elements, screen_w, screen_h, gs, 166.0, background);
+    let panel = push_furnace_background(elements, screen_w, screen_h, gs, variant, data, x_offset);
     // Vanilla centers the furnace title: (imageWidth - font.width(title)) / 2.
     let title_x = ((176.0 - text_width_fn(title, FONT_SIZE)) / 2.0).floor();
     panel.label(elements, title_x, 6.0, title);
     panel.label(elements, 8.0, 72.0, "Inventory");
-
-    push_progress_overlays(elements, &panel, lit_sprite, burn_sprite, data);
 
     let mut ctx = SlotCtx::new(
         elements,
@@ -103,8 +129,11 @@ pub fn build_furnace(
 
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
 
-    push_recipe_book_button(elements, &panel, cursor, 20.0, 34.0);
-    push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
+    if let Some(out) = deferred_cursor {
+        *out = shown_cursor;
+    } else {
+        push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
+    }
 
     let (ops, clicked_outside) = resolve_gesture(
         input,

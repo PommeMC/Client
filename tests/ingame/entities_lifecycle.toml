@@ -1,0 +1,42 @@
+# Entities spawn, die and are removed; dropped items are picked up; the
+# player mounts and dismounts a vehicle.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = '/summon minecraft:pig ~ ~ ~2 {NoAI:1b}'
+
+[[step]]
+expect = { entity = "pig" }
+
+[[step]]
+chat = "/ride @s mount @e[type=minecraft:pig,limit=1]"
+
+[[step]]
+expect = { riding = true }
+
+[[step]]
+chat = "/ride @s dismount"
+
+[[step]]
+expect = { riding = false }
+
+[[step]]
+chat = "/kill @e[type=minecraft:pig]"
+
+# Its porkchop, before the player can pick it up.
+[[step]]
+chat = "/kill @e[type=minecraft:item]"
+
+[[step]]
+expect = { gone = "pig" }
+
+[[step]]
+chat = '/summon minecraft:item ~ ~ ~ {Item:{id:"minecraft:diamond",count:2},PickupDelay:0}'
+
+[[step]]
+expect = { gone = "diamond" }
+
+[[step]]
+expect = { slot = 36, item = "diamond", count = 2 }

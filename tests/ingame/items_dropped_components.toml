@@ -1,0 +1,17 @@
+# Components pomme can't hold yet are dropped without losing the rest of the
+# stack or the packet.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = '/give @s minecraft:diamond_pickaxe[minecraft:can_break={blocks:"minecraft:stone"},minecraft:custom_name="Miner"]'
+
+[[step]]
+expect = { slot = 36, item = "diamond_pickaxe", components = ["custom_name"], absent = ["can_break"] }
+
+[[step]]
+chat = '/give @s minecraft:stone[minecraft:can_place_on={blocks:"minecraft:dirt"},minecraft:rarity="epic"] 3'
+
+[[step]]
+expect = { slot = 37, item = "stone", count = 3, components = ["rarity"], absent = ["can_place_on"] }

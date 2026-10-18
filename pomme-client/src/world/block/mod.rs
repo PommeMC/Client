@@ -920,6 +920,40 @@ fn all_states() -> impl Iterator<Item = (BlockState, &'static BlockData)> {
     })
 }
 
+/// Number of block-state table slots (one per distinct state-id space).
+pub(crate) const TABLE_SLOTS: usize = BLOCK_DATA.len();
+
+/// The table slot state ids are currently interpreted in.
+pub(crate) fn active_table_slot() -> usize {
+    ACTIVE_TABLE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// What a renderer needs to know about one block state, independent of which
+/// table is active.
+pub(crate) struct StateInfo {
+    pub id: &'static str,
+    pub properties: &'static PropMap,
+    pub is_air: bool,
+    pub can_occlude: bool,
+    pub has_fluid: bool,
+}
+
+/// Every state of table `slot`, in id order, or none if that table was never
+/// built (no state id can refer to it yet).
+pub(crate) fn states_in_slot(slot: usize) -> impl Iterator<Item = StateInfo> {
+    BLOCK_TABLES[slot]
+        .get()
+        .into_iter()
+        .flatten()
+        .map(|data| StateInfo {
+            id: data.id,
+            properties: &data.properties,
+            is_air: data.is_air,
+            can_occlude: data.light.can_occlude,
+            has_fluid: !matches!(data.fluid.kind, FluidKind::Empty),
+        })
+}
+
 /// First declared state of the named block, e.g. the light engine's bedrock
 /// fallback for unloaded-chunk reads.
 pub(crate) fn first_state_of(name: &str) -> Option<BlockState> {
@@ -1233,8 +1267,9 @@ pub fn shape_occludes(from: BlockState, to: BlockState, face: usize) -> bool {
 }
 
 /// The block's state matching the given property values (unlisted properties
-/// take whatever the first match has); shared with the light-engine tests.
-#[cfg(test)]
+/// take whatever the first match has); shared with the light-engine tests
+/// and the CPU bench.
+#[cfg(any(test, feature = "cpu-bench"))]
 pub(crate) fn find_state(name: &str, props: &[(&str, &str)]) -> BlockState {
     all_states()
         .find(|(s, d)| {

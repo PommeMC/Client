@@ -1,0 +1,49 @@
+# The creative screen's slot packet, which frames each component separately:
+# a copied stack must reach the server exactly as given.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+expect = { chat = "Creative Mode" }
+
+[[step]]
+chat = '/give @s minecraft:diamond_sword[minecraft:enchantments={sharpness:3},minecraft:custom_name="Blade"]'
+
+[[step]]
+expect = { slot = 36, item = "diamond_sword", components = ["enchantments", "custom_name"] }
+
+[[step]]
+chat = '/give @s minecraft:bundle[minecraft:bundle_contents=[{id:"minecraft:diamond",count:2}]]'
+
+[[step]]
+expect = { slot = 37, item = "bundle", components = ["bundle_contents"] }
+
+[[step]]
+creative_set_slot = { slot = 38, from = 36 }
+
+[[step]]
+creative_set_slot = { slot = 39, from = 37 }
+
+# The server applies slot packets and runs commands on separate queues
+# (ServerGamePacketListenerImpl: ensureRunningOnSameThread vs tryHandleChat),
+# so give it a few ticks before checking.
+[[step]]
+wait_ms = 500
+
+# The server checks its copies; hotbar.2 and hotbar.3 are menu slots 38 and
+# 39. Each match says its own marker, so a failure can't pass for the other.
+[[step]]
+chat = '/execute if items entity @s hotbar.2 minecraft:diamond_sword[minecraft:enchantments={sharpness:3},minecraft:custom_name="Blade"] run say sword copied'
+
+[[step]]
+expect = { chat = "sword copied" }
+
+[[step]]
+chat = '/execute if items entity @s hotbar.3 minecraft:bundle[minecraft:bundle_contents=[{id:"minecraft:diamond",count:2}]] run say bundle copied'
+
+[[step]]
+expect = { chat = "bundle copied" }
