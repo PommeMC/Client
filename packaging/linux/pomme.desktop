@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Pomme
+Comment=Minecraft client
+Exec=pomme-client
+Icon=pomme
+Categories=Game;
+Terminal=false

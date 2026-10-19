@@ -11,6 +11,10 @@ on:
         description: "Version core, e.g. 0.2.0 (blank = bump patch from latest)"
         required: false
         default: ""
+      dry_run:
+        description: "Build and package only: the files stay on the run, nothing is released"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,6 +37,7 @@ jobs:
       should_release: ${{ steps.check.outputs.should_release }}
       tag: ${{ steps.rel.outputs.tag }}
       prev: ${{ steps.rel.outputs.prev }}
+      version: ${{ steps.rel.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -96,6 +101,8 @@ jobs:
           fi
           prev=$(echo "$tags" | grep -vFx "$tag" | sort -V | tail -n1 || true)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          version=${tag#client-v}
+          echo "version=${version%%+*}" >> "$GITHUB_OUTPUT"
           echo "prev=$prev" >> "$GITHUB_OUTPUT"
 
   build-client:
@@ -202,6 +209,27 @@ jobs:
           Copy-Item "pomme-client/third-party/OpenAL-Soft-NOTICE.txt" bundle/
           Compress-Archive -Path "bundle/*" -DestinationPath "dist/${{ matrix.name }}.zip"
 
+      # The installers wrap the same files the zip holds, which stays the
+      # updater's download.
+      - name: Installer (macOS)
+        if: matrix.os == 'macos-latest'
+        run: packaging/macos.sh bundle "${{ needs.check.outputs.version }}" "dist/${{ matrix.name }}.dmg"
+
+      - name: Installer (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: packaging/linux.sh bundle "${{ needs.check.outputs.version }}" "dist/${{ matrix.name }}.AppImage"
+
+      - name: Installer (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install innosetup --version=6.7.1 -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            "/DAppVersion=${{ needs.check.outputs.version }}" `
+            "/DBundle=$PWD\bundle" "/DOutDir=$PWD\dist" "/DOutName=${{ matrix.name }}-setup" `
+            packaging\windows\pomme.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
@@ -210,7 +238,7 @@ jobs:
 
   release-client:
     needs: [check, build-client]
-    if: needs.check.outputs.should_release == 'true'
+    if: needs.check.outputs.should_release == 'true' && !inputs.dry_run
 
     runs-on: ubuntu-latest
     steps:
@@ -226,7 +254,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum *.zip > sha256sums.txt
+          sha256sum * > sha256sums.txt
 
       - uses: softprops/action-gh-release@v3
         with:
@@ -237,6 +265,11 @@ jobs:
           previous_tag: ${{ needs.check.outputs.prev }}
           files: dist/*
           generate_release_notes: ${{ needs.check.outputs.prev != '' }}
+          body: |
+            These builds aren't signed yet, so the first launch needs one extra step:
+            - **macOS:** open `Pomme.app` with right-click → Open, or allow it under System Settings → Privacy & Security.
+            - **Windows:** on the SmartScreen prompt, choose More info → Run anyway.
+            - **Linux:** `chmod +x pomme-client-linux-x64-gnu.AppImage`, then run it.
 
       - name: Announce release on Discord
         if: needs.check.outputs.prev != ''

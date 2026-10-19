@@ -41,7 +41,7 @@ async fn install(app: &AppHandle, http: &reqwest::Client, release: &Release) -> 
     let dir = storage::client_version_dir(tag);
 
     emit(app, 0, 1, "Downloading client...");
-    let bytes = client::download(http, release, &|_| {}).await?;
+    let bytes = client::download(http, release, client::platform_zip()?, &|_| {}).await?;
 
     emit(app, 1, 1, "Installing client...");
     client::extract_flat(&bytes, &dir)?;

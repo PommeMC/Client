@@ -29,13 +29,17 @@ struct Asset {
     browser_download_url: String,
 }
 
-/// This platform's release zip, or `None` where no build is published.
-fn platform_asset() -> Option<&'static str> {
+/// The Linux AppImage, which updates by replacing itself: its inside is a
+/// read-only mount.
+pub const APPIMAGE: &str = "pomme-client-linux-x64-gnu.AppImage";
+
+/// This platform's release zip, the files that sit beside the binary.
+pub fn platform_zip() -> Result<&'static str, String> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("windows", "x86_64") => Some("pomme-client-windows-x64.zip"),
-        ("linux", "x86_64") => Some("pomme-client-linux-x64-gnu.zip"),
-        ("macos", "aarch64") => Some("pomme-client-macos-arm64.zip"),
-        _ => None,
+        ("windows", "x86_64") => Ok("pomme-client-windows-x64.zip"),
+        ("linux", "x86_64") => Ok("pomme-client-linux-x64-gnu.zip"),
+        ("macos", "aarch64") => Ok("pomme-client-macos-arm64.zip"),
+        (os, arch) => Err(format!("No client build for {os}/{arch}")),
     }
 }
 
@@ -72,20 +76,14 @@ pub async fn latest_release(http: &reqwest::Client) -> Result<Release, String> {
         .ok_or_else(|| "No client release found".to_owned())
 }
 
-/// This platform's zip from `release`, refused unless it matches the
-/// release's published sha256.
+/// File `name` of `release`, refused unless it matches the release's
+/// published sha256.
 pub async fn download(
     http: &reqwest::Client,
     release: &Release,
+    name: &str,
     on_progress: &(dyn Fn(Progress) + Send + Sync),
 ) -> Result<Vec<u8>, String> {
-    let name = platform_asset().ok_or_else(|| {
-        format!(
-            "No client build for {}/{}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        )
-    })?;
     let asset = |name: &str| {
         release
             .assets

@@ -44,7 +44,12 @@ pub async fn run(
         return Ok(None);
     }
     tracing::info!("Updating from {ours} to {}", release.tag_name);
-    let zip = client::download(http, &release, on_progress).await?;
+    if let Some(appimage) = appimage() {
+        let file = client::download(http, &release, client::APPIMAGE, on_progress).await?;
+        replace_appimage(&file, &appimage).await?;
+        return Ok(Some(appimage));
+    }
+    let zip = client::download(http, &release, client::platform_zip()?, on_progress).await?;
     // Before the swap: Linux reports a renamed running binary by its new name.
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = exe.parent().ok_or("the binary has no folder")?.to_owned();
@@ -52,6 +57,23 @@ pub async fn run(
         .await
         .map_err(|e| e.to_string())??;
     Ok(Some(exe))
+}
+
+/// The `.AppImage` this runs from, which its runtime names in `$APPIMAGE`;
+/// `current_exe()` is inside its read-only mount.
+fn appimage() -> Option<PathBuf> {
+    std::env::var_os("APPIMAGE").map(PathBuf::from)
+}
+
+async fn replace_appimage(bytes: &[u8], path: &Path) -> Result<(), String> {
+    pomme_install::write_atomic(path, bytes).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 pub fn relaunch(exe: &Path) -> std::io::Result<()> {
@@ -63,7 +85,7 @@ pub fn relaunch(exe: &Path) -> std::io::Result<()> {
 
 /// Removes what the last update left behind.
 pub fn clean_up() {
-    if RELEASE.is_none() || cfg!(mobile) {
+    if RELEASE.is_none() || cfg!(mobile) || appimage().is_some() {
         return;
     }
     if let Ok(exe) = std::env::current_exe()
@@ -176,6 +198,22 @@ mod tests {
         assert!(!dir.join("pomme-client.old").exists());
         assert!(!dir.join("libopenal.so.old").exists());
         assert_eq!(read(&dir, "pomme-client"), "new");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_appimage_is_replaced_whole_and_executable() {
+        let dir = install_dir("appimage", &[("Pomme.AppImage", "old")]);
+        let appimage = dir.join("Pomme.AppImage");
+        replace_appimage(b"new", &appimage).await.unwrap();
+        assert_eq!(read(&dir, "Pomme.AppImage"), "new");
+        assert!(!dir.join("Pomme.AppImage.part").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&appimage).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

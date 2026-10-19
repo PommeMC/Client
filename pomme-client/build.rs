@@ -22,6 +22,15 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
     }
 
+    // The exe's own icon, for Explorer, the taskbar and shortcuts.
+    #[cfg(windows)]
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        winresource::WindowsResource::new()
+            .set_icon("assets/icon.ico")
+            .compile()
+            .expect("failed to embed the exe icon");
+    }
+
     let shader_dir = Path::new("src/renderer/shaders");
     let out_dir = std::env::var("OUT_DIR").unwrap();
 

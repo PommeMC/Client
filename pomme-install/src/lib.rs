@@ -271,7 +271,7 @@ fn sha1_hex(bytes: &[u8]) -> String {
 }
 
 /// Writes `bytes` beside `path`, then renames it into place.
-async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir)
             .await
