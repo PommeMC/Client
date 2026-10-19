@@ -119,7 +119,6 @@ impl Install {
                 },
                 format!("Minecraft {version}: {}", p.status),
             ),
-            // The reason is in the log; it's a URL-long line.
             State::Failed => (
                 0.0,
                 "Download failed. Check your connection, then tap or click to retry.".to_owned(),

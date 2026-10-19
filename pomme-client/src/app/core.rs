@@ -1225,7 +1225,6 @@ impl AppCore {
     /// the texture atlas. Clearing
     /// `menu.reload_assets` and `menu.reload_fonts` is safe here because the
     /// pending toggles they stand for are covered by the reload we just did.
-    /// Where the renderer's fonts come from.
     pub(crate) fn font_sources(&self) -> crate::ui::font::FontSources<'_> {
         crate::ui::font::FontSources {
             jar_assets_dir: &self.data_dirs.jar_assets_dir,

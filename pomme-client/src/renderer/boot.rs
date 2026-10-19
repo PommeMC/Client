@@ -32,7 +32,6 @@ impl BootScreen {
         })
     }
 
-    /// Rebuilds the swapchain for the window's new size.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RendererError> {
         let _ = self.ctx.device.wait_idle();
         let new = Swapchain::new(
