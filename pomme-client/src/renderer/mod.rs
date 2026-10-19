@@ -42,6 +42,7 @@ use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
 use pyronyx::khr::present_wait::PresentWaitDevice;
+use pyronyx::khr::surface::SurfacePhysicalDevice;
 use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
 use pyronyx::vk;
 use swapchain::Swapchain;
@@ -681,6 +682,20 @@ impl Renderer {
         self.ctx.recreate_surface(window)?;
         self.suspended = false;
         self.recreate_swapchain()
+    }
+
+    /// Whether a suboptimal swapchain needs rebuilding: only once the surface's
+    /// size changed. A phone held sideways is suboptimal on every frame (see
+    /// `choose_pre_transform`), and a same-size rebuild each frame stalls it.
+    fn surface_resized(&self) -> bool {
+        self.ctx
+            .physical_device
+            .get_surface_capabilities(self.ctx.surface)
+            .is_ok_and(|caps| {
+                let extent = caps.current_extent;
+                // Undefined (the window decides) or minimised: nothing to match.
+                extent.width != u32::MAX && extent.width > 0 && extent != self.swapchain.extent
+            })
     }
 
     pub fn set_vsync(&mut self, vsync: bool) {
@@ -1518,7 +1533,7 @@ impl Renderer {
             Err(e) => return Err(e.into()),
         };
 
-        self.swapchain_dirty |= image.suboptimal;
+        self.swapchain_dirty |= image.suboptimal && self.surface_resized();
         let image_index = image.value;
         let acquire_ms = t_acquire.elapsed().as_secs_f32() * 1000.0;
 
@@ -2135,9 +2150,8 @@ impl Renderer {
         let t_present = std::time::Instant::now();
         match self.ctx.present_queue.present(&present_info) {
             Ok(()) => {}
-            Err(vk::Error::OutOfDateKHR | vk::Error::SuboptimalKHR) => {
-                self.swapchain_dirty = true;
-            }
+            Err(vk::Error::OutOfDateKHR) => self.swapchain_dirty = true,
+            Err(vk::Error::SuboptimalKHR) => self.swapchain_dirty |= self.surface_resized(),
             Err(e) => return Err(e.into()),
         }
         let present_ms = t_present.elapsed().as_secs_f32() * 1000.0;
