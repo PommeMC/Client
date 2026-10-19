@@ -58,7 +58,6 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
     ) -> MainMenuResult {
-        // Launched without an account (no launcher): signing in is the way in.
         let gated = self.account_required && self.access_token.is_none();
         let leave = if gated { "Quit" } else { "Back" };
         if input.escape && !gated {

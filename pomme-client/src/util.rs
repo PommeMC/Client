@@ -94,7 +94,6 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(target_os = "android")]
 pub static ANDROID_APP: std::sync::OnceLock<crate::AndroidApp> = std::sync::OnceLock::new();
 
-/// Opens `url` in the browser.
 pub fn open_url(url: &str) {
     #[cfg(target_os = "android")]
     let opened = open_url_android(url).map_err(|e| e.to_string());
