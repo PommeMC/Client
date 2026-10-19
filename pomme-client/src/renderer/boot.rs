@@ -8,6 +8,7 @@ use super::context::VulkanContext;
 use super::pipelines::menu_overlay::MenuOverlayPipeline;
 use super::swapchain::Swapchain;
 use super::{Renderer, RendererError};
+use crate::stereo::StereoBackend;
 use crate::ui::font::FontSources;
 
 pub struct BootScreen {
@@ -23,7 +24,7 @@ impl BootScreen {
         font_sources: FontSources<'_>,
         vsync: bool,
     ) -> Result<Self, RendererError> {
-        let (ctx, swapchain, menu) = bring_up(window, font_sources, vsync)?;
+        let (ctx, swapchain, menu) = bring_up(window, font_sources, vsync, None)?;
         Ok(Self {
             menu,
             swapchain,
@@ -65,8 +66,9 @@ pub(super) fn bring_up(
     window: &Window,
     font_sources: FontSources<'_>,
     vsync: bool,
+    stereo: Option<&dyn StereoBackend>,
 ) -> Result<(VulkanContext, Swapchain, MenuOverlayPipeline), RendererError> {
-    let ctx = VulkanContext::new(window)?;
+    let ctx = VulkanContext::new(window, stereo)?;
     let size = window.inner_size();
     let swapchain = Swapchain::new(
         &ctx,

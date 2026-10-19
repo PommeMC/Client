@@ -94,6 +94,7 @@ jobs:
           cargo fmt -p pomme-auth -- --check
           cargo fmt -p pomme-install -- --check
           cargo fmt -p pomme-android -- --check
+          cargo fmt -p pomme-vr -- --check
 
       # Singleplayer is checked on Linux only, so SteelMC is not built three
       # times over.
@@ -104,6 +105,7 @@ jobs:
           cargo clippy -p pomme-dirs --release --all-targets -- -D warnings
           cargo clippy -p pomme-auth --release --all-targets --all-features -- -D warnings
           cargo clippy -p pomme-install --release --all-targets -- -D warnings
+          cargo clippy -p pomme-vr --release --all-targets --no-default-features -- -D warnings
 
       - name: Tests
         if: matrix.os == 'ubuntu-latest'

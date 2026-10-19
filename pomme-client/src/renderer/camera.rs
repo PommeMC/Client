@@ -1,9 +1,11 @@
 use glam::camera::rh::{proj, view};
 use glam::{DVec3, FloatExt, Mat4, Vec2, Vec3};
 
+use super::seated::Seated;
 use crate::app::input::InputState;
 use crate::entity::HURT_DURATION;
 use crate::entity::components::{LookDirection, Position};
+use crate::stereo::EyeView;
 
 pub const DEFAULT_FOV_DEGREES: f32 = 70.0;
 #[allow(dead_code)]
@@ -137,6 +139,9 @@ pub struct Camera {
     /// Projection far plane, scaled with render distance (vanilla
     /// `Camera.depthFar` = render distance in blocks * 4).
     depth_far: f32,
+    /// In VR, the headset's eyes and the mouse's crosshair, which replace the
+    /// view, the projection and the look input.
+    seated: Option<Seated>,
 }
 
 impl Camera {
@@ -162,6 +167,38 @@ impl Camera {
             hurt_dir: 0.0,
             damage_tilt_strength: 1.0,
             depth_far: MIN_FAR,
+            seated: None,
+        }
+    }
+
+    /// Switches to seated VR, aiming where the player looks now.
+    pub fn start_seated(&mut self) {
+        self.seated = Some(Seated::new(
+            self.look_dir.y_rot_deg(),
+            self.look_dir.x_rot_deg(),
+        ));
+    }
+
+    /// This frame's eye poses; `None` keeps the last ones.
+    pub fn set_eyes(&mut self, eyes: Option<[EyeView; 2]>) {
+        if let (Some(seated), Some(eyes)) = (&mut self.seated, eyes) {
+            seated.eyes = eyes;
+        }
+    }
+
+    /// Each eye's view-projection; outside VR, the one view in both.
+    pub fn eye_view_projections(&self) -> [Mat4; 2] {
+        match &self.seated {
+            Some(seated) => seated.view_projections(NEAR, self.depth_far, true),
+            None => [self.view_projection(); 2],
+        }
+    }
+
+    /// Each eye's sky view-projection (rotation only).
+    pub fn eye_sky_view_projections(&self) -> [Mat4; 2] {
+        match &self.seated {
+            Some(seated) => seated.view_projections(NEAR, self.depth_far, false),
+            None => [self.sky_view_projection(); 2],
         }
     }
 
@@ -236,6 +273,8 @@ impl Camera {
             * Mat4::from_rotation_x(pitch_deg.to_radians())
     }
 
+    /// `window` is the window's size in pixels, which seated VR measures
+    /// mouse moves against.
     pub fn update_look(
         &mut self,
         input: &mut InputState,
@@ -243,7 +282,25 @@ impl Camera {
         sensitivity: f32,
         invert_x: bool,
         invert_y: bool,
+        window: Vec2,
     ) {
+        if let Some(seated) = &mut self.seated {
+            if let Some(look_vec) = input.get_gamepad_right_analog() {
+                let step = CONTROLLER_SENSITIVITY * dt;
+                seated.turn(look_vec.x * invert_sign(invert_x) * step);
+                seated.adjust_pitch(-look_vec.y * invert_sign(invert_y) * step);
+            }
+            if input.is_cursor_captured() {
+                let (dx, dy) = input.consume_mouse_delta();
+                seated.move_aim(
+                    dx as f32 / window.x.max(1.0) * invert_sign(invert_x),
+                    dy as f32 / window.y.max(1.0) * invert_sign(invert_y),
+                );
+            }
+            let (yaw, pitch) = seated.aim();
+            self.look_dir = LookDirection::new(yaw, pitch);
+            return;
+        }
         if let Some(look_vec) = input.get_gamepad_right_analog() {
             self.update_gamepad_look(look_vec, dt, invert_x, invert_y);
         }
@@ -284,6 +341,9 @@ impl Camera {
     pub fn reset(&mut self, position: Position, look_dir: LookDirection) {
         self.position = position;
         self.look_dir = look_dir;
+        if let Some(seated) = &mut self.seated {
+            seated.set_aim(look_dir.y_rot_deg(), look_dir.x_rot_deg());
+        }
     }
 
     pub fn sync_pos(&mut self, position: Position) {
@@ -355,7 +415,7 @@ impl Camera {
     }
 
     pub fn frustum_planes(&self) -> [[f32; 4]; 6] {
-        Self::planes_from_view_projection(self.culling_view_projection(self.culling_fov()))
+        Self::planes_from_view_projection(self.culling_view_projection(self.culling_fov(), 0.0))
     }
 
     /// Frustum planes for a FOV widened by `extra_radians` (clamped below
@@ -363,7 +423,7 @@ impl Camera {
     /// scheduling.
     pub fn frustum_planes_dilated(&self, extra_radians: f32) -> [[f32; 4]; 6] {
         let fov = (self.culling_fov() + extra_radians).min(2.96);
-        Self::planes_from_view_projection(self.culling_view_projection(fov))
+        Self::planes_from_view_projection(self.culling_view_projection(fov, extra_radians))
     }
 
     fn culling_fov(&self) -> f32 {
@@ -373,7 +433,11 @@ impl Camera {
             .max(self.base_fov_degrees.to_radians())
     }
 
-    fn culling_view_projection(&self, fov: f32) -> Mat4 {
+    /// `extra` is what `fov` was widened by, which VR adds to each eye's own.
+    fn culling_view_projection(&self, fov: f32, extra: f32) -> Mat4 {
+        if let Some(seated) = &self.seated {
+            return seated.culling_view_projection(extra, NEAR, self.depth_far);
+        }
         let offset = self.third_person_offset();
         let (forward, up) = self.view_basis();
         // Vanilla prepares the cull frustum before bobHurt/bobView are applied.
@@ -406,6 +470,10 @@ impl Camera {
         if let Some(height) = self.top_down {
             return Vec3::new(0.0, height, 0.0);
         }
+        // VR stays in the player's head.
+        if self.seated.is_some() {
+            return Vec3::ZERO;
+        }
         let fwd = self.render_look_dir().as_vec();
         match self.mode {
             CameraMode::FirstPerson => Vec3::ZERO,
@@ -422,6 +490,9 @@ impl Camera {
         if self.top_down.is_some() {
             // Looking straight down with north up.
             return (Vec3::X, Vec3::NEG_Z);
+        }
+        if let Some(seated) = &self.seated {
+            return seated.head_axes();
         }
         let look_dir = self.render_look_dir();
         let (sin_yaw, cos_yaw) = look_dir.y_rot_rad().sin_cos();
@@ -613,7 +684,7 @@ impl CameraUniform {
             (blocks - span, blocks, ENV_FOG_START, ENV_FOG_END, sky_color)
         };
         Self {
-            view_projs: both_eyes(camera.view_projection()),
+            view_projs: camera.eye_view_projections().map(|m| m.to_cols_array_2d()),
             camera_pos: [pos.x, pos.y, pos.z, fog_start],
             fog_color: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_end],
             camera_block: anchor.as_ivec3().extend(0).to_array(),

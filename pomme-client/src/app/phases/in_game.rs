@@ -3896,6 +3896,11 @@ pub fn update_game(
         thunder_level: game.sky_state.thunder_level,
         partial_tick: sky_partial_tick,
     };
+    gfx.renderer
+        .set_crosshair_target(game.interaction.target.map(|hit| match hit {
+            HitResult::Block(block) => (block.hit_point, Some(block.face)),
+            HitResult::Entity(entity) => (entity.location, None),
+        }));
     if game.show_chunk_borders {
         gfx.renderer.update_chunk_borders(
             game.chunk_store.min_y(),

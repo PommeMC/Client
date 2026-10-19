@@ -28,6 +28,7 @@ use crate::dirs::DataDirs;
 use crate::net::connection::{ConnectArgs, ConnectionHandle, spawn_connection};
 use crate::renderer::{self, Renderer};
 use crate::singleplayer::World;
+use crate::stereo::StereoBackend;
 use crate::user::UserData;
 
 #[derive(Error, Debug)]
@@ -63,6 +64,10 @@ pub struct App {
     soft_keyboard: bool,
     #[cfg(feature = "test-harness")]
     harness: Option<crate::harness::Harness>,
+    /// The VR runtime, until the renderer takes it.
+    stereo: Option<Box<dyn StereoBackend>>,
+    /// Running in VR, where the headset paces every frame.
+    vr: bool,
 }
 
 /// Port of vanilla `FramerateLimiter`: paces to a target fps by sleeping most
@@ -222,7 +227,16 @@ impl App {
             fps_limiter: FramerateLimiter::new(),
             #[cfg(feature = "test-harness")]
             harness: None,
+            stereo: None,
+            vr: false,
         }
+    }
+
+    /// Renders the world to a headset through `stereo`.
+    pub fn with_stereo(mut self, stereo: Option<Box<dyn StereoBackend>>) -> Self {
+        self.vr = stereo.is_some();
+        self.stereo = stereo;
+        self
     }
 
     /// No launcher passed an account; see `MainMenu::require_account`.
@@ -271,8 +285,11 @@ impl App {
     /// The effective framerate cap, or `None` for uncapped, matching vanilla
     /// `FramerateLimitTracker`: occluded/iconified → 10, the title/menu (no
     /// world) → 60, otherwise the Max Framerate setting (uncapped at its top).
+    /// VR has none: the headset paces each frame.
     fn effective_framerate_limit(&self) -> Option<u32> {
-        if self.occluded {
+        if self.vr {
+            None
+        } else if self.occluded {
             Some(10)
         } else if !matches!(self.phase.get(), AppPhase::InGame { .. }) {
             Some(60)
@@ -367,6 +384,7 @@ impl ApplicationHandler for App {
                     &self.core.data_dirs.cache_dir,
                     self.core.menu.vsync,
                     &self.core.menu.theme().panorama_dir(&self.core.data_dirs),
+                    self.stereo.take(),
                 ) {
                     Ok(r) => r,
                     Err(e) => {
@@ -1060,6 +1078,9 @@ impl ApplicationHandler for App {
                     gfx.window.request_redraw();
                     // Paced here so input arriving during the wait is pumped before the next frame.
                     gfx.renderer.pace_frame();
+                    if gfx.renderer.stereo_should_exit() {
+                        event_loop.exit();
+                    }
                 }
                 if let Some(fps) = limit {
                     self.fps_limiter.limit_display_fps(fps);

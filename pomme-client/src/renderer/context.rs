@@ -1,4 +1,4 @@
-use std::ffi::{CStr, c_char};
+use std::ffi::{CStr, CString, c_char};
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +16,7 @@ use thiserror::Error;
 use winit::window::Window;
 
 use super::MAX_FRAMES_IN_FLIGHT;
+use crate::stereo::{RawHandle, StereoBackend};
 
 #[derive(Error, Debug)]
 pub enum ContextError {
@@ -30,6 +31,9 @@ pub enum ContextError {
 
     #[error("surface error: {0}")]
     HandleError(#[from] raw_window_handle::HandleError),
+
+    #[error("VR runtime: {0}")]
+    Stereo(String),
 }
 
 const VK_APP_NAME: &CStr = c"Pomme";
@@ -38,7 +42,7 @@ const VK_ENGINE_NAME: &CStr = c"Pomme Engine";
 const VK_ENGINE_VERSION: u32 = vk::make_api_version(0, 0, 1, 0);
 // 1.2 is the highest feature set used; requesting higher makes injected layers
 // (e.g. VK_LAYER_OBS_HOOK, capped at 1.3) warn about a version mismatch.
-const VK_API_VERSION: u32 = vk::API_VERSION_1_2;
+pub(super) const VK_API_VERSION: u32 = vk::API_VERSION_1_2;
 
 #[cfg(debug_assertions)]
 const VALIDATION_LAYERS: &[&CStr] = &[c"VK_LAYER_KHRONOS_validation"];
@@ -92,7 +96,8 @@ pub struct VulkanContext {
 }
 
 impl VulkanContext {
-    pub fn new(window: &Window) -> Result<Self, ContextError> {
+    /// `stereo` adds the VR runtime's extensions and takes the GPU it names.
+    pub fn new(window: &Window, stereo: Option<&dyn StereoBackend>) -> Result<Self, ContextError> {
         #[cfg(target_os = "android")]
         let required = [
             khr::surface::NAME.as_ptr(),
@@ -105,6 +110,10 @@ impl VulkanContext {
 
         #[cfg(target_os = "macos")]
         extensions.push(khr::portability_enumeration::NAME.as_ptr());
+
+        let stereo_instance_extensions =
+            ask(stereo, |s| s.instance_extensions())?.unwrap_or_default();
+        extensions.extend(stereo_instance_extensions.iter().map(|e| e.as_ptr()));
 
         #[cfg(debug_assertions)]
         let validation_available = check_validation_layer_support();
@@ -170,8 +179,9 @@ impl VulkanContext {
 
         let surface = window_surface(&instance, window)?;
 
+        let stereo_gpu = ask(stereo, |s| s.physical_device(to_raw(instance.handle())))?;
         let (physical_device, graphics_family, present_family) =
-            pick_physical_device(&instance, surface)?;
+            pick_physical_device(&instance, surface, stereo_gpu)?;
 
         let (gpu_name, vulkan_version) = {
             let props = physical_device.get_properties();
@@ -242,10 +252,13 @@ impl VulkanContext {
         } else {
             &[]
         };
+        let stereo_device_extensions = ask(stereo, |s| s.device_extensions())?.unwrap_or_default();
         let device_extension_names: Vec<*const c_char> = DEVICE_EXTENSIONS
             .iter()
-            .chain(optional_extensions)
-            .map(|ext| ext.as_ptr())
+            .copied()
+            .chain(optional_extensions.iter().copied())
+            .chain(stereo_device_extensions.iter().map(CString::as_c_str))
+            .map(CStr::as_ptr)
             .collect();
 
         let mut present_id_features = vk::PhysicalDevicePresentIdFeaturesKHR {
@@ -392,14 +405,17 @@ impl Drop for VulkanContext {
     }
 }
 
+/// `only` restricts the pick to the GPU a VR runtime named.
 fn pick_physical_device(
     instance: &vk::Instance,
     surface: vk::SurfaceKHR,
+    only: Option<RawHandle>,
 ) -> Result<(vk::PhysicalDevice, u32, u32), ContextError> {
     let devices = unsafe { instance.enumerate_physical_devices()? };
 
     let mut candidates: Vec<_> = devices
         .into_iter()
+        .filter(|pd| only.is_none_or(|only| to_raw(pd.handle()) == only))
         .filter_map(|pd| {
             let (gf, pf) = find_queue_families(&pd, surface)?;
             // The chunk pass indexes each section's meta by `firstInstance`.
@@ -427,6 +443,22 @@ fn pick_physical_device(
         .next()
         .map(|(pd, gf, pf, _)| (pd, gf, pf))
         .ok_or(ContextError::NoSuitableGpu)
+}
+
+/// `query`'s answer from the VR runtime, if there is one.
+fn ask<T>(
+    stereo: Option<&dyn StereoBackend>,
+    query: impl FnOnce(&dyn StereoBackend) -> Result<T, String>,
+) -> Result<Option<T>, ContextError> {
+    stereo.map(query).transpose().map_err(ContextError::Stereo)
+}
+
+/// A pyronyx dispatchable handle (`vk::vkInstance`, `vk::vkDevice`, ...) as
+/// the C API's pointer.
+pub(super) fn to_raw<H: Copy>(handle: H) -> RawHandle {
+    const { assert!(size_of::<H>() == size_of::<RawHandle>()) };
+    // SAFETY: pyronyx's handle types are `repr(transparent)` over one pointer.
+    unsafe { std::mem::transmute_copy(&handle) }
 }
 
 fn supports_extensions(device: &vk::PhysicalDevice, names: &[&CStr]) -> bool {

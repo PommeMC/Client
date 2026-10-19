@@ -11,6 +11,7 @@ members = [
     "pomme-dirs",
     "pomme-protocol",
     "pomme-singleplayer",
+    "pomme-vr",
     "tools/blockgen",
     "tools/ingame-test",
     "tools/protogen"

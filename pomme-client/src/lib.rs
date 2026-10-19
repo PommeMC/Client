@@ -30,6 +30,7 @@ mod recipe;
 mod renderer;
 mod resource_pack;
 mod singleplayer;
+pub mod stereo;
 #[cfg(test)]
 mod test_util;
 mod tool;
@@ -57,6 +58,8 @@ use crate::user::UserData;
 pub struct Platform {
     /// Replaces the per-user data directory; Android passes its app storage.
     pub data_root: Option<PathBuf>,
+    /// Renders to a VR headset through this runtime (`pomme-vr`).
+    pub stereo: Option<Box<dyn stereo::StereoBackend>>,
     #[cfg(target_os = "android")]
     pub android_app: AndroidApp,
 }
@@ -193,6 +196,7 @@ pub fn run(args: LaunchArgs, platform: Platform) {
     if require_account {
         app.require_account();
     }
+    app = app.with_stereo(platform.stereo);
     #[cfg(feature = "test-harness")]
     {
         let harness = crate::harness::Harness::from_args(

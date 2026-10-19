@@ -1,0 +1,19 @@
+[package]
+name = "pomme-vr"
+description = "PC VR entry point for the Pomme client, through OpenXR."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[features]
+default = ["singleplayer"]
+singleplayer = ["pomme-client/singleplayer"]
+
+[dependencies]
+pomme-client = { path = "../pomme-client", default-features = false }
+# `static` builds Khronos's loader in, so nothing ships beside the exe.
+openxr = { version = "0.22", default-features = false, features = ["static"] }
+glam = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+tracing = { workspace = true }

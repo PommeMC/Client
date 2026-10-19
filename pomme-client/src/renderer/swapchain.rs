@@ -10,10 +10,13 @@ use super::context::ContextError;
 use super::util;
 use crate::renderer::context::VulkanContext;
 
-/// An 8-bit sRGB format: BGRA (desktop drivers) or RGBA (Android), else the
-/// first one offered.
+/// 8-bit sRGB, best first: BGRA (desktop drivers) or RGBA (Android).
+pub(super) const SRGB_FORMATS: [vk::Format; 2] =
+    [vk::Format::B8G8R8A8Srgb, vk::Format::R8G8B8A8Srgb];
+
+/// The first of `SRGB_FORMATS` offered, else the first one offered.
 fn choose_format(formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
-    [vk::Format::B8G8R8A8Srgb, vk::Format::R8G8B8A8Srgb]
+    SRGB_FORMATS
         .into_iter()
         .find_map(|want| {
             formats
@@ -174,7 +177,7 @@ impl Swapchain {
             .collect::<Result<Vec<_>, _>>()?;
 
         let (depth_image, depth_view, depth_allocation) =
-            create_depth_resources(&ctx.device, extent, &ctx.allocator)?;
+            create_depth_resources(&ctx.device, extent, 1, &ctx.allocator)?;
 
         let render_pass = create_render_pass(&ctx.device, format.format)?;
         let render_pass_scene = create_render_pass_scene(&ctx.device, format.format)?;
@@ -258,11 +261,13 @@ impl Swapchain {
             device.destroy_render_pass(rp, None);
         }
 
-        device.destroy_image_view(self.depth_view, None);
-        if let Some(alloc) = self.depth_allocation.take() {
-            allocator.lock().unwrap().free(alloc).ok();
-        }
-        device.destroy_image(self.depth_image, None);
+        destroy_depth_resources(
+            device,
+            allocator,
+            self.depth_image,
+            self.depth_view,
+            self.depth_allocation.take(),
+        );
     }
 
     pub fn aspect_ratio(&self) -> f32 {
@@ -270,9 +275,25 @@ impl Swapchain {
     }
 }
 
-fn create_depth_resources(
+pub(super) fn destroy_depth_resources(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    image: vk::Image,
+    view: vk::ImageView,
+    allocation: Option<Allocation>,
+) {
+    device.destroy_image_view(view, None);
+    if let Some(alloc) = allocation {
+        allocator.lock().unwrap().free(alloc).ok();
+    }
+    device.destroy_image(image, None);
+}
+
+/// `layers` > 1 makes an array image, one layer per multiview view.
+pub(super) fn create_depth_resources(
     device: &vk::Device,
     extent: vk::Extent2D,
+    layers: u32,
     allocator: &Arc<Mutex<Allocator>>,
 ) -> Result<(vk::Image, vk::ImageView, Allocation), ContextError> {
     let depth_format = vk::Format::D32Sfloat;
@@ -286,7 +307,7 @@ fn create_depth_resources(
             depth: 1,
         },
         mip_levels: 1,
-        array_layers: 1,
+        array_layers: layers,
         samples: vk::SampleCountFlags::Type1,
         tiling: vk::ImageTiling::Optimal,
         usage: vk::ImageUsageFlags::DepthStencilAttachment,
@@ -308,9 +329,16 @@ fn create_depth_resources(
 
     let view_info = vk::ImageViewCreateInfo {
         image,
-        view_type: vk::ImageViewType::Type2D,
+        view_type: if layers > 1 {
+            vk::ImageViewType::Type2DArray
+        } else {
+            vk::ImageViewType::Type2D
+        },
         format: depth_format,
-        subresource_range: util::DEPTH_SUBRESOURCE_RANGE,
+        subresource_range: vk::ImageSubresourceRange {
+            layer_count: layers,
+            ..util::DEPTH_SUBRESOURCE_RANGE
+        },
         ..Default::default()
     };
     let view = device.create_image_view(&view_info, None)?;
@@ -400,6 +428,7 @@ fn create_render_pass_scene(
         vk::AttachmentLoadOp::Clear,
         vk::ImageLayout::Undefined,
         vk::ImageLayout::ColorAttachmentOptimal,
+        0,
     )
 }
 
@@ -413,15 +442,18 @@ fn create_render_pass_load(
         vk::AttachmentLoadOp::Load,
         vk::ImageLayout::ColorAttachmentOptimal,
         vk::ImageLayout::PresentSrcKHR,
+        0,
     )
 }
 
-fn create_render_pass_variant(
+/// A nonzero `view_mask` makes a multiview pass drawing to those layers.
+pub(super) fn create_render_pass_variant(
     device: &vk::Device,
     color_format: vk::Format,
     load_op: vk::AttachmentLoadOp,
     initial_layout: vk::ImageLayout,
     final_layout: vk::ImageLayout,
+    view_mask: u32,
 ) -> Result<vk::RenderPass, vk::Error> {
     let attachments = [
         vk::AttachmentDescription {
@@ -487,8 +519,19 @@ fn create_render_pass_variant(
         dependencies: dependency.as_ptr(),
         ..Default::default()
     };
-
-    device.create_render_pass(&info, None)
+    // The views are the eyes, which see nearly the same scene.
+    let mut multiview = vk::RenderPassMultiviewCreateInfo {
+        subpass_count: 1,
+        view_masks: &view_mask,
+        correlation_mask_count: 1,
+        correlation_masks: &view_mask,
+        ..Default::default()
+    };
+    if view_mask == 0 {
+        device.create_render_pass(&info, None)
+    } else {
+        device.create_render_pass(&info.next(&mut multiview), None)
+    }
 }
 
 #[cfg(test)]

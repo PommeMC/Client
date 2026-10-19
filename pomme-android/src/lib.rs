@@ -25,6 +25,7 @@ fn android_main(app: AndroidApp) {
         args,
         Platform {
             data_root: Some(files.to_path_buf()),
+            stereo: None,
             android_app: app,
         },
     );

@@ -344,6 +344,23 @@ impl ChunkBorderPipeline {
             push_line(&mut verts, x1, y, z0, x1, y, z1, YELLOW);
         }
 
+        self.upload(&verts);
+    }
+
+    /// Replaces the lines with `segments`, eye-relative, all in `color`.
+    pub fn set_segments(&mut self, segments: &[[glam::Vec3; 2]], color: [f32; 4]) {
+        let verts: Vec<LineVertex> = segments
+            .iter()
+            .flatten()
+            .map(|p| LineVertex {
+                position: p.to_array(),
+                color,
+            })
+            .collect();
+        self.upload(&verts);
+    }
+
+    fn upload(&mut self, verts: &[LineVertex]) {
         let max_verts = 4096;
         let count = verts.len().min(max_verts);
         let data = self.vertex_alloc.mapped_slice_mut().unwrap();
