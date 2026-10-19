@@ -60,16 +60,16 @@ android-install: android-build
 android-run:
     @adb shell am start -n {{ android_app }}/android.app.NativeActivity
 
-# Copies an install's assets and version files (the launcher's, by default)
-# into the app's own storage, through a staging dir `run-as` can read.
-android-push-assets src=(home_directory() / "Library/Application Support/.pomme"):
+# Copies a desktop install's `minecraft/` assets and version files into the
+# app's own storage, through a staging dir `run-as` can read.
+android-push-assets src=(home_directory() / "Library/Application Support/Pomme/minecraft"):
     #!/usr/bin/env bash
     set -e
     stage=/data/local/tmp/pomme
     adb shell rm -rf "$stage" && adb shell mkdir -p "$stage/versions"
     adb push "{{ src }}/assets" "$stage/"
     adb push "{{ src }}/versions/26.2" "$stage/versions/"
-    adb shell run-as {{ android_app }} sh -c "'mkdir -p files/.pomme && cp -r $stage/. files/.pomme/'"
+    adb shell run-as {{ android_app }} sh -c "'mkdir -p files/minecraft && cp -r $stage/. files/minecraft/'"
     adb shell rm -rf "$stage"
 
 # The launch arguments, as on a command line, e.g.

@@ -40,8 +40,9 @@ just android-log                           # logcat, filtered to pomme
 
 `10.0.2.2` is the Mac as seen from the emulator. `launch.txt` (what
 `android-config` writes) holds the same flags the desktop client takes. It
-and `.pomme` (assets, versions and the game directory) live in the app's
-internal storage, reached with `adb shell run-as com.pommemc.client`.
+and the data folder (laid out as on desktop: `minecraft/`, `profiles/` and so
+on) live in the app's internal storage, reached with
+`adb shell run-as com.pommemc.client`.
 
 ## Signing in
 
