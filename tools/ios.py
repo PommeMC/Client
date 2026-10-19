@@ -58,7 +58,7 @@ def xcodebuild(sdk, *args):
 
 
 def device_id():
-    """The first connected iPhone or iPad."""
+    """The first paired iPhone or iPad; devicectl connects to it when used."""
     with tempfile.TemporaryDirectory() as tmp:
         listing = Path(tmp) / "devices.json"
         run("xcrun", "devicectl", "list", "devices", "--json-output", listing, stdout=subprocess.DEVNULL)
@@ -66,10 +66,10 @@ def device_id():
     for device in devices:
         if (
             device["hardwareProperties"].get("platform") == "iOS"
-            and device["connectionProperties"].get("tunnelState") == "connected"
+            and device["connectionProperties"].get("pairingState") == "paired"
         ):
             return device["identifier"]
-    raise SystemExit("no iPhone or iPad connected: plug one in, unlock it and trust this Mac")
+    raise SystemExit("no iPhone or iPad paired: plug one in, unlock it and trust this Mac")
 
 
 def copy_into_app(sim, source, destination):

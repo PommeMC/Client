@@ -50,3 +50,6 @@ targets:
       - name: Build the client
         script: '"$PROJECT_DIR/build-app.sh"'
         basedOnDependencyAnalysis: false
+        # So Xcode re-signs the app when the executable changes.
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)

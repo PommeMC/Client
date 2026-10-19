@@ -216,8 +216,6 @@ impl Renderer {
             packs,
             options: font_options,
         } = font_sources;
-        let size = window.inner_size();
-
         let registry_handle = {
             let jar_assets_dir = jar_assets_dir.to_path_buf();
             let asset_index = asset_index.clone();
@@ -233,8 +231,8 @@ impl Renderer {
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
 
-        let sw = size.width.max(1) as f32;
-        let sh = size.height.max(1) as f32;
+        let sw = swapchain_extent.width as f32;
+        let sh = swapchain_extent.height as f32;
 
         let splash = |menu: &mut MenuOverlayPipeline, progress: f32, status: &str| {
             let _ = Self::render_splash(&ctx, &swapchain_state, menu, sw, sh, progress, status);
@@ -364,8 +362,8 @@ impl Renderer {
             ctx.graphics_queue,
             ctx.command_pool,
             &ctx.allocator,
-            size.width.max(1),
-            size.height.max(1),
+            swapchain_extent.width,
+            swapchain_extent.height,
             swapchain_state.format.format,
         );
         menu_pipeline.set_blur_texture(

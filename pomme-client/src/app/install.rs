@@ -97,6 +97,11 @@ impl Install {
         self.window = Some(window);
     }
 
+    #[cfg(target_os = "ios")]
+    pub fn window(&self) -> Option<&Window> {
+        self.window.as_deref()
+    }
+
     pub fn suspend(&mut self) {
         self.screen = None;
     }

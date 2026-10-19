@@ -300,12 +300,17 @@ fn create_window(
     let monitor = event_loop
         .primary_monitor()
         .or_else(|| event_loop.available_monitors().next());
-    let window_attrs = Window::default_attributes()
+    // A phone's window is the whole screen, shown from the start: iOS would
+    // otherwise make it the desktop size, and it never reports visibility, so
+    // the first frame couldn't show a hidden one.
+    let mut window_attrs = Window::default_attributes()
         .with_title("Pomme")
-        .with_inner_size(winit::dpi::LogicalSize::new(854, 480))
         .with_fullscreen(display_mode.fullscreen_for(monitor))
-        .with_visible(false)
+        .with_visible(cfg!(mobile))
         .with_window_icon(window_icon);
+    if cfg!(not(mobile)) {
+        window_attrs = window_attrs.with_inner_size(winit::dpi::LogicalSize::new(854, 480));
+    }
     event_loop.create_window(window_attrs).map(Arc::new)
 }
 
@@ -1084,10 +1089,25 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(if self.suspended {
-            winit::event_loop::ControlFlow::Wait
-        } else {
+        // UIKit ignores a redraw asked for mid-draw, which is where each frame
+        // asks for the next, so iOS asks again once drawing is done.
+        #[cfg(target_os = "ios")]
+        if !self.suspended {
+            let window = match &self.install {
+                Some(install) => install.window(),
+                None => self.phase.gfx_mut().map(|gfx| &*gfx.window),
+            };
+            if let Some(window) = window {
+                window.request_redraw();
+            }
+        }
+        // iOS delivers each requested redraw on the next display refresh, and
+        // polling would keep its run loop too busy to get there.
+        let poll = !self.suspended && !cfg!(target_os = "ios");
+        event_loop.set_control_flow(if poll {
             winit::event_loop::ControlFlow::Poll
+        } else {
+            winit::event_loop::ControlFlow::Wait
         });
     }
 }

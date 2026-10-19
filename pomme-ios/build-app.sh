@@ -33,7 +33,10 @@ VULKAN_SDK="$(python3 tools/fetch_moltenvk.py "$platform")"
 export VULKAN_SDK
 cargo build -p pomme-ios --target "$triple" ${release:+"$release"}
 mkdir -p "$app" "$frameworks"
-cp "target/$triple/$profile/pomme-ios" "$app/$EXECUTABLE_NAME"
+# Copied only when it changed, so an unchanged build isn't re-signed.
+if ! cmp -s "target/$triple/$profile/pomme-ios" "$app/$EXECUTABLE_NAME"; then
+    cp "target/$triple/$profile/pomme-ios" "$app/$EXECUTABLE_NAME"
+fi
 
 python3 tools/build_openal.py "$platform" "$frameworks"
 if [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
