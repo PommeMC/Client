@@ -51,6 +51,8 @@ pub struct App {
     phase: StateSlot<AppPhase>,
     core: AppCore,
     occluded: bool,
+    /// In the background on Android; the loop sleeps instead of polling.
+    suspended: bool,
     fps_limiter: FramerateLimiter,
     /// The version's assets are still downloading; startup waits for them.
     install: Option<install::Install>,
@@ -214,6 +216,7 @@ impl App {
             installed_window: None,
             core,
             occluded: false,
+            suspended: true,
             #[cfg(target_os = "android")]
             soft_keyboard: false,
             fps_limiter: FramerateLimiter::new(),
@@ -310,6 +313,7 @@ impl ApplicationHandler for App {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.suspended = true;
         if let Some(install) = &mut self.install {
             install.suspend();
         }
@@ -319,6 +323,7 @@ impl ApplicationHandler for App {
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.suspended = false;
         if let Some(install) = &mut self.install {
             install.resume(event_loop, &self.core);
             return;
@@ -1080,6 +1085,10 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+        event_loop.set_control_flow(if self.suspended {
+            winit::event_loop::ControlFlow::Wait
+        } else {
+            winit::event_loop::ControlFlow::Poll
+        });
     }
 }
