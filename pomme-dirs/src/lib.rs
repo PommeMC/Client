@@ -240,8 +240,9 @@ fn drop_stale(profile: &Path) {
 
 /// Points each installation whose `directory` was under `from` at the same
 /// place under `to` once its folder has moved, so one still in `from` keeps
-/// working there. `None` when nothing changed, including for custom
-/// directories and a registry that doesn't parse.
+/// working there. A move whose copy finished but whose cleanup failed counts
+/// as moved, and the leftover is deleted. `None` when nothing changed,
+/// including for custom directories and a registry that doesn't parse.
 fn rehome_installations(json: &str, from: &Path, to: &Path) -> Option<String> {
     let mut registry = serde_json::from_str::<serde_json::Value>(json).ok()?;
     let mut changed = false;
@@ -249,16 +250,37 @@ fn rehome_installations(json: &str, from: &Path, to: &Path) -> Option<String> {
         if let Some(dir) = install.get_mut("directory")
             && let Some(old_dir) = dir.as_str().map(PathBuf::from)
             && let Ok(rest) = old_dir.strip_prefix(from)
-            && !old_dir.exists()
         {
             let new_dir = to.join(rest);
-            if new_dir.exists() {
+            let left_over = old_dir.exists();
+            if new_dir.is_dir() && (!left_over || covers(&new_dir, &old_dir, 0)) {
+                if left_over {
+                    let _ = fs::remove_dir_all(&old_dir);
+                }
                 *dir = new_dir.to_string_lossy().into_owned().into();
                 changed = true;
             }
         }
     }
     changed.then(|| serde_json::to_string_pretty(&registry).ok())?
+}
+
+/// Everything in `old` also exists in `new`.
+fn covers(new: &Path, old: &Path, depth: u32) -> bool {
+    if depth > MAX_COPY_DEPTH {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(old) else {
+        return false;
+    };
+    entries.flatten().all(|entry| {
+        let target = new.join(entry.file_name());
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            target.is_dir() && covers(&target, &entry.path(), depth + 1)
+        } else {
+            target.exists()
+        }
+    })
 }
 
 #[cfg(test)]
@@ -443,6 +465,27 @@ mod tests {
         layout.migrate_from(&old).unwrap();
         assert_eq!(registry_dirs(&layout), [blocker]);
         assert!(!stuck.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_half_moved_profile_points_at_its_copy() {
+        let base = scratch("half-moved");
+        let old = base.join(".pomme");
+        let layout = Layout::new(base.join("Pomme"));
+        // The copy finished, then deleting the original stopped partway.
+        let left_over = old.join("installations/default");
+        write(&left_over.join("options.json"), "{}");
+        let copy = layout.default_profile();
+        write(&copy.join("options.json"), "{}");
+        write(&copy.join("saves/world/level.dat"), "world");
+        let registry = serde_json::json!([{ "directory": left_over }]);
+        write(&old.join("installations.json"), &registry.to_string());
+
+        layout.migrate_from(&old).unwrap();
+
+        assert_eq!(registry_dirs(&layout), [copy]);
+        assert!(!left_over.exists());
         fs::remove_dir_all(base).unwrap();
     }
 
