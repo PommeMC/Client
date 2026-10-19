@@ -42,19 +42,35 @@ pub struct StereoDevice {
     pub api_version: u32,
 }
 
-/// The runtime's swapchain: each `VkImage` holds both eyes as layers 0 and 1.
+/// The runtime's swapchains, both in one `VkFormat` it took from the
+/// client's preference list.
 pub struct StereoImages {
-    /// The `VkFormat` the runtime took from the client's preference list.
     pub format: i64,
+    /// The eyes' size; each `VkImage` holds both eyes as layers 0 and 1.
     pub width: u32,
     pub height: u32,
     pub images: Vec<u64>,
+    /// The GUI panel's, at the size the client asked for.
+    pub panel_images: Vec<u64>,
 }
 
-/// A frame the runtime wants rendered, into `images[image_index]`.
+/// A frame the runtime wants rendered, into `images[image_index]` and
+/// `panel_images[panel_index]`.
 pub struct StereoFrame {
     pub image_index: usize,
+    pub panel_index: usize,
     pub eyes: [EyeView; 2],
+}
+
+/// Where the GUI panel floats in the seated space, its front (+Z) toward the
+/// viewer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelPlacement {
+    pub orientation: Quat,
+    pub position: Vec3,
+    /// Metres.
+    pub width: f32,
+    pub height: f32,
 }
 
 pub trait StereoBackend {
@@ -67,17 +83,26 @@ pub trait StereoBackend {
     /// Device extensions the runtime needs, ahead of device creation.
     fn device_extensions(&self) -> Result<Vec<CString>, String>;
 
-    /// Starts the session on the client's device, with a swapchain in the
-    /// first of `formats` (`VkFormat`s, best first) the runtime supports.
-    fn start(&mut self, device: StereoDevice, formats: &[i64]) -> Result<StereoImages, String>;
+    /// Starts the session on the client's device, with swapchains in the
+    /// first of `formats` (`VkFormat`s, best first) the runtime supports:
+    /// the eyes', and a 2D one of `panel` pixels for the GUI.
+    fn start(
+        &mut self,
+        device: StereoDevice,
+        formats: &[i64],
+        panel: (u32, u32),
+    ) -> Result<StereoImages, String>;
 
     /// Blocks until the runtime wants the next frame. `None` skips rendering
     /// this frame (the session isn't visible); `end_frame` still follows.
     fn begin_frame(&mut self) -> Option<StereoFrame>;
 
-    /// Hands the frame back; `rendered` says whether `begin_frame`'s image was
-    /// drawn and submitted.
-    fn end_frame(&mut self, rendered: bool);
+    /// Hands the frame back: `world` says whether the eye image was drawn
+    /// and submitted, and `panel` where to show the panel image, if at all.
+    fn end_frame(&mut self, world: bool, panel: Option<PanelPlacement>);
+
+    /// Makes where the head is now the seated origin, facing ahead.
+    fn recenter(&mut self);
 
     /// The runtime asked the app to quit (headset session ending).
     fn should_exit(&self) -> bool;

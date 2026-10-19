@@ -36,7 +36,7 @@ use crate::renderer::pipelines::entity_renderer::{
     standing_eye_height, wool_color_tint,
 };
 use crate::renderer::pipelines::menu_overlay::MenuElement;
-use crate::renderer::{Renderer, SkyState};
+use crate::renderer::{GuiPanel, Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
@@ -2787,7 +2787,8 @@ pub fn update_game(
             &game.scoreboard,
             &game.player.effects,
             &game.boss_bars,
-            gfx.renderer.is_first_person(),
+            // VR's crosshair is in the world.
+            gfx.renderer.is_first_person() && !gfx.renderer.is_vr(),
             debug.as_ref(),
             gs,
             &attack,
@@ -4051,6 +4052,13 @@ pub fn update_game(
         player_preview,
         book_preview,
         game.player.eyes_in_water,
+        if hide_cursor {
+            GuiPanel::Hud
+        } else if game.chat.is_open() {
+            GuiPanel::Chat
+        } else {
+            GuiPanel::Screen
+        },
     ) {
         tracing::error!("Render error: {e}");
     }

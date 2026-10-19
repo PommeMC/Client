@@ -1,11 +1,12 @@
 use glam::camera::rh::{proj, view};
 use glam::{DVec3, FloatExt, Mat4, Vec2, Vec3};
 
-use super::seated::Seated;
+use super::panel::GuiPanel;
+use super::seated::{HudPlacement, Seated};
 use crate::app::input::InputState;
 use crate::entity::HURT_DURATION;
 use crate::entity::components::{LookDirection, Position};
-use crate::stereo::EyeView;
+use crate::stereo::{EyeView, PanelPlacement};
 
 pub const DEFAULT_FOV_DEGREES: f32 = 70.0;
 #[allow(dead_code)]
@@ -182,7 +183,23 @@ impl Camera {
     /// This frame's eye poses; `None` keeps the last ones.
     pub fn set_eyes(&mut self, eyes: Option<[EyeView; 2]>) {
         if let (Some(seated), Some(eyes)) = (&mut self.seated, eyes) {
-            seated.eyes = eyes;
+            seated.set_eyes(eyes);
+        }
+    }
+
+    /// Where VR's GUI panel floats for `kind`; `None` outside VR.
+    pub fn panel(
+        &mut self,
+        kind: GuiPanel,
+        hud: HudPlacement,
+        aspect: f32,
+    ) -> Option<PanelPlacement> {
+        Some(self.seated.as_mut()?.panel(kind, hud, aspect))
+    }
+
+    pub fn recenter_seated(&mut self) {
+        if let Some(seated) = &mut self.seated {
+            seated.recenter();
         }
     }
 

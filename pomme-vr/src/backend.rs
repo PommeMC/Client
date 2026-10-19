@@ -8,7 +8,7 @@ use std::time::Duration;
 use glam::{Quat, Vec3};
 use openxr as xr;
 use pomme_client::stereo::{
-    EyeView, Fov, RawHandle, StereoBackend, StereoDevice, StereoFrame, StereoImages,
+    EyeView, Fov, PanelPlacement, RawHandle, StereoBackend, StereoDevice, StereoFrame, StereoImages,
 };
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
@@ -29,15 +29,61 @@ struct Session {
     session: xr::Session<xr::Vulkan>,
     frame_waiter: xr::FrameWaiter,
     frame_stream: xr::FrameStream<xr::Vulkan>,
-    swapchain: xr::Swapchain<xr::Vulkan>,
-    extent: xr::Extent2Di,
-    /// The seated origin: where the head sat when the session began.
+    eyes: Swapchain,
+    panel: Swapchain,
+    /// The seated space: where the head sat when the session began or was
+    /// last recentred, `origin` in the runtime's LOCAL space.
     space: xr::Space,
+    origin: xr::Posef,
+    head: xr::Space,
     running: bool,
-    /// The frame `begin_frame` began: its display time, and whether it holds
-    /// a swapchain image and the views it was rendered for.
+    /// The frame `begin_frame` began: its display time, and the views it was
+    /// rendered for once there was something to render.
     frame: Option<(xr::Time, Option<[xr::View; 2]>)>,
+    last_time: Option<xr::Time>,
     last_eyes: Option<[EyeView; 2]>,
+}
+
+/// A runtime swapchain and whether this frame holds one of its images.
+struct Swapchain {
+    handle: xr::Swapchain<xr::Vulkan>,
+    rect: xr::Rect2Di,
+    acquired: bool,
+}
+
+impl Swapchain {
+    fn new(handle: xr::Swapchain<xr::Vulkan>, width: u32, height: u32) -> Self {
+        Self {
+            handle,
+            rect: xr::Rect2Di {
+                offset: xr::Offset2Di { x: 0, y: 0 },
+                extent: xr::Extent2Di {
+                    width: width as i32,
+                    height: height as i32,
+                },
+            },
+            acquired: false,
+        }
+    }
+
+    /// Takes the next image, once the compositor is done reading it.
+    fn acquire(&mut self) -> Option<usize> {
+        let index = self.handle.acquire_image().ok()?;
+        self.acquired = true;
+        self.handle.wait_image(xr::Duration::INFINITE).ok()?;
+        Some(index as usize)
+    }
+
+    /// Hands the image back; whether there was one to.
+    fn release(&mut self) -> bool {
+        std::mem::take(&mut self.acquired) && self.handle.release_image().is_ok()
+    }
+
+    fn sub_image(&self) -> xr::SwapchainSubImage<'_, xr::Vulkan> {
+        xr::SwapchainSubImage::new()
+            .swapchain(&self.handle)
+            .image_rect(self.rect)
+    }
 }
 
 impl OpenXrBackend {
@@ -126,12 +172,47 @@ fn extension_names(list: xr::Result<String>) -> Result<Vec<CString>, String> {
         .collect()
 }
 
+/// A `kind` space with its origin moved to `origin`.
+fn reference_space(
+    session: &xr::Session<xr::Vulkan>,
+    kind: xr::ReferenceSpaceType,
+    origin: xr::Posef,
+) -> Result<xr::Space, String> {
+    session
+        .create_reference_space(kind, origin)
+        .map_err(|e| e.to_string())
+}
+
+fn quat(pose: xr::Posef) -> Quat {
+    let o = pose.orientation;
+    Quat::from_xyzw(o.x, o.y, o.z, o.w)
+}
+
+fn vec3(pose: xr::Posef) -> Vec3 {
+    let p = pose.position;
+    Vec3::new(p.x, p.y, p.z)
+}
+
+fn posef(orientation: Quat, position: Vec3) -> xr::Posef {
+    xr::Posef {
+        orientation: xr::Quaternionf {
+            x: orientation.x,
+            y: orientation.y,
+            z: orientation.z,
+            w: orientation.w,
+        },
+        position: xr::Vector3f {
+            x: position.x,
+            y: position.y,
+            z: position.z,
+        },
+    }
+}
+
 fn eye_view(view: &xr::View) -> EyeView {
-    let o = view.pose.orientation;
-    let p = view.pose.position;
     EyeView {
-        orientation: Quat::from_xyzw(o.x, o.y, o.z, o.w),
-        position: Vec3::new(p.x, p.y, p.z),
+        orientation: quat(view.pose),
+        position: vec3(view.pose),
         fov: Fov {
             left: view.fov.angle_left,
             right: view.fov.angle_right,
@@ -166,7 +247,12 @@ impl StereoBackend for OpenXrBackend {
         extension_names(self.instance.vulkan_legacy_device_extensions(self.system))
     }
 
-    fn start(&mut self, device: StereoDevice, formats: &[i64]) -> Result<StereoImages, String> {
+    fn start(
+        &mut self,
+        device: StereoDevice,
+        formats: &[i64],
+        (panel_width, panel_height): (u32, u32),
+    ) -> Result<StereoImages, String> {
         let requirements = self
             .instance
             .graphics_requirements::<xr::Vulkan>(self.system)
@@ -213,38 +299,47 @@ impl StereoBackend for OpenXrBackend {
             view.recommended_image_rect_width,
             view.recommended_image_rect_height,
         );
-        let swapchain = session
-            .create_swapchain(&xr::SwapchainCreateInfo {
-                create_flags: xr::SwapchainCreateFlags::EMPTY,
-                // TRANSFER_SRC for the window's mirror of the left eye.
-                usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
-                    | xr::SwapchainUsageFlags::TRANSFER_SRC,
-                format: format as u32,
-                sample_count: 1,
-                width,
-                height,
-                face_count: 1,
-                array_size: 2,
-                mip_count: 1,
-            })
-            .map_err(|e| format!("OpenXR swapchain: {e}"))?;
-        let images = swapchain.enumerate_images().map_err(|e| e.to_string())?;
-        let space = session
-            .create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)
-            .map_err(|e| e.to_string())?;
+        let swapchain = |width, height, array_size, usage| {
+            session
+                .create_swapchain(&xr::SwapchainCreateInfo {
+                    create_flags: xr::SwapchainCreateFlags::EMPTY,
+                    usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT | usage,
+                    format: format as u32,
+                    sample_count: 1,
+                    width,
+                    height,
+                    face_count: 1,
+                    array_size,
+                    mip_count: 1,
+                })
+                .map_err(|e| format!("OpenXR swapchain: {e}"))
+        };
+        // The eyes are copied from for the window's mirror; the panel is
+        // copied into from the client's own panel image.
+        let eyes = swapchain(width, height, 2, xr::SwapchainUsageFlags::TRANSFER_SRC)?;
+        let panel = swapchain(
+            panel_width,
+            panel_height,
+            1,
+            xr::SwapchainUsageFlags::TRANSFER_DST,
+        )?;
+        let images = eyes.enumerate_images().map_err(|e| e.to_string())?;
+        let panel_images = panel.enumerate_images().map_err(|e| e.to_string())?;
+        let space = reference_space(&session, xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
+        let head = reference_space(&session, xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)?;
 
         self.session = Some(Session {
             session,
             frame_waiter,
             frame_stream,
-            swapchain,
-            extent: xr::Extent2Di {
-                width: width as i32,
-                height: height as i32,
-            },
+            eyes: Swapchain::new(eyes, width, height),
+            panel: Swapchain::new(panel, panel_width, panel_height),
             space,
+            origin: xr::Posef::IDENTITY,
+            head,
             running: false,
             frame: None,
+            last_time: None,
             last_eyes: None,
         });
         Ok(StereoImages {
@@ -252,6 +347,7 @@ impl StereoBackend for OpenXrBackend {
             width,
             height,
             images,
+            panel_images,
         })
     }
 
@@ -264,68 +360,109 @@ impl StereoBackend for OpenXrBackend {
         }
         let state = session.frame_waiter.wait().ok()?;
         session.frame_stream.begin().ok()?;
-        session.frame = Some((state.predicted_display_time, None));
+        let time = state.predicted_display_time;
+        session.last_time = Some(time);
+        session.frame = Some((time, None));
         if !state.should_render {
             return None;
         }
         let (flags, views) = session
             .session
-            .locate_views(VIEW_TYPE, state.predicted_display_time, &session.space)
+            .locate_views(VIEW_TYPE, time, &session.space)
             .ok()?;
         let views: [xr::View; 2] = views.try_into().ok()?;
-        let image_index = session.swapchain.acquire_image().ok()?;
-        session.frame = Some((state.predicted_display_time, Some(views)));
-        session.swapchain.wait_image(xr::Duration::INFINITE).ok()?;
+        session.frame = Some((time, Some(views)));
+        let image_index = session.eyes.acquire()?;
+        let panel_index = session.panel.acquire()?;
         // Tracking lost: hold the last good pose rather than snap to origin.
         let eyes = views.map(|view| eye_view(&view));
         if flags.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
             session.last_eyes = Some(eyes);
         }
         Some(StereoFrame {
-            image_index: image_index as usize,
+            image_index,
+            panel_index,
             eyes: session.last_eyes.unwrap_or(eyes),
         })
     }
 
-    fn end_frame(&mut self, rendered: bool) {
+    fn end_frame(&mut self, world: bool, panel: Option<PanelPlacement>) {
         let Some(session) = &mut self.session else {
             return;
         };
         let Some((display_time, views)) = session.frame.take() else {
             return;
         };
-        if views.is_some() {
-            let _ = session.swapchain.release_image();
+        let world = session.eyes.release() && world;
+        let panel = panel.filter(|_| session.panel.release());
+
+        let eyes = views.filter(|_| world).map(|views| {
+            [0, 1].map(|layer| {
+                let view = &views[layer as usize];
+                xr::CompositionLayerProjectionView::new()
+                    .pose(view.pose)
+                    .fov(view.fov)
+                    .sub_image(session.eyes.sub_image().image_array_index(layer))
+            })
+        });
+        let projection = eyes.as_ref().map(|eyes| {
+            xr::CompositionLayerProjection::new()
+                .space(&session.space)
+                .views(eyes)
+        });
+        // Source alpha lets the world show through the HUD; the 2D pass
+        // blends unpremultiplied.
+        let quad = panel.map(|panel| {
+            xr::CompositionLayerQuad::new()
+                .layer_flags(
+                    xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA
+                        | xr::CompositionLayerFlags::UNPREMULTIPLIED_ALPHA,
+                )
+                .space(&session.space)
+                .eye_visibility(xr::EyeVisibility::BOTH)
+                .sub_image(session.panel.sub_image())
+                .pose(posef(panel.orientation, panel.position))
+                .size(xr::Extent2Df {
+                    width: panel.width,
+                    height: panel.height,
+                })
+        });
+        let mut layers: Vec<&xr::CompositionLayerBase<'_, xr::Vulkan>> = Vec::new();
+        if let Some(projection) = &projection {
+            layers.push(projection);
         }
-        let result = match views.filter(|_| rendered) {
-            Some(views) => {
-                let rect = xr::Rect2Di {
-                    offset: xr::Offset2Di { x: 0, y: 0 },
-                    extent: session.extent,
-                };
-                let eye = |layer: u32, view: &xr::View| {
-                    xr::CompositionLayerProjectionView::new()
-                        .pose(view.pose)
-                        .fov(view.fov)
-                        .sub_image(
-                            xr::SwapchainSubImage::new()
-                                .swapchain(&session.swapchain)
-                                .image_array_index(layer)
-                                .image_rect(rect),
-                        )
-                };
-                let eyes = [eye(0, &views[0]), eye(1, &views[1])];
-                let layer = xr::CompositionLayerProjection::new()
-                    .space(&session.space)
-                    .views(&eyes);
-                session
-                    .frame_stream
-                    .end(display_time, self.blend_mode, &[&layer])
-            }
-            None => session.frame_stream.end(display_time, self.blend_mode, &[]),
-        };
-        if let Err(e) = result {
+        if let Some(quad) = &quad {
+            layers.push(quad);
+        }
+        if let Err(e) = session
+            .frame_stream
+            .end(display_time, self.blend_mode, &layers)
+        {
             tracing::warn!("OpenXR frame: {e}");
+        }
+    }
+
+    fn recenter(&mut self) {
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        let Some(time) = session.last_time else {
+            return;
+        };
+        let Ok(head) = session.head.locate(&session.space, time) else {
+            return;
+        };
+        let (rotation, position) = (quat(session.origin), vec3(session.origin));
+        // Yaw only, so the seated space stays level.
+        let forward = quat(head.pose) * Vec3::NEG_Z;
+        let yaw = Quat::from_rotation_y((-forward.x).atan2(-forward.z));
+        let origin = posef(rotation * yaw, position + rotation * vec3(head.pose));
+        match reference_space(&session.session, xr::ReferenceSpaceType::LOCAL, origin) {
+            Ok(space) => {
+                session.space = space;
+                session.origin = origin;
+            }
+            Err(e) => tracing::warn!("OpenXR recenter: {e}"),
         }
     }
 

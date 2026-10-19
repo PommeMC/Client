@@ -63,9 +63,7 @@ pub struct Swapchain {
     pub format: vk::SurfaceFormatKHR,
     pub extent: vk::Extent2D,
     pub present_mode: vk::PresentModeKHR,
-    pub depth_image: vk::Image,
-    pub depth_view: vk::ImageView,
-    pub depth_allocation: Option<Allocation>,
+    pub depth: Attachment,
     pub render_pass: vk::RenderPass,
     pub render_pass_scene: vk::RenderPass,
     pub render_pass_load: vk::RenderPass,
@@ -176,8 +174,7 @@ impl Swapchain {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let (depth_image, depth_view, depth_allocation) =
-            create_depth_resources(&ctx.device, extent, 1, &ctx.allocator)?;
+        let depth = Attachment::depth(&ctx.device, &ctx.allocator, extent, 1)?;
 
         let render_pass = create_render_pass(&ctx.device, format.format)?;
         let render_pass_scene = create_render_pass_scene(&ctx.device, format.format)?;
@@ -186,19 +183,7 @@ impl Swapchain {
         let make_fbs = |rp: vk::RenderPass| -> Result<Vec<vk::Framebuffer>, vk::Error> {
             image_views
                 .iter()
-                .map(|&view| {
-                    let attachments = [view, depth_view];
-                    let fb_info = vk::FramebufferCreateInfo {
-                        render_pass: rp,
-                        attachment_count: attachments.len() as u32,
-                        attachments: attachments.as_ptr(),
-                        width: extent.width,
-                        height: extent.height,
-                        layers: 1,
-                        ..Default::default()
-                    };
-                    ctx.device.create_framebuffer(&fb_info, None)
-                })
+                .map(|&view| create_framebuffer(&ctx.device, rp, view, depth.view, extent))
                 .collect()
         };
 
@@ -213,9 +198,7 @@ impl Swapchain {
             format,
             extent,
             present_mode,
-            depth_image,
-            depth_view,
-            depth_allocation: Some(depth_allocation),
+            depth,
             render_pass,
             render_pass_scene,
             render_pass_load,
@@ -261,13 +244,7 @@ impl Swapchain {
             device.destroy_render_pass(rp, None);
         }
 
-        destroy_depth_resources(
-            device,
-            allocator,
-            self.depth_image,
-            self.depth_view,
-            self.depth_allocation.take(),
-        );
+        self.depth.destroy(device, allocator);
     }
 
     pub fn aspect_ratio(&self) -> f32 {
@@ -275,75 +252,123 @@ impl Swapchain {
     }
 }
 
-pub(super) fn destroy_depth_resources(
+/// A colour-plus-depth framebuffer; a multiview pass's view mask picks the
+/// layers, so it too has one.
+pub(super) fn create_framebuffer(
     device: &vk::Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    image: vk::Image,
-    view: vk::ImageView,
-    allocation: Option<Allocation>,
-) {
-    device.destroy_image_view(view, None);
-    if let Some(alloc) = allocation {
-        allocator.lock().unwrap().free(alloc).ok();
-    }
-    device.destroy_image(image, None);
+    render_pass: vk::RenderPass,
+    color: vk::ImageView,
+    depth: vk::ImageView,
+    extent: vk::Extent2D,
+) -> Result<vk::Framebuffer, vk::Error> {
+    let attachments = [color, depth];
+    let info = vk::FramebufferCreateInfo {
+        render_pass,
+        attachment_count: attachments.len() as u32,
+        attachments: attachments.as_ptr(),
+        width: extent.width,
+        height: extent.height,
+        layers: 1,
+        ..Default::default()
+    };
+    device.create_framebuffer(&info, None)
 }
 
-/// `layers` > 1 makes an array image, one layer per multiview view.
-pub(super) fn create_depth_resources(
-    device: &vk::Device,
-    extent: vk::Extent2D,
-    layers: u32,
-    allocator: &Arc<Mutex<Allocator>>,
-) -> Result<(vk::Image, vk::ImageView, Allocation), ContextError> {
-    let depth_format = vk::Format::D32Sfloat;
+/// An image only rendered into or copied from, with one view over all its
+/// layers (> 1 for multiview, one per eye).
+pub(super) struct Attachment {
+    pub image: vk::Image,
+    pub view: vk::ImageView,
+    allocation: Option<Allocation>,
+}
 
-    let image_info = vk::ImageCreateInfo {
-        image_type: vk::ImageType::Type2D,
-        format: depth_format,
-        extent: vk::Extent3D {
-            width: extent.width,
-            height: extent.height,
-            depth: 1,
-        },
-        mip_levels: 1,
-        array_layers: layers,
-        samples: vk::SampleCountFlags::Type1,
-        tiling: vk::ImageTiling::Optimal,
-        usage: vk::ImageUsageFlags::DepthStencilAttachment,
-        ..Default::default()
-    };
+impl Attachment {
+    pub fn new(
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        extent: vk::Extent2D,
+        layers: u32,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        range: vk::ImageSubresourceRange,
+    ) -> Result<Self, ContextError> {
+        let image_info = vk::ImageCreateInfo {
+            image_type: vk::ImageType::Type2D,
+            format,
+            extent: vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            },
+            mip_levels: 1,
+            array_layers: layers,
+            samples: vk::SampleCountFlags::Type1,
+            tiling: vk::ImageTiling::Optimal,
+            usage,
+            ..Default::default()
+        };
 
-    let image = device.create_image(&image_info, None)?;
-    let mem_reqs = device.get_image_memory_requirements(image);
+        let image = device.create_image(&image_info, None)?;
+        let mem_reqs = device.get_image_memory_requirements(image);
 
-    let allocation = allocator.lock().unwrap().allocate(&AllocationCreateDesc {
-        name: "depth_image",
-        requirements: mem_reqs,
-        location: MemoryLocation::GpuOnly,
-        linear: false,
-        allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-    })?;
+        let allocation = allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "attachment",
+            requirements: mem_reqs,
+            location: MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
 
-    unsafe { device.bind_image_memory(image, allocation.memory(), allocation.offset())? };
+        unsafe { device.bind_image_memory(image, allocation.memory(), allocation.offset())? };
 
-    let view_info = vk::ImageViewCreateInfo {
-        image,
-        view_type: if layers > 1 {
-            vk::ImageViewType::Type2DArray
-        } else {
-            vk::ImageViewType::Type2D
-        },
-        format: depth_format,
-        subresource_range: vk::ImageSubresourceRange {
-            layer_count: layers,
-            ..util::DEPTH_SUBRESOURCE_RANGE
-        },
-        ..Default::default()
-    };
-    let view = device.create_image_view(&view_info, None)?;
+        let view_info = vk::ImageViewCreateInfo {
+            image,
+            view_type: if layers > 1 {
+                vk::ImageViewType::Type2DArray
+            } else {
+                vk::ImageViewType::Type2D
+            },
+            format,
+            subresource_range: vk::ImageSubresourceRange {
+                layer_count: layers,
+                ..range
+            },
+            ..Default::default()
+        };
+        let view = device.create_image_view(&view_info, None)?;
 
-    Ok((image, view, allocation))
+        Ok(Self {
+            image,
+            view,
+            allocation: Some(allocation),
+        })
+    }
+
+    /// The D32 depth buffer every render pass here takes.
+    pub fn depth(
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        extent: vk::Extent2D,
+        layers: u32,
+    ) -> Result<Self, ContextError> {
+        Self::new(
+            device,
+            allocator,
+            extent,
+            layers,
+            vk::Format::D32Sfloat,
+            vk::ImageUsageFlags::DepthStencilAttachment,
+            util::DEPTH_SUBRESOURCE_RANGE,
+        )
+    }
+
+    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        device.destroy_image_view(self.view, None);
+        if let Some(alloc) = self.allocation.take() {
+            allocator.lock().unwrap().free(alloc).ok();
+        }
+        device.destroy_image(self.image, None);
+    }
 }
 
 fn create_render_pass(

@@ -55,6 +55,13 @@ const ONLY_SHOW_SECURE_CHAT: &str = "Only Show Secure Chat:";
 const SAVE_CHAT_DRAFTS: &str = "Save Unsent Chats:";
 const FORCE_UNICODE_FONT: &str = "Force Unicode Font:";
 const JAPANESE_GLYPH_VARIANTS: &str = "Japanese Glyph Variants:";
+// VR option labels, shared by the screen and its handlers, with Vivecraft's
+// slider ranges.
+const VR_RESET_ORIGIN: &str = "Reset Origin";
+const VR_HUD_DISTANCE: &str = "HUD Distance:";
+const VR_HUD_DISTANCE_RANGE: (f32, f32) = (0.25, 5.0);
+const VR_HUD_SIZE: &str = "HUD Size:";
+const VR_HUD_SIZE_RANGE: (f32, f32) = (0.35, 2.5);
 const INVERT_MOUSE_X: &str = "Invert Mouse X:";
 const INVERT_MOUSE_Y: &str = "Invert Mouse Y:";
 
@@ -99,6 +106,14 @@ fn chat_delay_slider(secs: f32) -> f32 {
     }
 }
 
+fn to_slider(value: f32, (min, max): (f32, f32)) -> f32 {
+    (value - min) / (max - min)
+}
+
+fn from_slider(slider: f32, (min, max): (f32, f32)) -> f32 {
+    min + slider * (max - min)
+}
+
 /// `IntRangeBase.fromSliderValue`, back to seconds.
 fn chat_delay_from_slider(slider: f32) -> f32 {
     let slider = if slider >= 1.0 { 0.99999 } else { slider };
@@ -125,7 +140,7 @@ impl MainMenu {
         };
         // FOV slider + Online lead the grid, above the categories (vanilla header
         // sub-row).
-        let rows: Vec<OptRow> = vec![
+        let mut rows: Vec<OptRow> = vec![
             OptRow::Pair(&fov_label, "Online..."),
             OptRow::Pair("Skin Customization...", "Music & Sounds..."),
             OptRow::Pair("Video Settings...", "Controls..."),
@@ -133,6 +148,9 @@ impl MainMenu {
             OptRow::Pair("Resource Packs...", "Accessibility Settings..."),
             OptRow::Pair("Telemetry Data...", "Credits & Attribution..."),
         ];
+        if self.vr {
+            rows.push(OptRow::Big("VR Settings..."));
+        }
 
         let nav: &[(&str, Screen)] = &[
             ("Online...", Screen::OptionsOnline),
@@ -144,6 +162,7 @@ impl MainMenu {
             ("Chat Settings...", Screen::OptionsChatSettings),
             ("Resource Packs...", Screen::OptionsResourcePacks),
             ("Accessibility Settings...", Screen::OptionsAccessibility),
+            ("VR Settings...", Screen::OptionsVr),
             ("Telemetry Data...", Screen::OptionsTelemetry),
             ("Credits & Attribution...", Screen::OptionsCredits),
         ];
@@ -853,6 +872,41 @@ impl MainMenu {
         )
     }
 
+    /// Vivecraft's seated settings that apply here.
+    pub(super) fn build_options_vr(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+    ) -> MainMenuResult {
+        let hud = self.vr_hud;
+        let distance = format!("{VR_HUD_DISTANCE} {:.2}", hud.distance);
+        let size = format!("{VR_HUD_SIZE} {:.2}", hud.scale);
+        let rows: Vec<OptRow> = vec![OptRow::Big(VR_RESET_ORIGIN), OptRow::Pair(&distance, &size)];
+        let sliders: &[(&str, f32)] = &[
+            (
+                VR_HUD_DISTANCE,
+                to_slider(hud.distance, VR_HUD_DISTANCE_RANGE),
+            ),
+            (VR_HUD_SIZE, to_slider(hud.scale, VR_HUD_SIZE_RANGE)),
+        ];
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            "VR Settings",
+            Screen::Options,
+            &rows,
+            &[],
+            sliders,
+            &[],
+            false,
+            &[],
+            text_width_fn,
+        )
+    }
+
     pub(super) fn build_options_music(
         &mut self,
         sw: f32,
@@ -1321,6 +1375,9 @@ impl MainMenu {
                         self.attack_indicator = self.attack_indicator.cycle();
                         self.save_settings();
                     }
+                    if label == VR_RESET_ORIGIN {
+                        self.vr_recenter = true;
+                    }
                     if label.starts_with("View Bobbing:") {
                         self.view_bobbing = !self.view_bobbing;
                         self.save_settings();
@@ -1445,6 +1502,8 @@ impl MainMenu {
                 "FOV:" => self.fov = (30.0 + v * span).round() as u32,
                 "FOV Effects:" => self.fov_effect_scale = v,
                 "Damage Tilt:" => self.damage_tilt_strength = v,
+                VR_HUD_DISTANCE => self.vr_hud.distance = from_slider(v, VR_HUD_DISTANCE_RANGE),
+                VR_HUD_SIZE => self.vr_hud.scale = from_slider(v, VR_HUD_SIZE_RANGE),
                 "Sensitivity:" => self.sensitivity = v,
                 "Master Volume:" => self.master_volume = v,
                 "Music:" => self.music_volume = v,

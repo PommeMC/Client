@@ -4,11 +4,13 @@
 //! player once pushed past that. The crosshair is the player's look, so
 //! the raycast, the server's rotation and walking all follow it.
 
+use std::collections::VecDeque;
 use std::f32::consts::{FRAC_PI_4, PI};
 
 use glam::{Mat4, Quat, Vec3};
 
-use crate::stereo::{EyeView, Fov};
+use super::panel::GuiPanel;
+use crate::stereo::{EyeView, Fov, PanelPlacement};
 
 /// Vivecraft `keyholeX`: how far the crosshair strays from the head before
 /// the world turns.
@@ -24,8 +26,38 @@ const PITCH_SPEED: f32 = 0.5;
 /// Vivecraft clamps the aim short of straight up and down.
 const MAX_PITCH_DEG: f32 = 89.9;
 
+/// A panel's width per unit of scale (Vivecraft `getTexCoordsForCursor`).
+const PANEL_WIDTH: f32 = 1.5;
+/// A screen opens this far ahead of the head (Vivecraft's `(0, 0, -2)`
+/// offset, halved); chat this much higher.
+const SCREEN_DISTANCE: f32 = 1.0;
+const CHAT_RAISE: f32 = 0.25;
+/// The title screens: further out, twice the size.
+const MENU_DISTANCE: f32 = 2.5;
+const MENU_SCALE: f32 = 2.0;
+/// Vivecraft `HMD_AVG_MAX_SAMPLES`: frames the menu's head average spans.
+const HEAD_SAMPLES: usize = 90;
+
+/// How the HUD panel sits, from the VR settings.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct HudPlacement {
+    /// Metres from the head.
+    pub distance: f32,
+    pub scale: f32,
+}
+
+impl Default for HudPlacement {
+    /// Vivecraft `hudDistance` and `hudScale`.
+    fn default() -> Self {
+        Self {
+            distance: 1.25,
+            scale: 1.0,
+        }
+    }
+}
+
 pub(crate) struct Seated {
-    pub eyes: [EyeView; 2],
+    eyes: [EyeView; 2],
     /// World yaw (vanilla degrees) that the seated space's forward (-Z) maps
     /// to; turning adds to it. Unwrapped, like vanilla's own yaw.
     room_yaw: f32,
@@ -36,6 +68,10 @@ pub(crate) struct Seated {
     aim_offset: f32,
     /// Vanilla sign: positive looks down.
     aim_pitch: f32,
+    /// Where an open screen's panel was put when it opened.
+    screen_anchor: Option<(Vec3, Quat)>,
+    last_panel: GuiPanel,
+    head_samples: HeadSamples,
 }
 
 impl Seated {
@@ -57,7 +93,16 @@ impl Seated {
             aim_centre: 0.0,
             aim_offset: 0.0,
             aim_pitch: pitch,
+            screen_anchor: None,
+            last_panel: GuiPanel::Menu,
+            head_samples: HeadSamples::default(),
         }
+    }
+
+    pub fn set_eyes(&mut self, eyes: [EyeView; 2]) {
+        self.eyes = eyes;
+        self.head_samples
+            .add(self.head_position(), self.head_room_yaw());
     }
 
     /// The crosshair's direction as vanilla yaw and pitch.
@@ -93,9 +138,76 @@ impl Seated {
     /// Turns the player, re-centring the keyhole on where the head faces now.
     pub fn turn(&mut self, yaw_delta: f32) {
         self.room_yaw += yaw_delta;
-        let head = self.head_rotation() * Vec3::NEG_Z;
-        let head_yaw = (-head.x).atan2(head.z).to_degrees() - self.room_yaw;
-        self.aim_centre += wrap_degrees(head_yaw - self.aim_centre);
+        self.aim_centre += wrap_degrees(self.head_room_yaw() - self.aim_centre);
+    }
+
+    /// The runtime made the head's pose the seated origin: turn the world
+    /// with it, so neither the view nor the aim jumps.
+    pub fn recenter(&mut self) {
+        let head_yaw = self.head_room_yaw();
+        self.room_yaw += head_yaw;
+        self.aim_centre -= head_yaw;
+        self.screen_anchor = None;
+        self.head_samples = HeadSamples::default();
+    }
+
+    /// The head's yaw in the seated space, in vanilla's sign (right is
+    /// positive).
+    fn head_room_yaw(&self) -> f32 {
+        let forward = self.eyes[0].orientation * Vec3::NEG_Z;
+        forward.x.atan2(-forward.z).to_degrees()
+    }
+
+    fn head_position(&self) -> Vec3 {
+        (self.eyes[0].position + self.eyes[1].position) * 0.5
+    }
+
+    /// Where the panel floats for `kind`, Vivecraft-style: the HUD rides the
+    /// crosshair, a screen stays where it opened, and the title screens trail
+    /// the head's average heading. `aspect` is the panel's height over width.
+    pub fn panel(&mut self, kind: GuiPanel, hud: HudPlacement, aspect: f32) -> PanelPlacement {
+        let head = self.head_position();
+        let (position, orientation, scale) = match kind {
+            GuiPanel::Hud => {
+                let aim = self.aim_room_direction();
+                (head + aim * hud.distance, facing(aim), hud.scale)
+            }
+            GuiPanel::Screen | GuiPanel::Chat => {
+                let reopened = matches!(self.last_panel, GuiPanel::Hud | GuiPanel::Menu)
+                    || (kind == GuiPanel::Chat && self.last_panel != GuiPanel::Chat);
+                if reopened || self.screen_anchor.is_none() {
+                    let raise = if kind == GuiPanel::Chat {
+                        CHAT_RAISE
+                    } else {
+                        0.0
+                    };
+                    let offset = Vec3::new(0.0, raise, -SCREEN_DISTANCE);
+                    let position = head + self.eyes[0].orientation * offset;
+                    self.screen_anchor = Some((position, facing(position - head)));
+                }
+                let (position, orientation) = self.screen_anchor.unwrap();
+                (position, orientation, 1.0)
+            }
+            GuiPanel::Menu => {
+                let (position, yaw) = self.head_samples.average();
+                let ahead = yaw_direction(yaw);
+                (position + ahead * MENU_DISTANCE, facing(ahead), MENU_SCALE)
+            }
+        };
+        self.last_panel = kind;
+        let width = PANEL_WIDTH * scale;
+        PanelPlacement {
+            orientation,
+            position,
+            width,
+            height: width * aspect,
+        }
+    }
+
+    /// The crosshair's direction in the seated space.
+    fn aim_room_direction(&self) -> Vec3 {
+        let pitch = self.aim_pitch.to_radians();
+        yaw_direction(self.aim_centre + self.aim_offset) * pitch.cos() - Vec3::Y * pitch.sin()
     }
 
     pub fn adjust_pitch(&mut self, delta: f32) {
@@ -145,8 +257,7 @@ impl Seated {
             up: side(a.up.max(b.up) + extra),
             down: side(a.down.min(b.down) - extra),
         };
-        let room = self.room_rotation();
-        let centre = room * (self.eyes[0].position + self.eyes[1].position) * 0.5;
+        let centre = self.room_rotation() * self.head_position();
         let view = Mat4::from_rotation_translation(self.head_rotation(), centre).inverse();
         off_axis_projection(fov, near, far) * view
     }
@@ -175,6 +286,64 @@ pub(crate) fn off_axis_projection(fov: Fov, near: f32, far: f32) -> Mat4 {
     Mat4::from_diagonal([1.0, -1.0, 1.0, 1.0].into()) * projection
 }
 
+/// Level, `yaw` degrees right of the seated space's -Z.
+fn yaw_direction(yaw: f32) -> Vec3 {
+    let (sin, cos) = yaw.to_radians().sin_cos();
+    Vec3::new(sin, 0.0, -cos)
+}
+
+/// The roll-free rotation turning -Z to `direction`, so a panel's front
+/// (+Z) faces back along it.
+fn facing(direction: Vec3) -> Quat {
+    let d = direction.normalize();
+    Quat::from_rotation_y((-d.x).atan2(-d.z)) * Quat::from_rotation_x(d.y.asin())
+}
+
+/// Vivecraft `MCVR.hmdSampling`: the head's recent position, and a heading
+/// that only follows once the head has turned 20° from it, settling within
+/// 1°, so the title screens don't drift with every glance.
+#[derive(Default)]
+struct HeadSamples {
+    positions: VecDeque<Vec3>,
+    yaws: VecDeque<f32>,
+    /// The head's yaw, unwrapped.
+    yaw_total: f32,
+    yaw_last: f32,
+    following: bool,
+}
+
+impl HeadSamples {
+    fn add(&mut self, position: Vec3, yaw: f32) {
+        if self.positions.len() == HEAD_SAMPLES {
+            self.positions.pop_front();
+        }
+        if self.yaws.len() == HEAD_SAMPLES {
+            self.yaws.pop_front();
+        }
+        self.positions.push_back(position);
+        self.yaw_total += wrap_degrees(yaw - self.yaw_last);
+        self.yaw_last = yaw;
+        let (_, average) = self.average();
+        let off = (self.yaw_total - average).abs();
+        if off > 20.0 {
+            self.following = true;
+        } else if off < 1.0 {
+            self.following = false;
+        }
+        if self.following || self.yaws.is_empty() {
+            self.yaws.push_back(self.yaw_total);
+        }
+    }
+
+    fn average(&self) -> (Vec3, f32) {
+        let mean = |n: usize| n.max(1) as f32;
+        (
+            self.positions.iter().sum::<Vec3>() / mean(self.positions.len()),
+            self.yaws.iter().sum::<f32>() / mean(self.yaws.len()),
+        )
+    }
+}
+
 /// Vanilla `Mth.wrapDegrees`: into [-180, 180).
 fn wrap_degrees(degrees: f32) -> f32 {
     (degrees + 180.0).rem_euclid(360.0) - 180.0
@@ -185,6 +354,7 @@ mod tests {
     use glam::camera::rh::proj;
 
     use super::*;
+    use crate::renderer::panel::PANEL_ASPECT;
 
     #[test]
     fn symmetric_fov_matches_the_desktop_projection() {
@@ -219,6 +389,58 @@ mod tests {
         let seated = Seated::new(90.0, 0.0);
         let forward = seated.head_rotation() * Vec3::NEG_Z;
         assert!(forward.abs_diff_eq(Vec3::NEG_X, 1e-5));
+    }
+
+    #[test]
+    fn the_hud_rides_the_crosshair() {
+        let mut seated = Seated::new(0.0, 0.0);
+        seated.move_aim(10.0 / H_RANGE_DEG, 0.0);
+        let panel = seated.panel(GuiPanel::Hud, HudPlacement::default(), PANEL_ASPECT);
+        let ahead = yaw_direction(10.0);
+        assert!(panel.position.abs_diff_eq(ahead * 1.25, 1e-5));
+        assert!((panel.orientation * Vec3::NEG_Z).abs_diff_eq(ahead, 1e-5));
+        assert_eq!((panel.width, panel.height), (1.5, 1.5 * PANEL_ASPECT));
+    }
+
+    #[test]
+    fn a_screen_stays_where_it_opened() {
+        let mut seated = Seated::new(0.0, 0.0);
+        seated.panel(GuiPanel::Hud, HudPlacement::default(), PANEL_ASPECT);
+        let opened = seated.panel(GuiPanel::Screen, HudPlacement::default(), PANEL_ASPECT);
+        assert!(opened.position.abs_diff_eq(Vec3::NEG_Z, 1e-5));
+        let mut eyes = seated.eyes;
+        for eye in &mut eyes {
+            eye.orientation = Quat::from_rotation_y(1.0);
+        }
+        seated.set_eyes(eyes);
+        assert_eq!(
+            seated.panel(GuiPanel::Screen, HudPlacement::default(), PANEL_ASPECT),
+            opened
+        );
+    }
+
+    #[test]
+    fn the_title_screen_waits_for_a_real_turn() {
+        let mut seated = Seated::new(0.0, 0.0);
+        let mut turn_head = |yaw: f32| {
+            let mut eyes = seated.eyes;
+            for eye in &mut eyes {
+                eye.orientation = Quat::from_rotation_y(-yaw.to_radians());
+            }
+            seated.set_eyes(eyes);
+            seated.panel(GuiPanel::Menu, HudPlacement::default(), PANEL_ASPECT)
+        };
+        let start = turn_head(0.0);
+        assert!(
+            start
+                .position
+                .abs_diff_eq(Vec3::NEG_Z * MENU_DISTANCE, 1e-5)
+        );
+        assert_eq!(start.width, PANEL_WIDTH * MENU_SCALE);
+        // A glance under 20° leaves it.
+        assert_eq!(turn_head(15.0).position, start.position);
+        // A real turn draws it round.
+        assert!(turn_head(40.0).position.x > start.position.x);
     }
 
     #[test]

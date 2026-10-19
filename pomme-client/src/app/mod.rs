@@ -235,6 +235,7 @@ impl App {
     /// Renders the world to a headset through `stereo`.
     pub fn with_stereo(mut self, stereo: Option<Box<dyn StereoBackend>>) -> Self {
         self.vr = stereo.is_some();
+        self.core.menu.vr = self.vr;
         self.stereo = stereo;
         self
     }
@@ -818,9 +819,17 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.core
-                    .input
-                    .on_cursor_moved(position.x as f32, position.y as f32);
+                let (mut x, mut y) = (position.x as f32, position.y as f32);
+                // VR lays the UI out on the headset's panel, which the
+                // window's mouse maps straight onto.
+                if self.vr
+                    && let Some(gfx) = self.phase.gfx_mut()
+                {
+                    let window = gfx.window.inner_size();
+                    x *= gfx.renderer.screen_width() as f32 / window.width.max(1) as f32;
+                    y *= gfx.renderer.screen_height() as f32 / window.height.max(1) as f32;
+                }
+                self.core.input.on_cursor_moved(x, y);
             }
             WindowEvent::MouseInput { state, button, .. }
                 if matches!(
@@ -1080,6 +1089,10 @@ impl ApplicationHandler for App {
                     gfx.renderer.pace_frame();
                     if gfx.renderer.stereo_should_exit() {
                         event_loop.exit();
+                    }
+                    gfx.renderer.set_hud_placement(self.core.menu.vr_hud);
+                    if std::mem::take(&mut self.core.menu.vr_recenter) {
+                        gfx.renderer.recenter_vr();
                     }
                 }
                 if let Some(fps) = limit {

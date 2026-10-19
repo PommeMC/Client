@@ -19,12 +19,12 @@ use winit::keyboard::KeyCode;
 use crate::app::core::DisplayMode;
 use crate::app::input::{Action, KeyBindings};
 use crate::audio::SoundCategory;
-use crate::renderer::CloudMode;
 use crate::renderer::pipelines::menu_overlay::{
     ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_GEAR, ICON_GLOBE, ICON_LANGUAGE, ICON_LINK,
     ICON_PAINTBRUSH, ICON_UNIVERSAL_ACCESS, ICON_USER, ICON_USERS, MenuElement, SpriteId,
     TooltipLine,
 };
+use crate::renderer::{CloudMode, HudPlacement};
 use crate::ui::chat::ChatOptions;
 use crate::ui::font::FontOptions;
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
@@ -52,6 +52,8 @@ struct Settings {
     invert_mouse_y: bool,
     #[serde(default = "default_true")]
     view_bobbing: bool,
+    #[serde(default)]
+    vr_hud: HudPlacement,
     #[serde(default)]
     show_subtitles: bool,
     #[serde(default = "default_true")]
@@ -198,6 +200,7 @@ impl Default for Settings {
             invert_mouse_x: false,
             invert_mouse_y: false,
             view_bobbing: true,
+            vr_hud: HudPlacement::default(),
             show_subtitles: false,
             show_autosave_indicator: true,
             vignette: true,
@@ -499,6 +502,7 @@ enum Screen {
     OptionsChatSettings,
     OptionsResourcePacks,
     OptionsAccessibility,
+    OptionsVr,
     OptionsTelemetry,
     OptionsCredits,
     CreditsRoll,
@@ -523,6 +527,7 @@ impl Screen {
             Self::OptionsChatSettings => Self::OptionsChatSettings,
             Self::OptionsResourcePacks => Self::OptionsResourcePacks,
             Self::OptionsAccessibility => Self::OptionsAccessibility,
+            Self::OptionsVr => Self::OptionsVr,
             Self::OptionsTelemetry => Self::OptionsTelemetry,
             Self::OptionsCredits => Self::OptionsCredits,
             Self::CreditsRoll => Self::CreditsRoll,
@@ -645,6 +650,11 @@ pub struct MainMenu {
     pub invert_mouse_x: bool,
     pub invert_mouse_y: bool,
     pub view_bobbing: bool,
+    /// Running in VR, which shows the VR settings.
+    pub vr: bool,
+    pub vr_hud: HudPlacement,
+    /// Reset Origin was pressed; the renderer recentres and clears it.
+    pub vr_recenter: bool,
     pub show_subtitles: bool,
     pub show_autosave_indicator: bool,
     pub vignette: bool,
@@ -789,6 +799,9 @@ impl MainMenu {
             invert_mouse_x: settings.invert_mouse_x,
             invert_mouse_y: settings.invert_mouse_y,
             view_bobbing: settings.view_bobbing,
+            vr: false,
+            vr_hud: settings.vr_hud,
+            vr_recenter: false,
             show_subtitles: settings.show_subtitles,
             show_autosave_indicator: settings.show_autosave_indicator,
             vignette: settings.vignette,
@@ -979,6 +992,7 @@ impl MainMenu {
                 invert_mouse_x: self.invert_mouse_x,
                 invert_mouse_y: self.invert_mouse_y,
                 view_bobbing: self.view_bobbing,
+                vr_hud: self.vr_hud,
                 show_subtitles: self.show_subtitles,
                 show_autosave_indicator: self.show_autosave_indicator,
                 vignette: self.vignette,
@@ -1059,6 +1073,7 @@ impl MainMenu {
                 | Screen::OptionsChatSettings
                 | Screen::OptionsResourcePacks
                 | Screen::OptionsAccessibility
+                | Screen::OptionsVr
                 | Screen::OptionsTelemetry
                 | Screen::OptionsCredits
                 | Screen::CreditsRoll
@@ -1312,6 +1327,7 @@ impl MainMenu {
             Screen::OptionsAccessibility => {
                 self.build_options_accessibility(screen_w, screen_h, input, &text_width_fn)
             }
+            Screen::OptionsVr => self.build_options_vr(screen_w, screen_h, input, &text_width_fn),
             Screen::OptionsTelemetry => self.build_options_stub(
                 screen_w,
                 screen_h,

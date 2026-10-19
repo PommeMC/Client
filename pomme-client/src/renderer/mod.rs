@@ -5,6 +5,7 @@ pub mod chunk;
 mod context;
 pub mod entity_model;
 pub(crate) mod packing;
+mod panel;
 pub mod pipelines;
 mod screenshot;
 mod seated;
@@ -28,6 +29,8 @@ use chunk::buffer::ChunkBufferStore;
 use chunk::mesher::{ChunkMeshData, MeshDispatcher};
 use context::VulkanContext;
 use glam::dvec3;
+pub use panel::GuiPanel;
+use panel::{PANEL_ASPECT, PANEL_EXTENT};
 use pipelines::block_entity::BlockEntityPipeline;
 pub use pipelines::block_entity::BlockEntityRenderInfo;
 use pipelines::block_overlay::BlockOverlayPipeline;
@@ -46,6 +49,8 @@ pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
 use pyronyx::khr::present_wait::PresentWaitDevice;
 use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
 use pyronyx::vk;
+pub use seated::HudPlacement;
+use stereo_target::BlitImage;
 use swapchain::Swapchain;
 use thiserror::Error;
 use winit::dpi::PhysicalSize;
@@ -132,6 +137,7 @@ enum RenderMode<'a> {
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
+        panel: GuiPanel,
     },
     MainMenu {
         scroll: f32,
@@ -193,6 +199,7 @@ pub struct Renderer {
     /// The headset, when running in VR: the world pipelines are built for its
     /// multiview pass instead of the window's.
     stereo: Option<stereo_target::Stereo>,
+    hud_placement: HudPlacement,
     /// VR's in-world crosshair, drawn as lines; none outside VR.
     crosshair: Option<ChunkBorderPipeline>,
     crosshair_target: Option<CrosshairTarget>,
@@ -242,9 +249,18 @@ impl Renderer {
         let (ctx, swapchain_state, mut menu_pipeline) =
             boot::bring_up(&window, font_sources, vsync, stereo.as_deref())?;
         let stereo = stereo
-            .map(|backend| stereo_target::Stereo::start(&ctx, backend))
+            .map(|backend| {
+                stereo_target::Stereo::start(&ctx, backend, swapchain_state.format.format)
+            })
             .transpose()?;
         let world_pass = world_render_pass(stereo.as_ref(), &swapchain_state);
+        let gui_extent = gui_extent(
+            stereo.is_some(),
+            vk::Extent2D {
+                width: size.width.max(1),
+                height: size.height.max(1),
+            },
+        );
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
@@ -374,8 +390,8 @@ impl Renderer {
             ctx.graphics_queue,
             ctx.command_pool,
             &ctx.allocator,
-            size.width.max(1),
-            size.height.max(1),
+            gui_extent.width,
+            gui_extent.height,
             swapchain_state.format.format,
         );
         menu_pipeline.set_blur_texture(
@@ -445,8 +461,11 @@ impl Renderer {
 
         splash(&mut menu_pipeline, 0.95, "Caching item meshes...");
 
-        let initial_slot_px =
-            pipelines::gui_item_atlas::slot_px_for_screen(sw, sh, font_options.uniform);
+        let initial_slot_px = pipelines::gui_item_atlas::slot_px_for_screen(
+            gui_extent.width as f32,
+            gui_extent.height as f32,
+            font_options.uniform,
+        );
         let gui_item_atlas = build_gui_item_atlas(
             &ctx.device,
             &ctx.allocator,
@@ -502,6 +521,7 @@ impl Renderer {
             font_options,
             chunk_buffers,
             stereo,
+            hud_placement: HudPlacement::default(),
             crosshair,
             crosshair_target: None,
             render_finished_per_image,
@@ -813,13 +833,14 @@ impl Renderer {
             .recreate_pipeline(&self.ctx.device, world_pass);
         self.cloud_pipeline
             .recreate_pipeline(&self.ctx.device, world_pass);
+        let gui_extent = self.gui_extent();
         self.blur_pipeline.resize(
             &self.ctx.device,
             self.ctx.graphics_queue,
             self.ctx.command_pool,
             &self.ctx.allocator,
-            self.width,
-            self.height,
+            gui_extent.width,
+            gui_extent.height,
         );
         self.menu_pipeline.set_blur_texture(
             &self.ctx.device,
@@ -838,6 +859,10 @@ impl Renderer {
         Ok(())
     }
 
+    pub fn is_vr(&self) -> bool {
+        self.stereo.is_some()
+    }
+
     /// The VR runtime asked to quit.
     pub fn stereo_should_exit(&self) -> bool {
         self.stereo
@@ -845,12 +870,70 @@ impl Renderer {
             .is_some_and(|s| s.backend.should_exit())
     }
 
+    /// The 2D target's size, which the UI lays out for: the window, or in VR
+    /// the panel.
     pub fn screen_width(&self) -> u32 {
-        self.width
+        self.gui_extent().width
     }
 
     pub fn screen_height(&self) -> u32 {
-        self.height
+        self.gui_extent().height
+    }
+
+    fn gui_extent(&self) -> vk::Extent2D {
+        gui_extent(
+            self.stereo.is_some(),
+            vk::Extent2D {
+                width: self.width,
+                height: self.height,
+            },
+        )
+    }
+
+    /// Where the 2D pass draws.
+    fn gui_target(&self, window_fb: usize) -> GuiTarget {
+        match &self.stereo {
+            Some(stereo) => {
+                let panel = &stereo.panel;
+                let clear = (panel.clear_pass, panel.clear_framebuffer);
+                GuiTarget {
+                    image: panel.color.image,
+                    extent: PANEL_EXTENT,
+                    pass: clear,
+                    scene_pass: clear,
+                    load_pass: (panel.load_pass, panel.load_framebuffer),
+                }
+            }
+            None => GuiTarget {
+                image: self.swapchain.images[window_fb],
+                extent: self.swapchain.extent,
+                pass: (
+                    self.swapchain.render_pass,
+                    self.swapchain.framebuffers[window_fb],
+                ),
+                scene_pass: (
+                    self.swapchain.render_pass_scene,
+                    self.swapchain.framebuffers_scene[window_fb],
+                ),
+                load_pass: (
+                    self.swapchain.render_pass_load,
+                    self.swapchain.framebuffers_load[window_fb],
+                ),
+            },
+        }
+    }
+
+    /// The HUD panel's distance and size, from the VR settings.
+    pub fn set_hud_placement(&mut self, placement: HudPlacement) {
+        self.hud_placement = placement;
+    }
+
+    /// Makes where the head is now the seated origin.
+    pub fn recenter_vr(&mut self) {
+        if let Some(stereo) = &mut self.stereo {
+            stereo.backend.recenter();
+            self.camera.recenter_seated();
+        }
     }
 
     #[inline]
@@ -1228,6 +1311,7 @@ impl Renderer {
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
+        panel: GuiPanel,
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
         self.camera.set_render_distance(render_distance);
@@ -1276,6 +1360,7 @@ impl Renderer {
                 player_preview,
                 book_preview,
                 eyes_in_water,
+                panel,
             },
         )
     }
@@ -1671,6 +1756,31 @@ impl Renderer {
         cull_ms
     }
 
+    /// The world into the headset's eye image. Returns the chunk draw time.
+    fn record_stereo_scene(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        mode: &RenderMode<'_>,
+        eye_index: usize,
+        clear_values: &[vk::ClearValue],
+    ) -> f32 {
+        let Some(stereo) = &self.stereo else {
+            return 0.0;
+        };
+        let eyes = &stereo.eyes;
+        begin_pass(
+            cmd,
+            eyes.render_pass,
+            eyes.framebuffers[eye_index],
+            eyes.extent,
+            clear_values,
+        );
+        let cull_ms = self.record_scene(cmd, frame, mode);
+        cmd.end_render_pass();
+        cull_ms
+    }
+
     /// The first-person arm or held item, over a cleared depth buffer.
     fn record_hand(
         &mut self,
@@ -1730,16 +1840,14 @@ impl Renderer {
         }
     }
 
-    /// The HUD or open screen, then its 3D preview boxes.
-    #[allow(clippy::too_many_arguments)]
+    /// The HUD or open screen, then its 3D preview boxes; `scissor` is the
+    /// whole target.
     fn record_hud(
         &mut self,
         cmd: vk::CommandBuffer,
         frame: usize,
         mode: &RenderMode<'_>,
         scissor: vk::Rect2D,
-        sw: f32,
-        sh: f32,
         item_atlas_uvs: &HashMap<String, [f32; 4]>,
     ) {
         let RenderMode::World {
@@ -1751,13 +1859,15 @@ impl Renderer {
         else {
             return;
         };
+        let extent = scissor.extent;
+        let (sw, sh) = (extent.width as f32, extent.height as f32);
         self.menu_pipeline
             .draw(cmd, sw, sh, overlay, item_atlas_uvs);
 
         // Each preview box gets its depth cleared and its own scissor
         // while the 3D content draws.
         if let Some(p) = player_preview
-            && let Some(rect) = preview_box_rect(p.rect, self.swapchain.extent)
+            && let Some(rect) = preview_box_rect(p.rect, extent)
         {
             clear_depth(cmd, rect);
             cmd.set_scissor(0, &[rect]);
@@ -1767,7 +1877,7 @@ impl Renderer {
         }
 
         if let Some(p) = book_preview
-            && let Some(rect) = preview_box_rect(p.rect, self.swapchain.extent)
+            && let Some(rect) = preview_box_rect(p.rect, extent)
         {
             clear_depth(cmd, rect);
             cmd.set_scissor(0, &[rect]);
@@ -1875,11 +1985,6 @@ impl Renderer {
         };
         cmd.begin(&begin_info)?;
 
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: self.swapchain.extent,
-        };
-
         let draws_world = matches!(&mode, RenderMode::World { .. })
             && (self.stereo.is_none() || stereo_frame.is_some());
         if draws_world {
@@ -1972,9 +2077,10 @@ impl Renderer {
             }
         }
 
+        let gui_extent = self.gui_extent();
         let target_slot_px = pipelines::gui_item_atlas::slot_px_for_screen(
-            self.swapchain.extent.width as f32,
-            self.swapchain.extent.height as f32,
+            gui_extent.width as f32,
+            gui_extent.height as f32,
             self.font_options.uniform,
         );
         if target_slot_px != self.gui_item_atlas.slot_px() {
@@ -2064,65 +2170,38 @@ impl Renderer {
 
         let use_blur = matches!(&mode, RenderMode::MainMenu { blur, .. } if *blur > 0.01);
         let window_fb = image_index as usize;
+        let gui = self.gui_target(window_fb);
 
-        let sw = self.swapchain.extent.width as f32;
-        let sh = self.swapchain.extent.height as f32;
+        let sw = gui.extent.width as f32;
+        let sh = gui.extent.height as f32;
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: gui.extent,
+        };
 
         let frame_start = std::time::Instant::now();
 
-        // VR draws the world into the headset's images, mirrors the left eye
-        // onto the window, then draws the HUD over the mirror.
+        // In VR the world goes to the headset, and the 2D pass draws the
+        // panel, transparent where the world shows through.
         let mut cull_ms = 0.0;
-        match (&self.stereo, &stereo_frame) {
-            (Some(stereo), Some(xr)) if draws_world => {
-                let target = &stereo.target;
-                begin_pass(
-                    cmd,
-                    target.render_pass,
-                    target.framebuffers[xr.image_index],
-                    target.extent,
-                    &clear_values,
-                );
-                cull_ms = self.record_scene(cmd, frame, &mode);
-                cmd.end_render_pass();
-                let stereo = self.stereo.as_ref().unwrap();
-                stereo.target.record_mirror(
-                    cmd,
-                    xr.image_index,
-                    self.swapchain.images[window_fb],
-                    self.swapchain.extent,
-                );
-                begin_pass(
-                    cmd,
-                    self.swapchain.render_pass_load,
-                    self.swapchain.framebuffers_load[window_fb],
-                    self.swapchain.extent,
-                    &clear_values,
-                );
-            }
-            _ => {
-                let (rp, fb) = if use_blur {
-                    (
-                        self.swapchain.render_pass_scene,
-                        self.swapchain.framebuffers_scene[window_fb],
-                    )
-                } else {
-                    (
-                        self.swapchain.render_pass,
-                        self.swapchain.framebuffers[window_fb],
-                    )
-                };
-                begin_pass(cmd, rp, fb, self.swapchain.extent, &clear_values);
-                if draws_world {
-                    cull_ms = self.record_scene(cmd, frame, &mode);
-                    self.record_hand(cmd, frame, &mode, scissor, sw, sh);
-                }
-            }
+        let mut gui_clear_values = clear_values;
+        if let (Some(xr), true) = (&stereo_frame, draws_world) {
+            cull_ms = self.record_stereo_scene(cmd, frame, &mode, xr.image_index, &clear_values);
+            gui_clear_values[0] = vk::ClearValue {
+                color: vk::ClearColorValue { float32: [0.0; 4] },
+            };
+        }
+
+        let (rp, fb) = if use_blur { gui.scene_pass } else { gui.pass };
+        begin_pass(cmd, rp, fb, gui.extent, &gui_clear_values);
+        if draws_world && self.stereo.is_none() {
+            cull_ms = self.record_scene(cmd, frame, &mode);
+            self.record_hand(cmd, frame, &mode, scissor, sw, sh);
         }
 
         match &mode {
             RenderMode::World { .. } => {
-                self.record_hud(cmd, frame, &mode, scissor, sw, sh, &item_atlas_uvs);
+                self.record_hud(cmd, frame, &mode, scissor, &item_atlas_uvs);
                 self.last_timings.cull_ms = cull_ms;
                 self.last_timings.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
             }
@@ -2158,23 +2237,17 @@ impl Renderer {
                 if *blur > 0.01 {
                     cmd.end_render_pass();
 
-                    let swapchain_image = self.swapchain.images[window_fb];
                     let iterations = ((*blur * 3.0).ceil() as u32).clamp(1, 4);
                     self.blur_pipeline.execute(
                         cmd,
-                        swapchain_image,
-                        self.swapchain.extent.width,
-                        self.swapchain.extent.height,
+                        gui.image,
+                        gui.extent.width,
+                        gui.extent.height,
                         iterations,
                     );
 
-                    begin_pass(
-                        cmd,
-                        self.swapchain.render_pass_load,
-                        self.swapchain.framebuffers_load[window_fb],
-                        self.swapchain.extent,
-                        &clear_values,
-                    );
+                    let (rp, fb) = gui.load_pass;
+                    begin_pass(cmd, rp, fb, gui.extent, &clear_values);
                 }
 
                 if *show_skin {
@@ -2203,6 +2276,24 @@ impl Renderer {
 
         cmd.end_render_pass();
 
+        if let Some(stereo) = &self.stereo {
+            let window = BlitImage {
+                image: self.swapchain.images[window_fb],
+                extent: self.swapchain.extent,
+                before: vk::ImageLayout::Undefined,
+                after: vk::ImageLayout::PresentSrcKHR,
+            };
+            let mirrored = stereo_frame.as_ref().filter(|_| draws_world);
+            if let Some(xr) = mirrored {
+                stereo.record_mirror(cmd, xr.image_index, window);
+            }
+            stereo.record_panel_copies(
+                cmd,
+                stereo_frame.as_ref().map(|xr| xr.panel_index),
+                mirrored.is_none().then_some(window),
+            );
+        }
+
         // Image is now in PresentSrcKHR; grab it before present if F2 was pressed.
         self.screenshot.record_if_armed(
             &self.ctx.device,
@@ -2218,10 +2309,16 @@ impl Renderer {
 
         cmd.end()?;
 
+        // VR writes the window image with a blit, not a render pass.
+        let window_write_stage = if self.stereo.is_some() {
+            vk::PipelineStageFlags::Transfer
+        } else {
+            vk::PipelineStageFlags::ColorAttachmentOutput
+        };
         let submit_info = vk::SubmitInfo {
             wait_semaphore_count: 1,
             wait_semaphores: &image_available,
-            wait_dst_stage_mask: &vk::PipelineStageFlags::ColorAttachmentOutput,
+            wait_dst_stage_mask: &window_write_stage,
             command_buffer_count: 1,
             command_buffers: &cmd.handle(),
             signal_semaphore_count: 1,
@@ -2231,7 +2328,12 @@ impl Renderer {
 
         self.ctx.graphics_queue.submit(&[submit_info], fence)?;
         if let Some(stereo) = &mut self.stereo {
-            stereo.backend.end_frame(draws_world);
+            let panel = match &mode {
+                RenderMode::World { panel, .. } => *panel,
+                RenderMode::MainMenu { .. } => GuiPanel::Menu,
+            };
+            let placement = self.camera.panel(panel, self.hud_placement, PANEL_ASPECT);
+            stereo.backend.end_frame(draws_world, placement);
         }
 
         let mut present_info = vk::PresentInfoKHR {
@@ -2270,12 +2372,31 @@ impl Renderer {
     }
 }
 
+/// Where the 2D pass draws: the window, or VR's panel. Each pass is a render
+/// pass and its framebuffer.
+#[derive(Clone, Copy)]
+struct GuiTarget {
+    image: vk::Image,
+    extent: vk::Extent2D,
+    /// The window's ends in PresentSrc, ready to show.
+    pass: (vk::RenderPass, vk::Framebuffer),
+    /// Leaves the image for the blur to read back.
+    scene_pass: (vk::RenderPass, vk::Framebuffer),
+    /// Picks up after the blur.
+    load_pass: (vk::RenderPass, vk::Framebuffer),
+}
+
+/// The size the UI lays out for: the window's, or in VR the panel's.
+fn gui_extent(vr: bool, window: vk::Extent2D) -> vk::Extent2D {
+    if vr { PANEL_EXTENT } else { window }
+}
+
 /// The pass the world draws in: the headset's in VR, else the window's.
 fn world_render_pass(
     stereo: Option<&stereo_target::Stereo>,
     swapchain: &Swapchain,
 ) -> vk::RenderPass {
-    stereo.map_or(swapchain.render_pass, |s| s.target.render_pass)
+    stereo.map_or(swapchain.render_pass, |s| s.eyes.render_pass)
 }
 
 /// Begins `render_pass` over the whole of `extent`, with the viewport and
