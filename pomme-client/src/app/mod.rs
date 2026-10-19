@@ -1,5 +1,6 @@
 pub mod core;
 pub mod input;
+mod install;
 pub mod level_load;
 pub mod phases;
 pub mod state_slot;
@@ -51,6 +52,10 @@ pub struct App {
     core: AppCore,
     occluded: bool,
     fps_limiter: FramerateLimiter,
+    /// The version's assets are still downloading; startup waits for them.
+    install: Option<install::Install>,
+    /// The download screen's window, for the normal startup to keep.
+    installed_window: Option<Arc<Window>>,
     /// Whether Android's soft keyboard was last asked for.
     #[cfg(target_os = "android")]
     soft_keyboard: bool,
@@ -197,12 +202,17 @@ impl App {
         user: UserData,
         quick_play: Option<QuickPlay>,
     ) -> Self {
+        let installed = data_dirs.is_installed(&version);
+        let pending_skin_uuid = user.has_profile.then_some(user.uuid);
+        let core = AppCore::new(version, data_dirs, tokio_rt, presence, user);
         Self {
             phase: StateSlot::new(AppPhase::Setup {
                 quick_play,
-                pending_skin_uuid: user.has_profile.then_some(user.uuid),
+                pending_skin_uuid,
             }),
-            core: AppCore::new(version, data_dirs, tokio_rt, presence, user),
+            install: (!installed).then(|| install::Install::start(&core)),
+            installed_window: None,
+            core,
             occluded: false,
             #[cfg(target_os = "android")]
             soft_keyboard: false,
@@ -267,6 +277,32 @@ impl App {
     }
 }
 
+/// The game window, born in the persisted display mode: the swapchain is
+/// sized from `inner_size()` before the window is shown, so switching after
+/// creation would leave it built for the windowed size.
+fn create_window(
+    event_loop: &ActiveEventLoop,
+    display_mode: crate::app::core::DisplayMode,
+) -> Result<Arc<Window>, winit::error::OsError> {
+    let window_icon = {
+        let img =
+            image::load_from_memory(crate::assets::POMME_ICON_PNG).expect("failed to decode icon");
+        let rgba = img.to_rgba8();
+        let (w, h) = (rgba.width(), rgba.height());
+        winit::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
+    };
+    let monitor = event_loop
+        .primary_monitor()
+        .or_else(|| event_loop.available_monitors().next());
+    let window_attrs = Window::default_attributes()
+        .with_title("Pomme")
+        .with_inner_size(winit::dpi::LogicalSize::new(854, 480))
+        .with_fullscreen(display_mode.fullscreen_for(monitor))
+        .with_visible(false)
+        .with_window_icon(window_icon);
+    event_loop.create_window(window_attrs).map(Arc::new)
+}
+
 impl ApplicationHandler for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         // Minecraft.exitWorldAndClose runs screen().removed() before close().
@@ -274,12 +310,19 @@ impl ApplicationHandler for App {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(install) = &mut self.install {
+            install.suspend();
+        }
         if let Some(gfx) = self.phase.gfx_mut() {
             gfx.renderer.suspend();
         }
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(install) = &mut self.install {
+            install.resume(event_loop, &self.core);
+            return;
+        }
         if let Some(gfx) = self.phase.gfx_mut() {
             if let Err(e) = gfx.renderer.resume(&gfx.window) {
                 tracing::error!("Failed to resume the renderer: {e}");
@@ -292,29 +335,13 @@ impl ApplicationHandler for App {
                 quick_play,
                 mut pending_skin_uuid,
             } => {
-                let window_icon = {
-                    let img = image::load_from_memory(crate::assets::POMME_ICON_PNG)
-                        .expect("failed to decode icon");
-                    let rgba = img.to_rgba8();
-                    let (w, h) = (rgba.width(), rgba.height());
-                    winit::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
-                };
-
-                // Born in the persisted mode: the swapchain is sized from
-                // `inner_size()` before the window is shown, so switching after
-                // creation would leave it built for the windowed size.
-                let monitor = event_loop
-                    .primary_monitor()
-                    .or_else(|| event_loop.available_monitors().next());
-                let window_attrs = Window::default_attributes()
-                    .with_title("Pomme")
-                    .with_inner_size(winit::dpi::LogicalSize::new(854, 480))
-                    .with_fullscreen(self.core.display_mode.fullscreen_for(monitor))
-                    .with_visible(false)
-                    .with_window_icon(window_icon);
-
-                let window = match event_loop.create_window(window_attrs) {
-                    Ok(w) => Arc::new(w),
+                // The first-run download's window, if it ran.
+                let window = match self
+                    .installed_window
+                    .take()
+                    .map_or_else(|| create_window(event_loop, self.core.display_mode), Ok)
+                {
+                    Ok(w) => w,
                     Err(e) => {
                         tracing::error!("Failed to create window: {e}");
                         event_loop.exit();
@@ -327,12 +354,7 @@ impl ApplicationHandler for App {
 
                 let mut renderer = match Renderer::new(
                     Arc::clone(&window),
-                    crate::ui::font::FontSources {
-                        jar_assets_dir: &self.core.data_dirs.jar_assets_dir,
-                        asset_index: &self.core.asset_index,
-                        packs: &self.core.resource_packs,
-                        options: self.core.menu.font_options(),
-                    },
+                    self.core.font_sources(),
                     &self.core.data_dirs.game_dir,
                     &self.core.data_dirs.cache_dir,
                     self.core.menu.vsync,
@@ -401,6 +423,35 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        if let Some(install) = &mut self.install {
+            match event {
+                WindowEvent::RedrawRequested => {
+                    if let install::Step::Done(window) = install.frame(&self.core.version) {
+                        self.install = None;
+                        self.core.reload_installed_assets();
+                        self.installed_window = Some(window);
+                        self.resumed(event_loop);
+                        // The first frame of the normal loop, which asks for
+                        // each next one itself.
+                        if let Some(gfx) = self.phase.gfx_mut() {
+                            gfx.window.request_redraw();
+                        }
+                    }
+                }
+                WindowEvent::Resized(size) => install.resize(size.width, size.height),
+                WindowEvent::MouseInput {
+                    state: winit::event::ElementState::Pressed,
+                    ..
+                }
+                | WindowEvent::Touch(winit::event::Touch {
+                    phase: winit::event::TouchPhase::Started,
+                    ..
+                }) => install.retry(&self.core),
+                WindowEvent::CloseRequested => event_loop.exit(),
+                _ => {}
+            }
+            return;
+        }
         let binding_capture = self.core.menu.binding_capture_active()
             && self.core.unfocused_since.is_none()
             && match self.phase.get() {

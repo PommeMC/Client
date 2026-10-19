@@ -20,6 +20,7 @@ tokio = { workspace = true }
 reqwest = { workspace = true, features = ["form"] }
 pomme-protocol = { path = "../../pomme-protocol" }
 pomme-auth = { path = "../../pomme-auth", features = ["keyring", "specta"] }
+pomme-install = { path = "../../pomme-install" }
 
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"

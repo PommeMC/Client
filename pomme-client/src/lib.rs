@@ -136,10 +136,6 @@ pub fn run(args: LaunchArgs, platform: Platform) {
     // Block-state tables must be loaded before any world/render code runs.
     world::block::init(version);
 
-    if let Err(e) = data_dirs.verify() {
-        eprintln!("Failed to verify directories: {e}");
-        std::process::exit(1);
-    }
     data_dirs.ensure_game_dir().ok();
     tracing::info!("Installation directory: {}", data_dirs.game_dir.display());
 

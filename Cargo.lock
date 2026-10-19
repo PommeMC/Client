@@ -5368,6 +5368,7 @@ dependencies = [
  "pomme-auth",
  "pomme-dirs",
  "pomme-gpu-allocator",
+ "pomme-install",
  "pomme-protocol",
  "pomme-singleplayer",
  "pyronyx",
@@ -5419,6 +5420,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pomme-install"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1_smol",
+ "tokio",
+ "zip 9.0.4",
+]
+
+[[package]]
 name = "pomme-launcher"
 version = "0.1.2"
 dependencies = [
@@ -5428,6 +5441,7 @@ dependencies = [
  "open",
  "pomme-auth",
  "pomme-dirs",
+ "pomme-install",
  "pomme-protocol",
  "rand 0.10.3",
  "reqwest",

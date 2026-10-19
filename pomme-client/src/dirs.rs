@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 #[derive(Clone)]
 pub struct DataDirs {
+    pub assets_dir: PathBuf,
+    pub versions_dir: PathBuf,
     pub indexes_dir: PathBuf,
     pub objects_dir: PathBuf,
     pub pomme_assets_dir: PathBuf,
@@ -37,6 +39,8 @@ impl DataDirs {
         let objects_dir = assets_dir.join("objects");
 
         Self {
+            assets_dir,
+            versions_dir,
             indexes_dir,
             objects_dir,
             jar_assets_dir,
@@ -50,24 +54,8 @@ impl DataDirs {
         pomme_dirs::create_profile(&self.game_dir)
     }
 
-    pub fn verify(&self) -> Result<(), String> {
-        let DataDirs {
-            indexes_dir,
-            objects_dir,
-            pomme_assets_dir: _,
-            jar_assets_dir,
-            game_dir: _,
-            cache_dir: _,
-        } = self;
-
-        for dir in [indexes_dir, objects_dir, jar_assets_dir] {
-            if !dir.exists() {
-                return Err(format!(
-                    "{} not found, please use the launcher or specify all arguments.",
-                    dir.display()
-                ));
-            }
-        }
-        Ok(())
+    /// `version`'s assets are downloaded, so the client can start on them.
+    pub fn is_installed(&self, version: &str) -> bool {
+        pomme_install::is_installed(&self.assets_dir, &self.versions_dir, version)
     }
 }

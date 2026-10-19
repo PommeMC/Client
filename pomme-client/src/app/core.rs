@@ -567,6 +567,25 @@ fn cursor_step(grabbed: bool, stale: bool, want: bool, focused: bool) -> (Cursor
     }
 }
 
+/// The asset index, the menu's splash and the audio engine, which `AppCore`
+/// builds from the version's assets.
+fn load_assets(
+    data_dirs: &DataDirs,
+    version: &str,
+    resource_packs: &ResourcePackManager,
+    menu: &mut MainMenu,
+) -> (Option<AssetIndex>, crate::audio::AudioEngine) {
+    let asset_index = AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, version);
+    menu.load_splash(&data_dirs.jar_assets_dir, &asset_index);
+    let audio = crate::audio::AudioEngine::new(
+        &data_dirs.jar_assets_dir,
+        asset_index.clone(),
+        resource_packs,
+        menu.category_volumes(),
+    );
+    (asset_index, audio)
+}
+
 /// `LocalPlayerResolver`: a `Dynamic` profile resolves through the tab list
 /// first (by name, ignoring case), and only then through the Mojang API. A
 /// `Static` profile resolves to itself.
@@ -612,17 +631,7 @@ impl AppCore {
 
         let display_mode = menu.display_mode;
 
-        let asset_index =
-            AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, &version);
-
-        menu.load_splash(&data_dirs.jar_assets_dir, &asset_index);
-
-        let audio = crate::audio::AudioEngine::new(
-            &data_dirs.jar_assets_dir,
-            asset_index.clone(),
-            &resource_packs,
-            menu.category_volumes(),
-        );
+        let (asset_index, audio) = load_assets(&data_dirs, &version, &resource_packs, &mut menu);
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
         let (head_tx, head_rx) = crossbeam_channel::unbounded();
 
@@ -1216,6 +1225,29 @@ impl AppCore {
     /// the texture atlas. Clearing
     /// `menu.reload_assets` and `menu.reload_fonts` is safe here because the
     /// pending toggles they stand for are covered by the reload we just did.
+    /// Where the renderer's fonts come from.
+    pub(crate) fn font_sources(&self) -> crate::ui::font::FontSources<'_> {
+        crate::ui::font::FontSources {
+            jar_assets_dir: &self.data_dirs.jar_assets_dir,
+            asset_index: &self.asset_index,
+            packs: &self.resource_packs,
+            options: self.menu.font_options(),
+        }
+    }
+
+    /// Rebuilds what was built from assets that didn't exist yet, once the
+    /// first-run download has put them on disk.
+    pub(crate) fn reload_installed_assets(&mut self) {
+        let (asset_index, audio) = load_assets(
+            &self.data_dirs,
+            &self.version,
+            &self.resource_packs,
+            &mut self.menu,
+        );
+        self.asset_index = asset_index;
+        self.audio = audio;
+    }
+
     pub(crate) fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
         self.menu.active_packs = self.resource_packs.active_pack_info();
         renderer.reload_assets(&self.resource_packs, self.menu.font_options());

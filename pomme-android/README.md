@@ -1,8 +1,8 @@
 # Android
 
-An early port: the client builds as an arm64 APK, joins an offline-mode
-server and plays with touch controls. There is no login or asset download on
-the device yet, so the assets come from a desktop install over `adb`.
+An early port: the client builds as an arm64 APK, signs in with a Microsoft
+account, downloads the game's assets on first launch (about 500 MB) and plays
+with touch controls.
 
 ## Setup (macOS)
 
@@ -30,7 +30,8 @@ which the first `android-build` compiles from source.
 emulator -avd pomme -gpu host &           # or a phone with USB debugging on
 just ingame-server                         # prints the port; offline mode
 just android-install                       # builds the APK and installs it
-just android-push-assets                   # once: assets and the 26.2 version files
+just android-push-assets                   # optional: copy a desktop install's assets
+                                           # instead of downloading them
 just android-config --version 26.2 --username Tester \
     --quick-access-multiplayer 10.0.2.2:<port>
 just android-run

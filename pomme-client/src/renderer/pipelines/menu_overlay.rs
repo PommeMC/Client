@@ -77,6 +77,11 @@ struct GlyphEntry {
     v1: f32,
     width_px: f32,
     height_px: f32,
+    /// Text layout at `RASTER_PX`: pen advance, and the bitmap's offset from
+    /// the pen and from the line's top.
+    advance_px: f32,
+    left_px: f32,
+    top_px: f32,
 }
 
 struct FontAtlas {
@@ -96,6 +101,9 @@ fn build_font_atlas() -> FontAtlas {
     let mut cursor_y = 0u32;
     let mut row_height = 0u32;
 
+    let ascent = font
+        .horizontal_line_metrics(RASTER_PX)
+        .map_or(RASTER_PX, |m| m.ascent);
     let text_chars: Vec<(char, &fontdue::Font)> = (' '..='~').map(|ch| (ch, &font)).collect();
     let icon_chars: Vec<(char, &fontdue::Font)> = [
         ICON_USER,
@@ -151,6 +159,9 @@ fn build_font_atlas() -> FontAtlas {
                 v1: (cursor_y + metrics.height as u32) as f32 * inv,
                 width_px: metrics.width as f32,
                 height_px: metrics.height as f32,
+                advance_px: metrics.advance_width,
+                left_px: metrics.xmin as f32,
+                top_px: ascent - (metrics.ymin + metrics.height as i32) as f32,
             },
         );
 
@@ -1491,7 +1502,7 @@ impl MenuOverlayPipeline {
 
     fn text_width_in(&self, text: &str, scale: f32, font: Option<&str>) -> f32 {
         let Some(ref gm) = self.mc_glyph_map else {
-            return 0.0;
+            return plain_text_width(&self.atlas, text, scale);
         };
         (run_advance(gm, text, font, false, false) * scale / gm.cell_h as f32).ceil()
     }
@@ -1930,7 +1941,8 @@ impl MenuOverlayPipeline {
         }
     }
 
-    /// Pushes Minecraft-font text; nothing when no fonts loaded.
+    /// Pushes Minecraft-font text, or Montserrat before any Minecraft font
+    /// has loaded (the first-run download screen).
     #[allow(clippy::too_many_arguments)]
     fn push_text_into(
         &self,
@@ -1954,6 +1966,19 @@ impl MenuOverlayPipeline {
                 obfuscation_rng,
                 drawn_objects,
             );
+        } else {
+            let mut x = draw.x;
+            for span in spans {
+                x = push_plain_text(
+                    vertices,
+                    &self.atlas,
+                    x,
+                    draw.y,
+                    &span.text,
+                    draw.scale,
+                    span.color,
+                );
+            }
         }
     }
 
@@ -4563,6 +4588,47 @@ fn push_gradient_rect(
             corner_radius: radius,
         });
     }
+}
+
+/// Montserrat text from `x`; returns where the pen ends.
+fn push_plain_text(
+    verts: &mut Vec<Vertex>,
+    atlas: &FontAtlas,
+    mut x: f32,
+    y: f32,
+    text: &str,
+    scale: f32,
+    color: [f32; 4],
+) -> f32 {
+    let s = scale / RASTER_PX;
+    for g in text.chars().filter_map(|ch| atlas.glyphs.get(&ch)) {
+        if g.width_px > 0.0 {
+            push_quad(
+                verts,
+                x + g.left_px * s,
+                y + g.top_px * s,
+                g.width_px * s,
+                g.height_px * s,
+                g.u0,
+                g.v0,
+                g.u1,
+                g.v1,
+                color,
+                1.0,
+                [0.0, 0.0],
+                0.0,
+            );
+        }
+        x += g.advance_px * s;
+    }
+    x
+}
+
+fn plain_text_width(atlas: &FontAtlas, text: &str, scale: f32) -> f32 {
+    text.chars()
+        .filter_map(|ch| atlas.glyphs.get(&ch))
+        .map(|g| g.advance_px * scale / RASTER_PX)
+        .sum()
 }
 
 fn push_icon_glyph(

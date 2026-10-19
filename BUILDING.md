@@ -6,6 +6,7 @@
 pomme-client/         # Minecraft client (Rust, Vulkan)
 pomme-android/        # Android entry point and APK project (see its README)
 pomme-auth/           # Microsoft sign-in, shared by the client and launcher
+pomme-install/        # Downloads a version's assets, shared by the client and launcher
 pomme-launcher/       # Launcher app (Tauri, React, TypeScript)
 pomme-protocol/       # Per-version protocol data and wire encoding
 pomme-dirs/           # The data folder layout the client and launcher share
@@ -19,6 +20,7 @@ tools/                # protogen, blockgen, stategen, and the OpenAL fetch scrip
 The client is a standalone binary that receives launch arguments from
 the launcher. The launcher handles authentication, asset downloading,
 version management, and spawns the client with the appropriate flags.
+Started without them, the client signs in and downloads its assets itself.
 
 Before building, you must have [just](https://github.com/casey/just) installed.
 The Rust toolchain is pinned in `rust-toolchain.toml`; rustup picks it up.

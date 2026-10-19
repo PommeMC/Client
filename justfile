@@ -77,7 +77,7 @@ android-push-assets src=(home_directory() / "Library/Application Support/.pomme"
 android-config *args:
     #!/usr/bin/env bash
     set -e
-    echo "{{ args }}" | adb shell run-as {{ android_app }} sh -c "'cat > files/launch.txt'"
+    echo "{{ args }}" | adb shell run-as {{ android_app }} sh -c "'mkdir -p files && cat > files/launch.txt'"
 
 android-log:
     @adb logcat -s pomme:V RustStdoutStderr:V AndroidRuntime:E DEBUG:V

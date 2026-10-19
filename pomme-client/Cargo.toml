@@ -49,6 +49,7 @@ mimalloc = "0.1"
 pomme-gpu-allocator = { path = "../pomme-gpu-allocator" }
 pomme-dirs = { path = "../pomme-dirs" }
 pomme-protocol = { path = "../pomme-protocol" }
+pomme-install = { path = "../pomme-install" }
 pomme-singleplayer = { path = "../pomme-singleplayer", optional = true }
 winit = { version = "0.30", features = ["rwh_06"] }
 raw-window-handle = "0.6"

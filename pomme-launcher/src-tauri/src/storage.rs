@@ -47,22 +47,6 @@ pub fn pomme_assets_dir() -> PathBuf {
 pub fn versions_dir() -> PathBuf {
     layout().minecraft_versions()
 }
-/// `minecraft/versions/{version}/`
-pub fn version_dir(version: &str) -> PathBuf {
-    versions_dir().join(version)
-}
-/// `minecraft/versions/{version}/{version}.jar`
-pub fn version_jar(version: &str) -> PathBuf {
-    version_dir(version).join(format!("{version}.jar"))
-}
-/// `minecraft/versions/{version}/extracted/`
-pub fn version_extracted_dir(version: &str) -> PathBuf {
-    version_dir(version).join("extracted")
-}
-/// `minecraft/versions/{version}/extracted/.extracted`
-pub fn version_extracted_marker(version: &str) -> PathBuf {
-    version_extracted_dir(version).join(".extracted")
-}
 
 /// `launcher/clients/`
 pub fn clients_dir() -> PathBuf {

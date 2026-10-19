@@ -1,4 +1,5 @@
 pub mod block_entity_model;
+pub mod boot;
 pub mod camera;
 pub mod chunk;
 mod context;
@@ -223,38 +224,14 @@ impl Renderer {
             })
         };
 
-        let ctx = VulkanContext::new(&window)?;
-
-        let swapchain_state = Swapchain::new(
-            &ctx,
-            size.width.max(1),
-            size.height.max(1),
-            vsync,
-            vk::SwapchainKHR::null(),
-        )?;
+        let (ctx, swapchain_state, mut menu_pipeline) =
+            boot::bring_up(&window, font_sources, vsync)?;
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
-        let font_layer_limit = ctx
-            .physical_device
-            .get_properties()
-            .limits
-            .max_image_array_layers;
-
-        let mut menu_pipeline = MenuOverlayPipeline::new(
-            &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            swapchain_state.render_pass,
-            &ctx.allocator,
-            font_sources,
-            font_layer_limit,
-        )
-        .map_err(RendererError::Font)?;
 
         let sw = size.width.max(1) as f32;
         let sh = size.height.max(1) as f32;
-        window.set_visible(true);
 
         let splash = |menu: &mut MenuOverlayPipeline, progress: f32, status: &str| {
             let _ = Self::render_splash(&ctx, &swapchain_state, menu, sw, sh, progress, status);
@@ -534,7 +511,7 @@ impl Renderer {
         let cmd = ctx.command_buffers[0];
 
         let gs = (sh / 400.0).max(1.0);
-        let title_size = 28.0 * gs;
+        let logo_size = 48.0 * gs;
         let status_size = 8.0 * gs;
         let bar_w = 200.0 * gs;
         let bar_h = 6.0 * gs;
@@ -543,13 +520,13 @@ impl Renderer {
         let cy = sh / 2.0;
 
         let elements = vec![
-            MenuElement::Text {
-                x: cx,
-                y: cy - title_size - 20.0 * gs,
-                text: "Pomme".into(),
-                scale: title_size,
-                color: [0.86, 0.92, 1.0, 0.95],
-                centered: true,
+            MenuElement::Image {
+                x: cx - logo_size / 2.0,
+                y: cy - logo_size - 16.0 * gs,
+                w: logo_size,
+                h: logo_size,
+                sprite: pipelines::menu_overlay::SpriteId::PommeLogo,
+                tint: [1.0; 4],
             },
             MenuElement::Rect {
                 x: cx - bar_w / 2.0 - bar_border,
