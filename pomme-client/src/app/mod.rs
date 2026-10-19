@@ -436,10 +436,7 @@ impl ApplicationHandler for App {
             match event {
                 WindowEvent::RedrawRequested => {
                     let step = install.frame(&self.core);
-                    if let install::Step::Relaunch(exe) = &step {
-                        if let Err(e) = crate::update::relaunch(exe) {
-                            tracing::error!("Couldn't start the updated client: {e}");
-                        }
+                    if matches!(step, install::Step::Relaunched) {
                         event_loop.exit();
                     }
                     if let install::Step::Done(window) = step {

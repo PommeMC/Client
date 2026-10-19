@@ -329,7 +329,7 @@ mod tests {
         std::env::temp_dir().join(format!("pomme-install-{label}-{}", std::process::id()))
     }
 
-    pub(crate) fn jar(entries: &[(&str, &str)]) -> Vec<u8> {
+    fn jar(entries: &[(&str, &str)]) -> Vec<u8> {
         let entries: Vec<_> = entries
             .iter()
             .map(|&(name, body)| (name, body, 0o644))

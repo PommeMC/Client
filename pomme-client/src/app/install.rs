@@ -34,8 +34,8 @@ pub enum Step {
     Running,
     /// Everything is in; the normal startup takes over the window.
     Done(Arc<Window>),
-    /// A newer release replaced this one; it starts in this one's place.
-    Relaunch(PathBuf),
+    /// A newer release replaced this one and started in its place.
+    Relaunched,
 }
 
 pub struct Install {
@@ -187,11 +187,20 @@ impl Install {
                 0.0,
                 "Download failed. Check your connection, then tap or click to retry.".to_owned(),
             ),
-            State::Updated(exe) => return Step::Relaunch(exe),
+            State::Updated(exe) => match crate::update::relaunch(&exe) {
+                Ok(()) => return Step::Relaunched,
+                Err(e) => {
+                    // This build still runs fine from memory, so it carries
+                    // on as if there were no update.
+                    tracing::error!("Couldn't start the updated client: {e}");
+                    *self.state.lock().unwrap() = State::Done;
+                    (0.0, String::new())
+                }
+            },
             State::Done if self.job == Job::Update && self.needs_assets => {
                 self.job = Job::Assets;
                 self.start(core);
-                return Step::Running;
+                (0.0, String::new())
             }
             State::Done => {
                 // The full renderer makes its own surface on this window.
