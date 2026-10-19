@@ -68,4 +68,10 @@ impl LaunchArgs {
             self.game_dir.as_deref(),
         )
     }
+
+    /// No asset or version folder was passed. A launcher that passes them owns
+    /// them, and an older one still uses the old layout.
+    pub fn owns_data_folder(&self) -> bool {
+        self.assets_dir.is_none() && self.versions_dir.is_none()
+    }
 }

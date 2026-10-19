@@ -51,7 +51,9 @@ fn main() {
     let args = args::LaunchArgs::parse();
 
     // Ahead of logging, which writes into the folders this moves.
-    if let Err(e) = pomme_dirs::migrate() {
+    if args.owns_data_folder()
+        && let Err(e) = pomme_dirs::migrate()
+    {
         eprintln!("Couldn't move the old .pomme folder: {e}");
     }
 

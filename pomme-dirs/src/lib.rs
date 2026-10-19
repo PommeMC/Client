@@ -59,7 +59,8 @@ impl Layout {
 
     /// Moves the launcher-era `.pomme` folder at `old` into this layout. Safe
     /// to run on every start: anything whose new place is already taken, and
-    /// anything unrecognised, stays in `old`.
+    /// anything unrecognised, stays in `old`. A failed step doesn't stop the
+    /// rest; the next run retries it.
     pub fn migrate_from(&self, old: &Path) -> io::Result<()> {
         if !old.is_dir() || old == self.root {
             return Ok(());
@@ -71,6 +72,7 @@ impl Layout {
             }
         }
 
+        let mut result = Ok(());
         let launcher = self.launcher();
         for (from, to) in [
             (old.join("assets"), self.minecraft_assets()),
@@ -81,25 +83,32 @@ impl Layout {
             (old.join("clients"), launcher.join("clients")),
             (old.join("settings.json"), launcher.join("settings.json")),
         ] {
-            merge(&from, &to)?;
+            keep_first(&mut result, merge(&from, &to));
         }
 
+        // After a failed run the launcher may already have written an empty
+        // list here, which would otherwise hide the real one for good.
         let registry = old.join("installations.json");
         let new_registry = launcher.join("installations.json");
-        if registry.is_file() && !new_registry.exists() {
-            let json = fs::read_to_string(&registry)?;
-            fs::create_dir_all(&launcher)?;
-            fs::write(
-                &new_registry,
-                rehome_installations(&json, &installations, &self.profiles()),
-            )?;
-            fs::remove_file(&registry)?;
+        if registry.is_file()
+            && fs::read_to_string(&new_registry).map_or(true, |json| json.trim() == "[]")
+        {
+            let _ = fs::remove_file(&new_registry);
+            keep_first(
+                &mut result,
+                fs::create_dir_all(&launcher).and_then(|()| move_path(&registry, &new_registry)),
+            );
+        }
+        if let Ok(json) = fs::read_to_string(&new_registry)
+            && let Some(rehomed) = rehome_installations(&json, &installations, &self.profiles())
+        {
+            keep_first(&mut result, fs::write(&new_registry, rehomed));
         }
 
         // Older launchers wrote an empty account list nothing reads.
         let accounts = old.join("accounts.json");
         if fs::read_to_string(&accounts).is_ok_and(|json| json.trim() == "[]") {
-            fs::remove_file(&accounts)?;
+            keep_first(&mut result, fs::remove_file(&accounts));
         }
 
         let _ = fs::remove_dir(old);
@@ -110,7 +119,7 @@ impl Layout {
         {
             let _ = fs::remove_dir(parent);
         }
-        Ok(())
+        result
     }
 }
 
@@ -147,7 +156,7 @@ pub fn create_profile(dir: &Path) -> io::Result<()> {
 }
 
 /// Renames `from` to `to`, copying instead when they're on different
-/// volumes.
+/// volumes. If the copy's cleanup fails, `from` is left alongside the copy.
 pub fn move_path(from: &Path, to: &Path) -> io::Result<()> {
     if fs::rename(from, to).is_ok() {
         return Ok(());
@@ -194,14 +203,24 @@ fn merge(from: &Path, to: &Path) -> io::Result<()> {
         }
         return move_path(from, to);
     }
+    let mut result = Ok(());
     if from.is_dir() && to.is_dir() {
         for entry in fs::read_dir(from)? {
             let entry = entry?;
-            merge(&entry.path(), &to.join(entry.file_name()))?;
+            keep_first(
+                &mut result,
+                merge(&entry.path(), &to.join(entry.file_name())),
+            );
         }
         let _ = fs::remove_dir(from);
     }
-    Ok(())
+    result
+}
+
+fn keep_first(result: &mut io::Result<()>, step: io::Result<()>) {
+    if result.is_ok() {
+        *result = step;
+    }
 }
 
 /// The block caches (now kept under `cache/`) and the empty `plugins/` older
@@ -220,22 +239,26 @@ fn drop_stale(profile: &Path) {
 }
 
 /// Points each installation whose `directory` was under `from` at the same
-/// place under `to`. Custom directories elsewhere, and a registry that
-/// doesn't parse, are left as they are.
-fn rehome_installations(json: &str, from: &Path, to: &Path) -> String {
-    let Ok(mut registry) = serde_json::from_str::<serde_json::Value>(json) else {
-        return json.to_owned();
-    };
+/// place under `to` once its folder has moved, so one still in `from` keeps
+/// working there. `None` when nothing changed, including for custom
+/// directories and a registry that doesn't parse.
+fn rehome_installations(json: &str, from: &Path, to: &Path) -> Option<String> {
+    let mut registry = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    let mut changed = false;
     for install in registry.as_array_mut().into_iter().flatten() {
         if let Some(dir) = install.get_mut("directory")
-            && let Some(rest) = dir
-                .as_str()
-                .and_then(|d| Path::new(d).strip_prefix(from).ok())
+            && let Some(old_dir) = dir.as_str().map(PathBuf::from)
+            && let Ok(rest) = old_dir.strip_prefix(from)
+            && !old_dir.exists()
         {
-            *dir = to.join(rest).to_string_lossy().into_owned().into();
+            let new_dir = to.join(rest);
+            if new_dir.exists() {
+                *dir = new_dir.to_string_lossy().into_owned().into();
+                changed = true;
+            }
         }
     }
-    serde_json::to_string_pretty(&registry).unwrap_or_else(|_| json.to_owned())
+    changed.then(|| serde_json::to_string_pretty(&registry).ok())?
 }
 
 #[cfg(test)]
@@ -370,6 +393,56 @@ mod tests {
             fs::read_to_string(old.join("pomme-assets/panoramas/panorama_0.png")).unwrap(),
             "old"
         );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    fn registry_dirs(layout: &Layout) -> Vec<PathBuf> {
+        let json = fs::read_to_string(layout.launcher().join("installations.json")).unwrap();
+        let registry: serde_json::Value = serde_json::from_str(&json).unwrap();
+        registry
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|install| PathBuf::from(install["directory"].as_str().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn an_empty_launcher_registry_gives_way_to_the_real_one() {
+        let base = scratch("empty-registry");
+        let old = base.join(".pomme");
+        let layout = Layout::new(base.join("Pomme"));
+        write(&old.join("installations/default/options.json"), "{}");
+        let registry = serde_json::json!([{ "directory": old.join("installations/default") }]);
+        write(&old.join("installations.json"), &registry.to_string());
+        write(&layout.launcher().join("installations.json"), "[]");
+
+        layout.migrate_from(&old).unwrap();
+
+        assert_eq!(registry_dirs(&layout), [layout.default_profile()]);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_profile_that_cant_move_keeps_its_path_until_it_does() {
+        let base = scratch("stuck-profile");
+        let old = base.join(".pomme");
+        let layout = Layout::new(base.join("Pomme"));
+        let stuck = old.join("installations/stuck");
+        write(&stuck.join("options.json"), "{}");
+        let registry = serde_json::json!([{ "directory": stuck }]);
+        write(&old.join("installations.json"), &registry.to_string());
+        // A file where the profile's folder would go blocks the move.
+        let blocker = layout.profiles().join("stuck");
+        write(&blocker, "");
+
+        layout.migrate_from(&old).unwrap();
+        assert_eq!(registry_dirs(&layout), std::slice::from_ref(&stuck));
+
+        fs::remove_file(&blocker).unwrap();
+        layout.migrate_from(&old).unwrap();
+        assert_eq!(registry_dirs(&layout), [blocker]);
+        assert!(!stuck.exists());
         fs::remove_dir_all(base).unwrap();
     }
 
