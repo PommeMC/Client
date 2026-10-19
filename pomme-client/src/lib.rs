@@ -132,9 +132,6 @@ pub fn run(args: LaunchArgs, platform: Platform) {
 
     let log_dir = data_dirs.game_dir.join("logs");
     std::fs::create_dir_all(&log_dir).unwrap();
-    if let Err(e) = logging::rotate(&log_dir) {
-        eprintln!("Failed to rotate logs: {e}. latest.log will probably be overwritten.");
-    }
     let _guard = logging::init(&log_dir);
 
     // Block-state tables must be loaded before any world/render code runs.

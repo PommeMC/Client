@@ -4,7 +4,16 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
-pub fn init(log_dir: &Path) -> WorkerGuard {
+/// Starts logging once per process, which Android can run `android_main` in
+/// twice. The guard flushes the log file when dropped; Android keeps it for
+/// the process instead, so a later run still writes to that file.
+pub fn init(log_dir: &Path) -> Option<WorkerGuard> {
+    if tracing::dispatcher::has_been_set() {
+        return None;
+    }
+    if let Err(e) = rotate(log_dir) {
+        eprintln!("Failed to rotate logs: {e}. latest.log will probably be overwritten.");
+    }
     let file_appender = tracing_appender::rolling::never(log_dir, "latest.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
@@ -20,12 +29,13 @@ pub fn init(log_dir: &Path) -> WorkerGuard {
                 .with_filter(file_filter),
         )
         .with(console_layer().with_filter(stdout_filter))
-        // Android can run `android_main` twice in one process, and the first
-        // run's subscriber stays installed.
-        .try_init()
-        .ok();
+        .init();
 
-    guard
+    if cfg!(target_os = "android") {
+        std::mem::forget(guard);
+        return None;
+    }
+    Some(guard)
 }
 
 /// Panics to the log. Android drops stderr, so one before logging starts goes
@@ -55,7 +65,7 @@ where
 
 const MAX_LOG_FILES: usize = 5;
 
-pub fn rotate(log_dir: &Path) -> std::io::Result<()> {
+fn rotate(log_dir: &Path) -> std::io::Result<()> {
     let latest = log_dir.join("latest.log");
     if !latest.exists() {
         return Ok(());
