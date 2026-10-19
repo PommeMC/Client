@@ -18,6 +18,11 @@ const REPLACED: &str = "old";
 /// Offline, the check gives up this soon rather than hold the menu back.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// This build's `x.y.z` for display, or "dev" for one that isn't a release.
+pub fn version() -> &'static str {
+    RELEASE.and_then(client::release_version).unwrap_or("dev")
+}
+
 /// Whether this launch checks for a newer release. Not when the old launcher
 /// started it: that keeps its own copies under `launcher/clients`.
 pub fn enabled(args: &crate::LaunchArgs) -> bool {

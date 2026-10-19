@@ -564,7 +564,7 @@ pub(super) fn push_bottom_text(
     });
 
     let name = "Pomme";
-    let tag = "early dev";
+    let tag = crate::update::version();
     let tag_size = fs * 0.65;
     let gap = 2.0 * gs;
     let nw = text_width_fn(name, fs);

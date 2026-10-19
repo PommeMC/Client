@@ -52,10 +52,14 @@ pub fn is_newer(ours: &str, theirs: &str) -> bool {
     }
 }
 
-fn release_core(tag: &str) -> Option<(u32, u32, u32)> {
+/// The `x.y.z` of a `client-vx.y.z+<minecraft>` tag.
+pub fn release_version(tag: &str) -> Option<&str> {
     let core = tag.strip_prefix(TAG_PREFIX)?;
-    let core = core.split_once('+').map_or(core, |(core, _)| core);
-    let mut parts = core.split('.').map(str::parse);
+    Some(core.split_once('+').map_or(core, |(core, _)| core))
+}
+
+fn release_core(tag: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = release_version(tag)?.split('.').map(str::parse);
     let version = (
         parts.next()?.ok()?,
         parts.next()?.ok()?,
@@ -183,6 +187,13 @@ mod tests {
         assert!(!is_newer("client-v0.2.0+26.2", "client-v0.1.5+26.2"));
         assert!(!is_newer("client-v0.2.0+26.2", "launcher-v0.3.0"));
         assert!(!is_newer("dev", "client-v0.3.0+26.2"));
+    }
+
+    #[test]
+    fn the_version_drops_the_minecraft_part() {
+        assert_eq!(release_version("client-v0.2.8+26.2"), Some("0.2.8"));
+        assert_eq!(release_version("client-v0.2.8"), Some("0.2.8"));
+        assert_eq!(release_version("launcher-v0.1.2"), None);
     }
 
     #[test]

@@ -452,12 +452,12 @@ impl MainMenu {
             color: footer_col,
             centered: false,
         });
-        let copy = "Pomme early dev";
-        let copy_w = text_width_fn(copy, footer_size);
+        let copy = format!("Pomme {}", crate::update::version());
+        let copy_w = text_width_fn(&copy, footer_size);
         elements.push(MenuElement::Text {
             x: screen_w - footer_pad - copy_w,
             y: footer_y,
-            text: copy.into(),
+            text: copy,
             scale: footer_size,
             color: footer_col,
             centered: false,
