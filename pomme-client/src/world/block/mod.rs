@@ -410,7 +410,8 @@ const SHARED_BLOCK_DATA: &[(i32, i32)] = &[
 static BLOCK_TABLES: [OnceLock<Vec<BlockData>>; BLOCK_DATA.len()] =
     [const { OnceLock::new() }; BLOCK_DATA.len()];
 
-/// Cached single-state placeable blocks per embedded data file.
+/// Per table slot, each single-state block's one state, for placement
+/// prediction.
 static PLACEABLE_BLOCKS: [OnceLock<HashMap<&'static str, BlockState>>; BLOCK_DATA.len()] =
     [const { OnceLock::new() }; BLOCK_DATA.len()];
 
@@ -803,7 +804,11 @@ fn state_fluid(name: &'static str, props: &PropMap) -> Fluid {
 }
 
 fn table() -> &'static Vec<BlockData> {
-    BLOCK_TABLES[ACTIVE_TABLE.load(std::sync::atomic::Ordering::Acquire)]
+    slot_table(active_table_slot())
+}
+
+fn slot_table(slot: usize) -> &'static Vec<BlockData> {
+    BLOCK_TABLES[slot]
         .get()
         .expect("world::block::init must be called before use")
 }
@@ -919,7 +924,11 @@ fn block_data(state: BlockState) -> &'static BlockData {
 
 /// Every valid block state paired with its cached data, in id order.
 fn all_states() -> impl Iterator<Item = (BlockState, &'static BlockData)> {
-    table().iter().enumerate().map(|(id, data)| {
+    slot_states(active_table_slot())
+}
+
+fn slot_states(slot: usize) -> impl Iterator<Item = (BlockState, &'static BlockData)> {
+    slot_table(slot).iter().enumerate().map(|(id, data)| {
         let state = BlockState::try_from(id as u32).expect("table indices fit the id repr");
         (state, data)
     })
@@ -959,18 +968,18 @@ pub(crate) fn states_in_slot(slot: usize) -> impl Iterator<Item = StateInfo> {
         })
 }
 
-/// Resolves a held item's registry name to the `BlockState` to predict on
-/// placement in the currently active protocol's state space, or `None` if the
-/// item is not a single-state block.
+/// Resolves a held item's registry name (unprefixed, e.g. `"stone"`) to the
+/// `BlockState` to predict on placement, in the active protocol's state
+/// space, or `None` if the item is not a single-state block. Item and block
+/// share a registry name for this set.
 pub fn placeable_block_for_item(item_name: &str) -> Option<BlockState> {
-    let slot = ACTIVE_TABLE.load(std::sync::atomic::Ordering::Acquire);
+    placeable_block_in_slot(active_table_slot(), item_name)
+}
+
+fn placeable_block_in_slot(slot: usize, item_name: &str) -> Option<BlockState> {
     let map = PLACEABLE_BLOCKS[slot].get_or_init(|| {
-        let table = BLOCK_TABLES[slot]
-            .get()
-            .expect("active block table must be initialized");
         let mut seen: HashMap<&'static str, Option<BlockState>> = HashMap::new();
-        for (id, data) in table.iter().enumerate() {
-            let state = BlockState::try_from(id as u32).expect("table indices fit the id repr");
+        for (state, data) in slot_states(slot) {
             seen.entry(data.id)
                 .and_modify(|v| *v = None)
                 .or_insert(Some(state));
@@ -1887,35 +1896,20 @@ mod tests {
         assert_eq!(block_data_slot(native), Some(NATIVE_SLOT));
     }
 
+    /// Placement prediction reads the spoken version's table, built here
+    /// without switching to it, since other tests read the active one.
     #[test]
-    fn placeable_block_tracks_active_protocol() {
-        // Test that placeable_block_for_item returns the state ID matching the active
-        // protocol.
-        set_active_protocol(777); // 26.3
-        let obsidian_26_3 =
-            placeable_block_for_item("obsidian").expect("obsidian should be placeable");
-        let blackstone_26_3 =
-            placeable_block_for_item("blackstone").expect("blackstone should be placeable");
-        let redstone_block_26_3 =
-            placeable_block_for_item("redstone_block").expect("redstone_block should be placeable");
-        assert_eq!(block_id(obsidian_26_3), "obsidian");
-        assert_eq!(block_id(blackstone_26_3), "blackstone");
-        assert_eq!(block_id(redstone_block_26_3), "redstone_block");
-
-        set_active_protocol(pomme_protocol::version::NATIVE.protocol); // 26.2
-        let obsidian_26_2 =
-            placeable_block_for_item("obsidian").expect("obsidian should be placeable");
-        let blackstone_26_2 =
-            placeable_block_for_item("blackstone").expect("blackstone should be placeable");
-        let redstone_block_26_2 =
-            placeable_block_for_item("redstone_block").expect("redstone_block should be placeable");
-        assert_eq!(block_id(obsidian_26_2), "obsidian");
-        assert_eq!(block_id(blackstone_26_2), "blackstone");
-        assert_eq!(block_id(redstone_block_26_2), "redstone_block");
-
-        // The state IDs in 26.3 and 26.2 differ due to protocol shifts.
-        assert_ne!(obsidian_26_3, obsidian_26_2);
-        assert_ne!(blackstone_26_3, blackstone_26_2);
-        assert_ne!(redstone_block_26_3, redstone_block_26_2);
+    fn placeable_block_follows_the_table_slot() {
+        let native = prewarm_protocol(pomme_protocol::version::NATIVE.protocol);
+        let newer = prewarm_protocol(777);
+        for name in ["obsidian", "blackstone", "redstone_block"] {
+            let [native_state, newer_state] = [native, newer].map(|slot| {
+                let state = placeable_block_in_slot(slot, name).expect(name);
+                assert_eq!(slot_table(slot)[u32::from(state) as usize].id, name);
+                state
+            });
+            // 26.3's added blocks shift these ids.
+            assert_ne!(native_state, newer_state, "{name}");
+        }
     }
 }

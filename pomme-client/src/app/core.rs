@@ -3097,7 +3097,7 @@ impl AppCore {
         );
         let place_block = held_item
             .as_deref()
-            .and_then(|name| renderer.registry().placeable_block_for_item(name));
+            .and_then(crate::world::block::placeable_block_for_item);
         let hands_empty = held_stack.is_none() && game.player.inventory.offhand().is_empty();
         let player_aabb = game.player.bounding_box();
         let mut effects = crate::player::interaction::BreakEffects {
