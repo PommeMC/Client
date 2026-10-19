@@ -32,13 +32,10 @@ impl Assets {
         }
         let asset_index = AssetIndex::load(&dirs.indexes_dir, &dirs.objects_dir, version);
 
-        // A scratch game dir so the bench neither reads a stale block cache
-        // nor rewrites the real one.
-        let game_dir = std::env::temp_dir().join(format!("pomme_cpu_bench_{}", std::process::id()));
-        std::fs::create_dir_all(&game_dir).map_err(|e| format!("{}: {e}", game_dir.display()))?;
+        // No block cache, so the bench neither reads a stale one nor rewrites
+        // the real one.
         eprintln!("cpu-bench: loading block models...");
-        let registry = BlockRegistry::load(&dirs.jar_assets_dir, &asset_index, &game_dir, None);
-        std::fs::remove_dir_all(&game_dir).ok();
+        let registry = BlockRegistry::load(&dirs.jar_assets_dir, &asset_index, None, None);
 
         eprintln!("cpu-bench: packing texture atlas...");
         let (texture_names, generated_item_textures) = atlas_texture_names(&registry);

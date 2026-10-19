@@ -11,7 +11,7 @@ use azalea_registry::Registry as AzaleaRegistry;
 use azalea_registry::builtin::{MobEffect, Potion};
 use serde::{Deserialize, Serialize};
 
-pub const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
+const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
 
 use super::model;
 use super::model::BakedModel;
@@ -113,21 +113,19 @@ impl BlockRegistry {
     pub fn load(
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
-        game_dir: &Path,
+        cache_dir: Option<&Path>,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
     ) -> Self {
-        let cache_path = game_dir.join(BLOCK_CACHE_FILE);
+        // Only vanilla textures are cached, so a cache shared between
+        // profiles never carries one profile's resource packs into another.
+        let cache_path = cache_dir
+            .filter(|_| packs.is_none())
+            .map(|dir| dir.join(BLOCK_CACHE_FILE));
 
-        let textures = if packs.is_none() {
-            if let Some(cached) = load_cache(&cache_path) {
-                tracing::info!("Block registry: {} blocks (cached textures)", cached.len());
-                Some(cached)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let textures = cache_path.as_deref().and_then(load_cache);
+        if let Some(cached) = &textures {
+            tracing::info!("Block registry: {} blocks (cached textures)", cached.len());
+        }
 
         let textures = textures.unwrap_or_else(|| {
             let mut textures = model::load_all_block_textures(jar_assets_dir, asset_index, packs);
@@ -139,11 +137,10 @@ impl BlockRegistry {
                 .entry("lava".into())
                 .or_insert_with(|| FaceTextures::uniform("lava_still", Tint::None));
 
-            save_cache(&cache_path, &textures);
-            tracing::info!(
-                "Block registry: {} blocks (built and cached)",
-                textures.len()
-            );
+            if let Some(path) = &cache_path {
+                save_cache(path, &textures);
+            }
+            tracing::info!("Block registry: {} blocks (built)", textures.len());
             textures
         });
 
@@ -542,6 +539,9 @@ fn load_cache(path: &Path) -> Option<HashMap<String, FaceTextures>> {
 }
 
 fn save_cache(path: &Path, textures: &HashMap<String, FaceTextures>) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     if let Ok(json) = serde_json::to_string(textures)
         && let Err(e) = std::fs::write(path, json)
     {

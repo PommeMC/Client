@@ -1212,17 +1212,13 @@ impl AppCore {
     }
 
     /// Rebuilds every asset a pack can override. Only call this once the
-    /// active stack has really changed: it waits for device idle, drops the
-    /// block cache and rebuilds the texture atlas. Clearing
+    /// active stack has really changed: it waits for device idle and rebuilds
+    /// the texture atlas. Clearing
     /// `menu.reload_assets` and `menu.reload_fonts` is safe here because the
     /// pending toggles they stand for are covered by the reload we just did.
     pub(crate) fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
         self.menu.active_packs = self.resource_packs.active_pack_info();
-        renderer.reload_assets(
-            &self.data_dirs.game_dir,
-            &self.resource_packs,
-            self.menu.font_options(),
-        );
+        renderer.reload_assets(&self.resource_packs, self.menu.font_options());
         self.audio.reload_assets(&self.resource_packs);
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects

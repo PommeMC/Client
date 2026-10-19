@@ -5302,7 +5302,6 @@ dependencies = [
  "clap",
  "criterion",
  "crossbeam-channel",
- "directories",
  "discord-rich-presence",
  "fastrand",
  "flate2",
@@ -5317,6 +5316,7 @@ dependencies = [
  "open",
  "parking_lot",
  "png 0.17.16",
+ "pomme-dirs",
  "pomme-gpu-allocator",
  "pomme-protocol",
  "pomme-singleplayer",
@@ -5348,6 +5348,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pomme-dirs"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "serde_json",
+]
+
+[[package]]
 name = "pomme-gpu-allocator"
 version = "0.1.0"
 dependencies = [
@@ -5365,11 +5373,11 @@ name = "pomme-launcher"
 version = "0.1.2"
 dependencies = [
  "base64 0.23.1",
- "directories",
  "hickory-resolver 0.25.2",
  "keyring",
  "log",
  "open",
+ "pomme-dirs",
  "pomme-protocol",
  "rand 0.10.3",
  "reqwest",

@@ -199,6 +199,7 @@ impl Renderer {
         window: Arc<Window>,
         font_sources: FontSources<'_>,
         game_dir: &Path,
+        cache_dir: &Path,
         vsync: bool,
         panorama_dir: &Path,
     ) -> Result<Self, RendererError> {
@@ -213,9 +214,9 @@ impl Renderer {
         let registry_handle = {
             let jar_assets_dir = jar_assets_dir.to_path_buf();
             let asset_index = asset_index.clone();
-            let game_dir = game_dir.to_path_buf();
+            let cache_dir = cache_dir.to_path_buf();
             std::thread::spawn(move || {
-                BlockRegistry::load(&jar_assets_dir, &asset_index, &game_dir, None)
+                BlockRegistry::load(&jar_assets_dir, &asset_index, Some(&cache_dir), None)
             })
         };
 
@@ -1223,22 +1224,13 @@ impl Renderer {
 
     pub fn reload_assets(
         &mut self,
-        game_dir: &Path,
         packs: &crate::resource_pack::ResourcePackManager,
         font_options: FontOptions,
     ) {
         self.ctx.device.wait_idle().unwrap();
 
-        let cache_path = game_dir.join(crate::world::block::registry::BLOCK_CACHE_FILE);
-        let _ = std::fs::remove_file(&cache_path);
-        tracing::info!("Invalidated block cache");
-
-        self.registry = BlockRegistry::load(
-            &self.jar_assets_dir,
-            &self.asset_index,
-            game_dir,
-            Some(packs),
-        );
+        self.registry =
+            BlockRegistry::load(&self.jar_assets_dir, &self.asset_index, None, Some(packs));
 
         self.item_entity_pipeline
             .clear_meshes(&self.ctx.device, &self.ctx.allocator);

@@ -55,6 +55,7 @@ jobs:
         run: |
           cargo fmt -p pomme-client -- --check
           cargo fmt -p pomme-protocol -- --check
+          cargo fmt -p pomme-dirs -- --check
 
       # Singleplayer is checked on Linux only, so SteelMC is not built three
       # times over.
@@ -62,12 +63,14 @@ jobs:
         run: |
           cargo clippy -p pomme-client --release --all-targets --no-default-features -- -D warnings
           cargo clippy -p pomme-protocol --release --all-targets --all-features -- -D warnings
+          cargo clippy -p pomme-dirs --release --all-targets -- -D warnings
 
       - name: Tests
         if: matrix.os == 'ubuntu-latest'
         # --release reuses the dependency artifacts the clippy step built.
         run: |
           cargo test -p pomme-protocol
+          cargo test -p pomme-dirs
           cargo test -p pomme-client --release --no-default-features
 
       - name: Pin the steel revision

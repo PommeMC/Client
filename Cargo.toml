@@ -5,6 +5,7 @@ members = [
     "pomme-launcher/src-tauri",
     "pomme-gpu-allocator",
     "pomme-block",
+    "pomme-dirs",
     "pomme-protocol",
     "pomme-singleplayer",
     "tools/blockgen",

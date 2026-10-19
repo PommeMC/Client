@@ -6,6 +6,7 @@
 pomme-client/         # Minecraft client (Rust, Vulkan)
 pomme-launcher/       # Launcher app (Tauri, React, TypeScript)
 pomme-protocol/       # Per-version protocol data and wire encoding
+pomme-dirs/           # The data folder layout the client and launcher share
 pomme-block/          # Data-free stand-in for azalea-block; block tables are Pomme's own
 pomme-singleplayer/   # Runs SteelMC in-process as the integrated server
 pomme-gpu-allocator/  # Vendored fork of the gpu-allocator crate
@@ -103,6 +104,22 @@ Running the standalone client requires minecraft assets, for which you have 2 op
      --versions-dir $PWD/reference/versions \
      --game-dir $PWD/reference/game-dir
    ```
+
+### Data folder
+
+The client and launcher share one per-user folder: `%LOCALAPPDATA%\Pomme` on
+Windows, `~/Library/Application Support/Pomme` on macOS and
+`~/.local/share/pomme` on Linux. An older `.pomme` folder is moved into it on
+first launch.
+
+```
+minecraft/assets/     asset index and objects
+minecraft/versions/   each version's json, jar and extracted assets
+pomme-assets/         Pomme's branded assets
+profiles/<name>/      options, servers, saves, screenshots, logs, mods, packs
+cache/<version>/      rebuildable; safe to delete
+launcher/             launcher-only settings, installations and client builds
+```
 
 ## Development commands
 

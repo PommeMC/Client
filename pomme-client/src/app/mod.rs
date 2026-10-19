@@ -297,6 +297,7 @@ impl ApplicationHandler for App {
                         options: self.core.menu.font_options(),
                     },
                     &self.core.data_dirs.game_dir,
+                    &self.core.data_dirs.cache_dir,
                     self.core.menu.vsync,
                     &self.core.menu.theme().panorama_dir(&self.core.data_dirs),
                 ) {

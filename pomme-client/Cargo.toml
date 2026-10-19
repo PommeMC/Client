@@ -26,7 +26,6 @@ shaderc = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-directories = { workspace = true }
 sha1_smol = { workspace = true }
 open = { workspace = true }
 base64 = { workspace = true }
@@ -49,6 +48,7 @@ tracing-appender = "0.2"
 # stalls the main thread. Mirrors vanilla (JVM TLABs + LWJGL's jemalloc).
 mimalloc = "0.1"
 pomme-gpu-allocator = { path = "../pomme-gpu-allocator" }
+pomme-dirs = { path = "../pomme-dirs" }
 pomme-protocol = { path = "../pomme-protocol" }
 pomme-singleplayer = { path = "../pomme-singleplayer", optional = true }
 winit = { version = "0.30", features = ["rwh_06"] }

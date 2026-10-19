@@ -650,9 +650,7 @@ pub async fn save_servers(servers: Vec<crate::ping::SavedServer>) -> Result<(), 
 }
 
 fn servers_path() -> std::path::PathBuf {
-    storage::installations_dir()
-        .join("default")
-        .join("servers.json")
+    storage::default_profile().join("servers.json")
 }
 
 #[tauri::command]
