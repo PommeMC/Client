@@ -13,6 +13,7 @@ use thiserror::Error;
 use winit::window::Window;
 
 use super::MAX_FRAMES_IN_FLIGHT;
+use crate::renderer::GpuType;
 
 #[derive(Error, Debug)]
 pub enum ContextError {
@@ -74,7 +75,10 @@ pub struct VulkanContext {
     debug_messenger: vk::DebugUtilsMessengerEXT,
 
     pub gpu_name: String,
+    pub gpu_type: GpuType,
+    pub gpu_vendor_id: u32,
     pub vulkan_version: String,
+    pub driver_info: Option<String>,
 }
 
 impl VulkanContext {
@@ -155,21 +159,60 @@ impl VulkanContext {
         let (physical_device, graphics_family, present_family) =
             pick_physical_device(&instance, surface)?;
 
-        let (gpu_name, vulkan_version) = {
-            let props = physical_device.get_properties();
-            let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
-                .to_string_lossy()
-                .into_owned();
-            let v = props.api_version;
-            let ver = format!(
-                "Vulkan {}.{}.{}",
-                vk::api_version_major(v),
-                vk::api_version_minor(v),
-                vk::api_version_patch(v)
-            );
-            (name, ver)
+        let props = physical_device.get_properties();
+
+        let gpu_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+
+        let v = props.api_version;
+        let vulkan_version = format!(
+            "Vulkan {}.{}.{}",
+            vk::api_version_major(v),
+            vk::api_version_minor(v),
+            vk::api_version_patch(v)
+        );
+
+        let gpu_type = match props.device_type {
+            vk::PhysicalDeviceType::IntegratedGpu => GpuType::Integrated,
+            vk::PhysicalDeviceType::DiscreteGpu => GpuType::Discrete,
+            vk::PhysicalDeviceType::VirtualGpu => GpuType::Virtual,
+            vk::PhysicalDeviceType::Cpu => GpuType::Cpu,
+            vk::PhysicalDeviceType::Other => GpuType::Other,
         };
+
+        let gpu_vendor_id = props.vendor_id;
+        let driver_info = {
+            if v >= vk::make_api_version(0, 1, 2, 0) {
+                let mut driver = vk::PhysicalDeviceDriverProperties::default();
+                let mut props2 = vk::PhysicalDeviceProperties2::default().next(&mut driver);
+
+                physical_device.get_properties2(&mut props2);
+
+                let text = |raw: &[c_char]| unsafe {
+                    CStr::from_ptr(raw.as_ptr())
+                        .to_string_lossy()
+                        .trim()
+                        .to_owned()
+                };
+
+                let name = text(&driver.driver_name);
+                let info = text(&driver.driver_info);
+
+                if name.is_empty() || info.is_empty() {
+                    None
+                } else {
+                    Some(format!("{name} {info}"))
+                }
+            } else {
+                None
+            }
+        };
+
         tracing::info!("GPU: {gpu_name} ({vulkan_version})");
+        if let Some(driver_info) = driver_info.as_ref() {
+            tracing::info!("GPU driver: {driver_info}");
+        }
 
         let queue_priority = 1.0f32;
 
@@ -308,7 +351,10 @@ impl VulkanContext {
             #[cfg(debug_assertions)]
             debug_messenger,
             gpu_name,
+            gpu_type,
+            gpu_vendor_id,
             vulkan_version,
+            driver_info,
         })
     }
 

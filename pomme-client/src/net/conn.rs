@@ -12,6 +12,8 @@
 
 use std::fmt::Debug;
 use std::io::{self, Cursor};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use azalea_crypto::{Aes128CfbDec, Aes128CfbEnc};
 use azalea_protocol::packets::{Packet, ProtocolPacket};
@@ -29,12 +31,67 @@ pub struct RawReader {
     buffer: Cursor<Vec<u8>>,
     compression_threshold: Option<u32>,
     dec_cipher: Option<Aes128CfbDec>,
+    stats: Arc<PacketStats>,
 }
 
 pub struct RawWriter {
     stream: NetWriter,
     compression_threshold: Option<u32>,
     enc_cipher: Option<Aes128CfbEnc>,
+    stats: Arc<PacketStats>,
+}
+
+#[derive(Default)]
+pub struct PacketStats {
+    sent: AtomicU32,
+    received: AtomicU32,
+    /// f32 bits
+    avg_sent: AtomicU32,
+    /// f32 bits
+    avg_received: AtomicU32,
+    tick_count: AtomicU32,
+    in_bundle: AtomicBool,
+}
+
+impl PacketStats {
+    pub fn on_sent(&self) {
+        self.sent.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn on_received(&self) {
+        // Vanilla's PacketBundlePacker hands one packet to channelRead0 per bundle.
+        if !self.in_bundle.load(Ordering::Relaxed) {
+            self.received.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn toggle_bundle(&self) {
+        self.in_bundle.fetch_xor(true, Ordering::Relaxed);
+    }
+
+    pub fn tick(&self) {
+        if self
+            .tick_count
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(20)
+        {
+            let sent = self.sent.swap(0, Ordering::Relaxed) as f32;
+            let received = self.received.swap(0, Ordering::Relaxed) as f32;
+            let avg_s = f32::from_bits(self.avg_sent.load(Ordering::Relaxed));
+            let avg_r = f32::from_bits(self.avg_received.load(Ordering::Relaxed));
+            self.avg_sent
+                .store((0.25 * sent + 0.75 * avg_s).to_bits(), Ordering::Relaxed);
+            self.avg_received.store(
+                (0.25 * received + 0.75 * avg_r).to_bits(),
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    pub fn avg_sent(&self) -> f32 {
+        f32::from_bits(self.avg_sent.load(Ordering::Relaxed))
+    }
+    pub fn avg_received(&self) -> f32 {
+        f32::from_bits(self.avg_received.load(Ordering::Relaxed))
+    }
 }
 
 /// Held as two fields rather than behind accessors so the game loop can read
@@ -49,19 +106,22 @@ impl RawReader {
     // TODO: no maximum frame length, so a hostile length prefix buffers without
     // bound. Inherited from azalea's framing; cap it if framing moves here.
     pub async fn read(&mut self) -> Result<Box<[u8]>, Box<ReadPacketError>> {
-        read_raw_packet(
+        let frame = read_raw_packet(
             &mut self.stream,
             &mut self.buffer,
             self.compression_threshold,
             &mut self.dec_cipher,
         )
-        .await
+        .await?;
+        self.stats.on_received();
+        Ok(frame)
     }
 }
 
 impl RawWriter {
     /// Writes one already-serialized frame, compressing and encrypting it.
     pub async fn write(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.stats.on_sent();
         write_raw_packet(
             frame,
             &mut self.stream,
@@ -124,13 +184,20 @@ impl Conn {
                 buffer: Cursor::new(Vec::new()),
                 compression_threshold: None,
                 dec_cipher: None,
+                stats: Arc::default(),
             },
             writer: RawWriter {
                 stream: stream_out,
                 compression_threshold: None,
                 enc_cipher: None,
+                stats: Arc::default(),
             },
         }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<PacketStats>) {
+        self.reader.stats = stats.clone();
+        self.writer.stats = stats;
     }
 
     pub async fn read_packet<P: ProtocolPacket + Debug>(
@@ -161,6 +228,10 @@ impl Conn {
         let (enc_cipher, dec_cipher) = azalea_crypto::create_cipher(&key);
         self.reader.dec_cipher = Some(dec_cipher);
         self.writer.enc_cipher = Some(enc_cipher);
+    }
+
+    pub fn stats(&self) -> &Arc<PacketStats> {
+        &self.reader.stats
     }
 }
 
