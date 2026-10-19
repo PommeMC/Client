@@ -160,30 +160,38 @@ pub fn create_profile(dir: &Path) -> io::Result<()> {
 
 /// Renames `from` to `to`, copying instead when they're on different
 /// volumes. The copy goes through `<to>.part`, so `to` only ever appears
-/// complete; if deleting `from` then fails, `from` is left alongside it.
+/// complete, and the `.part` never outlives the call; if deleting `from` then
+/// fails, `from` is left alongside `to`.
 pub fn move_path(from: &Path, to: &Path) -> io::Result<()> {
-    if fs::rename(from, to).is_ok() {
-        return Ok(());
-    }
-    copy_then_remove(from, to)
-}
-
-fn copy_then_remove(from: &Path, to: &Path) -> io::Result<()> {
     let mut part = to.as_os_str().to_owned();
     part.push(".part");
     let part = PathBuf::from(part);
-    let dir = from.is_dir();
-    if dir {
-        let _ = fs::remove_dir_all(&part);
-        copy_dir(from, &part)?;
-    } else {
-        fs::copy(from, &part)?;
+    // A stale one is from an earlier attempt that got cut off.
+    let _ = remove(&part);
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
     }
-    fs::rename(&part, to)?;
-    if dir {
-        fs::remove_dir_all(from)
+    copy_then_remove(from, to, &part)
+}
+
+fn copy_then_remove(from: &Path, to: &Path, part: &Path) -> io::Result<()> {
+    let copied = if from.is_dir() {
+        copy_dir(from, part)
     } else {
-        fs::remove_file(from)
+        fs::copy(from, part).map(drop)
+    };
+    if let Err(e) = copied.and_then(|()| fs::rename(part, to)) {
+        let _ = remove(part);
+        return Err(e);
+    }
+    remove(from)
+}
+
+fn remove(path: &Path) -> io::Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
     }
 }
 
@@ -326,6 +334,12 @@ mod tests {
         let old = base.join(".pomme");
         let layout = Layout::new(base.join("Pomme"));
         (base, old, layout)
+    }
+
+    /// A scratch base with a `from` to move and the `to` it goes to.
+    fn from_and_to(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = scratch(name);
+        (base.clone(), base.join("from"), base.join("to"))
     }
 
     /// An old `installations.json` listing one installation at `dir`.
@@ -538,21 +552,46 @@ mod tests {
     }
 
     #[test]
-    fn a_copied_move_replaces_a_cut_off_copy() {
-        let base = scratch("copied-move");
-        let from = base.join("from");
-        let to = base.join("to");
+    fn a_copied_move_leaves_a_complete_copy() {
+        let (base, from, to) = from_and_to("copied-move");
+        let part = base.join("to.part");
         write(&from.join("saves/world/level.dat"), "world");
-        // What a copy that ran out of space left behind.
-        write(&base.join("to.part/saves/world/level.dat"), "");
 
-        copy_then_remove(&from, &to).unwrap();
+        copy_then_remove(&from, &to, &part).unwrap();
 
         assert_eq!(
             fs::read_to_string(to.join("saves/world/level.dat")).unwrap(),
             "world"
         );
         assert!(!from.exists());
+        assert!(!part.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_move_clears_a_cut_off_copy() {
+        let (base, from, to) = from_and_to("cut-off-copy");
+        write(&from.join("level.dat"), "world");
+        // What a copy that ran out of space left behind.
+        write(&base.join("to.part/level.dat"), "");
+
+        move_path(&from, &to).unwrap();
+
+        assert_eq!(fs::read_to_string(to.join("level.dat")).unwrap(), "world");
+        assert!(!base.join("to.part").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_move_onto_a_taken_folder_fails_without_a_part() {
+        let (base, from, to) = from_and_to("taken-folder");
+        write(&from.join("level.dat"), "world");
+        write(&to.join("level.dat"), "other");
+
+        assert!(move_path(&from, &to).is_err());
+
+        assert_eq!(fs::read_to_string(from.join("level.dat")).unwrap(), "world");
+        assert_eq!(fs::read_to_string(to.join("level.dat")).unwrap(), "other");
         assert!(!base.join("to.part").exists());
         fs::remove_dir_all(base).unwrap();
     }
