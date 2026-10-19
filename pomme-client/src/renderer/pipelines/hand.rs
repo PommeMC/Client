@@ -8,6 +8,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::renderer::camera::both_eyes;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, SkinData, shader, util};
 const NEAR: f32 = 0.05;
 const FAR: f32 = 10.0;
@@ -19,10 +20,20 @@ struct HandVertex {
     uv: [f32; 2],
 }
 
+/// `hand.vert`'s uniform, shared by the hand and the GUI previews: one matrix
+/// per eye in a multiview pass.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct HandUniform {
-    mvp: [[f32; 4]; 4],
+pub(crate) struct HandUniform {
+    mvps: [[[f32; 4]; 4]; 2],
+}
+
+pub(crate) fn write_hand_uniform(alloc: &mut Allocation, mvp: &Mat4) {
+    let uniform = HandUniform {
+        mvps: both_eyes(*mvp),
+    };
+    let bytes = bytemuck::bytes_of(&uniform);
+    alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
 }
 
 pub struct HandPipeline {
@@ -228,13 +239,7 @@ impl HandPipeline {
             * Mat4::from_translation(Vec3::new(5.6, 0.0, 0.0))
             * arm_local_rot;
 
-        let mvp = proj * bob * model;
-        let uniform = HandUniform {
-            mvp: mvp.to_cols_array_2d(),
-        };
-        let bytes = bytemuck::bytes_of(&uniform);
-        self.mvp_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
-            .copy_from_slice(bytes);
+        write_hand_uniform(&mut self.mvp_allocations[frame], &(proj * bob * model));
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
         cmd.bind_descriptor_sets(

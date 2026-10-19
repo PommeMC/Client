@@ -225,6 +225,10 @@ impl VulkanContext {
             draw_indirect_first_instance: vk::TRUE,
             ..Default::default()
         };
+        let mut multiview_features = vk::PhysicalDeviceMultiviewFeatures {
+            multiview: vk::TRUE,
+            ..Default::default()
+        };
         let mut vk12_features = vk::PhysicalDeviceVulkan12Features {
             draw_indirect_count: vk::TRUE,
             ..Default::default()
@@ -260,7 +264,8 @@ impl VulkanContext {
             enabled_extension_names: device_extension_names.as_ptr(),
             enabled_features: &enabled_features,
             ..Default::default()
-        };
+        }
+        .next(&mut multiview_features);
         // Only a 1.2 device takes the struct, so it's chained only with the count.
         if indirect_draw.count {
             device_info = device_info.next(&mut vk12_features);
@@ -398,8 +403,10 @@ fn pick_physical_device(
         .filter_map(|pd| {
             let (gf, pf) = find_queue_families(&pd, surface)?;
             // The chunk pass indexes each section's meta by `firstInstance`.
+            // Every world shader reads `gl_ViewIndex` (one pass, both eyes in VR).
             if !supports_extensions(&pd, DEVICE_EXTENSIONS)
                 || pd.get_features().draw_indirect_first_instance != vk::TRUE
+                || !supports_multiview(&pd)
             {
                 return None;
             }
@@ -459,6 +466,16 @@ fn window_surface(
         window.display_handle()?.as_raw(),
         window_handle,
     )?)
+}
+
+fn supports_multiview(device: &vk::PhysicalDevice) -> bool {
+    if device.get_properties().api_version < vk::API_VERSION_1_1 {
+        return false;
+    }
+    let mut multiview = vk::PhysicalDeviceMultiviewFeatures::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default().next(&mut multiview);
+    device.get_features2(&mut features);
+    multiview.multiview == vk::TRUE
 }
 
 fn supports_draw_indirect_count(device: &vk::PhysicalDevice) -> bool {

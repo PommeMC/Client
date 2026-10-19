@@ -13,9 +13,9 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use super::entity_renderer::WHITE_TINT;
+use super::hand::{HandUniform, write_hand_uniform};
 use super::skin_preview::{
-    PREVIEW_ALPHA_CUTOFF, Uniform, Vertex, create_pipeline, preview_push_constant_range,
-    push_preview_style, write_uniform,
+    PREVIEW_ALPHA_CUTOFF, Vertex, create_pipeline, preview_push_constant_range, push_preview_style,
 };
 use crate::assets::{AssetIndex, load_image, resolve_asset_path};
 use crate::renderer::{BookPreview, MAX_FRAMES_IN_FLIGHT, util};
@@ -132,13 +132,13 @@ impl BookPreviewPipeline {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
-                std::mem::size_of::<Uniform>() as u64,
+                std::mem::size_of::<HandUniform>() as u64,
                 "book_mvp",
             );
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
-                range: std::mem::size_of::<Uniform>() as u64,
+                range: std::mem::size_of::<HandUniform>() as u64,
             };
             let write = vk::WriteDescriptorSet {
                 dst_set: *set,
@@ -257,7 +257,7 @@ impl BookPreviewPipeline {
             Vec4::new(0.0, 0.0, s / 2000.0, 0.0),
             Vec4::new(bx, by, 0.5, 1.0),
         );
-        write_uniform(&mut self.mvp_allocations[frame], &clip);
+        write_hand_uniform(&mut self.mvp_allocations[frame], &clip);
 
         // GuiBookModelRenderer.renderToTexture's pose chain.
         let open = p.open;

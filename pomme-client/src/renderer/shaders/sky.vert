@@ -1,7 +1,9 @@
 #version 450
+#extension GL_EXT_multiview : require
 
 layout(set = 0, binding = 0) uniform SkyUBO {
-    mat4 view_proj;
+    // One per eye in a multiview (VR) pass.
+    mat4 view_projs[2];
     vec4 sky_color;
     vec4 sunrise_color;
     float sun_angle;
@@ -47,6 +49,6 @@ void main() {
         );
     }
 
-    gl_Position = view_proj * vec4(pos, 1.0);
+    gl_Position = view_projs[gl_ViewIndex] * vec4(pos, 1.0);
     v_uv = in_uv;
 }

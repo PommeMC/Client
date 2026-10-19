@@ -539,7 +539,8 @@ impl Camera {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
-    view_proj: [[f32; 4]; 4],
+    /// One per eye in a multiview (VR) pass.
+    view_projs: [[[f32; 4]; 4]; 2],
     /// xyz: eye position relative to the render anchor (small, full f32
     /// precision; see `Camera::anchor`), w: fog start. All world-space data
     /// is uploaded anchor-relative, so shaders never see large floats.
@@ -550,9 +551,14 @@ pub struct CameraUniform {
     camera_block: [i32; 4],
     /// xy: the environmental fog band (vanilla `environmentalStart/End`,
     /// spherical), layered by max() over the render-distance band in the .w
-    /// lanes above. Appended last so shaders that don't fog can keep their
-    /// shorter prefix declarations.
+    /// lanes above.
     fog_env: [f32; 4],
+}
+
+/// One matrix in both eye slots of a multiview uniform, for a single view.
+pub(crate) fn both_eyes(m: Mat4) -> [[[f32; 4]; 4]; 2] {
+    let m = m.to_cols_array_2d();
+    [m, m]
 }
 
 // Vanilla FogType.WATER defaults (EnvironmentAttributes): color 0xFF050533,
@@ -607,7 +613,7 @@ impl CameraUniform {
             (blocks - span, blocks, ENV_FOG_START, ENV_FOG_END, sky_color)
         };
         Self {
-            view_proj: camera.view_projection().to_cols_array_2d(),
+            view_projs: both_eyes(camera.view_projection()),
             camera_pos: [pos.x, pos.y, pos.z, fog_start],
             fog_color: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_end],
             camera_block: anchor.as_ivec3().extend(0).to_array(),
@@ -619,7 +625,7 @@ impl CameraUniform {
     /// buffer (a zero band reads as "everything past 0 is fogged").
     pub fn with_view_proj(view_proj: Mat4) -> Self {
         Self {
-            view_proj: view_proj.to_cols_array_2d(),
+            view_projs: both_eyes(view_proj),
             camera_pos: [0.0, 0.0, 0.0, f32::MAX],
             fog_color: [0.0, 0.0, 0.0, f32::MAX],
             camera_block: [0; 4],
@@ -631,6 +637,15 @@ impl CameraUniform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_uniform_matches_std140_layout() {
+        // camera_ubo.glsl: mat4[2] then four vec4s, no padding.
+        assert_eq!(std::mem::offset_of!(CameraUniform, camera_pos), 128);
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 192);
+        let uniform = CameraUniform::with_view_proj(Mat4::from_scale(Vec3::splat(2.0)));
+        assert_eq!(uniform.view_projs[0], uniform.view_projs[1]);
+    }
 
     fn assert_mat4_close(actual: Mat4, expected: Mat4, context: &str) {
         let actual = actual.to_cols_array();

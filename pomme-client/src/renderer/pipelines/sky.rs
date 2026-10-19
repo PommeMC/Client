@@ -7,7 +7,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::camera::Camera;
+use crate::renderer::camera::{Camera, both_eyes};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const STAR_COUNT: u32 = 1500;
@@ -92,7 +92,7 @@ struct SkyVertex {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct SkyUniform {
-    view_proj: [[f32; 4]; 4],
+    view_projs: [[[f32; 4]; 4]; 2],
     sky_color: [f32; 4],
     sunrise_color: [f32; 4],
     sun_angle: f32,
@@ -471,10 +471,8 @@ impl SkyPipeline {
 
         let celestial_alpha = 1.0 - sky.rain();
 
-        let view_proj = camera.sky_view_projection();
-
         let uniform = SkyUniform {
-            view_proj: view_proj.to_cols_array_2d(),
+            view_projs: both_eyes(camera.sky_view_projection()),
             sky_color,
             sunrise_color: sunrise_argb,
             sun_angle,

@@ -1,7 +1,7 @@
 #version 450
 
 layout(set = 0, binding = 0) uniform SkyUBO {
-    mat4 view_proj;
+    mat4 view_projs[2];
     vec4 sky_color;
     vec4 sunrise_color;
     float sun_angle;

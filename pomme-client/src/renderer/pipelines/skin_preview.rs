@@ -12,6 +12,7 @@ use crate::renderer::entity_model::{
 use crate::renderer::pipelines::entity_renderer::{
     ARMOR_ALPHA_CUTOFF, ARMOR_SUBMIT_ORDER, EntityRenderer, WHITE_TINT,
 };
+use crate::renderer::pipelines::hand::{HandUniform, write_hand_uniform};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, PlayerPreview, shader, util};
 
 #[repr(C)]
@@ -19,12 +20,6 @@ use crate::renderer::{MAX_FRAMES_IN_FLIGHT, PlayerPreview, shader, util};
 pub(crate) struct Vertex {
     pub(crate) position: [f32; 3],
     pub(crate) uv: [f32; 2],
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct Uniform {
-    mvp: [[f32; 4]; 4],
 }
 
 #[repr(C)]
@@ -211,13 +206,13 @@ impl SkinPreviewPipeline {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
-                std::mem::size_of::<Uniform>() as u64,
+                std::mem::size_of::<HandUniform>() as u64,
                 "skin_body_mvp",
             );
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
-                range: std::mem::size_of::<Uniform>() as u64,
+                range: std::mem::size_of::<HandUniform>() as u64,
             };
             let write = vk::WriteDescriptorSet {
                 dst_set: mvp_sets[i],
@@ -234,13 +229,13 @@ impl SkinPreviewPipeline {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
-                std::mem::size_of::<Uniform>() as u64,
+                std::mem::size_of::<HandUniform>() as u64,
                 "skin_head_mvp",
             );
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
-                range: std::mem::size_of::<Uniform>() as u64,
+                range: std::mem::size_of::<HandUniform>() as u64,
             };
             let write = vk::WriteDescriptorSet {
                 dst_set: head_mvp_sets[i],
@@ -257,13 +252,13 @@ impl SkinPreviewPipeline {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
-                std::mem::size_of::<Uniform>() as u64,
+                std::mem::size_of::<HandUniform>() as u64,
                 "skin_arm_mvp",
             );
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
-                range: std::mem::size_of::<Uniform>() as u64,
+                range: std::mem::size_of::<HandUniform>() as u64,
             };
             let write = vk::WriteDescriptorSet {
                 dst_set: arm_mvp_sets[i],
@@ -538,9 +533,9 @@ impl SkinPreviewPipeline {
             * Mat4::from_translation(-shoulder);
         let arm_mvp = vp * body_rot_mat * arm_swing;
 
-        write_uniform(&mut self.mvp_allocations[frame], &body_mvp);
-        write_uniform(&mut self.head_mvp_allocations[frame], &head_mvp);
-        write_uniform(&mut self.arm_mvp_allocations[frame], &arm_mvp);
+        write_hand_uniform(&mut self.mvp_allocations[frame], &body_mvp);
+        write_hand_uniform(&mut self.head_mvp_allocations[frame], &head_mvp);
+        write_hand_uniform(&mut self.arm_mvp_allocations[frame], &arm_mvp);
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
         push_preview_style(cmd, self.pipeline_layout, WHITE_TINT, PREVIEW_ALPHA_CUTOFF);
@@ -648,14 +643,6 @@ impl SkinPreviewPipeline {
 
 fn camera_view() -> Mat4 {
     view::look_at_mat4(Vec3::new(0.0, 0.0, -4.5), Vec3::ZERO, Vec3::Y)
-}
-
-pub(crate) fn write_uniform(alloc: &mut Allocation, mvp: &Mat4) {
-    let uniform = Uniform {
-        mvp: mvp.to_cols_array_2d(),
-    };
-    let bytes = bytemuck::bytes_of(&uniform);
-    alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
 }
 
 #[derive(Clone, Copy)]
