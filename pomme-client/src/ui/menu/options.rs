@@ -55,8 +55,7 @@ const ONLY_SHOW_SECURE_CHAT: &str = "Only Show Secure Chat:";
 const SAVE_CHAT_DRAFTS: &str = "Save Unsent Chats:";
 const FORCE_UNICODE_FONT: &str = "Force Unicode Font:";
 const JAPANESE_GLYPH_VARIANTS: &str = "Japanese Glyph Variants:";
-// VR option labels, shared by the screen and its handlers, with Vivecraft's
-// slider ranges.
+// VR option labels and slider ranges, shared by the screen and its handlers.
 const VR_RESET_ORIGIN: &str = "Reset Origin";
 const VR_HUD_DISTANCE: &str = "HUD Distance:";
 const VR_HUD_DISTANCE_RANGE: (f32, f32) = (0.25, 5.0);
@@ -872,7 +871,6 @@ impl MainMenu {
         )
     }
 
-    /// Vivecraft's seated settings that apply here.
     pub(super) fn build_options_vr(
         &mut self,
         sw: f32,

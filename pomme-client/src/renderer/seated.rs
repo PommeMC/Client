@@ -1,8 +1,7 @@
-//! Seated VR, after Vivecraft's seated defaults (`MCVR.updatePose`, mouse
-//! aim): the headset looks around freely while the mouse moves a crosshair
-//! up to `KEYHOLE_DEG` either side of where the head faced, turning the
-//! player once pushed past that. The crosshair is the player's look, so
-//! the raycast, the server's rotation and walking all follow it.
+//! Seated VR with mouse aim: the headset looks around freely while the mouse
+//! moves a crosshair up to `KEYHOLE_DEG` either side of where the head faced,
+//! turning the player once pushed past that. The crosshair is the player's
+//! look, so the raycast, the server's rotation and walking all follow it.
 
 use std::collections::VecDeque;
 use std::f32::consts::{FRAC_PI_4, PI};
@@ -12,30 +11,25 @@ use glam::{Mat4, Quat, Vec3};
 use super::panel::GuiPanel;
 use crate::stereo::{EyeView, Fov, PanelPlacement};
 
-/// Vivecraft `keyholeX`: how far the crosshair strays from the head before
-/// the world turns.
+/// How far the crosshair strays from the head before the world turns.
 const KEYHOLE_DEG: f32 = 15.0;
 /// The mouse's horizontal and vertical sweep across the window, in degrees.
 const H_RANGE_DEG: f32 = 110.0;
 const V_RANGE_DEG: f32 = 180.0;
-/// Turn per frame with the crosshair pushed to the window's edge (Vivecraft
-/// `20 * xSensitivity`, sensitivity 1).
+/// Turn per frame with the crosshair pushed to the window's edge.
 const TURN_DEG: f32 = 20.0;
-/// Vivecraft `0.5 * ySensitivity`.
 const PITCH_SPEED: f32 = 0.5;
-/// Vivecraft clamps the aim short of straight up and down.
 const MAX_PITCH_DEG: f32 = 89.9;
 
-/// A panel's width per unit of scale (Vivecraft `getTexCoordsForCursor`).
+/// A panel's width per unit of scale.
 const PANEL_WIDTH: f32 = 1.5;
-/// A screen opens this far ahead of the head (Vivecraft's `(0, 0, -2)`
-/// offset, halved); chat this much higher.
+/// A screen opens this far ahead of the head; chat this much higher.
 const SCREEN_DISTANCE: f32 = 1.0;
 const CHAT_RAISE: f32 = 0.25;
 /// The title screens: further out, twice the size.
 const MENU_DISTANCE: f32 = 2.5;
 const MENU_SCALE: f32 = 2.0;
-/// Vivecraft `HMD_AVG_MAX_SAMPLES`: frames the menu's head average spans.
+/// Frames the menu's head average spans.
 const HEAD_SAMPLES: usize = 90;
 
 /// How the HUD panel sits, from the VR settings.
@@ -47,7 +41,6 @@ pub struct HudPlacement {
 }
 
 impl Default for HudPlacement {
-    /// Vivecraft `hudDistance` and `hudScale`.
     fn default() -> Self {
         Self {
             distance: 1.25,
@@ -61,8 +54,8 @@ pub(crate) struct Seated {
     /// World yaw (vanilla degrees) that the seated space's forward (-Z) maps
     /// to; turning adds to it. Unwrapped, like vanilla's own yaw.
     room_yaw: f32,
-    /// The head's yaw in the seated space as of the last turn (Vivecraft
-    /// `hmdForwardYaw`): the keyhole's centre.
+    /// The head's yaw in the seated space as of the last turn: the keyhole's
+    /// centre.
     aim_centre: f32,
     /// The crosshair's yaw off `aim_centre`, within the keyhole.
     aim_offset: f32,
@@ -162,9 +155,9 @@ impl Seated {
         (self.eyes[0].position + self.eyes[1].position) * 0.5
     }
 
-    /// Where the panel floats for `kind`, Vivecraft-style: the HUD rides the
-    /// crosshair, a screen stays where it opened, and the title screens trail
-    /// the head's average heading. `aspect` is the panel's height over width.
+    /// Where the panel floats for `kind`: the HUD rides the crosshair, a
+    /// screen stays where it opened, and the title screens trail the head's
+    /// average heading. `aspect` is the panel's height over width.
     pub fn panel(&mut self, kind: GuiPanel, hud: HudPlacement, aspect: f32) -> PanelPlacement {
         let head = self.head_position();
         let (position, orientation, scale) = match kind {
@@ -299,9 +292,9 @@ fn facing(direction: Vec3) -> Quat {
     Quat::from_rotation_y((-d.x).atan2(-d.z)) * Quat::from_rotation_x(d.y.asin())
 }
 
-/// Vivecraft `MCVR.hmdSampling`: the head's recent position, and a heading
-/// that only follows once the head has turned 20° from it, settling within
-/// 1°, so the title screens don't drift with every glance.
+/// The head's recent position, and a heading that only follows once the
+/// head has turned 20° from it, settling within 1°, so the title screens
+/// don't drift with every glance.
 #[derive(Default)]
 struct HeadSamples {
     positions: VecDeque<Vec3>,

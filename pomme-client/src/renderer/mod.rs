@@ -1236,7 +1236,7 @@ impl Renderer {
         self.crosshair_target = target;
     }
 
-    /// Vivecraft's crosshair: a 0.125-block cross at the aim's hit, just short
+    /// The VR crosshair: a 0.125-block cross at the aim's hit, just short
     /// of it, lying on the block face it hits or else facing the aim.
     fn update_crosshair(&mut self) {
         // Vanilla's default block interaction range, where a miss ends.

@@ -1,4 +1,4 @@
-//! VR's GUI panel: the HUD, screens and menus drawn offscreen at Vivecraft's
+//! VR's GUI panel: the HUD, screens and menus drawn offscreen at a fixed
 //! virtual screen size, then shown in the headset as a quad layer.
 
 use std::sync::{Arc, Mutex};
@@ -10,7 +10,7 @@ use super::context::{ContextError, VulkanContext};
 use super::swapchain::{Attachment, create_framebuffer, create_render_pass_variant};
 use super::util;
 
-/// Vivecraft `GUI_WIDTH`/`GUI_HEIGHT`.
+/// The virtual screen the GUI lays out for in VR.
 pub(super) const PANEL_EXTENT: vk::Extent2D = vk::Extent2D {
     width: 1280,
     height: 720,
@@ -25,7 +25,7 @@ pub enum GuiPanel {
     Hud,
     /// A screen over the world: inventory, pause, death.
     Screen,
-    /// The chat screen, which Vivecraft lifts above the others.
+    /// The chat screen, which floats a little above the others.
     Chat,
     /// The title and other out-of-world screens.
     Menu,

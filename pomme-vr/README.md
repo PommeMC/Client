@@ -13,7 +13,7 @@ Any OpenXR runtime with Vulkan works (SteamVR, Meta's, Monado). The loader is
 built in, so nothing ships beside the exe. With no runtime it exits with
 "Couldn't start VR".
 
-## Controls (Vivecraft's seated defaults)
+## Controls
 
 - The headset looks around.
 - The mouse moves the crosshair, up to 15° either side of where you faced.
