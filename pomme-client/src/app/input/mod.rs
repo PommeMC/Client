@@ -198,6 +198,13 @@ pub struct InputState {
     strong_rumble_effect: Option<Effect>,
     active_gamepad_id: Option<GamepadId>,
     recent_actions: HashMap<Action, bool>,
+    /// Touch taps' releases, held back until the presses have been read.
+    tap_releases: Vec<TapRelease>,
+}
+
+enum TapRelease {
+    Mouse(MouseButton),
+    Key(KeyCode),
 }
 
 #[derive(Default)]
@@ -289,6 +296,7 @@ impl InputState {
             strong_rumble_effect: strong_effect,
             active_gamepad_id: None,
             recent_actions: HashMap::new(),
+            tap_releases: Vec::new(),
         }
     }
 
@@ -300,7 +308,9 @@ impl InputState {
         for event in &events {
             self.on_gamepad_event(event);
         }
-        let held = self.touch.tick(std::time::Instant::now());
+        let held = self
+            .touch
+            .tick(std::time::Instant::now(), phase.get().world_has_pointer());
         self.apply_touch(held);
 
         if self.binding_capture {
@@ -638,6 +648,14 @@ impl InputState {
         self.middle_click.just_pressed = false;
         self.middle_click.just_released = false;
         self.cursor_moved = false;
+
+        // A release in the same pass as its press would overwrite it.
+        for release in std::mem::take(&mut self.tap_releases) {
+            match release {
+                TapRelease::Mouse(button) => self.on_mouse_button(button, ElementState::Released),
+                TapRelease::Key(key) => self.on_key(key, ElementState::Released, false),
+            }
+        }
     }
 
     fn gamepad_stick(&self, x_axis: gilrs::Axis, y_axis: gilrs::Axis) -> Option<glam::Vec2> {
@@ -784,13 +802,7 @@ impl InputState {
                     && !self.menu_capture
                     && let Some(slot) = hotbar_slot(code)
                 {
-                    // Vanilla handleKeybinds: spectator digits drive the
-                    // spectator menu and never touch the carried slot.
-                    if self.spectator {
-                        self.spectator_slot_presses.push(slot);
-                    } else {
-                        self.selected_slot = slot;
-                    }
+                    self.select_hotbar(slot);
                 }
                 match code {
                     KeyCode::KeyE if !self.text_capture => {
@@ -1037,6 +1049,16 @@ impl InputState {
         self.apply_touch(out);
     }
 
+    /// Vanilla `handleKeybinds`: in spectator a hotbar slot drives the
+    /// spectator menu and never touches the carried slot.
+    fn select_hotbar(&mut self, slot: u8) {
+        if self.spectator {
+            self.spectator_slot_presses.push(slot);
+        } else {
+            self.selected_slot = slot;
+        }
+    }
+
     pub fn touch(&self) -> &TouchControls {
         &self.touch
     }
@@ -1053,17 +1075,22 @@ impl InputState {
                 TouchOutput::DestroyEnd | TouchOutput::PointerUp => {
                     self.on_mouse_button(MouseButton::Left, ElementState::Released);
                 }
+                TouchOutput::DestroyCancel => {
+                    self.left_click.held = false;
+                    self.recent_actions.remove(&Action::Destroy);
+                }
                 TouchOutput::Use => {
                     self.on_mouse_button(MouseButton::Right, ElementState::Pressed);
-                    self.on_mouse_button(MouseButton::Right, ElementState::Released);
+                    self.tap_releases
+                        .push(TapRelease::Mouse(MouseButton::Right));
                 }
                 TouchOutput::Tap(action) => {
                     if let Some(key) = action.default_key() {
                         self.on_key(key, ElementState::Pressed, false);
-                        self.on_key(key, ElementState::Released, false);
+                        self.tap_releases.push(TapRelease::Key(key));
                     }
                 }
-                TouchOutput::Hotbar(slot) => self.selected_slot = slot,
+                TouchOutput::Hotbar(slot) => self.select_hotbar(slot),
                 TouchOutput::PointerMove(p) => self.on_cursor_moved(p.x, p.y),
             }
         }
@@ -1237,6 +1264,17 @@ fn build_rumble_effect(
 #[cfg(test)]
 mod binding_capture_tests {
     use super::*;
+
+    #[test]
+    fn a_use_tap_is_seen_before_it_releases() {
+        let mut input = InputState::released();
+        input.apply_touch(vec![TouchOutput::Use]);
+        assert!(input.action_just_pressed(Action::Use));
+        assert!(input.right_held());
+
+        input.clear_just_pressed_actions();
+        assert!(!input.right_held());
+    }
 
     #[test]
     fn keyboard_capture_suppresses_repeats_until_release() {

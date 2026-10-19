@@ -26,18 +26,41 @@ impl MainMenu {
     fn start_sign_in(&mut self) {
         let state = Arc::clone(&self.sign_in);
         let store = Arc::clone(&self.account_store);
+        self.run_sign_in(async move {
+            pomme_auth::device_code_sign_in(crate::net::http::client(), &*store, |code| {
+                *state.write() = SignIn::Code(code.clone());
+            })
+            .await
+            .map(Some)
+        });
+    }
+
+    /// Signs in as the stored account without asking; with none, the
+    /// screen offers Sign In.
+    pub(crate) fn restore_account(&mut self) {
+        let store = Arc::clone(&self.account_store);
+        self.run_sign_in(async move { Ok(crate::account::restore(&*store).await) });
+    }
+
+    fn run_sign_in(
+        &mut self,
+        sign_in: impl Future<Output = Result<Option<pomme_auth::AuthAccount>, String>> + Send + 'static,
+    ) {
+        let state = Arc::clone(&self.sign_in);
         *state.write() = SignIn::Requesting;
         self.sign_in_task = Some(self.rt.spawn(async move {
-            let result =
-                pomme_auth::device_code_sign_in(crate::net::http::client(), &*store, |code| {
-                    *state.write() = SignIn::Code(code.clone());
-                })
-                .await;
-            *state.write() = match result {
-                Ok(account) => SignIn::Done(account),
+            *state.write() = match sign_in.await {
+                Ok(Some(account)) => SignIn::Done(account),
+                Ok(None) => SignIn::Idle,
                 Err(reason) => SignIn::Failed(reason),
             };
         }));
+    }
+
+    /// Signing out on desktop also signs the launcher out, which shares the
+    /// store.
+    pub(crate) fn forget_account(&self, uuid: &uuid::Uuid) {
+        crate::account::forget(&*self.account_store, uuid);
     }
 
     fn close_account(&mut self) {
@@ -58,7 +81,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
     ) -> MainMenuResult {
-        let gated = self.account_required && self.access_token.is_none();
+        let gated = self.account_gated();
         let leave = if gated { "Quit" } else { "Back" };
         if input.escape && !gated {
             self.close_account();
@@ -188,15 +211,7 @@ impl MainMenu {
                     crate::util::open_url(&code.verification_uri);
                 }
             }
-            Some("Sign Out") => {
-                if let Some(account) = pomme_auth::get_all_accounts(&*self.account_store)
-                    .into_iter()
-                    .find(|a| a.username == self.username)
-                {
-                    pomme_auth::remove_account(&*self.account_store, &account.uuid);
-                }
-                action = MenuAction::Account(None);
-            }
+            Some("Sign Out") => action = MenuAction::Account(None),
             Some("Cancel") => self.cancel_sign_in(),
             Some("Back") => self.close_account(),
             Some("Quit") => action = MenuAction::Quit,

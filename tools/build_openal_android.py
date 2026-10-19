@@ -46,13 +46,19 @@ def fetch_source(tag, expected_sha256):
         archive = download_verified(url, expected_sha256, WORK_DIR / f"openal-soft-{tag}.tar.gz")
     except Unreachable as e:
         raise SystemExit(str(e)) from e
+    # Unpacked aside and moved into place whole, so an interrupted run leaves
+    # nothing at `source` to be mistaken for a finished tree.
+    staging = WORK_DIR / f"openal-soft-{tag}.part"
+    shutil.rmtree(staging, ignore_errors=True)
     with tarfile.open(archive) as tar:
         # The data filter (Python 3.12+, and backports) refuses paths that
         # escape the target directory.
         if hasattr(tarfile, "data_filter"):
-            tar.extractall(WORK_DIR, filter="data")
+            tar.extractall(staging, filter="data")
         else:
-            tar.extractall(WORK_DIR)
+            tar.extractall(staging)
+    (staging / source.name).rename(source)
+    shutil.rmtree(staging)
     return source
 
 

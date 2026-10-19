@@ -15,7 +15,7 @@
             android:name="android.app.NativeActivity"
             android:exported="true"
             android:screenOrientation="sensorLandscape"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|uiMode">
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden|keyboard|navigation|uiMode|fontScale|locale|layoutDirection">
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="pomme_android" />

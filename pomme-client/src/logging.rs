@@ -20,9 +20,26 @@ pub fn init(log_dir: &Path) -> WorkerGuard {
                 .with_filter(file_filter),
         )
         .with(console_layer().with_filter(stdout_filter))
-        .init();
+        // Android can run `android_main` twice in one process, and the first
+        // run's subscriber stays installed.
+        .try_init()
+        .ok();
 
     guard
+}
+
+/// Panics to the log. Android drops stderr, so one before logging starts goes
+/// straight to logcat.
+#[cfg(target_os = "android")]
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        if tracing::dispatcher::has_been_set() {
+            tracing::error!("{info}");
+        } else {
+            let logcat = tracing_subscriber::registry().with(console_layer());
+            tracing::subscriber::with_default(logcat, || tracing::error!("{info}"));
+        }
+    }));
 }
 
 /// Stdout, or logcat on Android, which drops stdout.

@@ -100,6 +100,8 @@ pub enum TouchOutput {
     Look(Vec2),
     DestroyStart,
     DestroyEnd,
+    /// A destroy that outlived gameplay: stop it without a release.
+    DestroyCancel,
     Use,
     /// A tap of an action's key.
     Tap(Action),
@@ -132,7 +134,7 @@ enum Role {
 #[derive(Default)]
 pub struct TouchControls {
     touches: HashMap<u64, Role>,
-    /// Any touch has arrived, so the overlay shows; desktop never sees one.
+    /// Any touch has arrived, so the overlay shows; only Android feeds them.
     seen: bool,
 }
 
@@ -157,8 +159,8 @@ impl TouchControls {
         match phase {
             TouchPhase::Started => self.start(id, p, gameplay, layout, now),
             TouchPhase::Moved => self.drag(id, p, layout),
-            TouchPhase::Ended => self.end(id, now, true),
-            TouchPhase::Cancelled => self.end(id, now, false),
+            TouchPhase::Ended => self.end(id, now, true, gameplay),
+            TouchPhase::Cancelled => self.end(id, now, false, gameplay),
         }
     }
 
@@ -228,13 +230,18 @@ impl TouchControls {
         }
     }
 
-    fn end(&mut self, id: u64, now: Instant, lifted: bool) -> Vec<TouchOutput> {
+    /// A look touch lifted after a screen opened stays out of that screen.
+    fn end(&mut self, id: u64, now: Instant, lifted: bool, gameplay: bool) -> Vec<TouchOutput> {
         match self.touches.remove(&id) {
             Some(Role::Look {
                 destroying: true, ..
-            }) => vec![TouchOutput::DestroyEnd],
+            }) => vec![if gameplay {
+                TouchOutput::DestroyEnd
+            } else {
+                TouchOutput::DestroyCancel
+            }],
             Some(Role::Look { since, still, .. })
-                if lifted && still && now.duration_since(since) < TAP_TIME =>
+                if gameplay && lifted && still && now.duration_since(since) < TAP_TIME =>
             {
                 vec![TouchOutput::Use]
             }
@@ -243,9 +250,13 @@ impl TouchControls {
         }
     }
 
-    /// Once a frame: a look press held still long enough starts destroying.
-    pub fn tick(&mut self, now: Instant) -> Vec<TouchOutput> {
+    /// Once a frame: a look press held still long enough starts destroying,
+    /// while the world has the input.
+    pub fn tick(&mut self, now: Instant, gameplay: bool) -> Vec<TouchOutput> {
         let mut out = Vec::new();
+        if !gameplay {
+            return out;
+        }
         for role in self.touches.values_mut() {
             if let Role::Look {
                 since,
@@ -328,7 +339,7 @@ mod tests {
     fn a_quick_still_tap_uses() {
         let (mut c, t) = (TouchControls::default(), Instant::now());
         assert!(touch(&mut c, 1, TouchPhase::Started, LOOK, t).is_empty());
-        assert!(c.tick(ms(t, 100)).is_empty());
+        assert!(c.tick(ms(t, 100), true).is_empty());
         assert_eq!(
             touch(&mut c, 1, TouchPhase::Ended, LOOK, ms(t, 150)),
             [TouchOutput::Use]
@@ -337,11 +348,29 @@ mod tests {
     }
 
     #[test]
+    fn a_look_touch_stays_out_of_a_screen_opened_under_it() {
+        let (mut c, t) = (TouchControls::default(), Instant::now());
+        touch(&mut c, 1, TouchPhase::Started, LOOK, t);
+        assert!(c.tick(ms(t, 300), false).is_empty());
+        assert!(
+            c.on_touch(1, TouchPhase::Ended, LOOK, false, &LAYOUT, ms(t, 350))
+                .is_empty()
+        );
+
+        touch(&mut c, 2, TouchPhase::Started, LOOK, t);
+        assert_eq!(c.tick(ms(t, 300), true), [TouchOutput::DestroyStart]);
+        assert_eq!(
+            c.on_touch(2, TouchPhase::Ended, LOOK, false, &LAYOUT, ms(t, 400)),
+            [TouchOutput::DestroyCancel]
+        );
+    }
+
+    #[test]
     fn a_still_hold_destroys_until_lifted() {
         let (mut c, t) = (TouchControls::default(), Instant::now());
         touch(&mut c, 1, TouchPhase::Started, LOOK, t);
-        assert_eq!(c.tick(ms(t, 300)), [TouchOutput::DestroyStart]);
-        assert!(c.tick(ms(t, 400)).is_empty());
+        assert_eq!(c.tick(ms(t, 300), true), [TouchOutput::DestroyStart]);
+        assert!(c.tick(ms(t, 400), true).is_empty());
         assert_eq!(
             touch(&mut c, 1, TouchPhase::Ended, LOOK, ms(t, 500)),
             [TouchOutput::DestroyEnd]
@@ -357,7 +386,7 @@ mod tests {
             touch(&mut c, 1, TouchPhase::Moved, moved, ms(t, 50)),
             [TouchOutput::Look(Vec2::new(50.0, -25.0))]
         );
-        assert!(c.tick(ms(t, 400)).is_empty());
+        assert!(c.tick(ms(t, 400), true).is_empty());
         assert!(touch(&mut c, 1, TouchPhase::Ended, moved, ms(t, 100)).is_empty());
     }
 

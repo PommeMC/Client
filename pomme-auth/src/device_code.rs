@@ -55,12 +55,21 @@ pub async fn device_code_sign_in(
     store: &dyn SecretStore,
     on_code: impl FnOnce(&DeviceCode),
 ) -> Result<AuthAccount, String> {
-    let code: DeviceCode = http
+    let resp = http
         .post(DEVICE_CODE_URL)
         .form(&[("client_id", CLIENT_ID), ("scope", SCOPE)])
         .send()
         .await
-        .map_err(|e| format!("Sign-in request failed: {}", crate::error_chain(e)))?
+        .map_err(|e| format!("Sign-in request failed: {}", crate::error_chain(e)))?;
+    // Microsoft's own error reads better than a missing `user_code`.
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(match poll_error(&body) {
+            Poll::Failed(reason) => reason,
+            _ => format!("Sign-in failed: {body}"),
+        });
+    }
+    let code: DeviceCode = resp
         .json()
         .await
         .map_err(|e| format!("Sign-in response parse failed: {}", crate::error_chain(e)))?;

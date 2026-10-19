@@ -90,9 +90,10 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
-/// The Android app, for calls into its Java side (`open_url`).
+/// The Android app, for calls into its Java side (`open_url`). Replaced on
+/// each `android_main`, since a recreated activity gets a new one.
 #[cfg(target_os = "android")]
-pub static ANDROID_APP: std::sync::OnceLock<crate::AndroidApp> = std::sync::OnceLock::new();
+pub static ANDROID_APP: std::sync::RwLock<Option<crate::AndroidApp>> = std::sync::RwLock::new(None);
 
 pub fn open_url(url: &str) {
     #[cfg(target_os = "android")]
@@ -112,7 +113,7 @@ pub fn open_url(url: &str) {
 fn open_url_android(url: &str) -> jni::errors::Result<()> {
     use jni::objects::{JObject, JValue};
 
-    let Some(app) = ANDROID_APP.get() else {
+    let Some(app) = ANDROID_APP.read().ok().and_then(|app| app.clone()) else {
         return Ok(());
     };
     // SAFETY: android-activity's pointers are the process's JavaVM and the

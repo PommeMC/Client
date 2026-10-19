@@ -98,6 +98,7 @@ Running the standalone client requires minecraft assets, for which you have 2 op
    cp -r ~/.minecraft/assets/objects/. reference/assets/objects/
    cp ~/.minecraft/versions/26.3/26.3.jar reference/versions/26.3/
    unzip reference/versions/26.3/26.3.jar 'assets/*' -d reference/versions/26.3/extracted/
+   echo 26.3 > reference/versions/26.3/extracted/.extracted
    ```
 
    Then you can run the client with:

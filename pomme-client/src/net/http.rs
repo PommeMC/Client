@@ -5,6 +5,7 @@
 #[cfg(any(test, target_os = "android"))]
 use std::path::Path;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 /// The device's CA stores, newest location first: the updatable conscrypt
 /// module (Android 14+), then the system image.
@@ -28,10 +29,18 @@ pub fn blocking_builder() -> reqwest::blocking::ClientBuilder {
     builder
 }
 
-/// The shared client for requests without their own settings.
+/// The shared client for requests without their own settings. A stalled
+/// network fails a request instead of hanging it; a slow but moving
+/// download still finishes.
 pub fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| builder().build().expect("the HTTP client builds"))
+    CLIENT.get_or_init(|| {
+        builder()
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(30))
+            .build()
+            .expect("the HTTP client builds")
+    })
 }
 
 /// `reqwest::get` on the shared client.

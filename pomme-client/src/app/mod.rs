@@ -20,12 +20,12 @@ use crate::app::core::AppCore;
 use crate::app::input::touch::TouchLayout;
 use crate::app::phases::connecting::{ConnectingUpdateResult, update_connecting};
 use crate::app::phases::in_game::{GameState, GameUpdateResult, update_game};
-use crate::app::phases::in_menu::{MenuUpdateResult, connect_args, open_world, update_menu};
+use crate::app::phases::in_menu::{self, MenuUpdateResult, update_menu};
 use crate::app::phases::saving::update_saving;
 use crate::app::phases::{AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
 use crate::app::state_slot::StateSlot;
 use crate::dirs::DataDirs;
-use crate::net::connection::{ConnectArgs, ConnectionHandle, Transport, spawn_connection};
+use crate::net::connection::{ConnectArgs, ConnectionHandle, spawn_connection};
 use crate::renderer::{self, Renderer};
 use crate::singleplayer::World;
 use crate::user::UserData;
@@ -226,8 +226,11 @@ impl App {
     }
 
     /// No launcher passed an account; see `MainMenu::require_account`.
+    /// Holds the menu, and any quick play, until an account is signed in,
+    /// restoring the stored one in the background meanwhile.
     pub fn require_account(&mut self) {
         self.core.menu.require_account();
+        self.core.menu.restore_account();
     }
 
     #[cfg(feature = "test-harness")]
@@ -262,7 +265,7 @@ impl App {
     }
 
     fn world_has_pointer(&self) -> bool {
-        matches!(self.phase.get(), AppPhase::InGame { game, .. } if game.world_has_pointer())
+        self.phase.get().world_has_pointer()
     }
 
     /// The effective framerate cap, or `None` for uncapped, matching vanilla
@@ -394,20 +397,11 @@ impl ApplicationHandler for App {
                 };
                 let panorama = Panorama::new();
                 let launch = match quick_play {
-                    Some(QuickPlay::Multiplayer(server)) => MenuUpdateResult::Connect {
-                        // TODO: read the saved server list's protocol for
-                        // this address to skip the join-time probe.
-                        connect_args: connect_args(
-                            &self.core,
-                            Transport::Remote {
-                                server,
-                                protocol: None,
-                            },
-                            self.core.user.username.clone(),
-                        ),
-                        world: None,
-                    },
-                    Some(QuickPlay::Singleplayer(folder)) => open_world(&mut self.core, &folder),
+                    Some(play) if self.core.menu.account_gated() => {
+                        self.core.deferred_quick_play = Some(play);
+                        MenuUpdateResult::None
+                    }
+                    Some(play) => in_menu::quick_play(&mut self.core, play),
                     None => MenuUpdateResult::None,
                 };
                 match launch {
@@ -435,11 +429,15 @@ impl ApplicationHandler for App {
                         self.install = None;
                         self.core.reload_installed_assets();
                         self.installed_window = Some(window);
-                        self.resumed(event_loop);
-                        // The first frame of the normal loop, which asks for
-                        // each next one itself.
-                        if let Some(gfx) = self.phase.gfx_mut() {
-                            gfx.window.request_redraw();
+                        // In the background there's no surface to build the
+                        // renderer on; the real `resumed` builds it.
+                        if !self.suspended {
+                            self.resumed(event_loop);
+                            // The first frame of the normal loop, which asks
+                            // for each next one itself.
+                            if let Some(gfx) = self.phase.gfx_mut() {
+                                gfx.window.request_redraw();
+                            }
                         }
                     }
                 }
@@ -787,7 +785,8 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
             }
-            WindowEvent::Touch(touch) => {
+            // Desktop touchscreens already drive the mouse through the OS.
+            WindowEvent::Touch(touch) if cfg!(target_os = "android") => {
                 let gameplay = self.world_has_pointer();
                 if let Some(gfx) = self.phase.gfx_mut() {
                     let width = gfx.renderer.screen_width() as f32;

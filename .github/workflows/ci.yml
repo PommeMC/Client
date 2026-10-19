@@ -16,6 +16,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Desktop clippy never compiles the `cfg(target_os = "android")` code.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
+      - name: Add the Android target
+        run: rustup target add aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: android
+          cache-on-failure: true
+
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa
+        with:
+          vulkan_version: 1.4.341.0
+          install_runtime: false
+          cache: true
+          stripdown: true
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk@4.1.2 --locked
+
+      # The runner image ships an NDK and names it in ANDROID_NDK_LATEST_HOME.
+      - name: Clippy
+        run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo ndk -t arm64-v8a clippy -p pomme-android -- -D warnings
+
   client:
     strategy:
       matrix:
@@ -56,6 +91,9 @@ jobs:
           cargo fmt -p pomme-client -- --check
           cargo fmt -p pomme-protocol -- --check
           cargo fmt -p pomme-dirs -- --check
+          cargo fmt -p pomme-auth -- --check
+          cargo fmt -p pomme-install -- --check
+          cargo fmt -p pomme-android -- --check
 
       # Singleplayer is checked on Linux only, so SteelMC is not built three
       # times over.
@@ -64,6 +102,8 @@ jobs:
           cargo clippy -p pomme-client --release --all-targets --no-default-features -- -D warnings
           cargo clippy -p pomme-protocol --release --all-targets --all-features -- -D warnings
           cargo clippy -p pomme-dirs --release --all-targets -- -D warnings
+          cargo clippy -p pomme-auth --release --all-targets --all-features -- -D warnings
+          cargo clippy -p pomme-install --release --all-targets -- -D warnings
 
       - name: Tests
         if: matrix.os == 'ubuntu-latest'
@@ -71,6 +111,8 @@ jobs:
         run: |
           cargo test -p pomme-protocol
           cargo test -p pomme-dirs
+          cargo test -p pomme-auth
+          cargo test -p pomme-install
           cargo test -p pomme-client --release --no-default-features
 
       - name: Pin the steel revision

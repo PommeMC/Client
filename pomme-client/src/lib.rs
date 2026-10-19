@@ -49,6 +49,8 @@ pub use winit::platform::android::activity::AndroidApp;
 
 use crate::app::App;
 pub use crate::args::LaunchArgs;
+#[cfg(target_os = "android")]
+pub use crate::logging::install_panic_hook;
 use crate::user::UserData;
 
 /// What differs per platform at startup.
@@ -71,7 +73,9 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         eprintln!("Couldn't move the old .pomme folder: {e}");
     }
     #[cfg(target_os = "android")]
-    let _ = util::ANDROID_APP.set(platform.android_app.clone());
+    if let Ok(mut app) = util::ANDROID_APP.write() {
+        *app = Some(platform.android_app.clone());
+    }
 
     // Ahead of the launch-token guard, which bench builds have no launcher for.
     #[cfg(feature = "cpu-bench")]
@@ -154,17 +158,14 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         crate::net::chat_security::ProfileKeyServices::prefetch();
     }
 
-    // Without any account flags (no launcher), play as the stored account,
-    // or sign in before anything else.
-    let launcherless =
-        args.username.is_none() && args.uuid.is_none() && args.access_token.is_none();
-    let restored = launcherless
-        .then(|| account::restore(&rt, &*account::store(&data_dirs.game_dir)))
-        .flatten();
-    let user = match restored {
-        Some(account) => UserData::from_account(&account),
-        None => UserData::from_args(args.username, args.uuid, args.access_token),
-    };
+    // Without any account flags (no launcher), a release or Android build
+    // plays as the stored account or signs in first; a desktop dev build
+    // plays offline, and never reads the keychain unasked.
+    let require_account = args.username.is_none()
+        && args.uuid.is_none()
+        && args.access_token.is_none()
+        && cfg!(any(not(debug_assertions), target_os = "android"));
+    let user = UserData::from_args(args.username, args.uuid, args.access_token);
 
     // A harness script stays off the user's Discord profile, and Android has
     // no Discord client to talk to.
@@ -192,7 +193,7 @@ pub fn run(args: LaunchArgs, platform: Platform) {
                 .quick_access_singleplayer
                 .map(app::QuickPlay::Singleplayer)),
     );
-    if launcherless {
+    if require_account {
         app.require_account();
     }
     #[cfg(feature = "test-harness")]

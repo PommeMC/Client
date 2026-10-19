@@ -75,16 +75,19 @@ fn extracted_dir(versions_dir: &Path, version: &str) -> PathBuf {
     versions_dir.join(version).join("extracted")
 }
 
+/// Written into a version's extraction once it's complete.
+const EXTRACTED_MARKER: &str = ".extracted";
+
 fn extracted_marker(versions_dir: &Path, version: &str) -> PathBuf {
-    extracted_dir(versions_dir, version).join(".extracted")
+    extracted_dir(versions_dir, version).join(EXTRACTED_MARKER)
 }
 
-/// The version's index and its jar's `assets/` are in place. An install
-/// writes each only once it's complete, so either half-finished reads as
-/// missing; a hand-made layout without the launcher's marker still counts.
+/// The version's index and its jar's extraction are in place. Each is
+/// written only once it's complete, the extraction with its `.extracted`
+/// marker; older launchers extracted in place and wrote the marker last, so
+/// one without it may be half done.
 pub fn is_installed(assets_dir: &Path, versions_dir: &Path, version: &str) -> bool {
-    index_path(assets_dir, version).exists()
-        && extracted_dir(versions_dir, version).join("assets").is_dir()
+    index_path(assets_dir, version).exists() && extracted_marker(versions_dir, version).exists()
 }
 
 /// Downloads whatever of `version` is missing or damaged, reporting through
@@ -127,7 +130,7 @@ pub async fn install(
     write_atomic(&index_path(assets_dir, version), &index_bytes).await?;
 
     let out = extracted_dir(versions_dir, version);
-    if !out.join("assets").is_dir() {
+    if !extracted_marker(versions_dir, version).exists() {
         report(0, 1, "Downloading the client jar...");
         let client = &version_json.downloads.client;
         let jar = fetch_verified(http, &client.url, &client.sha1).await?;
@@ -144,11 +147,12 @@ pub async fn install(
         tokio::task::block_in_place(|| {
             let _ = std::fs::remove_dir_all(&part);
             extract_assets(&jar, &part, &extract_report)?;
+            // Inside the `.part`, so it lands with the files in one rename.
+            std::fs::write(part.join(EXTRACTED_MARKER), version)
+                .map_err(|e| format!("{}: {e}", part.display()))?;
             let _ = std::fs::remove_dir_all(&out);
             std::fs::rename(&part, &out).map_err(|e| format!("{}: {e}", out.display()))
         })?;
-        // Older launchers check for this marker.
-        write_atomic(&extracted_marker(versions_dir, version), version.as_bytes()).await?;
     }
     Ok(())
 }
@@ -362,7 +366,10 @@ mod tests {
             .await
             .unwrap();
         assert!(!is_installed(&assets, &versions, "26.2"));
+        // What an older launcher left when it was closed mid-extraction.
         std::fs::create_dir_all(versions.join("26.2/extracted/assets")).unwrap();
+        assert!(!is_installed(&assets, &versions, "26.2"));
+        std::fs::write(versions.join("26.2/extracted/.extracted"), "26.2").unwrap();
         assert!(is_installed(&assets, &versions, "26.2"));
         assert!(!assets.join("indexes/26.2.json.part").exists());
         std::fs::remove_dir_all(dir).unwrap();

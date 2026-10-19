@@ -59,7 +59,14 @@ impl SecretStore for FileStore {
             if let Some(dir) = self.path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
-            let _ = std::fs::write(&self.path, json);
+            // Through a temp file, so a crash mid-write can't lose every
+            // account.
+            let mut tmp = self.path.as_os_str().to_owned();
+            tmp.push(".part");
+            let tmp = PathBuf::from(tmp);
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(&tmp, &self.path);
+            }
         }
     }
 }

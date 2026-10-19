@@ -44,7 +44,7 @@ impl Install {
         let state = Arc::clone(&self.state);
         let dirs = core.data_dirs.clone();
         let version = core.version.clone();
-        core.tokio_rt.spawn(async move {
+        let task = core.tokio_rt.spawn(async move {
             let result = pomme_install::install(
                 crate::net::http::client(),
                 &dirs.assets_dir,
@@ -60,6 +60,13 @@ impl Install {
                     State::Failed
                 }
             };
+        });
+        // A panic would otherwise leave the screen waiting forever.
+        let state = Arc::clone(&self.state);
+        core.tokio_rt.spawn(async move {
+            if task.await.is_err() {
+                *state.lock().unwrap() = State::Failed;
+            }
         });
     }
 

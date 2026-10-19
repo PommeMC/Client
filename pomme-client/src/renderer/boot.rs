@@ -32,15 +32,14 @@ impl BootScreen {
         })
     }
 
+    /// A minimised window (0×0) keeps the old swapchain, as
+    /// `Renderer::resize` does, until it's restored.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RendererError> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
         let _ = self.ctx.device.wait_idle();
-        let new = Swapchain::new(
-            &self.ctx,
-            width.max(1),
-            height.max(1),
-            self.vsync,
-            self.swapchain.handle,
-        )?;
+        let new = Swapchain::new(&self.ctx, width, height, self.vsync, self.swapchain.handle)?;
         let mut old = std::mem::replace(&mut self.swapchain, new);
         old.destroy(&self.ctx.device, &self.ctx.allocator);
         Ok(())

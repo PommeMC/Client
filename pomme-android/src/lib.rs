@@ -10,7 +10,7 @@ const LAUNCH_FILE: &str = "launch.txt";
 
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
-    std::panic::set_hook(Box::new(|info| tracing::error!("{info}")));
+    pomme_client::install_panic_hook();
     // Internal storage, which the app owns; `adb push` into the external
     // directory leaves files the app can't write to.
     let files = app

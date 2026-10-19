@@ -895,16 +895,21 @@ impl MainMenu {
     pub(crate) fn set_account(&mut self, username: String, access_token: Option<String>) {
         self.username = username;
         self.access_token = access_token;
-        if self.account_required && self.access_token.is_none() {
+        if self.account_gated() {
             self.set_screen(Screen::Account);
         }
+    }
+
+    /// Sign-in is required and nobody is signed in yet.
+    pub(crate) fn account_gated(&self) -> bool {
+        self.account_required && self.access_token.is_none()
     }
 
     /// Puts the menu behind sign-in: with no account, it opens on the
     /// account screen and only Sign In or Quit leave it.
     pub(crate) fn require_account(&mut self) {
         self.account_required = true;
-        if self.access_token.is_none() {
+        if self.account_gated() {
             self.set_screen(Screen::Account);
         }
     }
