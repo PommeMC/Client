@@ -22,6 +22,9 @@ const MAX_COPY_DEPTH: u32 = 16;
 /// Left in a profile moved by copying when deleting the original failed: the
 /// copy is complete, so the next run can switch to it and drop the leftover.
 const MOVED_MARKER: &str = ".pomme-moved";
+/// Added to a move's destination while it's being copied; specific enough
+/// that a stale one can be deleted without touching anything of the user's.
+const PART_SUFFIX: &str = ".pomme-part";
 
 pub struct Layout {
     root: PathBuf,
@@ -159,12 +162,12 @@ pub fn create_profile(dir: &Path) -> io::Result<()> {
 }
 
 /// Renames `from` to `to`, copying instead when they're on different
-/// volumes. The copy goes through `<to>.part`, so `to` only ever appears
-/// complete, and the `.part` never outlives the call; if deleting `from` then
-/// fails, `from` is left alongside `to`.
+/// volumes. The copy goes through [`PART_SUFFIX`], so `to` only ever appears
+/// complete and the partial copy never outlives the call; if deleting `from`
+/// then fails, `from` is left alongside `to`.
 pub fn move_path(from: &Path, to: &Path) -> io::Result<()> {
     let mut part = to.as_os_str().to_owned();
-    part.push(".part");
+    part.push(PART_SUFFIX);
     let part = PathBuf::from(part);
     // A stale one is from an earlier attempt that got cut off.
     let _ = remove(&part);
@@ -554,7 +557,7 @@ mod tests {
     #[test]
     fn a_copied_move_leaves_a_complete_copy() {
         let (base, from, to) = from_and_to("copied-move");
-        let part = base.join("to.part");
+        let part = base.join(format!("to{PART_SUFFIX}"));
         write(&from.join("saves/world/level.dat"), "world");
 
         copy_then_remove(&from, &to, &part).unwrap();
@@ -573,12 +576,12 @@ mod tests {
         let (base, from, to) = from_and_to("cut-off-copy");
         write(&from.join("level.dat"), "world");
         // What a copy that ran out of space left behind.
-        write(&base.join("to.part/level.dat"), "");
+        write(&base.join(format!("to{PART_SUFFIX}/level.dat")), "");
 
         move_path(&from, &to).unwrap();
 
         assert_eq!(fs::read_to_string(to.join("level.dat")).unwrap(), "world");
-        assert!(!base.join("to.part").exists());
+        assert!(!base.join(format!("to{PART_SUFFIX}")).exists());
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -592,7 +595,7 @@ mod tests {
 
         assert_eq!(fs::read_to_string(from.join("level.dat")).unwrap(), "world");
         assert_eq!(fs::read_to_string(to.join("level.dat")).unwrap(), "other");
-        assert!(!base.join("to.part").exists());
+        assert!(!base.join(format!("to{PART_SUFFIX}")).exists());
         fs::remove_dir_all(base).unwrap();
     }
 
