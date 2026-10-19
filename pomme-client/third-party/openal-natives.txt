@@ -15,7 +15,7 @@ natives-windows       windows/x64/org/lwjgl/openal/OpenAL.dll       OpenAL.dll  
 natives-linux         linux/x64/org/lwjgl/openal/libopenal.so       libopenal.so      c3be36ffda26c46b77bfa359586424a95d7620be11427897c7a454abb16c0994
 natives-macos-arm64   macos/arm64/org/lwjgl/openal/libopenal.dylib  libopenal.dylib   704365e5bfc028c006d2fe54862742d661295bd4b960824a0d2fbe5a9c7b8ffd
 
-# Android: OpenAL Soft built from its tag's GitHub archive by
-# tools/build_openal_android.py.
-# android-source  openal-soft tag  archive sha256
-android-source    1.25.1           5f8efe8dfba5e9307a50251ba615ace857c7fa9dddfe34130b83e213d7f7cf24
+# Android and iOS: OpenAL Soft built from its tag's GitHub archive by
+# tools/build_openal.py.
+# source  openal-soft tag  archive sha256
+source    1.25.1           5f8efe8dfba5e9307a50251ba615ace857c7fa9dddfe34130b83e213d7f7cf24

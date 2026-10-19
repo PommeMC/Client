@@ -6,6 +6,16 @@ use std::path::Path;
 include!("src/renderer/chunk/packing_consts.rs");
 
 fn main() {
+    // `mobile` covers what Android and iOS share: touch, the soft keyboard,
+    // no launcher.
+    println!("cargo::rustc-check-cfg=cfg(mobile)");
+    if matches!(
+        std::env::var("CARGO_CFG_TARGET_OS").as_deref(),
+        Ok("android" | "ios")
+    ) {
+        println!("cargo:rustc-cfg=mobile");
+    }
+
     // Releases bundle the Vulkan loader (libvulkan.1.dylib) next to the binary,
     // since macOS has no system Vulkan; this rpath lets it be found at runtime.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {

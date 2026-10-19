@@ -90,13 +90,22 @@ symphonia = { version = "0.5.5", default-features = false, features = ["ogg", "v
 fastrand = "2"
 gilrs = "0.11.2"
 
-# arboard has no Android backend; pyronyx's window-handle helpers don't
-# compile there (see `renderer::context::window_surface`); Android has no OS
-# credential store for pomme-auth (see `account::store`).
-[target.'cfg(not(target_os = "android"))'.dependencies]
-pomme-auth = { path = "../pomme-auth", features = ["keyring"] }
+# arboard has no Android or iOS backend; pyronyx's window-handle helpers don't
+# compile for Android and have no iOS arm (see
+# `renderer::context::window_surface`).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 pyronyx = { workspace = true, features = ["rwh_06"] }
 arboard = { version = "3", features = ["wayland-data-control"] }
+
+# Android has no OS credential store for pomme-auth (see `account::store`).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+pomme-auth = { path = "../pomme-auth", features = ["keyring"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+raw-window-metal = "1.1"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-ui-kit = "0.3"
 
 [target.'cfg(target_os = "android")'.dependencies]
 pomme-auth = { path = "../pomme-auth" }

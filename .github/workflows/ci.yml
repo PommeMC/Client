@@ -51,6 +51,44 @@ jobs:
       - name: Clippy
         run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo ndk -t arm64-v8a clippy -p pomme-android -- -D warnings
 
+  # The same for `cfg(target_os = "ios")`.
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
+      - name: Add the iOS target
+        run: rustup target add aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ios
+          cache-on-failure: true
+
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa
+        with:
+          vulkan_version: 1.4.341.0
+          install_runtime: false
+          cache: true
+          stripdown: true
+
+      - uses: actions/cache@v4
+        with:
+          path: target/moltenvk
+          key: moltenvk-${{ hashFiles('tools/fetch_moltenvk.py') }}
+
+      # shaderc is built for the runner against the SDK; the iOS build links
+      # MoltenVK as its Vulkan.
+      - name: Clippy
+        run: SHADERC_LIB_DIR="$VULKAN_SDK/lib" VULKAN_SDK="$(python3 tools/fetch_moltenvk.py ios)" cargo clippy -p pomme-ios --target aarch64-apple-ios -- -D warnings
+
   client:
     strategy:
       matrix:
@@ -94,6 +132,7 @@ jobs:
           cargo fmt -p pomme-auth -- --check
           cargo fmt -p pomme-install -- --check
           cargo fmt -p pomme-android -- --check
+          cargo fmt -p pomme-ios -- --check
 
       # Singleplayer is checked on Linux only, so SteelMC is not built three
       # times over.

@@ -5,6 +5,7 @@
 ```bash
 pomme-client/         # Minecraft client (Rust, Vulkan)
 pomme-android/        # Android entry point and APK project (see its README)
+pomme-ios/            # iOS entry point and Xcode project (see its README)
 pomme-auth/           # Microsoft sign-in, shared by the client and launcher
 pomme-install/        # Downloads a version's assets, shared by the client and launcher
 pomme-launcher/       # Launcher app (Tauri, React, TypeScript)
@@ -130,6 +131,11 @@ launcher/             launcher-only settings, installations and client builds
 
 An early arm64 build with touch controls; setup and limitations are in
 [`pomme-android/README.md`](pomme-android/README.md).
+
+### iOS
+
+An early iPhone and iPad build with the same touch controls, plus TestFlight
+archives; setup and limitations are in [`pomme-ios/README.md`](pomme-ios/README.md).
 
 ## Development commands
 

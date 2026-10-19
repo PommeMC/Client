@@ -915,7 +915,7 @@ impl MainMenu {
     }
 
     /// A form's text field has keyboard focus.
-    #[cfg(target_os = "android")]
+    #[cfg(mobile)]
     pub(crate) fn text_field_focused(&self) -> bool {
         self.focused_field.is_some()
     }

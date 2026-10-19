@@ -3,10 +3,7 @@
 //! directory and runs the client there.
 #![cfg(target_os = "android")]
 
-use pomme_client::{AndroidApp, LaunchArgs, Platform};
-
-/// The launch arguments, as on a command line (`just android-config`).
-const LAUNCH_FILE: &str = "launch.txt";
+use pomme_client::{AndroidApp, LAUNCH_FILE, LaunchArgs, Platform};
 
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
@@ -16,13 +13,8 @@ fn android_main(app: AndroidApp) {
     let files = app
         .internal_data_path()
         .expect("the app has no internal files directory");
-    let text = std::fs::read_to_string(files.join(LAUNCH_FILE)).unwrap_or_default();
-    let args = LaunchArgs::from_words(&text).unwrap_or_else(|e| {
-        tracing::error!("{LAUNCH_FILE}: {e}");
-        LaunchArgs::from_words("").expect("no arguments always parse")
-    });
     pomme_client::run(
-        args,
+        LaunchArgs::from_file(&files.join(LAUNCH_FILE)),
         Platform {
             data_root: Some(files.to_path_buf()),
             android_app: app,

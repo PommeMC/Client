@@ -12,6 +12,9 @@ mod swapchain;
 pub(crate) mod util;
 
 pub(crate) const MAX_FRAMES_IN_FLIGHT: usize = 3;
+/// iOS keeps a backgrounded app's view and Metal layer, so its surface
+/// outlives a suspend; Android takes the native window away.
+const KEEPS_SURFACE_WHEN_SUSPENDED: bool = cfg!(target_os = "ios");
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -664,18 +667,26 @@ impl Renderer {
             .set_aspect_ratio(new_size.width as f32 / new_size.height as f32);
     }
 
-    /// Drops the surface and swapchain when Android takes the native window,
-    /// keeping the device and every other resource.
+    /// Stops rendering while the app is in the background, dropping the
+    /// surface and swapchain unless they outlive it, but keeping the device
+    /// and every other resource.
     pub fn suspend(&mut self) {
         let _ = self.ctx.device.wait_idle();
-        self.swapchain.release_surface(&self.ctx.device);
-        self.ctx.destroy_surface();
+        if !KEEPS_SURFACE_WHEN_SUSPENDED {
+            self.swapchain.release_surface(&self.ctx.device);
+            self.ctx.destroy_surface();
+        }
         self.suspended = true;
     }
 
-    /// Rebuilds the surface and swapchain for the window Android hands back.
+    /// Picks up rendering again, rebuilding the surface and swapchain if
+    /// `suspend` dropped them.
     pub fn resume(&mut self, window: &Window) -> Result<(), RendererError> {
         if !self.suspended {
+            return Ok(());
+        }
+        if KEEPS_SURFACE_WHEN_SUSPENDED {
+            self.suspended = false;
             return Ok(());
         }
         self.ctx.recreate_surface(window)?;

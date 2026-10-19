@@ -5308,7 +5308,6 @@ name = "pomme-android"
 version = "0.1.0"
 dependencies = [
  "pomme-client",
- "tracing",
 ]
 
 [[package]]
@@ -5361,6 +5360,9 @@ dependencies = [
  "libloading 0.9.0",
  "md-5 0.11.0",
  "mimalloc",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
  "open",
  "paranoid-android",
  "parking_lot",
@@ -5374,6 +5376,7 @@ dependencies = [
  "pyronyx",
  "rand 0.10.3",
  "raw-window-handle",
+ "raw-window-metal",
  "regex",
  "reqwest",
  "rsa",
@@ -5429,6 +5432,13 @@ dependencies = [
  "sha1_smol",
  "tokio",
  "zip 9.0.4",
+]
+
+[[package]]
+name = "pomme-ios"
+version = "0.1.0"
+dependencies = [
+ "pomme-client",
 ]
 
 [[package]]

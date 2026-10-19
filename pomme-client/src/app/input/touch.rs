@@ -134,7 +134,7 @@ enum Role {
 #[derive(Default)]
 pub struct TouchControls {
     touches: HashMap<u64, Role>,
-    /// Any touch has arrived, so the overlay shows; only Android feeds them.
+    /// Any touch has arrived, so the overlay shows; only phones feed them.
     seen: bool,
 }
 

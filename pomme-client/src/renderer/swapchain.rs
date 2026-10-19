@@ -88,10 +88,10 @@ impl Swapchain {
         let present_mode = if vsync {
             vk::PresentModeKHR::Fifo
         } else {
-            // MoltenVK's Mailbox stays synced to the display refresh, so on macOS
-            // only Immediate (displaySyncEnabled = NO) truly uncaps; elsewhere
-            // Mailbox is preferred (uncapped and tear-free).
-            let prefer = if cfg!(target_os = "macos") {
+            // MoltenVK's Mailbox stays synced to the display refresh, so on
+            // Apple only Immediate (displaySyncEnabled = NO) truly uncaps;
+            // elsewhere Mailbox is preferred (uncapped and tear-free).
+            let prefer = if cfg!(target_vendor = "apple") {
                 [vk::PresentModeKHR::Immediate, vk::PresentModeKHR::Mailbox]
             } else {
                 [vk::PresentModeKHR::Mailbox, vk::PresentModeKHR::Immediate]

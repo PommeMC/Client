@@ -11,4 +11,3 @@ crate-type = ["cdylib"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 pomme-client = { path = "../pomme-client", default-features = false }
-tracing = { workspace = true }

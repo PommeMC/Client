@@ -262,7 +262,12 @@ fn library_names() -> &'static [&'static str] {
             "/System/Library/Frameworks/OpenAL.framework/OpenAL",
         ]
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    // Relative to the app bundle, which is the executable's directory.
+    #[cfg(target_os = "ios")]
+    {
+        &["Frameworks/soft_oal.framework/soft_oal"]
+    }
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     {
         &["libopenal.so.1", "libopenal.so"]
     }

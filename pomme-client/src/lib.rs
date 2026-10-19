@@ -48,7 +48,7 @@ use pomme_protocol::version::{NATIVE, VERSIONS};
 pub use winit::platform::android::activity::AndroidApp;
 
 use crate::app::App;
-pub use crate::args::LaunchArgs;
+pub use crate::args::{LAUNCH_FILE, LaunchArgs};
 #[cfg(target_os = "android")]
 pub use crate::logging::install_panic_hook;
 use crate::user::UserData;
@@ -85,8 +85,8 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         std::process::exit(cpu_bench::run(version, &data_dirs, filter.as_deref()));
     }
 
-    // Android has no launcher to hand over a token.
-    #[cfg(not(any(debug_assertions, target_os = "android")))]
+    // Phones have no launcher to hand over a token.
+    #[cfg(not(any(debug_assertions, mobile)))]
     {
         match &args.launch_token {
             Some(path) => {
@@ -133,6 +133,14 @@ pub fn run(args: LaunchArgs, platform: Platform) {
     let log_dir = data_dirs.game_dir.join("logs");
     std::fs::create_dir_all(&log_dir).unwrap();
     let _guard = logging::init(&log_dir);
+    #[cfg(target_os = "ios")]
+    for dir in [
+        &data_dirs.assets_dir,
+        &data_dirs.versions_dir,
+        &data_dirs.cache_dir,
+    ] {
+        util::exclude_from_backup(dir);
+    }
 
     // Block-state tables must be loaded before any world/render code runs.
     world::block::init(version);
@@ -155,21 +163,21 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         crate::net::chat_security::ProfileKeyServices::prefetch();
     }
 
-    // Without any account flags (no launcher), a release or Android build
+    // Without any account flags (no launcher), a release or phone build
     // plays as the stored account or signs in first; a desktop dev build
     // plays offline, and never reads the keychain unasked.
     let require_account = args.username.is_none()
         && args.uuid.is_none()
         && args.access_token.is_none()
-        && cfg!(any(not(debug_assertions), target_os = "android"));
+        && cfg!(any(not(debug_assertions), mobile));
     let user = UserData::from_args(args.username, args.uuid, args.access_token);
 
-    // A harness script stays off the user's Discord profile, and Android has
+    // A harness script stays off the user's Discord profile, and phones have
     // no Discord client to talk to.
     #[cfg(feature = "test-harness")]
     let discord = args.harness_script.is_none();
     #[cfg(not(feature = "test-harness"))]
-    let discord = cfg!(not(target_os = "android"));
+    let discord = cfg!(not(mobile));
     let presence = discord
         .then(|| {
             crate::discord::DiscordPresence::start(version)

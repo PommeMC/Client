@@ -6,10 +6,10 @@ use pomme_gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 #[cfg(debug_assertions)]
 use pyronyx::ext::debug_utils::DebugUtilsInstance;
 use pyronyx::khr::surface::{SurfaceInstance, SurfacePhysicalDevice};
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 use pyronyx::raw_window_handle::{create_surface, get_required_extensions};
 use pyronyx::{khr, vk};
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 use raw_window_handle::HasDisplayHandle;
 use raw_window_handle::HasWindowHandle;
 use thiserror::Error;
@@ -45,7 +45,7 @@ const VALIDATION_LAYERS: &[&CStr] = &[c"VK_LAYER_KHRONOS_validation"];
 
 const DEVICE_EXTENSIONS: &[&CStr] = &[
     khr::swapchain::NAME,
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     khr::portability_subset::NAME,
 ];
 
@@ -98,11 +98,18 @@ impl VulkanContext {
             khr::surface::NAME.as_ptr(),
             khr::android_surface::NAME.as_ptr(),
         ];
-        #[cfg(not(target_os = "android"))]
+        #[cfg(target_os = "ios")]
+        let required = [
+            khr::surface::NAME.as_ptr(),
+            pyronyx::ext::metal_surface::NAME.as_ptr(),
+        ];
+        #[cfg(not(mobile))]
         let required = get_required_extensions(window.display_handle()?.as_raw())?;
         #[allow(unused_mut)]
         let mut extensions = required.to_vec();
 
+        // The loader only lists MoltenVK, a portability implementation, when
+        // asked; iOS links MoltenVK directly, with no loader.
         #[cfg(target_os = "macos")]
         extensions.push(khr::portability_enumeration::NAME.as_ptr());
 
@@ -175,9 +182,7 @@ impl VulkanContext {
 
         let (gpu_name, vulkan_version) = {
             let props = physical_device.get_properties();
-            let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
-                .to_string_lossy()
-                .into_owned();
+            let name = device_name(&props);
             let v = props.api_version;
             let ver = format!(
                 "Vulkan {}.{}.{}",
@@ -397,13 +402,19 @@ fn pick_physical_device(
         .into_iter()
         .filter_map(|pd| {
             let (gf, pf) = find_queue_families(&pd, surface)?;
+            let props = pd.get_properties();
             // The chunk pass indexes each section's meta by `firstInstance`.
-            if !supports_extensions(&pd, DEVICE_EXTENSIONS)
-                || pd.get_features().draw_indirect_first_instance != vk::TRUE
-            {
+            let missing = if !supports_extensions(&pd, DEVICE_EXTENSIONS) {
+                Some("a required extension")
+            } else if pd.get_features().draw_indirect_first_instance != vk::TRUE {
+                Some("drawIndirectFirstInstance")
+            } else {
+                None
+            };
+            if let Some(missing) = missing {
+                tracing::info!("Skipping {}: no {missing}", device_name(&props));
                 return None;
             }
-            let props = pd.get_properties();
             let score = match props.device_type {
                 vk::PhysicalDeviceType::DiscreteGpu => 100,
                 vk::PhysicalDeviceType::IntegratedGpu => 50,
@@ -420,6 +431,12 @@ fn pick_physical_device(
         .next()
         .map(|(pd, gf, pf, _)| (pd, gf, pf))
         .ok_or(ContextError::NoSuitableGpu)
+}
+
+fn device_name(props: &vk::PhysicalDeviceProperties) -> String {
+    unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn supports_extensions(device: &vk::PhysicalDevice, names: &[&CStr]) -> bool {
@@ -453,7 +470,24 @@ fn window_surface(
         };
         Ok(instance.create_android_surface(&create_info, None)?)
     }
-    #[cfg(not(target_os = "android"))]
+    // pyronyx 0.5.0's `create_surface` has no UiKit arm; this is its AppKit
+    // one, on the view's Metal layer.
+    #[cfg(target_os = "ios")]
+    {
+        use pyronyx::ext::metal_surface::MetalSurfaceInstance;
+        let raw_window_handle::RawWindowHandle::UiKit(handle) = window_handle else {
+            return Err(raw_window_handle::HandleError::NotSupported.into());
+        };
+        // SAFETY: winit's view is a live `UIView` while the window exists,
+        // and `into_raw` hands the layer's ownership to the surface.
+        let layer = unsafe { raw_window_metal::Layer::from_ui_view(handle.ui_view) };
+        let create_info = vk::MetalSurfaceCreateInfoEXT {
+            layer: layer.into_raw().as_ptr().cast(),
+            ..Default::default()
+        };
+        Ok(instance.create_metal_surface(&create_info, None)?)
+    }
+    #[cfg(not(mobile))]
     Ok(create_surface(
         instance,
         window.display_handle()?.as_raw(),

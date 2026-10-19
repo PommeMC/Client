@@ -47,20 +47,12 @@ pub trait ClipboardAccess {
     fn set(&mut self, s: &str);
 }
 
-/// The real OS clipboard (arboard); errors read as empty / write nothing.
+/// The real OS clipboard; errors read as empty / write nothing.
 pub struct SystemClipboard;
 
 impl ClipboardAccess for SystemClipboard {
     fn get(&mut self) -> String {
-        // TODO: Android's clipboard is a Java service (ClipboardManager), via JNI.
-        #[cfg(target_os = "android")]
-        {
-            String::new()
-        }
-        #[cfg(not(target_os = "android"))]
-        arboard::Clipboard::new()
-            .and_then(|mut cb| cb.get_text())
-            .unwrap_or_default()
+        crate::ui::common::get_clipboard()
     }
 
     fn set(&mut self, s: &str) {

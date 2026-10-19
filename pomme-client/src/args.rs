@@ -59,11 +59,25 @@ pub struct LaunchArgs {
     pub harness_out: Option<std::path::PathBuf>,
 }
 
+/// The launch arguments' file on a phone, in the app's own storage.
+pub const LAUNCH_FILE: &str = "launch.txt";
+
 impl LaunchArgs {
     /// Arguments written out as on a command line, whitespace-separated, for
-    /// platforms (Android) that start without an argv.
+    /// phones, which start without an argv.
     pub fn from_words(text: &str) -> Result<Self, clap::Error> {
         Self::try_parse_from(std::iter::once("pomme").chain(text.split_whitespace()))
+    }
+
+    /// [`Self::from_words`] read from `path` (a [`LAUNCH_FILE`]), which the
+    /// phone dev recipes write. A missing file is no arguments; a bad one is
+    /// logged and ignored.
+    pub fn from_file(path: &std::path::Path) -> Self {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        Self::from_words(&text).unwrap_or_else(|e| {
+            tracing::error!("{}: {e}", path.display());
+            Self::from_words("").expect("no arguments always parse")
+        })
     }
 
     pub fn data_dirs(&self, version: &str) -> DataDirs {

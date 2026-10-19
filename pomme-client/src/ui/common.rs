@@ -275,6 +275,22 @@ pub fn push_results_overlay(
     ResultAction::None
 }
 
+/// The system clipboard's text, empty when there's none or it can't be read.
+pub(crate) fn get_clipboard() -> String {
+    // TODO: Android's clipboard is a Java service (ClipboardManager), via JNI.
+    #[cfg(target_os = "android")]
+    return String::new();
+    // SAFETY: the general pasteboard is safe to use from any thread.
+    #[cfg(target_os = "ios")]
+    return unsafe { objc2_ui_kit::UIPasteboard::generalPasteboard().string() }
+        .map(|text| text.to_string())
+        .unwrap_or_default();
+    #[cfg(not(mobile))]
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.get_text())
+        .unwrap_or_default()
+}
+
 /// Copy `text` to the system clipboard, returning whether it succeeded.
 pub(crate) fn set_clipboard(text: &str) -> bool {
     #[cfg(target_os = "android")]
@@ -282,7 +298,14 @@ pub(crate) fn set_clipboard(text: &str) -> bool {
         let _ = text;
         false
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
+    {
+        let text = objc2_foundation::NSString::from_str(text);
+        // SAFETY: as in `get_clipboard`.
+        unsafe { objc2_ui_kit::UIPasteboard::generalPasteboard().setString(Some(&text)) };
+        true
+    }
+    #[cfg(not(mobile))]
     match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
         Ok(()) => true,
         Err(err) => {

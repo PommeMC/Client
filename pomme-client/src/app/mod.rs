@@ -51,15 +51,15 @@ pub struct App {
     phase: StateSlot<AppPhase>,
     core: AppCore,
     occluded: bool,
-    /// In the background on Android; the loop sleeps instead of polling.
+    /// In the background on a phone; the loop sleeps instead of polling.
     suspended: bool,
     fps_limiter: FramerateLimiter,
     /// The version's assets are still downloading; startup waits for them.
     install: Option<install::Install>,
     /// The download screen's window, for the normal startup to keep.
     installed_window: Option<Arc<Window>>,
-    /// Whether Android's soft keyboard was last asked for.
-    #[cfg(target_os = "android")]
+    /// Whether the phone's soft keyboard was last asked for.
+    #[cfg(mobile)]
     soft_keyboard: bool,
     #[cfg(feature = "test-harness")]
     harness: Option<crate::harness::Harness>,
@@ -217,7 +217,7 @@ impl App {
             core,
             occluded: false,
             suspended: true,
-            #[cfg(target_os = "android")]
+            #[cfg(mobile)]
             soft_keyboard: false,
             fps_limiter: FramerateLimiter::new(),
             #[cfg(feature = "test-harness")]
@@ -256,7 +256,7 @@ impl App {
 
     /// A text field has keyboard focus: chat and the in-game fields, or a
     /// menu form's.
-    #[cfg(target_os = "android")]
+    #[cfg(mobile)]
     fn wants_text_input(&self) -> bool {
         match self.phase.get() {
             AppPhase::InGame { game, .. } if !game.paused => self.core.input.text_capture,
@@ -786,7 +786,7 @@ impl ApplicationHandler for App {
                 }
             }
             // Desktop touchscreens already drive the mouse through the OS.
-            WindowEvent::Touch(touch) if cfg!(target_os = "android") => {
+            WindowEvent::Touch(touch) if cfg!(mobile) => {
                 let gameplay = self.world_has_pointer();
                 if let Some(gfx) = self.phase.gfx_mut() {
                     let width = gfx.renderer.screen_width() as f32;
@@ -1041,7 +1041,7 @@ impl ApplicationHandler for App {
 
                 // Desktop is left alone: allowing IME there moves typing from
                 // key events to IME events.
-                #[cfg(target_os = "android")]
+                #[cfg(mobile)]
                 {
                     let wanted = self.wants_text_input();
                     if wanted != self.soft_keyboard

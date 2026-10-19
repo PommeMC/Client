@@ -98,11 +98,48 @@ pub static ANDROID_APP: std::sync::RwLock<Option<crate::AndroidApp>> = std::sync
 pub fn open_url(url: &str) {
     #[cfg(target_os = "android")]
     let opened = open_url_android(url).map_err(|e| e.to_string());
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
+    let opened = open_url_ios(url);
+    #[cfg(not(mobile))]
     let opened = open::that(url).map_err(|e| e.to_string());
     if let Err(e) = opened {
         tracing::warn!("Could not open {url:?}: {e}");
     }
+}
+
+/// Keeps `dir`, which holds only re-downloadable files, out of iCloud
+/// backups; it's created if missing.
+#[cfg(target_os = "ios")]
+pub fn exclude_from_backup(dir: &std::path::Path) {
+    use objc2_foundation::{NSNumber, NSString, NSURL, NSURLIsExcludedFromBackupKey};
+
+    let _ = std::fs::create_dir_all(dir);
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&dir.to_string_lossy()));
+    // SAFETY: the key's value is an `NSNumber` boolean, as Foundation expects.
+    let excluded = unsafe {
+        url.setResourceValue_forKey_error(
+            Some(&NSNumber::new_bool(true)),
+            NSURLIsExcludedFromBackupKey,
+        )
+    };
+    if let Err(e) = excluded {
+        tracing::warn!("Couldn't keep {} out of backups: {e}", dir.display());
+    }
+}
+
+/// `[UIApplication.sharedApplication openURL:]`, which opens Safari; `open`
+/// would spawn a process, which iOS doesn't allow.
+#[cfg(target_os = "ios")]
+fn open_url_ios(url: &str) -> Result<(), String> {
+    use objc2_foundation::{MainThreadMarker, NSDictionary, NSString, NSURL};
+    use objc2_ui_kit::UIApplication;
+
+    let mtm = MainThreadMarker::new().ok_or("not on the main thread")?;
+    let url = NSURL::URLWithString(&NSString::from_str(url)).ok_or("not a URL")?;
+    let app = UIApplication::sharedApplication(mtm);
+    // SAFETY: the options dictionary is empty and there's no completion block.
+    unsafe { app.openURL_options_completionHandler(&url, &NSDictionary::new(), None) };
+    Ok(())
 }
 
 /// `activity.startActivity(new Intent(ACTION_VIEW, Uri.parse(url)))`, as a

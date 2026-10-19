@@ -53,7 +53,7 @@ ingame-server:
 android_app := "com.pommemc.client"
 
 android-build:
-    @python3 tools/build_openal_android.py pomme-android/app/src/main/jniLibs/arm64-v8a
+    @python3 tools/build_openal.py android pomme-android/app/src/main/jniLibs/arm64-v8a
     @cargo ndk -t arm64-v8a -o pomme-android/app/src/main/jniLibs build -p pomme-android
     @cd pomme-android && ./gradlew -q assembleDebug
 
@@ -84,6 +84,32 @@ android-config *args:
 
 android-log:
     @adb logcat -s pomme:V RustStdoutStderr:V AndroidRuntime:E DEBUG:V
+
+# iOS (pomme-ios/README.md). `team` is your Apple Developer team id.
+
+# Builds, installs and runs it with its log on the connected iPhone or iPad.
+ios-device team:
+    @python3 tools/ios.py device {{ team }}
+
+# On the booted simulator, which builds and starts but can't render yet.
+ios-sim:
+    @python3 tools/ios.py sim
+
+# The launch arguments, as on a command line; `--sim` first for the simulator.
+ios-config *args:
+    @python3 tools/ios.py config {{ args }}
+
+# Copies a desktop install's `minecraft/` assets in; `--sim` for the simulator.
+ios-push-assets *args:
+    @python3 tools/ios.py push-assets {{ args }}
+
+# A Release archive and its App Store .ipa, for TestFlight.
+ios-archive team:
+    @python3 tools/ios.py archive {{ team }}
+
+# Uploads the archive to App Store Connect, where TestFlight picks it up.
+ios-upload team:
+    @python3 tools/ios.py upload {{ team }}
 
 # TODO: CI also runs the client's clippy and tests with --no-default-features; mirror it here.
 
