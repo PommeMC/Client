@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "pomme-android",
+    "pomme-auth",
     "pomme-client",
     "pomme-launcher/src-tauri",
     "pomme-gpu-allocator",

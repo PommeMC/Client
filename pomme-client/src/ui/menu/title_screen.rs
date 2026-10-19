@@ -135,12 +135,13 @@ impl MainMenu {
         let icon_size = ICON_W * gs;
         let row_w = 3.0 * ICON_W + 2.0 * ICON_GAP;
         let icon_x0 = cx - row_w / 2.0 * gs;
-        let friends_enabled = self.access_token.is_some();
+        // Signed out, Friends opens the sign-in screen instead.
+        let signed_in = self.access_token.is_some();
         let icons: [(SpriteId, bool, &str); 3] = [
             (
                 SpriteId::IconFriends,
-                friends_enabled,
-                if friends_enabled {
+                true,
+                if signed_in {
                     "Friends"
                 } else {
                     "Sign in to use friends"
@@ -174,7 +175,8 @@ impl MainMenu {
             ) {
                 any_clicked = true;
                 match sprite {
-                    SpriteId::IconFriends => self.open_friends(),
+                    SpriteId::IconFriends if signed_in => self.open_friends(),
+                    SpriteId::IconFriends => self.open_account(),
                     SpriteId::IconAccessibility => {
                         self.settings_back = Screen::Main;
                         self.set_screen(Screen::OptionsAccessibility);

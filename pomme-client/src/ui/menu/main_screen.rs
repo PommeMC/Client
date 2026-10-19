@@ -331,7 +331,7 @@ impl MainMenu {
             };
 
         let bottom_icons: [(f32, char, bool); 4] = [
-            (btn_x, ICON_USER, false),
+            (btn_x, ICON_USER, true),
             (btn_x + icon_size + icon_gap, ICON_LINK, true),
             (btn_x + content_w - icon_size, ICON_GEAR, true),
             (
@@ -348,6 +348,7 @@ impl MainMenu {
             if enabled && clicked && hovered {
                 any_clicked = true;
                 match icon {
+                    ICON_USER => self.open_account(),
                     ICON_LINK => self.toggle_links(),
                     ICON_GEAR => {
                         self.open_options();
@@ -359,9 +360,9 @@ impl MainMenu {
         }
 
         // Second row mirrors vanilla 26.2: friends, language and accessibility,
-        // centered. Friends needs a signed-in account, so it's disabled offline.
-        let friends_enabled = self.access_token.is_some();
-        let friends_tip = if friends_enabled {
+        // centered. Signed out, Friends opens the sign-in screen instead.
+        let signed_in = self.access_token.is_some();
+        let friends_tip = if signed_in {
             "Friends"
         } else {
             "Sign in to use friends"
@@ -369,7 +370,7 @@ impl MainMenu {
         let new_row_w = icon_size * 3.0 + icon_gap * 2.0;
         let new_x0 = btn_x + (content_w - new_row_w) / 2.0;
         let new_icons: [(f32, char, bool, &str); 3] = [
-            (new_x0, ICON_USERS, friends_enabled, friends_tip),
+            (new_x0, ICON_USERS, true, friends_tip),
             (
                 new_x0 + icon_size + icon_gap,
                 ICON_LANGUAGE,
@@ -395,7 +396,8 @@ impl MainMenu {
             if enabled && clicked && hovered {
                 any_clicked = true;
                 match icon {
-                    ICON_USERS => self.open_friends(),
+                    ICON_USERS if signed_in => self.open_friends(),
+                    ICON_USERS => self.open_account(),
                     ICON_LANGUAGE => {
                         self.settings_back = Screen::Main;
                         self.set_screen(Screen::OptionsLanguage);

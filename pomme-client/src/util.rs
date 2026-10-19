@@ -90,6 +90,75 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
+/// The Android app, for calls into its Java side (`open_url`).
+#[cfg(target_os = "android")]
+pub static ANDROID_APP: std::sync::OnceLock<crate::AndroidApp> = std::sync::OnceLock::new();
+
+/// Opens `url` in the browser.
+pub fn open_url(url: &str) {
+    #[cfg(target_os = "android")]
+    let opened = open_url_android(url).map_err(|e| e.to_string());
+    #[cfg(not(target_os = "android"))]
+    let opened = open::that(url).map_err(|e| e.to_string());
+    if let Err(e) = opened {
+        tracing::warn!("Could not open {url:?}: {e}");
+    }
+}
+
+/// `activity.startActivity(new Intent(ACTION_VIEW, Uri.parse(url)))`, as a
+/// Custom Tab: the browser opens over the app, which stays in the foreground,
+/// and Back returns to it. The session extra (a null binder) is all Custom
+/// Tabs needs; androidx.browser's `CustomTabsIntent` only builds this intent.
+#[cfg(target_os = "android")]
+fn open_url_android(url: &str) -> jni::errors::Result<()> {
+    use jni::objects::{JObject, JValue};
+
+    let Some(app) = ANDROID_APP.get() else {
+        return Ok(());
+    };
+    // SAFETY: android-activity's pointers are the process's JavaVM and the
+    // activity's global reference, both alive while the app runs.
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+    let mut env = vm.attach_current_thread()?;
+    let url = env.new_string(url)?;
+    let uri = env
+        .call_static_method(
+            "android/net/Uri",
+            "parse",
+            "(Ljava/lang/String;)Landroid/net/Uri;",
+            &[JValue::Object(&url)],
+        )?
+        .l()?;
+    let action = env.new_string("android.intent.action.VIEW")?;
+    let intent = env.new_object(
+        "android/content/Intent",
+        "(Ljava/lang/String;Landroid/net/Uri;)V",
+        &[JValue::Object(&action), JValue::Object(&uri)],
+    )?;
+    let extras = env.new_object("android/os/Bundle", "()V", &[])?;
+    let session = env.new_string("android.support.customtabs.extra.SESSION")?;
+    env.call_method(
+        &extras,
+        "putBinder",
+        "(Ljava/lang/String;Landroid/os/IBinder;)V",
+        &[JValue::Object(&session), JValue::Object(&JObject::null())],
+    )?;
+    env.call_method(
+        &intent,
+        "putExtras",
+        "(Landroid/os/Bundle;)Landroid/content/Intent;",
+        &[JValue::Object(&extras)],
+    )?;
+    env.call_method(
+        &activity,
+        "startActivity",
+        "(Landroid/content/Intent;)V",
+        &[JValue::Object(&intent)],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,6 +5,7 @@
 ```bash
 pomme-client/         # Minecraft client (Rust, Vulkan)
 pomme-android/        # Android entry point and APK project (see its README)
+pomme-auth/           # Microsoft sign-in, shared by the client and launcher
 pomme-launcher/       # Launcher app (Tauri, React, TypeScript)
 pomme-protocol/       # Per-version protocol data and wire encoding
 pomme-dirs/           # The data folder layout the client and launcher share

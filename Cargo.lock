@@ -5312,6 +5312,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pomme-auth"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "keyring",
+ "rand 0.10.3",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "specta",
+ "tokio",
+ "urlencoding",
+]
+
+[[package]]
 name = "pomme-client"
 version = "0.1.0"
 dependencies = [
@@ -5341,6 +5357,7 @@ dependencies = [
  "gilrs",
  "glam",
  "image",
+ "jni 0.21.1",
  "libloading 0.9.0",
  "md-5 0.11.0",
  "mimalloc",
@@ -5348,6 +5365,7 @@ dependencies = [
  "paranoid-android",
  "parking_lot",
  "png 0.17.16",
+ "pomme-auth",
  "pomme-dirs",
  "pomme-gpu-allocator",
  "pomme-protocol",
@@ -5406,9 +5424,9 @@ version = "0.1.2"
 dependencies = [
  "base64 0.23.1",
  "hickory-resolver 0.25.2",
- "keyring",
  "log",
  "open",
+ "pomme-auth",
  "pomme-dirs",
  "pomme-protocol",
  "rand 0.10.3",
@@ -5429,7 +5447,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "url",
- "urlencoding",
  "zip 9.0.4",
 ]
 

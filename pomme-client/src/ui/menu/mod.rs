@@ -1,3 +1,4 @@
+mod account;
 mod credits;
 mod friends_screen;
 pub(crate) mod helpers;
@@ -321,6 +322,8 @@ pub enum MenuAction {
         protocol: Option<i32>,
     },
     ChangeTheme(PanoramaTheme),
+    /// Signed in (`Some`) or out (`None`) from the account screen.
+    Account(Option<pomme_auth::AuthAccount>),
     /// Open the singleplayer world in this save folder.
     PlayWorld {
         folder: String,
@@ -471,6 +474,7 @@ const DOUBLE_CLICK_MS: u128 = 400;
 
 enum Screen {
     Main,
+    Account,
     ServerList,
     WorldList,
     CreateWorld,
@@ -505,6 +509,7 @@ impl Screen {
         match self {
             Self::Main => Self::Main,
             Self::Friends => Self::Friends,
+            Self::Account => Self::Account,
             Self::Options => Self::Options,
             Self::OptionsOnline => Self::OptionsOnline,
             Self::OptionsVideo => Self::OptionsVideo,
@@ -585,6 +590,11 @@ pub struct MainMenu {
     add_friend_name: TextFieldState,
     action_error: ActionError,
     pending_remove: Option<(String, String)>,
+    account_store: Arc<dyn pomme_auth::SecretStore>,
+    sign_in: Arc<parking_lot::RwLock<account::SignIn>>,
+    sign_in_task: Option<tokio::task::JoinHandle<()>>,
+    /// No launcher passed an account, so the menu is behind sign-in.
+    account_required: bool,
     rt: Arc<tokio::runtime::Runtime>,
     links_open: bool,
     theme_open: bool,
@@ -742,6 +752,10 @@ impl MainMenu {
             add_friend_name: TextFieldState::new(MAX_FRIEND),
             action_error: Default::default(),
             pending_remove: None,
+            account_store: Arc::from(crate::account::store(game_dir)),
+            sign_in: Default::default(),
+            sign_in_task: None,
+            account_required: false,
             rt,
             links_open: false,
             theme_open: false,
@@ -875,6 +889,24 @@ impl MainMenu {
     /// `Mth::square`).
     pub fn fov_effect(&self) -> f32 {
         self.fov_effect_scale * self.fov_effect_scale
+    }
+
+    /// The account the menu shows and joins with.
+    pub(crate) fn set_account(&mut self, username: String, access_token: Option<String>) {
+        self.username = username;
+        self.access_token = access_token;
+        if self.account_required && self.access_token.is_none() {
+            self.set_screen(Screen::Account);
+        }
+    }
+
+    /// Puts the menu behind sign-in: with no account, it opens on the
+    /// account screen and only Sign In or Quit leave it.
+    pub(crate) fn require_account(&mut self) {
+        self.account_required = true;
+        if self.access_token.is_none() {
+            self.set_screen(Screen::Account);
+        }
     }
 
     /// A form's text field has keyboard focus.
@@ -1217,6 +1249,7 @@ impl MainMenu {
                 self.build_confirm_delete_world(screen_w, screen_h, input, &text_width_fn)
             }
             Screen::Friends => self.build_friends(screen_w, screen_h, input, &text_width_fn),
+            Screen::Account => self.build_account(screen_w, screen_h, input),
             Screen::ConfirmDelete(_) => {
                 self.build_confirm_delete(screen_w, screen_h, input, &text_width_fn)
             }
@@ -1296,6 +1329,26 @@ impl MainMenu {
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.ping_results.write().clear();
     }
+}
+
+/// `dir` must not exist: settings and the server list fall back to
+/// defaults, and a settings save silently fails instead of writing.
+#[cfg(test)]
+fn test_menu(dir: &str) -> MainMenu {
+    let rt = std::sync::Arc::new(
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime"),
+    );
+    let mut menu = MainMenu::new(
+        std::path::Path::new(dir),
+        rt,
+        "tester".into(),
+        "26.2".into(),
+        None,
+    );
+    menu.gui_scale_setting = 1;
+    menu
 }
 
 #[cfg(test)]

@@ -90,11 +90,15 @@ fastrand = "2"
 gilrs = "0.11.2"
 
 # arboard has no Android backend; pyronyx's window-handle helpers don't
-# compile there (see `renderer::context::window_surface`).
+# compile there (see `renderer::context::window_surface`); Android has no OS
+# credential store for pomme-auth (see `account::store`).
 [target.'cfg(not(target_os = "android"))'.dependencies]
+pomme-auth = { path = "../pomme-auth", features = ["keyring"] }
 pyronyx = { workspace = true, features = ["rwh_06"] }
 arboard = { version = "3", features = ["wayland-data-control"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
+pomme-auth = { path = "../pomme-auth" }
+jni = "0.21"
 winit = { version = "0.30", features = ["android-native-activity"] }
 paranoid-android = "0.2"

@@ -178,6 +178,20 @@ pub fn update_menu(
                 .reload_panorama(&theme.panorama_dir(&core.data_dirs));
             core.menu.start_transition_open();
         }
+        MenuAction::Account(account) => {
+            core.user = match &account {
+                Some(account) => crate::user::UserData::from_account(account),
+                None => {
+                    crate::user::UserData::from_args(Some(core.user.username.clone()), None, None)
+                }
+            };
+            core.menu
+                .set_account(core.user.username.clone(), core.user.access_token.clone());
+            if core.user.has_profile {
+                gfx.renderer
+                    .load_player_skin(&core.user.uuid, &core.tokio_rt);
+            }
+        }
         MenuAction::Quit => {
             return MenuUpdateResult::Quit;
         }

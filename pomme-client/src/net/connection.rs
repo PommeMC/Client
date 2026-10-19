@@ -431,19 +431,10 @@ async fn handle_encryption(
         })?;
 
         tracing::info!("Authenticating with session server (uuid: {uuid})");
-        // TODO: azalea builds its own HTTP client here, which on Android
-        // panics without rustls-platform-verifier's Java half; join through
-        // `net::http` once Android can log in.
-        azalea_auth::sessionserver::join(azalea_auth::sessionserver::SessionServerJoinOpts {
-            access_token,
-            public_key: &hello.public_key,
-            private_key: &e.secret_key,
-            uuid,
-            server_id: &hello.server_id,
-            proxy: None,
-        })
-        .await
-        .map_err(|e| ConnectionError::Auth(e.to_string()))?;
+        let hash = super::session::server_hash(&hello.server_id, &e.secret_key, &hello.public_key);
+        super::session::join(access_token, uuid, &hash)
+            .await
+            .map_err(ConnectionError::Auth)?;
         tracing::info!("Session server authentication successful");
     } else {
         tracing::info!("Server does not require authentication");

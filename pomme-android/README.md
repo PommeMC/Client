@@ -42,6 +42,14 @@ just android-log                           # logcat, filtered to pomme
 and `.pomme` (assets, versions and the game directory) live in the app's
 internal storage, reached with `adb shell run-as com.pommemc.client`.
 
+## Signing in
+
+With no account flags in `launch.txt` (drop `--username`), the app opens on
+a sign-in screen: it shows a code to enter at microsoft.com/link, on the
+phone (Open Link opens it in a Custom Tab) or any other device. The account
+is saved in the app's storage and restored on the next launch. With
+`--username`, as above, it plays offline as that name instead.
+
 ## Controls
 
 In the world: drag on the left to move (the stick appears where you press),
@@ -52,7 +60,6 @@ keyboard opens while a text field has focus, and Back works as Escape.
 
 ## Limitations
 
-- Offline-mode servers only: no Microsoft login on the device.
 - No singleplayer: the embedded server is off on Android.
 - The keyboard can cover the field being typed in: NativeActivity doesn't
   resize the window for it.

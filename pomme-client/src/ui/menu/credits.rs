@@ -207,7 +207,7 @@ impl MainMenu {
             ) {
                 match url {
                     Some(url) => {
-                        let _ = open::that(url);
+                        crate::util::open_url(url);
                     }
                     None => self.open_credits_roll(),
                 }

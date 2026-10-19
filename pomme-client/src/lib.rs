@@ -4,6 +4,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod account;
 mod app;
 mod args;
 mod assets;
@@ -69,6 +70,8 @@ pub fn run(args: LaunchArgs, platform: Platform) {
     {
         eprintln!("Couldn't move the old .pomme folder: {e}");
     }
+    #[cfg(target_os = "android")]
+    let _ = util::ANDROID_APP.set(platform.android_app.clone());
 
     // Ahead of the launch-token guard, which bench builds have no launcher for.
     #[cfg(feature = "cpu-bench")]
@@ -155,7 +158,17 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         crate::net::chat_security::ProfileKeyServices::prefetch();
     }
 
-    let user = UserData::from_args(args.username, args.uuid, args.access_token);
+    // Without any account flags (no launcher), play as the stored account,
+    // or sign in before anything else.
+    let launcherless =
+        args.username.is_none() && args.uuid.is_none() && args.access_token.is_none();
+    let restored = launcherless
+        .then(|| account::restore(&rt, &*account::store(&data_dirs.game_dir)))
+        .flatten();
+    let user = match restored {
+        Some(account) => UserData::from_account(&account),
+        None => UserData::from_args(args.username, args.uuid, args.access_token),
+    };
 
     // A harness script stays off the user's Discord profile, and Android has
     // no Discord client to talk to.
@@ -183,6 +196,9 @@ pub fn run(args: LaunchArgs, platform: Platform) {
                 .quick_access_singleplayer
                 .map(app::QuickPlay::Singleplayer)),
     );
+    if launcherless {
+        app.require_account();
+    }
     #[cfg(feature = "test-harness")]
     {
         let harness = crate::harness::Harness::from_args(

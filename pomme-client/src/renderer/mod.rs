@@ -2240,7 +2240,9 @@ pub(crate) async fn fetch_skin_texture_by_name(name: &str) -> Result<SkinData, S
         .map_err(|()| "profile url cannot take a path".to_owned())?
         .pop_if_empty()
         .push(name);
-    let response = crate::net::http::get(url).await.map_err(error_chain)?;
+    let response = crate::net::http::get(url)
+        .await
+        .map_err(pomme_auth::error_chain)?;
     if matches!(
         response.status(),
         reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::NOT_FOUND
@@ -2249,10 +2251,10 @@ pub(crate) async fn fetch_skin_texture_by_name(name: &str) -> Result<SkinData, S
     }
     let profile: NamedProfile = response
         .error_for_status()
-        .map_err(error_chain)?
+        .map_err(pomme_auth::error_chain)?
         .json()
         .await
-        .map_err(error_chain)?;
+        .map_err(pomme_auth::error_chain)?;
     fetch_skin_texture(&profile.id).await
 }
 
@@ -2268,7 +2270,9 @@ pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<SkinData, String> {
     }
 
     let url = format!("https://sessionserver.mojang.com/session/minecraft/profile/{uuid}");
-    let response = crate::net::http::get(&url).await.map_err(error_chain)?;
+    let response = crate::net::http::get(&url)
+        .await
+        .map_err(pomme_auth::error_chain)?;
     if matches!(
         response.status(),
         reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::NOT_FOUND
@@ -2277,10 +2281,10 @@ pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<SkinData, String> {
     }
     let profile: SessionProfile = response
         .error_for_status()
-        .map_err(error_chain)?
+        .map_err(pomme_auth::error_chain)?
         .json()
         .await
-        .map_err(error_chain)?;
+        .map_err(pomme_auth::error_chain)?;
 
     let value = &profile
         .properties
@@ -2360,8 +2364,9 @@ fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String>
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(value)
         .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
-        .map_err(error_chain)?;
-    let payload: TexturesPayload = serde_json::from_slice(&decoded).map_err(error_chain)?;
+        .map_err(pomme_auth::error_chain)?;
+    let payload: TexturesPayload =
+        serde_json::from_slice(&decoded).map_err(pomme_auth::error_chain)?;
 
     // authlib `unpackTextures`: one bad url empties the whole payload.
     // TODO: vanilla also shows the default skin for other players whose
@@ -2403,32 +2408,17 @@ fn is_allowed_texture_url(url: &str) -> bool {
     matches!(scheme, "http" | "https") && host == HOST && port_ok
 }
 
-/// Error message including the source chain (`reqwest` hides the detail there).
-fn error_chain(e: impl std::error::Error) -> String {
-    let mut msg = e.to_string();
-    let mut source = e.source();
-    while let Some(s) = source {
-        let text = s.to_string();
-        if !msg.contains(&text) {
-            msg.push_str(": ");
-            msg.push_str(&text);
-        }
-        source = s.source();
-    }
-    msg
-}
-
 async fn fetch_skin_image(skin_url: &str) -> Result<(Vec<u8>, u32, u32), String> {
     let skin_bytes = crate::net::http::get(skin_url)
         .await
-        .map_err(error_chain)?
+        .map_err(pomme_auth::error_chain)?
         .error_for_status()
-        .map_err(error_chain)?
+        .map_err(pomme_auth::error_chain)?
         .bytes()
         .await
-        .map_err(error_chain)?;
+        .map_err(pomme_auth::error_chain)?;
 
-    let img = image::load_from_memory(&skin_bytes).map_err(error_chain)?;
+    let img = image::load_from_memory(&skin_bytes).map_err(pomme_auth::error_chain)?;
     let rgba = img.to_rgba8();
     let w = rgba.width();
     let h = rgba.height();

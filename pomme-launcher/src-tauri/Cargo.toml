@@ -19,6 +19,7 @@ zip = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true, features = ["form"] }
 pomme-protocol = { path = "../../pomme-protocol" }
+pomme-auth = { path = "../../pomme-auth", features = ["keyring", "specta"] }
 
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
@@ -27,9 +28,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
 log = "0.4"
 rand = "0.10"
-keyring = { version = "3", features = ["apple-native", "sync-secret-service", "windows-native"] }
 sha2 = "0.11"
-urlencoding = "2"
 url = "2"
 hickory-resolver = { version = "0.25.2", features = ["tokio"] }
 

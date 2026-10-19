@@ -212,6 +212,11 @@ impl App {
         }
     }
 
+    /// No launcher passed an account; see `MainMenu::require_account`.
+    pub fn require_account(&mut self) {
+        self.core.menu.require_account();
+    }
+
     #[cfg(feature = "test-harness")]
     pub fn with_harness(mut self, harness: Option<crate::harness::Harness>) -> Self {
         // A test window rarely has focus, so it must not pause on losing it.

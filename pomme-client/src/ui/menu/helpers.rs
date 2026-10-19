@@ -1070,7 +1070,7 @@ impl MainMenu {
             drop_w,
             &items,
         ) {
-            let _ = open::that(LINKS[i].2);
+            crate::util::open_url(LINKS[i].2);
         }
     }
 

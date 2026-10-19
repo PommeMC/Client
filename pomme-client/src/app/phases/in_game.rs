@@ -1536,9 +1536,7 @@ fn handle_chat_ui_action(
             let Ok(url) = crate::chat_component::parse_untrusted_url(url) else {
                 return;
             };
-            if let Err(e) = open::that(&url) {
-                tracing::warn!("Could not open chat link {url:?}: {e}");
-            }
+            crate::util::open_url(&url);
         }
         ChatUiAction::OpenChatSettings => {
             game.chat.close_for_settings();
@@ -4158,7 +4156,7 @@ pub fn update_game(
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
         PauseAction::ReportBugs => {
-            let _ = open::that("https://github.com/PommeMC/Client/issues");
+            crate::util::open_url("https://github.com/PommeMC/Client/issues");
         }
         PauseAction::None => {}
     }

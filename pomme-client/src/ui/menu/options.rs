@@ -2061,25 +2061,6 @@ mod tests {
         assert_eq!(result.new_value, Some(1.0));
     }
 
-    /// `dir` must not exist: settings and the server list fall back to
-    /// defaults, and a settings save silently fails instead of writing.
-    fn test_menu(dir: &str) -> MainMenu {
-        let rt = std::sync::Arc::new(
-            tokio::runtime::Builder::new_current_thread()
-                .build()
-                .expect("current-thread runtime"),
-        );
-        let mut menu = MainMenu::new(
-            std::path::Path::new(dir),
-            rt,
-            "tester".into(),
-            "26.2".into(),
-            None,
-        );
-        menu.gui_scale_setting = 1;
-        menu
-    }
-
     #[test]
     fn binding_capture_replaces_all_inputs_without_activating_done() {
         let mut menu = test_menu("pomme-keybind-capture-test");

@@ -29,6 +29,14 @@ impl UserData {
         }
     }
 
+    pub fn from_account(account: &pomme_auth::AuthAccount) -> Self {
+        Self::from_args(
+            Some(account.username.clone()),
+            Some(account.uuid.clone()),
+            Some(account.access_token.clone()),
+        )
+    }
+
     /// Vanilla `UUIDUtil.createOfflinePlayerUUID`: a bare MD5 of the prefixed
     /// name, not a namespaced v3 UUID.
     fn offline_uuid(username: &str) -> uuid::Uuid {
