@@ -31,6 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
+      tag: ${{ steps.rel.outputs.tag }}
+      prev: ${{ steps.rel.outputs.prev }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -67,6 +69,34 @@ jobs:
           fi
 
           release
+
+      # Ahead of the build, which bakes the tag in for the client's updater.
+      - name: Resolve release tag
+        id: rel
+        shell: bash
+        run: |
+          git fetch --tags --force
+          tags=$(git tag --list 'client-v*')
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${{ github.ref_name }}"
+          else
+            core="${{ inputs.version }}"
+            if [ -z "$core" ]; then
+              latest=$(echo "$tags" \
+                | sed -nE 's/^client-v([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
+                | sort -V | tail -n1)
+              if [ -z "$latest" ]; then
+                core="0.1.0"
+              else
+                IFS=. read -r ma mi pa <<< "$latest"
+                core="$ma.$mi.$((pa + 1))"
+              fi
+            fi
+            tag="client-v${core}+${MC_VERSION}"
+          fi
+          prev=$(echo "$tags" | grep -vFx "$tag" | sort -V | tail -n1 || true)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prev=$prev" >> "$GITHUB_OUTPUT"
 
   build-client:
     needs: check
@@ -115,6 +145,8 @@ jobs:
           sudo apt-get install -y libvulkan-dev cmake libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev libdbus-1-dev
 
       - name: Build
+        env:
+          POMME_RELEASE: ${{ needs.check.outputs.tag }}
         run: cargo build -p pomme-client --release --target ${{ matrix.target }}
 
       # The runner images disagree on whether `python` or `python3` is on PATH,
@@ -186,33 +218,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve release tag
-        id: rel
-        shell: bash
-        run: |
-          git fetch --tags --force
-          tags=$(git tag --list 'client-v*')
-          if [ "${{ github.event_name }}" = "push" ]; then
-            tag="${{ github.ref_name }}"
-          else
-            core="${{ inputs.version }}"
-            if [ -z "$core" ]; then
-              latest=$(echo "$tags" \
-                | sed -nE 's/^client-v([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
-                | sort -V | tail -n1)
-              if [ -z "$latest" ]; then
-                core="0.1.0"
-              else
-                IFS=. read -r ma mi pa <<< "$latest"
-                core="$ma.$mi.$((pa + 1))"
-              fi
-            fi
-            tag="client-v${core}+${MC_VERSION}"
-          fi
-          prev=$(echo "$tags" | grep -vFx "$tag" | sort -V | tail -n1 || true)
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "prev=$prev" >> "$GITHUB_OUTPUT"
-
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -225,21 +230,21 @@ jobs:
 
       - uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ steps.rel.outputs.tag }}
+          tag_name: ${{ needs.check.outputs.tag }}
           prerelease: false
           # Keep the "Latest" badge on the launcher release, not the weekly client.
           make_latest: false
-          previous_tag: ${{ steps.rel.outputs.prev }}
+          previous_tag: ${{ needs.check.outputs.prev }}
           files: dist/*
-          generate_release_notes: ${{ steps.rel.outputs.prev != '' }}
+          generate_release_notes: ${{ needs.check.outputs.prev != '' }}
 
       - name: Announce release on Discord
-        if: steps.rel.outputs.prev != ''
+        if: needs.check.outputs.prev != ''
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          TAG: ${{ steps.rel.outputs.tag }}
+          TAG: ${{ needs.check.outputs.tag }}
         shell: bash
         run: |
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then

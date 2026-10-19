@@ -24,13 +24,13 @@ openal:
 client-dev *args: openal
     @cargo run -p pomme-client {{ args }}
 
-# Optimized release client for accurate benchmarking (supplies the launch token the guard needs).
+# Optimized release client for accurate benchmarking.
 # Plays offline as Steve unless given account flags, so it never asks to sign in.
 client-release *args: openal
     #!/usr/bin/env bash
     account=(--username Steve)
     case " {{ args }} " in *" --username"* | *" --uuid"* | *" --access-token"*) account=() ;; esac
-    cargo run --release -p pomme-client -- --launch-token "$(mktemp)" "${account[@]}" {{ args }}
+    cargo run --release -p pomme-client -- "${account[@]}" {{ args }}
 
 # Headless CPU benchmarks (mesher, fade rebuild, occlusion), no window or GPU.
 # An optional filter runs only matching benches, e.g. `just bench mesh`.

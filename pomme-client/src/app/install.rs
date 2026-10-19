@@ -1,6 +1,9 @@
-//! The first-run download of the version's assets (`pomme_install`) and its
-//! screen, run before the normal startup can build anything from them.
+//! What runs on the boot screen before the normal startup: updating a
+//! release build to the newest one, then the first-run download of the
+//! version's assets (`pomme_install`).
 
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use winit::event_loop::ActiveEventLoop;
@@ -9,57 +12,100 @@ use winit::window::Window;
 use crate::app::core::AppCore;
 use crate::renderer::boot::BootScreen;
 
+#[derive(Clone)]
 enum State {
+    /// The window isn't up yet, so the job hasn't started.
+    Waiting,
     Running(pomme_install::Progress),
     Failed,
     Done,
+    /// The update is in; this binary hands over to it.
+    Updated(PathBuf),
 }
 
-/// What the startup does after a frame of the download.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Job {
+    Update,
+    Assets,
+}
+
+/// What the startup does after a frame of the boot screen.
 pub enum Step {
     Running,
-    /// The assets are in; the normal startup takes over the window.
+    /// Everything is in; the normal startup takes over the window.
     Done(Arc<Window>),
+    /// A newer release replaced this one; it starts in this one's place.
+    Relaunch(PathBuf),
 }
 
 pub struct Install {
+    job: Job,
+    needs_assets: bool,
     state: Arc<Mutex<State>>,
     window: Option<Arc<Window>>,
     screen: Option<BootScreen>,
 }
 
 impl Install {
-    pub fn start(core: &AppCore) -> Self {
-        let install = Self {
-            state: Arc::new(Mutex::new(State::Running(Default::default()))),
+    /// The boot screen's work, or `None` when the normal startup can go
+    /// straight ahead. The job starts once the window is up.
+    pub fn new(core: &AppCore, update: bool) -> Option<Self> {
+        let needs_assets = !core.data_dirs.is_installed(&core.version);
+        let job = match (update, needs_assets) {
+            (true, _) => Job::Update,
+            (false, true) => Job::Assets,
+            (false, false) => return None,
+        };
+        Some(Self {
+            job,
+            needs_assets,
+            state: Arc::new(Mutex::new(State::Waiting)),
             window: None,
             screen: None,
-        };
-        install.download(core);
-        install
+        })
     }
 
-    fn download(&self, core: &AppCore) {
+    fn start(&self, core: &AppCore) {
         *self.state.lock().unwrap() = State::Running(Default::default());
         let state = Arc::clone(&self.state);
-        let dirs = core.data_dirs.clone();
-        let version = core.version.clone();
-        let task = core.tokio_rt.spawn(async move {
-            let result = pomme_install::install(
-                crate::net::http::client(),
-                &dirs.assets_dir,
-                &dirs.versions_dir,
-                &version,
-                &|progress| *state.lock().unwrap() = State::Running(progress),
-            )
-            .await;
-            *state.lock().unwrap() = match result {
-                Ok(()) => State::Done,
-                Err(reason) => {
-                    tracing::warn!("Asset download failed: {reason}");
-                    State::Failed
+        let report = move |progress| *state.lock().unwrap() = State::Running(progress);
+        let job: Pin<Box<dyn Future<Output = State> + Send>> = match self.job {
+            Job::Update => Box::pin(async move {
+                match crate::update::run(&report).await {
+                    Ok(Some(exe)) => State::Updated(exe),
+                    Ok(None) => State::Done,
+                    Err(reason) => {
+                        tracing::warn!("Skipping the update: {reason}");
+                        State::Done
+                    }
                 }
-            };
+            }),
+            Job::Assets => {
+                let dirs = core.data_dirs.clone();
+                let version = core.version.clone();
+                Box::pin(async move {
+                    let result = pomme_install::install(
+                        crate::net::http::client(),
+                        &dirs.assets_dir,
+                        &dirs.versions_dir,
+                        &version,
+                        &report,
+                    )
+                    .await;
+                    result.map_or_else(
+                        |reason| {
+                            tracing::warn!("Asset download failed: {reason}");
+                            State::Failed
+                        },
+                        |()| State::Done,
+                    )
+                })
+            }
+        };
+        let state = Arc::clone(&self.state);
+        let task = core.tokio_rt.spawn(async move {
+            let next = job.await;
+            *state.lock().unwrap() = next;
         });
         // A panic would otherwise leave the screen waiting forever.
         let state = Arc::clone(&self.state);
@@ -70,9 +116,10 @@ impl Install {
         });
     }
 
-    /// Brings the window up, or back after Android took it, with its screen.
-    /// A download that failed while the app was away (Android freezes a
-    /// backgrounded app, dropping its connections) picks up again.
+    /// Brings the window up, or back after Android took it, with its screen,
+    /// and starts the job the first time. A download that failed while the
+    /// app was away (Android freezes a backgrounded app, dropping its
+    /// connections) picks up again.
     pub fn resume(&mut self, event_loop: &ActiveEventLoop, core: &AppCore) {
         self.retry(core);
         let window = match self.window.take() {
@@ -116,25 +163,36 @@ impl Install {
 
     /// A click or tap retries a failed download.
     pub fn retry(&self, core: &AppCore) {
-        if matches!(*self.state.lock().unwrap(), State::Failed) {
-            self.download(core);
+        if matches!(*self.state.lock().unwrap(), State::Waiting | State::Failed) {
+            self.start(core);
         }
     }
 
-    pub fn frame(&mut self, version: &str) -> Step {
-        let (progress, status) = match &*self.state.lock().unwrap() {
+    pub fn frame(&mut self, core: &AppCore) -> Step {
+        let state = self.state.lock().unwrap().clone();
+        let (progress, status) = match state {
+            State::Waiting => (0.0, String::new()),
             State::Running(p) => (
                 if p.total == 0 {
                     0.0
                 } else {
                     p.done as f32 / p.total as f32
                 },
-                format!("Minecraft {version}: {}", p.status),
+                match self.job {
+                    Job::Update => format!("Updating Pomme: {}", p.status),
+                    Job::Assets => format!("Minecraft {}: {}", core.version, p.status),
+                },
             ),
             State::Failed => (
                 0.0,
                 "Download failed. Check your connection, then tap or click to retry.".to_owned(),
             ),
+            State::Updated(exe) => return Step::Relaunch(exe),
+            State::Done if self.job == Job::Update && self.needs_assets => {
+                self.job = Job::Assets;
+                self.start(core);
+                return Step::Running;
+            }
             State::Done => {
                 // The full renderer makes its own surface on this window.
                 self.screen = None;

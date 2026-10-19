@@ -205,7 +205,6 @@ impl App {
         quick_play: Option<QuickPlay>,
         window_size: winit::dpi::LogicalSize<u32>,
     ) -> Self {
-        let installed = data_dirs.is_installed(&version);
         let pending_skin_uuid = user.has_profile.then_some(user.uuid);
         let core = AppCore::new(version, data_dirs, tokio_rt, presence, user, window_size);
         Self {
@@ -213,7 +212,7 @@ impl App {
                 quick_play,
                 pending_skin_uuid,
             }),
-            install: (!installed).then(|| install::Install::start(&core)),
+            install: install::Install::new(&core, false),
             installed_window: None,
             core,
             occluded: false,
@@ -224,6 +223,11 @@ impl App {
             #[cfg(feature = "test-harness")]
             harness: None,
         }
+    }
+
+    /// Updates a release build to the newest release before the menu.
+    pub fn check_for_update(&mut self) {
+        self.install = install::Install::new(&self.core, true);
     }
 
     /// No launcher passed an account; see `MainMenu::require_account`.
@@ -431,7 +435,14 @@ impl ApplicationHandler for App {
         if let Some(install) = &mut self.install {
             match event {
                 WindowEvent::RedrawRequested => {
-                    if let install::Step::Done(window) = install.frame(&self.core.version) {
+                    let step = install.frame(&self.core);
+                    if let install::Step::Relaunch(exe) = &step {
+                        if let Err(e) = crate::update::relaunch(exe) {
+                            tracing::error!("Couldn't start the updated client: {e}");
+                        }
+                        event_loop.exit();
+                    }
+                    if let install::Step::Done(window) = step {
                         self.install = None;
                         self.core.reload_installed_assets();
                         self.installed_window = Some(window);

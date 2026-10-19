@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+pub mod client;
+
 const VERSION_MANIFEST_URL: &str =
     "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const RESOURCES_BASE_URL: &str = "https://resources.download.minecraft.net";
@@ -323,15 +325,24 @@ mod tests {
 
     use super::{extract_assets, is_installed, sha1_hex, write_atomic};
 
-    fn temp_dir(label: &str) -> std::path::PathBuf {
+    pub(crate) fn temp_dir(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("pomme-install-{label}-{}", std::process::id()))
     }
 
-    fn jar(entries: &[(&str, &str)]) -> Vec<u8> {
+    pub(crate) fn jar(entries: &[(&str, &str)]) -> Vec<u8> {
+        let entries: Vec<_> = entries
+            .iter()
+            .map(|&(name, body)| (name, body, 0o644))
+            .collect();
+        zip_of(&entries)
+    }
+
+    /// A zip of `(name, body, unix mode)` entries.
+    pub(crate) fn zip_of(entries: &[(&str, &str, u32)]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        for (name, body) in entries {
-            zip.start_file(*name, zip::write::SimpleFileOptions::default())
-                .unwrap();
+        for &(name, body, mode) in entries {
+            let options = zip::write::SimpleFileOptions::default().unix_permissions(mode);
+            zip.start_file(name, options).unwrap();
             zip.write_all(body.as_bytes()).unwrap();
         }
         zip.finish().unwrap().into_inner()

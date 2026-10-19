@@ -1,6 +1,6 @@
 [package]
 name = "pomme-install"
-description = "Downloads a Minecraft version's assets, shared by the Pomme client and launcher."
+description = "Downloads a Minecraft version's assets and Pomme's own client builds."
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
@@ -11,5 +11,6 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha1_smol = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt", "time"] }
 zip = { workspace = true }

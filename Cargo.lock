@@ -5430,6 +5430,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1_smol",
+ "sha2 0.11.1",
  "tokio",
  "zip 9.0.4",
 ]
@@ -5458,7 +5459,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1_smol",
- "sha2 0.11.1",
  "specta",
  "specta-typescript",
  "tauri",
@@ -5471,7 +5471,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "url",
- "zip 9.0.4",
 ]
 
 [[package]]

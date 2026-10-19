@@ -25,6 +25,8 @@ pub struct LaunchArgs {
     #[arg(long)]
     pub access_token: Option<String>,
 
+    /// Passed by the old launcher, which keeps its own copies of the client
+    /// up to date; it turns off the client's own update.
     #[arg(long)]
     pub launch_token: Option<String>,
 
