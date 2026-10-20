@@ -109,6 +109,27 @@ License: GNU Library General Public License version 2. Full text at
 with the bundling notice in
 [pomme-client/third-party/OpenAL-Soft-NOTICE.txt](./pomme-client/third-party/OpenAL-Soft-NOTICE.txt).
 
+## KhronosGroup/MoltenVK and KhronosGroup/Vulkan-Loader
+
+macOS releases bundle the unmodified MoltenVK library (`libMoltenVK.dylib`, its
+`MoltenVK_icd.json`) and Vulkan loader (`libvulkan.1.dylib`) from the Vulkan
+SDK, since macOS has no system Vulkan.
+
+Source: <https://github.com/KhronosGroup/MoltenVK>,
+<https://github.com/KhronosGroup/Vulkan-Loader>
+
+License: Apache-2.0 (the loader's few other files are under more permissive
+licenses, as its `LICENSE.txt` notes).
+
+## AppImage/type2-runtime
+
+Linux AppImages start through the unmodified AppImage type 2 runtime, which
+statically links its FUSE and SquashFS dependencies under their own licenses.
+
+Source: <https://github.com/AppImage/type2-runtime>
+
+License: MIT.
+
 ## azalea-rs/azalea
 
 `pomme-block` is a data-free shim patched in place of azalea-block, keeping its

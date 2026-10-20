@@ -28,7 +28,7 @@ What actually happened.
 
 - **OS:**
 - **GPU:**
-- **Pomme version:** (release tag, the folder name under `launcher/clients/` in the Pomme data folder; or the commit for a local build)
+- **Pomme version:** (bottom-right of the title screen, e.g. 0.2.8; or the commit for a local build)
 - **Server or world:** (e.g., 1.21.11 vanilla server, or a singleplayer world)
 
 ## Logs

@@ -7,7 +7,7 @@ pomme-client/         # Minecraft client (Rust, Vulkan)
 pomme-android/        # Android entry point and APK project (see its README)
 pomme-ios/            # iOS entry point and Xcode project (see its README)
 pomme-auth/           # Microsoft sign-in, shared by the client and launcher
-pomme-install/        # Downloads a version's assets, shared by the client and launcher
+pomme-install/        # Downloads a version's assets and Pomme's own releases, shared by the client and launcher
 pomme-launcher/       # Launcher app (Tauri, React, TypeScript)
 pomme-protocol/       # Per-version protocol data and wire encoding
 pomme-dirs/           # The data folder layout the client and launcher share
@@ -15,13 +15,14 @@ pomme-block/          # Data-free stand-in for azalea-block; block tables are Po
 pomme-singleplayer/   # Runs SteelMC in-process as the integrated server
 pomme-gpu-allocator/  # Vendored fork of the gpu-allocator crate
 third_party/SteelMC/  # SteelMC submodule
+packaging/            # Release installers: the macOS dmg, Windows setup and Linux AppImage
 tools/                # protogen, blockgen, stategen, and the OpenAL fetch script
 ```
 
-The client is a standalone binary that receives launch arguments from
-the launcher. The launcher handles authentication, asset downloading,
-version management, and spawns the client with the appropriate flags.
-Started without them, the client signs in and downloads its assets itself.
+The client is a standalone app: it signs in with a Microsoft account,
+downloads a version's assets on first start, and release builds keep
+themselves up to date. The launcher is being retired; it can still start the
+client with launch arguments.
 
 Before building, you must have [just](https://github.com/casey/just) installed.
 The Rust toolchain is pinned in `rust-toolchain.toml`; rustup picks it up.
@@ -69,18 +70,11 @@ just launcher-build --release
 
 ## Running
 
-### Via the launcher (recommended)
+### Client
 
-```bash
-pnpm install
-just launcher-dev
-```
+The client needs Minecraft's assets, for which you have 2 options:
 
-### Standalone client
-
-Running the standalone client requires minecraft assets, for which you have 2 options:
-
-1. Run the launcher and install the latest supported release. Then you can do:
+1. Let it download them on first start, into the data folder:
 
    ```bash
    just client-dev -- --username Steve
@@ -119,6 +113,13 @@ just client-dev -- --width 1280 --height 720
 ```
 
 They only apply on desktop, and don't change saved settings or fullscreen.
+
+### Launcher
+
+```bash
+pnpm install
+just launcher-dev
+```
 
 ### Data folder
 
