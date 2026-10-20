@@ -215,18 +215,23 @@ impl SkyState {
         value
     }
 
-    /// Vanilla `Level.skyDarken`: 15 less the overworld's `SKY_LIGHT_LEVEL`
-    /// timeline (15 by day, 4 at night), pulled toward 4 by rain and thunder.
-    /// Sampled per whole tick, as vanilla caches it; dimensions without sky
-    /// light never read it.
-    pub fn sky_darken(&self) -> u8 {
+    /// Vanilla `Level.skyDarken`: 15 less `SKY_LIGHT_LEVEL`, which the
+    /// overworld day timeline takes from 15 by day to 4 at night, and rain
+    /// and thunder pull toward 4. Sampled per whole tick, as vanilla caches
+    /// it. The end has no day timeline; the nether has no sky light to dim.
+    pub fn sky_darken(&self, overworld_day: bool) -> u8 {
         let toward_night = |alpha: f32| move |level: f32| level.lerp(4.0, alpha);
-        let level = self.weather_layers(
-            15.0 * sample_float_keyframes(
+        let day = if overworld_day {
+            sample_float_keyframes(
                 (self.day_time % TICKS_PER_DAY as u64) as f32,
                 SKY_LIGHT_LEVEL_KEYFRAMES,
                 TICKS_PER_DAY,
-            ),
+            )
+        } else {
+            1.0
+        };
+        let level = self.weather_layers(
+            15.0 * day,
             toward_night(0.3125),
             toward_night(0.527_343_75),
             FloatExt::lerp,
@@ -1212,12 +1217,14 @@ mod tests {
 
     #[test]
     fn sky_darkens_at_night_and_in_weather() {
-        assert_eq!(at(6000, 0.0, 0.0).sky_darken(), 0);
+        assert_eq!(at(6000, 0.0, 0.0).sky_darken(true), 0);
         // 15 x 0.26666668 rounds to 4 in f32, as in vanilla.
-        assert_eq!(at(18000, 0.0, 0.0).sky_darken(), 11);
-        assert_eq!(at(6000, 1.0, 0.0).sky_darken(), 3);
-        assert_eq!(at(6000, 1.0, 1.0).sky_darken(), 5);
+        assert_eq!(at(18000, 0.0, 0.0).sky_darken(true), 11);
+        assert_eq!(at(6000, 1.0, 0.0).sky_darken(true), 3);
+        assert_eq!(at(6000, 1.0, 1.0).sky_darken(true), 5);
         // Halfway through dusk: 15 x 0.633.
-        assert_eq!(at(12768, 0.0, 0.0).sky_darken(), 5);
+        assert_eq!(at(12768, 0.0, 0.0).sky_darken(true), 5);
+        // The end keeps its sky light through the night.
+        assert_eq!(at(18000, 0.0, 0.0).sky_darken(false), 0);
     }
 }

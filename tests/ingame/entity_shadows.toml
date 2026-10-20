@@ -67,16 +67,23 @@ screenshot = "day"
 chat = "/time set 18000"
 
 [[step]]
+wait_ms = 11000
+
+# Monsters that spawned in the dark, out of the shot.
+[[step]]
 chat = "/kill @e[type=!player,type=!pig,type=!item]"
 
 [[step]]
-wait_ms = 11000
+screenshot = "night"
 
 [[step]]
-screenshot = "night"
+chat = "/kill @e[type=!player]"
 
 [[step]]
 chat = "/fill -3 -60 0 3 -58 7 minecraft:air"
 
 [[step]]
 chat = "/time set 6000"
+
+[[step]]
+chat = "/gamerule advance_time true"

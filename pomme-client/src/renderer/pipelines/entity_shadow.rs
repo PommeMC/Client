@@ -20,10 +20,13 @@ use crate::world::chunk::ChunkStore;
 use crate::world::light::lightmap_brightness;
 
 /// Something that casts a shadow, with vanilla's `getShadowRadius` and
-/// `getShadowStrength`.
-#[derive(Clone, Copy)]
+/// `getShadowStrength`; radius 0 casts none.
+#[derive(Clone, Copy, Default)]
 pub struct ShadowCaster {
     pub position: DVec3,
+    /// Vanilla's render offset (a pufferfish's bob, an enderman's shake): it
+    /// moves the quads, not which blocks they land on.
+    pub offset: DVec3,
     pub radius: f32,
     pub strength: f32,
 }
@@ -348,7 +351,7 @@ fn extract_shadow(
     let depth = (pow / 0.5 - 1.0).min(radius);
     let y0 = (pos.y - f64::from(depth)).floor() as i32;
     let y1 = pos.y.floor() as i32;
-    let origin = (pos - anchor).as_vec3();
+    let origin = (pos + caster.offset - anchor).as_vec3();
     for z in (pos.z - r).floor() as i32..=(pos.z + r).floor() as i32 {
         for x in (pos.x - r).floor() as i32..=(pos.x + r).floor() as i32 {
             for y in y0..=y1 {

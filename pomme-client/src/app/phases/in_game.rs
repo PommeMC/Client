@@ -245,6 +245,8 @@ pub struct GameState {
     /// Dimension-type `ambient_light`: 0 in the overworld, 0.1 in the
     /// nether, 0.25 in the end.
     pub ambient_light: f32,
+    /// The dimension follows the overworld's day (see `SkyState::sky_darken`).
+    pub overworld_day: bool,
     /// The current dimension's `default_clock`, whose ticks are its day time.
     pub default_clock: Option<String>,
     /// F3+F4 game-mode switcher overlay, while open.
@@ -346,6 +348,11 @@ pub struct MeshedCol {
 }
 
 impl GameState {
+    /// This dimension's `skyDarken` right now.
+    pub fn sky_darken(&self) -> u8 {
+        self.sky_state.sky_darken(self.overworld_day)
+    }
+
     /// Notes a played sound for the harness, keeping the last 64.
     #[cfg(feature = "test-harness")]
     pub fn record_sound(&mut self, sound: &crate::audio::SoundRef) {
@@ -479,6 +486,7 @@ impl GameState {
             dimension: String::new(),
             cardinal_light: Default::default(),
             ambient_light: 0.0,
+            overworld_day: true,
             default_clock: None,
             game_mode_switcher: None,
             spectator: Default::default(),
@@ -2071,7 +2079,7 @@ fn eye_lightmap_brightness(game: &GameState) -> f32 {
         eye.x.floor() as i32,
         eye.y.floor() as i32,
         eye.z.floor() as i32,
-        game.sky_state.sky_darken(),
+        game.sky_darken(),
     );
     crate::world::light::lightmap_brightness(level, game.ambient_light)
 }
@@ -3755,7 +3763,7 @@ pub fn update_game(
                 let extras =
                     entity_extras(entity_id, e, partial_tick, game.sky_state.game_time as i64);
                 let is_sleeping = e.sleeping_pos.is_some();
-                let (shadow_radius, shadow_strength) = crate::entity::shadow::of_living(e);
+                let (radius, strength) = crate::entity::shadow::of_living(e);
 
                 EntityRenderInfo {
                     position: interp_pos + extras.render_offset,
@@ -3825,8 +3833,12 @@ pub fn update_game(
                     age_in_ticks: e.age_in_ticks as f32 + partial_tick,
                     attack_time: e.swing_progress(partial_tick),
                     skip_cull: false,
-                    shadow_radius,
-                    shadow_strength,
+                    shadow: ShadowCaster {
+                        position: *interp_pos,
+                        offset: extras.render_offset,
+                        radius,
+                        strength,
+                    },
                 }
             })
             .collect()
@@ -3849,8 +3861,7 @@ pub fn update_game(
             partial_tick,
         );
 
-        let (shadow_radius, shadow_strength) =
-            crate::entity::shadow::of_player(&game.player.attributes);
+        let (radius, strength) = crate::entity::shadow::of_player(&game.player.attributes);
         entity_renders.push(EntityRenderInfo {
             position: interp_pos,
             head_y_rot_deg: interp_y_rot_deg,
@@ -3873,8 +3884,13 @@ pub fn update_game(
             has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),
             death_time: render_death_time(game.player.death_time, partial_tick),
             skip_cull: true,
-            shadow_radius,
-            shadow_strength,
+            // Players drop their render offset before the shadow.
+            shadow: ShadowCaster {
+                position: *interp_pos,
+                radius,
+                strength,
+                ..Default::default()
+            },
             ..Default::default()
         });
     }
@@ -4037,7 +4053,7 @@ pub fn update_game(
         ShadowScene {
             casters: &shadow_casters,
             chunks: &game.chunk_store,
-            sky_darken: game.sky_state.sky_darken(),
+            sky_darken: game.sky_darken(),
             ambient_light: game.ambient_light,
         },
         &entity_renders,
@@ -4467,11 +4483,7 @@ fn shadow_casters(
     partial_tick: f32,
 ) -> Vec<ShadowCaster> {
     let (item_radius, item_strength) = crate::entity::shadow::ITEM;
-    let entities = entities.iter().map(|e| ShadowCaster {
-        position: *e.position,
-        radius: e.shadow_radius,
-        strength: e.shadow_strength,
-    });
+    let entities = entities.iter().map(|e| e.shadow);
     // A full-strength shadow fades out 16 blocks from the camera.
     let items = items
         .visible_items(camera_pos, 16.0)
@@ -4480,6 +4492,7 @@ fn shadow_casters(
             position: *item.prev_position.lerp(item.position, partial_tick as f64),
             radius: item_radius,
             strength: item_strength,
+            ..Default::default()
         });
     entities.chain(items).collect()
 }

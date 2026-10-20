@@ -123,6 +123,9 @@ pub enum NetworkEvent {
         cardinal_light: crate::world::block::model::CardinalLightType,
         /// Dimension-type `ambient_light`, the lightmap's floor.
         ambient_light: f32,
+        /// The dimension's `timelines` include the overworld day, which dims
+        /// its sky light at night.
+        overworld_day: bool,
         /// The `world_clock` driving this dimension's day time.
         default_clock: Option<String>,
     },
