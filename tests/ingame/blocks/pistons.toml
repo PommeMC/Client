@@ -1,0 +1,107 @@
+# Pistons, simulated client-side as vanilla's client does: the server never
+# sends the moving blocks, only the blocks they land as. A piston pushes a
+# line of blocks, a sticky piston leaves an immovable block behind when it
+# retracts, and a piston rising under the player lifts them.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/tp @s 0.5 -60 0.5 0 30"
+
+# Two blocks in front of an east-facing piston.
+[[step]]
+chat = "/setblock 0 -60 6 minecraft:piston[facing=east]"
+
+[[step]]
+chat = "/setblock 1 -60 6 minecraft:stone"
+
+[[step]]
+chat = "/setblock 2 -60 6 minecraft:dirt"
+
+[[step]]
+expect = { block = "dirt", at = [2, -60, 6] }
+
+[[step]]
+look_at = [2.0, -59.5, 6.5]
+
+[[step]]
+chat = "/setblock 0 -60 5 minecraft:redstone_block"
+
+# Mid-push: the head and both blocks part-way out.
+[[step]]
+wait_ms = 60
+
+[[step]]
+screenshot = "pushing"
+
+[[step]]
+expect = { block = "dirt", at = [3, -60, 6] }
+
+[[step]]
+expect = { block = "stone", at = [2, -60, 6] }
+
+[[step]]
+expect = { block = "piston_head", at = [1, -60, 6] }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "pushed"
+
+# A sticky piston can't pull obsidian: retracting only takes its head back,
+# and the obsidian must stay on the client too.
+[[step]]
+chat = "/setblock 0 -60 9 minecraft:sticky_piston[facing=east]"
+
+[[step]]
+chat = "/setblock 2 -60 9 minecraft:obsidian"
+
+[[step]]
+chat = "/setblock 0 -60 8 minecraft:redstone_block"
+
+[[step]]
+expect = { block = "piston_head", at = [1, -60, 9] }
+
+[[step]]
+chat = "/setblock 0 -60 8 minecraft:air"
+
+[[step]]
+expect = { block = "air", at = [1, -60, 9] }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+expect = { block = "obsidian", at = [2, -60, 9] }
+
+# The player stands on an upward piston set into the ground; its head
+# carries them up a block. The client moves itself, so only its own piston
+# push lifts it.
+[[step]]
+chat = "/setblock 0 -61 12 minecraft:piston[facing=up]"
+
+[[step]]
+chat = "/tp @s 0.5 -60 12.5 0 30"
+
+[[step]]
+expect = { player = { position = [0.5, -60.0, 12.5] } }
+
+[[step]]
+chat = "/setblock 1 -61 12 minecraft:redstone_block"
+
+[[step]]
+expect = { player = { position = [0.5, -59.0, 12.5] } }
+
+[[step]]
+chat = "/fill -1 -60 4 4 -58 13 minecraft:air"
+
+[[step]]
+chat = "/fill -1 -61 4 4 -61 13 minecraft:grass_block"
+
+[[step]]
+expect = { block = "grass_block", at = [0, -61, 12] }
