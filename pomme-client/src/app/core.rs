@@ -1323,12 +1323,16 @@ impl AppCore {
                     min_y,
                     has_skylight,
                     cardinal_light,
+                    ambient_light,
+                    overworld_day,
                     default_clock,
                 } => {
                     tracing::info!(
                         "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}, cardinal_light={cardinal_light:?}"
                     );
                     game.cardinal_light = cardinal_light;
+                    game.ambient_light = ambient_light;
+                    game.overworld_day = overworld_day;
                     game.default_clock = default_clock;
                     game.chunk_store =
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);

@@ -2,7 +2,7 @@ use std::f32::consts::{PI, TAU};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use glam::Vec3;
+use glam::{FloatExt, Vec3};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
@@ -40,6 +40,14 @@ const SKY_COLOR_KEYFRAMES: &[(f32, [f32; 3])] = &[
     (11867.0, [1.0, 1.0, 1.0]),
     (13670.0, [0.0, 0.0, 0.0]),
     (22330.0, [0.0, 0.0, 0.0]),
+];
+
+/// The overworld timeline's `SKY_LIGHT_LEVEL` multiplier.
+const SKY_LIGHT_LEVEL_KEYFRAMES: &[(f32, f32)] = &[
+    (133.0, 1.0),
+    (11867.0, 1.0),
+    (13670.0, 0.266_666_68),
+    (22330.0, 0.266_666_68),
 ];
 
 const SUNRISE_COLOR_KEYFRAMES: &[(f32, i32)] = &[
@@ -180,19 +188,55 @@ impl SkyState {
     /// `WeatherAttributes`: the sky blends to grey, the fog multiplies its RGB.
     fn apply_weather(
         &self,
-        mut rgb: [f32; 3],
+        rgb: [f32; 3],
         rain_mod: impl Fn([f32; 3]) -> [f32; 3],
         thunder_mod: impl Fn([f32; 3]) -> [f32; 3],
     ) -> [f32; 3] {
+        self.weather_layers(rgb, rain_mod, thunder_mod, lerp_rgb)
+    }
+
+    /// Vanilla `WeatherAttributes.addLayer`: the rain-only share of the rain
+    /// level, then the thunder level, each blending toward its modified value.
+    fn weather_layers<T: Copy>(
+        &self,
+        mut value: T,
+        rain_mod: impl Fn(T) -> T,
+        thunder_mod: impl Fn(T) -> T,
+        lerp: impl Fn(T, T, f32) -> T,
+    ) -> T {
         let thunder = self.thunder();
         let rain_only = (self.rain() - thunder).max(0.0);
         if rain_only > 0.0 {
-            rgb = lerp_rgb(rgb, rain_mod(rgb), rain_only);
+            value = lerp(value, rain_mod(value), rain_only);
         }
         if thunder > 0.0 {
-            rgb = lerp_rgb(rgb, thunder_mod(rgb), thunder);
+            value = lerp(value, thunder_mod(value), thunder);
         }
-        rgb
+        value
+    }
+
+    /// Vanilla `Level.skyDarken`: 15 less `SKY_LIGHT_LEVEL`, which the
+    /// overworld day timeline takes from 15 by day to 4 at night, and rain
+    /// and thunder pull toward 4. Sampled per whole tick, as vanilla caches
+    /// it. The end has no day timeline; the nether has no sky light to dim.
+    pub fn sky_darken(&self, overworld_day: bool) -> u8 {
+        let toward_night = |alpha: f32| move |level: f32| level.lerp(4.0, alpha);
+        let day = if overworld_day {
+            sample_float_keyframes(
+                (self.day_time % TICKS_PER_DAY as u64) as f32,
+                SKY_LIGHT_LEVEL_KEYFRAMES,
+                TICKS_PER_DAY,
+            )
+        } else {
+            1.0
+        };
+        let level = self.weather_layers(
+            15.0 * day,
+            toward_night(0.3125),
+            toward_night(0.527_343_75),
+            FloatExt::lerp,
+        );
+        (15.0 - level) as u8
     }
 }
 
@@ -1155,4 +1199,32 @@ fn create_pipelines(
     device.destroy_shader_module(frag_module, None);
 
     (pipelines[0], pipelines[1])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SkyState;
+
+    fn at(day_time: u64, rain_level: f32, thunder_level: f32) -> SkyState {
+        SkyState {
+            day_time,
+            game_time: day_time,
+            rain_level,
+            thunder_level,
+            partial_tick: 0.0,
+        }
+    }
+
+    #[test]
+    fn sky_darkens_at_night_and_in_weather() {
+        assert_eq!(at(6000, 0.0, 0.0).sky_darken(true), 0);
+        // 15 x 0.26666668 rounds to 4 in f32, as in vanilla.
+        assert_eq!(at(18000, 0.0, 0.0).sky_darken(true), 11);
+        assert_eq!(at(6000, 1.0, 0.0).sky_darken(true), 3);
+        assert_eq!(at(6000, 1.0, 1.0).sky_darken(true), 5);
+        // Halfway through dusk: 15 x 0.633.
+        assert_eq!(at(12768, 0.0, 0.0).sky_darken(true), 5);
+        // The end keeps its sky light through the night.
+        assert_eq!(at(18000, 0.0, 0.0).sky_darken(false), 0);
+    }
 }

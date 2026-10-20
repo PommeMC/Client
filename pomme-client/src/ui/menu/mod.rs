@@ -57,6 +57,8 @@ struct Settings {
     #[serde(default = "default_true")]
     vignette: bool,
     #[serde(default = "default_true")]
+    entity_shadows: bool,
+    #[serde(default = "default_true")]
     show_autosave_indicator: bool,
     #[serde(default = "default_true")]
     vsync: bool,
@@ -201,6 +203,7 @@ impl Default for Settings {
             show_subtitles: false,
             show_autosave_indicator: true,
             vignette: true,
+            entity_shadows: true,
             vsync: true,
             max_framerate: 120,
             show_online_status: true,
@@ -648,6 +651,7 @@ pub struct MainMenu {
     pub show_subtitles: bool,
     pub show_autosave_indicator: bool,
     pub vignette: bool,
+    pub entity_shadows: bool,
     pub vsync: bool,
     pub max_framerate: u32,
     pub show_online_status: bool,
@@ -792,6 +796,7 @@ impl MainMenu {
             show_subtitles: settings.show_subtitles,
             show_autosave_indicator: settings.show_autosave_indicator,
             vignette: settings.vignette,
+            entity_shadows: settings.entity_shadows,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
             show_online_status: settings.show_online_status,
@@ -982,6 +987,7 @@ impl MainMenu {
                 show_subtitles: self.show_subtitles,
                 show_autosave_indicator: self.show_autosave_indicator,
                 vignette: self.vignette,
+                entity_shadows: self.entity_shadows,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,
                 show_online_status: self.show_online_status,

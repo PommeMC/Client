@@ -1,0 +1,89 @@
+# Entity shadows: pigs and dropped items over a full block (stone), a bottom
+# slab and bare grass. Vanilla only shades full blocks, so the slab stays bare,
+# and each item casts one shadow at its feet, not one per copy. At night,
+# outdoors, the shadows all but fade out.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+# A pillar to look down from.
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 0.5 -57 0.5 0 50"
+
+[[step]]
+chat = "/setblock -2 -60 4 minecraft:stone"
+
+[[step]]
+chat = "/setblock 2 -60 4 minecraft:stone_slab[type=bottom]"
+
+[[step]]
+expect = { block = "stone_slab", at = [2, -60, 4] }
+
+[[step]]
+chat = "/summon minecraft:pig -1.5 -59 4.5 {NoAI:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:pig 2.5 -59.5 4.5 {NoAI:1b,Rotation:[180f,0f]}"
+
+# And one on bare grass, for comparison.
+[[step]]
+chat = "/summon minecraft:pig 0.5 -60 6.5 {NoAI:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = '/summon minecraft:item -1.5 -59 6.5 {Item:{id:"minecraft:diamond",count:16},PickupDelay:32767}'
+
+[[step]]
+chat = '/summon minecraft:item 2.5 -59.5 6.5 {Item:{id:"minecraft:diamond",count:16},PickupDelay:32767}'
+
+[[step]]
+expect = { entity = "pig" }
+
+[[step]]
+expect = { item_entity = "diamond", count = 16 }
+
+[[step]]
+look_at = [0.5, -60.0, 5.0]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "day"
+
+[[step]]
+chat = "/time set 18000"
+
+[[step]]
+wait_ms = 11000
+
+# Monsters that spawned in the dark, out of the shot.
+[[step]]
+chat = "/kill @e[type=!player,type=!pig,type=!item]"
+
+[[step]]
+screenshot = "night"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/fill -3 -60 0 3 -58 7 minecraft:air"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/gamerule advance_time true"

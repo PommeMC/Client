@@ -207,6 +207,13 @@ impl ChunkStore {
         }
     }
 
+    /// Vanilla `getMaxLocalRawBrightness`: block light, or sky light dimmed
+    /// by `sky_darken`, whichever is brighter.
+    pub fn max_local_raw_brightness(&self, x: i32, y: i32, z: i32, sky_darken: u8) -> u8 {
+        self.get_block_light(x, y, z)
+            .max(self.get_sky_light(x, y, z).saturating_sub(sky_darken))
+    }
+
     pub fn unload_chunk(&mut self, pos: &ChunkPos) {
         self.light_data.remove(&(pos.x, pos.z));
         self.partial_storage.limited_set(pos, None);

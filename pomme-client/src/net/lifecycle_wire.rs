@@ -12,6 +12,7 @@ use crossbeam_channel::Sender;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::lifecycle::{self, LifecyclePacket, Login, SpawnInfo};
 use pomme_protocol::{Direction, PacketTable, Phase};
+use simdnbt::owned::NbtTag;
 
 use super::NetworkEvent;
 use super::chat_security::ProfileKeyServices;
@@ -230,7 +231,26 @@ fn dimension_info(dim: &DimensionKindElement) -> NetworkEvent {
             Some("nether") => CardinalLightType::Nether,
             _ => CardinalLightType::Default,
         },
+        ambient_light: dim
+            ._extra
+            .get("ambient_light")
+            .and_then(|tag| tag.float())
+            .unwrap_or(0.0),
+        overworld_day: dim._extra.get("timelines").is_some_and(names_overworld_day),
         default_clock: string("default_clock"),
+    }
+}
+
+/// Whether a `timelines` holder set names `minecraft:day`, directly or through
+/// the `#minecraft:in_overworld` tag; other tags aren't tracked client-side.
+fn names_overworld_day(timelines: &NbtTag) -> bool {
+    let names = |id: &str| matches!(id, "minecraft:day" | "#minecraft:in_overworld");
+    match timelines {
+        NbtTag::String(id) => names(&id.to_str()),
+        NbtTag::List(list) => list
+            .strings()
+            .is_some_and(|ids| ids.iter().any(|id| names(&id.to_str()))),
+        _ => false,
     }
 }
 
@@ -304,10 +324,17 @@ mod tests {
             min_y,
             has_skylight,
             cardinal_light,
+            ambient_light,
+            overworld_day,
             default_clock,
         } = dimension_info(&dimension(&[
             ("has_skylight", NbtTag::Byte(1)),
             ("cardinal_light", NbtTag::String("nether".into())),
+            ("ambient_light", NbtTag::Float(0.1)),
+            (
+                "timelines",
+                NbtTag::String("#minecraft:in_overworld".into()),
+            ),
             (
                 "default_clock",
                 NbtTag::String("minecraft:overworld".into()),
@@ -318,6 +345,8 @@ mod tests {
         };
         assert_eq!((height, min_y, has_skylight), (384, -64, true));
         assert_eq!(cardinal_light, CardinalLightType::Nether);
+        assert_eq!(ambient_light, 0.1);
+        assert!(overworld_day);
         assert_eq!(default_clock.as_deref(), Some("minecraft:overworld"));
     }
 
@@ -326,6 +355,8 @@ mod tests {
         let NetworkEvent::DimensionInfo {
             has_skylight,
             cardinal_light,
+            ambient_light,
+            overworld_day,
             default_clock,
             ..
         } = dimension_info(&dimension(&[]))
@@ -334,6 +365,8 @@ mod tests {
         };
         assert!(has_skylight);
         assert_eq!(cardinal_light, CardinalLightType::Default);
+        assert_eq!(ambient_light, 0.0);
+        assert!(!overworld_day);
         assert_eq!(default_clock, None);
     }
 }

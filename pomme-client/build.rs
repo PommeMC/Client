@@ -115,6 +115,8 @@ fn main() {
         ("particle.frag", shaderc::ShaderKind::Fragment),
         ("clouds.vert", shaderc::ShaderKind::Vertex),
         ("clouds.frag", shaderc::ShaderKind::Fragment),
+        ("entity_shadow.vert", shaderc::ShaderKind::Vertex),
+        ("entity_shadow.frag", shaderc::ShaderKind::Fragment),
     ];
 
     for (file, kind) in &shaders {

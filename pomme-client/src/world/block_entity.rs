@@ -119,6 +119,7 @@ pub fn is_block_entity_block(name: &str) -> bool {
     )
 }
 
+/// Vanilla `RenderShape.INVISIBLE`: blocks with no model of their own.
 pub fn is_invisible_block(name: &str) -> bool {
     matches!(
         name,
@@ -129,7 +130,11 @@ pub fn is_invisible_block(name: &str) -> bool {
             | "light"
             | "structure_void"
             | "moving_piston"
-            | "heavy_core"
+            | "water"
+            | "lava"
+            | "bubble_column"
+            | "end_portal"
+            | "end_gateway"
     )
 }
 
