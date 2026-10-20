@@ -272,6 +272,8 @@ pub struct GameState {
     pub item_entity_store: ItemEntityStore,
     pub particle_store: crate::particle::ParticleStore,
     pub block_entity_anim: BlockEntityAnimStore,
+    /// Blocks pistons are moving, simulated client-side as in vanilla.
+    pub moving_pistons: crate::world::piston::MovingPistons,
     pub benchmark: Option<Benchmark>,
     pub benchmark_result: Option<BenchmarkResult>,
     /// In-flight/finished upload of the FPS result, while its overlay is shown.
@@ -410,6 +412,7 @@ impl GameState {
                 )
             },
             block_entity_anim: BlockEntityAnimStore::default(),
+            moving_pistons: Default::default(),
             player: LocalPlayer::new(),
             last_bubble_pop_sound_played: 0,
             biome_climate: Arc::new(HashMap::new()),
@@ -2268,6 +2271,7 @@ pub fn update_game(
         game.item_entity_store.tick(&game.chunk_store);
         game.particle_store.tick(&game.chunk_store);
         game.block_entity_anim.tick();
+        crate::app::core::tick_moving_pistons(core, game);
         game.title.tick();
         tick_tool_highlight(core, game);
         // LocalPlayer.handlePortalTransitionEffect belongs to aiStep, which is

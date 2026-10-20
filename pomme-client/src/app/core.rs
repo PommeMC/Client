@@ -153,6 +153,10 @@ fn apply_server_block(
     pos: azalea_core::position::BlockPos,
     state: azalea_block::BlockState,
 ) {
+    // Vanilla drops a moving block's entity once its cell holds anything else.
+    if crate::world::block::block_id(state) != "moving_piston" {
+        game.moving_pistons.remove(&pos);
+    }
     crate::world::block_entity::sync_block_entity(&mut game.chunk_store.block_entities, pos, state);
     if game.interaction.update_known_server_state(&pos, state) {
         return;
@@ -173,6 +177,61 @@ fn apply_server_block(
         game.chunk_store.min_y(),
         game.chunk_store.section_count(),
     );
+}
+
+/// The client world as the piston code sees it. Its writes take the server
+/// block path, and destroyed blocks' effects wait for the caller, which owns
+/// the audio and the particle registry.
+struct ClientPistonLevel<'a> {
+    game: &'a mut GameState,
+    remesh: &'a mut Vec<(azalea_core::position::ChunkPos, i32)>,
+    destroyed: Vec<(azalea_core::position::BlockPos, azalea_block::BlockState)>,
+}
+
+impl crate::world::piston::PistonLevel for ClientPistonLevel<'_> {
+    fn block(&self, pos: azalea_core::position::BlockPos) -> azalea_block::BlockState {
+        self.game.chunk_store.get_block_state(pos.x, pos.y, pos.z)
+    }
+
+    fn set_block(&mut self, pos: azalea_core::position::BlockPos, state: azalea_block::BlockState) {
+        apply_server_block(self.game, self.remesh, pos, state);
+    }
+
+    fn min_y(&self) -> i32 {
+        self.game.chunk_store.min_y()
+    }
+
+    fn max_y(&self) -> i32 {
+        self.game.chunk_store.min_y() + self.game.chunk_store.height() as i32 - 1
+    }
+
+    fn pistons(&mut self) -> &mut crate::world::piston::MovingPistons {
+        &mut self.game.moving_pistons
+    }
+
+    fn destroy_effect(
+        &mut self,
+        pos: azalea_core::position::BlockPos,
+        state: azalea_block::BlockState,
+    ) {
+        self.destroyed.push((pos, state));
+    }
+}
+
+/// Vanilla `PistonMovingBlockEntity.tick` for the client's moving blocks, at
+/// the block-entity point of the game tick; their landings remesh at once.
+pub(crate) fn tick_moving_pistons(core: &AppCore, game: &mut GameState) {
+    let mut remesh = Vec::new();
+    let mut level = ClientPistonLevel {
+        game,
+        remesh: &mut remesh,
+        destroyed: Vec::new(),
+    };
+    crate::world::piston::tick(&mut level, |_, _, _, _| {});
+    let player_chunk = game.player_chunk();
+    for (col, si) in remesh {
+        game.enqueue_section_edit(col, si, chunk_lod(col, player_chunk, core.menu.chunk_detail));
+    }
 }
 
 /// The local player's box as a push target, gated on `LivingEntity.isPushable`
@@ -1386,6 +1445,7 @@ impl AppCore {
                 }
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.chunk_store.unload_chunk(&pos);
+                    game.moving_pistons.drop_chunk(pos.x, pos.z);
                     game.light_engine.on_chunk_unloaded((pos.x, pos.z));
                     game.light_engine
                         .queue_task(crate::world::light::LightTask::Remove {
@@ -1995,7 +2055,12 @@ impl AppCore {
                         p.x.div_euclid(16) != chunk_pos.x || p.z.div_euclid(16) != chunk_pos.z
                     });
                     game.block_entity_anim.drop_chunk(chunk_pos.x, chunk_pos.z);
+                    game.moving_pistons.drop_chunk(chunk_pos.x, chunk_pos.z);
                     for (pos, kind, nbt) in entries {
+                        if kind == azalea_registry::builtin::BlockEntityKind::Piston {
+                            game.moving_pistons
+                                .insert(pos, crate::world::piston::MovingPiston::from_nbt(&nbt));
+                        }
                         game.chunk_store.block_entities.insert(
                             pos,
                             crate::world::block_entity::StoredBlockEntity { kind, nbt },
@@ -2019,8 +2084,36 @@ impl AppCore {
                     action_id,
                     action_parameter,
                 } => {
-                    // Action 1 for chest/shulker = open-viewer count.
-                    if action_id == 1 {
+                    // Vanilla `Level.blockEvent` hands the event to the block
+                    // the client has there.
+                    let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+                    if matches!(
+                        crate::world::block::block_id(state),
+                        "piston" | "sticky_piston"
+                    ) {
+                        let mut level = ClientPistonLevel {
+                            game,
+                            remesh: &mut priority_remesh,
+                            destroyed: Vec::new(),
+                        };
+                        crate::world::piston::trigger_event(
+                            &mut level,
+                            pos,
+                            action_id,
+                            action_parameter,
+                        );
+                        for (pos, state) in std::mem::take(&mut level.destroyed) {
+                            crate::player::interaction::play_break_sound(&self.audio, state, pos);
+                            game.particle_store.add_destroy_block_effect(
+                                pos,
+                                state,
+                                renderer.registry(),
+                                &game.chunk_store,
+                                &game.biome_climate,
+                            );
+                        }
+                    } else if action_id == 1 {
+                        // Chest/shulker: the open-viewer count.
                         game.block_entity_anim.set_open_count(pos, action_parameter);
                     }
                 }
