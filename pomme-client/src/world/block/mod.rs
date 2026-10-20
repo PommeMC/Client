@@ -1068,12 +1068,21 @@ pub fn with_property(state: BlockState, key: &str, value: &str) -> Option<BlockS
     }
     // A block's states are contiguous and share one interned id.
     let same_block = |d: &BlockData| std::ptr::eq(d.id, data.id);
-    let start = table[..id].iter().rposition(|d| !same_block(d)).map_or(0, |i| i + 1);
+    let start = table[..id]
+        .iter()
+        .rposition(|d| !same_block(d))
+        .map_or(0, |i| i + 1);
     let end = table[id..]
         .iter()
         .position(|d| !same_block(d))
         .map_or(table.len(), |i| id + i);
-    let wanted = |k: &str, v: &str| if k == key { v == value } else { data.properties.get(k) == Some(v) };
+    let wanted = |k: &str, v: &str| {
+        if k == key {
+            v == value
+        } else {
+            data.properties.get(k) == Some(v)
+        }
+    };
     (start..end)
         .find(|&i| table[i].properties.entries().all(|(k, v)| wanted(k, v)))
         .and_then(|i| BlockState::try_from(i as u32).ok())

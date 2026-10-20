@@ -424,12 +424,24 @@ impl Resolver {
         true
     }
 
-    fn add_block_line(&mut self, level: &impl PistonLevel, start: BlockPos, direction: Direction) -> bool {
+    fn add_block_line(
+        &mut self,
+        level: &impl PistonLevel,
+        start: BlockPos,
+        direction: Direction,
+    ) -> bool {
         let mut next_state = level.block(start);
         if block::is_air(next_state) {
             return true;
         }
-        if !is_pushable(level, next_state, start, self.push_direction, false, direction) {
+        if !is_pushable(
+            level,
+            next_state,
+            start,
+            self.push_direction,
+            false,
+            direction,
+        ) {
             return true;
         }
         if start == self.piston_pos {
@@ -483,8 +495,14 @@ impl Resolver {
             if block::is_air(next_state) {
                 return true;
             }
-            if !is_pushable(level, next_state, pos, self.push_direction, true, self.push_direction)
-                || pos == self.piston_pos
+            if !is_pushable(
+                level,
+                next_state,
+                pos,
+                self.push_direction,
+                true,
+                self.push_direction,
+            ) || pos == self.piston_pos
             {
                 return false;
             }
@@ -599,7 +617,10 @@ fn piston_type(sticky: bool) -> &'static str {
 fn moving_piston(direction: Direction, sticky: bool) -> BlockState {
     block::state_with(
         "moving_piston",
-        &[("facing", direction_name(direction)), ("type", piston_type(sticky))],
+        &[
+            ("facing", direction_name(direction)),
+            ("type", piston_type(sticky)),
+        ],
     )
     .unwrap_or(BlockState::AIR)
 }
@@ -709,15 +730,24 @@ mod tests {
     fn extending_pushes_the_whole_line() {
         let mut level = level(false, &["stone", "dirt"]);
         assert!(trigger_event(&mut level, at(0), 0, 5));
-        assert_eq!(block::block_properties(level.block(at(0))).get("extended"), Some("true"));
+        assert_eq!(
+            block::block_properties(level.block(at(0))).get("extended"),
+            Some("true")
+        );
         for x in 1..=3 {
             assert_eq!(name(&level, at(x)), "moving_piston", "x = {x}");
         }
         let head = level.pistons.get(&at(1)).unwrap();
         assert!(head.source && head.extending);
         assert_eq!(block::block_id(head.moved_state), "piston_head");
-        assert_eq!(block::block_id(level.pistons.get(&at(2)).unwrap().moved_state), "stone");
-        assert_eq!(block::block_id(level.pistons.get(&at(3)).unwrap().moved_state), "dirt");
+        assert_eq!(
+            block::block_id(level.pistons.get(&at(2)).unwrap().moved_state),
+            "stone"
+        );
+        assert_eq!(
+            block::block_id(level.pistons.get(&at(3)).unwrap().moved_state),
+            "dirt"
+        );
     }
 
     #[test]
@@ -745,7 +775,10 @@ mod tests {
         let mut level = level(false, &["stone", "poppy"]);
         assert!(trigger_event(&mut level, at(0), 0, 5));
         assert_eq!(level.destroyed, vec![at(2)]);
-        assert_eq!(block::block_id(level.pistons.get(&at(2)).unwrap().moved_state), "stone");
+        assert_eq!(
+            block::block_id(level.pistons.get(&at(2)).unwrap().moved_state),
+            "stone"
+        );
     }
 
     #[test]

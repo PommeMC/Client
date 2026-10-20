@@ -897,8 +897,10 @@ impl MeshDispatcher {
         base: [f32; 3],
     ) -> MovingBlockMesh {
         let [x, y, z] = cell;
-        let mut snapshot =
-            self.build_snapshot(chunk_store, ChunkPos::new(x.div_euclid(16), z.div_euclid(16)));
+        let mut snapshot = self.build_snapshot(
+            chunk_store,
+            ChunkPos::new(x.div_euclid(16), z.div_euclid(16)),
+        );
         let blocks = GridBox::spanning([x - 1, y - 1, z - 1], [x + 1, y + 1, z + 1]);
         let mut states = vec![azalea_block::BlockState::AIR; blocks.len()];
         states[blocks.index(cell).expect("the cell is the box's centre")] = state;

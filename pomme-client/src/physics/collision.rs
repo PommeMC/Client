@@ -67,7 +67,10 @@ impl CollisionWorld<'_> {
     /// block, else the block where it has got to plus, for a retracting
     /// piston, its extended base.
     fn moving_piston(&self, pos: BlockPos, boxes: &mut Vec<Aabb>) {
-        let Some(piston) = self.block_entity_anim.and_then(|anim| anim.pistons.get(&pos)) else {
+        let Some(piston) = self
+            .block_entity_anim
+            .and_then(|anim| anim.pistons.get(&pos))
+        else {
             return;
         };
         let mut add = |state: BlockState, offset: DVec3| {
@@ -82,7 +85,10 @@ impl CollisionWorld<'_> {
             && piston.source
             && matches!(block_id(moved), "piston" | "sticky_piston")
         {
-            add(with_property(moved, "extended", "true").unwrap_or(moved), DVec3::ZERO);
+            add(
+                with_property(moved, "extended", "true").unwrap_or(moved),
+                DVec3::ZERO,
+            );
         }
         if piston.progress < 1.0 && self.piston_noclip == Some(piston.movement_direction()) {
             return;
@@ -562,7 +568,10 @@ mod tests {
         retract_anim.pistons.insert(pos, retracting);
         world.block_entity_anim = Some(&retract_anim);
         let boxes = boxes(&world);
-        assert!(boxes.iter().any(|b| b.min.x == 4.0 && b.max.x < 5.0), "{boxes:?}");
+        assert!(
+            boxes.iter().any(|b| b.min.x == 4.0 && b.max.x < 5.0),
+            "{boxes:?}"
+        );
         assert!(boxes.iter().any(|b| b.max.x > 5.0), "{boxes:?}");
 
         // No moving block: nothing to collide with.
@@ -570,5 +579,4 @@ mod tests {
         assert!(world.special_boxes(moving, BlockPos::new(0, 64, 0), &mut empty));
         assert!(empty.is_empty());
     }
-
 }

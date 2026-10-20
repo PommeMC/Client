@@ -227,10 +227,35 @@ pub(crate) fn tick_moving_pistons(core: &AppCore, game: &mut GameState) {
         remesh: &mut remesh,
         destroyed: Vec::new(),
     };
-    crate::world::piston::tick(&mut level, |_, _, _, _| {});
+    let descending = core
+        .input
+        .performing_action(crate::app::input::Action::Sneak);
+    let game_time = level.game.sky_state.game_time;
+    crate::world::piston::tick(&mut level, |level, pos, piston, new_progress| {
+        let game = &mut *level.game;
+        // A passenger moves with its vehicle, which the server moves.
+        if game.position_set && game.riding_vehicle_id.is_none() {
+            // TODO: vanilla's client also moves other entities in the way;
+            // the server's position updates do it here.
+            movement::push_by_moving_piston(
+                &mut game.player,
+                &game.chunk_store,
+                &game.block_entity_anim,
+                pos,
+                piston,
+                new_progress,
+                descending,
+                game_time,
+            );
+        }
+    });
     let player_chunk = game.player_chunk();
     for (col, si) in remesh {
-        game.enqueue_section_edit(col, si, chunk_lod(col, player_chunk, core.menu.chunk_detail));
+        game.enqueue_section_edit(
+            col,
+            si,
+            chunk_lod(col, player_chunk, core.menu.chunk_detail),
+        );
     }
 }
 
@@ -2057,7 +2082,9 @@ impl AppCore {
                     game.block_entity_anim.drop_chunk(chunk_pos.x, chunk_pos.z);
                     for (pos, kind, nbt) in entries {
                         if kind == azalea_registry::builtin::BlockEntityKind::Piston {
-                            game.block_entity_anim.pistons.insert(pos, crate::world::piston::MovingPiston::from_nbt(&nbt));
+                            game.block_entity_anim
+                                .pistons
+                                .insert(pos, crate::world::piston::MovingPiston::from_nbt(&nbt));
                         }
                         game.chunk_store.block_entities.insert(
                             pos,
