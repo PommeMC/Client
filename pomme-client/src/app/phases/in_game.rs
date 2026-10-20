@@ -3928,6 +3928,8 @@ pub fn update_game(
         )
     };
 
+    let moving_block_renders = moving_block_renders(game, partial_tick);
+
     let shadow_casters = if core.menu.entity_shadows && !benchmark_running {
         shadow_casters(
             &entity_renders,
@@ -4060,6 +4062,7 @@ pub fn update_game(
             sky_darken: game.sky_darken(),
             ambient_light: game.ambient_light,
         },
+        &moving_block_renders,
         &entity_renders,
         &item_renders,
         &block_entity_renders,
@@ -4475,6 +4478,54 @@ fn emit_item_copies(
             push(glam::Mat4::from_translation(off));
         }
     }
+}
+
+/// Vanilla `PistonHeadRenderer.extractRenderState`: each moving block, meshed
+/// as terrain at its offset from the moving piston's cell and lit from the
+/// cell it left. A retracting piston also draws its base, extended, in place.
+fn moving_block_renders(
+    game: &GameState,
+    partial_tick: f32,
+) -> Vec<crate::renderer::chunk::moving_blocks::MovingBlockRender> {
+    use crate::world::block::{block_id, is_air, with_property};
+    use crate::world::piston;
+    let mut renders = Vec::new();
+    for (pos, moving) in game.moving_pistons.iter() {
+        let state = moving.moved_state;
+        if is_air(state) {
+            continue;
+        }
+        let origin = [pos.x, pos.y, pos.z];
+        let [bx, by, bz] = moving.movement_direction().opposite().offset();
+        let cell = [pos.x + bx, pos.y + by, pos.z + bz];
+        let mut mesh = |state, cell, base| {
+            renders.push(crate::renderer::chunk::moving_blocks::MovingBlockRender {
+                origin,
+                mesh: game
+                    .mesh_dispatcher
+                    .mesh_moving_block(&game.chunk_store, state, cell, base),
+            });
+        };
+        let progress = moving.progress(partial_tick);
+        let offset = moving.offset(partial_tick);
+        let short = |short: bool| if short { "true" } else { "false" };
+        if block_id(state) == "piston_head" && progress <= 4.0 {
+            let head = with_property(state, "short", short(progress <= 0.5)).unwrap_or(state);
+            mesh(head, cell, offset);
+        } else if moving.source && !moving.extending {
+            let Some(facing) = piston::facing(state) else {
+                continue;
+            };
+            let sticky = block_id(state) == "sticky_piston";
+            let head = piston::piston_head(facing, sticky, progress >= 0.5);
+            mesh(head, cell, offset);
+            let base = with_property(state, "extended", "true").unwrap_or(state);
+            mesh(base, origin, [0.0; 3]);
+        } else {
+            mesh(state, cell, offset);
+        }
+    }
+    renders
 }
 
 /// Vanilla `extractShadow`'s casters: every rendered entity, and each resting

@@ -27,6 +27,7 @@ use camera::{Camera, CameraUniform};
 use chunk::atlas::TextureAtlas;
 use chunk::buffer::ChunkBufferStore;
 use chunk::mesher::{ChunkMeshData, MeshDispatcher};
+use chunk::moving_blocks::{MovingBlockBuffers, MovingBlockRender};
 use context::VulkanContext;
 use glam::dvec3;
 use pipelines::block_entity::BlockEntityPipeline;
@@ -125,6 +126,7 @@ enum RenderMode<'a> {
         show_chunk_borders: bool,
         sky: SkyState,
         shadows: ShadowScene<'a>,
+        moving_blocks: &'a [MovingBlockRender],
         entities: &'a [EntityRenderInfo],
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
         block_entities: &'a [BlockEntityRenderInfo],
@@ -189,6 +191,7 @@ pub struct Renderer {
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
     entity_shadow_pipeline: EntityShadowPipeline,
+    moving_block_buffers: MovingBlockBuffers,
     block_entity_pipeline: BlockEntityPipeline,
     chunk_buffers: ChunkBufferStore,
     render_finished_per_image: Vec<vk::Semaphore>,
@@ -393,6 +396,8 @@ impl Renderer {
             packs,
         );
 
+        let moving_block_buffers = MovingBlockBuffers::new(&ctx.device, &ctx.allocator);
+
         let entity_shadow_pipeline = EntityShadowPipeline::new(
             &ctx.device,
             ctx.graphics_queue,
@@ -490,6 +495,7 @@ impl Renderer {
             book_preview,
             entity_renderer,
             entity_shadow_pipeline,
+            moving_block_buffers,
             block_entity_pipeline,
             chunk_border_pipeline,
             item_entity_pipeline,
@@ -1182,6 +1188,7 @@ impl Renderer {
         show_chunk_borders: bool,
         sky: SkyState,
         shadows: ShadowScene<'_>,
+        moving_blocks: &[MovingBlockRender],
         entities: &[EntityRenderInfo],
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
         block_entities: &[BlockEntityRenderInfo],
@@ -1231,6 +1238,7 @@ impl Renderer {
                 show_chunk_borders,
                 sky,
                 shadows,
+                moving_blocks,
                 entities,
                 item_entities,
                 block_entities,
@@ -1846,6 +1854,7 @@ impl Renderer {
                 show_chunk_borders,
                 sky,
                 shadows,
+                moving_blocks,
                 entities,
                 item_entities,
                 block_entities,
@@ -1873,10 +1882,14 @@ impl Renderer {
                 let t_cull = std::time::Instant::now();
                 // Solid (no discard) first so it lays down depth and early-Z lets
                 // the front-to-back order reject occluded fragments; cutout after.
+                // Blocks a piston is moving go through the same pipelines.
+                self.moving_block_buffers.upload(frame, moving_blocks);
                 self.chunk_pipeline.bind(cmd, frame, false);
                 self.chunk_buffers.draw_indirect(cmd, frame, false);
+                self.moving_block_buffers.draw(cmd, frame, false);
                 self.chunk_pipeline.bind(cmd, frame, true);
                 self.chunk_buffers.draw_indirect(cmd, frame, true);
+                self.moving_block_buffers.draw(cmd, frame, true);
                 let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
                 let anchor = self.camera.anchor();
@@ -2571,6 +2584,8 @@ impl Drop for Renderer {
         self.entity_renderer
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.entity_shadow_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.moving_block_buffers
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.block_entity_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);

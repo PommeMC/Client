@@ -144,6 +144,18 @@ pub(crate) struct ChunkMeta {
     solid_index_count: u32,
 }
 
+impl ChunkMeta {
+    /// An instance entry for a draw outside the section pool: just the
+    /// origin, fully faded in.
+    pub(crate) fn instance(origin: [i32; 3]) -> Self {
+        Self {
+            origin,
+            visibility: 1.0f32.to_bits(),
+            ..bytemuck::Zeroable::zeroed()
+        }
+    }
+}
+
 /// Copy already-packed `verts` into `dst` starting at byte `off`.
 fn write_verts(dst: &mut [u8], off: usize, verts: &[PackedVertex]) {
     let bytes: &[u8] = bytemuck::cast_slice(verts);
