@@ -109,18 +109,35 @@ ios-archive team:
 ios-upload team:
     @python3 tools/ios.py upload {{ team }}
 
-# TODO: CI also runs the client's clippy and tests with --no-default-features; mirror it here.
+# Everything CI checks for the Rust crates; CI runs the same recipes below,
+# so the two can't drift.
+client-pre-pr: ci-fmt ci-lint ci-test ci-singleplayer
 
-client-pre-pr:
-    @cargo fmt -p pomme-client -- --check
-    @cargo fmt -p pomme-protocol -- --check
-    @cargo fmt -p pomme-singleplayer -- --check
-    @cargo clippy -p pomme-client --release --all-targets --all-features -- -D warnings
-    @cargo clippy -p pomme-protocol --release --all-targets --all-features -- -D warnings
+# The client's optional features clippy covers; `ttf-fonts` needs the system
+# FreeType.
+lint_features := "test-harness,cpu-bench"
+
+# Formatting, for every crate.
+ci-fmt:
+    @cargo fmt --all --check
+
+# Lints that run on every OS. SteelMC is left to `ci-singleplayer`, so it isn't
+# built three times over.
+ci-lint:
+    @cargo clippy -p pomme-client --release --all-targets --no-default-features --features {{ lint_features }} -- -D warnings
+    @cargo clippy -p pomme-protocol -p pomme-auth --release --all-targets --all-features -- -D warnings
+    @cargo clippy -p pomme-dirs -p pomme-install -p azalea-block -p ingame-test -p protogen -p blockgen --release --all-targets -- -D warnings
+
+# Tests; the client's reuse `ci-lint`'s release build.
+ci-test:
+    @cargo test -p pomme-protocol -p pomme-dirs -p pomme-auth -p pomme-install -p ingame-test
+    @cargo test -p pomme-client --release --no-default-features
+
+# SteelMC's crate, the client with it, and the test that boots a real world.
+ci-singleplayer:
     @cargo clippy -p pomme-singleplayer --release --all-targets -- -D warnings
-    @cargo test -p pomme-protocol
-    @cargo test -p pomme-client
-    @cargo test -p pomme-singleplayer -- --include-ignored
+    @cargo clippy -p pomme-client --release --all-targets --features {{ lint_features }} -- -D warnings
+    @cargo test -p pomme-singleplayer --release -- --include-ignored
 
 # Regenerate a version's packet-id table from the decompiled reference.
 protogen version="26.2":

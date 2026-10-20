@@ -1174,12 +1174,13 @@ mod tests {
             super_key: false,
         }
     }
-    fn ctrl() -> KeyMods {
+    /// The edit-shortcut modifier: Cmd on macOS, Ctrl elsewhere.
+    fn edit() -> KeyMods {
         KeyMods {
             shift: false,
-            ctrl: true,
+            ctrl: !cfg!(target_os = "macos"),
             alt: false,
-            super_key: false,
+            super_key: cfg!(target_os = "macos"),
         }
     }
 
@@ -1241,7 +1242,7 @@ mod tests {
     fn delete_word_backwards() {
         let mut f = field("foo bar baz");
         f.move_cursor_to_end(false, WIDE, W);
-        key(&mut f, KeyCode::Backspace, ctrl());
+        key(&mut f, KeyCode::Backspace, edit());
         assert_eq!(f.value(), "foo bar ");
     }
 
@@ -1270,7 +1271,7 @@ mod tests {
     fn ctrl_a_selects_all_cursor_at_end() {
         let mut f = field("hello");
         f.move_cursor_to(2, false, WIDE, W);
-        key(&mut f, KeyCode::KeyA, ctrl());
+        key(&mut f, KeyCode::KeyA, edit());
         assert_eq!(f.cursor_pos, 5);
         assert_eq!(f.highlight_pos, 0);
         assert_eq!(f.get_highlighted(), "hello");
@@ -1283,15 +1284,15 @@ mod tests {
         f.move_cursor_to(0, false, WIDE, W);
         f.move_cursor_to(5, true, WIDE, W);
         // Copy selection.
-        f.key_pressed(KeyCode::KeyC, &ctrl(), &mut clip, WIDE, W);
+        f.key_pressed(KeyCode::KeyC, &edit(), &mut clip, WIDE, W);
         assert_eq!(clip.0, "hello");
         // Cut selection.
-        f.key_pressed(KeyCode::KeyX, &ctrl(), &mut clip, WIDE, W);
+        f.key_pressed(KeyCode::KeyX, &edit(), &mut clip, WIDE, W);
         assert_eq!(clip.0, "hello");
         assert_eq!(f.value(), " world");
         // Paste at start.
         f.move_cursor_to(0, false, WIDE, W);
-        f.key_pressed(KeyCode::KeyV, &ctrl(), &mut clip, WIDE, W);
+        f.key_pressed(KeyCode::KeyV, &edit(), &mut clip, WIDE, W);
         assert_eq!(f.value(), "hello world");
     }
 
@@ -1300,7 +1301,7 @@ mod tests {
         let mut clip = MockClipboard("old".to_string());
         let mut f = field("hello");
         f.move_cursor_to(2, false, WIDE, W);
-        f.key_pressed(KeyCode::KeyC, &ctrl(), &mut clip, WIDE, W);
+        f.key_pressed(KeyCode::KeyC, &edit(), &mut clip, WIDE, W);
         assert_eq!(clip.0, "");
     }
 
@@ -1363,9 +1364,7 @@ mod tests {
         let mut shift = plain();
         shift.shift = true;
         f.key_pressed(KeyCode::End, &shift, &mut clip, inner, W);
-        let mut ctrl = plain();
-        ctrl.ctrl = true;
-        f.key_pressed(KeyCode::KeyV, &ctrl, &mut clip, inner, W);
+        f.key_pressed(KeyCode::KeyV, &edit(), &mut clip, inner, W);
         assert_eq!(f.value(), pasted);
     }
 }

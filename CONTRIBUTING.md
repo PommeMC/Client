@@ -26,14 +26,14 @@ Thanks for your interest in contributing to Pomme!
 All of these must pass. CI will reject your PR if they don't.
 
 ```bash
-just client-pre-pr          # Client, protocol, and singleplayer (Rust)
+just client-pre-pr          # Every Rust crate and tool, as CI runs them
 just launcher-pre-pr        # Launcher (Rust & TypeScript)
 ```
 
-`client-pre-pr` includes the singleplayer crate's ignored test, which boots a
-real SteelMC server and writes a world to the temp dir, so it takes a minute.
-CI additionally runs the client's clippy and tests with `--no-default-features`,
-which the recipe does not.
+`client-pre-pr` runs the same `ci-*` recipes CI does, including the
+singleplayer crate's ignored test, which boots a real SteelMC server and writes
+a world to the temp dir, so it takes a minute. Android and iOS have their own
+CI jobs.
 
 For changes you'd otherwise check in game (items, inventory, entities,
 advancements), `just ingame-test` runs scripted tests against a local vanilla

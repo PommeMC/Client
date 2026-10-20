@@ -109,6 +109,12 @@ jobs:
           shared-key: client
           cache-on-failure: true
 
+      # The checks themselves are `just` recipes, which `just client-pre-pr`
+      # runs locally too.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
       - name: Install Vulkan SDK
         uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa
         with:
@@ -125,34 +131,14 @@ jobs:
 
       - name: Format check
         if: matrix.os == 'ubuntu-latest'
-        run: |
-          cargo fmt -p pomme-client -- --check
-          cargo fmt -p pomme-protocol -- --check
-          cargo fmt -p pomme-dirs -- --check
-          cargo fmt -p pomme-auth -- --check
-          cargo fmt -p pomme-install -- --check
-          cargo fmt -p pomme-android -- --check
-          cargo fmt -p pomme-ios -- --check
+        run: just ci-fmt
 
-      # Singleplayer is checked on Linux only, so SteelMC is not built three
-      # times over.
       - name: Clippy
-        run: |
-          cargo clippy -p pomme-client --release --all-targets --no-default-features -- -D warnings
-          cargo clippy -p pomme-protocol --release --all-targets --all-features -- -D warnings
-          cargo clippy -p pomme-dirs --release --all-targets -- -D warnings
-          cargo clippy -p pomme-auth --release --all-targets --all-features -- -D warnings
-          cargo clippy -p pomme-install --release --all-targets -- -D warnings
+        run: just ci-lint
 
       - name: Tests
         if: matrix.os == 'ubuntu-latest'
-        # --release reuses the dependency artifacts the clippy step built.
-        run: |
-          cargo test -p pomme-protocol
-          cargo test -p pomme-dirs
-          cargo test -p pomme-auth
-          cargo test -p pomme-install
-          cargo test -p pomme-client --release --no-default-features
+        run: just ci-test
 
       - name: Pin the steel revision
         if: matrix.os == 'ubuntu-latest'
@@ -174,15 +160,10 @@ jobs:
             third_party/SteelMC/steel-worldgen/src/generated
           key: steel-generated-${{ steps.steel.outputs.rev }}
 
-      # --include-ignored runs the world launch, which is the only check that
-      # steel actually boots.
+      # Its test boots a real world, the only check that steel actually starts.
       - name: Singleplayer
         if: matrix.os == 'ubuntu-latest'
-        run: |
-          cargo fmt -p pomme-singleplayer -- --check
-          cargo clippy -p pomme-singleplayer --release --all-targets -- -D warnings
-          cargo clippy -p pomme-client --release --all-targets -- -D warnings
-          cargo test -p pomme-singleplayer --release -- --include-ignored
+        run: just ci-singleplayer
 
   pr-template:
     runs-on: ubuntu-latest
