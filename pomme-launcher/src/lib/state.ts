@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 import { commands, Result } from "../bindings";
-import { AuthAccount } from "../bindings/pomme_launcher/auth";
+import { AuthAccount } from "../bindings/pomme_auth";
 import { GameVersion, PatchNote } from "../bindings/pomme_launcher/commands";
 import { LauncherSettings } from "../bindings/pomme_launcher/settings";
 import { useFriends } from "./friends";

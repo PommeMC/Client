@@ -28,6 +28,8 @@ pub struct DiscordPresence {
 
 impl DiscordPresence {
     pub fn start(version: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        // TODO: connect off the main thread; with Discord running, the
+        // handshake can block startup for tens of seconds.
         let mut client = DiscordIpcClient::new(DISCORD_CLIENT_ID);
         client.connect()?;
         client.set_activity(base_activity(version).state("Starting..."))?;

@@ -55,6 +55,8 @@ const ONLY_SHOW_SECURE_CHAT: &str = "Only Show Secure Chat:";
 const SAVE_CHAT_DRAFTS: &str = "Save Unsent Chats:";
 const FORCE_UNICODE_FONT: &str = "Force Unicode Font:";
 const JAPANESE_GLYPH_VARIANTS: &str = "Japanese Glyph Variants:";
+const INVERT_MOUSE_X: &str = "Invert Mouse X:";
+const INVERT_MOUSE_Y: &str = "Invert Mouse Y:";
 
 /// The `chatDelay` slider's `IntRange(0, 60)`, in tenths of a second.
 const CHAT_DELAY_MAX_TENTHS: i32 = 60;
@@ -259,6 +261,11 @@ impl MainMenu {
         } else {
             "Show Autosave Indicator: OFF"
         };
+        let entity_shadows_label = if self.entity_shadows {
+            "Entity Shadows: ON"
+        } else {
+            "Entity Shadows: OFF"
+        };
         let rows: Vec<OptRow> = vec![
             OptRow::Header("Display"),
             OptRow::Big("Fullscreen Resolution: Current"),
@@ -274,7 +281,7 @@ impl MainMenu {
             OptRow::Pair("Smooth Lighting: ON", &clouds_label),
             OptRow::PairLeft(&cd),
             OptRow::Pair("Particles: All", "Mipmap Levels: 4"),
-            OptRow::Pair("Entity Shadows: ON", "Entity Distance: 100%"),
+            OptRow::Pair(entity_shadows_label, "Entity Distance: 100%"),
             OptRow::Pair("Menu Background Blur: 50%", "Cloud Range: 128"),
             OptRow::Pair("Cutout Leaves: Fancy", "Improved Transparency: OFF"),
             OptRow::Pair("Texture Filtering: None", "Max Anisotropy: 1"),
@@ -306,7 +313,6 @@ impl MainMenu {
             "Smooth Lighting:",
             "Particles:",
             "Mipmap Levels:",
-            "Entity Shadows:",
             "Entity Distance:",
             "Menu Background Blur:",
             "Cloud Range:",
@@ -340,28 +346,25 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
-        let sensitivity_label = if self.sensitivity <= 0.0 {
-            "Sensitivity: *yawn*".to_string()
-        } else if self.sensitivity >= 1.0 {
-            "Sensitivity: HYPERSPEED!!!".to_string()
-        } else {
-            format!("Sensitivity: {}%", (self.sensitivity * 200.0) as u32)
-        };
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair(&sensitivity_label, "Invert Mouse: OFF"),
-            OptRow::Pair("Auto-Jump: ON", "Operator Items Tab: OFF"),
-            OptRow::Pair("Key Binds...", "Mouse Settings..."),
-            OptRow::Pair("Sneak: Toggle", "Sprint: Hold"),
+            OptRow::Pair("Mouse Settings...", "Key Binds..."),
+            OptRow::Pair("Sneak: Hold", "Sprint: Hold"),
+            OptRow::Pair("Attack/Destroy: Hold", "Use Item/Place Block: Hold"),
+            OptRow::Pair("Auto-Jump: OFF", "Sprint Window: 7"),
+            OptRow::PairLeft("Operator Items Tab: OFF"),
         ];
-        let nav: &[(&str, Screen)] = &[("Key Binds...", Screen::OptionsKeybinds)];
-        let sliders: &[(&str, f32)] = &[("Sensitivity:", self.sensitivity)];
+        let nav: &[(&str, Screen)] = &[
+            ("Mouse Settings...", Screen::OptionsMouse),
+            ("Key Binds...", Screen::OptionsKeybinds),
+        ];
         let disabled = &[
-            "Invert Mouse:",
-            "Auto-Jump:",
-            "Operator Items Tab:",
-            "Mouse Settings...",
             "Sneak:",
             "Sprint:",
+            "Attack/Destroy:",
+            "Use Item/Place Block:",
+            "Auto-Jump:",
+            "Sprint Window:",
+            "Operator Items Tab:",
         ];
         self.build_options_grid(
             sw,
@@ -371,6 +374,51 @@ impl MainMenu {
             Screen::Options,
             &rows,
             nav,
+            &[],
+            disabled,
+            true,
+            &[],
+            text_width_fn,
+        )
+    }
+
+    pub(super) fn build_options_mouse(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+    ) -> MainMenuResult {
+        let sensitivity_label = if self.sensitivity <= 0.0 {
+            "Sensitivity: *yawn*".to_string()
+        } else if self.sensitivity >= 1.0 {
+            "Sensitivity: HYPERSPEED!!!".to_string()
+        } else {
+            format!("Sensitivity: {}%", (self.sensitivity * 200.0) as u32)
+        };
+        let invert_x_label = format!("{INVERT_MOUSE_X} {}", on_off(self.invert_mouse_x));
+        let invert_y_label = format!("{INVERT_MOUSE_Y} {}", on_off(self.invert_mouse_y));
+        let rows: Vec<OptRow> = vec![
+            OptRow::Pair(&sensitivity_label, "Scroll Sensitivity: 1.00"),
+            OptRow::Pair("Discrete Scrolling: OFF", &invert_x_label),
+            OptRow::Pair(&invert_y_label, "Allow Cursor Changes: ON"),
+            OptRow::PairLeft("Raw Input: ON"),
+        ];
+        let sliders: &[(&str, f32)] = &[("Sensitivity:", self.sensitivity)];
+        let disabled = &[
+            "Scroll Sensitivity:",
+            "Discrete Scrolling:",
+            "Allow Cursor Changes:",
+            "Raw Input:",
+        ];
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            "Mouse Settings",
+            Screen::OptionsControls,
+            &rows,
+            &[],
             sliders,
             disabled,
             true,
@@ -1303,8 +1351,20 @@ impl MainMenu {
                         self.reload_fonts = true;
                         self.save_settings();
                     }
+                    if label.starts_with(INVERT_MOUSE_X) {
+                        self.invert_mouse_x = !self.invert_mouse_x;
+                        self.save_settings();
+                    }
+                    if label.starts_with(INVERT_MOUSE_Y) {
+                        self.invert_mouse_y = !self.invert_mouse_y;
+                        self.save_settings();
+                    }
                     if label.starts_with("Vignette:") {
                         self.vignette = !self.vignette;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Entity Shadows:") {
+                        self.entity_shadows = !self.entity_shadows;
                         self.save_settings();
                     }
                     if label.starts_with("Show Online Status:") {
@@ -2009,25 +2069,6 @@ mod tests {
         assert_eq!(result.new_value, Some(1.0));
     }
 
-    /// `dir` must not exist: settings and the server list fall back to
-    /// defaults, and a settings save silently fails instead of writing.
-    fn test_menu(dir: &str) -> MainMenu {
-        let rt = std::sync::Arc::new(
-            tokio::runtime::Builder::new_current_thread()
-                .build()
-                .expect("current-thread runtime"),
-        );
-        let mut menu = MainMenu::new(
-            std::path::Path::new(dir),
-            rt,
-            "tester".into(),
-            "26.2".into(),
-            None,
-        );
-        menu.gui_scale_setting = 1;
-        menu
-    }
-
     #[test]
     fn binding_capture_replaces_all_inputs_without_activating_done() {
         let mut menu = test_menu("pomme-keybind-capture-test");
@@ -2386,6 +2427,7 @@ mod tests {
         menu.build_options(sw, sh, &input, tw);
         menu.build_options_video(sw, sh, &input, tw);
         menu.build_options_controls(sw, sh, &input, tw);
+        menu.build_options_mouse(sw, sh, &input, tw);
         menu.build_options_chat(sw, sh, &input, tw);
         menu.build_options_accessibility(sw, sh, &input, tw);
         menu.build_options_music(sw, sh, &input, tw);

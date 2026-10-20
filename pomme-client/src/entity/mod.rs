@@ -1,4 +1,5 @@
 pub mod components;
+pub mod shadow;
 pub mod villager;
 
 use std::collections::HashMap;
@@ -122,6 +123,9 @@ fn within_simulation_distance(entity: Position, player: Position, distance: u32)
     entity_x.abs_diff(player_x).max(entity_z.abs_diff(player_z)) <= distance
 }
 
+/// `black`'s slot in `CAT_VARIANT_ORDER`.
+const CAT_DEFAULT_VARIANT: u32 = 1;
+
 #[allow(dead_code)]
 pub struct LivingEntity {
     pub position: Position,
@@ -171,6 +175,7 @@ pub struct LivingEntity {
     pub is_sitting: bool,
     pub is_tame: bool,
     pub is_sprinting: bool,
+    pub is_invisible: bool,
     /// Dye id, wolf/cat collars (vanilla default red).
     pub collar_color: u8,
     pub is_interested: bool,
@@ -373,12 +378,13 @@ impl LivingEntity {
             on_ground: true,
             wool_color: None,
             is_sheared: false,
-            // Vanilla salmon default is MEDIUM (id 1); non-default-only
-            // metadata means the size may never be synced.
-            variant: if entity_type == EntityKind::Salmon {
-                1
-            } else {
-                0
+            // Non-default-only metadata means these may never be synced:
+            // vanilla salmon default is MEDIUM (id 1), and `Cat.DEFAULT_VARIANT`
+            // is BLACK.
+            variant: match entity_type {
+                EntityKind::Salmon => 1,
+                EntityKind::Cat => CAT_DEFAULT_VARIANT,
+                _ => 0,
             },
             flap: 0.0,
             prev_flap: 0.0,
@@ -392,6 +398,7 @@ impl LivingEntity {
             is_sitting: false,
             is_tame: false,
             is_sprinting: false,
+            is_invisible: false,
             collar_color: 14,
             is_interested: false,
             anger_end_time: -1,
@@ -882,6 +889,11 @@ pub struct ItemEntityStore {
 }
 
 impl ItemEntityStore {
+    #[cfg(feature = "test-harness")]
+    pub fn items(&self) -> impl Iterator<Item = (i32, &ItemEntity)> {
+        self.items.iter().map(|(id, item)| (*id, item))
+    }
+
     pub fn new() -> Self {
         Self {
             items: HashMap::new(),
@@ -1204,8 +1216,11 @@ impl EntityStore {
         let kind = entity.entity_type;
         let index = normalize_player_index(kind, normalize_ageable_index(kind, index));
         match (kind, index, value) {
-            // Shared entity flags byte: bit 0x08 = sprinting.
-            (_, 0, Byte(f)) => entity.is_sprinting = f & 0x08 != 0,
+            // Shared entity flags byte: bit 0x08 = sprinting, 0x20 = invisible.
+            (_, 0, Byte(f)) => {
+                entity.is_sprinting = f & 0x08 != 0;
+                entity.is_invisible = f & 0x20 != 0;
+            }
             (_, 9, Float(h)) => entity.health = h,
             // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
             // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
@@ -1637,6 +1652,15 @@ mod tests {
     fn spawn(store: &mut EntityStore, id: i32, kind: EntityKind, position: Position) {
         let uuid = uuid::Uuid::from_u128(id as u128);
         store.spawn_living(id, kind, position, LookDirection::default(), 0.0, uuid);
+    }
+
+    #[test]
+    fn unsynced_cats_are_black() {
+        let order = crate::renderer::pipelines::entity_renderer::CAT_VARIANT_ORDER;
+        assert_eq!(order[CAT_DEFAULT_VARIANT as usize], "black");
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::Cat, Position::default());
+        assert_eq!(store.living[&1].variant, CAT_DEFAULT_VARIANT);
     }
 
     fn tick(store: &mut EntityStore) {

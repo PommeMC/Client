@@ -105,7 +105,7 @@ pub enum ConnectionPhase {
 
 pub enum AppPhase {
     Setup {
-        quick_access_multiplayer: Option<String>,
+        quick_play: Option<crate::app::QuickPlay>,
         pending_skin_uuid: Option<uuid::Uuid>,
     },
     InMenu {
@@ -144,6 +144,11 @@ pub enum AfterSaving {
 }
 
 impl AppPhase {
+    /// In a world with no screen, chat or pause menu over it.
+    pub fn world_has_pointer(&self) -> bool {
+        matches!(self, AppPhase::InGame { game, .. } if game.world_has_pointer())
+    }
+
     pub fn gfx_mut(&mut self) -> Option<&mut Gfx> {
         match self {
             AppPhase::Setup { .. } => None,

@@ -16,69 +16,173 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  client:
-    strategy:
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-
-    runs-on: ${{ matrix.os }}
+  # What a pull request touches, so it skips the checks it can't affect: a
+  # docs-only change builds nothing, and the launcher's jobs only run for it
+  # and the crates it uses. Pushes and manual runs check everything.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ github.event_name != 'pull_request' || steps.code.outputs.code == 'true' }}
+      launcher: ${{ github.event_name != 'pull_request' || steps.launcher.outputs.launcher == 'true' }}
     steps:
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
+        id: code
+        with:
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!LICENSE*'
+
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
+        id: launcher
+        with:
+          filters: |
+            launcher:
+              - 'pomme-launcher/**'
+              - 'pomme-auth/**'
+              - 'pomme-dirs/**'
+              - 'pomme-install/**'
+              - 'pomme-protocol/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - '.github/workflows/ci.yml'
+
+  # Desktop clippy never compiles the `cfg(target_os = "android")` code.
+  android:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: android
+
+      - name: Add the Android target
+        run: rustup target add aarch64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk@4.1.2 --locked
+
+      # The runner image ships an NDK and names it in ANDROID_NDK_LATEST_HOME.
+      - name: Clippy
+        run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo ndk -t arm64-v8a clippy -p pomme-android -- -D warnings
+
+  # The same for `cfg(target_os = "ios")`.
+  ios:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: ios
+
+      - name: Add the iOS target
+        run: rustup target add aarch64-apple-ios
+
+      - uses: actions/cache@v4
+        with:
+          path: target/moltenvk
+          key: moltenvk-${{ hashFiles('tools/fetch_moltenvk.py') }}
+
+      # shaderc is built for the runner against the SDK; the iOS build links
+      # MoltenVK as its Vulkan.
+      - name: Clippy
+        run: SHADERC_LIB_DIR="$VULKAN_SDK/lib" VULKAN_SDK="$(python3 tools/fetch_moltenvk.py ios)" cargo clippy -p pomme-ios --target aarch64-apple-ios -- -D warnings
+
+  fmt:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      # Submodules too: `cargo fmt --all` resolves SteelMC's path dependencies.
       - uses: actions/checkout@v7
         with:
           submodules: true
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          components: clippy, rustfmt
+          components: rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
         with:
-          shared-key: client
-          cache-on-failure: true
+          tool: just
 
-      - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa
+      - run: just ci-fmt
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
         with:
-          vulkan_version: 1.4.341.0
-          install_runtime: false
-          cache: true
-          stripdown: true
+          submodules: true
 
-      - name: Install Linux dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvulkan-dev libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: lint
 
-      - name: Format check
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          cargo fmt -p pomme-client -- --check
-          cargo fmt -p pomme-protocol -- --check
+      - run: just ci-lint
 
-      # Singleplayer is checked on Linux only, so SteelMC is not built three
-      # times over.
-      - name: Clippy
-        run: |
-          cargo clippy -p pomme-client --release --all-targets --no-default-features -- -D warnings
-          cargo clippy -p pomme-protocol --release --all-targets --all-features -- -D warnings
+  test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
 
-      - name: Tests
-        if: matrix.os == 'ubuntu-latest'
-        # --release reuses the dependency artifacts the clippy step built.
-        run: |
-          cargo test -p pomme-protocol
-          cargo test -p pomme-client --release --no-default-features
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: test
+
+      - run: just ci-test
+
+  # SteelMC on its own, as it's the slowest build; its test boots a real world,
+  # the only check that steel actually starts.
+  singleplayer:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: singleplayer
 
       - name: Pin the steel revision
-        if: matrix.os == 'ubuntu-latest'
         id: steel
         run: echo "rev=$(git -C third_party/SteelMC rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       # Steel's build scripts write generated source and the extracted Minecraft
       # assets into its own source tree, which the cargo cache does not cover.
       - name: Cache the generated steel source
-        if: matrix.os == 'ubuntu-latest'
         uses: actions/cache@v6
         with:
           path: |
@@ -90,15 +194,7 @@ jobs:
             third_party/SteelMC/steel-worldgen/src/generated
           key: steel-generated-${{ steps.steel.outputs.rev }}
 
-      # --include-ignored runs the world launch, which is the only check that
-      # steel actually boots.
-      - name: Singleplayer
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          cargo fmt -p pomme-singleplayer -- --check
-          cargo clippy -p pomme-singleplayer --release --all-targets -- -D warnings
-          cargo clippy -p pomme-client --release --all-targets -- -D warnings
-          cargo test -p pomme-singleplayer --release -- --include-ignored
+      - run: just ci-singleplayer
 
   pr-template:
     runs-on: ubuntu-latest
@@ -136,6 +232,8 @@ jobs:
           PY
 
   launcher-frontend:
+    needs: changes
+    if: needs.changes.outputs.launcher == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -163,6 +261,8 @@ jobs:
         run: pnpm --filter pomme-launcher exec tsc --noEmit
 
   launcher:
+    needs: changes
+    if: needs.changes.outputs.launcher == 'true'
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
@@ -203,3 +303,23 @@ jobs:
             echo "::error::pomme-launcher/src/bindings is stale. Run 'cargo run -p pomme-launcher --bin generate-bindings' and commit."
             exit 1
           fi
+
+  # The one required check: it passes once every other job has passed or been
+  # skipped, so jobs can be split or skipped without touching the ruleset.
+  ci:
+    if: always()
+    needs:
+      - changes
+      - android
+      - ios
+      - fmt
+      - lint
+      - test
+      - singleplayer
+      - pr-template
+      - launcher-frontend
+      - launcher
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

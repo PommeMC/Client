@@ -875,21 +875,6 @@ use std::io;
 ///
 /// This function handles SPIR-V of arbitrary endianness gracefully, and returns
 /// correctly aligned storage.
-///
-/// # Examples
-/// ```no_run
-/// // Decode SPIR-V from a file
-/// let mut file = std::fs::File::open("/path/to/shader.spv").unwrap();
-/// let words = ash::util::read_spv(&mut file).unwrap();
-/// ```
-/// ```
-/// // Decode SPIR-V from memory
-/// const SPIRV: &[u8] = &[
-///     // ...
-/// #   0x03, 0x02, 0x23, 0x07,
-/// ];
-/// let words = ash::util::read_spv(&mut std::io::Cursor::new(&SPIRV[..])).unwrap();
-/// ```
 pub fn read_spv<R: io::Read + io::Seek>(x: &mut R) -> io::Result<Vec<u32>> {
     // TODO use stream_len() once it is stabilized and remove the subsequent
     // rewind() call

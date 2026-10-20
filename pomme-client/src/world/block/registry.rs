@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use azalea_block::BlockState;
 use azalea_inventory::ItemStackData;
@@ -10,7 +11,7 @@ use azalea_registry::Registry as AzaleaRegistry;
 use azalea_registry::builtin::{MobEffect, Potion};
 use serde::{Deserialize, Serialize};
 
-pub const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
+const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
 
 use super::model;
 use super::model::BakedModel;
@@ -80,10 +81,22 @@ impl FaceTextures {
     }
 }
 
+/// A block state's model lookups, resolved once per state.
+struct StateRender {
+    model: Option<Arc<BakedModel>>,
+    opaque_full_cube: bool,
+    occludes: bool,
+    hidden_when_enclosed: bool,
+}
+
 #[derive(Clone)]
 pub struct BlockRegistry {
     textures: HashMap<String, FaceTextures>,
-    baked: HashMap<String, HashMap<String, BakedModel>>,
+    baked: HashMap<String, HashMap<String, Arc<BakedModel>>>,
+    /// Per block-state table slot, every state's resolved model lookups,
+    /// indexed by state id; built on first use of the slot. The mesher queries
+    /// these for every block and neighbour, so they must not hash or parse.
+    state_render: Arc<[OnceLock<Box<[StateRender]>>; super::TABLE_SLOTS]>,
     multipart: HashMap<String, Vec<model::MultipartEntry>>,
     item_models: HashMap<String, BakedModel>,
     flat_item_textures: std::collections::HashSet<String>,
@@ -91,30 +104,25 @@ pub struct BlockRegistry {
     item_gui_transforms: HashMap<String, model::DisplayTransform>,
     item_ground_transforms: HashMap<String, glam::Mat4>,
     item_tint_sources: HashMap<String, Vec<model::ItemTintSource>>,
-    /// Block name -> its single `BlockState`, for one-state blocks (see
-    /// `placeable_block_for_item`).
-    placeable_blocks: HashMap<&'static str, BlockState>,
 }
 
 impl BlockRegistry {
     pub fn load(
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
-        game_dir: &Path,
+        cache_dir: Option<&Path>,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
     ) -> Self {
-        let cache_path = game_dir.join(BLOCK_CACHE_FILE);
+        // Only vanilla textures are cached, so a cache shared between
+        // profiles never carries one profile's resource packs into another.
+        let cache_path = cache_dir
+            .filter(|_| packs.is_none())
+            .map(|dir| dir.join(BLOCK_CACHE_FILE));
 
-        let textures = if packs.is_none() {
-            if let Some(cached) = load_cache(&cache_path) {
-                tracing::info!("Block registry: {} blocks (cached textures)", cached.len());
-                Some(cached)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let textures = cache_path.as_deref().and_then(load_cache);
+        if let Some(cached) = &textures {
+            tracing::info!("Block registry: {} blocks (cached textures)", cached.len());
+        }
 
         let textures = textures.unwrap_or_else(|| {
             let mut textures = model::load_all_block_textures(jar_assets_dir, asset_index, packs);
@@ -126,15 +134,24 @@ impl BlockRegistry {
                 .entry("lava".into())
                 .or_insert_with(|| FaceTextures::uniform("lava_still", Tint::None));
 
-            save_cache(&cache_path, &textures);
-            tracing::info!(
-                "Block registry: {} blocks (built and cached)",
-                textures.len()
-            );
+            if let Some(path) = &cache_path {
+                save_cache(path, &textures);
+            }
+            tracing::info!("Block registry: {} blocks (built)", textures.len());
             textures
         });
 
         let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index, packs);
+        let baked = baked
+            .into_iter()
+            .map(|(block, variants)| {
+                let variants = variants
+                    .into_iter()
+                    .map(|(k, m)| (k, Arc::new(m)))
+                    .collect();
+                (block, variants)
+            })
+            .collect();
         let baked_items = model::bake_item_models(jar_assets_dir, asset_index, packs);
         let item_models = baked_items.models;
         let flat_item_textures = baked_items.generated_textures;
@@ -146,6 +163,7 @@ impl BlockRegistry {
         Self {
             textures,
             baked,
+            state_render: Arc::new([const { OnceLock::new() }; super::TABLE_SLOTS]),
             multipart,
             item_models,
             flat_item_textures,
@@ -153,15 +171,7 @@ impl BlockRegistry {
             item_gui_transforms,
             item_ground_transforms,
             item_tint_sources,
-            placeable_blocks: build_placeable_blocks(),
         }
-    }
-
-    /// Resolves a held item's registry name (unprefixed, e.g. `"stone"`) to the
-    /// `BlockState` to predict on placement, or `None` if the item is not a
-    /// single-state block. Item and block share a registry name for this set.
-    pub fn placeable_block_for_item(&self, item_name: &str) -> Option<BlockState> {
-        self.placeable_blocks.get(item_name).copied()
     }
 
     pub fn get_item_model(&self, name: &str) -> Option<&BakedModel> {
@@ -225,7 +235,36 @@ impl BlockRegistry {
     }
 
     pub fn get_baked_model(&self, state: BlockState) -> Option<&BakedModel> {
-        let variants = self.baked.get(super::block_id(state))?;
+        self.state_render(state)?.model.as_deref()
+    }
+
+    fn state_render(&self, state: BlockState) -> Option<&StateRender> {
+        let slot = super::active_table_slot();
+        self.state_render[slot]
+            .get_or_init(|| {
+                super::states_in_slot(slot)
+                    .map(|info| {
+                        let model = self.resolve_model(info.id, info.properties).cloned();
+                        let opaque_full_cube =
+                            !info.is_air && model.as_ref().is_some_and(|m| m.is_full_cube);
+                        let occludes = opaque_full_cube && info.can_occlude;
+                        let all_quads_cull = model
+                            .as_ref()
+                            .is_some_and(|m| m.quads.iter().all(|q| q.cullface.is_some()));
+                        StateRender {
+                            model,
+                            opaque_full_cube,
+                            occludes,
+                            hidden_when_enclosed: occludes && all_quads_cull && !info.has_fluid,
+                        }
+                    })
+                    .collect()
+            })
+            .get(u32::from(state) as usize)
+    }
+
+    fn resolve_model(&self, block: &str, props: &super::PropMap) -> Option<&Arc<BakedModel>> {
+        let variants = self.baked.get(block)?;
 
         if variants.len() == 1 {
             return variants.values().next();
@@ -234,7 +273,6 @@ impl BlockRegistry {
         // Vanilla variant keys only list the properties that affect the model, so
         // match by subset rather than exact string equality (an empty key matches
         // any state, serving as the default variant).
-        let props = super::block_properties(state);
         variants
             .iter()
             .find(|(key, _)| {
@@ -244,7 +282,10 @@ impl BlockRegistry {
             .or_else(|| variants.values().next())
     }
 
-    pub fn get_all_baked_variants(&self, block_id: &str) -> Option<&HashMap<String, BakedModel>> {
+    pub fn get_all_baked_variants(
+        &self,
+        block_id: &str,
+    ) -> Option<&HashMap<String, Arc<BakedModel>>> {
         self.baked.get(block_id)
     }
 
@@ -279,13 +320,20 @@ impl BlockRegistry {
     }
 
     pub fn is_opaque_full_cube(&self, state: BlockState) -> bool {
-        !super::is_air(state) && self.get_baked_model(state).is_some_and(|m| m.is_full_cube)
+        self.state_render(state).is_some_and(|r| r.opaque_full_cube)
     }
 
     /// Whether `state` culls a neighbor's adjacent face: a full cube that can
     /// occlude, so `noOcclusion` cubes like glass and leaves don't.
     pub fn occludes_neighbor(&self, state: BlockState) -> bool {
-        self.is_opaque_full_cube(state) && super::light_props(state).can_occlude
+        self.state_render(state).is_some_and(|r| r.occludes)
+    }
+
+    /// Whether `state` emits no geometry once all six neighbours occlude: a
+    /// non-fluid occluder whose every quad has a cullface.
+    pub fn hidden_when_enclosed(&self, state: BlockState) -> bool {
+        self.state_render(state)
+            .is_some_and(|r| r.hidden_when_enclosed)
     }
 
     pub fn texture_names(&self) -> impl Iterator<Item = &str> + '_ {
@@ -469,20 +517,6 @@ fn mob_effect_color(effect: MobEffect) -> u32 {
     crate::mob_effect::info(effect.to_u32()).map_or(0xFFFFFF, |info| info.color)
 }
 
-/// Builds the block-name -> single-`BlockState` map from the block table,
-/// keeping only names that map to exactly one state.
-fn build_placeable_blocks() -> HashMap<&'static str, BlockState> {
-    let mut seen: HashMap<&'static str, Option<BlockState>> = HashMap::new();
-    for (state, data) in super::all_states() {
-        seen.entry(data.id)
-            .and_modify(|v| *v = None)
-            .or_insert(Some(state));
-    }
-    seen.into_iter()
-        .filter_map(|(name, state)| state.map(|s| (name, s)))
-        .collect()
-}
-
 /// Whether every `key=value` constraint holds for `props`. A value may list
 /// alternatives separated by `|`, as vanilla multipart `when` clauses do.
 fn constraints_match<'a>(
@@ -501,9 +535,13 @@ fn load_cache(path: &Path) -> Option<HashMap<String, FaceTextures>> {
     serde_json::from_str(&data).ok()
 }
 
+/// Atomic, since every client of a version shares the one cache.
 fn save_cache(path: &Path, textures: &HashMap<String, FaceTextures>) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     if let Ok(json) = serde_json::to_string(textures)
-        && let Err(e) = std::fs::write(path, json)
+        && let Err(e) = crate::util::write_atomic(path, json.as_bytes())
     {
         tracing::warn!("Failed to write block cache: {e}");
     }

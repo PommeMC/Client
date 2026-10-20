@@ -1,0 +1,22 @@
+# Shift-clicking a chestplate from the hotbar equips it (menu slot 6).
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/give @s minecraft:iron_chestplate"
+
+[[step]]
+expect = { slot = 36, item = "iron_chestplate" }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+click = { slot = 36, op = "quick_move" }
+
+[[step]]
+expect = { slot = 6, item = "iron_chestplate" }
+
+[[step]]
+screenshot = "equipped"

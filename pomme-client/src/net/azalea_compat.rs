@@ -13,7 +13,14 @@ use azalea_registry::Holder;
 use azalea_registry::builtin::SoundEvent;
 use azalea_registry::identifier::Identifier;
 use glam::DVec3;
+use pomme_protocol::chunk::{self, ChunkPacket};
+use pomme_protocol::container::{self, ContainerPacket};
+use pomme_protocol::hud::{self, BossFlags, BossOp, HudPacket};
+use pomme_protocol::lifecycle::{self, LifecyclePacket};
 use pomme_protocol::packets::{Direction, PacketTable, Phase};
+use pomme_protocol::player_info::{self, PlayerInfoPacket};
+use pomme_protocol::scoreboard::{self, NumberFormat, ObjectiveMethod, ScoreboardPacket};
+use pomme_protocol::sound::{self, SoundPacket};
 use pomme_protocol::wire;
 
 fn table_id(phase: Phase, dir: Direction, name: &str) -> u32 {
@@ -241,6 +248,7 @@ fn packet_ids_match_azalea() {
         table_id(Phase::Game, Direction::Clientbound, "recipe_book_add")
     );
 
+    recipe_packet_ids_match_azalea();
     dialog_packet_ids_match_azalea();
 
     // `net::chat` decodes and encodes these itself; only the ids are shared.
@@ -411,29 +419,6 @@ fn sound_holder() -> Holder<SoundEvent, CustomSound> {
     })
 }
 
-/// Pins the azalea bug the raw sound path in `handler::handle_raw_game_packet`
-/// works around: azalea's `SoundSource` stops at `Voice = 9`, and the `AzBuf`
-/// derive decodes an unknown discriminant as the first variant rather than
-/// failing, so vanilla's `UI = 10` silently arrives as `Master`. When azalea
-/// gains the variant this fails, and the raw path can be deleted.
-#[test]
-fn azalea_sound_source_still_misdecodes_ui() {
-    use azalea_buf::AzBuf;
-    use azalea_protocol::packets::game::c_sound::SoundSource;
-
-    let mut ui = std::io::Cursor::new(&[10u8][..]);
-    assert_eq!(
-        SoundSource::azalea_read(&mut ui).unwrap(),
-        SoundSource::Master
-    );
-
-    let mut voice = std::io::Cursor::new(&[9u8][..]);
-    assert_eq!(
-        SoundSource::azalea_read(&mut voice).unwrap(),
-        SoundSource::Voice
-    );
-}
-
 /// Round-trip through azalea's `LpVec3` decoder to cross-check the port.
 fn decode_lp_vec3(bytes: &[u8]) -> DVec3 {
     use azalea_buf::AzBuf;
@@ -488,6 +473,31 @@ fn translate_and_decode(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
         .translate_game_frame(old.into_boxed_slice())
         .unwrap();
     azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap()
+}
+
+/// Translates a hand-built old-version game frame and decodes the result
+/// with pomme's `read` for packet `name`, as the raw chain does.
+fn translate_and_read<P>(protocol: i32, old: Vec<u8>, name: &str, read: RawRead<P>) -> P {
+    let translated = translation_for(protocol)
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    read_native_frame(&translated, name, read)
+}
+
+/// A pomme-protocol decoder (`chunk::read`, `block::read`, …).
+type RawRead<P> =
+    fn(&str, &mut pomme_protocol::codec::Reader) -> Option<pomme_protocol::codec::DecodeResult<P>>;
+
+/// A native 26.2 game frame for packet `name`, decoded with `read`.
+fn read_native_frame<P>(frame: &[u8], name: &str, read: RawRead<P>) -> P {
+    let mut r = pomme_protocol::codec::Reader::new(frame);
+    assert_eq!(
+        r.varint(),
+        Ok(table_id(Phase::Game, Direction::Clientbound, name))
+    );
+    let decoded = read(name, &mut r).unwrap().unwrap();
+    r.ensure_eof().unwrap();
+    decoded
 }
 
 /// `translate_and_decode` plus the id remap the connection applies next, for
@@ -711,33 +721,22 @@ fn registry_table_matches_azalea() {
     );
 }
 
-/// A 26.1 `add_entity` decoded with the 26.2 enum comes out as the wrong
-/// kind (ids past the sulfur_cube insertion shift by one); the remap fixes
-/// it in place.
+/// A 26.1 `add_entity`'s type id comes out as the wrong kind in 26.2's
+/// numbering (ids past the sulfur_cube insertion shift by one); the remap
+/// the raw path applies fixes it.
 #[test]
 fn remap_add_entity_26_1() {
-    use azalea_protocol::packets::game::ClientboundGamePacket;
-    use azalea_protocol::packets::game::c_add_entity::ClientboundAddEntity;
     use azalea_registry::Registry;
     use azalea_registry::builtin::EntityKind;
 
-    // 26.1 tadpole is id 130, which the 26.2 enum decodes as sulfur_cube.
-    let mut packet = ClientboundGamePacket::AddEntity(ClientboundAddEntity {
-        id: MinecraftEntityId(1),
-        uuid: uuid::Uuid::nil(),
-        entity_type: EntityKind::from_u32(130).unwrap(),
-        position: Default::default(),
-        movement: Default::default(),
-        x_rot: 0,
-        y_rot: 0,
-        y_head_rot: 0,
-        data: 0,
-    });
-    assert!(translation_for(775).remap_inbound(&mut packet));
-    let ClientboundGamePacket::AddEntity(p) = &packet else {
-        unreachable!()
-    };
-    assert_eq!(p.entity_type, EntityKind::Tadpole);
+    // 26.1 tadpole is id 130, which 26.2 numbers as sulfur_cube.
+    assert_eq!(EntityKind::from_u32(130), Some(EntityKind::SulfurCube));
+    let native =
+        translation_for(775).remap_to_native(pomme_protocol::ClientRegistry::EntityType, 130);
+    assert_eq!(
+        native.and_then(EntityKind::from_u32),
+        Some(EntityKind::Tadpole)
+    );
 }
 
 /// azalea's typed encoder always writes 26.2 component-type ids, so a
@@ -953,12 +952,13 @@ fn translate_chunk_774() {
     old.push(0); // no block entities
     old.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // empty light masks + lists
 
-    let ClientboundGamePacket::LevelChunkWithLight(p) = translate_and_decode(774, old) else {
+    let ChunkPacket::Level { x, z, sections, .. } =
+        translate_and_read(774, old, "level_chunk_with_light", chunk::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.x, 3);
-    assert_eq!(p.z, -2);
-    assert_eq!(p.chunk_data.data[..], [0, 1, 0, 0, 0, 5, 0, 0]);
+    assert_eq!((x, z), (3, -2));
+    assert_eq!(sections[..], [0, 1, 0, 0, 0, 5, 0, 0]);
 }
 
 /// The world-clock map synthesis (see `translate_set_time`).
@@ -970,13 +970,16 @@ fn translate_set_time_774() {
     old.extend_from_slice(&6000u64.to_be_bytes()); // day time
     old.push(1); // tickDayTime
 
-    let ClientboundGamePacket::SetTime(p) = translate_and_decode(774, old) else {
+    let LifecyclePacket::SetTime { game_time, clocks } =
+        translate_and_read(774, old, "set_time", lifecycle::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.game_time, 12000);
-    let clock = p.clock_updates.values().next().unwrap();
-    assert_eq!(clock.total_ticks, 6000);
-    assert_eq!(clock.rate, 1.0);
+    assert_eq!(game_time, 12000);
+    let [(_, clock)] = &clocks[..] else {
+        panic!("{clocks:?}");
+    };
+    assert_eq!((clock.total_ticks, clock.rate), (6000, 1.0));
 }
 
 /// Neither 1.21.11 nor 1.21.10 has a serverbound `attack`; the frame
@@ -1351,13 +1354,15 @@ fn translate_player_rotation_772() {
     old.extend_from_slice(&90.0f32.to_be_bytes()); // y rot
     old.extend_from_slice(&(-10.0f32).to_be_bytes()); // x rot
 
-    let ClientboundGamePacket::PlayerRotation(p) = translate_and_decode(772, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.y_rot, 90.0);
-    assert_eq!(p.x_rot, -10.0);
-    assert!(!p.relative_y);
-    assert!(!p.relative_x);
+    assert_eq!(
+        translate_and_read(772, old, "player_rotation", lifecycle::read),
+        LifecyclePacket::PlayerRotation {
+            y_rot: 90.0,
+            relative_y: false,
+            x_rot: -10.0,
+            relative_x: false,
+        }
+    );
 }
 
 /// `BlockPos + angle` -> `RespawnData` with a synthesized overworld
@@ -1623,14 +1628,20 @@ fn translate_chunk_769() {
     old.push(0); // no block entities
     old.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // empty light masks + lists
 
-    let ClientboundGamePacket::LevelChunkWithLight(p) = translate_and_decode(769, old) else {
+    let ChunkPacket::Level {
+        x,
+        z,
+        heightmaps,
+        sections,
+        ..
+    } = translate_and_read(769, old, "level_chunk_with_light", chunk::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.x, 3);
-    assert_eq!(p.z, -2);
-    assert_eq!(p.chunk_data.heightmaps.len(), 1);
-    assert_eq!(&*p.chunk_data.heightmaps[0].1, &[7u64]);
-    assert_eq!(p.chunk_data.data[..], [0, 1, 0, 0, 0, 5, 0, 0]);
+    assert_eq!((x, z), (3, -2));
+    assert_eq!(heightmaps.len(), 1);
+    assert_eq!(&*heightmaps[0].1, &[7u64]);
+    assert_eq!(sections[..], [0, 1, 0, 0, 0, 5, 0, 0]);
 }
 
 /// A `player_chat` frame with everything but the chat type fixed: 765 sends a
@@ -1805,11 +1816,13 @@ fn player_info_passthrough_768() {
     old.extend_from_slice(&[9; 16]); // uuid
     wire::write_varint(&mut old, 5); // list order
 
-    let ClientboundGamePacket::PlayerInfoUpdate(p) = translate_and_decode(768, old) else {
+    let PlayerInfoPacket::Update { actions, entries } =
+        translate_and_read(768, old, "player_info_update", player_info::read)
+    else {
         panic!("wrong packet");
     };
-    assert!(p.actions.update_list_order);
-    assert_eq!(p.entries[0].list_order, 5);
+    assert!(actions.update_list_order && !actions.update_hat);
+    assert_eq!(entries[0].list_order, 5);
 }
 
 /// The 1.21.2 `player_position` rework (`PositionMoveRotation`): the 767
@@ -1835,33 +1848,45 @@ fn translate_player_position_767() {
         old
     };
 
-    let absolute = build(0b0001_1000); // relative: Y_ROT | X_ROT
-    let ClientboundGamePacket::PlayerPosition(p) = translate_and_decode(767, absolute) else {
+    let read = |old| translate_and_read(767, old, "player_position", lifecycle::read);
+    let LifecyclePacket::PlayerPosition {
+        id,
+        change,
+        relative,
+    } = read(build(0b0001_1000))
+    // relative: Y_ROT | X_ROT
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.id, 42);
-    assert_eq!(
-        (p.change.pos.x, p.change.pos.y, p.change.pos.z),
-        (100.5, 64.0, -20.25)
-    );
-    assert_eq!(
-        (p.change.delta.x, p.change.delta.y, p.change.delta.z),
-        (0.0, 0.0, 0.0)
-    );
-    assert_eq!(p.change.look_direction.y_rot(), 90.0);
-    assert_eq!(p.change.look_direction.x_rot(), -10.0);
-    assert!(p.relative.y_rot && p.relative.x_rot);
-    assert!(!p.relative.x && !p.relative.y && !p.relative.z);
+    assert_eq!(id, 42);
+    assert_eq!(change.position, DVec3::new(100.5, 64.0, -20.25));
+    assert_eq!(change.delta, DVec3::ZERO);
+    assert_eq!((change.y_rot, change.x_rot), (90.0, -10.0));
     // Absolute on every position axis, so the velocity zeroes as 1.21.1's did.
-    assert!(!p.relative.delta_x && !p.relative.delta_y && !p.relative.delta_z);
+    assert_eq!(
+        relative,
+        pomme_protocol::entity::Relative {
+            y_rot: true,
+            x_rot: true,
+            ..Default::default()
+        }
+    );
 
-    let relative_xz = build(0b0000_0101); // relative: X | Z
-    let ClientboundGamePacket::PlayerPosition(p) = translate_and_decode(767, relative_xz) else {
+    let LifecyclePacket::PlayerPosition { relative, .. } = read(build(0b0000_0101))
+    // relative: X | Z
+    else {
         panic!("wrong packet");
     };
-    assert!(p.relative.x && p.relative.z && !p.relative.y);
-    assert!(p.relative.delta_x && p.relative.delta_z && !p.relative.delta_y);
-    assert!(!p.relative.rotate_delta);
+    assert_eq!(
+        relative,
+        pomme_protocol::entity::Relative {
+            x: true,
+            z: true,
+            delta_x: true,
+            delta_z: true,
+            ..Default::default()
+        }
+    );
 }
 
 /// 1.21.1's `teleport_entity` only synced position and rotation, so it becomes
@@ -1905,13 +1930,16 @@ fn translate_set_time_767() {
     old.extend_from_slice(&12000u64.to_be_bytes()); // game time
     old.extend_from_slice(&(-6000i64).to_be_bytes()); // frozen day time
 
-    let ClientboundGamePacket::SetTime(p) = translate_and_decode(767, old) else {
+    let LifecyclePacket::SetTime { game_time, clocks } =
+        translate_and_read(767, old, "set_time", lifecycle::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.game_time, 12000);
-    let clock = p.clock_updates.values().next().unwrap();
-    assert_eq!(clock.total_ticks, 6000);
-    assert_eq!(clock.rate, 0.0);
+    assert_eq!(game_time, 12000);
+    let [(_, clock)] = &clocks[..] else {
+        panic!("{clocks:?}");
+    };
+    assert_eq!((clock.total_ticks, clock.rate), (6000, 0.0));
 }
 
 /// 767 `container_set_slot` sentinels: container -1 becomes
@@ -1932,19 +1960,27 @@ fn translate_container_set_slot_767() {
         old
     };
 
-    let ClientboundGamePacket::SetCursorItem(_) = translate_and_decode(767, build(-1, 0)) else {
-        panic!("wrong packet for -1");
-    };
-    let ClientboundGamePacket::SetPlayerInventory(p) = translate_and_decode(767, build(-2, 7))
-    else {
-        panic!("wrong packet for -2");
-    };
-    assert_eq!(p.slot, 7);
-    let ClientboundGamePacket::ContainerSetSlot(p) = translate_and_decode(767, build(3, 1)) else {
-        panic!("wrong packet for plain");
-    };
-    assert_eq!(p.container_id, 3);
-    assert_eq!(p.slot, 1);
+    let read = |name, old| translate_and_read(767, old, name, container::read);
+    assert_eq!(
+        read("set_cursor_item", build(-1, 0)),
+        ContainerPacket::Cursor { item: None }
+    );
+    assert_eq!(
+        read("set_player_inventory", build(-2, 7)),
+        ContainerPacket::PlayerInventory {
+            slot: 7,
+            item: None
+        }
+    );
+    assert_eq!(
+        read("container_set_slot", build(3, 1)),
+        ContainerPacket::Slot {
+            container_id: 3,
+            state_id: 2,
+            slot: 1,
+            item: None
+        }
+    );
 }
 
 /// 767 `cooldown` item ids remap into the native registry space (azalea
@@ -2121,17 +2157,29 @@ fn translate_container_set_content_765() {
     old.extend_from_slice(&[10, 1, 0, 1, b'd', 5, 0]); // NBT {d: 5b}
     old.push(0); // carried: empty
 
-    let ClientboundGamePacket::ContainerSetContent(p) = translate_and_decode(765, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.container_id, 1);
-    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
-        panic!("empty stack");
-    };
-    assert_eq!(data.kind, azalea_registry::builtin::ItemKind::Stone);
-    assert_eq!(data.count, 3);
-    assert_eq!(data.component_patch.iter().count(), 0);
-    assert!(matches!(p.carried_item, azalea_inventory::ItemStack::Empty));
+    assert_eq!(
+        translate_and_read(765, old, "container_set_content", container::read),
+        ContainerPacket::Content {
+            container_id: 1,
+            state_id: 2,
+            items: vec![pomme_stack(azalea_registry::builtin::ItemKind::Stone, 3)],
+            carried: None,
+        }
+    );
+}
+
+/// `count` of `kind` with no components, as pomme decodes it.
+fn pomme_stack(
+    kind: azalea_registry::builtin::ItemKind,
+    count: i32,
+) -> Option<pomme_protocol::item::ItemStack> {
+    use azalea_registry::Registry;
+
+    Some(pomme_protocol::item::ItemStack {
+        item: kind.to_u32(),
+        count,
+        patch: Default::default(),
+    })
 }
 
 /// `set_equipment` slot/item pairs, high slot bit continuing the list.
@@ -2148,16 +2196,66 @@ fn translate_set_equipment_765() {
     old.push(0); // head
     old.push(0); // empty stack
 
-    let ClientboundGamePacket::SetEquipment(p) = translate_decode_and_remap(765, old) else {
+    let ContainerPacket::Equipment { entity, slots } =
+        translate_and_read(765, old, "set_equipment", container::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.entity_id, MinecraftEntityId(9));
-    assert_eq!(p.slots.slots.len(), 2);
-    let azalea_inventory::ItemStack::Present(data) = &p.slots.slots[0].1 else {
-        panic!("empty stack");
+    assert_eq!(entity, 9);
+    let [(5, Some(offhand)), (0, None)] = &slots[..] else {
+        panic!("slots: {slots:?}");
     };
-    assert_eq!(data.count, 1);
-    assert_eq!(data.kind, SHIFTED_ITEM_KIND);
+    assert_eq!(offhand.count, 1);
+    assert_eq!(native_item(765, offhand.item), Some(SHIFTED_ITEM_KIND));
+}
+
+/// A wire-version item id as the native item, as `container_wire` remaps it.
+fn native_item(protocol: i32, id: u32) -> Option<azalea_registry::builtin::ItemKind> {
+    use azalea_registry::Registry;
+
+    let native =
+        translation_for(protocol).remap_to_native(pomme_protocol::ClientRegistry::Item, id);
+    native.and_then(azalea_registry::builtin::ItemKind::from_u32)
+}
+
+/// The `-2` sentinel's stack, split into `set_player_inventory`, keeps its
+/// wire id until the raw path remaps it.
+#[test]
+fn translate_set_player_inventory_remaps_765() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(765, Direction::Clientbound, "container_set_slot"),
+    );
+    old.push(-2i8 as u8);
+    wire::write_varint(&mut old, 2); // state id
+    old.extend_from_slice(&7i16.to_be_bytes());
+    old.extend_from_slice(&[1, SHIFTED_ITEM, 1, 0]); // bare item, empty NBT
+    let ContainerPacket::PlayerInventory {
+        slot: 7,
+        item: Some(item),
+    } = translate_and_read(765, old, "set_player_inventory", container::read)
+    else {
+        panic!("wrong packet");
+    };
+    assert_eq!(native_item(765, item.item), Some(SHIFTED_ITEM_KIND));
+}
+
+/// 1.20.1's menu registry predates `crafter_3x3`, so its anvil is one id
+/// below the native one.
+#[test]
+fn remap_menu_763() {
+    use azalea_registry::Registry;
+    use azalea_registry::builtin::MenuKind;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let anvil = RegistryTable::for_protocol(763)
+        .unwrap()
+        .id_of(ClientRegistry::Menu, "anvil")
+        .unwrap();
+    assert_ne!(MenuKind::from_u32(anvil), Some(MenuKind::Anvil));
+    let native = translation_for(763).remap_to_native(ClientRegistry::Menu, anvil);
+    assert_eq!(native.and_then(MenuKind::from_u32), Some(MenuKind::Anvil));
 }
 
 /// `merchant_offers` costs were plain stacks before 1.20.5's `ItemCost`
@@ -2416,23 +2514,29 @@ fn translate_container_set_slot_765() {
         old
     };
 
-    let ClientboundGamePacket::SetCursorItem(_) = translate_and_decode(765, build(-1, 0)) else {
-        panic!("wrong packet for -1");
-    };
-    let ClientboundGamePacket::SetPlayerInventory(p) = translate_and_decode(765, build(-2, 7))
-    else {
-        panic!("wrong packet for -2");
-    };
-    assert_eq!(p.slot, 7);
-    let ClientboundGamePacket::ContainerSetSlot(p) = translate_and_decode(765, build(3, 1)) else {
-        panic!("wrong packet for plain");
-    };
-    assert_eq!(p.container_id, 3);
-    assert_eq!(p.slot, 1);
-    let azalea_inventory::ItemStack::Present(data) = &p.item_stack else {
-        panic!("empty stack");
-    };
-    assert_eq!(data.count, 2);
+    let read = |name, old| translate_and_read(765, old, name, container::read);
+    assert_eq!(
+        read("set_cursor_item", build(-1, 0)),
+        ContainerPacket::Cursor {
+            item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+        }
+    );
+    assert_eq!(
+        read("set_player_inventory", build(-2, 7)),
+        ContainerPacket::PlayerInventory {
+            slot: 7,
+            item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+        }
+    );
+    assert_eq!(
+        read("container_set_slot", build(3, 1)),
+        ContainerPacket::Slot {
+            container_id: 3,
+            state_id: 2,
+            slot: 1,
+            item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+        }
+    );
 }
 
 /// 765's single-NBT `registry_data` splits into per-registry frames whose
@@ -2443,7 +2547,6 @@ fn translate_container_set_slot_765() {
 fn translate_config_registry_data_765() {
     use azalea_buf::AzBuf;
     use azalea_protocol::packets::config::ClientboundConfigPacket;
-    use azalea_registry::DataRegistry;
     use simdnbt::owned::NbtTag;
 
     let root = dimension_registry_codec(&[
@@ -2481,13 +2584,16 @@ fn translate_config_registry_data_765() {
     write_spawn_info_765(&mut old, "minecraft:custom_end", "minecraft:overworld");
     old.push(3); // keep-data flags
 
-    let ClientboundGamePacket::Respawn(p) = translate_and_decode(765, old) else {
+    let LifecyclePacket::Respawn {
+        spawn,
+        data_to_keep,
+    } = translate_and_read(765, old, "respawn", lifecycle::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.common.dimension_type.protocol_id(), 1);
-    assert_eq!(p.common.dimension.to_string(), "minecraft:overworld");
-    assert_eq!(p.common.seed, 42);
-    assert_eq!(p.data_to_keep, 3);
+    assert_eq!(spawn.dimension_type, 1);
+    assert_eq!(spawn.dimension, "minecraft:overworld");
+    assert_eq!((spawn.seed, data_to_keep), (42, 3));
 }
 
 /// A 765 `CommonPlayerSpawnInfo`: dimension-type key, dimension name, then
@@ -2522,14 +2628,14 @@ fn translate_game_login_765() {
     old.extend_from_slice(&[0, 1, 0]); // reducedDebug, deathScreen, crafting
     write_spawn_info_765(&mut old, "minecraft:the_nether", "minecraft:the_nether");
 
-    let ClientboundGamePacket::Login(p) = translate_and_decode(765, old) else {
+    let LifecyclePacket::Login(p) = translate_and_read(765, old, "login", lifecycle::read) else {
         panic!("wrong packet");
     };
-    assert_eq!(p.player_id, MinecraftEntityId(7));
-    assert_eq!(p.levels, vec!["minecraft:the_nether".into()]);
+    assert_eq!(p.player_id, 7);
+    assert_eq!(p.levels, ["minecraft:the_nether"]);
     assert_eq!(p.max_players, 20);
     assert!(p.show_death_screen);
-    assert_eq!(p.common.dimension.to_string(), "minecraft:the_nether");
+    assert_eq!(p.spawn.dimension, "minecraft:the_nether");
     assert!(!p.enforces_secure_chat);
 }
 
@@ -2746,11 +2852,37 @@ fn translate_tab_list_764() {
     write_json(&mut old, r#"{"text":"head"}"#);
     write_json(&mut old, r#""foot""#); // bare JSON literal
 
-    let ClientboundGamePacket::TabList(p) = translate_and_decode(764, old) else {
+    let HudPacket::TabList { header, footer } = translate_and_read(764, old, "tab_list", hud::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.header.to_string(), "head");
-    assert_eq!(p.footer.to_string(), "foot");
+    assert_eq!(
+        (plain(&header), plain(&footer)),
+        ("head".into(), "foot".into())
+    );
+}
+
+/// `set_title_text`'s single component.
+#[test]
+fn translate_set_title_text_764() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(764, Direction::Clientbound, "set_title_text"),
+    );
+    write_json(&mut old, r#"{"text":"hello"}"#);
+
+    let HudPacket::Title(text) = translate_and_read(764, old, "set_title_text", hud::read) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(plain(&text), "hello");
+}
+
+/// A text component's plain text.
+fn plain(nbt: &[u8]) -> String {
+    crate::net::chat::read_component(nbt, &mut 0)
+        .unwrap()
+        .plain_text()
 }
 
 /// `player_combat_kill`'s trailing component.
@@ -2784,14 +2916,15 @@ fn translate_boss_event_764() {
     wire::write_varint(&mut old, 0); // overlay
     old.push(0); // flags
 
-    let ClientboundGamePacket::BossEvent(p) = translate_and_decode(764, old) else {
+    let HudPacket::BossEvent {
+        op: BossOp::Add { name, progress, .. },
+        ..
+    } = translate_and_read(764, old, "boss_event", hud::read)
+    else {
         panic!("wrong packet");
     };
-    let azalea_protocol::packets::game::c_boss_event::Operation::Add(add) = p.operation else {
-        panic!("wrong operation");
-    };
-    assert_eq!(add.name.to_string(), "boss");
-    assert_eq!(add.progress, 0.5);
+    assert_eq!(plain(&name), "boss");
+    assert_eq!(progress, 0.5);
 }
 
 /// The 764 team parameters (JSON components in the 767-era order) convert,
@@ -2819,10 +2952,7 @@ fn translate_set_player_team_764() {
         .translate_game_frame(old.into_boxed_slice())
         .unwrap();
     let (tx, rx) = crossbeam_channel::bounded(1);
-    assert!(crate::net::handler::handle_raw_game_packet(
-        &translated,
-        &tx
-    ));
+    assert!(crate::net::handler::handle_raw_for_test(&translated, &tx).0);
     match rx.recv().unwrap() {
         crate::net::NetworkEvent::ScoreboardTeam {
             display_name,
@@ -2920,14 +3050,15 @@ fn translate_player_info_764() {
     old.push(1); // display name present
     write_json(&mut old, r#"{"text":"Bob"}"#);
 
-    let ClientboundGamePacket::PlayerInfoUpdate(p) = translate_and_decode(764, old) else {
+    let PlayerInfoPacket::Update { actions, entries } =
+        translate_and_read(764, old, "player_info_update", player_info::read)
+    else {
         panic!("wrong packet");
     };
-    assert!(p.actions.add_player);
-    assert!(p.actions.update_display_name);
-    let entry = &p.entries[0];
-    assert_eq!(entry.profile.name, "bob");
-    assert_eq!(entry.display_name.as_ref().unwrap().to_string(), "Bob");
+    assert!(actions.add_player && actions.update_display_name);
+    let entry = &entries[0];
+    assert_eq!(entry.name, "bob");
+    assert_eq!(plain(entry.display_name.as_deref().unwrap()), "Bob");
 }
 
 /// `command_suggestions`: nullable tooltips inside the suggestion list.
@@ -2971,28 +3102,31 @@ fn translate_set_score_764() {
         old
     };
 
-    let ClientboundGamePacket::SetScore(p) = translate_and_decode(764, build(0, b"obj", true))
-    else {
-        panic!("wrong packet for change");
-    };
-    assert_eq!(p.owner, "bob");
-    assert_eq!(p.objective_name, "obj");
-    assert_eq!(p.score, 42);
-    assert!(p.display.is_none());
-    assert!(p.number_format.is_none());
-
-    let ClientboundGamePacket::ResetScore(p) = translate_and_decode(764, build(1, b"obj", false))
-    else {
-        panic!("wrong packet for remove");
-    };
-    assert_eq!(p.owner, "bob");
-    assert_eq!(p.objective_name.as_deref(), Some("obj"));
-
-    let ClientboundGamePacket::ResetScore(p) = translate_and_decode(764, build(1, b"", false))
-    else {
-        panic!("wrong packet for remove-all");
-    };
-    assert!(p.objective_name.is_none());
+    let read = |name, old| translate_and_read(764, old, name, scoreboard::read);
+    assert_eq!(
+        read("set_score", build(0, b"obj", true)),
+        ScoreboardPacket::Score {
+            owner: "bob".into(),
+            objective: "obj".into(),
+            score: 42,
+            display: None,
+            number_format: None,
+        }
+    );
+    assert_eq!(
+        read("reset_score", build(1, b"obj", false)),
+        ScoreboardPacket::ResetScore {
+            owner: "bob".into(),
+            objective: Some("obj".into()),
+        }
+    );
+    assert_eq!(
+        read("reset_score", build(1, b"", false)),
+        ScoreboardPacket::ResetScore {
+            owner: "bob".into(),
+            objective: None,
+        }
+    );
 }
 
 /// The 1.20.2 `set_objective` ends at the render type; the display
@@ -3009,19 +3143,16 @@ fn translate_set_objective_764() {
     write_json(&mut old, r#"{"text":"Deaths"}"#);
     wire::write_varint(&mut old, 1); // render type: hearts
 
-    let ClientboundGamePacket::SetObjective(p) = translate_and_decode(764, old) else {
+    let ScoreboardPacket::Objective {
+        method: ObjectiveMethod::Add(parameters),
+        ..
+    } = translate_and_read(764, old, "set_objective", scoreboard::read)
+    else {
         panic!("wrong packet");
     };
-    let azalea_protocol::packets::game::c_set_objective::Method::Add {
-        display_name,
-        number_format,
-        ..
-    } = p.method
-    else {
-        panic!("wrong method");
-    };
-    assert_eq!(display_name.to_string(), "Deaths");
-    assert_eq!(number_format, azalea_chat::numbers::NumberFormat::Blank);
+    assert_eq!(plain(&parameters.display_name), "Deaths");
+    assert_eq!(parameters.render_type, 1);
+    assert_eq!(parameters.number_format, None);
 }
 
 /// The unsplit 1.20.2 `resource_pack` maps to `resource_pack_push` with a
@@ -3155,12 +3286,13 @@ fn translate_entity_data_764() {
 }
 
 /// `update_attributes` names its attribute by registry id, and those shift
-/// between versions (1.21.2 also dropped the category prefixes), so each is
-/// remapped into the native space. Unremapped, an old `max_health` decodes as
-/// whatever attribute holds that id in 26.2.
+/// between versions (1.21.2 also dropped the category prefixes), so the frame
+/// rewrite remaps each into the native space, once: the raw decode after it
+/// must not remap again. Unremapped, an old `max_health` decodes as whatever
+/// attribute holds that id in 26.2.
 #[test]
 fn translate_update_attributes_old_versions() {
-    use azalea_registry::builtin::Attribute;
+    use pomme_protocol::player::PlayerPacket;
     use pomme_protocol::{ClientRegistry, RegistryTable};
 
     for protocol in [775, 774, 773, 772, 771, 770, 769, 768, 767] {
@@ -3187,12 +3319,22 @@ fn translate_update_attributes_old_versions() {
         old.extend_from_slice(&4.0f64.to_be_bytes()); // amount
         wire::write_varint(&mut old, 0); // operation
 
-        let ClientboundGamePacket::UpdateAttributes(p) = translate_and_decode(protocol, old) else {
+        let PlayerPacket::Attributes { snapshots, .. } = translate_and_read(
+            protocol,
+            old,
+            "update_attributes",
+            pomme_protocol::player::read,
+        ) else {
             panic!("wrong packet for {protocol}");
         };
-        assert_eq!(p.values[0].attribute, Attribute::MaxHealth, "{protocol}");
-        assert_eq!(p.values[0].base, 20.0, "{protocol}");
-        assert_eq!(p.values[0].modifiers[0].amount, 4.0, "{protocol}");
+        let attribute = crate::attribute::AttributeKind::from_id(snapshots[0].attribute);
+        assert_eq!(
+            attribute,
+            Some(crate::attribute::AttributeKind::MaxHealth),
+            "{protocol}"
+        );
+        assert_eq!(snapshots[0].base, 20.0, "{protocol}");
+        assert_eq!(snapshots[0].modifiers[0].amount, 4.0, "{protocol}");
     }
 }
 
@@ -3288,7 +3430,6 @@ fn write_login_763(old: &mut Vec<u8>, dimension_type: &str, dimensions: &[(&str,
 #[test]
 fn translate_login_registries_763() {
     use azalea_protocol::packets::config::ClientboundConfigPacket;
-    use azalea_registry::DataRegistry;
 
     let mut old = Vec::new();
     write_login_763(
@@ -3318,17 +3459,17 @@ fn translate_login_registries_763() {
 
     // The same frame then decodes as a game login, its dimension key resolved
     // against the order just captured.
-    let ClientboundGamePacket::Login(p) = translate_and_decode(763, old) else {
+    let LifecyclePacket::Login(p) = translate_and_read(763, old, "login", lifecycle::read) else {
         panic!("wrong packet");
     };
-    assert_eq!(p.player_id, MinecraftEntityId(7));
-    assert_eq!(p.levels, vec!["minecraft:overworld".into()]);
+    assert_eq!(p.player_id, 7);
+    assert_eq!(p.levels, ["minecraft:overworld"]);
     assert_eq!(p.max_players, 20);
     assert!(p.show_death_screen);
     assert!(!p.enforces_secure_chat);
-    assert_eq!(p.common.dimension_type.protocol_id(), 1);
-    assert_eq!(p.common.dimension.to_string(), "minecraft:overworld");
-    assert_eq!(p.common.seed, 42);
+    assert_eq!(p.spawn.dimension_type, 1);
+    assert_eq!(p.spawn.dimension, "minecraft:overworld");
+    assert_eq!(p.spawn.seed, 42);
 }
 
 /// 1.20.2 moved `dataToKeep` from the middle of the spawn info to the end.
@@ -3347,12 +3488,16 @@ fn translate_respawn_763() {
     old.push(0); // no death location
     wire::write_varint(&mut old, 8); // portal cooldown
 
-    let ClientboundGamePacket::Respawn(p) = translate_and_decode(763, old) else {
+    let LifecyclePacket::Respawn {
+        spawn,
+        data_to_keep,
+    } = translate_and_read(763, old, "respawn", lifecycle::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.data_to_keep, 3);
-    assert_eq!(p.common.dimension.to_string(), "minecraft:the_nether");
-    assert_eq!(p.common.seed, 42);
+    assert_eq!(data_to_keep, 3);
+    assert_eq!(spawn.dimension, "minecraft:the_nether");
+    assert_eq!(spawn.seed, 42);
 }
 
 /// 1.20.2 packed `forget_level_chunk`'s two ints into a ChunkPos long, whose
@@ -3367,11 +3512,10 @@ fn translate_forget_level_chunk_763() {
     old.extend_from_slice(&5i32.to_be_bytes()); // x
     old.extend_from_slice(&(-3i32).to_be_bytes()); // z
 
-    let ClientboundGamePacket::ForgetLevelChunk(p) = translate_and_decode(763, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.pos.x, 5);
-    assert_eq!(p.pos.z, -3);
+    assert_eq!(
+        translate_and_read(763, old, "forget_level_chunk", chunk::read),
+        ChunkPacket::Forget { x: 5, z: -3 }
+    );
 }
 
 /// 1.20.1 spawns other players with `add_player`, which 1.20.2 dropped for
@@ -3390,17 +3534,38 @@ fn translate_add_player_763() {
     old.push(20); // yaw, ahead of pitch at 763
     old.push(10); // pitch
 
-    let ClientboundGamePacket::AddEntity(p) = translate_decode_and_remap(763, old) else {
+    let translation = translation_for(763);
+    let pomme_protocol::entity::EntityPacket::Add {
+        id,
+        uuid: wire_uuid,
+        entity_type,
+        position,
+        x_rot,
+        y_rot,
+        y_head_rot,
+        data,
+        ..
+    } = translate_and_read(763, old, "add_entity", pomme_protocol::entity::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.id, MinecraftEntityId(42));
-    assert_eq!(p.uuid, uuid);
-    assert_eq!(p.entity_type, azalea_registry::builtin::EntityKind::Player);
-    assert_eq!(p.position.x, 1.5);
-    assert_eq!(p.position.y, 64.0);
-    assert_eq!(p.position.z, -2.5);
-    assert_eq!((p.x_rot, p.y_rot, p.y_head_rot), (10, 20, 20));
-    assert_eq!(p.data, 0);
+    assert_eq!(id, 42);
+    assert_eq!(wire_uuid, uuid.as_u128());
+    let native =
+        translation.remap_to_native(pomme_protocol::ClientRegistry::EntityType, entity_type);
+    assert_eq!(
+        native.and_then(
+            <azalea_registry::builtin::EntityKind as azalea_registry::Registry>::from_u32
+        ),
+        Some(azalea_registry::builtin::EntityKind::Player)
+    );
+    assert_eq!(position, glam::DVec3::new(1.5, 64.0, -2.5));
+    let angle = pomme_protocol::entity::unpack_degrees;
+    assert_eq!(
+        (x_rot, y_rot, y_head_rot),
+        (angle(10), angle(20), angle(20))
+    );
+    assert_eq!(data, 0);
 }
 
 /// 1.20.2 made the serverbound login hello's profile id mandatory; 763 wraps
@@ -3449,16 +3614,15 @@ fn translate_container_set_content_763() {
     old.extend_from_slice(&[10, 0, 0, 1, 0, 1, b'd', 5, 0]); // named-root {d: 5b}
     old.push(0); // carried: empty
 
-    let ClientboundGamePacket::ContainerSetContent(p) = translate_and_decode(763, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.container_id, 1);
-    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
-        panic!("empty stack");
-    };
-    assert_eq!(data.kind, azalea_registry::builtin::ItemKind::Stone);
-    assert_eq!(data.count, 3);
-    assert!(matches!(p.carried_item, azalea_inventory::ItemStack::Empty));
+    assert_eq!(
+        translate_and_read(763, old, "container_set_content", container::read),
+        ContainerPacket::Content {
+            container_id: 1,
+            state_id: 2,
+            items: vec![pomme_stack(azalea_registry::builtin::ItemKind::Stone, 3)],
+            carried: None,
+        }
+    );
 }
 
 /// A 763 chunk names both its heightmap root and every block entity's tag.
@@ -3490,17 +3654,25 @@ fn translate_chunk_763() {
     write_named_nbt_d5(&mut old);
     old.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // empty light masks + lists
 
-    let ClientboundGamePacket::LevelChunkWithLight(p) = translate_and_decode(763, old) else {
+    let ChunkPacket::Level {
+        x,
+        z,
+        heightmaps,
+        block_entities,
+        ..
+    } = translate_and_read(763, old, "level_chunk_with_light", chunk::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.x, 3);
-    assert_eq!(p.z, -2);
-    assert_eq!(p.chunk_data.heightmaps.len(), 1);
-    assert_eq!(&*p.chunk_data.heightmaps[0].1, &[7u64]);
-    assert_eq!(p.chunk_data.block_entities.len(), 1);
-    let be = &p.chunk_data.block_entities[0];
+    assert_eq!((x, z), (3, -2));
+    assert_eq!(heightmaps.len(), 1);
+    assert_eq!(&*heightmaps[0].1, &[7u64]);
+    let [be] = &block_entities[..] else {
+        panic!("block entities: {block_entities:?}");
+    };
     assert_eq!(be.y, 64);
-    assert_eq!(be.data.int("d"), Some(5));
+    let tag = crate::net::chat::read_nbt_tag(be.tag.as_deref().unwrap(), &mut 0).unwrap();
+    assert_eq!(tag.compound().and_then(|c| c.int("d")), Some(5));
 }
 
 /// A standalone 763 `block_entity_data` names its tag's root too, where the
@@ -3516,13 +3688,46 @@ fn translate_block_entity_data_763() {
     wire::write_varint(&mut old, 0); // block entity type
     write_named_nbt_d5(&mut old);
 
-    let ClientboundGamePacket::BlockEntityData(p) = translate_and_decode(763, old) else {
+    let pomme_protocol::block::BlockPacket::EntityData { tag, .. } =
+        translate_and_read(763, old, "block_entity_data", pomme_protocol::block::read)
+    else {
         panic!("wrong packet");
     };
-    let simdnbt::owned::Nbt::Some(tag) = p.tag else {
-        panic!("tag dropped");
+    let tag = crate::net::chat::read_nbt_tag(&tag, &mut 0).unwrap();
+    assert_eq!(tag.compound().and_then(|c| c.int("d")), Some(5));
+}
+
+/// Old block entity type ids reach the raw `block_entity_data` path in the
+/// wire version's numbering.
+#[test]
+fn remap_block_entity_type_old_versions() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let native = RegistryTable::for_protocol(776).unwrap();
+    let id_in = |table: &RegistryTable, name: &str| {
+        table
+            .names(ClientRegistry::BlockEntityType)
+            .iter()
+            .position(|n| n == name)
+            .map(|i| i as u32)
     };
-    assert_eq!(tag.as_compound().int("d"), Some(5));
+    for protocol in [775, 774, 773, 772, 771, 770, 769, 768, 767] {
+        let table = RegistryTable::for_protocol(protocol).unwrap();
+        let translation = translation_for(protocol);
+        let sign = id_in(table, "sign").unwrap();
+        assert_eq!(
+            translation.remap_to_native(ClientRegistry::BlockEntityType, sign),
+            id_in(native, "sign"),
+            "{protocol}"
+        );
+        if let Some(bed) = id_in(table, "bed") {
+            assert_eq!(
+                translation.remap_to_native(ClientRegistry::BlockEntityType, bed),
+                id_in(native, "bed"),
+                "{protocol}"
+            );
+        }
+    }
 }
 
 /// `tag_query` carries the same named root after its transaction id.
@@ -3874,29 +4079,36 @@ fn translate_explode_777() {
     assert_eq!(&translated[..], &expected[..]);
 }
 
-/// 26.3's `CommonPlayerSpawnInfo` sends `previousGameType` as an optional
-/// varint (0 = none, else id + 1) where 26.2 reads a signed byte; it sits
-/// a fixed distance from the end of `login` and `respawn`.
-#[test]
-fn translate_spawn_info_777() {
-    use azalea_core::game_type::{GameMode, OptionalGameType};
-    use azalea_protocol::packets::common::CommonPlayerSpawnInfo;
-    use azalea_protocol::packets::game::c_login::ClientboundLogin;
-    use azalea_protocol::packets::game::c_respawn::ClientboundRespawn;
+/// A survival overworld spawn (dimension type 0, seed 42, sea level 63) after
+/// `previous`, as azalea encodes it.
+fn azalea_spawn_info(
+    previous: Option<azalea_core::game_type::GameMode>,
+) -> azalea_protocol::packets::common::CommonPlayerSpawnInfo {
     use azalea_registry::DataRegistry;
 
-    let spawn_info = |previous| CommonPlayerSpawnInfo {
+    azalea_protocol::packets::common::CommonPlayerSpawnInfo {
         dimension_type: azalea_registry::data::DimensionKind::new_raw(0),
         dimension: "minecraft:overworld".into(),
         seed: 42,
-        game_type: GameMode::Survival,
-        previous_game_type: OptionalGameType(previous),
+        game_type: azalea_core::game_type::GameMode::Survival,
+        previous_game_type: azalea_core::game_type::OptionalGameType(previous),
         is_debug: false,
         is_flat: false,
         last_death_location: None,
         portal_cooldown: 0,
         sea_level: 63,
-    };
+    }
+}
+
+/// 26.3's `CommonPlayerSpawnInfo` sends `previousGameType` as an optional
+/// varint (0 = none, else id + 1) where 26.2 reads a signed byte; it sits
+/// a fixed distance from the end of `login` and `respawn`.
+#[test]
+fn translate_spawn_info_777() {
+    use azalea_core::game_type::GameMode;
+    use azalea_protocol::packets::game::c_login::ClientboundLogin;
+    use azalea_protocol::packets::game::c_respawn::ClientboundRespawn;
+
     // (previous game type, its 26.2 byte, its 26.3 byte)
     let cases = [
         (None, 0xFF, 0),
@@ -3914,12 +4126,12 @@ fn translate_spawn_info_777() {
             reduced_debug_info: false,
             show_death_screen: true,
             do_limited_crafting: false,
-            common: spawn_info(previous),
+            common: azalea_spawn_info(previous),
             online_mode: false,
             enforces_secure_chat: true,
         });
         let respawn = ClientboundGamePacket::Respawn(ClientboundRespawn {
-            common: spawn_info(previous),
+            common: azalea_spawn_info(previous),
             data_to_keep: 3,
         });
         // The byte precedes debug/flat/death/portal/sea level and the
@@ -4288,13 +4500,18 @@ fn translate_light_777() {
         false,
     );
     assert_eq!(&translated[..], &expected[..]);
-    let ClientboundGamePacket::LightUpdate(p) = translate_and_decode(
+    let ChunkPacket::Light {
+        light: light_data, ..
+    } = translate_and_read(
         777,
         update(old_id(777, Direction::Clientbound, "light_update"), true),
-    ) else {
+        "light_update",
+        chunk::read,
+    )
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.light_data.sky_updates.len(), 1);
+    assert_eq!(light_data.sky_updates.len(), 1);
 
     let chunk = |id, wire| {
         let mut out = Vec::new();
@@ -4552,6 +4769,125 @@ fn translate_game_event_777() {
 }
 
 /// The dialog packets pomme dispatches on, in both phases.
+/// `net::recipe_wire` and `wire.rs` decode and encode these themselves; only
+/// the ids are shared. azalea's place-recipe and seen-recipe packets still
+/// carry a resource location where 26.2 sends a `RecipeDisplayId`, so only the
+/// settings encoder round-trips through azalea.
+fn recipe_packet_ids_match_azalea() {
+    use azalea_buf::{AzBuf, AzBufVar};
+    use azalea_protocol::common::recipe::{
+        RecipeDisplayData, SlotDisplayData, StonecutterRecipeDisplay,
+    };
+    use azalea_protocol::packets::game::{
+        c_place_ghost_recipe, c_recipe_book_remove, c_recipe_book_settings, c_update_recipes,
+        s_place_recipe, s_recipe_book_change_settings, s_recipe_book_seen_recipe,
+    };
+
+    let clientbound = [
+        (
+            ClientboundGamePacket::RecipeBookRemove(
+                c_recipe_book_remove::ClientboundRecipeBookRemove {
+                    recipes: Vec::new(),
+                },
+            ),
+            "recipe_book_remove",
+        ),
+        (
+            ClientboundGamePacket::RecipeBookSettings(
+                c_recipe_book_settings::ClientboundRecipeBookSettings {
+                    book_settings: c_recipe_book_settings::RecipeBookSettings {
+                        gui_open: false,
+                        filtering_craftable: false,
+                        furnace_gui_open: false,
+                        furnace_filtering_craftable: false,
+                        blast_furnace_gui_open: false,
+                        blast_furnace_filtering_craftable: false,
+                        smoker_gui_open: false,
+                        smoker_filtering_craftable: false,
+                    },
+                },
+            ),
+            "recipe_book_settings",
+        ),
+        (
+            ClientboundGamePacket::UpdateRecipes(c_update_recipes::ClientboundUpdateRecipes {
+                item_sets: Default::default(),
+                stonecutter_recipes: Vec::new(),
+            }),
+            "update_recipes",
+        ),
+        (
+            ClientboundGamePacket::PlaceGhostRecipe(
+                c_place_ghost_recipe::ClientboundPlaceGhostRecipe {
+                    container_id: 0,
+                    recipe: RecipeDisplayData::Stonecutter(StonecutterRecipeDisplay {
+                        input: SlotDisplayData::Empty,
+                        result: SlotDisplayData::Empty,
+                        crafting_station: SlotDisplayData::Empty,
+                    }),
+                },
+            ),
+            "place_ghost_recipe",
+        ),
+    ];
+    for (packet, name) in clientbound {
+        assert_eq!(
+            packet.id(),
+            table_id(Phase::Game, Direction::Clientbound, name),
+            "{name}"
+        );
+    }
+
+    let recipe: Identifier = "minecraft:stick".into();
+    let place = ServerboundGamePacket::PlaceRecipe(s_place_recipe::ServerboundPlaceRecipe {
+        container_id: 0,
+        recipe: recipe.clone(),
+        shift_down: false,
+    });
+    assert_eq!(
+        place.id(),
+        table_id(Phase::Game, Direction::Serverbound, "place_recipe")
+    );
+    let seen = ServerboundGamePacket::RecipeBookSeenRecipe(
+        s_recipe_book_seen_recipe::ServerboundRecipeBookSeenRecipe { recipe },
+    );
+    assert_eq!(
+        seen.id(),
+        table_id(
+            Phase::Game,
+            Direction::Serverbound,
+            "recipe_book_seen_recipe"
+        )
+    );
+
+    let encoded = pomme_protocol::wire::encode_recipe_book_change_settings(
+        pomme_protocol::wire::RecipeBookType::BlastFurnace,
+        true,
+        false,
+    );
+    let mut cur = std::io::Cursor::new(encoded.as_slice());
+    assert_eq!(
+        u32::azalea_read_var(&mut cur).unwrap(),
+        table_id(
+            Phase::Game,
+            Direction::Serverbound,
+            "recipe_book_change_settings"
+        )
+    );
+    let decoded =
+        s_recipe_book_change_settings::ServerboundRecipeBookChangeSettings::azalea_read(&mut cur)
+            .unwrap();
+    assert_eq!(
+        decoded,
+        s_recipe_book_change_settings::ServerboundRecipeBookChangeSettings {
+            book_type: s_recipe_book_change_settings::RecipeBookType::BlastFurnace,
+            is_open: true,
+            is_filtering: false,
+        }
+    );
+    assert_eq!(cur.position() as usize, encoded.len());
+}
+
 fn dialog_packet_ids_match_azalea() {
     use azalea_protocol::packets::config::{
         ClientboundConfigPacket, ServerboundConfigPacket, c_clear_dialog as cfg_clear,
@@ -4640,4 +4976,1828 @@ fn dialog_packet_ids_match_azalea() {
             "custom_click_action"
         )
     );
+}
+
+/// A sample value of `shape`: non-empty lists, present optionals (to a
+/// depth), holders inline or by reference, and the first dispatch arm.
+fn sample_component(
+    shape: &pomme_protocol::item::Shape,
+    inline: bool,
+    depth: u32,
+    out: &mut Vec<u8>,
+) {
+    use pomme_protocol::item::Shape::*;
+
+    let deeper = |shape, out: &mut Vec<u8>| sample_component(shape, inline, depth + 1, out);
+    match shape {
+        Unit => {}
+        Bool => out.push(1),
+        Int | Float => out.extend(1i32.to_be_bytes()),
+        Long | Double => out.extend(1i64.to_be_bytes()),
+        VarInt => out.push(1),
+        Utf(_) => out.extend([1, b'a']),
+        Uuid => out.extend([0; 16]),
+        Nbt => out.extend([8, 0, 1, b'a']),
+        Compound => out.extend([10, 0]),
+        Optional(inner) => {
+            let present = depth < 3;
+            out.push(present as u8);
+            if present {
+                deeper(inner, out);
+            }
+        }
+        List(_, inner) => {
+            out.push(1);
+            deeper(inner, out);
+        }
+        Map(key, value) => {
+            out.push(1);
+            deeper(key, out);
+            deeper(value, out);
+        }
+        Either(left, _) => {
+            out.push(1);
+            deeper(left, out);
+        }
+        Struct(fields) => fields.iter().for_each(|f| deeper(f, out)),
+        Ref(inner) => deeper(inner, out),
+        Holder(direct) => {
+            if inline {
+                out.push(0);
+                deeper(direct, out);
+            } else {
+                out.push(2);
+            }
+        }
+        HolderSet => out.extend([2, 1]),
+        ById(arms) => {
+            out.push(arms.len() as u8 - 1);
+            deeper(&arms[arms.len() - 1], out);
+        }
+        ByRegistry(registry, arms) | ByRegistryOr(registry, arms, _) => {
+            let id = PacketTable::native().version().protocol;
+            let table = pomme_protocol::RegistryTable::for_protocol(id).unwrap();
+            let (name, arm) = &arms[0];
+            out.push(table.id_of(*registry, name).unwrap() as u8);
+            deeper(arm, out);
+        }
+        // Stone x1 with an empty patch.
+        ItemTemplate => out.extend([1, 1, 0, 0]),
+        // Damage 1.
+        TypedComponent => out.extend([3, 1]),
+    }
+}
+
+/// Every component pomme hands to azalea must read back to exactly its
+/// vanilla span; a shared-layout claim that's wrong fails here.
+#[test]
+fn azalea_reads_every_kept_component_exactly() {
+    use pomme_protocol::ClientRegistry;
+    use pomme_protocol::codec::Reader;
+    use pomme_protocol::item::ItemCodec;
+
+    use super::item_codec::{DROPPED, transcode_to_azalea};
+
+    // Holders azalea keeps as plain ids, so inline values can't cross.
+    const PLAIN_HOLDERS: &[&str] = &["equippable", "consumable", "death_protection", "trim"];
+    // Dropped for wrong values rather than a wrong layout.
+    const SAME_BYTES: &[&str] = &[
+        "block_entity_data",
+        "tropical_fish/pattern",
+        "rabbit/variant",
+    ];
+
+    let codec = ItemCodec::native();
+    let names = codec.registries().names(ClientRegistry::DataComponentType);
+    for (id, name) in names.iter().enumerate() {
+        let name = name.as_str();
+        let shape = codec.component_shape(id as u32).unwrap();
+        let mut reads = Vec::new();
+        for inline in [false, true] {
+            let mut value = Vec::new();
+            sample_component(shape, inline, 0, &mut value);
+            let mut r = Reader::new(&value);
+            codec
+                .read_component(&mut r, id as u32)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(r.remaining(), 0, "{name} sample");
+            if !(inline && PLAIN_HOLDERS.contains(&name)) {
+                reads.push(transcode_to_azalea(id as u32, &value).is_some());
+            }
+        }
+        if !DROPPED.contains(&name) {
+            assert!(
+                reads.iter().all(|&r| r),
+                "{name} doesn't read through azalea"
+            );
+        } else if !SAME_BYTES.contains(&name) {
+            assert!(
+                !reads.iter().all(|&r| r),
+                "{name} reads fine; no need to drop it"
+            );
+        }
+    }
+}
+
+/// A game frame: the native packet id, then `payload`.
+fn game_frame(name: &str, payload: &[u8]) -> Vec<u8> {
+    let mut raw = Vec::new();
+    wire::write_varint(
+        &mut raw,
+        table_id(Phase::Game, Direction::Clientbound, name),
+    );
+    raw.extend_from_slice(payload);
+    raw
+}
+
+/// pomme's entity data grammar and azalea's read the same frame identically,
+/// for every serializer but the particle ones (azalea's 26.2 `Particle` wire
+/// enum is out of sync).
+#[test]
+fn entity_data_matches_azalea() {
+    use azalea_entity::EntityDataValue;
+    use pomme_protocol::entity_data::Value;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let stone = registry_id(RegistryTable::native(), ClientRegistry::Item, "stone") as u8;
+    let text: &[u8] = &[8, 0, 2, b'h', b'i'];
+    let mut global_pos = vec![1];
+    wire::write_utf(&mut global_pos, "minecraft:overworld");
+    global_pos.extend([0; 8]);
+    let entries: [(u32, Vec<u8>); 41] = [
+        (0, vec![5]),
+        (1, vec![0xAC, 0x02]),
+        (2, vec![0x7F]),
+        (3, 1.5f32.to_be_bytes().into()),
+        (4, vec![2, b'h', b'i']),
+        (5, text.into()),
+        (6, [&[1], text].concat()),
+        (7, vec![2, stone, 0, 0]),
+        (8, vec![1]),
+        (9, vec![0; 12]),
+        (10, vec![0, 0, 0, 0, 0, 0, 0x10, 0x05]),
+        (11, vec![1, 0, 0, 0, 0, 0, 0, 0x10, 0x05]),
+        (12, vec![2]),
+        (13, [&[1u8][..], &[7; 16]].concat()),
+        (14, vec![1]),
+        (15, vec![0]),
+        (18, vec![1, 2, 3]),
+        (19, vec![4]),
+        (20, vec![5]),
+        (21, vec![0]),
+        (22, vec![0]),
+        (23, vec![1]),
+        (24, vec![0]),
+        (25, vec![1]),
+        (26, vec![0]),
+        (27, vec![0]),
+        (28, vec![0]),
+        (29, vec![0]),
+        (30, vec![1]),
+        (31, vec![0]),
+        (32, vec![0]),
+        (33, global_pos),
+        (34, vec![1]),
+        (35, vec![1]),
+        (36, vec![1]),
+        (37, vec![1]),
+        (38, vec![1]),
+        (39, vec![0; 12]),
+        (40, vec![0; 16]),
+        (41, vec![0; 8]),
+        (42, vec![1]),
+    ];
+    let mut payload = vec![42];
+    for (index, (serializer, value)) in entries.iter().enumerate() {
+        payload.push(index as u8);
+        wire::write_varint(&mut payload, *serializer);
+        payload.extend(value);
+    }
+    payload.push(0xFF);
+
+    let raw = game_frame("set_entity_data", &payload);
+    let mut cur = std::io::Cursor::new(&raw[..]);
+    let Ok(ClientboundGamePacket::SetEntityData(azalea)) =
+        azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(&mut cur)
+    else {
+        panic!("azalea reads the frame");
+    };
+    assert_eq!(cur.position() as usize, raw.len());
+
+    let mut r = pomme_protocol::codec::Reader::new(&payload[1..]);
+    let pomme = pomme_protocol::item::ItemCodec::native()
+        .read_entity_data(&mut r)
+        .unwrap();
+    r.ensure_eof().unwrap();
+
+    assert_eq!(pomme.len(), azalea.packed_items.len());
+    for (ours, theirs) in pomme.iter().zip(azalea.packed_items.iter()) {
+        assert_eq!(ours.index, theirs.index);
+        match (&ours.value, &theirs.value) {
+            (Value::Item(Some(stack)), EntityDataValue::ItemStack(az)) => {
+                assert_eq!(&crate::net::item_codec::to_azalea(stack), az);
+            }
+            // azalea re-encodes text as a compound; compare what it says.
+            (Value::OptionalComponent(Some(nbt)), EntityDataValue::OptionalFormattedText(az)) => {
+                assert_eq!(plain(nbt), az.as_ref().unwrap().to_string());
+            }
+            (ours, theirs) => assert_eq!(
+                Some(ours),
+                super::entity_data::from_azalea(theirs)
+                    .as_ref()
+                    .or(Some(&Value::Other)),
+                "{theirs:?}"
+            ),
+        }
+    }
+}
+
+/// pomme's `update_advancements` decode agrees with azalea's on every field
+/// the client reads.
+#[test]
+fn advancements_match_azalea() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let stone = registry_id(RegistryTable::native(), ClientRegistry::Item, "stone");
+    let mut p = vec![1, 1];
+    wire::write_utf(&mut p, "minecraft:story/root");
+    p.extend([0, 1]);
+    p.extend([8, 0, 2, b'h', b'i', 8, 0, 0]);
+    wire::write_varint(&mut p, stone);
+    p.extend([1, 0, 0, 2]);
+    p.extend(3i32.to_be_bytes());
+    wire::write_utf(&mut p, "minecraft:block/stone");
+    p.extend([0; 8]);
+    p.extend([1, 1]);
+    wire::write_utf(&mut p, "a");
+    p.extend([0, 1]);
+    wire::write_utf(&mut p, "minecraft:old");
+    p.push(1);
+    wire::write_utf(&mut p, "minecraft:story/root");
+    p.push(2);
+    wire::write_utf(&mut p, "a");
+    p.push(1);
+    p.extend(5i64.to_be_bytes());
+    wire::write_utf(&mut p, "b");
+    p.extend([0, 1]);
+
+    let raw = game_frame("update_advancements", &p);
+    let Ok(ClientboundGamePacket::UpdateAdvancements(azalea)) =
+        azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut std::io::Cursor::new(&raw[..]),
+        )
+    else {
+        panic!("azalea reads the frame");
+    };
+    let ours = super::advancement_wire::read_update(&p).unwrap();
+
+    assert_eq!(ours.reset, azalea.reset);
+    assert_eq!(ours.show_advancements, azalea.show_advancements);
+    assert_eq!(ours.removed, ["minecraft:old"]);
+    assert_eq!(azalea.removed[0].to_string(), "minecraft:old");
+    let (id, data) = &ours.added[0];
+    let theirs = &azalea.added[0];
+    assert_eq!(*id, theirs.id.to_string());
+    assert_eq!(data.requirements, theirs.value.requirements);
+    let display = data.display.as_ref().unwrap();
+    let their_display = theirs.value.display.as_ref().unwrap();
+    assert_eq!(display.show_toast, their_display.show_toast);
+    assert!(matches!(
+        display.frame,
+        crate::ui::toast::AdvancementFrame::Goal
+    ));
+    assert!(matches!(
+        their_display.frame,
+        azalea_protocol::packets::game::c_update_advancements::FrameType::Goal
+    ));
+    let azalea_inventory::ItemStack::Present(icon) = &their_display.icon else {
+        panic!("azalea reads the icon");
+    };
+    assert_eq!(
+        display.icon_item.as_deref(),
+        Some(&*crate::player::inventory::item_resource_name(icon.kind))
+    );
+    let (progress_id, criteria) = &ours.progress[0];
+    let their_criteria = &azalea.progress[0];
+    assert_eq!(
+        *progress_id,
+        azalea.progress.keys().next().unwrap().to_string()
+    );
+    for (name, obtained) in criteria {
+        assert_eq!(*obtained, their_criteria[name].date.is_some(), "{name}");
+    }
+}
+
+/// Every entity packet azalea encodes reads back through pomme's layouts
+/// with the same values, so the raw path changes nothing for valid input.
+#[test]
+fn entity_packets_match_azalea() {
+    use azalea_core::delta::{LpVec3, PositionDelta8};
+    use azalea_core::entity_id::OptionalEntityId;
+    use azalea_core::position::Vec3;
+    use azalea_entity::LookDirection;
+    use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+    use azalea_protocol::packets::game::c_animate::AnimationAction;
+    use azalea_protocol::packets::game::c_move_entity_pos_rot::CompactLookDirection;
+    use azalea_protocol::packets::game::*;
+    use pomme_protocol::entity::{self, EntityPacket};
+
+    let decode = |name, packet| decode_azalea(name, packet, entity::read);
+    let id = MinecraftEntityId(7);
+    let angle = entity::unpack_degrees;
+    let dvec = |v: Vec3| DVec3::new(v.x, v.y, v.z);
+    let position = Vec3::new(1.5, -60.0, 3.25);
+    let movement = Vec3::new(0.5, 0.25, -0.75);
+    let change = PositionMoveRotation {
+        pos: position,
+        delta: movement,
+        look_direction: LookDirection::new(45.0, -10.0),
+    };
+
+    let EntityPacket::Add {
+        id: 7,
+        uuid,
+        entity_type,
+        position: p,
+        movement: m,
+        x_rot,
+        y_rot,
+        y_head_rot,
+        data: 5,
+    } = decode(
+        "add_entity",
+        ClientboundGamePacket::AddEntity(c_add_entity::ClientboundAddEntity {
+            id,
+            uuid: uuid::Uuid::from_u128(42),
+            entity_type: azalea_registry::builtin::EntityKind::Zombie,
+            position,
+            movement: LpVec3::from(movement),
+            x_rot: -64,
+            y_rot: 32,
+            y_head_rot: 16,
+            data: 5,
+        }),
+    )
+    else {
+        panic!("add_entity");
+    };
+    assert_eq!(uuid, 42);
+    assert_eq!(
+        <azalea_registry::builtin::EntityKind as azalea_registry::Registry>::from_u32(entity_type),
+        Some(azalea_registry::builtin::EntityKind::Zombie)
+    );
+    assert_eq!(p, dvec(position));
+    assert!((m - dvec(movement)).abs().max_element() < 1e-3);
+    assert_eq!(
+        (x_rot, y_rot, y_head_rot),
+        (angle(-64), angle(32), angle(16))
+    );
+
+    let delta = PositionDelta8 {
+        xa: 4096,
+        ya: -2048,
+        za: 1,
+    };
+    let look = CompactLookDirection {
+        y_rot: 64,
+        x_rot: -32,
+    };
+    let delta_vec = Some(DVec3::new(1.0, -0.5, 1.0 / 4096.0));
+    let rotation = Some((angle(64), angle(-32)));
+    let cases = [
+        (
+            "move_entity_pos",
+            ClientboundGamePacket::MoveEntityPos(c_move_entity_pos::ClientboundMoveEntityPos {
+                entity_id: id,
+                delta,
+                on_ground: true,
+            }),
+            EntityPacket::Move {
+                id: 7,
+                delta: delta_vec,
+                rotation: None,
+                on_ground: true,
+            },
+        ),
+        (
+            "move_entity_pos_rot",
+            ClientboundGamePacket::MoveEntityPosRot(
+                c_move_entity_pos_rot::ClientboundMoveEntityPosRot {
+                    entity_id: id,
+                    delta,
+                    look_direction: look,
+                    on_ground: false,
+                },
+            ),
+            EntityPacket::Move {
+                id: 7,
+                delta: delta_vec,
+                rotation,
+                on_ground: false,
+            },
+        ),
+        (
+            "move_entity_rot",
+            ClientboundGamePacket::MoveEntityRot(c_move_entity_rot::ClientboundMoveEntityRot {
+                entity_id: id,
+                look_direction: look,
+                on_ground: true,
+            }),
+            EntityPacket::Move {
+                id: 7,
+                delta: None,
+                rotation,
+                on_ground: true,
+            },
+        ),
+        (
+            "entity_position_sync",
+            ClientboundGamePacket::EntityPositionSync(
+                c_entity_position_sync::ClientboundEntityPositionSync {
+                    id,
+                    values: change.clone(),
+                    on_ground: true,
+                },
+            ),
+            EntityPacket::PositionSync {
+                id: 7,
+                values: entity::PositionMoveRotation {
+                    position: dvec(position),
+                    delta: dvec(movement),
+                    y_rot: 45.0,
+                    x_rot: -10.0,
+                },
+                on_ground: true,
+            },
+        ),
+        (
+            "teleport_entity",
+            ClientboundGamePacket::TeleportEntity(c_teleport_entity::ClientboundTeleportEntity {
+                id,
+                change,
+                // azalea writes the flags byte-swapped; see the test below.
+                relative: RelativeMovements::default(),
+                on_ground: false,
+            }),
+            EntityPacket::Teleport {
+                id: 7,
+                change: entity::PositionMoveRotation {
+                    position: dvec(position),
+                    delta: dvec(movement),
+                    y_rot: 45.0,
+                    x_rot: -10.0,
+                },
+                relative: entity::Relative::default(),
+                on_ground: false,
+            },
+        ),
+        (
+            "rotate_head",
+            ClientboundGamePacket::RotateHead(c_rotate_head::ClientboundRotateHead {
+                entity_id: id,
+                y_head_rot: -96,
+            }),
+            EntityPacket::RotateHead {
+                id: 7,
+                y_head_rot: angle(-96),
+            },
+        ),
+        (
+            "animate",
+            ClientboundGamePacket::Animate(c_animate::ClientboundAnimate {
+                id,
+                action: AnimationAction::WakeUp,
+            }),
+            EntityPacket::Animate { id: 7, action: 2 },
+        ),
+        (
+            "entity_event",
+            ClientboundGamePacket::EntityEvent(c_entity_event::ClientboundEntityEvent {
+                entity_id: MinecraftEntityId(300),
+                event_id: 34,
+            }),
+            EntityPacket::Event { id: 300, event: 34 },
+        ),
+        (
+            "hurt_animation",
+            ClientboundGamePacket::HurtAnimation(c_hurt_animation::ClientboundHurtAnimation {
+                id,
+                yaw: 135.0,
+            }),
+            EntityPacket::HurtAnimation { id: 7, yaw: 135.0 },
+        ),
+        (
+            "damage_event",
+            ClientboundGamePacket::DamageEvent(c_damage_event::ClientboundDamageEvent {
+                entity_id: id,
+                source_type_id: 12,
+                source_cause_id: OptionalEntityId(Some(MinecraftEntityId(3))),
+                source_direct_id: OptionalEntityId(None),
+                source_position: Some(position),
+            }),
+            EntityPacket::Damage {
+                id: 7,
+                damage_type: 12,
+                cause: Some(3),
+                direct: None,
+                position: Some(dvec(position)),
+            },
+        ),
+        (
+            "take_item_entity",
+            ClientboundGamePacket::TakeItemEntity(c_take_item_entity::ClientboundTakeItemEntity {
+                item_id: 9,
+                player_id: MinecraftEntityId(1),
+                amount: 3,
+            }),
+            EntityPacket::TakeItem {
+                item: 9,
+                collector: 1,
+                amount: 3,
+            },
+        ),
+        (
+            "set_passengers",
+            ClientboundGamePacket::SetPassengers(c_set_passengers::ClientboundSetPassengers {
+                vehicle: id,
+                passengers: vec![MinecraftEntityId(8), MinecraftEntityId(9)],
+            }),
+            EntityPacket::Passengers {
+                vehicle: 7,
+                passengers: vec![8, 9],
+            },
+        ),
+        (
+            "remove_entities",
+            ClientboundGamePacket::RemoveEntities(c_remove_entities::ClientboundRemoveEntities {
+                entity_ids: vec![MinecraftEntityId(5), id],
+            }),
+            EntityPacket::Remove { ids: vec![5, 7] },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+
+    let EntityPacket::Motion { id: 7, velocity } = decode(
+        "set_entity_motion",
+        ClientboundGamePacket::SetEntityMotion(c_set_entity_motion::ClientboundSetEntityMotion {
+            id,
+            delta: LpVec3::from(Vec3::new(6.0, -1.0, 0.0)),
+        }),
+    ) else {
+        panic!("set_entity_motion");
+    };
+    assert!((velocity - DVec3::new(6.0, -1.0, 0.0)).abs().max_element() < 1e-3);
+}
+
+/// Teleport relative flags are `ByteBufCodecs.INT` (big-endian) with each
+/// `Relative` ordinal as a bit. azalea reads them that way but writes them
+/// byte-swapped, so this builds the vanilla bytes by hand: pomme and azalea's
+/// reader agree on X and Y_ROT.
+#[test]
+fn teleport_relative_flags_are_a_big_endian_int() {
+    use pomme_protocol::entity::{self, EntityPacket};
+
+    let mut raw = Vec::new();
+    wire::write_varint(
+        &mut raw,
+        table_id(Phase::Game, Direction::Clientbound, "teleport_entity"),
+    );
+    raw.push(7);
+    raw.extend([0u8; 56]);
+    raw.extend(0b1001i32.to_be_bytes());
+    raw.push(0);
+
+    let Ok(ClientboundGamePacket::TeleportEntity(azalea)) =
+        azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut std::io::Cursor::new(&raw[..]),
+        )
+    else {
+        panic!("azalea reads the frame");
+    };
+    assert!(azalea.relative.x && azalea.relative.y_rot && !azalea.relative.y);
+
+    let mut r = pomme_protocol::codec::Reader::new(&raw[1..]);
+    let Some(Ok(EntityPacket::Teleport { relative, .. })) = entity::read("teleport_entity", &mut r)
+    else {
+        panic!("pomme reads the frame");
+    };
+    assert_eq!(
+        relative,
+        entity::Relative {
+            x: true,
+            y_rot: true,
+            ..Default::default()
+        }
+    );
+}
+
+/// Every player-state packet azalea encodes reads back through pomme's
+/// layouts with the same values.
+#[test]
+fn player_packets_match_azalea() {
+    use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
+    use azalea_inventory::components::AttributeModifier;
+    use azalea_protocol::packets::game::c_game_event::EventType;
+    use azalea_protocol::packets::game::c_player_abilities::PlayerAbilitiesFlags;
+    use azalea_protocol::packets::game::*;
+    use azalea_registry::Registry;
+    use azalea_registry::builtin::{Attribute, MobEffect};
+    use pomme_protocol::player::{self, AttributeSnapshot, PlayerPacket};
+
+    let decode = |name, packet| decode_azalea(name, packet, player::read);
+    let cases = [
+        (
+            "set_health",
+            ClientboundGamePacket::SetHealth(c_set_health::ClientboundSetHealth {
+                health: 15.5,
+                food: 18,
+                saturation: 2.0,
+            }),
+            PlayerPacket::Health {
+                health: 15.5,
+                food: 18,
+                saturation: 2.0,
+            },
+        ),
+        (
+            "set_experience",
+            ClientboundGamePacket::SetExperience(c_set_experience::ClientboundSetExperience {
+                experience_progress: 0.25,
+                experience_level: 30,
+                total_experience: 1395,
+            }),
+            PlayerPacket::Experience {
+                progress: 0.25,
+                level: 30,
+                total: 1395,
+            },
+        ),
+        (
+            "update_attributes",
+            ClientboundGamePacket::UpdateAttributes(
+                c_update_attributes::ClientboundUpdateAttributes {
+                    entity_id: MinecraftEntityId(9),
+                    values: vec![c_update_attributes::AttributeSnapshot {
+                        attribute: Attribute::MaxHealth,
+                        base: 20.0,
+                        modifiers: vec![AttributeModifier {
+                            id: Identifier::new("minecraft:test"),
+                            amount: 4.0,
+                            operation: AttributeModifierOperation::AddMultipliedTotal,
+                        }],
+                    }],
+                },
+            ),
+            PlayerPacket::Attributes {
+                entity: 9,
+                snapshots: vec![AttributeSnapshot {
+                    attribute: Attribute::MaxHealth.to_u32(),
+                    base: 20.0,
+                    modifiers: vec![player::AttributeModifier {
+                        id: "minecraft:test".into(),
+                        amount: 4.0,
+                        operation: 2,
+                    }],
+                }],
+            },
+        ),
+        (
+            "remove_mob_effect",
+            ClientboundGamePacket::RemoveMobEffect(
+                c_remove_mob_effect::ClientboundRemoveMobEffect {
+                    entity_id: MinecraftEntityId(1),
+                    effect: MobEffect::Speed,
+                },
+            ),
+            PlayerPacket::RemoveEffect {
+                entity: 1,
+                effect: MobEffect::Speed.to_u32(),
+            },
+        ),
+        (
+            "set_held_slot",
+            ClientboundGamePacket::SetHeldSlot(c_set_held_slot::ClientboundSetHeldSlot { slot: 4 }),
+            PlayerPacket::HeldSlot { slot: 4 },
+        ),
+        (
+            "player_abilities",
+            ClientboundGamePacket::PlayerAbilities(
+                c_player_abilities::ClientboundPlayerAbilities {
+                    flags: PlayerAbilitiesFlags {
+                        invulnerable: false,
+                        flying: true,
+                        can_fly: true,
+                        instant_break: false,
+                    },
+                    flying_speed: 0.05,
+                    walking_speed: 0.1,
+                },
+            ),
+            PlayerPacket::Abilities {
+                flags: player::ABILITY_FLYING | player::ABILITY_CAN_FLY,
+                flying_speed: 0.05,
+                walking_speed: 0.1,
+            },
+        ),
+        (
+            "game_event",
+            ClientboundGamePacket::GameEvent(c_game_event::ClientboundGameEvent {
+                event: EventType::ThunderLevelChange,
+                param: 0.5,
+            }),
+            PlayerPacket::GameEvent {
+                event: 8,
+                param: 0.5,
+            },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+
+    // azalea keeps its effect flags type private, so read the same vanilla
+    // bytes with both: amplifier 1, 200 ticks, ambient + icon.
+    let mut raw = Vec::new();
+    wire::write_varint(
+        &mut raw,
+        table_id(Phase::Game, Direction::Clientbound, "update_mob_effect"),
+    );
+    wire::write_varint(&mut raw, 1);
+    wire::write_varint(&mut raw, MobEffect::Speed.to_u32());
+    raw.extend([
+        1,
+        0xC8,
+        0x01,
+        player::EFFECT_AMBIENT | player::EFFECT_SHOW_ICON,
+    ]);
+    let Ok(ClientboundGamePacket::UpdateMobEffect(azalea)) =
+        azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut std::io::Cursor::new(&raw[..]),
+        )
+    else {
+        panic!("azalea reads update_mob_effect");
+    };
+    let mut r = pomme_protocol::codec::Reader::new(&raw);
+    r.varint().unwrap();
+    let Some(Ok(PlayerPacket::UpdateEffect {
+        entity,
+        effect,
+        amplifier,
+        duration,
+        flags,
+    })) = player::read("update_mob_effect", &mut r)
+    else {
+        panic!("pomme reads update_mob_effect");
+    };
+    assert_eq!(entity, azalea.entity_id.0);
+    assert_eq!(effect, azalea.mob_effect.to_u32());
+    assert_eq!(
+        (amplifier, duration),
+        (azalea.data.amplifier, azalea.data.duration)
+    );
+    assert_eq!(
+        flags & player::EFFECT_AMBIENT != 0,
+        azalea.data.flags.ambient
+    );
+    assert_eq!(
+        flags & player::EFFECT_SHOW_ICON != 0,
+        azalea.data.flags.show_icon
+    );
+
+    let PlayerPacket::CombatKill { player: 3, message } = decode(
+        "player_combat_kill",
+        ClientboundGamePacket::PlayerCombatKill(
+            c_player_combat_kill::ClientboundPlayerCombatKill {
+                player_id: MinecraftEntityId(3),
+                message: "Tester fell".into(),
+            },
+        ),
+    ) else {
+        panic!("player_combat_kill");
+    };
+    assert_eq!(plain(&message), "Tester fell");
+}
+
+/// `packet` as azalea encodes it, decoded by pomme's `read` for `name`.
+fn decode_azalea<P>(name: &str, packet: ClientboundGamePacket, read: RawRead<P>) -> P {
+    read_native_frame(
+        &azalea_protocol::write::serialize_packet(&packet).unwrap(),
+        name,
+        read,
+    )
+}
+
+#[test]
+fn block_packets_match_azalea() {
+    use azalea_block::BlockState;
+    use azalea_core::position::{BlockPos, ChunkSectionBlockPos, ChunkSectionPos};
+    use azalea_protocol::packets::game::*;
+    use azalea_registry::Registry;
+    use azalea_registry::builtin::{BlockEntityKind, BlockKind};
+    use pomme_protocol::block::{self, BlockPacket};
+
+    let decode = |name, packet| decode_azalea(name, packet, block::read);
+    let pos = BlockPos::new(-3, -60, 4);
+    let state = BlockState::try_from(129u32).unwrap();
+    let mut compound = simdnbt::owned::NbtCompound::new();
+    compound.insert("d", 5);
+    let cases = [
+        (
+            "block_update",
+            ClientboundGamePacket::BlockUpdate(c_block_update::ClientboundBlockUpdate {
+                pos,
+                block_state: state,
+            }),
+            BlockPacket::Update {
+                pos: (-3, -60, 4),
+                state: 129,
+            },
+        ),
+        (
+            "section_blocks_update",
+            ClientboundGamePacket::SectionBlocksUpdate(
+                c_section_blocks_update::ClientboundSectionBlocksUpdate {
+                    section_pos: ChunkSectionPos::new(-1, -4, 2),
+                    states: vec![c_section_blocks_update::BlockStateWithPosition {
+                        pos: ChunkSectionBlockPos::new(15, 3, 0),
+                        state,
+                    }],
+                },
+            ),
+            BlockPacket::SectionUpdate {
+                updates: vec![((-1, -61, 32), 129)],
+            },
+        ),
+        (
+            "block_changed_ack",
+            ClientboundGamePacket::BlockChangedAck(
+                c_block_changed_ack::ClientboundBlockChangedAck { seq: 17 },
+            ),
+            BlockPacket::ChangedAck { seq: 17 },
+        ),
+        (
+            "block_event",
+            ClientboundGamePacket::BlockEvent(c_block_event::ClientboundBlockEvent {
+                pos,
+                action_id: 1,
+                action_parameter: 2,
+                block: BlockKind::Chest,
+            }),
+            BlockPacket::Event {
+                pos: (-3, -60, 4),
+                action: 1,
+                param: 2,
+                block: BlockKind::Chest.to_u32(),
+            },
+        ),
+        (
+            "block_entity_data",
+            ClientboundGamePacket::BlockEntityData(
+                c_block_entity_data::ClientboundBlockEntityData {
+                    pos,
+                    block_entity_type: BlockEntityKind::Sign,
+                    tag: simdnbt::owned::Nbt::Some(simdnbt::owned::BaseNbt::new("", compound)),
+                },
+            ),
+            BlockPacket::EntityData {
+                pos: (-3, -60, 4),
+                kind: BlockEntityKind::Sign.to_u32(),
+                tag: [10, 3, 0, 1, b'd', 0, 0, 0, 5, 0].into(),
+            },
+        ),
+        (
+            "level_event",
+            ClientboundGamePacket::LevelEvent(c_level_event::ClientboundLevelEvent {
+                event_type: 2001,
+                pos,
+                data: 129,
+                global_event: true,
+            }),
+            BlockPacket::LevelEvent {
+                event: 2001,
+                pos: (-3, -60, 4),
+                data: 129,
+                global: true,
+            },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+}
+
+#[test]
+fn chunk_packets_match_azalea() {
+    use std::sync::Arc;
+
+    use azalea_core::bitset::BitSet;
+    use azalea_core::heightmap_kind::HeightmapKind;
+    use azalea_core::position::ChunkPos;
+    use azalea_protocol::packets::game::*;
+    use azalea_registry::Registry;
+    use azalea_registry::builtin::BlockEntityKind;
+    use pomme_protocol::chunk::{BlockEntityInfo, LightData};
+
+    let decode = |name, packet| decode_azalea(name, packet, chunk::read);
+    let light_data = || c_light_update::ClientboundLightUpdatePacketData {
+        sky_y_mask: BitSet::from(vec![0b101u64, 1]),
+        block_y_mask: BitSet::from(vec![0b10u64]),
+        empty_sky_y_mask: BitSet::from(Vec::<u64>::new()),
+        empty_block_y_mask: BitSet::from(vec![1u64 << 40]),
+        sky_updates: Arc::new(vec![vec![7; 2048].into_boxed_slice()].into()),
+        block_updates: Arc::new(Box::new([])),
+    };
+    let light = LightData {
+        sky_y_mask: vec![0b101, 1],
+        block_y_mask: vec![0b10],
+        empty_sky_y_mask: vec![],
+        empty_block_y_mask: vec![1 << 40],
+        sky_updates: vec![vec![7; 2048].into()],
+        block_updates: vec![],
+    };
+    let mut compound = simdnbt::owned::NbtCompound::new();
+    compound.insert("d", 5);
+    let cases = [
+        (
+            "level_chunk_with_light",
+            ClientboundGamePacket::LevelChunkWithLight(
+                c_level_chunk_with_light::ClientboundLevelChunkWithLight {
+                    x: 3,
+                    z: -2,
+                    chunk_data: c_level_chunk_with_light::ClientboundLevelChunkPacketData {
+                        heightmaps: vec![
+                            (HeightmapKind::WorldSurface, vec![7].into()),
+                            (HeightmapKind::MotionBlocking, vec![8, 9].into()),
+                        ],
+                        data: Arc::new(vec![1, 2, 3].into()),
+                        block_entities: vec![c_level_chunk_with_light::BlockEntity {
+                            packed_xz: 0x59,
+                            y: (-64i16) as u16,
+                            kind: BlockEntityKind::Sign,
+                            data: simdnbt::owned::Nbt::Some(simdnbt::owned::BaseNbt::new(
+                                "", compound,
+                            )),
+                        }],
+                    },
+                    light_data: light_data(),
+                },
+            ),
+            ChunkPacket::Level {
+                x: 3,
+                z: -2,
+                heightmaps: vec![(1, vec![7].into()), (4, vec![8, 9].into())],
+                sections: vec![1, 2, 3].into(),
+                block_entities: vec![BlockEntityInfo {
+                    packed_xz: 0x59,
+                    y: -64,
+                    kind: BlockEntityKind::Sign.to_u32(),
+                    tag: Some([10, 3, 0, 1, b'd', 0, 0, 0, 5, 0].into()),
+                }],
+                light: light.clone(),
+            },
+        ),
+        (
+            "light_update",
+            ClientboundGamePacket::LightUpdate(c_light_update::ClientboundLightUpdate {
+                x: -5,
+                z: 6,
+                light_data: light_data(),
+            }),
+            ChunkPacket::Light { x: -5, z: 6, light },
+        ),
+        (
+            "forget_level_chunk",
+            ClientboundGamePacket::ForgetLevelChunk(
+                // A positive x: azalea's `ChunkPos` writer sign-extends x
+                // over the z half (vanilla masks it, `ChunkPos.pack`); its
+                // reader is right, and pomme's own fixture covers negatives.
+                c_forget_level_chunk::ClientboundForgetLevelChunk {
+                    pos: ChunkPos::new(3, -7),
+                },
+            ),
+            ChunkPacket::Forget { x: 3, z: -7 },
+        ),
+        (
+            "chunk_batch_start",
+            ClientboundGamePacket::ChunkBatchStart(c_chunk_batch_start::ClientboundChunkBatchStart),
+            ChunkPacket::BatchStart,
+        ),
+        (
+            "chunk_batch_finished",
+            ClientboundGamePacket::ChunkBatchFinished(
+                c_chunk_batch_finished::ClientboundChunkBatchFinished { batch_size: 64 },
+            ),
+            ChunkPacket::BatchFinished { size: 64 },
+        ),
+        (
+            "set_chunk_cache_center",
+            ClientboundGamePacket::SetChunkCacheCenter(
+                c_set_chunk_cache_center::ClientboundSetChunkCacheCenter { x: -1, z: 9 },
+            ),
+            ChunkPacket::CacheCenter { x: -1, z: 9 },
+        ),
+        (
+            "set_chunk_cache_radius",
+            ClientboundGamePacket::SetChunkCacheRadius(
+                c_set_chunk_cache_radius::ClientboundSetChunkCacheRadius { radius: 12 },
+            ),
+            ChunkPacket::CacheRadius { radius: 12 },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+}
+
+#[test]
+fn container_packets_match_azalea() {
+    use azalea_inventory::components::EquipmentSlot;
+    use azalea_inventory::{ItemStack, ItemStackData};
+    use azalea_protocol::packets::game::*;
+    use azalea_registry::Registry;
+    use azalea_registry::builtin::{ItemKind, MenuKind};
+
+    let decode = |name, packet| decode_azalea(name, packet, container::read);
+    let azalea_stack = |kind, count| {
+        ItemStack::Present(ItemStackData {
+            kind,
+            count,
+            component_patch: Default::default(),
+        })
+    };
+    let cases = [
+        (
+            "container_set_content",
+            ClientboundGamePacket::ContainerSetContent(
+                c_container_set_content::ClientboundContainerSetContent {
+                    container_id: 2,
+                    state_id: 7,
+                    items: vec![azalea_stack(ItemKind::Diamond, 3), ItemStack::Empty],
+                    carried_item: azalea_stack(ItemKind::Stone, 1),
+                },
+            ),
+            ContainerPacket::Content {
+                container_id: 2,
+                state_id: 7,
+                items: vec![pomme_stack(ItemKind::Diamond, 3), None],
+                carried: pomme_stack(ItemKind::Stone, 1),
+            },
+        ),
+        (
+            "container_set_slot",
+            ClientboundGamePacket::ContainerSetSlot(
+                c_container_set_slot::ClientboundContainerSetSlot {
+                    container_id: 0,
+                    state_id: 4,
+                    slot: 36,
+                    item_stack: azalea_stack(ItemKind::Bread, 2),
+                },
+            ),
+            ContainerPacket::Slot {
+                container_id: 0,
+                state_id: 4,
+                slot: 36,
+                item: pomme_stack(ItemKind::Bread, 2),
+            },
+        ),
+        (
+            "container_set_data",
+            ClientboundGamePacket::ContainerSetData(
+                c_container_set_data::ClientboundContainerSetData {
+                    container_id: 3,
+                    id: 1,
+                    value: 200,
+                },
+            ),
+            ContainerPacket::Data {
+                container_id: 3,
+                id: 1,
+                value: 200,
+            },
+        ),
+        (
+            "container_close",
+            ClientboundGamePacket::ContainerClose(c_container_close::ClientboundContainerClose {
+                container_id: 3,
+            }),
+            ContainerPacket::Close { container_id: 3 },
+        ),
+        (
+            "set_cursor_item",
+            ClientboundGamePacket::SetCursorItem(c_set_cursor_item::ClientboundSetCursorItem {
+                contents: azalea_stack(ItemKind::Stone, 64),
+            }),
+            ContainerPacket::Cursor {
+                item: pomme_stack(ItemKind::Stone, 64),
+            },
+        ),
+        (
+            "set_player_inventory",
+            ClientboundGamePacket::SetPlayerInventory(
+                c_set_player_inventory::ClientboundSetPlayerInventory {
+                    slot: 40,
+                    contents: azalea_stack(ItemKind::Shield, 1),
+                },
+            ),
+            ContainerPacket::PlayerInventory {
+                slot: 40,
+                item: pomme_stack(ItemKind::Shield, 1),
+            },
+        ),
+        (
+            "set_equipment",
+            ClientboundGamePacket::SetEquipment(c_set_equipment::ClientboundSetEquipment {
+                entity_id: MinecraftEntityId(9),
+                slots: c_set_equipment::EquipmentSlots {
+                    slots: vec![
+                        (
+                            EquipmentSlot::Mainhand,
+                            azalea_stack(ItemKind::StoneSword, 1),
+                        ),
+                        (EquipmentSlot::Head, ItemStack::Empty),
+                    ],
+                },
+            }),
+            ContainerPacket::Equipment {
+                entity: 9,
+                slots: vec![(0, pomme_stack(ItemKind::StoneSword, 1)), (5, None)],
+            },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+
+    let ContainerPacket::OpenScreen {
+        container_id,
+        menu,
+        title,
+    } = decode(
+        "open_screen",
+        ClientboundGamePacket::OpenScreen(c_open_screen::ClientboundOpenScreen {
+            container_id: 3,
+            menu_type: MenuKind::Generic9x3,
+            title: azalea_chat::FormattedText::from("Chest"),
+        }),
+    )
+    else {
+        panic!("open_screen");
+    };
+    assert_eq!((container_id, menu), (3, MenuKind::Generic9x3.to_u32()));
+    assert_eq!(plain(&title), "Chest");
+}
+
+#[test]
+fn hud_packets_match_azalea() {
+    use azalea_protocol::packets::game::c_boss_event::{
+        AddOperation, BossBarColor, BossBarOverlay, ClientboundBossEvent, Operation, Properties,
+        Style,
+    };
+    use azalea_protocol::packets::game::*;
+
+    let decode = |name, packet| decode_azalea(name, packet, hud::read);
+    let boss = |operation| {
+        ClientboundGamePacket::BossEvent(ClientboundBossEvent {
+            id: uuid::Uuid::from_u128(7),
+            operation,
+        })
+    };
+    let style = Style {
+        color: BossBarColor::Red,
+        overlay: BossBarOverlay::Notched10,
+    };
+    let properties = Properties {
+        darken_screen: true,
+        play_music: false,
+        create_world_fog: true,
+    };
+    let flags = BossFlags {
+        darken_screen: true,
+        play_music: false,
+        create_world_fog: true,
+    };
+
+    let cases = [
+        (
+            "set_titles_animation",
+            ClientboundGamePacket::SetTitlesAnimation(
+                c_set_titles_animation::ClientboundSetTitlesAnimation {
+                    fade_in: 10,
+                    stay: 70,
+                    fade_out: 20,
+                },
+            ),
+            HudPacket::TitlesAnimation {
+                fade_in: 10,
+                stay: 70,
+                fade_out: 20,
+            },
+        ),
+        (
+            "clear_titles",
+            ClientboundGamePacket::ClearTitles(c_clear_titles::ClientboundClearTitles {
+                reset_times: true,
+            }),
+            HudPacket::ClearTitles { reset_times: true },
+        ),
+        (
+            "boss_event",
+            boss(Operation::Remove),
+            HudPacket::BossEvent {
+                id: 7,
+                op: BossOp::Remove,
+            },
+        ),
+        (
+            "boss_event",
+            boss(Operation::UpdateProgress(0.25)),
+            HudPacket::BossEvent {
+                id: 7,
+                op: BossOp::Progress(0.25),
+            },
+        ),
+        (
+            "boss_event",
+            boss(Operation::UpdateStyle(style.clone())),
+            HudPacket::BossEvent {
+                id: 7,
+                op: BossOp::Style {
+                    color: 2,
+                    overlay: 2,
+                },
+            },
+        ),
+        (
+            "boss_event",
+            boss(Operation::UpdateProperties(properties.clone())),
+            HudPacket::BossEvent {
+                id: 7,
+                op: BossOp::Properties(flags),
+            },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+
+    let HudPacket::Title(title) = decode(
+        "set_title_text",
+        ClientboundGamePacket::SetTitleText(c_set_title_text::ClientboundSetTitleText {
+            text: "Hello".into(),
+        }),
+    ) else {
+        panic!("set_title_text");
+    };
+    assert_eq!(plain(&title), "Hello");
+    let HudPacket::Subtitle(subtitle) = decode(
+        "set_subtitle_text",
+        ClientboundGamePacket::SetSubtitleText(c_set_subtitle_text::ClientboundSetSubtitleText {
+            text: "sub".into(),
+        }),
+    ) else {
+        panic!("set_subtitle_text");
+    };
+    assert_eq!(plain(&subtitle), "sub");
+    let HudPacket::TabList { header, footer } = decode(
+        "tab_list",
+        ClientboundGamePacket::TabList(c_tab_list::ClientboundTabList {
+            header: "head".into(),
+            footer: "foot".into(),
+        }),
+    ) else {
+        panic!("tab_list");
+    };
+    assert_eq!(
+        (plain(&header), plain(&footer)),
+        ("head".into(), "foot".into())
+    );
+    let HudPacket::BossEvent {
+        id: 7,
+        op:
+            BossOp::Add {
+                name,
+                progress: 0.5,
+                color: 2,
+                overlay: 2,
+                flags: added,
+            },
+    } = decode(
+        "boss_event",
+        boss(Operation::Add(AddOperation {
+            name: "Boss".into(),
+            progress: 0.5,
+            style,
+            properties,
+        })),
+    )
+    else {
+        panic!("boss_event add");
+    };
+    assert_eq!((plain(&name), added), ("Boss".into(), flags));
+    let HudPacket::BossEvent {
+        op: BossOp::Name(name),
+        ..
+    } = decode("boss_event", boss(Operation::UpdateName("Renamed".into())))
+    else {
+        panic!("boss_event name");
+    };
+    assert_eq!(plain(&name), "Renamed");
+}
+
+/// azalea writes `set_objective`'s add and change without the number
+/// format's presence bool, so only its remove is compared here; azalea's
+/// team packet predates 26.2's `Optional<TeamColor>`.
+#[test]
+fn scoreboard_packets_match_azalea() {
+    use azalea_chat::numbers::NumberFormat as AzaleaFormat;
+    use azalea_protocol::packets::game::c_set_display_objective::DisplaySlot;
+    use azalea_protocol::packets::game::*;
+
+    let decode = |name, packet| decode_azalea(name, packet, scoreboard::read);
+    let score = |number_format| {
+        ClientboundGamePacket::SetScore(c_set_score::ClientboundSetScore {
+            owner: "Bob".into(),
+            objective_name: "kills".into(),
+            score: 9,
+            display: None,
+            number_format,
+        })
+    };
+    let pomme_score = |number_format| ScoreboardPacket::Score {
+        owner: "Bob".into(),
+        objective: "kills".into(),
+        score: 9,
+        display: None,
+        number_format,
+    };
+
+    let cases = [
+        (
+            "set_objective",
+            ClientboundGamePacket::SetObjective(c_set_objective::ClientboundSetObjective {
+                objective_name: "kills".into(),
+                method: c_set_objective::Method::Remove,
+            }),
+            ScoreboardPacket::Objective {
+                name: "kills".into(),
+                method: ObjectiveMethod::Remove,
+            },
+        ),
+        (
+            "set_display_objective",
+            ClientboundGamePacket::SetDisplayObjective(
+                c_set_display_objective::ClientboundSetDisplayObjective {
+                    slot: DisplaySlot::Sidebar,
+                    objective_name: "kills".into(),
+                },
+            ),
+            ScoreboardPacket::Display {
+                slot: 1,
+                objective: "kills".into(),
+            },
+        ),
+        ("set_score", score(None), pomme_score(None)),
+        (
+            "set_score",
+            score(Some(AzaleaFormat::Blank)),
+            pomme_score(Some(NumberFormat::Blank)),
+        ),
+        (
+            "reset_score",
+            ClientboundGamePacket::ResetScore(c_reset_score::ClientboundResetScore {
+                owner: "Bob".into(),
+                objective_name: None,
+            }),
+            ScoreboardPacket::ResetScore {
+                owner: "Bob".into(),
+                objective: None,
+            },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+
+    let ScoreboardPacket::Score {
+        display: Some(display),
+        number_format: Some(NumberFormat::Fixed(fixed)),
+        ..
+    } = decode(
+        "set_score",
+        ClientboundGamePacket::SetScore(c_set_score::ClientboundSetScore {
+            owner: "Bob".into(),
+            objective_name: "kills".into(),
+            score: 5,
+            display: Some("Hero".into()),
+            number_format: Some(AzaleaFormat::Fixed { value: "x".into() }),
+        }),
+    )
+    else {
+        panic!("set_score with display");
+    };
+    assert_eq!(
+        (plain(&display), plain(&fixed)),
+        ("Hero".into(), "x".into())
+    );
+}
+
+/// azalea's writer sets the `update_list_order` and `update_hat` bits but
+/// never writes their payloads, so those two are covered by
+/// `player_info.rs`'s fixtures instead.
+#[test]
+fn player_info_packets_match_azalea() {
+    use std::sync::Arc;
+
+    use azalea_auth::game_profile::{GameProfile, GameProfileProperties, ProfilePropertyValue};
+    use azalea_core::game_type::GameMode;
+    use azalea_protocol::packets::game::c_player_info_remove::ClientboundPlayerInfoRemove;
+    use azalea_protocol::packets::game::c_player_info_update::{
+        ActionEnumSet, ClientboundPlayerInfoUpdate, PlayerInfoEntry,
+    };
+    use azalea_protocol::packets::game::s_chat_session_update::{
+        ProfilePublicKeyData, RemoteChatSessionData,
+    };
+    use pomme_protocol::player_info::{Actions, ChatSession, Property};
+    use uuid::Uuid;
+
+    let decode = |name, packet| decode_azalea(name, packet, player_info::read);
+    let mut profile = GameProfile::new(Uuid::from_u128(9), "bob".into());
+    let mut properties = GameProfileProperties::default();
+    properties.map.insert(
+        "textures".into(),
+        ProfilePropertyValue {
+            value: "abc".into(),
+            signature: Some("sig".into()),
+        },
+    );
+    profile.properties = Arc::new(properties);
+    let sent = ActionEnumSet {
+        add_player: true,
+        initialize_chat: true,
+        update_game_mode: true,
+        update_listed: true,
+        update_latency: true,
+        update_display_name: true,
+        update_list_order: false,
+        update_hat: false,
+    };
+    let PlayerInfoPacket::Update { actions, entries } = decode(
+        "player_info_update",
+        ClientboundGamePacket::PlayerInfoUpdate(ClientboundPlayerInfoUpdate {
+            actions: sent,
+            entries: vec![PlayerInfoEntry {
+                profile,
+                chat_session: Some(RemoteChatSessionData {
+                    session_id: Uuid::from_u128(7),
+                    profile_public_key: ProfilePublicKeyData {
+                        expires_at: 1000,
+                        key: vec![0xAA, 0xBB],
+                        key_signature: vec![0xCC],
+                    },
+                }),
+                game_mode: GameMode::Creative,
+                listed: true,
+                latency: 42,
+                display_name: Some(Box::new("Bob".into())),
+                ..Default::default()
+            }],
+        }),
+    ) else {
+        panic!("player_info_update");
+    };
+    assert_eq!(
+        actions,
+        Actions {
+            add_player: true,
+            initialize_chat: true,
+            update_game_mode: true,
+            update_listed: true,
+            update_latency: true,
+            update_display_name: true,
+            update_list_order: false,
+            update_hat: false,
+        }
+    );
+    let [entry] = &entries[..] else {
+        panic!("{entries:?}");
+    };
+    assert_eq!(entry.profile_id, 9);
+    assert_eq!(entry.name, "bob");
+    assert_eq!(
+        entry.properties,
+        [Property {
+            name: "textures".into(),
+            value: "abc".into(),
+            signature: Some("sig".into()),
+        }]
+    );
+    assert_eq!(
+        entry.chat_session,
+        Some(ChatSession {
+            session_id: 7,
+            expires_at: 1000,
+            key: [0xAA, 0xBB].into(),
+            key_signature: [0xCC].into(),
+        })
+    );
+    assert_eq!(
+        (entry.game_mode, entry.listed, entry.latency),
+        (1, true, 42)
+    );
+    assert_eq!(plain(entry.display_name.as_deref().unwrap()), "Bob");
+
+    assert_eq!(
+        decode(
+            "player_info_remove",
+            ClientboundGamePacket::PlayerInfoRemove(ClientboundPlayerInfoRemove {
+                profile_ids: vec![Uuid::from_u128(1), Uuid::from_u128(2)],
+            }),
+        ),
+        PlayerInfoPacket::Remove(vec![1, 2])
+    );
+}
+
+#[test]
+fn sound_packets_match_azalea() {
+    use azalea_protocol::packets::game::c_sound::SoundSource;
+    use azalea_protocol::packets::game::{c_sound, c_sound_entity, c_stop_sound};
+    use pomme_protocol::sound::SoundEvent as PommeSound;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let decode = |name, packet| decode_azalea(name, packet, sound::read);
+    let explode = registry_id(
+        RegistryTable::native(),
+        ClientRegistry::SoundEvent,
+        "entity.generic.explode",
+    );
+    let cases = [
+        (
+            "sound",
+            ClientboundGamePacket::Sound(c_sound::ClientboundSound {
+                sound: Holder::Reference(SoundEvent::EntityGenericExplode),
+                source: SoundSource::Blocks,
+                x: -8,
+                y: 520,
+                z: 16,
+                volume: 0.5,
+                pitch: 2.0,
+                seed: 7,
+            }),
+            SoundPacket::Sound {
+                sound: PommeSound::Registered(explode),
+                source: 4,
+                x: -8,
+                y: 520,
+                z: 16,
+                volume: 0.5,
+                pitch: 2.0,
+                seed: 7,
+            },
+        ),
+        (
+            "sound_entity",
+            ClientboundGamePacket::SoundEntity(c_sound_entity::ClientboundSoundEntity {
+                sound: sound_holder(),
+                source: SoundSource::Voice,
+                id: MinecraftEntityId(9),
+                volume: 1.0,
+                pitch: 1.0,
+                seed: 3,
+            }),
+            SoundPacket::Entity {
+                sound: PommeSound::Direct {
+                    location: "minecraft:test.sound".into(),
+                    fixed_range: None,
+                },
+                source: 9,
+                entity: 9,
+                volume: 1.0,
+                pitch: 1.0,
+                seed: 3,
+            },
+        ),
+        (
+            "stop_sound",
+            ClientboundGamePacket::StopSound(c_stop_sound::ClientboundStopSound {
+                source: Some(SoundSource::Music),
+                name: Some(Identifier::new("minecraft:music.game")),
+            }),
+            SoundPacket::Stop {
+                source: Some(1),
+                name: Some("minecraft:music.game".into()),
+            },
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+}
+
+/// A 1.21.8 `sound` keeps its wire-space event id through translation; the
+/// raw decoder remaps it into 26.2's numbering.
+#[test]
+fn translate_sound_772() {
+    use pomme_protocol::sound::SoundEvent as PommeSound;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let sound_id = |table, name| registry_id(table, ClientRegistry::SoundEvent, name);
+    let old_table = RegistryTable::for_protocol(772).unwrap();
+    let old_explode = sound_id(old_table, "entity.generic.explode");
+    let native_explode = sound_id(RegistryTable::native(), "entity.generic.explode");
+    assert_ne!(old_explode, native_explode);
+
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(772, Direction::Clientbound, "sound"));
+    wire::write_varint(&mut old, old_explode + 1);
+    wire::write_varint(&mut old, 4); // blocks
+    for c in [8i32, 16, 24] {
+        old.extend_from_slice(&c.to_be_bytes());
+    }
+    old.extend_from_slice(&1f32.to_be_bytes());
+    old.extend_from_slice(&1f32.to_be_bytes());
+    old.extend_from_slice(&0i64.to_be_bytes());
+
+    let SoundPacket::Sound {
+        sound: PommeSound::Registered(id),
+        ..
+    } = translate_and_read(772, old, "sound", sound::read)
+    else {
+        panic!("wrong packet");
+    };
+    assert_eq!(id, old_explode);
+    assert_eq!(
+        translation_for(772).remap_to_native(ClientRegistry::SoundEvent, id),
+        Some(native_explode)
+    );
+}
+
+/// azalea writes `Relative` as a little-endian bitset where vanilla writes a
+/// big-endian int, so its teleports here are all absolute; `lifecycle.rs`'s
+/// fixtures cover mixed bits.
+#[test]
+fn lifecycle_packets_match_azalea() {
+    use azalea_core::game_type::GameMode;
+    use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+    use azalea_protocol::packets::game::*;
+    use azalea_registry::DataRegistry;
+    use pomme_protocol::lifecycle::{ClockState, Login, SpawnInfo};
+
+    let decode = |name, packet| decode_azalea(name, packet, lifecycle::read);
+    let spawn = SpawnInfo {
+        dimension_type: 0,
+        dimension: "minecraft:overworld".into(),
+        seed: 42,
+        game_type: 0,
+        previous_game_type: Some(1),
+        is_debug: false,
+        is_flat: false,
+        last_death: None,
+        portal_cooldown: 0,
+        sea_level: 63,
+    };
+    let cases = [
+        (
+            "login",
+            ClientboundGamePacket::Login(c_login::ClientboundLogin {
+                player_id: MinecraftEntityId(7),
+                hardcore: true,
+                levels: vec!["minecraft:overworld".into()],
+                max_players: 20,
+                chunk_radius: 12,
+                simulation_distance: 10,
+                reduced_debug_info: false,
+                show_death_screen: true,
+                do_limited_crafting: false,
+                common: azalea_spawn_info(Some(GameMode::Creative)),
+                online_mode: true,
+                enforces_secure_chat: false,
+            }),
+            LifecyclePacket::Login(Login {
+                player_id: 7,
+                hardcore: true,
+                levels: vec!["minecraft:overworld".into()],
+                max_players: 20,
+                chunk_radius: 12,
+                simulation_distance: 10,
+                reduced_debug_info: false,
+                show_death_screen: true,
+                do_limited_crafting: false,
+                spawn: spawn.clone(),
+                online_mode: true,
+                enforces_secure_chat: false,
+            }),
+        ),
+        (
+            "respawn",
+            ClientboundGamePacket::Respawn(c_respawn::ClientboundRespawn {
+                common: azalea_spawn_info(None),
+                data_to_keep: 3,
+            }),
+            LifecyclePacket::Respawn {
+                spawn: SpawnInfo {
+                    previous_game_type: None,
+                    ..spawn.clone()
+                },
+                data_to_keep: 3,
+            },
+        ),
+        (
+            "keep_alive",
+            ClientboundGamePacket::KeepAlive(c_keep_alive::ClientboundKeepAlive { id: 99 }),
+            LifecyclePacket::KeepAlive(99),
+        ),
+        (
+            "ping",
+            ClientboundGamePacket::Ping(c_ping::ClientboundPing { id: 5 }),
+            LifecyclePacket::Ping(5),
+        ),
+        (
+            "player_position",
+            ClientboundGamePacket::PlayerPosition(c_player_position::ClientboundPlayerPosition {
+                id: 3,
+                change: PositionMoveRotation {
+                    pos: azalea_core::position::Vec3::new(1.5, 64.0, -2.0),
+                    delta: azalea_core::position::Vec3::new(0.0, 0.5, 0.0),
+                    look_direction: azalea_entity::LookDirection::new(90.0, 10.0),
+                },
+                relative: RelativeMovements::default(),
+            }),
+            LifecyclePacket::PlayerPosition {
+                id: 3,
+                change: pomme_protocol::entity::PositionMoveRotation {
+                    position: DVec3::new(1.5, 64.0, -2.0),
+                    delta: DVec3::new(0.0, 0.5, 0.0),
+                    y_rot: 90.0,
+                    x_rot: 10.0,
+                },
+                relative: pomme_protocol::entity::Relative::default(),
+            },
+        ),
+        (
+            "player_rotation",
+            ClientboundGamePacket::PlayerRotation(c_player_rotation::ClientboundPlayerRotation {
+                y_rot: 45.0,
+                relative_y: true,
+                x_rot: -30.0,
+                relative_x: false,
+            }),
+            LifecyclePacket::PlayerRotation {
+                y_rot: 45.0,
+                relative_y: true,
+                x_rot: -30.0,
+                relative_x: false,
+            },
+        ),
+        (
+            "set_time",
+            ClientboundGamePacket::SetTime(c_set_time::ClientboundSetTime {
+                game_time: 100,
+                clock_updates: [(
+                    azalea_registry::data::WorldClock::new_raw(1),
+                    c_set_time::ClockState {
+                        total_ticks: 6000,
+                        partial_tick: 0.5,
+                        rate: 1.0,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+            LifecyclePacket::SetTime {
+                game_time: 100,
+                clocks: vec![(
+                    1,
+                    ClockState {
+                        total_ticks: 6000,
+                        partial_tick: 0.5,
+                        rate: 1.0,
+                    },
+                )],
+            },
+        ),
+        (
+            "set_simulation_distance",
+            ClientboundGamePacket::SetSimulationDistance(
+                c_set_simulation_distance::ClientboundSetSimulationDistance {
+                    simulation_distance: 8,
+                },
+            ),
+            LifecyclePacket::SimulationDistance(8),
+        ),
+    ];
+    for (name, packet, expected) in cases {
+        assert_eq!(decode(name, packet), expected, "{name}");
+    }
+
+    let LifecyclePacket::Disconnect(reason) = decode(
+        "disconnect",
+        ClientboundGamePacket::Disconnect(c_disconnect::ClientboundDisconnect {
+            reason: "bye".into(),
+        }),
+    ) else {
+        panic!("disconnect");
+    };
+    assert_eq!(plain(&reason), "bye");
 }

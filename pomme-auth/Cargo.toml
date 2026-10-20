@@ -1,0 +1,25 @@
+[package]
+name = "pomme-auth"
+description = "Microsoft account sign-in for Minecraft, shared by the Pomme client and launcher."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[features]
+# The OS credential store, shared by the launcher and the desktop client.
+keyring = ["dep:keyring"]
+# TypeScript bindings for the launcher.
+specta = ["dep:specta"]
+
+[dependencies]
+base64 = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true, features = ["form"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util", "time"] }
+urlencoding = "2"
+keyring = { version = "3", features = ["apple-native", "sync-secret-service", "windows-native"], optional = true }
+specta = { version = "=2.0.0-rc.24", features = ["derive"], optional = true }

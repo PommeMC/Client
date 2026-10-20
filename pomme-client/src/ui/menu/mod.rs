@@ -1,3 +1,4 @@
+mod account;
 mod credits;
 mod friends_screen;
 pub(crate) mod helpers;
@@ -45,12 +46,18 @@ struct Settings {
     damage_tilt_strength: f32,
     #[serde(default = "default_sensitivity")]
     sensitivity: f32,
+    #[serde(default)]
+    invert_mouse_x: bool,
+    #[serde(default)]
+    invert_mouse_y: bool,
     #[serde(default = "default_true")]
     view_bobbing: bool,
     #[serde(default)]
     show_subtitles: bool,
     #[serde(default = "default_true")]
     vignette: bool,
+    #[serde(default = "default_true")]
+    entity_shadows: bool,
     #[serde(default = "default_true")]
     show_autosave_indicator: bool,
     #[serde(default = "default_true")]
@@ -190,10 +197,13 @@ impl Default for Settings {
             fov_effect_scale: 1.0,
             damage_tilt_strength: 1.0,
             sensitivity: 0.5,
+            invert_mouse_x: false,
+            invert_mouse_y: false,
             view_bobbing: true,
             show_subtitles: false,
             show_autosave_indicator: true,
             vignette: true,
+            entity_shadows: true,
             vsync: true,
             max_framerate: 120,
             show_online_status: true,
@@ -315,6 +325,8 @@ pub enum MenuAction {
         protocol: Option<i32>,
     },
     ChangeTheme(PanoramaTheme),
+    /// Signed in (`Some`) or out (`None`) from the account screen.
+    Account(Option<pomme_auth::AuthAccount>),
     /// Open the singleplayer world in this save folder.
     PlayWorld {
         folder: String,
@@ -465,6 +477,7 @@ const DOUBLE_CLICK_MS: u128 = 400;
 
 enum Screen {
     Main,
+    Account,
     ServerList,
     WorldList,
     CreateWorld,
@@ -482,6 +495,7 @@ enum Screen {
     OptionsSkinCustomization,
     OptionsMusicSounds,
     OptionsControls,
+    OptionsMouse,
     OptionsKeybinds,
     OptionsLanguage,
     OptionsFontSettings,
@@ -498,12 +512,14 @@ impl Screen {
         match self {
             Self::Main => Self::Main,
             Self::Friends => Self::Friends,
+            Self::Account => Self::Account,
             Self::Options => Self::Options,
             Self::OptionsOnline => Self::OptionsOnline,
             Self::OptionsVideo => Self::OptionsVideo,
             Self::OptionsSkinCustomization => Self::OptionsSkinCustomization,
             Self::OptionsMusicSounds => Self::OptionsMusicSounds,
             Self::OptionsControls => Self::OptionsControls,
+            Self::OptionsMouse => Self::OptionsMouse,
             Self::OptionsKeybinds => Self::OptionsKeybinds,
             Self::OptionsLanguage => Self::OptionsLanguage,
             Self::OptionsFontSettings => Self::OptionsFontSettings,
@@ -577,6 +593,11 @@ pub struct MainMenu {
     add_friend_name: TextFieldState,
     action_error: ActionError,
     pending_remove: Option<(String, String)>,
+    account_store: Arc<dyn pomme_auth::SecretStore>,
+    sign_in: Arc<parking_lot::RwLock<account::SignIn>>,
+    sign_in_task: Option<tokio::task::JoinHandle<()>>,
+    /// No launcher passed an account, so the menu is behind sign-in.
+    account_required: bool,
     rt: Arc<tokio::runtime::Runtime>,
     links_open: bool,
     theme_open: bool,
@@ -624,10 +645,13 @@ pub struct MainMenu {
     pub fov_effect_scale: f32,
     pub damage_tilt_strength: f32,
     pub sensitivity: f32,
+    pub invert_mouse_x: bool,
+    pub invert_mouse_y: bool,
     pub view_bobbing: bool,
     pub show_subtitles: bool,
     pub show_autosave_indicator: bool,
     pub vignette: bool,
+    pub entity_shadows: bool,
     pub vsync: bool,
     pub max_framerate: u32,
     pub show_online_status: bool,
@@ -732,6 +756,10 @@ impl MainMenu {
             add_friend_name: TextFieldState::new(MAX_FRIEND),
             action_error: Default::default(),
             pending_remove: None,
+            account_store: Arc::from(crate::account::store(game_dir)),
+            sign_in: Default::default(),
+            sign_in_task: None,
+            account_required: false,
             rt,
             links_open: false,
             theme_open: false,
@@ -762,10 +790,13 @@ impl MainMenu {
             // Cubed by the look curve, so an out-of-range value reaches
             // infinity and leaves the look direction NaN for good.
             sensitivity: unit_range(settings.sensitivity),
+            invert_mouse_x: settings.invert_mouse_x,
+            invert_mouse_y: settings.invert_mouse_y,
             view_bobbing: settings.view_bobbing,
             show_subtitles: settings.show_subtitles,
             show_autosave_indicator: settings.show_autosave_indicator,
             vignette: settings.vignette,
+            entity_shadows: settings.entity_shadows,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
             show_online_status: settings.show_online_status,
@@ -865,6 +896,35 @@ impl MainMenu {
         self.fov_effect_scale * self.fov_effect_scale
     }
 
+    /// The account the menu shows and joins with.
+    pub(crate) fn set_account(&mut self, username: String, access_token: Option<String>) {
+        self.username = username;
+        self.access_token = access_token;
+        if self.account_gated() {
+            self.set_screen(Screen::Account);
+        }
+    }
+
+    /// Sign-in is required and nobody is signed in yet.
+    pub(crate) fn account_gated(&self) -> bool {
+        self.account_required && self.access_token.is_none()
+    }
+
+    /// Puts the menu behind sign-in: with no account, it opens on the
+    /// account screen and only Sign In or Quit leave it.
+    pub(crate) fn require_account(&mut self) {
+        self.account_required = true;
+        if self.account_gated() {
+            self.set_screen(Screen::Account);
+        }
+    }
+
+    /// A form's text field has keyboard focus.
+    #[cfg(mobile)]
+    pub(crate) fn text_field_focused(&self) -> bool {
+        self.focused_field.is_some()
+    }
+
     pub(crate) fn gui_scale(&self, screen_w: f32, screen_h: f32) -> f32 {
         crate::ui::hud::gui_scale(
             screen_w,
@@ -921,10 +981,13 @@ impl MainMenu {
                 fov_effect_scale: self.fov_effect_scale,
                 damage_tilt_strength: self.damage_tilt_strength,
                 sensitivity: self.sensitivity,
+                invert_mouse_x: self.invert_mouse_x,
+                invert_mouse_y: self.invert_mouse_y,
                 view_bobbing: self.view_bobbing,
                 show_subtitles: self.show_subtitles,
                 show_autosave_indicator: self.show_autosave_indicator,
                 vignette: self.vignette,
+                entity_shadows: self.entity_shadows,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,
                 show_online_status: self.show_online_status,
@@ -995,6 +1058,7 @@ impl MainMenu {
                 | Screen::OptionsSkinCustomization
                 | Screen::OptionsMusicSounds
                 | Screen::OptionsControls
+                | Screen::OptionsMouse
                 | Screen::OptionsKeybinds
                 | Screen::OptionsLanguage
                 | Screen::OptionsFontSettings
@@ -1196,6 +1260,7 @@ impl MainMenu {
                 self.build_confirm_delete_world(screen_w, screen_h, input, &text_width_fn)
             }
             Screen::Friends => self.build_friends(screen_w, screen_h, input, &text_width_fn),
+            Screen::Account => self.build_account(screen_w, screen_h, input),
             Screen::ConfirmDelete(_) => {
                 self.build_confirm_delete(screen_w, screen_h, input, &text_width_fn)
             }
@@ -1223,6 +1288,9 @@ impl MainMenu {
             }
             Screen::OptionsControls => {
                 self.build_options_controls(screen_w, screen_h, input, &text_width_fn)
+            }
+            Screen::OptionsMouse => {
+                self.build_options_mouse(screen_w, screen_h, input, &text_width_fn)
             }
             Screen::OptionsKeybinds => {
                 self.build_options_keybinds(screen_w, screen_h, input, &text_width_fn)
@@ -1272,6 +1340,26 @@ impl MainMenu {
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.ping_results.write().clear();
     }
+}
+
+/// `dir` must not exist: settings and the server list fall back to
+/// defaults, and a settings save silently fails instead of writing.
+#[cfg(test)]
+fn test_menu(dir: &str) -> MainMenu {
+    let rt = std::sync::Arc::new(
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime"),
+    );
+    let mut menu = MainMenu::new(
+        std::path::Path::new(dir),
+        rt,
+        "tester".into(),
+        "26.2".into(),
+        None,
+    );
+    menu.gui_scale_setting = 1;
+    menu
 }
 
 #[cfg(test)]
@@ -1346,6 +1434,19 @@ mod tests {
             };
             assert_eq!(chat.sanitized().delay_secs, secs, "delay {secs}");
         }
+    }
+
+    #[test]
+    fn mouse_settings_round_trip() {
+        let settings = Settings {
+            invert_mouse_x: true,
+            invert_mouse_y: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert!(loaded.invert_mouse_x);
+        assert!(loaded.invert_mouse_y);
     }
 
     #[test]

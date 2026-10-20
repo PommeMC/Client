@@ -383,6 +383,12 @@ impl Default for ToastState {
 }
 
 impl ToastState {
+    /// The ids of every advancement the server has sent.
+    #[cfg(feature = "test-harness")]
+    pub fn advancement_ids(&self) -> impl Iterator<Item = &str> {
+        self.advancements.by_id.keys().map(String::as_str)
+    }
+
     pub fn apply_advancements(&mut self, update: AdvancementsUpdate) {
         self.queued.extend(self.advancements.apply(update));
     }

@@ -6,6 +6,7 @@ pub mod chunk;
 pub mod chunk_borders;
 pub mod clouds;
 pub mod entity_renderer;
+pub mod entity_shadow;
 pub mod gui_item;
 pub mod gui_item_atlas;
 pub mod hand;

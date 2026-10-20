@@ -1,3 +1,4 @@
+use crate::app::QuickPlay;
 use crate::app::core::AppCore;
 use crate::app::phases::{Gfx, Panorama};
 use crate::net::connection::{ConnectArgs, Transport};
@@ -13,7 +14,60 @@ pub enum MenuUpdateResult {
     Quit,
 }
 
-fn connect_args(core: &AppCore, transport: Transport, username: String) -> ConnectArgs {
+/// Starts the integrated server for save folder `folder` and connects to it;
+/// on failure the menu shows why.
+pub fn open_world(core: &mut AppCore, folder: &str) -> MenuUpdateResult {
+    // Vanilla `quickplay.error.invalid_identifier`.
+    let opened = core
+        .menu
+        .world_to_launch(folder)
+        .ok_or_else(|| "Could not find a world with the provided identifier".to_owned())
+        .and_then(|(summary, dir)| singleplayer::open(&summary, &dir, core.view_distance()));
+    let (world, client_end) = match opened {
+        Ok(opened) => opened,
+        Err(reason) => {
+            tracing::error!("Failed to open {folder}: {reason}");
+            core.menu.show_disconnect(reason);
+            return MenuUpdateResult::None;
+        }
+    };
+    core.menu.world_played(folder);
+    core.audio.stop_menu_music();
+    let username = core.user.username.clone();
+    MenuUpdateResult::Connect {
+        connect_args: connect_args(
+            core,
+            Transport::Memory {
+                end: client_end,
+                protocol: singleplayer::PROTOCOL,
+            },
+            username,
+        ),
+        world: Some(world),
+    }
+}
+
+/// Starts `--quick-access-multiplayer` or `--quick-access-singleplayer`.
+pub fn quick_play(core: &mut AppCore, play: QuickPlay) -> MenuUpdateResult {
+    match play {
+        QuickPlay::Multiplayer(server) => MenuUpdateResult::Connect {
+            // TODO: read the saved server list's protocol for this address to
+            // skip the join-time probe.
+            connect_args: connect_args(
+                core,
+                Transport::Remote {
+                    server,
+                    protocol: None,
+                },
+                core.user.username.clone(),
+            ),
+            world: None,
+        },
+        QuickPlay::Singleplayer(folder) => open_world(core, &folder),
+    }
+}
+
+pub fn connect_args(core: &AppCore, transport: Transport, username: String) -> ConnectArgs {
     ConnectArgs {
         transport,
         username,
@@ -139,32 +193,33 @@ pub fn update_menu(
                 world: None,
             };
         }
-        MenuAction::PlayWorld { folder } => {
-            let Some((summary, dir)) = core.menu.world_to_launch(&folder) else {
-                return MenuUpdateResult::None;
-            };
-
-            match singleplayer::open(&summary, &dir, core.view_distance()) {
-                Ok((world, client_end)) => {
-                    core.menu.world_played(&folder);
-                    core.audio.stop_menu_music();
-
-                    let username = core.user.username.clone();
-                    return MenuUpdateResult::Connect {
-                        connect_args: connect_args(core, Transport::Memory(client_end), username),
-                        world: Some(world),
-                    };
-                }
-                Err(reason) => {
-                    tracing::error!("Failed to open {folder}: {reason}");
-                    core.menu.show_disconnect(reason);
-                }
-            }
-        }
+        MenuAction::PlayWorld { folder } => return open_world(core, &folder),
         MenuAction::ChangeTheme(theme) => {
             gfx.renderer
                 .reload_panorama(&theme.panorama_dir(&core.data_dirs));
             core.menu.start_transition_open();
+        }
+        MenuAction::Account(account) => {
+            if account.is_none() {
+                core.menu.forget_account(&core.user.uuid);
+            }
+            core.user = match &account {
+                Some(account) => crate::user::UserData::from_account(account),
+                None => {
+                    crate::user::UserData::from_args(Some(core.user.username.clone()), None, None)
+                }
+            };
+            core.menu
+                .set_account(core.user.username.clone(), core.user.access_token.clone());
+            if core.user.has_profile {
+                gfx.renderer
+                    .load_player_skin(&core.user.uuid, &core.tokio_rt);
+            }
+            if account.is_some()
+                && let Some(play) = core.deferred_quick_play.take()
+            {
+                return quick_play(core, play);
+            }
         }
         MenuAction::Quit => {
             return MenuUpdateResult::Quit;

@@ -334,6 +334,16 @@ fn player_input_state(
 }
 
 /// `base + value` for a relative field, `value` for an absolute one.
+/// The ticks of the dimension's `default_clock`, which drives its day time;
+/// `None` for a dimension without one, which keeps the time it has.
+fn dimension_clock(clocks: &[(String, u64)], default_clock: Option<&str>) -> Option<u64> {
+    let clock = default_clock?;
+    clocks
+        .iter()
+        .find(|(name, _)| name == clock)
+        .map(|(_, ticks)| *ticks)
+}
+
 fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
     if is_relative { base + value } else { value }
 }
@@ -363,8 +373,8 @@ struct ResolvedPlayerCorrection {
 
 fn resolve_player_position_correction(
     player: &LocalPlayer,
-    change: &azalea_protocol::common::movements::PositionMoveRotation,
-    relative: &azalea_protocol::common::movements::RelativeMovements,
+    change: &pomme_protocol::entity::PositionMoveRotation,
+    relative: &pomme_protocol::entity::Relative,
     is_passenger: bool,
 ) -> Option<ResolvedPlayerCorrection> {
     if is_passenger {
@@ -375,16 +385,16 @@ fn resolve_player_position_correction(
     // same `calculateAbsolute`.
     let resolve_position = |base: Position| {
         Position::new(
-            resolve(base.x, relative.x, change.pos.x),
-            resolve(base.y, relative.y, change.pos.y),
-            resolve(base.z, relative.z, change.pos.z),
+            resolve(base.x, relative.x, change.position.x),
+            resolve(base.y, relative.y, change.position.y),
+            resolve(base.z, relative.z, change.position.z),
         )
     };
     let resolve_look = |base| {
         resolve_corrected_look(
             base,
-            change.look_direction.y_rot(),
-            change.look_direction.x_rot(),
+            change.y_rot,
+            change.x_rot,
             relative.y_rot,
             relative.x_rot,
         )
@@ -469,6 +479,8 @@ pub struct AppCore {
     pub user: UserData,
     pub presence: Option<DiscordPresence>,
     pub display_mode: DisplayMode,
+    /// The windowed size the window opens at (`--width`/`--height`).
+    pub window_size: winit::dpi::LogicalSize<u32>,
     pub input: InputState,
     pub menu: MainMenu,
     pub tokio_rt: Arc<tokio::runtime::Runtime>,
@@ -484,6 +496,10 @@ pub struct AppCore {
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
     pub unfocused_since: Option<Instant>,
+    /// A quick play held back until the required sign-in is done.
+    pub deferred_quick_play: Option<crate::app::QuickPlay>,
+    /// Vanilla `options.pauseOnLostFocus`.
+    pub pause_on_lost_focus: bool,
     /// Vanilla `MouseHandler.mouseGrabbed`.
     mouse_grabbed: bool,
     /// The OS grab may no longer match `mouse_grabbed` (the window manager
@@ -555,6 +571,25 @@ fn cursor_step(grabbed: bool, stale: bool, want: bool, focused: bool) -> (Cursor
     }
 }
 
+/// The asset index, the menu's splash and the audio engine, which `AppCore`
+/// builds from the version's assets.
+fn load_assets(
+    data_dirs: &DataDirs,
+    version: &str,
+    resource_packs: &ResourcePackManager,
+    menu: &mut MainMenu,
+) -> (Option<AssetIndex>, crate::audio::AudioEngine) {
+    let asset_index = AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, version);
+    menu.load_splash(&data_dirs.jar_assets_dir, &asset_index);
+    let audio = crate::audio::AudioEngine::new(
+        &data_dirs.jar_assets_dir,
+        asset_index.clone(),
+        resource_packs,
+        menu.category_volumes(),
+    );
+    (asset_index, audio)
+}
+
 /// `LocalPlayerResolver`: a `Dynamic` profile resolves through the tab list
 /// first (by name, ignoring case), and only then through the Mojang API. A
 /// `Static` profile resolves to itself.
@@ -587,6 +622,7 @@ impl AppCore {
         tokio_rt: Arc<tokio::runtime::Runtime>,
         presence: Option<DiscordPresence>,
         user: UserData,
+        window_size: winit::dpi::LogicalSize<u32>,
     ) -> Self {
         let resource_packs = ResourcePackManager::new(&data_dirs.game_dir);
 
@@ -600,17 +636,7 @@ impl AppCore {
 
         let display_mode = menu.display_mode;
 
-        let asset_index =
-            AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, &version);
-
-        menu.load_splash(&data_dirs.jar_assets_dir, &asset_index);
-
-        let audio = crate::audio::AudioEngine::new(
-            &data_dirs.jar_assets_dir,
-            asset_index.clone(),
-            &resource_packs,
-            menu.category_volumes(),
-        );
+        let (asset_index, audio) = load_assets(&data_dirs, &version, &resource_packs, &mut menu);
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
         let (head_tx, head_rx) = crossbeam_channel::unbounded();
 
@@ -618,6 +644,7 @@ impl AppCore {
             user,
             presence,
             display_mode,
+            window_size,
             input: InputState::new(),
             menu,
             tokio_rt,
@@ -631,6 +658,8 @@ impl AppCore {
             time_tick_accumulator: 0.0,
             menu_dpad: RepeatStepper::default(),
             unfocused_since: None,
+            deferred_quick_play: None,
+            pause_on_lost_focus: true,
             mouse_grabbed: false,
             os_grab_stale: false,
             player_skin_tx,
@@ -1199,17 +1228,35 @@ impl AppCore {
     }
 
     /// Rebuilds every asset a pack can override. Only call this once the
-    /// active stack has really changed: it waits for device idle, drops the
-    /// block cache and rebuilds the texture atlas. Clearing
+    /// active stack has really changed: it waits for device idle and rebuilds
+    /// the texture atlas. Clearing
     /// `menu.reload_assets` and `menu.reload_fonts` is safe here because the
     /// pending toggles they stand for are covered by the reload we just did.
+    pub(crate) fn font_sources(&self) -> crate::ui::font::FontSources<'_> {
+        crate::ui::font::FontSources {
+            jar_assets_dir: &self.data_dirs.jar_assets_dir,
+            asset_index: &self.asset_index,
+            packs: &self.resource_packs,
+            options: self.menu.font_options(),
+        }
+    }
+
+    /// Rebuilds what was built from assets that didn't exist yet, once the
+    /// first-run download has put them on disk.
+    pub(crate) fn reload_installed_assets(&mut self) {
+        let (asset_index, audio) = load_assets(
+            &self.data_dirs,
+            &self.version,
+            &self.resource_packs,
+            &mut self.menu,
+        );
+        self.asset_index = asset_index;
+        self.audio = audio;
+    }
+
     pub(crate) fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
         self.menu.active_packs = self.resource_packs.active_pack_info();
-        renderer.reload_assets(
-            &self.data_dirs.game_dir,
-            &self.resource_packs,
-            self.menu.font_options(),
-        );
+        renderer.reload_assets(&self.resource_packs, self.menu.font_options());
         self.audio.reload_assets(&self.resource_packs);
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects
@@ -1276,11 +1323,17 @@ impl AppCore {
                     min_y,
                     has_skylight,
                     cardinal_light,
+                    ambient_light,
+                    overworld_day,
+                    default_clock,
                 } => {
                     tracing::info!(
                         "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}, cardinal_light={cardinal_light:?}"
                     );
                     game.cardinal_light = cardinal_light;
+                    game.ambient_light = ambient_light;
+                    game.overworld_day = overworld_day;
+                    game.default_clock = default_clock;
                     game.chunk_store =
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
                     game.light_engine =
@@ -1594,6 +1647,9 @@ impl AppCore {
                 NetworkEvent::DialogRegistry(registry) => {
                     game.dialog_registry = registry;
                 }
+                NetworkEvent::ItemTags(tags) => {
+                    game.recipe_book.set_item_tags(tags);
+                }
                 NetworkEvent::BlockTags { tags } => {
                     crate::world::block::replace_block_tags(tags);
                 }
@@ -1671,6 +1727,10 @@ impl AppCore {
                         // Vanilla setScreen replaces whatever screen is up,
                         // including the pause menu.
                         game.paused = false;
+                        if game.inventory_open || game.recipe_book_ui.captures_typing() {
+                            game.recipe_book_ui
+                                .reset_for_closed_screen(&mut game.recipe_book);
+                        }
                         game.inventory_open = false;
                         game.close_creative_inventory();
                         game.inv_drag = None;
@@ -1678,6 +1738,8 @@ impl AppCore {
                         game.open_container = Some(crate::app::phases::in_game::OpenContainer {
                             id: container_id,
                             title,
+                            #[cfg(feature = "test-harness")]
+                            menu: menu_type,
                             screen,
                             slots: vec![ItemStack::Empty; screen.click_kind().slot_count()],
                             data: [0; 10],
@@ -1808,6 +1870,36 @@ impl AppCore {
                 NetworkEvent::AdvancementsUpdate(update) => {
                     game.toasts.apply_advancements(*update);
                 }
+                NetworkEvent::RecipeBookAdd { entries, replace } => {
+                    game.recipe_book.apply_add(entries, replace);
+                }
+                NetworkEvent::RecipeBookRemove { ids } => {
+                    game.recipe_book.remove(ids);
+                }
+                NetworkEvent::RecipeBookSettings(settings) => {
+                    game.recipe_book.apply_settings(settings);
+                }
+                NetworkEvent::RecipeData(data) => {
+                    game.recipe_book.data = data;
+                }
+                NetworkEvent::GhostRecipe(ghost) => {
+                    use crate::app::phases::in_game::ContainerScreen;
+
+                    let active_recipe_container = if game.inventory_open {
+                        Some(0)
+                    } else {
+                        game.open_container.as_ref().and_then(|container| {
+                            matches!(
+                                container.screen,
+                                ContainerScreen::CraftingTable | ContainerScreen::Furnace(_)
+                            )
+                            .then_some(container.id)
+                        })
+                    };
+                    if active_recipe_container == Some(ghost.container_id) {
+                        game.recipe_book.ghost_recipe = Some(*ghost);
+                    }
+                }
                 NetworkEvent::RecipeToastAdd { entries } => {
                     game.toasts.add_recipes(entries);
                 }
@@ -1912,85 +2004,79 @@ impl AppCore {
                         );
                     }
                 }
-                NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => match nbt {
-                    Some(nbt) => {
-                        let chunk_pos = azalea_core::position::ChunkPos::new(
-                            pos.x.div_euclid(16),
-                            pos.z.div_euclid(16),
-                        );
-                        if game.chunk_store.get_chunk(&chunk_pos).is_some() {
-                            if kind == azalea_registry::builtin::BlockEntityKind::Piston {
-                                let facing_id = nbt
-                                    .byte("facing")
-                                    .map(|b| b as i32)
-                                    .or_else(|| nbt.int("facing"))
-                                    .unwrap_or(0);
-                                let facing = match facing_id {
-                                    0 => crate::world::block::model::Direction::Down,
-                                    1 => crate::world::block::model::Direction::Up,
-                                    2 => crate::world::block::model::Direction::North,
-                                    3 => crate::world::block::model::Direction::South,
-                                    4 => crate::world::block::model::Direction::West,
-                                    _ => crate::world::block::model::Direction::East,
-                                };
-                                let extending = nbt
-                                    .byte("extending")
-                                    .map(|b| b != 0)
-                                    .or_else(|| nbt.int("extending").map(|i| i != 0))
-                                    .unwrap_or(true);
-                                let source = nbt
-                                    .byte("source")
-                                    .map(|b| b != 0)
-                                    .or_else(|| nbt.int("source").map(|i| i != 0))
-                                    .unwrap_or(false);
-                                let progress = nbt.float("progress").unwrap_or(0.0);
-                                let moved_state = if let Some(bs) = nbt.compound("blockState") {
-                                    let name_str = bs
-                                        .string("Name")
-                                        .map(|s| s.to_str())
-                                        .unwrap_or(std::borrow::Cow::Borrowed(""));
-                                    let name =
-                                        name_str.strip_prefix("minecraft:").unwrap_or(&name_str);
-                                    let mut props = Vec::new();
-                                    if let Some(p_compound) = bs.compound("Properties") {
-                                        for (k, v) in p_compound.iter() {
-                                            if let Some(val) = v.string() {
-                                                props.push((
-                                                    k.to_str().to_string(),
-                                                    val.to_str().to_string(),
-                                                ));
-                                            }
+                NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => {
+                    let chunk_pos = azalea_core::position::ChunkPos::new(
+                        pos.x.div_euclid(16),
+                        pos.z.div_euclid(16),
+                    );
+                    if game.chunk_store.get_chunk(&chunk_pos).is_some() {
+                        if kind == azalea_registry::builtin::BlockEntityKind::Piston {
+                            let facing_id = nbt
+                                .byte("facing")
+                                .map(|b| b as i32)
+                                .or_else(|| nbt.int("facing"))
+                                .unwrap_or(0);
+                            let facing = match facing_id {
+                                0 => crate::world::block::model::Direction::Down,
+                                1 => crate::world::block::model::Direction::Up,
+                                2 => crate::world::block::model::Direction::North,
+                                3 => crate::world::block::model::Direction::South,
+                                4 => crate::world::block::model::Direction::West,
+                                _ => crate::world::block::model::Direction::East,
+                            };
+                            let extending = nbt
+                                .byte("extending")
+                                .map(|b| b != 0)
+                                .or_else(|| nbt.int("extending").map(|i| i != 0))
+                                .unwrap_or(true);
+                            let source = nbt
+                                .byte("source")
+                                .map(|b| b != 0)
+                                .or_else(|| nbt.int("source").map(|i| i != 0))
+                                .unwrap_or(false);
+                            let progress = nbt.float("progress").unwrap_or(0.0);
+                            let moved_state = if let Some(bs) = nbt.compound("blockState") {
+                                let name_str = bs
+                                    .string("Name")
+                                    .map(|s| s.to_str())
+                                    .unwrap_or(std::borrow::Cow::Borrowed(""));
+                                let name =
+                                    name_str.strip_prefix("minecraft:").unwrap_or(&name_str);
+                                let mut props = Vec::new();
+                                if let Some(p_compound) = bs.compound("Properties") {
+                                    for (k, v) in p_compound.iter() {
+                                        if let Some(val) = v.string() {
+                                            props.push((
+                                                k.to_str().to_string(),
+                                                val.to_str().to_string(),
+                                            ));
                                         }
                                     }
-                                    let prop_refs: Vec<(&str, &str)> = props
-                                        .iter()
-                                        .map(|(k, v)| (k.as_str(), v.as_str()))
-                                        .collect();
-                                    crate::world::block::find_state(name, &prop_refs)
-                                } else {
-                                    azalea_block::BlockState::AIR
-                                };
-                                game.block_entity_anim.set_moving_piston(
-                                    pos,
-                                    moved_state,
-                                    facing,
-                                    extending,
-                                    source,
-                                    progress,
-                                );
-                            }
-
-                            game.chunk_store.block_entities.insert(
+                                }
+                                let prop_refs: Vec<(&str, &str)> = props
+                                    .iter()
+                                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                                    .collect();
+                                crate::world::block::find_state(name, &prop_refs)
+                            } else {
+                                azalea_block::BlockState::AIR
+                            };
+                            game.block_entity_anim.set_moving_piston(
                                 pos,
-                                crate::world::block_entity::StoredBlockEntity { kind, nbt },
+                                moved_state,
+                                facing,
+                                extending,
+                                source,
+                                progress,
                             );
                         }
+
+                        game.chunk_store.block_entities.insert(
+                            pos,
+                            crate::world::block_entity::StoredBlockEntity { kind, nbt },
+                        );
                     }
-                    None => {
-                        game.block_entity_anim.remove_moving_piston(&pos);
-                        game.chunk_store.block_entities.remove(&pos);
-                    }
-                },
+                }
                 NetworkEvent::BlockEvent {
                     pos,
                     action_id,
@@ -2120,6 +2206,8 @@ impl AppCore {
                     pitch,
                     seed,
                 } => {
+                    #[cfg(feature = "test-harness")]
+                    game.record_sound(&sound);
                     self.audio
                         .play_world_sound(&sound, category, pos, volume, pitch, seed);
                 }
@@ -2139,6 +2227,8 @@ impl AppCore {
                         .or_else(|| game.entity_positions.get(&entity_id).copied());
 
                     if let Some(pos) = pos {
+                        #[cfg(feature = "test-harness")]
+                        game.record_sound(&sound);
                         self.audio.play_entity_sound(
                             &sound,
                             category,
@@ -2183,6 +2273,10 @@ impl AppCore {
                         }
                     }
                     if game.inventory_open || game.creative_inventory_open {
+                        if game.inventory_open && matches!(game_mode, 1 | 3) {
+                            game.recipe_book_ui
+                                .reset_for_closed_screen(&mut game.recipe_book);
+                        }
                         match game_mode {
                             1 => {
                                 game.inventory_open = false;
@@ -2244,25 +2338,21 @@ impl AppCore {
                         dirty_sections_for_block(&mut priority_remesh, b.x, b.y, b.z, min_y, n);
                     }
                 }
-                NetworkEvent::TimeUpdate {
-                    game_time,
-                    day_time,
-                } => {
+                NetworkEvent::TimeUpdate { game_time, clocks } => {
                     game.sky_state.game_time = game_time;
-                    if let Some(dt) = day_time {
-                        game.sky_state.day_time = dt;
+                    if let Some(ticks) = dimension_clock(&clocks, game.default_clock.as_deref()) {
+                        game.sky_state.day_time = ticks;
                     }
                 }
-                NetworkEvent::WeatherUpdate { event, param } => {
+                NetworkEvent::WeatherUpdate(weather) => {
                     // Mirrors vanilla ClientPacketListener.handleGameEvent: the
                     // server drives the level, the client just applies it.
-                    use azalea_protocol::packets::game::c_game_event::EventType;
-                    match event {
-                        EventType::StartRaining => game.sky_state.rain_level = 0.0,
-                        EventType::StopRaining => game.sky_state.rain_level = 1.0,
-                        EventType::RainLevelChange => game.sky_state.rain_level = param,
-                        EventType::ThunderLevelChange => game.sky_state.thunder_level = param,
-                        _ => {}
+                    use crate::net::Weather;
+                    match weather {
+                        Weather::StartRaining => game.sky_state.rain_level = 0.0,
+                        Weather::StopRaining => game.sky_state.rain_level = 1.0,
+                        Weather::RainLevel(level) => game.sky_state.rain_level = level,
+                        Weather::ThunderLevel(level) => game.sky_state.thunder_level = level,
                     }
                 }
                 NetworkEvent::EntitySpawned {
@@ -2604,6 +2694,9 @@ impl AppCore {
                     online_mode,
                 } => {
                     connection.packet_tx.chat_login(online_mode);
+                    game.recipe_book_ui
+                        .reset_for_closed_screen(&mut game.recipe_book);
+                    game.recipe_book.reset_for_login();
                     game.player.entity_id = entity_id;
                     game.hardcore = hardcore;
                     game.show_death_screen = show_death_screen;
@@ -3186,7 +3279,7 @@ impl AppCore {
         );
         let place_block = held_item
             .as_deref()
-            .and_then(|name| renderer.registry().placeable_block_for_item(name));
+            .and_then(crate::world::block::placeable_block_for_item);
         let hands_empty = held_stack.is_none() && game.player.inventory.offhand().is_empty();
         let player_aabb = game.player.bounding_box();
         let mut effects = crate::player::interaction::BreakEffects {
@@ -3252,6 +3345,7 @@ impl AppCore {
             &mut game.player_prev_walk_speed,
         );
         game.player.tick_bob(dx, dz, false);
+        game.player.drop_spam.tick();
 
         game.interaction
             .tick_player_state(input.is_cursor_captured(), held_stack.as_ref());
@@ -3315,9 +3409,7 @@ impl AppCore {
     fn send_input_packet(input: &InputState, connection: &ConnectionHandle, game: &mut GameState) {
         let sender = &connection.packet_tx;
 
-        let analog_move = input
-            .get_gamepad_movement_axes()
-            .unwrap_or(glam::Vec2::ZERO);
+        let analog_move = input.analog_movement_axes().unwrap_or(glam::Vec2::ZERO);
 
         let current =
             player_input_state(input, analog_move, input.performing_action(Action::Sprint));
@@ -3591,7 +3683,7 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 mod tests {
     use super::{
         CursorOp, DeathRoute, HeadProfile, MENU_REPEAT_DELAY, MENU_REPEAT_INTERVAL, RepeatStepper,
-        accepted_player_chat_tag, cursor_step, death_route, player_input_state,
+        accepted_player_chat_tag, cursor_step, death_route, dimension_clock, player_input_state,
         resolve_corrected_look, resolve_head_profile, resolve_player_position_correction,
         server_view_distance_update, serverbound_player_input, sync_living_attribute_mirrors,
         sync_player_attribute_mirrors, sync_respawn_attributes,
@@ -3603,16 +3695,16 @@ mod tests {
     };
     use crate::entity::components::{LookDirection, Position, Velocity};
     use crate::net::chat_security::SignedChatBody;
-    use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry, TabList};
+    use crate::player::tab_list::{PlayerInfoEntry, TabList};
     use crate::player::{LocalPlayer, valid_player_name};
     use crate::ui::chat::ChatMessageTag;
 
     fn tab_list_with(uuid: uuid::Uuid, name: &str, textures: Option<&str>) -> TabList {
         let mut tab_list = TabList::new();
         tab_list.apply_update(
-            &PlayerInfoActions {
+            &pomme_protocol::player_info::Actions {
                 add_player: true,
-                ..PlayerInfoActions::default()
+                ..Default::default()
             },
             &[PlayerInfoEntry {
                 uuid,
@@ -3891,8 +3983,25 @@ mod tests {
     }
 
     #[test]
+    fn day_time_follows_the_dimension_clock() {
+        let clocks = [
+            ("minecraft:the_end".to_owned(), 300),
+            ("minecraft:overworld".to_owned(), 6000),
+        ];
+        assert_eq!(
+            dimension_clock(&clocks, Some("minecraft:overworld")),
+            Some(6000)
+        );
+        assert_eq!(
+            dimension_clock(&clocks, Some("minecraft:the_end")),
+            Some(300)
+        );
+        assert_eq!(dimension_clock(&clocks, None), None);
+    }
+
+    #[test]
     fn mounted_player_position_correction_is_acknowledged_without_local_application() {
-        use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+        use pomme_protocol::entity::{PositionMoveRotation, Relative};
 
         let mut player = LocalPlayer::new();
         player.position = Position::new(1.0, 2.0, 3.0);
@@ -3902,11 +4011,12 @@ mod tests {
         player.prev_look_dir = LookDirection::new(5.0, 15.0);
 
         let change = PositionMoveRotation {
-            pos: azalea_core::position::Vec3::new(100.0, 200.0, 300.0),
-            delta: azalea_core::position::Vec3::new(1.0, 2.0, 3.0),
-            look_direction: azalea_entity::LookDirection::new(90.0, 45.0),
+            position: glam::DVec3::new(100.0, 200.0, 300.0),
+            delta: glam::DVec3::new(1.0, 2.0, 3.0),
+            y_rot: 90.0,
+            x_rot: 45.0,
         };
-        let relative = RelativeMovements::all_absolute();
+        let relative = Relative::default();
 
         let unmounted = resolve_player_position_correction(&player, &change, &relative, false)
             .expect("unmounted correction applies");

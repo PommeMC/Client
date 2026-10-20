@@ -34,6 +34,14 @@ use world::StoreWorld;
 use crate::world::block as block_data;
 use crate::world::chunk::{ChunkLightData, ChunkStore};
 
+/// Vanilla `Lightmap.getBrightness`: a 0..15 light level on the lightmap
+/// curve, lifted by the dimension's ambient light.
+pub fn lightmap_brightness(level: u8, ambient_light: f32) -> f32 {
+    let v = f32::from(level) / 15.0;
+    let curved = v / (4.0 - 3.0 * v);
+    curved + (1.0 - curved) * ambient_light
+}
+
 /// Vanilla `LightEngine.getOpacity`: light always attenuates by at least 1.
 pub(crate) fn opacity(state: BlockState) -> u8 {
     block_data::light_props(state).dampening.max(1)
@@ -784,5 +792,14 @@ mod tests {
         // Shaped states always relight.
         assert!(has_different_light_properties(air, slab));
         assert!(has_different_light_properties(slab, air));
+    }
+
+    #[test]
+    fn lightmap_brightness_follows_vanilla() {
+        assert_eq!(super::lightmap_brightness(15, 0.0), 1.0);
+        assert_eq!(super::lightmap_brightness(0, 0.0), 0.0);
+        assert!((super::lightmap_brightness(0, 0.25) - 0.25).abs() < 1e-6);
+        let v = 7.0 / 15.0;
+        assert!((super::lightmap_brightness(7, 0.0) - v / (4.0 - 3.0 * v)).abs() < 1e-6);
     }
 }

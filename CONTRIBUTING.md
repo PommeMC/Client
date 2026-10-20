@@ -12,14 +12,13 @@ Thanks for your interest in contributing to Pomme!
    cd Client
    ```
 
-   SteelMC is a submodule; see [Building](./README.md#building) for the
+   SteelMC is a submodule; see [BUILDING.md](./BUILDING.md) for the
    submodule, first-build, and skip notes.
 
 3. Build and run:
 
    ```bash
-   just client-build
-   just launcher-dev
+   just client-dev -- --username Steve
    ```
 
 ## Before Submitting a PR
@@ -27,14 +26,19 @@ Thanks for your interest in contributing to Pomme!
 All of these must pass. CI will reject your PR if they don't.
 
 ```bash
-just client-pre-pr          # Client, protocol, and singleplayer (Rust)
+just client-pre-pr          # Every Rust crate and tool, as CI runs them
 just launcher-pre-pr        # Launcher (Rust & TypeScript)
 ```
 
-`client-pre-pr` includes the singleplayer crate's ignored test, which boots a
-real SteelMC server and writes a world to the temp dir, so it takes a minute.
-CI additionally runs the client's clippy and tests with `--no-default-features`,
-which the recipe does not.
+`client-pre-pr` runs the same `ci-*` recipes CI does, including the
+singleplayer crate's ignored test, which boots a real SteelMC server and writes
+a world to the temp dir. Tests run through
+[cargo-nextest](https://nexte.st) (`cargo install cargo-nextest`). Android and
+iOS have their own CI jobs.
+
+For changes you'd otherwise check in game (items, inventory, entities,
+advancements), `just ingame-test` runs scripted tests against a local vanilla
+server. See [tests/ingame/README.md](tests/ingame/README.md).
 
 ## Development Guidelines
 
@@ -69,15 +73,16 @@ For bug fixes, also include:
 
 ## Project Structure
 
-The workspace crates are listed under [Architecture](./README.md#architecture)
-in the README. Inside the two apps:
+The workspace crates are listed under [Layout](./BUILDING.md#layout)
+in BUILDING.md. Inside the two apps:
 
 ### Pomme client
 
 ```bash
 pomme-client/
 └── src/
-    ├── main.rs             # Entry point
+    ├── lib.rs              # Startup, shared by every platform's entry point
+    ├── main.rs             # Desktop entry point
     ├── app/                # Winit event loop, input handling, state machine
     ├── args.rs             # CLI arguments
     ├── audio/              # OpenAL playback, sound events, music, subtitles
@@ -92,6 +97,7 @@ pomme-client/
     ├── ui/                 # HUD, chat, menus, pause screen
     ├── world/              # Chunk storage, block registry, models, lighting
     ├── singleplayer.rs     # The integrated server as the client sees it
+    ├── update.rs           # Release builds updating themselves
     ├── resource_pack.rs    # Local and server-sent resource packs
     ├── particle.rs         # Particle simulation
     ├── mob_effect.rs       # Status effects
@@ -117,6 +123,14 @@ Client releases are built by `.github/workflows/release-client.yml`:
 - A weekly run from `master` every Sunday, skipped when nothing landed since the
   last tag or when that commit's CI is not green.
 - A manual dispatch, optionally with a version core; blank bumps the patch.
+  Tick `dry_run` to build and package without releasing: the files stay on the
+  run.
+
+Each release has, per OS, a zip (the files the updater swaps in, also usable
+as a portable install) and an installer built from it by `packaging/`: a dmg
+on macOS, a per-user setup on Windows and an AppImage on Linux, plus
+`sha256sums.txt`. The tag is baked into the build, which is how it updates
+itself and shows its version, and each release becomes the repo's "Latest".
 
 Launcher releases are cut by pushing a `launcher-v*` tag (e.g. `launcher-v0.1.2`)
 or by manual dispatch.

@@ -1,0 +1,28 @@
+# Teleports land where the server puts them, with their rotation, and small
+# moves after them arrive as position deltas.
+
+[[step]]
+wait_ms = 2000
+
+# Tagged, so natural spawns can't be picked instead.
+[[step]]
+chat = '/summon minecraft:cow ~ ~ ~4 {NoAI:1b,Tags:["moved"]}'
+
+[[step]]
+expect = { entity = "cow" }
+
+[[step]]
+chat = "/tp @e[tag=moved] 6.5 -60 6.5 90 0"
+
+[[step]]
+expect = { entity = "cow", at = [6.5, -60.0, 6.5], y_rot = 90.0 }
+
+# Relative to the cow, not the player running the command.
+[[step]]
+chat = "/execute as @e[tag=moved] at @s run tp @s ~1 ~ ~-1"
+
+[[step]]
+expect = { entity = "cow", at = [7.5, -60.0, 5.5] }
+
+[[step]]
+screenshot = "moved"

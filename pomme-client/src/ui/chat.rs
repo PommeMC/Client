@@ -44,12 +44,8 @@ const SUGGEST_ROW_H: f32 = 12.0;
 const MAX_SUGGESTION_ROWS: usize = 10;
 const SUGGEST_BG_ALPHA: f32 = 208.0 / 255.0;
 
-/// Vanilla blends its black GUI fills in a gamma-space framebuffer; Pomme's
-/// sRGB target blends in linear space, where the same alpha looks lighter.
-/// Converts to the equivalent linear alpha (the vignette's 2.2 approximation).
 fn vanilla_black_fill(alpha: f32) -> [f32; 4] {
-    let alpha = alpha.clamp(0.0, 1.0);
-    [0.0, 0.0, 0.0, 1.0 - (1.0 - alpha).powf(2.2)]
+    common::vanilla_fill_rgba([0.0, 0.0, 0.0, alpha])
 }
 
 fn push_fill(elements: &mut Vec<MenuElement>, [x, y, w, h]: [f32; 4], color: [f32; 4]) {
@@ -594,6 +590,14 @@ pub struct ChatState {
 }
 
 impl ChatState {
+    /// Each received line's plain text, oldest first.
+    #[cfg(feature = "test-harness")]
+    pub fn message_texts(&self) -> impl Iterator<Item = String> + '_ {
+        self.messages
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.text.as_str()).collect())
+    }
+
     pub fn new() -> Self {
         Self {
             options: ChatOptions::default(),
@@ -3100,7 +3104,12 @@ fn slice_spans(spans: &[TextSpan], start: usize, end: usize) -> Vec<TextSpan> {
 }
 
 fn legacy_color(code: char) -> Option<[f32; 4]> {
-    let rgb = match code.to_ascii_lowercase() {
+    legacy_rgb(code).map(common::rgb)
+}
+
+/// The color of legacy formatting code `code` (`ChatFormatting`'s `0`-`f`).
+pub(crate) fn legacy_rgb(code: char) -> Option<u32> {
+    Some(match code.to_ascii_lowercase() {
         '0' => 0x000000,
         '1' => 0x0000aa,
         '2' => 0x00aa00,
@@ -3118,8 +3127,7 @@ fn legacy_color(code: char) -> Option<[f32; 4]> {
         'e' => 0xffff55,
         'f' => 0xffffff,
         _ => return None,
-    };
-    Some(common::rgb(rgb))
+    })
 }
 
 /// Vanilla `StringDecomposer.iterateFormatted` over each span: legacy codes

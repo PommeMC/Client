@@ -1,14 +1,15 @@
-use std::path::{Path, PathBuf};
-
-use directories::ProjectDirs;
+use std::path::PathBuf;
 
 #[derive(Clone)]
 pub struct DataDirs {
+    pub assets_dir: PathBuf,
+    pub versions_dir: PathBuf,
     pub indexes_dir: PathBuf,
     pub objects_dir: PathBuf,
     pub pomme_assets_dir: PathBuf,
     pub jar_assets_dir: PathBuf,
     pub game_dir: PathBuf,
+    pub cache_dir: PathBuf,
 }
 
 impl DataDirs {
@@ -18,21 +19,19 @@ impl DataDirs {
         versions_dir: Option<&str>,
         game_dir: Option<&str>,
     ) -> Self {
-        let root_dir = data_dir();
+        let layout = pomme_dirs::layout();
 
         let assets_dir = assets_dir
             .map(PathBuf::from)
-            .unwrap_or_else(|| root_dir.join("assets"));
-
-        let pomme_assets_dir = root_dir.join("pomme-assets");
+            .unwrap_or_else(|| layout.minecraft_assets());
 
         let game_dir = game_dir
             .map(PathBuf::from)
-            .unwrap_or_else(|| root_dir.join("installations").join("default"));
+            .unwrap_or_else(|| layout.default_profile());
 
         let versions_dir = versions_dir
             .map(PathBuf::from)
-            .unwrap_or_else(|| root_dir.join("versions"));
+            .unwrap_or_else(|| layout.minecraft_versions());
 
         let jar_assets_dir = versions_dir.join(version).join("extracted/assets");
 
@@ -40,41 +39,23 @@ impl DataDirs {
         let objects_dir = assets_dir.join("objects");
 
         Self {
+            assets_dir,
+            versions_dir,
             indexes_dir,
             objects_dir,
             jar_assets_dir,
-            pomme_assets_dir,
+            pomme_assets_dir: layout.pomme_assets(),
             game_dir,
+            cache_dir: layout.cache(version),
         }
     }
 
     pub fn ensure_game_dir(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.game_dir)
+        pomme_dirs::create_profile(&self.game_dir)
     }
 
-    pub fn verify(&self) -> Result<(), String> {
-        let DataDirs {
-            indexes_dir,
-            objects_dir,
-            pomme_assets_dir: _,
-            jar_assets_dir,
-            game_dir: _,
-        } = self;
-
-        for dir in [indexes_dir, objects_dir, jar_assets_dir] {
-            if !dir.exists() {
-                return Err(format!(
-                    "{} not found, please use the launcher or specify all arguments.",
-                    dir.display()
-                ));
-            }
-        }
-        Ok(())
+    /// `version`'s assets are downloaded, so the client can start on them.
+    pub fn is_installed(&self, version: &str) -> bool {
+        pomme_install::is_installed(&self.assets_dir, &self.versions_dir, version)
     }
-}
-
-fn data_dir() -> PathBuf {
-    ProjectDirs::from("", "", ".pomme")
-        .map(|dirs| dirs.data_dir().to_path_buf())
-        .unwrap_or_else(|| Path::new(".pomme").to_path_buf())
 }

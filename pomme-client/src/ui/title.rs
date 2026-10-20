@@ -61,6 +61,13 @@ impl TitleState {
         }
     }
 
+    /// The title and subtitle while they're on screen.
+    #[cfg(feature = "test-harness")]
+    pub fn shown(&self) -> Option<(&[TextSpan], Option<&[TextSpan]>)> {
+        let title = self.title.as_deref().filter(|_| self.title_time > 0)?;
+        Some((title, self.subtitle.as_deref()))
+    }
+
     pub fn clear(&mut self, reset_times: bool) {
         if reset_times {
             *self = Self::default();

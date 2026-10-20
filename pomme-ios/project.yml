@@ -1,0 +1,55 @@
+# XcodeGen spec for the iOS app (`just ios-project` generates Pomme.xcodeproj).
+# The app has no sources of its own: its executable is the `pomme-ios` Rust
+# binary, which build-app.sh builds and copies in.
+name: Pomme
+options:
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    # Pass your own team, e.g. `just ios-device <team id>`.
+    DEVELOPMENT_TEAM: ""
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Pomme:
+    type: application
+    platform: iOS
+    sources:
+      - path: Assets.xcassets
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Pomme
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UIViewControllerBasedStatusBarAppearance: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_NAME: Pomme
+        PRODUCT_BUNDLE_IDENTIFIER: com.pommemc.client
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ARCHS: arm64
+        ONLY_ACTIVE_ARCH: YES
+        # The Rust binary carries its own debug info.
+        DEBUG_INFORMATION_FORMAT: dwarf
+    postCompileScripts:
+      - name: Build the client
+        script: '"$PROJECT_DIR/build-app.sh"'
+        basedOnDependencyAnalysis: false
+        # So Xcode re-signs the app when the executable changes.
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)

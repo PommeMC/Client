@@ -138,6 +138,11 @@ impl TextSpan {
     }
 }
 
+/// The spans' text without formatting.
+pub fn span_text(spans: &[TextSpan]) -> String {
+    spans.iter().map(|span| span.text.as_str()).collect()
+}
+
 /// The spans with every alpha multiplied by `alpha` (for fade effects).
 pub fn with_alpha(spans: &[TextSpan], alpha: f32) -> Vec<TextSpan> {
     let mut spans = spans.to_vec();
@@ -344,7 +349,7 @@ fn rgb24(value: u32) -> [f32; 4] {
     argb32(value | 0xff00_0000)
 }
 
-fn argb32(value: u32) -> [f32; 4] {
+pub(crate) fn argb32(value: u32) -> [f32; 4] {
     [
         ((value >> 16) & 0xff) as f32 / 255.0,
         ((value >> 8) & 0xff) as f32 / 255.0,

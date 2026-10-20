@@ -1,0 +1,45 @@
+# Items whose definition selects on a component a plain stack lacks draw
+# their fallback model: untrimmed armor, an unloaded crossbow, an empty
+# bee nest.
+
+[[step]]
+chat = "/clear"
+
+[[step]]
+chat = "/give @s minecraft:iron_chestplate"
+
+[[step]]
+chat = "/give @s minecraft:crossbow"
+
+[[step]]
+chat = "/give @s minecraft:bee_nest"
+
+[[step]]
+chat = "/give @s minecraft:light"
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { slot = 36, item = "iron_chestplate" }
+
+[[step]]
+expect = { slot = 37, item = "crossbow" }
+
+[[step]]
+expect = { slot = 38, item = "bee_nest" }
+
+[[step]]
+expect = { slot = 39, item = "light" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "icons"
+
+[[step]]
+close_menu = true
+
+[[step]]
+chat = "/clear"

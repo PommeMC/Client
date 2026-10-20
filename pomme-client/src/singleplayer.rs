@@ -6,6 +6,12 @@
 /// Whether this build can open a world.
 pub const AVAILABLE: bool = cfg!(feature = "singleplayer");
 
+/// The protocol the integrated server speaks.
+#[cfg(feature = "singleplayer")]
+pub const PROTOCOL: i32 = pomme_singleplayer::PROTOCOL;
+#[cfg(not(feature = "singleplayer"))]
+pub const PROTOCOL: i32 = pomme_protocol::version::NATIVE.protocol;
+
 /// Shown wherever the feature is compiled out.
 pub const UNAVAILABLE_MESSAGE: &str = "This build was compiled without singleplayer.";
 
