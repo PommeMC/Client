@@ -1,0 +1,61 @@
+# Teleports, rotation, time and a dimension change arrive from the server.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+expect = { player = { dimension = "overworld" } }
+
+# Frozen, so the clock reads exactly what was set.
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+expect = { player = { day_time = 6000 } }
+
+[[step]]
+chat = "/tp @s 10 -60 10"
+
+[[step]]
+expect = { player = { position = [10.5, -60.0, 10.5] } }
+
+[[step]]
+chat = "/rotate @s 90 0"
+
+[[step]]
+expect = { player = { y_rot = 90.0 } }
+
+# Creative, so the nether's netherrack can't suffocate the player.
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/execute in minecraft:the_nether run tp @s 0 100 0"
+
+[[step]]
+expect = { player = { dimension = "the_nether" } }
+
+# Past the respawn's chunk loading.
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "nether"
+
+[[step]]
+chat = "/execute in minecraft:overworld run tp @s 0.5 -60 0.5"
+
+[[step]]
+expect = { player = { dimension = "overworld", position = [0.5, -60.0, 0.5] } }
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/gamerule advance_time true"
+
+[[step]]
+chat = "/time set day"

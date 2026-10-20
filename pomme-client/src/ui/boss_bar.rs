@@ -4,6 +4,8 @@
 
 use std::time::Instant;
 
+use pomme_protocol::hud::BossFlags;
+
 use crate::ui::text::TextSpan;
 
 /// A decoded `ClientboundBossEvent` operation, mirroring the packet's
@@ -14,9 +16,7 @@ pub enum BossBarOp {
         progress: f32,
         color: u8,
         overlay: u8,
-        darken_screen: bool,
-        play_music: bool,
-        create_world_fog: bool,
+        flags: BossFlags,
     },
     Remove,
     UpdateProgress(f32),
@@ -25,11 +25,7 @@ pub enum BossBarOp {
         color: u8,
         overlay: u8,
     },
-    UpdateProperties {
-        darken_screen: bool,
-        play_music: bool,
-        create_world_fog: bool,
-    },
+    UpdateProperties(BossFlags),
 }
 
 /// One tracked bar. Displayed progress chases the server value linearly over
@@ -45,9 +41,7 @@ pub struct BossBar {
     pub overlay: u8,
     // TODO: darken_screen (lightmap tint), play_music (End boss music), and
     // create_world_fog (fog pull-in, sky hidden) have no client effects yet.
-    pub darken_screen: bool,
-    pub play_music: bool,
-    pub create_world_fog: bool,
+    pub flags: BossFlags,
 }
 
 const LERP_MILLISECONDS: f32 = 100.0;
@@ -75,9 +69,7 @@ impl BossBarState {
                 progress,
                 color,
                 overlay,
-                darken_screen,
-                play_music,
-                create_world_fog,
+                flags,
             } => {
                 let bar = BossBar {
                     name,
@@ -86,9 +78,7 @@ impl BossBarState {
                     set_time: Instant::now(),
                     color,
                     overlay,
-                    darken_screen,
-                    play_music,
-                    create_world_fog,
+                    flags,
                 };
                 // A re-add replaces the entry but keeps its position.
                 match self.get_mut(id) {
@@ -115,15 +105,9 @@ impl BossBarState {
                     bar.overlay = overlay;
                 }
             }
-            BossBarOp::UpdateProperties {
-                darken_screen,
-                play_music,
-                create_world_fog,
-            } => {
+            BossBarOp::UpdateProperties(flags) => {
                 if let Some(bar) = self.get_mut(id) {
-                    bar.darken_screen = darken_screen;
-                    bar.play_music = play_music;
-                    bar.create_world_fog = create_world_fog;
+                    bar.flags = flags;
                 }
             }
         }

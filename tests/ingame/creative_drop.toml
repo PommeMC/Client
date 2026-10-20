@@ -1,0 +1,69 @@
+# The creative screen throws items into the world with the drop key: one or
+# the whole stack from a hotbar slot, and one from the catalog.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/kill @e[type=item]"
+
+[[step]]
+chat = "/give @s minecraft:stone 5"
+
+[[step]]
+expect = { slot = 36, item = "stone", count = 5 }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+hover = { slot = 36 }
+
+[[step]]
+press = { action = "key.drop" }
+
+[[step]]
+expect = { slot = 36, item = "stone", count = 4 }
+
+[[step]]
+expect = { item_entity = "stone" }
+
+[[step]]
+screenshot = "dropped_one"
+
+[[step]]
+press = { action = "key.drop", ctrl = true }
+
+[[step]]
+expect = { slot = 36, item = "air" }
+
+# The catalog's first Building Blocks cell, which leaves the inventory alone.
+[[step]]
+hover = { catalog = 0 }
+
+[[step]]
+press = { action = "key.drop" }
+
+[[step]]
+expect = { item_entity = "oak_log" }
+
+[[step]]
+expect = { slot = 36, item = "air" }
+
+[[step]]
+screenshot = "dropped_from_catalog"
+
+[[step]]
+close_menu = true
+
+[[step]]
+chat = "/kill @e[type=item]"
+
+[[step]]
+chat = "/gamemode survival"

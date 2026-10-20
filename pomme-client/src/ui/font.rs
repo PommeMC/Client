@@ -1413,10 +1413,13 @@ fn load_unihex_zip(path: &Path, overrides: &[UnihexOverride]) -> Result<Vec<Unih
 
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(|error| error.to_string())?;
-        if !entry.name().ends_with(".hex") {
+        let entry_name = entry
+            .name()
+            .map_err(|error| error.to_string())?
+            .into_owned();
+        if !entry_name.ends_with(".hex") {
             continue;
         }
-        let entry_name = entry.name().to_owned();
         let mut reader = BufReader::new(entry);
         let mut line = Vec::with_capacity(128);
         let mut line_number = 0usize;

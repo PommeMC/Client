@@ -1,0 +1,13 @@
+[package]
+name = "ingame-test"
+description = "Runs pomme's in-game test scripts against a local vanilla server."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+md-5 = "0.11"
+reqwest = { workspace = true, features = ["blocking"] }
+serde_json = { workspace = true }
+sha1_smol = { workspace = true }
+uuid = "1"

@@ -1,0 +1,16 @@
+# A mob's custom name, a text component in its entity data.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = '/summon minecraft:sheep ~ ~ ~3 {CustomName:"jeb_",NoAI:1b}'
+
+[[step]]
+expect = { entity = "sheep", name = "jeb_" }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "jeb_sheep"

@@ -686,7 +686,7 @@ struct DocResponse {
 
 /// POST the result JSON to paste.marshall.dev and return the shareable link.
 async fn post_paste(json: String) -> Result<String, String> {
-    let resp = reqwest::Client::new()
+    let resp = crate::net::http::client()
         .post(PASTE_URL)
         .header(reqwest::header::CONTENT_TYPE, "text/plain")
         .body(json)

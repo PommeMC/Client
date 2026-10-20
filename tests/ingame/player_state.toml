@@ -1,0 +1,56 @@
+# The local player's state packets: effects, experience, attributes, game
+# mode, weather and health.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/effect give @s minecraft:speed 30 1"
+
+[[step]]
+expect = { player = { effect = "speed" } }
+
+[[step]]
+chat = "/effect clear @s"
+
+[[step]]
+expect = { player = { no_effect = "speed" } }
+
+[[step]]
+chat = "/xp set @s 5 levels"
+
+[[step]]
+expect = { player = { level = 5 } }
+
+[[step]]
+chat = "/attribute @s minecraft:max_health base set 30"
+
+[[step]]
+expect = { player = { max_health = 30.0 } }
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+expect = { player = { game_mode = 1 } }
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+expect = { player = { game_mode = 0 } }
+
+[[step]]
+chat = "/weather rain"
+
+[[step]]
+expect = { player = { raining = true } }
+
+[[step]]
+screenshot = "rain"
+
+[[step]]
+chat = "/kill @s"
+
+[[step]]
+expect = { player = { health = 0.0 } }

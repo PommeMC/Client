@@ -1108,13 +1108,14 @@ struct ModelPart {
 /// representative state.
 fn collect_model_parts(json: &serde_json::Value) -> Vec<ModelPart> {
     let mut parts = Vec::new();
-    if let Some(node) = json.get("model") {
-        collect_parts_from_node(node, None, &mut parts);
-    }
+    let Some(root) = json.get("model").map(default_stack_branch) else {
+        return parts;
+    };
+    collect_parts_from_node(root, None, &mut parts);
     if !parts.is_empty() {
         return parts;
     }
-    if let Some(node) = find_first_item_model_node(json)
+    if let Some(node) = find_first_item_model_node(root)
         && let Some(path) = node.get("model").and_then(|value| value.as_str())
     {
         parts.push(ModelPart {
@@ -1126,7 +1127,7 @@ fn collect_model_parts(json: &serde_json::Value) -> Vec<ModelPart> {
                 .cloned()
                 .unwrap_or_default(),
         });
-    } else if let Some(path) = first_item_model_ref(json) {
+    } else if let Some(path) = first_model_ref(root) {
         // A special renderer's `base` carries its transforms but no tints.
         parts.push(ModelPart {
             path,
@@ -1159,11 +1160,39 @@ fn find_first_item_model_node(json: &serde_json::Value) -> Option<&serde_json::V
     }
 }
 
+/// The branch of an item definition's `model` node that a stack without
+/// the components its `select`s read resolves to. Vanilla `SelectItemModel`
+/// takes the `fallback` when no case matches, and `TrimMaterialProperty`
+/// (no `trim`), `Charge` (no `charged_projectiles`, `NONE`) and
+/// `ItemBlockState` (no `block_state`) never match for a plain stack.
+///
+/// TODO: pomme bakes one model per item, so stacks that do carry these
+/// components (trimmed armor, a loaded crossbow) still draw this branch;
+/// that needs per-stack selection, plus the `paletted_permutations` atlas
+/// source for the trim textures.
+fn default_stack_branch(mut node: &serde_json::Value) -> &serde_json::Value {
+    const COMPONENT_PROPERTIES: [&str; 3] = ["trim_material", "charge_type", "block_state"];
+    while node_type(node) == Some("select")
+        && node
+            .get("property")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|property| COMPONENT_PROPERTIES.contains(&strip_mc_prefix(property)))
+        && let Some(fallback) = node.get("fallback")
+    {
+        node = fallback;
+    }
+    node
+}
+
 /// First `model` reference in an item definition, falling back to a special
 /// renderer's `base`.
 pub fn first_item_model_ref(json: &serde_json::Value) -> Option<String> {
-    find_first_model_string(json)
-        .or_else(|| find_first_string_for_key(json, "base"))
+    first_model_ref(json.get("model").map_or(json, default_stack_branch))
+}
+
+fn first_model_ref(node: &serde_json::Value) -> Option<String> {
+    find_first_model_string(node)
+        .or_else(|| find_first_string_for_key(node, "base"))
         .map(|path| strip_mc_prefix(&path).to_string())
 }
 
@@ -2647,6 +2676,53 @@ mod tests {
         assert!(parts[0].transform.is_none());
         let legacy = find_first_model_string(&json).unwrap();
         assert_eq!(parts[0].path, strip_mc_prefix(&legacy));
+    }
+
+    /// Both resolvers pick `path` for an item definition.
+    fn assert_resolves_to(json: &serde_json::Value, path: &str) {
+        let parts = collect_model_parts(json);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].path, path);
+        assert_eq!(first_item_model_ref(json).as_deref(), Some(path));
+    }
+
+    #[test]
+    fn trim_select_bakes_the_untrimmed_fallback() {
+        let json = serde_json::json!({
+            "model": {
+                "type": "minecraft:select",
+                "property": "minecraft:trim_material",
+                "cases": [{
+                    "when": "minecraft:quartz",
+                    "model": {"type": "minecraft:model", "model": "minecraft:item/iron_chestplate_quartz_trim"}
+                }],
+                "fallback": {"type": "minecraft:model", "model": "minecraft:item/iron_chestplate"}
+            }
+        });
+        assert_resolves_to(&json, "item/iron_chestplate");
+    }
+
+    /// The charge fallback is a `condition`, which the heuristic resolves to
+    /// its `on_false`.
+    #[test]
+    fn charge_select_bakes_the_unloaded_crossbow() {
+        let json = serde_json::json!({
+            "model": {
+                "type": "minecraft:select",
+                "property": "minecraft:charge_type",
+                "cases": [{
+                    "when": "arrow",
+                    "model": {"type": "minecraft:model", "model": "minecraft:item/crossbow_arrow"}
+                }],
+                "fallback": {
+                    "type": "minecraft:condition",
+                    "property": "minecraft:using_item",
+                    "on_false": {"type": "minecraft:model", "model": "minecraft:item/crossbow"},
+                    "on_true": {"type": "minecraft:model", "model": "minecraft:item/crossbow_pulling_0"}
+                }
+            }
+        });
+        assert_resolves_to(&json, "item/crossbow");
     }
 
     #[test]

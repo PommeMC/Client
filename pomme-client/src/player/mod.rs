@@ -230,6 +230,30 @@ pub struct LocalPlayer {
     pub experience_level: i32,
     pub experience_progress: f32,
     pub effects: crate::mob_effect::ActiveMobEffects,
+    /// Vanilla `LocalPlayer.dropSpamThrottler`, gating creative drops.
+    pub drop_spam: DropThrottle,
+}
+
+/// Vanilla `TickThrottler(20, 1280)`: each drop adds 20, each tick takes one
+/// back, and drops stop while 1280 or more are owed.
+#[derive(Default)]
+pub struct DropThrottle {
+    count: u32,
+}
+
+impl DropThrottle {
+    pub fn tick(&mut self) {
+        self.count = self.count.saturating_sub(1);
+    }
+
+    pub fn increment(&mut self) {
+        self.count += 20;
+    }
+
+    /// Vanilla `LocalPlayer.canDropItems`.
+    pub fn can_drop(&self) -> bool {
+        self.count < 1280
+    }
 }
 
 impl LocalPlayer {
@@ -298,6 +322,7 @@ impl LocalPlayer {
             experience_level: 0,
             experience_progress: 0.0,
             effects: crate::mob_effect::ActiveMobEffects::default(),
+            drop_spam: DropThrottle::default(),
         }
     }
 

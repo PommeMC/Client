@@ -409,6 +409,12 @@ const SHARED_BLOCK_DATA: &[(i32, i32)] = &[
 /// protocol currently spoken (see [`set_active_protocol`]).
 static BLOCK_TABLES: [OnceLock<Vec<BlockData>>; BLOCK_DATA.len()] =
     [const { OnceLock::new() }; BLOCK_DATA.len()];
+
+/// Per table slot, each single-state block's one state, for placement
+/// prediction.
+static PLACEABLE_BLOCKS: [OnceLock<HashMap<&'static str, BlockState>>; BLOCK_DATA.len()] =
+    [const { OnceLock::new() }; BLOCK_DATA.len()];
+
 /// Server-provided block tags, resolved into Pomme's native block resource
 /// names. Sent during configuration and replaced after a datapack reload.
 #[derive(Debug, Default)]
@@ -798,7 +804,11 @@ fn state_fluid(name: &'static str, props: &PropMap) -> Fluid {
 }
 
 fn table() -> &'static Vec<BlockData> {
-    BLOCK_TABLES[ACTIVE_TABLE.load(std::sync::atomic::Ordering::Acquire)]
+    slot_table(active_table_slot())
+}
+
+fn slot_table(slot: usize) -> &'static Vec<BlockData> {
+    BLOCK_TABLES[slot]
         .get()
         .expect("world::block::init must be called before use")
 }
@@ -914,10 +924,71 @@ fn block_data(state: BlockState) -> &'static BlockData {
 
 /// Every valid block state paired with its cached data, in id order.
 fn all_states() -> impl Iterator<Item = (BlockState, &'static BlockData)> {
-    table().iter().enumerate().map(|(id, data)| {
+    slot_states(active_table_slot())
+}
+
+fn slot_states(slot: usize) -> impl Iterator<Item = (BlockState, &'static BlockData)> {
+    slot_table(slot).iter().enumerate().map(|(id, data)| {
         let state = BlockState::try_from(id as u32).expect("table indices fit the id repr");
         (state, data)
     })
+}
+
+/// Number of block-state table slots (one per distinct state-id space).
+pub(crate) const TABLE_SLOTS: usize = BLOCK_DATA.len();
+
+/// The table slot state ids are currently interpreted in.
+pub(crate) fn active_table_slot() -> usize {
+    ACTIVE_TABLE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// What a renderer needs to know about one block state, independent of which
+/// table is active.
+pub(crate) struct StateInfo {
+    pub id: &'static str,
+    pub properties: &'static PropMap,
+    pub is_air: bool,
+    pub can_occlude: bool,
+    pub has_fluid: bool,
+}
+
+/// Every state of table `slot`, in id order, or none if that table was never
+/// built (no state id can refer to it yet).
+pub(crate) fn states_in_slot(slot: usize) -> impl Iterator<Item = StateInfo> {
+    BLOCK_TABLES[slot]
+        .get()
+        .into_iter()
+        .flatten()
+        .map(|data| StateInfo {
+            id: data.id,
+            properties: &data.properties,
+            is_air: data.is_air,
+            can_occlude: data.light.can_occlude,
+            has_fluid: !matches!(data.fluid.kind, FluidKind::Empty),
+        })
+}
+
+/// Resolves a held item's registry name (unprefixed, e.g. `"stone"`) to the
+/// `BlockState` to predict on placement, in the active protocol's state
+/// space, or `None` if the item is not a single-state block. Item and block
+/// share a registry name for this set.
+pub fn placeable_block_for_item(item_name: &str) -> Option<BlockState> {
+    placeable_block_in_slot(active_table_slot(), item_name)
+}
+
+fn placeable_block_in_slot(slot: usize, item_name: &str) -> Option<BlockState> {
+    let map = PLACEABLE_BLOCKS[slot].get_or_init(|| {
+        let mut seen: HashMap<&'static str, Option<BlockState>> = HashMap::new();
+        for (state, data) in slot_states(slot) {
+            seen.entry(data.id)
+                .and_modify(|v| *v = None)
+                .or_insert(Some(state));
+        }
+        seen.into_iter()
+            .filter_map(|(name, state)| state.map(|s| (name, s)))
+            .collect()
+    });
+    map.get(item_name).copied()
 }
 
 /// First declared state of the named block, e.g. the light engine's bedrock
@@ -1233,8 +1304,9 @@ pub fn shape_occludes(from: BlockState, to: BlockState, face: usize) -> bool {
 }
 
 /// The block's state matching the given property values (unlisted properties
-/// take whatever the first match has); shared with the light-engine tests.
-#[cfg(test)]
+/// take whatever the first match has); shared with the light-engine tests
+/// and the CPU bench.
+#[cfg(any(test, feature = "cpu-bench"))]
 pub(crate) fn find_state(name: &str, props: &[(&str, &str)]) -> BlockState {
     all_states()
         .find(|(s, d)| {
@@ -1822,5 +1894,22 @@ mod tests {
     fn native_slot() {
         let native = pomme_protocol::version::NATIVE.protocol;
         assert_eq!(block_data_slot(native), Some(NATIVE_SLOT));
+    }
+
+    /// Placement prediction reads the spoken version's table, built here
+    /// without switching to it, since other tests read the active one.
+    #[test]
+    fn placeable_block_follows_the_table_slot() {
+        let native = prewarm_protocol(pomme_protocol::version::NATIVE.protocol);
+        let newer = prewarm_protocol(777);
+        for name in ["obsidian", "blackstone", "redstone_block"] {
+            let [native_state, newer_state] = [native, newer].map(|slot| {
+                let state = placeable_block_in_slot(slot, name).expect(name);
+                assert_eq!(slot_table(slot)[u32::from(state) as usize].id, name);
+                state
+            });
+            // 26.3's added blocks shift these ids.
+            assert_ne!(native_state, newer_state, "{name}");
+        }
     }
 }

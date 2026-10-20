@@ -647,7 +647,7 @@ fn update_sprint_state(
     let current_shift = input.performing_action(input::Action::Sneak);
     let current_backward = input.key_pressed(KeyCode::KeyS)
         || input
-            .get_gamepad_movement_axes()
+            .analog_movement_axes()
             .map(|vec| vec.y < -input::STICK_MOVEMENT_THRESHOLD)
             .unwrap_or(false);
     if player.was_shift_pressed || slow_due_to_using_item && vehicle.is_none() || current_backward {
@@ -1065,7 +1065,7 @@ fn is_moving_slowly(player: &LocalPlayer) -> bool {
 /// `ClientInput.moveVector` as `(left, forward)`. Pomme's analog stick is
 /// already clamped to unit length; keys normalize like `KeyboardInput.tick`.
 fn move_vector(input: &InputState) -> (f32, f32) {
-    if let Some(analog) = input.get_gamepad_movement_axes() {
+    if let Some(analog) = input.analog_movement_axes() {
         (analog.x, analog.y)
     } else {
         let mut forward = 0.0_f32;

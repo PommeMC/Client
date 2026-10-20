@@ -1,0 +1,35 @@
+# Components pomme converts to azalea's layout: equippable slots, armor trims,
+# death protection and a loaded crossbow (a nested item template).
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = '/give @s minecraft:stick[minecraft:equippable={slot:"head"}]'
+
+[[step]]
+expect = { slot = 36, item = "stick", components = ["equippable"] }
+
+[[step]]
+chat = '/give @s minecraft:iron_chestplate[minecraft:trim={material:"minecraft:gold",pattern:"minecraft:sentry"}]'
+
+[[step]]
+expect = { slot = 37, item = "iron_chestplate", components = ["trim"] }
+
+[[step]]
+chat = '/give @s minecraft:stick[minecraft:death_protection={death_effects:[{type:"minecraft:clear_all_effects"}]}]'
+
+[[step]]
+expect = { slot = 38, item = "stick", components = ["death_protection"] }
+
+[[step]]
+chat = '/give @s minecraft:crossbow[minecraft:charged_projectiles=[{id:"minecraft:arrow",count:1}]]'
+
+[[step]]
+expect = { slot = 39, item = "crossbow", components = ["charged_projectiles"] }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+screenshot = "inventory"

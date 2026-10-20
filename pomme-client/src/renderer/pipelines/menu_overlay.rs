@@ -77,6 +77,11 @@ struct GlyphEntry {
     v1: f32,
     width_px: f32,
     height_px: f32,
+    /// Text layout at `RASTER_PX`: pen advance, and the bitmap's offset from
+    /// the pen and from the line's top.
+    advance_px: f32,
+    left_px: f32,
+    top_px: f32,
 }
 
 struct FontAtlas {
@@ -96,6 +101,9 @@ fn build_font_atlas() -> FontAtlas {
     let mut cursor_y = 0u32;
     let mut row_height = 0u32;
 
+    let ascent = font
+        .horizontal_line_metrics(RASTER_PX)
+        .map_or(RASTER_PX, |m| m.ascent);
     let text_chars: Vec<(char, &fontdue::Font)> = (' '..='~').map(|ch| (ch, &font)).collect();
     let icon_chars: Vec<(char, &fontdue::Font)> = [
         ICON_USER,
@@ -151,6 +159,9 @@ fn build_font_atlas() -> FontAtlas {
                 v1: (cursor_y + metrics.height as u32) as f32 * inv,
                 width_px: metrics.width as f32,
                 height_px: metrics.height as f32,
+                advance_px: metrics.advance_width,
+                left_px: metrics.xmin as f32,
+                top_px: ascent - (metrics.ymin + metrics.height as i32) as f32,
             },
         );
 
@@ -1491,7 +1502,7 @@ impl MenuOverlayPipeline {
 
     fn text_width_in(&self, text: &str, scale: f32, font: Option<&str>) -> f32 {
         let Some(ref gm) = self.mc_glyph_map else {
-            return 0.0;
+            return plain_text_width(&self.atlas, text, scale);
         };
         (run_advance(gm, text, font, false, false) * scale / gm.cell_h as f32).ceil()
     }
@@ -1930,7 +1941,8 @@ impl MenuOverlayPipeline {
         }
     }
 
-    /// Pushes Minecraft-font text; nothing when no fonts loaded.
+    /// Pushes Minecraft-font text, or Montserrat before any Minecraft font
+    /// has loaded (the first-run download screen).
     #[allow(clippy::too_many_arguments)]
     fn push_text_into(
         &self,
@@ -1954,6 +1966,19 @@ impl MenuOverlayPipeline {
                 obfuscation_rng,
                 drawn_objects,
             );
+        } else {
+            let mut x = draw.x;
+            for span in spans {
+                x = push_plain_text(
+                    vertices,
+                    &self.atlas,
+                    x,
+                    draw.y,
+                    &span.text,
+                    draw.scale,
+                    span.color,
+                );
+            }
         }
     }
 
@@ -2439,6 +2464,36 @@ pub enum SpriteId {
     SlotHighlightFront,
     RecipeBookButton,
     RecipeBookButtonHighlighted,
+    WidgetTextField,
+    WidgetTextFieldHighlighted,
+    RecipeBookBackground,
+    RecipeBookTab,
+    RecipeBookTabSelected,
+    RecipeBookFilterEnabled,
+    RecipeBookFilterDisabled,
+    RecipeBookFilterEnabledHighlighted,
+    RecipeBookFilterDisabledHighlighted,
+    RecipeBookFurnaceFilterEnabled,
+    RecipeBookFurnaceFilterDisabled,
+    RecipeBookFurnaceFilterEnabledHighlighted,
+    RecipeBookFurnaceFilterDisabledHighlighted,
+    RecipeBookSlotCraftable,
+    RecipeBookSlotUncraftable,
+    RecipeBookSlotManyCraftable,
+    RecipeBookSlotManyUncraftable,
+    RecipeBookPageForward,
+    RecipeBookPageForwardHighlighted,
+    RecipeBookPageBackward,
+    RecipeBookPageBackwardHighlighted,
+    RecipeBookOverlay,
+    RecipeBookCraftingOverlay,
+    RecipeBookCraftingOverlayHighlighted,
+    RecipeBookCraftingOverlayDisabled,
+    RecipeBookCraftingOverlayDisabledHighlighted,
+    RecipeBookFurnaceOverlay,
+    RecipeBookFurnaceOverlayHighlighted,
+    RecipeBookFurnaceOverlayDisabled,
+    RecipeBookFurnaceOverlayDisabledHighlighted,
     ButtonNormal,
     ButtonHover,
     ButtonDisabled,
@@ -3013,6 +3068,151 @@ fn build_sprite_atlas(
         (
             SpriteId::RecipeBookButtonHighlighted,
             "minecraft/textures/gui/sprites/recipe_book/button_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::WidgetTextField,
+            "minecraft/textures/gui/sprites/widget/text_field.png",
+            1.0,
+        ),
+        (
+            SpriteId::WidgetTextFieldHighlighted,
+            "minecraft/textures/gui/sprites/widget/text_field_highlighted.png",
+            1.0,
+        ),
+        (
+            SpriteId::RecipeBookTab,
+            "minecraft/textures/gui/sprites/recipe_book/tab.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookTabSelected,
+            "minecraft/textures/gui/sprites/recipe_book/tab_selected.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookFilterEnabled,
+            "minecraft/textures/gui/sprites/recipe_book/filter_enabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookFilterDisabled,
+            "minecraft/textures/gui/sprites/recipe_book/filter_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookFilterEnabledHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/filter_enabled_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookFilterDisabledHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/filter_disabled_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookFurnaceFilterEnabled,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_filter_enabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookFurnaceFilterDisabled,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_filter_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookFurnaceFilterEnabledHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_filter_enabled_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookFurnaceFilterDisabledHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_filter_disabled_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookSlotCraftable,
+            "minecraft/textures/gui/sprites/recipe_book/slot_craftable.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookSlotUncraftable,
+            "minecraft/textures/gui/sprites/recipe_book/slot_uncraftable.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookSlotManyCraftable,
+            "minecraft/textures/gui/sprites/recipe_book/slot_many_craftable.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookSlotManyUncraftable,
+            "minecraft/textures/gui/sprites/recipe_book/slot_many_uncraftable.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookPageForward,
+            "minecraft/textures/gui/sprites/recipe_book/page_forward.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookPageForwardHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/page_forward_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookPageBackward,
+            "minecraft/textures/gui/sprites/recipe_book/page_backward.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookPageBackwardHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/page_backward_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookOverlay,
+            "minecraft/textures/gui/sprites/recipe_book/overlay_recipe.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookCraftingOverlay,
+            "minecraft/textures/gui/sprites/recipe_book/crafting_overlay.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookCraftingOverlayHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/crafting_overlay_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookCraftingOverlayDisabled,
+            "minecraft/textures/gui/sprites/recipe_book/crafting_overlay_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookCraftingOverlayDisabledHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/crafting_overlay_disabled_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookFurnaceOverlay,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_overlay.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookFurnaceOverlayHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_overlay_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookFurnaceOverlayDisabled,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_overlay_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookFurnaceOverlayDisabledHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_overlay_disabled_highlighted.png",
             0.0,
         ),
         (
@@ -3592,96 +3792,103 @@ fn build_sprite_atlas(
     ));
 
     // Container backgrounds live in a 256x256 atlas; crop out the used region
-    // starting at texture row `src_y`.
-    for (id, path, src_y, max_w, max_h) in [
+    // from texel `src` (vanilla's blit `u`, `v`).
+    for (id, path, src, max_w, max_h) in [
+        (
+            SpriteId::RecipeBookBackground,
+            "minecraft/textures/gui/recipe_book.png",
+            (1, 1),
+            147,
+            166,
+        ),
         (
             SpriteId::InventoryBackground,
             "minecraft/textures/gui/container/inventory.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::CraftingTableBackground,
             "minecraft/textures/gui/container/crafting_table.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::FurnaceBackground,
             "minecraft/textures/gui/container/furnace.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::BlastFurnaceBackground,
             "minecraft/textures/gui/container/blast_furnace.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::SmokerBackground,
             "minecraft/textures/gui/container/smoker.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::Generic54Top,
             "minecraft/textures/gui/container/generic_54.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             125,
         ),
         (
             SpriteId::Generic54Bottom,
             "minecraft/textures/gui/container/generic_54.png",
-            126,
+            (0, 126),
             INV_TEX_W,
             96,
         ),
         (
             SpriteId::ShulkerBoxBackground,
             "minecraft/textures/gui/container/shulker_box.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             167,
         ),
         (
             SpriteId::AnvilBackground,
             "minecraft/textures/gui/container/anvil.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::EnchantingTableBackground,
             "minecraft/textures/gui/container/enchanting_table.png",
-            0,
+            (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::CreativeItemsBackground,
             "minecraft/textures/gui/container/creative_inventory/tab_items.png",
-            0,
+            (0, 0),
             195,
             136,
         ),
         (
             SpriteId::CreativeSearchBackground,
             "minecraft/textures/gui/container/creative_inventory/tab_item_search.png",
-            0,
+            (0, 0),
             195,
             136,
         ),
         (
             SpriteId::CreativeInventoryBackground,
             "minecraft/textures/gui/container/creative_inventory/tab_inventory.png",
-            0,
+            (0, 0),
             195,
             136,
         ),
@@ -3690,7 +3897,7 @@ fn build_sprite_atlas(
         (
             SpriteId::NetherPortal,
             "minecraft/textures/block/nether_portal.png",
-            0,
+            (0, 0),
             16,
             16,
         ),
@@ -3699,12 +3906,13 @@ fn build_sprite_atlas(
         match crate::assets::load_image(&path) {
             Ok(img) => {
                 let rgba = img.to_rgba8();
+                let (src_x, src_y) = src;
                 let full_w = rgba.width();
-                let crop_w = max_w.min(full_w);
+                let crop_w = max_w.min(full_w.saturating_sub(src_x));
                 let crop_h = max_h.min(rgba.height().saturating_sub(src_y));
                 let mut cropped = vec![0u8; (crop_w * crop_h * 4) as usize];
                 for y in 0..crop_h {
-                    let src_off = ((src_y + y) * full_w * 4) as usize;
+                    let src_off = (((src_y + y) * full_w + src_x) * 4) as usize;
                     let dst_off = (y * crop_w * 4) as usize;
                     let row_bytes = (crop_w * 4) as usize;
                     cropped[dst_off..dst_off + row_bytes]
@@ -4380,6 +4588,47 @@ fn push_gradient_rect(
             corner_radius: radius,
         });
     }
+}
+
+/// Montserrat text from `x`; returns where the pen ends.
+fn push_plain_text(
+    verts: &mut Vec<Vertex>,
+    atlas: &FontAtlas,
+    mut x: f32,
+    y: f32,
+    text: &str,
+    scale: f32,
+    color: [f32; 4],
+) -> f32 {
+    let s = scale / RASTER_PX;
+    for g in text.chars().filter_map(|ch| atlas.glyphs.get(&ch)) {
+        if g.width_px > 0.0 {
+            push_quad(
+                verts,
+                x + g.left_px * s,
+                y + g.top_px * s,
+                g.width_px * s,
+                g.height_px * s,
+                g.u0,
+                g.v0,
+                g.u1,
+                g.v1,
+                color,
+                1.0,
+                [0.0, 0.0],
+                0.0,
+            );
+        }
+        x += g.advance_px * s;
+    }
+    x
+}
+
+fn plain_text_width(atlas: &FontAtlas, text: &str, scale: f32) -> f32 {
+    text.chars()
+        .filter_map(|ch| atlas.glyphs.get(&ch))
+        .map(|g| g.advance_px * scale / RASTER_PX)
+        .sum()
 }
 
 fn push_icon_glyph(

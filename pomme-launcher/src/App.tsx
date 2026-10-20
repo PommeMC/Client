@@ -2,7 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useRef } from "react";
 
 import { commands, events } from "./bindings";
-import { AuthAccount } from "./bindings/pomme_launcher/auth";
+import { AuthAccount } from "./bindings/pomme_auth";
 import { PatchNote } from "./bindings/pomme_launcher/commands";
 import { ACTIVITY_IDLE } from "./lib/friends";
 import { useAppStateContext } from "./lib/state";

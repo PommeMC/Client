@@ -1,0 +1,44 @@
+# Item components survive the trip from the server: each /give lands in the
+# next hotbar slot (menu slots 36 on) with all its components.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = '/give @s minecraft:diamond_sword[minecraft:enchantments={sharpness:3},minecraft:custom_name="Blade",minecraft:damage=10]'
+
+[[step]]
+expect = { chat = "Gave" }
+
+[[step]]
+chat = '/give @s minecraft:leather_helmet[minecraft:dyed_color=16711680]'
+
+[[step]]
+expect = { slot = 37, item = "leather_helmet", components = ["dyed_color"] }
+
+[[step]]
+chat = '/give @s minecraft:player_head[minecraft:profile={name:"Tester"}]'
+
+[[step]]
+expect = { slot = 38, item = "player_head", components = ["profile"] }
+
+[[step]]
+chat = '/give @s minecraft:written_book[minecraft:written_book_content={title:"Notes",author:"Tester",pages:["Hello"]}]'
+
+[[step]]
+expect = { slot = 39, item = "written_book", components = ["written_book_content"] }
+
+[[step]]
+chat = '/give @s minecraft:firework_rocket[minecraft:fireworks={flight_duration:2,explosions:[{shape:"star",colors:[I;16711680]}]}]'
+
+[[step]]
+expect = { slot = 40, item = "firework_rocket", components = ["fireworks"] }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { slot = 36, item = "diamond_sword", components = ["enchantments", "custom_name", "damage"] }
+
+[[step]]
+screenshot = "inventory"
