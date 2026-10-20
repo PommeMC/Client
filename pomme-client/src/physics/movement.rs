@@ -89,6 +89,7 @@ pub fn tick(
     let world = CollisionWorld {
         chunks: chunk_store,
         block_entity_anim: Some(block_entity_anim),
+        piston_noclip: None,
     };
 
     // `Player.tick` snapshots `wasUnderwater` before `Entity.baseTick`
@@ -252,6 +253,7 @@ pub fn tick_dead(
     let world = CollisionWorld {
         chunks: chunk_store,
         block_entity_anim: Some(block_entity_anim),
+        piston_noclip: None,
     };
     normalize_tiny_velocity(&mut player.velocity);
     travel(player, &neutral, world, 0.0, 0.0, sin_y_rot, cos_y_rot);

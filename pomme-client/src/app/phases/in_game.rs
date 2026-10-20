@@ -272,8 +272,6 @@ pub struct GameState {
     pub item_entity_store: ItemEntityStore,
     pub particle_store: crate::particle::ParticleStore,
     pub block_entity_anim: BlockEntityAnimStore,
-    /// Blocks pistons are moving, simulated client-side as in vanilla.
-    pub moving_pistons: crate::world::piston::MovingPistons,
     pub benchmark: Option<Benchmark>,
     pub benchmark_result: Option<BenchmarkResult>,
     /// In-flight/finished upload of the FPS result, while its overlay is shown.
@@ -412,7 +410,6 @@ impl GameState {
                 )
             },
             block_entity_anim: BlockEntityAnimStore::default(),
-            moving_pistons: Default::default(),
             player: LocalPlayer::new(),
             last_bubble_pop_sound_played: 0,
             biome_climate: Arc::new(HashMap::new()),
@@ -4490,7 +4487,7 @@ fn moving_block_renders(
     use crate::world::block::{block_id, is_air, with_property};
     use crate::world::piston;
     let mut renders = Vec::new();
-    for (pos, moving) in game.moving_pistons.iter() {
+    for (pos, moving) in game.block_entity_anim.pistons.iter() {
         let state = moving.moved_state;
         if is_air(state) {
             continue;

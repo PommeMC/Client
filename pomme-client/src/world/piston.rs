@@ -43,7 +43,12 @@ pub struct MovingPiston {
 }
 
 impl MovingPiston {
-    fn new(moved_state: BlockState, direction: Direction, extending: bool, source: bool) -> Self {
+    pub(crate) fn new(
+        moved_state: BlockState,
+        direction: Direction,
+        extending: bool,
+        source: bool,
+    ) -> Self {
         Self {
             moved_state,
             direction,

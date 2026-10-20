@@ -155,7 +155,7 @@ fn apply_server_block(
 ) {
     // Vanilla drops a moving block's entity once its cell holds anything else.
     if crate::world::block::block_id(state) != "moving_piston" {
-        game.moving_pistons.remove(&pos);
+        game.block_entity_anim.pistons.remove(&pos);
     }
     crate::world::block_entity::sync_block_entity(&mut game.chunk_store.block_entities, pos, state);
     if game.interaction.update_known_server_state(&pos, state) {
@@ -206,7 +206,7 @@ impl crate::world::piston::PistonLevel for ClientPistonLevel<'_> {
     }
 
     fn pistons(&mut self) -> &mut crate::world::piston::MovingPistons {
-        &mut self.game.moving_pistons
+        &mut self.game.block_entity_anim.pistons
     }
 
     fn destroy_effect(
@@ -1445,7 +1445,7 @@ impl AppCore {
                 }
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.chunk_store.unload_chunk(&pos);
-                    game.moving_pistons.drop_chunk(pos.x, pos.z);
+                    game.block_entity_anim.drop_chunk(pos.x, pos.z);
                     game.light_engine.on_chunk_unloaded((pos.x, pos.z));
                     game.light_engine
                         .queue_task(crate::world::light::LightTask::Remove {
@@ -2055,11 +2055,9 @@ impl AppCore {
                         p.x.div_euclid(16) != chunk_pos.x || p.z.div_euclid(16) != chunk_pos.z
                     });
                     game.block_entity_anim.drop_chunk(chunk_pos.x, chunk_pos.z);
-                    game.moving_pistons.drop_chunk(chunk_pos.x, chunk_pos.z);
                     for (pos, kind, nbt) in entries {
                         if kind == azalea_registry::builtin::BlockEntityKind::Piston {
-                            game.moving_pistons
-                                .insert(pos, crate::world::piston::MovingPiston::from_nbt(&nbt));
+                            game.block_entity_anim.pistons.insert(pos, crate::world::piston::MovingPiston::from_nbt(&nbt));
                         }
                         game.chunk_store.block_entities.insert(
                             pos,
