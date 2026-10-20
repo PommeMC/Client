@@ -128,16 +128,16 @@ ci-lint:
     @cargo clippy -p pomme-protocol -p pomme-auth --release --all-targets --all-features -- -D warnings
     @cargo clippy -p pomme-dirs -p pomme-install -p azalea-block -p ingame-test -p protogen -p blockgen --release --all-targets -- -D warnings
 
-# Tests; the client's reuse `ci-lint`'s release build.
+# Tests, in the dev profile (dependencies are optimised there).
 ci-test:
-    @cargo test -p pomme-protocol -p pomme-dirs -p pomme-auth -p pomme-install -p ingame-test
-    @cargo test -p pomme-client --release --no-default-features
+    @cargo nextest run -p pomme-protocol -p pomme-dirs -p pomme-auth -p pomme-install -p ingame-test
+    @cargo nextest run -p pomme-client --no-default-features
 
 # SteelMC's crate, the client with it, and the test that boots a real world.
 ci-singleplayer:
     @cargo clippy -p pomme-singleplayer --release --all-targets -- -D warnings
     @cargo clippy -p pomme-client --release --all-targets --features {{ lint_features }} -- -D warnings
-    @cargo test -p pomme-singleplayer --release -- --include-ignored
+    @cargo nextest run -p pomme-singleplayer --run-ignored all
 
 # Regenerate a version's packet-id table from the decompiled reference.
 protogen version="26.2":

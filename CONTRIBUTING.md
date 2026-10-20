@@ -32,8 +32,9 @@ just launcher-pre-pr        # Launcher (Rust & TypeScript)
 
 `client-pre-pr` runs the same `ci-*` recipes CI does, including the
 singleplayer crate's ignored test, which boots a real SteelMC server and writes
-a world to the temp dir, so it takes a minute. Android and iOS have their own
-CI jobs.
+a world to the temp dir. Tests run through
+[cargo-nextest](https://nexte.st) (`cargo install cargo-nextest`). Android and
+iOS have their own CI jobs.
 
 For changes you'd otherwise check in game (items, inventory, entities,
 advancements), `just ingame-test` runs scripted tests against a local vanilla

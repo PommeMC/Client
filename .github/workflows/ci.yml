@@ -67,25 +67,12 @@ jobs:
         with:
           submodules: true
 
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: ./.github/actions/setup-rust
         with:
-          components: clippy
+          cache-key: android
 
       - name: Add the Android target
         run: rustup target add aarch64-linux-android
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: android
-          cache-on-failure: true
-
-      - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa
-        with:
-          vulkan_version: 1.4.341.0
-          install_runtime: false
-          cache: true
-          stripdown: true
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk@4.1.2 --locked
@@ -104,25 +91,12 @@ jobs:
         with:
           submodules: true
 
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: ./.github/actions/setup-rust
         with:
-          components: clippy
+          cache-key: ios
 
       - name: Add the iOS target
         run: rustup target add aarch64-apple-ios
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ios
-          cache-on-failure: true
-
-      - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa
-        with:
-          vulkan_version: 1.4.341.0
-          install_runtime: false
-          cache: true
-          stripdown: true
 
       - uses: actions/cache@v4
         with:
@@ -134,77 +108,81 @@ jobs:
       - name: Clippy
         run: SHADERC_LIB_DIR="$VULKAN_SDK/lib" VULKAN_SDK="$(python3 tools/fetch_moltenvk.py ios)" cargo clippy -p pomme-ios --target aarch64-apple-ios -- -D warnings
 
-  client:
+  fmt:
     needs: changes
-    # Required checks: the job always runs, so it reports under its matrix
-    # name, and its steps skip when there's nothing to check.
-    env:
-      RUN: ${{ needs.changes.outputs.code }}
-    strategy:
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-
-    runs-on: ${{ matrix.os }}
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
     steps:
+      # Submodules too: `cargo fmt --all` resolves SteelMC's path dependencies.
       - uses: actions/checkout@v7
-        if: env.RUN == 'true'
         with:
           submodules: true
 
       - uses: dtolnay/rust-toolchain@nightly
-        if: env.RUN == 'true'
         with:
-          components: clippy, rustfmt
+          components: rustfmt
 
-      - uses: Swatinem/rust-cache@v2
-        if: env.RUN == 'true'
-        with:
-          shared-key: client
-          cache-on-failure: true
-
-      # The checks themselves are `just` recipes, which `just client-pre-pr`
-      # runs locally too.
       - uses: taiki-e/install-action@v2
-        if: env.RUN == 'true'
         with:
           tool: just
 
-      - name: Install Vulkan SDK
-        if: env.RUN == 'true'
-        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa
+      - run: just ci-fmt
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
         with:
-          vulkan_version: 1.4.341.0
-          install_runtime: false
-          cache: true
-          stripdown: true
+          submodules: true
 
-      - name: Install Linux dependencies
-        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvulkan-dev libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev libdbus-1-dev
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: lint
 
-      - name: Format check
-        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
-        run: just ci-fmt
+      - run: just ci-lint
 
-      - name: Clippy
-        if: env.RUN == 'true'
-        run: just ci-lint
+  test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
 
-      - name: Tests
-        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
-        run: just ci-test
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: test
+
+      - run: just ci-test
+
+  # SteelMC on its own, as it's the slowest build; its test boots a real world,
+  # the only check that steel actually starts.
+  singleplayer:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: singleplayer
 
       - name: Pin the steel revision
-        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
         id: steel
         run: echo "rev=$(git -C third_party/SteelMC rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       # Steel's build scripts write generated source and the extracted Minecraft
       # assets into its own source tree, which the cargo cache does not cover.
       - name: Cache the generated steel source
-        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
         uses: actions/cache@v6
         with:
           path: |
@@ -216,10 +194,7 @@ jobs:
             third_party/SteelMC/steel-worldgen/src/generated
           key: steel-generated-${{ steps.steel.outputs.rev }}
 
-      # Its test boots a real world, the only check that steel actually starts.
-      - name: Singleplayer
-        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
-        run: just ci-singleplayer
+      - run: just ci-singleplayer
 
   pr-template:
     runs-on: ubuntu-latest
@@ -287,9 +262,7 @@ jobs:
 
   launcher:
     needs: changes
-    # Required checks, so its steps skip rather than the job (see `client`).
-    env:
-      RUN: ${{ needs.changes.outputs.launcher }}
+    if: needs.changes.outputs.launcher == 'true'
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
@@ -297,40 +270,56 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-        if: env.RUN == 'true'
         with:
           submodules: true
 
       - uses: dtolnay/rust-toolchain@nightly
-        if: env.RUN == 'true'
         with:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
-        if: env.RUN == 'true'
         with:
           shared-key: launcher
           cache-on-failure: true
 
       - name: Install Linux dependencies
-        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Format check
-        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt -p pomme-launcher -- --check
 
       - name: Clippy
-        if: env.RUN == 'true'
         run: cargo clippy -p pomme-launcher --release --all-targets --all-features -- -D warnings
 
       - name: Check bindings are up to date
-        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest'
         run: |
           cargo run -p pomme-launcher --quiet --bin generate-bindings
           if ! git diff --exit-code -- ./pomme-launcher/src/bindings; then
             echo "::error::pomme-launcher/src/bindings is stale. Run 'cargo run -p pomme-launcher --bin generate-bindings' and commit."
             exit 1
           fi
+
+  # The one required check: it passes once every other job has passed or been
+  # skipped, so jobs can be split or skipped without touching the ruleset.
+  ci:
+    if: always()
+    needs:
+      - changes
+      - android
+      - ios
+      - fmt
+      - lint
+      - test
+      - singleplayer
+      - pr-template
+      - launcher-frontend
+      - launcher
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
