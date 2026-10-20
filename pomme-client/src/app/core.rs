@@ -1437,12 +1437,13 @@ impl AppCore {
                                 to_chunk_coord(correction.position.x),
                                 to_chunk_coord(correction.position.z),
                             ));
+                        // The camera is the eye, as `sync_camera_pos` keeps it
+                        // every frame; the feet would seed it a block and a half
+                        // low until the first in-game frame.
+                        renderer.reset_camera(game.player.eye_pos(), correction.look_dir);
+
                         if !game.position_set {
                             game.position_set = true;
-                            // The camera is the eye, as `sync_camera_pos` keeps it
-                            // every frame; the feet would seed it a block and a half
-                            // low until the first in-game frame.
-                            renderer.reset_camera(game.player.eye_pos(), correction.look_dir);
                             tracing::info!(
                                 "Player position set to ({:.1}, {:.1}, {:.1})",
                                 correction.position.x,
@@ -1464,9 +1465,6 @@ impl AppCore {
                             flags: Default::default(),
                         },
                     ));
-                    game.last_sent_pos = game.player.position;
-                    game.last_sent_look_dir = game.player.look_dir;
-                    game.position_send_counter = 0;
                     game.interaction.on_teleport();
                 }
                 NetworkEvent::PlayerRotation {
@@ -2010,67 +2008,6 @@ impl AppCore {
                         pos.z.div_euclid(16),
                     );
                     if game.chunk_store.get_chunk(&chunk_pos).is_some() {
-                        if kind == azalea_registry::builtin::BlockEntityKind::Piston {
-                            let facing_id = nbt
-                                .byte("facing")
-                                .map(|b| b as i32)
-                                .or_else(|| nbt.int("facing"))
-                                .unwrap_or(0);
-                            let facing = match facing_id {
-                                0 => crate::world::block::model::Direction::Down,
-                                1 => crate::world::block::model::Direction::Up,
-                                2 => crate::world::block::model::Direction::North,
-                                3 => crate::world::block::model::Direction::South,
-                                4 => crate::world::block::model::Direction::West,
-                                _ => crate::world::block::model::Direction::East,
-                            };
-                            let extending = nbt
-                                .byte("extending")
-                                .map(|b| b != 0)
-                                .or_else(|| nbt.int("extending").map(|i| i != 0))
-                                .unwrap_or(true);
-                            let source = nbt
-                                .byte("source")
-                                .map(|b| b != 0)
-                                .or_else(|| nbt.int("source").map(|i| i != 0))
-                                .unwrap_or(false);
-                            let progress = nbt.float("progress").unwrap_or(0.0);
-                            let moved_state = if let Some(bs) = nbt.compound("blockState") {
-                                let name_str = bs
-                                    .string("Name")
-                                    .map(|s| s.to_str())
-                                    .unwrap_or(std::borrow::Cow::Borrowed(""));
-                                let name =
-                                    name_str.strip_prefix("minecraft:").unwrap_or(&name_str);
-                                let mut props = Vec::new();
-                                if let Some(p_compound) = bs.compound("Properties") {
-                                    for (k, v) in p_compound.iter() {
-                                        if let Some(val) = v.string() {
-                                            props.push((
-                                                k.to_str().to_string(),
-                                                val.to_str().to_string(),
-                                            ));
-                                        }
-                                    }
-                                }
-                                let prop_refs: Vec<(&str, &str)> = props
-                                    .iter()
-                                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                                    .collect();
-                                crate::world::block::find_state(name, &prop_refs)
-                            } else {
-                                azalea_block::BlockState::AIR
-                            };
-                            game.block_entity_anim.set_moving_piston(
-                                pos,
-                                moved_state,
-                                facing,
-                                extending,
-                                source,
-                                progress,
-                            );
-                        }
-
                         game.chunk_store.block_entities.insert(
                             pos,
                             crate::world::block_entity::StoredBlockEntity { kind, nbt },
@@ -2082,119 +2019,8 @@ impl AppCore {
                     action_id,
                     action_parameter,
                 } => {
-                    let block_state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
-                    let block_id = crate::world::block::block_id(block_state);
-                    if block_id == "piston" || block_id == "sticky_piston" {
-                        let is_sticky = block_id == "sticky_piston";
-                        let facing = match action_parameter {
-                            0 => crate::world::block::model::Direction::Down,
-                            1 => crate::world::block::model::Direction::Up,
-                            2 => crate::world::block::model::Direction::North,
-                            3 => crate::world::block::model::Direction::South,
-                            4 => crate::world::block::model::Direction::West,
-                            _ => crate::world::block::model::Direction::East,
-                        };
-                        let facing_name = match facing {
-                            crate::world::block::model::Direction::Down => "down",
-                            crate::world::block::model::Direction::Up => "up",
-                            crate::world::block::model::Direction::North => "north",
-                            crate::world::block::model::Direction::South => "south",
-                            crate::world::block::model::Direction::West => "west",
-                            crate::world::block::model::Direction::East => "east",
-                        };
-                        let (ox, oy, oz) = match facing {
-                            crate::world::block::model::Direction::Down => (0, -1, 0),
-                            crate::world::block::model::Direction::Up => (0, 1, 0),
-                            crate::world::block::model::Direction::North => (0, 0, -1),
-                            crate::world::block::model::Direction::South => (0, 0, 1),
-                            crate::world::block::model::Direction::West => (-1, 0, 0),
-                            crate::world::block::model::Direction::East => (1, 0, 0),
-                        };
-                        let arm_pos = azalea_core::position::BlockPos::new(
-                            pos.x + ox,
-                            pos.y + oy,
-                            pos.z + oz,
-                        );
-                        let p_type = if is_sticky { "sticky" } else { "normal" };
-                        let head_state = crate::world::block::find_state(
-                            "piston_head",
-                            &[
-                                ("facing", facing_name),
-                                ("type", p_type),
-                                ("short", "false"),
-                            ],
-                        );
-
-                        if action_id == 0 {
-                            // Extend:
-                            let in_front = game
-                                .chunk_store
-                                .get_block_state(arm_pos.x, arm_pos.y, arm_pos.z);
-                            let in_front_id = crate::world::block::block_id(in_front);
-                            if in_front_id != "air" && in_front_id != "piston_head" {
-                                let pushed_dest = azalea_core::position::BlockPos::new(
-                                    arm_pos.x + ox,
-                                    arm_pos.y + oy,
-                                    arm_pos.z + oz,
-                                );
-                                game.block_entity_anim.set_moving_piston(
-                                    pushed_dest,
-                                    in_front,
-                                    facing,
-                                    true,
-                                    false,
-                                    0.0,
-                                );
-                            }
-                            let ext_base = crate::world::block::find_state(
-                                block_id,
-                                &[("facing", facing_name), ("extended", "true")],
-                            );
-                            apply_server_block(game, &mut priority_remesh, pos, ext_base);
-                            apply_server_block(
-                                game,
-                                &mut priority_remesh,
-                                arm_pos,
-                                azalea_block::BlockState::AIR,
-                            );
-                            game.block_entity_anim
-                                .set_moving_piston(arm_pos, head_state, facing, true, true, 0.0);
-                        } else {
-                            // Retract (action_id 1 or 2):
-                            let two_pos = azalea_core::position::BlockPos::new(
-                                arm_pos.x + ox,
-                                arm_pos.y + oy,
-                                arm_pos.z + oz,
-                            );
-                            let two_state = game
-                                .chunk_store
-                                .get_block_state(two_pos.x, two_pos.y, two_pos.z);
-                            let two_id = crate::world::block::block_id(two_state);
-                            if is_sticky
-                                && action_id == 1
-                                && two_id != "air"
-                                && two_id != "piston_head"
-                            {
-                                apply_server_block(
-                                    game,
-                                    &mut priority_remesh,
-                                    two_pos,
-                                    azalea_block::BlockState::AIR,
-                                );
-                                game.block_entity_anim.set_moving_piston(
-                                    arm_pos, two_state, facing, false, false, 0.0,
-                                );
-                            }
-                            apply_server_block(
-                                game,
-                                &mut priority_remesh,
-                                arm_pos,
-                                azalea_block::BlockState::AIR,
-                            );
-                            game.block_entity_anim
-                                .set_moving_piston(pos, head_state, facing, false, true, 0.0);
-                        }
-                    } else if action_id == 1 {
+                    // Action 1 for chest/shulker = open-viewer count.
+                    if action_id == 1 {
                         game.block_entity_anim.set_open_count(pos, action_parameter);
                     }
                 }

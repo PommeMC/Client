@@ -1304,8 +1304,10 @@ pub fn shape_occludes(from: BlockState, to: BlockState, face: usize) -> bool {
 }
 
 /// The block's state matching the given property values (unlisted properties
-/// take whatever the first match has).
-pub fn find_state(name: &str, props: &[(&str, &str)]) -> BlockState {
+/// take whatever the first match has); shared with the light-engine tests
+/// and the CPU bench.
+#[cfg(any(test, feature = "cpu-bench"))]
+pub(crate) fn find_state(name: &str, props: &[(&str, &str)]) -> BlockState {
     all_states()
         .find(|(s, d)| {
             d.id == name
@@ -1313,8 +1315,8 @@ pub fn find_state(name: &str, props: &[(&str, &str)]) -> BlockState {
                     .iter()
                     .all(|&(k, v)| block_properties(*s).get(k) == Some(v))
         })
-        .map(|(s, _)| s)
-        .unwrap_or(BlockState::AIR)
+        .unwrap_or_else(|| panic!("no state {name} {props:?}"))
+        .0
 }
 
 #[cfg(test)]

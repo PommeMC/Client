@@ -3916,7 +3916,6 @@ pub fn update_game(
         build_item_render_infos(
             &game.item_entity_store,
             &game.chunk_store,
-            &game.block_entity_anim,
             &gfx.renderer,
             game.cardinal_light,
             *gfx.renderer.camera_pivot_position(),
@@ -4498,11 +4497,9 @@ fn shadow_casters(
     entities.chain(items).collect()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_item_render_infos(
     entity_store: &crate::entity::ItemEntityStore,
     chunk_store: &ChunkStore,
-    block_entity_anim: &crate::world::block_entity_anim::BlockEntityAnimStore,
     renderer: &Renderer,
     cardinal_light: CardinalLightType,
     camera_pos: glam::DVec3,
@@ -4558,50 +4555,6 @@ fn build_item_render_infos(
             light,
             nether_lighting,
         );
-    }
-
-    for (pos, anim) in block_entity_anim.moving_pistons() {
-        let block_id = crate::world::block::block_id(anim.moved_state);
-        if block_id == "air" {
-            continue;
-        }
-        let variant_key = renderer.registry().get_baked_variant_key(anim.moved_state);
-        let item_key = if let Some(vk) = variant_key {
-            let specific = format!("{block_id}:{vk}");
-            if renderer.item_mesh_info(&specific).is_some() {
-                specific
-            } else {
-                block_id.to_string()
-            }
-        } else {
-            block_id.to_string()
-        };
-
-        if renderer.item_mesh_info(&item_key).is_none() {
-            continue;
-        }
-
-        let offset = anim.offset(partial_tick);
-        let world_pos = glam::DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64);
-        let block_rel = (world_pos - anchor).as_vec3();
-        let model_matrix =
-            glam::Mat4::from_translation(block_rel + glam::Vec3::splat(0.5) + offset);
-        let light = get_entity_light(
-            chunk_store,
-            (world_pos + glam::DVec3::new(0.5, 0.5, 0.5)).into(),
-        );
-        let tints = renderer
-            .registry()
-            .item_tint_palette(&item_key, None, None)
-            .into();
-
-        infos.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
-            item_name: item_key,
-            tints,
-            model_matrix,
-            light,
-            nether_lighting,
-        });
     }
 
     infos
