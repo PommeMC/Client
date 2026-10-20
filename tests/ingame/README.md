@@ -14,10 +14,15 @@ A full run takes about half a minute, server start included, and needs no one
 at the keyboard, so it's cheap to rerun on every change.
 
 ```sh
-just ingame-test                          # every script in this directory
-just ingame-test inventory_armor_equip    # one script
+just ingame-test                          # every script
+just ingame-test entities                 # every script in a folder
+just ingame-test player/armor_equip       # one script
 just ingame-test --jobs 2                 # two at once (default 6)
 ```
+
+Scripts live in a folder per area (`blocks`, `entities`, `items`, `player`,
+`ui`, `world`); a new one goes in the folder it tests. A script's name is its
+path without `.toml`.
 
 The runner (`tools/ingame-test`):
 
@@ -32,7 +37,8 @@ With `--jobs N`, N workers each start their own server and world under
 clients use a game dir there too, so a run never touches your own options.
 
 Each script writes `report.json`, its screenshots and the client's output
-(`client.log`) to `target/ingame/<script>/`. The run fails if any script does.
+(`client.log`) to `target/ingame/<script>/`, e.g. `target/ingame/entities/data/`.
+The run fails if any script does.
 
 ## The harness
 

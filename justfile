@@ -38,7 +38,8 @@ client-build *args: openal
     @cargo build -p pomme-client {{ args }}
 
 # In-game test scripts (tests/ingame/README.md) against a local vanilla
-# 26.2 server, e.g. `just ingame-test inventory_armor_equip`; no name runs them all.
+# 26.2 server, e.g. `just ingame-test player/armor_equip` or a whole folder like
+# `just ingame-test entities`; no name runs them all.
 ingame-test *scripts: openal
     @cargo run -p ingame-test -- {{ scripts }}
 

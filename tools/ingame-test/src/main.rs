@@ -1,9 +1,10 @@
-//! Runs pomme's in-game test scripts (`tests/ingame/*.toml`) against a local
+//! Runs pomme's in-game test scripts (`tests/ingame/**/*.toml`) against a local
 //! vanilla 26.2 server: downloads and verifies the server jar once, starts it
 //! offline with the test player opped, then runs a harness client per script.
 //!
-//! `ingame-test [--jobs N] [scripts...]` runs the named scripts (all when
-//! none) on N workers, each with its own server and world;
+//! `ingame-test [--jobs N] [scripts...]` runs the named scripts or folders
+//! (all when none, e.g. `entities` or `entities/data`) on N workers, each
+//! with its own server and world;
 //! `ingame-test --server-only` starts the server for live socket sessions.
 
 use std::io::{BufRead, BufReader, Write};
@@ -84,7 +85,7 @@ fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
 
 /// Whether every script passed.
 fn run(server_only: bool, jobs: usize, names: &[String]) -> Result<bool, String> {
-    let scripts = scripts(names)?;
+    let scripts = scripts(Path::new(SCRIPT_DIR), names)?;
     let server_dir = Path::new(OUT_DIR).join("server");
     let jar = server_jar(&server_dir)?;
     let java = java()?;
@@ -141,26 +142,49 @@ fn run(server_only: bool, jobs: usize, names: &[String]) -> Result<bool, String>
     Ok(failed.is_empty())
 }
 
-/// The named scripts, or every script in `tests/ingame`.
-fn scripts(names: &[String]) -> Result<Vec<PathBuf>, String> {
-    if !names.is_empty() {
-        return names
-            .iter()
-            .map(|name| {
-                let path = Path::new(SCRIPT_DIR).join(name).with_extension("toml");
-                path.exists()
-                    .then_some(path.clone())
-                    .ok_or_else(|| format!("no script {}", path.display()))
-            })
-            .collect();
+/// The named scripts and folders under `root`, or every script in it.
+fn scripts(root: &Path, names: &[String]) -> Result<Vec<PathBuf>, String> {
+    if names.is_empty() {
+        return scripts_under(root);
     }
-    let mut all: Vec<PathBuf> = std::fs::read_dir(SCRIPT_DIR)
-        .map_err(|e| format!("{SCRIPT_DIR}: {e}"))?
-        .filter_map(|entry| Some(entry.ok()?.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
-        .collect();
+    let mut all = Vec::new();
+    for name in names {
+        let path = root.join(name);
+        let script = path.with_extension("toml");
+        if script.is_file() {
+            all.push(script);
+        } else if path.is_dir() {
+            all.extend(scripts_under(&path)?);
+        } else {
+            return Err(format!("no script or folder {}", path.display()));
+        }
+    }
+    Ok(all)
+}
+
+/// Every script in `dir` and its subfolders, sorted.
+fn scripts_under(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut all = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.is_dir() {
+            all.extend(scripts_under(&path)?);
+        } else if path.extension().is_some_and(|ext| ext == "toml") {
+            all.push(path);
+        }
+    }
     all.sort();
     Ok(all)
+}
+
+/// A script's name: its path under `root` without `.toml`, e.g.
+/// `entities/data`, which also names its output folder.
+fn script_name(root: &Path, script: &Path) -> String {
+    let relative = script.strip_prefix(root).unwrap_or(script);
+    relative
+        .with_extension("")
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 /// The verified server jar, downloaded on first use.
@@ -271,8 +295,8 @@ fn build_client() -> Result<(), String> {
 /// Runs one script in a harness client, logging to `client.log` in its
 /// output dir; whether it passed.
 fn run_script(script: &Path, port: u16, game_dir: &Path) -> Result<bool, String> {
-    let name = script.file_stem().unwrap_or_default().to_string_lossy();
-    let out = Path::new(OUT_DIR).join(&*name);
+    let name = script_name(Path::new(SCRIPT_DIR), script);
+    let out = Path::new(OUT_DIR).join(&name);
     std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
     let log_path = out.join("client.log");
     let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
@@ -435,5 +459,40 @@ impl Drop for Server {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scripts_resolve_by_folder_and_name() {
+        let root = std::env::temp_dir().join(format!("ingame-test-scripts-{}", std::process::id()));
+        for file in [
+            "a/one.toml",
+            "a/two.toml",
+            "b/one.toml",
+            "top.toml",
+            "a/notes.md",
+        ] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let names = |paths: Vec<PathBuf>| -> Vec<String> {
+            paths.iter().map(|p| script_name(&root, p)).collect()
+        };
+        assert_eq!(
+            names(scripts(&root, &[]).unwrap()),
+            ["a/one", "a/two", "b/one", "top"]
+        );
+        assert_eq!(
+            names(scripts(&root, &["a".into()]).unwrap()),
+            ["a/one", "a/two"]
+        );
+        assert_eq!(names(scripts(&root, &["b/one".into()]).unwrap()), ["b/one"]);
+        assert!(scripts(&root, &["c".into()]).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
