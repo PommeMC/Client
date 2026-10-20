@@ -4493,8 +4493,8 @@ fn moving_block_renders(
             continue;
         }
         let origin = [pos.x, pos.y, pos.z];
-        let [bx, by, bz] = moving.movement_direction().opposite().offset();
-        let cell = [pos.x + bx, pos.y + by, pos.z + bz];
+        let cell = piston::relative(*pos, moving.movement_direction().opposite(), 1);
+        let cell = [cell.x, cell.y, cell.z];
         let mut mesh = |state, cell, base| {
             renders.push(crate::renderer::chunk::moving_blocks::MovingBlockRender {
                 origin,
@@ -4505,16 +4505,12 @@ fn moving_block_renders(
         };
         let progress = moving.progress(partial_tick);
         let offset = moving.offset(partial_tick);
-        let short = |short: bool| if short { "true" } else { "false" };
         if block_id(state) == "piston_head" && progress <= 4.0 {
-            let head = with_property(state, "short", short(progress <= 0.5)).unwrap_or(state);
-            mesh(head, cell, offset);
+            mesh(piston::with_short(state, progress <= 0.5), cell, offset);
         } else if moving.source && !moving.extending {
-            let Some(facing) = piston::facing(state) else {
+            let Some(head) = piston::head_of(state, progress >= 0.5) else {
                 continue;
             };
-            let sticky = block_id(state) == "sticky_piston";
-            let head = piston::piston_head(facing, sticky, progress >= 0.5);
             mesh(head, cell, offset);
             let base = with_property(state, "extended", "true").unwrap_or(state);
             mesh(base, origin, [0.0; 3]);

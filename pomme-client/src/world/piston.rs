@@ -100,6 +100,12 @@ impl MovingPiston {
         self.direction.offset().map(|step| step as f32 * amount)
     }
 
+    /// Vanilla `moveByPositionAndProgress`'s offset: where the block has got
+    /// to, relative to its cell.
+    pub fn extension(&self) -> glam::DVec3 {
+        glam::Vec3::from(self.offset(1.0)).as_dvec3()
+    }
+
     /// Vanilla `getMovementDirection`.
     pub fn movement_direction(&self) -> Direction {
         if self.extending {
@@ -189,8 +195,7 @@ pub fn trigger_event(level: &mut impl PistonLevel, pos: BlockPos, b0: u8, b1: u8
                 && !block::is_air(moving)
                 && is_pushable(level, moving, two, direction.opposite(), false, direction)
                 && (block::block_behavior(moving).push_reaction == PushReaction::Normal
-                    || is(moving, "piston")
-                    || is(moving, "sticky_piston"))
+                    || is_piston_base(moving))
             {
                 move_blocks(level, pos, direction, false, sticky);
             } else {
@@ -343,7 +348,7 @@ fn is_pushable(
         return false;
     }
     let behavior = block::block_behavior(state);
-    if is(state, "piston") || is(state, "sticky_piston") {
+    if is_piston_base(state) {
         if block::block_properties(state).get("extended") == Some("true") {
             return false;
         }
@@ -529,8 +534,8 @@ impl Resolver {
 
     fn add_branching_blocks(&mut self, level: &impl PistonLevel, from_pos: BlockPos) -> bool {
         let from_state = level.block(from_pos);
-        for direction in ALL_DIRECTIONS {
-            if axis(direction) == axis(self.push_direction) {
+        for direction in Direction::VALUES {
+            if direction.axis() == self.push_direction.axis() {
                 continue;
             }
             let neighbour_pos = relative(from_pos, direction, 1);
@@ -544,16 +549,6 @@ impl Resolver {
         true
     }
 }
-
-/// `Direction.values()` order.
-const ALL_DIRECTIONS: [Direction; 6] = [
-    Direction::Down,
-    Direction::Up,
-    Direction::North,
-    Direction::South,
-    Direction::West,
-    Direction::East,
-];
 
 fn is_sticky(state: BlockState) -> bool {
     is(state, "slime_block") || is(state, "honey_block")
@@ -573,41 +568,24 @@ fn is(state: BlockState, name: &str) -> bool {
     block::block_id(state) == name
 }
 
-fn relative(pos: BlockPos, direction: Direction, steps: i32) -> BlockPos {
+pub(crate) fn relative(pos: BlockPos, direction: Direction, steps: i32) -> BlockPos {
     let [x, y, z] = direction.offset();
     BlockPos::new(pos.x + x * steps, pos.y + y * steps, pos.z + z * steps)
 }
 
-fn axis(direction: Direction) -> u8 {
-    match direction {
-        Direction::Down | Direction::Up => 1,
-        Direction::North | Direction::South => 2,
-        Direction::West | Direction::East => 0,
-    }
-}
-
 /// Vanilla `Direction.from3DDataValue`.
 fn from_3d_data_value(id: u8) -> Direction {
-    ALL_DIRECTIONS[(id % 6) as usize]
+    Direction::VALUES[(id % 6) as usize]
 }
 
-fn direction_name(direction: Direction) -> &'static str {
-    match direction {
-        Direction::Down => "down",
-        Direction::Up => "up",
-        Direction::North => "north",
-        Direction::South => "south",
-        Direction::West => "west",
-        Direction::East => "east",
-    }
+/// Whether `state` is a piston base, vanilla `instanceof PistonBaseBlock`.
+pub fn is_piston_base(state: BlockState) -> bool {
+    is(state, "piston") || is(state, "sticky_piston")
 }
 
 /// A piston-family block's `facing`.
 pub fn facing(state: BlockState) -> Option<Direction> {
-    let name = block::block_properties(state).get("facing")?;
-    ALL_DIRECTIONS
-        .into_iter()
-        .find(|&d| direction_name(d) == name)
+    Direction::from_str(block::block_properties(state).get("facing")?)
 }
 
 fn piston_type(sticky: bool) -> &'static str {
@@ -617,10 +595,7 @@ fn piston_type(sticky: bool) -> &'static str {
 fn moving_piston(direction: Direction, sticky: bool) -> BlockState {
     block::state_with(
         "moving_piston",
-        &[
-            ("facing", direction_name(direction)),
-            ("type", piston_type(sticky)),
-        ],
+        &[("facing", direction.name()), ("type", piston_type(sticky))],
     )
     .unwrap_or(BlockState::AIR)
 }
@@ -628,23 +603,27 @@ fn moving_piston(direction: Direction, sticky: bool) -> BlockState {
 /// A retracted piston base, vanilla `defaultBlockState().setValue(FACING, ..)`.
 fn piston_base(sticky: bool, direction: Direction) -> BlockState {
     let name = if sticky { "sticky_piston" } else { "piston" };
-    block::state_with(
-        name,
-        &[("facing", direction_name(direction)), ("extended", "false")],
-    )
-    .unwrap_or(BlockState::AIR)
+    block::state_with(name, &[("facing", direction.name()), ("extended", "false")])
+        .unwrap_or(BlockState::AIR)
 }
 
 pub fn piston_head(direction: Direction, sticky: bool, short: bool) -> BlockState {
-    block::state_with(
+    let head = block::state_with(
         "piston_head",
-        &[
-            ("facing", direction_name(direction)),
-            ("type", piston_type(sticky)),
-            ("short", if short { "true" } else { "false" }),
-        ],
+        &[("facing", direction.name()), ("type", piston_type(sticky))],
     )
-    .unwrap_or(BlockState::AIR)
+    .unwrap_or(BlockState::AIR);
+    with_short(head, short)
+}
+
+/// `head` with its `short` property (the shorter arm) set.
+pub fn with_short(head: BlockState, short: bool) -> BlockState {
+    block::with_property(head, "short", if short { "true" } else { "false" }).unwrap_or(head)
+}
+
+/// The head of piston base `base`: its type and facing.
+pub fn head_of(base: BlockState, short: bool) -> Option<BlockState> {
+    Some(piston_head(facing(base)?, is(base, "sticky_piston"), short))
 }
 
 /// Vanilla `BlockState.CODEC`: `{Name, Properties}`.

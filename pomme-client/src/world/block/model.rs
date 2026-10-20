@@ -213,6 +213,16 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// Vanilla `Direction.values()`, indexed by the 3D data value.
+    pub const VALUES: [Direction; 6] = [
+        Direction::Down,
+        Direction::Up,
+        Direction::North,
+        Direction::South,
+        Direction::West,
+        Direction::East,
+    ];
+
     pub fn opposite(self) -> Self {
         match self {
             Direction::Down => Direction::Up,
@@ -235,7 +245,34 @@ impl Direction {
         }
     }
 
-    fn from_str(s: &str) -> Option<Self> {
+    /// The index of the direction's axis: 0 for X, 1 for Y, 2 for Z.
+    pub fn axis(self) -> usize {
+        match self {
+            Direction::West | Direction::East => 0,
+            Direction::Down | Direction::Up => 1,
+            Direction::North | Direction::South => 2,
+        }
+    }
+
+    /// The unit step along the direction.
+    pub fn step(self) -> glam::DVec3 {
+        let [x, y, z] = self.offset();
+        glam::dvec3(x.into(), y.into(), z.into())
+    }
+
+    /// The block-state property value, vanilla `getSerializedName`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Direction::Down => "down",
+            Direction::Up => "up",
+            Direction::North => "north",
+            Direction::South => "south",
+            Direction::West => "west",
+            Direction::East => "east",
+        }
+    }
+
+    pub(crate) fn from_str(s: &str) -> Option<Self> {
         match s {
             "down" => Some(Direction::Down),
             "up" => Some(Direction::Up),

@@ -1385,15 +1385,7 @@ pub fn shape_occludes(from: BlockState, to: BlockState, face: usize) -> bool {
 /// and the CPU bench.
 #[cfg(any(test, feature = "cpu-bench"))]
 pub(crate) fn find_state(name: &str, props: &[(&str, &str)]) -> BlockState {
-    all_states()
-        .find(|(s, d)| {
-            d.id == name
-                && props
-                    .iter()
-                    .all(|&(k, v)| block_properties(*s).get(k) == Some(v))
-        })
-        .unwrap_or_else(|| panic!("no state {name} {props:?}"))
-        .0
+    state_with(name, props).unwrap_or_else(|| panic!("no state {name} {props:?}"))
 }
 
 #[cfg(test)]

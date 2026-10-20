@@ -63,6 +63,22 @@ impl Aabb {
             && self.max.z > other.min.z
     }
 
+    /// Vanilla `AABB.minmax`: the box around both.
+    pub fn minmax(&self, other: &Aabb) -> Self {
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+        }
+    }
+
+    /// Vanilla `AABB.intersect`: the overlap of both.
+    pub fn intersect(&self, other: &Aabb) -> Self {
+        Self {
+            min: self.min.max(other.min),
+            max: self.max.min(other.max),
+        }
+    }
+
     pub fn offset(self, offset: DVec3) -> Self {
         Self {
             min: self.min + offset,

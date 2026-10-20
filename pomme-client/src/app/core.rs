@@ -188,6 +188,19 @@ struct ClientPistonLevel<'a> {
     destroyed: Vec<(azalea_core::position::BlockPos, azalea_block::BlockState)>,
 }
 
+impl<'a> ClientPistonLevel<'a> {
+    fn new(
+        game: &'a mut GameState,
+        remesh: &'a mut Vec<(azalea_core::position::ChunkPos, i32)>,
+    ) -> Self {
+        Self {
+            game,
+            remesh,
+            destroyed: Vec::new(),
+        }
+    }
+}
+
 impl crate::world::piston::PistonLevel for ClientPistonLevel<'_> {
     fn block(&self, pos: azalea_core::position::BlockPos) -> azalea_block::BlockState {
         self.game.chunk_store.get_block_state(pos.x, pos.y, pos.z)
@@ -222,11 +235,7 @@ impl crate::world::piston::PistonLevel for ClientPistonLevel<'_> {
 /// the block-entity point of the game tick; their landings remesh at once.
 pub(crate) fn tick_moving_pistons(core: &AppCore, game: &mut GameState) {
     let mut remesh = Vec::new();
-    let mut level = ClientPistonLevel {
-        game,
-        remesh: &mut remesh,
-        destroyed: Vec::new(),
-    };
+    let mut level = ClientPistonLevel::new(game, &mut remesh);
     let descending = core
         .input
         .performing_action(crate::app::input::Action::Sneak);
@@ -249,14 +258,41 @@ pub(crate) fn tick_moving_pistons(core: &AppCore, game: &mut GameState) {
             );
         }
     });
+    enqueue_edits(game, &remesh, core.menu.chunk_detail);
+}
+
+/// Meshes edited sections at once on the priority lane, ungated by
+/// visibility.
+fn enqueue_edits(
+    game: &mut GameState,
+    sections: &[(azalea_core::position::ChunkPos, i32)],
+    chunk_detail: u32,
+) {
     let player_chunk = game.player_chunk();
-    for (col, si) in remesh {
-        game.enqueue_section_edit(
-            col,
-            si,
-            chunk_lod(col, player_chunk, core.menu.chunk_detail),
-        );
+    for &(col, si) in sections {
+        game.enqueue_section_edit(col, si, chunk_lod(col, player_chunk, chunk_detail));
     }
+}
+
+/// Vanilla `LevelEventHandler` case 2001: a broken block's sound and
+/// particles.
+fn block_break_effect(
+    audio: &crate::audio::AudioEngine,
+    game: &mut GameState,
+    registry: &crate::world::block::registry::BlockRegistry,
+    pos: azalea_core::position::BlockPos,
+    state: azalea_block::BlockState,
+) {
+    if !crate::world::block::is_air(state) {
+        crate::player::interaction::play_break_sound(audio, state, pos);
+    }
+    game.particle_store.add_destroy_block_effect(
+        pos,
+        state,
+        registry,
+        &game.chunk_store,
+        &game.biome_climate,
+    );
 }
 
 /// The local player's box as a push target, gated on `LivingEntity.isPushable`
@@ -2112,15 +2148,8 @@ impl AppCore {
                     // Vanilla `Level.blockEvent` hands the event to the block
                     // the client has there.
                     let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
-                    if matches!(
-                        crate::world::block::block_id(state),
-                        "piston" | "sticky_piston"
-                    ) {
-                        let mut level = ClientPistonLevel {
-                            game,
-                            remesh: &mut priority_remesh,
-                            destroyed: Vec::new(),
-                        };
+                    if crate::world::piston::is_piston_base(state) {
+                        let mut level = ClientPistonLevel::new(game, &mut priority_remesh);
                         crate::world::piston::trigger_event(
                             &mut level,
                             pos,
@@ -2128,14 +2157,7 @@ impl AppCore {
                             action_parameter,
                         );
                         for (pos, state) in std::mem::take(&mut level.destroyed) {
-                            crate::player::interaction::play_break_sound(&self.audio, state, pos);
-                            game.particle_store.add_destroy_block_effect(
-                                pos,
-                                state,
-                                renderer.registry(),
-                                &game.chunk_store,
-                                &game.biome_climate,
-                            );
+                            block_break_effect(&self.audio, game, renderer.registry(), pos, state);
                         }
                     } else if action_id == 1 {
                         // Chest/shulker: the open-viewer count.
@@ -2421,16 +2443,7 @@ impl AppCore {
                     if event_type == 2001
                         && let Some(state) = crate::world::block::try_state(data)
                     {
-                        if !crate::world::block::is_air(state) {
-                            crate::player::interaction::play_break_sound(&self.audio, state, pos);
-                        }
-                        game.particle_store.add_destroy_block_effect(
-                            pos,
-                            state,
-                            renderer.registry(),
-                            &game.chunk_store,
-                            &game.biome_climate,
-                        );
+                        block_break_effect(&self.audio, game, renderer.registry(), pos, state);
                     }
                 }
                 NetworkEvent::LevelParticles {
@@ -2841,15 +2854,7 @@ impl AppCore {
         }
 
         let player_chunk = game.player_chunk();
-        // Edits mesh the affected section(s) immediately on the priority lane,
-        // ungated by visibility.
-        for &(col, si) in &priority_remesh {
-            game.enqueue_section_edit(
-                col,
-                si,
-                chunk_lod(col, player_chunk, self.menu.chunk_detail),
-            );
-        }
+        enqueue_edits(game, &priority_remesh, self.menu.chunk_detail);
 
         // Refresh the frustum tiers (throttled to camera movement / new loads),
         // then enqueue everything that needs meshing — visible-first, with hidden

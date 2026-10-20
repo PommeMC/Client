@@ -7,11 +7,12 @@ use super::block_shape::{self, CollisionContext};
 use crate::entity::components::Velocity;
 use crate::world::block::model::Direction;
 use crate::world::block::{
-    SpecialCollision, block_id, block_properties, collision_shape_position,
-    has_large_collision_shape, special_collision, with_property,
+    SpecialCollision, block_properties, collision_shape_position, has_large_collision_shape,
+    special_collision, with_property,
 };
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
+use crate::world::piston;
 
 /// What the block collision scan reads.
 #[derive(Clone, Copy)]
@@ -73,35 +74,22 @@ impl CollisionWorld<'_> {
         else {
             return;
         };
-        let mut add = |state: BlockState, offset: DVec3| {
-            let base = collision_shape_position(state, pos.x, pos.y, pos.z) + offset;
-            match block_shape::collision_shape(state, pos.y, &CollisionContext::EMPTY) {
-                Some(local) => boxes.extend(local.iter().map(|&b| Aabb::from_local(b, base))),
-                None => boxes.push(Aabb::from_local([0.0, 0.0, 0.0, 1.0, 1.0, 1.0], base)),
-            }
-        };
+        let empty = &CollisionContext::EMPTY;
         let moved = piston.moved_state;
-        if !piston.extending
-            && piston.source
-            && matches!(block_id(moved), "piston" | "sticky_piston")
-        {
-            add(
-                with_property(moved, "extended", "true").unwrap_or(moved),
-                DVec3::ZERO,
-            );
+        if !piston.extending && piston.source && piston::is_piston_base(moved) {
+            let base = with_property(moved, "extended", "true").unwrap_or(moved);
+            state_boxes(base, pos, empty, DVec3::ZERO, boxes);
         }
         if piston.progress < 1.0 && self.piston_noclip == Some(piston.movement_direction()) {
             return;
         }
         let state = if piston.source {
             let short = piston.extending != (1.0 - piston.progress < 0.25);
-            crate::world::piston::piston_head(piston.direction, false, short)
+            piston::piston_head(piston.direction, false, short)
         } else {
             moved
         };
-        let [x, y, z] = piston.direction.offset();
-        let extended = f64::from(piston.extended_progress(piston.progress));
-        add(state, dvec3(x.into(), y.into(), z.into()) * extended);
+        state_boxes(state, pos, empty, piston.extension(), boxes);
     }
 
     /// Shapes that come from block entity state rather than the block table;
@@ -131,6 +119,23 @@ impl CollisionWorld<'_> {
             |state, pos, boxes| self.special_boxes(state, pos, boxes),
             visit,
         );
+    }
+}
+
+/// `state`'s collision boxes at `pos`, moved by `offset`.
+pub(crate) fn state_boxes(
+    state: BlockState,
+    pos: BlockPos,
+    ctx: &CollisionContext,
+    offset: DVec3,
+    boxes: &mut Vec<Aabb>,
+) {
+    match block_shape::collision_shape(state, pos.y, ctx) {
+        Some(local) => {
+            let base = collision_shape_position(state, pos.x, pos.y, pos.z) + offset;
+            boxes.extend(local.iter().map(|&b| Aabb::from_local(b, base)));
+        }
+        None => boxes.push(Aabb::block(pos.x, pos.y, pos.z).offset(offset)),
     }
 }
 
@@ -170,13 +175,7 @@ fn for_each_block_collision(
                 let pos = BlockPos::new(bx, by, bz);
                 boxes.clear();
                 if !special_boxes(state, pos, &mut boxes) {
-                    match block_shape::collision_shape(state, by, ctx) {
-                        Some(local) => {
-                            let offset = collision_shape_position(state, bx, by, bz);
-                            boxes.extend(local.iter().map(|&b| Aabb::from_local(b, offset)));
-                        }
-                        None => boxes.push(Aabb::block(bx, by, bz)),
-                    }
+                    state_boxes(state, pos, ctx, DVec3::ZERO, &mut boxes);
                 }
                 if boxes.iter().any(|b| b.intersects(region)) {
                     visit(pos, &boxes);
@@ -574,7 +573,6 @@ mod tests {
         );
         assert!(boxes.iter().any(|b| b.max.x > 5.0), "{boxes:?}");
 
-        // No moving block: nothing to collide with.
         let mut empty = Vec::new();
         assert!(world.special_boxes(moving, BlockPos::new(0, 64, 0), &mut empty));
         assert!(empty.is_empty());

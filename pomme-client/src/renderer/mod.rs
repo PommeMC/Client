@@ -1882,7 +1882,6 @@ impl Renderer {
                 let t_cull = std::time::Instant::now();
                 // Solid (no discard) first so it lays down depth and early-Z lets
                 // the front-to-back order reject occluded fragments; cutout after.
-                // Blocks a piston is moving go through the same pipelines.
                 self.moving_block_buffers.upload(frame, moving_blocks);
                 self.chunk_pipeline.bind(cmd, frame, false);
                 self.chunk_buffers.draw_indirect(cmd, frame, false);

@@ -910,22 +910,17 @@ impl MeshDispatcher {
         let mut sink = MeshSink::default();
         let model_offset = crate::world::block::block_position_offset(state, x, z);
         let model_pos = (glam::Vec3::from(base) + model_offset.as_vec3()).to_array();
-        let (registry, uv_map) = (&*self.registry, &*self.uv_map);
-        if let Some(baked) = registry.get_baked_model(state) {
-            emit_baked_model(
-                &mut sink, model_pos, state, baked, &snapshot, registry, uv_map, x, y, z,
-            );
-        } else if let Some(quads) = registry.get_multipart_quads(state) {
-            emit_multipart(
-                &mut sink, model_pos, state, &quads, &snapshot, registry, uv_map, x, y, z,
-            );
-        } else if let Some(textures) = registry.get_textures(state) {
-            emit_cube_faces(
-                &mut sink, model_pos, state, textures, &snapshot, registry, uv_map, x, y, z,
-            );
-        } else {
-            emit_missing_cube(&mut sink, model_pos, &snapshot, registry, uv_map, x, y, z);
-        }
+        emit_block_model(
+            &mut sink,
+            model_pos,
+            state,
+            &snapshot,
+            &self.registry,
+            &self.uv_map,
+            x,
+            y,
+            z,
+        );
         MovingBlockMesh {
             vertices: sink.vertices.iter().map(pack_vertex).collect(),
             solid: sink.solid,
@@ -1745,24 +1740,13 @@ fn mesh_chunk_snapshot(
                     emit_fluid(
                         sink, kind, block_pos, state, snapshot, registry, uv_map, bx, by, bz,
                     );
-                } else if let Some(baked) = registry.get_baked_model(state) {
-                    emit_baked_model(
-                        sink, model_pos, state, baked, snapshot, registry, uv_map, bx, by, bz,
-                    );
-                } else if let Some(quads) = registry.get_multipart_quads(state) {
-                    emit_multipart(
-                        sink, model_pos, state, &quads, snapshot, registry, uv_map, bx, by, bz,
-                    );
-                } else if let Some(textures) = registry.get_textures(state) {
-                    emit_cube_faces(
-                        sink, model_pos, state, textures, snapshot, registry, uv_map, bx, by, bz,
-                    );
-                } else {
+                } else if !emit_block_model(
+                    sink, model_pos, state, snapshot, registry, uv_map, bx, by, bz,
+                ) {
                     let id = crate::world::block::block_id(state);
                     if logged_missing.insert(id) {
                         tracing::warn!("Missing model: {id}");
                     }
-                    emit_missing_cube(sink, model_pos, snapshot, registry, uv_map, bx, by, bz);
                 }
                 by += step;
             }
@@ -1811,6 +1795,41 @@ fn mesh_chunk_snapshot(
         queue_ms: 0.0,
         mesh_ms: 0.0,
     }
+}
+
+/// A block's model: its baked variant, multipart quads or plain cube, else
+/// the missing cube, in which case it returns `false`.
+// Inlined: a call here costs the chunk mesher ~3%.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn emit_block_model(
+    sink: &mut MeshSink,
+    model_pos: [f32; 3],
+    state: azalea_block::BlockState,
+    snapshot: &ChunkStoreSnapshot,
+    registry: &BlockRegistry,
+    uv_map: &AtlasUVMap,
+    bx: i32,
+    by: i32,
+    bz: i32,
+) -> bool {
+    if let Some(baked) = registry.get_baked_model(state) {
+        emit_baked_model(
+            sink, model_pos, state, baked, snapshot, registry, uv_map, bx, by, bz,
+        );
+    } else if let Some(quads) = registry.get_multipart_quads(state) {
+        emit_multipart(
+            sink, model_pos, state, &quads, snapshot, registry, uv_map, bx, by, bz,
+        );
+    } else if let Some(textures) = registry.get_textures(state) {
+        emit_cube_faces(
+            sink, model_pos, state, textures, snapshot, registry, uv_map, bx, by, bz,
+        );
+    } else {
+        emit_missing_cube(sink, model_pos, snapshot, registry, uv_map, bx, by, bz);
+        return false;
+    }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]

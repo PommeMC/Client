@@ -8,19 +8,21 @@ use glam::{DVec3, dvec3};
 use winit::keyboard::KeyCode;
 
 use super::aabb::Aabb;
-use super::block_shape::{self, CollisionContext};
-use super::collision::{CollisionWorld, find_supporting_block, no_collision, resolve_collision};
+use super::block_shape::CollisionContext;
+use super::collision::{
+    CollisionWorld, find_supporting_block, no_collision, resolve_collision, state_boxes,
+};
 use crate::app::input::{self, InputState};
 use crate::entity::components::Velocity;
 use crate::player::{CROUCH_HEIGHT, LocalPlayer, PLAYER_HALF_WIDTH, STANDING_HEIGHT, is_spectator};
 use crate::world::block::model::Direction;
 use crate::world::block::{
-    BlockTags, FluidKind, block_id, block_properties, block_tags, collision_shape_position, fluid,
-    movement_friction, movement_jump_factor, movement_speed_factor,
+    BlockTags, FluidKind, block_id, block_properties, block_tags, fluid, movement_friction,
+    movement_jump_factor, movement_speed_factor,
 };
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
-use crate::world::piston::MovingPiston;
+use crate::world::piston::{self, MovingPiston};
 
 // TODO: read movement speed, sprint modifier, jump strength, step height,
 // gravity, sneaking speed and water movement efficiency from
@@ -595,23 +597,43 @@ fn apply_collision(
         &ctx,
     );
 
-    // Vanilla horizontal collision flags use Mth.equal(double, double), whose
-    // epsilon is the widened float constant 1.0E-5f.
-    let collided_x = !mth_equal(delta.x, resolved.x);
-    // Vanilla only applies Mth.equal to the horizontal axes. Vertical
-    // collision is an exact double comparison.
-    let collided_y = delta.y != resolved.y;
-    let collided_z = !mth_equal(delta.z, resolved.z);
-    let horizontal_collision = collided_x || collided_z;
+    let collided = collided_axes(delta, resolved);
+    let horizontal_collision = collided[0] || collided[2];
 
     // TODO: `Entity.move`'s stuck speed (cobweb, berry bush, powder snow) and
     // its skip of sub-1e-7 moves.
     player.position += resolved;
-    player.on_ground = on_ground;
     player.horizontal_collision = horizontal_collision;
     player.minor_horizontal_collision = horizontal_collision
         && is_minor_horizontal_collision(forward, strafe, sin_y_rot, cos_y_rot, resolved);
-    update_supporting_block(player, world, on_ground, resolved, &ctx);
+    settle_after_move(player, world, resolved, on_ground, collided, &ctx);
+}
+
+/// Which axes `Entity.move`'s collision shortened `delta` on.
+fn collided_axes(delta: DVec3, resolved: DVec3) -> [bool; 3] {
+    // Vanilla horizontal collision flags use Mth.equal(double, double), whose
+    // epsilon is the widened float constant 1.0E-5f. Vertical collision is an
+    // exact double comparison.
+    [
+        !mth_equal(delta.x, resolved.x),
+        delta.y != resolved.y,
+        !mth_equal(delta.z, resolved.z),
+    ]
+}
+
+/// The rest of vanilla `Entity.move` once the move is applied: ground and
+/// supporting block, fluid contact, fall distance, and stopping on the
+/// collided axes.
+fn settle_after_move(
+    player: &mut LocalPlayer,
+    world: CollisionWorld<'_>,
+    resolved: DVec3,
+    on_ground: bool,
+    collided: [bool; 3],
+    ctx: &CollisionContext,
+) {
+    player.on_ground = on_ground;
+    update_supporting_block(player, world, on_ground, resolved, ctx);
 
     // `LivingEntity.checkFallDamage` refreshes a dry player's fluid contact
     // (adding any current) before collided axes are zeroed; the fall distance
@@ -627,13 +649,14 @@ fn apply_collision(
     }
 
     // TODO: slime/bed bounce (`restituteMovementAfterCollisions`).
-    if collided_x {
+    let [x, y, z] = collided;
+    if x {
         player.velocity.x = 0.0;
     }
-    if collided_z {
+    if z {
         player.velocity.z = 0.0;
     }
-    if collided_y {
+    if y {
         player.velocity.y = 0.0;
     }
 }
@@ -1188,6 +1211,15 @@ fn vanilla_look_y(pitch_degrees: f32) -> f64 {
     -f64::from(mth_sin(angle))
 }
 
+/// What a piston's move of the player reads: the world, whether the player
+/// is descending (holding sneak), and the game tick for the 0.51 budget.
+#[derive(Clone, Copy)]
+struct PistonMove<'a> {
+    world: CollisionWorld<'a>,
+    descending: bool,
+    game_time: u64,
+}
+
 /// Vanilla `Entity.limitPistonMovement`: a piston moves an entity along one
 /// axis, at most 0.51 per axis per game tick however many pistons push it.
 fn limit_piston_movement(player: &mut LocalPlayer, delta: DVec3, game_time: u64) -> DVec3 {
@@ -1214,13 +1246,7 @@ fn limit_piston_movement(player: &mut LocalPlayer, delta: DVec3, game_time: u64)
 
 /// Vanilla `Entity.move` with `MoverType.PISTON`: no edge back-off and no
 /// stuck-speed slowdown, but the usual collision.
-fn move_by_piston(
-    player: &mut LocalPlayer,
-    world: CollisionWorld<'_>,
-    delta: DVec3,
-    descending: bool,
-    game_time: u64,
-) {
+fn move_by_piston(player: &mut LocalPlayer, mv: PistonMove<'_>, delta: DVec3) {
     if is_spectator(player.game_mode) {
         // `noPhysics`.
         player.position += delta;
@@ -1228,77 +1254,45 @@ fn move_by_piston(
         player.minor_horizontal_collision = false;
         return;
     }
-    let delta = limit_piston_movement(player, delta, game_time);
+    let delta = limit_piston_movement(player, delta, mv.game_time);
     if delta == DVec3::ZERO {
         return;
     }
-    let ctx = collision_context(player, descending);
+    let ctx = collision_context(player, mv.descending);
     let (resolved, on_ground) = resolve_collision(
-        world,
+        mv.world,
         player.bounding_box(),
         delta.into(),
         f64::from(STEP_HEIGHT),
         player.on_ground,
         &ctx,
     );
-    let collided_x = !mth_equal(delta.x, resolved.x);
-    let collided_y = delta.y != resolved.y;
-    let collided_z = !mth_equal(delta.z, resolved.z);
+    let collided = collided_axes(delta, resolved);
     let moved = resolved.length_squared();
     if moved > 1.0e-7 || delta.length_squared() - moved < 1.0e-7 {
         player.position += resolved;
     }
-    player.horizontal_collision = collided_x || collided_z;
+    player.horizontal_collision = collided[0] || collided[2];
     // TODO: `isHorizontalCollisionMinor` reads the player's move input, which
     // a piston's move doesn't have here.
     player.minor_horizontal_collision = false;
-    // The local player is authoritative, so vertical state always updates.
-    player.on_ground = on_ground;
-    update_supporting_block(player, world, on_ground, resolved, &ctx);
-    if !player.in_water {
-        player.refresh_water_interaction(world.chunks);
-    }
-    if !player.in_water && resolved.y < 0.0 {
-        player.fall_distance -= f64::from(resolved.y as f32);
-    }
-    if on_ground {
-        player.fall_distance = 0.0;
-    }
-    // TODO: slime/bed bounce (`restituteMovementAfterCollisions`) and
-    // `applyEffectsFromBlocks`, as for the player's own move.
-    if collided_x {
-        player.velocity.x = 0.0;
-    }
-    if collided_z {
-        player.velocity.z = 0.0;
-    }
-    if collided_y {
-        player.velocity.y = 0.0;
-    }
+    settle_after_move(player, mv.world, resolved, on_ground, collided, &ctx);
 }
 
 /// Vanilla `PistonMovingBlockEntity.moveEntityByPiston`: `piston_direction`
 /// stops its own moving blocks colliding while the entity moves.
-#[allow(clippy::too_many_arguments)]
 fn move_entity_by_piston(
     player: &mut LocalPlayer,
-    world: CollisionWorld<'_>,
+    mv: PistonMove<'_>,
     piston_direction: Direction,
     delta: f64,
     movement: Direction,
-    descending: bool,
-    game_time: u64,
 ) {
     let world = CollisionWorld {
         piston_noclip: Some(piston_direction),
-        ..world
+        ..mv.world
     };
-    move_by_piston(player, world, step(movement) * delta, descending, game_time);
-}
-
-fn step(direction: Direction) -> DVec3 {
-    let [x, y, z] = direction.offset();
-    dvec3(x.into(), y.into(), z.into())
+    move_by_piston(player, PistonMove { world, ..mv }, movement.step() * delta);
 }
 
 /// Vanilla `PistonMovingBlockEntity.getMovement`: how far `aabb` must move
@@ -1317,53 +1311,18 @@ fn piston_movement(outside: &Aabb, movement: Direction, aabb: &Aabb) -> f64 {
 /// Vanilla `PistonMath.getMovementArea`: the slab `aabb`'s leading face
 /// sweeps when it moves `amount` along `direction`.
 fn movement_area(aabb: &Aabb, direction: Direction, amount: f64) -> Aabb {
-    let axis_step = match direction {
-        Direction::East | Direction::Up | Direction::South => 1.0,
-        Direction::West | Direction::Down | Direction::North => -1.0,
+    let step = direction.step();
+    let axis = direction.axis();
+    let delta = amount * step[axis];
+    let face = if step[axis] > 0.0 {
+        aabb.max[axis]
+    } else {
+        aabb.min[axis]
     };
-    let delta = amount * axis_step;
-    let (lo, hi) = (delta.min(0.0), delta.max(0.0));
-    let (min, max) = (aabb.min, aabb.max);
-    let (a, b) = match direction {
-        Direction::West => (
-            dvec3(min.x + lo, min.y, min.z),
-            dvec3(min.x + hi, max.y, max.z),
-        ),
-        Direction::East => (
-            dvec3(max.x + lo, min.y, min.z),
-            dvec3(max.x + hi, max.y, max.z),
-        ),
-        Direction::Down => (
-            dvec3(min.x, min.y + lo, min.z),
-            dvec3(max.x, min.y + hi, max.z),
-        ),
-        Direction::Up => (
-            dvec3(min.x, max.y + lo, min.z),
-            dvec3(max.x, max.y + hi, max.z),
-        ),
-        Direction::North => (
-            dvec3(min.x, min.y, min.z + lo),
-            dvec3(max.x, max.y, min.z + hi),
-        ),
-        Direction::South => (
-            dvec3(min.x, min.y, max.z + lo),
-            dvec3(max.x, max.y, max.z + hi),
-        ),
-    };
-    Aabb::new(a, b)
-}
-
-/// A state's empty-context collision boxes, local to its cell.
-fn local_collision_boxes(state: BlockState, pos: BlockPos) -> Vec<Aabb> {
-    let base = collision_shape_position(state, pos.x, pos.y, pos.z) - pos_vec(pos);
-    match block_shape::collision_shape(state, pos.y, &CollisionContext::EMPTY) {
-        Some(local) => local.iter().map(|&b| Aabb::from_local(b, base)).collect(),
-        None => vec![Aabb::from_local([0.0, 0.0, 0.0, 1.0, 1.0, 1.0], base)],
-    }
-}
-
-fn pos_vec(pos: BlockPos) -> DVec3 {
-    dvec3(pos.x.into(), pos.y.into(), pos.z.into())
+    let (mut min, mut max) = (aabb.min, aabb.max);
+    min[axis] = face + delta.min(0.0);
+    max[axis] = face + delta.max(0.0);
+    Aabb::new(min, max)
 }
 
 /// Vanilla `PistonMovingBlockEntity.tick`'s entity moves for the local player:
@@ -1381,58 +1340,52 @@ pub fn push_by_moving_piston(
     descending: bool,
     game_time: u64,
 ) {
-    let world = CollisionWorld {
-        chunks: chunk_store,
-        block_entity_anim: Some(block_entity_anim),
-        piston_noclip: None,
+    let mv = PistonMove {
+        world: CollisionWorld {
+            chunks: chunk_store,
+            block_entity_anim: Some(block_entity_anim),
+            piston_noclip: None,
+        },
+        descending,
+        game_time,
     };
     let movement = piston.movement_direction();
     let delta_progress = f64::from(new_progress - piston.progress);
-    // `moveByPositionAndProgress`.
-    let placed = pos_vec(pos)
-        + step(piston.direction) * f64::from(piston.extended_progress(piston.progress));
+    let empty = &CollisionContext::EMPTY;
 
     // `moveCollidedEntities`.
-    let shape = local_collision_boxes(collision_related_state(piston), pos);
-    if let Some(bounds) = union(&shape) {
-        let aabb = bounds.offset(placed);
-        let area = union(&[movement_area(&aabb, movement, delta_progress), aabb]).unwrap();
-        if player.bounding_box().intersects(&area) {
-            if block_id(piston.moved_state) == "slime_block" {
-                let [x, y, z] = movement.offset();
-                match movement {
-                    Direction::West | Direction::East => player.velocity.x = x.into(),
-                    Direction::Down | Direction::Up => player.velocity.y = y.into(),
-                    Direction::North | Direction::South => player.velocity.z = z.into(),
+    let mut shape = Vec::new();
+    state_boxes(
+        collision_related_state(piston),
+        pos,
+        empty,
+        piston.extension(),
+        &mut shape,
+    );
+    if let Some(aabb) = shape.iter().copied().reduce(|a, b| a.minmax(&b))
+        && player
+            .bounding_box()
+            .intersects(&movement_area(&aabb, movement, delta_progress).minmax(&aabb))
+    {
+        if block_id(piston.moved_state) == "slime_block" {
+            player.velocity[movement.axis()] = movement.step()[movement.axis()];
+        }
+        let mut delta = 0.0_f64;
+        for part in &shape {
+            let moving = movement_area(part, movement, delta_progress);
+            let entity = player.bounding_box();
+            if moving.intersects(&entity) {
+                delta = delta.max(piston_movement(&moving, movement, &entity));
+                if delta >= delta_progress {
+                    break;
                 }
             }
-            let mut delta = 0.0_f64;
-            for part in &shape {
-                let moving = movement_area(&part.offset(placed), movement, delta_progress);
-                let entity = player.bounding_box();
-                if moving.intersects(&entity) {
-                    delta = delta.max(piston_movement(&moving, movement, &entity));
-                    if delta >= delta_progress {
-                        break;
-                    }
-                }
-            }
-            if delta > 0.0 {
-                let delta = delta.min(delta_progress) + 0.01;
-                move_entity_by_piston(
-                    player, world, movement, delta, movement, descending, game_time,
-                );
-                if !piston.extending && piston.source {
-                    fix_entity_within_piston_base(
-                        player,
-                        world,
-                        pos,
-                        movement,
-                        delta_progress,
-                        descending,
-                        game_time,
-                    );
-                }
+        }
+        if delta > 0.0 {
+            let delta = delta.min(delta_progress) + 0.01;
+            move_entity_by_piston(player, mv, movement, delta, movement);
+            if !piston.extending && piston.source {
+                fix_entity_within_piston_base(player, mv, pos, movement, delta_progress);
             }
         }
     }
@@ -1441,12 +1394,15 @@ pub fn push_by_moving_piston(
     if block_id(piston.moved_state) == "honey_block"
         && !matches!(movement, Direction::Up | Direction::Down)
     {
-        let sticky_top = local_collision_boxes(piston.moved_state, pos)
-            .iter()
-            .map(|b| b.max.y)
-            .fold(0.0, f64::max);
-        let aabb =
-            Aabb::new(dvec3(0.0, sticky_top, 0.0), dvec3(1.0, 1.500_001, 1.0)).offset(placed);
+        let mut honey = Vec::new();
+        state_boxes(piston.moved_state, pos, empty, DVec3::ZERO, &mut honey);
+        let cell = Aabb::block(pos.x, pos.y, pos.z);
+        let top = honey.iter().map(|b| b.max.y).fold(cell.min.y, f64::max);
+        let aabb = Aabb::new(
+            dvec3(cell.min.x, top, cell.min.z),
+            dvec3(cell.max.x, cell.min.y + 1.500_001, cell.max.z),
+        )
+        .offset(piston.extension());
         let p = player.position;
         let sticks = player.on_ground
             && (player.main_supporting_block_pos == Some(pos)
@@ -1455,15 +1411,7 @@ pub fn push_by_moving_piston(
                     && p.z >= aabb.min.z
                     && p.z <= aabb.max.z);
         if sticks && player.bounding_box().intersects(&aabb) {
-            move_entity_by_piston(
-                player,
-                world,
-                movement,
-                delta_progress,
-                movement,
-                descending,
-                game_time,
-            );
+            move_entity_by_piston(player, mv, movement, delta_progress, movement);
         }
     }
 }
@@ -1472,28 +1420,20 @@ pub fn push_by_moving_piston(
 /// collides as its head.
 fn collision_related_state(piston: &MovingPiston) -> BlockState {
     let moved = piston.moved_state;
-    if !piston.extending
-        && piston.source
-        && matches!(block_id(moved), "piston" | "sticky_piston")
-        && let Some(facing) = crate::world::piston::facing(moved)
-    {
-        let sticky = block_id(moved) == "sticky_piston";
-        return crate::world::piston::piston_head(facing, sticky, piston.progress > 0.25);
+    if !piston.extending && piston.source && piston::is_piston_base(moved) {
+        return piston::head_of(moved, piston.progress > 0.25).unwrap_or(moved);
     }
     moved
 }
 
 /// Vanilla `PistonMovingBlockEntity.fixEntityWithinPistonBase`: an entity
 /// caught in the base cell of a retracting piston is pushed out the front.
-#[allow(clippy::too_many_arguments)]
 fn fix_entity_within_piston_base(
     player: &mut LocalPlayer,
-    world: CollisionWorld<'_>,
+    mv: PistonMove<'_>,
     pos: BlockPos,
     direction: Direction,
     delta_progress: f64,
-    descending: bool,
-    game_time: u64,
 ) {
     let entity = player.bounding_box();
     let cell = Aabb::block(pos.x, pos.y, pos.z);
@@ -1502,25 +1442,11 @@ fn fix_entity_within_piston_base(
     }
     let opposite = direction.opposite();
     let delta = piston_movement(&cell, opposite, &entity) + 0.01;
-    let delta_intersected = piston_movement(&cell, opposite, &intersect(&entity, &cell)) + 0.01;
+    let delta_intersected = piston_movement(&cell, opposite, &entity.intersect(&cell)) + 0.01;
     if (delta - delta_intersected).abs() < 0.01 {
         let delta = delta.min(delta_progress) + 0.01;
-        move_entity_by_piston(
-            player, world, direction, delta, opposite, descending, game_time,
-        );
+        move_entity_by_piston(player, mv, direction, delta, opposite);
     }
-}
-
-fn union(boxes: &[Aabb]) -> Option<Aabb> {
-    let (first, rest) = boxes.split_first()?;
-    Some(
-        rest.iter()
-            .fold(*first, |a, b| Aabb::new(a.min.min(b.min), a.max.max(b.max))),
-    )
-}
-
-fn intersect(a: &Aabb, b: &Aabb) -> Aabb {
-    Aabb::new(a.min.max(b.min), a.max.min(b.max))
 }
 
 #[cfg(test)]
