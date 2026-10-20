@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 
 use crate::Progress;
 
-/// Newest first. Client releases leave "Latest" to the launcher's, so
-/// `/releases/latest` can't be used.
+/// Newest first; listed rather than `/releases/latest`, which held the
+/// launcher's releases before the client's.
 const RELEASES_URL: &str = "https://api.github.com/repos/PommeMC/Client/releases?per_page=30";
 const TAG_PREFIX: &str = "client-v";
 const CHECKSUMS_ASSET: &str = "sha256sums.txt";

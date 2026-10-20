@@ -20,17 +20,17 @@ Pomme contains no Mojang code, and joins vanilla servers from 1.20 through 26.3.
   <img width="100%" alt="Pomme flying over a jungle" src="https://github.com/user-attachments/assets/c35e717e-3535-4f4f-9539-9e62dd482e04" />
 </p>
 
-<p align="center">
-  <img width="1920" height="1080" alt="The Pomme launcher" src="https://github.com/user-attachments/assets/b8353f51-a23b-45c5-9f3d-457e498a5253" />
-</p>
-
 ## Download
 
-Get the **Pomme launcher** from the
-[latest launcher release](https://github.com/PommeMC/Client/releases?q=launcher&expanded=true),
-for Windows x64, macOS (Apple Silicon) or Linux x64 (`.AppImage`, `.deb` or
-`.rpm`). It signs you in with your Microsoft account, installs and updates the
-client, and launches it. You need to own Minecraft: Java Edition.
+Get Pomme from the [latest release](https://github.com/PommeMC/Client/releases/latest):
+
+- **Windows x64**: `pomme-client-windows-x64-setup.exe`
+- **macOS (Apple Silicon)**: `pomme-client-macos-arm64.dmg`, then drag Pomme to Applications
+- **Linux x64**: `pomme-client-linux-x64-gnu.AppImage`
+
+It signs you in with your Microsoft account and keeps itself up to date. You
+need to own Minecraft: Java Edition. The builds aren't signed yet, so the first
+launch needs one extra step, described in the release notes.
 
 ## Why Pomme?
 
@@ -52,7 +52,7 @@ client, and launches it. You need to own Minecraft: Java Edition.
 - **Singleplayer**: worlds run on [SteelMC](https://github.com/Steel-Foundation/SteelMC), a Rust server embedded in the client
 - **Audio**: vanilla sound events, music and subtitles through OpenAL Soft
 - **Resource packs**: local and server-sent packs, applied live
-- **Launcher**: multiple accounts, patch notes and installation management
+- **Updates**: installs per platform and keeps itself up to date
 
 <details>
 <summary>Everything else</summary>

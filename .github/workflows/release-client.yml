@@ -260,8 +260,7 @@ jobs:
         with:
           tag_name: ${{ needs.check.outputs.tag }}
           prerelease: false
-          # Keep the "Latest" badge on the launcher release, not the weekly client.
-          make_latest: false
+          make_latest: true
           previous_tag: ${{ needs.check.outputs.prev }}
           files: dist/*
           generate_release_notes: ${{ needs.check.outputs.prev != '' }}
