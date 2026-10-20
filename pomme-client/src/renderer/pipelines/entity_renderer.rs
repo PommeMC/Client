@@ -191,6 +191,9 @@ pub struct EntityRenderInfo {
     /// Skip frustum/distance culling (the 3rd-person self entity, which sits at
     /// the camera and must never blink out).
     pub skip_cull: bool,
+    /// Vanilla `getShadowRadius`/`getShadowStrength`; radius 0 casts none.
+    pub shadow_radius: f32,
+    pub shadow_strength: f32,
 }
 
 /// Everything inert: mob-family animation inputs zeroed, no overlays, white
@@ -252,6 +255,8 @@ impl Default for EntityRenderInfo {
             age_in_ticks: 0.0,
             attack_time: 0.0,
             skip_cull: false,
+            shadow_radius: 0.0,
+            shadow_strength: 0.0,
         }
     }
 }

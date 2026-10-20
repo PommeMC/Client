@@ -1,19 +1,42 @@
+//! Entity shadows: vanilla `EntityRenderer.extractShadow` and
+//! `ShadowFeatureRenderer` (26.2), one quad per lit, full block under an
+//! entity.
+
 use std::path::Path;
 use std::slice;
 use std::sync::{Arc, Mutex};
 
-use azalea_registry::builtin::EntityKind;
 use glam::{DVec3, Vec3};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::physics::block_shape::outline_shape;
+use crate::physics::block_shape::{LocalBox, is_collision_shape_full_block, outline_shape};
 use crate::renderer::camera::CameraUniform;
-use crate::renderer::pipelines::entity_renderer::EntityRenderInfo;
-use crate::renderer::pipelines::item_entity::ItemRenderInfo;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::world::block::block_id;
+use crate::world::block_entity::is_invisible_block;
 use crate::world::chunk::ChunkStore;
+use crate::world::light::lightmap_brightness;
+
+/// Something that casts a shadow, with vanilla's `getShadowRadius` and
+/// `getShadowStrength`.
+#[derive(Clone, Copy)]
+pub struct ShadowCaster {
+    pub position: DVec3,
+    pub radius: f32,
+    pub strength: f32,
+}
+
+/// What a frame's shadows read: who casts them, onto which blocks, and the
+/// light those blocks are in.
+#[derive(Clone, Copy)]
+pub struct ShadowScene<'a> {
+    pub casters: &'a [ShadowCaster],
+    pub chunks: &'a ChunkStore,
+    pub sky_darken: u8,
+    pub ambient_light: f32,
+}
 
 /// Per-vertex data for shadow quads.
 #[repr(C)]
@@ -24,11 +47,13 @@ pub struct ShadowVertex {
     pub uv: [f32; 2],
 }
 
-/// Buffer capacity in vertices (each shadow part is a quad = 6 vertices: 2
-/// triangles). 16384 vertices accommodates ~2730 shadow quads per frame.
-const MAX_SHADOW_VERTS: usize = 16384;
+/// Two triangles per shadow piece.
+const VERTS_PER_QUAD: usize = 6;
+const MAX_SHADOW_QUADS: usize = 2730;
+const MAX_SHADOW_VERTS: usize = MAX_SHADOW_QUADS * VERTS_PER_QUAD;
+/// Vanilla `EntityRenderer.MAX_SHADOW_RADIUS`.
+const MAX_SHADOW_RADIUS: f32 = 32.0;
 
-#[allow(dead_code)]
 pub struct EntityShadowPipeline {
     pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
@@ -45,6 +70,8 @@ pub struct EntityShadowPipeline {
     texture_view: vk::ImageView,
     texture_sampler: vk::Sampler,
     texture_allocation: Allocation,
+    /// This frame's vertices, kept between frames for its capacity.
+    verts: Vec<ShadowVertex>,
 }
 
 impl EntityShadowPipeline {
@@ -219,6 +246,7 @@ impl EntityShadowPipeline {
             texture_view,
             texture_sampler,
             texture_allocation,
+            verts: Vec::with_capacity(MAX_SHADOW_VERTS),
         }
     }
 
@@ -233,88 +261,25 @@ impl EntityShadowPipeline {
             .copy_from_slice(bytes);
     }
 
-    /// Renders shadows for all given entities and item entities onto blocks
-    /// below.
-    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         cmd: vk::CommandBuffer,
         frame: usize,
-        chunks: &ChunkStore,
-        entities: &[EntityRenderInfo],
-        item_entities: &[ItemRenderInfo],
+        scene: &ShadowScene,
         anchor: DVec3,
         camera_pos: DVec3,
-        cull_distance: f32,
     ) {
-        let mut verts: Vec<ShadowVertex> = Vec::new();
-
-        // 1. Living entities / Players
-        for entity in entities {
-            if entity.is_sleeping {
-                continue;
-            }
-            let (radius, strength) = entity_shadow_params(entity.entity_kind, entity.is_baby);
-            if radius <= 0.0 || strength <= 0.0 {
-                continue;
-            }
-
-            let ent_pos = DVec3::new(entity.position.x, entity.position.y, entity.position.z);
-
-            let dist_to_camera_sq = ent_pos.distance_squared(camera_pos);
-            if dist_to_camera_sq > (cull_distance as f64).powi(2) {
-                continue;
-            }
-
-            // Vanilla distance opacity falloff: (1.0 - distSq / 256.0) * strength
-            let dist_factor = 1.0 - dist_to_camera_sq / 256.0;
-            if dist_factor <= 0.0 {
-                continue;
-            }
-            let opacity = (dist_factor as f32) * strength;
-            if opacity <= 0.0 {
-                continue;
-            }
-
-            extract_shadow_quads(&mut verts, chunks, ent_pos, anchor, radius, opacity);
-
-            if verts.len() >= MAX_SHADOW_VERTS {
+        self.verts.clear();
+        for caster in scene.casters {
+            if !extract_shadow(&mut self.verts, scene, caster, anchor, camera_pos) {
                 break;
             }
         }
-
-        // 2. Item entities (radius 0.15, strength 0.75 per issue #55 and vanilla)
-        for item in item_entities {
-            let col3 = item.model_matrix.col(3);
-            let ent_pos = anchor + DVec3::new(col3.x as f64, col3.y as f64, col3.z as f64);
-
-            let dist_to_camera_sq = ent_pos.distance_squared(camera_pos);
-            if dist_to_camera_sq > (cull_distance as f64).powi(2) {
-                continue;
-            }
-
-            let dist_factor = 1.0 - dist_to_camera_sq / 256.0;
-            if dist_factor <= 0.0 {
-                continue;
-            }
-            let opacity = (dist_factor as f32) * 0.75;
-            if opacity <= 0.0 {
-                continue;
-            }
-
-            extract_shadow_quads(&mut verts, chunks, ent_pos, anchor, 0.15, opacity);
-
-            if verts.len() >= MAX_SHADOW_VERTS {
-                break;
-            }
-        }
-
-        if verts.is_empty() {
+        if self.verts.is_empty() {
             return;
         }
 
-        let vert_count = verts.len().min(MAX_SHADOW_VERTS);
-        let bytes = bytemuck::cast_slice::<ShadowVertex, u8>(&verts[..vert_count]);
+        let bytes = bytemuck::cast_slice::<ShadowVertex, u8>(&self.verts);
         self.vertex_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
             .copy_from_slice(bytes);
 
@@ -327,233 +292,156 @@ impl EntityShadowPipeline {
             &[],
         );
         cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame]], &[0]);
-        cmd.draw(vert_count as u32, 1, 0, 0);
+        cmd.draw(self.verts.len() as u32, 1, 0, 0);
+    }
+
+    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        let mut alloc = allocator.lock().unwrap();
+        for buffer in self
+            .camera_buffers
+            .drain(..)
+            .chain(self.vertex_buffers.drain(..))
+        {
+            device.destroy_buffer(buffer, None);
+        }
+        for allocation in self
+            .camera_allocations
+            .drain(..)
+            .chain(self.vertex_allocations.drain(..))
+            .chain([std::mem::take(&mut self.texture_allocation)])
+        {
+            alloc.free(allocation).ok();
+        }
+        drop(alloc);
+
+        device.destroy_sampler(self.texture_sampler, None);
+        device.destroy_image_view(self.texture_view, None);
+        device.destroy_image(self.texture_image, None);
+        device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline_layout(self.pipeline_layout, None);
+        device.destroy_descriptor_pool(self.descriptor_pool, None);
+        device.destroy_descriptor_set_layout(self.camera_layout, None);
+        device.destroy_descriptor_set_layout(self.texture_layout, None);
     }
 }
 
-impl Drop for EntityShadowPipeline {
-    fn drop(&mut self) {
-        // Vulkan resources cleaned up by Renderer teardown / device wait idle
-    }
-}
-
-/// Vanilla `EntityRenderer.getShadowRadius` and `shadowStrength` per mob kind.
-pub fn entity_shadow_params(kind: EntityKind, is_baby: bool) -> (f32, f32) {
-    let strength = 1.0;
-    let radius = match kind {
-        EntityKind::Item => return (0.15, 0.75),
-        EntityKind::ExperienceOrb => return (0.15, 0.5),
-        EntityKind::ArmorStand => return (0.0, 0.0),
-        EntityKind::Player => 0.5,
-        EntityKind::Pig => 0.7,
-        EntityKind::Cow => 0.7,
-        EntityKind::Chicken => 0.3,
-        EntityKind::Sheep => 0.7,
-        EntityKind::Zombie
-        | EntityKind::Husk
-        | EntityKind::Drowned
-        | EntityKind::ZombieVillager
-        | EntityKind::Villager
-        | EntityKind::Witch => 0.5,
-        EntityKind::Skeleton | EntityKind::Stray | EntityKind::Bogged => 0.5,
-        EntityKind::Creeper => 0.5,
-        EntityKind::Spider => 0.8,
-        EntityKind::CaveSpider => 0.5,
-        EntityKind::Enderman => 0.5,
-        EntityKind::Endermite => 0.3,
-        EntityKind::Silverfish => 0.3,
-        EntityKind::Slime => 0.25,
-        EntityKind::Wolf => 0.5,
-        EntityKind::Cat | EntityKind::Ocelot => 0.4,
-        EntityKind::Rabbit => 0.3,
-        EntityKind::Horse
-        | EntityKind::Donkey
-        | EntityKind::Mule
-        | EntityKind::SkeletonHorse
-        | EntityKind::ZombieHorse => 0.75,
-        EntityKind::Squid | EntityKind::GlowSquid => 0.7,
-        EntityKind::Bat => 0.25,
-        EntityKind::Cod => 0.3,
-        EntityKind::Salmon => 0.4,
-        EntityKind::TropicalFish => 0.15,
-        EntityKind::Pufferfish => 0.2,
-        EntityKind::IronGolem => 0.7,
-        EntityKind::SnowGolem => 0.5,
-        EntityKind::Ghast => 1.5,
-        EntityKind::Warden => 0.9,
-        EntityKind::PolarBear => 0.9,
-        EntityKind::Panda => 0.9,
-        EntityKind::Turtle => 0.7,
-        EntityKind::Dolphin => 0.7,
-        EntityKind::Fox => 0.4,
-        EntityKind::Bee => 0.4,
-        EntityKind::Llama => 0.7,
-        EntityKind::Camel => 0.7,
-        EntityKind::Ravager => 1.1,
-        EntityKind::Sniffer => 1.1,
-        EntityKind::Allay => 0.4,
-        EntityKind::Vex => 0.3,
-        EntityKind::Frog => 0.3,
-        EntityKind::Tadpole => 0.14,
-        EntityKind::Blaze => 0.5,
-        EntityKind::Breeze => 0.5,
-        EntityKind::Wither => 1.0,
-        _ => 0.5,
-    };
-    let scale = if is_baby { 0.5 } else { 1.0 };
-    (radius * scale, strength)
-}
-
-/// Vanilla `extractShadowPiece` & `ShadowFeatureRenderer.prepare` geometry
-/// builder. Projects shadow quads onto the solid block top surfaces below the
-/// entity position.
-fn extract_shadow_quads(
+/// Vanilla `extractShadow`, appending one quad per `extractShadowPiece`;
+/// `false` once the buffer is full.
+fn extract_shadow(
     verts: &mut Vec<ShadowVertex>,
-    chunks: &ChunkStore,
-    ent_pos: DVec3,
+    scene: &ShadowScene,
+    caster: &ShadowCaster,
     anchor: DVec3,
-    radius: f32,
-    opacity: f32,
-) {
-    let min_bx = (ent_pos.x - radius as f64).floor() as i32;
-    let max_bx = (ent_pos.x + radius as f64).floor() as i32;
-    let min_bz = (ent_pos.z - radius as f64).floor() as i32;
-    let max_bz = (ent_pos.z + radius as f64).floor() as i32;
-
-    // y_span = ((opacity / 0.5) - 1.0).min(radius)
-    let y_span = ((opacity / 0.5) - 1.0).min(radius);
-    let min_by = (ent_pos.y - y_span as f64).floor() as i32;
-    let max_by = ent_pos.y.floor() as i32;
-
-    for bz in min_bz..=max_bz {
-        for bx in min_bx..=max_bx {
-            for by in min_by..=max_by {
-                // Check block below (by - 1)
-                let block_below = chunks.get_block_state(bx, by - 1, bz);
-                if block_below.is_air() {
+    camera_pos: DVec3,
+) -> bool {
+    let radius = caster.radius.min(MAX_SHADOW_RADIUS);
+    if radius <= 0.0 {
+        return true;
+    }
+    let pos = caster.position;
+    let pow =
+        ((1.0 - pos.distance_squared(camera_pos) / 256.0) * f64::from(caster.strength)) as f32;
+    if pow <= 0.0 {
+        return true;
+    }
+    let r = f64::from(radius);
+    let depth = (pow / 0.5 - 1.0).min(radius);
+    let y0 = (pos.y - f64::from(depth)).floor() as i32;
+    let y1 = pos.y.floor() as i32;
+    let origin = (pos - anchor).as_vec3();
+    for z in (pos.z - r).floor() as i32..=(pos.z + r).floor() as i32 {
+        for x in (pos.x - r).floor() as i32..=(pos.x + r).floor() as i32 {
+            for y in y0..=y1 {
+                let Some((shape, alpha)) = shadow_piece(scene, pos, pow, x, y, z) else {
                     continue;
-                }
-
-                // Check light level at current (air/passable) block (bx, by, bz)
-                let sky_light = chunks.get_sky_light(bx, by, bz);
-                let block_light = chunks.get_block_light(bx, by, bz);
-                let raw_light = sky_light.max(block_light);
-                if raw_light <= 3 {
-                    continue;
-                }
-
-                // Block outline/collision shape check (full cube blocks return FULL_CUBE_SHAPE
-                // [[0,0,0,1,1,1]])
-                let boxes = outline_shape(block_below);
-                if boxes.is_empty() {
-                    continue;
-                }
-
-                let bounds = match calculate_box_bounds(boxes) {
-                    Some(b) => b,
-                    None => continue,
                 };
-
-                // Vertical distance from entity Y to the top of the block bounding box:
-                // d = ent_pos.y - ((by - 1) as f64 + bounds.max_y)
-                let block_top_y = (by - 1) as f64 + bounds[4];
-                let d = (ent_pos.y - block_top_y) as f32;
-                if d < 0.0 {
-                    continue;
+                if verts.len() + VERTS_PER_QUAD > MAX_SHADOW_VERTS {
+                    return false;
                 }
-
-                // Opacity falloff with height: alpha = (opacity - d * 0.5) * 0.5 *
-                // light_brightness
-                let v = raw_light as f32 / 15.0;
-                let curved_light = v / (4.0 - 3.0 * v);
-                let alpha = ((opacity - d * 0.5) * 0.5 * curved_light).clamp(0.0, 1.0);
-                if alpha <= 0.0 {
-                    continue;
-                }
-
-                // Relative coordinates to entity center:
-                // rel_x = (bx as f64 - ent_pos.x) as f32
-                // rel_y = ((by - 1) as f64 - ent_pos.y) as f32
-                // rel_z = (bz as f64 - ent_pos.z) as f32
-                let rel_x = (bx as f64 - ent_pos.x) as f32;
-                let rel_y = ((by - 1) as f64 - ent_pos.y) as f32;
-                let rel_z = (bz as f64 - ent_pos.z) as f32;
-
-                let p_x0 = rel_x + bounds[0] as f32;
-                let p_x1 = rel_x + bounds[3] as f32;
-                let p_y = rel_y + bounds[4] as f32 + 0.005; // 0.005 lift to prevent z-fighting
-                let p_z0 = rel_z + bounds[2] as f32;
-                let p_z1 = rel_z + bounds[5] as f32;
-
-                // Vanilla UV formula from ShadowFeatureRenderer:
-                // u = -p_x / (2.0 * radius) + 0.5
-                // v = -p_z / (2.0 * radius) + 0.5
-                let u0 = -p_x0 / (2.0 * radius) + 0.5;
-                let u1 = -p_x1 / (2.0 * radius) + 0.5;
-                let v0 = -p_z0 / (2.0 * radius) + 0.5;
-                let v1 = -p_z1 / (2.0 * radius) + 0.5;
-
-                // World position relative to camera anchor:
-                // world = (ent_pos - anchor) + [p_x, p_y, p_z]
-                let base_anchor_rel = (ent_pos - anchor).as_vec3();
-                let v_pos = |x: f32, z: f32| -> [f32; 3] {
-                    (base_anchor_rel + Vec3::new(x, p_y, z)).to_array()
-                };
-
-                let color = [1.0, 1.0, 1.0, alpha];
-
-                // Quad vertices (2 triangles: 0, 1, 2 and 0, 2, 3)
-                // Corners:
-                // C0: (p_x0, p_z0) -> UV: (u0, v0)
-                // C1: (p_x0, p_z1) -> UV: (u0, v1)
-                // C2: (p_x1, p_z1) -> UV: (u1, v1)
-                // C3: (p_x1, p_z0) -> UV: (u1, v0)
-                let c0 = ShadowVertex {
-                    position: v_pos(p_x0, p_z0),
-                    color,
-                    uv: [u0, v0],
-                };
-                let c1 = ShadowVertex {
-                    position: v_pos(p_x0, p_z1),
-                    color,
-                    uv: [u0, v1],
-                };
-                let c2 = ShadowVertex {
-                    position: v_pos(p_x1, p_z1),
-                    color,
-                    uv: [u1, v1],
-                };
-                let c3 = ShadowVertex {
-                    position: v_pos(p_x1, p_z0),
-                    color,
-                    uv: [u1, v0],
-                };
-
-                verts.push(c0);
-                verts.push(c1);
-                verts.push(c2);
-                verts.push(c0);
-                verts.push(c2);
-                verts.push(c3);
-
-                if verts.len() >= MAX_SHADOW_VERTS {
-                    return;
-                }
+                let rel = Vec3::new(
+                    (f64::from(x) - pos.x) as f32,
+                    (f64::from(y) - pos.y) as f32,
+                    (f64::from(z) - pos.z) as f32,
+                );
+                push_quad(verts, origin, rel, shape, radius, alpha);
             }
         }
     }
+    true
 }
 
-fn calculate_box_bounds(boxes: &[crate::physics::block_shape::LocalBox]) -> Option<[f64; 6]> {
-    let &first = boxes.first()?;
-    let mut b = first;
-    for bx in &boxes[1..] {
-        for i in 0..3 {
-            b[i] = b[i].min(bx[i]);
-            b[i + 3] = b[i + 3].max(bx[i + 3]);
-        }
+/// Vanilla `extractShadowPiece` for the cell at (x, y, z): the bounds of the
+/// block below and the piece's alpha, or `None` where no shadow lands.
+fn shadow_piece(
+    scene: &ShadowScene,
+    pos: DVec3,
+    pow: f32,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> Option<(LocalBox, f32)> {
+    let power_at_depth = pow - (pos.y - f64::from(y)) as f32 * 0.5;
+    let below = scene.chunks.get_block_state(x, y - 1, z);
+    if !takes_a_shadow(below) {
+        return None;
     }
-    Some(b)
+    let brightness = scene
+        .chunks
+        .max_local_raw_brightness(x, y, z, scene.sky_darken);
+    if brightness <= 3 {
+        return None;
+    }
+    let shape = bounds(outline_shape(below))?;
+    let alpha = (power_at_depth * 0.5 * lightmap_brightness(brightness, scene.ambient_light))
+        .clamp(0.0, 1.0);
+    Some((shape, alpha))
+}
+
+/// Whether a shadow can lie on `state`: it renders, and fills its cell.
+fn takes_a_shadow(state: azalea_block::BlockState) -> bool {
+    !is_invisible_block(block_id(state)) && is_collision_shape_full_block(state)
+}
+
+/// Vanilla `ShadowFeatureRenderer`: the piece's quad, `rel` from the caster
+/// to the cell and `origin` from the anchor to the caster.
+fn push_quad(
+    verts: &mut Vec<ShadowVertex>,
+    origin: Vec3,
+    rel: Vec3,
+    shape: LocalBox,
+    radius: f32,
+    alpha: f32,
+) {
+    let x0 = rel.x + shape[0] as f32;
+    let x1 = rel.x + shape[3] as f32;
+    let y = rel.y + shape[1] as f32;
+    let z0 = rel.z + shape[2] as f32;
+    let z1 = rel.z + shape[5] as f32;
+    let uv = |p: f32| -p / (2.0 * radius) + 0.5;
+    let corner = |x: f32, z: f32| ShadowVertex {
+        position: (origin + Vec3::new(x, y, z)).to_array(),
+        color: [1.0, 1.0, 1.0, alpha],
+        uv: [uv(x), uv(z)],
+    };
+    let [c0, c1, c2, c3] = [
+        corner(x0, z0),
+        corner(x0, z1),
+        corner(x1, z1),
+        corner(x1, z0),
+    ];
+    verts.extend_from_slice(&[c0, c1, c2, c0, c2, c3]);
+}
+
+/// Vanilla `VoxelShape.bounds`: the box around every part of the shape.
+fn bounds(boxes: &[LocalBox]) -> Option<LocalBox> {
+    let (&first, rest) = boxes.split_first()?;
+    Some(rest.iter().fold(first, |mut b, part| {
+        for i in 0..3 {
+            b[i] = b[i].min(part[i]);
+            b[i + 3] = b[i + 3].max(part[i + 3]);
+        }
+        b
+    }))
 }
 
 fn load_shadow_texture(
@@ -752,33 +640,43 @@ fn create_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::block::find_state;
 
     #[test]
-    fn test_entity_shadow_params_item() {
-        let (radius, strength) = entity_shadow_params(EntityKind::Item, false);
-        assert!((radius - 0.15).abs() < 1e-4);
-        assert!((strength - 0.75).abs() < 1e-4);
+    fn shadows_land_only_on_full_visible_blocks() {
+        crate::world::block::init("26.2");
+        for (name, props, expected) in [
+            ("stone", &[][..], true),
+            ("grass_block", &[("snowy", "false")][..], true),
+            (
+                "stone_slab",
+                &[("type", "bottom"), ("waterlogged", "false")][..],
+                false,
+            ),
+            (
+                "stone_slab",
+                &[("type", "double"), ("waterlogged", "false")][..],
+                true,
+            ),
+            ("short_grass", &[][..], false),
+            ("barrier", &[("waterlogged", "false")][..], false),
+            ("water", &[("level", "0")][..], false),
+        ] {
+            assert_eq!(
+                takes_a_shadow(find_state(name, props)),
+                expected,
+                "{name} {props:?}"
+            );
+        }
     }
 
     #[test]
-    fn test_entity_shadow_params_player() {
-        let (radius, strength) = entity_shadow_params(EntityKind::Player, false);
-        assert!((radius - 0.5).abs() < 1e-4);
-        assert!((strength - 1.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn test_entity_shadow_params_baby() {
-        let (radius_adult, _) = entity_shadow_params(EntityKind::Cow, false);
-        let (radius_baby, _) = entity_shadow_params(EntityKind::Cow, true);
-        assert!((radius_adult - 0.7).abs() < 1e-4);
-        assert!((radius_baby - 0.35).abs() < 1e-4);
-    }
-
-    #[test]
-    fn test_entity_shadow_params_armor_stand() {
-        let (radius, strength) = entity_shadow_params(EntityKind::ArmorStand, false);
-        assert_eq!(radius, 0.0);
-        assert_eq!(strength, 0.0);
+    fn bounds_wrap_every_part() {
+        let boxes = [
+            [0.0, 0.0, 0.0, 1.0, 0.5, 1.0],
+            [0.25, 0.5, 0.25, 0.75, 1.0, 0.75],
+        ];
+        assert_eq!(bounds(&boxes), Some([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]));
+        assert_eq!(bounds(&[]), None);
     }
 }

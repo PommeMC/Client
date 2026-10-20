@@ -230,6 +230,11 @@ fn dimension_info(dim: &DimensionKindElement) -> NetworkEvent {
             Some("nether") => CardinalLightType::Nether,
             _ => CardinalLightType::Default,
         },
+        ambient_light: dim
+            ._extra
+            .get("ambient_light")
+            .and_then(|tag| tag.float())
+            .unwrap_or(0.0),
         default_clock: string("default_clock"),
     }
 }
@@ -304,10 +309,12 @@ mod tests {
             min_y,
             has_skylight,
             cardinal_light,
+            ambient_light,
             default_clock,
         } = dimension_info(&dimension(&[
             ("has_skylight", NbtTag::Byte(1)),
             ("cardinal_light", NbtTag::String("nether".into())),
+            ("ambient_light", NbtTag::Float(0.1)),
             (
                 "default_clock",
                 NbtTag::String("minecraft:overworld".into()),
@@ -318,6 +325,7 @@ mod tests {
         };
         assert_eq!((height, min_y, has_skylight), (384, -64, true));
         assert_eq!(cardinal_light, CardinalLightType::Nether);
+        assert_eq!(ambient_light, 0.1);
         assert_eq!(default_clock.as_deref(), Some("minecraft:overworld"));
     }
 
@@ -326,6 +334,7 @@ mod tests {
         let NetworkEvent::DimensionInfo {
             has_skylight,
             cardinal_light,
+            ambient_light,
             default_clock,
             ..
         } = dimension_info(&dimension(&[]))
@@ -334,6 +343,7 @@ mod tests {
         };
         assert!(has_skylight);
         assert_eq!(cardinal_light, CardinalLightType::Default);
+        assert_eq!(ambient_light, 0.0);
         assert_eq!(default_clock, None);
     }
 }

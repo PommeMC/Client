@@ -1,4 +1,5 @@
 pub mod components;
+pub mod shadow;
 pub mod villager;
 
 use std::collections::HashMap;
@@ -174,6 +175,7 @@ pub struct LivingEntity {
     pub is_sitting: bool,
     pub is_tame: bool,
     pub is_sprinting: bool,
+    pub is_invisible: bool,
     /// Dye id, wolf/cat collars (vanilla default red).
     pub collar_color: u8,
     pub is_interested: bool,
@@ -396,6 +398,7 @@ impl LivingEntity {
             is_sitting: false,
             is_tame: false,
             is_sprinting: false,
+            is_invisible: false,
             collar_color: 14,
             is_interested: false,
             anger_end_time: -1,
@@ -1213,8 +1216,11 @@ impl EntityStore {
         let kind = entity.entity_type;
         let index = normalize_player_index(kind, normalize_ageable_index(kind, index));
         match (kind, index, value) {
-            // Shared entity flags byte: bit 0x08 = sprinting.
-            (_, 0, Byte(f)) => entity.is_sprinting = f & 0x08 != 0,
+            // Shared entity flags byte: bit 0x08 = sprinting, 0x20 = invisible.
+            (_, 0, Byte(f)) => {
+                entity.is_sprinting = f & 0x08 != 0;
+                entity.is_invisible = f & 0x20 != 0;
+            }
             (_, 9, Float(h)) => entity.health = h,
             // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
             // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
