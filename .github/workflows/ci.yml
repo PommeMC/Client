@@ -16,8 +16,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # What a pull request touches, so it skips the checks it can't affect: a
+  # docs-only change builds nothing, and the launcher's jobs only run for it
+  # and the crates it uses. Pushes and manual runs check everything.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ github.event_name != 'pull_request' || steps.code.outputs.code == 'true' }}
+      launcher: ${{ github.event_name != 'pull_request' || steps.launcher.outputs.launcher == 'true' }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
+        id: code
+        with:
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!LICENSE*'
+
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
+        id: launcher
+        with:
+          filters: |
+            launcher:
+              - 'pomme-launcher/**'
+              - 'pomme-auth/**'
+              - 'pomme-dirs/**'
+              - 'pomme-install/**'
+              - 'pomme-protocol/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - '.github/workflows/ci.yml'
+
   # Desktop clippy never compiles the `cfg(target_os = "android")` code.
   android:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -53,6 +96,8 @@ jobs:
 
   # The same for `cfg(target_os = "ios")`.
   ios:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -90,6 +135,11 @@ jobs:
         run: SHADERC_LIB_DIR="$VULKAN_SDK/lib" VULKAN_SDK="$(python3 tools/fetch_moltenvk.py ios)" cargo clippy -p pomme-ios --target aarch64-apple-ios -- -D warnings
 
   client:
+    needs: changes
+    # Required checks: the job always runs, so it reports under its matrix
+    # name, and its steps skip when there's nothing to check.
+    env:
+      RUN: ${{ needs.changes.outputs.code }}
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
@@ -97,14 +147,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        if: env.RUN == 'true'
         with:
           submodules: true
 
       - uses: dtolnay/rust-toolchain@nightly
+        if: env.RUN == 'true'
         with:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+        if: env.RUN == 'true'
         with:
           shared-key: client
           cache-on-failure: true
@@ -112,10 +165,12 @@ jobs:
       # The checks themselves are `just` recipes, which `just client-pre-pr`
       # runs locally too.
       - uses: taiki-e/install-action@v2
+        if: env.RUN == 'true'
         with:
           tool: just
 
       - name: Install Vulkan SDK
+        if: env.RUN == 'true'
         uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa
         with:
           vulkan_version: 1.4.341.0
@@ -124,31 +179,32 @@ jobs:
           stripdown: true
 
       - name: Install Linux dependencies
-        if: matrix.os == 'ubuntu-latest'
+        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y libvulkan-dev libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev libdbus-1-dev
 
       - name: Format check
-        if: matrix.os == 'ubuntu-latest'
+        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
         run: just ci-fmt
 
       - name: Clippy
+        if: env.RUN == 'true'
         run: just ci-lint
 
       - name: Tests
-        if: matrix.os == 'ubuntu-latest'
+        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
         run: just ci-test
 
       - name: Pin the steel revision
-        if: matrix.os == 'ubuntu-latest'
+        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
         id: steel
         run: echo "rev=$(git -C third_party/SteelMC rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       # Steel's build scripts write generated source and the extracted Minecraft
       # assets into its own source tree, which the cargo cache does not cover.
       - name: Cache the generated steel source
-        if: matrix.os == 'ubuntu-latest'
+        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
         uses: actions/cache@v6
         with:
           path: |
@@ -162,7 +218,7 @@ jobs:
 
       # Its test boots a real world, the only check that steel actually starts.
       - name: Singleplayer
-        if: matrix.os == 'ubuntu-latest'
+        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
         run: just ci-singleplayer
 
   pr-template:
@@ -201,6 +257,8 @@ jobs:
           PY
 
   launcher-frontend:
+    needs: changes
+    if: needs.changes.outputs.launcher == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -228,6 +286,10 @@ jobs:
         run: pnpm --filter pomme-launcher exec tsc --noEmit
 
   launcher:
+    needs: changes
+    # Required checks, so its steps skip rather than the job (see `client`).
+    env:
+      RUN: ${{ needs.changes.outputs.launcher }}
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
@@ -235,33 +297,37 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        if: env.RUN == 'true'
         with:
           submodules: true
 
       - uses: dtolnay/rust-toolchain@nightly
+        if: env.RUN == 'true'
         with:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+        if: env.RUN == 'true'
         with:
           shared-key: launcher
           cache-on-failure: true
 
       - name: Install Linux dependencies
-        if: matrix.os == 'ubuntu-latest'
+        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Format check
-        if: matrix.os == 'ubuntu-latest'
+        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
         run: cargo fmt -p pomme-launcher -- --check
 
       - name: Clippy
+        if: env.RUN == 'true'
         run: cargo clippy -p pomme-launcher --release --all-targets --all-features -- -D warnings
 
       - name: Check bindings are up to date
-        if: matrix.os == 'ubuntu-latest'
+        if: env.RUN == 'true' && matrix.os == 'ubuntu-latest'
         run: |
           cargo run -p pomme-launcher --quiet --bin generate-bindings
           if ! git diff --exit-code -- ./pomme-launcher/src/bindings; then
