@@ -169,14 +169,13 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         crate::net::chat_security::ProfileKeyServices::prefetch();
     }
 
-    // Without any account flags (no launcher), a release or phone build
-    // plays as the stored account or signs in first; a desktop dev build
-    // plays offline, and never reads the keychain unasked.
-    let require_account = args.username.is_none()
-        && args.uuid.is_none()
-        && args.access_token.is_none()
-        && cfg!(any(not(debug_assertions), mobile));
-    let user = UserData::from_args(args.username, args.uuid, args.access_token);
+    let (user, require_account) = UserData::for_launch(
+        args.username,
+        args.uuid,
+        args.access_token,
+        cfg!(not(debug_assertions)),
+        cfg!(mobile),
+    );
 
     // A harness script stays off the user's Discord profile, and phones have
     // no Discord client to talk to.
