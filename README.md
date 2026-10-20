@@ -32,15 +32,17 @@ It signs you in with your Microsoft account and keeps itself up to date. You
 need to own Minecraft: Java Edition. The builds aren't signed yet, so the first
 launch needs one extra step, described in the release notes.
 
+Early Android and iOS builds build from source: see [BUILDING.md](./BUILDING.md).
+
 ## Why Pomme?
 
 - **No JVM**: a native binary, so there's no Java to install or tune.
 - **Vanilla behaviour**: physics, rendering, menus and networking are ported line
   by line from the decompiled game, and checked against it.
 - **Tested against real servers**: scripted [in-game tests](./tests/ingame/README.md)
-  run the client against a vanilla 26.3 server and screenshot the results.
+  run the client against a vanilla 26.2 server and screenshot the results.
 - **Many versions, one client**: per-version protocol tables are generated from
-  each version's decompiled source, and older versions are translated to 26.3.
+  each version's decompiled source, and other versions are translated to 26.2.
 
 > [!WARNING]
 > Pomme is in active development. Expect missing features and bugs, and please
@@ -52,6 +54,9 @@ launch needs one extra step, described in the release notes.
 - **Singleplayer**: worlds run on [SteelMC](https://github.com/Steel-Foundation/SteelMC), a Rust server embedded in the client
 - **Audio**: vanilla sound events, music and subtitles through OpenAL Soft
 - **Resource packs**: local and server-sent packs, applied live
+- **Inventories**: survival and creative inventories, crafting, furnaces, anvils, enchanting, chests, bundles and the recipe book
+- **Controls**: rebindable keys and controllers on desktop, touch controls on phones
+- **Friends**: the Minecraft friends list, requests and who's online
 - **Updates**: installs per platform and keeps itself up to date
 
 <details>
@@ -59,9 +64,10 @@ launch needs one extra step, described in the release notes.
 
 - Vanilla-exact movement, collision, swimming and drowning
 - Block entities, dropped items, block overlays and hand animation
-- HUD and menus: health, hunger, air, status effects, hotbar, boss bars, titles, waypoints, F3 debug, chat, pause menu, options, server list, world list
+- HUD and menus: health, hunger, air, status effects, hotbar, boss bars, titles, waypoints, advancement toasts, player list, F3 debug, chat, pause menu, options, server list, world list
 - Create, edit and delete singleplayer worlds from the menu
-- Microsoft account tokens stored in the OS keyring
+- Microsoft sign-in from the menu, with tokens stored in the OS keyring
+- Secure chat: signed messages, as vanilla sends them
 - Discord presence for the menu, servers and worlds
 
 </details>
