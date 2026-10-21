@@ -188,6 +188,8 @@ pub fn tick(
         player.no_jump_delay = 0;
     }
 
+    player.move_forward = forward;
+    player.move_strafe = strafe;
     travel(player, input, world, forward, strafe, sin_y_rot, cos_y_rot);
 
     player.tick_air_supply();
@@ -269,6 +271,8 @@ pub fn tick_dead(
         piston_noclip: None,
     };
     normalize_tiny_velocity(&mut player.velocity);
+    player.move_forward = 0.0;
+    player.move_strafe = 0.0;
     travel(player, &neutral, world, 0.0, 0.0, sin_y_rot, cos_y_rot);
 
     // Player.updatePlayerPose runs after LivingEntity.tick in vanilla. With
@@ -1219,23 +1223,24 @@ fn vanilla_look_y(pitch_degrees: f32) -> f64 {
 }
 
 /// What a piston's move of the player reads: the world, whether the player
-/// is descending (holding sneak), and the game tick for the 0.51 budget.
+/// is descending (holding sneak), and the tick for the 0.51 budget.
 #[derive(Clone, Copy)]
 struct PistonMove<'a> {
     world: CollisionWorld<'a>,
     descending: bool,
-    game_time: u64,
+    tick: u64,
 }
 
 /// Vanilla `Entity.limitPistonMovement`: a piston moves an entity along one
 /// axis, at most 0.51 per axis per game tick however many pistons push it.
-fn limit_piston_movement(player: &mut LocalPlayer, delta: DVec3, game_time: u64) -> DVec3 {
+fn limit_piston_movement(player: &mut LocalPlayer, delta: DVec3, tick: u64) -> DVec3 {
     if delta.length_squared() <= 1.0e-7 {
         return delta;
     }
-    if game_time != player.piston_deltas_game_time {
+    // Not the game time, which pomme advances outside the tick loop.
+    if tick != player.piston_deltas_tick {
         player.piston_deltas = [0.0; 3];
-        player.piston_deltas_game_time = game_time;
+        player.piston_deltas_tick = tick;
     }
     let Some(axis) = (0..3).find(|&axis| delta[axis] != 0.0) else {
         return DVec3::ZERO;
@@ -1253,15 +1258,10 @@ fn limit_piston_movement(player: &mut LocalPlayer, delta: DVec3, game_time: u64)
 
 /// Vanilla `Entity.move` with `MoverType.PISTON`: no edge back-off and no
 /// stuck-speed slowdown, but the usual collision.
+// TODO: `addMovementThisTick` for `applyEffectsFromBlocks`, which the
+// player's own move doesn't do yet either.
 fn move_by_piston(player: &mut LocalPlayer, mv: PistonMove<'_>, delta: DVec3) {
-    if is_spectator(player.game_mode) {
-        // `noPhysics`.
-        player.position += delta;
-        player.horizontal_collision = false;
-        player.minor_horizontal_collision = false;
-        return;
-    }
-    let delta = limit_piston_movement(player, delta, mv.game_time);
+    let delta = limit_piston_movement(player, delta, mv.tick);
     if delta == DVec3::ZERO {
         return;
     }
@@ -1280,10 +1280,19 @@ fn move_by_piston(player: &mut LocalPlayer, mv: PistonMove<'_>, delta: DVec3) {
         player.position += resolved;
     }
     player.horizontal_collision = collided[0] || collided[2];
-    // TODO: `isHorizontalCollisionMinor` reads the player's move input, which
-    // a piston's move doesn't have here.
-    player.minor_horizontal_collision = false;
+    let (sin_y_rot, cos_y_rot) = vanilla_yaw_sin_cos(player.look_dir.y_rot_deg());
+    player.minor_horizontal_collision = player.horizontal_collision
+        && is_minor_horizontal_collision(
+            player.move_forward,
+            player.move_strafe,
+            sin_y_rot,
+            cos_y_rot,
+            resolved,
+        );
     settle_after_move(player, mv.world, resolved, on_ground, collided, &ctx);
+    let speed_factor = f64::from(block_speed_factor(player, mv.world.chunks));
+    player.velocity.x *= speed_factor;
+    player.velocity.z *= speed_factor;
 }
 
 /// Vanilla `PistonMovingBlockEntity.moveEntityByPiston`: `piston_direction`
@@ -1336,7 +1345,6 @@ fn movement_area(aabb: &Aabb, direction: Direction, amount: f64) -> Aabb {
 /// `moveCollidedEntities` (with its slime bounce and the source piston's
 /// `fixEntityWithinPistonBase`), then `moveStuckEntities` for honey. Runs
 /// before the moving block's progress reaches `new_progress`.
-#[allow(clippy::too_many_arguments)]
 pub fn push_by_moving_piston(
     player: &mut LocalPlayer,
     chunk_store: &ChunkStore,
@@ -1344,17 +1352,21 @@ pub fn push_by_moving_piston(
     pos: BlockPos,
     piston: &MovingPiston,
     new_progress: f32,
-    descending: bool,
-    game_time: u64,
+    tick: u64,
 ) {
+    // `getEntities`' `NO_SPECTATORS`; honey's own filter needs `onGround`,
+    // which `Player.tick` clears for spectators.
+    if is_spectator(player.game_mode) {
+        return;
+    }
     let mv = PistonMove {
         world: CollisionWorld {
             chunks: chunk_store,
             block_entity_anim: Some(block_entity_anim),
             piston_noclip: None,
         },
-        descending,
-        game_time,
+        descending: player.was_shift_pressed,
+        tick,
     };
     let movement = piston.movement_direction();
     let delta_progress = f64::from(new_progress - piston.progress);
@@ -2374,7 +2386,7 @@ mod tests {
         assert_eq!(up(&mut player, 0.3, 7), 0.3);
         assert!((up(&mut player, 0.3, 7) - 0.21).abs() < 1e-12);
         assert_eq!(up(&mut player, 0.3, 7), 0.0);
-        // A new game tick starts the budget over.
+        // A new tick starts the budget over.
         assert_eq!(up(&mut player, 0.3, 8), 0.3);
         // Only the first non-zero axis moves.
         let both = limit_piston_movement(&mut player, dvec3(0.2, 0.2, 0.0), 9);
@@ -2398,8 +2410,9 @@ mod tests {
         assert!((piston_movement(&up, Direction::Up, &entity) - 0.3).abs() < 1e-12);
     }
 
-    #[test]
-    fn an_extending_piston_lifts_the_player_standing_on_it() {
+    /// The player's y after a stone rising out of (8, 64, 8) moves from
+    /// half to fully out, with them standing on its top face.
+    fn y_after_rising_stone(game_mode: u8) -> f64 {
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(2);
         let anim = BlockEntityAnimStore::default();
@@ -2408,14 +2421,21 @@ mod tests {
         let mut piston = MovingPiston::new(stone, Direction::Up, true, false);
         piston.progress = 0.5;
         let mut player = LocalPlayer::new();
-        // Standing on the block's top face, which is halfway up its cell.
+        player.game_mode = game_mode;
         player.position = dvec3(8.5, 64.5, 8.5).into();
         player.on_ground = true;
-        push_by_moving_piston(&mut player, &chunks, &anim, pos, &piston, 1.0, false, 1);
-        assert!(
-            (player.position.y - 65.01).abs() < 1e-9,
-            "{}",
-            player.position.y
-        );
+        push_by_moving_piston(&mut player, &chunks, &anim, pos, &piston, 1.0, 1);
+        player.position.y
+    }
+
+    #[test]
+    fn an_extending_piston_lifts_the_player_standing_on_it() {
+        let y = y_after_rising_stone(0);
+        assert!((y - 65.01).abs() < 1e-9, "{y}");
+    }
+
+    #[test]
+    fn pistons_leave_spectators_alone() {
+        assert_eq!(y_after_rising_stone(3), 64.5);
     }
 }

@@ -3925,7 +3925,8 @@ pub fn update_game(
         )
     };
 
-    let moving_block_renders = moving_block_renders(game, partial_tick);
+    let moving_block_renders =
+        moving_block_renders(game, gfx.renderer.camera_render_position(), partial_tick);
 
     let shadow_casters = if core.menu.entity_shadows && !benchmark_running {
         shadow_casters(
@@ -4482,14 +4483,18 @@ fn emit_item_copies(
 /// cell it left. A retracting piston also draws its base, extended, in place.
 fn moving_block_renders(
     game: &GameState,
+    camera_pos: glam::DVec3,
     partial_tick: f32,
 ) -> Vec<crate::renderer::chunk::moving_blocks::MovingBlockRender> {
     use crate::world::block::{block_id, is_air, with_property};
     use crate::world::piston;
+    /// Vanilla `PistonHeadRenderer.getViewDistance`.
+    const VIEW_DISTANCE: f64 = 68.0;
     let mut renders = Vec::new();
     for (pos, moving) in game.block_entity_anim.pistons.iter() {
         let state = moving.moved_state;
-        if is_air(state) {
+        let center = glam::DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64) + 0.5;
+        if is_air(state) || center.distance_squared(camera_pos) >= VIEW_DISTANCE * VIEW_DISTANCE {
             continue;
         }
         let origin = [pos.x, pos.y, pos.z];

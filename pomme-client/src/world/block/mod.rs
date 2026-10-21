@@ -53,13 +53,19 @@ const DEFAULT_BEHAVIOR: BlockBehavior = BlockBehavior {
 };
 
 /// Vanilla `PushReaction`: what a piston does to the block.
+/// 26.3 renamed its values; the aliases read those dumps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PushReaction {
+    #[serde(alias = "push_pull")]
     Normal,
+    #[serde(alias = "popped")]
     Destroy,
+    #[serde(alias = "immoveable")]
     Block,
+    #[serde(alias = "ignore_entity")]
     Ignore,
+    #[serde(alias = "push")]
     PushOnly,
 }
 
@@ -263,7 +269,7 @@ struct BehaviorEntry {
     requires_correct_tool: bool,
 }
 
-/// A `block_piston.json` entry; blocks missing from it are plain NORMAL
+/// A `piston-<v>.json` entry; blocks missing from it are plain NORMAL
 /// blocks without a block entity.
 #[derive(serde::Deserialize)]
 struct PistonEntry {
@@ -387,16 +393,19 @@ struct EmbeddedBlocks {
     protocol: i32,
     blocks: &'static str,
     state: &'static str,
+    piston: &'static str,
 }
 
-/// The `blocks-<v>.json` / `state-<v>.json` pair for version `v`, keyed by
-/// its protocol (checked against the file in [`build_table`]).
+/// The `blocks-<v>.json`, `state-<v>.json` and `piston-<v>.json` tables for
+/// version `v`, keyed by its protocol (checked against the file in
+/// [`build_table`]).
 macro_rules! embedded_blocks {
     ($protocol:expr, $version:literal) => {
         EmbeddedBlocks {
             protocol: $protocol,
             blocks: include_str!(concat!("data/blocks-", $version, ".json")),
             state: include_str!(concat!("data/state-", $version, ".json")),
+            piston: include_str!(concat!("data/piston-", $version, ".json")),
         }
     };
 }
@@ -421,8 +430,8 @@ const BLOCK_DATA: &[EmbeddedBlocks] = &[
 /// Protocols whose block set is identical to a newer embedded version's (no
 /// blocks added between them); they share that version's slot instead of
 /// building a second copy of the same table. The slot also serves the state
-/// table, so an alias requires the two versions' `generated/state.json`
-/// dumps to be identical as well, not just the block list.
+/// and piston tables, so an alias requires the two versions' stategen dumps
+/// to be identical as well, not just the block list.
 const SHARED_BLOCK_DATA: &[(i32, i32)] = &[
     // 1.21.7 added no blocks.
     (771, 772),
@@ -438,6 +447,10 @@ static BLOCK_TABLES: [OnceLock<Vec<BlockData>>; BLOCK_DATA.len()] =
 /// Per table slot, each single-state block's one state, for placement
 /// prediction.
 static PLACEABLE_BLOCKS: [OnceLock<HashMap<&'static str, BlockState>>; BLOCK_DATA.len()] =
+    [const { OnceLock::new() }; BLOCK_DATA.len()];
+
+/// Per table slot, each block's first state.
+static FIRST_STATES: [OnceLock<HashMap<&'static str, BlockState>>; BLOCK_DATA.len()] =
     [const { OnceLock::new() }; BLOCK_DATA.len()];
 
 /// Server-provided block tags, resolved into Pomme's native block resource
@@ -515,10 +528,9 @@ fn load_behaviors() -> HashMap<String, BehaviorEntry> {
         .expect("invalid block-behavior data")
 }
 
-/// Per-block piston data, dumped from the latest version by `just stategen`
-/// and shared by every version like the behavior table.
-fn load_piston_data() -> HashMap<String, PistonEntry> {
-    serde_json::from_str(include_str!("data/block_piston.json")).expect("invalid piston data")
+/// A version's per-block piston data, dumped by `just stategen`.
+fn load_piston_data(data: &EmbeddedBlocks) -> HashMap<String, PistonEntry> {
+    serde_json::from_str(data.piston).expect("invalid piston data")
 }
 
 fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
@@ -531,7 +543,7 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
         data.protocol
     );
     let behaviors = load_behaviors();
-    let piston_data = load_piston_data();
+    let piston_data = load_piston_data(data);
     let state_file: StateFile = serde_json::from_str(data.state).expect("invalid state data");
     assert_eq!(
         state_file.version, file.version,
@@ -960,6 +972,7 @@ fn block_data(state: BlockState) -> &'static BlockData {
 }
 
 /// Every valid block state paired with its cached data, in id order.
+#[cfg(test)]
 fn all_states() -> impl Iterator<Item = (BlockState, &'static BlockData)> {
     slot_states(active_table_slot())
 }
@@ -1031,7 +1044,15 @@ fn placeable_block_in_slot(slot: usize, item_name: &str) -> Option<BlockState> {
 /// First declared state of the named block, e.g. the light engine's bedrock
 /// fallback for unloaded-chunk reads.
 pub(crate) fn first_state_of(name: &str) -> Option<BlockState> {
-    all_states().find(|(_, d)| d.id == name).map(|(s, _)| s)
+    let slot = active_table_slot();
+    let map = FIRST_STATES[slot].get_or_init(|| {
+        let mut first = HashMap::new();
+        for (state, data) in slot_states(slot) {
+            first.entry(data.id).or_insert(state);
+        }
+        first
+    });
+    map.get(name).copied()
 }
 
 /// How many block states the active table holds (vanilla
@@ -1246,6 +1267,22 @@ pub(crate) fn has_large_collision_shape(state: BlockState) -> bool {
 
 pub fn fluid(state: BlockState) -> Fluid {
     block_data(state).fluid
+}
+
+/// Vanilla `FluidState.createLegacyBlock`: the block a lone fluid is.
+pub fn fluid_block(fluid: Fluid) -> BlockState {
+    let name = match fluid.kind {
+        FluidKind::Empty => return BlockState::AIR,
+        FluidKind::Water => "water",
+        FluidKind::Lava => "lava",
+    };
+    // `FlowingFluid.getLegacyLevel`.
+    let level = if fluid.amount == 8 && !fluid.falling {
+        0
+    } else {
+        8 - fluid.amount.min(8) + if fluid.falling { 8 } else { 0 }
+    };
+    state_with(name, &[("level", &level.to_string())]).unwrap_or(BlockState::AIR)
 }
 
 pub(crate) fn block_shape(state: BlockState) -> Option<&'static [LocalBox]> {
@@ -1534,6 +1571,12 @@ mod tests {
         assert_eq!(fluid(logged).amount, 8);
 
         assert_eq!(fluid(BlockState::AIR).kind, FluidKind::Empty);
+
+        assert_eq!(fluid_block(fluid(still)), still);
+        assert_eq!(fluid_block(fluid(logged)), still);
+        let level = |s| block_properties(fluid_block(fluid(s))).get("level");
+        assert_eq!(level(falling), Some("8"));
+        assert_eq!(fluid_block(fluid(BlockState::AIR)), BlockState::AIR);
     }
 
     #[test]
@@ -1953,6 +1996,30 @@ mod tests {
         }
     }
 
+    /// Each version's piston table parses and names only that version's
+    /// blocks, so a dump from the wrong version fails here.
+    #[test]
+    fn piston_tables_match_their_versions() {
+        for data in BLOCK_DATA {
+            let file: BlockFile = serde_json::from_str(data.blocks).unwrap();
+            let names: HashSet<&str> = file.blocks.iter().map(|b| b.name.as_str()).collect();
+            let piston = load_piston_data(data);
+            for key in piston.keys() {
+                assert!(
+                    names.contains(key.as_str()),
+                    "piston entry '{key}' isn't a {} block",
+                    file.version
+                );
+            }
+            assert_eq!(
+                piston.get("barrier").map(|p| p.push_reaction),
+                Some(PushReaction::Block),
+                "{}",
+                file.version
+            );
+        }
+    }
+
     /// Every block name in every embedded version table has an entry in the
     /// shared behavior and sound tables (a missing one would silently fall
     /// back to instant-break defaults and stone sounds), and every table key
@@ -1982,9 +2049,6 @@ mod tests {
         }
         for key in behaviors.keys() {
             assert!(known.contains(key), "orphaned behavior entry '{key}'");
-        }
-        for key in load_piston_data().keys() {
-            assert!(known.contains(key), "orphaned piston entry '{key}'");
         }
         for key in sound::BLOCK_SOUNDS.keys() {
             assert!(known.contains(key), "orphaned sound entry '{key}'");

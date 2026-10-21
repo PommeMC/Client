@@ -153,14 +153,44 @@ fn apply_server_block(
     pos: crate::position::BlockPos,
     state: azalea_block::BlockState,
 ) {
+    sync_block_entities(game, pos, state);
+    if game.interaction.update_known_server_state(&pos, state) {
+        return;
+    }
+    write_block(game, priority_remesh, pos, state);
+}
+
+/// Vanilla `Level.setBlock` from the client's own code, which no pending
+/// prediction absorbs.
+fn set_client_block(
+    game: &mut GameState,
+    priority_remesh: &mut Vec<(crate::position::ChunkPos, i32)>,
+    pos: crate::position::BlockPos,
+    state: azalea_block::BlockState,
+) {
+    sync_block_entities(game, pos, state);
+    write_block(game, priority_remesh, pos, state);
+}
+
+fn sync_block_entities(
+    game: &mut GameState,
+    pos: crate::position::BlockPos,
+    state: azalea_block::BlockState,
+) {
     // Vanilla drops a moving block's entity once its cell holds anything else.
     if crate::world::block::block_id(state) != "moving_piston" {
         game.block_entity_anim.pistons.remove(&pos);
     }
     crate::world::block_entity::sync_block_entity(&mut game.chunk_store.block_entities, pos, state);
-    if game.interaction.update_known_server_state(&pos, state) {
-        return;
-    }
+}
+
+/// The block + light write and the remesh cascade.
+fn write_block(
+    game: &mut GameState,
+    priority_remesh: &mut Vec<(crate::position::ChunkPos, i32)>,
+    pos: crate::position::BlockPos,
+    state: azalea_block::BlockState,
+) {
     crate::world::light::set_block_and_light(
         &game.chunk_store,
         &mut game.light_engine,
@@ -179,9 +209,8 @@ fn apply_server_block(
     );
 }
 
-/// The client world as the piston code sees it. Its writes take the server
-/// block path, and destroyed blocks' effects wait for the caller, which owns
-/// the audio and the particle registry.
+/// The client world as the piston code sees it. Destroyed blocks' effects
+/// wait for the caller, which owns the audio and the particle registry.
 struct ClientPistonLevel<'a> {
     game: &'a mut GameState,
     remesh: &'a mut Vec<(crate::position::ChunkPos, i32)>,
@@ -204,7 +233,12 @@ impl crate::world::piston::PistonLevel for ClientPistonLevel<'_> {
     }
 
     fn set_block(&mut self, pos: crate::position::BlockPos, state: azalea_block::BlockState) {
-        apply_server_block(self.game, self.remesh, pos, state);
+        set_client_block(self.game, self.remesh, pos, state);
+    }
+
+    fn is_loaded(&self, pos: crate::position::BlockPos) -> bool {
+        let chunk = crate::position::ChunkPos::new(pos.x.div_euclid(16), pos.z.div_euclid(16));
+        self.game.chunk_store.get_chunk(&chunk).is_some()
     }
 
     fn min_y(&self) -> i32 {
@@ -229,10 +263,7 @@ impl crate::world::piston::PistonLevel for ClientPistonLevel<'_> {
 pub(crate) fn tick_moving_pistons(core: &AppCore, game: &mut GameState) {
     let mut remesh = Vec::new();
     let mut level = ClientPistonLevel::new(game, &mut remesh);
-    let descending = core
-        .input
-        .performing_action(crate::app::input::Action::Sneak);
-    let game_time = level.game.sky_state.game_time;
+    let tick = level.game.tick_count;
     crate::world::piston::tick(&mut level, |level, pos, piston, new_progress| {
         let game = &mut *level.game;
         // A passenger moves with its vehicle, which the server moves.
@@ -246,8 +277,7 @@ pub(crate) fn tick_moving_pistons(core: &AppCore, game: &mut GameState) {
                 pos,
                 piston,
                 new_progress,
-                descending,
-                game_time,
+                tick,
             );
         }
     });
@@ -1450,6 +1480,8 @@ impl AppCore {
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
                     game.light_engine =
                         crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
+                    // The old level's block entities, moving blocks among them.
+                    game.block_entity_anim = Default::default();
                     game.position_set = false;
                     // Login/respawn recreate vanilla's LocalPlayer, resetting
                     // the XP display sentinel; waypoints persist.
@@ -1505,7 +1537,6 @@ impl AppCore {
                         .queue_task(crate::world::light::LightTask::Remove {
                             pos: (pos.x, pos.z),
                         });
-                    game.block_entity_anim.drop_chunk(pos.x, pos.z);
                     game.content_gen.remove(&pos);
                     game.meshed.remove(&pos);
                     game.compiled.remove(&pos);

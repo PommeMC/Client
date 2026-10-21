@@ -1893,7 +1893,12 @@ impl Renderer {
                 let t_cull = std::time::Instant::now();
                 // Solid (no discard) first so it lays down depth and early-Z lets
                 // the front-to-back order reject occluded fragments; cutout after.
-                self.moving_block_buffers.upload(frame, moving_blocks);
+                self.moving_block_buffers.upload(
+                    &self.ctx.device,
+                    &self.ctx.allocator,
+                    frame,
+                    moving_blocks,
+                );
                 self.chunk_pipeline.bind(cmd, frame, false);
                 self.chunk_buffers.draw_indirect(cmd, frame, false);
                 self.moving_block_buffers.draw(cmd, frame, false);

@@ -22,6 +22,8 @@ const DEATH_TICKS: u8 = 5;
 pub trait PistonLevel {
     fn block(&self, pos: BlockPos) -> BlockState;
     fn set_block(&mut self, pos: BlockPos, state: BlockState);
+    /// Whether `pos`'s chunk is loaded, so it can hold a block entity.
+    fn is_loaded(&self, pos: BlockPos) -> bool;
     fn min_y(&self) -> i32;
     fn max_y(&self) -> i32;
     fn pistons(&mut self) -> &mut MovingPistons;
@@ -67,8 +69,8 @@ impl MovingPiston {
             .and_then(state_from_nbt)
             .unwrap_or(BlockState::AIR);
         let direction = nbt
-            .int("facing")
-            .map(|id| from_3d_data_value(id as u8))
+            .byte("facing")
+            .map(|id| from_3d_data_value(id.into()))
             .unwrap_or(Direction::Down);
         let progress = nbt.float("progress").unwrap_or(0.0);
         let flag = |key| nbt.byte(key).is_some_and(|b| b != 0);
@@ -116,27 +118,45 @@ impl MovingPiston {
     }
 }
 
-/// The client's moving blocks, by position.
+/// The client's moving blocks, by position. Each keeps the order it was
+/// added in, which they tick in (vanilla's `blockEntityTickers` list).
 #[derive(Default)]
 pub struct MovingPistons {
-    entries: HashMap<BlockPos, MovingPiston>,
+    entries: HashMap<BlockPos, (u64, MovingPiston)>,
+    next_order: u64,
 }
 
 impl MovingPistons {
     pub fn get(&self, pos: &BlockPos) -> Option<&MovingPiston> {
-        self.entries.get(pos)
+        self.entries.get(pos).map(|(_, piston)| piston)
+    }
+
+    fn get_mut(&mut self, pos: &BlockPos) -> Option<&mut MovingPiston> {
+        self.entries.get_mut(pos).map(|(_, piston)| piston)
     }
 
     pub fn insert(&mut self, pos: BlockPos, piston: MovingPiston) {
-        self.entries.insert(pos, piston);
+        self.entries.insert(pos, (self.next_order, piston));
+        self.next_order += 1;
     }
 
     pub fn remove(&mut self, pos: &BlockPos) -> Option<MovingPiston> {
-        self.entries.remove(pos)
+        self.entries.remove(pos).map(|(_, piston)| piston)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&BlockPos, &MovingPiston)> {
-        self.entries.iter()
+        self.entries.iter().map(|(pos, (_, piston))| (pos, piston))
+    }
+
+    /// Positions in the order they were added.
+    fn tick_order(&self) -> Vec<BlockPos> {
+        let mut order: Vec<_> = self
+            .entries
+            .iter()
+            .map(|(pos, (n, _))| (*n, *pos))
+            .collect();
+        order.sort_unstable_by_key(|&(n, _)| n);
+        order.into_iter().map(|(_, pos)| pos).collect()
     }
 
     pub fn drop_chunk(&mut self, chunk_x: i32, chunk_z: i32) {
@@ -173,11 +193,13 @@ pub fn trigger_event(level: &mut impl PistonLevel, pos: BlockPos, b0: u8, b1: u8
     if level.pistons().get(&arm).is_some() {
         final_tick(level, arm);
     }
-    level.set_block(pos, moving_piston(direction, sticky));
-    let base = piston_base(sticky, from_3d_data_value(b1 & 7));
-    level
-        .pistons()
-        .insert(pos, MovingPiston::new(base, direction, false, true));
+    let base = piston_base(sticky, from_3d_data_value((b1 & 7).into()));
+    set_moving(
+        level,
+        pos,
+        moving_piston(direction, sticky),
+        MovingPiston::new(base, direction, false, true),
+    );
     if sticky {
         let two = relative(pos, direction, 2);
         let moving = level.block(two);
@@ -199,11 +221,11 @@ pub fn trigger_event(level: &mut impl PistonLevel, pos: BlockPos, b0: u8, b1: u8
             {
                 move_blocks(level, pos, direction, false, sticky);
             } else {
-                level.set_block(arm, BlockState::AIR);
+                remove_block(level, arm);
             }
         }
     } else {
-        level.set_block(arm, BlockState::AIR);
+        remove_block(level, arm);
     }
     true
 }
@@ -247,22 +269,42 @@ fn move_blocks(
     for (i, &from) in resolver.to_push.iter().enumerate().rev() {
         let pos = relative(from, push_direction, 1);
         delete_after_move.remove(&pos);
-        level.set_block(pos, moving_piston(direction, false));
         let piston = MovingPiston::new(to_push_shapes[i], direction, extending, false);
-        level.pistons().insert(pos, piston);
+        set_moving(level, pos, moving_piston(direction, false), piston);
     }
     if extending {
         let head = piston_head(direction, sticky, false);
         delete_after_move.remove(&arm);
-        level.set_block(arm, moving_piston(direction, sticky));
-        level
-            .pistons()
-            .insert(arm, MovingPiston::new(head, direction, true, true));
+        set_moving(
+            level,
+            arm,
+            moving_piston(direction, sticky),
+            MovingPiston::new(head, direction, true, true),
+        );
     }
     for pos in delete_after_move.into_keys() {
         level.set_block(pos, BlockState::AIR);
     }
     true
+}
+
+/// Vanilla `Level.removeBlock`: what's left is the cell's fluid.
+fn remove_block(level: &mut impl PistonLevel, pos: BlockPos) {
+    let fluid = block::fluid_block(block::fluid(level.block(pos)));
+    level.set_block(pos, fluid);
+}
+
+/// Vanilla `setBlock` then `setBlockEntity`: an unloaded chunk takes neither.
+fn set_moving(
+    level: &mut impl PistonLevel,
+    pos: BlockPos,
+    block_state: BlockState,
+    piston: MovingPiston,
+) {
+    level.set_block(pos, block_state);
+    if level.is_loaded(pos) {
+        level.pistons().insert(pos, piston);
+    }
 }
 
 /// Vanilla `PistonMovingBlockEntity.finalTick`: lands the block at once.
@@ -289,9 +331,9 @@ pub fn tick<L: PistonLevel>(
     level: &mut L,
     mut on_move: impl FnMut(&mut L, BlockPos, &MovingPiston, f32),
 ) {
-    let positions: Vec<BlockPos> = level.pistons().entries.keys().copied().collect();
+    let positions = level.pistons().tick_order();
     for pos in positions {
-        let Some(piston) = level.pistons().entries.get_mut(&pos) else {
+        let Some(piston) = level.pistons().get_mut(&pos) else {
             continue;
         };
         piston.progress_o = piston.progress;
@@ -313,7 +355,7 @@ pub fn tick<L: PistonLevel>(
         let new_progress = piston.progress + 0.5;
         let snapshot = *piston;
         on_move(level, pos, &snapshot, new_progress);
-        if let Some(piston) = level.pistons().entries.get_mut(&pos) {
+        if let Some(piston) = level.pistons().get_mut(&pos) {
             piston.progress = new_progress.min(1.0);
         }
     }
@@ -574,8 +616,8 @@ pub(crate) fn relative(pos: BlockPos, direction: Direction, steps: i32) -> Block
 }
 
 /// Vanilla `Direction.from3DDataValue`.
-fn from_3d_data_value(id: u8) -> Direction {
-    Direction::VALUES[(id % 6) as usize]
+fn from_3d_data_value(id: i32) -> Direction {
+    Direction::VALUES[(id % 6).unsigned_abs() as usize]
 }
 
 /// Whether `state` is a piston base, vanilla `instanceof PistonBaseBlock`.
@@ -663,6 +705,10 @@ mod tests {
                 self.pistons.remove(&pos);
             }
             self.blocks.insert(pos, state);
+        }
+
+        fn is_loaded(&self, _pos: BlockPos) -> bool {
+            true
         }
 
         fn min_y(&self) -> i32 {
@@ -813,6 +859,13 @@ mod tests {
         }
         assert_eq!(name(&level, at(2)), "stone");
         assert_eq!(name(&level, at(1)), "piston_head");
+    }
+
+    #[test]
+    fn chunk_data_facing_is_a_byte() {
+        let mut nbt = NbtCompound::new();
+        nbt.insert("facing", 5i8);
+        assert_eq!(MovingPiston::from_nbt(&nbt).direction, Direction::East);
     }
 
     #[test]

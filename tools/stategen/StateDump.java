@@ -30,10 +30,10 @@ import java.util.Map;
  * that reduces to 2D coverage — exact as long as every shape is 1/16-aligned,
  * which this tool hard-fails on if violated.
  *
- * With a third path it also writes the per-block piston data
+ * With a third path it also writes the version's per-block piston data
  * (getPistonPushReaction, hasBlockEntity) that PistonBaseBlock.isPushable
  * reads, keyed by block name and listing only blocks that aren't a plain
- * NORMAL block without a block entity.
+ * NORMAL (26.3: PUSH_PULL) block without a block entity.
  *
  * Usage: java -cp <server-classes-jar>;<bundled-libs...>;. StateDump <version> <out.json> [<piston-out.json>]
  */
@@ -221,7 +221,8 @@ public final class StateDump {
             String reaction = ((Enum<?>) state.getClass().getMethod("getPistonPushReaction")
                     .invoke(state)).name().toLowerCase(java.util.Locale.ROOT);
             boolean entity = (Boolean) state.getClass().getMethod("hasBlockEntity").invoke(state);
-            if (reaction.equals("normal") && !entity) {
+            boolean normal = reaction.equals("normal") || reaction.equals("push_pull");
+            if (normal && !entity) {
                 continue;
             }
             Object key = getKey.invoke(registry, block);
