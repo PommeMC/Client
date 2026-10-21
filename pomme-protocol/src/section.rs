@@ -136,17 +136,15 @@ impl Strategy {
         1 << (self.bits_per_axis() * 3)
     }
 
-    /// Vanilla `getConfigurationForBitCount`: the palette for a bit count
-    /// and the bits its storage uses in memory. Global storage needs the
-    /// registry's own width, which only a client-side resize computes; a read
-    /// takes the wire's, which a vanilla server derives from the same
-    /// registry.
-    fn configuration(self, bits: u32, global_bits: impl FnOnce() -> u32) -> (PaletteKind, u32) {
+    /// Vanilla `getConfigurationForBitCount`: the palette for a bit count and
+    /// the bits its storage uses. Global storage is as wide as the registry,
+    /// whatever count the wire gave.
+    fn configuration(self, bits: u32, registry_size: usize) -> (PaletteKind, u32) {
         match (self, bits) {
             (_, 0) => (PaletteKind::SingleValue, 0),
             (Strategy::BlockStates, 1..=4) => (PaletteKind::List, 4),
             (Strategy::BlockStates, 5..=8) | (Strategy::Biomes, 1..=3) => (PaletteKind::List, bits),
-            _ => (PaletteKind::Global, global_bits()),
+            _ => (PaletteKind::Global, ceil_log2(registry_size)),
         }
     }
 }
@@ -202,9 +200,6 @@ impl Palette {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PalettedContainer {
     strategy: Strategy,
-    /// The bit count this container's configuration was chosen for (the
-    /// palette's capacity), distinct from the storage's bits in memory.
-    bits: u32,
     palette: Palette,
     storage: BitStorage,
 }
@@ -214,17 +209,17 @@ impl PalettedContainer {
     pub fn new(strategy: Strategy) -> Self {
         Self {
             strategy,
-            bits: 0,
             palette: Palette::SingleValue(0),
             storage: BitStorage::new(0, strategy.entry_count()),
         }
     }
 
     /// Vanilla `PalettedContainer.read`: the bit count, the palette, then the
-    /// storage's longs with no length prefix.
-    pub fn read(strategy: Strategy, r: &mut Reader) -> DecodeResult<Self> {
+    /// storage's longs with no length prefix. `registry_size` is the size of
+    /// the registry the ids come from.
+    pub fn read(strategy: Strategy, r: &mut Reader, registry_size: usize) -> DecodeResult<Self> {
         let bits = u32::from(r.u8()?);
-        let (kind, storage_bits) = strategy.configuration(bits, || bits);
+        let (kind, storage_bits) = strategy.configuration(bits, registry_size);
         let palette = Palette::read(kind, r)?;
         let mut storage = BitStorage::new(storage_bits, strategy.entry_count());
         for long in storage.raw_mut() {
@@ -232,7 +227,6 @@ impl PalettedContainer {
         }
         Ok(Self {
             strategy,
-            bits,
             palette,
             storage,
         })
@@ -289,9 +283,10 @@ impl PalettedContainer {
     }
 
     /// Vanilla `Palette.idFor`, growing the container through `on_resize`
-    /// when the palette is full.
+    /// when the palette is full. A list palette holds as many values as its
+    /// storage bits can tell apart.
     fn id_for(&mut self, value: u32, registry_size: usize) -> u32 {
-        let capacity = 1usize << self.bits;
+        let bits = self.storage.bits;
         match &mut self.palette {
             Palette::SingleValue(v) if *v == value => 0,
             Palette::SingleValue(_) => self.on_resize(1, value, registry_size),
@@ -299,11 +294,11 @@ impl PalettedContainer {
                 if let Some(i) = values.iter().position(|&v| v == value) {
                     return i as u32;
                 }
-                if values.len() < capacity {
+                if values.len() < 1 << bits {
                     values.push(value);
                     (values.len() - 1) as u32
                 } else {
-                    self.on_resize(self.bits + 1, value, registry_size)
+                    self.on_resize(bits + 1, value, registry_size)
                 }
             }
             Palette::Global => value,
@@ -314,10 +309,9 @@ impl PalettedContainer {
     /// `bits`, copies every entry over, then places `value`.
     fn on_resize(&mut self, bits: u32, value: u32, registry_size: usize) -> u32 {
         let strategy = self.strategy;
-        let (kind, storage_bits) = strategy.configuration(bits, || ceil_log2(registry_size));
+        let (kind, storage_bits) = strategy.configuration(bits, registry_size);
         let mut resized = Self {
             strategy,
-            bits,
             palette: Palette::empty(kind),
             storage: BitStorage::new(storage_bits, strategy.entry_count()),
         };
@@ -353,12 +347,13 @@ impl Default for Section {
 }
 
 impl Section {
-    /// Vanilla `LevelChunkSection.read`.
-    pub fn read(r: &mut Reader) -> DecodeResult<Self> {
+    /// Vanilla `LevelChunkSection.read`, given how many block states and
+    /// biomes the ids can name.
+    pub fn read(r: &mut Reader, block_states: usize, biomes: usize) -> DecodeResult<Self> {
         let block_count = r.i16()? as u16;
         let fluid_count = r.i16()? as u16;
-        let states = PalettedContainer::read(Strategy::BlockStates, r)?;
-        let biomes = PalettedContainer::read(Strategy::Biomes, r)?;
+        let states = PalettedContainer::read(Strategy::BlockStates, r, block_states)?;
+        let biomes = PalettedContainer::read(Strategy::Biomes, r, biomes)?;
         Ok(Self {
             block_count,
             fluid_count,
@@ -420,6 +415,16 @@ mod tests {
         out
     }
 
+    use crate::vanilla_fixtures::registry_size;
+
+    fn block_states() -> usize {
+        registry_size("block_state")
+    }
+
+    fn biomes() -> usize {
+        registry_size("worldgen/biome")
+    }
+
     #[test]
     fn reads_a_linear_block_container_at_four_bits() {
         // Entry 0 -> palette[1], entry 1 -> palette[2], the rest palette[0].
@@ -427,7 +432,8 @@ mod tests {
         longs[0] = 0x21;
         let bytes = container_bytes(4, &[0, 1, 9], &longs);
         let mut r = Reader::new(&bytes);
-        let container = PalettedContainer::read(Strategy::BlockStates, &mut r).unwrap();
+        let container =
+            PalettedContainer::read(Strategy::BlockStates, &mut r, block_states()).unwrap();
         assert_eq!(r.remaining(), 0);
         assert_eq!(container.get(0, 0, 0), 1);
         assert_eq!(container.get(1, 0, 0), 9);
@@ -438,20 +444,52 @@ mod tests {
     fn reads_a_single_value_container_with_no_longs() {
         let bytes = container_bytes(0, &[7], &[]);
         let mut r = Reader::new(&bytes);
-        let container = PalettedContainer::read(Strategy::Biomes, &mut r).unwrap();
+        let container = PalettedContainer::read(Strategy::Biomes, &mut r, biomes()).unwrap();
         assert_eq!(r.remaining(), 0);
         assert_eq!(container.single_value(), Some(7));
         assert_eq!(container.get(3, 3, 3), 7);
     }
 
     #[test]
+    fn global_storage_is_as_wide_as_the_registry() {
+        // A hostile count: vanilla falls through to the registry's width, so
+        // this reads 15-bit storage and runs out of bytes instead of panicking.
+        let bytes = container_bytes(0xFF, &[], &[0; 8]);
+        assert!(
+            PalettedContainer::read(
+                Strategy::BlockStates,
+                &mut Reader::new(&bytes),
+                block_states()
+            )
+            .is_err()
+        );
+
+        // 9 bits for the 66 biomes still reads 7-bit storage: 9 per long, 8 longs.
+        let bytes = container_bytes(9, &[], &[0; 8]);
+        let mut r = Reader::new(&bytes);
+        let container = PalettedContainer::read(Strategy::Biomes, &mut r, biomes()).unwrap();
+        assert_eq!(r.remaining(), 0);
+        assert_eq!(container.storage.bits, 7);
+    }
+
+    #[test]
+    fn list_palettes_grow_from_four_bits() {
+        let mut container = PalettedContainer::new(Strategy::BlockStates);
+        container.get_and_set(0, 0, 0, 1, block_states());
+        assert_eq!(container.storage.bits, 4);
+        for i in 1..16 {
+            container.get_and_set(i, 0, 0, i + 1, block_states());
+        }
+        assert_eq!(container.storage.bits, 5);
+    }
+
+    #[test]
     fn setting_grows_the_palette_and_keeps_every_entry() {
         let mut container = PalettedContainer::new(Strategy::BlockStates);
-        // 300 distinct values pass the hashmap palette and land in global,
-        // sized for a 26.2-sized state registry.
+        // 300 distinct values pass the hashmap palette and land in global.
         for i in 0..300u32 {
             let (x, y, z) = (i % 16, i / 256, (i / 16) % 16);
-            container.get_and_set(x, y, z, i + 1, 29_000);
+            container.get_and_set(x, y, z, i + 1, block_states());
         }
         assert_eq!(container.palette, Palette::Global);
         assert_eq!(container.storage.bits, 15);
@@ -467,7 +505,7 @@ mod tests {
     /// out byte for byte.
     #[test]
     fn matches_vanilla_encoder() {
-        for (name, block_states, biomes) in [
+        for (name, distinct_states, distinct_biomes) in [
             ("empty", 0, 0),
             ("linear", 3, 3),
             ("hashmap", 20, 1),
@@ -475,24 +513,24 @@ mod tests {
         ] {
             let bytes = crate::vanilla_fixtures::case(&format!("chunk_section/{name}"));
             let mut r = Reader::new(&bytes);
-            let section = Section::read(&mut r).unwrap();
+            let section = Section::read(&mut r, block_states(), biomes()).unwrap();
             assert_eq!(r.remaining(), 0, "{name}");
 
-            let expected_count = if block_states == 0 { 0 } else { 4096 };
+            let expected_count = if distinct_states == 0 { 0 } else { 4096 };
             assert_eq!(section.block_count, expected_count, "{name}");
             for i in 0..4096u32 {
-                let expected = if block_states == 0 {
+                let expected = if distinct_states == 0 {
                     0
                 } else {
-                    1 + i % block_states
+                    1 + i % distinct_states
                 };
                 let state = section.states.get(i & 15, i >> 8, i >> 4 & 15);
                 assert_eq!(state, expected, "{name} block {i}");
             }
-            if biomes > 0 {
+            if distinct_biomes > 0 {
                 for i in 0..64u32 {
                     let biome = section.biome(i & 3, i >> 4, i >> 2 & 3);
-                    assert_eq!(biome, i % biomes, "{name} biome {i}");
+                    assert_eq!(biome, i % distinct_biomes, "{name} biome {i}");
                 }
             } else {
                 assert!(section.biomes.single_value().is_some(), "{name}");

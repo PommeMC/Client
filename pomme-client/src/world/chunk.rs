@@ -259,22 +259,18 @@ fn block_state(id: u32) -> BlockState {
 }
 
 /// Vanilla `LevelChunkSection.setBlockState`: the write, then the block
-/// count. Returns the previous state.
-// TODO: vanilla counts every `isAir` state (cave and void air too) and tracks
-// the fluid and ticking counts here.
+/// count, which wraps like vanilla's `short`. Returns the previous state.
+// TODO: vanilla also tracks the fluid and ticking counts here.
 fn set_section_state(section: &mut Section, x: u32, y: u32, z: u32, new: BlockState) -> BlockState {
-    let previous = section.states.get_and_set(
-        x,
-        y,
-        z,
-        u32::from(new.id()),
-        crate::world::block::state_count(),
-    );
-    let previous = block_state(previous);
-    if previous.is_air() && !new.is_air() {
-        section.block_count += 1;
-    } else if !previous.is_air() && new.is_air() {
-        section.block_count -= 1;
+    use crate::world::block::{is_air, state_count};
+
+    let id = u32::from(new.id());
+    let previous = block_state(section.states.get_and_set(x, y, z, id, state_count()));
+    if !is_air(previous) {
+        section.block_count = section.block_count.wrapping_sub(1);
+    }
+    if !is_air(new) {
+        section.block_count = section.block_count.wrapping_add(1);
     }
     previous
 }
@@ -320,10 +316,12 @@ impl Chunk {
         height: u32,
         min_y: i32,
         heightmaps: &[(HeightmapKind, Box<[u64]>)],
+        biomes: usize,
     ) -> DecodeResult<Self> {
         let mut r = Reader::new(data);
+        let block_states = crate::world::block::state_count();
         let sections = (0..height / 16)
-            .map(|_| Section::read(&mut r))
+            .map(|_| Section::read(&mut r, block_states, biomes))
             .collect::<DecodeResult<Vec<_>>>()?;
         Ok(Self {
             sections: sections.into(),
@@ -475,7 +473,7 @@ impl ChunkStore {
     pub fn new_with_dimension(view_distance: u32, height: u32, min_y: i32) -> Self {
         Self {
             // The grid silently drops out-of-range chunks and is never resized,
-            // so floor it at the max view distance (~0.5 MB of Option slots).
+            // so floor it at the max view distance (~1 MB of slots).
             grid: ChunkGrid::new(view_distance.max(MAX_VIEW_DISTANCE)),
             height,
             min_y,
@@ -488,13 +486,15 @@ impl ChunkStore {
         self.light_data.keys().map(|&(x, z)| ChunkPos::new(x, z))
     }
 
+    /// Loads a chunk packet's column; `biomes` is the biome registry's size.
     pub fn load_chunk(
         &mut self,
         pos: ChunkPos,
         data: &[u8],
         heightmaps: &[(HeightmapKind, Box<[u64]>)],
+        biomes: usize,
     ) -> Result<(), ChunkError> {
-        let chunk = Chunk::read(data, self.height, self.min_y, heightmaps)
+        let chunk = Chunk::read(data, self.height, self.min_y, heightmaps, biomes)
             .map_err(|e| ChunkError::Parse(e.to_string()))?;
         self.grid.replace(pos, chunk);
         Ok(())

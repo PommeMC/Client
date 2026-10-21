@@ -457,7 +457,7 @@ fn read_identifier(cur: &mut Cursor<&[u8]>) -> Result<String, String> {
 }
 
 /// A text component as network NBT
-/// (`ComponentSerialization.TRUSTED_STREAM_CODEC`).
+/// (`ComponentSerialization.STREAM_CODEC`).
 fn read_component(cur: &mut Cursor<&[u8]>) -> Result<crate::chat_component::Component, String> {
     let mut pos = cur.position() as usize;
     let component = super::chat::read_component(cur.get_ref(), &mut pos)?;
@@ -491,6 +491,25 @@ mod tests {
     use pomme_protocol::wire;
 
     use super::*;
+
+    /// An inline trim pattern as vanilla encodes it (`CodecOracle`).
+    #[test]
+    fn direct_trim_pattern_matches_vanilla_encoder() {
+        let bytes = pomme_protocol::vanilla_fixtures::case("trim_pattern/direct");
+        let mut cur = Cursor::new(bytes.as_slice());
+        let TrimPatternHolder::Direct {
+            asset_id,
+            description,
+            decal,
+        } = parse_trim_pattern(&mut cur).unwrap()
+        else {
+            panic!("expected a direct trim pattern");
+        };
+        assert_eq!(cur.position() as usize, bytes.len());
+        assert_eq!(asset_id, "minecraft:test");
+        assert_eq!(description.plain_text(), "Test Trim");
+        assert!(decal);
+    }
 
     #[test]
     fn slot_displays_nested_past_the_depth_cap_are_rejected() {

@@ -39,6 +39,7 @@ import net.minecraft.network.protocol.game.ClientboundSetSimulationDistancePacke
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.CommonPlayerSpawnInfo;
+import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.world.clock.ClockNetworkState;
@@ -46,6 +47,7 @@ import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.clock.WorldClocks;
 import net.minecraft.world.entity.PositionMoveRotation;
 import net.minecraft.world.entity.Relative;
+import net.minecraft.world.item.equipment.trim.TrimPattern;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
@@ -86,6 +88,8 @@ public final class CodecOracle {
 
         lifecycle(dimensionTypes, clocks);
         sections();
+        encode("trim_pattern/direct", TrimPattern.STREAM_CODEC::encode, Holder.direct(new TrimPattern(
+                Identifier.withDefaultNamespace("test"), Component.literal("Test Trim").withStyle(ChatFormatting.GOLD), true)));
 
         JsonObject out = new JsonObject();
         out.addProperty("version", SharedConstants.getCurrentVersion().name());
@@ -93,6 +97,10 @@ public final class CodecOracle {
         idsOf(ids, "dimension_type", dimensionTypes);
         idsOf(ids, "world_clock", clocks);
         out.add("registry_ids", ids);
+        JsonObject sizes = new JsonObject();
+        sizes.addProperty("block_state", Block.BLOCK_STATE_REGISTRY.size());
+        sizes.addProperty("worldgen/biome", biomes.size());
+        out.add("registry_sizes", sizes);
         JsonObject cases = new JsonObject();
         CASES.forEach(cases::addProperty);
         out.add("cases", cases);

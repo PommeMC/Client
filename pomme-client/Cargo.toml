@@ -116,3 +116,6 @@ pomme-auth = { path = "../pomme-auth" }
 jni = "0.21"
 winit = { version = "0.30", features = ["android-native-activity"] }
 paranoid-android = "0.2"
+
+[dev-dependencies]
+pomme-protocol = { path = "../pomme-protocol", features = ["vanilla-fixtures"] }

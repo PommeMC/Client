@@ -23,8 +23,8 @@ pub mod registries;
 pub mod scoreboard;
 pub mod section;
 pub mod sound;
-#[cfg(test)]
-mod vanilla_fixtures;
+#[cfg(any(test, feature = "vanilla-fixtures"))]
+pub mod vanilla_fixtures;
 pub mod version;
 pub mod wire;
 

@@ -1370,7 +1370,8 @@ impl AppCore {
                     heightmaps,
                     light,
                 } => {
-                    if let Err(e) = game.chunk_store.load_chunk(pos, &data, &heightmaps) {
+                    let biomes = crate::net::connection::biome_count(&game.registries);
+                    if let Err(e) = game.chunk_store.load_chunk(pos, &data, &heightmaps, biomes) {
                         tracing::error!("Failed to load chunk [{}, {}]: {e}", pos.x, pos.z);
                         continue;
                     }

@@ -14,14 +14,22 @@ use crate::entity::{PositionMoveRotation, Relative};
 struct Fixtures {
     version: String,
     registry_ids: std::collections::HashMap<String, u32>,
+    registry_sizes: std::collections::HashMap<String, usize>,
     cases: std::collections::HashMap<String, String>,
 }
 
 fn fixtures() -> &'static Fixtures {
     static FIXTURES: OnceLock<Fixtures> = OnceLock::new();
     FIXTURES.get_or_init(|| {
-        serde_json::from_str(include_str!("data/codec-fixtures-26.2.json"))
-            .expect("codec fixtures parse")
+        let fixtures: Fixtures =
+            serde_json::from_str(include_str!("data/codec-fixtures-26.2.json"))
+                .expect("codec fixtures parse");
+        assert_eq!(
+            fixtures.version,
+            crate::version::NATIVE.name,
+            "fixtures for another version"
+        );
+        fixtures
     })
 }
 
@@ -43,6 +51,12 @@ pub fn registry_id(registry: &str, entry: &str) -> u32 {
     fixtures().registry_ids[&format!("{registry}/{entry}")]
 }
 
+/// How many entries `registry` had when vanilla encoded the cases, e.g.
+/// `registry_size("block_state")`.
+pub fn registry_size(registry: &str) -> usize {
+    fixtures().registry_sizes[registry]
+}
+
 /// The pose and relative set `CodecOracle.lifecycle` teleports with, in
 /// `player_position` and `teleport_entity` alike.
 pub fn teleport() -> (PositionMoveRotation, Relative) {
@@ -59,9 +73,4 @@ pub fn teleport() -> (PositionMoveRotation, Relative) {
         ..Default::default()
     };
     (change, relative)
-}
-
-#[test]
-fn fixtures_are_for_the_native_version() {
-    assert_eq!(fixtures().version, crate::version::NATIVE.name);
 }

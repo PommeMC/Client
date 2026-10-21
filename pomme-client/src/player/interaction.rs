@@ -741,6 +741,8 @@ impl InteractionState {
                         hit.hit_point.y,
                         hit.hit_point.z,
                     ),
+                    // TODO: true when the ray started inside the shape, which
+                    // scaffolding placement reads.
                     inside: false,
                     world_border: false,
                 },
