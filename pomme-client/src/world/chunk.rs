@@ -305,6 +305,7 @@ pub struct Chunk {
 
 impl Chunk {
     /// An all-air column of `section_count` sections.
+    #[cfg(any(test, feature = "cpu-bench"))]
     pub fn empty(section_count: usize) -> Self {
         Self {
             sections: vec![Section::default(); section_count].into(),
