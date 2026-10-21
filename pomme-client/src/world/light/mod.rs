@@ -80,19 +80,39 @@ impl SectionEntry {
     }
 }
 
+/// A light packet's section mask, as the `java.util.BitSet` vanilla reads
+/// it into: bit `i` is bit `i % 64` of long `i / 64`, and bits past the last
+/// long are clear.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BitSet(Box<[u64]>);
+
+impl BitSet {
+    pub fn get(&self, i: usize) -> bool {
+        self.0
+            .get(i / 64)
+            .is_some_and(|long| long >> (i % 64) & 1 != 0)
+    }
+}
+
+impl From<Vec<u64>> for BitSet {
+    fn from(longs: Vec<u64>) -> Self {
+        Self(longs.into())
+    }
+}
+
 /// Vanilla `readSectionList`: expands a packet's y-mask pair into one entry
 /// per light section. Malformed (non-2048-byte) payloads are skipped rather
 /// than disconnecting.
 pub(crate) fn section_entries(
     light_section_count: usize,
-    y_mask: &azalea_core::bitset::BitSet,
-    empty_y_mask: &azalea_core::bitset::BitSet,
+    y_mask: &BitSet,
+    empty_y_mask: &BitSet,
     updates: &[Box<[u8]>],
 ) -> Vec<SectionEntry> {
     let mut next = 0usize;
     (0..light_section_count)
         .map(|i| {
-            if i < y_mask.len() && y_mask.index(i) {
+            if y_mask.get(i) {
                 let entry = match updates.get(next) {
                     Some(bytes) if bytes.len() == LAYER_BYTES => {
                         let mut data = Box::new([0u8; LAYER_BYTES]);
@@ -103,7 +123,7 @@ pub(crate) fn section_entries(
                 };
                 next += 1;
                 entry
-            } else if i < empty_y_mask.len() && empty_y_mask.index(i) {
+            } else if empty_y_mask.get(i) {
                 SectionEntry::Empty
             } else {
                 SectionEntry::Skip
@@ -291,9 +311,7 @@ impl LevelLightEngine {
                 .sky
                 .column_top(pos)
                 .map(|top| top - (self.min_section_y - 1));
-            if let Some(chunk) =
-                store.get_chunk(&azalea_core::position::ChunkPos::new(pos.0, pos.1))
-            {
+            if let Some(chunk) = store.get_chunk(&crate::position::ChunkPos::new(pos.0, pos.1)) {
                 sky.sources.insert(
                     pos,
                     ChunkSkyLightSources::fill_from(store.min_y(), &chunk.read()),

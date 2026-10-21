@@ -106,7 +106,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | A chat line | `chat` (text it contains) |
 | A block | `block` (state name, e.g. `air`), `at`, optional `block_entity` (type) |
 | The local player | `player = { ... }` with any of `health`, `food`, `level`, `game_mode`, `effect`, `no_effect`, `max_health`, `raining`, `hand`, `dimension`, `day_time`, `position` (within 0.01) and `y_rot` (within 0.01) |
-| The open menu | `menu` (a container's menu type, e.g. `generic_9x3`, or `inventory`, `creative`, `none`), optional `title` |
+| The open menu | `menu` (a container's menu type, e.g. `generic_9x3`, or `inventory`, `creative`, `pause`, `none`), optional `title` |
 | The HUD text | `hud = { ... }` with any of `title`, `subtitle` and `sidebar_title` (`""` when none is shown), `boss_bars` (every name, top to bottom), `sidebar` (every row as `"name number"`, top to bottom) and `tab_list` (every listed player as `{ name, game_mode? }`, in tab order) |
 | A played sound | `sound` (event name, e.g. `block.note_block.harp`), among the last 64 played |
 

@@ -39,6 +39,7 @@ import net.minecraft.network.protocol.game.ClientboundSetSimulationDistancePacke
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.CommonPlayerSpawnInfo;
+import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.world.clock.ClockNetworkState;
@@ -46,8 +47,15 @@ import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.clock.WorldClocks;
 import net.minecraft.world.entity.PositionMoveRotation;
 import net.minecraft.world.entity.Relative;
+import net.minecraft.world.item.equipment.trim.TrimPattern;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.phys.Vec3;
@@ -75,9 +83,13 @@ public final class CodecOracle {
 
         Registry<DimensionType> dimensionTypes = builtIn(Registries.DIMENSION_TYPE);
         Registry<WorldClock> clocks = builtIn(Registries.WORLD_CLOCK);
-        registries = new RegistryAccess.ImmutableRegistryAccess(List.of(dimensionTypes, clocks));
+        Registry<Biome> biomes = builtIn(Registries.BIOME);
+        registries = new RegistryAccess.ImmutableRegistryAccess(List.of(dimensionTypes, clocks, biomes));
 
         lifecycle(dimensionTypes, clocks);
+        sections();
+        encode("trim_pattern/direct", TrimPattern.STREAM_CODEC::encode, Holder.direct(new TrimPattern(
+                Identifier.withDefaultNamespace("test"), Component.literal("Test Trim").withStyle(ChatFormatting.GOLD), true)));
 
         JsonObject out = new JsonObject();
         out.addProperty("version", SharedConstants.getCurrentVersion().name());
@@ -85,6 +97,10 @@ public final class CodecOracle {
         idsOf(ids, "dimension_type", dimensionTypes);
         idsOf(ids, "world_clock", clocks);
         out.add("registry_ids", ids);
+        JsonObject sizes = new JsonObject();
+        sizes.addProperty("block_state", Block.BLOCK_STATE_REGISTRY.size());
+        sizes.addProperty("worldgen/biome", biomes.size());
+        out.add("registry_sizes", sizes);
         JsonObject cases = new JsonObject();
         CASES.forEach(cases::addProperty);
         out.add("cases", cases);
@@ -127,6 +143,33 @@ public final class CodecOracle {
         encode("set_time/two_clocks", ClientboundSetTimePacket.STREAM_CODEC::encode, new ClientboundSetTimePacket(12000L, updates));
         encode("set_simulation_distance/twelve", ClientboundSetSimulationDistancePacket.STREAM_CODEC::encode,
                 new ClientboundSetSimulationDistancePacket(12));
+    }
+
+    /**
+     * Chunk sections as {@code LevelChunkSection.write} sends them, one per
+     * palette kind. Every block takes state id {@code 1 + i % blockStates} (none
+     * when 0) and every biome cell biome id {@code i % biomes} (the default
+     * plains when 0), {@code i} being the entry's container index.
+     */
+    private static void sections() {
+        PalettedContainerFactory factory = PalettedContainerFactory.create(registries);
+        section(factory, "chunk_section/empty", 0, 0);
+        section(factory, "chunk_section/linear", 3, 3);
+        section(factory, "chunk_section/hashmap", 20, 1);
+        section(factory, "chunk_section/global", 300, 20);
+    }
+
+    private static void section(PalettedContainerFactory factory, String name, int blockStates, int biomes) {
+        PalettedContainer<BlockState> states = factory.createForBlockStates();
+        for (int i = 0; blockStates > 0 && i < 4096; ++i) {
+            states.set(i & 15, i >> 8, i >> 4 & 15, Block.BLOCK_STATE_REGISTRY.byId(1 + i % blockStates));
+        }
+        PalettedContainer<Holder<Biome>> biomeCells = factory.createForBiomes();
+        Registry<Biome> biomeRegistry = registries.lookupOrThrow(Registries.BIOME);
+        for (int i = 0; biomes > 0 && i < 64; ++i) {
+            biomeCells.set(i & 3, i >> 4, i >> 2 & 3, biomeRegistry.get(i % biomes).orElseThrow());
+        }
+        encode(name, (buf, section) -> section.write(buf), new LevelChunkSection(states, biomeCells));
     }
 
     /**

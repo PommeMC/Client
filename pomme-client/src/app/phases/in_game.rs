@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_inventory::components::EquipmentSlot;
 use azalea_protocol::packets::game::{
     ServerboundClientInformation, ServerboundCommandSuggestion, ServerboundGamePacket,
@@ -26,6 +25,7 @@ use crate::player::LocalPlayer;
 use crate::player::interaction::{HitResult, InteractionState};
 use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
+use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::buffer::column_is_near;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
@@ -2104,7 +2104,7 @@ fn detached_distance(own: f32, mount: Option<f32>) -> f32 {
 /// Vanilla `LivingEntity.getBedOrientation` for a sleeper's bed.
 fn bed_orientation(
     chunks: &ChunkStore,
-    sleeping_pos: Option<azalea_core::position::BlockPos>,
+    sleeping_pos: Option<crate::position::BlockPos>,
 ) -> Option<BedDirection> {
     let pos = sleeping_pos?;
     bed_direction(chunks.get_block_state(pos.x, pos.y, pos.z))

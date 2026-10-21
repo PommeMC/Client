@@ -1,9 +1,9 @@
-use azalea_buf::{AzBuf, AzBufVar};
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
 use azalea_registry::Registry;
 use azalea_registry::builtin::EntityKind;
 use crossbeam_channel::{Sender, TrySendError};
+use pomme_protocol::codec::{DecodeResult, Reader};
 
 use super::NetworkEvent;
 use super::commands::{CommandTree, SharedCommandTree};
@@ -247,7 +247,7 @@ pub fn handle_raw_game_packet(
     event_tx: &Sender<NetworkEvent>,
 ) -> bool {
     let mut cur = std::io::Cursor::new(raw);
-    let Ok(packet_id) = u32::azalea_read_var(&mut cur) else {
+    let Ok(packet_id) = Reader::on_cursor(&mut cur, Reader::varint) else {
         return false;
     };
 
@@ -313,7 +313,7 @@ pub fn handle_raw_game_packet(
     }
 
     if packet_id == explode_packet_id() {
-        if let Err(e) = handle_raw_explode(&mut cur, event_tx) {
+        if let Err(e) = handle_raw_explode(&mut Reader::new(payload), event_tx) {
             tracing::warn!("Skipping malformed Explode packet prefix: {e}");
         }
         return true;
@@ -322,7 +322,7 @@ pub fn handle_raw_game_packet(
     if packet_id != level_particles_packet_id() {
         return false;
     }
-    match parse_level_particles(&mut cur) {
+    match parse_level_particles(&mut Reader::new(payload)) {
         Ok(Some(event)) => {
             let _ = event_tx.try_send(event);
         }
@@ -366,24 +366,16 @@ pub(crate) fn handle_raw_for_test(
 /// the particle tail (see
 /// `azalea_compat::azalea_explode_still_misdecodes_native_particles`),
 /// so the knockback prefix is read here and the frame consumed.
-fn handle_raw_explode(
-    cur: &mut std::io::Cursor<&[u8]>,
-    event_tx: &Sender<NetworkEvent>,
-) -> Result<(), azalea_buf::BufReadError> {
+fn handle_raw_explode(r: &mut Reader, event_tx: &Sender<NetworkEvent>) -> DecodeResult<()> {
     // TODO: vanilla `handleExplosion` also plays the explosion sound and
     // spawns its particles from the center and the payload tail.
-    let _center = <[f64; 3]>::azalea_read(cur)?;
-    let _radius = f32::azalea_read(cur)?;
-    let _block_count = i32::azalea_read(cur)?;
+    let _center = r.vec3()?;
+    let _radius = r.f32()?;
+    let _block_count = r.i32()?;
 
-    if bool::azalea_read(cur)? {
-        let [x, y, z] = <[f64; 3]>::azalea_read(cur)?;
-        send_ordered(
-            event_tx,
-            NetworkEvent::PlayerKnockback {
-                delta: glam::DVec3::new(x, y, z),
-            },
-        );
+    if r.bool()? {
+        let delta = r.vec3()?;
+        send_ordered(event_tx, NetworkEvent::PlayerKnockback { delta });
     }
     Ok(())
 }
@@ -405,23 +397,17 @@ fn explode_packet_id() -> u32 {
 
 /// The wire layout of vanilla `ClientboundLevelParticlesPacket.write`, up to
 /// the particle type id.
-fn parse_level_particles(
-    cur: &mut std::io::Cursor<&[u8]>,
-) -> Result<Option<NetworkEvent>, azalea_buf::BufReadError> {
-    let override_limiter = bool::azalea_read(cur)?;
-    let _always_show = bool::azalea_read(cur)?;
-    let pos = glam::dvec3(
-        f64::azalea_read(cur)?,
-        f64::azalea_read(cur)?,
-        f64::azalea_read(cur)?,
-    );
-    let x_dist = f32::azalea_read(cur)?;
-    let y_dist = f32::azalea_read(cur)?;
-    let z_dist = f32::azalea_read(cur)?;
-    let max_speed = f32::azalea_read(cur)?;
+fn parse_level_particles(r: &mut Reader) -> DecodeResult<Option<NetworkEvent>> {
+    let override_limiter = r.bool()?;
+    let _always_show = r.bool()?;
+    let pos = r.vec3()?;
+    let x_dist = r.f32()?;
+    let y_dist = r.f32()?;
+    let z_dist = r.f32()?;
+    let max_speed = r.f32()?;
     // Signed on the wire; Java's `i < count` loop no-ops on negative counts.
-    let count = i32::azalea_read(cur)?.max(0) as u32;
-    let type_id = u32::azalea_read_var(cur)?;
+    let count = r.i32()?.max(0) as u32;
+    let type_id = r.varint()?;
     // Particle ids shift between versions; translate into the native id
     // space (`ServerParticleKind`'s) when speaking an older protocol.
     let type_id = match super::translate::active() {

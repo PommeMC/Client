@@ -3,12 +3,12 @@ use std::path::Path;
 use std::slice;
 use std::sync::{Arc, Mutex};
 
-use azalea_core::position::BlockPos;
 use azalea_registry::builtin::BlockEntityKind;
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::position::BlockPos;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::{BakedEntityModel, ModelConvention, PartAnim};

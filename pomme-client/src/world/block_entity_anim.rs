@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use azalea_core::position::BlockPos;
+use crate::position::BlockPos;
 
 /// Open/close animation for containers whose lid swings (chest) or translates
 /// (shulker box). One instance per BE position; the same shape is reused for

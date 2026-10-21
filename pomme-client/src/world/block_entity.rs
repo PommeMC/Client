@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use azalea_block::BlockState;
-use azalea_core::position::BlockPos;
 use azalea_registry::builtin::BlockEntityKind;
 use simdnbt::owned::NbtCompound;
+
+use crate::position::BlockPos;
 
 #[derive(Clone)]
 pub struct StoredBlockEntity {

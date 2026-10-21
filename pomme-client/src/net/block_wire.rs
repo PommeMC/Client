@@ -3,7 +3,6 @@
 //! only `block_entity_data`'s type needs a registry remap.
 
 use azalea_block::BlockState;
-use azalea_core::position::BlockPos;
 use azalea_registry::Registry;
 use azalea_registry::builtin::BlockEntityKind;
 use crossbeam_channel::Sender;
@@ -13,6 +12,7 @@ use simdnbt::owned::NbtCompound;
 
 use super::NetworkEvent;
 use super::handler::send_ordered;
+use crate::position::BlockPos;
 
 /// Decodes a block packet; `None` for any other packet.
 pub(super) fn handle_raw_block_packet(

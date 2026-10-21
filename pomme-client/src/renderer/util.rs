@@ -5,6 +5,8 @@ use pomme_gpu_allocator::MemoryLocation;
 use pomme_gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use pyronyx::vk;
 
+use super::MAX_FRAMES_IN_FLIGHT;
+
 pub fn create_gpu_image(
     device: &vk::Device,
     allocator: &Arc<Mutex<Allocator>>,
@@ -325,6 +327,82 @@ pub fn create_uniform_buffer(
         vk::BufferUsageFlags::UniformBuffer,
         name,
     )
+}
+
+/// One host-visible buffer per frame in flight.
+pub fn create_per_frame_host_buffers(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    size: u64,
+    usage: vk::BufferUsageFlags,
+    name: &str,
+) -> (Vec<vk::Buffer>, Vec<Allocation>) {
+    (0..MAX_FRAMES_IN_FLIGHT)
+        .map(|_| create_host_buffer(device, allocator, size, usage, name))
+        .unzip()
+}
+
+/// One `size`-byte uniform buffer per frame in flight, each bound to its own
+/// descriptor set from `pool` at binding 0, so a frame never rewrites one the
+/// GPU may still be reading.
+pub fn create_uniform_sets(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    pool: vk::DescriptorPool,
+    layout: vk::DescriptorSetLayout,
+    size: u64,
+    name: &str,
+) -> (Vec<vk::DescriptorSet>, Vec<vk::Buffer>, Vec<Allocation>) {
+    let layouts = [layout; MAX_FRAMES_IN_FLIGHT];
+    let alloc_info = vk::DescriptorSetAllocateInfo {
+        descriptor_pool: pool,
+        descriptor_set_count: layouts.len() as u32,
+        set_layouts: layouts.as_ptr(),
+        ..Default::default()
+    };
+    let mut sets = vec![vk::DescriptorSet::null(); layouts.len()];
+    device
+        .allocate_descriptor_sets(&alloc_info, &mut sets)
+        .unwrap_or_else(|e| panic!("failed to allocate {name} descriptor sets: {e:?}"));
+
+    let (buffers, allocations) = create_per_frame_host_buffers(
+        device,
+        allocator,
+        size,
+        vk::BufferUsageFlags::UniformBuffer,
+        name,
+    );
+    for (&set, &buffer) in sets.iter().zip(&buffers) {
+        let buffer_info = vk::DescriptorBufferInfo {
+            buffer,
+            offset: 0,
+            range: size,
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: set,
+            dst_binding: 0,
+            descriptor_type: vk::DescriptorType::UniformBuffer,
+            descriptor_count: 1,
+            buffer_info: &buffer_info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[write], &[]);
+    }
+    (sets, buffers, allocations)
+}
+
+/// Destroys buffers made by [`create_per_frame_host_buffers`] or
+/// [`create_uniform_sets`] and frees their memory.
+pub fn destroy_buffers(
+    device: &vk::Device,
+    allocator: &mut Allocator,
+    buffers: &[vk::Buffer],
+    allocations: &mut Vec<Allocation>,
+) {
+    for (&buffer, allocation) in buffers.iter().zip(allocations.drain(..)) {
+        device.destroy_buffer(buffer, None);
+        allocator.free(allocation).ok();
+    }
 }
 
 pub fn upload_image(

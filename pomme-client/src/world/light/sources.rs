@@ -7,9 +7,9 @@
 //! open-column sentinel that reads as `i32::MIN`).
 
 use azalea_block::BlockState;
-use azalea_world::Chunk;
 
 use crate::world::block;
+use crate::world::chunk::{Chunk, SectionBlocks};
 
 pub(crate) struct ChunkSkyLightSources {
     /// `level.getMinY() - 1`; the stored value for fully open columns.
@@ -56,12 +56,7 @@ impl ChunkSkyLightSources {
                 continue;
             }
             for y in (0..16).rev() {
-                let bottom_state =
-                    section.get_block_state(azalea_core::position::ChunkSectionBlockPos {
-                        x: x as u8,
-                        y: y as u8,
-                        z: z as u8,
-                    });
+                let bottom_state = section.get_block_state(x as u32, y as u32, z as u32);
                 if Self::is_edge_occluded(top_state, bottom_state) {
                     return top_y;
                 }

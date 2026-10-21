@@ -619,6 +619,38 @@ impl InputState {
             Action::DropItem | Action::SwapOffhand => self.default_key_pressed(action),
             // Vanilla `key.spectatorHotbar` default: middle mouse.
             Action::SpectatorHotbar => self.middle_click.held,
+            // TODO: These still go through their hardcoded call sites.
+            Action::Forward
+            | Action::Backward
+            | Action::StrafeLeft
+            | Action::StrafeRight
+            | Action::Screenshot
+            | Action::ToggleFullscreen
+            | Action::ToggleGui
+            | Action::ToggleOverlay
+            | Action::DebugModifier
+            | Action::DebugReloadChunks
+            | Action::DebugCopyLocation
+            | Action::DebugClearChat
+            | Action::DebugChunkBorders
+            | Action::DebugAdvancedTooltips
+            | Action::DebugCopyData
+            | Action::DebugGameModeSwitcher
+            | Action::DebugSpectate
+            | Action::DebugChunkOcclusion
+            | Action::DebugDumpVersion
+            | Action::NextHotbarSlot
+            | Action::PreviousHotbarSlot
+            | Action::Hotbar1
+            | Action::Hotbar2
+            | Action::Hotbar3
+            | Action::Hotbar4
+            | Action::Hotbar5
+            | Action::Hotbar6
+            | Action::Hotbar7
+            | Action::Hotbar8
+            | Action::Hotbar9
+            | Action::PickBlock => false,
         }
     }
 
@@ -782,10 +814,10 @@ impl InputState {
     /// pressing now would be cleared before anything read it.
     #[cfg(feature = "test-harness")]
     pub fn press_action(&mut self, action: Action, ctrl: bool) -> Result<(), String> {
-        let Some(InputKey::Keyboard(code)) = action.defaults().first() else {
+        let Some(code) = action.default_key() else {
             return Err(format!("{action:?} has no default key"));
         };
-        self.harness_press = Some((*code, ctrl));
+        self.harness_press = Some((code, ctrl));
         Ok(())
     }
 
@@ -1264,6 +1296,17 @@ fn build_rumble_effect(
 #[cfg(test)]
 mod binding_capture_tests {
     use super::*;
+
+    #[test]
+    fn fixed_escape_opens_the_menu() {
+        assert_eq!(Action::OpenMenu.default_key(), Some(KeyCode::Escape));
+        let mut input = InputState::released();
+        input.set_key_pressed_for_test(KeyCode::Escape, true);
+        assert!(input.performing_action(Action::OpenMenu));
+        assert!(!input.performing_action(Action::Close));
+        input.set_key_pressed_for_test(KeyCode::Escape, false);
+        assert!(!input.performing_action(Action::OpenMenu));
+    }
 
     #[test]
     fn a_use_tap_is_seen_before_it_releases() {

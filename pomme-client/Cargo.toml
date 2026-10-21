@@ -69,10 +69,11 @@ azalea-protocol = { version = "0.16", default-features = false }
 azalea-crypto = "0.16"
 azalea-auth = "0.16"
 azalea-entity = "0.16"
-azalea-world = "0.16"
 azalea-block = "0.16"
 azalea-chat = "0.16"
-azalea-core = "0.16"
+# azalea-core uses bevy_ecs without gating it on its feature; azalea-world
+# used to turn both of these on.
+azalea-core = { version = "0.16", features = ["bevy_ecs", "serde"] }
 azalea-registry = "0.16"
 azalea-inventory = "0.16"
 uuid = { version = "1", features = ["v4"] }
@@ -115,3 +116,6 @@ pomme-auth = { path = "../pomme-auth" }
 jni = "0.21"
 winit = { version = "0.30", features = ["android-native-activity"] }
 paranoid-android = "0.2"
+
+[dev-dependencies]
+pomme-protocol = { path = "../pomme-protocol", features = ["vanilla-fixtures"] }

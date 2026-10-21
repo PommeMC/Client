@@ -35,6 +35,33 @@ fn native_matches_azalea() {
     );
 }
 
+/// pomme's `EntityTypes` size table against azalea's, for every entity type.
+/// azalea rounds its generated sizes to five decimals (the donkey's vanilla
+/// `1.3964844f` is its `1.39648`), so they agree to that.
+#[test]
+fn entity_dimensions_match_azalea() {
+    use azalea_entity::dimensions::EntityDimensions as AzaleaDimensions;
+    use azalea_registry::Registry;
+    use azalea_registry::builtin::EntityKind;
+
+    use crate::entity::dimensions::EntityDimensions;
+
+    let mut checked = 0;
+    for kind in (0..).map_while(EntityKind::from_u32) {
+        let pomme = EntityDimensions::of(kind);
+        let azalea = AzaleaDimensions::from(kind);
+        assert!(
+            (pomme.width - azalea.width).abs() < 1e-5
+                && (pomme.height - azalea.height).abs() < 1e-5,
+            "{kind}: {pomme:?} vs {} x {}",
+            azalea.width,
+            azalea.height
+        );
+        checked += 1;
+    }
+    assert!(checked > 150, "{checked} entity types");
+}
+
 /// pomme's serverbound chat encoders, read back by azalea's decoders.
 #[test]
 fn chat_encoders_round_trip_through_azalea() {

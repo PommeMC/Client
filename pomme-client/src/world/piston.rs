@@ -7,9 +7,9 @@
 use std::collections::HashMap;
 
 use azalea_block::BlockState;
-use azalea_core::position::BlockPos;
 use simdnbt::owned::NbtCompound;
 
+use crate::position::BlockPos;
 use crate::world::block::model::Direction;
 use crate::world::block::{self, PushReaction};
 

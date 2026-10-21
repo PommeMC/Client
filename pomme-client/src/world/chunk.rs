@@ -1,16 +1,13 @@
-use std::io::Cursor;
 use std::sync::Arc;
 
 use azalea_block::BlockState;
-use azalea_core::heightmap_kind::HeightmapKind;
-use azalea_core::position::{BlockPos, ChunkPos};
-use azalea_world::chunk::Chunk;
-use azalea_world::chunk::partial::PartialChunkStorage;
-use azalea_world::chunk::storage::ChunkStorage;
 use parking_lot::RwLock;
+use pomme_protocol::codec::{DecodeResult, Reader};
+use pomme_protocol::section::{BitStorage, Section, ceil_log2};
 use thiserror::Error;
 
 use super::block_entity::StoredBlockEntity;
+use crate::position::{BlockPos, ChunkPos};
 
 pub(crate) const OVERWORLD_HEIGHT: u32 = 384;
 pub(crate) const OVERWORLD_MIN_Y: i32 = -64;
@@ -144,9 +141,322 @@ impl ChunkLightData {
     }
 }
 
+/// Vanilla `Heightmap.Types`, by network id (`Heightmap.java:144-149`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HeightmapKind {
+    WorldSurfaceWg,
+    WorldSurface,
+    OceanFloorWg,
+    OceanFloor,
+    MotionBlocking,
+    MotionBlockingNoLeaves,
+}
+
+impl HeightmapKind {
+    pub fn from_id(id: u32) -> Option<Self> {
+        Some(match id {
+            0 => Self::WorldSurfaceWg,
+            1 => Self::WorldSurface,
+            2 => Self::OceanFloorWg,
+            3 => Self::OceanFloor,
+            4 => Self::MotionBlocking,
+            5 => Self::MotionBlockingNoLeaves,
+            _ => return None,
+        })
+    }
+}
+
+/// Vanilla `Heightmap`: per column, one above the highest block its type
+/// counts as opaque.
+#[derive(Clone, Debug)]
+struct Heightmap {
+    kind: HeightmapKind,
+    data: BitStorage,
+    min_y: i32,
+}
+
+impl Heightmap {
+    /// Vanilla `Heightmap.setRawData`. Data of the wrong length is dropped,
+    /// where vanilla re-primes the map from the blocks.
+    fn new(kind: HeightmapKind, height: u32, min_y: i32, raw: &[u64]) -> Self {
+        let mut data = BitStorage::new(ceil_log2(height as usize + 1), 256);
+        if data.raw().len() == raw.len() {
+            data.raw_mut().copy_from_slice(raw);
+        } else {
+            tracing::warn!(
+                "Ignoring heightmap data, size does not match; expected: {}, got: {}",
+                data.raw().len(),
+                raw.len()
+            );
+        }
+        Self { kind, data, min_y }
+    }
+
+    fn index(x: u32, z: u32) -> usize {
+        (x + z * 16) as usize
+    }
+
+    fn first_available(&self, x: u32, z: u32) -> i32 {
+        self.data.get(Self::index(x, z)) as i32 + self.min_y
+    }
+
+    fn set_height(&mut self, x: u32, z: u32, height: i32) {
+        self.data
+            .set(Self::index(x, z), (height - self.min_y) as u32);
+    }
+
+    // TODO: vanilla's `Heightmap.Types` predicates (motion blocking also
+    // counts fluids, the no-leaves type skips leaves); every type here counts
+    // any non-air block.
+    fn is_opaque(state: BlockState) -> bool {
+        !state.is_air()
+    }
+
+    /// Vanilla `Heightmap.update`.
+    fn update(&mut self, x: u32, y: i32, z: u32, state: BlockState, sections: &[Section]) {
+        let first_available = self.first_available(x, z);
+        if y <= first_available - 2 {
+            return;
+        }
+        if Self::is_opaque(state) {
+            if y >= first_available {
+                self.set_height(x, z, y + 1);
+            }
+        } else if first_available - 1 == y {
+            for below in (self.min_y..y).rev() {
+                if Self::is_opaque(state_in(sections, x, below, z, self.min_y)) {
+                    self.set_height(x, z, below + 1);
+                    return;
+                }
+            }
+            self.set_height(x, z, self.min_y);
+        }
+    }
+}
+
+/// A section's state ids as block states; ids that aren't one read as air.
+pub trait SectionBlocks {
+    fn get_block_state(&self, x: u32, y: u32, z: u32) -> BlockState;
+
+    /// The state every block holds, when the section stores only one.
+    fn single_block_state(&self) -> Option<BlockState>;
+}
+
+impl SectionBlocks for Section {
+    #[inline]
+    fn get_block_state(&self, x: u32, y: u32, z: u32) -> BlockState {
+        block_state(self.states.get(x, y, z))
+    }
+
+    fn single_block_state(&self) -> Option<BlockState> {
+        self.states.single_value().map(block_state)
+    }
+}
+
+#[inline]
+fn block_state(id: u32) -> BlockState {
+    BlockState::try_from(id).unwrap_or_default()
+}
+
+/// Vanilla `LevelChunkSection.setBlockState`: the write, then the block
+/// count, which wraps like vanilla's `short`. Returns the previous state.
+// TODO: vanilla also tracks the fluid and ticking counts here.
+fn set_section_state(section: &mut Section, x: u32, y: u32, z: u32, new: BlockState) -> BlockState {
+    use crate::world::block::{is_air, state_count};
+
+    let id = u32::from(new.id());
+    let previous = block_state(section.states.get_and_set(x, y, z, id, state_count()));
+    if !is_air(previous) {
+        section.block_count = section.block_count.wrapping_sub(1);
+    }
+    if !is_air(new) {
+        section.block_count = section.block_count.wrapping_add(1);
+    }
+    previous
+}
+
+/// The section index holding world `y`, or `None` below the column.
+/// `div_euclid` so below-world y maps out of range instead of truncating into
+/// section 0; vanilla `getSectionIndex` floors.
+fn section_index(y: i32, min_y: i32) -> Option<usize> {
+    usize::try_from((y - min_y).div_euclid(16)).ok()
+}
+
+/// The state at local `x`/`z` and world `y` in a column's sections; air
+/// outside them.
+fn state_in(sections: &[Section], x: u32, y: i32, z: u32, min_y: i32) -> BlockState {
+    section_index(y, min_y)
+        .and_then(|i| sections.get(i))
+        .map_or(BlockState::AIR, |section| {
+            section.get_block_state(x, (y - min_y).rem_euclid(16) as u32, z)
+        })
+}
+
+/// A loaded column: what the client keeps of vanilla `LevelChunk`.
+#[derive(Debug)]
+pub struct Chunk {
+    pub sections: Box<[Section]>,
+    heightmaps: Vec<Heightmap>,
+}
+
+impl Chunk {
+    /// An all-air column of `section_count` sections.
+    #[cfg(any(test, feature = "cpu-bench"))]
+    pub fn empty(section_count: usize) -> Self {
+        Self {
+            sections: vec![Section::default(); section_count].into(),
+            heightmaps: Vec::new(),
+        }
+    }
+
+    /// Vanilla `LevelChunk.replaceWithPacketData`: the section buffer, then
+    /// the packet's heightmaps.
+    fn read(
+        data: &[u8],
+        height: u32,
+        min_y: i32,
+        heightmaps: &[(HeightmapKind, Box<[u64]>)],
+        biomes: usize,
+    ) -> DecodeResult<Self> {
+        let mut r = Reader::new(data);
+        let block_states = crate::world::block::state_count();
+        let sections = (0..height / 16)
+            .map(|_| Section::read(&mut r, block_states, biomes))
+            .collect::<DecodeResult<Vec<_>>>()?;
+        Ok(Self {
+            sections: sections.into(),
+            heightmaps: heightmaps
+                .iter()
+                .map(|(kind, raw)| Heightmap::new(*kind, height, min_y, raw))
+                .collect(),
+        })
+    }
+
+    /// The section holding world `y`, or `None` outside the column's height.
+    pub fn section(&self, y: i32, min_y: i32) -> Option<&Section> {
+        self.sections.get(section_index(y, min_y)?)
+    }
+
+    pub fn block_state(&self, x: i32, y: i32, z: i32, min_y: i32) -> BlockState {
+        state_in(
+            &self.sections,
+            x.rem_euclid(16) as u32,
+            y,
+            z.rem_euclid(16) as u32,
+            min_y,
+        )
+    }
+
+    /// Vanilla `LevelChunk.setBlockState`'s storage half: the section write,
+    /// then the heightmaps. Returns the previous state.
+    fn get_and_set_block_state(
+        &mut self,
+        x: u32,
+        y: i32,
+        z: u32,
+        state: BlockState,
+        min_y: i32,
+    ) -> BlockState {
+        let Some(section) = section_index(y, min_y).and_then(|i| self.sections.get_mut(i)) else {
+            return BlockState::AIR;
+        };
+        let previous = set_section_state(section, x, (y - min_y).rem_euclid(16) as u32, z, state);
+        for heightmap in &mut self.heightmaps {
+            heightmap.update(x, y, z, state, &self.sections);
+        }
+        previous
+    }
+
+    /// The biome registry id at a block, or `None` outside the column.
+    pub fn biome(&self, x: i32, y: i32, z: i32, min_y: i32) -> Option<u32> {
+        let section = self.section(y, min_y)?;
+        Some(section.biome(
+            (x.rem_euclid(16) / 4) as u32,
+            ((y - min_y).rem_euclid(16) / 4) as u32,
+            (z.rem_euclid(16) / 4) as u32,
+        ))
+    }
+
+    fn first_available(&self, kind: HeightmapKind, x: i32, z: i32) -> Option<i32> {
+        self.heightmaps
+            .iter()
+            .find(|h| h.kind == kind)
+            .map(|h| h.first_available(x.rem_euclid(16) as u32, z.rem_euclid(16) as u32))
+    }
+}
+
+/// A grid slot: the column there and the position it was stored for.
+type GridSlot = Option<(ChunkPos, Arc<RwLock<Chunk>>)>;
+
+/// Vanilla `ClientChunkCache.Storage`: a square grid of columns around the
+/// view center, indexed modulo its side so the center can move without
+/// shuffling slots.
+struct ChunkGrid {
+    view_center: ChunkPos,
+    chunk_radius: u32,
+    view_range: u32,
+    chunks: Box<[GridSlot]>,
+}
+
+impl ChunkGrid {
+    fn new(chunk_radius: u32) -> Self {
+        let view_range = chunk_radius * 2 + 1;
+        Self {
+            view_center: ChunkPos::new(0, 0),
+            chunk_radius,
+            view_range,
+            chunks: vec![None; (view_range * view_range) as usize].into(),
+        }
+    }
+
+    fn index(&self, pos: ChunkPos) -> usize {
+        let range = self.view_range as i32;
+        (pos.z.rem_euclid(range) * range + pos.x.rem_euclid(range)) as usize
+    }
+
+    fn in_range(&self, pos: ChunkPos) -> bool {
+        (pos.x - self.view_center.x).unsigned_abs() <= self.chunk_radius
+            && (pos.z - self.view_center.z).unsigned_abs() <= self.chunk_radius
+    }
+
+    // TODO: vanilla's `ClientChunkCache.getChunk` also requires the column
+    // to be in range of the current view center.
+    fn get(&self, pos: ChunkPos) -> Option<&Arc<RwLock<Chunk>>> {
+        match &self.chunks[self.index(pos)] {
+            Some((at, chunk)) if *at == pos => Some(chunk),
+            _ => None,
+        }
+    }
+
+    /// Stores `chunk` at `pos`. A column already there is refilled in place
+    /// so snapshots holding it see the new data, as vanilla replaces a valid
+    /// chunk's contents. Out-of-range columns are ignored.
+    fn replace(&mut self, pos: ChunkPos, chunk: Chunk) {
+        if !self.in_range(pos) {
+            tracing::warn!("Ignoring chunk since it's not in the view range: {pos:?}");
+            return;
+        }
+        if let Some(existing) = self.get(pos) {
+            *existing.write() = chunk;
+            return;
+        }
+        let index = self.index(pos);
+        self.chunks[index] = Some((pos, Arc::new(RwLock::new(chunk))));
+    }
+
+    /// Empties `pos`'s slot when it's in range.
+    fn remove(&mut self, pos: ChunkPos) {
+        if self.in_range(pos) {
+            let index = self.index(pos);
+            self.chunks[index] = None;
+        }
+    }
+}
+
 pub struct ChunkStore {
-    pub chunk_storage: ChunkStorage,
-    pub partial_storage: PartialChunkStorage,
+    grid: ChunkGrid,
+    height: u32,
+    min_y: i32,
     pub light_data: std::collections::HashMap<(i32, i32), Arc<ChunkLightData>>,
     pub block_entities: std::collections::HashMap<BlockPos, StoredBlockEntity>,
 }
@@ -162,10 +472,11 @@ impl ChunkStore {
 
     pub fn new_with_dimension(view_distance: u32, height: u32, min_y: i32) -> Self {
         Self {
-            chunk_storage: ChunkStorage::new(height, min_y),
             // The grid silently drops out-of-range chunks and is never resized,
-            // so floor it at the max view distance (~0.5 MB of Option slots).
-            partial_storage: PartialChunkStorage::new(view_distance.max(MAX_VIEW_DISTANCE)),
+            // so floor it at the max view distance (~1 MB of slots).
+            grid: ChunkGrid::new(view_distance.max(MAX_VIEW_DISTANCE)),
+            height,
+            min_y,
             light_data: std::collections::HashMap::new(),
             block_entities: std::collections::HashMap::new(),
         }
@@ -175,16 +486,24 @@ impl ChunkStore {
         self.light_data.keys().map(|&(x, z)| ChunkPos::new(x, z))
     }
 
+    /// Loads a chunk packet's column; `biomes` is the biome registry's size.
     pub fn load_chunk(
         &mut self,
         pos: ChunkPos,
         data: &[u8],
         heightmaps: &[(HeightmapKind, Box<[u64]>)],
+        biomes: usize,
     ) -> Result<(), ChunkError> {
-        let mut cursor = Cursor::new(data);
-        self.partial_storage
-            .replace_with_packet_data(&pos, &mut cursor, heightmaps, &mut self.chunk_storage)
-            .map_err(|e| ChunkError::Parse(e.to_string()))
+        let chunk = Chunk::read(data, self.height, self.min_y, heightmaps, biomes)
+            .map_err(|e| ChunkError::Parse(e.to_string()))?;
+        self.grid.replace(pos, chunk);
+        Ok(())
+    }
+
+    /// Stores an already-built column, as a chunk packet would.
+    #[cfg(any(test, feature = "cpu-bench"))]
+    pub(crate) fn insert_chunk(&mut self, pos: ChunkPos, chunk: Chunk) {
+        self.grid.replace(pos, chunk);
     }
 
     pub fn get_sky_light(&self, x: i32, y: i32, z: i32) -> u8 {
@@ -216,7 +535,7 @@ impl ChunkStore {
 
     pub fn unload_chunk(&mut self, pos: &ChunkPos) {
         self.light_data.remove(&(pos.x, pos.z));
-        self.partial_storage.limited_set(pos, None);
+        self.grid.remove(*pos);
         let cx = pos.x;
         let cz = pos.z;
         self.block_entities
@@ -224,11 +543,11 @@ impl ChunkStore {
     }
 
     pub fn set_center(&mut self, pos: ChunkPos) {
-        self.partial_storage.update_view_center(pos);
+        self.grid.view_center = pos;
     }
 
     pub fn get_chunk(&self, pos: &ChunkPos) -> Option<Arc<RwLock<Chunk>>> {
-        self.chunk_storage.get(pos).map(|c| Arc::clone(&c))
+        self.grid.get(*pos).cloned()
     }
 
     pub fn set_block_state(&self, x: i32, y: i32, z: i32, state: BlockState) {
@@ -251,20 +570,18 @@ impl ChunkStore {
             return (state, None);
         };
         let mut chunk = chunk_lock.write();
-        let section_index = (y - self.min_y()).div_euclid(16);
-        let Some(section) = usize::try_from(section_index)
-            .ok()
-            .filter(|&i| i < chunk.sections.len())
+        let Some(section) = section_index(y, self.min_y).filter(|&i| i < chunk.sections.len())
         else {
             return (state, None);
         };
         let was_empty = chunk.sections[section].block_count == 0;
-        let block_pos = azalea_core::position::ChunkBlockPos {
-            x: x.rem_euclid(16) as u8,
+        let old = chunk.get_and_set_block_state(
+            x.rem_euclid(16) as u32,
             y,
-            z: z.rem_euclid(16) as u8,
-        };
-        let old = chunk.get_and_set_block_state(&block_pos, state, self.chunk_storage.min_y());
+            z.rem_euclid(16) as u32,
+            state,
+            self.min_y,
+        );
         let is_empty = chunk.sections[section].block_count == 0;
         (old, (was_empty != is_empty).then_some(is_empty))
     }
@@ -275,15 +592,15 @@ impl ChunkStore {
             return BlockState::AIR;
         };
         let chunk = chunk_lock.read();
-        block_state_from_section(&chunk, x, y, z, self.chunk_storage.min_y())
+        chunk.block_state(x, y, z, self.min_y)
     }
 
     pub fn height(&self) -> u32 {
-        self.chunk_storage.height()
+        self.height
     }
 
     pub fn min_y(&self) -> i32 {
-        self.chunk_storage.min_y()
+        self.min_y
     }
 
     /// Number of 16³ block sections in a column (zero-based section index range
@@ -293,8 +610,8 @@ impl ChunkStore {
     }
 
     /// Whether the block section at world section-y has only air (vanilla
-    /// `LevelChunkSection.hasOnlyAir`; azalea tracks per-section block
-    /// counts). Missing chunks and out-of-range sections read as empty.
+    /// `LevelChunkSection.hasOnlyAir`, from its block count). Missing chunks
+    /// and out-of-range sections read as empty.
     pub fn section_is_empty(&self, pos: (i32, i32), section_y: i32) -> bool {
         let Some(chunk) = self.get_chunk(&ChunkPos::new(pos.0, pos.1)) else {
             return true;
@@ -321,9 +638,7 @@ impl ChunkStore {
         };
         let chunk = chunk_lock.read();
         chunk
-            .heightmaps
-            .get(&HeightmapKind::MotionBlocking)
-            .map(|h| h.get_first_available(x.rem_euclid(16) as u8, z.rem_euclid(16) as u8))
+            .first_available(HeightmapKind::MotionBlocking, x, z)
             .unwrap_or(self.min_y())
     }
 
@@ -335,40 +650,8 @@ impl ChunkStore {
             return 0;
         };
         let chunk = chunk_lock.read();
-        let biome_pos = azalea_core::position::ChunkBiomePos {
-            x: (x.rem_euclid(16) / 4) as u8,
-            y,
-            z: (z.rem_euclid(16) / 4) as u8,
-        };
-        let biome = chunk
-            .get_biome(biome_pos, self.chunk_storage.min_y())
-            .unwrap_or_default();
-        u32::from(biome)
+        chunk.biome(x, y, z, self.min_y).unwrap_or_default()
     }
-}
-
-/// The section holding world `y`, or `None` outside the chunk's height.
-pub fn section_at(chunk: &Chunk, y: i32, min_y: i32) -> Option<&azalea_world::chunk::Section> {
-    // div_euclid so below-world y maps out of range instead of truncating
-    // into section 0; vanilla getSectionIndex floors.
-    let section_idx = usize::try_from((y - min_y).div_euclid(16)).ok()?;
-    chunk.sections.get(section_idx)
-}
-
-pub fn block_state_from_section(chunk: &Chunk, x: i32, y: i32, z: i32, min_y: i32) -> BlockState {
-    let Some(section) = section_at(chunk, y, min_y) else {
-        return BlockState::AIR;
-    };
-
-    let local_x = x.rem_euclid(16) as u8;
-    let local_y = (y - min_y).rem_euclid(16) as u8;
-    let local_z = z.rem_euclid(16) as u8;
-
-    section.get_block_state(azalea_core::position::ChunkSectionBlockPos {
-        x: local_x,
-        y: local_y,
-        z: local_z,
-    })
 }
 
 #[cfg(test)]
@@ -377,11 +660,8 @@ impl ChunkStore {
     pub(crate) fn with_origin_chunk() -> Self {
         crate::world::block::init("26.2");
         let mut chunks = Self::new(2);
-        chunks.partial_storage.set(
-            &ChunkPos::new(0, 0),
-            Some(Chunk::default()),
-            &mut chunks.chunk_storage,
-        );
+        let sections = chunks.section_count() as usize;
+        chunks.insert_chunk(ChunkPos::new(0, 0), Chunk::empty(sections));
         chunks
     }
 }

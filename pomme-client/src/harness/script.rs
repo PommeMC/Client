@@ -190,7 +190,7 @@ struct BlockExpect {
 }
 
 /// The open menu: a container's menu type (`generic_9x3`), `inventory`,
-/// `creative` or `none`, and optionally its title.
+/// `creative`, `pause` or `none`, and optionally its title.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MenuExpect {

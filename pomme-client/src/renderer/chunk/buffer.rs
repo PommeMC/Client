@@ -1,12 +1,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use azalea_core::position::ChunkPos;
 use glam::DVec3;
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use super::mesher::{ChunkAABB, ChunkMeshData, PackedVertex, SectionMesh};
+use crate::position::ChunkPos;
 use crate::renderer::context::IndirectDrawFeatures;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 

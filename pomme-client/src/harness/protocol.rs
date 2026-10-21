@@ -10,6 +10,7 @@ use crate::app::phases::in_game::GameState;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
+use crate::ui::pause::PauseScreen;
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -174,7 +175,7 @@ pub struct SlotInfo {
 
 #[derive(Debug, Serialize)]
 pub struct InventoryInfo {
-    /// `inventory`, `creative`, a container id, or `none`.
+    /// `inventory`, `creative`, a container id, `pause`, or `none`.
     pub menu: String,
     /// The open container's vanilla menu type, e.g. `generic_9x3`.
     pub menu_type: Option<&'static str>,
@@ -190,6 +191,9 @@ pub fn inventory(game: &GameState) -> InventoryInfo {
         match game.open_menu_id() {
             Some(0) => "inventory".into(),
             Some(id) => id.to_string(),
+            None if game.paused && !matches!(game.pause_screen, PauseScreen::Hidden) => {
+                "pause".into()
+            }
             None => "none".into(),
         }
     };
@@ -433,7 +437,7 @@ pub fn block_entity(game: &GameState, [x, y, z]: [i32; 3]) -> Option<String> {
     let stored = game
         .chunk_store
         .block_entities
-        .get(&azalea_core::position::BlockPos { x, y, z })?;
+        .get(&crate::position::BlockPos { x, y, z })?;
     Some(bare(&stored.kind.to_string()))
 }
 

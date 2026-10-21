@@ -4,10 +4,10 @@
 use std::collections::HashMap;
 use std::hint::black_box;
 
-use azalea_core::position::ChunkPos;
 use criterion::Criterion;
 
 use super::fixtures::{Assets, EYE, Scene, build_world, columns_within};
+use crate::position::ChunkPos;
 use crate::renderer::chunk::occlusion_graph::{
     VisibilitySet, compute_visibility, compute_visible_mask,
 };

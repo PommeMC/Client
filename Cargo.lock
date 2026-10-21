@@ -757,23 +757,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "azalea-world"
-version = "0.16.0+mc26.2"
-source = "git+https://github.com/azalea-rs/azalea?rev=ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32#ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32"
-dependencies = [
- "azalea-block",
- "azalea-buf",
- "azalea-core",
- "azalea-registry",
- "bevy_ecs",
- "derive_more",
- "nohash-hasher",
- "parking_lot",
- "rustc-hash",
- "tracing",
-]
-
-[[package]]
 name = "base16ct"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5341,7 +5324,6 @@ dependencies = [
  "azalea-inventory",
  "azalea-protocol",
  "azalea-registry",
- "azalea-world",
  "base64 0.23.1",
  "bytemuck",
  "chrono",

@@ -1,0 +1,18 @@
+# The menu key opens the pause menu and closes it again. Escape is a fixed
+# input on key.menu, so this goes through the same lookup as the touch Pause
+# button.
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+screenshot = "paused"
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }

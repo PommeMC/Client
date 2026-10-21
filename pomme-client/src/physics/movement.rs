@@ -3,7 +3,6 @@
 // fall distance resets every tick while flying
 
 use azalea_block::BlockState;
-use azalea_core::position::BlockPos;
 use glam::{DVec3, dvec3};
 use winit::keyboard::KeyCode;
 
@@ -15,6 +14,7 @@ use super::collision::{
 use crate::app::input::{self, InputState};
 use crate::entity::components::Velocity;
 use crate::player::{CROUCH_HEIGHT, LocalPlayer, PLAYER_HALF_WIDTH, STANDING_HEIGHT, is_spectator};
+use crate::position::BlockPos;
 use crate::world::block::model::Direction;
 use crate::world::block::{
     BlockTags, FluidKind, block_id, block_properties, block_tags, fluid, movement_friction,
@@ -72,6 +72,13 @@ const CLIMB_UP_VELOCITY: f64 = 0.2;
 const CLIMB_MAX_FALL_SPEED: f32 = 0.15;
 const DEG_TO_RAD: f32 = std::f32::consts::PI / 180.0_f32;
 const SIN_SCALE: f64 = 10_430.378_350_470_453;
+
+/// Vanilla `Mth.SIN`: 65536 samples of one turn, in its own division form.
+static SIN: std::sync::LazyLock<Box<[f32]>> = std::sync::LazyLock::new(|| {
+    (0..65536)
+        .map(|i| (f64::from(i) / SIN_SCALE).sin() as f32)
+        .collect()
+});
 
 /// The vehicle the player rides, as the sprint and flight-toggle gates see it.
 #[derive(Clone, Copy)]
@@ -1193,12 +1200,12 @@ fn mth_sqrt(value: f32) -> f32 {
 
 fn mth_sin(angle: f32) -> f32 {
     let index = ((f64::from(angle) * SIN_SCALE) as i64 & 0xFFFF) as usize;
-    azalea_core::math::SIN[index]
+    SIN[index]
 }
 
 fn mth_cos(angle: f32) -> f32 {
     let index = ((f64::from(angle) * SIN_SCALE + 16_384.0) as i64 & 0xFFFF) as usize;
-    azalea_core::math::SIN[index]
+    SIN[index]
 }
 
 fn vanilla_yaw_sin_cos(yaw_degrees: f32) -> (f32, f32) {
@@ -2203,7 +2210,7 @@ mod tests {
     #[test]
     fn sleeping_player_is_immobile_without_freezing_travel() {
         let mut player = LocalPlayer::new();
-        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(0, 64, 0));
+        player.sleeping_pos = Some(crate::position::BlockPos::new(0, 64, 0));
 
         let mut forward = 0.75;
         let mut strafe = -0.25;

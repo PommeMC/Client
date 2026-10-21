@@ -1,12 +1,11 @@
 use std::io::Cursor;
 use std::sync::OnceLock;
 
-use azalea_buf::{AzBuf, AzBufVar};
 use azalea_protocol::common::tags::TagMap;
 use azalea_registry::Registry;
 use azalea_registry::builtin::{DataComponentKind, ItemKind};
-use azalea_registry::identifier::Identifier;
 use crossbeam_channel::Sender;
+use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::ItemCodec;
 use pomme_protocol::{Direction, PacketTable, Phase};
 
@@ -233,7 +232,7 @@ fn parse_recipe_display(cur: &mut Cursor<&[u8]>) -> Result<RecipeDisplay, String
             result: slot(cur)?,
             crafting_station: slot(cur)?,
             duration: read_var_u32(cur)?,
-            experience: f32::azalea_read(cur).map_err(buf_err)?,
+            experience: read(cur, Reader::f32)?,
         }),
         3 => Ok(RecipeDisplay::Stonecutter {
             input: slot(cur)?,
@@ -308,7 +307,7 @@ fn parse_trim_pattern(cur: &mut Cursor<&[u8]>) -> Result<TrimPatternHolder, Stri
     }
     Ok(TrimPatternHolder::Direct {
         asset_id: read_identifier(cur)?,
-        description: azalea_chat::FormattedText::azalea_read(cur).map_err(buf_err)?,
+        description: Box::new(read_component(cur)?),
         decal: read_bool(cur)?,
     })
 }
@@ -420,7 +419,7 @@ fn read_len(cur: &mut Cursor<&[u8]>) -> Result<usize, String> {
 }
 
 fn read_var_u32(cur: &mut Cursor<&[u8]>) -> Result<u32, String> {
-    u32::azalea_read_var(cur).map_err(buf_err)
+    read(cur, Reader::varint)
 }
 
 fn read_item_id(cur: &mut Cursor<&[u8]>) -> Result<u32, String> {
@@ -438,21 +437,32 @@ fn read_component_id(cur: &mut Cursor<&[u8]>) -> Result<u32, String> {
 }
 
 fn read_var_i32(cur: &mut Cursor<&[u8]>) -> Result<i32, String> {
-    i32::azalea_read_var(cur).map_err(buf_err)
+    read(cur, Reader::var_i32)
 }
 
 fn read_bool(cur: &mut Cursor<&[u8]>) -> Result<bool, String> {
-    bool::azalea_read(cur).map_err(buf_err)
+    read(cur, Reader::bool)
 }
 
 fn read_u8(cur: &mut Cursor<&[u8]>) -> Result<u8, String> {
-    u8::azalea_read(cur).map_err(buf_err)
+    read(cur, Reader::u8)
 }
 
+/// Vanilla `Identifier.STREAM_CODEC`, namespaced as `Identifier.parse` does.
 fn read_identifier(cur: &mut Cursor<&[u8]>) -> Result<String, String> {
-    Identifier::azalea_read(cur)
-        .map(|id| id.to_string())
-        .map_err(buf_err)
+    read(cur, |r| {
+        r.identifier()
+            .map(crate::chat_component::normalize_identifier)
+    })
+}
+
+/// A text component as network NBT
+/// (`ComponentSerialization.STREAM_CODEC`).
+fn read_component(cur: &mut Cursor<&[u8]>) -> Result<crate::chat_component::Component, String> {
+    let mut pos = cur.position() as usize;
+    let component = super::chat::read_component(cur.get_ref(), &mut pos)?;
+    cur.set_position(pos as u64);
+    Ok(component)
 }
 
 fn ensure_eof(cur: &Cursor<&[u8]>) -> Result<(), String> {
@@ -468,8 +478,12 @@ fn ensure_eof(cur: &Cursor<&[u8]>) -> Result<(), String> {
     }
 }
 
-fn buf_err(error: azalea_buf::BufReadError) -> String {
-    error.to_string()
+/// One pomme-protocol read on the rest of `cur`.
+fn read<'a, T>(
+    cur: &mut Cursor<&'a [u8]>,
+    f: impl FnOnce(&mut Reader<'a>) -> DecodeResult<T>,
+) -> Result<T, String> {
+    Reader::on_cursor(cur, f).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -477,6 +491,25 @@ mod tests {
     use pomme_protocol::wire;
 
     use super::*;
+
+    /// An inline trim pattern as vanilla encodes it (`CodecOracle`).
+    #[test]
+    fn direct_trim_pattern_matches_vanilla_encoder() {
+        let bytes = pomme_protocol::vanilla_fixtures::case("trim_pattern/direct");
+        let mut cur = Cursor::new(bytes.as_slice());
+        let TrimPatternHolder::Direct {
+            asset_id,
+            description,
+            decal,
+        } = parse_trim_pattern(&mut cur).unwrap()
+        else {
+            panic!("expected a direct trim pattern");
+        };
+        assert_eq!(cur.position() as usize, bytes.len());
+        assert_eq!(asset_id, "minecraft:test");
+        assert_eq!(description.plain_text(), "Test Trim");
+        assert!(decal);
+    }
 
     #[test]
     fn slot_displays_nested_past_the_depth_cap_are_rejected() {

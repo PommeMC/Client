@@ -11,7 +11,7 @@ use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::pipelines::item_entity::{
     self, ItemEntityPipeline, TintPaletteArena, push_model_light,
 };
-use crate::renderer::util;
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, util};
 use crate::world::block::model::DisplayTransform;
 
 pub struct GuiItemPipeline {
@@ -21,10 +21,12 @@ pub struct GuiItemPipeline {
     atlas_layout: vk::DescriptorSetLayout,
     tint_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
-    camera_set: vk::DescriptorSet,
+    camera_sets: Vec<vk::DescriptorSet>,
     atlas_set: vk::DescriptorSet,
-    camera_buffer: vk::Buffer,
-    camera_alloc: Option<Allocation>,
+    camera_buffers: Vec<vk::Buffer>,
+    camera_allocs: Vec<Allocation>,
+    /// The atlas size each frame's camera buffer was last written for.
+    camera_px: [Option<u32>; MAX_FRAMES_IN_FLIGHT],
     tint_arena: TintPaletteArena,
     sampler: vk::Sampler,
     atlas_px: u32,
@@ -82,7 +84,7 @@ impl GuiItemPipeline {
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
+                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::CombinedImageSampler,
@@ -90,11 +92,11 @@ impl GuiItemPipeline {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::StorageBuffer,
-                descriptor_count: crate::renderer::MAX_FRAMES_IN_FLIGHT as u32,
+                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
             },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: (crate::renderer::MAX_FRAMES_IN_FLIGHT + 2) as u32,
+            max_sets: (2 * MAX_FRAMES_IN_FLIGHT + 1) as u32,
             pool_size_count: pool_sizes.len() as u32,
             pool_sizes: pool_sizes.as_ptr(),
             ..Default::default()
@@ -102,17 +104,6 @@ impl GuiItemPipeline {
         let descriptor_pool = device
             .create_descriptor_pool(&pool_info, None)
             .expect("failed to create gui_item descriptor pool");
-
-        let cam_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: 1,
-            set_layouts: &camera_layout,
-            ..Default::default()
-        };
-        let mut camera_set = vk::DescriptorSet::null();
-        device
-            .allocate_descriptor_sets(&cam_alloc_info, slice::from_mut(&mut camera_set))
-            .expect("failed to allocate gui_item camera set");
 
         let atlas_alloc_info = vk::DescriptorSetAllocateInfo {
             descriptor_pool,
@@ -125,25 +116,14 @@ impl GuiItemPipeline {
             .allocate_descriptor_sets(&atlas_alloc_info, slice::from_mut(&mut atlas_set))
             .expect("failed to allocate gui_item atlas set");
 
-        let (camera_buffer, camera_alloc) = util::create_uniform_buffer(
+        let (camera_sets, camera_buffers, camera_allocs) = util::create_uniform_sets(
             device,
             allocator,
+            descriptor_pool,
+            camera_layout,
             size_of::<CameraUniform>() as u64,
             "gui_item_camera",
         );
-        let cam_buf_info = vk::DescriptorBufferInfo {
-            buffer: camera_buffer,
-            offset: 0,
-            range: size_of::<CameraUniform>() as u64,
-        };
-        let cam_write = vk::WriteDescriptorSet {
-            dst_set: camera_set,
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::UniformBuffer,
-            descriptor_count: 1,
-            buffer_info: &cam_buf_info,
-            ..Default::default()
-        };
 
         let sampler_info = vk::SamplerCreateInfo {
             mag_filter: vk::Filter::Nearest,
@@ -173,32 +153,30 @@ impl GuiItemPipeline {
             image_info: &atlas_img_info,
             ..Default::default()
         };
-        device.update_descriptor_sets(&[cam_write, atlas_write], &[]);
+        device.update_descriptor_sets(&[atlas_write], &[]);
         let tint_arena =
             TintPaletteArena::new(device, allocator, descriptor_pool, tint_layout, "gui_item");
 
-        let mut this = Self {
+        Self {
             pipeline,
             pipeline_layout,
             camera_layout,
             atlas_layout,
             tint_layout,
             descriptor_pool,
-            camera_set,
+            camera_sets,
             atlas_set,
-            camera_buffer,
-            camera_alloc: Some(camera_alloc),
+            camera_buffers,
+            camera_allocs,
+            camera_px: [None; MAX_FRAMES_IN_FLIGHT],
             tint_arena,
             sampler,
             atlas_px,
-        };
-        this.write_atlas_ortho(atlas_px as f32);
-        this
+        }
     }
 
     pub fn set_atlas_px(&mut self, atlas_px: u32) {
         self.atlas_px = atlas_px;
-        self.write_atlas_ortho(atlas_px as f32);
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, atlas_render_pass: vk::RenderPass) {
@@ -211,16 +189,20 @@ impl GuiItemPipeline {
         );
     }
 
-    fn write_atlas_ortho(&mut self, atlas_px: f32) {
+    /// Brings `frame`'s camera buffer up to the current atlas size.
+    fn write_atlas_ortho(&mut self, frame: usize) {
+        if self.camera_px[frame] == Some(self.atlas_px) {
+            return;
+        }
+        self.camera_px[frame] = Some(self.atlas_px);
+        let atlas_px = self.atlas_px as f32;
         // Bottom/top swapped to Y-invert the projection (matches vanilla's
         // `invertY=true`).
         let view_proj =
             proj::directx::orthographic(0.0, atlas_px, atlas_px, 0.0, -10000.0, 10000.0);
         let uniform = CameraUniform::with_view_proj(view_proj);
         let bytes = bytemuck::bytes_of(&uniform);
-        if let Some(alloc) = self.camera_alloc.as_mut() {
-            alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
-        }
+        self.camera_allocs[frame].mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
     }
 
     pub fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
@@ -250,12 +232,17 @@ impl GuiItemPipeline {
     ) {
         self.tint_arena
             .begin_frame(device, allocator, frame, required_colors);
+        self.write_atlas_ortho(frame);
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
         cmd.bind_descriptor_sets(
             vk::PipelineBindPoint::Graphics,
             self.pipeline_layout,
             0,
-            &[self.camera_set, self.atlas_set, self.tint_arena.set(frame)],
+            &[
+                self.camera_sets[frame],
+                self.atlas_set,
+                self.tint_arena.set(frame),
+            ],
             &[],
         );
         let viewport = vk::Viewport {
@@ -309,10 +296,12 @@ impl GuiItemPipeline {
         device.destroy_descriptor_set_layout(self.atlas_layout, None);
         device.destroy_descriptor_set_layout(self.tint_layout, None);
         device.destroy_sampler(self.sampler, None);
-        device.destroy_buffer(self.camera_buffer, None);
-        if let Some(a) = self.camera_alloc.take() {
-            allocator.lock().unwrap().free(a).ok();
-        }
+        util::destroy_buffers(
+            device,
+            &mut allocator.lock().unwrap(),
+            &self.camera_buffers,
+            &mut self.camera_allocs,
+        );
     }
 }
 

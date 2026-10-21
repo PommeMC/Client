@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use azalea_core::position::BlockPos;
 use azalea_inventory::ItemStack;
 use glam::DVec3;
 
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
 use crate::mob_effect::ActiveMobEffects;
+use crate::position::BlockPos;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::boss_bar::BossBarState;
 use crate::ui::text::TextSpan;
@@ -365,7 +365,7 @@ pub struct DebugInfo<'a> {
     pub x_rot_deg: f32,
     pub target_block: Option<(
         BlockPos,
-        azalea_core::direction::Direction,
+        crate::world::block::model::Direction,
         String,
         Vec<String>,
     )>,

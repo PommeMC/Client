@@ -688,14 +688,29 @@ async fn config_sequence(
     }
 }
 
+/// The synced biome registry, in protocol-id order.
+fn biome_registry(
+    holder: &azalea_core::registry_holder::RegistryHolder,
+) -> Option<&azalea_core::registry_holder::RegistryType<simdnbt::owned::NbtCompound>> {
+    holder
+        .extra
+        .get(&azalea_registry::identifier::Identifier::new(
+            "minecraft:worldgen/biome",
+        ))
+}
+
+/// How many biomes chunk sections can name.
+pub(crate) fn biome_count(holder: &azalea_core::registry_holder::RegistryHolder) -> usize {
+    biome_registry(holder).map_or(0, |registry| registry.map.len())
+}
+
 fn extract_biome_climate(
     holder: &azalea_core::registry_holder::RegistryHolder,
 ) -> std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate> {
     use crate::renderer::chunk::mesher::{BiomeClimate, GrassColorModifier, int_to_rgb};
 
     let mut result = std::collections::HashMap::new();
-    let biome_key: azalea_registry::identifier::Identifier = "minecraft:worldgen/biome".into();
-    if let Some(registry) = holder.extra.get(&biome_key) {
+    if let Some(registry) = biome_registry(holder) {
         for (id, (_, nbt)) in registry.map.iter().enumerate() {
             let temp = nbt_float(nbt, "temperature").unwrap_or(0.8);
             let downfall = nbt_float(nbt, "downfall").unwrap_or(0.4);

@@ -4,6 +4,9 @@ use crate::resource_pack::PackCompat;
 use crate::ui::common::BTN_H;
 use crate::ui::text::TextSpan;
 
+/// `KeyBindsList.KeyEntry`'s collision stripe.
+const COLLISION_STRIPE: [f32; 4] = common::rgb(0xffff00);
+
 /// A row in a vanilla-style options list: 25px pitch, a 310px `Big` widget, or
 /// two 150px widgets per `Pair` (`PairLeft` for an odd trailing widget).
 pub(super) enum OptRow<'a> {
@@ -561,20 +564,61 @@ impl MainMenu {
                     centered: false,
                 });
 
+                // KeyEntry.refreshEntry: a bound key collides with every other
+                // mapping on it, unless both are at their defaults.
+                let collisions: Vec<_> = bound
+                    .map(|bound| {
+                        Action::ALL
+                            .iter()
+                            .filter_map(|other| entries.iter().find(|(a, ..)| a == other))
+                            .filter(|&&(other, other_bound, other_default)| {
+                                other != action
+                                    && other_bound == Some(bound)
+                                    && !(other_default && is_default)
+                            })
+                            .map(|&(other, ..)| other.display_name())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
                 // TODO: Display and edit more than the first input per action.
                 let name = bound.map_or_else(|| NOT_BOUND.resolve(), |input| input.display_name());
-                let mut name = TextSpan::new(name.into_owned(), WHITE);
-                let spans = if self.action_binding == Some(action) {
-                    name.underline = true;
-                    let yellow = common::rgb(0xffff55);
-                    vec![
-                        TextSpan::new("> ".into(), yellow),
-                        name,
-                        TextSpan::new(" <".into(), yellow),
-                    ]
-                } else {
-                    vec![name]
-                };
+                let yellow = common::rgb(0xffff55);
+                let mut spans = vec![TextSpan::new(name.into_owned(), WHITE)];
+                if !collisions.is_empty() {
+                    spans.insert(0, TextSpan::new("[ ".into(), yellow));
+                    spans.push(TextSpan::new(" ]".into(), yellow));
+                }
+                if self.action_binding == Some(action) {
+                    for span in &mut spans {
+                        span.color = WHITE;
+                        span.underline = true;
+                    }
+                    spans.insert(0, TextSpan::new("> ".into(), yellow));
+                    spans.push(TextSpan::new(" <".into(), yellow));
+                }
+                if !collisions.is_empty()
+                    && common::hit_test(row_cursor, [change_x, y, change_w, btn_h])
+                {
+                    let text = crate::lang::translate("controls.keybinds.duplicateKeybinds")
+                        .unwrap_or("This key is also used for:\n%s")
+                        .replace("%s", &collisions.join(", "));
+                    let width0 = |spans: &[TextSpan]| {
+                        spans
+                            .iter()
+                            .map(|span| text_width_fn(&span.text, common::FONT_SIZE))
+                            .sum()
+                    };
+                    let lines = crate::ui::chat::wrap_spans(
+                        &[TextSpan::new(text, WHITE)],
+                        common::TOOLTIP_WRAP,
+                        &width0,
+                    )
+                    .into_iter()
+                    .map(TooltipLine::from_spans)
+                    .collect();
+                    common::push_tooltip_lines(&mut elements, input.cursor, sw, sh, gs, lines);
+                }
                 if push_button_label_f(
                     &mut elements,
                     ctx,
@@ -611,6 +655,16 @@ impl MainMenu {
                     self.key_bindings.reset(action);
                     self.save_settings();
                     any_clicked = true;
+                }
+                if !collisions.is_empty() {
+                    elements.push(MenuElement::Rect {
+                        x: change_x - 6.0 * gs,
+                        y: y + gs,
+                        w: 3.0 * gs,
+                        h: 17.0 * gs,
+                        corner_radius: 0.0,
+                        color: COLLISION_STRIPE,
+                    });
                 }
                 y += btn_h;
             }
@@ -2168,6 +2222,30 @@ mod tests {
         // Reset Keys, left of centre in the footer.
         click_keybinds(&mut menu, 600.0, (300.0, 575.0));
         assert!(menu.key_bindings.all_default());
+    }
+
+    #[test]
+    fn collisions_mark_both_rows_unless_both_default() {
+        let stripes = |menu: &mut MainMenu| {
+            let result =
+                menu.build_options_keybinds(800.0, 2000.0, &MenuInput::default(), &|_, _| 0.0);
+            result
+                .elements
+                .iter()
+                .filter(
+                    |e| matches!(e, MenuElement::Rect { color, .. } if *color == COLLISION_STRIPE),
+                )
+                .count()
+        };
+        let mut menu = test_menu("pomme-keybind-collision-test");
+        menu.set_screen(Screen::OptionsKeybinds);
+        assert_eq!(stripes(&mut menu), 0);
+        // Jump keeps its default Space; Drop moving onto it marks both.
+        menu.key_bindings.set(
+            Action::DropItem,
+            vec![InputKey::Keyboard(winit::keyboard::KeyCode::Space)],
+        );
+        assert_eq!(stripes(&mut menu), 2);
     }
 
     #[test]

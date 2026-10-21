@@ -4,16 +4,15 @@
 use std::path::PathBuf;
 
 use azalea_block::BlockState;
-use azalea_core::position::ChunkPos;
-use azalea_world::Chunk;
 use glam::DVec3;
 
 use crate::assets::AssetIndex;
 use crate::dirs::DataDirs;
+use crate::position::ChunkPos;
 use crate::renderer::chunk::atlas::{AtlasUVMap, TextureAtlas, atlas_texture_names};
 use crate::world::block::find_state;
 use crate::world::block::registry::BlockRegistry;
-use crate::world::chunk::{ChunkLightData, ChunkStore};
+use crate::world::chunk::{Chunk, ChunkLightData, ChunkStore};
 
 pub struct Assets {
     pub jar_assets_dir: PathBuf,
@@ -143,9 +142,8 @@ pub fn build_world(scene: Scene) -> ChunkStore {
     let s = States::lookup();
     let mut store = ChunkStore::new(8);
     for pos in columns_within(1) {
-        store
-            .partial_storage
-            .set(&pos, Some(Chunk::default()), &mut store.chunk_storage);
+        let sections = store.section_count() as usize;
+        store.insert_chunk(pos, Chunk::empty(sections));
     }
     let min_y = store.min_y();
     let mut rng = fastrand::Rng::with_seed(0x0050_4F4D_4D45);

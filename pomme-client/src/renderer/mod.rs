@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use azalea_block::BlockState;
-use azalea_core::position::{BlockPos, ChunkPos};
 pub use camera::CloudMode;
 use camera::{Camera, CameraUniform};
 use chunk::atlas::TextureAtlas;
@@ -58,6 +57,7 @@ use winit::window::Window;
 use crate::app::input::InputState;
 use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
+use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::ui::font::{FontOptions, FontSources};
@@ -642,7 +642,16 @@ impl Renderer {
         cmd.set_scissor(0, &[scissor]);
 
         let empty_uvs: HashMap<String, [f32; 4]> = HashMap::new();
-        menu.draw(cmd, sw, sh, &elements, &empty_uvs);
+        menu.draw(
+            &ctx.device,
+            &ctx.allocator,
+            cmd,
+            0,
+            sw,
+            sh,
+            &elements,
+            &empty_uvs,
+        );
 
         cmd.end_render_pass();
         cmd.end()?;
@@ -837,6 +846,8 @@ impl Renderer {
         self.particle_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.cloud_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.chunk_border_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.blur_pipeline.resize(
             &self.ctx.device,
@@ -2025,8 +2036,16 @@ impl Renderer {
                     }
                 }
 
-                self.menu_pipeline
-                    .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
+                self.menu_pipeline.draw(
+                    &self.ctx.device,
+                    &self.ctx.allocator,
+                    cmd,
+                    frame,
+                    sw,
+                    sh,
+                    overlay,
+                    &item_atlas_uvs,
+                );
 
                 // Each preview box gets its depth cleared and its own scissor
                 // while the 3D content draws.
@@ -2071,7 +2090,7 @@ impl Renderer {
             } => {
                 let aspect = sw / sh.max(1.0);
                 self.panorama_pipeline
-                    .draw(&self.ctx.device, cmd, *scroll, aspect, 0.0);
+                    .draw(&self.ctx.device, cmd, frame, *scroll, aspect, 0.0);
 
                 // A BlurBackdrop marker splits the elements: those before it are
                 // drawn into the scene so the blur pass captures them (the title
@@ -2082,7 +2101,10 @@ impl Renderer {
                 let mut vbase = 0u32;
                 if let Some(i) = split {
                     vbase = self.menu_pipeline.draw_from(
+                        &self.ctx.device,
+                        &self.ctx.allocator,
                         cmd,
+                        frame,
                         sw,
                         sh,
                         &elements[..i],
@@ -2139,8 +2161,17 @@ impl Renderer {
                     Some(i) => &elements[i + 1..],
                     None => &elements[..],
                 };
-                self.menu_pipeline
-                    .draw_from(cmd, sw, sh, fg, &item_atlas_uvs, vbase);
+                self.menu_pipeline.draw_from(
+                    &self.ctx.device,
+                    &self.ctx.allocator,
+                    cmd,
+                    frame,
+                    sw,
+                    sh,
+                    fg,
+                    &item_atlas_uvs,
+                    vbase,
+                );
             }
         }
 

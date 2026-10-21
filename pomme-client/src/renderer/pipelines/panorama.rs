@@ -7,7 +7,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationSc
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::{shader, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 // Minecraft panorama face order differs from Vulkan cubemap layer order
 const FACE_TO_LAYER: [u32; 6] = [4, 1, 5, 0, 2, 3];
@@ -18,10 +18,10 @@ pub struct PanoramaPipeline {
     params_layout: vk::DescriptorSetLayout,
     cube_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
-    params_set: vk::DescriptorSet,
+    params_sets: Vec<vk::DescriptorSet>,
     cube_set: vk::DescriptorSet,
-    params_buffer: vk::Buffer,
-    params_allocation: Option<Allocation>,
+    params_buffers: Vec<vk::Buffer>,
+    params_allocations: Vec<Allocation>,
     cube_image: vk::Image,
     cube_view: vk::ImageView,
     cube_sampler: vk::Sampler,
@@ -70,7 +70,7 @@ impl PanoramaPipeline {
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
+                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::CombinedImageSampler,
@@ -78,7 +78,7 @@ impl PanoramaPipeline {
             },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: 2,
+            max_sets: MAX_FRAMES_IN_FLIGHT as u32 + 1,
             pool_size_count: pool_sizes.len() as u32,
             pool_sizes: pool_sizes.as_ptr(),
             ..Default::default()
@@ -86,17 +86,6 @@ impl PanoramaPipeline {
         let descriptor_pool = device
             .create_descriptor_pool(&pool_info, None)
             .expect("failed to create panorama descriptor pool");
-
-        let params_alloc = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: 1,
-            set_layouts: &params_layout,
-            ..Default::default()
-        };
-        let mut params_set = vk::DescriptorSet::null();
-        device
-            .allocate_descriptor_sets(&params_alloc, slice::from_mut(&mut params_set))
-            .expect("failed to allocate params descriptor set");
 
         let cube_alloc = vk::DescriptorSetAllocateInfo {
             descriptor_pool,
@@ -109,23 +98,14 @@ impl PanoramaPipeline {
             .allocate_descriptor_sets(&cube_alloc, slice::from_mut(&mut cube_set))
             .expect("failed to allocate cube descriptor set");
 
-        let (params_buffer, params_allocation) =
-            util::create_uniform_buffer(device, allocator, 16, "panorama_params");
-
-        let buffer_info = vk::DescriptorBufferInfo {
-            buffer: params_buffer,
-            offset: 0,
-            range: 16,
-        };
-        let write = vk::WriteDescriptorSet {
-            dst_set: params_set,
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::UniformBuffer,
-            descriptor_count: 1,
-            buffer_info: &buffer_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[write], &[]);
+        let (params_sets, params_buffers, params_allocations) = util::create_uniform_sets(
+            device,
+            allocator,
+            descriptor_pool,
+            params_layout,
+            16,
+            "panorama_params",
+        );
 
         let (
             cube_image,
@@ -158,10 +138,10 @@ impl PanoramaPipeline {
             params_layout,
             cube_layout,
             descriptor_pool,
-            params_set,
+            params_sets,
             cube_set,
-            params_buffer,
-            params_allocation: Some(params_allocation),
+            params_buffers,
+            params_allocations,
             cube_image,
             cube_view,
             cube_sampler,
@@ -177,6 +157,7 @@ impl PanoramaPipeline {
         &mut self,
         device: &vk::Device,
         cmd: vk::CommandBuffer,
+        frame: usize,
         scroll: f32,
         aspect: f32,
         blur: f32,
@@ -187,11 +168,7 @@ impl PanoramaPipeline {
         }
 
         let data: [f32; 4] = [scroll, aspect, blur, 0.0];
-        self.params_allocation
-            .as_mut()
-            .unwrap()
-            .mapped_slice_mut()
-            .unwrap()[..16]
+        self.params_allocations[frame].mapped_slice_mut().unwrap()[..16]
             .copy_from_slice(bytemuck::cast_slice(&data));
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
@@ -199,7 +176,7 @@ impl PanoramaPipeline {
             vk::PipelineBindPoint::Graphics,
             self.pipeline_layout,
             0,
-            &[self.params_set, self.cube_set],
+            &[self.params_sets[frame], self.cube_set],
             &[],
         );
         cmd.draw(3, 1, 0, 0);
@@ -275,10 +252,12 @@ impl PanoramaPipeline {
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let mut alloc = allocator.lock().unwrap();
 
-        device.destroy_buffer(self.params_buffer, None);
-        if let Some(a) = self.params_allocation.take() {
-            alloc.free(a).ok();
-        }
+        util::destroy_buffers(
+            device,
+            &mut alloc,
+            &self.params_buffers,
+            &mut self.params_allocations,
+        );
 
         device.destroy_sampler(self.cube_sampler, None);
         device.destroy_image_view(self.cube_view, None);

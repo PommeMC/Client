@@ -1,6 +1,6 @@
 //! Chunk and light packets, as vanilla 26.2 lays them out
 //! (`net/minecraft/network/protocol/game/Clientbound*Packet`). The section
-//! buffer stays opaque: its paletted containers are the chunk store's.
+//! buffer stays opaque here; `section` reads its paletted containers.
 
 use crate::codec::{DecodeResult, Reader};
 

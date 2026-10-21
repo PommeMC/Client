@@ -6,12 +6,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use azalea_block::BlockState;
-use azalea_core::position::BlockPos;
 use glam::{DVec3, dvec3};
 
 use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::{self, CollisionContext, LocalBox};
 use crate::physics::collision::resolve_collision;
+use crate::position::BlockPos;
 use crate::renderer::ParticleQuad;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::renderer::chunk::mesher::{

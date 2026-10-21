@@ -8,7 +8,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::{packing, shader, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, packing, shader, util};
 use crate::ui::font::{FontSources, GLYPH_ATLAS_SIZE, GlyphAtlasPixels, GlyphInfo, GlyphMap};
 use crate::ui::text::{InlineObject, TextSpan};
 
@@ -40,8 +40,49 @@ struct Vertex {
     corner_radius: f32,
 }
 
-const MAX_VERTICES: usize = 16384;
+const INITIAL_VERTICES: usize = 16384;
 const VERTEX_SIZE: usize = size_of::<Vertex>();
+
+/// One frame slot's vertex buffer. It grows by replacing the buffer; the old
+/// one may still be read by draws recorded earlier, so it is only freed once
+/// the slot comes round again.
+struct VertexSlot {
+    buffer: vk::Buffer,
+    allocation: Allocation,
+    capacity: usize,
+    retired: Vec<(vk::Buffer, Allocation)>,
+}
+
+impl VertexSlot {
+    fn new(device: &vk::Device, allocator: &Arc<Mutex<Allocator>>, capacity: usize) -> Self {
+        let (buffer, allocation) = util::create_host_buffer(
+            device,
+            allocator,
+            (capacity * VERTEX_SIZE) as u64,
+            vk::BufferUsageFlags::VertexBuffer,
+            "menu_vertices",
+        );
+        Self {
+            buffer,
+            allocation,
+            capacity,
+            retired: Vec::new(),
+        }
+    }
+
+    fn free_retired(&mut self, device: &vk::Device, allocator: &mut Allocator) {
+        for (buffer, allocation) in self.retired.drain(..) {
+            device.destroy_buffer(buffer, None);
+            allocator.free(allocation).ok();
+        }
+    }
+
+    fn destroy(mut self, device: &vk::Device, allocator: &mut Allocator) {
+        self.free_retired(device, allocator);
+        device.destroy_buffer(self.buffer, None);
+        allocator.free(self.allocation).ok();
+    }
+}
 
 struct DrawOp {
     start: u32,
@@ -222,10 +263,10 @@ pub struct MenuOverlayPipeline {
     globals_layout: vk::DescriptorSetLayout,
     tex_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
-    globals_set: vk::DescriptorSet,
+    globals_sets: Vec<vk::DescriptorSet>,
     tex_set: vk::DescriptorSet,
-    globals_buffer: vk::Buffer,
-    globals_allocation: Option<Allocation>,
+    globals_buffers: Vec<vk::Buffer>,
+    globals_allocations: Vec<Allocation>,
     font_image: vk::Image,
     font_view: vk::ImageView,
     font_sampler: vk::Sampler,
@@ -246,8 +287,7 @@ pub struct MenuOverlayPipeline {
     font_layer_limit: u32,
     mc_glyph_map: Option<GlyphMap>,
     obfuscation_rng: ObfuscationRng,
-    vertex_buffer: vk::Buffer,
-    vertex_allocation: Option<Allocation>,
+    vertex_slots: Vec<VertexSlot>,
     atlas: FontAtlas,
     favicon_image: vk::Image,
     favicon_view: vk::ImageView,
@@ -322,7 +362,7 @@ impl MenuOverlayPipeline {
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
+                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::CombinedImageSampler,
@@ -330,7 +370,7 @@ impl MenuOverlayPipeline {
             },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: 2,
+            max_sets: MAX_FRAMES_IN_FLIGHT as u32 + 1,
             pool_size_count: pool_sizes.len() as u32,
             pool_sizes: pool_sizes.as_ptr(),
             ..Default::default()
@@ -338,17 +378,6 @@ impl MenuOverlayPipeline {
         let descriptor_pool = device
             .create_descriptor_pool(&pool_info, None)
             .expect("failed to create menu overlay descriptor pool");
-
-        let globals_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: 1,
-            set_layouts: &globals_layout,
-            ..Default::default()
-        };
-        let mut globals_set = vk::DescriptorSet::null();
-        device
-            .allocate_descriptor_sets(&globals_alloc_info, slice::from_mut(&mut globals_set))
-            .expect("failed to allocate globals descriptor set");
 
         let tex_alloc_info = vk::DescriptorSetAllocateInfo {
             descriptor_pool,
@@ -361,23 +390,14 @@ impl MenuOverlayPipeline {
             .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut tex_set))
             .expect("failed to allocate texture descriptor set");
 
-        let (globals_buffer, globals_allocation) =
-            util::create_uniform_buffer(device, allocator, 8, "menu_globals");
-
-        let buf_info = vk::DescriptorBufferInfo {
-            buffer: globals_buffer,
-            offset: 0,
-            range: 8,
-        };
-        let write = vk::WriteDescriptorSet {
-            dst_set: globals_set,
-            dst_binding: 0,
-            descriptor_count: 1,
-            descriptor_type: vk::DescriptorType::UniformBuffer,
-            buffer_info: &buf_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[write], &[]);
+        let (globals_sets, globals_buffers, globals_allocations) = util::create_uniform_sets(
+            device,
+            allocator,
+            descriptor_pool,
+            globals_layout,
+            8,
+            "menu_globals",
+        );
 
         let (font_image, font_view, font_alloc) = util::create_gpu_image_with_format(
             device,
@@ -578,13 +598,9 @@ impl MenuOverlayPipeline {
             .collect();
         device.update_descriptor_sets(&writes, &[]);
 
-        let (vertex_buffer, vertex_allocation) = util::create_host_buffer(
-            device,
-            allocator,
-            (MAX_VERTICES * VERTEX_SIZE) as u64,
-            vk::BufferUsageFlags::VertexBuffer,
-            "menu_vertices",
-        );
+        let vertex_slots = (0..MAX_FRAMES_IN_FLIGHT)
+            .map(|_| VertexSlot::new(device, allocator, INITIAL_VERTICES))
+            .collect();
 
         let obfuscation_seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -598,10 +614,10 @@ impl MenuOverlayPipeline {
             globals_layout,
             tex_layout,
             descriptor_pool,
-            globals_set,
+            globals_sets,
             tex_set,
-            globals_buffer,
-            globals_allocation: Some(globals_allocation),
+            globals_buffers,
+            globals_allocations,
             font_image,
             font_view,
             font_sampler,
@@ -621,8 +637,7 @@ impl MenuOverlayPipeline {
             font_layer_limit,
             mc_glyph_map,
             obfuscation_rng: ObfuscationRng::new(obfuscation_seed),
-            vertex_buffer,
-            vertex_allocation: Some(vertex_allocation),
+            vertex_slots,
             atlas,
             favicon_image,
             favicon_view,
@@ -685,24 +700,42 @@ impl MenuOverlayPipeline {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
         cmd: vk::CommandBuffer,
+        frame: usize,
         screen_w: f32,
         screen_h: f32,
         elements: &[MenuElement],
         item_atlas_uvs: &HashMap<String, [f32; 4]>,
     ) {
-        self.draw_from(cmd, screen_w, screen_h, elements, item_atlas_uvs, 0);
+        self.draw_from(
+            device,
+            allocator,
+            cmd,
+            frame,
+            screen_w,
+            screen_h,
+            elements,
+            item_atlas_uvs,
+            0,
+        );
     }
 
     /// Like [`draw`], but writes vertices starting at `vertex_base` in the
-    /// shared vertex buffer and returns the next free index, so it can be
+    /// frame's vertex buffer and returns the next free index, so it can be
     /// called more than once per frame (e.g. a backdrop before the blur and
     /// a dialog after).
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_from(
         &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
         cmd: vk::CommandBuffer,
+        frame: usize,
         screen_w: f32,
         screen_h: f32,
         elements: &[MenuElement],
@@ -710,11 +743,7 @@ impl MenuOverlayPipeline {
         vertex_base: u32,
     ) -> u32 {
         let globals: [f32; 2] = [screen_w, screen_h];
-        self.globals_allocation
-            .as_mut()
-            .unwrap()
-            .mapped_slice_mut()
-            .unwrap()[..8]
+        self.globals_allocations[frame].mapped_slice_mut().unwrap()[..8]
             .copy_from_slice(bytemuck::cast_slice(&globals));
 
         let mut vertices: Vec<Vertex> = Vec::with_capacity(elements.len() * 24);
@@ -1284,21 +1313,24 @@ impl MenuOverlayPipeline {
             return vertex_base;
         }
 
-        let written = if vertices.is_empty() {
-            0
-        } else {
-            let avail = MAX_VERTICES.saturating_sub(vertex_base as usize);
-            let count = vertices.len().min(avail);
-            let byte_data = bytemuck::cast_slice(&vertices[..count]);
-            let byte_off = vertex_base as usize * VERTEX_SIZE;
-            self.vertex_allocation
-                .as_mut()
-                .unwrap()
-                .mapped_slice_mut()
-                .unwrap()[byte_off..byte_off + byte_data.len()]
-                .copy_from_slice(byte_data);
-            count
-        };
+        let slot = &mut self.vertex_slots[frame];
+        // The first draw of a frame runs after the slot's fence, so buffers
+        // replaced last time round are no longer in use.
+        if vertex_base == 0 && !slot.retired.is_empty() {
+            slot.free_retired(device, &mut allocator.lock().unwrap());
+        }
+        let end = vertex_base as usize + vertices.len();
+        if end > slot.capacity {
+            let grown = VertexSlot::new(device, allocator, end.max(slot.capacity * 2));
+            let old = std::mem::replace(slot, grown);
+            slot.retired = old.retired;
+            slot.retired.push((old.buffer, old.allocation));
+        }
+        let byte_off = vertex_base as usize * VERTEX_SIZE;
+        let byte_data: &[u8] = bytemuck::cast_slice(&vertices);
+        slot.allocation.mapped_slice_mut().unwrap()[byte_off..byte_off + byte_data.len()]
+            .copy_from_slice(byte_data);
+        let vertex_buffer = slot.buffer;
 
         let default_scissor = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
@@ -1315,10 +1347,10 @@ impl MenuOverlayPipeline {
                 vk::PipelineBindPoint::Graphics,
                 self.pipeline_layout,
                 0,
-                &[self.globals_set, self.tex_set],
+                &[self.globals_sets[frame], self.tex_set],
                 &[],
             );
-            cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+            cmd.bind_vertex_buffers(0, &[vertex_buffer], &[0]);
         }
         let mut bound_invert: Option<bool> = None;
         for op in &draw_ops {
@@ -1348,12 +1380,10 @@ impl MenuOverlayPipeline {
                 default_scissor
             };
             cmd.set_scissor(0, &[rect]);
-            // TODO: clamp to `written`; past MAX_VERTICES this draws vertices
-            // that were never uploaded.
             cmd.draw(op.count, 1, vertex_base + op.start, 0);
         }
         cmd.set_scissor(0, &[default_scissor]);
-        vertex_base + written as u32
+        end as u32
     }
 
     pub fn set_item_atlas(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
@@ -2008,14 +2038,15 @@ impl MenuOverlayPipeline {
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let mut alloc = allocator.lock().unwrap();
 
-        device.destroy_buffer(self.globals_buffer, None);
-        if let Some(a) = self.globals_allocation.take() {
-            alloc.free(a).ok();
-        }
+        util::destroy_buffers(
+            device,
+            &mut alloc,
+            &self.globals_buffers,
+            &mut self.globals_allocations,
+        );
 
-        device.destroy_buffer(self.vertex_buffer, None);
-        if let Some(a) = self.vertex_allocation.take() {
-            alloc.free(a).ok();
+        for slot in self.vertex_slots.drain(..) {
+            slot.destroy(device, &mut alloc);
         }
 
         destroy_texture_resources(
