@@ -246,8 +246,8 @@ pub struct MenuOverlayPipeline {
     font_layer_limit: u32,
     mc_glyph_map: Option<GlyphMap>,
     obfuscation_rng: ObfuscationRng,
-    vertex_buffer: vk::Buffer,
-    vertex_allocation: Option<Allocation>,
+    vertex_buffers: Vec<vk::Buffer>,
+    vertex_allocations: Vec<Allocation>,
     atlas: FontAtlas,
     favicon_image: vk::Image,
     favicon_view: vk::ImageView,
@@ -558,7 +558,7 @@ impl MenuOverlayPipeline {
             .collect();
         device.update_descriptor_sets(&writes, &[]);
 
-        let (vertex_buffer, vertex_allocation) = util::create_host_buffer(
+        let (vertex_buffers, vertex_allocations) = util::create_per_frame_host_buffers(
             device,
             allocator,
             (MAX_VERTICES * VERTEX_SIZE) as u64,
@@ -601,8 +601,8 @@ impl MenuOverlayPipeline {
             font_layer_limit,
             mc_glyph_map,
             obfuscation_rng: ObfuscationRng::new(obfuscation_seed),
-            vertex_buffer,
-            vertex_allocation: Some(vertex_allocation),
+            vertex_buffers,
+            vertex_allocations,
             atlas,
             favicon_image,
             favicon_view,
@@ -678,7 +678,7 @@ impl MenuOverlayPipeline {
     }
 
     /// Like [`draw`], but writes vertices starting at `vertex_base` in the
-    /// shared vertex buffer and returns the next free index, so it can be
+    /// frame's vertex buffer and returns the next free index, so it can be
     /// called more than once per frame (e.g. a backdrop before the blur and
     /// a dialog after).
     #[allow(clippy::too_many_arguments)]
@@ -1270,11 +1270,8 @@ impl MenuOverlayPipeline {
             let count = vertices.len().min(avail);
             let byte_data = bytemuck::cast_slice(&vertices[..count]);
             let byte_off = vertex_base as usize * VERTEX_SIZE;
-            self.vertex_allocation
-                .as_mut()
-                .unwrap()
-                .mapped_slice_mut()
-                .unwrap()[byte_off..byte_off + byte_data.len()]
+            self.vertex_allocations[frame].mapped_slice_mut().unwrap()
+                [byte_off..byte_off + byte_data.len()]
                 .copy_from_slice(byte_data);
             count
         };
@@ -1297,7 +1294,7 @@ impl MenuOverlayPipeline {
                 &[self.globals_sets[frame], self.tex_set],
                 &[],
             );
-            cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+            cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame]], &[0]);
         }
         let mut bound_invert: Option<bool> = None;
         for op in &draw_ops {
@@ -1994,10 +1991,12 @@ impl MenuOverlayPipeline {
             &mut self.globals_allocations,
         );
 
-        device.destroy_buffer(self.vertex_buffer, None);
-        if let Some(a) = self.vertex_allocation.take() {
-            alloc.free(a).ok();
-        }
+        util::destroy_buffers(
+            device,
+            &mut alloc,
+            &self.vertex_buffers,
+            &mut self.vertex_allocations,
+        );
 
         destroy_texture_resources(
             device,

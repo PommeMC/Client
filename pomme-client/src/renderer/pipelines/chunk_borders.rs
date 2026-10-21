@@ -17,6 +17,233 @@ struct LineVertex {
 const YELLOW: [f32; 4] = [1.0, 1.0, 0.0, 0.6];
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 0.6];
 const BLUE: [f32; 4] = [0.0, 0.5, 1.0, 0.6];
+const MAX_VERTICES: usize = 4096;
+
+pub struct ChunkBorderPipeline {
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout,
+    desc_layout: vk::DescriptorSetLayout,
+    desc_pool: vk::DescriptorPool,
+    desc_sets: Vec<vk::DescriptorSet>,
+    camera_buffers: Vec<vk::Buffer>,
+    camera_allocs: Vec<Allocation>,
+    vertex_buffers: Vec<vk::Buffer>,
+    vertex_allocs: Vec<Allocation>,
+    lines: Vec<LineVertex>,
+    /// Frames whose vertex buffer predates the last `update_lines`.
+    stale: [bool; MAX_FRAMES_IN_FLIGHT],
+}
+
+impl ChunkBorderPipeline {
+    pub fn new(
+        device: &vk::Device,
+        render_pass: vk::RenderPass,
+        allocator: &Arc<Mutex<Allocator>>,
+    ) -> Self {
+        let binding = vk::DescriptorSetLayoutBinding {
+            binding: 0,
+            descriptor_type: vk::DescriptorType::UniformBuffer,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::Vertex,
+            ..Default::default()
+        };
+        let layout_info = vk::DescriptorSetLayoutCreateInfo {
+            binding_count: 1,
+            bindings: &binding,
+            ..Default::default()
+        };
+        let desc_layout = device
+            .create_descriptor_set_layout(&layout_info, None)
+            .unwrap();
+
+        let layout_info = vk::PipelineLayoutCreateInfo {
+            set_layout_count: 1,
+            set_layouts: &desc_layout,
+            ..Default::default()
+        };
+        let pipeline_layout = device.create_pipeline_layout(&layout_info, None).unwrap();
+
+        let pipeline = create_pipeline(device, render_pass, pipeline_layout);
+
+        let pool_sizes = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::UniformBuffer,
+            descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
+        }];
+        let pool_info = vk::DescriptorPoolCreateInfo {
+            max_sets: MAX_FRAMES_IN_FLIGHT as u32,
+            pool_size_count: 1,
+            pool_sizes: pool_sizes.as_ptr(),
+            ..Default::default()
+        };
+        let desc_pool = device.create_descriptor_pool(&pool_info, None).unwrap();
+
+        let (desc_sets, camera_buffers, camera_allocs) = util::create_uniform_sets(
+            device,
+            allocator,
+            desc_pool,
+            desc_layout,
+            size_of::<CameraUniform>() as u64,
+            "chunk_border_cam",
+        );
+
+        let (vertex_buffers, vertex_allocs) = util::create_per_frame_host_buffers(
+            device,
+            allocator,
+            (MAX_VERTICES * size_of::<LineVertex>()) as u64,
+            vk::BufferUsageFlags::VertexBuffer,
+            "chunk_border_verts",
+        );
+
+        Self {
+            pipeline,
+            pipeline_layout,
+            desc_layout,
+            desc_pool,
+            desc_sets,
+            camera_buffers,
+            camera_allocs,
+            vertex_buffers,
+            vertex_allocs,
+            lines: Vec::new(),
+            stale: [false; MAX_FRAMES_IN_FLIGHT],
+        }
+    }
+
+    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
+        device.destroy_pipeline(self.pipeline, None);
+        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
+    }
+
+    pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
+        let data = self.camera_allocs[frame].mapped_slice_mut().unwrap();
+        data[..size_of::<CameraUniform>()].copy_from_slice(bytemuck::bytes_of(uniform));
+    }
+
+    /// Lines are eye-relative (including the third-person offset, the origin
+    /// the view matrix renders from), subtracted in f64 so they stay on the
+    /// grid at extreme coordinates. The grid cell comes from `pivot` (the
+    /// player eye): vanilla outlines the entity's chunk, not the camera's.
+    /// Each frame uploads them when it next draws.
+    pub fn update_lines(&mut self, pivot: glam::DVec3, eye: glam::DVec3, min_y: i32, max_y: i32) {
+        let chunk_x = (pivot.x.floor() as i32).div_euclid(16) * 16;
+        let chunk_z = (pivot.z.floor() as i32).div_euclid(16) * 16;
+
+        let mut verts: Vec<LineVertex> = Vec::new();
+        let y_min = min_y as f64;
+        let y_max = max_y as f64;
+
+        let push_line = |verts: &mut Vec<LineVertex>,
+                         x0: f64,
+                         y0: f64,
+                         z0: f64,
+                         x1: f64,
+                         y1: f64,
+                         z1: f64,
+                         color: [f32; 4]| {
+            verts.push(LineVertex {
+                position: [
+                    (x0 - eye.x) as f32,
+                    (y0 - eye.y) as f32,
+                    (z0 - eye.z) as f32,
+                ],
+                color,
+            });
+            verts.push(LineVertex {
+                position: [
+                    (x1 - eye.x) as f32,
+                    (y1 - eye.y) as f32,
+                    (z1 - eye.z) as f32,
+                ],
+                color,
+            });
+        };
+
+        // Vertical lines at chunk corners (red)
+        for dx in [0, 16] {
+            for dz in [0, 16] {
+                let x = (chunk_x + dx) as f64;
+                let z = (chunk_z + dz) as f64;
+                push_line(&mut verts, x, y_min, z, x, y_max, z, RED);
+            }
+        }
+
+        // Vertical lines along chunk edges (blue) - every block along edges
+        for d in 1..16 {
+            let x0 = chunk_x as f64;
+            let x1 = (chunk_x + 16) as f64;
+            let z0 = chunk_z as f64;
+            let z1 = (chunk_z + 16) as f64;
+            let p = (chunk_x + d) as f64;
+            let q = (chunk_z + d) as f64;
+            push_line(&mut verts, p, y_min, z0, p, y_max, z0, BLUE);
+            push_line(&mut verts, p, y_min, z1, p, y_max, z1, BLUE);
+            push_line(&mut verts, x0, y_min, q, x0, y_max, q, BLUE);
+            push_line(&mut verts, x1, y_min, q, x1, y_max, q, BLUE);
+        }
+
+        // Horizontal lines at section boundaries (yellow)
+        for section in 0..=((max_y - min_y) / 16) {
+            let y = (min_y + section * 16) as f64;
+            let x0 = chunk_x as f64;
+            let x1 = (chunk_x + 16) as f64;
+            let z0 = chunk_z as f64;
+            let z1 = (chunk_z + 16) as f64;
+            push_line(&mut verts, x0, y, z0, x1, y, z0, YELLOW);
+            push_line(&mut verts, x0, y, z1, x1, y, z1, YELLOW);
+            push_line(&mut verts, x0, y, z0, x0, y, z1, YELLOW);
+            push_line(&mut verts, x1, y, z0, x1, y, z1, YELLOW);
+        }
+
+        verts.truncate(MAX_VERTICES);
+        self.lines = verts;
+        self.stale = [true; MAX_FRAMES_IN_FLIGHT];
+    }
+
+    pub fn draw(&mut self, cmd: vk::CommandBuffer, frame: usize) {
+        if self.lines.is_empty() {
+            return;
+        }
+        if self.stale[frame] {
+            self.stale[frame] = false;
+            let bytes = bytemuck::cast_slice(&self.lines);
+            self.vertex_allocs[frame].mapped_slice_mut().unwrap()[..bytes.len()]
+                .copy_from_slice(bytes);
+        }
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.pipeline_layout,
+            0,
+            &[self.desc_sets[frame]],
+            &[],
+        );
+        cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame]], &[0]);
+        cmd.draw(self.lines.len() as u32, 1, 0, 0);
+    }
+
+    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        let mut alloc = allocator.lock().unwrap();
+        util::destroy_buffers(
+            device,
+            &mut alloc,
+            &self.vertex_buffers,
+            &mut self.vertex_allocs,
+        );
+
+        util::destroy_buffers(
+            device,
+            &mut alloc,
+            &self.camera_buffers,
+            &mut self.camera_allocs,
+        );
+        drop(alloc);
+
+        device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline_layout(self.pipeline_layout, None);
+        device.destroy_descriptor_pool(self.desc_pool, None);
+        device.destroy_descriptor_set_layout(self.desc_layout, None);
+    }
+}
 
 fn create_pipeline(
     device: &vk::Device,
@@ -154,258 +381,4 @@ fn create_pipeline(
     device.destroy_shader_module(vert_mod, None);
     device.destroy_shader_module(frag_mod, None);
     pipeline
-}
-
-pub struct ChunkBorderPipeline {
-    pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    desc_layout: vk::DescriptorSetLayout,
-    desc_pool: vk::DescriptorPool,
-    desc_sets: Vec<vk::DescriptorSet>,
-    camera_buffers: Vec<vk::Buffer>,
-    camera_allocs: Vec<Allocation>,
-    vertex_buffer: vk::Buffer,
-    vertex_alloc: Allocation,
-    vertex_count: u32,
-}
-
-impl ChunkBorderPipeline {
-    pub fn new(
-        device: &vk::Device,
-        render_pass: vk::RenderPass,
-        allocator: &Arc<Mutex<Allocator>>,
-    ) -> Self {
-        let binding = vk::DescriptorSetLayoutBinding {
-            binding: 0,
-            descriptor_type: vk::DescriptorType::UniformBuffer,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlags::Vertex,
-            ..Default::default()
-        };
-        let layout_info = vk::DescriptorSetLayoutCreateInfo {
-            binding_count: 1,
-            bindings: &binding,
-            ..Default::default()
-        };
-        let desc_layout = device
-            .create_descriptor_set_layout(&layout_info, None)
-            .unwrap();
-
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: 1,
-            set_layouts: &desc_layout,
-            ..Default::default()
-        };
-        let pipeline_layout = device.create_pipeline_layout(&layout_info, None).unwrap();
-
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout);
-
-        let pool_sizes = [vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::UniformBuffer,
-            descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-        }];
-        let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: MAX_FRAMES_IN_FLIGHT as u32,
-            pool_size_count: 1,
-            pool_sizes: pool_sizes.as_ptr(),
-            ..Default::default()
-        };
-        let desc_pool = device.create_descriptor_pool(&pool_info, None).unwrap();
-
-        let layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| desc_layout).collect();
-        let alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool: desc_pool,
-            descriptor_set_count: layouts.len() as u32,
-            set_layouts: layouts.as_ptr(),
-            ..Default::default()
-        };
-        let mut desc_sets = vec![vk::DescriptorSet::null(); layouts.len()];
-        device
-            .allocate_descriptor_sets(&alloc_info, &mut desc_sets)
-            .unwrap();
-
-        let mut camera_buffers = Vec::new();
-        let mut camera_allocs = Vec::new();
-        for desc_set in &desc_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
-                device,
-                allocator,
-                size_of::<CameraUniform>() as u64,
-                "chunk_border_cam",
-            );
-            let buf_info = vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: size_of::<CameraUniform>() as u64,
-            };
-            let write = vk::WriteDescriptorSet {
-                dst_set: *desc_set,
-                dst_binding: 0,
-                descriptor_type: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
-                buffer_info: &buf_info,
-                ..Default::default()
-            };
-            device.update_descriptor_sets(&[write], &[]);
-            camera_buffers.push(buf);
-            camera_allocs.push(alloc);
-        }
-
-        let max_verts = 4096;
-        let (vertex_buffer, vertex_alloc) = util::create_host_buffer(
-            device,
-            allocator,
-            (max_verts * size_of::<LineVertex>()) as u64,
-            vk::BufferUsageFlags::VertexBuffer,
-            "chunk_border_verts",
-        );
-
-        Self {
-            pipeline,
-            pipeline_layout,
-            desc_layout,
-            desc_pool,
-            desc_sets,
-            camera_buffers,
-            camera_allocs,
-            vertex_buffer,
-            vertex_alloc,
-            vertex_count: 0,
-        }
-    }
-
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
-    }
-
-    pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
-        let data = self.camera_allocs[frame].mapped_slice_mut().unwrap();
-        data[..size_of::<CameraUniform>()].copy_from_slice(bytemuck::bytes_of(uniform));
-    }
-
-    /// Lines are eye-relative (including the third-person offset, the origin
-    /// the view matrix renders from), subtracted in f64 so they stay on the
-    /// grid at extreme coordinates. The grid cell comes from `pivot` (the
-    /// player eye): vanilla outlines the entity's chunk, not the camera's.
-    pub fn update_lines(&mut self, pivot: glam::DVec3, eye: glam::DVec3, min_y: i32, max_y: i32) {
-        let chunk_x = (pivot.x.floor() as i32).div_euclid(16) * 16;
-        let chunk_z = (pivot.z.floor() as i32).div_euclid(16) * 16;
-
-        let mut verts: Vec<LineVertex> = Vec::new();
-        let y_min = min_y as f64;
-        let y_max = max_y as f64;
-
-        let push_line = |verts: &mut Vec<LineVertex>,
-                         x0: f64,
-                         y0: f64,
-                         z0: f64,
-                         x1: f64,
-                         y1: f64,
-                         z1: f64,
-                         color: [f32; 4]| {
-            verts.push(LineVertex {
-                position: [
-                    (x0 - eye.x) as f32,
-                    (y0 - eye.y) as f32,
-                    (z0 - eye.z) as f32,
-                ],
-                color,
-            });
-            verts.push(LineVertex {
-                position: [
-                    (x1 - eye.x) as f32,
-                    (y1 - eye.y) as f32,
-                    (z1 - eye.z) as f32,
-                ],
-                color,
-            });
-        };
-
-        // Vertical lines at chunk corners (red)
-        for dx in [0, 16] {
-            for dz in [0, 16] {
-                let x = (chunk_x + dx) as f64;
-                let z = (chunk_z + dz) as f64;
-                push_line(&mut verts, x, y_min, z, x, y_max, z, RED);
-            }
-        }
-
-        // Vertical lines along chunk edges (blue) - every block along edges
-        for d in 1..16 {
-            let x0 = chunk_x as f64;
-            let x1 = (chunk_x + 16) as f64;
-            let z0 = chunk_z as f64;
-            let z1 = (chunk_z + 16) as f64;
-            let p = (chunk_x + d) as f64;
-            let q = (chunk_z + d) as f64;
-            push_line(&mut verts, p, y_min, z0, p, y_max, z0, BLUE);
-            push_line(&mut verts, p, y_min, z1, p, y_max, z1, BLUE);
-            push_line(&mut verts, x0, y_min, q, x0, y_max, q, BLUE);
-            push_line(&mut verts, x1, y_min, q, x1, y_max, q, BLUE);
-        }
-
-        // Horizontal lines at section boundaries (yellow)
-        for section in 0..=((max_y - min_y) / 16) {
-            let y = (min_y + section * 16) as f64;
-            let x0 = chunk_x as f64;
-            let x1 = (chunk_x + 16) as f64;
-            let z0 = chunk_z as f64;
-            let z1 = (chunk_z + 16) as f64;
-            push_line(&mut verts, x0, y, z0, x1, y, z0, YELLOW);
-            push_line(&mut verts, x0, y, z1, x1, y, z1, YELLOW);
-            push_line(&mut verts, x0, y, z0, x0, y, z1, YELLOW);
-            push_line(&mut verts, x1, y, z0, x1, y, z1, YELLOW);
-        }
-
-        let max_verts = 4096;
-        let count = verts.len().min(max_verts);
-        let data = self.vertex_alloc.mapped_slice_mut().unwrap();
-        let bytes = bytemuck::cast_slice(&verts[..count]);
-        data[..bytes.len()].copy_from_slice(bytes);
-        self.vertex_count = count as u32;
-    }
-
-    pub fn draw(&self, cmd: vk::CommandBuffer, frame: usize) {
-        if self.vertex_count == 0 {
-            return;
-        }
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.desc_sets[frame]],
-            &[],
-        );
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
-        cmd.draw(self.vertex_count, 1, 0, 0);
-    }
-
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let mut alloc = allocator.lock().unwrap();
-        device.destroy_buffer(self.vertex_buffer, None);
-
-        alloc
-            .free(std::mem::replace(&mut self.vertex_alloc, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
-
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            device.destroy_buffer(self.camera_buffers[i], None);
-
-            alloc
-                .free(std::mem::replace(&mut self.camera_allocs[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
-        }
-        drop(alloc);
-
-        device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_descriptor_pool(self.desc_pool, None);
-        device.destroy_descriptor_set_layout(self.desc_layout, None);
-    }
 }
