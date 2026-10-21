@@ -33,8 +33,6 @@ pub mod translate;
 use std::sync::Arc;
 
 use azalea_block::BlockState;
-use azalea_core::heightmap_kind::HeightmapKind;
-use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_inventory::ItemStack;
 use azalea_inventory::components::EquipmentSlot;
 use azalea_registry::builtin::{BlockEntityKind, EntityKind};
@@ -44,6 +42,8 @@ use simdnbt::owned::NbtCompound;
 use crate::entity::MetaValue;
 use crate::entity::components::Position;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
+use crate::position::{BlockPos, ChunkPos};
+use crate::world::chunk::HeightmapKind;
 
 /// A packet's per-column light payload (chunk load or standalone update):
 /// present sections listed in `*_updates`, selected by `*_y_mask`, with
@@ -51,10 +51,10 @@ use crate::entity::villager::{VillagerKind, VillagerProfession};
 pub struct PacketLightData {
     pub sky_updates: Arc<Box<[Box<[u8]>]>>,
     pub block_updates: Arc<Box<[Box<[u8]>]>>,
-    pub sky_y_mask: azalea_core::bitset::BitSet,
-    pub block_y_mask: azalea_core::bitset::BitSet,
-    pub empty_sky_y_mask: azalea_core::bitset::BitSet,
-    pub empty_block_y_mask: azalea_core::bitset::BitSet,
+    pub sky_y_mask: crate::world::light::BitSet,
+    pub block_y_mask: crate::world::light::BitSet,
+    pub empty_sky_y_mask: crate::world::light::BitSet,
+    pub empty_block_y_mask: crate::world::light::BitSet,
 }
 
 /// Decodes a native game packet with `read`, which returns `None` for the
@@ -668,6 +668,6 @@ pub fn client_information(
 /// configuration phase, or the game phase on versions without one.
 pub fn brand_payload() -> Vec<u8> {
     let mut out = Vec::new();
-    azalea_core::delta::AzBuf::azalea_write(&String::from("pomme"), &mut out).unwrap();
+    pomme_protocol::wire::write_utf(&mut out, "pomme");
     out
 }

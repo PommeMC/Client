@@ -3,7 +3,6 @@
 //! decode onto the same values.
 
 use azalea_buf::AzBuf;
-use azalea_core::position::BlockPos;
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_entity::EntityDataValue;
 use azalea_inventory::{ItemStack, ItemStackData};
@@ -19,6 +18,7 @@ use super::handler::variant_index;
 use super::{NetworkEvent, item_codec};
 use crate::entity::MetaValue;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
+use crate::position::BlockPos;
 
 /// `ItemEntity.DATA_ITEM`.
 const ITEM_INDEX: u8 = 8;

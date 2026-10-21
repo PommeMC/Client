@@ -1,10 +1,10 @@
 use azalea_block::BlockState;
-use azalea_core::position::BlockPos;
 use glam::{DVec3, dvec3};
 
 use super::aabb::Aabb;
 use super::block_shape::{self, CollisionContext};
 use crate::entity::components::Velocity;
+use crate::position::BlockPos;
 use crate::world::block::{
     SpecialCollision, block_properties, collision_shape_position, has_large_collision_shape,
     special_collision,

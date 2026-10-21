@@ -6,10 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, OnceLock, RwLock, RwLockReadGuard};
 
 use azalea_block::BlockState;
-use azalea_core::position::BlockPos;
 use glam::{DVec3, dvec3};
 
 use crate::physics::block_shape::{LocalBox, compute_outline, compute_shape};
+use crate::position::BlockPos;
 
 /// Compact per-state property map: `(key, value)` pairs sorted by key. States
 /// have at most ~10 properties, so binary search on a boxed slice beats a
@@ -995,6 +995,12 @@ fn placeable_block_in_slot(slot: usize, item_name: &str) -> Option<BlockState> {
 /// fallback for unloaded-chunk reads.
 pub(crate) fn first_state_of(name: &str) -> Option<BlockState> {
     all_states().find(|(_, d)| d.id == name).map(|(s, _)| s)
+}
+
+/// How many block states the active table holds (vanilla
+/// `Block.BLOCK_STATE_REGISTRY.size()`).
+pub(crate) fn state_count() -> usize {
+    table().len()
 }
 
 /// Converts a wire-side numeric state id, validated against the loaded table.

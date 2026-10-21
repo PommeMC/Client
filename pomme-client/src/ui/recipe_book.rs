@@ -1249,7 +1249,7 @@ fn tabs_for(kind: RecipeBookType) -> &'static [TabInfo] {
 
 fn direct_trim_pattern_name(pattern: &TrimPatternHolder) -> String {
     match pattern {
-        TrimPatternHolder::Direct { description, .. } => description.to_string(),
+        TrimPatternHolder::Direct { description, .. } => description.plain_text(),
         TrimPatternHolder::Reference(id) => {
             let Some(key) = azalea_registry::data::TrimPatternKey::ALL.get(*id as usize) else {
                 return format!("Trim Pattern #{id}");
@@ -3650,7 +3650,6 @@ mod tests {
 
     #[test]
     fn direct_trim_pattern_is_preserved_in_resolved_stack_and_tooltip() {
-        use azalea_chat::FormattedText;
         use azalea_registry::builtin::ItemKind;
 
         let book = RecipeBookState::default();
@@ -3659,7 +3658,7 @@ mod tests {
             material: Box::new(SlotDisplay::Item(ItemKind::Diamond.to_u32())),
             trim_pattern: TrimPatternHolder::Direct {
                 asset_id: "minecraft:test".into(),
-                description: FormattedText::from("Test Trim"),
+                description: Box::new(crate::chat_component::Component::text("Test Trim")),
                 decal: false,
             },
         };

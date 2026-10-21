@@ -4,12 +4,12 @@ use std::slice;
 use std::sync::{Arc, Mutex};
 
 use azalea_block::BlockState;
-use azalea_core::position::BlockPos;
 use glam::{Quat, Vec3};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::position::BlockPos;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::{CUBE_FACE_DIRS, cube_face_geometry};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};

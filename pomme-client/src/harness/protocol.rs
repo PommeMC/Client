@@ -433,7 +433,7 @@ pub fn block_entity(game: &GameState, [x, y, z]: [i32; 3]) -> Option<String> {
     let stored = game
         .chunk_store
         .block_entities
-        .get(&azalea_core::position::BlockPos { x, y, z })?;
+        .get(&crate::position::BlockPos { x, y, z })?;
     Some(bare(&stored.kind.to_string()))
 }
 

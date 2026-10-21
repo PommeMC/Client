@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use azalea_core::heightmap_kind::HeightmapKind;
-use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_protocol::packets::game::ServerboundGamePacket;
 use azalea_protocol::packets::game::s_chunk_batch_received::ServerboundChunkBatchReceived;
 use azalea_registry::builtin::BlockEntityKind;
@@ -16,6 +14,8 @@ use super::block_wire::{block_entity_nbt, native_block_entity_type};
 use super::chunk_batch::ChunkBatchSizeCalculator;
 use super::sender::PacketSender;
 use super::{NetworkEvent, PacketLightData};
+use crate::position::{BlockPos, ChunkPos};
+use crate::world::chunk::HeightmapKind;
 
 /// Decodes a chunk packet; `None` for any other packet.
 pub(super) fn handle_raw_chunk_packet(
@@ -42,7 +42,7 @@ pub(super) fn handle_raw_chunk_packet(
                     data: Arc::new(sections),
                     heightmaps: heightmaps
                         .into_iter()
-                        .filter_map(|(id, data)| Some((heightmap_kind(id)?, data)))
+                        .filter_map(|(id, data)| Some((HeightmapKind::from_id(id)?, data)))
                         .collect(),
                     light: light.into(),
                 });
@@ -88,19 +88,6 @@ pub(super) fn handle_raw_chunk_packet(
             }
         }),
     )
-}
-
-/// `Heightmap.Types` by its id (`Heightmap.java:144-149`).
-pub(crate) fn heightmap_kind(id: u32) -> Option<HeightmapKind> {
-    Some(match id {
-        0 => HeightmapKind::WorldSurfaceWg,
-        1 => HeightmapKind::WorldSurface,
-        2 => HeightmapKind::OceanFloorWg,
-        3 => HeightmapKind::OceanFloor,
-        4 => HeightmapKind::MotionBlocking,
-        5 => HeightmapKind::MotionBlockingNoLeaves,
-        _ => return None,
-    })
 }
 
 /// A chunk's block entity at its world position; `None` drops it.

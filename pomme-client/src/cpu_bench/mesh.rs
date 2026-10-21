@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::hint::black_box;
 use std::sync::Arc;
 
-use azalea_core::position::ChunkPos;
 use criterion::Criterion;
 
 use super::fixtures::{Assets, Scene, build_world};
+use crate::position::ChunkPos;
 use crate::renderer::chunk::mesher::MeshDispatcher;
 use crate::world::block::model::CardinalLightType;
 

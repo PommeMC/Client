@@ -143,6 +143,19 @@ pub fn write_varint(buf: &mut Vec<u8>, mut v: u32) {
     }
 }
 
+/// Vanilla `VarLong.write`.
+pub fn write_varlong(buf: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v == 0 {
+            buf.push(byte);
+            return;
+        }
+        buf.push(byte | 0x80);
+    }
+}
+
 /// Vanilla `Utf8String.write`: a varint byte length, then UTF-8.
 pub fn write_utf(buf: &mut Vec<u8>, s: &str) {
     write_varint(buf, s.len() as u32);
@@ -294,6 +307,28 @@ mod tests {
             let mut pos = 0;
             assert_eq!(read_varint(&buf, &mut pos), Some(v));
             assert_eq!(pos, buf.len());
+        }
+    }
+
+    #[test]
+    fn varlong_layout() {
+        let encode = |v| {
+            let mut buf = Vec::new();
+            write_varlong(&mut buf, v);
+            buf
+        };
+        assert_eq!(encode(0), [0x00]);
+        assert_eq!(encode(300), [0xAC, 0x02]);
+        assert_eq!(encode(24_000), [0xC0, 0xBB, 0x01]);
+        assert_eq!(
+            encode(u64::MAX),
+            [0xFF; 9].into_iter().chain([0x01]).collect::<Vec<_>>()
+        );
+        for v in [0, 300, 24_000, u64::MAX] {
+            let bytes = encode(v);
+            let mut r = crate::codec::Reader::new(&bytes);
+            assert_eq!(r.varlong().unwrap(), v);
+            assert_eq!(r.remaining(), 0);
         }
     }
 }

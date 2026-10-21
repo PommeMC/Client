@@ -198,7 +198,7 @@ pub struct LocalPlayer {
     /// Vanilla `Entity.minorHorizontalCollision`.
     pub minor_horizontal_collision: bool,
     /// Vanilla `Entity.mainSupportingBlockPos`.
-    pub main_supporting_block_pos: Option<azalea_core::position::BlockPos>,
+    pub main_supporting_block_pos: Option<crate::position::BlockPos>,
     /// Vanilla `Entity.onGroundNoBlocks`.
     pub on_ground_no_blocks: bool,
     pub sprint_toggle_timer: u32,
@@ -221,7 +221,7 @@ pub struct LocalPlayer {
     pub portal_effect_intensity: f32,
     pub prev_portal_effect_intensity: f32,
     /// Vanilla LivingEntity SLEEPING_POS metadata: Some while in a bed.
-    pub sleeping_pos: Option<azalea_core::position::BlockPos>,
+    pub sleeping_pos: Option<crate::position::BlockPos>,
     /// Vanilla Player.sleepCounter: drives the sleep overlay fade.
     pub sleep_counter: u32,
     pub game_mode: u8,
@@ -723,7 +723,7 @@ impl LocalPlayer {
     /// `LivingEntity.onSyncedDataUpdated(SLEEPING_POS)`: `setPosToBed` moves
     /// only the current position, so the camera lerps in. The sleep counter
     /// is left alone; only the server's `startSleepInBed` zeroes it.
-    pub fn set_sleeping_pos(&mut self, pos: Option<azalea_core::position::BlockPos>) {
+    pub fn set_sleeping_pos(&mut self, pos: Option<crate::position::BlockPos>) {
         self.sleeping_pos = pos;
         if let Some(pos) = pos {
             self.position = crate::world::block::sleeping_position(pos).into();
@@ -822,7 +822,7 @@ mod tests {
         player.eyes_in_water = true;
         player.swimming = true;
         player.air_supply = 12;
-        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(1, 64, 1));
+        player.sleeping_pos = Some(crate::position::BlockPos::new(1, 64, 1));
         player.sleep_counter = 100;
 
         player.reset_for_respawn(false);
@@ -876,7 +876,7 @@ mod tests {
         player.crouching = true;
         player.swimming_pose = true;
         player.air_supply = 87;
-        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(1, 64, 1));
+        player.sleeping_pos = Some(crate::position::BlockPos::new(1, 64, 1));
         player.food = 4;
         player.experience_level = 17;
         player.experience_progress = 0.75;
@@ -904,7 +904,7 @@ mod tests {
         assert_eq!(player.air_supply, 87);
         assert_eq!(
             player.sleeping_pos,
-            Some(azalea_core::position::BlockPos::new(1, 64, 1))
+            Some(crate::position::BlockPos::new(1, 64, 1))
         );
         assert_eq!(player.food, 20);
         assert_eq!(player.experience_level, 0);
@@ -952,7 +952,7 @@ mod tests {
     #[test]
     fn sleeping_pos_moves_to_bed_and_keeps_the_fade_counter() {
         let mut player = LocalPlayer::new();
-        let bed = azalea_core::position::BlockPos::new(1, 64, 1);
+        let bed = crate::position::BlockPos::new(1, 64, 1);
 
         player.position = Position::new(8.0, 70.0, -3.0);
         player.prev_position = Position::new(7.0, 70.0, -3.0);
@@ -974,7 +974,7 @@ mod tests {
 
         // A changed SLEEPING_POS still has Vanilla's synced-data repositioning
         // semantics even without an intervening wake.
-        let other_bed = azalea_core::position::BlockPos::new(-4, 72, 9);
+        let other_bed = crate::position::BlockPos::new(-4, 72, 9);
         player.set_sleeping_pos(Some(other_bed));
         assert_eq!(player.sleep_counter, 40);
         assert_eq!(player.position, Position::new(-3.5, 72.6875, 9.5));
@@ -993,7 +993,7 @@ mod tests {
     #[test]
     fn sleeping_eye_height_uses_vanilla_camera_smoothing_target() {
         let mut player = LocalPlayer::new();
-        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(0, 64, 0));
+        player.sleeping_pos = Some(crate::position::BlockPos::new(0, 64, 0));
         player.tick_eye_height();
         assert_eq!(player.prev_eye_height, STANDING_EYE_HEIGHT);
         assert!((player.eye_height - 0.91).abs() < 1e-6);
@@ -1007,7 +1007,7 @@ mod tests {
     #[test]
     fn reconfiguration_sleep_reset_keeps_the_camera_eye_height() {
         let mut player = LocalPlayer::new();
-        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(1, 64, 1));
+        player.sleeping_pos = Some(crate::position::BlockPos::new(1, 64, 1));
         player.sleep_counter = 87;
         player.eye_height = 0.3;
         player.reset_sleep_for_level_teardown();

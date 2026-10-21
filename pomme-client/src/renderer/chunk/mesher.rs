@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use azalea_block::BlockState;
-use azalea_core::position::ChunkPos;
 use pyronyx::vk;
 
 use super::occlusion_graph::{VisibilitySet, compute_visibility};
+use crate::position::ChunkPos;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::world::block::model::{
     BakedModel, CardinalLighting, Direction, face_positions, face_uvs,
@@ -14,7 +14,7 @@ use crate::world::block::model::{
 use crate::world::block::registry::{BlockRegistry, Tint};
 use crate::world::block::{FluidKind, block_outline, fluid, is_air, legacy_solid, light_props};
 use crate::world::chunk;
-use crate::world::chunk::ChunkStore;
+use crate::world::chunk::{ChunkStore, SectionBlocks};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1202,10 +1202,7 @@ fn lower_current_thread_priority() {
 }
 
 struct ChunkStoreSnapshot {
-    chunks: Vec<(
-        ChunkPos,
-        Option<Arc<parking_lot::RwLock<azalea_world::Chunk>>>,
-    )>,
+    chunks: Vec<(ChunkPos, Option<Arc<parking_lot::RwLock<chunk::Chunk>>>)>,
     light: std::collections::HashMap<(i32, i32), Arc<crate::world::chunk::ChunkLightData>>,
     grass_colormap: Arc<Colormap>,
     foliage_colormap: Arc<Colormap>,
@@ -1322,10 +1319,7 @@ struct BlockSlice {
 
 impl BlockSlice {
     fn build(
-        chunks: &[(
-            ChunkPos,
-            Option<Arc<parking_lot::RwLock<azalea_world::Chunk>>>,
-        )],
+        chunks: &[(ChunkPos, Option<Arc<parking_lot::RwLock<chunk::Chunk>>>)],
         pos: ChunkPos,
         min_y: i32,
         ys: std::ops::Range<i32>,
@@ -1342,18 +1336,13 @@ impl BlockSlice {
             };
             for y in min_y_box..min_y_box + size_y {
                 // Out-of-range Y stays air.
-                let Some(section) = chunk::section_at(&chunk, y, min_y) else {
+                let Some(section) = chunk.section(y, min_y) else {
                     continue;
                 };
-                let single = match section.states.palette {
-                    azalea_world::palette::Palette::SingleValue(state) => Some(state),
-                    _ => None,
-                };
+                let single = section.single_block_state();
                 for x in span(chunk_pos.x * 16, min_x, size_x) {
                     for z in span(chunk_pos.z * 16, min_z, size_z) {
-                        let state = single.unwrap_or_else(|| {
-                            chunk::block_state_from_section(&chunk, x, y, z, min_y)
-                        });
+                        let state = single.unwrap_or_else(|| chunk.block_state(x, y, z, min_y));
                         states[blocks.index([x, y, z]).expect("span lies inside the box")] = state;
                     }
                 }
@@ -1391,8 +1380,8 @@ impl ChunkStoreSnapshot {
             return azalea_block::BlockState::AIR;
         };
 
-        let c: parking_lot::RwLockReadGuard<'_, azalea_world::Chunk> = chunk_lock.read();
-        chunk::block_state_from_section(&c, x, y, z, self.min_y)
+        let c = chunk_lock.read();
+        c.block_state(x, y, z, self.min_y)
     }
 
     fn min_y(&self) -> i32 {
@@ -1403,7 +1392,7 @@ impl ChunkStoreSnapshot {
         self.height
     }
 
-    fn get_biome(&self, x: i32, y: i32, z: i32) -> azalea_registry::data::Biome {
+    fn get_biome(&self, x: i32, y: i32, z: i32) -> u32 {
         let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
         let chunk_lock = self
             .chunks
@@ -1411,19 +1400,16 @@ impl ChunkStoreSnapshot {
             .find(|(p, _)| *p == chunk_pos)
             .and_then(|(_, c)| c.as_ref());
         let Some(chunk_lock) = chunk_lock else {
-            return azalea_registry::data::Biome::default();
+            return 0;
         };
-        let c = chunk_lock.read();
-        let biome_pos = azalea_core::position::ChunkBiomePos {
-            x: (x.rem_euclid(16) / 4) as u8,
-            y,
-            z: (z.rem_euclid(16) / 4) as u8,
-        };
-        c.get_biome(biome_pos, self.min_y).unwrap_or_default()
+        chunk_lock
+            .read()
+            .biome(x, y, z, self.min_y)
+            .unwrap_or_default()
     }
 
     fn climate_at(&self, x: i32, y: i32, z: i32) -> BiomeClimate {
-        let biome = || u32::from(self.get_biome(x, y, z));
+        let biome = || self.get_biome(x, y, z);
         let Some(cache) = &self.climates else {
             return self.biome_climate_of(biome());
         };

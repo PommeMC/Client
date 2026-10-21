@@ -342,7 +342,7 @@
 use std::io::Cursor;
 use std::sync::Mutex;
 
-use azalea_buf::{AzBuf, AzBufVar};
+use azalea_buf::AzBuf;
 use azalea_inventory::components::{DataComponentUnion, Profile};
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_protocol::packets::game::s_container_click::HashedStack;
@@ -350,6 +350,7 @@ use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacke
 use azalea_registry::Registry;
 use azalea_registry::builtin::DataComponentKind;
 use glam::DVec3;
+use pomme_protocol::codec::Reader;
 use pomme_protocol::version::NATIVE;
 use pomme_protocol::{
     ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, RegistryTable, wire,
@@ -931,7 +932,7 @@ impl Translation {
     /// Rewrites a raw login-phase frame into the native layout.
     pub fn translate_login_frame(&self, raw: Box<[u8]>) -> Box<[u8]> {
         let mut cur = Cursor::new(&raw[..]);
-        let id = u32::azalea_read_var(&mut cur).ok();
+        let id = var_u32(&mut cur);
         if self.login_session_pad && id == Some(self.login_finished_id) {
             // 26.2 appended a session-id UUID; zero is fine, pomme only
             // reads the game profile. The 1.20.5/1.21-era trailing
@@ -1785,7 +1786,7 @@ fn split_registry_data(id: u32, payload: &[u8]) -> Option<Vec<Box<[u8]>>> {
     use simdnbt::owned::NbtTag;
 
     let mut cur = Cursor::new(payload);
-    let NbtTag::Compound(root) = NbtTag::azalea_read(&mut cur).ok()? else {
+    let NbtTag::Compound(root) = simdnbt::owned::read_tag(&mut cur).ok()? else {
         return None;
     };
 
@@ -1819,7 +1820,7 @@ fn split_registry_data(id: u32, payload: &[u8]) -> Option<Vec<Box<[u8]>>> {
             wire::write_varint(&mut out, name.len() as u32);
             out.extend_from_slice(name.as_bytes());
             out.push(1);
-            element.azalea_write(&mut out).ok()?;
+            NbtTag::Compound(element.clone()).write(&mut out);
         }
         frames.push(out.into_boxed_slice());
     }
@@ -2172,7 +2173,7 @@ fn translate_container_click_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
         wire::write_varint(&mut out, old_id);
         out.extend_from_slice(&payload[..cur.position() as usize]);
 
-        let changed = u32::azalea_read_var(&mut cur).ok()?;
+        let changed = var_u32(&mut cur)?;
         wire::write_varint(&mut out, changed);
         for _ in 0..changed {
             let slot_at = cur.position() as usize;
@@ -2195,7 +2196,7 @@ fn translate_creative_slot_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     let rewrite = || {
         let mut cur = Cursor::new(payload);
         advance(&mut cur, 2)?; // slot short
-        let count = u32::azalea_read_var(&mut cur).ok()?;
+        let count = var_u32(&mut cur)?;
 
         let mut out = Vec::with_capacity(payload.len() + 4);
         wire::write_varint(&mut out, old_id);
@@ -2204,7 +2205,7 @@ fn translate_creative_slot_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
             out.push(0);
             return Some(out);
         }
-        let item = u32::azalea_read_var(&mut cur).ok()?;
+        let item = var_u32(&mut cur)?;
         write_old_item(&mut out, Some((item, count)));
         Some(out)
     };
@@ -2265,22 +2266,22 @@ fn translate_update_attributes(
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // entity id
-    let entries = u32::azalea_read_var(&mut cur).ok()?;
+    let entries = var_u32(&mut cur)?;
 
     let mut out = Vec::with_capacity(payload.len() + 8);
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[..cur.position() as usize]);
     for _ in 0..entries {
-        let attribute = u32::azalea_read_var(&mut cur).ok()?;
+        let attribute = var_u32(&mut cur)?;
         wire::write_varint(
             &mut out,
             remaps.remap(ClientRegistry::Attribute, attribute)?,
         );
         let body_at = cur.position() as usize;
         advance(&mut cur, 8)?; // base
-        let modifiers = u32::azalea_read_var(&mut cur).ok()?;
+        let modifiers = var_u32(&mut cur)?;
         for _ in 0..modifiers {
-            let len = u32::azalea_read_var(&mut cur).ok()? as usize;
+            let len = var_u32(&mut cur)? as usize;
             advance(&mut cur, len)?; // modifier id
             advance(&mut cur, 8)?; // amount
             varint_span(&mut cur)?; // operation
@@ -2321,7 +2322,7 @@ fn read_old_item(cur: &mut Cursor<&[u8]>, named_nbt: bool) -> Option<Option<(u32
     if read_u8(cur)? == 0 {
         return Some(None);
     }
-    let item = u32::azalea_read_var(cur).ok()?;
+    let item = var_u32(cur)?;
     let count = read_u8(cur)?;
     skip_nbt_root(cur, named_nbt)?;
     Some(Some((item, count)))
@@ -2353,7 +2354,7 @@ fn translate_container_set_content_765(
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 1)?; // container id
     varint_span(&mut cur)?; // state id
-    let count = u32::azalea_read_var(&mut cur).ok()?;
+    let count = var_u32(&mut cur)?;
 
     let mut out = Vec::with_capacity(payload.len());
     wire::write_varint(&mut out, id);
@@ -2391,7 +2392,7 @@ fn translate_set_equipment_765(id: u32, payload: &[u8], named_nbt: bool) -> Opti
 fn translate_merchant_offers_765(id: u32, payload: &[u8], named_nbt: bool) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // container id
-    let offers = u32::azalea_read_var(&mut cur).ok()?;
+    let offers = var_u32(&mut cur)?;
 
     let mut out = Vec::with_capacity(payload.len());
     wire::write_varint(&mut out, id);
@@ -2470,7 +2471,7 @@ fn translate_update_attributes_uuid(
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // entity id
-    let entries = u32::azalea_read_var(&mut cur).ok()?;
+    let entries = var_u32(&mut cur)?;
 
     let mut out = Vec::with_capacity(payload.len() + 64);
     wire::write_varint(&mut out, id);
@@ -2478,7 +2479,7 @@ fn translate_update_attributes_uuid(
     for _ in 0..entries {
         let attribute = match key_table {
             Some(table) => {
-                let len = u32::azalea_read_var(&mut cur).ok()? as usize;
+                let len = var_u32(&mut cur)? as usize;
                 let key_at = cur.position() as usize;
                 advance(&mut cur, len)?;
                 let key = std::str::from_utf8(&payload[key_at..key_at + len]).ok()?;
@@ -2488,7 +2489,7 @@ fn translate_update_attributes_uuid(
                     .iter()
                     .position(|n| n == key)? as u32
             }
-            None => u32::azalea_read_var(&mut cur).ok()?,
+            None => var_u32(&mut cur)?,
         };
         wire::write_varint(
             &mut out,
@@ -2497,7 +2498,7 @@ fn translate_update_attributes_uuid(
 
         let body_at = cur.position() as usize;
         advance(&mut cur, 8)?; // base
-        let modifiers = u32::azalea_read_var(&mut cur).ok()?;
+        let modifiers = var_u32(&mut cur)?;
         out.extend_from_slice(&payload[body_at..cur.position() as usize]);
         for _ in 0..modifiers {
             translate_modifier_uuid(&mut cur, &mut out, payload)?;
@@ -2553,7 +2554,7 @@ fn translate_level_particles_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 /// with (id + 1, 0 being reserved for an inline value), then the rest of the
 /// frame. The id is synced-registry order either way, so it needs no remap.
 fn chat_type_holder(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, payload: &[u8]) -> Option<()> {
-    let chat_type = u32::azalea_read_var(cur).ok()?;
+    let chat_type = var_u32(cur)?;
     wire::write_varint(out, chat_type + 1);
     out.extend_from_slice(&payload[cur.position() as usize..]);
     Some(())
@@ -2682,7 +2683,7 @@ const LOGIN_PREFIX_763: usize = 7;
 /// cursor on the registry codec.
 fn seek_login_codec_763(cur: &mut Cursor<&[u8]>) -> Option<()> {
     advance(cur, LOGIN_PREFIX_763)?;
-    let levels = u32::azalea_read_var(cur).ok()?;
+    let levels = var_u32(cur)?;
     for _ in 0..levels {
         skip_utf(cur)?;
     }
@@ -2726,7 +2727,7 @@ fn translate_game_login_763(payload: &[u8]) -> Option<Vec<u8>> {
 fn translate_game_login_765(payload: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 5)?; // player id, hardcore
-    let levels = u32::azalea_read_var(&mut cur).ok()?;
+    let levels = var_u32(&mut cur)?;
     for _ in 0..levels {
         skip_utf(&mut cur)?;
     }
@@ -2746,7 +2747,7 @@ fn translate_game_login_765(payload: &[u8]) -> Option<Vec<u8>> {
 fn convert_spawn_info_dimension(payload: &[u8], spawn_at: usize) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     cur.set_position(spawn_at as u64);
-    let len = u32::azalea_read_var(&mut cur).ok()? as usize;
+    let len = var_u32(&mut cur)? as usize;
     let key_at = cur.position() as usize;
     advance(&mut cur, len)?;
     let key = std::str::from_utf8(&payload[key_at..key_at + len]).ok()?;
@@ -2777,6 +2778,20 @@ fn remap_serializer_765(old: u32) -> Option<u32> {
     }
 }
 
+/// Vanilla `VarInt.read` off the cursor.
+fn var_u32(cur: &mut Cursor<&[u8]>) -> Option<u32> {
+    Reader::on_cursor(cur, Reader::varint).ok()
+}
+
+fn var_i32(cur: &mut Cursor<&[u8]>) -> Option<i32> {
+    Reader::on_cursor(cur, Reader::var_i32).ok()
+}
+
+/// Vanilla `VarLong.read` off the cursor.
+fn var_u64(cur: &mut Cursor<&[u8]>) -> Option<u64> {
+    Reader::on_cursor(cur, Reader::varlong).ok()
+}
+
 /// Copies `n` bytes from the cursor's payload to `out`.
 fn copy_bytes(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: usize) -> Option<()> {
     let at = cur.position() as usize;
@@ -2787,7 +2802,7 @@ fn copy_bytes(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: usize) -> Option<()
 
 fn copy_varint(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<u32> {
     let at = cur.position() as usize;
-    let v = u32::azalea_read_var(cur).ok()?;
+    let v = var_u32(cur)?;
     out.extend_from_slice(&cur.get_ref()[at..cur.position() as usize]);
     Some(v)
 }
@@ -2815,12 +2830,13 @@ fn copy_optional(
 /// Reads one pre-1.20.3 length-prefixed JSON component and writes it as the
 /// network-NBT form 1.20.3 introduced.
 fn transcode_component(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
-    let len = u32::azalea_read_var(cur).ok()? as usize;
+    let len = var_u32(cur)? as usize;
     let at = cur.position() as usize;
     advance(cur, len)?;
     let json = std::str::from_utf8(&cur.get_ref()[at..at + len]).ok()?;
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    json_to_nbt(&value).azalea_write(out).ok()
+    json_to_nbt(&value).write(out);
+    Some(())
 }
 
 /// A JSON chat-component value as an owned NBT tag: the codec shape is
@@ -3020,7 +3036,7 @@ fn translate_set_score_764(v: &Ids764, payload: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     let mut owner = Vec::new();
     copy_utf(&mut cur, &mut owner)?;
-    let method = u32::azalea_read_var(&mut cur).ok()?;
+    let method = var_u32(&mut cur)?;
     let mut objective = Vec::new();
     copy_utf(&mut cur, &mut objective)?;
 
@@ -3088,7 +3104,7 @@ fn translate_resource_pack_response_764(old_id: u32, payload: &[u8]) -> Vec<Vec<
     let rewrite = || {
         let mut cur = Cursor::new(payload);
         advance(&mut cur, 16)?; // pack uuid
-        let action = u32::azalea_read_var(&mut cur).ok()?;
+        let action = var_u32(&mut cur)?;
         let action = match action {
             0..=3 => action,
             4 => 3,
@@ -3139,7 +3155,7 @@ fn translate_container_click(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
         wire::write_varint(&mut out, old_id);
         out.extend_from_slice(&payload[..cur.position() as usize]);
 
-        let changed = u32::azalea_read_var(&mut cur).ok()?;
+        let changed = var_u32(&mut cur)?;
         wire::write_varint(&mut out, changed);
         for _ in 0..changed {
             let slot_at = cur.position() as usize;
@@ -3162,14 +3178,14 @@ fn read_hashed_stack(cur: &mut Cursor<&[u8]>) -> Option<Option<(u32, u32)>> {
     if read_u8(cur)? == 0 {
         return Some(None);
     }
-    let item = u32::azalea_read_var(cur).ok()?;
-    let count = u32::azalea_read_var(cur).ok()?;
-    let added = u32::azalea_read_var(cur).ok()?;
+    let item = var_u32(cur)?;
+    let count = var_u32(cur)?;
+    let added = var_u32(cur)?;
     for _ in 0..added {
         varint_span(cur)?; // component id
         advance(cur, 4)?; // hash
     }
-    let removed = u32::azalea_read_var(cur).ok()?;
+    let removed = var_u32(cur)?;
     for _ in 0..removed {
         varint_span(cur)?;
     }
@@ -3379,7 +3395,7 @@ fn translate_entity_data(
             out.push(index);
             break;
         }
-        let old = u32::azalea_read_var(&mut cur).ok()?;
+        let old = var_u32(&mut cur)?;
         let Some(new) = (ids.serializer_map)(old) else {
             if ids.v772.is_some() && old == COMPOUND_TAG_SERIALIZER {
                 // compound_tag values are network NBT; drop the entry.
@@ -3460,13 +3476,13 @@ fn translate_item_stack(
     old_profile: bool,
 ) -> Option<bool> {
     let count_at = cur.position() as usize;
-    let count = i32::azalea_read_var(cur).ok()?;
+    let count = var_i32(cur)?;
     let count_end = cur.position() as usize;
     if count <= 0 {
         out.extend_from_slice(&cur.get_ref()[count_at..count_end]);
         return Some(true);
     }
-    let item = u32::azalea_read_var(cur).ok()?;
+    let item = var_u32(cur)?;
     let patch_at = cur.position() as usize;
     let mut patch = Vec::new();
     let walked = translate_component_patch(cur, &mut patch, remaps, old_profile).is_some();
@@ -3497,14 +3513,11 @@ fn translate_item_stack_template(
 ) -> Option<()> {
     // A non-empty `ItemStack` has a positive count; a template only rejects 0.
     let (item, count) = if ctx.layout.item_stack_count_first {
-        let count = i32::azalea_read_var(cur).ok().filter(|&count| count > 0)?;
-        (u32::azalea_read_var(cur).ok()?, count)
+        let count = var_i32(cur).filter(|&count| count > 0)?;
+        (var_u32(cur)?, count)
     } else {
-        let item = u32::azalea_read_var(cur).ok()?;
-        (
-            item,
-            i32::azalea_read_var(cur).ok().filter(|&count| count != 0)?,
-        )
+        let item = var_u32(cur)?;
+        (item, var_i32(cur).filter(|&count| count != 0)?)
     };
     wire::write_varint(out, ctx.remaps.remap(ClientRegistry::Item, item)?);
     wire::write_varint(out, count as u32);
@@ -3522,13 +3535,13 @@ fn translate_component_patch(
     old_profile: bool,
 ) -> Option<()> {
     let added_at = cur.position() as usize;
-    let added = u32::azalea_read_var(cur).ok()?;
+    let added = var_u32(cur)?;
     out.extend_from_slice(&cur.get_ref()[added_at..cur.position() as usize]);
     let removed_at = cur.position() as usize;
-    let removed = u32::azalea_read_var(cur).ok()?;
+    let removed = var_u32(cur)?;
     out.extend_from_slice(&cur.get_ref()[removed_at..cur.position() as usize]);
     for _ in 0..added {
-        let component = u32::azalea_read_var(cur).ok()?;
+        let component = var_u32(cur)?;
         let native = remaps.remap(ClientRegistry::DataComponentType, component)?;
         wire::write_varint(out, native);
         let value_at = cur.position() as usize;
@@ -3548,7 +3561,7 @@ fn translate_component_patch(
         out.extend_from_slice(&cur.get_ref()[value_at..cur.position() as usize]);
     }
     for _ in 0..removed {
-        let component = u32::azalea_read_var(cur).ok()?;
+        let component = var_u32(cur)?;
         wire::write_varint(
             out,
             remaps.remap(ClientRegistry::DataComponentType, component)?,
@@ -3565,7 +3578,7 @@ fn translate_old_profile(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<(
     let value_at = cur.position() as usize;
     skip_optional(cur, skip_utf)?; // name
     skip_optional(cur, |c| advance(c, 16))?; // uuid
-    let properties = u32::azalea_read_var(cur).ok()?;
+    let properties = var_u32(cur)?;
     for _ in 0..properties {
         skip_utf(cur)?; // property name
         skip_utf(cur)?; // value
@@ -3597,7 +3610,7 @@ fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool>
             varint_span(cur)?;
         }
         2 => {
-            u64::azalea_read_var(cur).ok()?; // var_long
+            var_u64(cur)?; // var_long
         }
         4 => skip_utf(cur)?,                           // string
         5 => skip_nbt(cur)?,                           // component
@@ -3620,7 +3633,7 @@ fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool>
         34 => {
             // painting variant holder: id + 1, or 0 followed by the direct
             // form (width, height, asset id, optional title/author)
-            if u32::azalea_read_var(cur).ok()? == 0 {
+            if var_u32(cur)? == 0 {
                 varint_span(cur)?;
                 varint_span(cur)?;
                 skip_utf(cur)?;
@@ -3681,14 +3694,14 @@ fn translate_particles(
     list: bool,
 ) -> Option<()> {
     let count = if list {
-        let count = u32::azalea_read_var(cur).ok()?;
+        let count = var_u32(cur)?;
         wire::write_varint(out, count);
         count
     } else {
         1
     };
     for _ in 0..count {
-        let old = u32::azalea_read_var(cur).ok()?;
+        let old = var_u32(cur)?;
         let new = remaps.remap(ClientRegistry::ParticleType, old)?;
         wire::write_varint(out, new);
         let name = RegistryTable::native().name_of(ClientRegistry::ParticleType, new)?;
@@ -3736,7 +3749,7 @@ fn copy_particle_payload(
             varint_span(cur)?; // duration
         }
         "vibration" => {
-            match u32::azalea_read_var(cur).ok()? {
+            match var_u32(cur)? {
                 0 => advance(cur, 8)?, // block position
                 1 => {
                     varint_span(cur)?; // entity id
@@ -3747,7 +3760,7 @@ fn copy_particle_payload(
             varint_span(cur)?; // arrival ticks
         }
         "item" => {
-            let item = u32::azalea_read_var(cur).ok()?;
+            let item = var_u32(cur)?;
             wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
             let count = varint_span(cur)?;
             out.extend_from_slice(&cur.get_ref()[count]);
@@ -3783,12 +3796,12 @@ fn copy_component_patch(
     out: &mut Vec<u8>,
     remaps: &RegistryRemaps,
 ) -> Option<()> {
-    let added = u32::azalea_read_var(cur).ok()?;
-    let removed = u32::azalea_read_var(cur).ok()?;
+    let added = var_u32(cur)?;
+    let removed = var_u32(cur)?;
     wire::write_varint(out, added);
     wire::write_varint(out, removed);
     for _ in 0..added {
-        let component = u32::azalea_read_var(cur).ok()?;
+        let component = var_u32(cur)?;
         let native = remaps.remap(ClientRegistry::DataComponentType, component)?;
         let kind = DataComponentKind::from_u32(native)?;
         if CHANGED_COMPONENTS_777.contains(&kind) {
@@ -3800,7 +3813,7 @@ fn copy_component_patch(
         out.extend_from_slice(&cur.get_ref()[value_at..cur.position() as usize]);
     }
     for _ in 0..removed {
-        let component = u32::azalea_read_var(cur).ok()?;
+        let component = var_u32(cur)?;
         wire::write_varint(
             out,
             remaps.remap(ClientRegistry::DataComponentType, component)?,
@@ -3817,7 +3830,7 @@ fn translate_sound_holder(
     out: &mut Vec<u8>,
     remaps: &RegistryRemaps,
 ) -> Option<()> {
-    let holder = u32::azalea_read_var(cur).ok()?;
+    let holder = var_u32(cur)?;
     if holder == 0 {
         let inline_at = cur.position() as usize;
         skip_utf(cur)?;
@@ -3832,7 +3845,7 @@ fn translate_sound_holder(
 }
 
 fn skip_utf(cur: &mut Cursor<&[u8]>) -> Option<()> {
-    let len = u32::azalea_read_var(cur).ok()?;
+    let len = var_u32(cur)?;
     advance(cur, len as usize)
 }
 
@@ -3877,7 +3890,7 @@ fn translate_chunk(
         skip_heightmaps(&mut cur)?;
         head.extend_from_slice(&payload[maps_at..cur.position() as usize]);
     }
-    let buffer_len = u32::azalea_read_var(&mut cur).ok()? as usize;
+    let buffer_len = var_u32(&mut cur)? as usize;
     let buffer_at = cur.position() as usize;
     let buffer_end = buffer_at.checked_add(buffer_len)?;
     if buffer_end > payload.len() {
@@ -3916,10 +3929,10 @@ fn translate_chunk(
 
 /// Advances past a chunk's packed heightmap list (type id, long array).
 fn skip_heightmaps(cur: &mut Cursor<&[u8]>) -> Option<()> {
-    let heightmaps = u32::azalea_read_var(cur).ok()?;
+    let heightmaps = var_u32(cur)?;
     for _ in 0..heightmaps {
         varint_span(cur)?; // heightmap type
-        let longs = u32::azalea_read_var(cur).ok()?;
+        let longs = var_u32(cur)?;
         advance(cur, (longs as usize).checked_mul(8)?)?;
     }
     Some(())
@@ -3932,7 +3945,7 @@ fn translate_chunk_777(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 8)?; // chunk x/z ints
     skip_heightmaps(&mut cur)?;
-    let buffer_len = u32::azalea_read_var(&mut cur).ok()?;
+    let buffer_len = var_u32(&mut cur)?;
     advance(&mut cur, buffer_len as usize)?;
 
     let mut out = Vec::with_capacity(payload.len() + 16);
@@ -3971,7 +3984,7 @@ fn copy_light_data_777(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()>
 /// byte count, little-endian bytes) as the 26.2 `writeBitSet` form
 /// (`toLongArray`: a varint long count, big-endian longs).
 fn repack_bit_set(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
-    let len = u32::azalea_read_var(cur).ok()? as usize;
+    let len = var_u32(cur)? as usize;
     let at = cur.position() as usize;
     advance(cur, len)?;
     let bytes = &cur.get_ref()[at..at + len];
@@ -4077,7 +4090,7 @@ fn skip_paletted_container(
             varint_span(cur)?;
         }
         _ if bits <= max_indirect_bits => {
-            let palette_len = u32::azalea_read_var(cur).ok()?;
+            let palette_len = var_u32(cur)?;
             for _ in 0..palette_len {
                 varint_span(cur)?;
             }
@@ -4107,7 +4120,7 @@ fn translate_set_time(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     out.extend_from_slice(game_time);
     out.push(1); // one clock update
     out.push(0); // world clock id 0
-    day_time.azalea_write_var(&mut out).ok()?;
+    wire::write_varlong(&mut out, day_time);
     out.extend_from_slice(&0f32.to_be_bytes()); // partial tick
     let rate: f32 = if tick_day_time != 0 { 1.0 } else { 0.0 };
     out.extend_from_slice(&rate.to_be_bytes());
@@ -4302,7 +4315,7 @@ fn translate_update_recipes(id: u32, payload: &[u8], ctx: RecipeCtx<'_>) -> Opti
         copy_utf(&mut cur, &mut out)?;
         let items = copy_varint(&mut cur, &mut out)?;
         for _ in 0..items {
-            let item = u32::azalea_read_var(&mut cur).ok()?;
+            let item = var_u32(&mut cur)?;
             wire::write_varint(&mut out, ctx.remaps.remap(ClientRegistry::Item, item)?);
         }
     }
@@ -4329,7 +4342,7 @@ fn translate_recipe_display(
     out: &mut Vec<u8>,
     ctx: RecipeCtx<'_>,
 ) -> Option<()> {
-    let source = u32::azalea_read_var(cur).ok()?;
+    let source = var_u32(cur)?;
     let display = ctx.remaps.remap(ClientRegistry::RecipeDisplay, source)?;
     wire::write_varint(out, display);
     let slots = |cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: usize| {
@@ -4382,7 +4395,7 @@ fn translate_slot_display(
     let depth = depth.checked_sub(1)?;
     let nested =
         |cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>| translate_slot_display(cur, out, ctx, depth);
-    let source = u32::azalea_read_var(cur).ok()?;
+    let source = var_u32(cur)?;
     let display = ctx.remaps.remap(ClientRegistry::SlotDisplay, source)?;
     if display == SMITHING_TRIM_DISPLAY && ctx.layout.trim_pattern_display {
         // 26.2 can't name a trim pattern by its template item, so keep the
@@ -4399,7 +4412,7 @@ fn translate_slot_display(
         3 => {
             // only_with_component
             nested(cur, out)?;
-            let component = u32::azalea_read_var(cur).ok()?;
+            let component = var_u32(cur)?;
             wire::write_varint(
                 out,
                 ctx.remaps
@@ -4408,7 +4421,7 @@ fn translate_slot_display(
             Some(())
         }
         4 => {
-            let item = u32::azalea_read_var(cur).ok()?;
+            let item = var_u32(cur)?;
             wire::write_varint(out, ctx.remaps.remap(ClientRegistry::Item, item)?);
             Some(())
         }
@@ -4435,7 +4448,7 @@ const SMITHING_TRIM_DISPLAY: u32 = 8;
 /// One `Holder<TrimPattern>`: a registry id + 1, or 0 and an inline pattern
 /// (asset id, description, decal).
 fn translate_trim_pattern_holder(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
-    let holder = u32::azalea_read_var(cur).ok()?;
+    let holder = var_u32(cur)?;
     wire::write_varint(out, holder);
     if holder != 0 {
         // Registry references use the connection's dynamic trim-pattern
@@ -4445,7 +4458,7 @@ fn translate_trim_pattern_holder(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> 
 
     copy_utf(cur, out)?; // asset id
     let description_at = cur.position() as usize;
-    azalea_chat::FormattedText::azalea_read(cur).ok()?;
+    Reader::on_cursor(cur, Reader::nbt).ok()?; // description
     out.extend_from_slice(&cur.get_ref()[description_at..cur.position() as usize]);
     copy_bytes(cur, out, 1) // decal
 }
@@ -4517,7 +4530,7 @@ fn translate_team(id: u32, payload: &[u8], string_scopes: bool) -> Option<Vec<u8
         advance(&mut cur, 1)?;
         let visibility = read_scope(&mut cur, string_scopes)?;
         let collision = read_scope(&mut cur, string_scopes)?;
-        let color = u32::azalea_read_var(&mut cur).ok()?;
+        let color = var_u32(&mut cur)?;
         let prefix = nbt_span(&mut cur)?;
         let suffix = nbt_span(&mut cur)?;
 
@@ -4550,9 +4563,9 @@ fn translate_team(id: u32, payload: &[u8], string_scopes: bool) -> Option<Vec<u8
 /// ALWAYS like vanilla's byName).
 fn read_scope(cur: &mut Cursor<&[u8]>, string_scopes: bool) -> Option<u8> {
     if !string_scopes {
-        return Some(u32::azalea_read_var(cur).ok()? as u8);
+        return Some(var_u32(cur)? as u8);
     }
-    let len = u32::azalea_read_var(cur).ok()? as usize;
+    let len = var_u32(cur)? as usize;
     let start = cur.position() as usize;
     advance(cur, len)?;
     Some(
@@ -4603,7 +4616,7 @@ fn collapse_vec_delta(cur: &mut Cursor<&[u8]>, step_count: u32) -> Option<[i16; 
 fn translate_move_entity_777(id: u32, payload: &[u8], rotation: bool) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     let entity = varint_span(&mut cur)?;
-    let properties = u32::azalea_read_var(&mut cur).ok()?;
+    let properties = var_u32(&mut cur)?;
     let delta = collapse_vec_delta(&mut cur, properties >> 1)?;
     let rot_at = cur.position() as usize;
     if rotation {
@@ -4650,16 +4663,12 @@ fn translate_move_entity_rot_777(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 /// counted list of `Vec3` + tick-offset varint steps), returning the 24
 /// position bytes it ends at.
 fn read_position_path_end<'a>(cur: &mut Cursor<&'a [u8]>) -> Option<&'a [u8]> {
-    let stepped = match u32::azalea_read_var(cur).ok()? {
+    let stepped = match var_u32(cur)? {
         0 => false,
         1 => true,
         _ => return None,
     };
-    let steps = if stepped {
-        u32::azalea_read_var(cur).ok()?
-    } else {
-        1
-    };
+    let steps = if stepped { var_u32(cur)? } else { 1 };
     let mut end = None;
     for _ in 0..steps {
         let at = cur.position() as usize;
@@ -4712,7 +4721,7 @@ fn translate_explode_777(
     out.extend_from_slice(&payload[..head_end]);
     translate_particles(&mut cur, &mut out, ids, remaps, false)?;
     translate_sound_holder(&mut cur, &mut out, remaps)?;
-    let entries = u32::azalea_read_var(&mut cur).ok()?;
+    let entries = var_u32(&mut cur)?;
     wire::write_varint(&mut out, entries);
     for _ in 0..entries {
         translate_particles(&mut cur, &mut out, ids, remaps, false)?;
@@ -4736,7 +4745,7 @@ fn rewrite_previous_game_type(id: u32, payload: &[u8], spawn_info_at: usize) -> 
     advance(&mut cur, 8)?; // seed
     varint_span(&mut cur)?; // game type
     let previous_at = cur.position() as usize;
-    let previous = u32::azalea_read_var(&mut cur).ok()?;
+    let previous = var_u32(&mut cur)?;
 
     let mut out = Vec::with_capacity(payload.len() + 1);
     wire::write_varint(&mut out, id);
@@ -4751,7 +4760,7 @@ fn rewrite_previous_game_type(id: u32, payload: &[u8], spawn_info_at: usize) -> 
 fn translate_login_777(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 5)?; // player id, hardcore
-    let levels = u32::azalea_read_var(&mut cur).ok()?;
+    let levels = var_u32(&mut cur)?;
     for _ in 0..levels {
         skip_utf(&mut cur)?;
     }
@@ -4790,8 +4799,8 @@ fn translate_animate_777(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 fn translate_swing_animation_777(animate_id: u32, payload: &[u8]) -> Option<Box<[u8]>> {
     let mut cur = Cursor::new(payload);
     let entity = varint_span(&mut cur)?;
-    let hand = u32::azalea_read_var(&mut cur).ok()?;
-    if u32::azalea_read_var(&mut cur).ok()? == 0 {
+    let hand = var_u32(&mut cur)?;
+    if var_u32(&mut cur)? == 0 {
         return None;
     }
     let mut out = Vec::with_capacity(entity.end + 2);
@@ -4815,7 +4824,7 @@ fn translate_level_particles_777(
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
-    let particle = u32::azalea_read_var(&mut cur).ok()?;
+    let particle = var_u32(&mut cur)?;
     let name = v
         .wire_registries
         .name_of(ClientRegistry::ParticleType, particle)?;
@@ -4826,7 +4835,7 @@ fn translate_level_particles_777(
     advance(&mut cur, 38)?; // flags, position, spread
     let speed_at = cur.position() as usize;
     advance(&mut cur, 12)?;
-    let count = u32::azalea_read_var(&mut cur).ok()?;
+    let count = var_u32(&mut cur)?;
     varint_span(&mut cur)?; // randomization type
 
     let mut out = Vec::with_capacity(payload.len() + 4);
@@ -4851,7 +4860,7 @@ fn translate_update_advancements_777(
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 1)?; // reset
-    let count = u32::azalea_read_var(&mut cur).ok()?;
+    let count = var_u32(&mut cur)?;
     let mut out = Vec::with_capacity(payload.len() + 1);
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[..cur.position() as usize]);
@@ -4865,8 +4874,8 @@ fn translate_update_advancements_777(
         } else {
             None
         };
-        for _ in 0..u32::azalea_read_var(&mut cur).ok()? {
-            for _ in 0..u32::azalea_read_var(&mut cur).ok()? {
+        for _ in 0..var_u32(&mut cur)? {
+            for _ in 0..var_u32(&mut cur)? {
                 skip_utf(&mut cur)?; // requirement
             }
         }
@@ -4972,14 +4981,14 @@ fn translate_player_chat_777(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     skip_optional(&mut cur, |c| advance(c, 256))?; // signature
     skip_utf(&mut cur)?; // content
     advance(&mut cur, 16)?; // timestamp, salt
-    for _ in 0..u32::azalea_read_var(&mut cur).ok()? {
+    for _ in 0..var_u32(&mut cur)? {
         // A last-seen entry: cache id + 1, or 0 and the full signature.
-        if u32::azalea_read_var(&mut cur).ok()? == 0 {
+        if var_u32(&mut cur)? == 0 {
             advance(&mut cur, 256)?;
         }
     }
     skip_optional(&mut cur, skip_nbt)?; // unsigned content
-    let mask = u32::azalea_read_var(&mut cur).ok()?;
+    let mask = var_u32(&mut cur)?;
 
     let mut out = Vec::with_capacity(payload.len() + 8);
     wire::write_varint(&mut out, id);
@@ -5019,7 +5028,7 @@ fn translate_commands_777(
             copy_utf(&mut cur, &mut out)?; // name
         }
         if node_type == 2 {
-            let parser = u32::azalea_read_var(&mut cur).ok()?;
+            let parser = var_u32(&mut cur)?;
             let name = v
                 .wire_registries
                 .name_of(ClientRegistry::CommandArgumentType, parser)?;
@@ -5103,13 +5112,13 @@ fn translate_item_holder_set(
     out: &mut Vec<u8>,
     remaps: &RegistryRemaps,
 ) -> Option<()> {
-    let encoded = u32::azalea_read_var(cur).ok()?;
+    let encoded = var_u32(cur)?;
     wire::write_varint(out, encoded);
     if encoded == 0 {
         return copy_utf(cur, out);
     }
     for _ in 1..encoded {
-        let item = u32::azalea_read_var(cur).ok()?;
+        let item = var_u32(cur)?;
         wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
     }
     Some(())
@@ -5129,10 +5138,10 @@ fn copy_slot_display_777(
 ) -> Option<()> {
     use ClientRegistry::SlotDisplay;
     let depth = depth.checked_sub(1)?;
-    let kind = u32::azalea_read_var(cur).ok()?;
+    let kind = var_u32(cur)?;
     let name = wire_registries.name_of(SlotDisplay, kind)?;
     if name == "tag" {
-        let set = u32::azalea_read_var(cur).ok()?;
+        let set = var_u32(cur)?;
         if set > 0 {
             let native = RegistryTable::native();
             let item = native.id_of(SlotDisplay, "item")?;
@@ -5140,7 +5149,7 @@ fn copy_slot_display_777(
             wire::write_varint(out, set - 1);
             for _ in 1..set {
                 wire::write_varint(out, item);
-                let source_item = u32::azalea_read_var(cur).ok()?;
+                let source_item = var_u32(cur)?;
                 wire::write_varint(out, remaps.remap(ClientRegistry::Item, source_item)?);
             }
             return Some(());
@@ -5161,17 +5170,17 @@ fn copy_slot_display_777(
         "empty" | "any_fuel" | "with_any_potion" | "dyed" | "with_remainder" | "composite" => {}
         "tag" => copy_utf(cur, out)?,
         "item" => {
-            let source_item = u32::azalea_read_var(cur).ok()?;
+            let source_item = var_u32(cur)?;
             wire::write_varint(out, remaps.remap(ClientRegistry::Item, source_item)?);
         }
         "item_stack" => {
-            let source_item = u32::azalea_read_var(cur).ok()?;
+            let source_item = var_u32(cur)?;
             wire::write_varint(out, remaps.remap(ClientRegistry::Item, source_item)?);
             copy_varint(cur, out)?; // count
             copy_component_patch(cur, out, remaps)?;
         }
         "only_with_component" => {
-            let component = u32::azalea_read_var(cur).ok()?;
+            let component = var_u32(cur)?;
             let native = remaps.remap(ClientRegistry::DataComponentType, component)?;
             wire::write_varint(out, native);
         }
@@ -5196,7 +5205,7 @@ fn copy_recipe_display_777(
     wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
 ) -> Option<()> {
-    let kind = u32::azalea_read_var(cur).ok()?;
+    let kind = var_u32(cur)?;
     let name = wire_registries.name_of(ClientRegistry::RecipeDisplay, kind)?;
     wire::write_varint(out, remaps.remap(ClientRegistry::RecipeDisplay, kind)?);
     let slots = |cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: u32| {
@@ -5284,7 +5293,7 @@ fn translate_update_recipes_777(
     for _ in 0..copy_varint(&mut cur, &mut out)? {
         copy_utf(&mut cur, &mut out)?; // property set key
         for _ in 0..copy_varint(&mut cur, &mut out)? {
-            let source_item = u32::azalea_read_var(&mut cur).ok()?;
+            let source_item = var_u32(&mut cur)?;
             wire::write_varint(&mut out, remaps.remap(ClientRegistry::Item, source_item)?);
         }
     }
@@ -5304,7 +5313,7 @@ fn translate_update_recipes_777(
 /// The byte range of one varint, advancing past it.
 fn varint_span(cur: &mut Cursor<&[u8]>) -> Option<std::ops::Range<usize>> {
     let start = cur.position() as usize;
-    u32::azalea_read_var(cur).ok()?;
+    var_u32(cur)?;
     Some(start..cur.position() as usize)
 }
 

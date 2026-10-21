@@ -21,6 +21,7 @@ pub mod player;
 pub mod player_info;
 pub mod registries;
 pub mod scoreboard;
+pub mod section;
 pub mod sound;
 #[cfg(test)]
 mod vanilla_fixtures;

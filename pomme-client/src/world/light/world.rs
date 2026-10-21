@@ -6,11 +6,10 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use azalea_block::BlockState;
-use azalea_world::Chunk;
 use parking_lot::RwLock;
 
 use super::storage::LightPos;
-use crate::world::chunk::{ChunkStore, block_state_from_section};
+use crate::world::chunk::{Chunk, ChunkStore};
 
 pub(crate) trait LightBlockGetter {
     fn state(&self, pos: LightPos) -> BlockState;
@@ -51,7 +50,7 @@ impl<'a> StoreWorld<'a> {
         }
         let chunk = self
             .store
-            .get_chunk(&azalea_core::position::ChunkPos::new(cx, cz));
+            .get_chunk(&crate::position::ChunkPos::new(cx, cz));
         cache[1] = cache[0].clone();
         cache[0] = ((cx, cz), chunk.clone());
         chunk
@@ -64,7 +63,7 @@ impl LightBlockGetter for StoreWorld<'_> {
             return self.bedrock;
         };
         let chunk = chunk.read();
-        block_state_from_section(&chunk, pos.x, pos.y, pos.z, self.min_y)
+        chunk.block_state(pos.x, pos.y, pos.z, self.min_y)
     }
 
     fn clear_cache(&self) {

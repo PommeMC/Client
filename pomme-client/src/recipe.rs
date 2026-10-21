@@ -60,7 +60,7 @@ pub enum TrimPatternHolder {
     Reference(u32),
     Direct {
         asset_id: String,
-        description: azalea_chat::FormattedText,
+        description: Box<crate::chat_component::Component>,
         decal: bool,
     },
 }
