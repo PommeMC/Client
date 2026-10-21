@@ -391,6 +391,20 @@ pub fn create_uniform_sets(
     (sets, buffers, allocations)
 }
 
+/// Destroys buffers made by [`create_per_frame_host_buffers`] or
+/// [`create_uniform_sets`] and frees their memory.
+pub fn destroy_buffers(
+    device: &vk::Device,
+    allocator: &mut Allocator,
+    buffers: &[vk::Buffer],
+    allocations: &mut Vec<Allocation>,
+) {
+    for (&buffer, allocation) in buffers.iter().zip(allocations.drain(..)) {
+        device.destroy_buffer(buffer, None);
+        allocator.free(allocation).ok();
+    }
+}
+
 pub fn upload_image(
     device: &vk::Device,
     queue: vk::Queue,

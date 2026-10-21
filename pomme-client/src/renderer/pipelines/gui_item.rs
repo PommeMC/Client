@@ -296,11 +296,12 @@ impl GuiItemPipeline {
         device.destroy_descriptor_set_layout(self.atlas_layout, None);
         device.destroy_descriptor_set_layout(self.tint_layout, None);
         device.destroy_sampler(self.sampler, None);
-        let mut alloc = allocator.lock().unwrap();
-        for (buffer, allocation) in self.camera_buffers.iter().zip(self.camera_allocs.drain(..)) {
-            device.destroy_buffer(*buffer, None);
-            alloc.free(allocation).ok();
-        }
+        util::destroy_buffers(
+            device,
+            &mut allocator.lock().unwrap(),
+            &self.camera_buffers,
+            &mut self.camera_allocs,
+        );
     }
 }
 

@@ -1987,14 +1987,12 @@ impl MenuOverlayPipeline {
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let mut alloc = allocator.lock().unwrap();
 
-        for (buffer, allocation) in self
-            .globals_buffers
-            .iter()
-            .zip(self.globals_allocations.drain(..))
-        {
-            device.destroy_buffer(*buffer, None);
-            alloc.free(allocation).ok();
-        }
+        util::destroy_buffers(
+            device,
+            &mut alloc,
+            &self.globals_buffers,
+            &mut self.globals_allocations,
+        );
 
         device.destroy_buffer(self.vertex_buffer, None);
         if let Some(a) = self.vertex_allocation.take() {

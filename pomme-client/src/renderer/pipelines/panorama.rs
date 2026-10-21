@@ -252,14 +252,12 @@ impl PanoramaPipeline {
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let mut alloc = allocator.lock().unwrap();
 
-        for (buffer, allocation) in self
-            .params_buffers
-            .iter()
-            .zip(self.params_allocations.drain(..))
-        {
-            device.destroy_buffer(*buffer, None);
-            alloc.free(allocation).ok();
-        }
+        util::destroy_buffers(
+            device,
+            &mut alloc,
+            &self.params_buffers,
+            &mut self.params_allocations,
+        );
 
         device.destroy_sampler(self.cube_sampler, None);
         device.destroy_image_view(self.cube_view, None);
