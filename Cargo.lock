@@ -1742,7 +1742,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 3.0.9",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -5381,7 +5381,7 @@ dependencies = [
  "uuid 1.28.0",
  "winit",
  "winresource",
- "zip 9.0.4",
+ "zip 9.0.5",
 ]
 
 [[package]]
@@ -5415,7 +5415,7 @@ dependencies = [
  "sha1_smol",
  "sha2 0.11.1",
  "tokio",
- "zip 9.0.4",
+ "zip 9.0.5",
 ]
 
 [[package]]
@@ -9994,9 +9994,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.0.4"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a954114b47a54df49f83d2722814e86b23d4bb1b54a1b90fb7d92b41619ddc22"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "crc32fast",
  "flate2",
