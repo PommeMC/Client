@@ -89,7 +89,7 @@ scopeguard = "1.2"
 libloading = "0.9"
 open = { workspace = true }
 discord-rich-presence = "1.1"
-criterion = { version = "=0.5.1", default-features = false, optional = true }
+criterion = { version = "=0.8.2", default-features = false, optional = true }
 symphonia = { version = "0.5.5", default-features = false, features = ["ogg", "vorbis"] }
 fastrand = "2"
 gilrs = "0.11.2"
