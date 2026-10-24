@@ -422,6 +422,8 @@ pub struct ChunkLoadResult {
     /// Phase split of the worst frame across the measured runs — what the spike
     /// was actually spent on.
     pub worst_frame_breakdown: FrameBreakdown,
+    /// The level-of-detail distance chunks were meshed with.
+    pub chunk_detail: u32,
     /// "debug" or "release" — see [`build_profile`].
     pub profile: String,
     pub measurement_note: String,
@@ -475,6 +477,7 @@ pub struct ChunkLoadBench {
     phase: ChunkPhase,
     target_rd: u32,
     effective_rd: u32,
+    chunk_detail: u32,
     mode: BenchMode,
     player_pos: [f64; 3],
     reset_start: Instant,
@@ -499,7 +502,13 @@ pub struct ChunkLoadBench {
 }
 
 impl ChunkLoadBench {
-    pub fn new(target_rd: u32, server_rd: u32, mode: BenchMode, player_pos: glam::DVec3) -> Self {
+    pub fn new(
+        target_rd: u32,
+        server_rd: u32,
+        chunk_detail: u32,
+        mode: BenchMode,
+        player_pos: glam::DVec3,
+    ) -> Self {
         let effective_rd = if server_rd > 0 {
             target_rd.min(server_rd)
         } else {
@@ -510,6 +519,7 @@ impl ChunkLoadBench {
             phase: ChunkPhase::Reset,
             target_rd,
             effective_rd,
+            chunk_detail,
             mode,
             player_pos: player_pos.to_array(),
             reset_start: now,
@@ -717,6 +727,7 @@ impl ChunkLoadBench {
                 .map(|r| r.worst_frame_breakdown.clone())
                 .unwrap_or_default(),
             runs_detail: measured.to_vec(),
+            chunk_detail: self.chunk_detail,
             profile: build_profile().to_owned(),
             measurement_note: self.mode.note().to_owned(),
         }

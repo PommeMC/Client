@@ -1887,6 +1887,7 @@ pub fn start_chunk_load(
     game.chunk_load_bench = Some(ChunkLoadBench::new(
         rd,
         game.server_render_distance,
+        core.menu.chunk_detail,
         BenchMode::Windowed {
             gpu: gfx.renderer.gpu_name().to_owned(),
             vulkan: gfx.renderer.vulkan_version().to_owned(),

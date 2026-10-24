@@ -188,7 +188,7 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         && let Some(rd) = args.chunk_bench
     {
         let play = quick_play.expect("a chunk bench always has a world");
-        let user = headless::user(&args, &data_dirs.game_dir, &rt);
+        let user = headless::user(&args, &play, &data_dirs.game_dir, &rt);
         std::process::exit(headless::run(rd, play, user, version, &data_dirs, &rt));
     }
 

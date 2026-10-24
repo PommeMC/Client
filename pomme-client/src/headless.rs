@@ -23,25 +23,30 @@ use crate::renderer::RenderTimings;
 use crate::renderer::chunk::mesh_source::CpuMeshAssets;
 use crate::singleplayer::World;
 use crate::ui::chat::ChatOptions;
-use crate::ui::menu::default_chunk_detail;
+use crate::ui::menu::saved_chunk_detail;
 use crate::ui::world_list::WorldList;
 use crate::user::UserData;
 use crate::world::block::block_registry::BlockDefinitions;
 
-/// `--username` and the rest when given, else the stored sign-in, which an
-/// online server needs, else offline.
-pub fn user(args: &LaunchArgs, game_dir: &Path, rt: &tokio::runtime::Runtime) -> UserData {
-    if args.username.is_some() {
-        return UserData::from_args(
+/// For a server with no `--username`, the stored sign-in, which an online
+/// server needs. Otherwise, or if it can't be restored, offline: the
+/// integrated server doesn't check accounts.
+pub fn user(
+    args: &LaunchArgs,
+    play: &QuickPlay,
+    game_dir: &Path,
+    rt: &tokio::runtime::Runtime,
+) -> UserData {
+    let stored = (args.username.is_none() && matches!(play, QuickPlay::Multiplayer(_)))
+        .then(|| rt.block_on(crate::account::restore(&*crate::account::store(game_dir))))
+        .flatten();
+    match stored {
+        Some(account) => UserData::from_account(&account),
+        None => UserData::from_args(
             args.username.clone(),
             args.uuid.clone(),
             args.access_token.clone(),
-        );
-    }
-    let store = crate::account::store(game_dir);
-    match rt.block_on(crate::account::restore(&*store)) {
-        Some(account) => UserData::from_account(&account),
-        None => UserData::from_args(None, None, None),
+        ),
     }
 }
 
@@ -146,6 +151,7 @@ fn drive(
     mut world: Option<&mut World>,
     dirs: &DataDirs,
 ) -> i32 {
+    let chunk_detail = saved_chunk_detail(&dirs.game_dir);
     // Columns with at least one non-empty section, as the GPU buffers count
     // them.
     let mut drawn: HashMap<ChunkPos, u32> = HashMap::new();
@@ -230,7 +236,7 @@ fn drive(
         game.last_update_phases.net_decode_ms = ms(t_net);
         // Meshing doesn't wait on visibility, which only orders the drawing.
         let t_rescan = Instant::now();
-        game.rescan_mesh_jobs(game.player_chunk(), default_chunk_detail());
+        game.rescan_mesh_jobs(game.player_chunk(), chunk_detail);
         game.last_update_phases.rescan_ms = ms(t_rescan);
 
         let batch = game.drain_meshes();
@@ -256,12 +262,13 @@ fn drive(
                 tick_accumulator -= TICK_RATE;
             }
         }
-        game.update_light(default_chunk_detail());
+        game.update_light(chunk_detail);
 
         if game.chunk_load_bench.is_none() && game.client_loaded {
             game.chunk_load_bench = Some(ChunkLoadBench::new(
                 rd,
                 game.server_render_distance,
+                chunk_detail,
                 BenchMode::Headless,
                 *game.player.position,
             ));
