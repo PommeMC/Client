@@ -99,6 +99,16 @@ impl DisplayTransform {
         scale: Vec3::ONE,
     };
 
+    /// Vanilla `ItemTransform.apply`'s left-hand fix: X translation and the
+    /// Y and Z rotations mirrored.
+    pub(crate) fn mirrored(self) -> Self {
+        Self {
+            rotation: self.rotation * Vec3::new(1.0, -1.0, -1.0),
+            translation: self.translation * Vec3::new(-1.0, 1.0, 1.0),
+            scale: self.scale,
+        }
+    }
+
     pub(crate) fn to_matrix(self) -> Mat4 {
         Mat4::from_translation(self.translation)
             * Mat4::from_rotation_x(self.rotation.x.to_radians())
