@@ -43,7 +43,7 @@ pub enum WindowError {
     Renderer(#[from] renderer::RendererError),
 }
 
-const TICK_RATE: f32 = 1.0 / 20.0;
+pub(crate) const TICK_RATE: f32 = 1.0 / 20.0;
 const TICK_RATE_MS: u32 = 1000 / 20;
 const POSITION_SEND_INTERVAL: u32 = 20;
 const POSITION_THRESHOLD_SQ: f64 = 4.0e-8;
@@ -194,8 +194,8 @@ fn start_connecting(
     let block_definitions = Rc::clone(&core.block_definitions);
     let connection = spawn_connection(&core.tokio_rt, connect_args);
     let game = GameState::new(
-        &gfx.renderer,
-        &core.resource_packs,
+        &*gfx.renderer,
+        Some(&core.resource_packs),
         core.menu.render_distance,
         world.is_some(),
         core.menu.chat_options,
@@ -244,10 +244,12 @@ impl App {
         }
     }
 
-    /// A `--chunk-bench` run: borderless, as most players play, and never
-    /// paused for losing focus.
+    /// A `--chunk-bench` run: borderless, as most players play, never paused
+    /// for losing focus, and joining at the benchmark's render distance so an
+    /// integrated server sends that far.
     pub fn with_chunk_bench(mut self, rd: Option<u32>) -> Self {
-        if rd.is_some() {
+        if let Some(rd) = rd {
+            self.core.menu.set_bench_render_distance(rd);
             self.core.pause_on_lost_focus = false;
             self.core
                 .override_display_mode(core::DisplayMode::Borderless);

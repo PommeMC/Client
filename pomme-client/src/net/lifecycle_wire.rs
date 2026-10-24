@@ -14,10 +14,10 @@ use pomme_protocol::lifecycle::{self, LifecyclePacket, Login, SpawnInfo};
 use pomme_protocol::{Direction, PacketTable, Phase};
 use simdnbt::owned::NbtTag;
 
-use super::NetworkEvent;
 use super::chat_security::ProfileKeyServices;
 use super::handler::send_ordered;
 use super::sender::PacketSender;
+use super::{DimensionInfo, NetworkEvent};
 use crate::world::block::model::CardinalLightType;
 
 /// Decodes a lifecycle packet other than `login`, which the game loop reads
@@ -218,7 +218,7 @@ fn dimension_info(dim: &DimensionKindElement) -> NetworkEvent {
             .and_then(|tag| tag.string())
             .map(|value| value.to_str().into_owned())
     };
-    NetworkEvent::DimensionInfo {
+    NetworkEvent::DimensionInfo(DimensionInfo {
         height: dim.height,
         min_y: dim.min_y,
         has_skylight: dim
@@ -238,7 +238,7 @@ fn dimension_info(dim: &DimensionKindElement) -> NetworkEvent {
             .unwrap_or(0.0),
         overworld_day: dim._extra.get("timelines").is_some_and(names_overworld_day),
         default_clock: string("default_clock"),
-    }
+    })
 }
 
 /// Whether a `timelines` holder set names `minecraft:day`, directly or through
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn dimension_info_reads_vanilla_extras() {
-        let NetworkEvent::DimensionInfo {
+        let NetworkEvent::DimensionInfo(DimensionInfo {
             height,
             min_y,
             has_skylight,
@@ -327,7 +327,7 @@ mod tests {
             ambient_light,
             overworld_day,
             default_clock,
-        } = dimension_info(&dimension(&[
+        }) = dimension_info(&dimension(&[
             ("has_skylight", NbtTag::Byte(1)),
             ("cardinal_light", NbtTag::String("nether".into())),
             ("ambient_light", NbtTag::Float(0.1)),
@@ -352,14 +352,14 @@ mod tests {
 
     #[test]
     fn dimension_info_defaults_like_vanilla() {
-        let NetworkEvent::DimensionInfo {
+        let NetworkEvent::DimensionInfo(DimensionInfo {
             has_skylight,
             cardinal_light,
             ambient_light,
             overworld_day,
             default_clock,
             ..
-        } = dimension_info(&dimension(&[]))
+        }) = dimension_info(&dimension(&[]))
         else {
             panic!("dimension_info returned the wrong event variant");
         };

@@ -238,6 +238,12 @@ impl Default for Settings {
     }
 }
 
+/// The chunk detail the options hold, which a headless run meshes with as the
+/// window would.
+pub(crate) fn saved_chunk_detail(game_dir: &Path) -> u32 {
+    load_settings(game_dir).chunk_detail
+}
+
 fn load_settings(game_dir: &Path) -> Settings {
     let path = game_dir.join("options.json");
     std::fs::read_to_string(&path)
@@ -724,7 +730,7 @@ impl MainMenu {
         key_bindings: &mut KeyBindings,
     ) -> Self {
         let server_list = ServerList::load(game_dir);
-        let saves_dir = game_dir.join("saves");
+        let saves_dir = crate::ui::world_list::saves_dir(game_dir);
         // Servers ping lazily as their rows draw (build_server_list), not at boot.
         let ping_results: PingResults = Default::default();
         let settings = load_settings(game_dir);
@@ -1417,18 +1423,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_save_during_a_chunk_bench_keeps_the_players_render_distance() {
+    fn a_chunk_bench_saves_the_players_render_distance_and_reads_their_chunk_detail() {
         let dir = std::env::temp_dir().join(format!("pomme-bench-rd-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut key_bindings = KeyBindings::default();
         let mut menu = test_menu(dir.to_str().unwrap(), &mut key_bindings);
         menu.render_distance = 12;
         menu.set_bench_render_distance(2);
+        menu.chunk_detail = 4;
         menu.save_settings(&key_bindings);
         let saved = load_settings(&dir).render_distance;
+        let chunk_detail = saved_chunk_detail(&dir);
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(saved, 12);
         assert_eq!(menu.render_distance, 2);
+        assert_eq!(chunk_detail, 4);
     }
 
     #[test]

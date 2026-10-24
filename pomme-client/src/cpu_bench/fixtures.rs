@@ -1,26 +1,19 @@
 //! Bench inputs: block render assets and atlas UV map loaded from the version's
 //! assets on disk (CPU-only), and deterministic synthetic worlds.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use azalea_block::BlockState;
 use glam::DVec3;
 
 use crate::assets::AssetIndex;
 use crate::dirs::DataDirs;
 use crate::position::ChunkPos;
-use crate::renderer::chunk::atlas::{AtlasUVMap, TextureAtlas, atlas_texture_names};
+use crate::renderer::chunk::mesh_source::CpuMeshAssets;
 use crate::world::block::BlockStateTable;
-use crate::world::block::render_assets::BlockRenderAssets;
 use crate::world::chunk::{Chunk, ChunkLightData, ChunkStore};
 
 pub struct Assets {
-    pub jar_assets_dir: PathBuf,
-    pub asset_index: Option<AssetIndex>,
-    pub render_assets: Arc<BlockRenderAssets>,
+    pub mesh: CpuMeshAssets,
     pub block_state_table: BlockStateTable,
-    pub uv_map: AtlasUVMap,
 }
 
 impl Assets {
@@ -35,35 +28,11 @@ impl Assets {
                 dirs.jar_assets_dir.display()
             ));
         }
+        eprintln!("cpu-bench: loading block models and packing the atlas...");
         let asset_index = AssetIndex::load(&dirs.indexes_dir, &dirs.objects_dir, version);
-
-        // No block cache, so the bench neither reads a stale one nor rewrites
-        // the real one.
-        eprintln!("cpu-bench: loading block models...");
-        let render_assets = Arc::new(BlockRenderAssets::load(
-            &dirs.jar_assets_dir,
-            &asset_index,
-            None,
-            None,
-        ));
-
-        eprintln!("cpu-bench: packing texture atlas...");
-        let (texture_names, generated_item_textures) = atlas_texture_names(&render_assets);
-        let uv_map = TextureAtlas::build_cpu(
-            &dirs.jar_assets_dir,
-            &asset_index,
-            &texture_names,
-            &generated_item_textures,
-            None,
-        )
-        .uv_map;
-
         Ok(Self {
-            jar_assets_dir: dirs.jar_assets_dir.clone(),
-            asset_index,
-            render_assets,
+            mesh: CpuMeshAssets::load(&dirs.jar_assets_dir, asset_index),
             block_state_table,
-            uv_map,
         })
     }
 }

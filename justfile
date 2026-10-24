@@ -34,10 +34,16 @@ client-release *args: openal
 bench *args:
     @cargo run --release -p pomme-client --features cpu-bench -- --cpu-bench {{ args }}
 
-# The chunk-load benchmark at render distance `rd`, run unattended in a quick-play
-# world, borderless fullscreen, e.g. `just chunk-bench 16 --quick-access-singleplayer
-# MyWorld`. Writes chunk_load.json to the game dir and exits.
-chunk-bench rd *args: openal
+# The chunk-load benchmark, headless: render distance `rd` (16 by default) in a
+# fixed-seed bench world, or in a quick-play world or server passed after the
+# distance, e.g. `just chunk-bench 16 --quick-access-multiplayer dev.pomme.rs`.
+# Writes chunk_load.json to the game dir and exits.
+chunk-bench rd="16" *args: openal
+    @cargo run --release -p pomme-client -- --chunk-bench {{ rd }} --headless {{ args }}
+
+# The same in the window, borderless fullscreen, for frame times and GPU uploads
+# while chunks load. Like any release build, it needs a signed-in account.
+chunk-bench-windowed rd="16" *args: openal
     @cargo run --release -p pomme-client -- --chunk-bench {{ rd }} {{ args }}
 
 client-build *args: openal

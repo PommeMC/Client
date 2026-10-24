@@ -4,8 +4,6 @@ use crate::dirs::DataDirs;
 
 #[derive(Parser, Debug)]
 #[command(name = "pomme", about = "Minecraft client")]
-#[command(group = clap::ArgGroup::new("quick_play")
-    .args(["quick_access_multiplayer", "quick_access_singleplayer"]))]
 pub struct LaunchArgs {
     #[arg(long)]
     pub version: Option<String>,
@@ -49,16 +47,22 @@ pub struct LaunchArgs {
     #[arg(long)]
     pub quick_access_singleplayer: Option<String>,
 
-    /// Joins the quick-access world, runs the chunk-load benchmark at this
-    /// render distance, writes `chunk_load.json` and exits.
+    /// Joins the quick-access world, or else the fixed-seed bench world, runs
+    /// the chunk-load benchmark at this render distance, writes
+    /// `chunk_load.json` and exits.
     #[arg(
         long,
         value_name = "RD",
         value_parser = clap::value_parser!(u32)
-            .range(crate::benchmark::CHUNK_LOAD_MIN_RD as i64 + 1..),
-        requires = "quick_play"
+            .range(crate::benchmark::CHUNK_LOAD_MIN_RD as i64 + 1
+                ..=crate::world::chunk::MAX_VIEW_DISTANCE as i64)
     )]
     pub chunk_bench: Option<u32>,
+
+    /// Runs `--chunk-bench` with no window or GPU: chunks are meshed but not
+    /// uploaded or drawn.
+    #[arg(long, requires = "chunk_bench")]
+    pub headless: bool,
 
     /// Runs the headless CPU benchmarks (optionally only those whose id
     /// contains the filter) and exits.
@@ -101,6 +105,16 @@ impl LaunchArgs {
             tracing::error!("{}: {e}", path.display());
             Self::from_words("").expect("no arguments always parse")
         })
+    }
+
+    pub fn quick_play(&self) -> Option<crate::app::QuickPlay> {
+        self.quick_access_multiplayer
+            .clone()
+            .map(crate::app::QuickPlay::Multiplayer)
+            .or(self
+                .quick_access_singleplayer
+                .clone()
+                .map(crate::app::QuickPlay::Singleplayer))
     }
 
     pub fn data_dirs(&self, version: &str) -> DataDirs {
@@ -154,18 +168,16 @@ mod tests {
     }
 
     #[test]
-    fn chunk_bench_needs_a_quick_play_world() {
+    fn chunk_bench_takes_a_render_distance_above_the_reset() {
         let words = |text| LaunchArgs::from_words(text).map(|a| a.chunk_bench);
-        assert_eq!(
-            words("--chunk-bench 16 --quick-access-singleplayer World").unwrap(),
-            Some(16)
-        );
+        assert_eq!(words("--chunk-bench 16").unwrap(), Some(16));
         assert_eq!(
             words("--chunk-bench 8 --quick-access-multiplayer localhost").unwrap(),
             Some(8)
         );
-        assert!(words("--chunk-bench 16").is_err());
         // The reset distance itself would time an empty load.
         assert!(words("--chunk-bench 2 --quick-access-singleplayer World").is_err());
+        assert!(words("--chunk-bench 129 --quick-access-singleplayer World").is_err());
+        assert!(words("--headless --quick-access-singleplayer World").is_err());
     }
 }

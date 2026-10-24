@@ -2,6 +2,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::renderer::RenderTimings;
+use crate::ui::world_list::{Difficulty, GameMode, WorldList, WorldSummary, saves_dir};
 
 const DURATION_SECS: f32 = 10.0;
 const WARMUP_FRAMES: u32 = 30;
@@ -220,6 +221,32 @@ impl BenchRenderDistance {
     }
 }
 
+/// The save `--chunk-bench` joins without a quick-play world. Its seed is
+/// fixed, so every run loads the same terrain.
+const BENCH_WORLD: &str = "chunk-bench";
+
+/// The bench world's folder, created on first use.
+pub fn bench_world(game_dir: &Path, version: &str) -> String {
+    let mut worlds = WorldList::scan(&saves_dir(game_dir));
+    if worlds.get(BENCH_WORLD).is_none()
+        && let Err(e) = worlds.create(WorldSummary {
+            name: "Chunk Bench".to_owned(),
+            folder: BENCH_WORLD.to_owned(),
+            last_played: 0,
+            game_mode: GameMode::Creative,
+            hardcore: false,
+            allow_commands: true,
+            difficulty: Difficulty::Peaceful,
+            seed: "pomme".to_owned(),
+            version: version.to_owned(),
+            extra: Default::default(),
+        })
+    {
+        tracing::error!("Failed to create the bench world: {e}");
+    }
+    BENCH_WORLD.to_owned()
+}
+
 /// Lowest render distance to drop to during the chunk-load reset phase.
 pub const CHUNK_LOAD_MIN_RD: u32 = 2;
 /// Minimum time to hold the minimum render distance before the timed load can
@@ -241,8 +268,6 @@ pub const CHUNK_LOAD_WARMUP_RUNS: u32 = 1;
 /// Runs that actually count toward the averaged result.
 pub const CHUNK_LOAD_MEASURED_RUNS: u32 = 3;
 const CHUNK_LOAD_TOTAL_RUNS: u32 = CHUNK_LOAD_WARMUP_RUNS + CHUNK_LOAD_MEASURED_RUNS;
-const MEASUREMENT_NOTE: &str =
-    "frame_ms measured with entities, weather, and HUD hidden (top-down benchmark view)";
 
 /// Debug builds run unoptimized, so their timings are far slower and not
 /// comparable to release — results record and surface which one produced them.
@@ -320,8 +345,39 @@ pub struct ChunkLoadRun {
     pub worst_frame_breakdown: FrameBreakdown,
 }
 
+/// How a chunk-load run was taken: in the window, or with no window or GPU.
+pub enum BenchMode {
+    Windowed {
+        gpu: String,
+        vulkan: String,
+        resolution: (u32, u32),
+    },
+    Headless,
+}
+
+impl BenchMode {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Windowed { .. } => "windowed",
+            Self::Headless => "headless",
+        }
+    }
+
+    fn note(&self) -> &'static str {
+        match self {
+            Self::Windowed { .. } => {
+                "frame_ms measured with entities, weather, and HUD hidden (top-down benchmark view)"
+            }
+            Self::Headless => {
+                "no window or GPU: nothing is uploaded or drawn, and frame_ms is one pass of the loop"
+            }
+        }
+    }
+}
+
 #[derive(Clone, serde::Serialize)]
 pub struct ChunkLoadResult {
+    pub mode: String,
     pub version: String,
     pub os: String,
     pub arch: String,
@@ -366,13 +422,28 @@ pub struct ChunkLoadResult {
     /// Phase split of the worst frame across the measured runs — what the spike
     /// was actually spent on.
     pub worst_frame_breakdown: FrameBreakdown,
+    /// The level-of-detail distance chunks were meshed with.
+    pub chunk_detail: u32,
     /// "debug" or "release" — see [`build_profile`].
     pub profile: String,
     pub measurement_note: String,
 }
 
 impl ChunkLoadResult {
+    /// Logs the summary and writes `chunk_load.json`.
     pub fn save(&self, game_dir: &Path) {
+        tracing::info!(
+            "Chunk load RD {} (effective {}): {} chunks in {:.2}s ({:.0} chunks/s), \
+             first chunk {:.2}s, frame avg {:.1}ms / worst {:.1}ms",
+            self.target_rd,
+            self.effective_rd,
+            self.chunk_count,
+            self.load_secs,
+            self.chunks_per_sec,
+            self.time_to_first_secs,
+            self.avg_frame_ms,
+            self.worst_frame_ms,
+        );
         let path = game_dir.join("chunk_load.json");
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(&path, json);
@@ -406,9 +477,8 @@ pub struct ChunkLoadBench {
     phase: ChunkPhase,
     target_rd: u32,
     effective_rd: u32,
-    gpu_name: String,
-    vulkan: String,
-    resolution: (u32, u32),
+    chunk_detail: u32,
+    mode: BenchMode,
     player_pos: [f64; 3],
     reset_start: Instant,
     start: Instant,
@@ -432,15 +502,12 @@ pub struct ChunkLoadBench {
 }
 
 impl ChunkLoadBench {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         target_rd: u32,
         server_rd: u32,
-        gpu_name: &str,
-        vulkan: &str,
-        width: u32,
-        height: u32,
-        player_pos: [f64; 3],
+        chunk_detail: u32,
+        mode: BenchMode,
+        player_pos: glam::DVec3,
     ) -> Self {
         let effective_rd = if server_rd > 0 {
             target_rd.min(server_rd)
@@ -452,10 +519,9 @@ impl ChunkLoadBench {
             phase: ChunkPhase::Reset,
             target_rd,
             effective_rd,
-            gpu_name: gpu_name.to_owned(),
-            vulkan: vulkan.to_owned(),
-            resolution: (width, height),
-            player_pos,
+            chunk_detail,
+            mode,
+            player_pos: player_pos.to_array(),
             reset_start: now,
             start: now,
             last_count: 0,
@@ -613,16 +679,25 @@ impl ChunkLoadBench {
         let avg = |sel: fn(&ChunkLoadRun) -> f32| measured.iter().map(sel).sum::<f32>() / n;
         let chunk_count =
             (measured.iter().map(|r| r.chunk_count as f32).sum::<f32>() / n).round() as u32;
+        let (gpu, vulkan, (width, height)) = match &self.mode {
+            BenchMode::Windowed {
+                gpu,
+                vulkan,
+                resolution,
+            } => (gpu.as_str(), vulkan.as_str(), *resolution),
+            BenchMode::Headless => ("none", "none", (0, 0)),
+        };
         ChunkLoadResult {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
-            gpu: self.gpu_name.clone(),
-            vulkan: self.vulkan.clone(),
+            mode: self.mode.name().to_owned(),
+            gpu: gpu.to_owned(),
+            vulkan: vulkan.to_owned(),
             cpu_threads: std::thread::available_parallelism()
                 .map(|n| n.get() as u32)
                 .unwrap_or(0),
-            resolution: [self.resolution.0, self.resolution.1],
+            resolution: [width, height],
             timestamp: iso8601_utc_now(),
             player_pos: self.player_pos,
             target_rd: self.target_rd,
@@ -652,8 +727,9 @@ impl ChunkLoadBench {
                 .map(|r| r.worst_frame_breakdown.clone())
                 .unwrap_or_default(),
             runs_detail: measured.to_vec(),
+            chunk_detail: self.chunk_detail,
             profile: build_profile().to_owned(),
-            measurement_note: MEASUREMENT_NOTE.to_owned(),
+            measurement_note: self.mode.note().to_owned(),
         }
     }
 

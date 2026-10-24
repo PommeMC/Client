@@ -17,8 +17,8 @@ use crate::app::phases::Gfx;
 use crate::app::{TICK_RATE, input};
 use crate::audio::{CATEGORY_AMBIENT, CATEGORY_PLAYERS, SoundRef};
 use crate::benchmark::{
-    Benchmark, BenchmarkResult, ChunkLoadBench, ChunkLoadResult, ChunkLoadStep, UploadHandle,
-    UploadStatus, upload_result,
+    BenchMode, Benchmark, BenchmarkResult, ChunkLoadBench, ChunkLoadResult, ChunkLoadStep,
+    UploadHandle, UploadStatus, upload_result,
 };
 use crate::entity::components::{LookDirection, Position};
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
@@ -29,6 +29,7 @@ use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::buffer::column_is_near;
+use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::entity_model::triangle_wave;
@@ -372,23 +373,26 @@ impl GameState {
     }
 
     pub(crate) fn new(
-        renderer: &Renderer,
-        resource_packs: &ResourcePackManager,
+        mesh_source: &impl MeshSource,
+        resource_packs: Option<&ResourcePackManager>,
         render_distance: u32,
         singleplayer: bool,
         chat_options: crate::ui::chat::ChatOptions,
         block_definitions: Rc<BlockDefinitions>,
         protocol: i32,
     ) -> Self {
-        let block_registry =
-            BlockRegistry::new(block_definitions, renderer.shared_render_assets(), protocol);
+        let block_registry = BlockRegistry::new(
+            block_definitions,
+            mesh_source.shared_render_assets(),
+            protocol,
+        );
         let biome_climate = Arc::new(HashMap::new());
         // The dimension's shade table arrives with `DimensionInfo`, which
         // builds a fresh dispatcher.
-        let mesh_dispatcher = renderer.create_mesh_dispatcher(
+        let mesh_dispatcher = mesh_source.create_mesh_dispatcher(
             block_registry.owned_render_view(),
             biome_climate,
-            Some(resource_packs),
+            resource_packs,
             Default::default(),
         );
 
@@ -417,7 +421,7 @@ impl GameState {
             particle_store: {
                 let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
                 crate::particle::ParticleStore::new(
-                    renderer.atlas_uv_map().clone(),
+                    mesh_source.uv_map().clone(),
                     grass,
                     foliage,
                     dry_foliage,
@@ -1182,6 +1186,17 @@ impl GameState {
     /// Shared with the loading phase, which streams the spawn chunks in before
     /// the game phase takes over.
     pub fn drain_and_upload_meshes(&mut self, renderer: &mut Renderer) {
+        let batch = self.drain_meshes();
+        let upload_start = std::time::Instant::now();
+        let dropped = renderer.upload_chunk_meshes(&batch);
+        self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
+        self.clear_dropped_meshed(dropped);
+        self.recycle_meshes(batch);
+    }
+
+    /// The frame's ready meshes, stale ones dropped and the rest's CPU-side
+    /// bookkeeping applied.
+    pub fn drain_meshes(&mut self) -> Vec<ChunkMeshData> {
         let drain_start = std::time::Instant::now();
         let results: Vec<_> = self.mesh_dispatcher.drain_results().collect();
         let mut batch = Vec::with_capacity(results.len());
@@ -1225,11 +1240,11 @@ impl GameState {
             batch.push(mesh);
         }
         self.last_update_phases.mesh_drain_ms = drain_start.elapsed().as_secs_f32() * 1000.0;
-        let upload_start = std::time::Instant::now();
-        let dropped = renderer.upload_chunk_meshes(&batch);
-        self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
-        self.clear_dropped_meshed(dropped);
-        // Return the uploaded meshes' buffers to the worker pool for reuse.
+        batch
+    }
+
+    /// Returns the meshes' buffers to the worker pool for reuse.
+    pub fn recycle_meshes(&mut self, batch: Vec<ChunkMeshData>) {
         for mesh in batch {
             self.mesh_dispatcher.recycle(mesh);
         }
@@ -1518,7 +1533,7 @@ fn section_bit(si: i32) -> u32 {
 }
 
 /// The bits for several section indices.
-fn section_bits(indices: impl IntoIterator<Item = i32>) -> u32 {
+pub(crate) fn section_bits(indices: impl IntoIterator<Item = i32>) -> u32 {
     indices
         .into_iter()
         .fold(0u32, |mask, si| mask | section_bit(si))
@@ -1872,15 +1887,13 @@ pub fn start_chunk_load(
     game.chunk_load_bench = Some(ChunkLoadBench::new(
         rd,
         game.server_render_distance,
-        gfx.renderer.gpu_name(),
-        gfx.renderer.vulkan_version(),
-        gfx.renderer.screen_width(),
-        gfx.renderer.screen_height(),
-        [
-            game.player.position.x,
-            game.player.position.y,
-            game.player.position.z,
-        ],
+        core.menu.chunk_detail,
+        BenchMode::Windowed {
+            gpu: gfx.renderer.gpu_name().to_owned(),
+            vulkan: gfx.renderer.vulkan_version().to_owned(),
+            resolution: (gfx.renderer.screen_width(), gfx.renderer.screen_height()),
+        },
+        *game.player.position,
     ));
     game.chunk_load_result = None;
     // Drop to the minimum render distance so the server unloads the far
@@ -2311,7 +2324,7 @@ pub fn update_game(
         // Vanilla `Minecraft.tick` order: `gameMode.tick` drives the connection
         // tick (and so the level load tracker) before the level's entities,
         // i.e. before the local player moves or sends anything.
-        AppCore::tick_level_load(&gfx.renderer, connection, game);
+        AppCore::tick_level_load(gfx.renderer.camera_render_position(), connection, game);
         // Vanilla Gui.tick falls back from dead health alone when no screen is
         // open, so death UI/auto-respawn must not depend on PlayerCombatKill.
         let has_screen = game.death_screen_open
@@ -3044,18 +3057,6 @@ pub fn update_game(
             }
             ChunkLoadStep::Done(result) => {
                 end_chunk_load(core, game, connection);
-                tracing::info!(
-                    "Chunk load RD {} (effective {}): {} chunks in {:.2}s ({:.0} chunks/s), \
-                     first chunk {:.2}s, frame avg {:.1}ms / worst {:.1}ms",
-                    result.target_rd,
-                    result.effective_rd,
-                    result.chunk_count,
-                    result.load_secs,
-                    result.chunks_per_sec,
-                    result.time_to_first_secs,
-                    result.avg_frame_ms,
-                    result.worst_frame_ms,
-                );
                 result.save(&core.data_dirs.game_dir);
                 game.chunk_load_result = Some(*result);
                 game.chunk_load_upload = None;

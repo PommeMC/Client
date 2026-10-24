@@ -152,6 +152,8 @@ archives; setup and limitations are in [`pomme-ios/README.md`](pomme-ios/README.
 Run `just` with no arguments to list every recipe. The common ones:
 
 - `just client-dev` / `just client-build` / `just client-release`: run, build, or benchmark the client; flags forward after `--`, e.g. `just client-dev -- --username Steve`
+- `just bench [filter]`: headless CPU benchmarks of the mesher, fade rebuild and cave culling
+- `just chunk-bench [rd]`: times loading every chunk in render distance `rd` (16 by default) with no window or GPU, in a fixed-seed world or a server passed after the distance, e.g. `just chunk-bench 16 --quick-access-multiplayer dev.pomme.rs`; `just chunk-bench-windowed` runs it in the window for frame times. Results go to `chunk_load.json` in the game folder
 - `just launcher-dev` / `just launcher-build`: run or bundle the launcher
 - `just client-pre-pr` / `just launcher-pre-pr`: the fmt, clippy, and test checks CI enforces
 - `just protogen` / `just registrygen` / `just knownpackgen` / `just blockgen` / `just stategen`: regenerate a version's packet-id, registry, known-pack, block-state, and per-state property tables from `reference/<version>/`; `stategen` runs vanilla's own code and needs JDK 25 (`just jdk=<bin dir> stategen`, Windows only)

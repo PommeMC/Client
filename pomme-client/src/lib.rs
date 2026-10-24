@@ -19,6 +19,7 @@ mod discord;
 mod entity;
 #[cfg(feature = "test-harness")]
 mod harness;
+mod headless;
 mod lang;
 mod logging;
 mod mob_effect;
@@ -178,6 +179,19 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         crate::net::chat_security::ProfileKeyServices::prefetch();
     }
 
+    let quick_play = args.quick_play().or_else(|| {
+        args.chunk_bench.map(|_| {
+            app::QuickPlay::Singleplayer(benchmark::bench_world(&data_dirs.game_dir, version))
+        })
+    });
+    if args.headless
+        && let Some(rd) = args.chunk_bench
+    {
+        let play = quick_play.expect("a chunk bench always has a world");
+        let user = headless::user(&args, &play, &data_dirs.game_dir, &rt);
+        std::process::exit(headless::run(rd, play, user, version, &data_dirs, &rt));
+    }
+
     let (user, require_account) = UserData::for_launch(
         args.username,
         args.uuid,
@@ -206,11 +220,7 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         rt,
         presence,
         user,
-        args.quick_access_multiplayer
-            .map(app::QuickPlay::Multiplayer)
-            .or(args
-                .quick_access_singleplayer
-                .map(app::QuickPlay::Singleplayer)),
+        quick_play,
         winit::dpi::LogicalSize::new(args.width, args.height),
     )
     .with_chunk_bench(args.chunk_bench);
