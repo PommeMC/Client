@@ -2771,7 +2771,6 @@ pub fn update_game(
             mode: core.menu.attack_indicator,
             scale,
             show_full,
-            main_hand_right: core.menu.main_hand_right(),
         };
         if crate::player::is_spectator(game.player.game_mode) {
             crate::ui::spectator_menu::build_spectator_menu(
@@ -2803,6 +2802,8 @@ pub fn update_game(
             bar,
             game.player.game_mode,
             game.player.inventory.hotbar_slots(),
+            game.player.inventory.offhand(),
+            core.menu.main_hand_right(),
             game.tool_highlight_timer,
             game.action_bar
                 .as_ref()
