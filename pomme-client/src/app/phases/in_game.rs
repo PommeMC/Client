@@ -24,7 +24,9 @@ use crate::entity::components::{LookDirection, Position};
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
 use crate::player::LocalPlayer;
-use crate::player::interaction::{HitResult, InteractionState};
+use crate::player::interaction::{
+    HANDS, HitResult, InteractionHand, InteractionState, send_use_swing,
+};
 use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
 use crate::position::{BlockPos, ChunkPos};
@@ -3704,7 +3706,7 @@ pub fn update_game(
             // arm swing; only the packet is sent here, as for the world drop.
             crate::ui::creative_inventory::CreativeAction::DropItem(item) => {
                 drop_creative_item(game, connection, item);
-                crate::player::interaction::send_use_swing(&connection.packet_tx);
+                send_use_swing(&connection.packet_tx, InteractionHand::MainHand);
             }
             crate::ui::creative_inventory::CreativeAction::DropSlot {
                 slot,
@@ -3713,7 +3715,7 @@ pub fn update_game(
             } => {
                 set_creative_slot(game, connection, slot, remaining);
                 drop_creative_item(game, connection, dropped);
-                crate::player::interaction::send_use_swing(&connection.packet_tx);
+                send_use_swing(&connection.packet_tx, InteractionHand::MainHand);
             }
             crate::ui::creative_inventory::CreativeAction::None => {}
         }
@@ -3838,8 +3840,8 @@ pub fn update_game(
         core.input.clear_just_pressed_actions();
     }
 
-    let swing_progress = game.interaction.get_swing_progress(partial_tick);
-    let use_anim = game.interaction.use_animation(partial_tick);
+    let swing_progress = HANDS.map(|hand| game.interaction.swing_progress(hand, partial_tick));
+    let use_anim = HANDS.map(|hand| game.interaction.use_animation(hand, partial_tick));
     let destroy_info = game.interaction.destroy_stage().map(|(pos, stage)| {
         let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
         (pos, stage, state)

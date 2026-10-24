@@ -3214,13 +3214,13 @@ impl AppCore {
         if game.dead {
             game.player.tick_death();
             let removed_this_tick = game.player.death_animation_finished();
-            let held_stack = game
+            let hand_stacks = game
                 .player
                 .inventory
-                .held_stack(self.input.selected_slot())
-                .cloned();
+                .hand_stacks(self.input.selected_slot())
+                .map(Option::<&_>::cloned);
             game.interaction.tick_using_item(
-                held_stack.as_ref(),
+                hand_stacks.each_ref().map(Option::as_ref),
                 &connection.packet_tx,
                 &self.audio,
                 &game.chunk_store,
@@ -3259,7 +3259,7 @@ impl AppCore {
                 game.player.tick_bob(dx, dz, true);
             }
             game.interaction
-                .tick_dead_player_state(held_stack.as_ref(), !removed_this_tick);
+                .tick_dead_player_state(hand_stacks[0].as_ref(), !removed_this_tick);
 
             let neutral = InputState::released();
             Self::send_abilities_packet(connection, game);
@@ -3297,7 +3297,10 @@ impl AppCore {
                         .inventory
                         .remove_from_selected(self.input.selected_slot(), whole_stack)
                     {
-                        crate::player::interaction::send_use_swing(&connection.packet_tx);
+                        crate::player::interaction::send_use_swing(
+                            &connection.packet_tx,
+                            crate::player::interaction::InteractionHand::MainHand,
+                        );
                     }
                 }
             }
@@ -3381,11 +3384,13 @@ impl AppCore {
 
         // Vanilla `Minecraft.tick`: pick and keybinds run before the entity
         // tick, so interaction packets precede the movement packet.
-        let held_stack = game
+        let hand_stacks = game
             .player
             .inventory
-            .held_stack(input.selected_slot())
-            .cloned();
+            .hand_stacks(input.selected_slot())
+            .map(Option::<&_>::cloned);
+        let hand_stacks = hand_stacks.each_ref().map(Option::as_ref);
+        let held_stack = hand_stacks[0];
         let held_item = held_stack
             .as_ref()
             .map(|data| crate::player::inventory::item_resource_name(data.kind));
@@ -3400,7 +3405,7 @@ impl AppCore {
             held_item.as_deref(),
         );
         let legacy_mining = crate::tool::legacy_mining(
-            held_stack.as_ref(),
+            held_stack,
             game.player
                 .inventory
                 .armor_slots()
@@ -3408,10 +3413,13 @@ impl AppCore {
                 .filter_map(|stack| stack.as_present()),
             game.block_registry.protocol(),
         );
-        let place_block = held_item
-            .as_deref()
-            .and_then(|name| game.block_registry.placeable_block_for_item(name));
-        let hands_empty = held_stack.is_none() && game.player.inventory.offhand().is_empty();
+        let hands = hand_stacks.map(|stack| crate::player::interaction::HandItem {
+            stack,
+            place_block: stack.and_then(|s| {
+                game.block_registry
+                    .placeable_block_for_item(&crate::player::inventory::item_resource_name(s.kind))
+            }),
+        });
         let player_aabb = game.player.bounding_box();
         let mut effects = crate::player::interaction::BreakEffects {
             particles: &mut game.particle_store,
@@ -3432,17 +3440,15 @@ impl AppCore {
             crate::player::is_creative(game.player.game_mode),
             game.player.food,
             input.selected_slot(),
-            held_stack.as_ref(),
+            hands,
             &game.player.attributes,
             &game.player.effects,
             game.player.eyes_in_water,
             legacy_mining,
-            place_block,
-            hands_empty,
             &mut effects,
         );
         game.interaction.tick_using_item(
-            held_stack.as_ref(),
+            hand_stacks,
             &connection.packet_tx,
             &self.audio,
             &game.chunk_store,
@@ -3484,7 +3490,7 @@ impl AppCore {
         game.player.drop_spam.tick();
 
         game.interaction
-            .tick_player_state(input.is_cursor_captured(), held_stack.as_ref());
+            .tick_player_state(input.is_cursor_captured(), held_stack);
 
         Self::send_abilities_packet(connection, game);
         Self::send_input_packet(input, connection, game);
