@@ -1146,7 +1146,7 @@ pub(super) fn write_clipboard(text: &str) -> bool {
 
 /// The protocol to join `address` with: the completed ping's, else the
 /// persisted one, so the join skips the wire-version probe when possible.
-fn join_protocol(
+pub(super) fn join_protocol(
     ping_results: &std::collections::HashMap<String, PingState>,
     address: &str,
     persisted: Option<i32>,

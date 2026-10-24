@@ -383,6 +383,7 @@ impl SkinPreviewPipeline {
         aspect: f32,
         screen_x: f32,
         screen_y: f32,
+        scale: f32,
         mouse_px_x: f32,
         mouse_px_y: f32,
         screen_w: f32,
@@ -400,15 +401,15 @@ impl SkinPreviewPipeline {
         let head_y_rot_rad = head_y_rot_deg.to_radians();
         let head_x_rot_rad = head_x_rot_raw * 20.0f32.to_radians();
 
-        let fov = 0.6f32;
-        let mut proj = proj::directx::perspective(fov, aspect, 0.1, 100.0);
+        let mut proj = proj::directx::perspective(MENU_FOV, aspect, 0.1, 100.0);
         proj.y_axis.y *= -1.0;
 
         let ndc_x = screen_x * 2.0 - 1.0;
         let ndc_y = screen_y * 2.0 - 1.0;
         let clip_offset = Mat4::from_translation(Vec3::new(ndc_x, ndc_y, 0.0));
+        let size = Mat4::from_scale(Vec3::new(scale, scale, 1.0));
 
-        let vp = clip_offset * proj * camera_view();
+        let vp = clip_offset * size * proj * camera_view();
         self.record(
             cmd,
             frame,
@@ -646,8 +647,20 @@ impl SkinPreviewPipeline {
     }
 }
 
+const CAMERA_DISTANCE: f32 = 4.5;
+const MENU_FOV: f32 = 0.6;
+/// The player mesh runs from its feet at y = -1.5 to the top of its head at
+/// 0.5, so `draw`'s anchor sits a quarter of its height below the head.
+const MODEL_HEIGHT: f32 = 2.0;
+pub const MODEL_ANCHOR_BELOW_HEAD: f32 = 0.25;
+
+/// The model's height as a fraction of the screen's at `draw`'s scale 1.
+pub fn menu_model_height() -> f32 {
+    MODEL_HEIGHT / (2.0 * CAMERA_DISTANCE * (MENU_FOV / 2.0).tan())
+}
+
 fn camera_view() -> Mat4 {
-    view::look_at_mat4(Vec3::new(0.0, 0.0, -4.5), Vec3::ZERO, Vec3::Y)
+    view::look_at_mat4(Vec3::new(0.0, 0.0, -CAMERA_DISTANCE), Vec3::ZERO, Vec3::Y)
 }
 
 pub(crate) fn write_uniform(alloc: &mut Allocation, mvp: &Mat4) {

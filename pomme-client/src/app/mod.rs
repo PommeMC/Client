@@ -405,6 +405,7 @@ impl ApplicationHandler for App {
 
                 if let Some(uuid) = pending_skin_uuid.take() {
                     renderer.load_player_skin(&uuid, &self.core.tokio_rt);
+                    self.core.menu.set_player_face(Some(&uuid));
                 }
 
                 self.core.apply_cursor_grab(&window, None);
