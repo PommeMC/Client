@@ -4043,20 +4043,22 @@ pub fn update_game(
     } else {
         core.menu.render_distance
     };
-    let held_item = if benchmark_running {
-        None
+    let held_items = if benchmark_running {
+        [None, None]
     } else {
-        match game.player.inventory.hotbar_slots()[core.input.selected_slot() as usize] {
-            azalea_inventory::ItemStack::Present(ref data) => {
+        let light = get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
+        let held = |stack: &azalea_inventory::ItemStack| match stack {
+            azalea_inventory::ItemStack::Present(data) => {
                 let name = crate::player::inventory::item_resource_name(data.kind);
-                (name != "air").then(|| {
-                    let light =
-                        get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
-                    (name, light, data.clone())
-                })
+                (name != "air").then(|| (name, light, data.clone()))
             }
             _ => None,
-        }
+        };
+        let inventory = &game.player.inventory;
+        [
+            held(&inventory.hotbar_slots()[core.input.selected_slot() as usize]),
+            held(inventory.offhand()),
+        ]
     };
     // Last element pushed: vanilla draws the saving indicator on its own
     // stratum above screens, with the GUI hidden (F1) included.
@@ -4082,7 +4084,8 @@ pub fn update_game(
         elements,
         swing_progress,
         use_anim,
-        held_item,
+        held_items,
+        core.menu.main_hand_right(),
         game.scoreboard.member_team_color(&core.user.username),
         renders_first_person_hand(game),
         destroy_info,
