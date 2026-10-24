@@ -15,6 +15,7 @@ pub(crate) struct ChunkSkyLightSources {
     /// `level.getMinY() - 1`; the stored value for fully open columns.
     min_y: i32,
     /// Lowest full-sky Y per column, indexed `x + z * 16`.
+    // TODO: vanilla packs these as 9-bit offsets (296 B instead of 1 KB).
     heightmap: Box<[i32; 256]>,
 }
 

@@ -10,6 +10,7 @@ use crate::position::ChunkPos;
 use crate::renderer::chunk::mesh_source::CpuMeshAssets;
 use crate::world::block::BlockStateTable;
 use crate::world::chunk::{Chunk, ChunkLightData, ChunkStore};
+use crate::world::light::DataLayer;
 
 pub struct Assets {
     pub mesh: CpuMeshAssets,
@@ -213,7 +214,7 @@ fn add_sky_light(store: &mut ChunkStore, block_state_table: BlockStateTable) {
     let layer_count = store.section_count() as usize + 2;
     for pos in columns_within(1) {
         let mut light = ChunkLightData {
-            sky_sections: vec![Some(Box::new([0; 2048])); layer_count],
+            sky_sections: vec![Some(DataLayer::new()); layer_count],
             block_sections: vec![None; layer_count],
             min_y,
             has_sky: true,

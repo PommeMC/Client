@@ -180,16 +180,6 @@ impl BlockRenderAssets {
         });
 
         let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index, packs);
-        let baked = baked
-            .into_iter()
-            .map(|(block, variants)| {
-                let variants = variants
-                    .into_iter()
-                    .map(|(k, m)| (k, Arc::new(m)))
-                    .collect();
-                (block, variants)
-            })
-            .collect();
         let baked_items = model::bake_item_models(jar_assets_dir, asset_index, packs);
         let item_models = baked_items.models;
         let flat_item_textures = baked_items.generated_textures;
@@ -342,19 +332,19 @@ impl BlockRenderAssets {
         let baked_textures = self.baked.values().flat_map(|variants| {
             variants
                 .values()
-                .flat_map(|model| model.quads.iter().map(|q| q.texture.as_str()))
+                .flat_map(|model| model.quads.iter().map(|q| q.texture.name()))
         });
 
         let multipart_textures = self.multipart.values().flat_map(|entries| {
             entries
                 .iter()
-                .flat_map(|e| e.quads.iter().map(|q| q.texture.as_str()))
+                .flat_map(|e| e.quads.iter().map(|q| q.texture.name()))
         });
 
         let item_model_textures = self
             .item_models
             .values()
-            .flat_map(|model| model.quads.iter().map(|q| q.texture.as_str()));
+            .flat_map(|model| model.quads.iter().map(|q| q.texture.name()));
 
         face_textures
             .chain(baked_textures)

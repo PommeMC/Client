@@ -25,54 +25,65 @@ const MAGIC: [u32; 192] = [
     70409299, 70409299, 0, 69273666, 69273666, 0, 0x04104104, 0x04104104, 0, 0x80000000, 0, 5,
 ];
 
+/// Per bit count, the `MAGIC` row a storage of that width divides with,
+/// looked up rather than copied into every storage as vanilla does.
+#[derive(Clone, Copy)]
+struct Divide {
+    values_per_long: u32,
+    mul: u64,
+    add: u64,
+    shift: u32,
+}
+
+const DIVIDE: [Divide; 33] = {
+    let mut table = [Divide {
+        values_per_long: 0,
+        mul: 0,
+        add: 0,
+        shift: 0,
+    }; 33];
+    let mut bits = 1;
+    while bits <= 32 {
+        let values_per_long = 64 / bits;
+        let row = 3 * (values_per_long as usize - 1);
+        table[bits as usize] = Divide {
+            values_per_long,
+            mul: MAGIC[row] as u64,
+            add: MAGIC[row + 1] as u64,
+            shift: MAGIC[row + 2],
+        };
+        bits += 1;
+    }
+    table
+};
+
 /// Vanilla `SimpleBitStorage`, or `ZeroBitStorage` at zero bits: `size`
 /// values of `bits` bits each, packed into longs without spanning a boundary.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BitStorage {
     data: Box<[u64]>,
     bits: u32,
-    mask: u64,
-    values_per_long: u32,
-    divide_mul: u64,
-    divide_add: u64,
-    divide_shift: u32,
 }
 
 impl BitStorage {
     pub fn new(bits: u32, size: usize) -> Self {
-        if bits == 0 {
-            return Self {
-                data: Box::new([]),
-                bits: 0,
-                mask: 0,
-                values_per_long: 0,
-                divide_mul: 0,
-                divide_add: 0,
-                divide_shift: 0,
-            };
-        }
         debug_assert!(bits <= 32, "{bits} bits per value");
-        let values_per_long = 64 / bits;
-        let row = 3 * (values_per_long as usize - 1);
-        Self {
-            data: vec![0; size.div_ceil(values_per_long as usize)].into(),
-            bits,
-            mask: (1 << bits) - 1,
-            values_per_long,
-            divide_mul: u64::from(MAGIC[row]),
-            divide_add: u64::from(MAGIC[row + 1]),
-            divide_shift: MAGIC[row + 2],
-        }
+        let data = match bits {
+            0 => Box::new([]) as Box<[u64]>,
+            _ => vec![0; size.div_ceil(DIVIDE[bits as usize].values_per_long as usize)].into(),
+        };
+        Self { data, bits }
     }
 
-    fn cell_index(&self, index: usize) -> usize {
-        ((index as u64 * self.divide_mul + self.divide_add) >> 32 >> self.divide_shift) as usize
+    fn mask(&self) -> u64 {
+        (1 << self.bits) - 1
     }
 
     /// The cell holding `index` and the value's bit offset within it.
     fn locate(&self, index: usize) -> (usize, u32) {
-        let cell = self.cell_index(index);
-        let bit = (index - cell * self.values_per_long as usize) as u32 * self.bits;
+        let divide = DIVIDE[self.bits as usize];
+        let cell = ((index as u64 * divide.mul + divide.add) >> 32 >> divide.shift) as usize;
+        let bit = (index - cell * divide.values_per_long as usize) as u32 * self.bits;
         (cell, bit)
     }
 
@@ -82,7 +93,7 @@ impl BitStorage {
             return 0;
         }
         let (cell, bit) = self.locate(index);
-        ((self.data[cell] >> bit) & self.mask) as u32
+        ((self.data[cell] >> bit) & self.mask()) as u32
     }
 
     pub fn get_and_set(&mut self, index: usize, value: u32) -> u32 {
@@ -90,9 +101,10 @@ impl BitStorage {
             return 0;
         }
         let (cell, bit) = self.locate(index);
+        let mask = self.mask();
         let old = self.data[cell];
-        self.data[cell] = (old & !(self.mask << bit)) | ((u64::from(value) & self.mask) << bit);
-        ((old >> bit) & self.mask) as u32
+        self.data[cell] = (old & !(mask << bit)) | ((u64::from(value) & mask) << bit);
+        ((old >> bit) & mask) as u32
     }
 
     pub fn set(&mut self, index: usize, value: u32) {
@@ -379,6 +391,13 @@ impl Section {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_keeps_only_its_data_and_width() {
+        // Every chunk holds two of these per section, so the divide constants
+        // come from `DIVIDE` instead of each instance.
+        assert_eq!(std::mem::size_of::<BitStorage>(), 24);
+    }
 
     #[test]
     fn bit_storage_round_trips_without_spanning_longs() {

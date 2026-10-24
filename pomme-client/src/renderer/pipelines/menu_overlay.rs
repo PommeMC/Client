@@ -271,14 +271,10 @@ pub struct MenuOverlayPipeline {
     font_view: vk::ImageView,
     font_sampler: vk::Sampler,
     font_allocation: Option<Allocation>,
-    font_staging_buffer: vk::Buffer,
-    font_staging_allocation: Option<Allocation>,
     sprite_image: vk::Image,
     sprite_view: vk::ImageView,
     sprite_sampler: vk::Sampler,
     sprite_allocation: Option<Allocation>,
-    sprite_staging_buffer: vk::Buffer,
-    sprite_staging_allocation: Option<Allocation>,
     sprite_atlas: SpriteAtlas,
     item_placeholder: Option<TextureResources>,
     mc_font: TextureResources,
@@ -408,29 +404,21 @@ impl MenuOverlayPipeline {
             "menu_font_atlas",
         );
 
-        let (font_staging_buffer, font_staging_alloc) =
-            util::create_staging_buffer(device, allocator, &atlas.pixels, "menu_font_staging");
-
-        util::upload_image(
+        upload_and_free_staging(
             device,
             queue,
             command_pool,
-            font_staging_buffer,
+            allocator,
+            &atlas.pixels,
             font_image,
             ATLAS_SIZE,
             ATLAS_SIZE,
+            "menu_font_staging",
         );
 
         let font_sampler = unsafe { util::create_linear_sampler(device) };
 
-        let (
-            sprite_atlas_data,
-            sprite_image,
-            sprite_view,
-            sprite_alloc,
-            sprite_staging_buffer,
-            sprite_staging_alloc,
-        ) = build_sprite_atlas(
+        let (sprite_atlas_data, sprite_image, sprite_view, sprite_alloc) = build_sprite_atlas(
             device,
             queue,
             command_pool,
@@ -622,14 +610,10 @@ impl MenuOverlayPipeline {
             font_view,
             font_sampler,
             font_allocation: Some(font_alloc),
-            font_staging_buffer,
-            font_staging_allocation: Some(font_staging_alloc),
             sprite_image,
             sprite_view,
             sprite_sampler,
             sprite_allocation: Some(sprite_alloc),
-            sprite_staging_buffer,
-            sprite_staging_allocation: sprite_staging_alloc,
             sprite_atlas: sprite_atlas_data,
             item_placeholder,
             mc_font,
@@ -2057,8 +2041,8 @@ impl MenuOverlayPipeline {
                 image: self.font_image,
                 view: self.font_view,
                 image_alloc: self.font_allocation.take(),
-                staging_buffer: self.font_staging_buffer,
-                staging_alloc: self.font_staging_allocation.take(),
+                staging_buffer: vk::Buffer::null(),
+                staging_alloc: None,
             },
         );
         destroy_texture_resources(
@@ -2069,8 +2053,8 @@ impl MenuOverlayPipeline {
                 image: self.sprite_image,
                 view: self.sprite_view,
                 image_alloc: self.sprite_allocation.take(),
-                staging_buffer: self.sprite_staging_buffer,
-                staging_alloc: self.sprite_staging_allocation.take(),
+                staging_buffer: vk::Buffer::null(),
+                staging_alloc: None,
             },
         );
         if let Some(mut res) = self.item_placeholder.take() {
@@ -2732,14 +2716,7 @@ fn build_sprite_atlas(
     allocator: &Arc<Mutex<Allocator>>,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
-) -> (
-    SpriteAtlas,
-    vk::Image,
-    vk::ImageView,
-    Allocation,
-    vk::Buffer,
-    Option<Allocation>,
-) {
+) -> (SpriteAtlas, vk::Image, vk::ImageView, Allocation) {
     let sprites: &[(SpriteId, &str, f32)] = &[
         (
             SpriteId::Hotbar,
@@ -4089,26 +4066,19 @@ fn build_sprite_atlas(
     // `atlas_size` above; feeding these a size of their own would read past it.
     let (image, view, allocation) =
         util::create_gpu_image(device, allocator, atlas_size, atlas_size, "sprite_atlas");
-    let (staging_buffer, staging_allocation) =
-        util::create_staging_buffer(device, allocator, &pixels, "sprite_staging");
-    util::upload_image(
+    upload_and_free_staging(
         device,
         queue,
         command_pool,
-        staging_buffer,
+        allocator,
+        &pixels,
         image,
         atlas_size,
         atlas_size,
+        "sprite_staging",
     );
 
-    (
-        SpriteAtlas { regions },
-        image,
-        view,
-        allocation,
-        staging_buffer,
-        Some(staging_allocation),
-    )
+    (SpriteAtlas { regions }, image, view, allocation)
 }
 
 fn load_overlay_rgba(
@@ -4144,9 +4114,7 @@ fn upload_and_free_staging(
 ) {
     let (staging, staging_alloc) = util::create_staging_buffer(device, allocator, pixels, name);
     util::upload_image(device, queue, command_pool, staging, image, w, h);
-    // upload_image waits for the copy, so the staging buffer can go right away.
-    device.destroy_buffer(staging, None);
-    allocator.lock().unwrap().free(staging_alloc).ok();
+    util::free_staging(device, allocator, staging, staging_alloc);
 }
 
 /// Compose the full-screen camera overlay textures (vignette + pumpkin blur)

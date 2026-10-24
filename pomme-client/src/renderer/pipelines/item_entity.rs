@@ -652,7 +652,7 @@ impl ItemEntityPipeline {
             let translucent = model
                 .quads
                 .iter()
-                .any(|quad| uv_map.get_region(&quad.texture).translucent);
+                .any(|quad| uv_map.region(quad.texture).translucent);
             self.insert_mesh(device, allocator, name, &vertices, true, translucent);
         }
     }
@@ -809,7 +809,7 @@ fn tint_index_or_none(index: Option<u32>) -> u32 {
 fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ItemVertex> {
     let mut vertices = Vec::new();
     for quad in &model.quads {
-        let region = uv_map.get_region(&quad.texture);
+        let region = uv_map.region(quad.texture);
         let u_span = region.u_max - region.u_min;
         let v_span = region.v_max - region.v_min;
         let tint_index = tint_index_or_none(quad.tint_index);

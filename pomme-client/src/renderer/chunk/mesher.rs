@@ -632,12 +632,18 @@ pub fn int_to_rgb(color: i32) -> [f32; 3] {
 /// Pre-allocation hints sized to a typical section so a fresh buffer fills
 /// without reallocating (indices run ~1.5x vertices: 6 per quad vs 4).
 const SECTION_VERTEX_HINT: usize = 2048;
+/// Pooled packed-vertex and index `Vec`s per kind: enough for the meshes in
+/// flight between the workers and the upload.
+const MESH_POOL_CAPACITY: usize = 384;
+/// An overworld column's sections; taller dimensions allocate past the pool.
+const POOLED_COLUMN_SECTIONS: usize = 24;
 const SECTION_INDEX_HINT: usize = 3072;
 
 /// Recycles section vertex/index `Vec`s so workers reuse them instead of
 /// allocating/freeing through the OS each mesh (vanilla reuses its
 /// `ByteBufferBuilder`s the same way). Bounded: returns past capacity are
-/// dropped, takes past it allocate.
+/// dropped, takes past it allocate, and a `Vec` grown far past its hint is
+/// shrunk on return so one dense section doesn't keep it large.
 struct BufferPool {
     // Float scratch the workers mesh into; never leaves the worker (packed at
     // section finalize).
@@ -650,8 +656,8 @@ struct BufferPool {
 }
 
 impl BufferPool {
-    fn new(capacity: usize) -> Self {
-        let (scratch_tx, scratch_rx) = crossbeam_channel::bounded(capacity);
+    fn new(scratch_capacity: usize, capacity: usize) -> Self {
+        let (scratch_tx, scratch_rx) = crossbeam_channel::bounded(scratch_capacity);
         let (vtx_tx, vtx_rx) = crossbeam_channel::bounded(capacity);
         let (idx_tx, idx_rx) = crossbeam_channel::bounded(capacity);
         Self {
@@ -670,9 +676,12 @@ impl BufferPool {
         rx.try_recv().unwrap_or_else(|_| Vec::with_capacity(hint))
     }
 
-    fn give<T>(tx: &crossbeam_channel::Sender<Vec<T>>, mut buf: Vec<T>) {
+    fn give<T>(tx: &crossbeam_channel::Sender<Vec<T>>, mut buf: Vec<T>, hint: usize) {
         if buf.capacity() > 0 {
             buf.clear();
+            if buf.capacity() > 4 * hint {
+                buf.shrink_to(hint);
+            }
             let _ = tx.try_send(buf);
         }
     }
@@ -690,15 +699,15 @@ impl BufferPool {
     }
 
     fn recycle_scratch(&self, vertices: Vec<TerrainVertex>) {
-        Self::give(&self.scratch_tx, vertices);
+        Self::give(&self.scratch_tx, vertices, SECTION_VERTEX_HINT);
     }
 
     fn recycle_vertices(&self, vertices: Vec<PackedVertex>) {
-        Self::give(&self.vtx_tx, vertices);
+        Self::give(&self.vtx_tx, vertices, SECTION_VERTEX_HINT);
     }
 
     fn recycle_indices(&self, indices: Vec<u32>) {
-        Self::give(&self.idx_tx, indices);
+        Self::give(&self.idx_tx, indices, SECTION_INDEX_HINT);
     }
 }
 
@@ -829,7 +838,12 @@ impl MeshDispatcher {
             dry_foliage_colormap,
             biome_climate,
             cardinal_lighting,
-            pool: Arc::new(BufferPool::new(1024)),
+            // Scratch only lives inside a job, so each worker needs at most a
+            // column's worth.
+            pool: Arc::new(BufferPool::new(
+                worker_count * POOLED_COLUMN_SECTIONS,
+                MESH_POOL_CAPACITY,
+            )),
         }
     }
 
@@ -1678,14 +1692,6 @@ fn mesh_chunk_snapshot(
     let by_end = min_y + range.end * 16;
 
     let mut sinks: Vec<MeshSink> = (0..section_count).map(|_| MeshSink::default()).collect();
-    // In-range sections get recycled buffers (capacity retained from earlier
-    // meshes) so the worker fills them without going through the OS allocator.
-    // The cutout list stays un-pooled (empty for the common all-solid section).
-    for si in range.clone() {
-        let sink = &mut sinks[si as usize];
-        sink.vertices = pool.take_scratch();
-        sink.solid = pool.take_indices();
-    }
 
     snapshot.blocks = Some(BlockSlice::build(
         &snapshot.chunks,
@@ -1763,6 +1769,14 @@ fn mesh_chunk_snapshot(
                 let s =
                     (((by - min_y) / 16) as usize).min((section_count as usize).saturating_sub(1));
                 let sink = &mut sinks[s];
+                // A section takes recycled buffers (capacity retained from
+                // earlier meshes) on its first block, so air sections never
+                // do. The cutout list stays un-pooled (empty for the common
+                // all-solid section).
+                if sink.vertices.capacity() == 0 {
+                    sink.vertices = pool.take_scratch();
+                    sink.solid = pool.take_indices();
+                }
 
                 // Section-local base (matching the origin buffer.rs derives), so
                 // vertex positions never pass through absolute f32 world space.
@@ -1899,7 +1913,7 @@ fn emit_baked_model(
             }
         }
 
-        let region = uv_map.get_region(&quad.texture);
+        let region = uv_map.region(quad.texture);
         let tint = tint_color(quad.tint, snapshot, state, bx, by, bz);
         let lights = if let Some(dir) = quad.cullface {
             compute_face_ao(snapshot, registry, bx, by, bz, dir, quad.shade_face)
@@ -2341,7 +2355,7 @@ fn emit_multipart(
             }
         }
 
-        let region = uv_map.get_region(&quad.texture);
+        let region = uv_map.region(quad.texture);
         let tint = tint_color(quad.tint, snapshot, state, bx, by, bz);
         emit_face(
             sink,

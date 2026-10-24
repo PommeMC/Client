@@ -102,7 +102,10 @@ impl Drop for ConnectionHandle {
 }
 
 pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> ConnectionHandle {
-    let (event_tx, event_rx) = crossbeam_channel::bounded(4096);
+    // Chunk events carry their section and light bytes (up to ~150 KB each),
+    // so the queue stays short; a full queue blocks the network task until the
+    // game thread drains it, which it does every frame.
+    let (event_tx, event_rx) = crossbeam_channel::bounded(256);
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<Outbound>();
     let game_packet_tx = packet_tx.clone();
     let packet_tx = PacketSender::new(packet_tx);

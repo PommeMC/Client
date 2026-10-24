@@ -1,11 +1,15 @@
 //! Vanilla `DataLayer`: one section's light as 4096 nibbles, lazily
 //! materialized so homogeneous layers (all-0, all-15) stay allocation-free.
+//! Clones share the bytes until one of them is written, like vanilla's
+//! `swapSectionMap`, which copies a layer only when it changes.
+
+use std::sync::Arc;
 
 pub(crate) const LAYER_BYTES: usize = 2048;
 
 #[derive(Clone)]
 pub(crate) struct DataLayer {
-    data: Option<Box<[u8; LAYER_BYTES]>>,
+    data: Option<Arc<[u8; LAYER_BYTES]>>,
     default: u8,
 }
 
@@ -27,7 +31,7 @@ impl DataLayer {
         }
     }
 
-    pub fn from_bytes(data: Box<[u8; LAYER_BYTES]>) -> Self {
+    pub fn from_bytes(data: Arc<[u8; LAYER_BYTES]>) -> Self {
         Self {
             data: Some(data),
             default: 0,
@@ -68,30 +72,19 @@ impl DataLayer {
         self.data.is_none() && self.default == 0
     }
 
-    /// Vanilla `isDefinitelyHomogenous`: still a lazy fill, no byte array.
-    pub fn is_homogeneous(&self) -> bool {
-        self.data.is_none()
+    /// The nibble bytes, or `None` for a homogeneous layer (vanilla
+    /// `isDefinitelyHomogenous`).
+    pub fn as_bytes(&self) -> Option<&[u8; LAYER_BYTES]> {
+        self.data.as_deref()
     }
 
-    /// A full layer of the homogeneous default, both nibbles packed per byte.
-    fn default_bytes(&self) -> Box<[u8; LAYER_BYTES]> {
-        let nibble = self.default & 0xF;
-        Box::new([nibble | nibble << 4; LAYER_BYTES])
-    }
-
+    /// The bytes to write, copied first if another clone shares them.
     fn materialize(&mut self) -> &mut [u8; LAYER_BYTES] {
-        if self.data.is_none() {
-            self.data = Some(self.default_bytes());
-        }
-        self.data.as_mut().unwrap()
-    }
-
-    /// The layer as raw nibble bytes, materializing homogeneous layers.
-    pub fn to_bytes(&self) -> Box<[u8; LAYER_BYTES]> {
-        match &self.data {
-            Some(data) => data.clone(),
-            None => self.default_bytes(),
-        }
+        let nibble = self.default & 0xF;
+        Arc::make_mut(
+            self.data
+                .get_or_insert_with(|| Arc::new([nibble | nibble << 4; LAYER_BYTES])),
+        )
     }
 }
 
@@ -105,8 +98,7 @@ mod tests {
         assert!(layer.is_empty());
         layer.set(1, 2, 3, 15);
         // index = 2<<8 | 3<<4 | 1 = 561 (odd -> high nibble of byte 280).
-        let bytes = layer.to_bytes();
-        assert_eq!(bytes[280], 0xF0);
+        assert_eq!(layer.as_bytes().unwrap()[280], 0xF0);
         assert_eq!(layer.get(1, 2, 3), 15);
         assert_eq!(layer.get(0, 2, 3), 0);
         layer.set(0, 2, 3, 7);
@@ -120,12 +112,32 @@ mod tests {
         let mut layer = DataLayer::filled(15);
         assert_eq!(layer.get(0, 0, 0), 15);
         assert!(!layer.is_empty());
-        assert_eq!(layer.to_bytes()[0], 0xFF);
+        assert!(layer.as_bytes().is_none());
         layer.set(5, 5, 5, 3);
+        assert_eq!(layer.as_bytes().unwrap()[0], 0xFF);
         assert_eq!(layer.get(5, 5, 5), 3);
         assert_eq!(layer.get(6, 5, 5), 15);
         layer.fill(0);
         assert!(layer.is_empty());
         assert_eq!(layer.get(5, 5, 5), 0);
+    }
+
+    #[test]
+    fn clones_share_bytes_until_one_is_written() {
+        let mut engine = DataLayer::new();
+        engine.set(0, 0, 0, 9);
+        let published = engine.clone();
+        assert!(std::ptr::eq(
+            engine.as_bytes().unwrap(),
+            published.as_bytes().unwrap()
+        ));
+        engine.set(1, 0, 0, 4);
+        assert!(!std::ptr::eq(
+            engine.as_bytes().unwrap(),
+            published.as_bytes().unwrap()
+        ));
+        assert_eq!(published.get(1, 0, 0), 0);
+        assert_eq!(published.get(0, 0, 0), 9);
+        assert_eq!(engine.get(1, 0, 0), 4);
     }
 }

@@ -405,6 +405,18 @@ pub fn destroy_buffers(
     }
 }
 
+/// Frees a staging buffer whose upload has returned; the uploads wait for
+/// their copy, so the buffer is already unused.
+pub fn free_staging(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    buffer: vk::Buffer,
+    allocation: Allocation,
+) {
+    device.destroy_buffer(buffer, None);
+    allocator.lock().unwrap().free(allocation).ok();
+}
+
 pub fn upload_image(
     device: &vk::Device,
     queue: vk::Queue,
