@@ -1,4 +1,6 @@
 //! Vanilla `TitleScreen`, drawn when the theme switcher is set to Default.
+//! The Bedrock theme draws it too, with Bedrock's logo in place of the Java
+//! one.
 //!
 //! Positions come straight from `TitleScreen.init` / `LogoRenderer` /
 //! `SplashRenderer` in GUI units and are multiplied by the GUI scale, so the
@@ -23,6 +25,13 @@ const EDITION_W: f32 = 128.0;
 const EDITION_H: f32 = 14.0;
 const LOGO_HEIGHT_OFFSET: f32 = 30.0;
 const EDITION_LOGO_OVERLAP: f32 = 7.0;
+
+/// Bedrock's `title_panel_win10`: 55% of the screen wide, below the start
+/// screen's 12% top padding.
+const BEDROCK_TITLE_SCREEN_W: f32 = 0.55;
+const BEDROCK_TITLE_TOP: f32 = 0.12;
+/// `title.png` is 1937x333.
+const BEDROCK_TITLE_ASPECT: f32 = 333.0 / 1937.0;
 
 /// `SplashRenderer`
 const SPLASH_WIDTH_OFFSET: f32 = 123.0;
@@ -78,24 +87,43 @@ impl MainMenu {
         let col_x = cx - COL_W / 2.0 * gs;
         let col_w = COL_W * gs;
 
-        elements.push(MenuElement::Image {
-            x: cx - LOGO_W / 2.0 * gs,
-            y: LOGO_HEIGHT_OFFSET * gs,
-            w: LOGO_W * gs,
-            h: LOGO_H * gs,
-            sprite: SpriteId::MinecraftLogo,
-            tint: WHITE,
-        });
-        elements.push(MenuElement::Image {
-            x: cx - EDITION_W / 2.0 * gs,
-            y: (LOGO_HEIGHT_OFFSET + LOGO_H - EDITION_LOGO_OVERLAP) * gs,
-            w: EDITION_W * gs,
-            h: EDITION_H * gs,
-            sprite: SpriteId::MinecraftEdition,
-            tint: WHITE,
-        });
+        let splash_pivot = if self.theme == PanoramaTheme::Bedrock {
+            let w = screen_w * BEDROCK_TITLE_SCREEN_W;
+            let h = w * BEDROCK_TITLE_ASPECT;
+            let x = cx - w / 2.0;
+            let y = screen_h * BEDROCK_TITLE_TOP;
+            elements.push(MenuElement::Image {
+                x,
+                y,
+                w,
+                h,
+                sprite: SpriteId::BedrockTitle,
+                tint: WHITE,
+            });
+            // Inset from the logo's corner as vanilla's is from its own.
+            let inset = (LOGO_W / 2.0 - SPLASH_WIDTH_OFFSET) * gs;
+            (x + w - inset, y + h - inset)
+        } else {
+            elements.push(MenuElement::Image {
+                x: cx - LOGO_W / 2.0 * gs,
+                y: LOGO_HEIGHT_OFFSET * gs,
+                w: LOGO_W * gs,
+                h: LOGO_H * gs,
+                sprite: SpriteId::MinecraftLogo,
+                tint: WHITE,
+            });
+            elements.push(MenuElement::Image {
+                x: cx - EDITION_W / 2.0 * gs,
+                y: (LOGO_HEIGHT_OFFSET + LOGO_H - EDITION_LOGO_OVERLAP) * gs,
+                w: EDITION_W * gs,
+                h: EDITION_H * gs,
+                sprite: SpriteId::MinecraftEdition,
+                tint: WHITE,
+            });
+            (cx + SPLASH_WIDTH_OFFSET * gs, SPLASH_HEIGHT_OFFSET * gs)
+        };
 
-        self.push_splash(&mut elements, cx, gs, &text_width_fn);
+        self.push_splash(&mut elements, splash_pivot, gs, &text_width_fn);
 
         // Realms is never enabled.
         let rows: [(&str, bool); 3] = [
@@ -343,7 +371,7 @@ impl MainMenu {
     fn push_splash(
         &self,
         elements: &mut Vec<MenuElement>,
-        cx: f32,
+        pivot: (f32, f32),
         gs: f32,
         text_width_fn: &impl Fn(&str, f32) -> f32,
     ) {
@@ -357,7 +385,6 @@ impl MainMenu {
         let phase = 1.8 - ((millis as f32 / 1000.0 * TAU).sin() * 0.1).abs();
         let text_scale = phase * 100.0 / (text_w + 32.0);
 
-        let pivot = (cx + SPLASH_WIDTH_OFFSET * gs, SPLASH_HEIGHT_OFFSET * gs);
         let scale = common::FONT_SIZE * gs * text_scale;
         elements.push(MenuElement::McTextRotated {
             // `accept(LEFT, -textWidth / 2, -8, ...)` in the scaled frame.

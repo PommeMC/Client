@@ -594,6 +594,7 @@ pub(super) struct DropdownStyle {
     font: f32,
     icon_scale: f32,
     pad: f32,
+    bar_h: f32,
 }
 
 impl DropdownStyle {
@@ -604,6 +605,7 @@ impl DropdownStyle {
             font: 9.0 * gs,
             icon_scale: 11.0 * gs,
             pad: 10.0 * gs,
+            bar_h: 2.0 * gs,
         }
     }
 
@@ -641,10 +643,7 @@ impl DropdownStyle {
                 drop_w,
                 i,
                 items.len(),
-                item.label,
-                item.icon,
-                DROP_TEXT_BRIGHT,
-                item.color,
+                item,
             );
             if clicked && hovered {
                 picked = Some(i);
@@ -681,10 +680,7 @@ impl DropdownStyle {
         drop_w: f32,
         index: usize,
         count: usize,
-        label: &str,
-        icon: Option<(char, [f32; 4])>,
-        hover_color: [f32; 4],
-        normal_color: [f32; 4],
+        item: &DropItem,
     ) -> bool {
         let iy = drop_y + index as f32 * self.item_h;
         let rect = [drop_x, iy, drop_w, self.item_h];
@@ -707,24 +703,43 @@ impl DropdownStyle {
             });
         }
 
-        if let Some((icon_char, icon_col)) = icon {
+        if let Some((icon_char, icon_col)) = item.icon {
             elements.push(MenuElement::Icon {
                 x: drop_x + self.pad + self.icon_scale / 2.0,
                 y: iy + self.item_h / 2.0,
                 icon: icon_char,
                 scale: self.icon_scale,
-                color: if hovered { hover_color } else { icon_col },
+                color: if hovered { DROP_TEXT_BRIGHT } else { icon_col },
             });
         }
 
         elements.push(MenuElement::Text {
             x: drop_x + self.pad + self.icon_scale + 6.0,
             y: iy + (self.item_h - self.font) / 2.0,
-            text: label.to_string(),
+            text: item.label.to_string(),
             scale: self.font,
-            color: if hovered { hover_color } else { normal_color },
+            color: if hovered {
+                DROP_TEXT_BRIGHT
+            } else {
+                item.color
+            },
             centered: false,
         });
+
+        if let Some(progress) = item.progress {
+            let (x, w) = (drop_x + self.pad, drop_w - 2.0 * self.pad);
+            let y = iy + self.item_h - self.bar_h - self.pad / 2.0;
+            for (w, color) in [(w, [1.0, 1.0, 1.0, 0.1]), (w * progress, DROP_ACCENT)] {
+                elements.push(MenuElement::Rect {
+                    x,
+                    y,
+                    w,
+                    h: self.bar_h,
+                    corner_radius: self.bar_h / 2.0,
+                    color,
+                });
+            }
+        }
 
         hovered
     }
@@ -740,6 +755,8 @@ pub(super) struct DropItem {
     pub(super) label: &'static str,
     pub(super) icon: Option<(char, [f32; 4])>,
     pub(super) color: [f32; 4],
+    /// Drawn as a bar along the row's bottom.
+    pub(super) progress: Option<f32>,
 }
 
 pub(super) fn smoothstep(t: f32) -> f32 {
@@ -1011,6 +1028,7 @@ const DROP_TEXT: [f32; 4] = [0.89, 0.90, 0.96, 0.85];
 const DROP_TEXT_BRIGHT: [f32; 4] = [0.94, 0.95, 0.98, 1.0];
 const DROP_ACCENT: [f32; 4] = [0.39, 0.71, 1.0, 0.9];
 const DROP_LINK_ICON: [f32; 4] = [0.6, 0.7, 0.85, 0.8];
+const DROP_FAILED: [f32; 4] = [1.0, 0.45, 0.45, 0.9];
 
 const LINKS: [(&str, char, &str); 3] = [
     ("Website", ICON_GLOBE, "https://pomme.rs"),
@@ -1021,10 +1039,21 @@ const LINKS: [(&str, char, &str); 3] = [
         "https://github.com/PommeMC/Pomme-Client",
     ),
 ];
-const THEMES: [(&str, PanoramaTheme); 2] = [
+const THEMES: [(&str, PanoramaTheme); 3] = [
     ("Pomme", PanoramaTheme::Pomme),
     ("Default", PanoramaTheme::Default),
+    ("Bedrock", PanoramaTheme::Bedrock),
 ];
+
+/// The Bedrock theme's textures, downloaded the first time it's picked.
+#[derive(Clone, Copy)]
+pub(super) enum BedrockDownload {
+    Idle,
+    /// The fraction done.
+    Running(f32),
+    Failed,
+    Done,
+}
 
 /// The Pomme link and theme dropdowns and the theme wipe, shared by both
 /// title screens.
@@ -1057,6 +1086,7 @@ impl MainMenu {
             label,
             icon: Some((icon, DROP_LINK_ICON)),
             color: DROP_TEXT,
+            progress: None,
         });
         if let Some(i) = style.push_list(
             elements,
@@ -1075,7 +1105,8 @@ impl MainMenu {
     }
 
     /// Picking a different theme starts the wipe; the swap itself lands in
-    /// `drive_theme_transition` once the strips have closed.
+    /// `drive_theme_transition` once the strips have closed. Bedrock's files
+    /// download first, the row showing how far along they are.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push_theme_dropdown(
         &mut self,
@@ -1089,12 +1120,24 @@ impl MainMenu {
         drop_bottom: f32,
         drop_w: f32,
     ) {
+        let download = *self.bedrock.lock();
         let items = THEMES.map(|(label, theme)| {
             let selected = theme == self.theme;
+            let (icon, progress) = match download {
+                _ if selected => (Some((ICON_CHECK, DROP_ACCENT)), None),
+                BedrockDownload::Running(done) if theme == PanoramaTheme::Bedrock => {
+                    (Some((ICON_DOWNLOAD, DROP_ACCENT)), Some(done))
+                }
+                BedrockDownload::Failed if theme == PanoramaTheme::Bedrock => {
+                    (Some((ICON_RETRY, DROP_FAILED)), None)
+                }
+                _ => (None, None),
+            };
             DropItem {
                 label,
-                icon: selected.then_some((ICON_CHECK, DROP_ACCENT)),
+                icon,
                 color: if selected { DROP_ACCENT } else { DROP_TEXT },
+                progress,
             }
         });
         if let Some(i) = style.push_list(
@@ -1110,12 +1153,64 @@ impl MainMenu {
             &items,
         ) && THEMES[i].1 != self.theme
         {
+            self.pick_theme(THEMES[i].1);
+        }
+    }
+
+    pub(super) fn bedrock_installed(&self) -> bool {
+        pomme_install::bedrock::is_installed(&self.bedrock_dir)
+    }
+
+    pub(super) fn pick_theme(&mut self, theme: PanoramaTheme) {
+        self.bedrock_pending = theme == PanoramaTheme::Bedrock;
+        if self.bedrock_pending && !self.bedrock_installed() {
+            self.download_bedrock();
+        } else {
             self.transition = Some(ThemeTransition {
                 start: Instant::now(),
-                target: THEMES[i].1,
+                target: theme,
                 reloaded: false,
                 open_start: None,
             });
+        }
+    }
+
+    fn download_bedrock(&mut self) {
+        let state = Arc::clone(&self.bedrock);
+        {
+            let mut download = state.lock();
+            if matches!(*download, BedrockDownload::Running(_)) {
+                return;
+            }
+            *download = BedrockDownload::Running(0.0);
+        }
+        let root = self.bedrock_dir.clone();
+        self.rt.spawn(async move {
+            let report =
+                |p: pomme_install::Progress| *state.lock() = BedrockDownload::Running(p.fraction());
+            let result =
+                pomme_install::bedrock::install(crate::net::http::client(), &root, &report).await;
+            *state.lock() = match result {
+                Ok(()) => BedrockDownload::Done,
+                Err(reason) => {
+                    tracing::warn!("Bedrock theme download failed: {reason}");
+                    BedrockDownload::Failed
+                }
+            };
+        });
+    }
+
+    /// Starts the wipe into Bedrock once its download lands, unless another
+    /// theme was picked meanwhile.
+    fn finish_bedrock_download(&mut self) {
+        let mut download = self.bedrock.lock();
+        if !matches!(*download, BedrockDownload::Done) {
+            return;
+        }
+        *download = BedrockDownload::Idle;
+        drop(download);
+        if self.bedrock_pending && self.transition.is_none() {
+            self.pick_theme(PanoramaTheme::Bedrock);
         }
     }
 
@@ -1128,6 +1223,7 @@ impl MainMenu {
         screen_h: f32,
         key_bindings: &KeyBindings,
     ) -> Option<MenuAction> {
+        self.finish_bedrock_download();
         let mut action = None;
         let mut committed = false;
         if let Some(ref mut tr) = self.transition {
