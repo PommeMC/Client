@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::chat::wrap_spans;
-use crate::ui::common::{FONT_SIZE, rgb};
+use crate::ui::common::{FONT_SIZE, LINE_HEIGHT, rgb};
 use crate::ui::text::TextSpan;
 
 const TOAST_WIDTH: i32 = 160; // Toast.DEFAULT_WIDTH
@@ -18,8 +18,6 @@ const SLIDE_MS: i64 = 600; // ToastInstance.SLIDE_ANIMATION_DURATION_MS
 /// `notificationDisplayTime` option (pomme has none, so the default 1.0
 /// applies); tutorial toasts are unscaled even in vanilla.
 const DISPLAY_TIME_MS: f64 = 5000.0;
-/// Vanilla `font.lineHeight`.
-const LINE_HEIGHT: i32 = 9;
 
 const HEADER_COLOR_CHALLENGE: [f32; 4] = rgb(0xFF88FF); // vanilla -30465
 const HEADER_COLOR_NORMAL: [f32; 4] = rgb(0xFFFF00); // vanilla -256

@@ -87,6 +87,30 @@ pub(crate) fn find_line_break(
     None
 }
 
+/// Vanilla `Font.split` for unstyled text: `text` broken into lines no wider
+/// than `max_w`, with `char_width` measuring each character.
+pub(crate) fn wrap_plain(text: &str, max_w: f32, char_width: impl Fn(char) -> f32) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    loop {
+        let widths = chars[start..]
+            .iter()
+            .enumerate()
+            .map(|(offset, &ch)| (start + offset, ch, char_width(ch)));
+        match find_line_break(widths, max_w) {
+            Some((end, next)) => {
+                lines.push(chars[start..end].iter().collect());
+                start = next;
+            }
+            None => {
+                lines.push(chars[start..].iter().collect());
+                return lines;
+            }
+        }
+    }
+}
+
 /// A styled run of text (color plus formatting flags). The shared span type for
 /// rendering rich chat and server-MOTD text.
 #[derive(Clone, Debug, PartialEq)]
@@ -373,6 +397,20 @@ mod tests {
 
     use super::*;
     use crate::chat_component::{ClickEvent, HoverEvent};
+
+    #[test]
+    fn plain_text_wraps_at_spaces_and_splits_overlong_words() {
+        let wrap = |text: &str| wrap_plain(text, 5.0, |_| 1.0);
+        assert_eq!(wrap("ab cd efg"), ["ab cd", "efg"]);
+        assert_eq!(wrap("abcdefgh"), ["abcde", "fgh"]);
+        assert_eq!(
+            wrap(
+                "one
+two"
+            ),
+            ["one", "two"]
+        );
+    }
 
     #[test]
     fn head_atlas_keys_carry_the_whole_profile() {

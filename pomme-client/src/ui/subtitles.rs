@@ -5,15 +5,12 @@ use std::time::Instant;
 use glam::DVec3;
 
 use crate::renderer::pipelines::menu_overlay::MenuElement;
-use crate::ui::common::FONT_SIZE;
+use crate::ui::common::{FONT_SIZE, LINE_HEIGHT};
 use crate::ui::text::TextSpan;
 
 /// Vanilla `SubtitleOverlay.DISPLAY_TIME` (times the notification-display-time
 /// option, which pomme doesn't have).
 const DISPLAY_TIME_MS: f32 = 3000.0;
-
-/// Vanilla `Font.lineHeight`.
-const LINE_HEIGHT: i32 = 9;
 
 struct PlayedAt {
     pos: DVec3,

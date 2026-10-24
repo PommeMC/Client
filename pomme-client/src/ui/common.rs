@@ -10,6 +10,8 @@ use crate::ui::text_edit::TextFieldRenderInfo;
 
 pub const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 pub const FONT_SIZE: f32 = 8.0;
+/// Vanilla `Font.lineHeight`: one line of text plus its spacing.
+pub const LINE_HEIGHT: i32 = 9;
 pub const BTN_H: f32 = 20.0;
 /// `Tooltip.create` splits at this width.
 pub const TOOLTIP_WRAP: f32 = 170.0;

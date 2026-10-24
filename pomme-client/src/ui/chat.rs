@@ -10,6 +10,7 @@ use azalea_registry::builtin::ItemKind;
 use simdnbt::owned::{NbtCompound, NbtTag};
 
 use super::common;
+use super::common::LINE_HEIGHT;
 use crate::chat_component::{
     Argument, ClickEvent, Component, HoverEvent, ResolvedStyle, list_elements, normalize_identifier,
 };
@@ -2270,7 +2271,6 @@ const CONFIRM_BUTTON_WIDTH: i32 = 150;
 const CONFIRM_LINK_BUTTON_WIDTH: i32 = 100;
 /// `ConfirmScreen.addMessage`'s `setMaxRows`.
 const CONFIRM_MESSAGE_MAX_ROWS: usize = 15;
-const LINE_HEIGHT: i32 = 9;
 
 /// Vanilla `ConfirmScreen`: title, wrapped message, optional extra line and a
 /// button row in a vertical `LinearLayout` centred on the screen.

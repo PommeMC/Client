@@ -1030,12 +1030,18 @@ impl MainMenu {
         }
     }
 
+    /// Vanilla `DisconnectedScreen`: a vertical layout centred on the screen,
+    /// holding the title and the reason (wrapped to `width - 50`, centred),
+    /// each padded 10, then the back button padded 2.
+    // TODO: vanilla titles it by cause (`connect.failed` "Failed to connect to
+    // the server", `disconnect.lost` "Connection Lost"), and its button is
+    // `gui.toMenu` "Back to Server List", returning to the screen it came from.
     pub(super) fn build_disconnected(
         &mut self,
         screen_w: f32,
         screen_h: f32,
         input: &MenuInput,
-        _text_width_fn: &dyn Fn(&str, f32) -> f32,
+        text_width_fn: &dyn Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
         let reason = match &self.screen {
             Screen::Disconnected(r) => r.clone(),
@@ -1043,38 +1049,42 @@ impl MainMenu {
         };
 
         let gs = self.gui_scale(screen_w, screen_h);
-        let title_size = 18.0 * gs;
-        let body_size = 11.0 * gs;
-        let btn_w = 160.0 * gs;
-        let btn_h = 30.0 * gs;
-        let gap = 12.0 * gs;
+        let fs = common::FONT_SIZE * gs;
+        let line_h = common::LINE_HEIGHT as f32 * gs;
+        let btn_w = 200.0 * gs;
+        let btn_h = common::BTN_H * gs;
+        let (text_pad, btn_pad) = (10.0 * gs, 2.0 * gs);
 
+        let max_w = ((screen_w / gs).floor() - 50.0) * gs;
+        let lines = crate::ui::text::wrap_plain(&reason, max_w, |ch| {
+            text_width_fn(ch.encode_utf8(&mut [0; 4]), fs)
+        });
+        let reason_h = lines.len() as f32 * line_h;
+        let total_h = line_h + reason_h + btn_h + 4.0 * text_pad + 2.0 * btn_pad;
+        // `FrameLayout.centerInRectangle` truncates to whole gui units.
+        let top = ((screen_h - total_h) / 2.0 / gs).floor() * gs;
         let cx = screen_w / 2.0;
-        let total_h = title_size + gap + body_size + gap * 2.0 + btn_h;
-        let top_y = (screen_h - total_h) / 2.0;
 
         let mut elements = Vec::new();
         let mut any_hovered = false;
+        let mut text = |text: String, y: f32| {
+            elements.push(MenuElement::Text {
+                x: cx,
+                y,
+                text,
+                scale: fs,
+                color: common::WHITE,
+                centered: true,
+            })
+        };
+        let title_y = top + text_pad;
+        text("Disconnected".into(), title_y);
+        let reason_y = title_y + line_h + 2.0 * text_pad;
+        for (i, line) in lines.into_iter().enumerate() {
+            text(line, reason_y + i as f32 * line_h);
+        }
 
-        elements.push(MenuElement::Text {
-            x: cx,
-            y: top_y,
-            text: "Disconnected".into(),
-            scale: title_size,
-            color: [1.0, 0.4, 0.4, 1.0],
-            centered: true,
-        });
-
-        elements.push(MenuElement::Text {
-            x: cx,
-            y: top_y + title_size + gap,
-            text: reason,
-            scale: body_size,
-            color: [0.85, 0.85, 0.85, 0.9],
-            centered: true,
-        });
-
-        let btn_y = top_y + title_size + gap + body_size + gap * 2.0;
+        let btn_y = reason_y + reason_h + text_pad + btn_pad;
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
         if push_button_f(
@@ -1139,5 +1149,43 @@ fn join_protocol(
     match ping_results.get(address) {
         Some(PingState::Success { protocol, .. }) => Some(*protocol),
         _ => persisted,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_disconnect_reason_wraps_inside_the_screen() {
+        const W: f32 = 1280.0;
+        let mut menu = test_menu("pomme-disconnect-wrap-test");
+        let reason =
+            "Connection failed: server requires authentication but no access token was available";
+        menu.show_disconnect(reason.into());
+        let width = |text: &str, scale: f32| text.chars().count() as f32 * scale * 2.0;
+        let result = menu.build(W, 720.0, &MenuInput::default(), width);
+        let gs = menu.gui_scale(W, 720.0);
+        let lines: Vec<&str> = result
+            .elements
+            .iter()
+            .filter_map(|e| match e {
+                MenuElement::Text { text, .. }
+                    if text != "Disconnected" && text != "Back to Menu" =>
+                {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(lines.len() > 1, "the reason wraps: {lines:?}");
+        let max = (W / gs - 50.0) * gs;
+        for line in &lines {
+            assert!(
+                width(line, common::FONT_SIZE * gs) <= max,
+                "{line:?} overflows"
+            );
+        }
+        assert_eq!(lines.join(" "), reason);
     }
 }

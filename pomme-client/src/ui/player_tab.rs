@@ -4,13 +4,12 @@
 use crate::entity::EntityStore;
 use crate::player::tab_list::{TabList, TabListPlayer};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
-use crate::ui::common::FONT_SIZE;
+use crate::ui::common::{FONT_SIZE, LINE_HEIGHT};
 use crate::ui::hud::Scoreboard;
 use crate::ui::text::{TextSpan, span_text};
 
 const MAX_ROWS_PER_COL: usize = 20;
 const HEAD_COL_W: i32 = 9;
-const LINE_HEIGHT: i32 = 9;
 const SPECTATOR_GAME_MODE: u8 = 3;
 
 const BG_BACKDROP: [f32; 4] = [0.0, 0.0, 0.0, 0.5]; // Integer.MIN_VALUE (0x80000000)
