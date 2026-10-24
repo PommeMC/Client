@@ -149,51 +149,55 @@ fn open_url_ios(url: &str) -> Result<(), String> {
 #[cfg(target_os = "android")]
 fn open_url_android(url: &str) -> jni::errors::Result<()> {
     use jni::objects::{JObject, JValue};
+    use jni::{jni_sig, jni_str};
 
     let Some(app) = ANDROID_APP.read().ok().and_then(|app| app.clone()) else {
         return Ok(());
     };
-    // SAFETY: android-activity's pointers are the process's JavaVM and the
-    // activity's global reference, both alive while the app runs.
-    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
-    let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
-    let mut env = vm.attach_current_thread()?;
-    let url = env.new_string(url)?;
-    let uri = env
-        .call_static_method(
-            "android/net/Uri",
-            "parse",
-            "(Ljava/lang/String;)Landroid/net/Uri;",
-            &[JValue::Object(&url)],
-        )?
-        .l()?;
-    let action = env.new_string("android.intent.action.VIEW")?;
-    let intent = env.new_object(
-        "android/content/Intent",
-        "(Ljava/lang/String;Landroid/net/Uri;)V",
-        &[JValue::Object(&action), JValue::Object(&uri)],
-    )?;
-    let extras = env.new_object("android/os/Bundle", "()V", &[])?;
-    let session = env.new_string("android.support.customtabs.extra.SESSION")?;
-    env.call_method(
-        &extras,
-        "putBinder",
-        "(Ljava/lang/String;Landroid/os/IBinder;)V",
-        &[JValue::Object(&session), JValue::Object(&JObject::null())],
-    )?;
-    env.call_method(
-        &intent,
-        "putExtras",
-        "(Landroid/os/Bundle;)Landroid/content/Intent;",
-        &[JValue::Object(&extras)],
-    )?;
-    env.call_method(
-        &activity,
-        "startActivity",
-        "(Landroid/content/Intent;)V",
-        &[JValue::Object(&intent)],
-    )?;
-    Ok(())
+    // SAFETY: android-activity's pointer is the process's JavaVM, alive while
+    // the app runs.
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    vm.attach_current_thread(|env| {
+        // SAFETY: the activity's global reference outlives this frame, and
+        // `JObject` never deletes the reference it wraps.
+        let activity = unsafe { JObject::from_raw(env, app.activity_as_ptr().cast()) };
+        let url = env.new_string(url)?;
+        let uri = env
+            .call_static_method(
+                jni_str!("android/net/Uri"),
+                jni_str!("parse"),
+                jni_sig!("(Ljava/lang/String;)Landroid/net/Uri;"),
+                &[JValue::Object(&url)],
+            )?
+            .l()?;
+        let action = env.new_string("android.intent.action.VIEW")?;
+        let intent = env.new_object(
+            jni_str!("android/content/Intent"),
+            jni_sig!("(Ljava/lang/String;Landroid/net/Uri;)V"),
+            &[JValue::Object(&action), JValue::Object(&uri)],
+        )?;
+        let extras = env.new_object(jni_str!("android/os/Bundle"), jni_sig!("()V"), &[])?;
+        let session = env.new_string("android.support.customtabs.extra.SESSION")?;
+        env.call_method(
+            &extras,
+            jni_str!("putBinder"),
+            jni_sig!("(Ljava/lang/String;Landroid/os/IBinder;)V"),
+            &[JValue::Object(&session), JValue::Object(&JObject::null())],
+        )?;
+        env.call_method(
+            &intent,
+            jni_str!("putExtras"),
+            jni_sig!("(Landroid/os/Bundle;)Landroid/content/Intent;"),
+            &[JValue::Object(&extras)],
+        )?;
+        env.call_method(
+            &activity,
+            jni_str!("startActivity"),
+            jni_sig!("(Landroid/content/Intent;)V"),
+            &[JValue::Object(&intent)],
+        )?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]
