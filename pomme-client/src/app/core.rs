@@ -271,7 +271,7 @@ impl crate::world::piston::PistonLevel for ClientPistonLevel<'_> {
 
 /// Vanilla `PistonMovingBlockEntity.tick` for the client's moving blocks, at
 /// the block-entity point of the game tick; their landings remesh at once.
-pub(crate) fn tick_moving_pistons(core: &AppCore, game: &mut GameState) {
+pub(crate) fn tick_moving_pistons(game: &mut GameState) {
     let mut remesh = Vec::new();
     let mut level = ClientPistonLevel::new(game, &mut remesh);
     let tick = level.game.tick_count;
@@ -296,19 +296,13 @@ pub(crate) fn tick_moving_pistons(core: &AppCore, game: &mut GameState) {
             );
         }
     });
-    enqueue_edits(game, &remesh, core.menu.chunk_detail);
+    enqueue_edits(game, &remesh);
 }
 
-/// Meshes edited sections at once on the priority lane, ungated by
-/// visibility.
-fn enqueue_edits(
-    game: &mut GameState,
-    sections: &[(crate::position::ChunkPos, i32)],
-    chunk_detail: u32,
-) {
-    let player_chunk = game.player_chunk();
+/// Marks edited sections for remeshing as recompiles, ungated by visibility.
+fn enqueue_edits(game: &mut GameState, sections: &[(crate::position::ChunkPos, i32)]) {
     for &(col, si) in sections {
-        game.enqueue_section_edit(col, si, chunk_lod(col, player_chunk, chunk_detail));
+        game.enqueue_section_edit(col, si);
     }
 }
 
@@ -424,7 +418,6 @@ impl GameState {
         // already meshed.
         self.section_vis.clear();
         self.section_vis_epoch.clear();
-        self.meshed.clear();
         self.compiled.clear();
         self.mesh_dispatcher = mesh_source.create_mesh_dispatcher(
             self.block_registry.owned_render_view(),
@@ -432,6 +425,7 @@ impl GameState {
             None,
             cardinal_light,
         );
+        self.reset_mesh_columns();
     }
 
     pub fn load_chunk(
@@ -479,12 +473,10 @@ impl GameState {
             .queue_task(crate::world::light::LightTask::Remove {
                 pos: (pos.x, pos.z),
             });
-        self.content_gen.remove(&pos);
-        self.meshed.remove(&pos);
+        self.forget_mesh_column(pos);
         self.compiled.remove(&pos);
         self.vis_mask.remove(&pos);
         self.vis_tiers.remove(&pos);
-        self.section_gen.retain(|(p, _), _| *p != pos);
         self.section_vis.retain(|(p, _), _| *p != pos);
         self.section_vis_epoch.retain(|(p, _), _| *p != pos);
     }
@@ -1577,7 +1569,7 @@ impl AppCore {
             dry_foliage,
         );
 
-        game.meshed.clear();
+        game.reset_mesh_columns();
         game.section_vis.clear();
         game.section_vis_epoch.clear();
         game.vis_mask.clear();
@@ -3024,7 +3016,7 @@ impl AppCore {
         }
 
         let player_chunk = game.player_chunk();
-        enqueue_edits(game, &priority_remesh, self.menu.chunk_detail);
+        enqueue_edits(game, &priority_remesh);
 
         // Refresh the frustum tiers (throttled to camera movement / new loads),
         // then enqueue everything that needs meshing — visible-first, with hidden
@@ -3040,7 +3032,7 @@ impl AppCore {
         game.last_update_phases.visibility_ms = ms(t_vis);
 
         let t_rescan = std::time::Instant::now();
-        game.rescan_mesh_jobs(player_chunk, self.menu.chunk_detail);
+        game.rescan_mesh_jobs(self.menu.chunk_detail);
         game.last_update_phases.rescan_ms = ms(t_rescan);
 
         disconnect_reason
