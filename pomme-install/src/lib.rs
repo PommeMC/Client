@@ -32,6 +32,16 @@ pub struct Progress {
     pub status: String,
 }
 
+impl Progress {
+    pub fn fraction(&self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.done as f32 / self.total as f32
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct VersionManifest {
     versions: Vec<VersionEntry>,

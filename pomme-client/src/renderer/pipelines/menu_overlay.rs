@@ -28,6 +28,8 @@ pub const ICON_CHECK: char = '\u{f00c}';
 pub const ICON_USERS: char = '\u{f0c0}';
 pub const ICON_LANGUAGE: char = '\u{f1ab}';
 pub const ICON_UNIVERSAL_ACCESS: char = '\u{f29a}';
+pub const ICON_DOWNLOAD: char = '\u{f019}';
+pub const ICON_RETRY: char = '\u{f2f9}';
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -158,6 +160,8 @@ fn build_font_atlas() -> FontAtlas {
         ICON_USERS,
         ICON_LANGUAGE,
         ICON_UNIVERSAL_ACCESS,
+        ICON_DOWNLOAD,
+        ICON_RETRY,
     ]
     .iter()
     .map(|&ch| (ch, &icon_font))
@@ -311,6 +315,7 @@ pub struct MenuOverlayPipeline {
 }
 
 impl MenuOverlayPipeline {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &vk::Device,
         queue: vk::Queue,
@@ -318,6 +323,7 @@ impl MenuOverlayPipeline {
         render_pass: vk::RenderPass,
         allocator: &Arc<Mutex<Allocator>>,
         font_sources: FontSources<'_>,
+        bedrock_ui_dir: Option<&Path>,
         font_layer_limit: u32,
     ) -> Result<Self, String> {
         let atlas = build_font_atlas();
@@ -437,6 +443,7 @@ impl MenuOverlayPipeline {
             allocator,
             font_sources.jar_assets_dir,
             font_sources.asset_index,
+            bedrock_ui_dir,
         );
 
         let sprite_sampler = unsafe { util::create_nearest_sampler(device) };
@@ -1386,7 +1393,13 @@ impl MenuOverlayPipeline {
         end as u32
     }
 
-    pub fn set_item_atlas(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
+    fn bind_texture(
+        &self,
+        device: &vk::Device,
+        binding: u32,
+        view: vk::ImageView,
+        sampler: vk::Sampler,
+    ) {
         let info = vk::DescriptorImageInfo {
             sampler,
             image_view: view,
@@ -1394,7 +1407,7 @@ impl MenuOverlayPipeline {
         };
         let write = vk::WriteDescriptorSet {
             dst_set: self.tex_set,
-            dst_binding: 2,
+            dst_binding: binding,
             descriptor_count: 1,
             descriptor_type: vk::DescriptorType::CombinedImageSampler,
             image_info: &info,
@@ -1403,21 +1416,56 @@ impl MenuOverlayPipeline {
         device.update_descriptor_sets(&[write], &[]);
     }
 
+    pub fn set_item_atlas(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
+        self.bind_texture(device, 2, view, sampler);
+    }
+
     pub fn set_blur_texture(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
-        let info = vk::DescriptorImageInfo {
-            sampler,
-            image_view: view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        self.bind_texture(device, 4, view, sampler);
+    }
+
+    pub fn has_sprite(&self, id: SpriteId) -> bool {
+        self.sprite_atlas.regions.contains_key(&id)
+    }
+
+    /// Rebuilds the sprite atlas, for sprites whose files arrived after it was
+    /// built. Call with the device idle: the old image is destroyed right away.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reload_sprite_atlas(
+        &mut self,
+        device: &vk::Device,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        allocator: &Arc<Mutex<Allocator>>,
+        jar_assets_dir: &Path,
+        asset_index: &Option<AssetIndex>,
+        bedrock_ui_dir: Option<&Path>,
+    ) {
+        let (atlas, image, view, allocation, staging_buffer, staging_allocation) =
+            build_sprite_atlas(
+                device,
+                queue,
+                command_pool,
+                allocator,
+                jar_assets_dir,
+                asset_index,
+                bedrock_ui_dir,
+            );
+        self.bind_texture(device, 1, view, self.sprite_sampler);
+        let mut old = TextureResources {
+            // The sampler stays; destroying a null one is a no-op.
+            sampler: vk::Sampler::null(),
+            image: std::mem::replace(&mut self.sprite_image, image),
+            view: std::mem::replace(&mut self.sprite_view, view),
+            image_alloc: self.sprite_allocation.replace(allocation),
+            staging_buffer: std::mem::replace(&mut self.sprite_staging_buffer, staging_buffer),
+            staging_alloc: std::mem::replace(
+                &mut self.sprite_staging_allocation,
+                staging_allocation,
+            ),
         };
-        let write = vk::WriteDescriptorSet {
-            dst_set: self.tex_set,
-            dst_binding: 4,
-            descriptor_count: 1,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            image_info: &info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[write], &[]);
+        destroy_texture_resources(device, &mut util::lock_allocator(allocator), &mut old);
+        self.sprite_atlas = atlas;
     }
 
     pub fn update_favicon_atlas(
@@ -2581,6 +2629,7 @@ pub enum SpriteId {
     PommeLogo,
     MinecraftLogo,
     MinecraftEdition,
+    BedrockTitle,
     IconFriends,
     IconLanguage,
     IconAccessibility,
@@ -2689,7 +2738,7 @@ fn rotate_verts(verts: &mut [Vertex], pivot: (f32, f32), rotation: f32) {
 /// transparent border's black stays out of the edge texels' colour. The atlas
 /// stores straight alpha and the shader premultiplies at sample time, so a
 /// naive filter would darken every anti-aliased edge twice over.
-fn downscale_straight_alpha(src: &image::RgbaImage, size: u32) -> image::RgbaImage {
+fn downscale_straight_alpha(src: &image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
     let mut premul = image::Rgba32FImage::new(src.width(), src.height());
     for (dst, src) in premul.pixels_mut().zip(src.pixels()) {
         let a = f32::from(src[3]) / 255.0;
@@ -2703,9 +2752,8 @@ fn downscale_straight_alpha(src: &image::RgbaImage, size: u32) -> image::RgbaIma
 
     // Lanczos rings and the resize clamps each channel on its own, so colour
     // can land above its own alpha; undo the premultiply against that clamp.
-    let scaled =
-        image::imageops::resize(&premul, size, size, image::imageops::FilterType::Lanczos3);
-    let mut out = image::RgbaImage::new(size, size);
+    let scaled = image::imageops::resize(&premul, w, h, image::imageops::FilterType::Lanczos3);
+    let mut out = image::RgbaImage::new(w, h);
     for (dst, src) in out.pixels_mut().zip(scaled.pixels()) {
         let a = src[3].clamp(0.0, 1.0);
         let straight = |c: f32| {
@@ -2732,6 +2780,7 @@ fn build_sprite_atlas(
     allocator: &Arc<Mutex<Allocator>>,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
+    bedrock_ui_dir: Option<&Path>,
 ) -> (
     SpriteAtlas,
     vk::Image,
@@ -4025,13 +4074,33 @@ fn build_sprite_atlas(
         Ok(img) => {
             images.push((
                 SpriteId::PommeLogo,
-                downscale_straight_alpha(&img.to_rgba8(), POMME_LOGO_SIZE).into_raw(),
+                downscale_straight_alpha(&img.to_rgba8(), POMME_LOGO_SIZE, POMME_LOGO_SIZE)
+                    .into_raw(),
                 POMME_LOGO_SIZE,
                 POMME_LOGO_SIZE,
                 0.0,
             ));
         }
         Err(e) => tracing::warn!("Failed to load pomme logo: {e}"),
+    }
+
+    // The Bedrock title draws at 55% of the screen width, 1056 px at 1080p, so
+    // 1024 keeps the NEAREST sampler close to 1:1 there.
+    const BEDROCK_TITLE_W: u32 = 1024;
+    if let Some(dir) = bedrock_ui_dir {
+        match crate::assets::load_image(&dir.join("title.png")) {
+            Ok(img) => {
+                let h = (img.height() * BEDROCK_TITLE_W).div_ceil(img.width());
+                images.push((
+                    SpriteId::BedrockTitle,
+                    downscale_straight_alpha(&img.to_rgba8(), BEDROCK_TITLE_W, h).into_raw(),
+                    BEDROCK_TITLE_W,
+                    h,
+                    0.0,
+                ));
+            }
+            Err(e) => tracing::debug!("No Bedrock title yet: {e}"),
+        }
     }
 
     let sizes: Vec<(u32, u32)> = images.iter().map(|sprite| (sprite.2, sprite.3)).collect();
@@ -5561,7 +5630,7 @@ mod tests {
             };
         }
 
-        let out = downscale_straight_alpha(&src, 4);
+        let out = downscale_straight_alpha(&src, 4, 4);
         assert!(out.pixels().any(|px| px[3] > 0 && px[3] < 255));
         for px in out.pixels().filter(|px| px[3] > 0) {
             assert_eq!([px[0], px[1], px[2]], [255, 255, 255], "alpha {}", px[3]);

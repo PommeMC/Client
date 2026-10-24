@@ -791,6 +791,7 @@ impl AppCore {
         let mut input = InputState::new();
         let mut menu = MainMenu::new(
             &data_dirs.game_dir,
+            data_dirs.bedrock_assets_dir.clone(),
             Arc::clone(&tokio_rt),
             user.username.clone(),
             version.clone(),

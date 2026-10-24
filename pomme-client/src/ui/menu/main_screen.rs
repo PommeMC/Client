@@ -17,7 +17,7 @@ impl MainMenu {
             PanoramaTheme::Pomme => {
                 self.build_main_pomme(screen_w, screen_h, input, text_width_fn, key_bindings)
             }
-            PanoramaTheme::Default => {
+            PanoramaTheme::Default | PanoramaTheme::Bedrock => {
                 self.build_main_vanilla(screen_w, screen_h, input, text_width_fn, key_bindings)
             }
         }

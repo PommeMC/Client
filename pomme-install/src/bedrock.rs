@@ -13,11 +13,10 @@ use crate::{Fetch, Hash, Progress};
 const REPO: &str = "Mojang/bedrock-samples";
 const TAG: &str = "v1.26.50.4";
 const COMMIT: &str = "46ba6ea985fb5a92d79a9419198f10dda14c199d";
+/// Bedrock's UI textures, relative to `dir`.
+pub const UI_DIR: &str = "resource_pack/textures/ui";
 /// The repo folders downloaded, with their tree shas at `COMMIT`.
-const FOLDERS: &[(&str, &str)] = &[(
-    "resource_pack/textures/ui",
-    "06a2b4631b9f8ef76579ed793b49852691de8aff",
-)];
+const FOLDERS: &[(&str, &str)] = &[(UI_DIR, "06a2b4631b9f8ef76579ed793b49852691de8aff")];
 const MARKER: &str = ".installed";
 
 #[derive(Deserialize)]

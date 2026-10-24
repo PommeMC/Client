@@ -173,11 +173,7 @@ impl Install {
         let (progress, status) = match state {
             State::Waiting => (0.0, String::new()),
             State::Running(p) => (
-                if p.total == 0 {
-                    0.0
-                } else {
-                    p.done as f32 / p.total as f32
-                },
+                p.fraction(),
                 match self.job {
                     Job::Update => format!("Updating Pomme: {}", p.status),
                     Job::Assets => format!("Minecraft {}: {}", core.version, p.status),

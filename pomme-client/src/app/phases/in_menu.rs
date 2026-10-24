@@ -3,7 +3,7 @@ use crate::app::core::AppCore;
 use crate::app::phases::{Gfx, Panorama};
 use crate::net::connection::{ConnectArgs, Transport};
 use crate::singleplayer::{self, World};
-use crate::ui::menu::MenuAction;
+use crate::ui::menu::{MenuAction, PanoramaTheme};
 
 pub enum MenuUpdateResult {
     None,
@@ -199,6 +199,10 @@ pub fn update_menu(
         MenuAction::ChangeTheme(theme) => {
             gfx.renderer
                 .reload_panorama(&theme.panorama_dir(&core.data_dirs));
+            if theme == PanoramaTheme::Bedrock {
+                gfx.renderer
+                    .load_bedrock_title(&core.data_dirs.bedrock_ui_dir());
+            }
             core.menu.start_transition_open();
         }
         MenuAction::Account(account) => {
