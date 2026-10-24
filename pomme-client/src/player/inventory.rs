@@ -85,10 +85,14 @@ impl Inventory {
 
     /// The non-empty stack in the selected hotbar slot.
     pub fn held_stack(&self, selected: u8) -> Option<&ItemStackData> {
-        match self.hotbar_slots().get(selected as usize) {
-            Some(ItemStack::Present(data)) if data.count > 0 => Some(data),
-            _ => None,
-        }
+        self.hotbar_slots()
+            .get(selected as usize)
+            .and_then(non_empty)
+    }
+
+    /// The non-empty main-hand then offhand stacks.
+    pub fn hand_stacks(&self, selected: u8) -> [Option<&ItemStackData>; 2] {
+        [self.held_stack(selected), non_empty(self.offhand())]
     }
 
     /// Remove one item (or the whole stack) from the selected hotbar slot,
@@ -107,6 +111,13 @@ impl Inventory {
             }
             _ => false,
         }
+    }
+}
+
+fn non_empty(stack: &ItemStack) -> Option<&ItemStackData> {
+    match stack {
+        ItemStack::Present(data) if data.count > 0 => Some(data),
+        _ => None,
     }
 }
 
