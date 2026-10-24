@@ -457,6 +457,7 @@ fn create_window(
 
 impl ApplicationHandler for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.core.menu.restore_bench_render_distance();
         // Minecraft.exitWorldAndClose runs screen().removed() before close().
         self.core.menu.flush_settings(&self.core.input.key_bindings);
     }

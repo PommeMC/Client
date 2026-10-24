@@ -687,6 +687,7 @@ pub struct MainMenu {
     settings_dir: PathBuf,
     /// Set by slider drags, written by `flush_settings`.
     settings_dirty: bool,
+    bench_render_distance: crate::benchmark::BenchRenderDistance,
     /// The title screen's splash line, rolled at launch and on every return
     /// from a world like vanilla's fresh `TitleScreen`. `None` renders nothing.
     pub splash: Option<String>,
@@ -832,6 +833,7 @@ impl MainMenu {
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             settings_dirty: false,
+            bench_render_distance: Default::default(),
             splash: None,
             menu_open_time: None,
             last_favicon_count: 0,
@@ -965,6 +967,16 @@ impl MainMenu {
         })
     }
 
+    pub fn set_bench_render_distance(&mut self, rd: u32) {
+        self.bench_render_distance
+            .set(&mut self.render_distance, rd);
+    }
+
+    pub fn restore_bench_render_distance(&mut self) -> Option<u32> {
+        self.bench_render_distance
+            .restore(&mut self.render_distance)
+    }
+
     /// Writes pending slider changes, vanilla `OptionsSubScreen.removed()`.
     pub fn flush_settings(&mut self, key_bindings: &KeyBindings) {
         if self.settings_dirty {
@@ -979,7 +991,10 @@ impl MainMenu {
             &Settings {
                 key_bindings: key_bindings.clone(),
                 gui_scale: self.gui_scale_setting,
-                render_distance: self.render_distance,
+                render_distance: self
+                    .bench_render_distance
+                    .saved()
+                    .unwrap_or(self.render_distance),
                 chunk_detail: self.chunk_detail,
                 simulation_distance: self.simulation_distance,
                 fov: self.fov,
@@ -1376,8 +1391,8 @@ impl MainMenu {
     }
 }
 
-/// `dir` must not exist: settings and the server list fall back to
-/// defaults, and a settings save silently fails instead of writing.
+/// With a `dir` that doesn't exist, settings and the server list fall back
+/// to defaults and a settings save silently fails instead of writing.
 #[cfg(test)]
 fn test_menu(dir: &str, key_bindings: &mut KeyBindings) -> MainMenu {
     let rt = std::sync::Arc::new(
@@ -1400,6 +1415,21 @@ fn test_menu(dir: &str, key_bindings: &mut KeyBindings) -> MainMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_save_during_a_chunk_bench_keeps_the_players_render_distance() {
+        let dir = std::env::temp_dir().join(format!("pomme-bench-rd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu(dir.to_str().unwrap(), &mut key_bindings);
+        menu.render_distance = 12;
+        menu.set_bench_render_distance(2);
+        menu.save_settings(&key_bindings);
+        let saved = load_settings(&dir).render_distance;
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(saved, 12);
+        assert_eq!(menu.render_distance, 2);
+    }
 
     #[test]
     fn damage_tilt_defaults_to_full_strength_and_clamps_to_unit_range() {

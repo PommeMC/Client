@@ -261,7 +261,6 @@ fn drive(
         if game.chunk_load_bench.is_none() && game.client_loaded {
             game.chunk_load_bench = Some(ChunkLoadBench::new(
                 rd,
-                rd,
                 game.server_render_distance,
                 BenchMode::Headless,
                 *game.player.position,
