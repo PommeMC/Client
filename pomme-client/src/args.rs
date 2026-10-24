@@ -4,6 +4,8 @@ use crate::dirs::DataDirs;
 
 #[derive(Parser, Debug)]
 #[command(name = "pomme", about = "Minecraft client")]
+#[command(group = clap::ArgGroup::new("quick_play")
+    .args(["quick_access_multiplayer", "quick_access_singleplayer"]))]
 pub struct LaunchArgs {
     #[arg(long)]
     pub version: Option<String>,
@@ -46,6 +48,17 @@ pub struct LaunchArgs {
     /// `--quickPlaySingleplayer`).
     #[arg(long)]
     pub quick_access_singleplayer: Option<String>,
+
+    /// Joins the quick-access world, runs the chunk-load benchmark at this
+    /// render distance, writes `chunk_load.json` and exits.
+    #[arg(
+        long,
+        value_name = "RD",
+        value_parser = clap::value_parser!(u32)
+            .range(crate::benchmark::CHUNK_LOAD_MIN_RD as i64 + 1..),
+        requires = "quick_play"
+    )]
+    pub chunk_bench: Option<u32>,
 
     /// Runs the headless CPU benchmarks (optionally only those whose id
     /// contains the filter) and exits.
@@ -138,5 +151,21 @@ mod tests {
             let args = LaunchArgs::try_parse_from(["pomme"].iter().chain(argv)).unwrap();
             assert_eq!((args.width, args.height), size, "{argv:?}");
         }
+    }
+
+    #[test]
+    fn chunk_bench_needs_a_quick_play_world() {
+        let words = |text| LaunchArgs::from_words(text).map(|a| a.chunk_bench);
+        assert_eq!(
+            words("--chunk-bench 16 --quick-access-singleplayer World").unwrap(),
+            Some(16)
+        );
+        assert_eq!(
+            words("--chunk-bench 8 --quick-access-multiplayer localhost").unwrap(),
+            Some(8)
+        );
+        assert!(words("--chunk-bench 16").is_err());
+        // The reset distance itself would time an empty load.
+        assert!(words("--chunk-bench 2 --quick-access-singleplayer World").is_err());
     }
 }

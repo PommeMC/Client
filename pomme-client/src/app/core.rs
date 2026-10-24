@@ -640,6 +640,7 @@ pub struct AppCore {
     pub user: UserData,
     pub presence: Option<DiscordPresence>,
     pub display_mode: DisplayMode,
+    display_mode_override: Option<DisplayMode>,
     /// The windowed size the window opens at (`--width`/`--height`).
     pub window_size: winit::dpi::LogicalSize<u32>,
     pub input: InputState,
@@ -808,6 +809,7 @@ impl AppCore {
             user,
             presence,
             display_mode,
+            display_mode_override: None,
             window_size,
             input,
             menu,
@@ -878,9 +880,17 @@ impl AppCore {
         }
     }
 
+    /// Uses `mode` for the window and every sync after, whatever the saved
+    /// one is.
+    pub fn override_display_mode(&mut self, mode: DisplayMode) {
+        self.display_mode = mode;
+        self.display_mode_override = Some(mode);
+    }
+
     pub fn sync_display_mode(&mut self, window: &Window) {
-        if self.menu.display_mode != self.display_mode {
-            self.display_mode = self.menu.display_mode;
+        let wanted = self.display_mode_override.unwrap_or(self.menu.display_mode);
+        if wanted != self.display_mode {
+            self.display_mode = wanted;
             self.apply_display_mode(window);
         }
     }

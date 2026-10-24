@@ -212,7 +212,8 @@ pub fn run(args: LaunchArgs, platform: Platform) {
                 .quick_access_singleplayer
                 .map(app::QuickPlay::Singleplayer)),
         winit::dpi::LogicalSize::new(args.width, args.height),
-    );
+    )
+    .with_chunk_bench(args.chunk_bench);
     if check_for_update {
         app.check_for_update();
     }
@@ -250,6 +251,9 @@ pub fn run(args: LaunchArgs, platform: Platform) {
     }
     #[cfg(feature = "test-harness")]
     if let Some(code) = app.harness_exit_code() {
+        std::process::exit(code);
+    }
+    if let Some(code) = app.chunk_bench_exit_code() {
         std::process::exit(code);
     }
 }

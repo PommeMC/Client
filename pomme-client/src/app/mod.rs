@@ -20,7 +20,7 @@ use crate::app::core::AppCore;
 use crate::app::input::Action;
 use crate::app::input::touch::TouchLayout;
 use crate::app::phases::connecting::{ConnectingUpdateResult, update_connecting};
-use crate::app::phases::in_game::{GameState, GameUpdateResult, update_game};
+use crate::app::phases::in_game::{GameState, GameUpdateResult, start_chunk_load, update_game};
 use crate::app::phases::in_menu::{self, MenuUpdateResult, update_menu};
 use crate::app::phases::saving::update_saving;
 use crate::app::phases::{AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
@@ -64,6 +64,17 @@ pub struct App {
     soft_keyboard: bool,
     #[cfg(feature = "test-harness")]
     harness: Option<crate::harness::Harness>,
+    chunk_bench: Option<ChunkBenchLaunch>,
+}
+
+/// Where a `--chunk-bench` run is.
+#[derive(Clone, Copy)]
+enum ChunkBenchLaunch {
+    /// The render distance to benchmark, until in game.
+    Waiting(u32),
+    Running,
+    /// The process exit code.
+    Ended(i32),
 }
 
 /// Port of vanilla `FramerateLimiter`: paces to a target fps by sleeping most
@@ -229,7 +240,121 @@ impl App {
             fps_limiter: FramerateLimiter::new(),
             #[cfg(feature = "test-harness")]
             harness: None,
+            chunk_bench: None,
         }
+    }
+
+    /// A `--chunk-bench` run: borderless, as most players play, and never
+    /// paused for losing focus.
+    pub fn with_chunk_bench(mut self, rd: Option<u32>) -> Self {
+        if rd.is_some() {
+            self.core.pause_on_lost_focus = false;
+            self.core
+                .override_display_mode(core::DisplayMode::Borderless);
+        }
+        self.chunk_bench = rd.map(ChunkBenchLaunch::Waiting);
+        self
+    }
+
+    /// The `--chunk-bench` run's exit code, once it has ended.
+    pub fn chunk_bench_exit_code(&self) -> Option<i32> {
+        match self.chunk_bench? {
+            ChunkBenchLaunch::Ended(code) => Some(code),
+            _ => None,
+        }
+    }
+
+    /// Starts the `--chunk-bench` run once in game, and quits when it ends
+    /// or the connection does.
+    fn tick_chunk_bench(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(launch) = self.chunk_bench else {
+            return;
+        };
+        let next = match (launch, self.phase.get_mut()) {
+            (
+                ChunkBenchLaunch::Waiting(rd),
+                AppPhase::InGame {
+                    gfx,
+                    connection,
+                    game,
+                    ..
+                },
+            ) => {
+                start_chunk_load(&mut self.core, gfx, connection, game, rd);
+                ChunkBenchLaunch::Running
+            }
+            (ChunkBenchLaunch::Running, AppPhase::InGame { game, .. }) => {
+                match (&game.chunk_load_bench, &game.chunk_load_result) {
+                    (Some(_), _) => return,
+                    (None, Some(_)) => ChunkBenchLaunch::Ended(0),
+                    // Cancelled with Esc.
+                    (None, None) => ChunkBenchLaunch::Ended(1),
+                }
+            }
+            // The quick play failed to open or connect; a deferred one is
+            // still waiting for a sign-in.
+            (ChunkBenchLaunch::Waiting(_), AppPhase::InMenu { .. })
+                if self.core.deferred_quick_play.is_none() =>
+            {
+                ChunkBenchLaunch::Ended(1)
+            }
+            (ChunkBenchLaunch::Running, _) => ChunkBenchLaunch::Ended(1),
+            _ => return,
+        };
+        self.chunk_bench = Some(next);
+        if matches!(next, ChunkBenchLaunch::Ended(_)) {
+            self.quit(event_loop);
+        }
+    }
+
+    /// Closes the game, saving the world first in singleplayer.
+    fn quit(&mut self, event_loop: &ActiveEventLoop) {
+        // A world saves on the way out, so the window stays up for it
+        // rather than vanishing while the process finishes writing.
+        self.phase.transition(|app| match app {
+            AppPhase::Connecting {
+                gfx,
+                panorama,
+                connection,
+                world: world @ Some(_),
+                ..
+            } => leave_world(
+                &mut self.core,
+                gfx,
+                panorama,
+                connection,
+                world,
+                AfterSaving::Quit,
+            ),
+            AppPhase::InGame {
+                gfx,
+                connection,
+                world: world @ Some(_),
+                ..
+            } => leave_world(
+                &mut self.core,
+                gfx,
+                Panorama::new(),
+                connection,
+                world,
+                AfterSaving::Quit,
+            ),
+            AppPhase::SavingWorld {
+                gfx,
+                panorama,
+                world,
+                ..
+            } => AppPhase::SavingWorld {
+                gfx,
+                panorama,
+                world,
+                then: AfterSaving::Quit,
+            },
+            app => {
+                event_loop.exit();
+                app
+            }
+        });
     }
 
     /// Updates a release build to the newest release before the menu.
@@ -488,52 +613,7 @@ impl ApplicationHandler for App {
         self.core.input.set_binding_capture(binding_capture);
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
-                // A world saves on the way out, so the window stays up for it
-                // rather than vanishing while the process finishes writing.
-                self.phase.transition(|app| match app {
-                    AppPhase::Connecting {
-                        gfx,
-                        panorama,
-                        connection,
-                        world: world @ Some(_),
-                        ..
-                    } => leave_world(
-                        &mut self.core,
-                        gfx,
-                        panorama,
-                        connection,
-                        world,
-                        AfterSaving::Quit,
-                    ),
-                    AppPhase::InGame {
-                        gfx,
-                        connection,
-                        world: world @ Some(_),
-                        ..
-                    } => leave_world(
-                        &mut self.core,
-                        gfx,
-                        Panorama::new(),
-                        connection,
-                        world,
-                        AfterSaving::Quit,
-                    ),
-                    AppPhase::SavingWorld {
-                        gfx,
-                        panorama,
-                        world,
-                        ..
-                    } => AppPhase::SavingWorld {
-                        gfx,
-                        panorama,
-                        world,
-                        then: AfterSaving::Quit,
-                    },
-                    app => {
-                        event_loop.exit();
-                        app
-                    }
-                });
+                self.quit(event_loop);
             }
             WindowEvent::Resized(new_size) => {
                 if let Some(app_rt) = self.phase.gfx_mut() {
@@ -1160,6 +1240,7 @@ impl ApplicationHandler for App {
                 }
 
                 core.input.end_frame();
+                self.tick_chunk_bench(event_loop);
 
                 // Desktop is left alone: allowing IME there moves typing from
                 // key events to IME events.
