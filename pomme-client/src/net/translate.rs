@@ -334,26 +334,29 @@
 //! versions unless the matching rewrite lands at the same time. Each site
 //! carries a `TODO` pointing here.
 //! - outbound `set_creative_mode_slot` leaves component values undelimited,
-//!   which is 1.21.4's layout rather than 26.2's
+//!   which is 1.21.4's layout rather than 26.2's (native sessions encode it
+//!   with pomme's item grammar instead; see `net::item_codec`)
 //! - inbound `cooldown` carries an item registry id, where 26.2 names a
 //!   cooldown group
 
 use std::io::Cursor;
 use std::sync::Mutex;
 
-use azalea_buf::{AzBuf, AzBufVar};
-use azalea_core::sound::CustomSound;
+use azalea_buf::AzBuf;
 use azalea_inventory::components::{DataComponentUnion, Profile};
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_protocol::packets::game::s_container_click::HashedStack;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
-use azalea_registry::builtin::{DataComponentKind, SoundEvent};
-use azalea_registry::{Holder, Registry};
+use azalea_registry::Registry;
+use azalea_registry::builtin::DataComponentKind;
 use glam::DVec3;
+use pomme_protocol::codec::Reader;
 use pomme_protocol::version::NATIVE;
 use pomme_protocol::{
     ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, RegistryTable, wire,
 };
+
+use crate::recipe::MAX_SLOT_DISPLAY_DEPTH;
 
 pub struct Translation {
     to_native: &'static RegistryRemaps,
@@ -373,6 +376,13 @@ pub struct Translation {
     /// Handled outside [`GameIds`]: the attribute ids need remapping even on
     /// a version whose packet ids all match the native (26.1).
     update_attributes_id: u32,
+    /// Recipe bodies carry static-registry ids that still need remapping when
+    /// packet ids are otherwise native-identical (notably 26.1).
+    recipe_book_add_id: u32,
+    update_recipes_id: u32,
+    place_ghost_recipe_id: u32,
+    /// Recipe frame layout from 1.21.2 (768) on; `None` before display ids.
+    recipe_layout: Option<RecipeLayout>,
     /// Game-phase packet-id translation and the rewrites tied to it; `None`
     /// when the wire version's ids match the native (26.1).
     game_ids: Option<GameIds>,
@@ -812,6 +822,15 @@ pub fn joinable(protocol: i32) -> bool {
     protocol == NATIVE.protocol || TRANSLATED.contains(&protocol)
 }
 
+/// A wire id in `registry` as the native version numbers it: remapped for a
+/// translated session, unchanged for a native one.
+pub fn native_id(registry: ClientRegistry, id: u32) -> Option<u32> {
+    match active() {
+        Some(t) => t.remap_to_native(registry, id),
+        None => Some(id),
+    }
+}
+
 /// The translation for the wire version negotiated with the current server,
 /// or `None` for the native version.
 pub fn active() -> Option<&'static Translation> {
@@ -839,7 +858,7 @@ pub fn active() -> Option<&'static Translation> {
 /// after a server-list ping finds them warm. No-op when already built.
 pub fn prewarm(protocol: i32) {
     let _ = Translation::for_protocol(protocol);
-    crate::world::block::prewarm_protocol(protocol);
+    let _ = crate::world::block::BlockStateTable::for_protocol(protocol);
 }
 
 impl Translation {
@@ -871,6 +890,14 @@ impl Translation {
                 set_player_team_id: id(Phase::Game, "set_player_team"),
             }),
             update_attributes_id: id(Phase::Game, "update_attributes"),
+            recipe_book_add_id: id(Phase::Game, "recipe_book_add"),
+            update_recipes_id: id(Phase::Game, "update_recipes"),
+            place_ghost_recipe_id: id(Phase::Game, "place_ghost_recipe"),
+            recipe_layout: (protocol >= 768).then_some(RecipeLayout {
+                old_profile: protocol <= 772,
+                item_stack_count_first: protocol <= 774,
+                trim_pattern_display: protocol <= 769,
+            }),
             game_ids: GameIds::build(protocol, table, native),
             config_ids: ConfigIds::build(protocol, table, native),
             no_config_phase: table
@@ -905,7 +932,7 @@ impl Translation {
     /// Rewrites a raw login-phase frame into the native layout.
     pub fn translate_login_frame(&self, raw: Box<[u8]>) -> Box<[u8]> {
         let mut cur = Cursor::new(&raw[..]);
-        let id = u32::azalea_read_var(&mut cur).ok();
+        let id = var_u32(&mut cur);
         if self.login_session_pad && id == Some(self.login_finished_id) {
             // 26.2 appended a session-id UUID; zero is fine, pomme only
             // reads the game profile. The 1.20.5/1.21-era trailing
@@ -1133,6 +1160,18 @@ impl Translation {
             }
         } else if v775.is_some_and(|v| id == v.set_player_team_id) {
             translate_team(id, payload, v769)
+        } else if v777.is_none()
+            && let Some(layout) = self.recipe_layout
+            && let Some(translate) = self.recipe_translator(id)
+        {
+            translate(
+                id,
+                payload,
+                RecipeCtx {
+                    remaps: self.to_native,
+                    layout,
+                },
+            )
         } else if let Some(ids) = &self.game_ids {
             // Pre-1.20.2 wire NBT carries an empty root name the native
             // version's readers don't expect.
@@ -1341,46 +1380,25 @@ impl Translation {
         self.to_native.remap(ClientRegistry::ParticleType, id)
     }
 
+    /// The native-version id in `registry` for a source-version one, for the
+    /// raw decode paths; `None` drops what carries it.
+    pub fn remap_to_native(&self, registry: ClientRegistry, id: u32) -> Option<u32> {
+        self.to_native.remap(registry, id)
+    }
+
+    /// Native-version item id for a source-version item id. Used by decoded
+    /// configuration/game tag payloads, whose element ids are not covered by
+    /// the packet-id translation layer.
+    pub fn remap_item_to_native(&self, id: u32) -> Option<u32> {
+        self.to_native.remap(ClientRegistry::Item, id)
+    }
+
     /// Remaps a decoded packet's static-registry ids into the native
     /// version's id space; `false` drops the packet (its subject no longer
     /// exists, e.g. the bed block entity removed in 26.2).
     pub fn remap_inbound(&self, packet: &mut ClientboundGamePacket) -> bool {
         use ClientRegistry as R;
         match packet {
-            ClientboundGamePacket::AddEntity(p) => {
-                remap_with(self.to_native, R::EntityType, &mut p.entity_type)
-            }
-            ClientboundGamePacket::Sound(p) => self.remap_sound(&mut p.sound),
-            ClientboundGamePacket::SoundEntity(p) => self.remap_sound(&mut p.sound),
-            ClientboundGamePacket::UpdateAttributes(p) => {
-                p.values
-                    .retain_mut(|v| remap_with(self.to_native, R::Attribute, &mut v.attribute));
-                true
-            }
-            ClientboundGamePacket::BlockEntityData(p) => {
-                remap_with(self.to_native, R::BlockEntityType, &mut p.block_entity_type)
-            }
-            ClientboundGamePacket::LevelChunkWithLight(p) => {
-                p.chunk_data
-                    .block_entities
-                    .retain_mut(|be| remap_with(self.to_native, R::BlockEntityType, &mut be.kind));
-                true
-            }
-            ClientboundGamePacket::ContainerSetContent(p) => {
-                for item in &mut p.items {
-                    remap_stack(self.to_native, item);
-                }
-                remap_stack(self.to_native, &mut p.carried_item);
-                true
-            }
-            ClientboundGamePacket::ContainerSetSlot(p) => {
-                remap_stack(self.to_native, &mut p.item_stack);
-                true
-            }
-            ClientboundGamePacket::SetCursorItem(p) => {
-                remap_stack(self.to_native, &mut p.contents);
-                true
-            }
             ClientboundGamePacket::SetEntityData(p) => {
                 // `translate_entity_data` already remaps item-stack values
                 // while rewriting serializer ids, except on pre-1.20.5 wires
@@ -1392,12 +1410,6 @@ impl Translation {
                             remap_stack(self.to_native, stack);
                         }
                     }
-                }
-                true
-            }
-            ClientboundGamePacket::SetEquipment(p) => {
-                for (_, stack) in &mut p.slots.slots {
-                    remap_stack(self.to_native, stack);
                 }
                 true
             }
@@ -1441,13 +1453,6 @@ impl Translation {
                 }
             }
             _ => {}
-        }
-    }
-
-    pub(super) fn remap_sound(&self, sound: &mut Holder<SoundEvent, CustomSound>) -> bool {
-        match sound {
-            Holder::Reference(kind) => remap_with(self.to_native, ClientRegistry::SoundEvent, kind),
-            Holder::Direct(_) => true,
         }
     }
 
@@ -1781,7 +1786,7 @@ fn split_registry_data(id: u32, payload: &[u8]) -> Option<Vec<Box<[u8]>>> {
     use simdnbt::owned::NbtTag;
 
     let mut cur = Cursor::new(payload);
-    let NbtTag::Compound(root) = NbtTag::azalea_read(&mut cur).ok()? else {
+    let NbtTag::Compound(root) = simdnbt::owned::read_tag(&mut cur).ok()? else {
         return None;
     };
 
@@ -1815,7 +1820,7 @@ fn split_registry_data(id: u32, payload: &[u8]) -> Option<Vec<Box<[u8]>>> {
             wire::write_varint(&mut out, name.len() as u32);
             out.extend_from_slice(name.as_bytes());
             out.push(1);
-            element.azalea_write(&mut out).ok()?;
+            NbtTag::Compound(element.clone()).write(&mut out);
         }
         frames.push(out.into_boxed_slice());
     }
@@ -2003,7 +2008,12 @@ fn translate_teleport_entity_767(v: &Ids767, payload: &[u8]) -> Option<Vec<u8>> 
     let mut out = Vec::with_capacity(72);
     wire::write_varint(&mut out, v.entity_position_sync_id);
     wire::write_varint(&mut out, entity);
-    write_position_move_rotation(&mut out, pos, unpack_degrees(y_rot), unpack_degrees(x_rot));
+    write_position_move_rotation(
+        &mut out,
+        pos,
+        pomme_protocol::entity::unpack_degrees(y_rot),
+        pomme_protocol::entity::unpack_degrees(x_rot),
+    );
     out.push(on_ground);
     Some(out)
 }
@@ -2014,11 +2024,6 @@ fn write_position_move_rotation(out: &mut Vec<u8>, pos: &[u8], y_rot: f32, x_rot
     out.extend_from_slice(&[0; 24]); // zero delta movement
     out.extend_from_slice(&y_rot.to_be_bytes());
     out.extend_from_slice(&x_rot.to_be_bytes());
-}
-
-/// Vanilla `Mth.unpackDegrees`: a packed rotation byte to float degrees.
-fn unpack_degrees(b: i8) -> f32 {
-    f32::from(b) * 360.0 / 256.0
 }
 
 /// Inserts the `seaLevel` varint 1.21.2 appended to CommonPlayerSpawnInfo,
@@ -2168,7 +2173,7 @@ fn translate_container_click_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
         wire::write_varint(&mut out, old_id);
         out.extend_from_slice(&payload[..cur.position() as usize]);
 
-        let changed = u32::azalea_read_var(&mut cur).ok()?;
+        let changed = var_u32(&mut cur)?;
         wire::write_varint(&mut out, changed);
         for _ in 0..changed {
             let slot_at = cur.position() as usize;
@@ -2191,7 +2196,7 @@ fn translate_creative_slot_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     let rewrite = || {
         let mut cur = Cursor::new(payload);
         advance(&mut cur, 2)?; // slot short
-        let count = u32::azalea_read_var(&mut cur).ok()?;
+        let count = var_u32(&mut cur)?;
 
         let mut out = Vec::with_capacity(payload.len() + 4);
         wire::write_varint(&mut out, old_id);
@@ -2200,7 +2205,7 @@ fn translate_creative_slot_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
             out.push(0);
             return Some(out);
         }
-        let item = u32::azalea_read_var(&mut cur).ok()?;
+        let item = var_u32(&mut cur)?;
         write_old_item(&mut out, Some((item, count)));
         Some(out)
     };
@@ -2261,22 +2266,22 @@ fn translate_update_attributes(
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // entity id
-    let entries = u32::azalea_read_var(&mut cur).ok()?;
+    let entries = var_u32(&mut cur)?;
 
     let mut out = Vec::with_capacity(payload.len() + 8);
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[..cur.position() as usize]);
     for _ in 0..entries {
-        let attribute = u32::azalea_read_var(&mut cur).ok()?;
+        let attribute = var_u32(&mut cur)?;
         wire::write_varint(
             &mut out,
             remaps.remap(ClientRegistry::Attribute, attribute)?,
         );
         let body_at = cur.position() as usize;
         advance(&mut cur, 8)?; // base
-        let modifiers = u32::azalea_read_var(&mut cur).ok()?;
+        let modifiers = var_u32(&mut cur)?;
         for _ in 0..modifiers {
-            let len = u32::azalea_read_var(&mut cur).ok()? as usize;
+            let len = var_u32(&mut cur)? as usize;
             advance(&mut cur, len)?; // modifier id
             advance(&mut cur, 8)?; // amount
             varint_span(&mut cur)?; // operation
@@ -2317,7 +2322,7 @@ fn read_old_item(cur: &mut Cursor<&[u8]>, named_nbt: bool) -> Option<Option<(u32
     if read_u8(cur)? == 0 {
         return Some(None);
     }
-    let item = u32::azalea_read_var(cur).ok()?;
+    let item = var_u32(cur)?;
     let count = read_u8(cur)?;
     skip_nbt_root(cur, named_nbt)?;
     Some(Some((item, count)))
@@ -2349,7 +2354,7 @@ fn translate_container_set_content_765(
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 1)?; // container id
     varint_span(&mut cur)?; // state id
-    let count = u32::azalea_read_var(&mut cur).ok()?;
+    let count = var_u32(&mut cur)?;
 
     let mut out = Vec::with_capacity(payload.len());
     wire::write_varint(&mut out, id);
@@ -2387,7 +2392,7 @@ fn translate_set_equipment_765(id: u32, payload: &[u8], named_nbt: bool) -> Opti
 fn translate_merchant_offers_765(id: u32, payload: &[u8], named_nbt: bool) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // container id
-    let offers = u32::azalea_read_var(&mut cur).ok()?;
+    let offers = var_u32(&mut cur)?;
 
     let mut out = Vec::with_capacity(payload.len());
     wire::write_varint(&mut out, id);
@@ -2466,7 +2471,7 @@ fn translate_update_attributes_uuid(
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // entity id
-    let entries = u32::azalea_read_var(&mut cur).ok()?;
+    let entries = var_u32(&mut cur)?;
 
     let mut out = Vec::with_capacity(payload.len() + 64);
     wire::write_varint(&mut out, id);
@@ -2474,7 +2479,7 @@ fn translate_update_attributes_uuid(
     for _ in 0..entries {
         let attribute = match key_table {
             Some(table) => {
-                let len = u32::azalea_read_var(&mut cur).ok()? as usize;
+                let len = var_u32(&mut cur)? as usize;
                 let key_at = cur.position() as usize;
                 advance(&mut cur, len)?;
                 let key = std::str::from_utf8(&payload[key_at..key_at + len]).ok()?;
@@ -2484,7 +2489,7 @@ fn translate_update_attributes_uuid(
                     .iter()
                     .position(|n| n == key)? as u32
             }
-            None => u32::azalea_read_var(&mut cur).ok()?,
+            None => var_u32(&mut cur)?,
         };
         wire::write_varint(
             &mut out,
@@ -2493,7 +2498,7 @@ fn translate_update_attributes_uuid(
 
         let body_at = cur.position() as usize;
         advance(&mut cur, 8)?; // base
-        let modifiers = u32::azalea_read_var(&mut cur).ok()?;
+        let modifiers = var_u32(&mut cur)?;
         out.extend_from_slice(&payload[body_at..cur.position() as usize]);
         for _ in 0..modifiers {
             translate_modifier_uuid(&mut cur, &mut out, payload)?;
@@ -2549,7 +2554,7 @@ fn translate_level_particles_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 /// with (id + 1, 0 being reserved for an inline value), then the rest of the
 /// frame. The id is synced-registry order either way, so it needs no remap.
 fn chat_type_holder(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, payload: &[u8]) -> Option<()> {
-    let chat_type = u32::azalea_read_var(cur).ok()?;
+    let chat_type = var_u32(cur)?;
     wire::write_varint(out, chat_type + 1);
     out.extend_from_slice(&payload[cur.position() as usize..]);
     Some(())
@@ -2678,7 +2683,7 @@ const LOGIN_PREFIX_763: usize = 7;
 /// cursor on the registry codec.
 fn seek_login_codec_763(cur: &mut Cursor<&[u8]>) -> Option<()> {
     advance(cur, LOGIN_PREFIX_763)?;
-    let levels = u32::azalea_read_var(cur).ok()?;
+    let levels = var_u32(cur)?;
     for _ in 0..levels {
         skip_utf(cur)?;
     }
@@ -2722,7 +2727,7 @@ fn translate_game_login_763(payload: &[u8]) -> Option<Vec<u8>> {
 fn translate_game_login_765(payload: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 5)?; // player id, hardcore
-    let levels = u32::azalea_read_var(&mut cur).ok()?;
+    let levels = var_u32(&mut cur)?;
     for _ in 0..levels {
         skip_utf(&mut cur)?;
     }
@@ -2742,7 +2747,7 @@ fn translate_game_login_765(payload: &[u8]) -> Option<Vec<u8>> {
 fn convert_spawn_info_dimension(payload: &[u8], spawn_at: usize) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     cur.set_position(spawn_at as u64);
-    let len = u32::azalea_read_var(&mut cur).ok()? as usize;
+    let len = var_u32(&mut cur)? as usize;
     let key_at = cur.position() as usize;
     advance(&mut cur, len)?;
     let key = std::str::from_utf8(&payload[key_at..key_at + len]).ok()?;
@@ -2773,6 +2778,20 @@ fn remap_serializer_765(old: u32) -> Option<u32> {
     }
 }
 
+/// Vanilla `VarInt.read` off the cursor.
+fn var_u32(cur: &mut Cursor<&[u8]>) -> Option<u32> {
+    Reader::on_cursor(cur, Reader::varint).ok()
+}
+
+fn var_i32(cur: &mut Cursor<&[u8]>) -> Option<i32> {
+    Reader::on_cursor(cur, Reader::var_i32).ok()
+}
+
+/// Vanilla `VarLong.read` off the cursor.
+fn var_u64(cur: &mut Cursor<&[u8]>) -> Option<u64> {
+    Reader::on_cursor(cur, Reader::varlong).ok()
+}
+
 /// Copies `n` bytes from the cursor's payload to `out`.
 fn copy_bytes(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: usize) -> Option<()> {
     let at = cur.position() as usize;
@@ -2783,7 +2802,7 @@ fn copy_bytes(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: usize) -> Option<()
 
 fn copy_varint(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<u32> {
     let at = cur.position() as usize;
-    let v = u32::azalea_read_var(cur).ok()?;
+    let v = var_u32(cur)?;
     out.extend_from_slice(&cur.get_ref()[at..cur.position() as usize]);
     Some(v)
 }
@@ -2811,12 +2830,13 @@ fn copy_optional(
 /// Reads one pre-1.20.3 length-prefixed JSON component and writes it as the
 /// network-NBT form 1.20.3 introduced.
 fn transcode_component(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
-    let len = u32::azalea_read_var(cur).ok()? as usize;
+    let len = var_u32(cur)? as usize;
     let at = cur.position() as usize;
     advance(cur, len)?;
     let json = std::str::from_utf8(&cur.get_ref()[at..at + len]).ok()?;
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    json_to_nbt(&value).azalea_write(out).ok()
+    json_to_nbt(&value).write(out);
+    Some(())
 }
 
 /// A JSON chat-component value as an owned NBT tag: the codec shape is
@@ -3016,7 +3036,7 @@ fn translate_set_score_764(v: &Ids764, payload: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     let mut owner = Vec::new();
     copy_utf(&mut cur, &mut owner)?;
-    let method = u32::azalea_read_var(&mut cur).ok()?;
+    let method = var_u32(&mut cur)?;
     let mut objective = Vec::new();
     copy_utf(&mut cur, &mut objective)?;
 
@@ -3084,7 +3104,7 @@ fn translate_resource_pack_response_764(old_id: u32, payload: &[u8]) -> Vec<Vec<
     let rewrite = || {
         let mut cur = Cursor::new(payload);
         advance(&mut cur, 16)?; // pack uuid
-        let action = u32::azalea_read_var(&mut cur).ok()?;
+        let action = var_u32(&mut cur)?;
         let action = match action {
             0..=3 => action,
             4 => 3,
@@ -3135,7 +3155,7 @@ fn translate_container_click(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
         wire::write_varint(&mut out, old_id);
         out.extend_from_slice(&payload[..cur.position() as usize]);
 
-        let changed = u32::azalea_read_var(&mut cur).ok()?;
+        let changed = var_u32(&mut cur)?;
         wire::write_varint(&mut out, changed);
         for _ in 0..changed {
             let slot_at = cur.position() as usize;
@@ -3158,14 +3178,14 @@ fn read_hashed_stack(cur: &mut Cursor<&[u8]>) -> Option<Option<(u32, u32)>> {
     if read_u8(cur)? == 0 {
         return Some(None);
     }
-    let item = u32::azalea_read_var(cur).ok()?;
-    let count = u32::azalea_read_var(cur).ok()?;
-    let added = u32::azalea_read_var(cur).ok()?;
+    let item = var_u32(cur)?;
+    let count = var_u32(cur)?;
+    let added = var_u32(cur)?;
     for _ in 0..added {
         varint_span(cur)?; // component id
         advance(cur, 4)?; // hash
     }
-    let removed = u32::azalea_read_var(cur).ok()?;
+    let removed = var_u32(cur)?;
     for _ in 0..removed {
         varint_span(cur)?;
     }
@@ -3375,7 +3395,7 @@ fn translate_entity_data(
             out.push(index);
             break;
         }
-        let old = u32::azalea_read_var(&mut cur).ok()?;
+        let old = var_u32(&mut cur)?;
         let Some(new) = (ids.serializer_map)(old) else {
             if ids.v772.is_some() && old == COMPOUND_TAG_SERIALIZER {
                 // compound_tag values are network NBT; drop the entry.
@@ -3456,13 +3476,13 @@ fn translate_item_stack(
     old_profile: bool,
 ) -> Option<bool> {
     let count_at = cur.position() as usize;
-    let count = i32::azalea_read_var(cur).ok()?;
+    let count = var_i32(cur)?;
     let count_end = cur.position() as usize;
     if count <= 0 {
         out.extend_from_slice(&cur.get_ref()[count_at..count_end]);
         return Some(true);
     }
-    let item = u32::azalea_read_var(cur).ok()?;
+    let item = var_u32(cur)?;
     let patch_at = cur.position() as usize;
     let mut patch = Vec::new();
     let walked = translate_component_patch(cur, &mut patch, remaps, old_profile).is_some();
@@ -3483,6 +3503,27 @@ fn translate_item_stack(
     Some(walked)
 }
 
+/// An `item_stack` display's stack, written as 26.2's `ItemStackTemplate`
+/// (item id, count, patch). Through 1.21.11 the display wrapped a non-empty
+/// `ItemStack`, which leads with the count instead.
+fn translate_item_stack_template(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    ctx: RecipeCtx<'_>,
+) -> Option<()> {
+    // A non-empty `ItemStack` has a positive count; a template only rejects 0.
+    let (item, count) = if ctx.layout.item_stack_count_first {
+        let count = var_i32(cur).filter(|&count| count > 0)?;
+        (var_u32(cur)?, count)
+    } else {
+        let item = var_u32(cur)?;
+        (item, var_i32(cur).filter(|&count| count != 0)?)
+    };
+    wire::write_varint(out, ctx.remaps.remap(ClientRegistry::Item, item)?);
+    wire::write_varint(out, count as u32);
+    translate_component_patch(cur, out, ctx.remaps, ctx.layout.old_profile)
+}
+
 /// Remaps an item stack's component patch into the native registry space.
 /// `old_profile` marks the pre-1.21.9 `profile` component layout (see
 /// [`translate_old_profile`]). `None` means a component payload the walker
@@ -3494,13 +3535,13 @@ fn translate_component_patch(
     old_profile: bool,
 ) -> Option<()> {
     let added_at = cur.position() as usize;
-    let added = u32::azalea_read_var(cur).ok()?;
+    let added = var_u32(cur)?;
     out.extend_from_slice(&cur.get_ref()[added_at..cur.position() as usize]);
     let removed_at = cur.position() as usize;
-    let removed = u32::azalea_read_var(cur).ok()?;
+    let removed = var_u32(cur)?;
     out.extend_from_slice(&cur.get_ref()[removed_at..cur.position() as usize]);
     for _ in 0..added {
-        let component = u32::azalea_read_var(cur).ok()?;
+        let component = var_u32(cur)?;
         let native = remaps.remap(ClientRegistry::DataComponentType, component)?;
         wire::write_varint(out, native);
         let value_at = cur.position() as usize;
@@ -3520,7 +3561,7 @@ fn translate_component_patch(
         out.extend_from_slice(&cur.get_ref()[value_at..cur.position() as usize]);
     }
     for _ in 0..removed {
-        let component = u32::azalea_read_var(cur).ok()?;
+        let component = var_u32(cur)?;
         wire::write_varint(
             out,
             remaps.remap(ClientRegistry::DataComponentType, component)?,
@@ -3537,7 +3578,7 @@ fn translate_old_profile(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<(
     let value_at = cur.position() as usize;
     skip_optional(cur, skip_utf)?; // name
     skip_optional(cur, |c| advance(c, 16))?; // uuid
-    let properties = u32::azalea_read_var(cur).ok()?;
+    let properties = var_u32(cur)?;
     for _ in 0..properties {
         skip_utf(cur)?; // property name
         skip_utf(cur)?; // value
@@ -3569,7 +3610,7 @@ fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool>
             varint_span(cur)?;
         }
         2 => {
-            u64::azalea_read_var(cur).ok()?; // var_long
+            var_u64(cur)?; // var_long
         }
         4 => skip_utf(cur)?,                           // string
         5 => skip_nbt(cur)?,                           // component
@@ -3592,7 +3633,7 @@ fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool>
         34 => {
             // painting variant holder: id + 1, or 0 followed by the direct
             // form (width, height, asset id, optional title/author)
-            if u32::azalea_read_var(cur).ok()? == 0 {
+            if var_u32(cur)? == 0 {
                 varint_span(cur)?;
                 varint_span(cur)?;
                 skip_utf(cur)?;
@@ -3653,14 +3694,14 @@ fn translate_particles(
     list: bool,
 ) -> Option<()> {
     let count = if list {
-        let count = u32::azalea_read_var(cur).ok()?;
+        let count = var_u32(cur)?;
         wire::write_varint(out, count);
         count
     } else {
         1
     };
     for _ in 0..count {
-        let old = u32::azalea_read_var(cur).ok()?;
+        let old = var_u32(cur)?;
         let new = remaps.remap(ClientRegistry::ParticleType, old)?;
         wire::write_varint(out, new);
         let name = RegistryTable::native().name_of(ClientRegistry::ParticleType, new)?;
@@ -3708,7 +3749,7 @@ fn copy_particle_payload(
             varint_span(cur)?; // duration
         }
         "vibration" => {
-            match u32::azalea_read_var(cur).ok()? {
+            match var_u32(cur)? {
                 0 => advance(cur, 8)?, // block position
                 1 => {
                     varint_span(cur)?; // entity id
@@ -3719,7 +3760,7 @@ fn copy_particle_payload(
             varint_span(cur)?; // arrival ticks
         }
         "item" => {
-            let item = u32::azalea_read_var(cur).ok()?;
+            let item = var_u32(cur)?;
             wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
             let count = varint_span(cur)?;
             out.extend_from_slice(&cur.get_ref()[count]);
@@ -3755,12 +3796,12 @@ fn copy_component_patch(
     out: &mut Vec<u8>,
     remaps: &RegistryRemaps,
 ) -> Option<()> {
-    let added = u32::azalea_read_var(cur).ok()?;
-    let removed = u32::azalea_read_var(cur).ok()?;
+    let added = var_u32(cur)?;
+    let removed = var_u32(cur)?;
     wire::write_varint(out, added);
     wire::write_varint(out, removed);
     for _ in 0..added {
-        let component = u32::azalea_read_var(cur).ok()?;
+        let component = var_u32(cur)?;
         let native = remaps.remap(ClientRegistry::DataComponentType, component)?;
         let kind = DataComponentKind::from_u32(native)?;
         if CHANGED_COMPONENTS_777.contains(&kind) {
@@ -3772,7 +3813,7 @@ fn copy_component_patch(
         out.extend_from_slice(&cur.get_ref()[value_at..cur.position() as usize]);
     }
     for _ in 0..removed {
-        let component = u32::azalea_read_var(cur).ok()?;
+        let component = var_u32(cur)?;
         wire::write_varint(
             out,
             remaps.remap(ClientRegistry::DataComponentType, component)?,
@@ -3789,7 +3830,7 @@ fn translate_sound_holder(
     out: &mut Vec<u8>,
     remaps: &RegistryRemaps,
 ) -> Option<()> {
-    let holder = u32::azalea_read_var(cur).ok()?;
+    let holder = var_u32(cur)?;
     if holder == 0 {
         let inline_at = cur.position() as usize;
         skip_utf(cur)?;
@@ -3804,7 +3845,7 @@ fn translate_sound_holder(
 }
 
 fn skip_utf(cur: &mut Cursor<&[u8]>) -> Option<()> {
-    let len = u32::azalea_read_var(cur).ok()?;
+    let len = var_u32(cur)?;
     advance(cur, len as usize)
 }
 
@@ -3849,7 +3890,7 @@ fn translate_chunk(
         skip_heightmaps(&mut cur)?;
         head.extend_from_slice(&payload[maps_at..cur.position() as usize]);
     }
-    let buffer_len = u32::azalea_read_var(&mut cur).ok()? as usize;
+    let buffer_len = var_u32(&mut cur)? as usize;
     let buffer_at = cur.position() as usize;
     let buffer_end = buffer_at.checked_add(buffer_len)?;
     if buffer_end > payload.len() {
@@ -3888,10 +3929,10 @@ fn translate_chunk(
 
 /// Advances past a chunk's packed heightmap list (type id, long array).
 fn skip_heightmaps(cur: &mut Cursor<&[u8]>) -> Option<()> {
-    let heightmaps = u32::azalea_read_var(cur).ok()?;
+    let heightmaps = var_u32(cur)?;
     for _ in 0..heightmaps {
         varint_span(cur)?; // heightmap type
-        let longs = u32::azalea_read_var(cur).ok()?;
+        let longs = var_u32(cur)?;
         advance(cur, (longs as usize).checked_mul(8)?)?;
     }
     Some(())
@@ -3904,7 +3945,7 @@ fn translate_chunk_777(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 8)?; // chunk x/z ints
     skip_heightmaps(&mut cur)?;
-    let buffer_len = u32::azalea_read_var(&mut cur).ok()?;
+    let buffer_len = var_u32(&mut cur)?;
     advance(&mut cur, buffer_len as usize)?;
 
     let mut out = Vec::with_capacity(payload.len() + 16);
@@ -3943,7 +3984,7 @@ fn copy_light_data_777(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()>
 /// byte count, little-endian bytes) as the 26.2 `writeBitSet` form
 /// (`toLongArray`: a varint long count, big-endian longs).
 fn repack_bit_set(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
-    let len = u32::azalea_read_var(cur).ok()? as usize;
+    let len = var_u32(cur)? as usize;
     let at = cur.position() as usize;
     advance(cur, len)?;
     let bytes = &cur.get_ref()[at..at + len];
@@ -4049,7 +4090,7 @@ fn skip_paletted_container(
             varint_span(cur)?;
         }
         _ if bits <= max_indirect_bits => {
-            let palette_len = u32::azalea_read_var(cur).ok()?;
+            let palette_len = var_u32(cur)?;
             for _ in 0..palette_len {
                 varint_span(cur)?;
             }
@@ -4079,7 +4120,7 @@ fn translate_set_time(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     out.extend_from_slice(game_time);
     out.push(1); // one clock update
     out.push(0); // world clock id 0
-    day_time.azalea_write_var(&mut out).ok()?;
+    wire::write_varlong(&mut out, day_time);
     out.extend_from_slice(&0f32.to_be_bytes()); // partial tick
     let rate: f32 = if tick_day_time != 0 { 1.0 } else { 0.0 };
     out.extend_from_slice(&rate.to_be_bytes());
@@ -4198,6 +4239,230 @@ fn translate_explode(
     Some(out)
 }
 
+/// Normalizes post-1.21.2 recipe-book entries into 26.2's static-registry
+/// id space before azalea parses them. The recipe-display registry itself is
+/// stable across these versions, but slot-display, item and component ids
+/// are not (1.21.11's `item` slot is id 2; 26.2 id 2 means
+/// `with_any_potion`).
+/// How a pre-26.2 recipe frame's slot displays differ from 26.2's, beyond
+/// the registry remap (decompiled 1.21.4 / 1.21.5 / 1.21.11 `SlotDisplay`).
+#[derive(Clone, Copy)]
+struct RecipeLayout {
+    /// Pre-1.21.9 `profile` component layout.
+    old_profile: bool,
+    /// Through 1.21.11 an `item_stack` display wraps a non-empty `ItemStack`
+    /// (count, item, patch) rather than 26.1's `ItemStackTemplate`.
+    item_stack_count_first: bool,
+    /// Through 1.21.4 `smithing_trim`'s pattern is a `SlotDisplay` (the
+    /// template item), not a `Holder<TrimPattern>`.
+    trim_pattern_display: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RecipeCtx<'a> {
+    remaps: &'a RegistryRemaps,
+    layout: RecipeLayout,
+}
+
+type RecipeTranslator = fn(u32, &[u8], RecipeCtx<'_>) -> Option<Vec<u8>>;
+
+impl Translation {
+    fn recipe_translator(&self, id: u32) -> Option<RecipeTranslator> {
+        if id == self.recipe_book_add_id {
+            Some(translate_recipe_book_add)
+        } else if id == self.update_recipes_id {
+            Some(translate_update_recipes)
+        } else if id == self.place_ghost_recipe_id {
+            Some(translate_place_ghost_recipe)
+        } else {
+            None
+        }
+    }
+}
+
+fn translate_recipe_book_add(id: u32, payload: &[u8], ctx: RecipeCtx<'_>) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    wire::write_varint(&mut out, id);
+
+    let entries = copy_varint(&mut cur, &mut out)?;
+    for _ in 0..entries {
+        copy_varint(&mut cur, &mut out)?; // RecipeDisplayId
+        translate_recipe_display(&mut cur, &mut out, ctx)?;
+        copy_varint(&mut cur, &mut out)?; // OptionalInt wire sentinel
+        copy_varint(&mut cur, &mut out)?; // RecipeBookCategory
+        copy_optional(&mut cur, &mut out, |cur, out| {
+            let requirements = copy_varint(cur, out)?;
+            for _ in 0..requirements {
+                translate_item_holder_set(cur, out, ctx.remaps)?;
+            }
+            Some(())
+        })?;
+        copy_bytes(&mut cur, &mut out, 1)?; // entry flags
+    }
+    copy_bytes(&mut cur, &mut out, 1)?; // replace
+    (cur.position() as usize == payload.len()).then_some(out)
+}
+
+/// Normalizes the post-1.21.2 recipe property sets and stonecutter entries.
+fn translate_update_recipes(id: u32, payload: &[u8], ctx: RecipeCtx<'_>) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    wire::write_varint(&mut out, id);
+
+    let property_sets = copy_varint(&mut cur, &mut out)?;
+    for _ in 0..property_sets {
+        copy_utf(&mut cur, &mut out)?;
+        let items = copy_varint(&mut cur, &mut out)?;
+        for _ in 0..items {
+            let item = var_u32(&mut cur)?;
+            wire::write_varint(&mut out, ctx.remaps.remap(ClientRegistry::Item, item)?);
+        }
+    }
+
+    let stonecutter = copy_varint(&mut cur, &mut out)?;
+    for _ in 0..stonecutter {
+        translate_item_holder_set(&mut cur, &mut out, ctx.remaps)?;
+        translate_slot_display(&mut cur, &mut out, ctx, MAX_SLOT_DISPLAY_DEPTH)?;
+    }
+    (cur.position() as usize == payload.len()).then_some(out)
+}
+
+fn translate_place_ghost_recipe(id: u32, payload: &[u8], ctx: RecipeCtx<'_>) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    wire::write_varint(&mut out, id);
+    copy_varint(&mut cur, &mut out)?; // container id
+    translate_recipe_display(&mut cur, &mut out, ctx)?;
+    (cur.position() as usize == payload.len()).then_some(out)
+}
+
+fn translate_recipe_display(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    ctx: RecipeCtx<'_>,
+) -> Option<()> {
+    let source = var_u32(cur)?;
+    let display = ctx.remaps.remap(ClientRegistry::RecipeDisplay, source)?;
+    wire::write_varint(out, display);
+    let slots = |cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: usize| {
+        (0..n).try_for_each(|_| translate_slot_display(cur, out, ctx, MAX_SLOT_DISPLAY_DEPTH))
+    };
+    match display {
+        0 => {
+            // Shapeless: ingredient displays, result, crafting station.
+            translate_slot_display_vec(cur, out, ctx, MAX_SLOT_DISPLAY_DEPTH)?;
+            slots(cur, out, 2)
+        }
+        1 => {
+            // Shaped: width, height, ingredient displays, result, station.
+            copy_varint(cur, out)?;
+            copy_varint(cur, out)?;
+            translate_slot_display_vec(cur, out, ctx, MAX_SLOT_DISPLAY_DEPTH)?;
+            slots(cur, out, 2)
+        }
+        2 => {
+            // Furnace: ingredient, fuel, result, station, duration, xp.
+            slots(cur, out, 4)?;
+            copy_varint(cur, out)?;
+            copy_bytes(cur, out, 4)
+        }
+        // Stonecutter: input, result, station.
+        3 => slots(cur, out, 3),
+        // Smithing: template, base, addition, result, station.
+        4 => slots(cur, out, 5),
+        _ => None,
+    }
+}
+
+fn translate_slot_display_vec(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    ctx: RecipeCtx<'_>,
+    depth: usize,
+) -> Option<()> {
+    let len = copy_varint(cur, out)?;
+    (0..len).try_for_each(|_| translate_slot_display(cur, out, ctx, depth))
+}
+
+/// One slot display, `depth` levels of nesting allowed below it.
+fn translate_slot_display(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    ctx: RecipeCtx<'_>,
+    depth: usize,
+) -> Option<()> {
+    let depth = depth.checked_sub(1)?;
+    let nested =
+        |cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>| translate_slot_display(cur, out, ctx, depth);
+    let source = var_u32(cur)?;
+    let display = ctx.remaps.remap(ClientRegistry::SlotDisplay, source)?;
+    if display == SMITHING_TRIM_DISPLAY && ctx.layout.trim_pattern_display {
+        // 26.2 can't name a trim pattern by its template item, so keep the
+        // untrimmed base: the nearest display it can carry.
+        nested(cur, out)?;
+        let mut discarded = Vec::new();
+        nested(cur, &mut discarded)?; // material
+        return nested(cur, &mut discarded); // pattern
+    }
+    wire::write_varint(out, display);
+    match display {
+        0 | 1 => Some(()),     // empty, any_fuel
+        2 => nested(cur, out), // with_any_potion
+        3 => {
+            // only_with_component
+            nested(cur, out)?;
+            let component = var_u32(cur)?;
+            wire::write_varint(
+                out,
+                ctx.remaps
+                    .remap(ClientRegistry::DataComponentType, component)?,
+            );
+            Some(())
+        }
+        4 => {
+            let item = var_u32(cur)?;
+            wire::write_varint(out, ctx.remaps.remap(ClientRegistry::Item, item)?);
+            Some(())
+        }
+        5 => translate_item_stack_template(cur, out, ctx),
+        6 => copy_utf(cur, out), // tag resource location
+        7 | 9 => {
+            // dyed (dye, target), with_remainder (input, remainder)
+            nested(cur, out)?;
+            nested(cur, out)
+        }
+        SMITHING_TRIM_DISPLAY => {
+            nested(cur, out)?;
+            nested(cur, out)?;
+            translate_trim_pattern_holder(cur, out)
+        }
+        10 => translate_slot_display_vec(cur, out, ctx, depth),
+        _ => None,
+    }
+}
+
+/// Native `smithing_trim` slot-display id.
+const SMITHING_TRIM_DISPLAY: u32 = 8;
+
+/// One `Holder<TrimPattern>`: a registry id + 1, or 0 and an inline pattern
+/// (asset id, description, decal).
+fn translate_trim_pattern_holder(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    let holder = var_u32(cur)?;
+    wire::write_varint(out, holder);
+    if holder != 0 {
+        // Registry references use the connection's dynamic trim-pattern
+        // registry directly; there is no static client remap to apply.
+        return Some(());
+    }
+
+    copy_utf(cur, out)?; // asset id
+    let description_at = cur.position() as usize;
+    Reader::on_cursor(cur, Reader::nbt).ok()?; // description
+    out.extend_from_slice(&cur.get_ref()[description_at..cur.position() as usize]);
+    copy_bytes(cur, out, 1) // decal
+}
+
 fn remap_with<T: Registry>(remaps: &RegistryRemaps, reg: ClientRegistry, value: &mut T) -> bool {
     match remaps.remap(reg, value.to_u32()).and_then(T::from_u32) {
         Some(v) => {
@@ -4265,7 +4530,7 @@ fn translate_team(id: u32, payload: &[u8], string_scopes: bool) -> Option<Vec<u8
         advance(&mut cur, 1)?;
         let visibility = read_scope(&mut cur, string_scopes)?;
         let collision = read_scope(&mut cur, string_scopes)?;
-        let color = u32::azalea_read_var(&mut cur).ok()?;
+        let color = var_u32(&mut cur)?;
         let prefix = nbt_span(&mut cur)?;
         let suffix = nbt_span(&mut cur)?;
 
@@ -4298,9 +4563,9 @@ fn translate_team(id: u32, payload: &[u8], string_scopes: bool) -> Option<Vec<u8
 /// ALWAYS like vanilla's byName).
 fn read_scope(cur: &mut Cursor<&[u8]>, string_scopes: bool) -> Option<u8> {
     if !string_scopes {
-        return Some(u32::azalea_read_var(cur).ok()? as u8);
+        return Some(var_u32(cur)? as u8);
     }
-    let len = u32::azalea_read_var(cur).ok()? as usize;
+    let len = var_u32(cur)? as usize;
     let start = cur.position() as usize;
     advance(cur, len)?;
     Some(
@@ -4351,7 +4616,7 @@ fn collapse_vec_delta(cur: &mut Cursor<&[u8]>, step_count: u32) -> Option<[i16; 
 fn translate_move_entity_777(id: u32, payload: &[u8], rotation: bool) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     let entity = varint_span(&mut cur)?;
-    let properties = u32::azalea_read_var(&mut cur).ok()?;
+    let properties = var_u32(&mut cur)?;
     let delta = collapse_vec_delta(&mut cur, properties >> 1)?;
     let rot_at = cur.position() as usize;
     if rotation {
@@ -4398,16 +4663,12 @@ fn translate_move_entity_rot_777(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 /// counted list of `Vec3` + tick-offset varint steps), returning the 24
 /// position bytes it ends at.
 fn read_position_path_end<'a>(cur: &mut Cursor<&'a [u8]>) -> Option<&'a [u8]> {
-    let stepped = match u32::azalea_read_var(cur).ok()? {
+    let stepped = match var_u32(cur)? {
         0 => false,
         1 => true,
         _ => return None,
     };
-    let steps = if stepped {
-        u32::azalea_read_var(cur).ok()?
-    } else {
-        1
-    };
+    let steps = if stepped { var_u32(cur)? } else { 1 };
     let mut end = None;
     for _ in 0..steps {
         let at = cur.position() as usize;
@@ -4460,7 +4721,7 @@ fn translate_explode_777(
     out.extend_from_slice(&payload[..head_end]);
     translate_particles(&mut cur, &mut out, ids, remaps, false)?;
     translate_sound_holder(&mut cur, &mut out, remaps)?;
-    let entries = u32::azalea_read_var(&mut cur).ok()?;
+    let entries = var_u32(&mut cur)?;
     wire::write_varint(&mut out, entries);
     for _ in 0..entries {
         translate_particles(&mut cur, &mut out, ids, remaps, false)?;
@@ -4484,7 +4745,7 @@ fn rewrite_previous_game_type(id: u32, payload: &[u8], spawn_info_at: usize) -> 
     advance(&mut cur, 8)?; // seed
     varint_span(&mut cur)?; // game type
     let previous_at = cur.position() as usize;
-    let previous = u32::azalea_read_var(&mut cur).ok()?;
+    let previous = var_u32(&mut cur)?;
 
     let mut out = Vec::with_capacity(payload.len() + 1);
     wire::write_varint(&mut out, id);
@@ -4499,7 +4760,7 @@ fn rewrite_previous_game_type(id: u32, payload: &[u8], spawn_info_at: usize) -> 
 fn translate_login_777(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 5)?; // player id, hardcore
-    let levels = u32::azalea_read_var(&mut cur).ok()?;
+    let levels = var_u32(&mut cur)?;
     for _ in 0..levels {
         skip_utf(&mut cur)?;
     }
@@ -4538,8 +4799,8 @@ fn translate_animate_777(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 fn translate_swing_animation_777(animate_id: u32, payload: &[u8]) -> Option<Box<[u8]>> {
     let mut cur = Cursor::new(payload);
     let entity = varint_span(&mut cur)?;
-    let hand = u32::azalea_read_var(&mut cur).ok()?;
-    if u32::azalea_read_var(&mut cur).ok()? == 0 {
+    let hand = var_u32(&mut cur)?;
+    if var_u32(&mut cur)? == 0 {
         return None;
     }
     let mut out = Vec::with_capacity(entity.end + 2);
@@ -4563,7 +4824,7 @@ fn translate_level_particles_777(
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
-    let particle = u32::azalea_read_var(&mut cur).ok()?;
+    let particle = var_u32(&mut cur)?;
     let name = v
         .wire_registries
         .name_of(ClientRegistry::ParticleType, particle)?;
@@ -4574,7 +4835,7 @@ fn translate_level_particles_777(
     advance(&mut cur, 38)?; // flags, position, spread
     let speed_at = cur.position() as usize;
     advance(&mut cur, 12)?;
-    let count = u32::azalea_read_var(&mut cur).ok()?;
+    let count = var_u32(&mut cur)?;
     varint_span(&mut cur)?; // randomization type
 
     let mut out = Vec::with_capacity(payload.len() + 4);
@@ -4599,7 +4860,7 @@ fn translate_update_advancements_777(
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 1)?; // reset
-    let count = u32::azalea_read_var(&mut cur).ok()?;
+    let count = var_u32(&mut cur)?;
     let mut out = Vec::with_capacity(payload.len() + 1);
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[..cur.position() as usize]);
@@ -4613,8 +4874,8 @@ fn translate_update_advancements_777(
         } else {
             None
         };
-        for _ in 0..u32::azalea_read_var(&mut cur).ok()? {
-            for _ in 0..u32::azalea_read_var(&mut cur).ok()? {
+        for _ in 0..var_u32(&mut cur)? {
+            for _ in 0..var_u32(&mut cur)? {
                 skip_utf(&mut cur)?; // requirement
             }
         }
@@ -4720,14 +4981,14 @@ fn translate_player_chat_777(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     skip_optional(&mut cur, |c| advance(c, 256))?; // signature
     skip_utf(&mut cur)?; // content
     advance(&mut cur, 16)?; // timestamp, salt
-    for _ in 0..u32::azalea_read_var(&mut cur).ok()? {
+    for _ in 0..var_u32(&mut cur)? {
         // A last-seen entry: cache id + 1, or 0 and the full signature.
-        if u32::azalea_read_var(&mut cur).ok()? == 0 {
+        if var_u32(&mut cur)? == 0 {
             advance(&mut cur, 256)?;
         }
     }
     skip_optional(&mut cur, skip_nbt)?; // unsigned content
-    let mask = u32::azalea_read_var(&mut cur).ok()?;
+    let mask = var_u32(&mut cur)?;
 
     let mut out = Vec::with_capacity(payload.len() + 8);
     wire::write_varint(&mut out, id);
@@ -4767,7 +5028,7 @@ fn translate_commands_777(
             copy_utf(&mut cur, &mut out)?; // name
         }
         if node_type == 2 {
-            let parser = u32::azalea_read_var(&mut cur).ok()?;
+            let parser = var_u32(&mut cur)?;
             let name = v
                 .wire_registries
                 .name_of(ClientRegistry::CommandArgumentType, parser)?;
@@ -4843,32 +5104,44 @@ fn write_substitute_parser(out: &mut Vec<u8>, parser: &str) -> Option<()> {
     Some(())
 }
 
-/// Copies one item `HolderSet` (`ByteBufCodecs.holderSet`: 0 then a tag
-/// id, or count + 1 then that many item ids).
-fn copy_holder_set(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
-    match copy_varint(cur, out)? {
-        0 => copy_utf(cur, out),
-        n => (1..n).try_for_each(|_| copy_varint(cur, out).map(drop)),
+/// Normalizes one item `HolderSet` (`ByteBufCodecs.holderSet`: 0 then a tag
+/// id, or count + 1 then that many concrete item ids) into native item-id
+/// space. Named tags keep their resource id; direct holders must be remapped.
+fn translate_item_holder_set(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    let encoded = var_u32(cur)?;
+    wire::write_varint(out, encoded);
+    if encoded == 0 {
+        return copy_utf(cur, out);
     }
+    for _ in 1..encoded {
+        let item = var_u32(cur)?;
+        wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
+    }
+    Some(())
 }
 
 /// Copies one 26.3 `SlotDisplay`, recursively. Only `tag` changed: 26.3
 /// sends a `HolderSet` where 26.2 sent the tag id, and 26.3's
 /// `Ingredient.display()` routes direct item lists through it too, which
-/// 26.2 sent as a `composite` of `item` displays. The other types' layouts
-/// are unchanged (`SlotDisplay`); item ids stay in wire space.
-/// TODO: remap recipe-display item ids once `remap_inbound` covers recipes.
+/// 26.2 sent as a `composite` of `item` displays. Concrete item ids are
+/// normalized into native 26.2 registry space while named tags keep their id.
 fn copy_slot_display_777(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
     wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
+    depth: usize,
 ) -> Option<()> {
     use ClientRegistry::SlotDisplay;
-    let kind = u32::azalea_read_var(cur).ok()?;
+    let depth = depth.checked_sub(1)?;
+    let kind = var_u32(cur)?;
     let name = wire_registries.name_of(SlotDisplay, kind)?;
     if name == "tag" {
-        let set = u32::azalea_read_var(cur).ok()?;
+        let set = var_u32(cur)?;
         if set > 0 {
             let native = RegistryTable::native();
             let item = native.id_of(SlotDisplay, "item")?;
@@ -4876,7 +5149,8 @@ fn copy_slot_display_777(
             wire::write_varint(out, set - 1);
             for _ in 1..set {
                 wire::write_varint(out, item);
-                copy_varint(cur, out)?;
+                let source_item = var_u32(cur)?;
+                wire::write_varint(out, remaps.remap(ClientRegistry::Item, source_item)?);
             }
             return Some(());
         }
@@ -4890,21 +5164,23 @@ fn copy_slot_display_777(
         _ => 0,
     };
     for _ in 0..nested {
-        copy_slot_display_777(cur, out, wire_registries, remaps)?;
+        copy_slot_display_777(cur, out, wire_registries, remaps, depth)?;
     }
     match name {
         "empty" | "any_fuel" | "with_any_potion" | "dyed" | "with_remainder" | "composite" => {}
         "tag" => copy_utf(cur, out)?,
         "item" => {
-            copy_varint(cur, out)?;
+            let source_item = var_u32(cur)?;
+            wire::write_varint(out, remaps.remap(ClientRegistry::Item, source_item)?);
         }
         "item_stack" => {
-            copy_varint(cur, out)?; // item
+            let source_item = var_u32(cur)?;
+            wire::write_varint(out, remaps.remap(ClientRegistry::Item, source_item)?);
             copy_varint(cur, out)?; // count
             copy_component_patch(cur, out, remaps)?;
         }
         "only_with_component" => {
-            let component = u32::azalea_read_var(cur).ok()?;
+            let component = var_u32(cur)?;
             let native = remaps.remap(ClientRegistry::DataComponentType, component)?;
             wire::write_varint(out, native);
         }
@@ -4929,11 +5205,13 @@ fn copy_recipe_display_777(
     wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
 ) -> Option<()> {
-    let kind = u32::azalea_read_var(cur).ok()?;
+    let kind = var_u32(cur)?;
     let name = wire_registries.name_of(ClientRegistry::RecipeDisplay, kind)?;
     wire::write_varint(out, remaps.remap(ClientRegistry::RecipeDisplay, kind)?);
     let slots = |cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: u32| {
-        (0..n).try_for_each(|_| copy_slot_display_777(cur, out, wire_registries, remaps))
+        (0..n).try_for_each(|_| {
+            copy_slot_display_777(cur, out, wire_registries, remaps, MAX_SLOT_DISPLAY_DEPTH)
+        })
     };
     match name {
         // Ingredients, then the result and crafting station.
@@ -4976,12 +5254,13 @@ fn translate_recipe_book_add_777(
         copy_varint(&mut cur, &mut out)?; // group (optional varint)
         copy_varint(&mut cur, &mut out)?; // category
         copy_optional(&mut cur, &mut out, |cur, out| {
-            (0..copy_varint(cur, out)?).try_for_each(|_| copy_holder_set(cur, out))
+            (0..copy_varint(cur, out)?)
+                .try_for_each(|_| translate_item_holder_set(cur, out, remaps))
         })?;
         copy_bytes(&mut cur, &mut out, 1)?; // flags
     }
     copy_bytes(&mut cur, &mut out, 1)?; // replace
-    Some(out)
+    (cur.position() as usize == payload.len()).then_some(out)
 }
 
 /// Rewrites `place_ghost_recipe` from 26.3: container id, then a display.
@@ -4996,7 +5275,7 @@ fn translate_place_ghost_recipe_777(
     wire::write_varint(&mut out, id);
     copy_varint(&mut cur, &mut out)?;
     copy_recipe_display_777(&mut cur, &mut out, v.wire_registries, remaps)?;
-    Some(out)
+    (cur.position() as usize == payload.len()).then_some(out)
 }
 
 /// Rewrites `update_recipes` from 26.3: the property sets copy through, and
@@ -5014,20 +5293,27 @@ fn translate_update_recipes_777(
     for _ in 0..copy_varint(&mut cur, &mut out)? {
         copy_utf(&mut cur, &mut out)?; // property set key
         for _ in 0..copy_varint(&mut cur, &mut out)? {
-            copy_varint(&mut cur, &mut out)?; // item
+            let source_item = var_u32(&mut cur)?;
+            wire::write_varint(&mut out, remaps.remap(ClientRegistry::Item, source_item)?);
         }
     }
     for _ in 0..copy_varint(&mut cur, &mut out)? {
-        copy_holder_set(&mut cur, &mut out)?;
-        copy_slot_display_777(&mut cur, &mut out, v.wire_registries, remaps)?;
+        translate_item_holder_set(&mut cur, &mut out, remaps)?;
+        copy_slot_display_777(
+            &mut cur,
+            &mut out,
+            v.wire_registries,
+            remaps,
+            MAX_SLOT_DISPLAY_DEPTH,
+        )?;
     }
-    Some(out)
+    (cur.position() as usize == payload.len()).then_some(out)
 }
 
 /// The byte range of one varint, advancing past it.
 fn varint_span(cur: &mut Cursor<&[u8]>) -> Option<std::ops::Range<usize>> {
     let start = cur.position() as usize;
-    u32::azalea_read_var(cur).ok()?;
+    var_u32(cur)?;
     Some(start..cur.position() as usize)
 }
 
@@ -5054,55 +5340,382 @@ fn read_i32(cur: &mut Cursor<&[u8]>) -> Option<i32> {
     Some(i32::from_be_bytes(b))
 }
 
-/// Skips one NBT payload of the given tag type (vanilla `TagTypes` wire
-/// layout). Named tags only appear inside compounds; the depth cap matches
-/// vanilla's nesting limit.
+/// Skips one NBT payload of the given tag type; see
+/// [`pomme_protocol::codec::Reader::skip_nbt_payload`].
 fn skip_nbt_payload(cur: &mut Cursor<&[u8]>, tag: u8, depth: u32) -> Option<()> {
-    const MAX_DEPTH: u32 = 512;
-    if depth > MAX_DEPTH {
-        return None;
+    pomme_protocol::codec::Reader::on_cursor(cur, |r| r.skip_nbt_payload(tag, depth)).ok()
+}
+
+#[cfg(test)]
+mod recipe_translation_tests {
+    use super::*;
+
+    /// The recipe context the live translator uses for `protocol`.
+    fn recipe_ctx(protocol: i32) -> (Translation, RecipeLayout) {
+        let translation = Translation::for_protocol(protocol).expect("translated protocol");
+        let layout = translation.recipe_layout.expect("recipe display protocol");
+        (translation, layout)
     }
-    match tag {
-        0 => Some(()),        // End (empty root / list of End)
-        1 => advance(cur, 1), // Byte
-        2 => advance(cur, 2), // Short
-        3 => advance(cur, 4), // Int
-        4 => advance(cur, 8), // Long
-        5 => advance(cur, 4), // Float
-        6 => advance(cur, 8), // Double
-        7 => {
-            let n = read_i32(cur)?;
-            advance(cur, usize::try_from(n).ok()?)
-        }
-        8 => {
-            let n = read_u16(cur)?;
-            advance(cur, n as usize)
-        }
-        9 => {
-            let elem = read_u8(cur)?;
-            let n = read_i32(cur)?;
-            for _ in 0..n.max(0) {
-                skip_nbt_payload(cur, elem, depth + 1)?;
-            }
-            Some(())
-        }
-        10 => loop {
-            let elem = read_u8(cur)?;
-            if elem == 0 {
-                return Some(());
-            }
-            let name_len = read_u16(cur)?;
-            advance(cur, name_len as usize)?;
-            skip_nbt_payload(cur, elem, depth + 1)?;
-        },
-        11 => {
-            let n = read_i32(cur)?;
-            advance(cur, usize::try_from(n).ok()?.checked_mul(4)?)
-        }
-        12 => {
-            let n = read_i32(cur)?;
-            advance(cur, usize::try_from(n).ok()?.checked_mul(8)?)
-        }
-        _ => None,
+
+    /// Translates one `recipe_book_add` entry around `display` (a recipe
+    /// display's bytes) for `protocol`; returns the translated display bytes.
+    fn translate_display(protocol: i32, display: &[u8]) -> Option<Vec<u8>> {
+        let (translation, layout) = recipe_ctx(protocol);
+        let ctx = RecipeCtx {
+            remaps: translation.to_native,
+            layout,
+        };
+        let id = required_id(
+            PacketTable::native(),
+            Phase::Game,
+            Direction::Clientbound,
+            "recipe_book_add",
+        );
+        let mut payload = vec![1, 5];
+        payload.extend_from_slice(display);
+        payload.extend_from_slice(&[0, 0, 0, 0, 0]); // group, category, reqs, flags, replace
+        let out = translate_recipe_book_add(id, &payload, ctx)?;
+        let mut pos = 0;
+        wire::read_varint(&out, &mut pos)?;
+        let body = &out[pos..];
+        // Strip the entry header (count, id) and trailer added above.
+        Some(body[2..body.len() - 5].to_vec())
+    }
+
+    #[test]
+    fn item_stack_display_reads_count_first_through_1_21_11() {
+        // 1.21.11 shapeless display: ingredient item(dripstone 26), result
+        // item_stack wrapping ItemStack.STREAM_CODEC (count 4, item 26,
+        // empty patch), empty station. 1.21.x slot-display ids: item 2,
+        // item_stack 3; 26.2: item 4, item_stack 5, dripstone 53.
+        let display = [0, 1, 2, 26, 3, 4, 26, 0, 0, 0];
+        assert_eq!(
+            translate_display(774, &display).unwrap(),
+            [0, 1, 4, 53, 5, 53, 4, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn item_stack_display_rejects_an_empty_stack() {
+        let display = [0, 0, 3, 0, 0];
+        assert_eq!(translate_display(774, &display), None);
+    }
+
+    #[test]
+    fn smithing_trim_keeps_the_pattern_holder_from_1_21_5() {
+        // 1.21.11 smithing display (template, base, addition, result,
+        // station); result is smithing_trim(5): base item 26, material
+        // item 26, pattern registry reference 3 (wire value 4).
+        let display = [4, 0, 0, 0, 5, 2, 26, 2, 26, 4, 0];
+        assert_eq!(
+            translate_display(774, &display).unwrap(),
+            [4, 0, 0, 0, 8, 4, 53, 4, 53, 4, 0]
+        );
+    }
+
+    #[test]
+    fn smithing_trim_pattern_display_through_1_21_4_keeps_the_base() {
+        // 1.21.4's pattern is a SlotDisplay (here item 26): 26.2 carries no
+        // equivalent, so the result keeps just the untrimmed base.
+        let display = [4, 0, 0, 0, 5, 2, 26, 2, 26, 2, 26, 0];
+        assert_eq!(
+            translate_display(769, &display).unwrap(),
+            [4, 0, 0, 0, 4, 53, 0]
+        );
+    }
+
+    #[test]
+    fn nested_slot_displays_past_the_depth_cap_are_rejected() {
+        // 26.1 stonecutter display (input, result, station) whose input is
+        // `wrappers` with_any_potion (2) levels around an empty display.
+        let stonecutter = |wrappers: usize| {
+            let mut display = vec![3];
+            display.extend(std::iter::repeat_n(2, wrappers));
+            display.extend_from_slice(&[0, 0, 0]);
+            display
+        };
+        let at_cap = stonecutter(MAX_SLOT_DISPLAY_DEPTH - 1);
+        assert_eq!(
+            translate_display(775, &at_cap).as_deref(),
+            Some(&at_cap[..])
+        );
+        assert_eq!(
+            translate_display(775, &stonecutter(MAX_SLOT_DISPLAY_DEPTH)),
+            None
+        );
+    }
+
+    #[test]
+    fn recipe_book_add_remaps_1_21_11_slot_and_item_ids() {
+        let (translation, layout) = recipe_ctx(774);
+        let ctx = RecipeCtx {
+            remaps: translation.to_native,
+            layout,
+        };
+        let id = required_id(
+            PacketTable::native(),
+            Phase::Game,
+            Direction::Clientbound,
+            "recipe_book_add",
+        );
+
+        // One shapeless recipe. In 1.21.11 slot-display id 2 is `item` and
+        // item id 26 is `dripstone_block`; in 26.2 those ids are 4 and 53.
+        let payload = [
+            1, // entries
+            5, // recipe display id
+            0, // shapeless recipe-display type
+            1, // ingredient display count
+            2, 26, // old item slot-display + old dripstone_block id
+            2, 26, // result
+            0,  // empty crafting station
+            0,  // OptionalInt group = empty
+            0,  // crafting_building_blocks category
+            0,  // no crafting requirements
+            3,  // notification + highlight
+            0,  // replace = false
+        ];
+
+        let translated = translate_recipe_book_add(id, &payload, ctx).unwrap();
+        let mut pos = 0;
+        assert_eq!(wire::read_varint(&translated, &mut pos), Some(id));
+        assert_eq!(
+            &translated[pos..],
+            [
+                1, // entries
+                5, // recipe display id
+                0, // shapeless
+                1, // ingredient display count
+                4, 53, // native item slot-display + native dripstone_block
+                4, 53, // result
+                0,  // crafting station
+                0,  // group
+                0,  // category
+                0,  // requirements
+                3,  // flags
+                0,  // replace
+            ]
+        );
+    }
+
+    #[test]
+    fn recipe_book_add_remaps_26_1_even_without_game_id_translation() {
+        let translation = Translation::for_protocol(775).expect("26.1 translation");
+        assert!(translation.game_ids.is_none());
+        let id = required_id(
+            PacketTable::native(),
+            Phase::Game,
+            Direction::Clientbound,
+            "recipe_book_add",
+        );
+
+        let payload = [
+            1, // entries
+            5, // recipe display id
+            0, // shapeless
+            1, // ingredient display count
+            4, 26, // item slot + 26.1 dripstone_block
+            4, 26, // result
+            0,  // empty crafting station
+            0,  // group
+            0,  // category
+            0,  // requirements
+            0,  // flags
+            0,  // replace
+        ];
+        let mut frame = Vec::new();
+        wire::write_varint(&mut frame, id);
+        frame.extend_from_slice(&payload);
+
+        let translated = translation
+            .translate_game_frame(frame.into_boxed_slice())
+            .expect("translated recipe frame");
+        let mut pos = 0;
+        assert_eq!(wire::read_varint(&translated, &mut pos), Some(id));
+        assert_eq!(translated[pos + 5], 53); // first remapped dripstone_block
+        assert_eq!(translated[pos + 7], 53); // result dripstone_block
+    }
+
+    #[test]
+    fn recipe_packets_remap_26_3_concrete_item_ids() {
+        let translation = Translation::for_protocol(777).expect("26.3 translation");
+        let wire_packets = PacketTable::for_protocol(777).expect("26.3 packets");
+        let wire_registries = RegistryTable::for_protocol(777).expect("26.3 registries");
+        let native_packets = PacketTable::native();
+        let native_registries = RegistryTable::native();
+
+        let wire_item = wire_registries
+            .id_of(ClientRegistry::Item, "diamond")
+            .expect("26.3 diamond");
+        let native_item = native_registries
+            .id_of(ClientRegistry::Item, "diamond")
+            .expect("native diamond");
+        assert_ne!(
+            wire_item, native_item,
+            "fixture must exercise a moved item id"
+        );
+
+        let wire_shapeless = wire_registries
+            .id_of(ClientRegistry::RecipeDisplay, "crafting_shapeless")
+            .unwrap();
+        let native_shapeless = native_registries
+            .id_of(ClientRegistry::RecipeDisplay, "crafting_shapeless")
+            .unwrap();
+        let wire_slot_item = wire_registries
+            .id_of(ClientRegistry::SlotDisplay, "item")
+            .unwrap();
+        let native_slot_item = native_registries
+            .id_of(ClientRegistry::SlotDisplay, "item")
+            .unwrap();
+        let wire_slot_empty = wire_registries
+            .id_of(ClientRegistry::SlotDisplay, "empty")
+            .unwrap();
+        let native_slot_empty = native_registries
+            .id_of(ClientRegistry::SlotDisplay, "empty")
+            .unwrap();
+
+        let wire_add = required_id(
+            wire_packets,
+            Phase::Game,
+            Direction::Clientbound,
+            "recipe_book_add",
+        );
+        let native_add = required_id(
+            native_packets,
+            Phase::Game,
+            Direction::Clientbound,
+            "recipe_book_add",
+        );
+        let mut add = Vec::new();
+        wire::write_varint(&mut add, wire_add);
+        wire::write_varint(&mut add, 1); // entries
+        wire::write_varint(&mut add, 7); // display id
+        wire::write_varint(&mut add, wire_shapeless);
+        wire::write_varint(&mut add, 1); // display ingredients
+        wire::write_varint(&mut add, wire_slot_item);
+        wire::write_varint(&mut add, wire_item);
+        wire::write_varint(&mut add, wire_slot_item); // result
+        wire::write_varint(&mut add, wire_item);
+        wire::write_varint(&mut add, wire_slot_empty); // station
+        wire::write_varint(&mut add, 0); // no group
+        wire::write_varint(&mut add, 0); // category
+        add.push(1); // crafting requirements present
+        wire::write_varint(&mut add, 1); // one requirement
+        wire::write_varint(&mut add, 2); // one direct holder (+ 1)
+        wire::write_varint(&mut add, wire_item);
+        add.push(0); // flags
+        add.push(0); // replace
+
+        let mut malformed_add = add.clone();
+        malformed_add.push(0x7f);
+        assert!(
+            translation
+                .translate_game_frame(malformed_add.into_boxed_slice())
+                .is_none(),
+            "26.3 recipe_book_add must reject trailing source bytes"
+        );
+
+        let translated = translation
+            .translate_game_frame(add.into_boxed_slice())
+            .expect("translated 26.3 recipe add");
+        let mut expected = Vec::new();
+        wire::write_varint(&mut expected, native_add);
+        wire::write_varint(&mut expected, 1);
+        wire::write_varint(&mut expected, 7);
+        wire::write_varint(&mut expected, native_shapeless);
+        wire::write_varint(&mut expected, 1);
+        wire::write_varint(&mut expected, native_slot_item);
+        wire::write_varint(&mut expected, native_item);
+        wire::write_varint(&mut expected, native_slot_item);
+        wire::write_varint(&mut expected, native_item);
+        wire::write_varint(&mut expected, native_slot_empty);
+        wire::write_varint(&mut expected, 0);
+        wire::write_varint(&mut expected, 0);
+        expected.push(1);
+        wire::write_varint(&mut expected, 1);
+        wire::write_varint(&mut expected, 2);
+        wire::write_varint(&mut expected, native_item);
+        expected.push(0);
+        expected.push(0);
+        assert_eq!(&*translated, &expected);
+
+        let wire_update = required_id(
+            wire_packets,
+            Phase::Game,
+            Direction::Clientbound,
+            "update_recipes",
+        );
+        let native_update = required_id(
+            native_packets,
+            Phase::Game,
+            Direction::Clientbound,
+            "update_recipes",
+        );
+        let mut update = Vec::new();
+        wire::write_varint(&mut update, wire_update);
+        wire::write_varint(&mut update, 1); // property sets
+        let key = b"minecraft:test";
+        wire::write_varint(&mut update, key.len() as u32);
+        update.extend_from_slice(key);
+        wire::write_varint(&mut update, 1); // property set items
+        wire::write_varint(&mut update, wire_item);
+        wire::write_varint(&mut update, 1); // stonecutter entries
+        wire::write_varint(&mut update, 2); // one direct ingredient holder
+        wire::write_varint(&mut update, wire_item);
+        wire::write_varint(&mut update, wire_slot_item);
+        wire::write_varint(&mut update, wire_item);
+
+        let mut malformed_update = update.clone();
+        malformed_update.push(0x7f);
+        assert!(
+            translation
+                .translate_game_frame(malformed_update.into_boxed_slice())
+                .is_none(),
+            "26.3 update_recipes must reject trailing source bytes"
+        );
+
+        let translated = translation
+            .translate_game_frame(update.into_boxed_slice())
+            .expect("translated 26.3 update recipes");
+        let mut expected = Vec::new();
+        wire::write_varint(&mut expected, native_update);
+        wire::write_varint(&mut expected, 1);
+        wire::write_varint(&mut expected, key.len() as u32);
+        expected.extend_from_slice(key);
+        wire::write_varint(&mut expected, 1);
+        wire::write_varint(&mut expected, native_item);
+        wire::write_varint(&mut expected, 1);
+        wire::write_varint(&mut expected, 2);
+        wire::write_varint(&mut expected, native_item);
+        wire::write_varint(&mut expected, native_slot_item);
+        wire::write_varint(&mut expected, native_item);
+        assert_eq!(&*translated, &expected);
+
+        let wire_ghost = required_id(
+            wire_packets,
+            Phase::Game,
+            Direction::Clientbound,
+            "place_ghost_recipe",
+        );
+        let mut ghost = Vec::new();
+        wire::write_varint(&mut ghost, wire_ghost);
+        wire::write_varint(&mut ghost, 3); // container id
+        wire::write_varint(&mut ghost, wire_shapeless);
+        wire::write_varint(&mut ghost, 0); // no ingredient displays
+        wire::write_varint(&mut ghost, wire_slot_empty); // result
+        wire::write_varint(&mut ghost, wire_slot_empty); // station
+        let mut malformed_ghost = ghost.clone();
+        malformed_ghost.push(0x7f);
+        assert!(
+            translation
+                .translate_game_frame(malformed_ghost.into_boxed_slice())
+                .is_none(),
+            "26.3 place_ghost_recipe must reject trailing source bytes"
+        );
+        assert!(
+            translation
+                .translate_game_frame(ghost.into_boxed_slice())
+                .is_some()
+        );
     }
 }

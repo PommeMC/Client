@@ -1,12 +1,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use azalea_core::position::ChunkPos;
 use glam::DVec3;
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use super::mesher::{ChunkAABB, ChunkMeshData, PackedVertex, SectionMesh};
+use crate::position::ChunkPos;
+use crate::renderer::context::IndirectDrawFeatures;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const BUCKET_VERTICES: u32 = 32768;
@@ -125,7 +126,7 @@ fn compute_bucket_count(physical_device: vk::PhysicalDevice) -> u32 {
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct ChunkMeta {
+pub(crate) struct ChunkMeta {
     /// Section-local vertex bounds; the cull shader rebases them via `origin`.
     aabb_min: [f32; 4],
     aabb_max: [f32; 4],
@@ -141,6 +142,18 @@ struct ChunkMeta {
     /// Read by the cull shader to split the solid/cutout draws; fills the
     /// fourth lane of `origin`'s 16-byte slot, keeping the struct at 64 bytes.
     solid_index_count: u32,
+}
+
+impl ChunkMeta {
+    /// An instance entry for a draw outside the section pool: just the
+    /// origin, fully faded in.
+    pub(crate) fn instance(origin: [i32; 3]) -> Self {
+        Self {
+            origin,
+            visibility: 1.0f32.to_bits(),
+            ..bytemuck::Zeroable::zeroed()
+        }
+    }
 }
 
 /// Copy already-packed `verts` into `dst` starting at byte `off`.
@@ -265,6 +278,70 @@ fn origin_dvec(origin: [i32; 3]) -> DVec3 {
     DVec3::new(origin[0] as f64, origin[1] as f64, origin[2] as f64)
 }
 
+/// Whether `pos`'s column renders opaque immediately: fading is off, or the
+/// column is near the eye (a nearby column never fades in).
+fn column_nearby(fade_enabled: bool, pos: ChunkPos, eye: DVec3) -> bool {
+    !fade_enabled || column_is_near(pos, eye)
+}
+
+/// Rebuilds the draw list into `out`: one [`ChunkMeta`] per uploaded section
+/// the occlusion mask keeps, with its fade-in factor at `now`.
+pub(crate) fn build_meta(
+    chunks: &HashMap<ChunkPos, ChunkAlloc>,
+    chunk_visibility: &HashMap<ChunkPos, u32>,
+    fade_enabled: bool,
+    eye: DVec3,
+    now: std::time::Instant,
+    out: &mut Vec<ChunkMeta>,
+) {
+    out.clear();
+    for (pos, alloc) in chunks.iter() {
+        // Near columns never fade; otherwise each section fades on its own
+        // timer (X/Z distance is per-column).
+        let nearby = column_nearby(fade_enabled, *pos, eye);
+
+        // CPU omission: the visibility graph's mask skips sections proven
+        // occluded, so they never reach the GPU cull (absent => all draw).
+        let col_vis = chunk_visibility.get(pos).copied().unwrap_or(u32::MAX);
+
+        for sec in &alloc.sections {
+            if col_vis & (1u32 << sec.section_index) == 0 {
+                continue;
+            }
+            let vis = ChunkBufferStore::section_visibility(nearby, sec, now);
+            out.push(ChunkMeta {
+                aabb_min: sec.aabb.min,
+                aabb_max: sec.aabb.max,
+                index_count: sec.index_count,
+                first_index: sec.first_index,
+                vertex_offset: sec.vertex_offset,
+                visibility: vis.to_bits(),
+                origin: sec.origin,
+                solid_index_count: sec.solid_index_count,
+            });
+        }
+    }
+}
+
+/// Sorts the draw list front-to-back by section center distance to `eye`.
+pub(crate) fn sort_meta(meta: &mut [ChunkMeta], eye: DVec3) {
+    // Section centers rebased against the eye in f64, for precision at
+    // extreme coordinates.
+    let center_dist_sq = |m: &ChunkMeta| {
+        let center = DVec3::new(
+            ((m.aabb_min[0] + m.aabb_max[0]) * 0.5) as f64,
+            ((m.aabb_min[1] + m.aabb_max[1]) * 0.5) as f64,
+            ((m.aabb_min[2] + m.aabb_max[2]) * 0.5) as f64,
+        );
+        (origin_dvec(m.origin) + center - eye).length_squared()
+    };
+    meta.sort_unstable_by(|a, b| {
+        center_dist_sq(a)
+            .partial_cmp(&center_dist_sq(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct FrustumData {
@@ -286,7 +363,7 @@ struct FrustumData {
 /// so the slices can be returned to the free-lists on removal. `uploaded_at`
 /// drives the per-section fade so editing one section never re-fades the rest
 /// of the column.
-struct SectionAlloc {
+pub(crate) struct SectionAlloc {
     section_index: i32,
     aabb: ChunkAABB,
     /// Section world origin (`chunk*16`, `min_y + si*16`), used to rebase the
@@ -312,11 +389,47 @@ struct SectionAlloc {
     epoch: u64,
 }
 
-struct ChunkAlloc {
+pub(crate) struct ChunkAlloc {
     sections: Vec<SectionAlloc>,
 }
 
+#[cfg(any(test, feature = "cpu-bench"))]
+impl ChunkAlloc {
+    /// A column of synthetic full-size sections at `section_indices`, all
+    /// uploaded at `uploaded_at`, for tests and the CPU bench.
+    pub(crate) fn synthetic(
+        pos: ChunkPos,
+        min_y: i32,
+        section_indices: impl IntoIterator<Item = i32>,
+        uploaded_at: std::time::Instant,
+    ) -> Self {
+        let sections = section_indices
+            .into_iter()
+            .map(|si| SectionAlloc {
+                section_index: si,
+                aabb: ChunkAABB {
+                    min: [0.0, 0.0, 0.0, 0.0],
+                    max: [16.0, 16.0, 16.0, 0.0],
+                },
+                origin: [pos.x * 16, min_y + si * 16, pos.z * 16],
+                first_index: 0,
+                index_count: 6,
+                solid_index_count: 6,
+                water_first_index: 0,
+                water_index_count: 0,
+                idx_len: 6,
+                vertex_offset: 0,
+                vtx_len: 4,
+                uploaded_at,
+                epoch: 0,
+            })
+            .collect();
+        Self { sections }
+    }
+}
+
 pub struct ChunkBufferStore {
+    indirect_draw: IndirectDrawFeatures,
     /// Capacity (in draws) of the per-frame meta/indirect buffers. Grown on
     /// demand because per-section packing yields many more draws than buckets.
     max_meta: usize,
@@ -397,6 +510,7 @@ impl ChunkBufferStore {
         physical_device: vk::PhysicalDevice,
         graphics_family: u32,
         allocator: &Arc<Mutex<Allocator>>,
+        indirect_draw: IndirectDrawFeatures,
     ) -> Self {
         let total_buckets = compute_bucket_count(physical_device);
         let vertex_size = total_buckets as u64 * BUCKET_VERTICES as u64 * VERTEX_SIZE;
@@ -720,6 +834,7 @@ impl ChunkBufferStore {
         }
 
         Self {
+            indirect_draw,
             max_meta,
             vertex_buffer,
             vertex_alloc,
@@ -769,12 +884,6 @@ impl ChunkBufferStore {
     /// cull). Read back from the GPU count buffer, so it lags a few frames.
     pub fn sections_drawn(&self) -> u32 {
         self.last_draw_count
-    }
-
-    /// Whether `pos`'s column is near enough to the eye to render opaque
-    /// immediately (a nearby column never fades in).
-    fn column_nearby(&self, pos: ChunkPos, eye: DVec3) -> bool {
-        !self.fade_enabled || column_is_near(pos, eye)
     }
 
     /// Submit the accumulated staging copies as a single transfer and block on
@@ -1101,7 +1210,7 @@ impl ChunkBufferStore {
             let revealed = plans
                 .iter()
                 .any(|p| !was_present.contains(&p.section_index));
-            if revealed && !self.column_nearby(mesh.pos, self.last_sort_cam) {
+            if revealed && !column_nearby(self.fade_enabled, mesh.pos, self.last_sort_cam) {
                 let dur = std::time::Duration::from_secs_f32(FADE_DURATION_MS / 1000.0);
                 self.fade_until = self.fade_until.max(now + dur);
             }
@@ -1339,53 +1448,20 @@ impl ChunkBufferStore {
         let content_changed = self.meta_dirty || any_fading;
 
         if content_changed {
-            self.cached_meta.clear();
-            for (pos, alloc) in self.chunks.iter() {
-                // Near columns never fade; otherwise each section fades on its own
-                // timer (X/Z distance is per-column).
-                let nearby = self.column_nearby(*pos, eye);
-
-                // CPU omission: the visibility graph's mask skips sections proven
-                // occluded, so they never reach the GPU cull (absent => all draw).
-                let col_vis = self.chunk_visibility.get(pos).copied().unwrap_or(u32::MAX);
-
-                for sec in &alloc.sections {
-                    if col_vis & (1u32 << sec.section_index) == 0 {
-                        continue;
-                    }
-                    let vis = Self::section_visibility(nearby, sec, now);
-                    self.cached_meta.push(ChunkMeta {
-                        aabb_min: sec.aabb.min,
-                        aabb_max: sec.aabb.max,
-                        index_count: sec.index_count,
-                        first_index: sec.first_index,
-                        vertex_offset: sec.vertex_offset,
-                        visibility: vis.to_bits(),
-                        origin: sec.origin,
-                        solid_index_count: sec.solid_index_count,
-                    });
-                }
-            }
+            build_meta(
+                &self.chunks,
+                &self.chunk_visibility,
+                self.fade_enabled,
+                eye,
+                now,
+                &mut self.cached_meta,
+            );
             self.meta_dirty = false;
         }
 
         let cam_moved = (eye - self.last_sort_cam).length_squared() > SORT_RECAM_SQ;
         if content_changed || cam_moved {
-            // Section centers rebased against the eye in f64, for precision at
-            // extreme coordinates.
-            let center_dist_sq = |m: &ChunkMeta| {
-                let center = DVec3::new(
-                    ((m.aabb_min[0] + m.aabb_max[0]) * 0.5) as f64,
-                    ((m.aabb_min[1] + m.aabb_max[1]) * 0.5) as f64,
-                    ((m.aabb_min[2] + m.aabb_max[2]) * 0.5) as f64,
-                );
-                (origin_dvec(m.origin) + center - eye).length_squared()
-            };
-            self.cached_meta.sort_unstable_by(|a, b| {
-                center_dist_sq(a)
-                    .partial_cmp(&center_dist_sq(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            sort_meta(&mut self.cached_meta, eye);
             self.last_sort_cam = eye;
             // Draw list reordered: every frame slot's meta buffer needs the refresh.
             self.meta_upload_pending = MAX_FRAMES_IN_FLIGHT as u32;
@@ -1426,14 +1502,15 @@ impl ChunkBufferStore {
                 + read_and_clear(&mut self.count_cutout_allocs[frame]);
         }
 
-        // macOS draws the whole indirect buffer (no drawIndirectCount), so slots
+        // Without drawIndirectCount the whole indirect buffer is drawn, so slots
         // the cull shader leaves unfilled must read as no-op draws, not stale data.
-        #[cfg(target_os = "macos")]
-        for a in [
-            &mut self.indirect_allocs[frame],
-            &mut self.indirect_cutout_allocs[frame],
-        ] {
-            a.mapped_slice_mut().unwrap().fill(0);
+        if !self.indirect_draw.count {
+            for a in [
+                &mut self.indirect_allocs[frame],
+                &mut self.indirect_cutout_allocs[frame],
+            ] {
+                a.mapped_slice_mut().unwrap().fill(0);
+            }
         }
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Compute, self.compute_pipeline);
@@ -1492,17 +1569,15 @@ impl ChunkBufferStore {
         // instance for the section origin + fade (indexed by `first_instance`).
         cmd.bind_vertex_buffers(0, &[self.vertex_buffer, self.meta_buffers[frame]], &[0, 0]);
         cmd.bind_index_buffer(self.index_buffer, 0, vk::IndexType::Uint32);
-        if cfg!(target_os = "macos") {
-            cmd.draw_indexed_indirect(indirect, 0, max_draws, size_of::<DrawCommand>() as u32);
+        let stride = size_of::<DrawCommand>() as u32;
+        if self.indirect_draw.count {
+            cmd.draw_indexed_indirect_count(indirect, 0, count, 0, max_draws, stride);
+        } else if self.indirect_draw.multi_draw {
+            cmd.draw_indexed_indirect(indirect, 0, max_draws, stride);
         } else {
-            cmd.draw_indexed_indirect_count(
-                indirect,
-                0,
-                count,
-                0,
-                max_draws,
-                size_of::<DrawCommand>() as u32,
-            );
+            for i in 0..max_draws {
+                cmd.draw_indexed_indirect(indirect, (i * stride) as u64, 1, stride);
+            }
         }
     }
 
@@ -1551,7 +1626,7 @@ impl ChunkBufferStore {
         let now = std::time::Instant::now();
         for (pos, alloc) in self.chunks.iter() {
             let col_vis = self.chunk_visibility.get(pos).copied().unwrap_or(u32::MAX);
-            let nearby = self.column_nearby(*pos, eye);
+            let nearby = column_nearby(self.fade_enabled, *pos, eye);
             for sec in &alloc.sections {
                 if sec.water_index_count == 0
                     || col_vis & (1u32 << sec.section_index) == 0
@@ -1734,4 +1809,41 @@ fn desc_write(
     };
 
     (info, write)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[test]
+    fn build_meta_masks_fades_and_sorts_front_to_back() {
+        let now = Instant::now();
+        let near = ChunkPos::new(0, 0);
+        let far = ChunkPos::new(4, 0);
+        let mut chunks = HashMap::new();
+        chunks.insert(near, ChunkAlloc::synthetic(near, -64, [4, 5], now));
+        chunks.insert(
+            far,
+            ChunkAlloc::synthetic(far, -64, [4], now - Duration::from_millis(500)),
+        );
+        // Section 5 of the near column is occluded.
+        let vis = HashMap::from([(near, 1u32 << 4)]);
+        let eye = DVec3::new(8.0, 8.0, 8.0);
+
+        let mut meta = Vec::new();
+        build_meta(&chunks, &vis, true, eye, now, &mut meta);
+        sort_meta(&mut meta, eye);
+
+        assert_eq!(meta.len(), 2);
+        assert_eq!(meta[0].origin, [0, 0, 0]);
+        assert_eq!(f32::from_bits(meta[0].visibility), 1.0);
+        assert_eq!(meta[1].origin, [64, 0, 0]);
+        let far_vis = f32::from_bits(meta[1].visibility);
+        assert!((far_vis - 0.5).abs() < 0.01, "far fade {far_vis}");
+
+        build_meta(&chunks, &vis, false, eye, now, &mut meta);
+        assert!(meta.iter().all(|m| f32::from_bits(m.visibility) == 1.0));
+    }
 }

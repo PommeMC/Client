@@ -18,6 +18,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
@@ -63,7 +64,7 @@ impl MainMenu {
                 return empty_result(2.0);
             }
             if self.focused_field.take().is_none() {
-                self.set_screen(Screen::Main);
+                self.set_screen(Screen::Main, key_bindings);
                 return empty_result(2.0);
             }
         }
@@ -75,7 +76,7 @@ impl MainMenu {
                 [panel_x, tab_y, panel_w, (panel_y + panel_h) - tab_y],
             )
         {
-            self.set_screen(Screen::Main);
+            self.set_screen(Screen::Main, key_bindings);
             return empty_result(2.0);
         }
         if input.f5 {
@@ -94,7 +95,13 @@ impl MainMenu {
         // the panel.
         let backdrop_input = MenuInput::backdrop();
         let mut elements = self
-            .build_main(screen_w, screen_h, &backdrop_input, text_width_fn)
+            .build_main(
+                screen_w,
+                screen_h,
+                &backdrop_input,
+                text_width_fn,
+                key_bindings,
+            )
             .elements;
         // Everything above is the title-screen backdrop; the marker tells the
         // renderer to draw it into the scene and blur it. A full-screen frosted

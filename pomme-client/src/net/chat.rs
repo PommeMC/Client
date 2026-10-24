@@ -18,7 +18,7 @@ use crate::chat_component::{
 };
 use crate::net::chat_security::{LastSeenUpdate, SignedChatBody};
 use crate::ui::chat::{ChatMessageSource, ChatMessageTag};
-use crate::ui::text::format_component_spans;
+use crate::ui::text::{TextSpan, format_component_spans};
 
 const BAD_CHAT_INDEX: &str = "multiplayer.disconnect.bad_chat_index";
 const INVALID_PACKET: &str = "multiplayer.disconnect.invalid_packet";
@@ -408,8 +408,8 @@ fn parse_player_chat(
     validation_error.style.italic = Some(true);
     let missing_profile = decorate(validation_error, &bound);
 
-    // Vanilla `ChatTrustLevel.isModified`, against the message as displayed
-    // with and without its unsigned content.
+    // Keep the unfiltered trust inputs with and without unsigned content;
+    // text-dependent trust must use the same bindings as receipt-time rendering.
     let decorated = decorate(
         unsigned
             .clone()
@@ -420,11 +420,10 @@ fn parse_player_chat(
     let modified_style = unsigned
         .as_ref()
         .is_some_and(component_has_non_default_font);
-    let modified =
-        |decorated: &Component| !decorated.plain_text().contains(&signed_content) || modified_style;
     let signed_body = SignedChatBody {
-        modified: modified(&decorated),
-        modified_when_unsigned_hidden: modified(&decorated_signed),
+        decorated_content: Box::new(decorated.clone()),
+        decorated_signed_content: Box::new(decorated_signed.clone()),
+        modified_style,
         fully_filtered: matches!(filter, FilterMask::FullyFiltered),
         content: signed_content.clone(),
         timestamp_ms,
@@ -519,19 +518,10 @@ impl<'a> ChatDelivery<'a> {
 }
 
 fn send_chat(event_tx: &Sender<NetworkEvent>, delivery: ChatDelivery<'_>) {
-    let spans = format_component_spans(delivery.component, [1.0; 4]);
-    let secure_spans = delivery
-        .secure_component
-        .map(|component| format_component_spans(component, [1.0; 4]));
-    let missing_profile_spans = delivery
-        .missing_profile_component
-        .map(|component| format_component_spans(component, [1.0; 4]));
-    let text: String = spans.iter().map(|span| span.text.as_str()).collect();
-    tracing::info!("Chat: {text}");
     let _ = event_tx.try_send(NetworkEvent::ChatMessage {
-        spans,
-        secure_spans,
-        missing_profile_spans,
+        component: Box::new(delivery.component.clone()),
+        secure_component: delivery.secure_component.cloned().map(Box::new),
+        missing_profile_component: delivery.missing_profile_component.cloned().map(Box::new),
         signature: delivery.signature,
         sender_uuid: delivery.sender_uuid,
         signed_body: delivery.signed_body,
@@ -541,8 +531,9 @@ fn send_chat(event_tx: &Sender<NetworkEvent>, delivery: ChatDelivery<'_>) {
 }
 
 fn send_action_bar(event_tx: &Sender<NetworkEvent>, component: &Component) {
-    let spans = format_component_spans(component, [1.0; 4]);
-    let _ = event_tx.try_send(NetworkEvent::ActionBar { spans });
+    let _ = event_tx.try_send(NetworkEvent::ActionBar {
+        component: component.clone(),
+    });
 }
 
 fn decorate(content: Component, bound: &BoundChatType) -> Component {
@@ -725,6 +716,22 @@ pub(super) fn read_component(raw: &[u8], pos: &mut usize) -> Result<Component, S
     Component::from_nbt_tag(&tag).map_err(|e| format!("invalid text component: {e}"))
 }
 
+/// A component's spans; `None`, logged, when it's unreadable.
+pub(super) fn component_spans(nbt: &[u8]) -> Option<Vec<TextSpan>> {
+    component_spans_over(nbt, [1.0; 4])
+}
+
+/// [`component_spans`] with unstyled text in `base`.
+pub(super) fn component_spans_over(nbt: &[u8], base: [f32; 4]) -> Option<Vec<TextSpan>> {
+    match read_component(nbt, &mut 0) {
+        Ok(text) => Some(format_component_spans(&text, base)),
+        Err(e) => {
+            tracing::debug!("Ignoring a packet with unreadable text: {e}");
+            None
+        }
+    }
+}
+
 pub(super) fn read_nbt_tag(raw: &[u8], pos: &mut usize) -> Result<NbtTag, String> {
     let slice = raw
         .get(*pos..)
@@ -901,10 +908,10 @@ mod tests {
     }
 
     fn decode_chat(raw: &[u8], chat_types: &ChatTypeRegistry) -> Vec<TextSpan> {
-        let NetworkEvent::ChatMessage { spans, .. } = decode(raw, chat_types) else {
+        let NetworkEvent::ChatMessage { component, .. } = decode(raw, chat_types) else {
             panic!("expected chat event");
         };
-        spans
+        format_component_spans(&component, [1.0; 4])
     }
 
     /// An unsigned chat message with an empty last-seen update.
@@ -1143,6 +1150,87 @@ mod tests {
         assert!(matches!(filtered.hover_event, Some(HoverEvent::Text(_))));
     }
 
+    fn live_binding_chat_trust(
+        signed: &str,
+        only_secure: bool,
+    ) -> (String, Option<ChatMessageTag>) {
+        use winit::keyboard::KeyCode;
+
+        use crate::app::input::{Action, InputKey, KeyBindings};
+        use crate::ui::text::{format_component_spans_with_bindings, span_text};
+
+        let mut raw = Vec::new();
+        write_varint(&mut raw, native_id("player_chat"));
+        write_varint(&mut raw, 0);
+        raw.extend_from_slice(&[0; 16]);
+        write_varint(&mut raw, 0);
+        raw.push(0); // Signature validation is separate; exercise the accepted-signed path below.
+        write_wire_string(&mut raw, signed);
+        raw.extend_from_slice(&1_000i64.to_be_bytes());
+        raw.extend_from_slice(&0i64.to_be_bytes());
+        write_varint(&mut raw, 0);
+        raw.push(1);
+        let mut unsigned = NbtCompound::new();
+        unsigned.insert("keybind", "key.jump");
+        write_component(&mut raw, unsigned);
+        write_varint(&mut raw, 0); // pass-through filter
+        write_bound_chat_type(&mut raw, "Alice");
+        let NetworkEvent::ChatMessage {
+            component,
+            secure_component,
+            signed_body: Some(body),
+            ..
+        } = decode(&raw, &test_chat_registries("<%s> %s"))
+        else {
+            panic!("expected player chat");
+        };
+        let mut bindings = KeyBindings::default();
+        bindings.set(Action::Jump, vec![InputKey::Keyboard(KeyCode::KeyJ)]);
+        let component = if only_secure {
+            secure_component.unwrap_or(component)
+        } else {
+            component
+        };
+        let spans = format_component_spans_with_bindings(&component, [1.0; 4], &bindings);
+        let tag = crate::app::core::accepted_player_chat_tag(
+            false,
+            true,
+            &body,
+            1_001,
+            only_secure,
+            &bindings,
+        );
+        (span_text(&spans), tag)
+    }
+
+    #[test]
+    fn live_binding_chat_modified_marker_follows_displayed_text() {
+        // Jump defaults to Space, but this player's live binding is J.
+        for (signed, expected_tag) in [
+            (
+                "Space",
+                Some(ChatMessageTag::Modified {
+                    original: "Space".into(),
+                }),
+            ),
+            ("J", None),
+        ] {
+            assert_eq!(
+                live_binding_chat_trust(signed, false),
+                ("<Alice> J".into(), expected_tag),
+                "signed text: {signed}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_binding_chat_secure_selection_ignores_unsigned_text() {
+        assert_eq!(
+            live_binding_chat_trust("Space", true),
+            ("<Alice> Space".into(), None)
+        );
+    }
+
     #[test]
     fn action_bar_and_overlay_system_chat_reach_the_action_bar() {
         let mut action_bar = Vec::new();
@@ -1154,11 +1242,11 @@ mod tests {
         overlay.push(1); // overlay
 
         for raw in [action_bar, overlay] {
-            let NetworkEvent::ActionBar { spans } = decode(&raw, &ChatTypeRegistry::default())
+            let NetworkEvent::ActionBar { component } = decode(&raw, &ChatTypeRegistry::default())
             else {
                 panic!("expected action bar event");
             };
-            assert_eq!(plain(&spans), "bar");
+            assert_eq!(component.plain_text(), "bar");
         }
     }
 
@@ -1495,14 +1583,17 @@ mod tests {
             .unwrap();
         let NetworkEvent::ChatMessage {
             sender_uuid,
-            missing_profile_spans,
+            missing_profile_component,
             ..
         } = rx.recv().unwrap()
         else {
             panic!("expected chat event");
         };
         assert_eq!(sender_uuid, Some(sender));
-        let fallback = missing_profile_spans.expect("missing-profile fallback");
+        let fallback = format_component_spans(
+            &missing_profile_component.expect("missing-profile fallback"),
+            [1.0; 4],
+        );
         assert_eq!(
             fallback.iter().map(|s| s.text.as_str()).collect::<String>(),
             "<Alice> chat.validation_error"

@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use azalea_core::position::BlockPos;
 use azalea_inventory::ItemStack;
 use glam::DVec3;
 
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
 use crate::mob_effect::ActiveMobEffects;
+use crate::position::BlockPos;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::boss_bar::BossBarState;
 use crate::ui::text::TextSpan;
@@ -68,6 +68,9 @@ struct Objective {
     display: Vec<TextSpan>,
     number_format: Option<ScoreNumberFormat>,
 }
+
+/// A sidebar row: the name, then its number text.
+pub type SidebarRow = (Vec<TextSpan>, Vec<TextSpan>);
 
 #[derive(Default)]
 pub struct Scoreboard {
@@ -309,6 +312,50 @@ impl Scoreboard {
         }
         line
     }
+
+    /// The sidebar objective's title and its rows: sorted by score descending
+    /// then owner case-insensitive, `#`-prefixed owners hidden, at most 15,
+    /// each number format falling back to the objective's and then to
+    /// styled red.
+    pub fn sidebar(&self) -> Option<(&[TextSpan], Vec<SidebarRow>)> {
+        let objective = self.sidebar.as_ref()?;
+        let obj = self.objectives.get(objective)?;
+        let mut entries: Vec<_> = self
+            .scores
+            .iter()
+            .filter(|((entry_objective, owner), _)| {
+                entry_objective == objective && !owner.starts_with('#')
+            })
+            .collect();
+        entries.sort_by(|((_, a), a_entry), ((_, b), b_entry)| {
+            b_entry
+                .score
+                .cmp(&a_entry.score)
+                .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+        });
+        entries.truncate(15);
+        let rows = entries
+            .iter()
+            .map(|((_, owner), entry)| {
+                let name = self.line(owner, entry.display.as_deref());
+                let number = match entry
+                    .number_format
+                    .as_ref()
+                    .or(obj.number_format.as_ref())
+                    .cloned()
+                    .unwrap_or(ScoreNumberFormat::Styled(super::common::rgb(0xff5555)))
+                {
+                    ScoreNumberFormat::Blank => Vec::new(),
+                    ScoreNumberFormat::Styled(color) => {
+                        vec![TextSpan::new(entry.score.to_string(), color)]
+                    }
+                    ScoreNumberFormat::Fixed(spans) => spans,
+                };
+                (name, number)
+            })
+            .collect();
+        Some((&obj.display, rows))
+    }
 }
 
 pub struct DebugInfo<'a> {
@@ -318,7 +365,7 @@ pub struct DebugInfo<'a> {
     pub x_rot_deg: f32,
     pub target_block: Option<(
         BlockPos,
-        azalea_core::direction::Direction,
+        crate::world::block::model::Direction,
         String,
         Vec<String>,
     )>,
@@ -400,6 +447,25 @@ const ICON_SIZE: f32 = 9.0;
 const ICON_STRIDE: f32 = 8.0;
 const XP_BAR_W: f32 = 182.0;
 const XP_BAR_H: f32 = 5.0;
+
+/// The hotbar sprite's top-left corner.
+fn hotbar_origin(screen_w: f32, screen_h: f32, gs: f32) -> (f32, f32) {
+    (
+        (screen_w / 2.0 - HOTBAR_W * gs / 2.0).round(),
+        (screen_h - HOTBAR_H * gs).round(),
+    )
+}
+
+/// The hotbar slot under `(x, y)`, for touch selection.
+pub fn hotbar_slot_at(screen_w: f32, screen_h: f32, gs: f32, (x, y): (f32, f32)) -> Option<u8> {
+    let (hotbar_x, hotbar_y) = hotbar_origin(screen_w, screen_h, gs);
+    if y < hotbar_y {
+        return None;
+    }
+    // A 1-unit border, then nine 20-unit slots.
+    let slot = ((x - hotbar_x - gs) / (SLOT_STRIDE * gs)).floor();
+    (0.0..9.0).contains(&slot).then_some(slot as u8)
+}
 
 /// Vanilla `Window.calculateScale`: the largest scale that keeps the screen at
 /// least 320x240, capped by `setting` (0 is Auto), then made even while Force
@@ -557,8 +623,7 @@ pub fn build_hud(
     // The bar geometry also anchors the status rows and XP bar below.
     let hotbar_w = HOTBAR_W * gs;
     let hotbar_h = HOTBAR_H * gs;
-    let hotbar_x = (cx - hotbar_w / 2.0).round();
-    let hotbar_y = (screen_h - hotbar_h).round();
+    let (hotbar_x, hotbar_y) = hotbar_origin(screen_w, screen_h, gs);
 
     // Vanilla `Hud.extractHotbarAndDecorations`: spectators get the spectator
     // command bar (pushed by the caller) instead of the item hotbar.
@@ -1024,11 +1089,9 @@ fn build_boss_bars(
     }
 }
 
-/// Vanilla `Hud.displayScoreboardSidebar`: entries sorted by score
-/// descending then owner case-insensitive, `#`-prefixed owners hidden, at
-/// most 15 rows, number format per score falling back to the objective's and
-/// then to styled red, block anchored at `height/2 + rowsHeight/3`, title
-/// background 0.4 over rows 0.3, no text shadow.
+/// Vanilla `Hud.displayScoreboardSidebar`: the [`Scoreboard::sidebar`]
+/// rows, block anchored at `height/2 + rowsHeight/3`, title background 0.4
+/// over rows 0.3, no text shadow.
 fn build_scoreboard(
     elements: &mut Vec<MenuElement>,
     screen_w: f32,
@@ -1038,50 +1101,18 @@ fn build_scoreboard(
     text_width_fn: TextWidthFn,
     spans_width_fn: super::common::SpansWidthFn<'_>,
 ) {
-    let Some(objective) = scoreboard.sidebar.as_ref() else {
-        return;
-    };
-    let Some(obj) = scoreboard.objectives.get(objective) else {
+    let Some((title, rows)) = scoreboard.sidebar() else {
         return;
     };
     let fs = FONT_SIZE * gs;
-    let mut entries: Vec<_> = scoreboard
-        .scores
-        .iter()
-        .filter(|((entry_objective, owner), _)| {
-            entry_objective == objective && !owner.starts_with('#')
-        })
-        .collect();
-    entries.sort_by(|((_, a), a_entry), ((_, b), b_entry)| {
-        b_entry
-            .score
-            .cmp(&a_entry.score)
-            .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
-    });
-    entries.truncate(15);
-    let rows: Vec<(Vec<TextSpan>, Vec<TextSpan>, f32)> = entries
-        .iter()
-        .map(|((_, owner), entry)| {
-            let name = scoreboard.line(owner, entry.display.as_deref());
-            let number = match entry
-                .number_format
-                .as_ref()
-                .or(obj.number_format.as_ref())
-                .cloned()
-                .unwrap_or(ScoreNumberFormat::Styled(super::common::rgb(0xff5555)))
-            {
-                ScoreNumberFormat::Blank => Vec::new(),
-                ScoreNumberFormat::Styled(color) => {
-                    vec![TextSpan::new(entry.score.to_string(), color)]
-                }
-                ScoreNumberFormat::Fixed(spans) => spans,
-            };
+    let rows: Vec<(Vec<TextSpan>, Vec<TextSpan>, f32)> = rows
+        .into_iter()
+        .map(|(name, number)| {
             let number_w = spans_width_fn(&number, fs);
             (name, number, number_w)
         })
         .collect();
 
-    let title = &obj.display;
     let title_w = spans_width_fn(title, fs);
     let spacer_w = text_width_fn(": ", fs);
     let width = rows.iter().fold(title_w, |width, (name, _, number_w)| {
@@ -1119,7 +1150,7 @@ fn build_scoreboard(
     elements.push(MenuElement::McText {
         x: left + width / 2.0 - title_w / 2.0,
         y: header_y - line_h,
-        spans: title.clone(),
+        spans: title.to_vec(),
         scale: fs,
         centered: false,
         shadow: false,

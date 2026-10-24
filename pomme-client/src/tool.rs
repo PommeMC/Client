@@ -9,7 +9,7 @@ use azalea_registry::identifier::Identifier;
 use azalea_registry::{HolderSet, Registry};
 use pomme_protocol::version::NATIVE;
 
-use crate::world::block::BlockTags;
+use crate::world::block::{BlockStateTable, BlockTags};
 
 /// First protocol whose shears use the `shears_*_breaking_speed` tags (26.2).
 const SHEARS_SPEED_TAGS_PROTOCOL: i32 = 776;
@@ -367,7 +367,8 @@ fn wire_blocks(blocks: &HolderSet<BlockKind, Identifier>, protocol: i32) -> Tool
                     } else {
                         // azalea decoded the raw id as a native BlockKind;
                         // map it through that protocol's block registry.
-                        crate::world::block::block_registry_name(protocol, kind.to_u32())
+                        BlockStateTable::for_protocol(protocol)
+                            .registry_name(kind.to_u32())
                             .map(str::to_owned)
                             .unwrap_or_else(|| block_name(kind))
                     }
@@ -425,11 +426,13 @@ mod tests {
     use super::*;
 
     fn test_tags() -> BlockTags {
-        crate::world::block::init("26.2");
-        crate::world::block::block_tags_for_test(&[
-            ("mineable/pickaxe", &["stone", "obsidian"]),
-            ("incorrect_for_iron_tool", &["obsidian"]),
-        ])
+        crate::world::block::block_tags_for_test(
+            BlockStateTable::native(),
+            &[
+                ("mineable/pickaxe", &["stone", "obsidian"]),
+                ("incorrect_for_iron_tool", &["obsidian"]),
+            ],
+        )
     }
 
     #[test]
@@ -469,16 +472,18 @@ mod tests {
 
     #[test]
     fn legacy_tiers_use_needs_tool_tags_before_1_20_5() {
-        crate::world::block::init("26.2");
-        let tags = crate::world::block::block_tags_for_test(&[
-            (
-                "mineable/pickaxe",
-                &["stone", "iron_ore", "diamond_ore", "obsidian"],
-            ),
-            ("needs_stone_tool", &["iron_ore"]),
-            ("needs_iron_tool", &["diamond_ore"]),
-            ("needs_diamond_tool", &["obsidian"]),
-        ]);
+        let tags = crate::world::block::block_tags_for_test(
+            BlockStateTable::for_protocol(765),
+            &[
+                (
+                    "mineable/pickaxe",
+                    &["stone", "iron_ore", "diamond_ore", "obsidian"],
+                ),
+                ("needs_stone_tool", &["iron_ore"]),
+                ("needs_iron_tool", &["diamond_ore"]),
+                ("needs_diamond_tool", &["obsidian"]),
+            ],
+        );
         let wooden = material_tool(2.0, "incorrect_for_wooden_tool", "mineable/pickaxe", 0);
         let stone = material_tool(4.0, "incorrect_for_stone_tool", "mineable/pickaxe", 1);
         let iron = material_tool(6.0, "incorrect_for_iron_tool", "mineable/pickaxe", 2);
@@ -566,11 +571,10 @@ mod tests {
 
     #[test]
     fn shears_use_leaves_and_wool_tags_before_26_2() {
-        crate::world::block::init("26.2");
-        let tags = crate::world::block::block_tags_for_test(&[
-            ("leaves", &["oak_leaves"]),
-            ("wool", &["white_wool"]),
-        ]);
+        let tags = crate::world::block::block_tags_for_test(
+            BlockStateTable::for_protocol(775),
+            &[("leaves", &["oak_leaves"]), ("wool", &["white_wool"])],
+        );
         let shears = default_tool(ItemKind::Shears, 775).expect("26.1 shears");
         assert_eq!(*shears, legacy_shears_tool());
         assert_eq!(shears.mining_speed("cobweb", &tags), 15.0);
@@ -627,7 +631,7 @@ mod tests {
     fn direct_holder_ids_use_the_negotiated_block_registry() {
         let raw_old_id = 998u32;
         assert_eq!(
-            crate::world::block::block_registry_name(775, raw_old_id),
+            BlockStateTable::for_protocol(775).registry_name(raw_old_id),
             Some("calcite")
         );
         let latest_interpretation = BlockKind::from_u32(raw_old_id).expect("latest block id");

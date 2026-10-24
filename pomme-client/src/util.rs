@@ -4,50 +4,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use azalea_core::position::ChunkPos;
-
-/// Largest supported server view distance. A `(2 * MAX_RD + 1)` ring gives
-/// every simultaneously loaded column a distinct slot.
-pub const MAX_RD: u32 = 128;
-const CHUNK_RING_SIDE: usize = (MAX_RD * 2 + 1) as usize;
-const CHUNK_RING_LEN: usize = CHUNK_RING_SIDE * CHUNK_RING_SIDE;
-
-/// Fixed-size storage indexed by world chunk coordinates.
-pub struct ChunkRing<T> {
-    pub buf: Box<[T]>,
-}
-
-impl<T> ChunkRing<T> {
-    pub fn from_fn(mut init: impl FnMut(usize, usize) -> T) -> Self {
-        let mut values = Vec::with_capacity(CHUNK_RING_LEN);
-        for x in 0..CHUNK_RING_SIDE {
-            for z in 0..CHUNK_RING_SIDE {
-                values.push(init(x, z));
-            }
-        }
-        Self {
-            buf: values.into_boxed_slice(),
-        }
-    }
-
-    #[inline]
-    fn index(pos: ChunkPos) -> usize {
-        let x = pos.x.rem_euclid(CHUNK_RING_SIDE as i32) as usize;
-        let z = pos.z.rem_euclid(CHUNK_RING_SIDE as i32) as usize;
-        x * CHUNK_RING_SIDE + z
-    }
-
-    #[inline]
-    pub fn get(&self, pos: ChunkPos) -> &T {
-        &self.buf[Self::index(pos)]
-    }
-
-    #[inline]
-    pub fn get_mut(&mut self, pos: ChunkPos) -> &mut T {
-        &mut self.buf[Self::index(pos)]
-    }
-}
-
 /// Java `java.util.Random` (`LegacyRandomSource`) reimplementation: a 48-bit
 /// LCG matching the JVM bit-for-bit so seeded sequences line up with vanilla.
 ///
@@ -134,24 +90,120 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
+/// The Android app, for calls into its Java side (`open_url`). Replaced on
+/// each `android_main`, since a recreated activity gets a new one.
+#[cfg(target_os = "android")]
+pub static ANDROID_APP: std::sync::RwLock<Option<crate::AndroidApp>> = std::sync::RwLock::new(None);
+
+pub fn open_url(url: &str) {
+    #[cfg(target_os = "android")]
+    let opened = open_url_android(url).map_err(|e| e.to_string());
+    #[cfg(target_os = "ios")]
+    let opened = open_url_ios(url);
+    #[cfg(not(mobile))]
+    let opened = open::that(url).map_err(|e| e.to_string());
+    if let Err(e) = opened {
+        tracing::warn!("Could not open {url:?}: {e}");
+    }
+}
+
+/// Keeps `dir`, which holds only re-downloadable files, out of iCloud
+/// backups; it's created if missing.
+#[cfg(target_os = "ios")]
+pub fn exclude_from_backup(dir: &std::path::Path) {
+    use objc2_foundation::{NSNumber, NSString, NSURL, NSURLIsExcludedFromBackupKey};
+
+    let _ = std::fs::create_dir_all(dir);
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&dir.to_string_lossy()));
+    // SAFETY: the key's value is an `NSNumber` boolean, as Foundation expects.
+    let excluded = unsafe {
+        url.setResourceValue_forKey_error(
+            Some(&NSNumber::new_bool(true)),
+            NSURLIsExcludedFromBackupKey,
+        )
+    };
+    if let Err(e) = excluded {
+        tracing::warn!("Couldn't keep {} out of backups: {e}", dir.display());
+    }
+}
+
+/// `[UIApplication.sharedApplication openURL:]`, which opens Safari; `open`
+/// would spawn a process, which iOS doesn't allow.
+#[cfg(target_os = "ios")]
+fn open_url_ios(url: &str) -> Result<(), String> {
+    use objc2_foundation::{MainThreadMarker, NSDictionary, NSString, NSURL};
+    use objc2_ui_kit::UIApplication;
+
+    let mtm = MainThreadMarker::new().ok_or("not on the main thread")?;
+    let url = NSURL::URLWithString(&NSString::from_str(url)).ok_or("not a URL")?;
+    let app = UIApplication::sharedApplication(mtm);
+    // SAFETY: the options dictionary is empty and there's no completion block.
+    unsafe { app.openURL_options_completionHandler(&url, &NSDictionary::new(), None) };
+    Ok(())
+}
+
+/// `activity.startActivity(new Intent(ACTION_VIEW, Uri.parse(url)))`, as a
+/// Custom Tab: the browser opens over the app, which stays in the foreground,
+/// and Back returns to it. The session extra (a null binder) is all Custom
+/// Tabs needs; androidx.browser's `CustomTabsIntent` only builds this intent.
+#[cfg(target_os = "android")]
+fn open_url_android(url: &str) -> jni::errors::Result<()> {
+    use jni::objects::{JObject, JValue};
+    use jni::{jni_sig, jni_str};
+
+    let Some(app) = ANDROID_APP.read().ok().and_then(|app| app.clone()) else {
+        return Ok(());
+    };
+    // SAFETY: android-activity's pointer is the process's JavaVM, alive while
+    // the app runs.
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    vm.attach_current_thread(|env| {
+        // SAFETY: the activity's global reference outlives this frame, and
+        // `JObject` never deletes the reference it wraps.
+        let activity = unsafe { JObject::from_raw(env, app.activity_as_ptr().cast()) };
+        let url = env.new_string(url)?;
+        let uri = env
+            .call_static_method(
+                jni_str!("android/net/Uri"),
+                jni_str!("parse"),
+                jni_sig!("(Ljava/lang/String;)Landroid/net/Uri;"),
+                &[JValue::Object(&url)],
+            )?
+            .l()?;
+        let action = env.new_string("android.intent.action.VIEW")?;
+        let intent = env.new_object(
+            jni_str!("android/content/Intent"),
+            jni_sig!("(Ljava/lang/String;Landroid/net/Uri;)V"),
+            &[JValue::Object(&action), JValue::Object(&uri)],
+        )?;
+        let extras = env.new_object(jni_str!("android/os/Bundle"), jni_sig!("()V"), &[])?;
+        let session = env.new_string("android.support.customtabs.extra.SESSION")?;
+        env.call_method(
+            &extras,
+            jni_str!("putBinder"),
+            jni_sig!("(Ljava/lang/String;Landroid/os/IBinder;)V"),
+            &[JValue::Object(&session), JValue::Object(&JObject::null())],
+        )?;
+        env.call_method(
+            &intent,
+            jni_str!("putExtras"),
+            jni_sig!("(Landroid/os/Bundle;)Landroid/content/Intent;"),
+            &[JValue::Object(&extras)],
+        )?;
+        env.call_method(
+            &activity,
+            jni_str!("startActivity"),
+            jni_sig!("(Landroid/content/Intent;)V"),
+            &[JValue::Object(&intent)],
+        )?;
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_util::test_temp_dir;
-
-    #[test]
-    fn chunk_ring_handles_zero_negative_and_wrapped_positions() {
-        let mut ring = ChunkRing::from_fn(|_, _| 0u32);
-        let zero = ChunkPos::new(0, 0);
-        let negative = ChunkPos::new(-1, -1);
-        *ring.get_mut(zero) = 1;
-        *ring.get_mut(negative) = 2;
-        assert_eq!(*ring.get(zero), 1);
-        assert_eq!(*ring.get(negative), 2);
-
-        let wrapped = ChunkPos::new(CHUNK_RING_SIDE as i32, 0);
-        assert_eq!(*ring.get(wrapped), 1);
-    }
 
     fn entries(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir)

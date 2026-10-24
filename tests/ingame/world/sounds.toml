@@ -1,0 +1,38 @@
+# Sounds the server plays reach the client: a direct event from /playsound,
+# one in the UI category, and a registered one from a note block.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/playsound minecraft:block.note_block.pling master @a"
+
+[[step]]
+expect = { sound = "block.note_block.pling" }
+
+[[step]]
+chat = "/playsound minecraft:ui.button.click ui @a"
+
+[[step]]
+expect = { sound = "ui.button.click" }
+
+[[step]]
+chat = "/forceload add 0 0"
+
+[[step]]
+chat = "/setblock 0 -60 3 minecraft:note_block"
+
+[[step]]
+chat = "/setblock 0 -60 4 minecraft:redstone_block"
+
+[[step]]
+expect = { sound = "block.note_block.harp" }
+
+[[step]]
+chat = "/setblock 0 -60 4 minecraft:air"
+
+[[step]]
+chat = "/setblock 0 -60 3 minecraft:air"
+
+[[step]]
+chat = "/forceload remove 0 0"

@@ -30,7 +30,12 @@ import java.util.Map;
  * that reduces to 2D coverage — exact as long as every shape is 1/16-aligned,
  * which this tool hard-fails on if violated.
  *
- * Usage: java -cp <server-classes-jar>;<bundled-libs...>;. StateDump <version> <out.json>
+ * With a third path it also writes the version's per-block piston data
+ * (getPistonPushReaction, hasBlockEntity) that PistonBaseBlock.isPushable
+ * reads, keyed by block name and listing only blocks that aren't a plain
+ * NORMAL (26.3: PUSH_PULL) block without a block entity.
+ *
+ * Usage: java -cp <server-classes-jar>;<bundled-libs...>;. StateDump <version> <out.json> [<piston-out.json>]
  */
 public final class StateDump {
     // Direction.values() order (DOWN, UP, NORTH, SOUTH, WEST, EAST) -> slice axis:
@@ -38,8 +43,8 @@ public final class StateDump {
     private static final char[] AXIS_BY_ORDINAL = {'Y', 'Y', 'Z', 'Z', 'X', 'X'};
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 2) {
-            System.err.println("usage: StateDump <version> <out.json>");
+        if (args.length != 2 && args.length != 3) {
+            System.err.println("usage: StateDump <version> <out.json> [<piston-out.json>]");
             System.exit(2);
         }
         String version = args[0];
@@ -191,6 +196,50 @@ public final class StateDump {
         }
         System.out.println("wrote " + id + " states (" + faceMasks.size()
                 + " with face-occlusion shapes) to " + out);
+        if (args.length == 3) {
+            dumpPiston(Path.of(args[2]));
+        }
+    }
+
+    /** Per-block push reaction and block entity flag, by block name. */
+    private static void dumpPiston(Path out) throws Exception {
+        Object registry = Class.forName("net.minecraft.core.registries.BuiltInRegistries")
+                .getField("BLOCK").get(null);
+        Method getKey = null;
+        for (Method method : registry.getClass().getMethods()) {
+            if (method.getName().equals("getKey") && method.getParameterCount() == 1) {
+                getKey = method;
+                break;
+            }
+        }
+        if (getKey == null) {
+            throw new IllegalStateException("no BLOCK.getKey");
+        }
+        Map<String, String> entries = new java.util.TreeMap<>();
+        for (Object block : (Iterable<?>) registry) {
+            Object state = block.getClass().getMethod("defaultBlockState").invoke(block);
+            String reaction = ((Enum<?>) state.getClass().getMethod("getPistonPushReaction")
+                    .invoke(state)).name().toLowerCase(java.util.Locale.ROOT);
+            boolean entity = (Boolean) state.getClass().getMethod("hasBlockEntity").invoke(state);
+            boolean normal = reaction.equals("normal") || reaction.equals("push_pull");
+            if (normal && !entity) {
+                continue;
+            }
+            Object key = getKey.invoke(registry, block);
+            String name = (String) key.getClass().getMethod("getPath").invoke(key);
+            entries.put(name, "{\"push_reaction\": \"" + reaction + "\", \"has_block_entity\": "
+                    + entity + "}");
+        }
+        try (BufferedWriter w = Files.newBufferedWriter(out)) {
+            w.write("{\n");
+            int i = 0;
+            for (Map.Entry<String, String> e : entries.entrySet()) {
+                w.write("  \"" + e.getKey() + "\": " + e.getValue()
+                        + (++i < entries.size() ? ",\n" : "\n"));
+            }
+            w.write("}\n");
+        }
+        System.out.println("wrote " + entries.size() + " piston entries to " + out);
     }
 
     private static void writeArray(BufferedWriter w, String key, List<?> values)

@@ -191,6 +191,7 @@ pub struct EntityRenderInfo {
     /// Skip frustum/distance culling (the 3rd-person self entity, which sits at
     /// the camera and must never blink out).
     pub skip_cull: bool,
+    pub shadow: super::entity_shadow::ShadowCaster,
 }
 
 /// Everything inert: mob-family animation inputs zeroed, no overlays, white
@@ -252,6 +253,7 @@ impl Default for EntityRenderInfo {
             age_in_ticks: 0.0,
             attack_time: 0.0,
             skip_cull: false,
+            shadow: Default::default(),
         }
     }
 }
@@ -1869,11 +1871,17 @@ impl EntityRenderer {
             .create_descriptor_pool(&pool_info, None)
             .expect("failed to create entity descriptor pool");
 
-        let (camera_sets, camera_buffers, camera_allocations) =
-            create_camera_sets(device, allocator, descriptor_pool, camera_layout);
+        let (camera_sets, camera_buffers, camera_allocations) = util::create_uniform_sets(
+            device,
+            allocator,
+            descriptor_pool,
+            camera_layout,
+            size_of::<CameraUniform>() as u64,
+            "entity_camera_uniform",
+        );
         // Per-instance data is a vertex buffer (bound at binding 1), not an SSBO:
         // MoltenVK can't translate a storage-buffer read in a vertex shader.
-        let (instance_buffers, instance_allocations) = create_per_frame_host_buffers(
+        let (instance_buffers, instance_allocations) = util::create_per_frame_host_buffers(
             device,
             allocator,
             (MAX_INSTANCES * size_of::<EntityInstance>()) as u64,
@@ -2699,70 +2707,6 @@ impl EntityRenderer {
         device.destroy_descriptor_set_layout(self.camera_layout, None);
         device.destroy_descriptor_set_layout(self.texture_layout, None);
     }
-}
-
-/// One host-visible buffer per frame in flight.
-fn create_per_frame_host_buffers(
-    device: &vk::Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    size: u64,
-    usage: vk::BufferUsageFlags,
-    name: &str,
-) -> (Vec<vk::Buffer>, Vec<Allocation>) {
-    let mut buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-    let mut allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-    for _ in 0..MAX_FRAMES_IN_FLIGHT {
-        let (buf, alloc) = util::create_host_buffer(device, allocator, size, usage, name);
-        buffers.push(buf);
-        allocations.push(alloc);
-    }
-    (buffers, allocations)
-}
-
-/// Per-frame camera UBOs, each bound to its own descriptor set at binding 0.
-fn create_camera_sets(
-    device: &vk::Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    pool: vk::DescriptorPool,
-    layout: vk::DescriptorSetLayout,
-) -> (Vec<vk::DescriptorSet>, Vec<vk::Buffer>, Vec<Allocation>) {
-    let layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| layout).collect();
-    let alloc_info = vk::DescriptorSetAllocateInfo {
-        descriptor_pool: pool,
-        descriptor_set_count: layouts.len() as u32,
-        set_layouts: layouts.as_ptr(),
-        ..Default::default()
-    };
-    let mut sets = vec![vk::DescriptorSet::null(); layouts.len()];
-    device
-        .allocate_descriptor_sets(&alloc_info, &mut sets)
-        .expect("failed to allocate entity camera descriptor sets");
-
-    let size = size_of::<CameraUniform>() as u64;
-    let (buffers, allocations) = create_per_frame_host_buffers(
-        device,
-        allocator,
-        size,
-        vk::BufferUsageFlags::UniformBuffer,
-        "entity_camera_uniform",
-    );
-    for (&set, &buffer) in sets.iter().zip(&buffers) {
-        let buffer_info = vk::DescriptorBufferInfo {
-            buffer,
-            offset: 0,
-            range: size,
-        };
-        let write = vk::WriteDescriptorSet {
-            dst_set: set,
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::UniformBuffer,
-            descriptor_count: 1,
-            buffer_info: &buffer_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[write], &[]);
-    }
-    (sets, buffers, allocations)
 }
 
 /// A culled, drawable entity with its world transform, animation, and the

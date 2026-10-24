@@ -59,6 +59,64 @@ pub fn encode_pick_item_from_entity(entity_id: i32, include_data: bool) -> Vec<u
     buf
 }
 
+/// Vanilla 26.2 `ServerboundPlaceRecipePacket`: container id, recipe display
+/// id, then whether Shift requested the maximum craftable amount.
+pub fn encode_place_recipe(
+    container_id: i32,
+    recipe_display_id: u32,
+    use_max_items: bool,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_varint(&mut buf, game_serverbound_id("place_recipe"));
+    write_varint(&mut buf, container_id as u32);
+    write_varint(&mut buf, recipe_display_id);
+    buf.push(use_max_items as u8);
+    buf
+}
+
+/// Vanilla `RecipeBookType` enum order used by the settings packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RecipeBookType {
+    Crafting = 0,
+    Furnace = 1,
+    BlastFurnace = 2,
+    Smoker = 3,
+}
+
+/// Vanilla 26.2 `ServerboundRecipeBookChangeSettingsPacket`.
+pub fn encode_recipe_book_change_settings(
+    kind: RecipeBookType,
+    open: bool,
+    filtering: bool,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_varint(&mut buf, game_serverbound_id("recipe_book_change_settings"));
+    write_varint(&mut buf, kind as u32);
+    buf.push(open as u8);
+    buf.push(filtering as u8);
+    buf
+}
+
+/// Vanilla 26.2 `ServerboundRecipeBookSeenRecipePacket`.
+pub fn encode_recipe_book_seen_recipe(recipe_display_id: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_varint(&mut buf, game_serverbound_id("recipe_book_seen_recipe"));
+    write_varint(&mut buf, recipe_display_id);
+    buf
+}
+
+/// Vanilla 26.2 `ServerboundSetCreativeModeSlotPacket`: the slot, then
+/// `ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`, whose patch length-prefixes
+/// each component value.
+pub fn encode_set_creative_mode_slot(slot: i16, stack: Option<&crate::item::ItemStack>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_varint(&mut buf, game_serverbound_id("set_creative_mode_slot"));
+    buf.extend(slot.to_be_bytes());
+    crate::item::write_stack(&mut buf, stack, true);
+    buf
+}
+
 /// Reads one varint, advancing `pos`; `None` on truncation or overlong data.
 pub fn read_varint(bytes: &[u8], pos: &mut usize) -> Option<u32> {
     let mut v = 0u32;
@@ -83,6 +141,25 @@ pub fn write_varint(buf: &mut Vec<u8>, mut v: u32) {
         }
         buf.push(byte | 0x80);
     }
+}
+
+/// Vanilla `VarLong.write`.
+pub fn write_varlong(buf: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v == 0 {
+            buf.push(byte);
+            return;
+        }
+        buf.push(byte | 0x80);
+    }
+}
+
+/// Vanilla `Utf8String.write`: a varint byte length, then UTF-8.
+pub fn write_utf(buf: &mut Vec<u8>, s: &str) {
+    write_varint(buf, s.len() as u32);
+    buf.extend_from_slice(s.as_bytes());
 }
 
 /// Vanilla `LpVec3.write`: a low-precision vec3. Each component is quantized
@@ -193,6 +270,17 @@ mod tests {
     }
 
     #[test]
+    fn recipe_book_packet_layouts() {
+        // Packet ids come from the native 26.2 serverbound table.
+        assert_eq!(encode_place_recipe(7, 300, true), [0x27, 7, 0xac, 0x02, 1]);
+        assert_eq!(
+            encode_recipe_book_change_settings(RecipeBookType::BlastFurnace, true, false),
+            [0x2e, 2, 1, 0]
+        );
+        assert_eq!(encode_recipe_book_seen_recipe(300), [0x2f, 0xac, 0x02]);
+    }
+
+    #[test]
     fn lp_vec3_round_trip() {
         for v in [
             DVec3::ZERO,
@@ -219,6 +307,28 @@ mod tests {
             let mut pos = 0;
             assert_eq!(read_varint(&buf, &mut pos), Some(v));
             assert_eq!(pos, buf.len());
+        }
+    }
+
+    #[test]
+    fn varlong_layout() {
+        let encode = |v| {
+            let mut buf = Vec::new();
+            write_varlong(&mut buf, v);
+            buf
+        };
+        assert_eq!(encode(0), [0x00]);
+        assert_eq!(encode(300), [0xAC, 0x02]);
+        assert_eq!(encode(24_000), [0xC0, 0xBB, 0x01]);
+        assert_eq!(
+            encode(u64::MAX),
+            [0xFF; 9].into_iter().chain([0x01]).collect::<Vec<_>>()
+        );
+        for v in [0, 300, 24_000, u64::MAX] {
+            let bytes = encode(v);
+            let mut r = crate::codec::Reader::new(&bytes);
+            assert_eq!(r.varlong().unwrap(), v);
+            assert_eq!(r.remaining(), 0);
         }
     }
 }

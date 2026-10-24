@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_inventory::components::EquipmentSlot;
 use azalea_protocol::packets::game::{
     ServerboundClientInformation, ServerboundCommandSuggestion, ServerboundGamePacket,
@@ -11,13 +11,14 @@ use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::FloatExt as _;
 
 use crate::app::core::{AppCore, PlayerInputState};
+use crate::app::input::{Action, InputKey, KeyBindings};
 use crate::app::level_load::LevelLoadTracker;
 use crate::app::phases::Gfx;
 use crate::app::{TICK_RATE, input};
 use crate::audio::{CATEGORY_AMBIENT, CATEGORY_PLAYERS, SoundRef};
 use crate::benchmark::{
-    Benchmark, BenchmarkResult, ChunkLoadBench, ChunkLoadResult, ChunkLoadStep, UploadHandle,
-    UploadStatus, upload_result,
+    BenchMode, Benchmark, BenchmarkResult, ChunkLoadBench, ChunkLoadResult, ChunkLoadStep,
+    UploadHandle, UploadStatus, upload_result,
 };
 use crate::entity::components::{LookDirection, Position};
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
@@ -26,7 +27,9 @@ use crate::player::LocalPlayer;
 use crate::player::interaction::{HitResult, InteractionState};
 use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
+use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::buffer::column_is_near;
+use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::entity_model::triangle_wave;
@@ -35,6 +38,7 @@ use crate::renderer::pipelines::entity_renderer::{
     EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, armor_render_infos, dye_color_tint, jeb_sheep_tint,
     standing_eye_height, wool_color_tint,
 };
+use crate::renderer::pipelines::entity_shadow::{ShadowCaster, ShadowScene};
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
@@ -42,9 +46,9 @@ use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
-use crate::util::ChunkRing;
+use crate::world::block::BedDirection;
+use crate::world::block::block_registry::{BlockDefinitions, BlockRegistry};
 use crate::world::block::model::CardinalLightType;
-use crate::world::block::{BedDirection, bed_direction};
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
@@ -77,6 +81,8 @@ impl ContainerScreen {
 pub struct OpenContainer {
     pub id: i32,
     pub title: String,
+    #[cfg(feature = "test-harness")]
+    pub menu: azalea_registry::builtin::MenuKind,
     pub screen: ContainerScreen,
     /// Menu slots in container indices; slots from `inv_start()` on are backed
     /// by the player inventory.
@@ -171,6 +177,12 @@ pub struct GameState {
     pub bundle_scroll: (f32, f32),
     /// Server registries, for hashing predicted container clicks.
     pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
+    /// Session metadata and state bindings to the app-owned block definitions.
+    pub(crate) block_registry: BlockRegistry,
+    /// Per-session recipe book, recipe container, ghost placement, and item
+    /// tags.
+    pub recipe_book: crate::recipe::RecipeBookState,
+    pub recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState,
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
     pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
@@ -195,6 +207,9 @@ pub struct GameState {
     pub boss_bars: crate::ui::boss_bar::BossBarState,
     pub toasts: crate::ui::toast::ToastState,
     pub subtitles: crate::ui::subtitles::SubtitleOverlayState,
+    /// The sound events most recently played, oldest first.
+    #[cfg(feature = "test-harness")]
+    pub recent_sounds: std::collections::VecDeque<String>,
     /// Client tick counter (vanilla `player.tickCount`).
     pub tick_count: u64,
     /// Vanilla `Hud.autosaveIndicatorValue` / `lastAutosaveIndicatorValue`;
@@ -223,6 +238,9 @@ pub struct GameState {
     /// A chord fired while F3 was held, so releasing F3 must not toggle the
     /// overlay (vanilla `usedDebugKeyAsModifier`).
     pub f3_chord_consumed: bool,
+    /// An overlay input was released while another debug modifier remained
+    /// held.
+    pub debug_overlay_pending: bool,
     /// Set by F3+A; consumed by `update_game` to re-mesh every loaded chunk.
     pub pending_chunk_reload: bool,
     /// Game mode before the last change (vanilla `previousLocalPlayerMode`),
@@ -233,6 +251,13 @@ pub struct GameState {
     /// Dimension-type `cardinal_light`, which picks the terrain shade table
     /// and the item entity light directions.
     pub cardinal_light: CardinalLightType,
+    /// Dimension-type `ambient_light`: 0 in the overworld, 0.1 in the
+    /// nether, 0.25 in the end.
+    pub ambient_light: f32,
+    /// The dimension follows the overworld's day (see `SkyState::sky_darken`).
+    pub overworld_day: bool,
+    /// The current dimension's `default_clock`, whose ticks are its day time.
+    pub default_clock: Option<String>,
     /// F3+F4 game-mode switcher overlay, while open.
     pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
     /// Spectator hotbar menu (vanilla `SpectatorGui`). Not a GUI screen: the
@@ -255,6 +280,7 @@ pub struct GameState {
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
     pub particle_store: crate::particle::ParticleStore,
+    pub level_runtime: crate::world::level::LevelRuntime,
     pub block_entity_anim: BlockEntityAnimStore,
     pub benchmark: Option<Benchmark>,
     pub benchmark_result: Option<BenchmarkResult>,
@@ -273,20 +299,29 @@ pub struct GameState {
     /// Last frame's `update_game` CPU phase timings, for the chunk-load
     /// benchmark's worst-frame breakdown.
     pub last_update_phases: crate::benchmark::UpdatePhases,
-    /// Main-thread scheduling metadata in a render-distance-sized coordinate
-    /// ring. Generation zero means that the slot has no occupant.
-    chunk_meta: ChunkRing<ChunkMeta>,
-    /// Source of globally unique, nonzero chunk-incarnation/content tokens.
-    next_chunk_generation: u64,
-    /// Detail level used when the dirty set was last scheduled. Changing it
-    /// invalidates every loaded column's mesh LOD.
-    pub last_mesh_detail: Option<u32>,
+    /// Monotonic content generation per column, bumped on every edit (and chunk
+    /// load). This is the dirty marker: a column needs (re)meshing whenever its
+    /// `content_gen` outruns what was last enqueued, regardless of visibility,
+    /// so an edit to a deferred/hidden column can never be lost.
+    pub content_gen: HashMap<ChunkPos, u64>,
+    /// What was most recently meshed for each column: the LOD, the column
+    /// `content_gen`, and the bitmask of section indices already meshed. The
+    /// re-scan meshes only sections newly made visible (or re-meshes all on a
+    /// lod/content change), so hidden sections never mesh.
+    pub meshed: HashMap<ChunkPos, MeshedCol>,
     /// Per-column bitmask of currently-visible section indices (bit `si` set =
     /// section is in-frustum and not occluded). Computed in
     /// `update_visibility`.
     pub vis_mask: HashMap<ChunkPos, u32>,
-    /// Per-section cave-cull visibility fed by mesh results and consumed by the
-    /// occlusion walk.
+    /// Per-section generation for edits only (bulk uses the column
+    /// `content_gen` above). Bumped per edited section so a result is
+    /// dropped only when *that* section was edited again — editing one
+    /// section never invalidates a sibling section's in-flight result.
+    /// Sections meshed together as one edit span share one gen value.
+    pub section_gen: HashMap<(ChunkPos, i32), u64>,
+    pub next_section_gen: u64,
+    /// Per-section cave-cull visibility (vanilla `VisibilitySet`), keyed like
+    /// `section_gen`. Fed by mesh results; consumed by the occlusion walk.
     pub section_vis: HashMap<(ChunkPos, i32), VisibilitySet>,
     /// Per-column bitmask of sections whose mesh is finished and, if it had
     /// any geometry, uploaded — vanilla's "not `UNCOMPILED`", where an empty
@@ -313,28 +348,51 @@ pub struct GameState {
     pub chunk_occlusion_enabled: bool,
 }
 
-#[derive(Clone, Copy, Default)]
-struct ChunkMeta {
-    pos: ChunkPos,
-    incarnation: u64,
-    generation: u64,
-    dirty_sections: u32,
+/// What a column was last meshed as: LOD, content generation, and the set of
+/// section indices (bitmask) that have been meshed so far.
+#[derive(Clone, Copy)]
+pub struct MeshedCol {
+    pub lod: u32,
+    pub content_gen: u64,
+    pub mask: u32,
 }
 
 impl GameState {
-    pub fn new(
-        renderer: &Renderer,
-        resource_packs: &ResourcePackManager,
+    /// This dimension's `skyDarken` right now.
+    pub fn sky_darken(&self) -> u8 {
+        self.sky_state.sky_darken(self.overworld_day)
+    }
+
+    /// Notes a played sound for the harness, keeping the last 64.
+    #[cfg(feature = "test-harness")]
+    pub fn record_sound(&mut self, sound: &crate::audio::SoundRef) {
+        if self.recent_sounds.len() == 64 {
+            self.recent_sounds.pop_front();
+        }
+        self.recent_sounds.push_back(sound.event_name().to_owned());
+    }
+
+    pub(crate) fn new(
+        mesh_source: &impl MeshSource,
+        resource_packs: Option<&ResourcePackManager>,
         render_distance: u32,
         singleplayer: bool,
         chat_options: crate::ui::chat::ChatOptions,
+        block_definitions: Rc<BlockDefinitions>,
+        protocol: i32,
     ) -> Self {
+        let block_registry = BlockRegistry::new(
+            block_definitions,
+            mesh_source.shared_render_assets(),
+            protocol,
+        );
         let biome_climate = Arc::new(HashMap::new());
         // The dimension's shade table arrives with `DimensionInfo`, which
         // builds a fresh dispatcher.
-        let mesh_dispatcher = renderer.create_mesh_dispatcher(
+        let mesh_dispatcher = mesh_source.create_mesh_dispatcher(
+            block_registry.owned_render_view(),
             biome_climate,
-            Some(resource_packs),
+            resource_packs,
             Default::default(),
         );
 
@@ -363,13 +421,14 @@ impl GameState {
             particle_store: {
                 let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
                 crate::particle::ParticleStore::new(
-                    renderer.atlas_uv_map().clone(),
+                    mesh_source.uv_map().clone(),
                     grass,
                     foliage,
                     dry_foliage,
                 )
             },
             block_entity_anim: BlockEntityAnimStore::default(),
+            level_runtime: crate::world::level::LevelRuntime::new(),
             player: LocalPlayer::new(),
             last_bubble_pop_sound_played: 0,
             biome_climate: Arc::new(HashMap::new()),
@@ -401,6 +460,9 @@ impl GameState {
             bundle_hovered: None,
             bundle_scroll: (0.0, 0.0),
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
+            block_registry,
+            recipe_book: crate::recipe::RecipeBookState::default(),
+            recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState::new(),
             chat: {
                 let mut chat = ChatState::new();
                 chat.set_options(chat_options);
@@ -423,6 +485,8 @@ impl GameState {
             boss_bars: crate::ui::boss_bar::BossBarState::default(),
             toasts: crate::ui::toast::ToastState::default(),
             subtitles: crate::ui::subtitles::SubtitleOverlayState::default(),
+            #[cfg(feature = "test-harness")]
+            recent_sounds: std::collections::VecDeque::new(),
             tick_count: 0,
             saving_indicator_value: 0.0,
             last_saving_indicator_value: 0.0,
@@ -437,10 +501,14 @@ impl GameState {
             advanced_item_tooltips: false,
             hide_gui: false,
             f3_chord_consumed: false,
+            debug_overlay_pending: false,
             pending_chunk_reload: false,
             previous_game_mode: None,
             dimension: String::new(),
             cardinal_light: Default::default(),
+            ambient_light: 0.0,
+            overworld_day: true,
+            default_clock: None,
             game_mode_switcher: None,
             spectator: Default::default(),
             switcher_was_open: false,
@@ -460,10 +528,11 @@ impl GameState {
             chunk_load_abort: false,
             chunk_load_upload: None,
             last_update_phases: crate::benchmark::UpdatePhases::default(),
-            chunk_meta: ChunkRing::from_fn(|_, _| ChunkMeta::default()),
-            next_chunk_generation: 0,
-            last_mesh_detail: None,
+            content_gen: HashMap::new(),
+            meshed: HashMap::new(),
             vis_mask: HashMap::new(),
+            section_gen: HashMap::new(),
+            next_section_gen: 0,
             section_vis: HashMap::new(),
             compiled: HashMap::new(),
             section_vis_epoch: HashMap::new(),
@@ -515,6 +584,15 @@ impl GameState {
     /// it neither draw nor take input.
     pub fn dialog_open(&self) -> bool {
         self.server_dialog.is_some() || self.chat.has_pending_modal_prompt()
+    }
+
+    /// The world, not a screen, chat or the pause menu, takes pointer input.
+    pub fn world_has_pointer(&self) -> bool {
+        !self.paused
+            && !self.dead
+            && !self.death_screen_open
+            && !self.gui_open()
+            && !self.chat.is_open()
     }
 
     pub fn gui_open(&self) -> bool {
@@ -584,6 +662,24 @@ impl GameState {
         }
     }
 
+    /// Opens the player's inventory, the creative one in creative mode.
+    pub fn open_inventory(&mut self) {
+        if crate::player::is_creative(self.player.game_mode) {
+            self.creative_inventory_open = true;
+        } else {
+            self.inventory_open = true;
+        }
+    }
+
+    /// Closes whichever inventory or container menu is open.
+    pub fn close_inventory(&mut self) {
+        if self.creative_inventory_open {
+            self.close_creative_inventory();
+        } else {
+            self.close_menu();
+        }
+    }
+
     pub fn close_creative_inventory(&mut self) {
         self.creative_inventory_open = false;
         self.creative_state.reset_interaction();
@@ -602,6 +698,20 @@ impl GameState {
         self.bundle_selection = None;
         self.bundle_hovered = None;
         self.bundle_scroll = (0.0, 0.0);
+        self.recipe_book_ui
+            .reset_for_closed_screen(&mut self.recipe_book);
+    }
+
+    pub fn recipe_book_screen_active(&self) -> bool {
+        self.inventory_open
+            || matches!(
+                self.open_container.as_ref(),
+                Some(container)
+                    if matches!(
+                        container.screen,
+                        ContainerScreen::CraftingTable | ContainerScreen::Furnace(_)
+                    )
+            )
     }
 
     /// A server update replaced the stack in `slot` of `menu` (every slot when
@@ -651,6 +761,9 @@ impl GameState {
         }
         if self.creative_inventory_open {
             return self.creative_state.tab.captures_typing();
+        }
+        if self.recipe_book_screen_active() && self.recipe_book_ui.captures_typing() {
+            return true;
         }
         matches!(
             &self.open_container,
@@ -711,10 +824,13 @@ impl GameState {
         &mut self,
         code: winit::keyboard::KeyCode,
         f3_held: bool,
+        bindings: &KeyBindings,
         connection: &ConnectionHandle,
     ) -> bool {
-        use winit::keyboard::KeyCode;
-        if code == KeyCode::F3 {
+        let input = InputKey::Keyboard(code);
+        if bindings.matches(Action::DebugModifier, &input)
+            || bindings.matches(Action::ToggleOverlay, &input)
+        {
             // Consumed, but acts on release so chords can suppress it.
             return true;
         }
@@ -722,13 +838,13 @@ impl GameState {
             return false;
         }
         let handled = match code {
-            KeyCode::KeyA => {
+            _ if bindings.matches(Action::DebugReloadChunks, &input) => {
                 self.pending_chunk_reload = true;
                 self.debug_feedback("Reloading all chunks");
                 true
             }
             // TODO: F3+B show hitboxes (no entity hitbox renderer yet)
-            KeyCode::KeyC => {
+            _ if bindings.matches(Action::DebugCopyLocation, &input) => {
                 // Vanilla also crashes the game when held for 10s; not ported.
                 let p = &self.player;
                 let cmd = format!(
@@ -745,11 +861,11 @@ impl GameState {
                 }
                 true
             }
-            KeyCode::KeyD => {
+            _ if bindings.matches(Action::DebugClearChat, &input) => {
                 self.chat.clear_messages();
                 true
             }
-            KeyCode::KeyG => {
+            _ if bindings.matches(Action::DebugChunkBorders, &input) => {
                 self.show_chunk_borders = !self.show_chunk_borders;
                 self.debug_feedback(if self.show_chunk_borders {
                     "Chunk borders: shown"
@@ -758,7 +874,7 @@ impl GameState {
                 });
                 true
             }
-            KeyCode::KeyH => {
+            _ if bindings.matches(Action::DebugAdvancedTooltips, &input) => {
                 self.advanced_item_tooltips = !self.advanced_item_tooltips;
                 self.debug_feedback(if self.advanced_item_tooltips {
                     "Advanced tooltips: shown"
@@ -767,7 +883,7 @@ impl GameState {
                 });
                 true
             }
-            KeyCode::KeyI => {
+            _ if bindings.matches(Action::DebugCopyData, &input) => {
                 // TODO: entity variant and server-side NBT query (vanilla
                 // copyRecreateCommand with addNbt/pullFromServer)
                 if let Some(HitResult::Block(t)) = self.interaction.target {
@@ -776,12 +892,14 @@ impl GameState {
                         t.block_pos.y,
                         t.block_pos.z,
                     );
-                    let props = crate::world::block::block_properties(state)
+                    let block_state_data = self.block_registry.block_state_data(state);
+                    let props = block_state_data
+                        .properties()
                         .entries()
                         .map(|(k, v)| format!("{k}={v}"))
                         .collect::<Vec<_>>()
                         .join(",");
-                    let block = crate::world::block::block_id(state);
+                    let block = block_state_data.id();
                     let desc = if props.is_empty() {
                         block.to_string()
                     } else {
@@ -797,7 +915,7 @@ impl GameState {
                 }
                 true
             }
-            KeyCode::F4 => {
+            _ if bindings.matches(Action::DebugGameModeSwitcher, &input) => {
                 if let Some(switcher) = &mut self.game_mode_switcher {
                     switcher.cycle();
                 } else if self.input_live() {
@@ -813,7 +931,7 @@ impl GameState {
                 }
                 true
             }
-            KeyCode::KeyN => {
+            _ if bindings.matches(Action::DebugSpectate, &input) => {
                 // Sent unconditionally; the server refuses without permission.
                 use azalea_core::game_type::GameMode;
                 let target = if self.player.game_mode != 3 {
@@ -832,7 +950,7 @@ impl GameState {
                 ));
                 true
             }
-            KeyCode::KeyO => {
+            _ if bindings.matches(Action::DebugChunkOcclusion, &input) => {
                 // Pomme-specific: chunk occlusion culling toggle.
                 self.chunk_occlusion_enabled = !self.chunk_occlusion_enabled;
                 // Force the throttled recompute to run next frame so the
@@ -841,7 +959,7 @@ impl GameState {
                 tracing::info!("Chunk occlusion: {}", self.chunk_occlusion_enabled);
                 true
             }
-            KeyCode::KeyV => {
+            _ if bindings.matches(Action::DebugDumpVersion, &input) => {
                 self.debug_feedback("Client version info:");
                 self.chat.push_message(vec![crate::ui::text::TextSpan::new(
                     format!("Pomme Client {}", env!("CARGO_PKG_VERSION")),
@@ -858,11 +976,21 @@ impl GameState {
         handled
     }
 
-    /// Vanilla toggles the debug overlay when F3 is released, unless a chord
-    /// key consumed it as a modifier while held (KeyboardHandler.keyPress).
-    /// An open game-mode switcher applies its selection instead.
-    pub fn handle_f3_release(&mut self, connection: &ConnectionHandle) {
-        if let Some(switcher) = self.game_mode_switcher.take() {
+    /// Settle debug releases once all modifiers are up. Chords suppress the
+    /// overlay toggle; releasing a modifier applies an open game-mode switcher.
+    pub fn handle_f3_release(
+        &mut self,
+        overlay: bool,
+        modifier: bool,
+        modifier_held: bool,
+        connection: &ConnectionHandle,
+    ) {
+        let Some(overlay) =
+            debug_overlay_release(&mut self.debug_overlay_pending, overlay, modifier_held)
+        else {
+            return;
+        };
+        if modifier && let Some(switcher) = self.game_mode_switcher.take() {
             use azalea_core::game_type::GameMode;
             if switcher.selected != self.player.game_mode
                 && let Some(mode) = GameMode::from_id(switcher.selected)
@@ -878,10 +1006,11 @@ impl GameState {
             self.f3_chord_consumed = false;
             return;
         }
-        if self.f3_chord_consumed {
-            self.f3_chord_consumed = false;
-        } else {
+        if overlay && !self.f3_chord_consumed {
             self.show_debug = !self.show_debug;
+        }
+        if modifier {
+            self.f3_chord_consumed = false;
         }
     }
 
@@ -940,55 +1069,14 @@ impl GameState {
             ));
     }
 
-    fn next_chunk_generation(&mut self) -> u64 {
-        self.next_chunk_generation = self
-            .next_chunk_generation
-            .checked_add(1)
-            .expect("chunk mesh generation overflow");
-        self.next_chunk_generation
-    }
-
-    fn mark_chunk_dirty(&mut self, pos: ChunkPos, sections: u32) -> u64 {
-        let generation = self.next_chunk_generation();
-        let meta = self.chunk_meta.get_mut(pos);
-        if meta.generation == 0 || meta.pos != pos {
-            *meta = ChunkMeta {
-                pos,
-                incarnation: generation,
-                generation,
-                dirty_sections: sections,
-            };
-        } else {
-            meta.generation = generation;
-            meta.dirty_sections |= sections;
-        }
-        generation
-    }
-
-    fn chunk_incarnation(&self, pos: ChunkPos) -> Option<u64> {
-        let meta = self.chunk_meta.get(pos);
-        (meta.generation != 0 && meta.pos == pos).then_some(meta.incarnation)
-    }
-
-    /// Invalidate this incarnation without waiting for a queued/running mesh.
-    pub fn unload_mesh_column(&mut self, pos: ChunkPos) {
-        let canceled_at = self.next_chunk_generation();
-        let meta = self.chunk_meta.get_mut(pos);
-        if meta.generation != 0 && meta.pos == pos {
-            *meta = ChunkMeta::default();
-            self.mesh_dispatcher.cancel(pos, canceled_at);
-        }
-    }
-
-    pub fn reset_mesh_columns(&mut self) {
-        self.chunk_meta = ChunkRing::from_fn(|_, _| ChunkMeta::default());
-        self.last_mesh_detail = None;
-    }
-
-    /// Mark a column dirty with a fresh globally unique generation. Any result
-    /// from an older incarnation or snapshot is rejected on arrival.
+    /// Mark a column dirty by advancing its content generation, returning the
+    /// new value. Any in-flight mesh built from an older generation is
+    /// dropped on arrival, so a deferred column always remeshes with the
+    /// latest blocks.
     pub fn bump_content_gen(&mut self, pos: ChunkPos) -> u64 {
-        self.mark_chunk_dirty(pos, section_mask(self.chunk_store.section_count()))
+        let g = self.content_gen.entry(pos).or_insert(0);
+        *g += 1;
+        *g
     }
 
     /// The chunk column the player stands in.
@@ -1002,12 +1090,16 @@ impl GameState {
     /// Runs one light update (vanilla `ClientLevel.update`, called per frame
     /// from `Minecraft.runTick`: drain queued light tasks, then
     /// `runLightUpdates`) and turns the resulting dirty scope into remesh
-    /// work. Whole-column and individual-section changes both merge into the
-    /// same per-column metadata and are claimed by the normal scheduler.
-    pub fn update_light(&mut self) {
+    /// work: columns whose chunk-load light applied go through the
+    /// content-gen path like chunk loads (the visibility rescan enqueues
+    /// them tier-gated), individual lit sections remesh on the priority lane.
+    pub fn update_light(&mut self, chunk_detail: u32) {
         let mut dirty = crate::world::light::LightDirty::default();
-        self.light_engine
-            .poll_and_run(&mut self.chunk_store, &mut dirty);
+        self.light_engine.poll_and_run(
+            &mut self.chunk_store,
+            self.block_registry.block_state_table(),
+            &mut dirty,
+        );
         if dirty.columns.is_empty() && dirty.sections.is_empty() {
             return;
         }
@@ -1025,6 +1117,7 @@ impl GameState {
         if !bumped.is_empty() {
             self.pending_load_rescan = true;
         }
+        let player_chunk = self.player_chunk();
         let min_section_y = self.chunk_store.min_y() >> 4;
         let section_count = self.chunk_store.section_count();
         for key in &dirty.sections {
@@ -1038,13 +1131,21 @@ impl GameState {
             if self.chunk_store.get_chunk(&col).is_none() {
                 continue;
             }
-            self.mark_chunk_dirty(col, section_bit(si));
+            self.enqueue_section_edit(
+                col,
+                si,
+                crate::app::core::chunk_lod(col, player_chunk, chunk_detail),
+            );
         }
     }
 
-    /// Mark an asynchronously changed section for the normal scheduler.
-    pub fn enqueue_section_edit(&mut self, col: ChunkPos, si: i32) {
-        self.mark_chunk_dirty(col, section_bit(si));
+    /// Mesh a single edited section now on the priority lane, ungated by
+    /// visibility. Bumps that section's generation so the result is dropped
+    /// only if the same section is edited again before it lands.
+    pub fn enqueue_section_edit(&mut self, col: ChunkPos, si: i32, lod: u32) {
+        let g = self.bump_section_gen(col, si..si + 1);
+        self.mesh_dispatcher
+            .enqueue(&self.chunk_store, col, lod, true, g, si..si + 1);
     }
 
     /// Vanilla `compileSync` under `PrioritizeChunkUpdates.PLAYER_AFFECTED`:
@@ -1058,10 +1159,25 @@ impl GameState {
         col: ChunkPos,
         sections: std::ops::Range<i32>,
     ) {
+        // The gen bump drops any in-flight priority result for these
+        // sections at drain time; stale bulk results are rejected by the
+        // buffer's per-section epoch gate (`ChunkMeshData::upload_epoch`).
+        let g = self.bump_section_gen(col, sections.clone());
         let mesh = self
             .mesh_dispatcher
-            .mesh_sections_now(&self.chunk_store, col, sections, 0);
+            .mesh_sections_now(&self.chunk_store, col, sections, g);
         self.apply_mesh_upload(renderer, mesh);
+    }
+
+    /// One gen for the whole span: the drain stale-check compares every
+    /// section in a mesh's `replaced` range against its single
+    /// `content_gen`, so grouped sections must share a value.
+    fn bump_section_gen(&mut self, col: ChunkPos, sections: std::ops::Range<i32>) -> u64 {
+        self.next_section_gen += 1;
+        for si in sections {
+            self.section_gen.insert((col, si), self.next_section_gen);
+        }
+        self.next_section_gen
     }
 
     /// Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
@@ -1070,6 +1186,17 @@ impl GameState {
     /// Shared with the loading phase, which streams the spawn chunks in before
     /// the game phase takes over.
     pub fn drain_and_upload_meshes(&mut self, renderer: &mut Renderer) {
+        let batch = self.drain_meshes();
+        let upload_start = std::time::Instant::now();
+        let dropped = renderer.upload_chunk_meshes(&batch);
+        self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
+        self.clear_dropped_meshed(dropped);
+        self.recycle_meshes(batch);
+    }
+
+    /// The frame's ready meshes, stale ones dropped and the rest's CPU-side
+    /// bookkeeping applied.
+    pub fn drain_meshes(&mut self) -> Vec<ChunkMeshData> {
         let drain_start = std::time::Instant::now();
         let results: Vec<_> = self.mesh_dispatcher.drain_results().collect();
         let mut batch = Vec::with_capacity(results.len());
@@ -1079,13 +1206,33 @@ impl GameState {
                 bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
             }
             // Drop a mesh built from an out-of-date snapshot. A mesh for a chunk
-            // that has since unloaded is always stale (uploading it would
-            // resurrect a column nothing cleans up).
+            // that has since unloaded is always stale (uploading it would resurrect
+            // a column nothing cleans up). Edits (priority lane, single section)
+            // are keyed per section so editing one section never drops a sibling's
+            // in-flight result; bulk loads keep the column key.
             let stale = self.chunk_store.get_chunk(&mesh.pos).is_none()
-                || self.chunk_incarnation(mesh.pos) != Some(mesh.incarnation);
+                || if mesh.timing.is_some() {
+                    mesh.replaced.clone().any(|si| {
+                        self.section_gen.get(&(mesh.pos, si)).copied() != Some(mesh.content_gen)
+                    })
+                } else {
+                    mesh.content_gen < self.content_gen.get(&mesh.pos).copied().unwrap_or(0)
+                };
             if stale {
                 self.mesh_dispatcher.recycle(mesh);
                 continue;
+            }
+            if let Some(t) = &mesh.timing {
+                let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
+                tracing::debug!(
+                    "edit remesh [{}, {}]: queue {:.1}ms + mesh {:.1}ms + drain {:.1}ms = {:.1}ms",
+                    mesh.pos.x,
+                    mesh.pos.z,
+                    ms(t.started_at - t.enqueued_at),
+                    ms(t.meshed_at - t.started_at),
+                    ms(t.meshed_at.elapsed()),
+                    ms(t.enqueued_at.elapsed()),
+                );
             }
             // Taken before the upload so the mesh can move into the batch; the
             // upload reports back what it had to drop.
@@ -1093,11 +1240,11 @@ impl GameState {
             batch.push(mesh);
         }
         self.last_update_phases.mesh_drain_ms = drain_start.elapsed().as_secs_f32() * 1000.0;
-        let upload_start = std::time::Instant::now();
-        let dropped = renderer.upload_chunk_meshes(&batch);
-        self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
-        self.clear_dropped_meshed(dropped);
-        // Return the uploaded meshes' buffers to the worker pool for reuse.
+        batch
+    }
+
+    /// Returns the meshes' buffers to the worker pool for reuse.
+    pub fn recycle_meshes(&mut self, batch: Vec<ChunkMeshData>) {
         for mesh in batch {
             self.mesh_dispatcher.recycle(mesh);
         }
@@ -1155,23 +1302,21 @@ impl GameState {
                 self.section_vis.insert((pos, si), vis);
             }
         }
-        let meta = self.chunk_meta.get_mut(pos);
-        if meta.generation == mesh.content_gen && meta.pos == pos {
-            meta.dirty_sections &= !section_bits(mesh.replaced.clone());
-        }
         *self.compiled.entry(pos).or_default() |= section_bits(mesh.replaced.clone());
     }
 
-    /// Sections dropped on pool exhaustion were retired from the buffer; put
-    /// their bits back in the dirty set, and clear their compiled bit since
-    /// nothing reached the GPU.
+    /// Sections dropped on pool exhaustion were retired from the buffer; clear
+    /// their meshed bit so the next rescan re-enqueues them, and their compiled
+    /// bit, since nothing of them reached the GPU.
     fn clear_dropped_meshed(&mut self, dropped: Vec<(ChunkPos, Vec<i32>)>) {
         for (pos, sections) in dropped {
             let retired = section_bits(sections);
+            if let Some(m) = self.meshed.get_mut(&pos) {
+                m.mask &= !retired;
+            }
             if let Some(mask) = self.compiled.get_mut(&pos) {
                 *mask &= !retired;
             }
-            self.mark_chunk_dirty(pos, retired);
         }
     }
 
@@ -1303,65 +1448,50 @@ impl GameState {
         renderer.set_chunk_visibility(masks);
     }
 
-    /// Enqueue dirty sections nearest-first. The dirty bitset is the sole
-    /// pending-work state; `compiled` only records readiness for the load gate.
-    /// Every loaded section is meshed regardless of occlusion, which only gates
-    /// drawing.
+    /// Enqueue every loaded column's not-yet-meshed sections (re-meshing the
+    /// whole column on a lod/content change). Like vanilla, every section in
+    /// render distance meshes regardless of visibility — occlusion gates only
+    /// drawing — and the queue orders the backlog nearest-first. Runs every
+    /// frame to drain it.
     pub fn rescan_mesh_jobs(&mut self, player_chunk: ChunkPos, chunk_detail: u32) {
         let n = self.chunk_store.section_count();
         let full = section_mask(n);
-        if self.last_mesh_detail != Some(chunk_detail) {
-            self.last_mesh_detail = Some(chunk_detail);
-            let loaded: Vec<_> = self.chunk_store.loaded_positions().collect();
-            for pos in loaded {
-                self.mark_chunk_dirty(pos, full);
-            }
-        }
-        let loaded: Vec<_> = self.chunk_store.loaded_positions().collect();
-        let mut active: Vec<ChunkPos> = Vec::new();
-        for pos in loaded {
-            let claimed = self.mesh_dispatcher.claimed_generation(pos);
-            let meta = self.chunk_meta.get_mut(pos);
-            if meta.generation == 0 || meta.pos != pos {
-                continue;
-            }
-            if claimed < meta.generation && meta.dirty_sections != 0 {
-                active.push(pos);
-            }
-        }
-        active.sort_by_key(|pos| {
-            let dx = pos.x - player_chunk.x;
-            let dz = pos.z - player_chunk.z;
-            dx * dx + dz * dz
-        });
-
-        let mut requests = Vec::new();
-        for pos in active {
-            if self.chunk_store.get_chunk(&pos).is_none() {
-                self.unload_mesh_column(pos);
-                continue;
-            }
+        for pos in self.chunk_store.loaded_positions() {
             let lod = crate::app::core::chunk_lod(pos, player_chunk, chunk_detail);
-            let meta = self.chunk_meta.get_mut(pos);
-            if meta.generation == 0 || meta.pos != pos || meta.dirty_sections == 0 {
-                continue;
-            }
-            let content_gen = meta.generation;
-            let incarnation = meta.incarnation;
-            let dirty_mask = meta.dirty_sections;
+            let content_gen = self.content_gen.get(&pos).copied().unwrap_or(0);
+            // Mesh the whole column once, then nothing until a lod/content change.
+            // Occlusion gates drawing, not meshing, so off-screen and hidden
+            // sections still mesh (the queue orders the backlog nearest-first).
             // TODO: vanilla won't schedule a section's first compile until its
             // 3x3 column neighbourhood is loaded and lit
             // (`LevelExtractor.java:155` / `SectionUpdateTracker.hasAllNeighbors`);
             // we mesh against missing neighbours as air and repair the borders
             // when their light bumps `content_gen`.
-            // One job per column is the scheduling unit. A sparse mask may
-            // mesh clean sections between its first and last dirty bit, but it
-            // cannot create overlapping jobs for the same column.
-            let start = dirty_mask.trailing_zeros() as i32;
-            let end = 32 - dirty_mask.leading_zeros() as i32;
-            requests.push((pos, lod, incarnation, content_gen, start..end));
+            let to_mesh = match self.meshed.get(&pos) {
+                Some(m) if m.lod == lod && m.content_gen == content_gen => full & !m.mask,
+                _ => full,
+            };
+            if to_mesh != 0 {
+                for (start, end) in contiguous_runs(to_mesh) {
+                    self.mesh_dispatcher.enqueue(
+                        &self.chunk_store,
+                        pos,
+                        lod,
+                        false,
+                        content_gen,
+                        start..end,
+                    );
+                }
+            }
+            self.meshed.insert(
+                pos,
+                MeshedCol {
+                    lod,
+                    content_gen,
+                    mask: full,
+                },
+            );
         }
-        self.mesh_dispatcher.enqueue(&self.chunk_store, requests);
     }
 }
 
@@ -1403,7 +1533,7 @@ fn section_bit(si: i32) -> u32 {
 }
 
 /// The bits for several section indices.
-fn section_bits(indices: impl IntoIterator<Item = i32>) -> u32 {
+pub(crate) fn section_bits(indices: impl IntoIterator<Item = i32>) -> u32 {
     indices
         .into_iter()
         .fold(0u32, |mask, si| mask | section_bit(si))
@@ -1412,6 +1542,25 @@ fn section_bits(indices: impl IntoIterator<Item = i32>) -> u32 {
 /// Full mask for an `n`-section column (bits `0..n` set).
 fn section_mask(n: i32) -> u32 {
     if n >= 32 { u32::MAX } else { (1u32 << n) - 1 }
+}
+
+/// Contiguous `(start, end)` index runs of set bits in `mask`, so a (usually
+/// contiguous) visible set enqueues as a few range jobs — one gather per run.
+fn contiguous_runs(mask: u32) -> Vec<(i32, i32)> {
+    let mut runs = Vec::new();
+    let mut i = 0i32;
+    while i < 32 {
+        if mask & (1u32 << i) != 0 {
+            let start = i;
+            while i < 32 && mask & (1u32 << i) != 0 {
+                i += 1;
+            }
+            runs.push((start, i));
+        } else {
+            i += 1;
+        }
+    }
+    runs
 }
 
 /// Conservative AABB-vs-frustum test (the dominant-corner max-dot used by
@@ -1451,13 +1600,11 @@ fn handle_chat_ui_action(
             let Ok(url) = crate::chat_component::parse_untrusted_url(url) else {
                 return;
             };
-            if let Err(e) = open::that(&url) {
-                tracing::warn!("Could not open chat link {url:?}: {e}");
-            }
+            crate::util::open_url(&url);
         }
         ChatUiAction::OpenChatSettings => {
             game.chat.close_for_settings();
-            core.menu.open_chat_settings();
+            core.menu.open_chat_settings(&core.input.key_bindings);
             game.options_from_game = true;
             game.paused = true;
         }
@@ -1659,7 +1806,7 @@ pub(crate) fn server_dialog_key(
     if game.chat.has_pending_modal_prompt() {
         // `ConfirmScreen` answers Escape with `accept(false)`, which returns
         // to the screen under it.
-        if code == KeyCode::Escape {
+        if core.input.key_bindings.matches_key(Action::Close, code) {
             game.escape_chat();
             core.input.clear_action(input::Action::OpenMenu);
             core.apply_cursor_grab(window, Some(game));
@@ -1669,7 +1816,7 @@ pub(crate) fn server_dialog_key(
         return;
     }
     match code {
-        KeyCode::Escape => {
+        _ if core.input.key_bindings.matches_key(Action::Close, code) => {
             let action = game
                 .server_dialog
                 .as_mut()
@@ -1728,17 +1875,50 @@ fn apply_result_action(
     }
 }
 
-/// Set the active render distance (the persisted menu value) and push it to the
-/// server — used by the chunk-load benchmark as it ramps the distance up and
-/// down.
+/// Starts the chunk-load benchmark at `rd`, from the pause menu or
+/// `--chunk-bench`.
+pub fn start_chunk_load(
+    core: &mut AppCore,
+    gfx: &Gfx,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+    rd: u32,
+) {
+    game.chunk_load_bench = Some(ChunkLoadBench::new(
+        rd,
+        game.server_render_distance,
+        core.menu.chunk_detail,
+        BenchMode::Windowed {
+            gpu: gfx.renderer.gpu_name().to_owned(),
+            vulkan: gfx.renderer.vulkan_version().to_owned(),
+            resolution: (gfx.renderer.screen_width(), gfx.renderer.screen_height()),
+        },
+        *game.player.position,
+    ));
+    game.chunk_load_result = None;
+    // Drop to the minimum render distance so the server unloads the far
+    // chunks; the driver raises it to the target once the reset settles.
+    apply_render_distance(core, game, connection, crate::benchmark::CHUNK_LOAD_MIN_RD);
+}
+
+/// Set the chunk-load benchmark's render distance and push it to the server
+/// as it ramps the distance up and down.
 fn apply_render_distance(
     core: &mut AppCore,
     game: &mut GameState,
     connection: &ConnectionHandle,
     rd: u32,
 ) {
-    core.menu.render_distance = rd;
+    core.menu.set_bench_render_distance(rd);
     game.sync_client_information(connection, rd, core.menu.chat_options);
+}
+
+/// Puts back the render distance the chunk-load benchmark replaced, on the
+/// server too.
+fn end_chunk_load(core: &mut AppCore, game: &mut GameState, connection: &ConnectionHandle) {
+    if let Some(rd) = core.menu.restore_bench_render_distance() {
+        game.sync_client_information(connection, rd, core.menu.chat_options);
+    }
 }
 
 /// Vanilla `ScrollWheelHandler.onMouseScroll` on one frame's (x, y) scroll,
@@ -1787,10 +1967,65 @@ fn send_bundle_selection(sender: &crate::net::sender::PacketSender, slot: u16, s
     ));
 }
 
+/// Vanilla `MultiPlayerGameMode.handleCreativeModeItemAdd`: the creative
+/// screen sets an inventory slot directly. Returns whether it was sent, which
+/// it never is outside creative.
+pub(crate) fn set_creative_slot(
+    game: &mut GameState,
+    connection: &ConnectionHandle,
+    slot_num: u16,
+    item: azalea_inventory::ItemStack,
+) -> bool {
+    if !send_creative_slot(game, connection, slot_num, item.clone()) {
+        return false;
+    }
+    // Optimistic local update; the server echoes via ContainerSetSlot.
+    game.player.inventory.set_slot(slot_num as usize, item);
+    true
+}
+
+/// Vanilla `MultiPlayerGameMode.handleCreativeModeItemDrop`: the creative
+/// screen drops a stack into the world through slot -1.
+pub(crate) fn drop_creative_item(
+    game: &mut GameState,
+    connection: &ConnectionHandle,
+    item: azalea_inventory::ItemStack,
+) -> bool {
+    let sent = send_creative_slot(game, connection, u16::MAX, item);
+    if sent {
+        game.player.drop_spam.increment();
+    }
+    sent
+}
+
+/// `ServerboundSetCreativeModeSlotPacket` for `slot_num`, only in creative;
+/// the slot is a short on the wire, so `u16::MAX` is vanilla's -1.
+fn send_creative_slot(
+    game: &GameState,
+    connection: &ConnectionHandle,
+    slot_num: u16,
+    item: azalea_inventory::ItemStack,
+) -> bool {
+    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+
+    if !crate::player::is_creative(game.player.game_mode) {
+        return false;
+    }
+    connection
+        .packet_tx
+        .send(ServerboundGamePacket::SetCreativeModeSlot(
+            ServerboundSetCreativeModeSlot {
+                slot_num,
+                item_stack: item,
+            },
+        ));
+    true
+}
+
 /// Predict each container click locally (instant UI + drag preview), then send
 /// the predicted diff as `HashedStack`es so the server suppresses corrections
 /// when the prediction is right (vanilla lockstep).
-fn send_container_clicks(
+pub(crate) fn send_container_clicks(
     game: &mut GameState,
     connection: &ConnectionHandle,
     audio: &crate::audio::AudioEngine,
@@ -1895,29 +2130,22 @@ fn send_container_clicks(
     }
 }
 
-/// Vanilla `Lightmap.getBrightness` at a block position, with
-/// `getMaxLocalRawBrightness` = max(skyLight - skyDarken, blockLight).
-/// TODO: skyDarken (26.2: 15 - the SKY_LIGHT_LEVEL environment attribute) is
-/// untracked; 0 assumed, so the outdoor night-time vignette stays weak.
-fn lightmap_brightness(chunks: &ChunkStore, dimension: &str, x: i32, y: i32, z: i32) -> f32 {
-    let level = chunks
-        .get_sky_light(x, y, z)
-        .max(chunks.get_block_light(x, y, z)) as f32;
-    // Dimension-type ambient light, matched by id since the dimension-type
-    // registry isn't tracked; custom dimensions fall back to 0.
-    let ambient = if dimension == "minecraft:the_nether" {
-        0.1
-    } else {
-        0.0
-    };
-    let v = level / 15.0;
-    let curved = v / (4.0 - 3.0 * v);
-    // Mth.lerp(ambientLight, curved, 1.0)
-    curved + (1.0 - curved) * ambient
-}
-
 fn sleeping_head_pitch_deg(is_sleeping: bool, head_x_rot_deg: f32) -> f32 {
     if is_sleeping { 0.0 } else { head_x_rot_deg }
+}
+
+/// Vanilla `GameRenderer.renderItemInHand`: not while asleep, with the HUD
+/// hidden (F1), or in spectator.
+pub(crate) fn renders_first_person_hand(game: &GameState) -> bool {
+    hand_visible(
+        game.player.is_sleeping(),
+        game.hide_gui,
+        game.player.game_mode,
+    )
+}
+
+fn hand_visible(sleeping: bool, hide_gui: bool, game_mode: u8) -> bool {
+    !sleeping && !hide_gui && game_mode != 3
 }
 
 fn should_render_local_player(
@@ -1931,13 +2159,13 @@ fn should_render_local_player(
 
 fn eye_lightmap_brightness(game: &GameState) -> f32 {
     let eye = game.player.eye_pos();
-    lightmap_brightness(
-        &game.chunk_store,
-        &game.dimension,
+    let level = game.chunk_store.max_local_raw_brightness(
         eye.x.floor() as i32,
         eye.y.floor() as i32,
         eye.z.floor() as i32,
-    )
+        game.sky_darken(),
+    );
+    crate::world::light::lightmap_brightness(level, game.ambient_light)
 }
 
 /// Approximates vanilla's data-driven `equippable.camera_overlay` component
@@ -1959,11 +2187,13 @@ fn detached_distance(own: f32, mount: Option<f32>) -> f32 {
 
 /// Vanilla `LivingEntity.getBedOrientation` for a sleeper's bed.
 fn bed_orientation(
-    chunks: &ChunkStore,
-    sleeping_pos: Option<azalea_core::position::BlockPos>,
+    game: &GameState,
+    sleeping_pos: Option<crate::position::BlockPos>,
 ) -> Option<BedDirection> {
     let pos = sleeping_pos?;
-    bed_direction(chunks.get_block_state(pos.x, pos.y, pos.z))
+    game.block_registry
+        .block_state_data(game.chunk_store.get_block_state(pos.x, pos.y, pos.z))
+        .bed_direction()
 }
 
 /// Vanilla `LivingEntityRenderer`: hurt or dying entities take the red overlay.
@@ -2040,9 +2270,10 @@ pub fn update_game(
     // with no screen open pauses the game, which also releases the cursor
     // (otherwise a system overlay like Win-key search opens over a still
     // captured cursor). TODO: F3+P toggle (options.pauseOnLostFocus).
-    if core
-        .unfocused_since
-        .is_some_and(|t| t.elapsed().as_millis() > 500)
+    if core.pause_on_lost_focus
+        && core
+            .unfocused_since
+            .is_some_and(|t| t.elapsed().as_millis() > 500)
         && game.input_live()
         && !game.dead
     {
@@ -2077,8 +2308,13 @@ pub fn update_game(
     }
 
     if game.input_live() && game.chunk_load_bench.is_none() {
-        gfx.renderer
-            .update_camera(&mut core.input, dt, core.menu.sensitivity);
+        gfx.renderer.update_camera(
+            &mut core.input,
+            dt,
+            core.menu.sensitivity,
+            core.menu.invert_mouse_x,
+            core.menu.invert_mouse_y,
+        );
     }
 
     // Menus never pause the simulation; tick_physics substitutes neutral input.
@@ -2088,7 +2324,7 @@ pub fn update_game(
         // Vanilla `Minecraft.tick` order: `gameMode.tick` drives the connection
         // tick (and so the level load tracker) before the level's entities,
         // i.e. before the local player moves or sends anything.
-        AppCore::tick_level_load(&gfx.renderer, connection, game);
+        AppCore::tick_level_load(gfx.renderer.camera_render_position(), connection, game);
         // Vanilla Gui.tick falls back from dead health alone when no screen is
         // open, so death UI/auto-respawn must not depend on PlayerCombatKill.
         let has_screen = game.death_screen_open
@@ -2115,15 +2351,25 @@ pub fn update_game(
             game.player.effects.tick();
             game.player.tick_sleep();
         }
-        game.item_entity_store.tick(&game.chunk_store);
-        game.particle_store.tick(&game.chunk_store);
+        game.item_entity_store
+            .tick(&game.chunk_store, game.block_registry.block_state_table());
+        game.level_runtime.animate_tick(
+            &game.block_registry,
+            &game.chunk_store,
+            *game.player.position,
+        );
+        game.particle_store
+            .tick(&game.chunk_store, game.block_registry.block_state_table());
         game.block_entity_anim.tick();
+        crate::app::core::tick_moving_pistons(core, game);
         game.title.tick();
         tick_tool_highlight(core, game);
         // LocalPlayer.handlePortalTransitionEffect belongs to aiStep, which is
         // skipped once tickDeath removes the player at exactly death tick 20.
         let local_player_ai_step_ran = !game.dead || !game.player.death_animation_finished();
-        let inside_portal = game.player.is_inside_nether_portal(&game.chunk_store);
+        let inside_portal = game
+            .player
+            .is_inside_nether_portal(&game.chunk_store, game.block_registry.block_state_table());
         if local_player_ai_step_ran && game.player.tick_portal_effect(inside_portal) {
             // Vanilla forLocalAmbience: AMBIENT category at the listener,
             // volume 0.25, pitch 0.8..1.2.
@@ -2162,10 +2408,10 @@ pub fn update_game(
 
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
     // calls `level.update()`.
-    game.update_light();
+    game.update_light(core.menu.chunk_detail);
 
     // F1 (vanilla keyToggleGui); only while no screen or chat is open.
-    if core.input.key_just_pressed(winit::keyboard::KeyCode::F1) && game.input_live() {
+    if core.input.action_input_just_pressed(Action::ToggleGui) && game.input_live() {
         game.hide_gui = !game.hide_gui;
     }
     if std::mem::take(&mut game.stop_sleeping_requested) {
@@ -2211,7 +2457,7 @@ pub fn update_game(
     // F3+A: drop every mesh and re-enqueue all loaded columns.
     if game.pending_chunk_reload {
         game.pending_chunk_reload = false;
-        game.last_mesh_detail = None;
+        game.meshed.clear();
         gfx.renderer.clear_chunk_meshes();
         game.vis_valid = false;
         game.pending_load_rescan = true;
@@ -2298,7 +2544,7 @@ pub fn update_game(
     let mut pause_action = PauseAction::None;
     let mut death_action = DeathAction::None;
 
-    let sleeping_direction = bed_orientation(&game.chunk_store, game.player.sleeping_pos);
+    let sleeping_direction = bed_orientation(game, game.player.sleeping_pos);
     let is_sleeping = game.player.is_sleeping();
     // `Camera.alignWithEntity`, then the first-person sleeping `move(0, 0.15, 0)`.
     let first_person_lift = if is_sleeping && gfx.renderer.is_first_person() {
@@ -2339,15 +2585,14 @@ pub fn update_game(
     gfx.renderer
         .set_view_bob(bob_walk, bob_amount, core.menu.view_bobbing);
     gfx.renderer.update_third_person_distance(
+        game.block_registry.render_view(),
         camera_pivot,
         &game.chunk_store,
         game.third_person_distance(),
     );
-    // Esc cancels a running benchmark: restore the render distance it changed.
-    if std::mem::take(&mut game.chunk_load_abort)
-        && let Some(bench) = game.chunk_load_bench.take()
-    {
-        apply_render_distance(core, game, connection, bench.original_rd());
+    // Esc cancels a running benchmark.
+    if std::mem::take(&mut game.chunk_load_abort) && game.chunk_load_bench.take().is_some() {
+        end_chunk_load(core, game, connection);
     }
     // Watch the chunk-load benchmark from straight above, framed to its load
     // radius.
@@ -2378,14 +2623,16 @@ pub fn update_game(
                 let state =
                     game.chunk_store
                         .get_block_state(t.block_pos.x, t.block_pos.y, t.block_pos.z);
-                let props = crate::world::block::block_properties(state)
+                let block_state_data = game.block_registry.block_state_data(state);
+                let props = block_state_data
+                    .properties()
                     .entries()
                     .map(|(k, v)| format!("{k}: {v}"))
                     .collect();
                 Some((
                     t.block_pos,
                     t.face,
-                    crate::world::block::block_id(state).to_string(),
+                    block_state_data.id().to_string(),
                     props,
                 ))
             }),
@@ -2635,6 +2882,18 @@ pub fn update_game(
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
+        if core.input.touch().seen() && game.world_has_pointer() {
+            let layout = input::touch::TouchLayout {
+                width: sw,
+                height: sh,
+                gs,
+            };
+            crate::ui::touch_controls::build_touch_controls(
+                &mut elements,
+                &layout,
+                core.input.touch(),
+            );
+        }
     }
 
     // Vanilla Hud.extractSleepOverlay sits outside the isHidden gate: above
@@ -2797,19 +3056,7 @@ pub fn update_game(
                 game.chunk_load_bench = Some(bench);
             }
             ChunkLoadStep::Done(result) => {
-                apply_render_distance(core, game, connection, bench.original_rd());
-                tracing::info!(
-                    "Chunk load RD {} (effective {}): {} chunks in {:.2}s ({:.0} chunks/s), \
-                     first chunk {:.2}s, frame avg {:.1}ms / worst {:.1}ms",
-                    result.target_rd,
-                    result.effective_rd,
-                    result.chunk_count,
-                    result.load_secs,
-                    result.chunks_per_sec,
-                    result.time_to_first_secs,
-                    result.avg_frame_ms,
-                    result.worst_frame_ms,
-                );
+                end_chunk_load(core, game, connection);
                 result.save(&core.data_dirs.game_dir);
                 game.chunk_load_result = Some(*result);
                 game.chunk_load_upload = None;
@@ -2918,7 +3165,9 @@ pub fn update_game(
         let r = &gfx.renderer;
         let result = core
             .menu
-            .build(sw, sh, &menu_input, |t, s| r.menu_text_width(t, s));
+            .build(sw, sh, &menu_input, &mut core.input.key_bindings, |t, s| {
+                r.menu_text_width(t, s)
+            });
         elements.extend(result.elements);
         core.input.clear_just_pressed_actions();
         core.sync_display_mode(&gfx.window);
@@ -2974,21 +3223,100 @@ pub fn update_game(
     let mut player_preview = None;
     let mut book_preview = None;
     if (game.inventory_open || game.open_container.is_some()) && !dialog_open {
-        // Key shortcuts stay quiet while a text field (anvil rename) types.
+        let cursor = core.input.cursor_pos();
+        let raw_left = core.input.left_just_pressed();
+        let raw_right = core.input.right_just_pressed();
+        let recipe_context = if game.inventory_open {
+            Some((
+                crate::ui::recipe_book::RecipeBookScreenSpec::player(0),
+                game.player.inventory.slots().to_vec(),
+            ))
+        } else {
+            game.open_container
+                .as_ref()
+                .and_then(|container| match container.screen {
+                    ContainerScreen::CraftingTable => Some((
+                        crate::ui::recipe_book::RecipeBookScreenSpec::crafting_table(container.id),
+                        container.slots.clone(),
+                    )),
+                    ContainerScreen::Furnace(variant) => Some((
+                        crate::ui::recipe_book::RecipeBookScreenSpec::furnace(
+                            container.id,
+                            variant.recipe_book_type(),
+                        ),
+                        container.slots.clone(),
+                    )),
+                    _ => None,
+                })
+        };
+        if recipe_context.is_none() && game.recipe_book_ui.has_screen() {
+            game.recipe_book_ui
+                .reset_for_closed_screen(&mut game.recipe_book);
+        }
+        let recipe_selection_key = !game.recipe_book_ui.captures_typing()
+            && (core.input.key_just_pressed(winit::keyboard::KeyCode::Space)
+                || core.input.key_just_pressed(winit::keyboard::KeyCode::Enter)
+                || core
+                    .input
+                    .key_just_pressed(winit::keyboard::KeyCode::NumpadEnter));
+        let recipe_frame = recipe_context.as_ref().map(|(spec, slots)| {
+            crate::ui::recipe_book::handle_input(
+                &mut game.recipe_book_ui,
+                &mut game.recipe_book,
+                &connection.packet_tx,
+                *spec,
+                sw,
+                sh,
+                gs,
+                cursor,
+                raw_left,
+                raw_right,
+                core.input.shift_held(),
+                recipe_selection_key,
+                &text_events,
+                slots,
+                &|t, s| gfx.renderer.menu_text_width(t, s),
+            )
+        });
+        let book_blocks_pointer = recipe_context
+            .as_ref()
+            .zip(recipe_frame.as_ref())
+            .is_some_and(|((spec, _), frame)| {
+                frame.consumed_left_click
+                    || frame.consumed_right_click
+                    || crate::ui::recipe_book::click_hits_book(
+                        &game.recipe_book,
+                        spec.kind,
+                        sw,
+                        sh,
+                        gs,
+                        cursor,
+                    )
+            });
+        // Key shortcuts stay quiet while a text field (anvil rename or recipe
+        // search) types.
         let keys_live = !game.wants_text_input();
         let menu_scroll = core.input.consume_menu_scroll_xy();
         let input = crate::ui::container::ContainerInput {
-            left_pressed: core.input.left_just_pressed(),
-            right_pressed: core.input.right_just_pressed(),
-            middle_pressed: core.input.middle_just_pressed(),
-            left_held: core.input.left_held(),
-            right_held: core.input.right_held(),
+            left_pressed: raw_left && !book_blocks_pointer,
+            right_pressed: raw_right && !book_blocks_pointer,
+            left_held: core.input.left_held() && !book_blocks_pointer,
+            right_held: core.input.right_held() && !book_blocks_pointer,
+            middle_pressed: core
+                .input
+                .key_bindings
+                .inputs_for_action(Action::PickBlock)
+                .any(|key| {
+                    (keys_live || !matches!(key, InputKey::Keyboard(_)))
+                        && core.input.input_just_pressed(key)
+                })
+                && !book_blocks_pointer,
             shift: core.input.shift_held(),
             hotbar_swap: keys_live
                 .then(|| core.input.hotbar_key_just_pressed())
                 .flatten(),
-            swap_offhand: keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyF),
-            throw: keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyQ),
+            swap_offhand: keys_live && core.input.action_input_just_pressed(Action::SwapOffhand),
+            throw: keys_live && core.input.action_input_just_pressed(Action::DropItem),
             throw_all: core.input.ctrl_held(),
         };
         // The anvil rename field consumes this frame's typing; a changed
@@ -3007,7 +3335,51 @@ pub fn update_game(
                     name,
                 }));
         }
-        let (clicked_outside, ops, hovered) = if let Some(container) = &game.open_container {
+        let main_x_offset = recipe_frame.map_or(0.0, |frame| frame.main_x_offset);
+        let recipe_book_visible = recipe_frame.is_some_and(|frame| frame.visible);
+        let hide_main_for_book = recipe_frame.is_some_and(|frame| frame.visible && frame.narrow);
+        let mut deferred_recipe_cursor = azalea_inventory::ItemStack::Empty;
+        let (clicked_outside, ops, hovered) = if hide_main_for_book {
+            // `AbstractRecipeBookScreen`: a narrow screen with the book open
+            // shows only the screen's background behind it, and the book
+            // takes every click.
+            let cursor = core.input.cursor_pos();
+            match game.open_container.as_ref().map(|c| (c.screen, &c.data)) {
+                Some((ContainerScreen::CraftingTable, _)) => {
+                    crate::ui::crafting_table::push_crafting_table_background(
+                        &mut elements,
+                        sw,
+                        sh,
+                        gs,
+                        0.0,
+                    );
+                }
+                Some((ContainerScreen::Furnace(variant), data)) => {
+                    crate::ui::furnace::push_furnace_background(
+                        &mut elements,
+                        sw,
+                        sh,
+                        gs,
+                        variant,
+                        data,
+                        0.0,
+                    );
+                }
+                _ => {
+                    let (_, preview) = crate::ui::inventory::push_inventory_background(
+                        &mut elements,
+                        sw,
+                        sh,
+                        gs,
+                        0.0,
+                        cursor,
+                        &game.player.inventory,
+                    );
+                    player_preview = Some(preview);
+                }
+            }
+            (false, Vec::new(), None)
+        } else if let Some(container) = &game.open_container {
             let result = match container.screen {
                 ContainerScreen::CraftingTable => crate::ui::crafting_table::build_crafting_table(
                     &mut elements,
@@ -3021,6 +3393,8 @@ pub fn update_game(
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
                     gs,
+                    main_x_offset,
+                    recipe_book_visible.then_some(&mut deferred_recipe_cursor),
                 ),
                 ContainerScreen::Furnace(variant) => crate::ui::furnace::build_furnace(
                     &mut elements,
@@ -3036,6 +3410,8 @@ pub fn update_game(
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
                     gs,
+                    main_x_offset,
+                    recipe_book_visible.then_some(&mut deferred_recipe_cursor),
                     &|t, s| gfx.renderer.menu_text_width(t, s),
                 ),
                 ContainerScreen::Chest { rows } => crate::ui::chest::build_chest(
@@ -3136,10 +3512,52 @@ pub fn update_game(
                 &mut game.inv_drag,
                 &mut game.inv_last_click,
                 gs,
+                main_x_offset,
+                recipe_book_visible.then_some(&mut deferred_recipe_cursor),
             );
             player_preview = Some(result.player_preview);
             (result.clicked_outside, result.ops, result.hovered)
         };
+
+        if let Some((spec, _)) = recipe_context.as_ref()
+            && ops
+                .iter()
+                .filter_map(|op| op.slot_num())
+                .any(|slot| spec.crafting_slots.contains(&(slot as usize)))
+        {
+            game.recipe_book_ui
+                .crafting_slot_clicked(&mut game.recipe_book);
+        }
+
+        if let (Some((spec, _)), Some(frame)) = (recipe_context.as_ref(), recipe_frame) {
+            crate::ui::recipe_book::render(
+                &mut elements,
+                &mut game.recipe_book_ui,
+                &game.recipe_book,
+                *spec,
+                frame,
+                sw,
+                sh,
+                gs,
+                cursor,
+                core.input.ctrl_held(),
+                &|t, s| gfx.renderer.menu_text_width(t, s),
+            );
+            if frame.visible {
+                let shown_cursor = if hide_main_for_book {
+                    &game.cursor_item
+                } else {
+                    &deferred_recipe_cursor
+                };
+                crate::ui::container::push_cursor_stack(
+                    &mut elements,
+                    cursor,
+                    frame.panel_scale,
+                    shown_cursor,
+                );
+            }
+        }
+
         close_inventory = clicked_outside;
 
         let menu_id = game.open_container.as_ref().map_or(0, |c| c.id);
@@ -3233,11 +3651,21 @@ pub fn update_game(
     if game.creative_inventory_open && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
-        let middle_clicked = core.input.middle_just_pressed();
+        let middle_clicked = core
+            .input
+            .key_bindings
+            .inputs_for_action(Action::PickBlock)
+            .any(|key| {
+                (!game.wants_text_input() || !matches!(key, InputKey::Keyboard(_)))
+                    && core.input.input_just_pressed(key)
+            });
         let right_clicked = core.input.right_just_pressed();
         let scroll_delta = core.input.consume_menu_scroll();
         // `typed`/`backspace` come from the frame's single drain up top; a
         // second drain here would always read empty.
+        // Vanilla's focused search box takes every key, the drop key included.
+        let drop = (!game.wants_text_input() && core.input.drop_key_just_pressed())
+            .then(|| core.input.ctrl_held());
         let action = crate::ui::creative_inventory::build_creative_inventory(
             &mut elements,
             &mut game.creative_state,
@@ -3249,9 +3677,11 @@ pub fn update_game(
             right_clicked,
             scroll_delta,
             &text_events,
-            core.input.key_just_pressed(winit::keyboard::KeyCode::KeyT),
+            core.input.action_input_just_pressed(Action::OpenChat),
             core.input.hotbar_key_just_pressed(),
-            core.input.key_just_pressed(winit::keyboard::KeyCode::KeyF),
+            core.input.action_input_just_pressed(Action::SwapOffhand),
+            drop,
+            game.player.drop_spam.can_drop(),
             &game.player.inventory,
             gs,
             game.advanced_item_tooltips,
@@ -3267,32 +3697,32 @@ pub fn update_game(
             &game.player.inventory,
             gs,
         );
-        use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
-        let mut set_creative_slot = |slot_num: u16, item: azalea_inventory::ItemStack| {
-            if crate::player::is_creative(game.player.game_mode) {
-                connection
-                    .packet_tx
-                    .send(ServerboundGamePacket::SetCreativeModeSlot(
-                        ServerboundSetCreativeModeSlot {
-                            slot_num,
-                            item_stack: item.clone(),
-                        },
-                    ));
-                // Optimistic local update; the server echoes via ContainerSetSlot.
-                game.player.inventory.set_slot(slot_num as usize, item);
-            }
-        };
         match action {
             crate::ui::creative_inventory::CreativeAction::Close => {
                 close_inventory = true;
             }
             crate::ui::creative_inventory::CreativeAction::SetSlot(slot_num, item) => {
-                set_creative_slot(slot_num, item);
+                set_creative_slot(game, connection, slot_num, item);
             }
             crate::ui::creative_inventory::CreativeAction::SetSlots(items) => {
                 for (slot_num, item) in items {
-                    set_creative_slot(slot_num, item);
+                    set_creative_slot(game, connection, slot_num, item);
                 }
+            }
+            // TODO: vanilla's client `LivingEntity.drop` also starts the local
+            // arm swing; only the packet is sent here, as for the world drop.
+            crate::ui::creative_inventory::CreativeAction::DropItem(item) => {
+                drop_creative_item(game, connection, item);
+                crate::player::interaction::send_use_swing(&connection.packet_tx);
+            }
+            crate::ui::creative_inventory::CreativeAction::DropSlot {
+                slot,
+                dropped,
+                remaining,
+            } => {
+                set_creative_slot(game, connection, slot, remaining);
+                drop_creative_item(game, connection, dropped);
+                crate::player::interaction::send_use_swing(&connection.packet_tx);
             }
             crate::ui::creative_inventory::CreativeAction::None => {}
         }
@@ -3325,6 +3755,7 @@ pub fn update_game(
                 shift: core.input.shift_held(),
                 command_tree: command_tree.as_deref(),
                 advanced_item_tooltips: game.advanced_item_tooltips,
+                key_bindings: &core.input.key_bindings,
                 text_width_fn: &|t, s| gfx.renderer.menu_text_width(t, s),
                 spans_width_fn: &|spans, s| gfx.renderer.menu_spans_width(spans, s),
             },
@@ -3434,6 +3865,7 @@ pub fn update_game(
                 let extras =
                     entity_extras(entity_id, e, partial_tick, game.sky_state.game_time as i64);
                 let is_sleeping = e.sleeping_pos.is_some();
+                let (radius, strength) = crate::entity::shadow::of_living(e);
 
                 EntityRenderInfo {
                     position: interp_pos + extras.render_offset,
@@ -3454,7 +3886,7 @@ pub fn update_game(
                         partial_tick,
                     ),
                     is_sleeping,
-                    sleeping_direction: bed_orientation(&game.chunk_store, e.sleeping_pos),
+                    sleeping_direction: bed_orientation(game, e.sleeping_pos),
                     sleeping_eye_height: standing_eye_height(e.entity_type, e.is_baby),
                     is_baby: e.is_baby,
                     is_crouching: e.is_crouching,
@@ -3503,6 +3935,12 @@ pub fn update_game(
                     age_in_ticks: e.age_in_ticks as f32 + partial_tick,
                     attack_time: e.swing_progress(partial_tick),
                     skip_cull: false,
+                    shadow: ShadowCaster {
+                        position: *interp_pos,
+                        offset: extras.render_offset,
+                        radius,
+                        strength,
+                    },
                 }
             })
             .collect()
@@ -3525,6 +3963,7 @@ pub fn update_game(
             partial_tick,
         );
 
+        let (radius, strength) = crate::entity::shadow::of_player(&game.player.attributes);
         entity_renders.push(EntityRenderInfo {
             position: interp_pos,
             head_y_rot_deg: interp_y_rot_deg,
@@ -3547,6 +3986,13 @@ pub fn update_game(
             has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),
             death_time: render_death_time(game.player.death_time, partial_tick),
             skip_cull: true,
+            // Players drop their render offset before the shadow.
+            shadow: ShadowCaster {
+                position: *interp_pos,
+                radius,
+                strength,
+                ..Default::default()
+            },
             ..Default::default()
         });
     }
@@ -3580,6 +4026,20 @@ pub fn update_game(
         )
     };
 
+    let moving_block_renders =
+        moving_block_renders(game, gfx.renderer.camera_render_position(), partial_tick);
+
+    let shadow_casters = if core.menu.entity_shadows && !benchmark_running {
+        shadow_casters(
+            &entity_renders,
+            &game.item_entity_store,
+            *gfx.renderer.camera_pivot_position(),
+            partial_tick,
+        )
+    } else {
+        Vec::new()
+    };
+
     let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = if benchmark_running {
         Vec::new()
     } else {
@@ -3588,13 +4048,14 @@ pub fn update_game(
             .iter()
             .filter_map(|(pos, be)| {
                 let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
-                let id = crate::world::block::block_id(state);
+                let block_state_data = game.block_registry.block_state_data(state);
+                let id = block_state_data.id();
                 // A predicted break leaves a stale entry until the server
                 // confirms; don't render entries whose block is gone.
                 if !crate::world::block_entity::is_block_entity_block(id) {
                     return None;
                 }
-                let props = crate::world::block::block_properties(state);
+                let props = block_state_data.properties();
                 let variant = block_entity::variant_for_block(be.kind, id, props);
                 let yaw = block_entity::yaw_for_block(be.kind, props);
                 let openness_at = |p: &BlockPos| {
@@ -3684,6 +4145,7 @@ pub fn update_game(
     // the cursor mid-frame), so the renderer doesn't re-hide it from a stale value.
     let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();
     if let Err(e) = gfx.renderer.render_world(
+        game.block_registry.render_view(),
         &gfx.window,
         hide_cursor,
         elements,
@@ -3691,10 +4153,18 @@ pub fn update_game(
         use_anim,
         held_item,
         game.scoreboard.member_team_color(&core.user.username),
-        !game.player.is_sleeping(),
+        renders_first_person_hand(game),
         destroy_info,
         game.show_chunk_borders,
         sky,
+        ShadowScene {
+            casters: &shadow_casters,
+            chunks: &game.chunk_store,
+            block_state_table: game.block_registry.block_state_table(),
+            sky_darken: game.sky_darken(),
+            ambient_light: game.ambient_light,
+        },
+        &moving_block_renders,
         &entity_renders,
         &item_renders,
         &block_entity_renders,
@@ -3764,7 +4234,7 @@ pub fn update_game(
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
         PauseAction::Options => {
-            core.menu.open_options();
+            core.menu.open_options(&core.input.key_bindings);
             game.options_from_game = true;
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
@@ -3796,30 +4266,13 @@ pub fn update_game(
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
         PauseAction::StartChunkLoad(rd) => {
-            game.chunk_load_bench = Some(ChunkLoadBench::new(
-                rd,
-                core.menu.render_distance,
-                game.server_render_distance,
-                gfx.renderer.gpu_name(),
-                gfx.renderer.vulkan_version(),
-                gfx.renderer.screen_width(),
-                gfx.renderer.screen_height(),
-                [
-                    game.player.position.x,
-                    game.player.position.y,
-                    game.player.position.z,
-                ],
-            ));
-            game.chunk_load_result = None;
+            start_chunk_load(core, gfx, connection, game, rd);
             game.pause_screen = PauseScreen::Main;
             game.paused = false;
-            // Drop to the minimum render distance so the server unloads the far
-            // chunks; the driver raises it to the target once the reset settles.
-            apply_render_distance(core, game, connection, crate::benchmark::CHUNK_LOAD_MIN_RD);
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
         PauseAction::ReportBugs => {
-            let _ = open::that("https://github.com/PommeMC/Client/issues");
+            crate::util::open_url("https://github.com/PommeMC/Client/issues");
         }
         PauseAction::None => {}
     }
@@ -3956,8 +4409,8 @@ mod dropped_item_tests {
     use azalea_registry::builtin::EntityKind;
 
     use super::{
-        item_stack_seed, should_render_local_player, sleeping_head_pitch_deg, standing_eye_height,
-        transform_item_bounds,
+        hand_visible, item_stack_seed, should_render_local_player, sleeping_head_pitch_deg,
+        standing_eye_height, transform_item_bounds,
     };
 
     #[test]
@@ -3984,6 +4437,15 @@ mod dropped_item_tests {
     }
 
     #[test]
+    fn hand_hides_asleep_with_f1_and_in_spectator() {
+        assert!(hand_visible(false, false, 0));
+        assert!(hand_visible(false, false, 1));
+        assert!(!hand_visible(true, false, 0));
+        assert!(!hand_visible(false, true, 0));
+        assert!(!hand_visible(false, false, 3));
+    }
+
+    #[test]
     fn villager_sleeping_eye_height_uses_explicit_baby_dimensions() {
         assert_eq!(standing_eye_height(EntityKind::Villager, false), 1.62);
         assert_eq!(standing_eye_height(EntityKind::Villager, true), 0.63);
@@ -4005,14 +4467,14 @@ fn dropped_item_geometry(renderer: &Renderer, item_name: &str) -> (glam::Mat4, f
     let mesh = renderer.item_mesh_info(item_name);
     let is_block_model = mesh
         .map(|mesh| mesh.is_block_model)
-        .unwrap_or_else(|| renderer.registry().get_item_model(item_name).is_some());
+        .unwrap_or_else(|| renderer.render_assets().get_item_model(item_name).is_some());
     let fallback_transform = if is_block_model {
         crate::world::block::model::default_block_ground_transform()
     } else {
         glam::Mat4::from_scale(glam::Vec3::splat(0.5))
     };
     let ground_transform = renderer
-        .registry()
+        .render_assets()
         .get_item_ground_transform(item_name)
         .unwrap_or(fallback_transform);
     let (bounds_min, bounds_max) = mesh
@@ -4038,7 +4500,7 @@ fn dropped_item_geometry(renderer: &Renderer, item_name: &str) -> (glam::Mat4, f
 #[allow(clippy::too_many_arguments)]
 fn emit_item_copies(
     infos: &mut Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo>,
-    registry: &crate::world::block::registry::BlockRegistry,
+    render_assets: &crate::world::block::render_assets::BlockRenderAssets,
     item_name: &str,
     item_id: u32,
     damage: i32,
@@ -4066,7 +4528,7 @@ fn emit_item_copies(
         * glam::Mat4::from_rotation_y(spin);
     // Dropped item entities are not LivingEntity owners in vanilla, so a
     // `team` tint source falls back to the JSON default here.
-    let tints: std::sync::Arc<[u32]> = registry
+    let tints: std::sync::Arc<[u32]> = render_assets
         .item_tint_palette(item_name, item_stack, None)
         .into();
     let mut push = |copy_offset: glam::Mat4| {
@@ -4103,6 +4565,85 @@ fn emit_item_copies(
     }
 }
 
+/// Vanilla `PistonHeadRenderer.extractRenderState`: each moving block, meshed
+/// as terrain at its offset from the moving piston's cell and lit from the
+/// cell it left. A retracting piston also draws its base, extended, in place.
+fn moving_block_renders(
+    game: &GameState,
+    camera_pos: glam::DVec3,
+    partial_tick: f32,
+) -> Vec<crate::renderer::chunk::moving_blocks::MovingBlockRender> {
+    use crate::world::piston;
+    /// Vanilla `PistonHeadRenderer.getViewDistance`.
+    const VIEW_DISTANCE: f64 = 68.0;
+    let blocks = game.block_registry.block_state_table();
+    let mut renders = Vec::new();
+    for (pos, moving) in game.block_entity_anim.pistons.iter() {
+        let state = moving.moved_state;
+        let data = blocks.block_state_data(state);
+        let center = glam::DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64) + 0.5;
+        if data.is_air() || center.distance_squared(camera_pos) >= VIEW_DISTANCE * VIEW_DISTANCE {
+            continue;
+        }
+        let origin = [pos.x, pos.y, pos.z];
+        let cell = piston::relative(*pos, moving.movement_direction().opposite(), 1);
+        let cell = [cell.x, cell.y, cell.z];
+        let mut mesh = |state, cell, base| {
+            renders.push(crate::renderer::chunk::moving_blocks::MovingBlockRender {
+                origin,
+                mesh: game
+                    .mesh_dispatcher
+                    .mesh_moving_block(&game.chunk_store, state, cell, base),
+            });
+        };
+        let progress = moving.progress(partial_tick);
+        let offset = moving.offset(partial_tick);
+        if data.id() == "piston_head" && progress <= 4.0 {
+            mesh(
+                piston::with_short(blocks, state, progress <= 0.5),
+                cell,
+                offset,
+            );
+        } else if moving.source && !moving.extending {
+            let Some(head) = piston::head_of(blocks, state, progress >= 0.5) else {
+                continue;
+            };
+            mesh(head, cell, offset);
+            let base = blocks
+                .with_property(state, "extended", "true")
+                .unwrap_or(state);
+            mesh(base, origin, [0.0; 3]);
+        } else {
+            mesh(state, cell, offset);
+        }
+    }
+    renders
+}
+
+/// Vanilla `extractShadow`'s casters: every rendered entity, and each resting
+/// item entity once, at its own position rather than its bobbing copies'.
+/// Items being picked up are gone in vanilla, so they cast none.
+fn shadow_casters(
+    entities: &[EntityRenderInfo],
+    items: &crate::entity::ItemEntityStore,
+    camera_pos: glam::DVec3,
+    partial_tick: f32,
+) -> Vec<ShadowCaster> {
+    let (item_radius, item_strength) = crate::entity::shadow::ITEM;
+    let entities = entities.iter().map(|e| e.shadow);
+    // A full-strength shadow fades out 16 blocks from the camera.
+    let items = items
+        .visible_items(camera_pos, 16.0)
+        .into_iter()
+        .map(|item| ShadowCaster {
+            position: *item.prev_position.lerp(item.position, partial_tick as f64),
+            radius: item_radius,
+            strength: item_strength,
+            ..Default::default()
+        });
+    entities.chain(items).collect()
+}
+
 fn build_item_render_infos(
     entity_store: &crate::entity::ItemEntityStore,
     chunk_store: &ChunkStore,
@@ -4121,7 +4662,7 @@ fn build_item_render_infos(
         let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &item.item_name);
         emit_item_copies(
             &mut infos,
-            renderer.registry(),
+            renderer.render_assets(),
             &item.item_name,
             item.item_id,
             item.damage,
@@ -4146,7 +4687,7 @@ fn build_item_render_infos(
         let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &pickup.item_name);
         emit_item_copies(
             &mut infos,
-            renderer.registry(),
+            renderer.render_assets(),
             &pickup.item_name,
             pickup.item_id,
             pickup.damage,
@@ -4696,5 +5237,54 @@ mod tests {
         assert!(has_red_overlay(1, 0));
         assert!(has_red_overlay(0, 1));
         assert!(!has_red_overlay(0, 0));
+    }
+}
+
+/// Retain overlay releases until all debug modifiers are up; `None` defers
+/// settlement.
+fn debug_overlay_release(pending: &mut bool, overlay: bool, modifier_held: bool) -> Option<bool> {
+    *pending |= overlay;
+    if modifier_held {
+        None
+    } else {
+        Some(std::mem::take(pending))
+    }
+}
+
+#[cfg(test)]
+mod debug_release_tests {
+    use winit::keyboard::KeyCode;
+
+    use super::*;
+    use crate::app::input::{InputState, KeyBindings};
+
+    #[test]
+    fn overlay_release_survives_both_modifier_release_orders() {
+        let f3 = InputKey::Keyboard(KeyCode::F3);
+        let f6 = InputKey::Keyboard(KeyCode::F6);
+        let mut bindings = KeyBindings::default();
+        bindings.set(Action::DebugModifier, vec![f3, f6]);
+        for order in [[KeyCode::F3, KeyCode::F6], [KeyCode::F6, KeyCode::F3]] {
+            let mut input = InputState::released();
+            input.set_key_pressed_for_test(KeyCode::F3, true);
+            input.set_key_pressed_for_test(KeyCode::F6, true);
+            let mut pending = false;
+            for (index, code) in order.into_iter().enumerate() {
+                input.set_key_pressed_for_test(code, false);
+                let result = debug_overlay_release(
+                    &mut pending,
+                    bindings.matches_key(Action::ToggleOverlay, code),
+                    bindings
+                        .inputs_for_action(Action::DebugModifier)
+                        .any(|key| input.input_pressed(key)),
+                );
+                assert_eq!(result, if index == 0 { None } else { Some(true) });
+            }
+            assert!(!pending);
+            assert_eq!(
+                debug_overlay_release(&mut pending, false, false),
+                Some(false)
+            );
+        }
     }
 }

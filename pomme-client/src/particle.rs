@@ -6,12 +6,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use azalea_block::BlockState;
-use azalea_core::position::BlockPos;
 use glam::{DVec3, dvec3};
 
 use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::{self, CollisionContext, LocalBox};
 use crate::physics::collision::resolve_collision;
+use crate::position::BlockPos;
 use crate::renderer::ParticleQuad;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::renderer::chunk::mesher::{
@@ -19,8 +19,8 @@ use crate::renderer::chunk::mesher::{
     tint_sample_y, world_brightness,
 };
 use crate::renderer::pipelines::particle::MAX_PARTICLE_QUADS as MAX_PARTICLES;
-use crate::world::block::registry::{BlockRegistry, Tint};
-use crate::world::block::{block_id, is_air, outline_shape_position};
+use crate::world::block::BlockStateTable;
+use crate::world::block::render_assets::{BlockRenderView, Tint};
 use crate::world::chunk::ChunkStore;
 
 /// Vanilla `ParticleGroup.RESERVOIR_START` — above this, new particles are
@@ -171,7 +171,12 @@ impl Particle {
     }
 
     /// Vanilla `Particle.tick`. Returns false when the particle expires.
-    fn tick(&mut self, chunks: &ChunkStore, end_rod_frames: &[AtlasRegion; 8]) -> bool {
+    fn tick(
+        &mut self,
+        chunks: &ChunkStore,
+        block_state_table: BlockStateTable,
+        end_rod_frames: &[AtlasRegion; 8],
+    ) -> bool {
         self.prev_pos = self.pos;
         if self.age >= self.lifetime {
             return false;
@@ -179,7 +184,7 @@ impl Particle {
         self.age += 1;
         self.vel.y -= 0.04 * self.gravity;
         match self.kind {
-            Kind::Terrain => self.move_with_collision(chunks),
+            Kind::Terrain => self.move_with_collision(chunks, block_state_table),
             // EndRodParticle.move() skips collision entirely.
             Kind::EndRod => self.pos += self.vel,
         }
@@ -213,7 +218,7 @@ impl Particle {
     }
 
     /// Vanilla `Particle.move`.
-    fn move_with_collision(&mut self, chunks: &ChunkStore) {
+    fn move_with_collision(&mut self, chunks: &ChunkStore, block_state_table: BlockStateTable) {
         if self.stopped_by_collision {
             return;
         }
@@ -222,7 +227,7 @@ impl Particle {
         if delta != DVec3::ZERO && delta.length_squared() < MAX_COLLISION_VELOCITY_SQ {
             let aabb = Aabb::from_center(self.pos, HALF_WIDTH, HALF_WIDTH);
             (delta, _) = resolve_collision(
-                chunks.into(),
+                crate::physics::collision::CollisionWorld::new(chunks, block_state_table),
                 aabb,
                 orig.into(),
                 0.0,
@@ -325,14 +330,15 @@ impl ParticleStore {
         &mut self,
         pos: BlockPos,
         state: BlockState,
-        registry: &BlockRegistry,
+        registry: BlockRenderView<'_>,
         chunks: &ChunkStore,
         biome_climate: &HashMap<u32, BiomeClimate>,
     ) {
-        if is_air(state) {
+        let block_state_data = registry.block_state_table().block_state_data(state);
+        if block_state_data.is_air() {
             return;
         }
-        let block_id = block_id(state);
+        let block_id = block_state_data.id();
         // The only vanilla `noTerrainParticles` blocks.
         if matches!(block_id, "barrier" | "structure_void") {
             return;
@@ -348,10 +354,17 @@ impl ParticleStore {
             && block_id != "grass_block"
         {
             let tint = match faces.tint {
-                Tint::Redstone => crate::world::block::redstone_wire_rgb(state),
-                Tint::Stem => crate::world::block::stem_rgb(state),
+                Tint::Redstone => block_state_data.redstone_wire_rgb(),
+                Tint::Stem => block_state_data.stem_rgb(),
                 Tint::Constant(color) => crate::renderer::chunk::mesher::int_to_rgb(color as i32),
-                _ => self.blend_tint(faces.tint, state, pos, chunks, biome_climate),
+                _ => self.blend_tint(
+                    faces.tint,
+                    state,
+                    pos,
+                    chunks,
+                    biome_climate,
+                    registry.block_state_table(),
+                ),
             };
             for (c, t) in color.iter_mut().zip(tint) {
                 *c *= t;
@@ -369,8 +382,8 @@ impl ParticleStore {
 
         // Vanilla `ParticleEngine.destroy` scatters over the outline shape's
         // boxes, so a block with an empty outline emits nothing.
-        let boxes: &[LocalBox] = block_shape::outline_shape(state);
-        let shape_origin = outline_shape_position(state, pos.x, pos.y, pos.z);
+        let boxes: &[LocalBox] = block_shape::outline_shape(block_state_data);
+        let shape_origin = block_state_data.outline_shape_position(pos.x, pos.y, pos.z);
 
         for b in boxes {
             let width_x = (b[3] - b[0]).min(1.0);
@@ -509,8 +522,9 @@ impl ParticleStore {
         pos: BlockPos,
         chunks: &ChunkStore,
         biome_climate: &HashMap<u32, BiomeClimate>,
+        block_state_table: BlockStateTable,
     ) -> [f32; 3] {
-        let sample_y = tint_sample_y(tint, state, pos.y);
+        let sample_y = tint_sample_y(tint, state, pos.y, block_state_table);
         blend_color(pos.x, pos.z, |x, z| {
             let climate = biome_climate
                 .get(&chunks.biome_id(x, sample_y, z))
@@ -545,9 +559,10 @@ impl ParticleStore {
         self.pending.push(particle);
     }
 
-    pub fn tick(&mut self, chunks: &ChunkStore) {
+    pub fn tick(&mut self, chunks: &ChunkStore, block_state_table: BlockStateTable) {
         let frames = self.end_rod_frames;
-        self.particles.retain_mut(|p| p.tick(chunks, &frames));
+        self.particles
+            .retain_mut(|p| p.tick(chunks, block_state_table, &frames));
         self.particles.append(&mut self.pending);
     }
 

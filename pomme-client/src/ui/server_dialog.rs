@@ -52,8 +52,6 @@ const SCROLL_RATE: f32 = 10.0;
 /// `Checkbox.getBoxSize`, and the gap to its label.
 const CHECKBOX_SIZE: f32 = LINE_H + 8.0;
 const CHECKBOX_SPACING: f32 = 4.0;
-/// `Tooltip.create` splits at this width.
-const TOOLTIP_WRAP: f32 = 170.0;
 /// `EditBox.DEFAULT_TEXT_COLOR`.
 const EDIT_TEXT: [f32; 4] = common::rgb(0xe0e0e0);
 /// `WaitingForResponseScreen.BUTTON_ACTIVE_AFTER`, in the client ticks the
@@ -2039,7 +2037,7 @@ fn warning_button_position(x: f32, y: f32, w: f32, h: f32) -> (f32, f32) {
 
 /// `Tooltip.create`, which splits at 170.
 fn wrapped_tooltip(component: &Component, m: &Measure) -> Vec<TooltipLine> {
-    crate::ui::chat::wrapped_tooltip_lines(component, TOOLTIP_WRAP, &|line| m.spans_w(line))
+    crate::ui::chat::wrapped_tooltip_lines(component, common::TOOLTIP_WRAP, &|line| m.spans_w(line))
 }
 
 /// The dialog's keyboard focus ring for this frame.

@@ -1,0 +1,10 @@
+[package]
+name = "pomme-ios"
+description = "iOS entry point for the Pomme client."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[target.'cfg(target_os = "ios")'.dependencies]
+pomme-client = { path = "../pomme-client", default-features = false }

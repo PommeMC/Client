@@ -564,7 +564,7 @@ pub(super) fn push_bottom_text(
     });
 
     let name = "Pomme";
-    let tag = "early dev";
+    let tag = crate::update::version();
     let tag_size = fs * 0.65;
     let gap = 2.0 * gs;
     let nw = text_width_fn(name, fs);
@@ -1070,7 +1070,7 @@ impl MainMenu {
             drop_w,
             &items,
         ) {
-            let _ = open::that(LINKS[i].2);
+            crate::util::open_url(LINKS[i].2);
         }
     }
 
@@ -1126,6 +1126,7 @@ impl MainMenu {
         elements: &mut Vec<MenuElement>,
         screen_w: f32,
         screen_h: f32,
+        key_bindings: &KeyBindings,
     ) -> Option<MenuAction> {
         let mut action = None;
         let mut committed = false;
@@ -1147,7 +1148,7 @@ impl MainMenu {
             }
         }
         if committed {
-            self.save_settings();
+            self.save_settings(key_bindings);
         }
         action
     }

@@ -14,11 +14,6 @@ use serde::{Deserialize, Serialize};
 const FRIENDS_URL: &str = "https://api.minecraftservices.com/friends";
 const PRESENCE_URL: &str = "https://api.minecraftservices.com/presence";
 
-fn http() -> &'static reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
-}
-
 #[derive(Deserialize)]
 struct Friend {
     #[serde(rename = "profileId")]
@@ -254,7 +249,7 @@ fn request_view(f: Friend) -> FriendView {
 }
 
 async fn get_friends(access_token: &str) -> Result<FriendsList, String> {
-    let resp = http()
+    let resp = crate::net::http::client()
         .get(FRIENDS_URL)
         .bearer_auth(access_token)
         .send()
@@ -269,7 +264,7 @@ async fn get_friends(access_token: &str) -> Result<FriendsList, String> {
 /// Posts our presence ("ONLINE", idle) and reads back friends' presence,
 /// returned keyed by undashed profile id.
 async fn get_presence(access_token: &str) -> Result<HashMap<String, FriendStatus>, String> {
-    let resp = http()
+    let resp = crate::net::http::client()
         .post(PRESENCE_URL)
         .bearer_auth(access_token)
         .json(&serde_json::json!({ "status": "ONLINE" }))
@@ -344,7 +339,7 @@ async fn put_action(
     body: FriendActionRequest<'_>,
     by_name: bool,
 ) -> Result<(), String> {
-    let resp = http()
+    let resp = crate::net::http::client()
         .put(FRIENDS_URL)
         .bearer_auth(access_token)
         .json(&body)

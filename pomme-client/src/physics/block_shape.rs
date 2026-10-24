@@ -3,24 +3,21 @@
 //! older tables fall back to the native computations below. Boxes are
 //! block-local; callers translate them through the shape offset helpers.
 //!
-//! [`collision_shape`] and [`outline_shape_holding`] layer the entity-context
-//! branches of `ScaffoldingBlock`, `PowderSnowBlock` and `LightBlock` on top.
-//! TODO: `LiquidBlock.getCollisionShape`'s `canStandOnFluid` branch.
+//! [`collision_shape`] and [`outline_shape_holding_data`] layer the
+//! entity-context branches of `ScaffoldingBlock`, `PowderSnowBlock` and
+//! `LightBlock` on top. TODO: `LiquidBlock.getCollisionShape`'s
+//! `canStandOnFluid` branch.
 
-use azalea_block::BlockState;
-
-use crate::world::block::{
-    PropMap, SpecialCollision, block_id, block_properties, has_collision, special_collision,
-};
+use crate::world::block::{BlockStateData, PropMap, SpecialCollision};
 
 /// A block-local axis-aligned box: `[min_x, min_y, min_z, max_x, max_y,
 /// max_z]`.
 pub type LocalBox = [f64; 6];
 
-/// Cached collision boxes for `state`: `None` for a full cube, `Some(&[])` for
-/// no collision, `Some(boxes)` for a partial shape.
-pub fn partial_shape(state: BlockState) -> Option<&'static [LocalBox]> {
-    crate::world::block::block_shape(state)
+/// Cached collision boxes for resolved data: `None` for a full cube,
+/// `Some(&[])` for no collision, `Some(boxes)` for a partial shape.
+pub fn partial_shape(block_state_data: &BlockStateData) -> Option<&'static [LocalBox]> {
+    block_state_data.collision_boxes()
 }
 
 const FULL_CUBE_SHAPE: &[LocalBox] = &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
@@ -42,7 +39,6 @@ pub struct CollisionContext {
 }
 
 impl CollisionContext {
-    #[cfg(test)]
     pub const EMPTY: Self = Self {
         entity_bottom: None,
         descending: false,
@@ -87,17 +83,17 @@ impl CollisionContext {
 /// `context.getCollisionShape(state, level, pos)` in `partial_shape`'s
 /// encoding. Scaffolding is `noCollision()` but overrides the shape anyway.
 pub fn collision_shape(
-    state: BlockState,
+    block_state_data: &BlockStateData,
     pos_y: i32,
     ctx: &CollisionContext,
 ) -> Option<&'static [LocalBox]> {
-    match special_collision(state) {
+    match block_state_data.special_collision() {
         // `ScaffoldingBlock.getCollisionShape`: the table holds SHAPE_STABLE.
         SpecialCollision::Scaffolding => {
             if ctx.is_above(1.0, pos_y, true) && !ctx.descending {
-                return partial_shape(state);
+                return partial_shape(block_state_data);
             }
-            let props = block_properties(state);
+            let props = block_state_data.properties();
             if props.get("distance") != Some("0")
                 && props.get("bottom") == Some("true")
                 && ctx.is_above(0.0, pos_y, true)
@@ -118,28 +114,38 @@ pub fn collision_shape(
         }
         // Explicit shapes beat `noCollision` (`PitcherCropBlock`,
         // `WallHangingSignBlock`); only the full-cube default needs the flag.
-        _ => match partial_shape(state) {
-            None if !has_collision(state) => Some(&[]),
+        _ => match partial_shape(block_state_data) {
+            None if !block_state_data.has_collision() => Some(&[]),
             shape => shape,
         },
     }
 }
 
+/// Vanilla `isCollisionShapeFullBlock`: the empty-context collision shape
+/// fills the cell.
+pub fn is_collision_shape_full_block(block_state_data: &BlockStateData) -> bool {
+    collision_shape(block_state_data, 0, &CollisionContext::EMPTY).is_none()
+}
+
 /// Boxes the interaction raycast clips against (vanilla `getShape`). Unlike
 /// `partial_shape` the full-cube case is already resolved, so an empty slice
 /// means "not targetable" rather than "no collision".
-pub fn outline_shape(state: BlockState) -> &'static [LocalBox] {
-    crate::world::block::block_outline(state).unwrap_or(FULL_CUBE_SHAPE)
+pub fn outline_shape(block_state_data: &BlockStateData) -> &'static [LocalBox] {
+    block_state_data.outline_boxes().unwrap_or(FULL_CUBE_SHAPE)
 }
 
 /// [`outline_shape`] under a player's context: `LightBlock` and
 /// `ScaffoldingBlock.getShape` fill the cell while their own item is held.
-pub fn outline_shape_holding(state: BlockState, held_item: Option<&str>) -> &'static [LocalBox] {
-    let id = block_id(state);
+/// Uses already resolved session metadata.
+pub(crate) fn outline_shape_holding_data(
+    block_state_data: &BlockStateData,
+    held_item: Option<&str>,
+) -> &'static [LocalBox] {
+    let id = block_state_data.id();
     if matches!(id, "light" | "scaffolding") && held_item == Some(id) {
         FULL_CUBE_SHAPE
     } else {
-        outline_shape(state)
+        outline_shape(block_state_data)
     }
 }
 
@@ -281,17 +287,19 @@ fn ccw(facing: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::block::find_state;
 
     #[test]
     fn held_item_fills_light_and_scaffolding_outlines() {
-        crate::world::block::init("26.2");
-        let light = find_state("light", &[]);
+        let block_state_table = crate::world::block::BlockStateTable::native();
+        let outline_shape_holding = |state, held_item| {
+            outline_shape_holding_data(block_state_table.block_state_data(state), held_item)
+        };
+        let light = block_state_table.find_state("light", &[]);
         assert!(outline_shape_holding(light, None).is_empty());
         assert!(outline_shape_holding(light, Some("scaffolding")).is_empty());
         assert_eq!(outline_shape_holding(light, Some("light")), FULL_CUBE_SHAPE);
 
-        let scaffolding = find_state("scaffolding", &[]);
+        let scaffolding = block_state_table.find_state("scaffolding", &[]);
         assert_ne!(outline_shape_holding(scaffolding, None), FULL_CUBE_SHAPE);
         assert_eq!(
             outline_shape_holding(scaffolding, Some("scaffolding")),

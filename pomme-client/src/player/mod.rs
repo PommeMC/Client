@@ -11,7 +11,7 @@ use crate::entity::HURT_DURATION;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::physics::aabb::Aabb;
 use crate::world::block::model::Direction;
-use crate::world::block::{Fluid, FluidKind, block_id, blocks_motion, fluid, is_full_face_sturdy};
+use crate::world::block::{BlockStateTable, Fluid, FluidKind};
 
 pub const MAX_AIR_SUPPLY: i32 = 300;
 // Vanilla stores player dimensions/eye heights as floats and only widens them
@@ -53,8 +53,8 @@ pub fn is_spectator(game_mode: u8) -> bool {
     game_mode == 3
 }
 
-fn is_water_block(state: azalea_block::BlockState) -> bool {
-    fluid(state).kind == FluidKind::Water
+fn is_water_block(state: azalea_block::BlockState, block_state_table: BlockStateTable) -> bool {
+    block_state_table.block_state_data(state).fluid().kind == FluidKind::Water
 }
 
 #[inline]
@@ -82,6 +82,7 @@ fn affects_water_flow(f: Fluid) -> bool {
 
 fn water_flow_at(
     chunks: &crate::world::chunk::ChunkStore,
+    block_state_table: BlockStateTable,
     x: i32,
     y: i32,
     z: i32,
@@ -97,7 +98,8 @@ fn water_flow_at(
         let nx = x + dx;
         let nz = z + dz;
         let neighbor_state = chunks.get_block_state(nx, y, nz);
-        let neighbor_fluid = fluid(neighbor_state);
+        let neighbor_block_state_data = block_state_table.block_state_data(neighbor_state);
+        let neighbor_fluid = neighbor_block_state_data.fluid();
         if !affects_water_flow(neighbor_fluid) {
             continue;
         }
@@ -105,8 +107,10 @@ fn water_flow_at(
         let mut neighbor_height = neighbor_fluid.height();
         let mut distance = 0.0_f32;
         if neighbor_height == 0.0 {
-            let below_fluid = fluid(chunks.get_block_state(nx, y - 1, nz));
-            if !blocks_motion(neighbor_state) && affects_water_flow(below_fluid) && {
+            let below_fluid = block_state_table
+                .block_state_data(chunks.get_block_state(nx, y - 1, nz))
+                .fluid();
+            if !neighbor_block_state_data.blocks_motion() && affects_water_flow(below_fluid) && {
                 neighbor_height = below_fluid.height();
                 neighbor_height > 0.0
             } {
@@ -129,10 +133,11 @@ fn water_flow_at(
             let nz = z + dz;
             let solid_face = |by| {
                 let state = chunks.get_block_state(nx, by, nz);
-                let same_water = fluid(state).kind == FluidKind::Water;
+                let block_state_data = block_state_table.block_state_data(state);
+                let same_water = block_state_data.fluid().kind == FluidKind::Water;
                 !same_water
-                    && !matches!(block_id(state), "ice" | "frosted_ice")
-                    && is_full_face_sturdy(state, direction) == Some(true)
+                    && !matches!(block_state_data.id(), "ice" | "frosted_ice")
+                    && block_state_data.is_full_face_sturdy(direction) == Some(true)
             };
             if solid_face(y) || solid_face(y + 1) {
                 flow = vanilla_vec3_normalize(flow) + dvec3(0.0, -6.0, 0.0);
@@ -198,9 +203,16 @@ pub struct LocalPlayer {
     /// Vanilla `Entity.minorHorizontalCollision`.
     pub minor_horizontal_collision: bool,
     /// Vanilla `Entity.mainSupportingBlockPos`.
-    pub main_supporting_block_pos: Option<azalea_core::position::BlockPos>,
+    pub main_supporting_block_pos: Option<crate::position::BlockPos>,
     /// Vanilla `Entity.onGroundNoBlocks`.
     pub on_ground_no_blocks: bool,
+    /// Vanilla `Entity.pistonDeltas`: this game tick's piston movement per
+    /// axis, capped at 0.51.
+    pub piston_deltas: [f64; 3],
+    pub piston_deltas_tick: u64,
+    /// Vanilla `zza`/`xxa`: the move input the last `aiStep` travelled with.
+    pub move_forward: f32,
+    pub move_strafe: f32,
     pub sprint_toggle_timer: u32,
     /// Last tick's input, as `LocalPlayer.aiStep` samples it.
     pub was_forward_pressed: bool,
@@ -221,7 +233,7 @@ pub struct LocalPlayer {
     pub portal_effect_intensity: f32,
     pub prev_portal_effect_intensity: f32,
     /// Vanilla LivingEntity SLEEPING_POS metadata: Some while in a bed.
-    pub sleeping_pos: Option<azalea_core::position::BlockPos>,
+    pub sleeping_pos: Option<crate::position::BlockPos>,
     /// Vanilla Player.sleepCounter: drives the sleep overlay fade.
     pub sleep_counter: u32,
     pub game_mode: u8,
@@ -230,6 +242,30 @@ pub struct LocalPlayer {
     pub experience_level: i32,
     pub experience_progress: f32,
     pub effects: crate::mob_effect::ActiveMobEffects,
+    /// Vanilla `LocalPlayer.dropSpamThrottler`, gating creative drops.
+    pub drop_spam: DropThrottle,
+}
+
+/// Vanilla `TickThrottler(20, 1280)`: each drop adds 20, each tick takes one
+/// back, and drops stop while 1280 or more are owed.
+#[derive(Default)]
+pub struct DropThrottle {
+    count: u32,
+}
+
+impl DropThrottle {
+    pub fn tick(&mut self) {
+        self.count = self.count.saturating_sub(1);
+    }
+
+    pub fn increment(&mut self) {
+        self.count += 20;
+    }
+
+    /// Vanilla `LocalPlayer.canDropItems`.
+    pub fn can_drop(&self) -> bool {
+        self.count < 1280
+    }
 }
 
 impl LocalPlayer {
@@ -278,6 +314,10 @@ impl LocalPlayer {
             minor_horizontal_collision: false,
             main_supporting_block_pos: None,
             on_ground_no_blocks: false,
+            piston_deltas: [0.0; 3],
+            piston_deltas_tick: 0,
+            move_forward: 0.0,
+            move_strafe: 0.0,
             sprint_toggle_timer: 0,
             was_forward_pressed: false,
             was_shift_pressed: false,
@@ -298,6 +338,7 @@ impl LocalPlayer {
             experience_level: 0,
             experience_progress: 0.0,
             effects: crate::mob_effect::ActiveMobEffects::default(),
+            drop_spam: DropThrottle::default(),
         }
     }
 
@@ -524,15 +565,20 @@ impl LocalPlayer {
     pub fn update_water_state(
         &mut self,
         chunks: &crate::world::chunk::ChunkStore,
+        block_state_table: BlockStateTable,
         is_passenger: bool,
     ) {
-        self.refresh_water_interaction(chunks);
-        self.update_swimming_state(chunks, is_passenger);
+        self.refresh_water_interaction(chunks, block_state_table);
+        self.update_swimming_state(chunks, block_state_table, is_passenger);
     }
 
     /// Vanilla `Entity.updateFluidInteraction`, which
     /// `LivingEntity.checkFallDamage` repeats mid-move.
-    pub(crate) fn refresh_water_interaction(&mut self, chunks: &crate::world::chunk::ChunkStore) {
+    pub(crate) fn refresh_water_interaction(
+        &mut self,
+        chunks: &crate::world::chunk::ChunkStore,
+        block_state_table: BlockStateTable,
+    ) {
         let half_w = PLAYER_HALF_WIDTH;
         let height = self.height();
         let eye_height = f64::from(self.target_eye_height());
@@ -554,11 +600,16 @@ impl LocalPlayer {
         for bx in x0..=x1 {
             for by in y0..=y1 {
                 for bz in z0..=z1 {
-                    let f = fluid(chunks.get_block_state(bx, by, bz));
+                    let f = block_state_table
+                        .block_state_data(chunks.get_block_state(bx, by, bz))
+                        .fluid();
                     if f.kind != FluidKind::Water {
                         continue;
                     }
-                    let block_height = if is_water_block(chunks.get_block_state(bx, by + 1, bz)) {
+                    let block_height = if is_water_block(
+                        chunks.get_block_state(bx, by + 1, bz),
+                        block_state_table,
+                    ) {
                         1.0
                     } else {
                         // f32 to match vanilla's float math.
@@ -570,7 +621,7 @@ impl LocalPlayer {
                     }
 
                     fluid_height = fluid_height.max(fluid_top - feet_y);
-                    let mut flow = water_flow_at(chunks, bx, by, bz, f);
+                    let mut flow = water_flow_at(chunks, block_state_table, bx, by, bz, f);
                     // Shallow contact scales the flow by the height so far.
                     if fluid_height < 0.4 {
                         flow *= fluid_height;
@@ -601,11 +652,13 @@ impl LocalPlayer {
         let eye_block_x = self.position.x.floor() as i32;
         let eye_block_y = eye_y.floor() as i32;
         let eye_block_z = self.position.z.floor() as i32;
-        let eye_fluid = fluid(chunks.get_block_state(eye_block_x, eye_block_y, eye_block_z));
+        let eye_fluid = block_state_table
+            .block_state_data(chunks.get_block_state(eye_block_x, eye_block_y, eye_block_z))
+            .fluid();
         let eye_fluid_top = if eye_fluid.kind == FluidKind::Water {
             let above = chunks.get_block_state(eye_block_x, eye_block_y + 1, eye_block_z);
             f64::from(eye_block_y)
-                + if is_water_block(above) {
+                + if is_water_block(above, block_state_table) {
                     1.0
                 } else {
                     f64::from(eye_fluid.height())
@@ -628,6 +681,7 @@ impl LocalPlayer {
     fn update_swimming_state(
         &mut self,
         chunks: &crate::world::chunk::ChunkStore,
+        block_state_table: BlockStateTable,
         is_passenger: bool,
     ) {
         // `Entity.updateSwimming`: starts with eyes and feet in water, latches
@@ -642,14 +696,21 @@ impl LocalPlayer {
                 self.position.y.floor() as i32,
                 self.position.z.floor() as i32,
             );
-            self.sprinting && self.under_water && self.in_water && is_water_block(feet_state)
+            self.sprinting
+                && self.under_water
+                && self.in_water
+                && is_water_block(feet_state, block_state_table)
         };
     }
 
     /// Vanilla Entity.checkInsideBlocks: a nether portal counts as entered when
     /// the bounding box deflated by the widened float `1.0E-5f` overlaps its
     /// (full) block cell.
-    pub fn is_inside_nether_portal(&self, chunks: &crate::world::chunk::ChunkStore) -> bool {
+    pub fn is_inside_nether_portal(
+        &self,
+        chunks: &crate::world::chunk::ChunkStore,
+        block_state_table: BlockStateTable,
+    ) -> bool {
         let half_w = PLAYER_HALF_WIDTH;
         let x0 = (self.position.x - half_w + INSIDE_BLOCK_MARGIN).floor() as i32;
         let x1 = (self.position.x + half_w - INSIDE_BLOCK_MARGIN).ceil() as i32 - 1;
@@ -661,7 +722,9 @@ impl LocalPlayer {
         for bx in x0..=x1 {
             for by in y0..=y1 {
                 for bz in z0..=z1 {
-                    if crate::world::block::block_id(chunks.get_block_state(bx, by, bz))
+                    if block_state_table
+                        .block_state_data(chunks.get_block_state(bx, by, bz))
+                        .id()
                         == "nether_portal"
                     {
                         return true;
@@ -698,7 +761,7 @@ impl LocalPlayer {
     /// `LivingEntity.onSyncedDataUpdated(SLEEPING_POS)`: `setPosToBed` moves
     /// only the current position, so the camera lerps in. The sleep counter
     /// is left alone; only the server's `startSleepInBed` zeroes it.
-    pub fn set_sleeping_pos(&mut self, pos: Option<azalea_core::position::BlockPos>) {
+    pub fn set_sleeping_pos(&mut self, pos: Option<crate::position::BlockPos>) {
         self.sleeping_pos = pos;
         if let Some(pos) = pos {
             self.position = crate::world::block::sleeping_position(pos).into();
@@ -797,7 +860,7 @@ mod tests {
         player.eyes_in_water = true;
         player.swimming = true;
         player.air_supply = 12;
-        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(1, 64, 1));
+        player.sleeping_pos = Some(crate::position::BlockPos::new(1, 64, 1));
         player.sleep_counter = 100;
 
         player.reset_for_respawn(false);
@@ -851,7 +914,7 @@ mod tests {
         player.crouching = true;
         player.swimming_pose = true;
         player.air_supply = 87;
-        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(1, 64, 1));
+        player.sleeping_pos = Some(crate::position::BlockPos::new(1, 64, 1));
         player.food = 4;
         player.experience_level = 17;
         player.experience_progress = 0.75;
@@ -879,7 +942,7 @@ mod tests {
         assert_eq!(player.air_supply, 87);
         assert_eq!(
             player.sleeping_pos,
-            Some(azalea_core::position::BlockPos::new(1, 64, 1))
+            Some(crate::position::BlockPos::new(1, 64, 1))
         );
         assert_eq!(player.food, 20);
         assert_eq!(player.experience_level, 0);
@@ -927,7 +990,7 @@ mod tests {
     #[test]
     fn sleeping_pos_moves_to_bed_and_keeps_the_fade_counter() {
         let mut player = LocalPlayer::new();
-        let bed = azalea_core::position::BlockPos::new(1, 64, 1);
+        let bed = crate::position::BlockPos::new(1, 64, 1);
 
         player.position = Position::new(8.0, 70.0, -3.0);
         player.prev_position = Position::new(7.0, 70.0, -3.0);
@@ -949,7 +1012,7 @@ mod tests {
 
         // A changed SLEEPING_POS still has Vanilla's synced-data repositioning
         // semantics even without an intervening wake.
-        let other_bed = azalea_core::position::BlockPos::new(-4, 72, 9);
+        let other_bed = crate::position::BlockPos::new(-4, 72, 9);
         player.set_sleeping_pos(Some(other_bed));
         assert_eq!(player.sleep_counter, 40);
         assert_eq!(player.position, Position::new(-3.5, 72.6875, 9.5));
@@ -968,7 +1031,7 @@ mod tests {
     #[test]
     fn sleeping_eye_height_uses_vanilla_camera_smoothing_target() {
         let mut player = LocalPlayer::new();
-        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(0, 64, 0));
+        player.sleeping_pos = Some(crate::position::BlockPos::new(0, 64, 0));
         player.tick_eye_height();
         assert_eq!(player.prev_eye_height, STANDING_EYE_HEIGHT);
         assert!((player.eye_height - 0.91).abs() < 1e-6);
@@ -982,7 +1045,7 @@ mod tests {
     #[test]
     fn reconfiguration_sleep_reset_keeps_the_camera_eye_height() {
         let mut player = LocalPlayer::new();
-        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(1, 64, 1));
+        player.sleeping_pos = Some(crate::position::BlockPos::new(1, 64, 1));
         player.sleep_counter = 87;
         player.eye_height = 0.3;
         player.reset_sleep_for_level_teardown();
@@ -1020,19 +1083,19 @@ mod tests {
     #[test]
     fn shallow_water_contact_uses_actual_fluid_surface_height() {
         let chunks = crate::world::chunk::ChunkStore::with_origin_chunk();
-        let shallow = crate::world::block::find_state("water", &[("level", "7")]);
-        chunks.set_block_state(8, 64, 8, shallow);
+        let shallow = BlockStateTable::native().find_state("water", &[("level", "7")]);
+        chunks.set_block_state(8, 64, 8, shallow, BlockStateTable::native());
 
         let mut player = LocalPlayer::new();
         player.position = Position::new(8.5, 64.2, 8.5);
-        player.update_water_state(&chunks, false);
+        player.update_water_state(&chunks, BlockStateTable::native(), false);
         assert!(
             !player.in_water,
             "level-7 water is only 1/9 block high; feet above its surface are not in water"
         );
 
         player.position = Position::new(8.5, 64.05, 8.5);
-        player.update_water_state(&chunks, false);
+        player.update_water_state(&chunks, BlockStateTable::native(), false);
         assert!(
             player.in_water,
             "feet below the level-7 surface must still register water contact"
@@ -1042,23 +1105,23 @@ mod tests {
     #[test]
     fn passenger_state_clears_shared_swimming_flag() {
         let chunks = crate::world::chunk::ChunkStore::with_origin_chunk();
-        let source = crate::world::block::find_state("water", &[("level", "0")]);
+        let source = BlockStateTable::native().find_state("water", &[("level", "0")]);
         for y in 64..=66 {
-            chunks.set_block_state(8, y, 8, source);
+            chunks.set_block_state(8, y, 8, source, BlockStateTable::native());
         }
 
         let mut unmounted = LocalPlayer::new();
         unmounted.position = Position::new(8.5, 64.0, 8.5);
         unmounted.sprinting = true;
         unmounted.swimming = true;
-        unmounted.update_water_state(&chunks, false);
+        unmounted.update_water_state(&chunks, BlockStateTable::native(), false);
         assert!(unmounted.swimming);
 
         let mut mounted = LocalPlayer::new();
         mounted.position = Position::new(8.5, 64.0, 8.5);
         mounted.sprinting = true;
         mounted.swimming = true;
-        mounted.update_water_state(&chunks, true);
+        mounted.update_water_state(&chunks, BlockStateTable::native(), true);
         assert!(
             !mounted.swimming,
             "Entity.updateSwimming clears the shared swimming flag while passenger"
@@ -1068,39 +1131,60 @@ mod tests {
     #[test]
     fn water_flow_is_zero_across_equal_source_levels() {
         let chunks = crate::world::chunk::ChunkStore::with_origin_chunk();
-        let source = crate::world::block::find_state("water", &[("level", "0")]);
+        let source = BlockStateTable::native().find_state("water", &[("level", "0")]);
         for (x, z) in [(8, 8), (8, 7), (9, 8), (8, 9), (7, 8)] {
-            chunks.set_block_state(x, 64, z, source);
+            chunks.set_block_state(x, 64, z, source, BlockStateTable::native());
         }
 
-        let flow = water_flow_at(&chunks, 8, 64, 8, fluid(source));
+        let flow = water_flow_at(
+            &chunks,
+            BlockStateTable::native(),
+            8,
+            64,
+            8,
+            BlockStateTable::native().block_state_data(source).fluid(),
+        );
         assert_eq!(flow, glam::DVec3::ZERO);
     }
 
     #[test]
     fn water_flow_points_toward_lower_neighbor() {
         let chunks = crate::world::chunk::ChunkStore::with_origin_chunk();
-        let source = crate::world::block::find_state("water", &[("level", "0")]);
-        let lower = crate::world::block::find_state("water", &[("level", "1")]);
-        chunks.set_block_state(8, 64, 8, source);
-        chunks.set_block_state(8, 64, 7, source);
-        chunks.set_block_state(9, 64, 8, lower);
-        chunks.set_block_state(8, 64, 9, source);
-        chunks.set_block_state(7, 64, 8, source);
+        let source = BlockStateTable::native().find_state("water", &[("level", "0")]);
+        let lower = BlockStateTable::native().find_state("water", &[("level", "1")]);
+        chunks.set_block_state(8, 64, 8, source, BlockStateTable::native());
+        chunks.set_block_state(8, 64, 7, source, BlockStateTable::native());
+        chunks.set_block_state(9, 64, 8, lower, BlockStateTable::native());
+        chunks.set_block_state(8, 64, 9, source, BlockStateTable::native());
+        chunks.set_block_state(7, 64, 8, source, BlockStateTable::native());
 
-        let flow = water_flow_at(&chunks, 8, 64, 8, fluid(source));
+        let flow = water_flow_at(
+            &chunks,
+            BlockStateTable::native(),
+            8,
+            64,
+            8,
+            BlockStateTable::native().block_state_data(source).fluid(),
+        );
         assert_eq!(flow, glam::DVec3::X);
     }
 
     #[test]
     fn falling_water_next_to_sturdy_wall_pulls_downward() {
         let chunks = crate::world::chunk::ChunkStore::with_origin_chunk();
-        let falling = crate::world::block::find_state("water", &[("level", "8")]);
-        let stone = crate::world::block::find_state("stone", &[]);
-        chunks.set_block_state(8, 64, 8, falling);
-        chunks.set_block_state(9, 64, 8, stone);
+        let falling = BlockStateTable::native().find_state("water", &[("level", "8")]);
+        let stone = BlockStateTable::native().find_state("stone", &[]);
+        chunks.set_block_state(8, 64, 8, falling, BlockStateTable::native());
+        chunks.set_block_state(9, 64, 8, stone, BlockStateTable::native());
 
-        let flow = water_flow_at(&chunks, 8, 64, 8, fluid(falling));
+        let flow = water_flow_at(
+            &chunks,
+            BlockStateTable::native(),
+            8,
+            64,
+            8,
+            BlockStateTable::native().block_state_data(falling).fluid(),
+        );
         assert_eq!(flow, glam::DVec3::NEG_Y);
     }
 

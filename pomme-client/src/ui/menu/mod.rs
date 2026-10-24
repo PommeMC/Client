@@ -1,3 +1,4 @@
+mod account;
 mod credits;
 mod friends_screen;
 pub(crate) mod helpers;
@@ -45,12 +46,18 @@ struct Settings {
     damage_tilt_strength: f32,
     #[serde(default = "default_sensitivity")]
     sensitivity: f32,
+    #[serde(default)]
+    invert_mouse_x: bool,
+    #[serde(default)]
+    invert_mouse_y: bool,
     #[serde(default = "default_true")]
     view_bobbing: bool,
     #[serde(default)]
     show_subtitles: bool,
     #[serde(default = "default_true")]
     vignette: bool,
+    #[serde(default = "default_true")]
+    entity_shadows: bool,
     #[serde(default = "default_true")]
     show_autosave_indicator: bool,
     #[serde(default = "default_true")]
@@ -190,10 +197,13 @@ impl Default for Settings {
             fov_effect_scale: 1.0,
             damage_tilt_strength: 1.0,
             sensitivity: 0.5,
+            invert_mouse_x: false,
+            invert_mouse_y: false,
             view_bobbing: true,
             show_subtitles: false,
             show_autosave_indicator: true,
             vignette: true,
+            entity_shadows: true,
             vsync: true,
             max_framerate: 120,
             show_online_status: true,
@@ -226,6 +236,12 @@ impl Default for Settings {
             japanese_glyph_variants: default_japanese_glyph_variants(),
         }
     }
+}
+
+/// The chunk detail the options hold, which a headless run meshes with as the
+/// window would.
+pub(crate) fn saved_chunk_detail(game_dir: &Path) -> u32 {
+    load_settings(game_dir).chunk_detail
 }
 
 fn load_settings(game_dir: &Path) -> Settings {
@@ -315,6 +331,8 @@ pub enum MenuAction {
         protocol: Option<i32>,
     },
     ChangeTheme(PanoramaTheme),
+    /// Signed in (`Some`) or out (`None`) from the account screen.
+    Account(Option<pomme_auth::AuthAccount>),
     /// Open the singleplayer world in this save folder.
     PlayWorld {
         folder: String,
@@ -465,6 +483,7 @@ const DOUBLE_CLICK_MS: u128 = 400;
 
 enum Screen {
     Main,
+    Account,
     ServerList,
     WorldList,
     CreateWorld,
@@ -482,6 +501,7 @@ enum Screen {
     OptionsSkinCustomization,
     OptionsMusicSounds,
     OptionsControls,
+    OptionsMouse,
     OptionsKeybinds,
     OptionsLanguage,
     OptionsFontSettings,
@@ -498,12 +518,14 @@ impl Screen {
         match self {
             Self::Main => Self::Main,
             Self::Friends => Self::Friends,
+            Self::Account => Self::Account,
             Self::Options => Self::Options,
             Self::OptionsOnline => Self::OptionsOnline,
             Self::OptionsVideo => Self::OptionsVideo,
             Self::OptionsSkinCustomization => Self::OptionsSkinCustomization,
             Self::OptionsMusicSounds => Self::OptionsMusicSounds,
             Self::OptionsControls => Self::OptionsControls,
+            Self::OptionsMouse => Self::OptionsMouse,
             Self::OptionsKeybinds => Self::OptionsKeybinds,
             Self::OptionsLanguage => Self::OptionsLanguage,
             Self::OptionsFontSettings => Self::OptionsFontSettings,
@@ -547,7 +569,6 @@ fn atlas_dirty(count: usize, last: &mut usize, since: &mut Option<Instant>) -> b
 }
 
 pub struct MainMenu {
-    pub key_bindings: KeyBindings,
     action_binding: Option<Action>,
     username: String,
     version: String,
@@ -577,6 +598,11 @@ pub struct MainMenu {
     add_friend_name: TextFieldState,
     action_error: ActionError,
     pending_remove: Option<(String, String)>,
+    account_store: Arc<dyn pomme_auth::SecretStore>,
+    sign_in: Arc<parking_lot::RwLock<account::SignIn>>,
+    sign_in_task: Option<tokio::task::JoinHandle<()>>,
+    /// No launcher passed an account, so the menu is behind sign-in.
+    account_required: bool,
     rt: Arc<tokio::runtime::Runtime>,
     links_open: bool,
     theme_open: bool,
@@ -624,10 +650,13 @@ pub struct MainMenu {
     pub fov_effect_scale: f32,
     pub damage_tilt_strength: f32,
     pub sensitivity: f32,
+    pub invert_mouse_x: bool,
+    pub invert_mouse_y: bool,
     pub view_bobbing: bool,
     pub show_subtitles: bool,
     pub show_autosave_indicator: bool,
     pub vignette: bool,
+    pub entity_shadows: bool,
     pub vsync: bool,
     pub max_framerate: u32,
     pub show_online_status: bool,
@@ -664,6 +693,7 @@ pub struct MainMenu {
     settings_dir: PathBuf,
     /// Set by slider drags, written by `flush_settings`.
     settings_dirty: bool,
+    bench_render_distance: crate::benchmark::BenchRenderDistance,
     /// The title screen's splash line, rolled at launch and on every return
     /// from a world like vanilla's fresh `TitleScreen`. `None` renders nothing.
     pub splash: Option<String>,
@@ -697,14 +727,15 @@ impl MainMenu {
         username: String,
         version: String,
         access_token: Option<String>,
+        key_bindings: &mut KeyBindings,
     ) -> Self {
         let server_list = ServerList::load(game_dir);
-        let saves_dir = game_dir.join("saves");
+        let saves_dir = crate::ui::world_list::saves_dir(game_dir);
         // Servers ping lazily as their rows draw (build_server_list), not at boot.
         let ping_results: PingResults = Default::default();
         let settings = load_settings(game_dir);
+        *key_bindings = settings.key_bindings;
         Self {
-            key_bindings: settings.key_bindings,
             action_binding: None,
             username,
             version,
@@ -732,6 +763,10 @@ impl MainMenu {
             add_friend_name: TextFieldState::new(MAX_FRIEND),
             action_error: Default::default(),
             pending_remove: None,
+            account_store: Arc::from(crate::account::store(game_dir)),
+            sign_in: Default::default(),
+            sign_in_task: None,
+            account_required: false,
             rt,
             links_open: false,
             theme_open: false,
@@ -762,10 +797,13 @@ impl MainMenu {
             // Cubed by the look curve, so an out-of-range value reaches
             // infinity and leaves the look direction NaN for good.
             sensitivity: unit_range(settings.sensitivity),
+            invert_mouse_x: settings.invert_mouse_x,
+            invert_mouse_y: settings.invert_mouse_y,
             view_bobbing: settings.view_bobbing,
             show_subtitles: settings.show_subtitles,
             show_autosave_indicator: settings.show_autosave_indicator,
             vignette: settings.vignette,
+            entity_shadows: settings.entity_shadows,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
             show_online_status: settings.show_online_status,
@@ -801,6 +839,7 @@ impl MainMenu {
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             settings_dirty: false,
+            bench_render_distance: Default::default(),
             splash: None,
             menu_open_time: None,
             last_favicon_count: 0,
@@ -818,9 +857,9 @@ impl MainMenu {
 
     /// Chat Settings opened from chat; leaving them leaves the menu, back to
     /// the chat screen that opened them.
-    pub fn open_chat_settings(&mut self) {
+    pub fn open_chat_settings(&mut self, key_bindings: &KeyBindings) {
         self.settings_back = Screen::Main;
-        self.set_screen(Screen::OptionsChatSettings);
+        self.set_screen(Screen::OptionsChatSettings, key_bindings);
     }
 
     pub fn binding_capture_active(&self) -> bool {
@@ -831,8 +870,8 @@ impl MainMenu {
         self.action_binding = None;
     }
 
-    fn set_screen(&mut self, screen: Screen) {
-        self.flush_settings();
+    fn set_screen(&mut self, screen: Screen, key_bindings: &KeyBindings) {
+        self.flush_settings(key_bindings);
         // Vanilla opens Key Binds with a fresh list and returns to Controls's
         // own; neither should inherit the other's offset.
         if matches!(screen, Screen::OptionsKeybinds)
@@ -863,6 +902,40 @@ impl MainMenu {
     /// `Mth::square`).
     pub fn fov_effect(&self) -> f32 {
         self.fov_effect_scale * self.fov_effect_scale
+    }
+
+    /// The account the menu shows and joins with.
+    pub(crate) fn set_account(
+        &mut self,
+        username: String,
+        access_token: Option<String>,
+        key_bindings: &KeyBindings,
+    ) {
+        self.username = username;
+        self.access_token = access_token;
+        if self.account_gated() {
+            self.set_screen(Screen::Account, key_bindings);
+        }
+    }
+
+    /// Sign-in is required and nobody is signed in yet.
+    pub(crate) fn account_gated(&self) -> bool {
+        self.account_required && self.access_token.is_none()
+    }
+
+    /// Puts the menu behind sign-in: with no account, it opens on the
+    /// account screen and only Sign In or Quit leave it.
+    pub(crate) fn require_account(&mut self, key_bindings: &KeyBindings) {
+        self.account_required = true;
+        if self.account_gated() {
+            self.set_screen(Screen::Account, key_bindings);
+        }
+    }
+
+    /// A form's text field has keyboard focus.
+    #[cfg(mobile)]
+    pub(crate) fn text_field_focused(&self) -> bool {
+        self.focused_field.is_some()
     }
 
     pub(crate) fn gui_scale(&self, screen_w: f32, screen_h: f32) -> f32 {
@@ -900,31 +973,47 @@ impl MainMenu {
         })
     }
 
+    pub fn set_bench_render_distance(&mut self, rd: u32) {
+        self.bench_render_distance
+            .set(&mut self.render_distance, rd);
+    }
+
+    pub fn restore_bench_render_distance(&mut self) -> Option<u32> {
+        self.bench_render_distance
+            .restore(&mut self.render_distance)
+    }
+
     /// Writes pending slider changes, vanilla `OptionsSubScreen.removed()`.
-    pub fn flush_settings(&mut self) {
+    pub fn flush_settings(&mut self, key_bindings: &KeyBindings) {
         if self.settings_dirty {
-            self.save_settings();
+            self.save_settings(key_bindings);
         }
     }
 
-    fn save_settings(&mut self) {
+    fn save_settings(&mut self, key_bindings: &KeyBindings) {
         // A failed write stays dirty so the next screen change retries it.
         self.settings_dirty = save_settings(
             &self.settings_dir,
             &Settings {
-                key_bindings: self.key_bindings.clone(),
+                key_bindings: key_bindings.clone(),
                 gui_scale: self.gui_scale_setting,
-                render_distance: self.render_distance,
+                render_distance: self
+                    .bench_render_distance
+                    .saved()
+                    .unwrap_or(self.render_distance),
                 chunk_detail: self.chunk_detail,
                 simulation_distance: self.simulation_distance,
                 fov: self.fov,
                 fov_effect_scale: self.fov_effect_scale,
                 damage_tilt_strength: self.damage_tilt_strength,
                 sensitivity: self.sensitivity,
+                invert_mouse_x: self.invert_mouse_x,
+                invert_mouse_y: self.invert_mouse_y,
                 view_bobbing: self.view_bobbing,
                 show_subtitles: self.show_subtitles,
                 show_autosave_indicator: self.show_autosave_indicator,
                 vignette: self.vignette,
+                entity_shadows: self.entity_shadows,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,
                 show_online_status: self.show_online_status,
@@ -960,24 +1049,24 @@ impl MainMenu {
         .is_err();
     }
 
-    pub fn set_display_mode(&mut self, display_mode: DisplayMode) {
+    pub fn set_display_mode(&mut self, display_mode: DisplayMode, key_bindings: &KeyBindings) {
         self.display_mode = display_mode;
-        self.save_settings();
+        self.save_settings(key_bindings);
     }
 
     pub fn main_hand_right(&self) -> bool {
         self.skin_main_hand_right
     }
 
-    pub fn open_options(&mut self) {
+    pub fn open_options(&mut self, key_bindings: &KeyBindings) {
         // Stale after a disconnect; the in-game path re-sets it every frame.
         self.server_render_distance = 0;
-        self.set_screen(Screen::Options);
+        self.set_screen(Screen::Options, key_bindings);
     }
 
     /// Open the friends screen and kick off a fetch (no-op without a token).
-    fn open_friends(&mut self) {
-        self.set_screen(Screen::Friends);
+    fn open_friends(&mut self, key_bindings: &KeyBindings) {
+        self.set_screen(Screen::Friends, key_bindings);
         self.scroll_offset = 0.0;
         self.friend_tab = FriendTab::Friends;
         self.add_friend_name.clear();
@@ -995,6 +1084,7 @@ impl MainMenu {
                 | Screen::OptionsSkinCustomization
                 | Screen::OptionsMusicSounds
                 | Screen::OptionsControls
+                | Screen::OptionsMouse
                 | Screen::OptionsKeybinds
                 | Screen::OptionsLanguage
                 | Screen::OptionsFontSettings
@@ -1107,8 +1197,8 @@ impl MainMenu {
             .collect()
     }
 
-    pub fn show_disconnect(&mut self, reason: String) {
-        self.set_screen(Screen::Disconnected(reason));
+    pub fn show_disconnect(&mut self, reason: String, key_bindings: &KeyBindings) {
+        self.set_screen(Screen::Disconnected(reason), key_bindings);
     }
 
     /// Resolves a world for launch, since the world list and the saves
@@ -1171,61 +1261,82 @@ impl MainMenu {
         screen_w: f32,
         screen_h: f32,
         input: &MenuInput,
+        key_bindings: &mut KeyBindings,
         text_width_fn: impl Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
         match self.screen {
             Screen::Main => {
-                let mut result = self.build_main(screen_w, screen_h, input, text_width_fn);
-                if let Some(action) =
-                    self.drive_theme_transition(&mut result.elements, screen_w, screen_h)
-                {
+                let mut result =
+                    self.build_main(screen_w, screen_h, input, text_width_fn, key_bindings);
+                if let Some(action) = self.drive_theme_transition(
+                    &mut result.elements,
+                    screen_w,
+                    screen_h,
+                    key_bindings,
+                ) {
                     result.action = action;
                 }
                 result
             }
 
-            Screen::ServerList => self.build_server_list(screen_w, screen_h, input, &text_width_fn),
-            Screen::WorldList => self.build_world_list(screen_w, screen_h, input, &text_width_fn),
+            Screen::ServerList => {
+                self.build_server_list(screen_w, screen_h, input, &text_width_fn, key_bindings)
+            }
+            Screen::WorldList => {
+                self.build_world_list(screen_w, screen_h, input, &text_width_fn, key_bindings)
+            }
             Screen::CreateWorld => {
-                self.build_create_world(screen_w, screen_h, input, &text_width_fn)
+                self.build_create_world(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
             Screen::EditWorld(_) => {
-                self.build_edit_world(screen_w, screen_h, input, &text_width_fn)
+                self.build_edit_world(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
-            Screen::ConfirmDeleteWorld(_) => {
-                self.build_confirm_delete_world(screen_w, screen_h, input, &text_width_fn)
+            Screen::ConfirmDeleteWorld(_) => self.build_confirm_delete_world(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
+            Screen::Friends => {
+                self.build_friends(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
-            Screen::Friends => self.build_friends(screen_w, screen_h, input, &text_width_fn),
+            Screen::Account => self.build_account(screen_w, screen_h, input, key_bindings),
             Screen::ConfirmDelete(_) => {
-                self.build_confirm_delete(screen_w, screen_h, input, &text_width_fn)
+                self.build_confirm_delete(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
             Screen::DirectConnect => {
-                self.build_direct_connect(screen_w, screen_h, input, &text_width_fn)
+                self.build_direct_connect(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
             Screen::AddServer | Screen::EditServer(_) => {
-                self.build_edit_server(screen_w, screen_h, input, &text_width_fn)
+                self.build_edit_server(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
             Screen::Disconnected(_) => {
-                self.build_disconnected(screen_w, screen_h, input, &text_width_fn)
+                self.build_disconnected(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
-            Screen::Options => self.build_options(screen_w, screen_h, input, &text_width_fn),
+            Screen::Options => {
+                self.build_options(screen_w, screen_h, input, &text_width_fn, key_bindings)
+            }
             Screen::OptionsOnline => {
-                self.build_options_online(screen_w, screen_h, input, &text_width_fn)
+                self.build_options_online(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
             Screen::OptionsVideo => {
-                self.build_options_video(screen_w, screen_h, input, &text_width_fn)
+                self.build_options_video(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
             Screen::OptionsSkinCustomization => {
-                self.build_options_skin(screen_w, screen_h, input, &text_width_fn)
+                self.build_options_skin(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
             Screen::OptionsMusicSounds => {
-                self.build_options_music(screen_w, screen_h, input, &text_width_fn)
+                self.build_options_music(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
             Screen::OptionsControls => {
-                self.build_options_controls(screen_w, screen_h, input, &text_width_fn)
+                self.build_options_controls(screen_w, screen_h, input, &text_width_fn, key_bindings)
+            }
+            Screen::OptionsMouse => {
+                self.build_options_mouse(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
             Screen::OptionsKeybinds => {
-                self.build_options_keybinds(screen_w, screen_h, input, &text_width_fn)
+                self.build_options_keybinds(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
             Screen::OptionsLanguage => {
                 let back = self.settings_back.clone_screen();
@@ -1236,20 +1347,29 @@ impl MainMenu {
                     "Language",
                     back,
                     Some(("Font Settings...", Screen::OptionsFontSettings)),
+                    key_bindings,
                 )
             }
             Screen::OptionsFontSettings => {
-                self.build_options_font(screen_w, screen_h, input, &text_width_fn)
+                self.build_options_font(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
             Screen::OptionsChatSettings => {
-                self.build_options_chat(screen_w, screen_h, input, &text_width_fn)
+                self.build_options_chat(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
-            Screen::OptionsResourcePacks => {
-                self.build_options_resource_packs(screen_w, screen_h, input, &text_width_fn)
-            }
-            Screen::OptionsAccessibility => {
-                self.build_options_accessibility(screen_w, screen_h, input, &text_width_fn)
-            }
+            Screen::OptionsResourcePacks => self.build_options_resource_packs(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
+            Screen::OptionsAccessibility => self.build_options_accessibility(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
             Screen::OptionsTelemetry => self.build_options_stub(
                 screen_w,
                 screen_h,
@@ -1257,10 +1377,13 @@ impl MainMenu {
                 "Telemetry Data",
                 Screen::Options,
                 None,
+                key_bindings,
             ),
-            Screen::OptionsCredits => self.build_options_credits(screen_w, screen_h, input),
+            Screen::OptionsCredits => {
+                self.build_options_credits(screen_w, screen_h, input, key_bindings)
+            }
             Screen::CreditsRoll => {
-                self.build_credits_roll(screen_w, screen_h, input, &text_width_fn)
+                self.build_credits_roll(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
         }
     }
@@ -1274,9 +1397,48 @@ impl MainMenu {
     }
 }
 
+/// With a `dir` that doesn't exist, settings and the server list fall back
+/// to defaults and a settings save silently fails instead of writing.
+#[cfg(test)]
+fn test_menu(dir: &str, key_bindings: &mut KeyBindings) -> MainMenu {
+    let rt = std::sync::Arc::new(
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime"),
+    );
+    let mut menu = MainMenu::new(
+        std::path::Path::new(dir),
+        rt,
+        "tester".into(),
+        "26.2".into(),
+        None,
+        key_bindings,
+    );
+    menu.gui_scale_setting = 1;
+    menu
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chunk_bench_saves_the_players_render_distance_and_reads_their_chunk_detail() {
+        let dir = std::env::temp_dir().join(format!("pomme-bench-rd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu(dir.to_str().unwrap(), &mut key_bindings);
+        menu.render_distance = 12;
+        menu.set_bench_render_distance(2);
+        menu.chunk_detail = 4;
+        menu.save_settings(&key_bindings);
+        let saved = load_settings(&dir).render_distance;
+        let chunk_detail = saved_chunk_detail(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(saved, 12);
+        assert_eq!(menu.render_distance, 2);
+        assert_eq!(chunk_detail, 4);
+    }
 
     #[test]
     fn damage_tilt_defaults_to_full_strength_and_clamps_to_unit_range() {
@@ -1346,6 +1508,19 @@ mod tests {
             };
             assert_eq!(chat.sanitized().delay_secs, secs, "delay {secs}");
         }
+    }
+
+    #[test]
+    fn mouse_settings_round_trip() {
+        let settings = Settings {
+            invert_mouse_x: true,
+            invert_mouse_y: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert!(loaded.invert_mouse_x);
+        assert!(loaded.invert_mouse_y);
     }
 
     #[test]

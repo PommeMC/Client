@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use azalea_core::position::BlockPos;
+use crate::position::BlockPos;
 
 /// Open/close animation for containers whose lid swings (chest) or translates
 /// (shulker box). One instance per BE position; the same shape is reused for
@@ -37,6 +37,8 @@ impl ContainerAnim {
 #[derive(Default)]
 pub struct BlockEntityAnimStore {
     containers: HashMap<BlockPos, ContainerAnim>,
+    /// Blocks pistons are moving, simulated client-side as in vanilla.
+    pub pistons: crate::world::piston::MovingPistons,
 }
 
 impl BlockEntityAnimStore {
@@ -63,5 +65,6 @@ impl BlockEntityAnimStore {
     pub fn drop_chunk(&mut self, chunk_x: i32, chunk_z: i32) {
         self.containers
             .retain(|p, _| p.x.div_euclid(16) != chunk_x || p.z.div_euclid(16) != chunk_z);
+        self.pistons.drop_chunk(chunk_x, chunk_z);
     }
 }

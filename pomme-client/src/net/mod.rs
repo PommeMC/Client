@@ -1,25 +1,38 @@
+mod advancement_wire;
 #[cfg(test)]
 mod azalea_compat;
-mod bundle_codec;
+mod block_wire;
 pub(crate) mod chat;
 pub(crate) mod chat_security;
 pub mod chunk_batch;
+pub(crate) mod chunk_wire;
 pub mod commands;
 pub mod conn;
 pub mod connection;
+mod container_wire;
 mod dialog;
+mod entity_data;
+mod entity_wire;
 pub mod handler;
+pub(crate) mod http;
+mod hud_wire;
+pub mod item_codec;
 pub mod known_packs;
+mod lifecycle_wire;
+mod player_info_wire;
+mod player_wire;
+mod recipe_wire;
 pub mod resolve;
+mod scoreboard_wire;
 pub mod sender;
+mod session;
+mod sound_wire;
 pub mod stream;
 pub mod translate;
 
 use std::sync::Arc;
 
 use azalea_block::BlockState;
-use azalea_core::heightmap_kind::HeightmapKind;
-use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_inventory::ItemStack;
 use azalea_inventory::components::EquipmentSlot;
 use azalea_registry::builtin::{BlockEntityKind, EntityKind};
@@ -29,6 +42,8 @@ use simdnbt::owned::NbtCompound;
 use crate::entity::MetaValue;
 use crate::entity::components::Position;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
+use crate::position::{BlockPos, ChunkPos};
+use crate::world::chunk::HeightmapKind;
 
 /// A packet's per-column light payload (chunk load or standalone update):
 /// present sections listed in `*_updates`, selected by `*_y_mask`, with
@@ -36,35 +51,82 @@ use crate::entity::villager::{VillagerKind, VillagerProfession};
 pub struct PacketLightData {
     pub sky_updates: Arc<Box<[Box<[u8]>]>>,
     pub block_updates: Arc<Box<[Box<[u8]>]>>,
-    pub sky_y_mask: azalea_core::bitset::BitSet,
-    pub block_y_mask: azalea_core::bitset::BitSet,
-    pub empty_sky_y_mask: azalea_core::bitset::BitSet,
-    pub empty_block_y_mask: azalea_core::bitset::BitSet,
+    pub sky_y_mask: crate::world::light::BitSet,
+    pub block_y_mask: crate::world::light::BitSet,
+    pub empty_sky_y_mask: crate::world::light::BitSet,
+    pub empty_block_y_mask: crate::world::light::BitSet,
 }
 
-impl From<&azalea_protocol::packets::game::c_light_update::ClientboundLightUpdatePacketData>
-    for PacketLightData
-{
-    fn from(
-        data: &azalea_protocol::packets::game::c_light_update::ClientboundLightUpdatePacketData,
-    ) -> Self {
-        Self {
-            sky_updates: data.sky_updates.clone(),
-            block_updates: data.block_updates.clone(),
-            sky_y_mask: data.sky_y_mask.clone(),
-            block_y_mask: data.block_y_mask.clone(),
-            empty_sky_y_mask: data.empty_sky_y_mask.clone(),
-            empty_block_y_mask: data.empty_block_y_mask.clone(),
-        }
+/// Decodes a native game packet with `read`, which returns `None` for the
+/// packets it doesn't own; a frame with bytes left over is malformed.
+fn read_raw_packet<P>(
+    packet_id: u32,
+    payload: &[u8],
+    read: fn(
+        &str,
+        &mut pomme_protocol::codec::Reader,
+    ) -> Option<pomme_protocol::codec::DecodeResult<P>>,
+) -> Option<pomme_protocol::codec::DecodeResult<P>> {
+    use pomme_protocol::{Direction, PacketTable, Phase};
+
+    let name = PacketTable::native().name_of(Phase::Game, Direction::Clientbound, packet_id)?;
+    let mut r = pomme_protocol::codec::Reader::new(payload);
+    Some(read(name, &mut r)?.and_then(|packet| {
+        r.ensure_eof()?;
+        Ok(packet)
+    }))
+}
+
+/// A `GameType` id as the client stores it; `GameType.byId` maps an unknown id
+/// to SURVIVAL.
+fn game_type(id: u32) -> u8 {
+    if id <= 3 { id as u8 } else { 0 }
+}
+
+/// An optional field converted with `convert`, which failing drops the
+/// packet.
+fn present<T, U>(value: Option<T>, convert: impl FnOnce(T) -> Option<U>) -> Option<Option<U>> {
+    match value {
+        Some(value) => convert(value).map(Some),
+        None => Some(None),
     }
 }
 
+/// `ClientboundGameEventPacket`'s weather changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Weather {
+    StartRaining,
+    StopRaining,
+    RainLevel(f32),
+    ThunderLevel(f32),
+}
+
+/// A dimension type's fields the client uses, from login and respawn.
+pub struct DimensionInfo {
+    pub height: u32,
+    pub min_y: i32,
+    pub has_skylight: bool,
+    pub cardinal_light: crate::world::block::model::CardinalLightType,
+    /// Dimension-type `ambient_light`, the lightmap's floor.
+    pub ambient_light: f32,
+    /// The dimension's `timelines` include the overworld day, which dims
+    /// its sky light at night.
+    pub overworld_day: bool,
+    /// The `world_clock` driving this dimension's day time.
+    pub default_clock: Option<String>,
+}
+
 pub enum NetworkEvent {
+    /// Ordered before login/configuration events on both transports.
+    ProtocolSelected {
+        protocol: i32,
+    },
     Connected,
     Registries(Arc<azalea_core::registry_holder::RegistryHolder>),
     /// The `minecraft:dialog` registry with its tags, sent with `Registries`
     /// and again whenever a tag update replaces the dialog tags.
     DialogRegistry(Arc<crate::ui::server_dialog::DialogRegistry>),
+    ItemTags(crate::recipe::ItemTags),
     BlockTags {
         tags: Vec<(String, Vec<i32>)>,
     },
@@ -73,12 +135,7 @@ pub enum NetworkEvent {
     },
     /// `LEVEL_CHUNKS_LOAD_START`: the server has started sending the level.
     LevelChunksLoadStart,
-    DimensionInfo {
-        height: u32,
-        min_y: i32,
-        has_skylight: bool,
-        cardinal_light: crate::world::block::model::CardinalLightType,
-    },
+    DimensionInfo(DimensionInfo),
     ChunkLoaded {
         pos: ChunkPos,
         data: Arc<Box<[u8]>>,
@@ -103,8 +160,8 @@ pub enum NetworkEvent {
     PlayerPosition {
         /// Teleport id to acknowledge.
         id: u32,
-        change: azalea_protocol::common::movements::PositionMoveRotation,
-        relative: azalea_protocol::common::movements::RelativeMovements,
+        change: pomme_protocol::entity::PositionMoveRotation,
+        relative: pomme_protocol::entity::Relative,
     },
     PlayerRotation {
         y_rot: f32,
@@ -182,11 +239,13 @@ pub enum NetworkEvent {
         item: ItemStack,
     },
     ChatMessage {
-        spans: Vec<crate::ui::text::TextSpan>,
-        /// Same bound chat type rendered from the signed body with unsigned
+        /// Preserves keybind references for resolution using the app's current
+        /// bindings.
+        component: Box<crate::chat_component::Component>,
+        /// Same bound chat type decorated from the signed body with unsigned
         /// content removed, for Vanilla's `onlyShowSecureChat` path.
-        secure_spans: Option<Vec<crate::ui::text::TextSpan>>,
-        missing_profile_spans: Option<Vec<crate::ui::text::TextSpan>>,
+        secure_component: Option<Box<crate::chat_component::Component>>,
+        missing_profile_component: Option<Box<crate::chat_component::Component>>,
         signature: Option<[u8; 256]>,
         sender_uuid: Option<uuid::Uuid>,
         signed_body: Option<crate::net::chat_security::SignedChatBody>,
@@ -197,7 +256,7 @@ pub enum NetworkEvent {
         signature: [u8; 256],
     },
     ActionBar {
-        spans: Vec<crate::ui::text::TextSpan>,
+        component: crate::chat_component::Component,
     },
     ServerLinks {
         links: Vec<crate::ui::server_dialog::ServerLink>,
@@ -211,6 +270,16 @@ pub enum NetworkEvent {
         op: crate::ui::boss_bar::BossBarOp,
     },
     AdvancementsUpdate(Box<crate::ui::toast::AdvancementsUpdate>),
+    RecipeBookAdd {
+        entries: Vec<crate::recipe::RecipeBookAddEntry>,
+        replace: bool,
+    },
+    RecipeBookRemove {
+        ids: Vec<crate::recipe::RecipeDisplayId>,
+    },
+    RecipeBookSettings(crate::recipe::RecipeBookSettings),
+    RecipeData(crate::recipe::RecipeData),
+    GhostRecipe(Box<crate::recipe::GhostRecipe>),
     RecipeToastAdd {
         entries: Vec<crate::ui::toast::RecipeToastEntry>,
     },
@@ -292,7 +361,7 @@ pub enum NetworkEvent {
     BlockEntityUpdate {
         pos: BlockPos,
         kind: BlockEntityKind,
-        nbt: Option<NbtCompound>,
+        nbt: NbtCompound,
     },
     BlockEvent {
         pos: BlockPos,
@@ -321,12 +390,10 @@ pub enum NetworkEvent {
     },
     TimeUpdate {
         game_time: u64,
-        day_time: Option<u64>,
+        /// Every world clock by name, with its total ticks.
+        clocks: Vec<(String, u64)>,
     },
-    WeatherUpdate {
-        event: azalea_protocol::packets::game::c_game_event::EventType,
-        param: f32,
-    },
+    WeatherUpdate(Weather),
     GameModeChanged {
         game_mode: u8,
         /// `Some` = authoritative previous mode from login/respawn (which may
@@ -559,7 +626,7 @@ pub enum NetworkEvent {
         reason: String,
     },
     PlayerInfoUpdate {
-        actions: crate::player::tab_list::PlayerInfoActions,
+        actions: pomme_protocol::player_info::Actions,
         entries: Vec<crate::player::tab_list::PlayerInfoEntry>,
     },
     PlayerInfoRemove {
@@ -610,6 +677,6 @@ pub fn client_information(
 /// configuration phase, or the game phase on versions without one.
 pub fn brand_payload() -> Vec<u8> {
     let mut out = Vec::new();
-    azalea_core::delta::AzBuf::azalea_write(&String::from("pomme"), &mut out).unwrap();
+    pomme_protocol::wire::write_utf(&mut out, "pomme");
     out
 }

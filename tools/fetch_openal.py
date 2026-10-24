@@ -39,9 +39,10 @@ class Native:
 
 
 def read_manifest():
-    """Returns (version, {classifier: Native})."""
+    """Returns (version, {classifier: Native}, (source tag, sha256) or None)."""
     version = None
     natives = {}
+    source = None
     for lineno, raw in enumerate(MANIFEST.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -49,13 +50,15 @@ def read_manifest():
         fields = line.split()
         if fields[0] == "version" and len(fields) == 2:
             version = fields[1]
+        elif fields[0] == "source" and len(fields) == 3:
+            source = (fields[1], fields[2])
         elif len(fields) == 4:
             natives[fields[0]] = Native(fields[1], fields[2], fields[3])
         else:
             raise SystemExit(f"{MANIFEST}:{lineno}: cannot parse {raw!r}")
     if version is None:
         raise SystemExit(f"{MANIFEST}: no version line")
-    return version, natives
+    return version, natives, source
 
 
 def host_classifier():
@@ -79,11 +82,15 @@ def host_classifier():
 
 def fetch_jar(version, classifier, expected_sha256):
     """Downloads the jar unless a verified copy is already cached."""
-    cached = CACHE_DIR / f"lwjgl-openal-{version}-{classifier}.jar"
+    name = f"lwjgl-openal-{version}-{classifier}.jar"
+    return download_verified(f"{BASE_URL}/{version}/{name}", expected_sha256, CACHE_DIR / name)
+
+
+def download_verified(url, expected_sha256, cached):
+    """Downloads `url` to `cached` unless a verified copy is already there."""
     if cached.is_file() and sha256(cached.read_bytes()) == expected_sha256:
         return cached
 
-    url = f"{BASE_URL}/{version}/lwjgl-openal-{version}-{classifier}.jar"
     print(f"downloading {url}")
     try:
         with urllib.request.urlopen(url) as response:
@@ -94,7 +101,7 @@ def fetch_jar(version, classifier, expected_sha256):
     actual = sha256(payload)
     if actual != expected_sha256:
         raise SystemExit(f"{url}: sha256 {actual} does not match the pinned {expected_sha256}")
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cached.parent.mkdir(parents=True, exist_ok=True)
     cached.write_bytes(payload)
     return cached
 
@@ -115,7 +122,7 @@ def main():
     )
     args = parser.parse_args()
 
-    version, natives = read_manifest()
+    version, natives, _ = read_manifest()
     classifier = args.classifier or host_classifier()
     native = natives.get(classifier) if classifier else None
     if native is None:

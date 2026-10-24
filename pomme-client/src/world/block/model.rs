@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use glam::{Mat3, Mat4, Quat, Vec3};
 use serde::Deserialize;
 
-use super::registry::{FaceTextures, Tint};
+use super::render_assets::{FaceTextures, Tint};
 use crate::assets::{AssetId, AssetIndex, resolve_asset_path_with_packs};
 use crate::renderer::chunk::mesher::Colormap;
 
@@ -213,6 +213,16 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// Vanilla `Direction.values()`, indexed by the 3D data value.
+    pub const VALUES: [Direction; 6] = [
+        Direction::Down,
+        Direction::Up,
+        Direction::North,
+        Direction::South,
+        Direction::West,
+        Direction::East,
+    ];
+
     pub fn opposite(self) -> Self {
         match self {
             Direction::Down => Direction::Up,
@@ -235,7 +245,34 @@ impl Direction {
         }
     }
 
-    fn from_str(s: &str) -> Option<Self> {
+    /// The index of the direction's axis: 0 for X, 1 for Y, 2 for Z.
+    pub fn axis(self) -> usize {
+        match self {
+            Direction::West | Direction::East => 0,
+            Direction::Down | Direction::Up => 1,
+            Direction::North | Direction::South => 2,
+        }
+    }
+
+    /// The unit step along the direction.
+    pub fn step(self) -> glam::DVec3 {
+        let [x, y, z] = self.offset();
+        glam::dvec3(x.into(), y.into(), z.into())
+    }
+
+    /// The block-state property value, vanilla `getSerializedName`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Direction::Down => "down",
+            Direction::Up => "up",
+            Direction::North => "north",
+            Direction::South => "south",
+            Direction::West => "west",
+            Direction::East => "east",
+        }
+    }
+
+    pub(crate) fn from_str(s: &str) -> Option<Self> {
         match s {
             "down" => Some(Direction::Down),
             "up" => Some(Direction::Up),
@@ -281,6 +318,47 @@ impl Direction {
     /// looks its dimension's table up at mesh time instead.
     pub(crate) fn shade_light(&self) -> f32 {
         CardinalLighting::DEFAULT.by_face(*self)
+    }
+
+    /// Vanilla `Direction.getApproximateNearest`: the direction whose normal
+    /// has the largest positive dot with `v`, in float precision; `North`
+    /// when none is positive.
+    pub fn approximate_nearest(v: glam::DVec3) -> Self {
+        let (x, y, z) = (v.x as f32, v.y as f32, v.z as f32);
+        let mut result = Direction::North;
+        // Java's `Float.MIN_VALUE`: the smallest subnormal.
+        let mut highest = f32::from_bits(1);
+        for direction in [
+            Direction::Down,
+            Direction::Up,
+            Direction::North,
+            Direction::South,
+            Direction::West,
+            Direction::East,
+        ] {
+            let [nx, ny, nz] = direction.offset();
+            let dot = x * nx as f32 + y * ny as f32 + z * nz as f32;
+            if dot > highest {
+                highest = dot;
+                result = direction;
+            }
+        }
+        result
+    }
+}
+
+// TODO: drop this once the serverbound packets carrying a face are
+// pomme-encoded.
+impl From<Direction> for azalea_core::direction::Direction {
+    fn from(direction: Direction) -> Self {
+        match direction {
+            Direction::Down => Self::Down,
+            Direction::Up => Self::Up,
+            Direction::North => Self::North,
+            Direction::South => Self::South,
+            Direction::West => Self::West,
+            Direction::East => Self::East,
+        }
     }
 }
 
@@ -349,7 +427,7 @@ pub struct BakedQuad {
     pub uvs: [[f32; 2]; 4],
     pub texture: String,
     pub cullface: Option<Direction>,
-    pub tint: super::registry::Tint,
+    pub tint: super::render_assets::Tint,
     /// Raw vanilla face `tintindex`. Terrain resolves this through `tint`,
     /// while item models use it to index the `ItemTintSource` palette from
     /// their item definition.
@@ -1081,7 +1159,7 @@ fn add_chest_cube(
                 .map(|[u_px, v_px]| [u_px / TEX_SIZE, v_px / TEX_SIZE]),
             texture: texture.to_string(),
             cullface: None,
-            tint: super::registry::Tint::None,
+            tint: super::render_assets::Tint::None,
             tint_index: None,
             shade_light: spec.shade,
             shade_face: None,
@@ -1108,13 +1186,14 @@ struct ModelPart {
 /// representative state.
 fn collect_model_parts(json: &serde_json::Value) -> Vec<ModelPart> {
     let mut parts = Vec::new();
-    if let Some(node) = json.get("model") {
-        collect_parts_from_node(node, None, &mut parts);
-    }
+    let Some(root) = json.get("model").map(default_stack_branch) else {
+        return parts;
+    };
+    collect_parts_from_node(root, None, &mut parts);
     if !parts.is_empty() {
         return parts;
     }
-    if let Some(node) = find_first_item_model_node(json)
+    if let Some(node) = find_first_item_model_node(root)
         && let Some(path) = node.get("model").and_then(|value| value.as_str())
     {
         parts.push(ModelPart {
@@ -1126,7 +1205,7 @@ fn collect_model_parts(json: &serde_json::Value) -> Vec<ModelPart> {
                 .cloned()
                 .unwrap_or_default(),
         });
-    } else if let Some(path) = first_item_model_ref(json) {
+    } else if let Some(path) = first_model_ref(root) {
         // A special renderer's `base` carries its transforms but no tints.
         parts.push(ModelPart {
             path,
@@ -1159,11 +1238,39 @@ fn find_first_item_model_node(json: &serde_json::Value) -> Option<&serde_json::V
     }
 }
 
+/// The branch of an item definition's `model` node that a stack without
+/// the components its `select`s read resolves to. Vanilla `SelectItemModel`
+/// takes the `fallback` when no case matches, and `TrimMaterialProperty`
+/// (no `trim`), `Charge` (no `charged_projectiles`, `NONE`) and
+/// `ItemBlockState` (no `block_state`) never match for a plain stack.
+///
+/// TODO: pomme bakes one model per item, so stacks that do carry these
+/// components (trimmed armor, a loaded crossbow) still draw this branch;
+/// that needs per-stack selection, plus the `paletted_permutations` atlas
+/// source for the trim textures.
+fn default_stack_branch(mut node: &serde_json::Value) -> &serde_json::Value {
+    const COMPONENT_PROPERTIES: [&str; 3] = ["trim_material", "charge_type", "block_state"];
+    while node_type(node) == Some("select")
+        && node
+            .get("property")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|property| COMPONENT_PROPERTIES.contains(&strip_mc_prefix(property)))
+        && let Some(fallback) = node.get("fallback")
+    {
+        node = fallback;
+    }
+    node
+}
+
 /// First `model` reference in an item definition, falling back to a special
 /// renderer's `base`.
 pub fn first_item_model_ref(json: &serde_json::Value) -> Option<String> {
-    find_first_model_string(json)
-        .or_else(|| find_first_string_for_key(json, "base"))
+    first_model_ref(json.get("model").map_or(json, default_stack_branch))
+}
+
+fn first_model_ref(node: &serde_json::Value) -> Option<String> {
+    find_first_model_string(node)
+        .or_else(|| find_first_string_for_key(node, "base"))
         .map(|path| strip_mc_prefix(&path).to_string())
 }
 
@@ -1627,7 +1734,7 @@ fn bake_resolved_model(
     resolved: &ResolvedModel,
     rot_x: i32,
     rot_y: i32,
-    tint: super::registry::Tint,
+    tint: super::render_assets::Tint,
 ) -> Option<BakedModel> {
     if resolved.elements.is_empty() {
         return None;
@@ -1669,7 +1776,7 @@ fn bake_resolved_model(
             let quad_tint = if face_def.tint_index.is_some() {
                 tint
             } else {
-                super::registry::Tint::None
+                super::render_assets::Tint::None
             };
 
             if rot_x != 0 || rot_y != 0 {
@@ -2647,6 +2754,53 @@ mod tests {
         assert!(parts[0].transform.is_none());
         let legacy = find_first_model_string(&json).unwrap();
         assert_eq!(parts[0].path, strip_mc_prefix(&legacy));
+    }
+
+    /// Both resolvers pick `path` for an item definition.
+    fn assert_resolves_to(json: &serde_json::Value, path: &str) {
+        let parts = collect_model_parts(json);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].path, path);
+        assert_eq!(first_item_model_ref(json).as_deref(), Some(path));
+    }
+
+    #[test]
+    fn trim_select_bakes_the_untrimmed_fallback() {
+        let json = serde_json::json!({
+            "model": {
+                "type": "minecraft:select",
+                "property": "minecraft:trim_material",
+                "cases": [{
+                    "when": "minecraft:quartz",
+                    "model": {"type": "minecraft:model", "model": "minecraft:item/iron_chestplate_quartz_trim"}
+                }],
+                "fallback": {"type": "minecraft:model", "model": "minecraft:item/iron_chestplate"}
+            }
+        });
+        assert_resolves_to(&json, "item/iron_chestplate");
+    }
+
+    /// The charge fallback is a `condition`, which the heuristic resolves to
+    /// its `on_false`.
+    #[test]
+    fn charge_select_bakes_the_unloaded_crossbow() {
+        let json = serde_json::json!({
+            "model": {
+                "type": "minecraft:select",
+                "property": "minecraft:charge_type",
+                "cases": [{
+                    "when": "arrow",
+                    "model": {"type": "minecraft:model", "model": "minecraft:item/crossbow_arrow"}
+                }],
+                "fallback": {
+                    "type": "minecraft:condition",
+                    "property": "minecraft:using_item",
+                    "on_false": {"type": "minecraft:model", "model": "minecraft:item/crossbow"},
+                    "on_true": {"type": "minecraft:model", "model": "minecraft:item/crossbow_pulling_0"}
+                }
+            }
+        });
+        assert_resolves_to(&json, "item/crossbow");
     }
 
     #[test]

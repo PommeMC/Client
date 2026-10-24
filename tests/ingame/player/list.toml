@@ -1,0 +1,25 @@
+# The player list tracks the local player's game mode as the server sends it.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+expect = { hud = { tab_list = [{ name = "Tester", game_mode = 0 }] } }
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+expect = { hud = { tab_list = [{ name = "Tester", game_mode = 1 }] } }
+
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+expect = { hud = { tab_list = [{ name = "Tester", game_mode = 3 }] } }
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+expect = { hud = { tab_list = [{ name = "Tester", game_mode = 0 }] } }

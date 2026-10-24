@@ -17,9 +17,10 @@ use super::NetworkEvent;
 use super::chat::ChatPacketError;
 use super::chat_security::{ChatSender, ProfileKeyPair};
 use super::conn::{Conn, MemoryEnd, RawWriter};
-use super::handler::{handle_game_packet, handle_raw_game_packet};
+use super::handler::{handle_game_packet, handle_raw_game_packet, send_ordered};
 use super::sender::{Outbound, PacketSender};
 use crate::ui::server_dialog::DialogRegistry;
+use crate::world::block::BlockStateTable;
 
 #[derive(Error, Debug)]
 pub enum ConnectionError {
@@ -70,8 +71,11 @@ pub enum Transport {
         protocol: Option<i32>,
     },
     /// An integrated server in this process, reached over an in-memory pipe.
-    #[allow(dead_code, reason = "only a singleplayer build opens a world")]
-    Memory(MemoryEnd),
+    Memory {
+        end: MemoryEnd,
+        /// The protocol that server speaks.
+        protocol: i32,
+    },
 }
 
 pub struct ConnectArgs {
@@ -92,11 +96,8 @@ pub struct ConnectionHandle {
 impl Drop for ConnectionHandle {
     fn drop(&mut self) {
         self.task.abort();
-        // The session is over: restore the launched version's wire protocol
-        // and block table so nothing stale leaks into the next one.
+        // The session is over: restore the launched version's wire protocol.
         crate::version::clear_session_protocol();
-        crate::world::block::clear_block_tags();
-        crate::world::block::set_active_protocol(crate::version::selected_protocol());
     }
 }
 
@@ -134,26 +135,29 @@ pub async fn connect_to_server(
         chat_options,
     } = args;
 
-    let mut conn = match transport {
+    let (mut conn, wire) = match transport {
         Transport::Remote { server, protocol } => {
             let server_addr: ServerAddr = server
                 .as_str()
                 .try_into()
                 .map_err(|_| ConnectionError::InvalidAddress(server.clone()))?;
-            negotiate_wire_version(&server_addr, protocol).await?;
-            super::resolve::connect(&server_addr, ClientIntention::Login).await?
+            let wire = negotiate_wire_version(&server_addr, protocol).await?;
+            select_block_protocol(&event_tx, wire);
+            (
+                super::resolve::connect(&server_addr, ClientIntention::Login).await?,
+                wire,
+            )
         }
-        Transport::Memory(end) => {
-            // The integrated server speaks the native protocol, so there is
-            // nothing to probe and translation stays inert for the session.
-            #[cfg(feature = "singleplayer")]
-            const _: () =
-                assert!(pomme_singleplayer::PROTOCOL == pomme_protocol::version::NATIVE.protocol);
-            adopt_wire_protocol(pomme_protocol::version::NATIVE.protocol);
+        Transport::Memory { end, protocol } => {
+            // The integrated server's protocol is known, so there is nothing
+            // to probe; one other than native is translated like a remote
+            // server's.
+            adopt_wire_protocol(protocol);
+            select_block_protocol(&event_tx, protocol);
             let mut conn = Conn::from_memory(end);
             super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntention::Login)
                 .await?;
-            conn
+            (conn, protocol)
         }
     };
 
@@ -218,6 +222,7 @@ pub async fn connect_to_server(
         conn,
         &event_tx,
         GameLoopArgs {
+            block_state_table: BlockStateTable::for_protocol(wire),
             outbound_tx: game_packet_tx,
             outbound_rx: game_packet_rx,
             joined,
@@ -258,10 +263,9 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
         // A server that turns the join away here does it with a play-phase
         // disconnect, the login phase having already ended.
         if let Some(raw) = translation.translate_game_frame(login)
-            && let Ok(ClientboundGamePacket::Disconnect(p)) =
-                deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw))
+            && let Some(reason) = super::lifecycle_wire::read_disconnect(&raw)
         {
-            return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
+            return Err(ConnectionError::Disconnected(reason));
         }
         return Err(ConnectionError::Disconnected(
             "could not read the registries from the login packet".into(),
@@ -302,7 +306,7 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
 async fn negotiate_wire_version(
     server_addr: &ServerAddr,
     known: Option<i32>,
-) -> Result<(), ConnectionError> {
+) -> Result<i32, ConnectionError> {
     let selected = crate::version::selected_protocol();
     let probed = match known {
         Some(p) => Some(p),
@@ -325,15 +329,20 @@ async fn negotiate_wire_version(
     })?;
     tracing::info!("Negotiated wire protocol {wire}");
     adopt_wire_protocol(wire);
-    Ok(())
+    Ok(wire)
 }
 
-/// Speaks `wire` for the rest of the session. The translation layer, block
-/// tags and block-state tables all key off it, so they always move together.
+/// Publish the adopted wire identity before either transport starts login.
+fn select_block_protocol(event_tx: &Sender<NetworkEvent>, protocol: i32) {
+    // Builds the table here, so the game thread only switches to it.
+    let _ = crate::world::block::BlockStateTable::for_protocol(protocol);
+    send_ordered(event_tx, NetworkEvent::ProtocolSelected { protocol });
+}
+
+/// Speaks `wire` for the rest of the session through the translation layer.
+/// Block metadata is selected separately with the same negotiated protocol.
 fn adopt_wire_protocol(wire: i32) {
-    crate::world::block::clear_block_tags();
     crate::version::set_session_protocol(wire);
-    crate::world::block::set_active_protocol(wire);
 }
 
 /// The wire protocol to speak given the probed server protocol and the
@@ -431,16 +440,10 @@ async fn handle_encryption(
         })?;
 
         tracing::info!("Authenticating with session server (uuid: {uuid})");
-        azalea_auth::sessionserver::join(azalea_auth::sessionserver::SessionServerJoinOpts {
-            access_token,
-            public_key: &hello.public_key,
-            private_key: &e.secret_key,
-            uuid,
-            server_id: &hello.server_id,
-            proxy: None,
-        })
-        .await
-        .map_err(|e| ConnectionError::Auth(e.to_string()))?;
+        let hash = super::session::server_hash(&hello.server_id, &e.secret_key, &hello.public_key);
+        super::session::join(access_token, uuid, &hash)
+            .await
+            .map_err(ConnectionError::Auth)?;
         tracing::info!("Session server authentication successful");
     } else {
         tracing::info!("Server does not require authentication");
@@ -589,7 +592,7 @@ async fn config_sequence(
                 if let Some(tags) = dialog_tags(&p.tags) {
                     received_dialog_tags = Some(tags);
                 }
-                forward_block_tags(event_tx, &p.tags);
+                forward_tags(event_tx, &p.tags);
             }
             ClientboundConfigPacket::SelectKnownPacks(p) => {
                 // Vanilla `handleSelectKnownPacks`: claim the offered packs we
@@ -694,14 +697,29 @@ async fn config_sequence(
     }
 }
 
+/// The synced biome registry, in protocol-id order.
+fn biome_registry(
+    holder: &azalea_core::registry_holder::RegistryHolder,
+) -> Option<&azalea_core::registry_holder::RegistryType<simdnbt::owned::NbtCompound>> {
+    holder
+        .extra
+        .get(&azalea_registry::identifier::Identifier::new(
+            "minecraft:worldgen/biome",
+        ))
+}
+
+/// How many biomes chunk sections can name.
+pub(crate) fn biome_count(holder: &azalea_core::registry_holder::RegistryHolder) -> usize {
+    biome_registry(holder).map_or(0, |registry| registry.map.len())
+}
+
 fn extract_biome_climate(
     holder: &azalea_core::registry_holder::RegistryHolder,
 ) -> std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate> {
     use crate::renderer::chunk::mesher::{BiomeClimate, GrassColorModifier, int_to_rgb};
 
     let mut result = std::collections::HashMap::new();
-    let biome_key: azalea_registry::identifier::Identifier = "minecraft:worldgen/biome".into();
-    if let Some(registry) = holder.extra.get(&biome_key) {
+    if let Some(registry) = biome_registry(holder) {
         for (id, (_, nbt)) in registry.map.iter().enumerate() {
             let temp = nbt_float(nbt, "temperature").unwrap_or(0.8);
             let downfall = nbt_float(nbt, "downfall").unwrap_or(0.4);
@@ -832,10 +850,8 @@ fn dialog_tags(
 
 /// Forwards the `minecraft:block` tags of an `update_tags` packet, if it has
 /// any.
-fn forward_block_tags(
-    event_tx: &Sender<NetworkEvent>,
-    tags: &azalea_protocol::common::tags::TagMap,
-) {
+fn forward_tags(event_tx: &Sender<NetworkEvent>, tags: &azalea_protocol::common::tags::TagMap) {
+    let _ = event_tx.try_send(NetworkEvent::ItemTags(super::recipe_wire::item_tags(tags)));
     let key: azalea_registry::identifier::Identifier = "minecraft:block".into();
     let Some(tags) = tags.0.get(&key) else {
         return;
@@ -855,6 +871,7 @@ fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -
 }
 
 struct GameLoopArgs {
+    block_state_table: BlockStateTable,
     outbound_tx: mpsc::UnboundedSender<Outbound>,
     outbound_rx: mpsc::UnboundedReceiver<Outbound>,
     joined: Joined,
@@ -870,6 +887,7 @@ async fn game_loop(
     args: GameLoopArgs,
 ) -> Result<(), ConnectionError> {
     let GameLoopArgs {
+        block_state_table,
         outbound_tx,
         mut outbound_rx,
         joined,
@@ -967,8 +985,28 @@ async fn game_loop(
             Some(Ok(())) => continue,
             None => {}
         }
+        if let Some(login) = super::lifecycle_wire::read_login(&raw) {
+            match login {
+                Ok(mut login) => {
+                    inbound_chat.reset();
+                    if crate::version::session_protocol() < 776 {
+                        login.online_mode = conn.is_encrypted();
+                    }
+                    super::lifecycle_wire::login_events(&login, &configured.registries, event_tx);
+                }
+                Err(e) => tracing::warn!("Skipping malformed login packet: {e}"),
+            }
+            continue;
+        }
         if super::dialog::handle_raw_dialog_packet(Phase::Game, &raw, event_tx)
-            || handle_raw_game_packet(&raw, event_tx)
+            || handle_raw_game_packet(
+                &raw,
+                block_state_table,
+                &configured.registries,
+                &sender,
+                &mut batch_size_calculator,
+                event_tx,
+            )
         {
             continue;
         }
@@ -982,8 +1020,7 @@ async fn game_loop(
                     // acknowledgement.
                     // TODO: chat events still in flight to the game thread
                     // miss this ack; the next login resets the tracker anyway.
-                    crate::world::block::clear_block_tags();
-                    let _ = event_tx.try_send(NetworkEvent::Reconfiguring);
+                    send_ordered(event_tx, NetworkEvent::Reconfiguring);
                     while let Ok(out) = outbound_rx.try_recv() {
                         if let Some(frame) =
                             outbound_frame(out, translation, &mut chat, &shared_tree)?
@@ -1034,13 +1071,7 @@ async fn game_loop(
                         let _ = event_tx
                             .try_send(NetworkEvent::DialogRegistry(configured.dialogs.clone()));
                     }
-                    forward_block_tags(event_tx, &p.tags);
-                }
-                if let ClientboundGamePacket::Login(login) = &mut packet {
-                    inbound_chat.reset();
-                    if crate::version::session_protocol() < 776 {
-                        login.online_mode = conn.is_encrypted();
-                    }
+                    forward_tags(event_tx, &p.tags);
                 }
                 handle_game_packet(
                     &packet,
@@ -1048,7 +1079,6 @@ async fn game_loop(
                     event_tx,
                     &configured.registries,
                     &shared_tree,
-                    &mut batch_size_calculator,
                 );
             }
             Err(e) => skip_malformed_packet(e)?,
@@ -1067,7 +1097,11 @@ fn outbound_frame(
         Outbound::Packet(mut packet) => {
             match translation {
                 Some(t) => t.remap_outbound(&mut packet),
-                None => super::bundle_codec::encode_native_outbound(&mut packet),
+                None => {
+                    if let ServerboundGamePacket::SetCreativeModeSlot(p) = &*packet {
+                        return Ok(Some(super::item_codec::creative_slot_frame(p)));
+                    }
+                }
             }
             Some(serialize_frame(&*packet)?)
         }
@@ -1213,6 +1247,13 @@ mod tests {
         assert_eq!(plains.downfall, 0.4);
     }
 
+    #[test]
+    fn integrated_server_is_joinable() {
+        assert!(crate::net::translate::joinable(
+            crate::singleplayer::PROTOCOL
+        ));
+    }
+
     /// 762 (1.19.4) is not a supported version at all, so it never gains a
     /// wire translation; 775 has one.
     #[test]
@@ -1256,6 +1297,41 @@ mod tests {
         }
     }
 
+    /// A remote join selects the block protocol before it opens the
+    /// connection, so configuration-phase tags already use that table. The
+    /// port is closed, so a selection after connecting never happens.
+    #[tokio::test]
+    async fn remote_join_selects_the_protocol_before_connecting() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(4096);
+        let (packet_tx, packet_rx) = mpsc::unbounded_channel();
+        let joined = connect_to_server(
+            ConnectArgs {
+                transport: Transport::Remote {
+                    server,
+                    protocol: Some(NATIVE.protocol),
+                },
+                username: "Steve".to_owned(),
+                uuid: uuid::Uuid::nil(),
+                access_token: None,
+                view_distance: 8,
+                chat_options: crate::ui::chat::ChatOptions::default(),
+            },
+            event_tx,
+            packet_tx,
+            packet_rx,
+        )
+        .await;
+
+        assert!(joined.is_err());
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(NetworkEvent::ProtocolSelected { protocol }) if protocol == NATIVE.protocol
+        ));
+    }
+
     /// The whole join over an in-memory pipe, against a peer that sends only
     /// the two frames the client actually requires: login finished, then
     /// finish configuration. No registry data, no compression, no encryption.
@@ -1285,7 +1361,10 @@ mod tests {
 
         let client = tokio::spawn(connect_to_server(
             ConnectArgs {
-                transport: Transport::Memory(client_end),
+                transport: Transport::Memory {
+                    end: client_end,
+                    protocol: NATIVE.protocol,
+                },
                 username: "Steve".to_owned(),
                 uuid: Uuid::nil(),
                 access_token: None,
@@ -1335,12 +1414,16 @@ mod tests {
             ServerboundConfigPacket::FinishConfiguration(_)
         ));
 
-        // Emitted as soon as configuration ends, before any game packet.
+        // Protocol selection precedes configuration; the remaining events
+        // arrive as soon as configuration ends, before any game packet.
         let events: Vec<_> = std::iter::from_fn(|| event_rx.recv().ok())
-            .take(2)
+            .take(3)
             .collect();
-        assert!(matches!(events[0], NetworkEvent::BiomeColors { .. }));
-        assert!(matches!(events[1], NetworkEvent::Connected));
+        assert!(
+            matches!(events[0], NetworkEvent::ProtocolSelected { protocol } if protocol == NATIVE.protocol)
+        );
+        assert!(matches!(events[1], NetworkEvent::BiomeColors { .. }));
+        assert!(matches!(events[2], NetworkEvent::Connected));
 
         client.abort();
     }

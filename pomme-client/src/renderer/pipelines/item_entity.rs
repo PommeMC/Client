@@ -540,7 +540,7 @@ fn push_world_lighting(
     let nether = if nether { 1.0_f32 } else { 0.0_f32 };
     cmd.push_constants(
         layout,
-        vk::ShaderStageFlags::Vertex,
+        vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
         68,
         bytemuck::bytes_of(&nether),
     );
@@ -553,7 +553,7 @@ fn push_world_lighting(
     ];
     cmd.push_constants(
         layout,
-        vk::ShaderStageFlags::Vertex,
+        vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
         80,
         bytemuck::bytes_of(&padded_cols),
     );

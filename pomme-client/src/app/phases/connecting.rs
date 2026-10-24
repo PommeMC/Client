@@ -53,7 +53,7 @@ pub fn update_connecting(
         game.drain_and_upload_meshes(&mut gfx.renderer);
         // Vanilla runs `ClientLevel.update()` every frame, loading screen
         // included; the load gate waits on the light this applies.
-        game.update_light();
+        game.update_light(core.menu.chunk_detail);
 
         // Vanilla keeps ticking behind the loading screen: the tracker advances
         // and every tick is still marked with `client_tick_end`, while
@@ -62,7 +62,7 @@ pub fn update_connecting(
         if game.level_load.is_some() {
             core.tick_accumulator += dt;
             while core.tick_accumulator >= TICK_RATE {
-                AppCore::tick_level_load(&gfx.renderer, connection, game);
+                AppCore::tick_level_load(gfx.renderer.camera_render_position(), connection, game);
                 if game.client_loaded {
                     // Vanilla closes `LevelLoadingScreen` on the same tick that
                     // sends `player_loaded`, and the local player then ticks

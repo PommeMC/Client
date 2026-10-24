@@ -4,8 +4,9 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use azalea_core::position::ChunkPos;
 use glam::DVec3;
+
+use crate::position::ChunkPos;
 
 /// The six block faces, ordinals matching vanilla `Direction`
 /// (DOWN, UP, NORTH, SOUTH, WEST, EAST).

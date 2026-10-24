@@ -4,7 +4,16 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
-pub fn init(log_dir: &Path) -> WorkerGuard {
+/// Starts logging once per process, which Android can run `android_main` in
+/// twice. The guard flushes the log file when dropped; Android keeps it for
+/// the process instead, so a later run still writes to that file.
+pub fn init(log_dir: &Path) -> Option<WorkerGuard> {
+    if tracing::dispatcher::has_been_set() {
+        return None;
+    }
+    if let Err(e) = rotate(log_dir) {
+        eprintln!("Failed to rotate logs: {e}. latest.log will probably be overwritten.");
+    }
     let file_appender = tracing_appender::rolling::never(log_dir, "latest.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
@@ -19,19 +28,44 @@ pub fn init(log_dir: &Path) -> WorkerGuard {
                 .with_writer(non_blocking)
                 .with_filter(file_filter),
         )
-        .with(
-            fmt::layer()
-                .with_writer(std::io::stdout)
-                .with_filter(stdout_filter),
-        )
+        .with(console_layer().with_filter(stdout_filter))
         .init();
 
-    guard
+    if cfg!(target_os = "android") {
+        std::mem::forget(guard);
+        return None;
+    }
+    Some(guard)
+}
+
+/// Panics to the log. Android drops stderr, so one before logging starts goes
+/// straight to logcat.
+#[cfg(target_os = "android")]
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        if tracing::dispatcher::has_been_set() {
+            tracing::error!("{info}");
+        } else {
+            let logcat = tracing_subscriber::registry().with(console_layer());
+            tracing::subscriber::with_default(logcat, || tracing::error!("{info}"));
+        }
+    }));
+}
+
+/// Stdout, or logcat on Android, which drops stdout.
+fn console_layer<S>() -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    #[cfg(target_os = "android")]
+    return paranoid_android::layer("pomme").with_ansi(false);
+    #[cfg(not(target_os = "android"))]
+    fmt::layer().with_writer(std::io::stdout)
 }
 
 const MAX_LOG_FILES: usize = 5;
 
-pub fn rotate(log_dir: &Path) -> std::io::Result<()> {
+fn rotate(log_dir: &Path) -> std::io::Result<()> {
     let latest = log_dir.join("latest.log");
     if !latest.exists() {
         return Ok(());

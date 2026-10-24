@@ -11,6 +11,14 @@ on:
         description: "Version core, e.g. 0.2.0 (blank = bump patch from latest)"
         required: false
         default: ""
+      dry_run:
+        description: "Build and package only: the files stay on the run, nothing is released"
+        type: boolean
+        default: false
+  # A pull request that changes the packaging builds and packages it, like a
+  # dry run, so a broken installer shows up before the weekly release.
+  pull_request:
+    paths: ["packaging/**", ".github/workflows/release-client.yml"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,17 +28,21 @@ permissions:
   contents: write
   actions: read # reading CI's conclusion for the commit being released
 
-# Serialized, never cancelled: two runs would resolve the same next version and
-# race on the tag, and cancelling one mid-upload would leave a partial release.
+# Releases are serialized, never cancelled: two runs would resolve the same next
+# version and race on the tag, and cancelling one mid-upload would leave a
+# partial release. A pull request's runs only replace each other.
 concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || 'release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
+      tag: ${{ steps.rel.outputs.tag }}
+      prev: ${{ steps.rel.outputs.prev }}
+      version: ${{ steps.rel.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -45,7 +57,7 @@ jobs:
           skip() { echo "should_release=false" >> "$GITHUB_OUTPUT"; echo "$1"; exit 0; }
 
           # Only the weekly cron is gated; a tag push or manual dispatch is a
-          # deliberate act and always releases.
+          # deliberate act and always releases, and a pull request only builds.
           if [ "${{ github.event_name }}" != "schedule" ]; then
             release
           fi
@@ -67,6 +79,36 @@ jobs:
           fi
 
           release
+
+      # Ahead of the build, which bakes the tag in for the client's updater.
+      - name: Resolve release tag
+        id: rel
+        shell: bash
+        run: |
+          git fetch --tags --force
+          tags=$(git tag --list 'client-v*')
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${{ github.ref_name }}"
+          else
+            core="${{ inputs.version }}"
+            if [ -z "$core" ]; then
+              latest=$(echo "$tags" \
+                | sed -nE 's/^client-v([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
+                | sort -V | tail -n1)
+              if [ -z "$latest" ]; then
+                core="0.1.0"
+              else
+                IFS=. read -r ma mi pa <<< "$latest"
+                core="$ma.$mi.$((pa + 1))"
+              fi
+            fi
+            tag="client-v${core}+${MC_VERSION}"
+          fi
+          prev=$(echo "$tags" | grep -vFx "$tag" | sort -V | tail -n1 || true)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          version=${tag#client-v}
+          echo "version=${version%%+*}" >> "$GITHUB_OUTPUT"
+          echo "prev=$prev" >> "$GITHUB_OUTPUT"
 
   build-client:
     needs: check
@@ -96,25 +138,13 @@ jobs:
         with:
           submodules: true
 
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: ./.github/actions/setup-rust
         with:
-          targets: ${{ matrix.target }}
-
-      - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa
-        with:
-          vulkan_version: 1.4.341.0
-          install_runtime: false
-          cache: true
-          stripdown: true
-
-      - name: Install Linux dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvulkan-dev cmake libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev
+          cache-key: release
 
       - name: Build
+        env:
+          POMME_RELEASE: ${{ needs.check.outputs.tag }}
         run: cargo build -p pomme-client --release --target ${{ matrix.target }}
 
       # The runner images disagree on whether `python` or `python3` is on PATH,
@@ -170,6 +200,27 @@ jobs:
           Copy-Item "pomme-client/third-party/OpenAL-Soft-NOTICE.txt" bundle/
           Compress-Archive -Path "bundle/*" -DestinationPath "dist/${{ matrix.name }}.zip"
 
+      # The installers wrap the same files the zip holds, which stays the
+      # updater's download.
+      - name: Installer (macOS)
+        if: matrix.os == 'macos-latest'
+        run: packaging/macos.sh bundle "${{ needs.check.outputs.version }}" "dist/${{ matrix.name }}.dmg"
+
+      - name: Installer (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: packaging/linux.sh bundle "${{ needs.check.outputs.version }}" "dist/${{ matrix.name }}.AppImage"
+
+      - name: Installer (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install innosetup --version=6.7.1 -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            "/DAppVersion=${{ needs.check.outputs.version }}" `
+            "/DBundle=$PWD\bundle" "/DOutDir=$PWD\dist" "/DOutName=${{ matrix.name }}-setup" `
+            packaging\windows\pomme.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
@@ -178,40 +229,15 @@ jobs:
 
   release-client:
     needs: [check, build-client]
-    if: needs.check.outputs.should_release == 'true'
+    if: >-
+      needs.check.outputs.should_release == 'true' && !inputs.dry_run
+      && github.event_name != 'pull_request'
 
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
-      - name: Resolve release tag
-        id: rel
-        shell: bash
-        run: |
-          git fetch --tags --force
-          tags=$(git tag --list 'client-v*')
-          if [ "${{ github.event_name }}" = "push" ]; then
-            tag="${{ github.ref_name }}"
-          else
-            core="${{ inputs.version }}"
-            if [ -z "$core" ]; then
-              latest=$(echo "$tags" \
-                | sed -nE 's/^client-v([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
-                | sort -V | tail -n1)
-              if [ -z "$latest" ]; then
-                core="0.1.0"
-              else
-                IFS=. read -r ma mi pa <<< "$latest"
-                core="$ma.$mi.$((pa + 1))"
-              fi
-            fi
-            tag="client-v${core}+${MC_VERSION}"
-          fi
-          prev=$(echo "$tags" | grep -vFx "$tag" | sort -V | tail -n1 || true)
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "prev=$prev" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v8
         with:
@@ -221,25 +247,29 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum *.zip > sha256sums.txt
+          sha256sum * > sha256sums.txt
 
       - uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ steps.rel.outputs.tag }}
+          tag_name: ${{ needs.check.outputs.tag }}
           prerelease: false
-          # Keep the "Latest" badge on the launcher release, not the weekly client.
-          make_latest: false
-          previous_tag: ${{ steps.rel.outputs.prev }}
+          make_latest: true
+          previous_tag: ${{ needs.check.outputs.prev }}
           files: dist/*
-          generate_release_notes: ${{ steps.rel.outputs.prev != '' }}
+          generate_release_notes: ${{ needs.check.outputs.prev != '' }}
+          body: |
+            These builds aren't signed yet, so the first launch needs one extra step:
+            - **macOS:** open `Pomme.app` with right-click → Open, or allow it under System Settings → Privacy & Security.
+            - **Windows:** on the SmartScreen prompt, choose More info → Run anyway.
+            - **Linux:** `chmod +x pomme-client-linux-x64-gnu.AppImage`, then run it.
 
       - name: Announce release on Discord
-        if: steps.rel.outputs.prev != ''
+        if: needs.check.outputs.prev != ''
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          TAG: ${{ steps.rel.outputs.tag }}
+          TAG: ${{ needs.check.outputs.tag }}
         shell: bash
         run: |
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then

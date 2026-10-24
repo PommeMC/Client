@@ -19,6 +19,7 @@ pub mod menu;
 pub mod object_glyph;
 pub mod pause;
 pub mod player_tab;
+pub mod recipe_book;
 pub mod server_dialog;
 pub mod server_list;
 pub mod spectator_menu;
@@ -27,6 +28,7 @@ pub mod text;
 pub mod text_edit;
 pub mod title;
 pub mod toast;
+pub mod touch_controls;
 pub mod world_list;
 
 pub mod bundle;

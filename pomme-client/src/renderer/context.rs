@@ -6,9 +6,12 @@ use pomme_gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 #[cfg(debug_assertions)]
 use pyronyx::ext::debug_utils::DebugUtilsInstance;
 use pyronyx::khr::surface::{SurfaceInstance, SurfacePhysicalDevice};
+#[cfg(not(mobile))]
 use pyronyx::raw_window_handle::{create_surface, get_required_extensions};
 use pyronyx::{khr, vk};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+#[cfg(not(mobile))]
+use raw_window_handle::HasDisplayHandle;
+use raw_window_handle::HasWindowHandle;
 use thiserror::Error;
 use winit::window::Window;
 
@@ -42,9 +45,19 @@ const VALIDATION_LAYERS: &[&CStr] = &[c"VK_LAYER_KHRONOS_validation"];
 
 const DEVICE_EXTENSIONS: &[&CStr] = &[
     khr::swapchain::NAME,
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     khr::portability_subset::NAME,
 ];
+
+/// The optional features behind the chunk pass's indirect draws.
+#[derive(Clone, Copy, Debug)]
+pub struct IndirectDrawFeatures {
+    /// `vkCmdDrawIndexedIndirectCount` (core in 1.2). Without it the whole
+    /// draw list is drawn, its unfilled slots zeroed into no-op draws.
+    pub count: bool,
+    /// `multiDrawIndirect`. Without it each draw-list slot is its own call.
+    pub multi_draw: bool,
+}
 
 /// Optional, enabled only when the device supports both.
 const PRESENT_WAIT_EXTENSIONS: &[&CStr] = &[khr::present_id::NAME, khr::present_wait::NAME];
@@ -69,6 +82,7 @@ pub struct VulkanContext {
     pub in_flight_fences: [vk::Fence; MAX_FRAMES_IN_FLIGHT],
     pub frame_index: usize,
     pub present_wait: bool,
+    pub indirect_draw: IndirectDrawFeatures,
 
     #[cfg(debug_assertions)]
     debug_messenger: vk::DebugUtilsMessengerEXT,
@@ -79,12 +93,23 @@ pub struct VulkanContext {
 
 impl VulkanContext {
     pub fn new(window: &Window) -> Result<Self, ContextError> {
-        let display_handle = window.display_handle()?.as_raw();
-        let window_handle = window.window_handle()?.as_raw();
-
+        #[cfg(target_os = "android")]
+        let required = [
+            khr::surface::NAME.as_ptr(),
+            khr::android_surface::NAME.as_ptr(),
+        ];
+        #[cfg(target_os = "ios")]
+        let required = [
+            khr::surface::NAME.as_ptr(),
+            pyronyx::ext::metal_surface::NAME.as_ptr(),
+        ];
+        #[cfg(not(mobile))]
+        let required = get_required_extensions(window.display_handle()?.as_raw())?;
         #[allow(unused_mut)]
-        let mut extensions = get_required_extensions(display_handle)?.to_vec();
+        let mut extensions = required.to_vec();
 
+        // The loader only lists MoltenVK, a portability implementation, when
+        // asked; iOS links MoltenVK directly, with no loader.
         #[cfg(target_os = "macos")]
         extensions.push(khr::portability_enumeration::NAME.as_ptr());
 
@@ -150,16 +175,14 @@ impl VulkanContext {
             vk::DebugUtilsMessengerEXT::null()
         };
 
-        let surface = create_surface(&instance, display_handle, window_handle)?;
+        let surface = window_surface(&instance, window)?;
 
         let (physical_device, graphics_family, present_family) =
             pick_physical_device(&instance, surface)?;
 
         let (gpu_name, vulkan_version) = {
             let props = physical_device.get_properties();
-            let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
-                .to_string_lossy()
-                .into_owned();
+            let name = device_name(&props);
             let v = props.api_version;
             let ver = format!(
                 "Vulkan {}.{}.{}",
@@ -197,13 +220,18 @@ impl VulkanContext {
             ]
         };
 
+        let indirect_draw = IndirectDrawFeatures {
+            count: supports_draw_indirect_count(&physical_device),
+            multi_draw: physical_device.get_features().multi_draw_indirect == vk::TRUE,
+        };
+        tracing::info!("Indirect draws: {indirect_draw:?}");
+        let enabled_features = vk::PhysicalDeviceFeatures {
+            multi_draw_indirect: indirect_draw.multi_draw.into(),
+            draw_indirect_first_instance: vk::TRUE,
+            ..Default::default()
+        };
         let mut vk12_features = vk::PhysicalDeviceVulkan12Features {
-            // MoltenVK lacks drawIndirectCount; the chunk renderer has a macOS fallback.
-            draw_indirect_count: if cfg!(target_os = "macos") {
-                vk::FALSE
-            } else {
-                vk::TRUE
-            },
+            draw_indirect_count: vk::TRUE,
             ..Default::default()
         };
 
@@ -235,9 +263,13 @@ impl VulkanContext {
             queue_create_infos: queue_create_infos.as_ptr(),
             enabled_extension_count: device_extension_names.len() as u32,
             enabled_extension_names: device_extension_names.as_ptr(),
+            enabled_features: &enabled_features,
             ..Default::default()
+        };
+        // Only a 1.2 device takes the struct, so it's chained only with the count.
+        if indirect_draw.count {
+            device_info = device_info.next(&mut vk12_features);
         }
-        .next(&mut vk12_features);
         if present_wait {
             device_info = device_info
                 .next(&mut present_id_features)
@@ -305,11 +337,24 @@ impl VulkanContext {
             in_flight_fences,
             frame_index: 0,
             present_wait,
+            indirect_draw,
             #[cfg(debug_assertions)]
             debug_messenger,
             gpu_name,
             vulkan_version,
         })
+    }
+
+    /// Destroys the surface while Android has taken the native window away.
+    pub fn destroy_surface(&mut self) {
+        self.instance.destroy_surface(self.surface, None);
+        self.surface = vk::SurfaceKHR::null();
+    }
+
+    /// A surface for the native window Android hands back on resume.
+    pub fn recreate_surface(&mut self, window: &Window) -> Result<(), ContextError> {
+        self.surface = window_surface(&self.instance, window)?;
+        Ok(())
     }
 
     pub fn advance_frame(&mut self) {
@@ -357,10 +402,19 @@ fn pick_physical_device(
         .into_iter()
         .filter_map(|pd| {
             let (gf, pf) = find_queue_families(&pd, surface)?;
-            if !supports_extensions(&pd, DEVICE_EXTENSIONS) {
+            let props = pd.get_properties();
+            // The chunk pass indexes each section's meta by `firstInstance`.
+            let missing = if !supports_extensions(&pd, DEVICE_EXTENSIONS) {
+                Some("a required extension")
+            } else if pd.get_features().draw_indirect_first_instance != vk::TRUE {
+                Some("drawIndirectFirstInstance")
+            } else {
+                None
+            };
+            if let Some(missing) = missing {
+                tracing::info!("Skipping {}: no {missing}", device_name(&props));
                 return None;
             }
-            let props = pd.get_properties();
             let score = match props.device_type {
                 vk::PhysicalDeviceType::DiscreteGpu => 100,
                 vk::PhysicalDeviceType::IntegratedGpu => 50,
@@ -379,6 +433,12 @@ fn pick_physical_device(
         .ok_or(ContextError::NoSuitableGpu)
 }
 
+fn device_name(props: &vk::PhysicalDeviceProperties) -> String {
+    unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn supports_extensions(device: &vk::PhysicalDevice, names: &[&CStr]) -> bool {
     let available = device
         .enumerate_device_extension_properties(None)
@@ -388,6 +448,61 @@ fn supports_extensions(device: &vk::PhysicalDevice, names: &[&CStr]) -> bool {
             .iter()
             .any(|ext| unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) == required })
     })
+}
+
+fn window_surface(
+    instance: &vk::Instance,
+    window: &Window,
+) -> Result<vk::SurfaceKHR, ContextError> {
+    let window_handle = window.window_handle()?.as_raw();
+    // TODO: pyronyx 0.5.0's Android arm of `create_surface` doesn't compile
+    // (it passes the `c_void` window where `ANativeWindow` is expected), so
+    // Android builds its surface here, without pyronyx's `rwh_06` feature.
+    #[cfg(target_os = "android")]
+    {
+        use pyronyx::khr::android_surface::AndroidSurfaceInstance;
+        let raw_window_handle::RawWindowHandle::AndroidNdk(handle) = window_handle else {
+            return Err(raw_window_handle::HandleError::NotSupported.into());
+        };
+        let create_info = vk::AndroidSurfaceCreateInfoKHR {
+            window: handle.a_native_window.as_ptr().cast(),
+            ..Default::default()
+        };
+        Ok(instance.create_android_surface(&create_info, None)?)
+    }
+    // pyronyx 0.5.0's `create_surface` has no UiKit arm; this is its AppKit
+    // one, on the view's Metal layer.
+    #[cfg(target_os = "ios")]
+    {
+        use pyronyx::ext::metal_surface::MetalSurfaceInstance;
+        let raw_window_handle::RawWindowHandle::UiKit(handle) = window_handle else {
+            return Err(raw_window_handle::HandleError::NotSupported.into());
+        };
+        // SAFETY: winit's view is a live `UIView` while the window exists,
+        // and `into_raw` hands the layer's ownership to the surface.
+        let layer = unsafe { raw_window_metal::Layer::from_ui_view(handle.ui_view) };
+        let create_info = vk::MetalSurfaceCreateInfoEXT {
+            layer: layer.into_raw().as_ptr().cast(),
+            ..Default::default()
+        };
+        Ok(instance.create_metal_surface(&create_info, None)?)
+    }
+    #[cfg(not(mobile))]
+    Ok(create_surface(
+        instance,
+        window.display_handle()?.as_raw(),
+        window_handle,
+    )?)
+}
+
+fn supports_draw_indirect_count(device: &vk::PhysicalDevice) -> bool {
+    if device.get_properties().api_version < vk::API_VERSION_1_2 {
+        return false;
+    }
+    let mut vk12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default().next(&mut vk12);
+    device.get_features2(&mut features);
+    vk12.draw_indirect_count == vk::TRUE
 }
 
 fn supports_present_wait(device: &vk::PhysicalDevice) -> bool {

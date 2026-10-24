@@ -336,6 +336,7 @@ impl LightEngine for SkyLightEngine {
         from_level: u8,
     ) {
         let mut from_state: Option<BlockState> = None;
+        let block_state_table = world.block_state_table();
         let empty_sections_below = self.count_empty_sections_below_if_at_border(from);
         for dir in Dir::ALL {
             if !entry::should_propagate_in_direction(data, dir) {
@@ -350,7 +351,8 @@ impl LightEngine for SkyLightEngine {
                 continue;
             }
             let to_state = world.state(to);
-            let new_to_level = from_level as i32 - opacity(to_state) as i32;
+            let new_to_level =
+                from_level as i32 - opacity(block_state_table.block_state_data(to_state)) as i32;
             if new_to_level <= to_level {
                 continue;
             }
@@ -361,7 +363,11 @@ impl LightEngine for SkyLightEngine {
                     world.state(from)
                 }
             });
-            if block::shape_occludes(from_state, to_state, dir as usize) {
+            if block::shape_occludes_data(
+                block_state_table.block_state_data(from_state),
+                block_state_table.block_state_data(to_state),
+                dir as usize,
+            ) {
                 continue;
             }
             self.storage.set_stored_level(to, new_to_level as u8);
@@ -370,7 +376,9 @@ impl LightEngine for SkyLightEngine {
                     to,
                     entry::increase_skip_one_direction(
                         new_to_level as u8,
-                        block::is_empty_shape(to_state),
+                        block_state_table
+                            .block_state_data(to_state)
+                            .is_empty_shape(),
                         dir.opposite(),
                     ),
                 ));

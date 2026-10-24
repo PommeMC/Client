@@ -2,5 +2,7 @@ pub mod block;
 pub mod block_entity;
 pub mod block_entity_anim;
 pub mod chunk;
+pub mod level;
 pub mod light;
+pub mod piston;
 pub mod waypoints;

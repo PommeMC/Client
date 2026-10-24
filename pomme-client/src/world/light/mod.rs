@@ -31,21 +31,36 @@ use storage::StorageCore;
 pub(crate) use storage::{LightPos, SectionKey};
 use world::StoreWorld;
 
-use crate::world::block as block_data;
+use crate::world::block::{BlockStateData, BlockStateTable};
 use crate::world::chunk::{ChunkLightData, ChunkStore};
 
+/// Vanilla `Lightmap.getBrightness`: a 0..15 light level on the lightmap
+/// curve, lifted by the dimension's ambient light.
+pub fn lightmap_brightness(level: u8, ambient_light: f32) -> f32 {
+    let v = f32::from(level) / 15.0;
+    let curved = v / (4.0 - 3.0 * v);
+    curved + (1.0 - curved) * ambient_light
+}
+
 /// Vanilla `LightEngine.getOpacity`: light always attenuates by at least 1.
-pub(crate) fn opacity(state: BlockState) -> u8 {
-    block_data::light_props(state).dampening.max(1)
+pub(crate) fn opacity(block_state_data: &BlockStateData) -> u8 {
+    block_state_data.light_props().dampening.max(1)
 }
 
 /// Vanilla `LightEngine.hasDifferentLightProperties`: whether a block change
 /// requires a relight.
-pub(crate) fn has_different_light_properties(old: BlockState, new: BlockState) -> bool {
+pub(crate) fn has_different_light_properties(
+    old: BlockState,
+    new: BlockState,
+    block_state_table: BlockStateTable,
+) -> bool {
     if old == new {
         return false;
     }
-    let (o, n) = (block_data::light_props(old), block_data::light_props(new));
+    let (o, n) = (
+        block_state_table.block_state_data(old).light_props(),
+        block_state_table.block_state_data(new).light_props(),
+    );
     n.dampening != o.dampening
         || n.emission != o.emission
         || n.use_shape_for_light_occlusion
@@ -72,19 +87,39 @@ impl SectionEntry {
     }
 }
 
+/// A light packet's section mask, as the `java.util.BitSet` vanilla reads
+/// it into: bit `i` is bit `i % 64` of long `i / 64`, and bits past the last
+/// long are clear.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BitSet(Box<[u64]>);
+
+impl BitSet {
+    pub fn get(&self, i: usize) -> bool {
+        self.0
+            .get(i / 64)
+            .is_some_and(|long| long >> (i % 64) & 1 != 0)
+    }
+}
+
+impl From<Vec<u64>> for BitSet {
+    fn from(longs: Vec<u64>) -> Self {
+        Self(longs.into())
+    }
+}
+
 /// Vanilla `readSectionList`: expands a packet's y-mask pair into one entry
 /// per light section. Malformed (non-2048-byte) payloads are skipped rather
 /// than disconnecting.
 pub(crate) fn section_entries(
     light_section_count: usize,
-    y_mask: &azalea_core::bitset::BitSet,
-    empty_y_mask: &azalea_core::bitset::BitSet,
+    y_mask: &BitSet,
+    empty_y_mask: &BitSet,
     updates: &[Box<[u8]>],
 ) -> Vec<SectionEntry> {
     let mut next = 0usize;
     (0..light_section_count)
         .map(|i| {
-            if i < y_mask.len() && y_mask.index(i) {
+            if y_mask.get(i) {
                 let entry = match updates.get(next) {
                     Some(bytes) if bytes.len() == LAYER_BYTES => {
                         let mut data = Box::new([0u8; LAYER_BYTES]);
@@ -95,7 +130,7 @@ pub(crate) fn section_entries(
                 };
                 next += 1;
                 entry
-            } else if i < empty_y_mask.len() && empty_y_mask.index(i) {
+            } else if empty_y_mask.get(i) {
                 SectionEntry::Empty
             } else {
                 SectionEntry::Skip
@@ -109,13 +144,15 @@ pub(crate) fn section_entries(
 pub(crate) fn set_block_and_light(
     store: &ChunkStore,
     engine: &mut LevelLightEngine,
+    block_state_table: BlockStateTable,
     x: i32,
     y: i32,
     z: i32,
     state: BlockState,
 ) -> BlockState {
-    let (old, empty_flip) = store.set_block_state_tracked(x, y, z, state);
+    let (old, empty_flip) = store.set_block_state_tracked(x, y, z, state, block_state_table);
     engine.on_block_changed(
+        block_state_table,
         LightPos::new(x, y, z),
         old,
         state,
@@ -209,6 +246,7 @@ impl LevelLightEngine {
     /// the position's x/z by world Y.
     pub fn on_block_changed(
         &mut self,
+        block_state_table: BlockStateTable,
         pos: LightPos,
         old: BlockState,
         new: BlockState,
@@ -221,11 +259,17 @@ impl LevelLightEngine {
                 sky.update_section_status(pos.section(), empty);
             }
         }
-        if has_different_light_properties(old, new) {
+        if has_different_light_properties(old, new, block_state_table) {
             if let Some(sky) = &mut self.sky
                 && let Some(sources) = sky.sources.get_mut(&(pos.x >> 4, pos.z >> 4))
             {
-                sources.update(column_state, pos.x & 15, pos.y, pos.z & 15);
+                sources.update(
+                    block_state_table,
+                    column_state,
+                    pos.x & 15,
+                    pos.y,
+                    pos.z & 15,
+                );
             }
             self.block.check_block(pos);
             if let Some(sky) = &mut self.sky {
@@ -240,14 +284,27 @@ impl LevelLightEngine {
     /// `hasDifferentLightProperties` work-skip dropped — section status
     /// dedups and `checkNode` recomputes idempotently, so results match at a
     /// small recompute cost.
-    pub fn on_block_dirty(&mut self, store: &ChunkStore, x: i32, y: i32, z: i32) {
+    pub fn on_block_dirty(
+        &mut self,
+        store: &ChunkStore,
+        block_state_table: BlockStateTable,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) {
         let pos = LightPos::new(x, y, z);
         let empty = store.section_is_empty((x >> 4, z >> 4), y >> 4);
         self.block.update_section_status(pos.section(), empty);
         if let Some(sky) = &mut self.sky {
             sky.update_section_status(pos.section(), empty);
             if let Some(sources) = sky.sources.get_mut(&(x >> 4, z >> 4)) {
-                sources.update(&|cy| store.get_block_state(x, cy, z), x & 15, y, z & 15);
+                sources.update(
+                    block_state_table,
+                    &|cy| store.get_block_state(x, cy, z),
+                    x & 15,
+                    y,
+                    z & 15,
+                );
             }
         }
         self.block.check_block(pos);
@@ -261,7 +318,12 @@ impl LevelLightEngine {
     /// queued light task) and creates its light column from any layers the
     /// engine already stores (border sections lit by loaded neighbors), so
     /// later publishes only need to touch changed sections.
-    pub fn on_chunk_loaded(&mut self, store: &mut ChunkStore, pos: (i32, i32)) {
+    pub fn on_chunk_loaded(
+        &mut self,
+        store: &mut ChunkStore,
+        block_state_table: BlockStateTable,
+        pos: (i32, i32),
+    ) {
         let count = self.light_section_count();
         let min_section_y = self.min_section_y;
         let key_at = |index: usize| SectionKey::new(pos.0, min_section_y - 1 + index as i32, pos.1);
@@ -283,12 +345,14 @@ impl LevelLightEngine {
                 .sky
                 .column_top(pos)
                 .map(|top| top - (self.min_section_y - 1));
-            if let Some(chunk) =
-                store.get_chunk(&azalea_core::position::ChunkPos::new(pos.0, pos.1))
-            {
+            if let Some(chunk) = store.get_chunk(&crate::position::ChunkPos::new(pos.0, pos.1)) {
                 sky.sources.insert(
                     pos,
-                    ChunkSkyLightSources::fill_from(store.min_y(), &chunk.read()),
+                    ChunkSkyLightSources::fill_from(
+                        store.min_y(),
+                        &chunk.read(),
+                        block_state_table,
+                    ),
                 );
             }
         }
@@ -315,7 +379,12 @@ impl LevelLightEngine {
 
     /// Drains queued light tasks at vanilla's per-tick rate limit, then runs
     /// the light updates. Call once per game tick.
-    pub fn poll_and_run(&mut self, store: &mut ChunkStore, out: &mut LightDirty) {
+    pub fn poll_and_run(
+        &mut self,
+        store: &mut ChunkStore,
+        block_state_table: BlockStateTable,
+        out: &mut LightDirty,
+    ) {
         // Vanilla ClientLevel.pollLightUpdates: size < 1000 ? max(10, size/10)
         // : size tasks per tick.
         let size = self.tasks.len();
@@ -330,7 +399,7 @@ impl LevelLightEngine {
             };
             self.apply_task(task, store, out);
         }
-        self.run_light_updates(store, out);
+        self.run_light_updates(store, block_state_table, out);
     }
 
     fn apply_task(&mut self, task: LightTask, store: &mut ChunkStore, out: &mut LightDirty) {
@@ -414,10 +483,15 @@ impl LevelLightEngine {
     /// Vanilla `runLightUpdates` per engine (block first, then sky), with the
     /// publish step sitting where `swapSectionMap` does: after the decrease
     /// pass, before the increase pass.
-    fn run_light_updates(&mut self, store: &mut ChunkStore, out: &mut LightDirty) {
+    fn run_light_updates(
+        &mut self,
+        store: &mut ChunkStore,
+        block_state_table: BlockStateTable,
+        out: &mut LightDirty,
+    ) {
         let (min_section_y, section_count) = (self.min_section_y, self.section_count);
         {
-            let world = StoreWorld::new(store);
+            let world = StoreWorld::new(store, block_state_table);
             self.block.begin_updates(&world);
         }
         Self::publish(
@@ -430,12 +504,12 @@ impl LevelLightEngine {
             out,
         );
         {
-            let world = StoreWorld::new(store);
+            let world = StoreWorld::new(store, block_state_table);
             self.block.finish_updates(&world);
         }
         if let Some(sky) = &mut self.sky {
             {
-                let world = StoreWorld::new(store);
+                let world = StoreWorld::new(store, block_state_table);
                 sky.begin_updates(&world);
             }
             Self::publish(
@@ -448,7 +522,7 @@ impl LevelLightEngine {
                 out,
             );
             {
-                let world = StoreWorld::new(store);
+                let world = StoreWorld::new(store, block_state_table);
                 sky.finish_updates(&world);
             }
         }
@@ -506,16 +580,20 @@ mod tests {
 
     use super::world::LightBlockGetter;
     use super::*;
-    use crate::world::block::find_state;
+
+    fn find_state(name: &str, props: &[(&str, &str)]) -> BlockState {
+        BlockStateTable::native().find_state(name, props)
+    }
 
     struct TestWorld {
+        block_state_table: BlockStateTable,
         blocks: HashMap<LightPos, BlockState>,
     }
 
     impl TestWorld {
         fn new() -> Self {
-            crate::world::block::init("26.2");
             Self {
+                block_state_table: BlockStateTable::native(),
                 blocks: HashMap::new(),
             }
         }
@@ -530,6 +608,10 @@ mod tests {
     }
 
     impl LightBlockGetter for TestWorld {
+        fn block_state_table(&self) -> BlockStateTable {
+            self.block_state_table
+        }
+
         fn state(&self, pos: LightPos) -> BlockState {
             self.blocks.get(&pos).copied().unwrap_or(BlockState::AIR)
         }
@@ -691,7 +773,13 @@ mod tests {
         engine.update_section_status(SectionKey::new(0, 0, 0), false);
         let mut sources = ChunkSkyLightSources::new(-64);
         for &(x, y, z) in source_ys {
-            sources.update(&|sy| world.state(LightPos::new(x, sy, z)), x, y, z);
+            sources.update(
+                world.block_state_table(),
+                &|sy| world.state(LightPos::new(x, sy, z)),
+                x,
+                y,
+                z,
+            );
         }
         engine.sources.insert((0, 0), sources);
         engine.set_light_enabled((0, 0), true);
@@ -720,6 +808,7 @@ mod tests {
         // sideways under the floor.
         world.clear(8, 0, 8);
         engine.sources.get_mut(&(0, 0)).unwrap().update(
+            world.block_state_table(),
             &|y| world.state(LightPos::new(8, y, 8)),
             8,
             0,
@@ -737,6 +826,7 @@ mod tests {
         // re-darkens everything under the floor.
         world.set(8, 0, 8, stone);
         engine.sources.get_mut(&(0, 0)).unwrap().update(
+            world.block_state_table(),
             &|y| world.state(LightPos::new(8, y, 8)),
             8,
             0,
@@ -776,13 +866,46 @@ mod tests {
         let glass = find_state("glass", &[]);
         let slab = find_state("oak_slab", &[("type", "bottom"), ("waterlogged", "false")]);
 
-        assert!(!has_different_light_properties(stone, stone));
-        assert!(has_different_light_properties(air, stone));
-        assert!(has_different_light_properties(air, torch));
+        assert!(!has_different_light_properties(
+            stone,
+            stone,
+            _world.block_state_table()
+        ));
+        assert!(has_different_light_properties(
+            air,
+            stone,
+            _world.block_state_table()
+        ));
+        assert!(has_different_light_properties(
+            air,
+            torch,
+            _world.block_state_table()
+        ));
         // Glass matches air in every light property: no relight, as vanilla.
-        assert!(!has_different_light_properties(air, glass));
+        assert!(!has_different_light_properties(
+            air,
+            glass,
+            _world.block_state_table()
+        ));
         // Shaped states always relight.
-        assert!(has_different_light_properties(air, slab));
-        assert!(has_different_light_properties(slab, air));
+        assert!(has_different_light_properties(
+            air,
+            slab,
+            _world.block_state_table()
+        ));
+        assert!(has_different_light_properties(
+            slab,
+            air,
+            _world.block_state_table()
+        ));
+    }
+
+    #[test]
+    fn lightmap_brightness_follows_vanilla() {
+        assert_eq!(super::lightmap_brightness(15, 0.0), 1.0);
+        assert_eq!(super::lightmap_brightness(0, 0.0), 0.0);
+        assert!((super::lightmap_brightness(0, 0.25) - 0.25).abs() < 1e-6);
+        let v = 7.0 / 15.0;
+        assert!((super::lightmap_brightness(7, 0.0) - v / (4.0 - 3.0 * v)).abs() < 1e-6);
     }
 }

@@ -1,0 +1,76 @@
+# A rebound key binding follows its new key: drop moved to J throws from J
+# and no longer from Q, and a key bound to two actions fires both.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/kill @e[type=item]"
+
+[[step]]
+chat = "/give @s minecraft:stone 5"
+
+[[step]]
+expect = { slot = 36, item = "stone", count = 5 }
+
+[[step]]
+bind = { action = "key.drop", keys = ["key.keyboard.j"] }
+
+[[step]]
+press = { key = "key.keyboard.q" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+expect = { slot = 36, item = "stone", count = 5 }
+
+[[step]]
+press = { key = "key.keyboard.j" }
+
+[[step]]
+expect = { slot = 36, item = "stone", count = 4 }
+
+[[step]]
+expect = { item_entity = "stone" }
+
+# Q on both drop and hotbar slot 2 fires both, the slot first as the game
+# does: one dirt drops from slot 2 and the stone stays.
+[[step]]
+chat = "/give @s minecraft:dirt 3"
+
+[[step]]
+expect = { slot = 37, item = "dirt", count = 3 }
+
+[[step]]
+bind = { action = "key.drop", keys = ["key.keyboard.q"] }
+
+[[step]]
+bind = { action = "key.hotbar.2", keys = ["key.keyboard.q"] }
+
+[[step]]
+press = { key = "key.keyboard.q" }
+
+[[step]]
+expect = { slot = 37, item = "dirt", count = 2 }
+
+[[step]]
+expect = { slot = 36, item = "stone", count = 4 }
+
+[[step]]
+bind = { action = "key.drop" }
+
+[[step]]
+bind = { action = "key.hotbar.2" }
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/kill @e[type=item]"

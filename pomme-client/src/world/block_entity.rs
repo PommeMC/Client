@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
-use azalea_block::BlockState;
-use azalea_core::position::BlockPos;
 use azalea_registry::builtin::BlockEntityKind;
 use simdnbt::owned::NbtCompound;
+
+use crate::position::BlockPos;
+use crate::world::block::BlockStateData;
 
 #[derive(Clone)]
 pub struct StoredBlockEntity {
@@ -50,9 +51,9 @@ fn is_rendered(kind: BlockEntityKind) -> bool {
 pub fn sync_block_entity(
     map: &mut HashMap<BlockPos, StoredBlockEntity>,
     pos: BlockPos,
-    state: BlockState,
+    block_state_data: &BlockStateData,
 ) {
-    let id = crate::world::block::block_id(state);
+    let id = block_state_data.id();
     if let Some(kind) = rendered_kind(id) {
         if map.get(&pos).is_none_or(|e| e.kind != kind) {
             map.insert(
@@ -119,6 +120,7 @@ pub fn is_block_entity_block(name: &str) -> bool {
     )
 }
 
+/// Vanilla `RenderShape.INVISIBLE`: blocks with no model of their own.
 pub fn is_invisible_block(name: &str) -> bool {
     matches!(
         name,
@@ -129,7 +131,11 @@ pub fn is_invisible_block(name: &str) -> bool {
             | "light"
             | "structure_void"
             | "moving_piston"
-            | "heavy_core"
+            | "water"
+            | "lava"
+            | "bubble_column"
+            | "end_portal"
+            | "end_gateway"
     )
 }
 

@@ -1,4 +1,5 @@
 pub mod block_entity_model;
+pub mod boot;
 pub mod camera;
 pub mod chunk;
 mod context;
@@ -11,18 +12,22 @@ mod swapchain;
 pub(crate) mod util;
 
 pub(crate) const MAX_FRAMES_IN_FLIGHT: usize = 3;
+/// iOS keeps a backgrounded app's view and Metal layer, so its surface
+/// outlives a suspend; Android takes the native window away.
+const KEEPS_SURFACE_WHEN_SUSPENDED: bool = cfg!(target_os = "ios");
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use azalea_block::BlockState;
-use azalea_core::position::{BlockPos, ChunkPos};
 pub use camera::CloudMode;
 use camera::{Camera, CameraUniform};
-use chunk::atlas::TextureAtlas;
+use chunk::atlas::{AtlasUVMap, TextureAtlas};
 use chunk::buffer::ChunkBufferStore;
-use chunk::mesher::{ChunkMeshData, MeshDispatcher};
+use chunk::mesh_source::MeshSource;
+use chunk::mesher::ChunkMeshData;
+use chunk::moving_blocks::{MovingBlockBuffers, MovingBlockRender};
 use context::VulkanContext;
 use glam::dvec3;
 use pipelines::block_entity::BlockEntityPipeline;
@@ -33,6 +38,7 @@ use pipelines::book_preview::BookPreviewPipeline;
 use pipelines::chunk::ChunkPipeline;
 use pipelines::clouds::CloudPipeline;
 use pipelines::entity_renderer::{ArmorRenderInfo, EntityRenderInfo, EntityRenderer};
+use pipelines::entity_shadow::{EntityShadowPipeline, ShadowScene};
 use pipelines::hand::HandPipeline;
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
 use pipelines::panorama::PanoramaPipeline;
@@ -41,6 +47,7 @@ use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
 use pyronyx::khr::present_wait::PresentWaitDevice;
+use pyronyx::khr::surface::SurfacePhysicalDevice;
 use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
 use pyronyx::vk;
 use swapchain::Swapchain;
@@ -51,10 +58,30 @@ use winit::window::Window;
 use crate::app::input::InputState;
 use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
+use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::ui::font::{FontOptions, FontSources};
-use crate::world::block::registry::BlockRegistry;
+use crate::world::block::render_assets::{BlockRenderAssets, BlockRenderView};
+
+/// The live atlas's layout, so meshes bake in UVs that match it.
+impl MeshSource for Renderer {
+    fn shared_render_assets(&self) -> Arc<BlockRenderAssets> {
+        Arc::clone(&self.render_assets)
+    }
+
+    fn uv_map(&self) -> &AtlasUVMap {
+        &self.atlas.uv_map
+    }
+
+    fn jar_assets_dir(&self) -> &Path {
+        &self.jar_assets_dir
+    }
+
+    fn asset_index(&self) -> &Option<AssetIndex> {
+        &self.asset_index
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum RendererError {
@@ -109,6 +136,7 @@ fn preview_box_rect(rect: [f32; 4], extent: vk::Extent2D) -> Option<vk::Rect2D> 
 #[allow(clippy::large_enum_variant)]
 enum RenderMode<'a> {
     World {
+        block_render: BlockRenderView<'a>,
         overlay: Vec<MenuElement>,
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
@@ -118,6 +146,8 @@ enum RenderMode<'a> {
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
+        shadows: ShadowScene<'a>,
+        moving_blocks: &'a [MovingBlockRender],
         entities: &'a [EntityRenderInfo],
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
         block_entities: &'a [BlockEntityRenderInfo],
@@ -154,7 +184,7 @@ pub struct Renderer {
     swapchain: Swapchain,
     camera: Camera,
 
-    registry: BlockRegistry,
+    render_assets: Arc<BlockRenderAssets>,
     jar_assets_dir: PathBuf,
     asset_index: Option<AssetIndex>,
 
@@ -181,11 +211,16 @@ pub struct Renderer {
 
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
+    entity_shadow_pipeline: EntityShadowPipeline,
+    moving_block_buffers: MovingBlockBuffers,
     block_entity_pipeline: BlockEntityPipeline,
     chunk_buffers: ChunkBufferStore,
     render_finished_per_image: Vec<vk::Semaphore>,
     screenshot: screenshot::ScreenshotCapture,
     swapchain_dirty: bool,
+    /// The native window is gone (Android backgrounded the app), and with it
+    /// the surface and swapchain; nothing renders until `resume`.
+    suspended: bool,
     /// Id of the last present tagged via `VK_KHR_present_id`; per swapchain.
     present_id: u64,
     vsync: bool,
@@ -199,6 +234,7 @@ impl Renderer {
         window: Arc<Window>,
         font_sources: FontSources<'_>,
         game_dir: &Path,
+        cache_dir: &Path,
         vsync: bool,
         panorama_dir: &Path,
     ) -> Result<Self, RendererError> {
@@ -208,49 +244,23 @@ impl Renderer {
             packs,
             options: font_options,
         } = font_sources;
-        let size = window.inner_size();
-
-        let registry_handle = {
+        let render_assets_handle = {
             let jar_assets_dir = jar_assets_dir.to_path_buf();
             let asset_index = asset_index.clone();
-            let game_dir = game_dir.to_path_buf();
+            let cache_dir = cache_dir.to_path_buf();
             std::thread::spawn(move || {
-                BlockRegistry::load(&jar_assets_dir, &asset_index, &game_dir, None)
+                BlockRenderAssets::load(&jar_assets_dir, &asset_index, Some(&cache_dir), None)
             })
         };
 
-        let ctx = VulkanContext::new(&window)?;
-
-        let swapchain_state = Swapchain::new(
-            &ctx,
-            size.width.max(1),
-            size.height.max(1),
-            vsync,
-            vk::SwapchainKHR::null(),
-        )?;
+        let (ctx, swapchain_state, mut menu_pipeline) =
+            boot::bring_up(&window, font_sources, vsync)?;
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
-        let font_layer_limit = ctx
-            .physical_device
-            .get_properties()
-            .limits
-            .max_image_array_layers;
 
-        let mut menu_pipeline = MenuOverlayPipeline::new(
-            &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            swapchain_state.render_pass,
-            &ctx.allocator,
-            font_sources,
-            font_layer_limit,
-        )
-        .map_err(RendererError::Font)?;
-
-        let sw = size.width.max(1) as f32;
-        let sh = size.height.max(1) as f32;
-        window.set_visible(true);
+        let sw = swapchain_extent.width as f32;
+        let sh = swapchain_extent.height as f32;
 
         let splash = |menu: &mut MenuOverlayPipeline, progress: f32, status: &str| {
             let _ = Self::render_splash(&ctx, &swapchain_state, menu, sw, sh, progress, status);
@@ -259,18 +269,16 @@ impl Renderer {
         splash(&mut menu_pipeline, 0.0, "Loading block models...");
 
         let camera = Camera::new(swapchain_state.aspect_ratio());
-        let registry = registry_handle
-            .join()
-            .expect("block registry thread panicked");
+        let render_assets = Arc::new(
+            render_assets_handle
+                .join()
+                .expect("block render assets thread panicked"),
+        );
 
         splash(&mut menu_pipeline, 0.2, "Building texture atlas...");
 
-        let generated_item_textures: HashSet<&str> = registry.flat_item_textures().collect();
-        let texture_names: HashSet<&str> = registry
-            .texture_names()
-            .chain(generated_item_textures.iter().copied())
-            .chain(crate::particle::END_ROD_SPRITES)
-            .collect();
+        let (texture_names, generated_item_textures) =
+            chunk::atlas::atlas_texture_names(&render_assets);
         let atlas = TextureAtlas::build(
             &ctx.device,
             ctx.graphics_queue,
@@ -385,8 +393,8 @@ impl Renderer {
             ctx.graphics_queue,
             ctx.command_pool,
             &ctx.allocator,
-            size.width.max(1),
-            size.height.max(1),
+            swapchain_extent.width,
+            swapchain_extent.height,
             swapchain_state.format.format,
         );
         menu_pipeline.set_blur_texture(
@@ -412,6 +420,18 @@ impl Renderer {
             packs,
         );
 
+        let moving_block_buffers = MovingBlockBuffers::new(&ctx.device, &ctx.allocator);
+
+        let entity_shadow_pipeline = EntityShadowPipeline::new(
+            &ctx.device,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            jar_assets_dir,
+            asset_index,
+        );
+
         let block_entity_pipeline = BlockEntityPipeline::new(
             &ctx.device,
             ctx.graphics_queue,
@@ -433,6 +453,7 @@ impl Renderer {
             ctx.physical_device,
             ctx.graphics_family,
             &ctx.allocator,
+            ctx.indirect_draw,
         );
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
@@ -476,14 +497,14 @@ impl Renderer {
             &ctx.allocator,
             &mut item_entity_pipeline,
             &atlas.uv_map,
-            &registry,
+            &render_assets,
         );
 
         Ok(Self {
             ctx,
             swapchain: swapchain_state,
             camera,
-            registry,
+            render_assets,
             jar_assets_dir: jar_assets_dir.to_path_buf(),
             asset_index: asset_index.clone(),
             atlas,
@@ -497,6 +518,8 @@ impl Renderer {
             skin_preview,
             book_preview,
             entity_renderer,
+            entity_shadow_pipeline,
+            moving_block_buffers,
             block_entity_pipeline,
             chunk_border_pipeline,
             item_entity_pipeline,
@@ -511,6 +534,7 @@ impl Renderer {
             render_finished_per_image,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
             swapchain_dirty: false,
+            suspended: false,
             present_id: 0,
             vsync,
             width: swapchain_extent.width,
@@ -533,7 +557,7 @@ impl Renderer {
         let cmd = ctx.command_buffers[0];
 
         let gs = (sh / 400.0).max(1.0);
-        let title_size = 28.0 * gs;
+        let logo_size = 48.0 * gs;
         let status_size = 8.0 * gs;
         let bar_w = 200.0 * gs;
         let bar_h = 6.0 * gs;
@@ -542,13 +566,13 @@ impl Renderer {
         let cy = sh / 2.0;
 
         let elements = vec![
-            MenuElement::Text {
-                x: cx,
-                y: cy - title_size - 20.0 * gs,
-                text: "Pomme".into(),
-                scale: title_size,
-                color: [0.86, 0.92, 1.0, 0.95],
-                centered: true,
+            MenuElement::Image {
+                x: cx - logo_size / 2.0,
+                y: cy - logo_size - 16.0 * gs,
+                w: logo_size,
+                h: logo_size,
+                sprite: pipelines::menu_overlay::SpriteId::PommeLogo,
+                tint: [1.0; 4],
             },
             MenuElement::Rect {
                 x: cx - bar_w / 2.0 - bar_border,
@@ -642,7 +666,16 @@ impl Renderer {
         cmd.set_scissor(0, &[scissor]);
 
         let empty_uvs: HashMap<String, [f32; 4]> = HashMap::new();
-        menu.draw(cmd, sw, sh, &elements, &empty_uvs);
+        menu.draw(
+            &ctx.device,
+            &ctx.allocator,
+            cmd,
+            0,
+            sw,
+            sh,
+            &elements,
+            &empty_uvs,
+        );
 
         cmd.end_render_pass();
         cmd.end()?;
@@ -686,6 +719,47 @@ impl Renderer {
             .set_aspect_ratio(new_size.width as f32 / new_size.height as f32);
     }
 
+    /// Stops rendering while the app is in the background, dropping the
+    /// surface and swapchain unless they outlive it, but keeping the device
+    /// and every other resource.
+    pub fn suspend(&mut self) {
+        let _ = self.ctx.device.wait_idle();
+        if !KEEPS_SURFACE_WHEN_SUSPENDED {
+            self.swapchain.release_surface(&self.ctx.device);
+            self.ctx.destroy_surface();
+        }
+        self.suspended = true;
+    }
+
+    /// Picks up rendering again, rebuilding the surface and swapchain if
+    /// `suspend` dropped them.
+    pub fn resume(&mut self, window: &Window) -> Result<(), RendererError> {
+        if !self.suspended {
+            return Ok(());
+        }
+        if KEEPS_SURFACE_WHEN_SUSPENDED {
+            self.suspended = false;
+            return Ok(());
+        }
+        self.ctx.recreate_surface(window)?;
+        self.suspended = false;
+        self.recreate_swapchain()
+    }
+
+    /// Whether a suboptimal swapchain needs rebuilding: only once the surface's
+    /// size changed. A phone held sideways is suboptimal on every frame (see
+    /// `choose_pre_transform`), and a same-size rebuild each frame stalls it.
+    fn surface_resized(&self) -> bool {
+        self.ctx
+            .physical_device
+            .get_surface_capabilities(self.ctx.surface)
+            .is_ok_and(|caps| {
+                let extent = caps.current_extent;
+                // Undefined (the window decides) or minimised: nothing to match.
+                extent.width != u32::MAX && extent.width > 0 && extent != self.swapchain.extent
+            })
+    }
+
     pub fn set_vsync(&mut self, vsync: bool) {
         if self.vsync != vsync {
             self.vsync = vsync;
@@ -700,7 +774,10 @@ impl Renderer {
         const PACE_TIMEOUT_NS: u64 = 100_000_000;
 
         self.last_timings.pace_ms = 0.0;
-        if self.swapchain_dirty || self.swapchain.present_mode != vk::PresentModeKHR::Fifo {
+        if self.suspended
+            || self.swapchain_dirty
+            || self.swapchain.present_mode != vk::PresentModeKHR::Fifo
+        {
             return;
         }
         let t_pace = std::time::Instant::now();
@@ -780,6 +857,8 @@ impl Renderer {
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.entity_renderer
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.entity_shadow_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.block_entity_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.item_entity_pipeline
@@ -791,6 +870,8 @@ impl Renderer {
         self.particle_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.cloud_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.chunk_border_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.blur_pipeline.resize(
             &self.ctx.device,
@@ -830,8 +911,16 @@ impl Renderer {
         &self.last_timings
     }
 
-    pub fn update_camera(&mut self, input: &mut InputState, dt: f32, sensitivity: f32) {
-        self.camera.update_look(input, dt, sensitivity);
+    pub fn update_camera(
+        &mut self,
+        input: &mut InputState,
+        dt: f32,
+        sensitivity: f32,
+        invert_x: bool,
+        invert_y: bool,
+    ) {
+        self.camera
+            .update_look(input, dt, sensitivity, invert_x, invert_y);
     }
 
     pub fn sync_camera_pos(&mut self, position: Position) {
@@ -865,6 +954,7 @@ impl Renderer {
 
     pub fn update_third_person_distance(
         &mut self,
+        block_render: BlockRenderView<'_>,
         eye_pos: Position,
         chunks: &crate::world::chunk::ChunkStore,
         max_distance: f32,
@@ -908,7 +998,7 @@ impl Renderer {
                     check.y.floor() as i32,
                     check.z.floor() as i32,
                 );
-                self.registry.is_opaque_full_cube(state)
+                block_render.is_opaque_full_cube(state)
             });
             if hit {
                 dist = (t - 0.3).max(0.5);
@@ -1038,6 +1128,12 @@ impl Renderer {
         self.screenshot.arm();
     }
 
+    /// [`Renderer::request_screenshot`], saved to `path`.
+    #[cfg(feature = "test-harness")]
+    pub fn request_screenshot_to(&mut self, path: std::path::PathBuf) {
+        self.screenshot.arm_to(path);
+    }
+
     /// Drain finished screenshots: `Ok(relative filename)` or `Err(message)`.
     /// The caller turns each into a chat line.
     pub fn take_screenshot_messages(&mut self) -> Vec<Result<String, String>> {
@@ -1077,54 +1173,8 @@ impl Renderer {
         self.chunk_buffers.clear();
     }
 
-    /// Rebuild state caches after the server protocol switches the block table.
-    pub fn rebuild_block_state_tables(&mut self) {
-        self.registry.build_state_tables();
-    }
-
-    pub fn registry(&self) -> &BlockRegistry {
-        &self.registry
-    }
-
-    pub fn atlas_uv_map(&self) -> &crate::renderer::chunk::atlas::AtlasUVMap {
-        &self.atlas.uv_map
-    }
-
-    pub fn create_mesh_dispatcher(
-        &self,
-        biome_climate: std::sync::Arc<
-            std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
-        >,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
-        cardinal_light: crate::world::block::model::CardinalLightType,
-    ) -> MeshDispatcher {
-        let grass_colormap = crate::renderer::chunk::mesher::Colormap::load(
-            &self.jar_assets_dir,
-            &self.asset_index,
-            "minecraft/textures/colormap/grass.png",
-            packs,
-        );
-        let foliage_colormap = crate::renderer::chunk::mesher::Colormap::load(
-            &self.jar_assets_dir,
-            &self.asset_index,
-            "minecraft/textures/colormap/foliage.png",
-            packs,
-        );
-        let dry_foliage_colormap = crate::renderer::chunk::mesher::Colormap::load(
-            &self.jar_assets_dir,
-            &self.asset_index,
-            "minecraft/textures/colormap/dry_foliage.png",
-            packs,
-        );
-        MeshDispatcher::new(
-            self.registry.clone(),
-            self.atlas.uv_map.clone(),
-            grass_colormap,
-            foliage_colormap,
-            dry_foliage_colormap,
-            biome_climate,
-            cardinal_light.table(),
-        )
+    pub fn render_assets(&self) -> &BlockRenderAssets {
+        &self.render_assets
     }
 
     pub fn update_chunk_borders(&mut self, min_y: i32, max_y: i32) {
@@ -1139,6 +1189,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub fn render_world(
         &mut self,
+        block_render: BlockRenderView<'_>,
         window: &Window,
         hide_cursor: bool,
         overlay: Vec<MenuElement>,
@@ -1150,6 +1201,8 @@ impl Renderer {
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
+        shadows: ShadowScene<'_>,
+        moving_blocks: &[MovingBlockRender],
         entities: &[EntityRenderInfo],
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
         block_entities: &[BlockEntityRenderInfo],
@@ -1165,7 +1218,7 @@ impl Renderer {
         self.camera.set_render_distance(render_distance);
         let held_item = held_item.map(|(name, light, stack)| {
             let item_tints =
-                self.registry
+                self.render_assets
                     .item_tint_palette(&name, Some(&stack), player_team_color);
             let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
             pipelines::held_item::HeldItemInfo {
@@ -1189,6 +1242,7 @@ impl Renderer {
             hide_cursor,
             [clear_col[0], clear_col[1], clear_col[2], 1.0],
             RenderMode::World {
+                block_render,
                 overlay,
                 swing_progress,
                 use_anim,
@@ -1198,6 +1252,8 @@ impl Renderer {
                 destroy_info,
                 show_chunk_borders,
                 sky,
+                shadows,
+                moving_blocks,
                 entities,
                 item_entities,
                 block_entities,
@@ -1237,34 +1293,23 @@ impl Renderer {
 
     pub fn reload_assets(
         &mut self,
-        game_dir: &Path,
         packs: &crate::resource_pack::ResourcePackManager,
         font_options: FontOptions,
     ) {
         self.ctx.device.wait_idle().unwrap();
 
-        let cache_path = game_dir.join(crate::world::block::registry::BLOCK_CACHE_FILE);
-        let _ = std::fs::remove_file(&cache_path);
-        tracing::info!("Invalidated block cache");
-
-        self.registry = BlockRegistry::load(
+        self.render_assets = Arc::new(BlockRenderAssets::load(
             &self.jar_assets_dir,
             &self.asset_index,
-            game_dir,
+            None,
             Some(packs),
-        );
+        ));
 
         self.item_entity_pipeline
             .clear_meshes(&self.ctx.device, &self.ctx.allocator);
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
-        let generated_item_textures: std::collections::HashSet<&str> =
-            self.registry.flat_item_textures().collect();
-        let texture_names: std::collections::HashSet<&str> = self
-            .registry
-            .texture_names()
-            .chain(generated_item_textures.iter().copied())
-            .chain(crate::particle::END_ROD_SPRITES)
-            .collect();
+        let (texture_names, generated_item_textures) =
+            chunk::atlas::atlas_texture_names(&self.render_assets);
         self.atlas = TextureAtlas::build(
             &self.ctx.device,
             self.ctx.graphics_queue,
@@ -1305,7 +1350,7 @@ impl Renderer {
             &self.ctx.allocator,
             &mut self.item_entity_pipeline,
             &self.atlas.uv_map,
-            &self.registry,
+            &self.render_assets,
         );
 
         // GUI item slots cache fully rendered pixels. Releasing their keys is
@@ -1460,7 +1505,7 @@ impl Renderer {
         if let Some(info) = self.item_entity_pipeline.mesh_info(name) {
             return info;
         }
-        let is_block_model = if let Some(model) = self.registry.get_item_model(name) {
+        let is_block_model = if let Some(model) = self.render_assets.get_item_model(name) {
             self.item_entity_pipeline.ensure_mesh(
                 &self.ctx.device,
                 &self.ctx.allocator,
@@ -1474,7 +1519,7 @@ impl Renderer {
                 &self.ctx.device,
                 &self.ctx.allocator,
                 name,
-                &self.registry.flat_item_layers(name),
+                &self.render_assets.flat_item_layers(name),
                 &self.atlas.uv_map,
             );
             false
@@ -1505,6 +1550,9 @@ impl Renderer {
         clear_color: [f32; 4],
         mut mode: RenderMode<'_>,
     ) -> Result<(), RendererError> {
+        if self.suspended {
+            return Ok(());
+        }
         if self.swapchain_dirty {
             self.recreate_swapchain()?;
         }
@@ -1539,7 +1587,7 @@ impl Renderer {
             Err(e) => return Err(e.into()),
         };
 
-        self.swapchain_dirty |= image.suboptimal;
+        self.swapchain_dirty |= image.suboptimal && self.surface_resized();
         let image_index = image.value;
         let acquire_ms = t_acquire.elapsed().as_secs_f32() * 1000.0;
 
@@ -1561,6 +1609,7 @@ impl Renderer {
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
+            self.entity_shadow_pipeline.update_camera(frame, &uniform);
             self.block_entity_pipeline.update_camera(frame, &uniform);
             self.chunk_border_pipeline.update_camera(frame, &uniform);
             self.item_entity_pipeline.update_camera(frame, &uniform);
@@ -1653,7 +1702,7 @@ impl Renderer {
                     } else {
                         None
                     };
-                    *item_tints = self.registry.item_tint_palette(
+                    *item_tints = self.render_assets.item_tint_palette(
                         item_name,
                         item_stack.as_ref(),
                         owner_team_color,
@@ -1672,7 +1721,7 @@ impl Renderer {
                                 return Vec::new();
                             };
                             let name = crate::player::inventory::item_resource_name(data.kind);
-                            let tints = self.registry.item_tint_palette(
+                            let tints = self.render_assets.item_tint_palette(
                                 &name,
                                 Some(data),
                                 player_team_color,
@@ -1739,7 +1788,7 @@ impl Renderer {
                         slot,
                         name: name.clone(),
                         item_tints: item_tints.clone(),
-                        display: self.registry.get_item_gui_transform(name),
+                        display: self.render_assets.get_item_gui_transform(name),
                         needs_clear: matches!(state, pipelines::gui_item_atlas::SlotState::Stale),
                     });
                 }
@@ -1814,6 +1863,7 @@ impl Renderer {
 
         match &mode {
             RenderMode::World {
+                block_render,
                 overlay,
                 swing_progress,
                 use_anim,
@@ -1823,6 +1873,8 @@ impl Renderer {
                 destroy_info,
                 show_chunk_borders,
                 sky,
+                shadows,
+                moving_blocks,
                 entities,
                 item_entities,
                 block_entities,
@@ -1850,10 +1902,18 @@ impl Renderer {
                 let t_cull = std::time::Instant::now();
                 // Solid (no discard) first so it lays down depth and early-Z lets
                 // the front-to-back order reject occluded fragments; cutout after.
+                self.moving_block_buffers.upload(
+                    &self.ctx.device,
+                    &self.ctx.allocator,
+                    frame,
+                    moving_blocks,
+                );
                 self.chunk_pipeline.bind(cmd, frame, false);
                 self.chunk_buffers.draw_indirect(cmd, frame, false);
+                self.moving_block_buffers.draw(cmd, frame, false);
                 self.chunk_pipeline.bind(cmd, frame, true);
                 self.chunk_buffers.draw_indirect(cmd, frame, true);
+                self.moving_block_buffers.draw(cmd, frame, true);
                 let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
                 let anchor = self.camera.anchor();
@@ -1863,7 +1923,7 @@ impl Renderer {
                     self.block_overlay_pipeline.draw(
                         cmd,
                         frame,
-                        &self.registry,
+                        *block_render,
                         *state,
                         block_pos,
                         anchor,
@@ -1875,6 +1935,10 @@ impl Renderer {
                 // Entities aren't sent beyond the server's tracking range; a
                 // generous render-distance cap just trims anything stray.
                 let ent_cull_dist = (*render_distance * 16) as f32 + 16.0;
+
+                self.entity_shadow_pipeline
+                    .draw(cmd, frame, shadows, anchor, eye);
+
                 self.entity_renderer.draw(
                     cmd,
                     frame,
@@ -1986,8 +2050,16 @@ impl Renderer {
                     }
                 }
 
-                self.menu_pipeline
-                    .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
+                self.menu_pipeline.draw(
+                    &self.ctx.device,
+                    &self.ctx.allocator,
+                    cmd,
+                    frame,
+                    sw,
+                    sh,
+                    overlay,
+                    &item_atlas_uvs,
+                );
 
                 // Each preview box gets its depth cleared and its own scissor
                 // while the 3D content draws.
@@ -2032,7 +2104,7 @@ impl Renderer {
             } => {
                 let aspect = sw / sh.max(1.0);
                 self.panorama_pipeline
-                    .draw(&self.ctx.device, cmd, *scroll, aspect, 0.0);
+                    .draw(&self.ctx.device, cmd, frame, *scroll, aspect, 0.0);
 
                 // A BlurBackdrop marker splits the elements: those before it are
                 // drawn into the scene so the blur pass captures them (the title
@@ -2043,7 +2115,10 @@ impl Renderer {
                 let mut vbase = 0u32;
                 if let Some(i) = split {
                     vbase = self.menu_pipeline.draw_from(
+                        &self.ctx.device,
+                        &self.ctx.allocator,
                         cmd,
+                        frame,
                         sw,
                         sh,
                         &elements[..i],
@@ -2100,8 +2175,17 @@ impl Renderer {
                     Some(i) => &elements[i + 1..],
                     None => &elements[..],
                 };
-                self.menu_pipeline
-                    .draw_from(cmd, sw, sh, fg, &item_atlas_uvs, vbase);
+                self.menu_pipeline.draw_from(
+                    &self.ctx.device,
+                    &self.ctx.allocator,
+                    cmd,
+                    frame,
+                    sw,
+                    sh,
+                    fg,
+                    &item_atlas_uvs,
+                    vbase,
+                );
             }
         }
 
@@ -2156,9 +2240,8 @@ impl Renderer {
         let t_present = std::time::Instant::now();
         match self.ctx.present_queue.present(&present_info) {
             Ok(()) => {}
-            Err(vk::Error::OutOfDateKHR | vk::Error::SuboptimalKHR) => {
-                self.swapchain_dirty = true;
-            }
+            Err(vk::Error::OutOfDateKHR) => self.swapchain_dirty = true,
+            Err(vk::Error::SuboptimalKHR) => self.swapchain_dirty |= self.surface_resized(),
             Err(e) => return Err(e.into()),
         }
         let present_ms = t_present.elapsed().as_secs_f32() * 1000.0;
@@ -2195,17 +2278,17 @@ fn warm_item_meshes(
     allocator: &Arc<std::sync::Mutex<pomme_gpu_allocator::vulkan::Allocator>>,
     item_entity_pipeline: &mut ItemEntityPipeline,
     uv_map: &chunk::atlas::AtlasUVMap,
-    registry: &BlockRegistry,
+    render_assets: &BlockRenderAssets,
 ) {
-    for name in registry.item_names() {
-        if let Some(model) = registry.get_item_model(name) {
+    for name in render_assets.item_names() {
+        if let Some(model) = render_assets.get_item_model(name) {
             item_entity_pipeline.ensure_mesh(device, allocator, name, model, uv_map);
         } else {
             item_entity_pipeline.ensure_flat_mesh(
                 device,
                 allocator,
                 name,
-                &registry.flat_item_layers(name),
+                &render_assets.flat_item_layers(name),
                 uv_map,
             );
         }
@@ -2238,7 +2321,9 @@ pub(crate) async fn fetch_skin_texture_by_name(name: &str) -> Result<SkinData, S
         .map_err(|()| "profile url cannot take a path".to_owned())?
         .pop_if_empty()
         .push(name);
-    let response = reqwest::get(url).await.map_err(error_chain)?;
+    let response = crate::net::http::get(url)
+        .await
+        .map_err(pomme_auth::error_chain)?;
     if matches!(
         response.status(),
         reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::NOT_FOUND
@@ -2247,10 +2332,10 @@ pub(crate) async fn fetch_skin_texture_by_name(name: &str) -> Result<SkinData, S
     }
     let profile: NamedProfile = response
         .error_for_status()
-        .map_err(error_chain)?
+        .map_err(pomme_auth::error_chain)?
         .json()
         .await
-        .map_err(error_chain)?;
+        .map_err(pomme_auth::error_chain)?;
     fetch_skin_texture(&profile.id).await
 }
 
@@ -2266,7 +2351,9 @@ pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<SkinData, String> {
     }
 
     let url = format!("https://sessionserver.mojang.com/session/minecraft/profile/{uuid}");
-    let response = reqwest::get(&url).await.map_err(error_chain)?;
+    let response = crate::net::http::get(&url)
+        .await
+        .map_err(pomme_auth::error_chain)?;
     if matches!(
         response.status(),
         reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::NOT_FOUND
@@ -2275,10 +2362,10 @@ pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<SkinData, String> {
     }
     let profile: SessionProfile = response
         .error_for_status()
-        .map_err(error_chain)?
+        .map_err(pomme_auth::error_chain)?
         .json()
         .await
-        .map_err(error_chain)?;
+        .map_err(pomme_auth::error_chain)?;
 
     let value = &profile
         .properties
@@ -2358,8 +2445,9 @@ fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String>
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(value)
         .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
-        .map_err(error_chain)?;
-    let payload: TexturesPayload = serde_json::from_slice(&decoded).map_err(error_chain)?;
+        .map_err(pomme_auth::error_chain)?;
+    let payload: TexturesPayload =
+        serde_json::from_slice(&decoded).map_err(pomme_auth::error_chain)?;
 
     // authlib `unpackTextures`: one bad url empties the whole payload.
     // TODO: vanilla also shows the default skin for other players whose
@@ -2401,32 +2489,17 @@ fn is_allowed_texture_url(url: &str) -> bool {
     matches!(scheme, "http" | "https") && host == HOST && port_ok
 }
 
-/// Error message including the source chain (`reqwest` hides the detail there).
-fn error_chain(e: impl std::error::Error) -> String {
-    let mut msg = e.to_string();
-    let mut source = e.source();
-    while let Some(s) = source {
-        let text = s.to_string();
-        if !msg.contains(&text) {
-            msg.push_str(": ");
-            msg.push_str(&text);
-        }
-        source = s.source();
-    }
-    msg
-}
-
 async fn fetch_skin_image(skin_url: &str) -> Result<(Vec<u8>, u32, u32), String> {
-    let skin_bytes = reqwest::get(skin_url)
+    let skin_bytes = crate::net::http::get(skin_url)
         .await
-        .map_err(error_chain)?
+        .map_err(pomme_auth::error_chain)?
         .error_for_status()
-        .map_err(error_chain)?
+        .map_err(pomme_auth::error_chain)?
         .bytes()
         .await
-        .map_err(error_chain)?;
+        .map_err(pomme_auth::error_chain)?;
 
-    let img = image::load_from_memory(&skin_bytes).map_err(error_chain)?;
+    let img = image::load_from_memory(&skin_bytes).map_err(pomme_auth::error_chain)?;
     let rgba = img.to_rgba8();
     let w = rgba.width();
     let h = rgba.height();
@@ -2553,6 +2626,10 @@ impl Drop for Renderer {
         self.book_preview
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.entity_renderer
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.entity_shadow_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.moving_block_buffers
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.block_entity_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);

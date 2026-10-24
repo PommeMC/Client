@@ -11,11 +11,14 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: impl Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         match self.theme {
-            PanoramaTheme::Pomme => self.build_main_pomme(screen_w, screen_h, input, text_width_fn),
+            PanoramaTheme::Pomme => {
+                self.build_main_pomme(screen_w, screen_h, input, text_width_fn, key_bindings)
+            }
             PanoramaTheme::Default => {
-                self.build_main_vanilla(screen_w, screen_h, input, text_width_fn)
+                self.build_main_vanilla(screen_w, screen_h, input, text_width_fn, key_bindings)
             }
         }
     }
@@ -27,6 +30,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: impl Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gs = self.gui_scale(screen_w, screen_h);
         let cursor = input.cursor;
@@ -280,12 +284,14 @@ impl MainMenu {
                 } else {
                     match def.id {
                         0 => {
-                            self.open_world_list(gs, &|t: &str| {
-                                text_width_fn(t, common::FONT_SIZE * gs)
-                            });
+                            self.open_world_list(
+                                gs,
+                                &|t: &str| text_width_fn(t, common::FONT_SIZE * gs),
+                                key_bindings,
+                            );
                         }
                         1 => {
-                            self.set_screen(Screen::ServerList);
+                            self.set_screen(Screen::ServerList, key_bindings);
                             self.scroll_offset = 0.0;
                             self.selected_server = None;
                         }
@@ -331,7 +337,7 @@ impl MainMenu {
             };
 
         let bottom_icons: [(f32, char, bool); 4] = [
-            (btn_x, ICON_USER, false),
+            (btn_x, ICON_USER, true),
             (btn_x + icon_size + icon_gap, ICON_LINK, true),
             (btn_x + content_w - icon_size, ICON_GEAR, true),
             (
@@ -348,9 +354,10 @@ impl MainMenu {
             if enabled && clicked && hovered {
                 any_clicked = true;
                 match icon {
+                    ICON_USER => self.open_account(key_bindings),
                     ICON_LINK => self.toggle_links(),
                     ICON_GEAR => {
-                        self.open_options();
+                        self.open_options(key_bindings);
                     }
                     ICON_PAINTBRUSH => self.toggle_theme(),
                     _ => {}
@@ -359,9 +366,9 @@ impl MainMenu {
         }
 
         // Second row mirrors vanilla 26.2: friends, language and accessibility,
-        // centered. Friends needs a signed-in account, so it's disabled offline.
-        let friends_enabled = self.access_token.is_some();
-        let friends_tip = if friends_enabled {
+        // centered. Signed out, Friends opens the sign-in screen instead.
+        let signed_in = self.access_token.is_some();
+        let friends_tip = if signed_in {
             "Friends"
         } else {
             "Sign in to use friends"
@@ -369,7 +376,7 @@ impl MainMenu {
         let new_row_w = icon_size * 3.0 + icon_gap * 2.0;
         let new_x0 = btn_x + (content_w - new_row_w) / 2.0;
         let new_icons: [(f32, char, bool, &str); 3] = [
-            (new_x0, ICON_USERS, friends_enabled, friends_tip),
+            (new_x0, ICON_USERS, true, friends_tip),
             (
                 new_x0 + icon_size + icon_gap,
                 ICON_LANGUAGE,
@@ -395,14 +402,15 @@ impl MainMenu {
             if enabled && clicked && hovered {
                 any_clicked = true;
                 match icon {
-                    ICON_USERS => self.open_friends(),
+                    ICON_USERS if signed_in => self.open_friends(key_bindings),
+                    ICON_USERS => self.open_account(key_bindings),
                     ICON_LANGUAGE => {
                         self.settings_back = Screen::Main;
-                        self.set_screen(Screen::OptionsLanguage);
+                        self.set_screen(Screen::OptionsLanguage, key_bindings);
                     }
                     ICON_UNIVERSAL_ACCESS => {
                         self.settings_back = Screen::Main;
-                        self.set_screen(Screen::OptionsAccessibility);
+                        self.set_screen(Screen::OptionsAccessibility, key_bindings);
                     }
                     _ => {}
                 }
@@ -450,12 +458,12 @@ impl MainMenu {
             color: footer_col,
             centered: false,
         });
-        let copy = "Pomme early dev";
-        let copy_w = text_width_fn(copy, footer_size);
+        let copy = format!("Pomme {}", crate::update::version());
+        let copy_w = text_width_fn(&copy, footer_size);
         elements.push(MenuElement::Text {
             x: screen_w - footer_pad - copy_w,
             y: footer_y,
-            text: copy.into(),
+            text: copy,
             scale: footer_size,
             color: footer_col,
             centered: false,

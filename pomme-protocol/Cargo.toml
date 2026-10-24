@@ -9,3 +9,7 @@ license = "GPL-3.0-or-later"
 serde = { workspace = true }
 serde_json = { workspace = true }
 glam = { workspace = true }
+
+[features]
+# Exposes `vanilla_fixtures` to other crates' tests.
+vanilla-fixtures = []

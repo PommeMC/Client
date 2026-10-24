@@ -4,6 +4,7 @@ use std::sync::Arc;
 use azalea_chat::FormattedText;
 use azalea_chat::style::Style;
 
+use crate::app::input::KeyBindings;
 use crate::chat_component::{Component, ResolvedStyle};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -87,6 +88,30 @@ pub(crate) fn find_line_break(
     None
 }
 
+/// Vanilla `Font.split` for unstyled text: `text` broken into lines no wider
+/// than `max_w`, with `char_width` measuring each character.
+pub(crate) fn wrap_plain(text: &str, max_w: f32, char_width: impl Fn(char) -> f32) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    loop {
+        let widths = chars[start..]
+            .iter()
+            .enumerate()
+            .map(|(offset, &ch)| (start + offset, ch, char_width(ch)));
+        match find_line_break(widths, max_w) {
+            Some((end, next)) => {
+                lines.push(chars[start..end].iter().collect());
+                start = next;
+            }
+            None => {
+                lines.push(chars[start..].iter().collect());
+                return lines;
+            }
+        }
+    }
+}
+
 /// A styled run of text (color plus formatting flags). The shared span type for
 /// rendering rich chat and server-MOTD text.
 #[derive(Clone, Debug, PartialEq)]
@@ -138,6 +163,11 @@ impl TextSpan {
     }
 }
 
+/// The spans' text without formatting.
+pub fn span_text(spans: &[TextSpan]) -> String {
+    spans.iter().map(|span| span.text.as_str()).collect()
+}
+
 /// The spans with every alpha multiplied by `alpha` (for fade effects).
 pub fn with_alpha(spans: &[TextSpan], alpha: f32) -> Vec<TextSpan> {
     let mut spans = spans.to_vec();
@@ -153,6 +183,20 @@ pub fn format_component_spans(component: &Component, base_color: [f32; 4]) -> Ve
     format_component_spans_with_parent(component, &ResolvedStyle::default(), base_color)
 }
 
+/// Flatten a component using the app's current effective key bindings.
+pub fn format_component_spans_with_bindings(
+    component: &Component,
+    base_color: [f32; 4],
+    bindings: &KeyBindings,
+) -> Vec<TextSpan> {
+    format_component_spans_with_parent_and_bindings(
+        component,
+        &ResolvedStyle::default(),
+        base_color,
+        bindings,
+    )
+}
+
 /// [`format_component_spans`] under an inherited parent style, which the
 /// component's own explicit style overrides (vanilla appending it to a styled
 /// parent).
@@ -161,8 +205,23 @@ pub fn format_component_spans_with_parent(
     parent: &ResolvedStyle,
     base_color: [f32; 4],
 ) -> Vec<TextSpan> {
+    format_component_spans_with_parent_and_bindings(
+        component,
+        parent,
+        base_color,
+        &KeyBindings::default(),
+    )
+}
+
+/// Styled traversal with both an inherited style and current input bindings.
+pub fn format_component_spans_with_parent_and_bindings(
+    component: &Component,
+    parent: &ResolvedStyle,
+    base_color: [f32; 4],
+    bindings: &KeyBindings,
+) -> Vec<TextSpan> {
     let mut spans = Vec::new();
-    component.visit_text(parent, &mut |text, style| {
+    component.visit_text_with_bindings(parent, bindings, &mut |text, style| {
         let color = style.color.map(rgb24).unwrap_or(base_color);
         spans.push(TextSpan {
             text: text.to_owned(),
@@ -344,7 +403,7 @@ fn rgb24(value: u32) -> [f32; 4] {
     argb32(value | 0xff00_0000)
 }
 
-fn argb32(value: u32) -> [f32; 4] {
+pub(crate) fn argb32(value: u32) -> [f32; 4] {
     [
         ((value >> 16) & 0xff) as f32 / 255.0,
         ((value >> 8) & 0xff) as f32 / 255.0,
@@ -368,6 +427,20 @@ mod tests {
 
     use super::*;
     use crate::chat_component::{ClickEvent, HoverEvent};
+
+    #[test]
+    fn plain_text_wraps_at_spaces_and_splits_overlong_words() {
+        let wrap = |text: &str| wrap_plain(text, 5.0, |_| 1.0);
+        assert_eq!(wrap("ab cd efg"), ["ab cd", "efg"]);
+        assert_eq!(wrap("abcdefgh"), ["abcde", "fgh"]);
+        assert_eq!(
+            wrap(
+                "one
+two"
+            ),
+            ["one", "two"]
+        );
+    }
 
     #[test]
     fn head_atlas_keys_carry_the_whole_profile() {

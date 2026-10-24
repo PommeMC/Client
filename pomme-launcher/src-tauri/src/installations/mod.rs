@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commands::fetch_versions;
 use crate::installations;
-use crate::storage::installations_dir;
+use crate::storage::{default_profile, profiles_dir};
 
 const MAX_NAME_LENGTH: usize = 35;
 #[cfg(target_os = "windows")]
@@ -187,7 +187,7 @@ impl TryFrom<String> for Directory {
         let path = if path.is_absolute() {
             path
         } else {
-            installations_dir().join(path)
+            profiles_dir().join(path)
         };
         if path
             .components()
@@ -202,7 +202,7 @@ impl TryFrom<String> for Directory {
 }
 impl Directory {
     pub fn latest() -> Self {
-        Directory(installations_dir().join("default"))
+        Directory(default_profile())
     }
 
     #[cfg(target_os = "windows")]

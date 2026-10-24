@@ -1,0 +1,22 @@
+# Villager data (type, profession, level) for villagers and zombie villagers.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/time set midnight"
+
+[[step]]
+chat = '/summon minecraft:villager ~ ~ ~3 {VillagerData:{type:"minecraft:desert",profession:"minecraft:librarian",level:2},NoAI:1b}'
+
+[[step]]
+expect = { entity = "villager", villager_type = "desert", profession = "librarian" }
+
+[[step]]
+chat = '/summon minecraft:zombie_villager ~2 ~ ~3 {VillagerData:{type:"minecraft:snow",profession:"minecraft:farmer",level:1},NoAI:1b}'
+
+[[step]]
+expect = { entity = "zombie_villager", villager_type = "snow", profession = "farmer" }
+
+[[step]]
+screenshot = "villagers"

@@ -258,6 +258,59 @@ mod tests {
             t.id(Phase::Game, Direction::Clientbound, "level_particles"),
             Some(47)
         );
+        // Item-bearing packets decoded by pomme's item grammar.
+        for (dir, name, id) in [
+            (Direction::Clientbound, "container_set_content", 18),
+            (Direction::Clientbound, "add_entity", 1),
+            (Direction::Clientbound, "animate", 2),
+            (Direction::Clientbound, "damage_event", 25),
+            (Direction::Clientbound, "entity_event", 34),
+            (Direction::Clientbound, "entity_position_sync", 35),
+            (Direction::Clientbound, "hurt_animation", 42),
+            (Direction::Clientbound, "move_entity_pos", 53),
+            (Direction::Clientbound, "move_entity_pos_rot", 54),
+            (Direction::Clientbound, "move_entity_rot", 56),
+            (Direction::Clientbound, "remove_entities", 77),
+            (Direction::Clientbound, "rotate_head", 83),
+            (Direction::Clientbound, "set_entity_motion", 101),
+            (Direction::Clientbound, "set_passengers", 107),
+            (Direction::Clientbound, "take_item_entity", 124),
+            (Direction::Clientbound, "teleport_entity", 125),
+            (Direction::Clientbound, "set_health", 104),
+            (Direction::Clientbound, "set_experience", 103),
+            (Direction::Clientbound, "update_attributes", 131),
+            (Direction::Clientbound, "update_mob_effect", 132),
+            (Direction::Clientbound, "remove_mob_effect", 78),
+            (Direction::Clientbound, "set_held_slot", 105),
+            (Direction::Clientbound, "player_abilities", 64),
+            (Direction::Clientbound, "game_event", 38),
+            (Direction::Clientbound, "player_combat_kill", 68),
+            (Direction::Clientbound, "container_set_slot", 20),
+            (Direction::Clientbound, "open_screen", 59),
+            (Direction::Clientbound, "container_set_data", 19),
+            (Direction::Clientbound, "container_close", 17),
+            (Direction::Clientbound, "set_cursor_item", 96),
+            (Direction::Clientbound, "set_entity_data", 99),
+            (Direction::Clientbound, "set_equipment", 102),
+            (Direction::Clientbound, "set_player_inventory", 108),
+            (Direction::Clientbound, "update_advancements", 130),
+            (Direction::Clientbound, "block_update", 8),
+            (Direction::Clientbound, "section_blocks_update", 84),
+            (Direction::Clientbound, "block_changed_ack", 4),
+            (Direction::Clientbound, "block_event", 7),
+            (Direction::Clientbound, "block_entity_data", 6),
+            (Direction::Clientbound, "level_event", 46),
+            (Direction::Clientbound, "level_chunk_with_light", 45),
+            (Direction::Clientbound, "light_update", 48),
+            (Direction::Clientbound, "forget_level_chunk", 37),
+            (Direction::Clientbound, "chunk_batch_start", 12),
+            (Direction::Clientbound, "chunk_batch_finished", 11),
+            (Direction::Clientbound, "set_chunk_cache_center", 94),
+            (Direction::Clientbound, "set_chunk_cache_radius", 95),
+            (Direction::Serverbound, "set_creative_mode_slot", 56),
+        ] {
+            assert_eq!(t.id(Phase::Game, dir, name), Some(id), "{name}");
+        }
         assert_eq!(
             t.id(Phase::Game, Direction::Clientbound, "hurt_animation"),
             Some(42)
@@ -274,10 +327,32 @@ mod tests {
             t.id(Phase::Game, Direction::Clientbound, "boss_event"),
             Some(9)
         );
-        assert_eq!(
-            t.id(Phase::Game, Direction::Clientbound, "recipe_book_add"),
-            Some(74)
-        );
+        // Recipe book (`GameProtocols.java`; clientbound counts from the
+        // bundle delimiter at id 0).
+        for (name, id) in [
+            ("recipe_book_add", 74),
+            ("recipe_book_remove", 75),
+            ("recipe_book_settings", 76),
+            ("place_ghost_recipe", 63),
+            ("update_recipes", 133),
+        ] {
+            assert_eq!(
+                t.id(Phase::Game, Direction::Clientbound, name),
+                Some(id),
+                "{name}"
+            );
+        }
+        for (name, id) in [
+            ("place_recipe", 39),
+            ("recipe_book_change_settings", 46),
+            ("recipe_book_seen_recipe", 47),
+        ] {
+            assert_eq!(
+                t.id(Phase::Game, Direction::Serverbound, name),
+                Some(id),
+                "{name}"
+            );
+        }
         assert_eq!(
             t.id(Phase::Game, Direction::Clientbound, "update_advancements"),
             Some(130)
@@ -324,6 +399,29 @@ mod tests {
             t.id(Phase::Game, Direction::Clientbound, "set_titles_animation"),
             Some(115)
         );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "tab_list"),
+            Some(122)
+        );
+        for (name, id) in [
+            ("disconnect", 32),
+            ("keep_alive", 44),
+            ("login", 49),
+            ("ping", 61),
+            ("player_info_remove", 69),
+            ("player_info_update", 70),
+            ("player_position", 72),
+            ("player_rotation", 73),
+            ("reset_score", 79),
+            ("respawn", 82),
+            ("set_display_objective", 98),
+            ("set_objective", 106),
+            ("set_score", 110),
+            ("set_simulation_distance", 111),
+            ("set_time", 113),
+        ] {
+            assert_eq!(t.id(Phase::Game, Direction::Clientbound, name), Some(id));
+        }
         assert_eq!(
             t.id(Phase::Game, Direction::Clientbound, "sound_entity"),
             Some(116)

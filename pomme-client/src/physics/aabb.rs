@@ -63,6 +63,22 @@ impl Aabb {
             && self.max.z > other.min.z
     }
 
+    /// Vanilla `AABB.minmax`: the box around both.
+    pub fn minmax(&self, other: &Aabb) -> Self {
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+        }
+    }
+
+    /// Vanilla `AABB.intersect`: the overlap of both.
+    pub fn intersect(&self, other: &Aabb) -> Self {
+        Self {
+            min: self.min.max(other.min),
+            max: self.max.min(other.max),
+        }
+    }
+
     pub fn offset(self, offset: DVec3) -> Self {
         Self {
             min: self.min + offset,
@@ -166,29 +182,45 @@ pub fn clip_boxes(
     let delta = to - from;
     let mut nearest = 1.0;
     let mut face = None;
-
     for &local in boxes {
-        let aabb = Aabb::from_local(local, offset);
-        for axis in [Axis::X, Axis::Y, Axis::Z] {
-            // A ray only enters through the face it travels towards, so the
-            // sign of its component picks which plane to test.
-            let d = component(delta, axis);
-            let max = if d > EPSILON {
-                false
-            } else if d < -EPSILON {
-                true
-            } else {
-                continue;
-            };
-            let plane = component(if max { aabb.max } else { aabb.min }, axis);
-            if let Some(t) = clip_point(&aabb, plane, axis, from, delta, nearest) {
-                nearest = t;
-                face = Some(Face { axis, max });
-            }
+        face = clip_box(&Aabb::from_local(local, offset), from, delta, &mut nearest).or(face);
+    }
+    face.map(|face| (nearest, face))
+}
+
+impl Aabb {
+    /// Vanilla `AABB.clip(Vec3, Vec3)`: where the ray `from -> to` enters the
+    /// box, or `None` if it misses.
+    pub fn clip(&self, from: DVec3, to: DVec3) -> Option<DVec3> {
+        let delta = to - from;
+        let mut nearest = 1.0;
+        clip_box(self, from, delta, &mut nearest)?;
+        Some(from + delta * nearest)
+    }
+}
+
+/// Vanilla `AABB.getDirection` for one box: the face the ray enters nearer
+/// than `nearest`, which it lowers to that fraction.
+fn clip_box(aabb: &Aabb, from: DVec3, delta: DVec3, nearest: &mut f64) -> Option<Face> {
+    let mut face = None;
+    for axis in [Axis::X, Axis::Y, Axis::Z] {
+        // A ray only enters through the face it travels towards, so the
+        // sign of its component picks which plane to test.
+        let d = component(delta, axis);
+        let max = if d > EPSILON {
+            false
+        } else if d < -EPSILON {
+            true
+        } else {
+            continue;
+        };
+        let plane = component(if max { aabb.max } else { aabb.min }, axis);
+        if let Some(t) = clip_point(aabb, plane, axis, from, delta, *nearest) {
+            *nearest = t;
+            face = Some(Face { axis, max });
         }
     }
-
-    face.map(|face| (nearest, face))
+    face
 }
 
 /// Ports vanilla `AABB.clipPoint`: the fraction at which the ray crosses

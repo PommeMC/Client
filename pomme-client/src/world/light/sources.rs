@@ -7,9 +7,9 @@
 //! open-column sentinel that reads as `i32::MIN`).
 
 use azalea_block::BlockState;
-use azalea_world::Chunk;
 
 use crate::world::block;
+use crate::world::chunk::{Chunk, SectionBlocks};
 
 pub(crate) struct ChunkSkyLightSources {
     /// `level.getMinY() - 1`; the stored value for fully open columns.
@@ -28,7 +28,11 @@ impl ChunkSkyLightSources {
     }
 
     /// Initial build from a loaded chunk (vanilla `fillFrom`).
-    pub fn fill_from(world_min_y: i32, chunk: &Chunk) -> Self {
+    pub fn fill_from(
+        world_min_y: i32,
+        chunk: &Chunk,
+        block_state_table: block::BlockStateTable,
+    ) -> Self {
         let mut sources = Self::new(world_min_y);
         let Some(top_index) = chunk.sections.iter().rposition(|s| s.block_count > 0) else {
             return sources;
@@ -36,7 +40,7 @@ impl ChunkSkyLightSources {
         for z in 0..16 {
             for x in 0..16 {
                 let y = sources
-                    .find_lowest_source_y(chunk, top_index, x, z)
+                    .find_lowest_source_y(block_state_table, chunk, top_index, x, z)
                     .max(sources.min_y);
                 sources.heightmap[Self::index(x, z)] = y;
             }
@@ -44,7 +48,14 @@ impl ChunkSkyLightSources {
         sources
     }
 
-    fn find_lowest_source_y(&self, chunk: &Chunk, top_index: usize, x: i32, z: i32) -> i32 {
+    fn find_lowest_source_y(
+        &self,
+        block_state_table: block::BlockStateTable,
+        chunk: &Chunk,
+        top_index: usize,
+        x: i32,
+        z: i32,
+    ) -> i32 {
         let min_section_y = (self.min_y + 1) >> 4;
         let mut top_state = BlockState::AIR;
         let mut top_y = (min_section_y + top_index as i32 + 1) << 4;
@@ -56,13 +67,8 @@ impl ChunkSkyLightSources {
                 continue;
             }
             for y in (0..16).rev() {
-                let bottom_state =
-                    section.get_block_state(azalea_core::position::ChunkSectionBlockPos {
-                        x: x as u8,
-                        y: y as u8,
-                        z: z as u8,
-                    });
-                if Self::is_edge_occluded(top_state, bottom_state) {
+                let bottom_state = section.get_block_state(x as u32, y as u32, z as u32);
+                if Self::is_edge_occluded(block_state_table, top_state, bottom_state) {
                     return top_y;
                 }
                 top_state = bottom_state;
@@ -77,6 +83,7 @@ impl ChunkSkyLightSources {
     /// state by world Y. Returns whether the heightmap changed.
     pub fn update(
         &mut self,
+        block_state_table: block::BlockStateTable,
         column_state: &impl Fn(i32) -> BlockState,
         x: i32,
         y: i32,
@@ -89,15 +96,33 @@ impl ChunkSkyLightSources {
         }
         let top_state = column_state(y + 1);
         let middle_state = column_state(y);
-        if self.update_edge(column_state, index, current, y + 1, top_state, middle_state) {
+        if self.update_edge(
+            block_state_table,
+            column_state,
+            index,
+            current,
+            y + 1,
+            top_state,
+            middle_state,
+        ) {
             return true;
         }
         let bottom_state = column_state(y - 1);
-        self.update_edge(column_state, index, current, y, middle_state, bottom_state)
+        self.update_edge(
+            block_state_table,
+            column_state,
+            index,
+            current,
+            y,
+            middle_state,
+            bottom_state,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_edge(
         &mut self,
+        block_state_table: block::BlockStateTable,
         column_state: &impl Fn(i32) -> BlockState,
         index: usize,
         old_top_edge_y: i32,
@@ -105,14 +130,18 @@ impl ChunkSkyLightSources {
         top_state: BlockState,
         bottom_state: BlockState,
     ) -> bool {
-        if Self::is_edge_occluded(top_state, bottom_state) {
+        if Self::is_edge_occluded(block_state_table, top_state, bottom_state) {
             if checked_edge_y > old_top_edge_y {
                 self.heightmap[index] = checked_edge_y;
                 return true;
             }
         } else if checked_edge_y == old_top_edge_y {
-            self.heightmap[index] =
-                self.find_lowest_source_below(column_state, checked_edge_y - 1, bottom_state);
+            self.heightmap[index] = self.find_lowest_source_below(
+                block_state_table,
+                column_state,
+                checked_edge_y - 1,
+                bottom_state,
+            );
             return true;
         }
         false
@@ -120,6 +149,7 @@ impl ChunkSkyLightSources {
 
     fn find_lowest_source_below(
         &self,
+        block_state_table: block::BlockStateTable,
         column_state: &impl Fn(i32) -> BlockState,
         start_y: i32,
         start_state: BlockState,
@@ -129,7 +159,7 @@ impl ChunkSkyLightSources {
         let mut bottom_y = start_y - 1;
         while bottom_y >= self.min_y {
             let bottom_state = column_state(bottom_y);
-            if Self::is_edge_occluded(top_state, bottom_state) {
+            if Self::is_edge_occluded(block_state_table, top_state, bottom_state) {
                 return top_y;
             }
             top_state = bottom_state;
@@ -140,9 +170,21 @@ impl ChunkSkyLightSources {
     }
 
     /// Whether full sky stops between a block and the one below it.
-    fn is_edge_occluded(top_state: BlockState, bottom_state: BlockState) -> bool {
-        block::light_props(bottom_state).dampening != 0
-            || block::shape_occludes(top_state, bottom_state, 0 /* DOWN */)
+    fn is_edge_occluded(
+        block_state_table: block::BlockStateTable,
+        top_state: BlockState,
+        bottom_state: BlockState,
+    ) -> bool {
+        block_state_table
+            .block_state_data(bottom_state)
+            .light_props()
+            .dampening
+            != 0
+            || block::shape_occludes_data(
+                block_state_table.block_state_data(top_state),
+                block_state_table.block_state_data(bottom_state),
+                0, /* DOWN */
+            )
     }
 
     /// Lowest full-sky Y for the column, `i32::MIN` when open below world.
@@ -168,7 +210,6 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::world::block::find_state;
 
     fn column(blocks: &HashMap<i32, BlockState>) -> impl Fn(i32) -> BlockState + '_ {
         |y| blocks.get(&y).copied().unwrap_or(BlockState::AIR)
@@ -176,29 +217,29 @@ mod tests {
 
     #[test]
     fn update_tracks_placed_and_removed_occluders() {
-        crate::world::block::init("26.2");
-        let stone = find_state("stone", &[]);
+        let block_state_table = block::BlockStateTable::native();
+        let stone = block_state_table.find_state("stone", &[]);
         let mut blocks: HashMap<i32, BlockState> = HashMap::new();
         let mut sources = ChunkSkyLightSources::new(-64);
         assert_eq!(sources.lowest_source_y(3, 5), i32::MIN);
 
         blocks.insert(64, stone);
-        assert!(sources.update(&column(&blocks), 3, 64, 5));
+        assert!(sources.update(block_state_table, &column(&blocks), 3, 64, 5));
         assert_eq!(sources.lowest_source_y(3, 5), 65);
 
         // A second occluder below doesn't move the edge...
         blocks.insert(60, stone);
-        assert!(!sources.update(&column(&blocks), 3, 60, 5));
+        assert!(!sources.update(block_state_table, &column(&blocks), 3, 60, 5));
         assert_eq!(sources.lowest_source_y(3, 5), 65);
 
         // ...until the top one breaks and the rescan finds it.
         blocks.remove(&64);
-        assert!(sources.update(&column(&blocks), 3, 64, 5));
+        assert!(sources.update(block_state_table, &column(&blocks), 3, 64, 5));
         assert_eq!(sources.lowest_source_y(3, 5), 61);
 
         // Breaking the last occluder opens the column below the world.
         blocks.remove(&60);
-        assert!(sources.update(&column(&blocks), 3, 60, 5));
+        assert!(sources.update(block_state_table, &column(&blocks), 3, 60, 5));
         assert_eq!(sources.lowest_source_y(3, 5), i32::MIN);
         // Other columns were never touched.
         assert_eq!(sources.lowest_source_y(4, 5), i32::MIN);

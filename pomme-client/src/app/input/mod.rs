@@ -2,15 +2,15 @@
 //!
 //! Key bindings serialize action IDs to arrays of physical input IDs, for
 //! example `"key.jump": ["key.keyboard.space", "key.gamepad.south"]`.
-//! The Key Binds screen edits these settings using limited input capture;
-//! live gameplay still uses the existing hardcoded mappings.
+//! The Key Binds screen edits these settings using limited input capture.
 use std::collections::{HashMap, HashSet};
 
 use gilrs::ff::{BaseEffect, Effect, EffectBuilder, Repeat, Replay};
 use gilrs::{Button, GamepadId, Gilrs};
-use winit::event::{ElementState, Modifiers, MouseButton};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, Touch};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 
+use self::touch::{TouchControls, TouchLayout, TouchOutput};
 use crate::app::TICK_RATE_MS;
 use crate::app::phases::AppPhase;
 use crate::app::state_slot::StateSlot;
@@ -20,6 +20,7 @@ pub mod action;
 pub mod input_key;
 pub mod key_bindings;
 mod metadata;
+pub mod touch;
 
 pub use action::Action;
 pub use input_key::InputKey;
@@ -39,102 +40,19 @@ pub(crate) fn gamepad_movement_axes(analog: glam::Vec2) -> glam::Vec2 {
 /// an "instant".
 pub const SHORT_RUMBLE_TIME: u32 = 5;
 
-pub const KEY_FORWARD: KeyCode = KeyCode::KeyW;
-pub const KEY_LEFT: KeyCode = KeyCode::KeyA;
-pub const KEY_BACK: KeyCode = KeyCode::KeyS;
-pub const KEY_RIGHT: KeyCode = KeyCode::KeyD;
-
-/// Label of key mapping `key`: Pomme's binding for the actions it has, else
-/// vanilla's default (`Options` key mappings). A lang key and its en_us
-/// fallback.
-pub fn keybind_label(key: &str) -> Option<(&'static str, &'static str)> {
-    Some(match key {
-        "key.forward" => ("key.keyboard.w", "W"),
-        "key.left" => ("key.keyboard.a", "A"),
-        "key.back" => ("key.keyboard.s", "S"),
-        "key.right" => ("key.keyboard.d", "D"),
-        "key.jump" => action_label(Action::Jump)?,
-        "key.sneak" => action_label(Action::Sneak)?,
-        "key.sprint" => action_label(Action::Sprint)?,
-        "key.inventory" => action_label(Action::ToggleInventory)?,
-        "key.swapOffhand" => action_label(Action::SwapOffhand)?,
-        "key.drop" => action_label(Action::DropItem)?,
-        "key.use" => ("key.mouse.right", "Right Button"),
-        "key.attack" => ("key.mouse.left", "Left Button"),
-        "key.pickItem" | "key.spectatorHotbar" => ("key.mouse.middle", "Middle Button"),
-        "key.chat" => action_label(Action::OpenChat)?,
-        "key.playerlist" => action_label(Action::ViewPlayerList)?,
-        "key.command" => action_label(Action::OpenCommands)?,
-        "key.togglePerspective" => action_label(Action::ChangePerspective)?,
-        "key.friends" => ("key.keyboard.o", "O"),
-        "key.socialInteractions" => ("key.keyboard.p", "P"),
-        "key.screenshot" => ("key.keyboard.f2", "F2"),
-        "key.smoothCamera" | "key.spectatorOutlines" => ("key.keyboard.unknown", "Not Bound"),
-        "key.fullscreen" => ("key.keyboard.f11", "F11"),
-        "key.advancements" => ("key.keyboard.l", "L"),
-        "key.quickActions" => ("key.keyboard.g", "G"),
-        "key.toggleGui" => ("key.keyboard.f1", "F1"),
-        "key.toggleSpectatorShaderEffects" => ("key.keyboard.f4", "F4"),
-        "key.saveToolbarActivator" => ("key.keyboard.c", "C"),
-        "key.loadToolbarActivator" => ("key.keyboard.x", "X"),
-        "key.hotbar.1" => ("key.keyboard.1", "1"),
-        "key.hotbar.2" => ("key.keyboard.2", "2"),
-        "key.hotbar.3" => ("key.keyboard.3", "3"),
-        "key.hotbar.4" => ("key.keyboard.4", "4"),
-        "key.hotbar.5" => ("key.keyboard.5", "5"),
-        "key.hotbar.6" => ("key.keyboard.6", "6"),
-        "key.hotbar.7" => ("key.keyboard.7", "7"),
-        "key.hotbar.8" => ("key.keyboard.8", "8"),
-        "key.hotbar.9" => ("key.keyboard.9", "9"),
-        "key.debug.overlay" | "key.debug.modifier" => ("key.keyboard.f3", "F3"),
-        "key.debug.crash" | "key.debug.copyLocation" => ("key.keyboard.c", "C"),
-        "key.debug.reloadChunk" => ("key.keyboard.a", "A"),
-        "key.debug.showHitboxes" => ("key.keyboard.b", "B"),
-        "key.debug.clearChat" => ("key.keyboard.d", "D"),
-        "key.debug.showChunkBorders" => ("key.keyboard.g", "G"),
-        "key.debug.showAdvancedTooltips" => ("key.keyboard.h", "H"),
-        "key.debug.copyRecreateCommand" => ("key.keyboard.i", "I"),
-        "key.debug.spectate" => ("key.keyboard.n", "N"),
-        "key.debug.switchGameMode" => ("key.keyboard.f4", "F4"),
-        "key.debug.debugOptions" => ("key.keyboard.f6", "F6"),
-        "key.debug.focusPause" => ("key.keyboard.p", "P"),
-        "key.debug.dumpDynamicTextures" => ("key.keyboard.s", "S"),
-        "key.debug.reloadResourcePacks" => ("key.keyboard.t", "T"),
-        "key.debug.profiling" => ("key.keyboard.l", "L"),
-        "key.debug.dumpVersion" => ("key.keyboard.v", "V"),
-        "key.debug.profilingChart" => ("key.keyboard.1", "1"),
-        "key.debug.fpsCharts" => ("key.keyboard.2", "2"),
-        "key.debug.networkCharts" => ("key.keyboard.3", "3"),
-        "key.debug.lightmapTexture" => ("key.keyboard.4", "4"),
-        _ => return None,
-    })
-}
-
-fn action_label(action: Action) -> Option<(&'static str, &'static str)> {
-    keycode_translation(action.default_key()?)
-}
-
-fn keycode_translation(key: KeyCode) -> Option<(&'static str, &'static str)> {
-    match key {
-        KeyCode::Space => Some(("key.keyboard.space", "Space")),
-        KeyCode::ShiftLeft => Some(("key.keyboard.left.shift", "Left Shift")),
-        KeyCode::ControlLeft => Some(("key.keyboard.left.control", "Left Control")),
-        KeyCode::KeyE => Some(("key.keyboard.e", "E")),
-        KeyCode::KeyF => Some(("key.keyboard.f", "F")),
-        KeyCode::KeyQ => Some(("key.keyboard.q", "Q")),
-        KeyCode::KeyT => Some(("key.keyboard.t", "T")),
-        KeyCode::Tab => Some(("key.keyboard.tab", "Tab")),
-        KeyCode::Slash => Some(("key.keyboard.slash", "/")),
-        KeyCode::F5 => Some(("key.keyboard.f5", "F5")),
-        _ => None,
-    }
-}
-
 pub struct InputState {
+    pub key_bindings: KeyBindings,
     pressed: HashSet<KeyCode>,
     modifiers: Modifiers,
+    /// Ctrl held by a harness `press`, for one frame.
+    #[cfg(feature = "test-harness")]
+    harness_ctrl: bool,
+    /// A harness `press` waiting for the next frame.
+    #[cfg(feature = "test-harness")]
+    harness_press: Option<(KeyCode, bool)>,
     mouse_delta: (f64, f64),
     cursor_captured: bool,
+    touch: TouchControls,
     selected_slot: u8,
     left_click: ClickState,
     right_click: ClickState,
@@ -158,6 +76,9 @@ pub struct InputState {
     /// Keys pressed since the last `end_frame`, including OS key repeats:
     /// vanilla dispatches GLFW repeats to screens and debug chords.
     just_pressed: HashSet<KeyCode>,
+    mouse_buttons_down: HashSet<MouseButton>,
+    mouse_buttons_just_pressed: HashSet<MouseButton>,
+    gamepad_buttons_just_pressed: HashSet<(GamepadId, Button)>,
     /// Per-action press counters mirroring vanilla `KeyMapping.click`, so a
     /// key repeating faster than the tick rate still fires once per press.
     click_counts: HashMap<Action, u32>,
@@ -184,6 +105,9 @@ pub struct InputState {
     strong_rumble_effect: Option<Effect>,
     active_gamepad_id: Option<GamepadId>,
     recent_actions: HashMap<Action, bool>,
+    touch_actions_down: HashSet<Action>,
+    /// Touch taps' releases, held back until the presses have been read.
+    tap_releases: Vec<Action>,
 }
 
 #[derive(Default)]
@@ -191,6 +115,17 @@ pub struct ClickState {
     held: bool,
     just_pressed: bool,
     just_released: bool,
+}
+
+impl ClickState {
+    fn set(&mut self, pressed: bool) {
+        self.held = pressed;
+        if pressed {
+            self.just_pressed = true;
+        } else {
+            self.just_released = true;
+        }
+    }
 }
 
 impl InputState {
@@ -234,10 +169,16 @@ impl InputState {
         };
 
         Self {
+            key_bindings: KeyBindings::default(),
             pressed: HashSet::new(),
             modifiers: Modifiers::default(),
+            #[cfg(feature = "test-harness")]
+            harness_ctrl: false,
+            #[cfg(feature = "test-harness")]
+            harness_press: None,
             mouse_delta: (0.0, 0.0),
             cursor_captured: true,
+            touch: TouchControls::default(),
             selected_slot: 0,
             left_click: ClickState::default(),
             right_click: ClickState::default(),
@@ -251,6 +192,9 @@ impl InputState {
             spectator: false,
             spectator_slot_presses: Vec::new(),
             just_pressed: HashSet::new(),
+            mouse_buttons_down: HashSet::new(),
+            mouse_buttons_just_pressed: HashSet::new(),
+            gamepad_buttons_just_pressed: HashSet::new(),
             click_counts: HashMap::new(),
             text_events: Vec::new(),
             binding_capture: false,
@@ -270,6 +214,8 @@ impl InputState {
             strong_rumble_effect: strong_effect,
             active_gamepad_id: None,
             recent_actions: HashMap::new(),
+            touch_actions_down: HashSet::new(),
+            tap_releases: Vec::new(),
         }
     }
 
@@ -281,6 +227,10 @@ impl InputState {
         for event in &events {
             self.on_gamepad_event(event);
         }
+        let held = self
+            .touch
+            .tick(std::time::Instant::now(), phase.get().world_has_pointer());
+        self.apply_touch(held);
 
         if self.binding_capture {
             return false;
@@ -291,7 +241,7 @@ impl InputState {
         phase.transition(|mut app| {
             if let AppPhase::InGame {
                 gfx,
-                connection: _connection,
+                connection,
                 game,
                 ..
             } = &mut app
@@ -299,11 +249,11 @@ impl InputState {
                 // A dialog (or the confirm screen over it) is a screen, and
                 // vanilla runs no key mapping while one is up.
                 if self.action_just_pressed(Action::ToggleInventory) && !game.dialog_open() {
-                    if game.creative_inventory_open {
-                        game.close_creative_inventory();
-                        should_apply_cursor_grab = true;
-                    } else if game.open_container.is_some() {
-                        game.close_menu();
+                    if game.creative_inventory_open
+                        || game.open_container.is_some()
+                        || game.inventory_open
+                    {
+                        game.close_inventory();
                         should_apply_cursor_grab = true;
                     } else if !game.paused
                         && !game.dead
@@ -312,11 +262,7 @@ impl InputState {
                         && !game.chat.is_open()
                         && game.game_mode_switcher.is_none()
                     {
-                        if crate::player::is_creative(game.player.game_mode) {
-                            game.creative_inventory_open = true;
-                        } else {
-                            game.inventory_open = !game.inventory_open;
-                        }
+                        game.open_inventory();
                         should_apply_cursor_grab = true;
                     }
 
@@ -340,7 +286,12 @@ impl InputState {
                     } else if !game.dead && !game.death_screen_open && !game.options_from_game {
                         use crate::ui::pause::PauseScreen;
                         if game.inventory_open || game.open_container.is_some() {
-                            game.close_menu();
+                            if !game
+                                .recipe_book_ui
+                                .close_for_escape(&mut game.recipe_book, &connection.packet_tx)
+                            {
+                                game.close_menu();
+                            }
                         } else if game.paused {
                             // Step back through the benchmark sub-screens; close
                             // the menu from the main screen.
@@ -385,7 +336,13 @@ impl InputState {
                     self.recent_actions.remove(&Action::ChangePerspective);
                 }
                 if self.action_just_pressed(Action::OpenChat) {
-                    if !game.paused
+                    if game.recipe_book_ui.focus_search_from_chat_key(
+                        &game.recipe_book,
+                        game.recipe_book_screen_active(),
+                    ) {
+                        // Vanilla `keyChat` focuses an open recipe book's search.
+                        self.text_capture = true;
+                    } else if !game.paused
                         && !game.death_screen_open
                         && !game.gui_open()
                         && !game.chat.is_open()
@@ -472,120 +429,131 @@ impl InputState {
             return;
         }
 
-        match event.event {
-            gilrs::EventType::ButtonPressed(button, _) => match button {
-                Button::RightTrigger2 => {
-                    self.recent_actions.insert(Action::Destroy, true);
-                }
+        if let gilrs::EventType::ButtonPressed(button, _) = event.event {
+            self.gamepad_buttons_just_pressed.insert((event.id, button));
+        }
+
+        let (button, pressed) = match event.event {
+            gilrs::EventType::ButtonPressed(button, _) => (button, true),
+            gilrs::EventType::ButtonReleased(button, _) => (button, false),
+            _ => return,
+        };
+        for action in self.bound_actions(InputKey::Controller(button)) {
+            match action {
                 // TODO: gamepad spectator-menu support (vanilla has none).
-                Button::RightTrigger if !self.spectator && !self.menu_capture => {
+                Action::NextHotbarSlot if pressed && !self.spectator && !self.menu_capture => {
                     self.selected_slot = (self.selected_slot + 1) % 9;
                 }
-                Button::LeftTrigger2 => {
-                    self.recent_actions.insert(Action::Use, true);
-                }
-                Button::LeftTrigger if !self.spectator && !self.menu_capture => {
+                Action::PreviousHotbarSlot if pressed && !self.spectator && !self.menu_capture => {
                     self.selected_slot = (self.selected_slot + 8) % 9;
                 }
-                Button::North => {
-                    self.recent_actions.insert(Action::ToggleInventory, true);
+                Action::Destroy
+                | Action::Use
+                | Action::ToggleInventory
+                | Action::OpenMenu
+                | Action::ChangePerspective
+                | Action::OpenChat
+                | Action::Close => {
+                    self.recent_actions.insert(action, pressed);
                 }
-
-                Button::Start => {
-                    self.recent_actions.insert(Action::OpenMenu, true);
-                }
-
-                Button::DPadUp => {
-                    self.recent_actions.insert(Action::ChangePerspective, true);
-                }
-
-                Button::DPadRight => {
-                    self.recent_actions.insert(Action::OpenChat, true);
-                }
-
-                Button::East => {
-                    self.recent_actions.insert(Action::Close, true);
-                }
-
+                Action::PickBlock => self.middle_click.set(pressed),
+                Action::SpectatorHotbar if pressed => self.click_spectator_hotbar(),
                 _ => {}
-            },
-            gilrs::EventType::ButtonReleased(button, _) => match button {
-                Button::RightTrigger2 => {
-                    self.recent_actions.insert(Action::Destroy, false);
-                }
-                Button::LeftTrigger2 => {
-                    self.recent_actions.insert(Action::Use, false);
-                }
-                Button::North => {
-                    self.recent_actions.insert(Action::ToggleInventory, false);
-                }
-
-                Button::Start => {
-                    self.recent_actions.insert(Action::OpenMenu, false);
-                }
-
-                Button::DPadUp => {
-                    self.recent_actions.insert(Action::ChangePerspective, false);
-                }
-
-                Button::DPadRight => {
-                    self.recent_actions.insert(Action::OpenChat, false);
-                }
-
-                Button::East => {
-                    self.recent_actions.insert(Action::Close, false);
-                }
-
-                _ => {}
-            },
-
-            _ => {}
+            }
         }
+    }
+
+    /// Every action bound to `input`: vanilla `KeyMapping.click` and `set`
+    /// reach all the mappings on a key, not just the first.
+    fn bound_actions(&self, input: InputKey) -> Vec<Action> {
+        self.key_bindings
+            .actions_for_input(&input)
+            .copied()
+            .collect()
+    }
+
+    /// Queues one press of `action`, vanilla `KeyMapping.click`.
+    fn click(&mut self, action: Action) {
+        *self.click_counts.entry(action).or_insert(0) += 1;
+    }
+
+    fn click_spectator_hotbar(&mut self) {
+        if self.spectator && !self.menu_capture {
+            self.click(Action::SpectatorHotbar);
+        }
+    }
+
+    /// Whether any input bound to `action` is held.
+    pub fn action_held(&self, action: Action) -> bool {
+        self.key_bindings
+            .inputs_for_action(action)
+            .any(|input| self.input_pressed(input))
+    }
+
+    /// Whether any input bound to `action` was pressed since `end_frame`.
+    pub fn action_input_just_pressed(&self, action: Action) -> bool {
+        self.key_bindings
+            .inputs_for_action(action)
+            .any(|input| self.input_just_pressed(input))
     }
 
     pub fn performing_action(&self, action: Action) -> bool {
+        if self.touch_actions_down.contains(&action) {
+            return true;
+        }
         match action {
-            Action::Jump => {
-                self.default_key_pressed(action) || self.gamepad_button_down(Button::South)
-            }
-            Action::Sneak => {
-                self.default_key_pressed(action) || self.gamepad_button_down(Button::LeftThumb)
-            }
-            Action::Sprint => {
-                self.default_key_pressed(action) || self.gamepad_button_down(Button::West)
-            }
-            Action::Destroy => self.left_held() || self.gamepad_button_down(Button::RightTrigger2),
-            Action::Use => self.right_held() || self.gamepad_button_down(Button::LeftTrigger2),
+            Action::Jump => self.action_held(action) || self.touch.jump_held(),
             Action::ToggleInventory => {
-                self.action_just_pressed(Action::ToggleInventory)
-                    || self.gamepad_button_down(Button::North)
+                self.action_just_pressed(action) || self.bound_gamepad_button_down(action)
             }
-            Action::OpenMenu => {
-                self.default_key_pressed(action) || self.gamepad_button_down(Button::Start)
-            }
-            Action::ViewPlayerList => {
-                self.default_key_pressed(action) || self.gamepad_button_down(Button::Select)
-            }
-            Action::ChangePerspective => {
-                self.default_key_pressed(action) || self.gamepad_button_down(Button::DPadUp)
-            }
-            Action::OpenChat => {
-                self.default_key_pressed(action) || self.gamepad_button_down(Button::DPadRight)
-            }
-            Action::OpenCommands => self.default_key_pressed(action),
             // Controller-only; keyboard Escape closes via OpenMenu and the chat path.
-            Action::Close => self.gamepad_button_down(Button::East),
-            // Click-count driven (`consume_click`); held state only.
-            Action::DropItem | Action::SwapOffhand => self.default_key_pressed(action),
-            // Vanilla `key.spectatorHotbar` default: middle mouse.
-            Action::SpectatorHotbar => self.middle_click.held,
+            Action::Close => self.bound_gamepad_button_down(action),
+            // DropItem and SwapOffhand are click-count driven (`consume_click`);
+            // this is their held state only.
+            Action::Sneak
+            | Action::Sprint
+            | Action::Destroy
+            | Action::Use
+            | Action::OpenMenu
+            | Action::ViewPlayerList
+            | Action::ChangePerspective
+            | Action::OpenChat
+            | Action::OpenCommands
+            | Action::DropItem
+            | Action::SwapOffhand
+            | Action::SpectatorHotbar => self.action_held(action),
+            // Other actions do not have a held-state query here.
+            _ => false,
         }
     }
 
-    fn default_key_pressed(&self, action: Action) -> bool {
-        action
-            .default_key()
-            .is_some_and(|key| self.key_pressed(key))
+    fn bound_gamepad_button_down(&self, action: Action) -> bool {
+        self.key_bindings
+            .inputs_for_action(action)
+            .any(|input| match input {
+                InputKey::Controller(button) => self.gamepad_button_down(*button),
+                _ => false,
+            })
+    }
+
+    /// Whether the physical key or button is currently held.
+    pub fn input_pressed(&self, input: &InputKey) -> bool {
+        match input {
+            InputKey::Keyboard(key) => self.key_pressed(*key),
+            InputKey::Mouse(button) => self.mouse_buttons_down.contains(button),
+            InputKey::Controller(button) => self.gamepad_button_down(*button),
+        }
+    }
+
+    /// Physical presses since `end_frame`, including keyboard repeats.
+    pub fn input_just_pressed(&self, input: &InputKey) -> bool {
+        match input {
+            InputKey::Keyboard(key) => self.key_just_pressed(*key),
+            InputKey::Mouse(button) => self.mouse_buttons_just_pressed.contains(button),
+            InputKey::Controller(button) => self
+                .active_gamepad_id
+                .is_some_and(|id| self.gamepad_buttons_just_pressed.contains(&(id, *button))),
+        }
     }
 
     pub fn action_just_pressed(&self, action: Action) -> bool {
@@ -608,6 +576,11 @@ impl InputState {
         self.middle_click.just_pressed = false;
         self.middle_click.just_released = false;
         self.cursor_moved = false;
+
+        // A release in the same pass as its press would overwrite it.
+        for release in std::mem::take(&mut self.tap_releases) {
+            self.touch_actions_down.remove(&release);
+        }
     }
 
     fn gamepad_stick(&self, x_axis: gilrs::Axis, y_axis: gilrs::Axis) -> Option<glam::Vec2> {
@@ -627,8 +600,12 @@ impl InputState {
         self.gamepad_stick(gilrs::Axis::LeftStickX, gilrs::Axis::LeftStickY)
     }
 
-    pub fn get_gamepad_movement_axes(&self) -> Option<glam::Vec2> {
-        self.get_gamepad_left_analog().map(gamepad_movement_axes)
+    /// The touch stick's or gamepad left stick's movement, touch first.
+    pub fn analog_movement_axes(&self) -> Option<glam::Vec2> {
+        self.touch
+            .stick()
+            .or_else(|| self.get_gamepad_left_analog())
+            .map(gamepad_movement_axes)
     }
 
     pub fn get_gamepad_right_analog(&self) -> Option<glam::Vec2> {
@@ -650,13 +627,20 @@ impl InputState {
 
     /// Pressed since the last `end_frame`, OS key repeats included (vanilla
     /// screens and debug chords receive GLFW repeat events).
+    /// The drop key this frame, for screens that throw items themselves
+    /// (vanilla `AbstractContainerScreen.keyPressed`'s `keyDrop`).
+    pub fn drop_key_just_pressed(&self) -> bool {
+        self.action_input_just_pressed(Action::DropItem)
+    }
+
     pub fn key_just_pressed(&self, key: KeyCode) -> bool {
         self.just_pressed.contains(&key)
     }
 
     /// Hotbar digit pressed since the last `end_frame`, for container swaps.
     pub fn hotbar_key_just_pressed(&self) -> Option<u8> {
-        self.just_pressed.iter().find_map(|&c| hotbar_slot(c))
+        // `AbstractContainerScreen.checkHotbarKeyPressed` takes the first.
+        (0..9).find(|&slot| self.action_input_just_pressed(HOTBAR_SLOTS[slot as usize]))
     }
 
     /// Consume one queued press of `action`, vanilla `KeyMapping.consumeClick`.
@@ -684,6 +668,17 @@ impl InputState {
     /// latch set outside its consumer's screen can't fire later.
     pub fn end_frame(&mut self) {
         self.just_pressed.clear();
+        self.mouse_buttons_just_pressed.clear();
+        self.gamepad_buttons_just_pressed.clear();
+        #[cfg(feature = "test-harness")]
+        {
+            self.harness_ctrl = false;
+            if let Some((code, ctrl)) = self.harness_press.take() {
+                self.harness_ctrl = ctrl;
+                self.on_key(code, ElementState::Pressed, false);
+                self.on_key(code, ElementState::Released, false);
+            }
+        }
         self.up_pressed = false;
         self.down_pressed = false;
         self.page_up_pressed = false;
@@ -703,57 +698,71 @@ impl InputState {
             .map_or(Ok(()), Effect::play)
     }
 
-    pub fn on_key_event(&mut self, event: &winit::event::KeyEvent) {
-        if let PhysicalKey::Code(code) = event.physical_key {
-            if self.captures_key_event(event) {
-                self.capture_keyboard_input(code, event.state, event.repeat);
-                return;
-            }
-            match event.state {
-                ElementState::Pressed => {
-                    self.pressed.insert(code);
-                    self.just_pressed.insert(code);
-                    if !self.text_capture
-                        && !self.menu_capture
-                        && let Some(slot) = hotbar_slot(code)
-                    {
-                        // Vanilla handleKeybinds: spectator digits drive the
-                        // spectator menu and never touch the carried slot.
-                        if self.spectator {
-                            self.spectator_slot_presses.push(slot);
-                        } else {
-                            self.selected_slot = slot;
-                        }
+    pub fn on_key_event(&mut self, event: &KeyEvent) {
+        if let Some(code) = key_code(event) {
+            self.on_key(code, event.state, event.repeat);
+        }
+    }
+
+    /// Presses and releases `code` for the next frame, as a real key event
+    /// arriving between frames would, with Ctrl held for that frame when
+    /// `ctrl` is set. The harness runs after the frame's update, so pressing
+    /// now would be cleared before anything read it.
+    #[cfg(feature = "test-harness")]
+    pub fn press_key(&mut self, code: KeyCode, ctrl: bool) {
+        self.harness_press = Some((code, ctrl));
+    }
+
+    fn on_key(&mut self, code: KeyCode, state: ElementState, repeat: bool) {
+        if self.captures_key(code) {
+            self.capture_keyboard_input(code, state, repeat);
+            return;
+        }
+        match state {
+            ElementState::Pressed => {
+                self.pressed.insert(code);
+                self.just_pressed.insert(code);
+                let actions = self.bound_actions(InputKey::Keyboard(code));
+                // Vanilla `handleKeybinds` visits slots in order: the last
+                // selects, and in spectator each one reaches the menu.
+                if !self.text_capture && !self.menu_capture {
+                    for slot in hotbar_slots(&actions) {
+                        self.select_hotbar(slot);
                     }
-                    match code {
-                        KeyCode::KeyE if !self.text_capture => {
-                            self.recent_actions.insert(Action::ToggleInventory, true);
+                }
+                let gameplay = !self.text_capture && !self.menu_capture;
+                for action in actions {
+                    match action {
+                        Action::ToggleInventory if !self.text_capture => {
+                            self.recent_actions.insert(action, true);
                         }
-                        KeyCode::KeyQ if !self.text_capture && !self.menu_capture => {
-                            *self.click_counts.entry(Action::DropItem).or_insert(0) += 1;
+                        Action::DropItem | Action::SwapOffhand if gameplay => {
+                            self.click(action);
                         }
-                        KeyCode::KeyF if !self.text_capture && !self.menu_capture => {
-                            *self.click_counts.entry(Action::SwapOffhand).or_insert(0) += 1;
-                        }
-                        KeyCode::Escape => {
+                        // Screen cancellation follows Escape's route, including
+                        // recipe-book interception, without opening pause in play.
+                        Action::OpenMenu => {
                             self.recent_actions.insert(Action::OpenMenu, true);
                         }
-                        KeyCode::F5 => {
-                            self.recent_actions.insert(Action::ChangePerspective, true);
+                        Action::Close if self.menu_capture => {
+                            self.recent_actions.insert(Action::OpenMenu, true);
                         }
-                        KeyCode::KeyT => {
-                            self.recent_actions.insert(Action::OpenChat, true);
+                        Action::ChangePerspective | Action::OpenChat | Action::OpenCommands => {
+                            self.recent_actions.insert(action, true);
                         }
-                        KeyCode::Slash => {
-                            self.recent_actions.insert(Action::OpenCommands, true);
+                        Action::PickBlock if gameplay => self.middle_click.set(true),
+                        Action::SpectatorHotbar if !self.text_capture => {
+                            self.click_spectator_hotbar();
                         }
-
                         _ => {}
                     }
                 }
-                ElementState::Released => {
-                    self.pressed.remove(&code);
+            }
+            ElementState::Released => {
+                if self.key_bindings.matches_key(Action::PickBlock, code) {
+                    self.middle_click.set(false);
                 }
+                self.pressed.remove(&code);
             }
         }
     }
@@ -774,6 +783,8 @@ impl InputState {
             self.clear_just_pressed_actions();
             self.clear_click_counts();
             self.just_pressed.clear();
+            self.mouse_buttons_just_pressed.clear();
+            self.gamepad_buttons_just_pressed.clear();
             self.text_events.clear();
             self.enter_pressed = false;
             self.escape_pressed = false;
@@ -786,9 +797,12 @@ impl InputState {
         }
     }
 
-    pub fn captures_key_event(&self, event: &winit::event::KeyEvent) -> bool {
-        self.binding_capture
-            || matches!(event.physical_key, PhysicalKey::Code(code) if self.binding_keys_down.contains(&code))
+    pub fn captures_key_event(&self, event: &KeyEvent) -> bool {
+        key_code(event).is_some_and(|code| self.captures_key(code)) || self.binding_capture
+    }
+
+    fn captures_key(&self, code: KeyCode) -> bool {
+        self.binding_capture || self.binding_keys_down.contains(&code)
     }
 
     fn capture_keyboard_input(&mut self, code: KeyCode, state: ElementState, repeat: bool) {
@@ -819,10 +833,16 @@ impl InputState {
             return;
         }
 
+        self.on_menu_key_press(key_code(event), event.text.as_deref());
+    }
+
+    // Normalized press data keeps the screen route independent of winit's
+    // platform-private KeyEvent fields.
+    fn on_menu_key_press(&mut self, code: Option<KeyCode>, text: Option<&str>) {
         // The ordered event stream for caret-editing text fields. Chars are
         // suppressed while the edit modifier is held, like GLFW's char
         // callback for Ctrl (Cmd) chords.
-        if let PhysicalKey::Code(code) = event.physical_key {
+        if let Some(code) = code {
             self.text_events
                 .push(crate::ui::text_edit::TextInputEvent::Key {
                     code,
@@ -830,7 +850,7 @@ impl InputState {
                 });
         }
         let state = self.modifiers.state();
-        if let Some(text) = &event.text
+        if let Some(text) = text
             && !state.control_key()
             && !state.super_key()
         {
@@ -842,10 +862,12 @@ impl InputState {
             }
         }
 
-        if let PhysicalKey::Code(code) = event.physical_key {
+        if let Some(code) = code {
             match code {
+                _ if self.key_bindings.matches_key(Action::Close, code) => {
+                    self.escape_pressed = true
+                }
                 KeyCode::Enter | KeyCode::NumpadEnter => self.enter_pressed = true,
-                KeyCode::Escape => self.escape_pressed = true,
                 KeyCode::Tab => self.tab_pressed = true,
                 KeyCode::F5 => self.f5_pressed = true,
                 // Chat history/scroll keys; latched here so OS key repeat
@@ -906,6 +928,10 @@ impl InputState {
     }
 
     pub fn ctrl_held(&self) -> bool {
+        #[cfg(feature = "test-harness")]
+        if self.harness_ctrl {
+            return true;
+        }
         self.modifiers.state().control_key()
     }
 
@@ -950,6 +976,70 @@ impl InputState {
         }
     }
 
+    /// `gameplay`: the world has the input (no screen, chat or pause menu).
+    pub fn on_touch(&mut self, touch: &Touch, gameplay: bool, layout: &TouchLayout) {
+        let p = glam::vec2(touch.location.x as f32, touch.location.y as f32);
+        let out = self.touch.on_touch(
+            touch.id,
+            touch.phase,
+            p,
+            gameplay,
+            layout,
+            std::time::Instant::now(),
+        );
+        self.apply_touch(out);
+    }
+
+    /// Vanilla `handleKeybinds`: in spectator a hotbar slot drives the
+    /// spectator menu and never touches the carried slot.
+    fn select_hotbar(&mut self, slot: u8) {
+        if self.spectator {
+            self.spectator_slot_presses.push(slot);
+        } else {
+            self.selected_slot = slot;
+        }
+    }
+
+    pub fn touch(&self) -> &TouchControls {
+        &self.touch
+    }
+
+    /// Gameplay gestures target actions independently of physical bindings;
+    /// screen touches remain pointer events.
+    fn apply_touch(&mut self, out: Vec<TouchOutput>) {
+        for output in out {
+            match output {
+                TouchOutput::Look(delta) => self.on_mouse_motion((delta.x.into(), delta.y.into())),
+                TouchOutput::PointerDown => {
+                    self.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+                }
+                TouchOutput::PointerUp => {
+                    self.on_mouse_button(MouseButton::Left, ElementState::Released);
+                }
+                TouchOutput::DestroyStart => {
+                    self.touch_actions_down.insert(Action::Destroy);
+                    self.recent_actions.insert(Action::Destroy, true);
+                }
+                TouchOutput::DestroyEnd | TouchOutput::DestroyCancel => {
+                    self.touch_actions_down.remove(&Action::Destroy);
+                    self.recent_actions.remove(&Action::Destroy);
+                }
+                TouchOutput::Use => {
+                    self.touch_actions_down.insert(Action::Use);
+                    self.recent_actions.insert(Action::Use, true);
+                    self.tap_releases.push(Action::Use);
+                }
+                TouchOutput::Tap(action) => {
+                    self.touch_actions_down.insert(action);
+                    self.recent_actions.insert(action, true);
+                    self.tap_releases.push(action);
+                }
+                TouchOutput::Hotbar(slot) => self.select_hotbar(slot),
+                TouchOutput::PointerMove(p) => self.on_cursor_moved(p.x, p.y),
+            }
+        }
+    }
+
     pub fn on_mouse_motion(&mut self, delta: (f64, f64)) {
         self.mouse_delta.0 += delta.0;
         self.mouse_delta.1 += delta.1;
@@ -974,42 +1064,27 @@ impl InputState {
             ElementState::Released => false,
         };
 
+        if was_pressed {
+            self.mouse_buttons_down.insert(button);
+            self.mouse_buttons_just_pressed.insert(button);
+        } else {
+            self.mouse_buttons_down.remove(&button);
+        }
         match button {
-            MouseButton::Left => {
-                self.left_click.held = was_pressed;
-                if was_pressed {
-                    self.left_click.just_pressed = true;
-                    self.recent_actions.insert(Action::Destroy, true);
-                } else {
-                    self.left_click.just_released = true;
-                    self.recent_actions.insert(Action::Destroy, false);
-                }
-            }
-            MouseButton::Right => {
-                self.right_click.held = was_pressed;
-                if was_pressed {
-                    self.right_click.just_pressed = true;
-                    self.recent_actions.insert(Action::Use, true);
-                } else {
-                    self.right_click.just_released = true;
-                    self.recent_actions.insert(Action::Use, false);
-                }
-            }
-            MouseButton::Middle => {
-                self.middle_click.held = was_pressed;
-                if was_pressed {
-                    self.middle_click.just_pressed = true;
-                    if self.spectator && !self.menu_capture {
-                        *self
-                            .click_counts
-                            .entry(Action::SpectatorHotbar)
-                            .or_insert(0) += 1;
-                    }
-                } else {
-                    self.middle_click.just_released = true;
-                }
-            }
+            MouseButton::Left => self.left_click.set(was_pressed),
+            MouseButton::Right => self.right_click.set(was_pressed),
             _ => (),
+        }
+
+        for action in self.bound_actions(InputKey::Mouse(button)) {
+            match action {
+                Action::Destroy | Action::Use => {
+                    self.recent_actions.insert(action, was_pressed);
+                }
+                Action::PickBlock => self.middle_click.set(was_pressed),
+                Action::SpectatorHotbar if was_pressed => self.click_spectator_hotbar(),
+                _ => {}
+            }
         }
     }
 
@@ -1051,19 +1126,36 @@ impl InputState {
     }
 }
 
-fn hotbar_slot(code: KeyCode) -> Option<u8> {
-    match code {
-        KeyCode::Digit1 => Some(0),
-        KeyCode::Digit2 => Some(1),
-        KeyCode::Digit3 => Some(2),
-        KeyCode::Digit4 => Some(3),
-        KeyCode::Digit5 => Some(4),
-        KeyCode::Digit6 => Some(5),
-        KeyCode::Digit7 => Some(6),
-        KeyCode::Digit8 => Some(7),
-        KeyCode::Digit9 => Some(8),
+/// The key's code, with Android's Back as Escape: it arrives with no physical
+/// code, and closes screens and chat as Escape does.
+pub fn key_code(event: &KeyEvent) -> Option<KeyCode> {
+    key_code_of(&event.physical_key, &event.logical_key)
+}
+
+fn key_code_of(physical: &PhysicalKey, logical: &Key) -> Option<KeyCode> {
+    match (physical, logical) {
+        (PhysicalKey::Code(code), _) => Some(*code),
+        (_, Key::Named(NamedKey::BrowserBack)) => Some(KeyCode::Escape),
         _ => None,
     }
+}
+
+/// The hotbar actions, slot 0 first.
+const HOTBAR_SLOTS: [Action; 9] = [
+    Action::Hotbar1,
+    Action::Hotbar2,
+    Action::Hotbar3,
+    Action::Hotbar4,
+    Action::Hotbar5,
+    Action::Hotbar6,
+    Action::Hotbar7,
+    Action::Hotbar8,
+    Action::Hotbar9,
+];
+
+/// The hotbar slots among `actions`, in slot order.
+fn hotbar_slots(actions: &[Action]) -> impl Iterator<Item = u8> + '_ {
+    (0..9u8).filter(|&slot| actions.contains(&HOTBAR_SLOTS[slot as usize]))
 }
 
 /// Build a single-motor force-feedback effect targeting the FF-capable gamepads
@@ -1104,6 +1196,38 @@ fn build_rumble_effect(
 #[cfg(test)]
 mod binding_capture_tests {
     use super::*;
+
+    #[test]
+    fn fixed_catalog_escape_preserves_legacy_pause_routing() {
+        assert!(
+            Action::OpenMenu
+                .fixed_inputs()
+                .contains(&InputKey::Keyboard(KeyCode::Escape))
+        );
+        assert!(
+            Action::OpenMenu
+                .defaults()
+                .iter()
+                .all(|input| !matches!(input, InputKey::Keyboard(_)))
+        );
+        let mut input = InputState::released();
+        input.set_key_pressed_for_test(KeyCode::Escape, true);
+        assert!(input.performing_action(Action::OpenMenu));
+        assert!(!input.performing_action(Action::Close));
+        input.set_key_pressed_for_test(KeyCode::Escape, false);
+        assert!(!input.performing_action(Action::OpenMenu));
+    }
+
+    #[test]
+    fn a_use_tap_is_seen_before_it_releases() {
+        let mut input = InputState::released();
+        input.apply_touch(vec![TouchOutput::Use]);
+        assert!(input.action_just_pressed(Action::Use));
+        assert!(input.performing_action(Action::Use));
+
+        input.clear_just_pressed_actions();
+        assert!(!input.performing_action(Action::Use));
+    }
 
     #[test]
     fn keyboard_capture_suppresses_repeats_until_release() {
@@ -1149,5 +1273,260 @@ mod binding_capture_tests {
         assert!(input.take_binding_presses().is_empty());
         input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
         assert!(input.left_just_pressed());
+    }
+}
+
+#[cfg(test)]
+mod key_code_tests {
+    use winit::keyboard::{Key, KeyCode, NamedKey, NativeKey, NativeKeyCode, PhysicalKey};
+
+    use super::key_code_of;
+
+    #[test]
+    fn android_back_is_escape() {
+        let unidentified = PhysicalKey::Unidentified(NativeKeyCode::Android(4));
+        assert_eq!(
+            key_code_of(
+                &PhysicalKey::Code(KeyCode::KeyT),
+                &Key::Character("t".into())
+            ),
+            Some(KeyCode::KeyT)
+        );
+        assert_eq!(
+            key_code_of(&unidentified, &Key::Named(NamedKey::BrowserBack)),
+            Some(KeyCode::Escape)
+        );
+        assert_eq!(
+            key_code_of(&unidentified, &Key::Unidentified(NativeKey::Android(4))),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
+mod binding_lookup_tests {
+    use super::*;
+
+    #[test]
+    fn configured_close_routes_captured_keys_like_escape() {
+        // Captured Close uses Escape's OpenMenu action, not controller Close.
+        for text_capture in [false, true] {
+            for code in [KeyCode::Escape, KeyCode::KeyJ] {
+                let mut input = InputState::released();
+                input.menu_capture = true;
+                input.text_capture = text_capture;
+                input
+                    .key_bindings
+                    .set(Action::Close, vec![InputKey::Keyboard(KeyCode::KeyJ)]);
+                input.on_key(code, ElementState::Pressed, false);
+                input.on_key(code, ElementState::Released, false);
+                assert!(input.action_just_pressed(Action::OpenMenu), "{code:?}");
+                assert!(!input.action_just_pressed(Action::Close));
+            }
+        }
+
+        // Cancel must not become a second pause binding during gameplay.
+        let mut input = InputState::released();
+        input
+            .key_bindings
+            .set(Action::Close, vec![InputKey::Keyboard(KeyCode::KeyJ)]);
+        input.on_key(KeyCode::KeyJ, ElementState::Pressed, false);
+        assert!(!input.action_just_pressed(Action::OpenMenu));
+    }
+
+    #[test]
+    fn configured_enter_close_precedes_menu_activation() {
+        use crate::ui::menu::MenuInput;
+
+        for code in [KeyCode::Enter, KeyCode::NumpadEnter] {
+            for bound in [false, true] {
+                let mut input = InputState::released();
+                if bound {
+                    input
+                        .key_bindings
+                        .set(Action::Close, vec![InputKey::Keyboard(code)]);
+                }
+                input.on_key(code, ElementState::Pressed, false);
+                input.on_menu_key_press(Some(code), Some("\r"));
+                let menu_input = MenuInput {
+                    enter: input.enter_pressed(),
+                    escape: input.escape_pressed(),
+                    events: input.drain_text_events(),
+                    ..MenuInput::backdrop()
+                };
+                assert_eq!(menu_input.activate(), !bound, "{code:?}, bound={bound}");
+                assert_eq!(menu_input.escape, bound);
+                assert_eq!(menu_input.events.len(), 1, "retain the text-edit key event");
+
+                // Escape remains fixed even after Close is rebound to Enter.
+                input.on_menu_key_press(Some(KeyCode::Escape), None);
+                assert!(input.escape_pressed());
+                assert!(!input.enter_pressed());
+            }
+        }
+    }
+
+    #[test]
+    fn rebound_hotbar_routes_selection_spectator_and_captured_presses() {
+        let mut input = InputState::released();
+        input
+            .key_bindings
+            .set(Action::Hotbar3, vec![InputKey::Keyboard(KeyCode::KeyJ)]);
+        input.on_key(KeyCode::Digit3, ElementState::Pressed, false);
+        assert_eq!(input.selected_slot(), 0);
+        input.on_key(KeyCode::Digit3, ElementState::Released, false);
+        input.on_key(KeyCode::KeyJ, ElementState::Pressed, false);
+        assert_eq!(input.selected_slot(), 2);
+        input.on_key(KeyCode::KeyJ, ElementState::Released, false);
+        input.end_frame();
+
+        input.set_selected_slot(0);
+        input.spectator = true;
+        input.on_key(KeyCode::KeyJ, ElementState::Pressed, false);
+        assert_eq!(input.selected_slot(), 0);
+        assert_eq!(input.take_spectator_slot_presses(), [2]);
+        input.on_key(KeyCode::KeyJ, ElementState::Released, false);
+        input.end_frame();
+
+        input.menu_capture = true;
+        assert_eq!(input.hotbar_key_just_pressed(), None);
+        input.on_key(KeyCode::KeyJ, ElementState::Pressed, false);
+        assert!(input.take_spectator_slot_presses().is_empty());
+        assert_eq!(input.selected_slot(), 0);
+        assert_eq!(input.hotbar_key_just_pressed(), Some(2));
+    }
+
+    #[test]
+    fn touch_actions_survive_rebinding_without_leaking_pointer_input() {
+        let mut input = InputState::released();
+        input.key_bindings.set(Action::Destroy, Vec::new());
+        input.key_bindings.set(Action::ToggleInventory, Vec::new());
+        input.apply_touch(vec![TouchOutput::DestroyStart]);
+        assert!(input.performing_action(Action::Destroy));
+        assert!(input.action_just_pressed(Action::Destroy));
+        assert!(!input.left_just_pressed());
+        assert!(!input.left_held());
+        input.clear_just_pressed_actions();
+        assert!(input.performing_action(Action::Destroy));
+        input.apply_touch(vec![TouchOutput::DestroyCancel]);
+        assert!(!input.performing_action(Action::Destroy));
+        assert!(!input.left_click.just_released);
+
+        input.apply_touch(vec![TouchOutput::Tap(Action::ToggleInventory)]);
+        assert!(input.performing_action(Action::ToggleInventory));
+        assert!(input.action_just_pressed(Action::ToggleInventory));
+        input.clear_just_pressed_actions();
+        assert!(!input.performing_action(Action::ToggleInventory));
+        assert!(!input.action_just_pressed(Action::ToggleInventory));
+        input.apply_touch(vec![TouchOutput::PointerDown]);
+        assert!(input.left_just_pressed());
+        input.apply_touch(vec![TouchOutput::PointerUp]);
+        assert!(input.left_click.just_released);
+    }
+
+    #[test]
+    fn rebound_drop_routes_gameplay_clicks_and_captured_key_presses() {
+        let mut input = InputState::released();
+        input
+            .key_bindings
+            .set(Action::DropItem, vec![InputKey::Keyboard(KeyCode::KeyJ)]);
+        input.on_key(KeyCode::KeyQ, ElementState::Pressed, false);
+        assert!(!input.drop_key_just_pressed());
+        assert!(!input.consume_click(Action::DropItem));
+        input.on_key(KeyCode::KeyJ, ElementState::Pressed, false);
+        assert!(input.drop_key_just_pressed());
+        assert!(input.consume_click(Action::DropItem));
+        input.end_frame();
+        input.menu_capture = true;
+        input.on_key(KeyCode::KeyJ, ElementState::Pressed, true);
+        assert!(input.drop_key_just_pressed());
+        assert!(!input.consume_click(Action::DropItem));
+    }
+
+    #[test]
+    fn rebound_mouse_actions_separate_ui_clicks_and_action_lifetimes() {
+        let mut input = InputState::released();
+        let button = MouseButton::Other(7);
+        let mouse = InputKey::Mouse(button);
+        input.key_bindings.set(Action::Destroy, vec![mouse]);
+        input.key_bindings.set(Action::PickBlock, vec![mouse]);
+        input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+        assert!(input.left_just_pressed());
+        assert!(!input.action_just_pressed(Action::Destroy));
+        assert!(!input.middle_just_pressed());
+        input.on_mouse_button(MouseButton::Left, ElementState::Released);
+        input.clear_just_pressed_actions();
+
+        input.on_mouse_button(button, ElementState::Pressed);
+        assert!(input.action_just_pressed(Action::Destroy));
+        assert!(!input.left_just_pressed());
+        input.on_mouse_button(button, ElementState::Released);
+        assert!(!input.action_just_pressed(Action::Destroy));
+        assert!(!input.input_pressed(&mouse));
+        assert!(input.input_just_pressed(&mouse));
+        input.end_frame();
+        assert!(!input.input_just_pressed(&mouse));
+        // A short Pick click survives the frame, but not action/tick clearing.
+        assert!(input.middle_just_pressed());
+        input.clear_just_pressed_actions();
+        assert!(!input.middle_just_pressed());
+    }
+
+    #[test]
+    fn a_key_bound_to_two_actions_fires_both() {
+        let mut input = InputState::released();
+        let f = InputKey::Keyboard(KeyCode::KeyF);
+        input.key_bindings.set(Action::DropItem, vec![f]);
+        input.key_bindings.set(Action::SwapOffhand, vec![f]);
+        input.on_key(KeyCode::KeyF, ElementState::Pressed, false);
+        assert!(input.consume_click(Action::DropItem));
+        assert!(input.consume_click(Action::SwapOffhand));
+    }
+
+    #[test]
+    fn a_key_bound_to_two_hotbar_slots_selects_the_later_one() {
+        let mut input = InputState::released();
+        let j = InputKey::Keyboard(KeyCode::KeyJ);
+        input.key_bindings.set(Action::Hotbar3, vec![j]);
+        input.key_bindings.set(Action::Hotbar5, vec![j]);
+        input.on_key(KeyCode::KeyJ, ElementState::Pressed, false);
+        assert_eq!(input.selected_slot(), 4);
+        input.on_key(KeyCode::KeyJ, ElementState::Released, false);
+
+        input.spectator = true;
+        input.on_key(KeyCode::KeyJ, ElementState::Pressed, false);
+        assert_eq!(input.take_spectator_slot_presses(), [2, 4]);
+    }
+
+    #[test]
+    fn pick_block_and_spectator_hotbar_follow_a_keyboard_binding() {
+        let mut input = InputState::released();
+        let k = InputKey::Keyboard(KeyCode::KeyK);
+        input.key_bindings.set(Action::PickBlock, vec![k]);
+        input.on_key(KeyCode::KeyK, ElementState::Pressed, false);
+        assert!(input.middle_just_pressed());
+        input.on_key(KeyCode::KeyK, ElementState::Released, false);
+        input.clear_just_pressed_actions();
+
+        input.on_mouse_button(MouseButton::Middle, ElementState::Pressed);
+        assert!(!input.middle_just_pressed(), "middle no longer picks");
+
+        input.key_bindings.set(Action::SpectatorHotbar, vec![k]);
+        input.spectator = true;
+        input.on_key(KeyCode::KeyK, ElementState::Pressed, false);
+        assert!(input.consume_click(Action::SpectatorHotbar));
+    }
+
+    #[test]
+    fn held_actions_follow_a_binding_on_another_device() {
+        let mut input = InputState::released();
+        let side = MouseButton::Back;
+        input
+            .key_bindings
+            .set(Action::Jump, vec![InputKey::Mouse(side)]);
+        input.on_mouse_button(side, ElementState::Pressed);
+        assert!(input.performing_action(Action::Jump));
+        input.on_mouse_button(side, ElementState::Released);
+        assert!(!input.performing_action(Action::Jump));
     }
 }

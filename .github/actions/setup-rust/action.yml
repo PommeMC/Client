@@ -1,0 +1,42 @@
+name: Set up Rust
+description: >-
+  The toolchain, a cargo cache, just and cargo-nextest, the Vulkan SDK and, on
+  Linux, the system libraries the client links. Runs after checkout.
+
+inputs:
+  cache-key:
+    description: The rust-cache key, one per job so each keeps its own build.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: clippy, rustfmt
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.cache-key }}
+        cache-on-failure: true
+
+    # The checks themselves are `just` recipes, which `just client-pre-pr`
+    # runs locally too.
+    - uses: taiki-e/install-action@v2
+      with:
+        tool: just,cargo-nextest
+
+    - name: Install Vulkan SDK
+      uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa
+      with:
+        vulkan_version: 1.4.341.0
+        install_runtime: false
+        cache: true
+        stripdown: true
+
+    - name: Install Linux dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libvulkan-dev cmake libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev libdbus-1-dev

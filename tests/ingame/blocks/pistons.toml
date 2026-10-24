@@ -1,0 +1,192 @@
+# Pistons, simulated client-side as vanilla's client does: the server never
+# sends the moving blocks, only the blocks they land as, so a `moving_piston`
+# seen here, or a block the server never touches, is the client's own work.
+# A piston pushes a line of blocks, a sticky piston pulls a normal block but
+# leaves obsidian and glazed terracotta behind, a push pops a flower, and a
+# piston rising under the player lifts them.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/tp @s 0.5 -60 0.5 0 30"
+
+# Two blocks in front of an east-facing piston.
+[[step]]
+chat = "/setblock 0 -60 6 minecraft:piston[facing=east]"
+
+[[step]]
+chat = "/setblock 1 -60 6 minecraft:stone"
+
+[[step]]
+chat = "/setblock 2 -60 6 minecraft:dirt"
+
+[[step]]
+expect = { block = "dirt", at = [2, -60, 6] }
+
+[[step]]
+look_at = [2.0, -59.5, 6.5]
+
+[[step]]
+chat = "/setblock 0 -60 5 minecraft:redstone_block"
+
+[[step]]
+expect = { block = "moving_piston", at = [3, -60, 6] }
+
+# Mid-push: the head and both blocks part-way out.
+[[step]]
+wait_ms = 60
+
+[[step]]
+screenshot = "pushing"
+
+[[step]]
+expect = { block = "dirt", at = [3, -60, 6] }
+
+[[step]]
+expect = { block = "stone", at = [2, -60, 6] }
+
+[[step]]
+expect = { block = "piston_head", at = [1, -60, 6] }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "pushed"
+
+# A sticky piston can't pull obsidian: retracting only takes its head back,
+# and the obsidian must stay on the client too.
+[[step]]
+chat = "/setblock 0 -60 9 minecraft:sticky_piston[facing=east]"
+
+[[step]]
+chat = "/setblock 2 -60 9 minecraft:obsidian"
+
+[[step]]
+chat = "/setblock 0 -60 8 minecraft:redstone_block"
+
+[[step]]
+expect = { block = "piston_head", at = [1, -60, 9] }
+
+[[step]]
+chat = "/setblock 0 -60 8 minecraft:air"
+
+[[step]]
+expect = { block = "air", at = [1, -60, 9] }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+expect = { block = "obsidian", at = [2, -60, 9] }
+
+# The player stands on an upward piston set into the ground; its head
+# carries them up a block. The client moves itself, so only its own piston
+# push lifts it.
+[[step]]
+chat = "/setblock 0 -61 12 minecraft:piston[facing=up]"
+
+[[step]]
+chat = "/tp @s 0.5 -60 12.5 0 30"
+
+[[step]]
+expect = { player = { position = [0.5, -60.0, 12.5] } }
+
+[[step]]
+chat = "/setblock 1 -61 12 minecraft:redstone_block"
+
+[[step]]
+expect = { player = { position = [0.5, -59.0, 12.5] } }
+
+# A sticky piston pulls a normal block back with it.
+[[step]]
+chat = "/setblock 0 -60 15 minecraft:sticky_piston[facing=east]"
+
+[[step]]
+chat = "/setblock 1 -60 15 minecraft:stone"
+
+[[step]]
+expect = { block = "stone", at = [1, -60, 15] }
+
+[[step]]
+chat = "/setblock 0 -60 14 minecraft:redstone_block"
+
+[[step]]
+expect = { block = "stone", at = [2, -60, 15] }
+
+[[step]]
+chat = "/setblock 0 -60 14 minecraft:air"
+
+[[step]]
+expect = { block = "moving_piston", at = [1, -60, 15] }
+
+[[step]]
+expect = { block = "stone", at = [1, -60, 15] }
+
+[[step]]
+expect = { block = "air", at = [2, -60, 15] }
+
+# Glazed terracotta is pushed but never pulled: the server leaves its cell
+# alone on the retract, so a wrong pull would stay on the client.
+[[step]]
+chat = "/setblock 0 -60 18 minecraft:sticky_piston[facing=east]"
+
+[[step]]
+chat = "/setblock 1 -60 18 minecraft:white_glazed_terracotta"
+
+[[step]]
+expect = { block = "white_glazed_terracotta", at = [1, -60, 18] }
+
+[[step]]
+chat = "/setblock 0 -60 17 minecraft:redstone_block"
+
+[[step]]
+expect = { block = "white_glazed_terracotta", at = [2, -60, 18] }
+
+[[step]]
+chat = "/setblock 0 -60 17 minecraft:air"
+
+[[step]]
+expect = { block = "air", at = [1, -60, 18] }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+expect = { block = "white_glazed_terracotta", at = [2, -60, 18] }
+
+# A flower in the way pops instead of moving; a pushed copy would land in a
+# cell the server never updates.
+[[step]]
+chat = "/setblock 0 -60 21 minecraft:piston[facing=east]"
+
+[[step]]
+chat = "/setblock 1 -60 21 minecraft:poppy"
+
+[[step]]
+expect = { block = "poppy", at = [1, -60, 21] }
+
+[[step]]
+chat = "/setblock 0 -60 20 minecraft:redstone_block"
+
+[[step]]
+expect = { block = "piston_head", at = [1, -60, 21] }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+expect = { block = "air", at = [2, -60, 21] }
+
+[[step]]
+chat = "/fill -1 -60 4 4 -58 21 minecraft:air"
+
+[[step]]
+chat = "/fill -1 -61 4 4 -61 21 minecraft:grass_block"
+
+[[step]]
+expect = { block = "grass_block", at = [0, -61, 12] }

@@ -1,0 +1,10 @@
+[package]
+name = "pomme-dirs"
+description = "Pomme's data folder layout, shared by the client and the launcher, and the move from the old `.pomme` folder."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+directories = { workspace = true }
+serde_json = { workspace = true }
