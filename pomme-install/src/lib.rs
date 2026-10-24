@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+pub mod bedrock;
 pub mod client;
 
 const VERSION_MANIFEST_URL: &str =
@@ -20,6 +21,8 @@ const RESOURCES_BASE_URL: &str = "https://resources.download.minecraft.net";
 const CONCURRENT_DOWNLOADS: usize = 32;
 const ATTEMPTS: u32 = 3;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+/// GitHub's API refuses requests without one.
+const USER_AGENT: &str = "pomme";
 
 /// How far an install has got: `done` of `total` steps, with what's happening.
 #[derive(Clone, Debug, Default)]
@@ -102,14 +105,7 @@ pub async fn install(
     version: &str,
     on_progress: &(dyn Fn(Progress) + Send + Sync),
 ) -> Result<(), String> {
-    let report = |done, total, status: &str| {
-        on_progress(Progress {
-            done,
-            total,
-            status: status.to_owned(),
-        })
-    };
-
+    let report = reporter(on_progress);
     report(0, 1, "Fetching version info...");
     let manifest: VersionManifest = get_json(http, VERSION_MANIFEST_URL).await?;
     let entry = manifest
@@ -123,11 +119,24 @@ pub async fn install(
         http,
         &version_json.asset_index.url,
         &version_json.asset_index.sha1,
+        Hash::Sha1,
     )
     .await?;
     let index: AssetIndexJson =
         serde_json::from_slice(&index_bytes).map_err(|e| format!("Asset index: {e}"))?;
-    download_objects(http, &assets_dir.join("objects"), &index, &report).await?;
+    let objects_dir = assets_dir.join("objects");
+    let objects = index
+        .objects
+        .values()
+        .map(|obj| Fetch {
+            url: format!("{RESOURCES_BASE_URL}/{}/{}", &obj.hash[..2], obj.hash),
+            path: object_path(&objects_dir, &obj.hash),
+            size: obj.size,
+            sha1: obj.hash.clone(),
+            hash: Hash::Sha1,
+        })
+        .collect();
+    download_all(http, objects, &report).await?;
     // After the objects, so an index on disk means they're all there.
     write_atomic(&index_path(assets_dir, version), &index_bytes).await?;
 
@@ -135,7 +144,7 @@ pub async fn install(
     if !extracted_marker(versions_dir, version).exists() {
         report(0, 1, "Downloading the client jar...");
         let client = &version_json.downloads.client;
-        let jar = fetch_verified(http, &client.url, &client.sha1).await?;
+        let jar = fetch_verified(http, &client.url, &client.sha1, Hash::Sha1).await?;
         let mut part = out.as_os_str().to_owned();
         part.push(".part");
         let part = PathBuf::from(part);
@@ -159,46 +168,81 @@ pub async fn install(
     Ok(())
 }
 
-async fn download_objects(
+/// How a download's hash is taken: Mojang publishes plain sha1s, while git
+/// hashes a blob behind a `blob <len>\0` header.
+#[derive(Clone, Copy)]
+pub(crate) enum Hash {
+    Sha1,
+    GitBlob,
+}
+
+impl Hash {
+    fn of(self, bytes: &[u8]) -> String {
+        let mut sha1 = sha1_smol::Sha1::new();
+        if let Self::GitBlob = self {
+            sha1.update(format!("blob {}\0", bytes.len()).as_bytes());
+        }
+        sha1.update(bytes);
+        sha1.digest().to_string()
+    }
+}
+
+/// `on_progress` taking the parts of a `Progress`.
+fn reporter(
+    on_progress: &(dyn Fn(Progress) + Send + Sync),
+) -> impl Fn(u32, u32, &str) + Send + Sync + '_ {
+    move |done, total, status| {
+        on_progress(Progress {
+            done,
+            total,
+            status: status.to_owned(),
+        })
+    }
+}
+
+/// One file to download to `path`, checked against `sha1`.
+pub(crate) struct Fetch {
+    pub url: String,
+    pub path: PathBuf,
+    pub size: u64,
+    pub sha1: String,
+    pub hash: Hash,
+}
+
+/// Downloads every file of `files` not already on disk at its size.
+pub(crate) async fn download_all(
     http: &reqwest::Client,
-    objects_dir: &Path,
-    index: &AssetIndexJson,
+    files: Vec<Fetch>,
     report: &(dyn Fn(u32, u32, &str) + Send + Sync),
 ) -> Result<(), String> {
-    let missing: Vec<&AssetObject> = index
-        .objects
-        .values()
-        .filter(|obj| {
-            !std::fs::metadata(object_path(objects_dir, &obj.hash))
-                .is_ok_and(|m| m.len() == obj.size)
-        })
+    let missing: Vec<Fetch> = files
+        .into_iter()
+        .filter(|file| !std::fs::metadata(&file.path).is_ok_and(|m| m.len() == file.size))
         .collect();
     let total = missing.len() as u32;
-    let total_mb = missing.iter().map(|o| o.size).sum::<u64>() as f64 / 1048576.0;
+    let total_mb = missing.iter().map(|f| f.size).sum::<u64>() as f64 / 1048576.0;
 
     let mut done = 0;
     let mut done_bytes = 0;
     let mut last_report = Instant::now();
     let mut pending = missing.into_iter();
     let mut tasks = tokio::task::JoinSet::new();
-    let spawn = |tasks: &mut tokio::task::JoinSet<_>, obj: &AssetObject| {
-        let (http, hash, size) = (http.clone(), obj.hash.clone(), obj.size);
-        let path = object_path(objects_dir, &hash);
+    let spawn = |tasks: &mut tokio::task::JoinSet<_>, file: Fetch| {
+        let http = http.clone();
         tasks.spawn(async move {
-            let url = format!("{RESOURCES_BASE_URL}/{}/{hash}", &hash[..2]);
-            let bytes = fetch_verified(&http, &url, &hash).await?;
-            write_atomic(&path, &bytes).await?;
-            Ok::<u64, String>(size)
+            let bytes = fetch_verified(&http, &file.url, &file.sha1, file.hash).await?;
+            write_atomic(&file.path, &bytes).await?;
+            Ok::<u64, String>(file.size)
         });
     };
-    for obj in pending.by_ref().take(CONCURRENT_DOWNLOADS) {
-        spawn(&mut tasks, obj);
+    for file in pending.by_ref().take(CONCURRENT_DOWNLOADS) {
+        spawn(&mut tasks, file);
     }
     while let Some(result) = tasks.join_next().await {
         done_bytes += result.map_err(|e| e.to_string())??;
         done += 1;
-        if let Some(obj) = pending.next() {
-            spawn(&mut tasks, obj);
+        if let Some(file) = pending.next() {
+            spawn(&mut tasks, file);
         }
         if last_report.elapsed() >= PROGRESS_INTERVAL {
             let done_mb = done_bytes as f64 / 1048576.0;
@@ -217,7 +261,7 @@ fn object_path(objects_dir: &Path, hash: &str) -> PathBuf {
     objects_dir.join(&hash[..2]).join(hash)
 }
 
-async fn get_json<T: serde::de::DeserializeOwned>(
+pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(
     http: &reqwest::Client,
     url: &str,
 ) -> Result<T, String> {
@@ -225,21 +269,30 @@ async fn get_json<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(|e| format!("{url}: {e}"))
 }
 
-async fn fetch(http: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
-    let response = http
-        .get(url)
+pub(crate) async fn get(http: &reqwest::Client, url: &str) -> Result<reqwest::Response, String> {
+    http.get(url)
+        .header(reqwest::header::USER_AGENT, USER_AGENT)
         .send()
         .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| e.to_string())?;
-    Ok(response.bytes().await.map_err(|e| e.to_string())?.to_vec())
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|e| e.to_string())
+}
+
+async fn fetch(http: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
+    let bytes = get(http, url).await?.bytes().await;
+    Ok(bytes.map_err(|e| e.to_string())?.to_vec())
 }
 
 /// The body of `url`, which must hash to `sha1`.
-async fn fetch_verified(http: &reqwest::Client, url: &str, sha1: &str) -> Result<Vec<u8>, String> {
+async fn fetch_verified(
+    http: &reqwest::Client,
+    url: &str,
+    sha1: &str,
+    hash: Hash,
+) -> Result<Vec<u8>, String> {
     with_retries(url, || async {
         let bytes = fetch(http, url).await?;
-        if sha1_hex(&bytes) == sha1 {
+        if hash.of(&bytes) == sha1 {
             Ok(bytes)
         } else {
             Err("the download didn't match its sha1".into())
@@ -264,10 +317,6 @@ where
         }
     }
     Err(format!("{url}: {last_error}"))
-}
-
-fn sha1_hex(bytes: &[u8]) -> String {
-    sha1_smol::Sha1::from(bytes).digest().to_string()
 }
 
 /// Writes `bytes` beside `path`, then renames it into place.
@@ -323,7 +372,7 @@ fn extract_assets(jar: &[u8], out: &Path, report: &dyn Fn(u32, u32)) -> Result<(
 mod tests {
     use std::io::Write;
 
-    use super::{extract_assets, is_installed, sha1_hex, write_atomic};
+    use super::{Hash, extract_assets, is_installed, write_atomic};
 
     pub(crate) fn temp_dir(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("pomme-install-{label}-{}", std::process::id()))
@@ -350,7 +399,22 @@ mod tests {
 
     #[test]
     fn sha1_is_lower_hex() {
-        assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            Hash::Sha1.of(b"abc"),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+    }
+
+    #[test]
+    fn git_blob_hashes_match_git() {
+        assert_eq!(
+            Hash::GitBlob.of(b""),
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+        );
+        assert_eq!(
+            Hash::GitBlob.of(b"hello\n"),
+            "ce013625030ba8dba906f756967f9e9ca394464a"
+        );
     }
 
     #[test]

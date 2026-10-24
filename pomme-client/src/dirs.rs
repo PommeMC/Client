@@ -7,6 +7,7 @@ pub struct DataDirs {
     pub indexes_dir: PathBuf,
     pub objects_dir: PathBuf,
     pub pomme_assets_dir: PathBuf,
+    pub bedrock_assets_dir: PathBuf,
     pub jar_assets_dir: PathBuf,
     pub game_dir: PathBuf,
     pub cache_dir: PathBuf,
@@ -45,6 +46,7 @@ impl DataDirs {
             objects_dir,
             jar_assets_dir,
             pomme_assets_dir: layout.pomme_assets(),
+            bedrock_assets_dir: layout.bedrock_assets(),
             game_dir,
             cache_dir: layout.cache(version),
         }
