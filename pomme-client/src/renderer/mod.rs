@@ -59,6 +59,7 @@ use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
+use crate::renderer::pipelines::held_item::HeldHand;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::ui::font::{FontOptions, FontSources};
 use crate::world::block::render_assets::{
@@ -122,7 +123,9 @@ enum RenderMode<'a> {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
-        held_item: Option<pipelines::held_item::HeldItemInfo>,
+        /// The main hand's then the offhand's item.
+        held_items: [Option<pipelines::held_item::HeldItemInfo>; 2],
+        main_hand_right: bool,
         player_team_color: Option<u32>,
         render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
@@ -1206,7 +1209,8 @@ impl Renderer {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
-        held_item: Option<(String, f32, azalea_inventory::ItemStackData)>,
+        held_items: [Option<(String, f32, azalea_inventory::ItemStackData)>; 2],
+        main_hand_right: bool,
         player_team_color: Option<u32>,
         render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
@@ -1227,17 +1231,19 @@ impl Renderer {
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
         self.camera.set_render_distance(render_distance);
-        let held_item = held_item.map(|(name, light, stack)| {
-            let item_tints =
-                self.render_assets
-                    .item_tint_palette(&name, Some(&stack), player_team_color);
-            let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
-            pipelines::held_item::HeldItemInfo {
-                name,
-                light,
-                item_tints,
-                has_3d_model,
-            }
+        let held_items = held_items.map(|held| {
+            held.map(|(name, light, stack)| {
+                let item_tints =
+                    self.render_assets
+                        .item_tint_palette(&name, Some(&stack), player_team_color);
+                let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
+                pipelines::held_item::HeldItemInfo {
+                    name,
+                    light,
+                    item_tints,
+                    has_3d_model,
+                }
+            })
         });
         // Clear to the sky color: the strip between the sky disc's edge and the
         // terrain shows the clear color, so it must match the sky/terrain or it
@@ -1257,7 +1263,8 @@ impl Renderer {
                 overlay,
                 swing_progress,
                 use_anim,
-                held_item,
+                held_items,
+                main_hand_right,
                 player_team_color,
                 render_first_person_hand,
                 destroy_info,
@@ -1878,7 +1885,8 @@ impl Renderer {
                 overlay,
                 swing_progress,
                 use_anim,
-                held_item,
+                held_items,
+                main_hand_right,
                 player_team_color: _,
                 render_first_person_hand,
                 destroy_info,
@@ -2034,30 +2042,49 @@ impl Renderer {
                     // Vanilla applies bobHurt (death + hurt) and bobView to the
                     // first-person arm/item pose stack as well as the world.
                     let view_effect = self.camera.view_effect_matrix();
-                    // Vanilla renderArmWithItem draws the arm only for an empty
-                    // hand; a held item renders alone.
-                    match held_item {
-                        Some(item) => self.held_item_pipeline.update_and_draw(
+                    // Vanilla submitArmWithItem draws the bare arm only for an
+                    // empty main hand; held items render alone, and an empty
+                    // offhand draws nothing.
+                    // TODO: mirror the bare arm for a left main hand
+                    // (`renderPlayerArm`'s arm side).
+                    let [main_hand, off_hand] = held_items;
+                    if main_hand.is_none() {
+                        self.hand_pipeline.update_and_draw(
+                            cmd,
+                            frame,
+                            aspect,
+                            hud_fov,
+                            *swing_progress,
+                            view_effect,
+                        );
+                    }
+                    // TODO: the offhand's own swing and use animations
+                    // (`swingingArm`, `getUsedItemHand`) once it can be used.
+                    let main = main_hand.as_ref().map(|item| HeldHand {
+                        item,
+                        right_arm: *main_hand_right,
+                        swing_progress: *swing_progress,
+                        use_anim: *use_anim,
+                    });
+                    let off = off_hand.as_ref().map(|item| HeldHand {
+                        item,
+                        right_arm: !*main_hand_right,
+                        swing_progress: 0.0,
+                        use_anim: None,
+                    });
+                    let hands: Vec<_> = main.into_iter().chain(off).collect();
+                    if !hands.is_empty() {
+                        self.held_item_pipeline.update_and_draw(
                             &self.ctx.device,
                             &self.ctx.allocator,
                             cmd,
                             frame,
                             aspect,
                             hud_fov,
-                            *swing_progress,
-                            *use_anim,
-                            item,
+                            &hands,
                             &self.item_entity_pipeline,
                             view_effect,
-                        ),
-                        None => self.hand_pipeline.update_and_draw(
-                            cmd,
-                            frame,
-                            aspect,
-                            hud_fov,
-                            *swing_progress,
-                            view_effect,
-                        ),
+                        );
                     }
                 }
 
