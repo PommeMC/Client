@@ -196,6 +196,30 @@ impl Benchmark {
     }
 }
 
+/// The player's render distance while a chunk-load benchmark has replaced the
+/// menu's: saved in its place, and put back however the run ends.
+#[derive(Default)]
+pub struct BenchRenderDistance {
+    saved: Option<u32>,
+}
+
+impl BenchRenderDistance {
+    pub fn saved(&self) -> Option<u32> {
+        self.saved
+    }
+
+    pub fn set(&mut self, current: &mut u32, rd: u32) {
+        self.saved.get_or_insert(*current);
+        *current = rd;
+    }
+
+    /// Returns the restored distance, if a run had replaced it.
+    pub fn restore(&mut self, current: &mut u32) -> Option<u32> {
+        *current = self.saved.take()?;
+        Some(*current)
+    }
+}
+
 /// Lowest render distance to drop to during the chunk-load reset phase.
 pub const CHUNK_LOAD_MIN_RD: u32 = 2;
 /// Minimum time to hold the minimum render distance before the timed load can
@@ -382,7 +406,6 @@ pub struct ChunkLoadBench {
     phase: ChunkPhase,
     target_rd: u32,
     effective_rd: u32,
-    original_rd: u32,
     gpu_name: String,
     vulkan: String,
     resolution: (u32, u32),
@@ -412,7 +435,6 @@ impl ChunkLoadBench {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         target_rd: u32,
-        original_rd: u32,
         server_rd: u32,
         gpu_name: &str,
         vulkan: &str,
@@ -430,7 +452,6 @@ impl ChunkLoadBench {
             phase: ChunkPhase::Reset,
             target_rd,
             effective_rd,
-            original_rd,
             gpu_name: gpu_name.to_owned(),
             vulkan: vulkan.to_owned(),
             resolution: (width, height),
@@ -636,10 +657,6 @@ impl ChunkLoadBench {
         }
     }
 
-    pub fn original_rd(&self) -> u32 {
-        self.original_rd
-    }
-
     pub fn target_rd(&self) -> u32 {
         self.target_rd
     }
@@ -719,4 +736,24 @@ pub fn upload_result(rt: &tokio::runtime::Runtime, json: String) -> UploadHandle
         *out.lock().unwrap() = status;
     });
     handle
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BenchRenderDistance;
+
+    #[test]
+    fn bench_render_distance_puts_the_saved_one_back() {
+        let mut menu = 12;
+        let mut bench = BenchRenderDistance::default();
+        bench.set(&mut menu, 2);
+        bench.set(&mut menu, 16);
+        assert_eq!(menu, 16);
+        assert_eq!(bench.saved(), Some(12));
+        assert_eq!(bench.restore(&mut menu), Some(12));
+        assert_eq!(menu, 12);
+        // Leaving the world after a run that already ended changes nothing.
+        assert_eq!(bench.restore(&mut menu), None);
+        assert_eq!(menu, 12);
+    }
 }
