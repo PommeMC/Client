@@ -244,10 +244,12 @@ impl App {
         }
     }
 
-    /// A `--chunk-bench` run: borderless, as most players play, and never
-    /// paused for losing focus.
+    /// A `--chunk-bench` run: borderless, as most players play, never paused
+    /// for losing focus, and joining at the benchmark's render distance so an
+    /// integrated server sends that far.
     pub fn with_chunk_bench(mut self, rd: Option<u32>) -> Self {
-        if rd.is_some() {
+        if let Some(rd) = rd {
+            self.core.menu.set_bench_render_distance(rd);
             self.core.pause_on_lost_focus = false;
             self.core
                 .override_display_mode(core::DisplayMode::Borderless);

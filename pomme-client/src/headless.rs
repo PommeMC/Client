@@ -117,7 +117,7 @@ fn open(play: QuickPlay, dirs: &DataDirs, rd: u32) -> Result<(Transport, Option<
             None,
         )),
         QuickPlay::Singleplayer(folder) => {
-            let saves_dir = dirs.game_dir.join("saves");
+            let saves_dir = crate::ui::world_list::saves_dir(&dirs.game_dir);
             let worlds = WorldList::scan(&saves_dir);
             let summary = worlds
                 .get(&folder)

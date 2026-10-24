@@ -2,6 +2,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::renderer::RenderTimings;
+use crate::ui::world_list::{Difficulty, GameMode, WorldList, WorldSummary, saves_dir};
 
 const DURATION_SECS: f32 = 10.0;
 const WARMUP_FRAMES: u32 = 30;
@@ -218,6 +219,32 @@ impl BenchRenderDistance {
         *current = self.saved.take()?;
         Some(*current)
     }
+}
+
+/// The save `--chunk-bench` joins without a quick-play world. Its seed is
+/// fixed, so every run loads the same terrain.
+const BENCH_WORLD: &str = "chunk-bench";
+
+/// The bench world's folder, created on first use.
+pub fn bench_world(game_dir: &Path, version: &str) -> String {
+    let mut worlds = WorldList::scan(&saves_dir(game_dir));
+    if worlds.get(BENCH_WORLD).is_none()
+        && let Err(e) = worlds.create(WorldSummary {
+            name: "Chunk Bench".to_owned(),
+            folder: BENCH_WORLD.to_owned(),
+            last_played: 0,
+            game_mode: GameMode::Creative,
+            hardcore: false,
+            allow_commands: true,
+            difficulty: Difficulty::Peaceful,
+            seed: "pomme".to_owned(),
+            version: version.to_owned(),
+            extra: Default::default(),
+        })
+    {
+        tracing::error!("Failed to create the bench world: {e}");
+    }
+    BENCH_WORLD.to_owned()
 }
 
 /// Lowest render distance to drop to during the chunk-load reset phase.

@@ -179,11 +179,15 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         crate::net::chat_security::ProfileKeyServices::prefetch();
     }
 
-    let quick_play = args.quick_play();
+    let quick_play = args.quick_play().or_else(|| {
+        args.chunk_bench.map(|_| {
+            app::QuickPlay::Singleplayer(benchmark::bench_world(&data_dirs.game_dir, version))
+        })
+    });
     if args.headless
         && let Some(rd) = args.chunk_bench
     {
-        let play = quick_play.expect("--chunk-bench requires a quick-play world");
+        let play = quick_play.expect("a chunk bench always has a world");
         let user = headless::user(&args, &data_dirs.game_dir, &rt);
         std::process::exit(headless::run(rd, play, user, version, &data_dirs, &rt));
     }

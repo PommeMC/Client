@@ -724,7 +724,7 @@ impl MainMenu {
         key_bindings: &mut KeyBindings,
     ) -> Self {
         let server_list = ServerList::load(game_dir);
-        let saves_dir = game_dir.join("saves");
+        let saves_dir = crate::ui::world_list::saves_dir(game_dir);
         // Servers ping lazily as their rows draw (build_server_list), not at boot.
         let ping_results: PingResults = Default::default();
         let settings = load_settings(game_dir);
