@@ -7,15 +7,13 @@ use std::path::Path;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::Progress;
+use crate::{Progress, get};
 
 /// Newest first; listed rather than `/releases/latest`, which held the
 /// launcher's releases before the client's.
 const RELEASES_URL: &str = "https://api.github.com/repos/PommeMC/Client/releases?per_page=30";
 const TAG_PREFIX: &str = "client-v";
 const CHECKSUMS_ASSET: &str = "sha256sums.txt";
-/// GitHub's API refuses requests without one.
-const USER_AGENT: &str = "pomme";
 
 #[derive(Deserialize)]
 pub struct Release {
@@ -164,15 +162,6 @@ fn checksum_for(sums: &str, asset: &str) -> Option<String> {
         let file = fields.next()?.trim_start_matches('*');
         (file.rsplit('/').next() == Some(asset)).then(|| hash.to_owned())
     })
-}
-
-async fn get(http: &reqwest::Client, url: &str) -> Result<reqwest::Response, String> {
-    http.get(url)
-        .header(reqwest::header::USER_AGENT, USER_AGENT)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| format!("{url}: {e}"))
 }
 
 #[cfg(test)]
