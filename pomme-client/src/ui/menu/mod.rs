@@ -177,7 +177,7 @@ fn default_japanese_glyph_variants() -> bool {
         })
 }
 
-fn default_chunk_detail() -> u32 {
+pub(crate) fn default_chunk_detail() -> u32 {
     8
 }
 

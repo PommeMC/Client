@@ -36,7 +36,8 @@ bench *args:
 
 # The chunk-load benchmark at render distance `rd`, run unattended in a quick-play
 # world, borderless fullscreen, e.g. `just chunk-bench 16 --quick-access-singleplayer
-# MyWorld`. Writes chunk_load.json to the game dir and exits.
+# MyWorld`; `--headless` runs it with no window or GPU. Writes chunk_load.json to
+# the game dir and exits.
 chunk-bench rd *args: openal
     @cargo run --release -p pomme-client -- --chunk-bench {{ rd }} {{ args }}
 

@@ -8,21 +8,18 @@ use criterion::Criterion;
 
 use super::fixtures::{Assets, Scene, build_world};
 use crate::position::ChunkPos;
-use crate::renderer::chunk::mesher::MeshDispatcher;
+use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::world::block::model::CardinalLightType;
 use crate::world::block::render_assets::OwnedBlockRenderView;
 
 pub fn bench(c: &mut Criterion, assets: &Assets) {
     // `mesh_sections_now` meshes on the calling thread; the dispatcher's
     // workers stay idle.
-    let dispatcher = MeshDispatcher::load(
-        OwnedBlockRenderView::new(assets.render_assets.clone(), assets.block_state_table),
-        assets.uv_map.clone(),
-        &assets.jar_assets_dir,
-        &assets.asset_index,
-        None,
+    let dispatcher = assets.mesh.create_mesh_dispatcher(
+        OwnedBlockRenderView::new(assets.mesh.render_assets.clone(), assets.block_state_table),
         Arc::new(HashMap::new()),
-        CardinalLightType::Default.table(),
+        None,
+        CardinalLightType::Default,
     );
 
     let mut group = c.benchmark_group("mesh");

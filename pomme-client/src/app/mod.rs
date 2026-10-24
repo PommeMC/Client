@@ -43,7 +43,7 @@ pub enum WindowError {
     Renderer(#[from] renderer::RendererError),
 }
 
-const TICK_RATE: f32 = 1.0 / 20.0;
+pub(crate) const TICK_RATE: f32 = 1.0 / 20.0;
 const TICK_RATE_MS: u32 = 1000 / 20;
 const POSITION_SEND_INTERVAL: u32 = 20;
 const POSITION_THRESHOLD_SQ: f64 = 4.0e-8;
@@ -194,8 +194,8 @@ fn start_connecting(
     let block_definitions = Rc::clone(&core.block_definitions);
     let connection = spawn_connection(&core.tokio_rt, connect_args);
     let game = GameState::new(
-        &gfx.renderer,
-        &core.resource_packs,
+        &*gfx.renderer,
+        Some(&core.resource_packs),
         core.menu.render_distance,
         world.is_some(),
         core.menu.chat_options,

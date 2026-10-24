@@ -23,9 +23,10 @@ use std::sync::Arc;
 use azalea_block::BlockState;
 pub use camera::CloudMode;
 use camera::{Camera, CameraUniform};
-use chunk::atlas::TextureAtlas;
+use chunk::atlas::{AtlasUVMap, TextureAtlas};
 use chunk::buffer::ChunkBufferStore;
-use chunk::mesher::{ChunkMeshData, MeshDispatcher};
+use chunk::mesh_source::MeshSource;
+use chunk::mesher::ChunkMeshData;
 use chunk::moving_blocks::{MovingBlockBuffers, MovingBlockRender};
 use context::VulkanContext;
 use glam::dvec3;
@@ -61,9 +62,26 @@ use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::ui::font::{FontOptions, FontSources};
-use crate::world::block::render_assets::{
-    BlockRenderAssets, BlockRenderView, OwnedBlockRenderView,
-};
+use crate::world::block::render_assets::{BlockRenderAssets, BlockRenderView};
+
+/// The live atlas's layout, so meshes bake in UVs that match it.
+impl MeshSource for Renderer {
+    fn shared_render_assets(&self) -> Arc<BlockRenderAssets> {
+        Arc::clone(&self.render_assets)
+    }
+
+    fn uv_map(&self) -> &AtlasUVMap {
+        &self.atlas.uv_map
+    }
+
+    fn jar_assets_dir(&self) -> &Path {
+        &self.jar_assets_dir
+    }
+
+    fn asset_index(&self) -> &Option<AssetIndex> {
+        &self.asset_index
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum RendererError {
@@ -1157,35 +1175,6 @@ impl Renderer {
 
     pub fn render_assets(&self) -> &BlockRenderAssets {
         &self.render_assets
-    }
-
-    pub(crate) fn shared_render_assets(&self) -> Arc<BlockRenderAssets> {
-        Arc::clone(&self.render_assets)
-    }
-
-    pub fn atlas_uv_map(&self) -> &crate::renderer::chunk::atlas::AtlasUVMap {
-        &self.atlas.uv_map
-    }
-
-    /// The session view must use the CPU assets loaded with the current atlas.
-    pub fn create_mesh_dispatcher(
-        &self,
-        render_view: OwnedBlockRenderView,
-        biome_climate: std::sync::Arc<
-            std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
-        >,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
-        cardinal_light: crate::world::block::model::CardinalLightType,
-    ) -> MeshDispatcher {
-        MeshDispatcher::load(
-            render_view,
-            self.atlas.uv_map.clone(),
-            &self.jar_assets_dir,
-            &self.asset_index,
-            packs,
-            biome_climate,
-            cardinal_light.table(),
-        )
     }
 
     pub fn update_chunk_borders(&mut self, min_y: i32, max_y: i32) {

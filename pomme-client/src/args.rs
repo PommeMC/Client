@@ -55,10 +55,16 @@ pub struct LaunchArgs {
         long,
         value_name = "RD",
         value_parser = clap::value_parser!(u32)
-            .range(crate::benchmark::CHUNK_LOAD_MIN_RD as i64 + 1..),
+            .range(crate::benchmark::CHUNK_LOAD_MIN_RD as i64 + 1
+                ..=crate::world::chunk::MAX_VIEW_DISTANCE as i64),
         requires = "quick_play"
     )]
     pub chunk_bench: Option<u32>,
+
+    /// Runs `--chunk-bench` with no window or GPU: chunks are meshed but not
+    /// uploaded or drawn.
+    #[arg(long, requires = "chunk_bench")]
+    pub headless: bool,
 
     /// Runs the headless CPU benchmarks (optionally only those whose id
     /// contains the filter) and exits.
@@ -101,6 +107,16 @@ impl LaunchArgs {
             tracing::error!("{}: {e}", path.display());
             Self::from_words("").expect("no arguments always parse")
         })
+    }
+
+    pub fn quick_play(&self) -> Option<crate::app::QuickPlay> {
+        self.quick_access_multiplayer
+            .clone()
+            .map(crate::app::QuickPlay::Multiplayer)
+            .or(self
+                .quick_access_singleplayer
+                .clone()
+                .map(crate::app::QuickPlay::Singleplayer))
     }
 
     pub fn data_dirs(&self, version: &str) -> DataDirs {
@@ -167,5 +183,7 @@ mod tests {
         assert!(words("--chunk-bench 16").is_err());
         // The reset distance itself would time an empty load.
         assert!(words("--chunk-bench 2 --quick-access-singleplayer World").is_err());
+        assert!(words("--chunk-bench 129 --quick-access-singleplayer World").is_err());
+        assert!(words("--headless --quick-access-singleplayer World").is_err());
     }
 }

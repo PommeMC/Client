@@ -19,6 +19,7 @@ mod discord;
 mod entity;
 #[cfg(feature = "test-harness")]
 mod harness;
+mod headless;
 mod lang;
 mod logging;
 mod mob_effect;
@@ -178,6 +179,15 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         crate::net::chat_security::ProfileKeyServices::prefetch();
     }
 
+    let quick_play = args.quick_play();
+    if args.headless
+        && let Some(rd) = args.chunk_bench
+    {
+        let play = quick_play.expect("--chunk-bench requires a quick-play world");
+        let user = headless::user(&args, &data_dirs.game_dir, &rt);
+        std::process::exit(headless::run(rd, play, user, version, &data_dirs, &rt));
+    }
+
     let (user, require_account) = UserData::for_launch(
         args.username,
         args.uuid,
@@ -206,11 +216,7 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         rt,
         presence,
         user,
-        args.quick_access_multiplayer
-            .map(app::QuickPlay::Multiplayer)
-            .or(args
-                .quick_access_singleplayer
-                .map(app::QuickPlay::Singleplayer)),
+        quick_play,
         winit::dpi::LogicalSize::new(args.width, args.height),
     )
     .with_chunk_bench(args.chunk_bench);
