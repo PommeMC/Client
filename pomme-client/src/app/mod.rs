@@ -256,12 +256,13 @@ impl App {
         self
     }
 
-    /// The `--chunk-bench` run's exit code, once it has ended.
+    /// The `--chunk-bench` run's exit code: 1 if the game quit before the run
+    /// ended.
     pub fn chunk_bench_exit_code(&self) -> Option<i32> {
-        match self.chunk_bench? {
-            ChunkBenchLaunch::Ended(code) => Some(code),
-            _ => None,
-        }
+        self.chunk_bench.map(|launch| match launch {
+            ChunkBenchLaunch::Ended(code) => code,
+            _ => 1,
+        })
     }
 
     /// Starts the `--chunk-bench` run once in game, and quits when it ends
@@ -291,10 +292,11 @@ impl App {
                     (None, None) => ChunkBenchLaunch::Ended(1),
                 }
             }
-            // The quick play failed to open or connect; a deferred one is
-            // still waiting for a sign-in.
+            // The quick play failed to open or connect, or is held for a
+            // sign-in that has nothing to restore.
             (ChunkBenchLaunch::Waiting(_), AppPhase::InMenu { .. })
-                if self.core.deferred_quick_play.is_none() =>
+                if self.core.deferred_quick_play.is_none()
+                    || self.core.menu.no_account_to_restore() =>
             {
                 ChunkBenchLaunch::Ended(1)
             }
@@ -644,11 +646,7 @@ impl ApplicationHandler for App {
                             .key_bindings
                             .matches_key(Action::ToggleFullscreen, code)
                     {
-                        let display_mode = self.core.display_mode.cycle();
-                        self.core
-                            .menu
-                            .set_display_mode(display_mode, &self.core.input.key_bindings);
-                        self.core.sync_display_mode(window);
+                        self.core.toggle_display_mode(window);
                     }
                     // F2 screenshot works in every phase, like vanilla.
                     // TODO: Ctrl+F2 panoramic screenshot

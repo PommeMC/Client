@@ -887,6 +887,18 @@ impl AppCore {
         self.display_mode_override = Some(mode);
     }
 
+    /// The fullscreen key: cycles and saves the display mode, unless an
+    /// override holds it.
+    pub fn toggle_display_mode(&mut self, window: &Window) {
+        if self.display_mode_override.is_some() {
+            return;
+        }
+        let display_mode = self.display_mode.cycle();
+        self.menu
+            .set_display_mode(display_mode, &self.input.key_bindings);
+        self.sync_display_mode(window);
+    }
+
     pub fn sync_display_mode(&mut self, window: &Window) {
         let wanted = self.display_mode_override.unwrap_or(self.menu.display_mode);
         if wanted != self.display_mode {
