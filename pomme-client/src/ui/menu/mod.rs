@@ -1,4 +1,5 @@
 mod account;
+mod bedrock_screen;
 mod credits;
 mod friends_screen;
 pub(crate) mod helpers;
@@ -616,6 +617,11 @@ pub struct MainMenu {
     bedrock: Arc<parking_lot::Mutex<BedrockDownload>>,
     /// Bedrock was the last theme picked, so its download switches to it.
     bedrock_pending: bool,
+    /// Where the Bedrock title screen last placed its skin model.
+    bedrock_skin: Option<crate::renderer::MenuSkin>,
+    /// The signed-in player's undashed UUID, whose face the Bedrock Profile
+    /// button shows.
+    player_face: Option<String>,
     scroll_offset: f32,
     /// Which text field of the current form has keyboard focus (index within
     /// the form). Separate from `focus` (button/widget focus ring).
@@ -780,6 +786,8 @@ impl MainMenu {
             bedrock_dir,
             bedrock: Arc::new(parking_lot::Mutex::new(BedrockDownload::Idle)),
             bedrock_pending: false,
+            bedrock_skin: None,
+            player_face: None,
             scroll_offset: 0.0,
             focused_field: None,
             last_field_click_time: Instant::now(),
@@ -918,6 +926,15 @@ impl MainMenu {
     }
 
     /// The account the menu shows and joins with.
+    /// The player whose skin the title screen shows, `None` without a
+    /// profile. Starts fetching their face for the Bedrock Profile button.
+    pub(crate) fn set_player_face(&mut self, uuid: Option<&uuid::Uuid>) {
+        self.player_face = uuid.map(|uuid| uuid.simple().to_string());
+        if let Some(uuid) = &self.player_face {
+            friends::fetch_face(&self.rt, uuid.clone(), &self.face_cache);
+        }
+    }
+
     pub(crate) fn set_account(
         &mut self,
         username: String,
@@ -1111,10 +1128,20 @@ impl MainMenu {
         self.theme
     }
 
-    /// The rotating 3D skin is Pomme's own chrome; the vanilla title screen
-    /// has no such thing.
-    pub fn show_skin_preview(&self) -> bool {
-        self.is_main_screen() && self.theme == PanoramaTheme::Pomme
+    /// The title screen's rotating 3D skin. Pomme's and Bedrock's screens
+    /// have one; the vanilla title screen has no such thing.
+    pub fn skin_preview(&self) -> Option<crate::renderer::MenuSkin> {
+        if !self.is_main_screen() {
+            return None;
+        }
+        match self.theme {
+            PanoramaTheme::Pomme => Some(crate::renderer::MenuSkin {
+                at: (0.7, 0.5),
+                scale: 1.0,
+            }),
+            PanoramaTheme::Bedrock => self.bedrock_skin,
+            PanoramaTheme::Default => None,
+        }
     }
 
     /// Picks the title screen's splash line. Separate from `new` because the

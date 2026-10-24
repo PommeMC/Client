@@ -1,6 +1,4 @@
 //! Vanilla `TitleScreen`, drawn when the theme switcher is set to Default.
-//! The Bedrock theme draws it too, with Bedrock's logo in place of the Java
-//! one.
 //!
 //! Positions come straight from `TitleScreen.init` / `LogoRenderer` /
 //! `SplashRenderer` in GUI units and are multiplied by the GUI scale, so the
@@ -26,13 +24,6 @@ const EDITION_H: f32 = 14.0;
 const LOGO_HEIGHT_OFFSET: f32 = 30.0;
 const EDITION_LOGO_OVERLAP: f32 = 7.0;
 
-/// Bedrock's `title_panel_win10`: 55% of the screen wide, below the start
-/// screen's 12% top padding.
-const BEDROCK_TITLE_SCREEN_W: f32 = 0.55;
-const BEDROCK_TITLE_TOP: f32 = 0.12;
-/// `title.png` is 1937x333.
-const BEDROCK_TITLE_ASPECT: f32 = 333.0 / 1937.0;
-
 /// `SplashRenderer`
 const SPLASH_WIDTH_OFFSET: f32 = 123.0;
 const SPLASH_HEIGHT_OFFSET: f32 = 69.0;
@@ -51,11 +42,6 @@ const ICON_SPRITE: f32 = 15.0;
 const FOOTER_OFFSET: f32 = 10.0;
 
 const COPYRIGHT: &str = "Copyright Mojang AB. Do not distribute!";
-
-/// Dropdown widths, wide enough for the longest label at `DropdownStyle`'s
-/// 10-unit pad plus 11-unit icon.
-const DROP_LINKS_W: f32 = 74.0;
-const DROP_THEME_W: f32 = 66.0;
 
 impl MainMenu {
     #[allow(clippy::too_many_lines)]
@@ -87,43 +73,30 @@ impl MainMenu {
         let col_x = cx - COL_W / 2.0 * gs;
         let col_w = COL_W * gs;
 
-        let splash_pivot = if self.theme == PanoramaTheme::Bedrock {
-            let w = screen_w * BEDROCK_TITLE_SCREEN_W;
-            let h = w * BEDROCK_TITLE_ASPECT;
-            let x = cx - w / 2.0;
-            let y = screen_h * BEDROCK_TITLE_TOP;
-            elements.push(MenuElement::Image {
-                x,
-                y,
-                w,
-                h,
-                sprite: SpriteId::BedrockTitle,
-                tint: WHITE,
-            });
-            // Inset from the logo's corner as vanilla's is from its own.
-            let inset = (LOGO_W / 2.0 - SPLASH_WIDTH_OFFSET) * gs;
-            (x + w - inset, y + h - inset)
-        } else {
-            elements.push(MenuElement::Image {
-                x: cx - LOGO_W / 2.0 * gs,
-                y: LOGO_HEIGHT_OFFSET * gs,
-                w: LOGO_W * gs,
-                h: LOGO_H * gs,
-                sprite: SpriteId::MinecraftLogo,
-                tint: WHITE,
-            });
-            elements.push(MenuElement::Image {
-                x: cx - EDITION_W / 2.0 * gs,
-                y: (LOGO_HEIGHT_OFFSET + LOGO_H - EDITION_LOGO_OVERLAP) * gs,
-                w: EDITION_W * gs,
-                h: EDITION_H * gs,
-                sprite: SpriteId::MinecraftEdition,
-                tint: WHITE,
-            });
-            (cx + SPLASH_WIDTH_OFFSET * gs, SPLASH_HEIGHT_OFFSET * gs)
-        };
+        elements.push(MenuElement::Image {
+            x: cx - LOGO_W / 2.0 * gs,
+            y: LOGO_HEIGHT_OFFSET * gs,
+            w: LOGO_W * gs,
+            h: LOGO_H * gs,
+            sprite: SpriteId::MinecraftLogo,
+            tint: WHITE,
+        });
+        elements.push(MenuElement::Image {
+            x: cx - EDITION_W / 2.0 * gs,
+            y: (LOGO_HEIGHT_OFFSET + LOGO_H - EDITION_LOGO_OVERLAP) * gs,
+            w: EDITION_W * gs,
+            h: EDITION_H * gs,
+            sprite: SpriteId::MinecraftEdition,
+            tint: WHITE,
+        });
 
-        self.push_splash(&mut elements, splash_pivot, gs, &text_width_fn);
+        self.push_splash(
+            &mut elements,
+            (cx + SPLASH_WIDTH_OFFSET * gs, SPLASH_HEIGHT_OFFSET * gs),
+            gs,
+            &text_width_fn,
+            true,
+        );
 
         // Realms is never enabled.
         let rows: [(&str, bool); 3] = [
@@ -367,13 +340,16 @@ impl MainMenu {
         }
     }
 
-    /// `SplashRenderer.extractRenderState`.
-    fn push_splash(
+    /// `SplashRenderer.extractRenderState`, rotated about `pivot`. Java fits
+    /// the splash to a fixed width; Bedrock's (`fit` false) keeps the text's
+    /// own size and only pulses.
+    pub(super) fn push_splash(
         &self,
         elements: &mut Vec<MenuElement>,
         pivot: (f32, f32),
         gs: f32,
         text_width_fn: &impl Fn(&str, f32) -> f32,
+        fit: bool,
     ) {
         let Some(ref splash) = self.splash else {
             return;
@@ -383,7 +359,11 @@ impl MainMenu {
         let text_w = text_width_fn(splash, common::FONT_SIZE);
         let millis = self.created.elapsed().as_millis() % 1000;
         let phase = 1.8 - ((millis as f32 / 1000.0 * TAU).sin() * 0.1).abs();
-        let text_scale = phase * 100.0 / (text_w + 32.0);
+        let text_scale = if fit {
+            phase * 100.0 / (text_w + 32.0)
+        } else {
+            phase / 1.8
+        };
 
         let scale = common::FONT_SIZE * gs * text_scale;
         elements.push(MenuElement::McTextRotated {
@@ -418,18 +398,20 @@ fn push_icon_button(
     screen_h: f32,
     tooltip: &str,
 ) -> bool {
-    let hit = common::hit_test(cursor, [x, y, size, size]);
-    let focused = ctx.focused(enabled, hit);
-    let hovered = enabled && hit;
-    push_icon_widget(elements, x, y, size, gs, face, enabled, hovered || focused);
-    *any_hovered |= hovered;
-    let keyboard = focused && ctx.activate;
-    if keyboard {
-        ctx.fired = true;
-    }
+    let button = ctx.button(any_hovered, cursor, clicked, [x, y, size, size], enabled);
+    push_icon_widget(
+        elements,
+        x,
+        y,
+        size,
+        gs,
+        face,
+        enabled,
+        button.hovered || button.focused,
+    );
     // Vanilla keys tooltips off `isHovered`, which ignores `active`.
-    if hit {
+    if button.hit {
         common::push_tooltip(elements, cursor, screen_w, screen_h, gs, tooltip);
     }
-    (hovered && clicked) || keyboard
+    button.activated
 }

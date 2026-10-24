@@ -216,6 +216,41 @@ impl FocusCtx {
         }
         self.focus == Some(idx)
     }
+
+    /// Claims a focus slot for a button at `rect` and reports how it's being
+    /// used this frame. Fires on a click on it, or Enter/Space while focused.
+    pub(super) fn button(
+        &mut self,
+        any_hovered: &mut bool,
+        cursor: (f32, f32),
+        clicked: bool,
+        rect: [f32; 4],
+        enabled: bool,
+    ) -> ButtonUse {
+        let hit = common::hit_test(cursor, rect);
+        let hovered = enabled && hit;
+        let focused = self.focused(enabled, hovered);
+        *any_hovered |= hovered;
+        let keyboard = focused && self.activate;
+        if keyboard {
+            self.fired = true;
+        }
+        ButtonUse {
+            hit,
+            hovered,
+            focused,
+            activated: (hovered && clicked) || keyboard,
+        }
+    }
+}
+
+/// How a button is used this frame, from [`FocusCtx::button`].
+pub(super) struct ButtonUse {
+    /// The cursor is on it, whether or not it's enabled.
+    pub(super) hit: bool,
+    pub(super) hovered: bool,
+    pub(super) focused: bool,
+    pub(super) activated: bool,
 }
 
 /// A focusable vanilla-style button. Assigns itself the next focus index,
@@ -271,9 +306,8 @@ pub(super) fn push_button_label_f(
     enabled: bool,
     scroll: Option<&common::LabelScroll<'_>>,
 ) -> bool {
-    let real_hovered = enabled && common::hit_test(cursor, [x, y, w, h]);
-    let focused = ctx.focused(enabled, real_hovered);
-    let draw_cursor = focus_cursor(focused, real_hovered, x, y, w, h, cursor);
+    let button = ctx.button(any_hovered, cursor, clicked, [x, y, w, h], enabled);
+    let draw_cursor = focus_cursor(button.focused, button.hovered, x, y, w, h, cursor);
     common::push_button_label(
         elements,
         draw_cursor,
@@ -287,12 +321,7 @@ pub(super) fn push_button_label_f(
         enabled,
         scroll,
     );
-    *any_hovered |= real_hovered;
-    let keyboard = focused && ctx.activate;
-    if keyboard {
-        ctx.fired = true;
-    }
-    (real_hovered && clicked) || keyboard
+    button.activated
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1029,6 +1058,11 @@ const DROP_TEXT_BRIGHT: [f32; 4] = [0.94, 0.95, 0.98, 1.0];
 const DROP_ACCENT: [f32; 4] = [0.39, 0.71, 1.0, 0.9];
 const DROP_LINK_ICON: [f32; 4] = [0.6, 0.7, 0.85, 0.8];
 const DROP_FAILED: [f32; 4] = [1.0, 0.45, 0.45, 0.9];
+
+/// Dropdown widths in GUI units, wide enough for the longest label at
+/// `DropdownStyle`'s 10-unit pad plus 11-unit icon.
+pub(super) const DROP_LINKS_W: f32 = 74.0;
+pub(super) const DROP_THEME_W: f32 = 66.0;
 
 const LINKS: [(&str, char, &str); 3] = [
     ("Website", ICON_GLOBE, "https://pomme.rs"),

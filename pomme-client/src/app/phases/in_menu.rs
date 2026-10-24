@@ -144,7 +144,7 @@ pub fn update_menu(
         result.blur,
         result.elements,
         core.input.cursor_pos(),
-        core.menu.show_skin_preview(),
+        core.menu.skin_preview(),
     ) {
         tracing::error!("Render error: {e}");
     }
@@ -201,7 +201,7 @@ pub fn update_menu(
                 .reload_panorama(&theme.panorama_dir(&core.data_dirs));
             if theme == PanoramaTheme::Bedrock {
                 gfx.renderer
-                    .load_bedrock_title(&core.data_dirs.bedrock_ui_dir());
+                    .load_bedrock_sprites(&core.data_dirs.bedrock_ui_dir());
             }
             core.menu.start_transition_open();
         }
@@ -224,6 +224,8 @@ pub fn update_menu(
                 gfx.renderer
                     .load_player_skin(&core.user.uuid, &core.tokio_rt);
             }
+            core.menu
+                .set_player_face(core.user.has_profile.then_some(&core.user.uuid));
             if account.is_some()
                 && let Some(play) = core.deferred_quick_play.take()
             {
