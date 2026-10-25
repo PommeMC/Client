@@ -1636,24 +1636,22 @@ fn hand_render_selection(
                 InteractionHand::OffHand => HandRenderSelection::OFF_ONLY,
             };
         }
-        return if hand == InteractionHand::MainHand && is_charged_crossbow(off) {
+        return if hand == InteractionHand::MainHand && off.is_some_and(is_charged_crossbow) {
             HandRenderSelection::MAIN_ONLY
         } else {
             HandRenderSelection::BOTH
         };
     }
-    if is_charged_crossbow(main) {
+    if main.is_some_and(is_charged_crossbow) {
         return HandRenderSelection::MAIN_ONLY;
     }
     HandRenderSelection::BOTH
 }
 
 /// Vanilla `ItemInHandRenderer.isChargedCrossbow` / `CrossbowItem.isCharged`.
-fn is_charged_crossbow(stack: Option<&ItemStackData>) -> bool {
-    stack.is_some_and(|s| {
-        s.kind == ItemKind::Crossbow
-            && stack_component::<ChargedProjectiles>(s).is_some_and(|c| !c.items.is_empty())
-    })
+pub(crate) fn is_charged_crossbow(stack: &ItemStackData) -> bool {
+    stack.kind == ItemKind::Crossbow
+        && stack_component::<ChargedProjectiles>(stack).is_some_and(|c| !c.items.is_empty())
 }
 
 /// The stack's component override if the server set one, else the item's

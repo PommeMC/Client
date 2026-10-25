@@ -1224,15 +1224,18 @@ impl Renderer {
         self.camera.set_render_distance(render_distance);
         let held_items = held_items.map(|held| {
             held.map(|(name, light, stack)| {
+                let model = self.render_assets.stack_model_key(&name, &stack);
                 let item_tints =
                     self.render_assets
-                        .item_tint_palette(&name, Some(&stack), player_team_color);
-                let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
+                        .item_tint_palette(&model, Some(&stack), player_team_color);
+                let has_3d_model = self.ensure_item_mesh(&model).is_block_model;
                 pipelines::held_item::HeldItemInfo {
                     name,
+                    model,
                     light,
                     item_tints,
                     has_3d_model,
+                    charged_crossbow: crate::player::interaction::is_charged_crossbow(&stack),
                 }
             })
         });
@@ -1712,6 +1715,9 @@ impl Renderer {
                     } else {
                         None
                     };
+                    if let Some(stack) = item_stack {
+                        *item_name = self.render_assets.stack_model_key(item_name, stack);
+                    }
                     *item_tints = self.render_assets.item_tint_palette(
                         item_name,
                         item_stack.as_ref(),
@@ -2039,10 +2045,9 @@ impl Renderer {
                     // empty main hand; held items render alone, and an empty
                     // offhand draws nothing. The main arm is the options' one,
                     // which the server echoes back as `getMainArm`.
-                    // TODO: mirror the bare arm for a left main hand
-                    // (`renderPlayerArm`'s arm side).
                     // TODO: map (`renderOneHandedMap`/`renderTwoHandedMap`)
-                    // and crossbow arm poses.
+                    // and the crossbow loading pose, once crossbow use is
+                    // tracked.
                     let [main_hand, off_hand] = held_items;
                     if shown_hands.main && main_hand.is_none() {
                         self.hand_pipeline.update_and_draw(
@@ -2051,6 +2056,7 @@ impl Renderer {
                             aspect,
                             hud_fov,
                             *swing_progress,
+                            *main_hand_right,
                             view_effect,
                         );
                     }
@@ -2062,6 +2068,7 @@ impl Renderer {
                             .filter(|_| shown_hands.main)
                             .map(|item| HeldHand {
                                 item,
+                                main_hand: true,
                                 right_arm: *main_hand_right,
                                 swing_progress: *swing_progress,
                                 use_anim: *use_anim,
@@ -2071,6 +2078,7 @@ impl Renderer {
                         .filter(|_| shown_hands.off)
                         .map(|item| HeldHand {
                             item,
+                            main_hand: false,
                             right_arm: !*main_hand_right,
                             swing_progress: 0.0,
                             use_anim: None,

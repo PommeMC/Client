@@ -5,10 +5,10 @@ use std::sync::{Arc, OnceLock};
 use azalea_block::BlockState;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
-    CustomModelData, DyedColor, FireworkExplosion, MapColor, PotionContents,
+    ChargedProjectiles, CustomModelData, DyedColor, FireworkExplosion, MapColor, PotionContents,
 };
 use azalea_registry::Registry as AzaleaRegistry;
-use azalea_registry::builtin::{MobEffect, Potion};
+use azalea_registry::builtin::{ItemKind, MobEffect, Potion};
 use serde::{Deserialize, Serialize};
 
 const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
@@ -211,6 +211,24 @@ impl BlockRenderAssets {
 
     pub fn get_item_model(&self, name: &str) -> Option<&BakedModel> {
         self.item_models.get(name)
+    }
+
+    /// The model `name` draws with for this stack: its loaded variant
+    /// (vanilla `Charge` select property) if it bakes one, else `name`.
+    pub fn stack_model_key(&self, name: &str, stack: &ItemStackData) -> String {
+        let charge = stack
+            .get_component::<ChargedProjectiles>()
+            .filter(|c| !c.items.is_empty())
+            .map(|c| {
+                let rocket = c.items.iter().any(|i| i.kind() == ItemKind::FireworkRocket);
+                if rocket { "rocket" } else { "arrow" }
+            });
+        charge
+            .map(|charge| model::charge_model_key(name, charge))
+            .filter(|key| {
+                self.item_models.contains_key(key) || self.flat_item_texture_keys.contains_key(key)
+            })
+            .unwrap_or_else(|| name.to_string())
     }
 
     /// Every item with a baked 3D model or a generated flat sprite.
@@ -583,7 +601,6 @@ fn save_cache(path: &Path, textures: &HashMap<String, FaceTextures>) {
 mod tint_tests {
     use azalea_inventory::ItemStack;
     use azalea_inventory::components::CustomModelData;
-    use azalea_registry::builtin::ItemKind;
 
     use super::*;
 

@@ -37,6 +37,7 @@ pub struct HandPipeline {
     mvp_allocations: Vec<Allocation>,
     vertex_buffer: vk::Buffer,
     vertex_allocation: Allocation,
+    /// Per arm: the buffer holds the right arm, then the left.
     vertex_count: u32,
     skin_image: vk::Image,
     skin_view: vk::ImageView,
@@ -192,6 +193,7 @@ impl HandPipeline {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_and_draw(
         &mut self,
         cmd: vk::CommandBuffer,
@@ -199,34 +201,11 @@ impl HandPipeline {
         aspect: f32,
         hud_fov: f32,
         swing_progress: f32,
+        right_arm: bool,
         bob: Mat4,
     ) {
         let proj = projection(aspect, hud_fov);
-
-        let sp = swing_progress;
-        let sqrt_sp = sp.sqrt();
-        let pi = std::f32::consts::PI;
-
-        let x_off = -0.3 * (sqrt_sp * pi).sin();
-        let y_off = 0.4 * (sqrt_sp * pi * 2.0).sin();
-        let z_off = -0.4 * (sp * pi).sin();
-
-        let swing_y = (sqrt_sp * pi).sin() * 70.0_f32.to_radians();
-        let swing_z = (sp * sp * pi).sin() * (-20.0_f32).to_radians();
-
-        let pivot = Vec3::new(-5.0 / 16.0, 2.0 / 16.0, 0.0);
-        let arm_local_rot = Mat4::from_translation(pivot) * Mat4::from_rotation_z(0.1);
-
-        let model = Mat4::from_translation(Vec3::new(x_off + 0.64, y_off - 0.6, z_off - 0.72))
-            * Mat4::from_rotation_y(45.0_f32.to_radians())
-            * Mat4::from_rotation_y(swing_y)
-            * Mat4::from_rotation_z(swing_z)
-            * Mat4::from_translation(Vec3::new(-1.0, 3.6, 3.5))
-            * Mat4::from_rotation_z(120.0_f32.to_radians())
-            * Mat4::from_rotation_x(200.0_f32.to_radians())
-            * Mat4::from_rotation_y((-135.0_f32).to_radians())
-            * Mat4::from_translation(Vec3::new(5.6, 0.0, 0.0))
-            * arm_local_rot;
+        let model = arm_matrix(swing_progress, arm_invert(right_arm));
 
         let mvp = proj * bob * model;
         let uniform = HandUniform {
@@ -245,7 +224,8 @@ impl HandPipeline {
             &[],
         );
         cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
-        cmd.draw(self.vertex_count, 1, 0, 0);
+        let first_vertex = if right_arm { 0 } else { self.vertex_count };
+        cmd.draw(self.vertex_count, 1, first_vertex, 0);
     }
 
     pub fn skin_view(&self) -> vk::ImageView {
@@ -354,6 +334,45 @@ impl HandPipeline {
     }
 }
 
+/// Vanilla `ItemInHandRenderer`'s `invert`: 1 for the right arm, -1 for the
+/// left.
+pub(super) fn arm_invert(right_arm: bool) -> f32 {
+    if right_arm { 1.0 } else { -1.0 }
+}
+
+/// Vanilla `ItemInHandRenderer.renderPlayerArm`, mirrored by `invert`.
+fn arm_matrix(swing_progress: f32, invert: f32) -> Mat4 {
+    let sp = swing_progress;
+    let sqrt_sp = sp.sqrt();
+    let pi = std::f32::consts::PI;
+
+    let x_off = -0.3 * (sqrt_sp * pi).sin();
+    let y_off = 0.4 * (sqrt_sp * pi * 2.0).sin();
+    let z_off = -0.4 * (sp * pi).sin();
+
+    let swing_y = invert * (sqrt_sp * pi).sin() * 70.0_f32.to_radians();
+    let swing_z = invert * (sp * sp * pi).sin() * (-20.0_f32).to_radians();
+
+    // `PlayerModel`'s arm pivots at (-5, 2, 0) on the right and (5, 2, 0)
+    // on the left; `renderHand` sets their zRot to 0.1 and -0.1.
+    let pivot = Vec3::new(invert * -5.0 / 16.0, 2.0 / 16.0, 0.0);
+    let arm_local_rot = Mat4::from_translation(pivot) * Mat4::from_rotation_z(invert * 0.1);
+
+    Mat4::from_translation(Vec3::new(
+        invert * (x_off + 0.64),
+        y_off - 0.6,
+        z_off - 0.72,
+    )) * Mat4::from_rotation_y((invert * 45.0_f32).to_radians())
+        * Mat4::from_rotation_y(swing_y)
+        * Mat4::from_rotation_z(swing_z)
+        * Mat4::from_translation(Vec3::new(-invert, 3.6, 3.5))
+        * Mat4::from_rotation_z((invert * 120.0_f32).to_radians())
+        * Mat4::from_rotation_x(200.0_f32.to_radians())
+        * Mat4::from_rotation_y((invert * -135.0_f32).to_radians())
+        * Mat4::from_translation(Vec3::new(invert * 5.6, 0.0, 0.0))
+        * arm_local_rot
+}
+
 pub(super) fn projection(aspect: f32, hud_fov: f32) -> Mat4 {
     let mut proj = proj::directx::perspective(hud_fov, aspect, NEAR, FAR);
     proj.y_axis.y *= -1.0;
@@ -367,7 +386,10 @@ fn create_arm_vertex_buffer(
     skin_h: u32,
     slim: bool,
 ) -> (vk::Buffer, Allocation, u32) {
-    let vertices = build_arm_vertices(skin_w, skin_h, slim);
+    // The right arm, then the left.
+    let mut vertices = build_arm_vertices(skin_w, skin_h, slim, true);
+    let arm_vertex_count = vertices.len() as u32;
+    vertices.extend(build_arm_vertices(skin_w, skin_h, slim, false));
     let vertex_bytes = bytemuck::cast_slice::<HandVertex, u8>(&vertices);
     let (buffer, allocation) = util::create_mapped_buffer(
         device,
@@ -376,27 +398,31 @@ fn create_arm_vertex_buffer(
         vk::BufferUsageFlags::VertexBuffer,
         "hand_vertices",
     );
-    (buffer, allocation, vertices.len() as u32)
+    (buffer, allocation, arm_vertex_count)
 }
 
-fn build_arm_vertices(skin_w: u32, skin_h: u32, slim: bool) -> Vec<HandVertex> {
+fn build_arm_vertices(skin_w: u32, skin_h: u32, slim: bool, right: bool) -> Vec<HandVertex> {
     let sw = skin_w as f32;
     let sh = skin_h as f32;
 
     // Vanilla right arm addBox(-3, -2, -2, 4, 12, 4), or the slim layout's
-    // addBox(-2, -2, -2, 3, 12, 4), scaled to blocks (1/16).
-    // Model space is Y-down: y0 is the shoulder end, y1 the hand end.
+    // addBox(-2, -2, -2, 3, 12, 4); the left arm's starts at x -1 either way.
+    // Scaled to blocks (1/16). Model space is Y-down: y0 is the shoulder
+    // end, y1 the hand end.
     let w = if slim { 3.0 } else { 4.0 };
-    let x0: f32 = if slim { -2.0 } else { -3.0 } / 16.0;
+    let x0: f32 = match (right, slim) {
+        (false, _) => -1.0,
+        (true, true) => -2.0,
+        (true, false) => -3.0,
+    } / 16.0;
     let x1: f32 = x0 + w / 16.0;
     let y0: f32 = -2.0 / 16.0;
     let y1: f32 = 10.0 / 16.0;
     let z0: f32 = -2.0 / 16.0;
     let z1: f32 = 2.0 / 16.0;
 
-    // texOffs(40, 16), box dimensions h=12 d=4
-    let u0 = 40.0;
-    let v0 = 16.0;
+    // texOffs(40, 16) on the right, (32, 48) on the left; h=12 d=4
+    let (u0, v0) = if right { (40.0, 16.0) } else { (32.0, 48.0) };
     let h = 12.0;
     let d = 4.0;
 
@@ -668,4 +694,33 @@ fn create_pipeline(
     device.destroy_shader_module(frag_module, None);
 
     pipeline
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_left_arm_mirrors_the_right() {
+        let flip = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
+        for swing in [0.0, 0.3, 0.7, 1.0] {
+            let mirrored = flip * arm_matrix(swing, 1.0) * flip;
+            assert!(
+                arm_matrix(swing, -1.0).abs_diff_eq(mirrored, 1e-4),
+                "swing {swing}"
+            );
+        }
+        for slim in [false, true] {
+            let x_range = |right| {
+                let verts = build_arm_vertices(64, 64, slim, right);
+                let xs = verts.iter().map(|v| v.position[0]);
+                (
+                    xs.clone().fold(f32::MAX, f32::min),
+                    xs.fold(f32::MIN, f32::max),
+                )
+            };
+            let (right_min, right_max) = x_range(true);
+            assert_eq!(x_range(false), (-right_max, -right_min), "slim {slim}");
+        }
+    }
 }

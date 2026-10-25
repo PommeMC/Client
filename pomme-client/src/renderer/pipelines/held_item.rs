@@ -14,16 +14,22 @@ use crate::renderer::pipelines::item_entity::{
 };
 
 pub struct HeldItemInfo {
+    /// The item, whose model JSON gives the display transforms.
     pub name: String,
+    /// The baked mesh this stack draws with
+    /// (`BlockRenderAssets::stack_model_key`).
+    pub model: String,
     pub light: f32,
     pub item_tints: Vec<u32>,
     pub has_3d_model: bool,
+    pub charged_crossbow: bool,
 }
 
 /// One first-person hand holding an item (vanilla `submitArmWithItem` for a
 /// non-empty stack).
 pub struct HeldHand<'a> {
     pub item: &'a HeldItemInfo,
+    pub main_hand: bool,
     pub right_arm: bool,
     pub swing_progress: f32,
     pub use_anim: Option<UseAnim>,
@@ -123,7 +129,7 @@ impl HeldItemPipeline {
         self.shared.bind(cmd, frame, self.pipeline);
         for (hand, tint_range) in hands.iter().zip(tint_ranges) {
             let item = hand.item;
-            let Some((buffer, vertex_count)) = meshes.mesh_handle(&item.name) else {
+            let Some((buffer, vertex_count)) = meshes.mesh_handle(&item.model) else {
                 continue;
             };
             let default = default_first_person(item.has_3d_model, hand.right_arm);
@@ -132,11 +138,17 @@ impl HeldItemPipeline {
             } else {
                 self.left_display.resolve(&item.name, default).mirrored()
             };
-            let invert = if hand.right_arm { 1.0 } else { -1.0 };
-            let arm = match hand.use_anim {
+            let invert = hand::arm_invert(hand.right_arm);
+            let mut arm = match hand.use_anim {
                 Some(anim) => eat_item_matrix(anim, invert),
                 None => first_person_item_matrix(hand.swing_progress, invert),
             };
+            // Vanilla `submitArmWithItem`'s crossbow branch: a charged one
+            // held still in the main hand turns toward the crosshair.
+            if item.charged_crossbow && hand.main_hand && hand.swing_progress < 0.001 {
+                arm *= Mat4::from_translation(Vec3::new(invert * -0.641864, 0.0, 0.0))
+                    * Mat4::from_rotation_y((invert * 10.0).to_radians());
+            }
             let model = arm * display.to_matrix();
             cmd.bind_vertex_buffers(0, &[buffer], &[0]);
             push_model_light(
@@ -163,7 +175,7 @@ impl HeldItemPipeline {
 }
 
 /// Vanilla `ItemInHandRenderer.applyItemArmTransform` (inverseArmHeight 0):
-/// `invert` is 1 for the right arm and -1 for the left.
+/// `invert` is [`hand::arm_invert`].
 fn item_arm_matrix(invert: f32) -> Mat4 {
     Mat4::from_translation(Vec3::new(invert * 0.56, -0.52, -0.72))
 }
