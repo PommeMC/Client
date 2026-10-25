@@ -1,0 +1,44 @@
+# An item swapped into the offhand shows in the HUD's offhand slot, left of
+# the hotbar for a right-handed player and right of it for a left-handed one.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:totem_of_undying"
+
+[[step]]
+expect = { slot = 36, item = "totem_of_undying" }
+
+[[step]]
+press = { action = "key.swapOffhand" }
+
+[[step]]
+expect = { slot = 45, item = "totem_of_undying" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "offhand"
+
+[[step]]
+option = { main_hand = "left" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "offhand_left"
+
+[[step]]
+option = { main_hand = "right" }
+
+[[step]]
+chat = "/clear @s"

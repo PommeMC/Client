@@ -3,8 +3,6 @@
 #include "fog.glsl"
 #include "atlas_sprite.glsl"
 
-layout(set = 1, binding = 0) uniform sampler2D atlas_texture;
-
 layout(location = 0) in vec2 v_sprite_uv;
 layout(location = 1) in float v_light;
 layout(location = 2) in vec3 v_tint;
@@ -18,7 +16,7 @@ layout(location = 0) out vec4 out_color;
 const float WATER_ALPHA = 0.7;
 
 void main() {
-    vec4 color = sample_atlas_sprite(atlas_texture, v_sprite_uv, v_sprite);
+    vec4 color = sample_atlas_sprite(v_sprite_uv, v_sprite);
     vec3 shaded =
         shade_chunk_surface(color.rgb, v_tint, v_light, v_visibility, v_fog_color, v_fog);
     out_color = vec4(shaded, WATER_ALPHA);

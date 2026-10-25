@@ -9,6 +9,7 @@ use uuid::Uuid;
 use super::NetworkEvent;
 use super::chat::component_spans;
 use super::chat_security::{ProfileKeyServices, ValidatedChatSession};
+use super::handler::send_ordered;
 use crate::player::tab_list::PlayerInfoEntry;
 
 /// Decodes a player list packet; `None` for any other packet.
@@ -20,7 +21,7 @@ pub(super) fn handle_raw_player_info_packet(
     Some(
         super::read_raw_packet(packet_id, payload, player_info::read)?.map(|packet| {
             if let Some(event) = event(packet) {
-                let _ = event_tx.try_send(event);
+                send_ordered(event_tx, event);
             }
         }),
     )

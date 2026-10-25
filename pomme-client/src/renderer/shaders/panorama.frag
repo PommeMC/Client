@@ -7,7 +7,8 @@ layout(set = 0, binding = 0) uniform PanoramaParams {
     float _pad;
 };
 
-layout(set = 1, binding = 0) uniform samplerCube cube_tex;
+layout(set = 1, binding = 0) uniform textureCube cube_tex;
+layout(set = 1, binding = 1) uniform sampler cube_tex_sampler;
 
 layout(location = 0) in vec2 v_uv;
 
@@ -33,5 +34,5 @@ vec3 get_dir(vec2 uv) {
 void main() {
     vec3 dir = get_dir(v_uv);
     float lod = blur * 5.0;
-    out_color = textureLod(cube_tex, dir, lod);
+    out_color = textureLod(samplerCube(cube_tex, cube_tex_sampler), dir, lod);
 }

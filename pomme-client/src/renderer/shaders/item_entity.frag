@@ -1,12 +1,10 @@
 #version 450
 
+#include "item_push.glsl"
 #include "fog.glsl"
 
-layout(set = 1, binding = 0) uniform sampler2D atlas_texture;
-
-layout(push_constant) uniform PushConstants {
-    layout(offset = 64) float world_light;
-};
+layout(set = 1, binding = 0) uniform texture2D atlas_texture;
+layout(set = 1, binding = 1) uniform sampler atlas_texture_sampler;
 
 layout(location = 0) in vec2 v_tex_coords;
 layout(location = 1) in float v_light;
@@ -17,7 +15,7 @@ layout(location = 4) in vec3 v_fog_color;
 layout(location = 0) out vec4 out_color;
 
 void main() {
-    vec4 color = texture(atlas_texture, v_tex_coords);
+    vec4 color = texture(sampler2D(atlas_texture, atlas_texture_sampler), v_tex_coords);
     // Vanilla ITEM_CUTOUT and ITEM_TRANSLUCENT both use ALPHA_CUTOUT=0.1.
     if (color.a < 0.1) discard;
     // Vanilla's item shader multiplies the sampled texture by the normalized

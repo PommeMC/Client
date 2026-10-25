@@ -59,7 +59,7 @@ than deleting them.
 Ticking a box under **Type of change** applies the matching label automatically,
 and unticking it removes the label again.
 
-Under **Reference**, name the classes in `reference/26.2/decompiled` you checked
+Under **Reference**, name the classes in `reference/26.3/decompiled` you checked
 the change against. This is what reviewers compare against, so it saves a round
 trip. Put `n/a` for launcher, tooling and chore PRs.
 

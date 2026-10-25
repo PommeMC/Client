@@ -13,6 +13,7 @@ use simdnbt::owned::{NbtCompound, NbtTag};
 use uuid::Uuid;
 
 use super::NetworkEvent;
+use super::handler::send_ordered;
 use crate::chat_component::{
     Argument, Component, HoverEvent, Style, nbt_to_value, normalize_identifier,
 };
@@ -466,7 +467,7 @@ fn parse_delete_chat(
     let signature = inbound
         .unpack(packed)
         .ok_or(ChatPacketError::Disconnect(INVALID_PACKET))?;
-    let _ = event_tx.try_send(NetworkEvent::DeleteChatMessage { signature });
+    send_ordered(event_tx, NetworkEvent::DeleteChatMessage { signature });
     Ok(())
 }
 
@@ -487,7 +488,10 @@ fn parse_command_suggestions(
         options.push(crate::ui::chat::ChatSuggestion { text, tooltip });
     }
     ensure_end(raw, *pos, "command_suggestions")?;
-    let _ = event_tx.try_send(NetworkEvent::CommandSuggestions { id, start, options });
+    send_ordered(
+        event_tx,
+        NetworkEvent::CommandSuggestions { id, start, options },
+    );
     Ok(())
 }
 
@@ -518,22 +522,28 @@ impl<'a> ChatDelivery<'a> {
 }
 
 fn send_chat(event_tx: &Sender<NetworkEvent>, delivery: ChatDelivery<'_>) {
-    let _ = event_tx.try_send(NetworkEvent::ChatMessage {
-        component: Box::new(delivery.component.clone()),
-        secure_component: delivery.secure_component.cloned().map(Box::new),
-        missing_profile_component: delivery.missing_profile_component.cloned().map(Box::new),
-        signature: delivery.signature,
-        sender_uuid: delivery.sender_uuid,
-        signed_body: delivery.signed_body,
-        source: delivery.source,
-        tag: delivery.tag,
-    });
+    send_ordered(
+        event_tx,
+        NetworkEvent::ChatMessage {
+            component: Box::new(delivery.component.clone()),
+            secure_component: delivery.secure_component.cloned().map(Box::new),
+            missing_profile_component: delivery.missing_profile_component.cloned().map(Box::new),
+            signature: delivery.signature,
+            sender_uuid: delivery.sender_uuid,
+            signed_body: delivery.signed_body,
+            source: delivery.source,
+            tag: delivery.tag,
+        },
+    );
 }
 
 fn send_action_bar(event_tx: &Sender<NetworkEvent>, component: &Component) {
-    let _ = event_tx.try_send(NetworkEvent::ActionBar {
-        component: component.clone(),
-    });
+    send_ordered(
+        event_tx,
+        NetworkEvent::ActionBar {
+            component: component.clone(),
+        },
+    );
 }
 
 fn decorate(content: Component, bound: &BoundChatType) -> Component {

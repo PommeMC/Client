@@ -1,14 +1,11 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::slice;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use azalea_inventory::ItemStack;
 use azalea_inventory::components::{DataComponentTrait, DyedColor, EquipmentSlot, Equippable};
 use azalea_registry::builtin::EntityKind;
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
 use serde::Deserialize;
 
 use crate::assets::{AssetIndex, resolve_asset_path, resolve_asset_path_with_packs};
@@ -16,7 +13,8 @@ use crate::entity::components::Position;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::BakedEntityModel;
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, entity_model, shader, util};
+use crate::renderer::rhi::{self, VertexFormat};
+use crate::renderer::{entity_model, shader, util};
 use crate::resource_pack::ResourcePackManager;
 use crate::world::block::BedDirection;
 
@@ -278,12 +276,9 @@ enum OverlayKind {
 
 struct MobVariant {
     model: BakedEntityModel,
-    vertex_buffer: vk::Buffer,
-    vertex_allocation: Allocation,
-    texture_image: vk::Image,
-    texture_view: vk::ImageView,
-    texture_allocation: Allocation,
-    texture_set: vk::DescriptorSet,
+    vertex_buffer: rhi::backend::Buffer,
+    texture: rhi::backend::Texture,
+    texture_set: rhi::backend::BindGroup,
     overlay_kind: OverlayKind,
     /// Overlay whose part poses (pivots/rotations/scales) differ from the
     /// base model's, so its part transforms can't be shared with the base
@@ -302,10 +297,8 @@ struct MobEntry {
 }
 
 struct PlayerSkinTexture {
-    image: vk::Image,
-    view: vk::ImageView,
-    allocation: Allocation,
-    set: vk::DescriptorSet,
+    texture: rhi::backend::Texture,
+    set: rhi::backend::BindGroup,
     slim: bool,
 }
 
@@ -346,10 +339,8 @@ struct ArmorAssetDef {
 }
 
 struct ArmorTextureLayer {
-    image: vk::Image,
-    view: vk::ImageView,
-    allocation: Allocation,
-    set: vk::DescriptorSet,
+    texture: rhi::backend::Texture,
+    set: rhi::backend::BindGroup,
     dye: ArmorDye,
 }
 
@@ -386,8 +377,7 @@ struct ArmorAsset {
 
 struct ArmorMesh {
     model: BakedEntityModel,
-    vertex_buffer: vk::Buffer,
-    vertex_allocation: Allocation,
+    vertex_buffer: rhi::backend::Buffer,
 }
 
 struct ArmorMeshes {
@@ -669,32 +659,11 @@ fn load_armor_asset_defs(
         .collect()
 }
 
-fn create_armor_descriptor_pool(device: &vk::Device, texture_count: u32) -> vk::DescriptorPool {
-    let texture_count = texture_count.max(1);
-    let pool_size = vk::DescriptorPoolSize {
-        ty: vk::DescriptorType::CombinedImageSampler,
-        descriptor_count: texture_count,
-    };
-    let info = vk::DescriptorPoolCreateInfo {
-        max_sets: texture_count,
-        pool_size_count: 1,
-        pool_sizes: &pool_size,
-        ..Default::default()
-    };
-    device
-        .create_descriptor_pool(&info, None)
-        .expect("failed to create armor descriptor pool")
-}
-
 #[allow(clippy::too_many_arguments)]
 fn build_armor_texture_layer(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
-    descriptor_pool: vk::DescriptorPool,
-    texture_layout: vk::DescriptorSetLayout,
-    texture_sampler: vk::Sampler,
+    device: &rhi::backend::Device,
+    texture_layout: rhi::backend::BindGroupLayout,
+    texture_sampler: rhi::backend::Sampler,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     packs: Option<&ResourcePackManager>,
@@ -708,87 +677,34 @@ fn build_armor_texture_layer(
         );
         fallback_texture(64)
     });
-    let (image, view, allocation) =
-        util::create_gpu_image(device, allocator, width, height, "armor_texture");
-    let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, &pixels, "armor_texture_staging");
-    util::upload_image(
-        device,
-        queue,
-        command_pool,
-        staging_buf,
-        image,
-        width,
-        height,
-    );
-    device.destroy_buffer(staging_buf, None);
-    allocator.lock().unwrap().free(staging_alloc).ok();
+    let texture = util::create_sampled_texture(device, "armor_texture", &pixels, width, height);
 
-    let alloc_info = vk::DescriptorSetAllocateInfo {
-        descriptor_pool,
-        descriptor_set_count: 1,
-        set_layouts: &texture_layout,
-        ..Default::default()
-    };
-    let mut set = vk::DescriptorSet::null();
-    device
-        .allocate_descriptor_sets(&alloc_info, slice::from_mut(&mut set))
-        .expect("failed to allocate armor texture descriptor set");
-    let image_info = vk::DescriptorImageInfo {
-        sampler: texture_sampler,
-        image_view: view,
-        image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-    };
-    let write = vk::WriteDescriptorSet {
-        dst_set: set,
-        dst_binding: 0,
-        descriptor_type: vk::DescriptorType::CombinedImageSampler,
-        descriptor_count: 1,
-        image_info: &image_info,
-        ..Default::default()
-    };
-    device.update_descriptor_sets(&[write], &[]);
+    let set = util::create_texture_group(device, texture_layout, texture.handle(), texture_sampler);
 
     ArmorTextureLayer {
-        image,
-        view,
-        allocation,
+        texture,
         set,
         dye: def.dye,
     }
 }
 
 /// Loads every equipment definition with humanoid layers and uploads its
-/// textures into a freshly sized descriptor pool.
-#[allow(clippy::too_many_arguments)]
+/// textures.
 fn load_armor_assets(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
-    texture_layout: vk::DescriptorSetLayout,
-    texture_sampler: vk::Sampler,
+    device: &rhi::backend::Device,
+    texture_layout: rhi::backend::BindGroupLayout,
+    texture_sampler: rhi::backend::Sampler,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     packs: &ResourcePackManager,
-) -> (vk::DescriptorPool, HashMap<String, ArmorAsset>) {
+) -> HashMap<String, ArmorAsset> {
     let packs = Some(packs);
     let defs = load_armor_asset_defs(jar_assets_dir, packs);
-    let texture_count = defs
-        .values()
-        .map(|asset| (asset.humanoid.len() + asset.leggings.len()) as u32)
-        .sum();
-    let descriptor_pool = create_armor_descriptor_pool(device, texture_count);
-    let assets = defs
-        .into_iter()
+    defs.into_iter()
         .map(|(id, def)| {
             let build = |layer| {
                 build_armor_texture_layer(
                     device,
-                    queue,
-                    command_pool,
-                    allocator,
-                    descriptor_pool,
                     texture_layout,
                     texture_sampler,
                     jar_assets_dir,
@@ -805,34 +721,25 @@ fn load_armor_assets(
                 },
             )
         })
-        .collect();
-    (descriptor_pool, assets)
+        .collect()
 }
 
-fn build_armor_mesh(
-    device: &vk::Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    model: BakedEntityModel,
-) -> ArmorMesh {
-    let bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&model.vertices);
-    let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
+fn build_armor_mesh(device: &rhi::backend::Device, model: BakedEntityModel) -> ArmorMesh {
+    let vertex_buffer = rhi::backend::Buffer::with_data(
         device,
-        allocator,
-        bytes,
-        vk::BufferUsageFlags::VertexBuffer,
         "armor_vertices",
+        bytemuck::cast_slice(&model.vertices),
+        rhi::BufferUsages::VERTEX,
     );
     ArmorMesh {
         model,
         vertex_buffer,
-        vertex_allocation,
     }
 }
 
-fn build_armor_meshes(device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) -> ArmorMeshes {
+fn build_armor_meshes(device: &rhi::backend::Device) -> ArmorMeshes {
     let bake = |bake_slot: fn(entity_model::HumanoidArmorSlot) -> BakedEntityModel| {
-        entity_model::HumanoidArmorSlot::ALL
-            .map(|slot| build_armor_mesh(device, allocator, bake_slot(slot)))
+        entity_model::HumanoidArmorSlot::ALL.map(|slot| build_armor_mesh(device, bake_slot(slot)))
     };
     ArmorMeshes {
         humanoid: bake(entity_model::bake_humanoid_armor_model),
@@ -841,19 +748,13 @@ fn build_armor_meshes(device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) ->
     }
 }
 
-fn destroy_armor_assets(
-    device: &vk::Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    assets: &mut HashMap<String, ArmorAsset>,
-) {
-    let mut alloc = allocator.lock().unwrap();
+fn destroy_armor_assets(device: &rhi::backend::Device, assets: &mut HashMap<String, ArmorAsset>) {
     for layer in assets
         .drain()
         .flat_map(|(_, asset)| asset.humanoid.into_iter().chain(asset.leggings))
     {
-        device.destroy_image_view(layer.view, None);
-        device.destroy_image(layer.image, None);
-        alloc.free(layer.allocation).ok();
+        layer.texture.destroy(device);
+        layer.set.destroy(device);
     }
 }
 
@@ -880,31 +781,27 @@ impl ArmorMeshes {
 }
 
 pub struct EntityRenderer {
-    pipeline: vk::Pipeline,
+    pipeline: rhi::backend::RenderPipeline,
     /// Opaque with backface culling — bat wings.
-    culled_pipeline: vk::Pipeline,
+    culled_pipeline: rhi::backend::RenderPipeline,
     /// Translucent, depth-writing — slime shell.
-    body_translucent_pipeline: vk::Pipeline,
+    body_translucent_pipeline: rhi::backend::RenderPipeline,
     /// Translucent, depth-write off — spider eyes.
-    eyes_pipeline: vk::Pipeline,
+    eyes_pipeline: rhi::backend::RenderPipeline,
     /// Additive, depth-writing — charged-creeper energy swirl.
-    swirl_pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    camera_layout: vk::DescriptorSetLayout,
-    texture_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    camera_sets: Vec<vk::DescriptorSet>,
-    camera_buffers: Vec<vk::Buffer>,
-    camera_allocations: Vec<Allocation>,
+    swirl_pipeline: rhi::backend::RenderPipeline,
+    pipeline_layout: rhi::backend::PipelineLayout,
+    camera_layout: rhi::backend::BindGroupLayout,
+    texture_layout: rhi::backend::BindGroupLayout,
+    camera_sets: Vec<rhi::backend::BindGroup>,
+    camera_buffers: Vec<rhi::backend::Buffer>,
     /// Per-instance vertex buffer (bound at binding 1), one per frame in
     /// flight.
-    instance_buffers: Vec<vk::Buffer>,
-    instance_allocations: Vec<Allocation>,
-    texture_sampler: vk::Sampler,
+    instance_buffers: Vec<rhi::backend::Buffer>,
+    texture_sampler: rhi::backend::Sampler,
     /// REPEAT-wrap sampler for the scrolling swirl overlay.
-    texture_sampler_repeat: vk::Sampler,
+    texture_sampler_repeat: rhi::backend::Sampler,
     mobs: HashMap<EntityKind, MobEntry>,
-    armor_descriptor_pool: vk::DescriptorPool,
     armor_assets: HashMap<String, ArmorAsset>,
     armor_meshes: ArmorMeshes,
     player_skins: HashMap<uuid::Uuid, PlayerSkinTexture>,
@@ -1792,36 +1689,17 @@ fn mob_definitions() -> Vec<MobDef> {
 }
 
 impl EntityRenderer {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        device: &vk::Device,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        render_pass: vk::RenderPass,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
         packs: &ResourcePackManager,
     ) -> Self {
-        let camera_layout = util::create_descriptor_set_layout(
-            device,
-            vk::DescriptorType::UniformBuffer,
-            vk::ShaderStageFlags::Vertex,
-        );
-        let texture_layout = util::create_descriptor_set_layout(
-            device,
-            vk::DescriptorType::CombinedImageSampler,
-            vk::ShaderStageFlags::Fragment,
-        );
-        let layouts = [camera_layout, texture_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: layouts.len() as u32,
-            set_layouts: layouts.as_ptr(),
-            ..Default::default()
-        };
-        let pipeline_layout = device
-            .create_pipeline_layout(&layout_info, None)
-            .expect("failed to create entity pipeline layout");
+        let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
+        let texture_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
+        let pipeline_layout =
+            rhi::backend::create_pipeline_layout(device, &[camera_layout, texture_layout], None);
 
         let [
             pipeline,
@@ -1829,80 +1707,37 @@ impl EntityRenderer {
             body_translucent_pipeline,
             eyes_pipeline,
             swirl_pipeline,
-        ] = create_pipelines(device, render_pass, pipeline_layout);
+        ] = create_pipelines(device, targets, pipeline_layout);
 
         let defs = mob_definitions();
-        let tex_count: u32 = defs
-            .iter()
-            .map(|d| {
-                let mut n: u32 = d.adult.iter().map(|v| v.tex_variants.len() as u32).sum();
-                if let Some(b) = &d.baby {
-                    n += b.tex_variants.len() as u32;
-                }
-                for o in &d.adult_overlays {
-                    n += o.tex_variants.len() as u32;
-                }
-                for o in &d.baby_overlays {
-                    n += o.tex_variants.len() as u32;
-                }
-                n
-            })
-            .sum();
-        let tex_count = tex_count + MAX_PLAYER_SKINS as u32;
 
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: tex_count,
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo {
-            flags: vk::DescriptorPoolCreateFlags::FreeDescriptorSet,
-            max_sets: MAX_FRAMES_IN_FLIGHT as u32 + tex_count,
-            pool_size_count: pool_sizes.len() as u32,
-            pool_sizes: pool_sizes.as_ptr(),
-            ..Default::default()
-        };
-        let descriptor_pool = device
-            .create_descriptor_pool(&pool_info, None)
-            .expect("failed to create entity descriptor pool");
-
-        let (camera_sets, camera_buffers, camera_allocations) = util::create_uniform_sets(
+        let (camera_sets, camera_buffers) = util::create_uniform_sets(
             device,
-            allocator,
-            descriptor_pool,
             camera_layout,
             size_of::<CameraUniform>() as u64,
             "entity_camera_uniform",
         );
         // Per-instance data is a vertex buffer (bound at binding 1), not an SSBO:
         // MoltenVK can't translate a storage-buffer read in a vertex shader.
-        let (instance_buffers, instance_allocations) = util::create_per_frame_host_buffers(
+        let instance_buffers = util::create_per_frame_host_buffers(
             device,
-            allocator,
             (MAX_INSTANCES * size_of::<EntityInstance>()) as u64,
-            vk::BufferUsageFlags::VertexBuffer,
+            rhi::BufferUsages::VERTEX,
             "entity_instances",
         );
 
-        let texture_sampler = unsafe { util::create_nearest_sampler(device) };
-        let texture_sampler_repeat = unsafe { util::create_nearest_repeat_sampler(device) };
-        let (armor_descriptor_pool, armor_assets) = load_armor_assets(
+        let texture_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
+        let texture_sampler_repeat =
+            rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST_REPEAT);
+        let armor_assets = load_armor_assets(
             device,
-            queue,
-            command_pool,
-            allocator,
             texture_layout,
             texture_sampler,
             jar_assets_dir,
             asset_index,
             packs,
         );
-        let armor_meshes = build_armor_meshes(device, allocator);
+        let armor_meshes = build_armor_meshes(device);
 
         let mut mobs = HashMap::new();
 
@@ -1910,10 +1745,6 @@ impl EntityRenderer {
             let mut build = |v: VariantDef| {
                 build_variants(
                     device,
-                    queue,
-                    command_pool,
-                    allocator,
-                    descriptor_pool,
                     texture_layout,
                     texture_sampler,
                     texture_sampler_repeat,
@@ -1973,40 +1804,28 @@ impl EntityRenderer {
             pipeline_layout,
             camera_layout,
             texture_layout,
-            descriptor_pool,
             camera_sets,
             camera_buffers,
-            camera_allocations,
             instance_buffers,
-            instance_allocations,
             texture_sampler,
             texture_sampler_repeat,
             mobs,
-            armor_descriptor_pool,
             armor_assets,
             armor_meshes,
             player_skins: HashMap::new(),
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn reload_armor_assets(
         &mut self,
-        device: &vk::Device,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
         packs: &ResourcePackManager,
     ) {
-        destroy_armor_assets(device, allocator, &mut self.armor_assets);
-        device.destroy_descriptor_pool(self.armor_descriptor_pool, None);
-        (self.armor_descriptor_pool, self.armor_assets) = load_armor_assets(
+        destroy_armor_assets(device, &mut self.armor_assets);
+        self.armor_assets = load_armor_assets(
             device,
-            queue,
-            command_pool,
-            allocator,
             self.texture_layout,
             self.texture_sampler,
             jar_assets_dir,
@@ -2017,16 +1836,12 @@ impl EntityRenderer {
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
         let bytes = bytemuck::bytes_of(uniform);
-        self.camera_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
-            .copy_from_slice(bytes);
+        self.camera_buffers[frame].write(bytes);
     }
 
     pub fn update_player_skin(
         &mut self,
-        device: &vk::Device,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
         uuid: &uuid::Uuid,
         skin: &crate::renderer::SkinData,
     ) {
@@ -2035,59 +1850,29 @@ impl EntityRenderer {
             return;
         }
 
-        let (image, view, allocation) = upload_texture_pixels(
+        let texture = util::create_sampled_texture(
             device,
-            queue,
-            command_pool,
-            allocator,
+            "player_skin_texture",
             &skin.pixels,
             skin.width,
             skin.height,
         );
-        let set = if let Some(old) = self.player_skins.get(uuid) {
-            old.set
-        } else {
-            let tex_alloc_info = vk::DescriptorSetAllocateInfo {
-                descriptor_pool: self.descriptor_pool,
-                descriptor_set_count: 1,
-                set_layouts: &self.texture_layout,
-                ..Default::default()
-            };
-            let mut texture_set = vk::DescriptorSet::null();
-            device
-                .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut texture_set))
-                .expect("failed to allocate player skin texture descriptor set");
-            texture_set
-        };
-
-        let image_info = vk::DescriptorImageInfo {
-            sampler: self.texture_sampler,
-            image_view: view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let tex_write = vk::WriteDescriptorSet {
-            dst_set: set,
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 1,
-            image_info: &image_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[tex_write], &[]);
+        let set = util::create_texture_group(
+            device,
+            self.texture_layout,
+            texture.handle(),
+            self.texture_sampler,
+        );
 
         if let Some(old) = self.player_skins.insert(
             uuid.to_owned(),
             PlayerSkinTexture {
-                image,
-                view,
-                allocation,
+                texture,
                 set,
                 slim: skin.slim,
             },
         ) {
-            device.destroy_image_view(old.view, None);
-            device.destroy_image(old.image, None);
-            allocator.lock().unwrap().free(old.allocation).ok();
+            free_player_skin_texture(device, old);
         }
 
         tracing::debug!(
@@ -2097,21 +1882,15 @@ impl EntityRenderer {
         );
     }
 
-    pub fn remove_player_skin(
-        &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        uuid: &uuid::Uuid,
-    ) {
+    pub fn remove_player_skin(&mut self, device: &rhi::backend::Device, uuid: &uuid::Uuid) {
         if let Some(skin) = self.player_skins.remove(uuid) {
-            free_player_skin_texture(device, allocator, self.descriptor_pool, skin);
+            free_player_skin_texture(device, skin);
         }
     }
 
-    pub fn clear_player_skins(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let descriptor_pool = self.descriptor_pool;
+    pub fn clear_player_skins(&mut self, device: &rhi::backend::Device) {
         for (_, skin) in self.player_skins.drain() {
-            free_player_skin_texture(device, allocator, descriptor_pool, skin);
+            free_player_skin_texture(device, skin);
         }
     }
 
@@ -2125,8 +1904,8 @@ impl EntityRenderer {
     fn player_texture_set(
         &self,
         info: &EntityRenderInfo,
-        fallback: vk::DescriptorSet,
-    ) -> vk::DescriptorSet {
+        fallback: rhi::backend::BindGroup,
+    ) -> rhi::backend::BindGroup {
         self.player_skin(info).map_or(fallback, |skin| skin.set)
     }
 
@@ -2142,7 +1921,7 @@ impl EntityRenderer {
         &'a self,
         armor: &'a ArmorRenderInfo,
         slot: usize,
-    ) -> impl Iterator<Item = (vk::DescriptorSet, [f32; 4])> + 'a {
+    ) -> impl Iterator<Item = (rhi::backend::BindGroup, [f32; 4])> + 'a {
         self.armor_assets
             .get(&*armor.asset_id)
             .into_iter()
@@ -2195,7 +1974,7 @@ impl EntityRenderer {
                         });
                         records.push(DrawRecord {
                             texture_set,
-                            vertex_buffer: mesh.vertex_buffer,
+                            vertex_buffer: mesh.vertex_buffer.handle(),
                             part_start: *start,
                             part_count: *part_count,
                             first_instance,
@@ -2440,7 +2219,7 @@ impl EntityRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
-        cmd: vk::CommandBuffer,
+        pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
         entities: &[EntityRenderInfo],
         frustum: &[[f32; 4]; 6],
@@ -2560,51 +2339,44 @@ impl EntityRenderer {
             );
         }
         let bytes = bytemuck::cast_slice(&instances[..count]);
-        self.instance_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
-            .copy_from_slice(bytes);
+        self.instance_buffers[frame].write(bytes);
 
-        self.record_pass(cmd, frame, self.pipeline, &opaque, count);
-        self.record_pass(cmd, frame, self.pipeline, &armor, count);
-        self.record_pass(cmd, frame, self.culled_pipeline, &culled, count);
-        self.record_pass(cmd, frame, self.body_translucent_pipeline, &body, count);
-        self.record_pass(cmd, frame, self.eyes_pipeline, &eyes, count);
-        self.record_pass(cmd, frame, self.swirl_pipeline, &swirl, count);
+        self.record_pass(pass, frame, self.pipeline, &opaque, count);
+        self.record_pass(pass, frame, self.pipeline, &armor, count);
+        self.record_pass(pass, frame, self.culled_pipeline, &culled, count);
+        self.record_pass(pass, frame, self.body_translucent_pipeline, &body, count);
+        self.record_pass(pass, frame, self.eyes_pipeline, &eyes, count);
+        self.record_pass(pass, frame, self.swirl_pipeline, &swirl, count);
     }
 
     fn record_pass(
         &self,
-        cmd: vk::CommandBuffer,
+        pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
-        pipeline: vk::Pipeline,
+        pipeline: rhi::backend::RenderPipeline,
         records: &[DrawRecord],
         count: usize,
     ) {
         if records.is_empty() {
             return;
         }
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, pipeline);
+        pass.set_pipeline(&pipeline);
         // Per-instance data (binding 1) is the same buffer for the whole pass;
         // gl_InstanceIndex (incl. firstInstance) indexes into it.
-        cmd.bind_vertex_buffers(1, &[self.instance_buffers[frame]], &[0]);
-        let mut last_vb = vk::Buffer::null();
-        let mut last_texture_set = vk::DescriptorSet::null();
+        pass.set_vertex_buffer(1, self.instance_buffers[frame].handle());
+        let mut last_vb = rhi::backend::BufferHandle::default();
+        let mut last_texture_set = rhi::backend::BindGroup::default();
         for r in records {
             if r.first_instance as usize + r.instance_count as usize > count {
                 continue; // dropped by the capacity clamp above
             }
             if r.vertex_buffer != last_vb || r.texture_set != last_texture_set {
-                cmd.bind_descriptor_sets(
-                    vk::PipelineBindPoint::Graphics,
-                    self.pipeline_layout,
-                    0,
-                    &[self.camera_sets[frame], r.texture_set],
-                    &[],
-                );
-                cmd.bind_vertex_buffers(0, &[r.vertex_buffer], &[0]);
+                pass.set_bind_groups(0, &[self.camera_sets[frame], r.texture_set]);
+                pass.set_vertex_buffer(0, r.vertex_buffer);
                 last_vb = r.vertex_buffer;
                 last_texture_set = r.texture_set;
             }
-            cmd.draw(
+            pass.draw(
                 r.part_count,
                 r.instance_count,
                 r.part_start,
@@ -2613,41 +2385,30 @@ impl EntityRenderer {
         }
     }
 
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline(self.culled_pipeline, None);
-        device.destroy_pipeline(self.body_translucent_pipeline, None);
-        device.destroy_pipeline(self.eyes_pipeline, None);
-        device.destroy_pipeline(self.swirl_pipeline, None);
+    pub fn recreate_pipeline(
+        &mut self,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
+    ) {
+        self.pipeline.destroy(device);
+        self.culled_pipeline.destroy(device);
+        self.body_translucent_pipeline.destroy(device);
+        self.eyes_pipeline.destroy(device);
+        self.swirl_pipeline.destroy(device);
         [
             self.pipeline,
             self.culled_pipeline,
             self.body_translucent_pipeline,
             self.eyes_pipeline,
             self.swirl_pipeline,
-        ] = create_pipelines(device, render_pass, self.pipeline_layout);
+        ] = create_pipelines(device, targets, self.pipeline_layout);
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        destroy_armor_assets(device, allocator, &mut self.armor_assets);
-        device.destroy_descriptor_pool(self.armor_descriptor_pool, None);
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        destroy_armor_assets(device, &mut self.armor_assets);
 
-        let mut alloc = allocator.lock().unwrap();
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            device.destroy_buffer(self.camera_buffers[i], None);
-            alloc
-                .free(std::mem::replace(&mut self.camera_allocations[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
-            device.destroy_buffer(self.instance_buffers[i], None);
-            alloc
-                .free(std::mem::replace(
-                    &mut self.instance_allocations[i],
-                    unsafe { std::mem::zeroed() },
-                ))
-                .ok();
-        }
+        util::destroy_buffers(device, &mut self.camera_buffers);
+        util::destroy_buffers(device, &mut self.instance_buffers);
 
         for mesh in self
             .armor_meshes
@@ -2656,16 +2417,11 @@ impl EntityRenderer {
             .chain(self.armor_meshes.husk.iter_mut())
             .chain(self.armor_meshes.zombie_villager.iter_mut())
         {
-            device.destroy_buffer(mesh.vertex_buffer, None);
-            alloc
-                .free(std::mem::replace(&mut mesh.vertex_allocation, unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
+            std::mem::take(&mut mesh.vertex_buffer).destroy(device);
         }
 
-        device.destroy_sampler(self.texture_sampler, None);
-        device.destroy_sampler(self.texture_sampler_repeat, None);
+        self.texture_sampler.destroy(device);
+        self.texture_sampler_repeat.destroy(device);
 
         for entry in self.mobs.values_mut() {
             let variants: Vec<&mut MobVariant> = entry
@@ -2676,36 +2432,24 @@ impl EntityRenderer {
                 .chain(entry.baby_overlays.iter_mut().flatten())
                 .collect();
             for v in variants {
-                device.destroy_buffer(v.vertex_buffer, None);
-                alloc
-                    .free(std::mem::replace(&mut v.vertex_allocation, unsafe {
-                        std::mem::zeroed()
-                    }))
-                    .ok();
-                device.destroy_image_view(v.texture_view, None);
-                alloc
-                    .free(std::mem::replace(&mut v.texture_allocation, unsafe {
-                        std::mem::zeroed()
-                    }))
-                    .ok();
-                device.destroy_image(v.texture_image, None);
+                std::mem::take(&mut v.vertex_buffer).destroy(device);
+                std::mem::take(&mut v.texture).destroy(device);
+                v.texture_set.destroy(device);
             }
         }
         for (_, skin) in self.player_skins.drain() {
-            destroy_player_skin_texture(device, &mut alloc, skin);
+            free_player_skin_texture(device, skin);
         }
 
-        drop(alloc);
-
-        device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline(self.culled_pipeline, None);
-        device.destroy_pipeline(self.body_translucent_pipeline, None);
-        device.destroy_pipeline(self.eyes_pipeline, None);
-        device.destroy_pipeline(self.swirl_pipeline, None);
-        device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_descriptor_pool(self.descriptor_pool, None);
-        device.destroy_descriptor_set_layout(self.camera_layout, None);
-        device.destroy_descriptor_set_layout(self.texture_layout, None);
+        self.pipeline.destroy(device);
+        self.culled_pipeline.destroy(device);
+        self.body_translucent_pipeline.destroy(device);
+        self.eyes_pipeline.destroy(device);
+        self.swirl_pipeline.destroy(device);
+        self.pipeline_layout.destroy(device);
+        util::destroy_bind_groups(device, self.camera_sets.drain(..));
+        self.camera_layout.destroy(device);
+        self.texture_layout.destroy(device);
     }
 }
 
@@ -2722,8 +2466,8 @@ struct VisEntity<'a> {
 /// One instanced (variant, part) draw: a run of `instance_count` instances from
 /// `first_instance` in the per-frame instance buffer.
 struct DrawRecord {
-    texture_set: vk::DescriptorSet,
-    vertex_buffer: vk::Buffer,
+    texture_set: rhi::backend::BindGroup,
+    vertex_buffer: rhi::backend::BufferHandle,
     part_start: u32,
     part_count: u32,
     first_instance: u32,
@@ -2737,11 +2481,16 @@ type Member = (usize, [f32; 4], [f32; 4], [f32; 2]);
 /// one instanced draw covering all its entities.
 #[derive(Default)]
 struct VariantGroups<'a> {
-    groups: Vec<(&'a MobVariant, vk::DescriptorSet, Vec<Member>)>,
+    groups: Vec<(&'a MobVariant, rhi::backend::BindGroup, Vec<Member>)>,
 }
 
 impl<'a> VariantGroups<'a> {
-    fn add(&mut self, variant: &'a MobVariant, texture_set: vk::DescriptorSet, member: Member) {
+    fn add(
+        &mut self,
+        variant: &'a MobVariant,
+        texture_set: rhi::backend::BindGroup,
+        member: Member,
+    ) {
         let key = variant as *const MobVariant as usize;
         let gi =
             match self.groups.iter().position(|(v, set, _)| {
@@ -2785,7 +2534,7 @@ impl<'a> VariantGroups<'a> {
                 }
                 records.push(DrawRecord {
                     texture_set: *texture_set,
-                    vertex_buffer: variant.vertex_buffer,
+                    vertex_buffer: variant.vertex_buffer.handle(),
                     part_start: *start,
                     part_count: *part_count,
                     first_instance,
@@ -2994,14 +2743,10 @@ fn link_overlays(base: &[MobVariant], overlays: &mut [Vec<MobVariant>]) {
 // batch the per-texture one-time upload submits into one fence wait.
 #[allow(clippy::too_many_arguments)]
 fn build_variants(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
-    descriptor_pool: vk::DescriptorPool,
-    texture_layout: vk::DescriptorSetLayout,
-    texture_sampler: vk::Sampler,
-    texture_sampler_repeat: vk::Sampler,
+    device: &rhi::backend::Device,
+    texture_layout: rhi::backend::BindGroupLayout,
+    texture_sampler: rhi::backend::Sampler,
+    texture_sampler_repeat: rhi::backend::Sampler,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     variant: VariantDef,
@@ -3022,58 +2767,23 @@ fn build_variants(
     tex_variants
         .iter()
         .map(|tex_keys| {
-            let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
+            let vertex_buffer = rhi::backend::Buffer::with_data(
                 device,
-                allocator,
-                vert_bytes,
-                vk::BufferUsageFlags::VertexBuffer,
                 "entity_vertices",
+                vert_bytes,
+                rhi::BufferUsages::VERTEX,
             );
 
-            let (texture_image, texture_view, texture_allocation) = load_entity_texture(
-                device,
-                queue,
-                command_pool,
-                allocator,
-                jar_assets_dir,
-                asset_index,
-                tex_keys,
-                tex_size,
-            );
+            let texture =
+                load_entity_texture(device, jar_assets_dir, asset_index, tex_keys, tex_size);
 
-            let tex_alloc_info = vk::DescriptorSetAllocateInfo {
-                descriptor_pool,
-                descriptor_set_count: 1,
-                set_layouts: &texture_layout,
-                ..Default::default()
-            };
-            let mut texture_set = vk::DescriptorSet::null();
-            device
-                .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut texture_set))
-                .expect("failed to allocate entity texture descriptor set");
-
-            let image_info = vk::DescriptorImageInfo {
-                sampler,
-                image_view: texture_view,
-                image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-            };
-            let tex_write = vk::WriteDescriptorSet {
-                dst_set: texture_set,
-                dst_binding: 0,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-                image_info: &image_info,
-                ..Default::default()
-            };
-            device.update_descriptor_sets(&[tex_write], &[]);
+            let texture_set =
+                util::create_texture_group(device, texture_layout, texture.handle(), sampler);
 
             MobVariant {
                 model: model.clone(),
                 vertex_buffer,
-                vertex_allocation,
-                texture_image,
-                texture_view,
-                texture_allocation,
+                texture,
                 texture_set,
                 overlay_kind,
                 own_pivots: false,
@@ -3082,17 +2792,13 @@ fn build_variants(
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn load_entity_texture(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
+    device: &rhi::backend::Device,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     asset_keys: &[&str],
     fallback_size: u32,
-) -> (vk::Image, vk::ImageView, Allocation) {
+) -> rhi::backend::Texture {
     let (pixels, width, height) = asset_keys
         .iter()
         .find_map(|key| {
@@ -3107,72 +2813,14 @@ fn load_entity_texture(
             fallback_texture(fallback_size)
         });
 
-    let (image, view, allocation) =
-        util::create_gpu_image(device, allocator, width, height, "entity_texture");
-    let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, &pixels, "entity_texture_staging");
-    util::upload_image(
-        device,
-        queue,
-        command_pool,
-        staging_buf,
-        image,
-        width,
-        height,
-    );
-    device.destroy_buffer(staging_buf, None);
-    allocator.lock().unwrap().free(staging_alloc).ok();
-    (image, view, allocation)
+    util::create_sampled_texture(device, "entity_texture", &pixels, width, height)
 }
 
-fn upload_texture_pixels(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
-    pixels: &[u8],
-    width: u32,
-    height: u32,
-) -> (vk::Image, vk::ImageView, Allocation) {
-    let (image, view, allocation) =
-        util::create_gpu_image(device, allocator, width, height, "player_skin_texture");
-    let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, pixels, "player_skin_texture_staging");
-    util::upload_image(
-        device,
-        queue,
-        command_pool,
-        staging_buf,
-        image,
-        width,
-        height,
-    );
-    device.destroy_buffer(staging_buf, None);
-    allocator.lock().unwrap().free(staging_alloc).ok();
-    (image, view, allocation)
-}
-
-fn free_player_skin_texture(
-    device: &vk::Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    descriptor_pool: vk::DescriptorPool,
-    skin: PlayerSkinTexture,
-) {
-    device
-        .free_descriptor_sets(descriptor_pool, &[skin.set])
-        .ok();
-    let mut alloc = allocator.lock().unwrap();
-    destroy_player_skin_texture(device, &mut alloc, skin);
-}
-
-fn destroy_player_skin_texture(
-    device: &vk::Device,
-    allocator: &mut Allocator,
-    skin: PlayerSkinTexture,
-) {
-    device.destroy_image_view(skin.view, None);
-    allocator.free(skin.allocation).ok();
-    device.destroy_image(skin.image, None);
+// TODO: frames in flight may still read a replaced, removed or cleared skin;
+// free it once they finish.
+fn free_player_skin_texture(device: &rhi::backend::Device, skin: PlayerSkinTexture) {
+    skin.texture.destroy(device);
+    skin.set.destroy(device);
 }
 
 pub(super) fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
@@ -3183,42 +2831,42 @@ pub(super) fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
 /// The entity render pipelines, in draw order: opaque base, translucent eyes,
 /// additive swirl.
 fn create_pipelines(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-) -> [vk::Pipeline; 5] {
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
+) -> [rhi::backend::RenderPipeline; 5] {
     [
         create_pipeline(
             device,
-            render_pass,
+            targets,
             layout,
             BlendMode::Opaque,
             ModelInput::Instanced,
         ),
         create_pipeline(
             device,
-            render_pass,
+            targets,
             layout,
             BlendMode::OpaqueCulled,
             ModelInput::Instanced,
         ),
         create_pipeline(
             device,
-            render_pass,
+            targets,
             layout,
             BlendMode::TranslucentDepthWrite,
             ModelInput::Instanced,
         ),
         create_pipeline(
             device,
-            render_pass,
+            targets,
             layout,
             BlendMode::Translucent,
             ModelInput::Instanced,
         ),
         create_pipeline(
             device,
-            render_pass,
+            targets,
             layout,
             BlendMode::Additive,
             ModelInput::Instanced,
@@ -3235,181 +2883,75 @@ pub(super) enum ModelInput {
 }
 
 pub(super) fn create_pipeline(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
     blend: BlendMode,
     model_input: ModelInput,
-) -> vk::Pipeline {
-    let vert_spv: &[u8] = match model_input {
-        ModelInput::Instanced => shader::include_spirv!("entity.vert.spv"),
-        ModelInput::PushConstant => shader::include_spirv!("block_entity.vert.spv"),
+) -> rhi::backend::RenderPipeline {
+    let vertex_shader: rhi::Shader = match model_input {
+        ModelInput::Instanced => shader::include_shader!("entity.vert"),
+        ModelInput::PushConstant => shader::include_shader!("block_entity.vert"),
     };
-    let frag_spv = shader::include_spirv!("entity.frag.spv");
-
-    let vert_module = shader::create_shader_module(device, vert_spv);
-    let frag_module = shader::create_shader_module(device, frag_spv);
-
-    let stages = [
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Vertex,
-            module: vert_module,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Fragment,
-            module: frag_module,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-    ];
-
     // Binding 0: per-vertex mesh data. Instanced pipelines add binding 1 with
     // per-instance data (model columns + tint + overlay + uv), one EntityInstance
     // per (entity, part); push-constant ones bind only the mesh.
-    let mut bindings = vec![ChunkVertex::binding_description()];
-    let mut attrs = ChunkVertex::attribute_descriptions().to_vec();
-    if let ModelInput::Instanced = model_input {
-        bindings.push(vk::VertexInputBindingDescription {
-            binding: 1,
+    let vertex_buffers = [
+        ChunkVertex::BUFFER,
+        rhi::VertexBufferLayout {
             stride: size_of::<EntityInstance>() as u32,
-            input_rate: vk::VertexInputRate::Instance,
-        });
-        for i in 0..7u32 {
-            attrs.push(vk::VertexInputAttributeDescription {
-                location: 3 + i,
-                binding: 1,
-                format: vk::Format::R32G32B32A32Sfloat,
-                offset: i * 16,
-            });
-        }
-    }
-
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo {
-        vertex_binding_description_count: bindings.len() as u32,
-        vertex_binding_descriptions: bindings.as_ptr(),
-        vertex_attribute_description_count: attrs.len() as u32,
-        vertex_attribute_descriptions: attrs.as_ptr(),
-        ..Default::default()
-    };
-
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
-        topology: vk::PrimitiveTopology::TriangleList,
-        ..Default::default()
-    };
-
-    let viewport_state = vk::PipelineViewportStateCreateInfo {
-        viewport_count: 1,
-        scissor_count: 1,
-        ..Default::default()
-    };
-
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo {
-        polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: if blend == BlendMode::OpaqueCulled {
-            vk::CullModeFlags::Back
-        } else {
-            vk::CullModeFlags::None
+            step_mode: rhi::VertexStepMode::Instance,
+            attributes: &rhi::packed_attributes(3, [VertexFormat::Float32x4; 7]),
         },
-        front_face: vk::FrontFace::CounterClockwise,
-        line_width: 1.0,
-        ..Default::default()
+    ];
+    let vertex_buffers = match model_input {
+        ModelInput::Instanced => &vertex_buffers[..],
+        ModelInput::PushConstant => &vertex_buffers[..1],
     };
-
-    let multisampling = vk::PipelineMultisampleStateCreateInfo {
-        rasterization_samples: vk::SampleCountFlags::Type1,
-        ..Default::default()
-    };
-
-    // Only the translucent eyes overlay skips depth-write (vanilla `EYES`); the
-    // opaque base, slime shell, and additive swirl write depth.
-    let depth_write = match blend {
-        BlendMode::Translucent => vk::FALSE,
-        _ => vk::TRUE,
-    };
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
-        depth_test_enable: vk::TRUE,
-        depth_write_enable: depth_write,
-        depth_compare_op: vk::CompareOp::LessOrEqual,
-        ..Default::default()
-    };
-
-    let blend_attachment = match blend {
-        BlendMode::Opaque | BlendMode::OpaqueCulled => vk::PipelineColorBlendAttachmentState {
-            blend_enable: vk::FALSE,
-            color_write_mask: vk::ColorComponentFlags::RGBA,
-            ..Default::default()
-        },
-        // Standard src-alpha over (glowing eyes, slime shell).
-        BlendMode::Translucent | BlendMode::TranslucentDepthWrite => {
-            vk::PipelineColorBlendAttachmentState {
-                blend_enable: vk::TRUE,
-                src_color_blend_factor: vk::BlendFactor::SrcAlpha,
-                dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
-                color_blend_op: vk::BlendOp::Add,
-                src_alpha_blend_factor: vk::BlendFactor::One,
-                dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
-                alpha_blend_op: vk::BlendOp::Add,
-                color_write_mask: vk::ColorComponentFlags::RGBA,
-            }
-        }
-        // Additive (energy swirl glow).
-        BlendMode::Additive => vk::PipelineColorBlendAttachmentState {
-            blend_enable: vk::TRUE,
-            src_color_blend_factor: vk::BlendFactor::SrcAlpha,
-            dst_color_blend_factor: vk::BlendFactor::One,
-            color_blend_op: vk::BlendOp::Add,
-            src_alpha_blend_factor: vk::BlendFactor::One,
-            dst_alpha_blend_factor: vk::BlendFactor::One,
-            alpha_blend_op: vk::BlendOp::Add,
-            color_write_mask: vk::ColorComponentFlags::RGBA,
-        },
-    };
-    let color_blending = vk::PipelineColorBlendStateCreateInfo {
-        attachment_count: 1,
-        attachments: &blend_attachment,
-        ..Default::default()
-    };
-
-    let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
-    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
-        dynamic_state_count: dynamic_states.len() as u32,
-        dynamic_states: dynamic_states.as_ptr(),
-        ..Default::default()
-    };
-
-    let pipeline_info = [vk::GraphicsPipelineCreateInfo {
-        stage_count: stages.len() as u32,
-        stages: stages.as_ptr(),
-        vertex_input_state: &vertex_input,
-        input_assembly_state: &input_assembly,
-        viewport_state: &viewport_state,
-        rasterization_state: &rasterizer,
-        multisample_state: &multisampling,
-        depth_stencil_state: &depth_stencil,
-        color_blend_state: &color_blending,
-        dynamic_state: &dynamic_state,
+    rhi::backend::create_render_pipeline(
+        device,
+        targets,
         layout,
-        render_pass,
-        subpass: 0,
-        ..Default::default()
-    }];
-
-    let mut pipeline = vk::Pipeline::null();
-    device
-        .create_graphics_pipelines(
-            vk::PipelineCache::null(),
-            &pipeline_info,
-            None,
-            slice::from_mut(&mut pipeline),
-        )
-        .expect("failed to create entity pipeline");
-
-    device.destroy_shader_module(vert_module, None);
-    device.destroy_shader_module(frag_module, None);
-
-    pipeline
+        &rhi::RenderPipelineDesc {
+            cull_mode: if blend == BlendMode::OpaqueCulled {
+                rhi::CullMode::Back
+            } else {
+                rhi::CullMode::None
+            },
+            // Only the translucent eyes overlay skips depth-write (vanilla
+            // `EYES`); the opaque base, slime shell, and additive swirl write
+            // depth.
+            depth: Some(if blend == BlendMode::Translucent {
+                rhi::DepthState::READ_ONLY
+            } else {
+                rhi::DepthState::WRITE
+            }),
+            blend: match blend {
+                BlendMode::Opaque | BlendMode::OpaqueCulled => None,
+                // Glowing eyes, slime shell.
+                BlendMode::Translucent | BlendMode::TranslucentDepthWrite => {
+                    Some(rhi::BlendState::TRANSLUCENT)
+                }
+                // Energy swirl glow.
+                BlendMode::Additive => Some(rhi::BlendState {
+                    color: rhi::BlendComponent {
+                        src: rhi::BlendFactor::SrcAlpha,
+                        dst: rhi::BlendFactor::One,
+                    },
+                    alpha: rhi::BlendComponent {
+                        src: rhi::BlendFactor::One,
+                        dst: rhi::BlendFactor::One,
+                    },
+                }),
+            },
+            ..rhi::RenderPipelineDesc::new(
+                "entity",
+                vertex_shader,
+                shader::include_shader!("entity.frag"),
+                vertex_buffers,
+            )
+        },
+    )
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use glam::{Mat3, Mat4, Quat, Vec3};
 use serde::Deserialize;
@@ -97,6 +98,16 @@ impl DisplayTransform {
         translation: Vec3::ZERO,
         scale: Vec3::ONE,
     };
+
+    /// Vanilla `ItemTransform.apply`'s left-hand fix: X translation and the
+    /// Y and Z rotations mirrored.
+    pub(crate) fn mirrored(self) -> Self {
+        Self {
+            rotation: self.rotation * Vec3::new(1.0, -1.0, -1.0),
+            translation: self.translation * Vec3::new(-1.0, 1.0, 1.0),
+            scale: self.scale,
+        }
+    }
 
     pub(crate) fn to_matrix(self) -> Mat4 {
         Mat4::from_translation(self.translation)
@@ -421,11 +432,56 @@ impl CardinalLightType {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// A texture name interned once per process, so a quad holds two bytes
+/// instead of its own `String` and a mesh finds its atlas region by index
+/// (`AtlasUVMap::region`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TextureId(u16);
+
+#[derive(Default)]
+struct TextureNames {
+    names: Vec<&'static str>,
+    ids: HashMap<&'static str, u16>,
+}
+
+/// Names are leaked: a few thousand distinct textures, for the whole run.
+static TEXTURE_NAMES: LazyLock<RwLock<TextureNames>> = LazyLock::new(Default::default);
+
+impl TextureId {
+    pub fn intern(name: &str) -> Self {
+        if let Some(&id) = TEXTURE_NAMES.read().unwrap().ids.get(name) {
+            return Self(id);
+        }
+        let mut table = TEXTURE_NAMES.write().unwrap();
+        if let Some(&id) = table.ids.get(name) {
+            return Self(id);
+        }
+        let id = u16::try_from(table.names.len()).expect("over 65536 texture names");
+        let name: &'static str = Box::leak(name.into());
+        table.names.push(name);
+        table.ids.insert(name, id);
+        Self(id)
+    }
+
+    pub fn name(self) -> &'static str {
+        TEXTURE_NAMES.read().unwrap().names[self.index()]
+    }
+
+    pub fn index(self) -> usize {
+        usize::from(self.0)
+    }
+
+    /// Every name interned so far, by id.
+    pub fn all_names() -> Vec<&'static str> {
+        TEXTURE_NAMES.read().unwrap().names.clone()
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct BakedQuad {
     pub positions: [[f32; 3]; 4],
     pub uvs: [[f32; 2]; 4],
-    pub texture: String,
+    pub texture: TextureId,
     pub cullface: Option<Direction>,
     pub tint: super::render_assets::Tint,
     /// Raw vanilla face `tintindex`. Terrain resolves this through `tint`,
@@ -438,7 +494,7 @@ pub struct BakedQuad {
     pub shade_face: Option<Direction>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub struct BakedModel {
     pub quads: Vec<BakedQuad>,
     pub is_full_cube: bool,
@@ -447,7 +503,7 @@ pub struct BakedModel {
 #[derive(Clone)]
 pub struct MultipartEntry {
     pub when: HashMap<String, String>,
-    pub quads: Vec<BakedQuad>,
+    pub model: Arc<BakedModel>,
 }
 
 pub fn load_all_block_textures(
@@ -484,7 +540,7 @@ pub fn load_all_block_textures(
     results
 }
 
-type BakedModelMap = HashMap<String, HashMap<String, BakedModel>>;
+type BakedModelMap = HashMap<String, HashMap<String, Arc<BakedModel>>>;
 type MultipartMap = HashMap<String, Vec<MultipartEntry>>;
 
 pub fn bake_all_models(
@@ -492,7 +548,7 @@ pub fn bake_all_models(
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> (BakedModelMap, MultipartMap) {
-    let mut results: HashMap<String, HashMap<String, BakedModel>> = HashMap::new();
+    let mut results: BakedModelMap = HashMap::new();
     let mut multipart_results: HashMap<String, Vec<MultipartEntry>> = HashMap::new();
     let mut model_cache = HashMap::new();
     let mut total = 0u32;
@@ -503,44 +559,48 @@ pub fn bake_all_models(
         packs,
         |block_name, blockstate| {
             total += 1;
-            let mut variants_map: HashMap<String, BakedModel> = HashMap::new();
+            let mut variants_map: HashMap<String, Arc<BakedModel>> = HashMap::new();
+            // Variants (and multipart cases) naming the same model, rotation
+            // and uvlock share one bake. Per block, since tints are.
+            let mut shared: HashMap<(String, i32, i32, bool), Arc<BakedModel>> = HashMap::new();
+            let mut bake = |model_ref: &ModelRef| {
+                let key = (
+                    model_ref.model.clone(),
+                    model_ref.x,
+                    model_ref.y,
+                    model_ref.uvlock,
+                );
+                if let Some(baked) = shared.get(&key) {
+                    return Some(Arc::clone(baked));
+                }
+                let resolved = resolve_model(
+                    &model_ref.model,
+                    jar_assets_dir,
+                    asset_index,
+                    &mut model_cache,
+                    packs,
+                );
+                let mut baked =
+                    bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)?;
+                apply_block_tints(&mut baked, block_name);
+                let baked = Arc::new(baked);
+                shared.insert(key, Arc::clone(&baked));
+                Some(baked)
+            };
 
             if let Some(variants) = &blockstate.variants {
                 for (variant_key, variant_entry) in variants {
-                    let model_ref = variant_entry.first()?;
-                    let resolved = resolve_model(
-                        &model_ref.model,
-                        jar_assets_dir,
-                        asset_index,
-                        &mut model_cache,
-                        packs,
-                    );
-                    if let Some(mut baked) =
-                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)
-                    {
-                        apply_block_tints(&mut baked, block_name);
+                    if let Some(baked) = bake(variant_entry.first()?) {
                         variants_map.insert(variant_key.clone(), baked);
                     }
                 }
             } else if let Some(multipart) = &blockstate.multipart {
                 let mut entries = Vec::new();
                 for case in multipart {
-                    let model_ref = case.apply.first()?;
-                    let resolved = resolve_model(
-                        &model_ref.model,
-                        jar_assets_dir,
-                        asset_index,
-                        &mut model_cache,
-                        packs,
-                    );
-                    if let Some(mut baked) =
-                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)
-                    {
-                        apply_block_tints(&mut baked, block_name);
-                        let when = parse_when_condition(&case.when);
+                    if let Some(baked) = bake(case.apply.first()?) {
                         entries.push(MultipartEntry {
-                            when,
-                            quads: baked.quads,
+                            when: parse_when_condition(&case.when),
+                            model: baked,
                         });
                     }
                 }
@@ -893,6 +953,11 @@ pub fn bake_item_models(
             continue;
         }
         bake(item_name, &parts);
+        for (charge, node) in charge_type_cases(&json) {
+            let mut parts = Vec::new();
+            collect_parts_from_node(node, None, &mut parts);
+            bake(&charge_model_key(item_name, charge), &parts);
+        }
         // The bundle's selected-item model composes these around the
         // selected stack at draw time.
         if let Some(layers) = selected_bundle_layers(&json) {
@@ -1157,7 +1222,7 @@ fn add_chest_cube(
             uvs: spec
                 .uv_pixels
                 .map(|[u_px, v_px]| [u_px / TEX_SIZE, v_px / TEX_SIZE]),
-            texture: texture.to_string(),
+            texture: TextureId::intern(texture),
             cullface: None,
             tint: super::render_assets::Tint::None,
             tint_index: None,
@@ -1244,17 +1309,17 @@ fn find_first_item_model_node(json: &serde_json::Value) -> Option<&serde_json::V
 /// (no `trim`), `Charge` (no `charged_projectiles`, `NONE`) and
 /// `ItemBlockState` (no `block_state`) never match for a plain stack.
 ///
-/// TODO: pomme bakes one model per item, so stacks that do carry these
-/// components (trimmed armor, a loaded crossbow) still draw this branch;
-/// that needs per-stack selection, plus the `paletted_permutations` atlas
-/// source for the trim textures.
+/// A loaded crossbow's `charge_type` cases bake separately (see
+/// [`charge_model_key`]).
+///
+/// TODO: this branch still draws for loaded crossbows outside first person
+/// and GUI icons (dropped items, third person, the bundle tooltip, chat
+/// hovers), and for trimmed armor, which also needs the
+/// `paletted_permutations` atlas source for its trim textures.
 fn default_stack_branch(mut node: &serde_json::Value) -> &serde_json::Value {
     const COMPONENT_PROPERTIES: [&str; 3] = ["trim_material", "charge_type", "block_state"];
     while node_type(node) == Some("select")
-        && node
-            .get("property")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|property| COMPONENT_PROPERTIES.contains(&strip_mc_prefix(property)))
+        && node_property(node).is_some_and(|property| COMPONENT_PROPERTIES.contains(&property))
         && let Some(fallback) = node.get("fallback")
     {
         node = fallback;
@@ -1281,6 +1346,46 @@ fn node_type(node: &serde_json::Value) -> Option<&str> {
         .map(strip_mc_prefix)
 }
 
+/// The item-model key a root `minecraft:charge_type` select's case bakes
+/// under, for a stack loaded with `charge` (vanilla `Charge`: `arrow` or
+/// `rocket`).
+pub fn charge_model_key(item_name: &str, charge: &str) -> String {
+    format!("__pomme_{item_name}_charge_{charge}")
+}
+
+/// Each `when` of an item definition's root `minecraft:charge_type` select,
+/// with its model node.
+fn charge_type_cases(json: &serde_json::Value) -> Vec<(&str, &serde_json::Value)> {
+    let Some(root) = json.get("model").filter(|root| {
+        node_type(root) == Some("select") && node_property(root) == Some("charge_type")
+    }) else {
+        return Vec::new();
+    };
+    let cases = root.get("cases").and_then(serde_json::Value::as_array);
+    cases
+        .into_iter()
+        .flatten()
+        .filter_map(|case| Some((case.get("when")?, case.get("model")?)))
+        .flat_map(|(when, model)| {
+            let whens = match when {
+                serde_json::Value::Array(whens) => whens.iter().collect(),
+                when => vec![when],
+            };
+            whens
+                .into_iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(move |when| (when, model))
+        })
+        .collect()
+}
+
+/// A select or condition node's `property`, without the `minecraft:` prefix.
+fn node_property(node: &serde_json::Value) -> Option<&str> {
+    node.get("property")
+        .and_then(serde_json::Value::as_str)
+        .map(strip_mc_prefix)
+}
+
 /// The item-model key the bundle's selected layers bake under: behind the
 /// selected stack, or in front of it.
 pub fn selected_bundle_layer_key(item_name: &str, front: bool) -> String {
@@ -1295,11 +1400,7 @@ pub fn selected_bundle_layer_key(item_name: &str, front: bool) -> String {
 fn selected_bundle_layers(json: &serde_json::Value) -> Option<[Vec<ModelPart>; 2]> {
     fn find_condition(node: &serde_json::Value) -> Option<&serde_json::Value> {
         let is_condition = node_type(node) == Some("condition")
-            && node
-                .get("property")
-                .and_then(|p| p.as_str())
-                .map(strip_mc_prefix)
-                == Some("bundle/has_selected_item");
+            && node_property(node) == Some("bundle/has_selected_item");
         if is_condition {
             return Some(node);
         }
@@ -1793,7 +1894,7 @@ fn bake_resolved_model(
             quads.push(BakedQuad {
                 positions,
                 uvs,
-                texture: texture_name,
+                texture: TextureId::intern(&texture_name),
                 cullface,
                 tint: quad_tint,
                 tint_index: face_def
@@ -2261,7 +2362,7 @@ mod tests {
         let mut quad = BakedQuad {
             positions: face_positions(Direction::Up, [0.0; 3], [1.0; 3]),
             uvs: [[0.0; 2]; 4],
-            texture: "block/stone".to_string(),
+            texture: TextureId::intern("block/stone"),
             cullface: None,
             tint: Tint::None,
             tint_index: None,
@@ -2571,7 +2672,7 @@ mod tests {
                 BakedQuad {
                     positions: [[0.0; 3]; 4],
                     uvs: [[0.0; 2]; 4],
-                    texture: "fern".to_string(),
+                    texture: TextureId::intern("fern"),
                     cullface: None,
                     tint: Tint::None,
                     tint_index: Some(0),
@@ -2581,7 +2682,7 @@ mod tests {
                 BakedQuad {
                     positions: [[0.0; 3]; 4],
                     uvs: [[0.0; 2]; 4],
-                    texture: "fern_overlay".to_string(),
+                    texture: TextureId::intern("fern_overlay"),
                     cullface: None,
                     tint: Tint::None,
                     tint_index: None,
@@ -2804,6 +2905,33 @@ mod tests {
     }
 
     #[test]
+    fn charge_type_cases_list_each_loaded_model() {
+        let json = serde_json::json!({"model": {
+            "type": "minecraft:select",
+            "property": "minecraft:charge_type",
+            "cases": [
+                {"when": "arrow", "model": {"type": "minecraft:model", "model": "item/a"}},
+                {"when": ["rocket", "other"], "model": {"type": "minecraft:model", "model": "item/r"}}
+            ],
+            "fallback": {"type": "minecraft:model", "model": "item/x"}
+        }});
+        let cases: Vec<_> = charge_type_cases(&json)
+            .into_iter()
+            .map(|(when, node)| (when, node["model"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            cases,
+            [
+                ("arrow", "item/a"),
+                ("rocket", "item/r"),
+                ("other", "item/r")
+            ]
+        );
+        let trim = serde_json::json!({"model": {"type": "minecraft:select", "property": "minecraft:trim_material", "cases": []}});
+        assert!(charge_type_cases(&trim).is_empty());
+    }
+
+    #[test]
     fn bundle_selected_layers_split_around_the_selected_item() {
         // Vanilla 26.2 `items/bundle.json`.
         let json = serde_json::json!({"model": {
@@ -3018,7 +3146,12 @@ mod tests {
         let resolved = resolve_model("block/test_core", &root, &None, &mut cache, None);
         let baked = bake_resolved_model(&resolved, 0, 0, Tint::None).unwrap();
         assert_eq!(baked.quads.len(), 6);
-        assert!(baked.quads.iter().all(|quad| quad.texture == "test_core"));
+        assert!(
+            baked
+                .quads
+                .iter()
+                .all(|quad| quad.texture.name() == "test_core")
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

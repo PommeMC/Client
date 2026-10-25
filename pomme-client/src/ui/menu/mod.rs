@@ -238,6 +238,12 @@ impl Default for Settings {
     }
 }
 
+/// The chunk detail the options hold, which a headless run meshes with as the
+/// window would.
+pub(crate) fn saved_chunk_detail(game_dir: &Path) -> u32 {
+    load_settings(game_dir).chunk_detail
+}
+
 fn load_settings(game_dir: &Path) -> Settings {
     let path = game_dir.join("options.json");
     std::fs::read_to_string(&path)
@@ -697,6 +703,7 @@ pub struct MainMenu {
     settings_dir: PathBuf,
     /// Set by slider drags, written by `flush_settings`.
     settings_dirty: bool,
+    bench_render_distance: crate::benchmark::BenchRenderDistance,
     /// The title screen's splash line, rolled at launch and on every return
     /// from a world like vanilla's fresh `TitleScreen`. `None` renders nothing.
     pub splash: Option<String>,
@@ -734,7 +741,7 @@ impl MainMenu {
         key_bindings: &mut KeyBindings,
     ) -> Self {
         let server_list = ServerList::load(game_dir);
-        let saves_dir = game_dir.join("saves");
+        let saves_dir = crate::ui::world_list::saves_dir(game_dir);
         // Servers ping lazily as their rows draw (build_server_list), not at boot.
         let ping_results: PingResults = Default::default();
         let settings = load_settings(game_dir);
@@ -846,6 +853,7 @@ impl MainMenu {
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             settings_dirty: false,
+            bench_render_distance: Default::default(),
             splash: None,
             menu_open_time: None,
             last_favicon_count: 0,
@@ -986,6 +994,16 @@ impl MainMenu {
         })
     }
 
+    pub fn set_bench_render_distance(&mut self, rd: u32) {
+        self.bench_render_distance
+            .set(&mut self.render_distance, rd);
+    }
+
+    pub fn restore_bench_render_distance(&mut self) -> Option<u32> {
+        self.bench_render_distance
+            .restore(&mut self.render_distance)
+    }
+
     /// Writes pending slider changes, vanilla `OptionsSubScreen.removed()`.
     pub fn flush_settings(&mut self, key_bindings: &KeyBindings) {
         if self.settings_dirty {
@@ -1000,7 +1018,10 @@ impl MainMenu {
             &Settings {
                 key_bindings: key_bindings.clone(),
                 gui_scale: self.gui_scale_setting,
-                render_distance: self.render_distance,
+                render_distance: self
+                    .bench_render_distance
+                    .saved()
+                    .unwrap_or(self.render_distance),
                 chunk_detail: self.chunk_detail,
                 simulation_distance: self.simulation_distance,
                 fov: self.fov,
@@ -1056,6 +1077,11 @@ impl MainMenu {
 
     pub fn main_hand_right(&self) -> bool {
         self.skin_main_hand_right
+    }
+
+    pub fn set_main_hand_right(&mut self, right: bool, key_bindings: &KeyBindings) {
+        self.skin_main_hand_right = right;
+        self.save_settings(key_bindings);
     }
 
     pub fn open_options(&mut self, key_bindings: &KeyBindings) {
@@ -1397,8 +1423,8 @@ impl MainMenu {
     }
 }
 
-/// `dir` must not exist: settings and the server list fall back to
-/// defaults, and a settings save silently fails instead of writing.
+/// With a `dir` that doesn't exist, settings and the server list fall back
+/// to defaults and a settings save silently fails instead of writing.
 #[cfg(test)]
 fn test_menu(dir: &str, key_bindings: &mut KeyBindings) -> MainMenu {
     let rt = std::sync::Arc::new(
@@ -1422,6 +1448,24 @@ fn test_menu(dir: &str, key_bindings: &mut KeyBindings) -> MainMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chunk_bench_saves_the_players_render_distance_and_reads_their_chunk_detail() {
+        let dir = std::env::temp_dir().join(format!("pomme-bench-rd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu(dir.to_str().unwrap(), &mut key_bindings);
+        menu.render_distance = 12;
+        menu.set_bench_render_distance(2);
+        menu.chunk_detail = 4;
+        menu.save_settings(&key_bindings);
+        let saved = load_settings(&dir).render_distance;
+        let chunk_detail = saved_chunk_detail(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(saved, 12);
+        assert_eq!(menu.render_distance, 2);
+        assert_eq!(chunk_detail, 4);
+    }
 
     #[test]
     fn damage_tilt_defaults_to_full_strength_and_clamps_to_unit_range() {

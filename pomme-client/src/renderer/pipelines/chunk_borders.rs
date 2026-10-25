@@ -1,11 +1,5 @@
-use std::slice;
-use std::sync::{Arc, Mutex};
-
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
-
 use crate::renderer::camera::CameraUniform;
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -20,103 +14,61 @@ const BLUE: [f32; 4] = [0.0, 0.5, 1.0, 0.6];
 const MAX_VERTICES: usize = 4096;
 
 pub struct ChunkBorderPipeline {
-    pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    desc_layout: vk::DescriptorSetLayout,
-    desc_pool: vk::DescriptorPool,
-    desc_sets: Vec<vk::DescriptorSet>,
-    camera_buffers: Vec<vk::Buffer>,
-    camera_allocs: Vec<Allocation>,
-    vertex_buffers: Vec<vk::Buffer>,
-    vertex_allocs: Vec<Allocation>,
+    pipeline: rhi::backend::RenderPipeline,
+    pipeline_layout: rhi::backend::PipelineLayout,
+    camera_layout: rhi::backend::BindGroupLayout,
+    camera_sets: Vec<rhi::backend::BindGroup>,
+    camera_buffers: Vec<rhi::backend::Buffer>,
+    vertex_buffers: Vec<rhi::backend::Buffer>,
     lines: Vec<LineVertex>,
     /// Frames whose vertex buffer predates the last `update_lines`.
     stale: [bool; MAX_FRAMES_IN_FLIGHT],
 }
 
 impl ChunkBorderPipeline {
-    pub fn new(
-        device: &vk::Device,
-        render_pass: vk::RenderPass,
-        allocator: &Arc<Mutex<Allocator>>,
-    ) -> Self {
-        let binding = vk::DescriptorSetLayoutBinding {
-            binding: 0,
-            descriptor_type: vk::DescriptorType::UniformBuffer,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlags::Vertex,
-            ..Default::default()
-        };
-        let layout_info = vk::DescriptorSetLayoutCreateInfo {
-            binding_count: 1,
-            bindings: &binding,
-            ..Default::default()
-        };
-        let desc_layout = device
-            .create_descriptor_set_layout(&layout_info, None)
-            .unwrap();
+    pub fn new(device: &rhi::backend::Device, targets: rhi::backend::PipelineTargets) -> Self {
+        let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
+        let pipeline_layout = rhi::backend::create_pipeline_layout(device, &[camera_layout], None);
 
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: 1,
-            set_layouts: &desc_layout,
-            ..Default::default()
-        };
-        let pipeline_layout = device.create_pipeline_layout(&layout_info, None).unwrap();
+        let pipeline = create_pipeline(device, targets, pipeline_layout);
 
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout);
-
-        let pool_sizes = [vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::UniformBuffer,
-            descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-        }];
-        let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: MAX_FRAMES_IN_FLIGHT as u32,
-            pool_size_count: 1,
-            pool_sizes: pool_sizes.as_ptr(),
-            ..Default::default()
-        };
-        let desc_pool = device.create_descriptor_pool(&pool_info, None).unwrap();
-
-        let (desc_sets, camera_buffers, camera_allocs) = util::create_uniform_sets(
+        let (camera_sets, camera_buffers) = util::create_uniform_sets(
             device,
-            allocator,
-            desc_pool,
-            desc_layout,
+            camera_layout,
             size_of::<CameraUniform>() as u64,
             "chunk_border_cam",
         );
 
-        let (vertex_buffers, vertex_allocs) = util::create_per_frame_host_buffers(
+        let vertex_buffers = util::create_per_frame_host_buffers(
             device,
-            allocator,
             (MAX_VERTICES * size_of::<LineVertex>()) as u64,
-            vk::BufferUsageFlags::VertexBuffer,
+            rhi::BufferUsages::VERTEX,
             "chunk_border_verts",
         );
 
         Self {
             pipeline,
             pipeline_layout,
-            desc_layout,
-            desc_pool,
-            desc_sets,
+            camera_layout,
+            camera_sets,
             camera_buffers,
-            camera_allocs,
             vertex_buffers,
-            vertex_allocs,
             lines: Vec::new(),
             stale: [false; MAX_FRAMES_IN_FLIGHT],
         }
     }
 
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
+    pub fn recreate_pipeline(
+        &mut self,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
+    ) {
+        self.pipeline.destroy(device);
+        self.pipeline = create_pipeline(device, targets, self.pipeline_layout);
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
-        let data = self.camera_allocs[frame].mapped_slice_mut().unwrap();
-        data[..size_of::<CameraUniform>()].copy_from_slice(bytemuck::bytes_of(uniform));
+        self.camera_buffers[frame].write(bytemuck::bytes_of(uniform));
     }
 
     /// Lines are eye-relative (including the third-person offset, the origin
@@ -199,186 +151,51 @@ impl ChunkBorderPipeline {
         self.stale = [true; MAX_FRAMES_IN_FLIGHT];
     }
 
-    pub fn draw(&mut self, cmd: vk::CommandBuffer, frame: usize) {
+    pub fn draw(&mut self, pass: &mut rhi::backend::RenderPassEncoder, frame: usize) {
         if self.lines.is_empty() {
             return;
         }
         if self.stale[frame] {
             self.stale[frame] = false;
             let bytes = bytemuck::cast_slice(&self.lines);
-            self.vertex_allocs[frame].mapped_slice_mut().unwrap()[..bytes.len()]
-                .copy_from_slice(bytes);
+            self.vertex_buffers[frame].write(bytes);
         }
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.desc_sets[frame]],
-            &[],
-        );
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame]], &[0]);
-        cmd.draw(self.lines.len() as u32, 1, 0, 0);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, self.camera_sets[frame]);
+        pass.set_vertex_buffer(0, self.vertex_buffers[frame].handle());
+        pass.draw(self.lines.len() as u32, 1, 0, 0);
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let mut alloc = allocator.lock().unwrap();
-        util::destroy_buffers(
-            device,
-            &mut alloc,
-            &self.vertex_buffers,
-            &mut self.vertex_allocs,
-        );
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        util::destroy_buffers(device, &mut self.vertex_buffers);
+        util::destroy_buffers(device, &mut self.camera_buffers);
 
-        util::destroy_buffers(
-            device,
-            &mut alloc,
-            &self.camera_buffers,
-            &mut self.camera_allocs,
-        );
-        drop(alloc);
-
-        device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_descriptor_pool(self.desc_pool, None);
-        device.destroy_descriptor_set_layout(self.desc_layout, None);
+        self.pipeline.destroy(device);
+        self.pipeline_layout.destroy(device);
+        util::destroy_bind_groups(device, self.camera_sets.drain(..));
+        self.camera_layout.destroy(device);
     }
 }
 
 fn create_pipeline(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-) -> vk::Pipeline {
-    let vert_spv = shader::include_spirv!("chunk_border.vert.spv");
-    let frag_spv = shader::include_spirv!("chunk_border.frag.spv");
-    let vert_mod = shader::create_shader_module(device, vert_spv);
-    let frag_mod = shader::create_shader_module(device, frag_spv);
-
-    let stages = [
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Vertex,
-            module: vert_mod,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Fragment,
-            module: frag_mod,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-    ];
-
-    let binding_desc = vk::VertexInputBindingDescription {
-        binding: 0,
-        stride: size_of::<LineVertex>() as u32,
-        input_rate: vk::VertexInputRate::Vertex,
-    };
-    let attr_descs = [
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32B32Sfloat,
-            offset: 0,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R32G32B32A32Sfloat,
-            offset: 12,
-        },
-    ];
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo {
-        vertex_binding_description_count: 1,
-        vertex_binding_descriptions: &binding_desc,
-        vertex_attribute_description_count: attr_descs.len() as u32,
-        vertex_attribute_descriptions: attr_descs.as_ptr(),
-        ..Default::default()
-    };
-
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
-        topology: vk::PrimitiveTopology::LineList,
-        ..Default::default()
-    };
-
-    let viewport_state = vk::PipelineViewportStateCreateInfo {
-        viewport_count: 1,
-        scissor_count: 1,
-        ..Default::default()
-    };
-
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo {
-        polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeFlags::None,
-        front_face: vk::FrontFace::CounterClockwise,
-        line_width: 1.0,
-        ..Default::default()
-    };
-
-    let multisampling = vk::PipelineMultisampleStateCreateInfo {
-        rasterization_samples: vk::SampleCountFlags::Type1,
-        ..Default::default()
-    };
-
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
-        depth_test_enable: vk::TRUE,
-        depth_write_enable: vk::FALSE,
-        depth_compare_op: vk::CompareOp::LessOrEqual,
-        ..Default::default()
-    };
-
-    let blend_attachment = vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::TRUE,
-        src_color_blend_factor: vk::BlendFactor::SrcAlpha,
-        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
-        color_blend_op: vk::BlendOp::Add,
-        src_alpha_blend_factor: vk::BlendFactor::One,
-        dst_alpha_blend_factor: vk::BlendFactor::Zero,
-        alpha_blend_op: vk::BlendOp::Add,
-        color_write_mask: vk::ColorComponentFlags::RGBA,
-    };
-    let color_blending = vk::PipelineColorBlendStateCreateInfo {
-        attachment_count: 1,
-        attachments: &blend_attachment,
-        ..Default::default()
-    };
-
-    let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
-    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
-        dynamic_state_count: dynamic_states.len() as u32,
-        dynamic_states: dynamic_states.as_ptr(),
-        ..Default::default()
-    };
-
-    let pipeline_info = [vk::GraphicsPipelineCreateInfo {
-        stage_count: stages.len() as u32,
-        stages: stages.as_ptr(),
-        vertex_input_state: &vertex_input,
-        input_assembly_state: &input_assembly,
-        viewport_state: &viewport_state,
-        rasterization_state: &rasterizer,
-        multisample_state: &multisampling,
-        depth_stencil_state: &depth_stencil,
-        color_blend_state: &color_blending,
-        dynamic_state: &dynamic_state,
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
+) -> rhi::backend::RenderPipeline {
+    rhi::backend::create_render_pipeline(
+        device,
+        targets,
         layout,
-        render_pass,
-        subpass: 0,
-        ..Default::default()
-    }];
-
-    let mut pipeline = vk::Pipeline::null();
-    device
-        .create_graphics_pipelines(
-            vk::PipelineCache::null(),
-            &pipeline_info,
-            None,
-            slice::from_mut(&mut pipeline),
-        )
-        .unwrap();
-
-    device.destroy_shader_module(vert_mod, None);
-    device.destroy_shader_module(frag_mod, None);
-    pipeline
+        &rhi::RenderPipelineDesc {
+            topology: rhi::Topology::LineList,
+            depth: Some(rhi::DepthState::READ_ONLY),
+            blend: Some(rhi::BlendState::OVER_REPLACE_ALPHA),
+            ..rhi::RenderPipelineDesc::new(
+                "chunk border",
+                shader::include_shader!("chunk_border.vert"),
+                shader::include_shader!("chunk_border.frag"),
+                &[rhi::vertex_buffer!(LineVertex, [Float32x3, Float32x4])],
+            )
+        },
+    )
 }

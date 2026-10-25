@@ -1,11 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
 
-use pomme_gpu_allocator::MemoryLocation;
-use pomme_gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
-use pyronyx::vk;
-
-use crate::renderer::util;
+use crate::renderer::rhi;
 
 // Target capacity per atlas page in slots. The atlas is sized to fit this many
 // at the active slot size, clamped to MIN_ATLAS_PX so very small slots still
@@ -19,8 +14,7 @@ pub fn is_animated_item(item_name: &str) -> bool {
     matches!(item_name, "compass" | "recovery_compass" | "clock")
 }
 
-const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8Unorm;
-const DEPTH_FORMAT: vk::Format = vk::Format::D32Sfloat;
+const COLOR_FORMAT: rhi::TextureFormat = rhi::TextureFormat::Rgba8Unorm;
 
 /// Returns the slot size in pixels matching `16 * gui_scale` at the Auto GUI
 /// scale, the vanilla formula (`GuiRenderer.prepareItemElements`). 16 is the
@@ -174,73 +168,49 @@ impl DynamicAtlasAllocator {
 }
 
 pub struct GuiItemAtlas {
-    color_image: vk::Image,
-    color_view: vk::ImageView,
-    color_alloc: Option<Allocation>,
-    depth_image: vk::Image,
-    depth_view: vk::ImageView,
-    depth_alloc: Option<Allocation>,
-    render_pass: vk::RenderPass,
-    framebuffer: vk::Framebuffer,
-    sampler: vk::Sampler,
+    color: rhi::backend::Texture,
+    depth: rhi::backend::Texture,
+    sampler: rhi::backend::Sampler,
     slot_px: u32,
     atlas_px: u32,
     allocator: DynamicAtlasAllocator,
 }
 
 impl GuiItemAtlas {
-    pub fn new(
-        device: &vk::Device,
-        gpu_alloc: &Arc<Mutex<Allocator>>,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        slot_px: u32,
-    ) -> Self {
+    pub fn new(device: &rhi::backend::Device, slot_px: u32) -> Self {
         let atlas_px = atlas_px_for_slot(slot_px);
         let slots_per_side = atlas_px / slot_px;
 
-        let (color_image, color_view, color_alloc) =
-            create_color_image(device, gpu_alloc, atlas_px, atlas_px);
-        let (depth_image, depth_view, depth_alloc) =
-            create_depth_image(device, gpu_alloc, atlas_px, atlas_px);
-
-        init_color_clear_and_transition(device, queue, command_pool, color_image);
-        transition_depth_to_attachment(device, queue, command_pool, depth_image);
-
-        let render_pass = create_render_pass(device);
-        let framebuffer = create_framebuffer(
+        let color = rhi::backend::Texture::new(
             device,
-            render_pass,
-            color_view,
-            depth_view,
-            atlas_px,
-            atlas_px,
+            &rhi::TextureDesc::new(
+                "gui_item_atlas_color",
+                atlas_px,
+                atlas_px,
+                COLOR_FORMAT,
+                rhi::TextureUsages::RENDER_ATTACHMENT
+                    | rhi::TextureUsages::TEXTURE_BINDING
+                    | rhi::TextureUsages::COPY_DST,
+            ),
+        );
+        let depth = rhi::backend::Texture::new(
+            device,
+            &rhi::TextureDesc::new(
+                "gui_item_atlas_depth",
+                atlas_px,
+                atlas_px,
+                rhi::TextureFormat::Depth32Float,
+                rhi::TextureUsages::RENDER_ATTACHMENT,
+            ),
         );
 
-        let sampler_info = vk::SamplerCreateInfo {
-            mag_filter: vk::Filter::Nearest,
-            min_filter: vk::Filter::Nearest,
-            mipmap_mode: vk::SamplerMipmapMode::Nearest,
-            address_mode_u: vk::SamplerAddressMode::ClampToEdge,
-            address_mode_v: vk::SamplerAddressMode::ClampToEdge,
-            address_mode_w: vk::SamplerAddressMode::ClampToEdge,
-            min_lod: 0.0,
-            max_lod: 0.0,
-            ..Default::default()
-        };
-        let sampler = device
-            .create_sampler(&sampler_info, None)
-            .expect("failed to create gui_item_atlas sampler");
+        init_color_clear_and_transition(device, color.handle());
+
+        let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
 
         Self {
-            color_image,
-            color_view,
-            color_alloc: Some(color_alloc),
-            depth_image,
-            depth_view,
-            depth_alloc: Some(depth_alloc),
-            render_pass,
-            framebuffer,
+            color,
+            depth,
             sampler,
             slot_px,
             atlas_px,
@@ -256,8 +226,11 @@ impl GuiItemAtlas {
         self.atlas_px
     }
 
-    pub fn render_pass(&self) -> vk::RenderPass {
-        self.render_pass
+    pub fn targets(&self) -> rhi::backend::PipelineTargets {
+        rhi::backend::PipelineTargets {
+            color: rhi::backend::texture_format(COLOR_FORMAT),
+            depth: true,
+        }
     }
 
     pub fn get_or_allocate(
@@ -292,16 +265,12 @@ impl GuiItemAtlas {
     }
 
     /// Bottom-origin framebuffer rect for the bake-pass scissor and slot clear.
-    pub fn scissor_rect(&self, slot: &Slot) -> vk::Rect2D {
-        vk::Rect2D {
-            offset: vk::Offset2D {
-                x: (slot.x * self.slot_px) as i32,
-                y: self.atlas_px as i32 - (slot.y as i32 + 1) * self.slot_px as i32,
-            },
-            extent: vk::Extent2D {
-                width: self.slot_px,
-                height: self.slot_px,
-            },
+    pub fn scissor_rect(&self, slot: &Slot) -> rhi::Rect {
+        rhi::Rect {
+            x: slot.x * self.slot_px,
+            y: self.atlas_px - (slot.y + 1) * self.slot_px,
+            width: self.slot_px,
+            height: self.slot_px,
         }
     }
 
@@ -314,360 +283,96 @@ impl GuiItemAtlas {
         [u0, v0, u0 + step, v0 - step]
     }
 
-    pub fn begin_bake_pass(&self, cmd: vk::CommandBuffer) {
-        let clears = [
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 0.0],
-                },
+    /// Draws into the atlas over a cleared depth buffer, keeping the slots
+    /// already baked. [`Self::end_bake_pass`] hands it back to shaders.
+    pub fn begin_bake_pass(
+        &self,
+        device: &rhi::backend::Device,
+        encoder: &rhi::backend::CommandEncoder,
+    ) -> rhi::backend::RenderPassEncoder {
+        self.transition_color(
+            encoder,
+            rhi::TextureUse::ShaderRead,
+            rhi::TextureUse::ColorAttachment,
+        );
+        let desc = rhi::backend::RenderPassDesc {
+            color: rhi::backend::ColorAttachment {
+                texture: self.color.handle(),
+                format: rhi::backend::texture_format(COLOR_FORMAT),
+                load: rhi::LoadOp::Load,
+                store: rhi::StoreOp::Store,
             },
-            vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
-                    stencil: 0,
-                },
-            },
-        ];
-        let info = vk::RenderPassBeginInfo {
-            render_pass: self.render_pass,
-            framebuffer: self.framebuffer,
-            render_area: vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: vk::Extent2D {
-                    width: self.atlas_px,
-                    height: self.atlas_px,
-                },
-            },
-            clear_value_count: clears.len() as u32,
-            clear_values: clears.as_ptr(),
-            ..Default::default()
-        };
-        cmd.begin_render_pass(&info, vk::SubpassContents::Inline);
-    }
-
-    pub fn end_bake_pass(&self, cmd: vk::CommandBuffer) {
-        cmd.end_render_pass();
-    }
-
-    pub fn clear_slot_color(&self, cmd: vk::CommandBuffer, slot: &Slot) {
-        let clear_attachment = vk::ClearAttachment {
-            aspect_mask: vk::ImageAspectFlags::Color,
-            color_attachment: 0,
-            clear_value: vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 0.0],
-                },
+            depth: Some(rhi::backend::DepthAttachment::cleared(self.depth.handle())),
+            extent: rhi::Extent {
+                width: self.atlas_px,
+                height: self.atlas_px,
             },
         };
-        let clear_rect = vk::ClearRect {
-            rect: self.scissor_rect(slot),
-            base_array_layer: 0,
-            layer_count: 1,
-        };
-        cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
+        encoder.begin_render_pass(device, &desc)
     }
 
-    pub fn color_view(&self) -> vk::ImageView {
-        self.color_view
+    pub fn end_bake_pass(
+        &self,
+        encoder: &rhi::backend::CommandEncoder,
+        pass: rhi::backend::RenderPassEncoder,
+    ) {
+        pass.end();
+        self.transition_color(
+            encoder,
+            rhi::TextureUse::ColorAttachment,
+            rhi::TextureUse::ShaderRead,
+        );
     }
 
-    pub fn sampler(&self) -> vk::Sampler {
+    fn transition_color(
+        &self,
+        encoder: &rhi::backend::CommandEncoder,
+        from: rhi::TextureUse,
+        to: rhi::TextureUse,
+    ) {
+        encoder.transition_textures(&[rhi::backend::TextureTransition::color(
+            self.color.handle(),
+            from,
+            to,
+        )]);
+    }
+
+    pub fn clear_slot_color(&self, pass: &rhi::backend::RenderPassEncoder, slot: &Slot) {
+        pass.clear_color(self.scissor_rect(slot), [0.0; 4]);
+    }
+
+    pub fn color_texture(&self) -> rhi::backend::TextureHandle {
+        self.color.handle()
+    }
+
+    pub fn sampler(&self) -> rhi::backend::Sampler {
         self.sampler
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, gpu_alloc: &Arc<Mutex<Allocator>>) {
-        device.destroy_framebuffer(self.framebuffer, None);
-        device.destroy_render_pass(self.render_pass, None);
-        device.destroy_sampler(self.sampler, None);
-        device.destroy_image_view(self.color_view, None);
-        device.destroy_image(self.color_image, None);
-        device.destroy_image_view(self.depth_view, None);
-        device.destroy_image(self.depth_image, None);
-        if let Some(a) = self.color_alloc.take() {
-            gpu_alloc.lock().unwrap().free(a).ok();
-        }
-        if let Some(a) = self.depth_alloc.take() {
-            gpu_alloc.lock().unwrap().free(a).ok();
-        }
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        self.sampler.destroy(device);
+        std::mem::take(&mut self.color).destroy(device);
+        std::mem::take(&mut self.depth).destroy(device);
     }
-}
-
-fn create_color_image(
-    device: &vk::Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    width: u32,
-    height: u32,
-) -> (vk::Image, vk::ImageView, Allocation) {
-    create_atlas_image(
-        device,
-        allocator,
-        width,
-        height,
-        COLOR_FORMAT,
-        vk::ImageUsageFlags::ColorAttachment
-            | vk::ImageUsageFlags::Sampled
-            | vk::ImageUsageFlags::TransferDst,
-        util::COLOR_SUBRESOURCE_RANGE,
-        "gui_item_atlas_color",
-    )
-}
-
-fn create_depth_image(
-    device: &vk::Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    width: u32,
-    height: u32,
-) -> (vk::Image, vk::ImageView, Allocation) {
-    create_atlas_image(
-        device,
-        allocator,
-        width,
-        height,
-        DEPTH_FORMAT,
-        vk::ImageUsageFlags::DepthStencilAttachment,
-        util::DEPTH_SUBRESOURCE_RANGE,
-        "gui_item_atlas_depth",
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn create_atlas_image(
-    device: &vk::Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    width: u32,
-    height: u32,
-    format: vk::Format,
-    usage: vk::ImageUsageFlags,
-    subresource_range: vk::ImageSubresourceRange,
-    name: &str,
-) -> (vk::Image, vk::ImageView, Allocation) {
-    let image_info = vk::ImageCreateInfo {
-        image_type: vk::ImageType::Type2D,
-        format,
-        extent: vk::Extent3D {
-            width,
-            height,
-            depth: 1,
-        },
-        mip_levels: 1,
-        array_layers: 1,
-        samples: vk::SampleCountFlags::Type1,
-        tiling: vk::ImageTiling::Optimal,
-        usage,
-        ..Default::default()
-    };
-    let image = device
-        .create_image(&image_info, None)
-        .expect("failed to create atlas image");
-    let mem_reqs = device.get_image_memory_requirements(image);
-    let allocation = allocator
-        .lock()
-        .unwrap()
-        .allocate(&AllocationCreateDesc {
-            name,
-            requirements: mem_reqs,
-            location: MemoryLocation::GpuOnly,
-            linear: false,
-            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-        })
-        .expect("failed to allocate atlas image memory");
-    unsafe {
-        device
-            .bind_image_memory(image, allocation.memory(), allocation.offset())
-            .expect("failed to bind atlas image memory");
-    }
-    let view_info = vk::ImageViewCreateInfo {
-        image,
-        view_type: vk::ImageViewType::Type2D,
-        format,
-        subresource_range,
-        ..Default::default()
-    };
-    let view = device
-        .create_image_view(&view_info, None)
-        .expect("failed to create atlas image view");
-    (image, view, allocation)
 }
 
 fn init_color_clear_and_transition(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    image: vk::Image,
+    device: &rhi::backend::Device,
+    image: rhi::backend::TextureHandle,
 ) {
-    util::submit_one_time(device, queue, command_pool, |cmd| {
-        let to_transfer = vk::ImageMemoryBarrier {
+    device.submit(|encoder| {
+        encoder.transition_textures(&[rhi::backend::TextureTransition::color(
             image,
-            old_layout: vk::ImageLayout::Undefined,
-            new_layout: vk::ImageLayout::TransferDstOptimal,
-            src_access_mask: vk::AccessFlags::empty(),
-            dst_access_mask: vk::AccessFlags::TransferWrite,
-            subresource_range: util::COLOR_SUBRESOURCE_RANGE,
-            ..Default::default()
-        };
-        cmd.pipeline_barrier(
-            vk::PipelineStageFlags::TopOfPipe,
-            vk::PipelineStageFlags::Transfer,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[to_transfer],
-        );
-
-        let clear_color = vk::ClearColorValue {
-            float32: [0.0, 0.0, 0.0, 0.0],
-        };
-        cmd.clear_color_image(
+            rhi::TextureUse::Undefined,
+            rhi::TextureUse::CopyDst,
+        )]);
+        encoder.clear_texture(image, rhi::TextureRange::BASE, [0.0; 4]);
+        encoder.transition_textures(&[rhi::backend::TextureTransition::color(
             image,
-            vk::ImageLayout::TransferDstOptimal,
-            &clear_color,
-            &[util::COLOR_SUBRESOURCE_RANGE],
-        );
-
-        let to_shader_read = vk::ImageMemoryBarrier {
-            image,
-            old_layout: vk::ImageLayout::TransferDstOptimal,
-            new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-            src_access_mask: vk::AccessFlags::TransferWrite,
-            dst_access_mask: vk::AccessFlags::ShaderRead,
-            subresource_range: util::COLOR_SUBRESOURCE_RANGE,
-            ..Default::default()
-        };
-        cmd.pipeline_barrier(
-            vk::PipelineStageFlags::Transfer,
-            vk::PipelineStageFlags::FragmentShader,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[to_shader_read],
-        );
+            rhi::TextureUse::CopyDst,
+            rhi::TextureUse::ShaderRead,
+        )]);
     });
-}
-
-fn transition_depth_to_attachment(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    image: vk::Image,
-) {
-    util::submit_one_time(device, queue, command_pool, |cmd| {
-        let barrier = vk::ImageMemoryBarrier {
-            image,
-            old_layout: vk::ImageLayout::Undefined,
-            new_layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
-            src_access_mask: vk::AccessFlags::empty(),
-            dst_access_mask: vk::AccessFlags::DepthStencilAttachmentWrite,
-            subresource_range: util::DEPTH_SUBRESOURCE_RANGE,
-            ..Default::default()
-        };
-        cmd.pipeline_barrier(
-            vk::PipelineStageFlags::TopOfPipe,
-            vk::PipelineStageFlags::EarlyFragmentTests,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[barrier],
-        );
-    });
-}
-
-fn create_render_pass(device: &vk::Device) -> vk::RenderPass {
-    let attachments = [
-        vk::AttachmentDescription {
-            format: COLOR_FORMAT,
-            samples: vk::SampleCountFlags::Type1,
-            load_op: vk::AttachmentLoadOp::Load,
-            store_op: vk::AttachmentStoreOp::Store,
-            initial_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-            final_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-            ..Default::default()
-        },
-        vk::AttachmentDescription {
-            format: DEPTH_FORMAT,
-            samples: vk::SampleCountFlags::Type1,
-            load_op: vk::AttachmentLoadOp::Clear,
-            store_op: vk::AttachmentStoreOp::DontCare,
-            initial_layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
-            final_layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
-            ..Default::default()
-        },
-    ];
-
-    let color_ref = vk::AttachmentReference {
-        attachment: 0,
-        layout: vk::ImageLayout::ColorAttachmentOptimal,
-    };
-    let depth_ref = vk::AttachmentReference {
-        attachment: 1,
-        layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
-    };
-    let subpass = vk::SubpassDescription {
-        pipeline_bind_point: vk::PipelineBindPoint::Graphics,
-        color_attachments: &color_ref,
-        color_attachment_count: 1,
-        depth_stencil_attachment: &depth_ref,
-        ..Default::default()
-    };
-
-    let dependencies = [
-        vk::SubpassDependency {
-            src_subpass: vk::SUBPASS_EXTERNAL,
-            dst_subpass: 0,
-            src_stage_mask: vk::PipelineStageFlags::FragmentShader,
-            src_access_mask: vk::AccessFlags::ShaderRead,
-            dst_stage_mask: vk::PipelineStageFlags::ColorAttachmentOutput
-                | vk::PipelineStageFlags::EarlyFragmentTests,
-            dst_access_mask: vk::AccessFlags::ColorAttachmentRead
-                | vk::AccessFlags::ColorAttachmentWrite
-                | vk::AccessFlags::DepthStencilAttachmentWrite,
-            ..Default::default()
-        },
-        vk::SubpassDependency {
-            src_subpass: 0,
-            dst_subpass: vk::SUBPASS_EXTERNAL,
-            src_stage_mask: vk::PipelineStageFlags::ColorAttachmentOutput,
-            src_access_mask: vk::AccessFlags::ColorAttachmentWrite,
-            dst_stage_mask: vk::PipelineStageFlags::FragmentShader,
-            dst_access_mask: vk::AccessFlags::ShaderRead,
-            ..Default::default()
-        },
-    ];
-
-    let info = vk::RenderPassCreateInfo {
-        attachment_count: attachments.len() as u32,
-        attachments: attachments.as_ptr(),
-        subpass_count: 1,
-        subpasses: &subpass,
-        dependency_count: dependencies.len() as u32,
-        dependencies: dependencies.as_ptr(),
-        ..Default::default()
-    };
-    device
-        .create_render_pass(&info, None)
-        .expect("failed to create gui_item_atlas render pass")
-}
-
-fn create_framebuffer(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    color_view: vk::ImageView,
-    depth_view: vk::ImageView,
-    width: u32,
-    height: u32,
-) -> vk::Framebuffer {
-    let attachments = [color_view, depth_view];
-    let info = vk::FramebufferCreateInfo {
-        render_pass,
-        attachment_count: attachments.len() as u32,
-        attachments: attachments.as_ptr(),
-        width,
-        height,
-        layers: 1,
-        ..Default::default()
-    };
-    device
-        .create_framebuffer(&info, None)
-        .expect("failed to create gui_item_atlas framebuffer")
 }
 
 #[cfg(test)]

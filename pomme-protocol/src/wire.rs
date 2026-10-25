@@ -6,21 +6,19 @@ use glam::DVec3;
 
 use crate::packets::{Direction, PacketTable, Phase};
 
-const MAIN_HAND: u32 = 0;
-
 pub fn game_serverbound_id(name: &str) -> u32 {
     PacketTable::native()
         .id(Phase::Game, Direction::Serverbound, name)
         .unwrap_or_else(|| panic!("{name} missing from packet table"))
 }
 
-/// Vanilla `ServerboundInteractPacket`: right-click on an entity. `location`
-/// is the hit point relative to the entity origin.
-pub fn encode_interact(entity_id: i32, location: DVec3, sneaking: bool) -> Vec<u8> {
+/// Vanilla `ServerboundInteractPacket`: right-click on an entity with `hand`
+/// (0 main, 1 off). `location` is the hit point relative to the entity origin.
+pub fn encode_interact(entity_id: i32, hand: u32, location: DVec3, sneaking: bool) -> Vec<u8> {
     let mut buf = Vec::new();
     write_varint(&mut buf, game_serverbound_id("interact"));
     write_varint(&mut buf, entity_id as u32);
-    write_varint(&mut buf, MAIN_HAND);
+    write_varint(&mut buf, hand);
     write_lp_vec3(&mut buf, location);
     buf.push(sneaking as u8);
     buf
@@ -241,9 +239,15 @@ mod tests {
 
     #[test]
     fn interact_packet_layout() {
-        let bytes = encode_interact(42, DVec3::ZERO, true);
-        // id 0x1A, entity id 42, main hand 0, LpVec3 zero byte, sneaking.
-        assert_eq!(bytes, [0x1A, 42, 0, 0, 1]);
+        // id 0x1A, entity id 42, hand, LpVec3 zero byte, sneaking.
+        assert_eq!(
+            encode_interact(42, 0, DVec3::ZERO, true),
+            [0x1A, 42, 0, 0, 1]
+        );
+        assert_eq!(
+            encode_interact(42, 1, DVec3::ZERO, false),
+            [0x1A, 42, 1, 0, 0]
+        );
     }
 
     #[test]

@@ -35,6 +35,12 @@ impl MainMenu {
         });
     }
 
+    /// Still signed out, with no sign-in under way: the stored account is
+    /// missing or failed to restore.
+    pub(crate) fn no_account_to_restore(&self) -> bool {
+        self.account_gated() && matches!(*self.sign_in.read(), SignIn::Idle | SignIn::Failed(_))
+    }
+
     /// Signs in as the stored account without asking; with none, the
     /// screen offers Sign In.
     pub(crate) fn restore_account(&mut self) {
