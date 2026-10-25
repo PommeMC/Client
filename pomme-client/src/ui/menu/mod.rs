@@ -600,6 +600,8 @@ pub struct MainMenu {
     face_cache: FaceCache,
     last_face_count: usize,
     face_dirty_since: Option<Instant>,
+    /// Whether the menu atlas last held favicons, and faces.
+    atlas_shows: (bool, bool),
     friend_tab: FriendTab,
     add_friend_name: TextFieldState,
     action_error: ActionError,
@@ -776,6 +778,7 @@ impl MainMenu {
             face_cache: Default::default(),
             last_face_count: 0,
             face_dirty_since: None,
+            atlas_shows: (false, false),
             friend_tab: FriendTab::Friends,
             add_friend_name: TextFieldState::new(MAX_FRIEND),
             action_error: Default::default(),
@@ -933,7 +936,6 @@ impl MainMenu {
         self.fov_effect_scale * self.fov_effect_scale
     }
 
-    /// The account the menu shows and joins with.
     /// The player whose skin the title screen shows, `None` without a
     /// profile. Starts fetching their face for the Bedrock Profile button.
     pub(crate) fn set_player_face(&mut self, uuid: Option<&uuid::Uuid>) {
@@ -943,6 +945,7 @@ impl MainMenu {
         }
     }
 
+    /// The account the menu shows and joins with.
     pub(crate) fn set_account(
         &mut self,
         username: String,
@@ -1188,15 +1191,39 @@ impl MainMenu {
         );
     }
 
-    pub fn is_server_list_screen(&self) -> bool {
+    fn is_server_list_screen(&self) -> bool {
         matches!(self.screen, Screen::ServerList)
     }
 
-    pub fn is_friends_screen(&self) -> bool {
+    fn is_friends_screen(&self) -> bool {
         matches!(self.screen, Screen::Friends)
     }
 
-    pub fn favicons_changed(&mut self) -> bool {
+    /// The favicons and faces the current screen draws, when they changed
+    /// or the screen draws a different kind than the last upload held.
+    pub fn menu_atlas_images(&mut self) -> Option<Vec<(String, Vec<u8>, u32)>> {
+        let bedrock_main = self.is_main_screen() && self.theme == PanoramaTheme::Bedrock;
+        let shows = (
+            bedrock_main || self.is_server_list_screen(),
+            bedrock_main || self.is_friends_screen(),
+        );
+        let favicons = shows.0 && self.favicons_changed();
+        let faces = shows.1 && self.faces_changed();
+        if !favicons && !faces && shows == self.atlas_shows {
+            return None;
+        }
+        self.atlas_shows = shows;
+        let mut images = Vec::new();
+        if shows.0 {
+            images.extend(self.collect_favicons());
+        }
+        if shows.1 {
+            images.extend(self.collect_faces());
+        }
+        (!images.is_empty()).then_some(images)
+    }
+
+    fn favicons_changed(&mut self) -> bool {
         let count = self
             .ping_results
             .read()
@@ -1218,7 +1245,7 @@ impl MainMenu {
         )
     }
 
-    pub fn collect_favicons(&self) -> Vec<(String, Vec<u8>, u32)> {
+    fn collect_favicons(&self) -> Vec<(String, Vec<u8>, u32)> {
         let results = self.ping_results.read();
         results
             .iter()
@@ -1237,12 +1264,12 @@ impl MainMenu {
             .collect()
     }
 
-    pub fn faces_changed(&mut self) -> bool {
+    fn faces_changed(&mut self) -> bool {
         let count = self.face_cache.read().len();
         atlas_dirty(count, &mut self.last_face_count, &mut self.face_dirty_since)
     }
 
-    pub fn collect_faces(&self) -> Vec<(String, Vec<u8>, u32)> {
+    fn collect_faces(&self) -> Vec<(String, Vec<u8>, u32)> {
         self.face_cache
             .read()
             .iter()
@@ -1475,6 +1502,44 @@ fn test_menu(dir: &str, key_bindings: &mut KeyBindings) -> MainMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bedrock_title_screen_uploads_faces_and_favicons_together() {
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-menu-atlas-test", &mut key_bindings);
+        menu.theme = PanoramaTheme::Bedrock;
+        menu.face_cache
+            .write()
+            .insert("face".into(), vec![0; 8 * 8 * 4]);
+        menu.ping_results.write().insert(
+            "server".into(),
+            PingState::Success {
+                motd: Vec::new(),
+                online: 0,
+                max: 0,
+                latency_ms: 0,
+                version: String::new(),
+                protocol: 0,
+                compat: Compat::Native,
+                favicon_rgba: Some(vec![0; 64 * 64 * 4]),
+                player_names: Vec::new(),
+            },
+        );
+        let keys = |menu: &mut MainMenu| {
+            menu.menu_atlas_images().map(|images| {
+                let mut keys: Vec<_> = images.into_iter().map(|(key, ..)| key).collect();
+                keys.sort();
+                keys
+            })
+        };
+        let both = Some(vec!["face".to_owned(), "server".to_owned()]);
+        assert_eq!(keys(&mut menu), both);
+        assert_eq!(keys(&mut menu), None);
+        menu.screen = Screen::Friends;
+        assert_eq!(keys(&mut menu), Some(vec!["face".to_owned()]));
+        menu.screen = Screen::Main;
+        assert_eq!(keys(&mut menu), both);
+    }
 
     #[test]
     fn a_chunk_bench_saves_the_players_render_distance_and_reads_their_chunk_detail() {

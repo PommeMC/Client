@@ -119,18 +119,8 @@ pub fn update_menu(
         gfx.window.set_cursor(cursor_icon);
     }
 
-    if core.menu.is_server_list_screen() && core.menu.favicons_changed() {
-        let favicons = core.menu.collect_favicons();
-        if !favicons.is_empty() {
-            gfx.renderer.update_favicon_atlas(&favicons);
-        }
-    }
-
-    if core.menu.is_friends_screen() && core.menu.faces_changed() {
-        let faces = core.menu.collect_faces();
-        if !faces.is_empty() {
-            gfx.renderer.update_face_atlas(&faces);
-        }
+    if let Some(images) = core.menu.menu_atlas_images() {
+        gfx.renderer.update_favicon_atlas(&images);
     }
 
     // TODO: menu screens (a server MOTD, say) draw object glyphs as their

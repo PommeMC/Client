@@ -2444,6 +2444,7 @@ pub enum SpriteId {
     BedrockBlack,
     BedrockDropdown,
     BedrockDropdownHover,
+    BedrockDropdownSelect,
     BedrockRadioOn,
     BedrockRadioOnHover,
     BedrockRadioOff,
@@ -2593,7 +2594,7 @@ fn downscale_straight_alpha(src: &image::RgbaImage, w: u32, h: u32) -> image::Rg
 
 /// The Bedrock UI textures the Bedrock title screen draws, by path from
 /// `textures/ui` without the extension.
-const BEDROCK_SPRITES: [(SpriteId, &str); 16] = [
+const BEDROCK_SPRITES: [(SpriteId, &str); 17] = [
     (SpriteId::BedrockButton, "button_borderless_light"),
     (SpriteId::BedrockButtonHover, "button_borderless_lighthover"),
     (
@@ -2621,6 +2622,7 @@ const BEDROCK_SPRITES: [(SpriteId, &str); 16] = [
     (SpriteId::BedrockBlack, "Black"),
     (SpriteId::BedrockDropdown, "dropdown_background"),
     (SpriteId::BedrockDropdownHover, "dropDownHoverBG"),
+    (SpriteId::BedrockDropdownSelect, "dropDownSelectBG"),
     (SpriteId::BedrockRadioOn, "radio_on"),
     (SpriteId::BedrockRadioOnHover, "radio_on_hover"),
     (SpriteId::BedrockRadioOff, "radio_off"),

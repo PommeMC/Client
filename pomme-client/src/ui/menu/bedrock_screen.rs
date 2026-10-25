@@ -34,11 +34,12 @@ const ROW_H: f32 = 32.0;
 /// `padding_3`, kept clear for the footer.
 const BOTTOM_PAD: f32 = 10.0;
 
-/// Form-fitting buttons: border, image and content insets around a 24-unit
-/// content row (`new_ui_form_fitting_button_panel`).
+/// Form-fitting buttons (`light_content_form_fitting_button`,
+/// `light_text_form_fitting_button`): a 24-unit content row, 5 in from each
+/// side once `$button_offset` moves it 3 past the 2-unit border.
 const FIT_H: f32 = 24.0;
-const FIT_LEFT: f32 = 2.0;
-const FIT_RIGHT: f32 = 2.0 + 6.0;
+const FIT_LEFT: f32 = 5.0;
+const FIT_RIGHT: f32 = 5.0;
 /// `friendsdrawer_button_panel` and the top-left pickers' corner offset.
 const CORNER: f32 = 5.0;
 /// `social_button_stackpanel`: an 18-unit slot holding the 12-unit glyph.
@@ -49,9 +50,11 @@ const SOCIAL_GAP: f32 = 3.0;
 const PICKER: f32 = 24.0;
 const PICKER_ICON: f32 = 16.0;
 
-/// `skin_panel` and `online_button_stack` are `50% - 75px` wide.
+/// `skin_panel` and `online_button_stack` are `50% - 75px` wide, raised 10%
+/// of the height.
 const SIDE_INSET: f32 = 75.0;
-/// `skin_panel`: 124 tall, raised 10% of the height plus 4.
+const SIDE_RAISE: f32 = 0.10;
+/// `skin_panel`: 124 tall, raised 4 more.
 const SKIN_PANEL_H: f32 = 124.0;
 const SKIN_PANEL_RAISE: f32 = 4.0;
 /// `skin_viewer_panel` is lifted 16 above the panel top.
@@ -66,7 +69,7 @@ const NAMEPLATE_ALPHA: f32 = 0.25;
 /// `dressing_room_button`: 25 tall at the bottom of the panel.
 const DRESSING_H: f32 = 25.0;
 
-/// `online_button_stack`, raised 10% of the height, left-padded 5.
+/// `gathering_panel.horizontal_panel`'s left pad.
 const LEFT_PAD: f32 = 5.0;
 /// `gathering_badge` and `gathering_button`.
 const TILE: (f32, f32) = (100.0, 30.0);
@@ -76,9 +79,11 @@ const TILE_BUTTON_H: f32 = 25.0;
 const PROFILE_ROW_H: f32 = 32.0;
 const PROFILE_INDENT: f32 = 0.05;
 const PROFILE_PAD: f32 = 5.0;
-/// `gamerpic_with_border`: a 16-unit head in an 18-unit black frame.
+/// `gamerpic_with_border`: a 16-unit head in an 18-unit black frame, offset 2
+/// left.
 const HEAD: f32 = 16.0;
 const HEAD_GAP: f32 = 2.0;
+const GAMERPIC_OFFSET: f32 = -2.0;
 
 /// `start.text_panel`: a 10-tall strip 1 above the bottom, on `Black` at 0.6.
 const FOOTER_H: f32 = 10.0;
@@ -156,6 +161,11 @@ impl Look {
     fn drop(self, gs: f32) -> f32 {
         if self == Self::Pressed { gs } else { 0.0 }
     }
+
+    /// Where a label centred in the `h`-tall row at `y` starts.
+    fn label_y(self, y: f32, h: f32, gs: f32) -> f32 {
+        y + (h - common::FONT_SIZE * gs) / 2.0 + self.drop(gs)
+    }
 }
 
 /// Bedrock's colours are sRGB; sprite tints and icon colours are linear,
@@ -194,7 +204,8 @@ pub(super) fn push_dropdown_background(elements: &mut Vec<MenuElement>, rect: [f
 }
 
 /// `settings_common.radio_visuals`: a 10-unit radio (or the item's icon) 3
-/// units in, the label 16 further, over `dropDownHoverBG` when hovered.
+/// units in, the label 16 further, over `dropDownHoverBG` when hovered or
+/// `dropDownSelectBG` when checked.
 pub(super) fn push_dropdown_row(
     elements: &mut Vec<MenuElement>,
     rect: [f32; 4],
@@ -205,6 +216,8 @@ pub(super) fn push_dropdown_row(
     let [x, y, ..] = rect;
     if hovered {
         push_image(elements, rect, SpriteId::BedrockDropdownHover, WHITE);
+    } else if item.radio == Some(true) {
+        push_image(elements, rect, SpriteId::BedrockDropdownSelect, WHITE);
     }
     let left = x + 3.0 * gs;
     // The visuals are 16 tall at the row's top.
@@ -263,11 +276,14 @@ fn push_image(elements: &mut Vec<MenuElement>, rect: [f32; 4], sprite: SpriteId,
     });
 }
 
-/// `text` on a backing 1 unit around its `h`-tall line, left edge at `x`.
+/// `text` on a backing from 1 unit above and left of its `h`-tall line,
+/// `pad` wider than the text and 2 taller; left edge at `x`.
+#[allow(clippy::too_many_arguments)]
 fn push_backed_text(
     elements: &mut Vec<MenuElement>,
     [x, y]: [f32; 2],
     text_w: f32,
+    pad: f32,
     h: f32,
     gs: f32,
     text: &str,
@@ -276,7 +292,7 @@ fn push_backed_text(
     let rect = [
         (x - 1.0) * gs,
         (y - 1.0) * gs,
-        (text_w + 2.0) * gs,
+        (text_w + pad) * gs,
         (h + 2.0) * gs,
     ];
     push_backing(elements, rect, alpha);
@@ -333,8 +349,7 @@ impl Buttons<'_> {
     fn text(&mut self, rect: [f32; 4], palette: Palette, label: &str) -> bool {
         let (fired, look, color) = self.frame(rect, palette);
         let [x, y, w, h] = rect;
-        let fs = common::FONT_SIZE * self.gs;
-        let ty = y + (h - fs) / 2.0 + look.drop(self.gs);
+        let ty = look.label_y(y, h, self.gs);
         push_label(self.elements, x + w / 2.0, ty, self.gs, label, color, true);
         fired
     }
@@ -354,9 +369,8 @@ impl Buttons<'_> {
         let gs = self.gs;
         let rect = [x, y, fit_width(icon_w, label_w) * gs, h * gs];
         let (fired, look, color) = self.frame(rect, Palette::Light);
-        let fs = common::FONT_SIZE * gs;
         let tx = x + (FIT_LEFT + icon_w) * gs;
-        let ty = y + (h * gs - fs) / 2.0 + look.drop(gs);
+        let ty = look.label_y(y, h * gs, gs);
         push_label(self.elements, tx, ty, gs, label, color, false);
         (fired, look, rect)
     }
@@ -380,7 +394,7 @@ fn title_and_column(w: f32, h: f32) -> ([f32; 4], f32) {
         panel_w,
         panel_h,
     ];
-    let fill = (h - pad - panel_h - ROW_H * 4.0 - BOTTOM_PAD) / 2.0;
+    let fill = ((h - pad - panel_h - ROW_H * 4.0 - BOTTOM_PAD) / 2.0).max(0.0);
     (panel, pad + panel_h + fill)
 }
 
@@ -451,19 +465,14 @@ impl MainMenu {
                 (ROW_H - 2.0) * gs,
             ];
             if buttons.text(rect, palette, label) {
+                any_clicked = true;
                 match label {
-                    "Play" => {
-                        any_clicked = true;
-                        self.open_world_list(
-                            gs,
-                            &|t: &str| text_width_fn(t, common::FONT_SIZE * gs),
-                            key_bindings,
-                        );
-                    }
-                    "Settings" => {
-                        any_clicked = true;
-                        self.open_options(key_bindings);
-                    }
+                    "Play" => self.open_world_list(
+                        gs,
+                        &|t: &str| text_width_fn(t, common::FONT_SIZE * gs),
+                        key_bindings,
+                    ),
+                    "Settings" => self.open_options(key_bindings),
                     _ => {}
                 }
             }
@@ -548,7 +557,8 @@ impl MainMenu {
 
         // The skin panel, bottom right.
         let side_w = uw / 2.0 - SIDE_INSET;
-        let skin_top = uh - uh * TITLE_OFFSET - SKIN_PANEL_RAISE - SKIN_PANEL_H;
+        let side_bottom = uh - uh * SIDE_RAISE;
+        let skin_top = side_bottom - SKIN_PANEL_RAISE - SKIN_PANEL_H;
         let skin_cx = uw - side_w / 2.0;
         let viewer_top = skin_top - VIEWER_LIFT;
         let anchor_y =
@@ -562,6 +572,7 @@ impl MainMenu {
             buttons.elements,
             [skin_cx - name_w / 2.0, viewer_top + NAME_TOP],
             name_w,
+            2.0,
             common::FONT_SIZE,
             gs,
             &self.username,
@@ -577,15 +588,11 @@ impl MainMenu {
             dressing,
             dressing_w,
         );
-        if fired {
-            any_clicked = true;
-            self.open_account(key_bindings);
-        }
+        let mut open_account = fired;
 
         // The left column, bottom up: the Profile row, then the featured
         // server's join button and tile.
-        let left_bottom = uh - uh * TITLE_OFFSET;
-        let profile_y = left_bottom - PROFILE_ROW_H + (PROFILE_ROW_H - FIT_H) / 2.0;
+        let profile_y = side_bottom - PROFILE_ROW_H + (PROFILE_ROW_H - FIT_H) / 2.0;
         let head_w = ICON_SLOT + HEAD_GAP;
         let profile = "Profile";
         let profile_w = units(profile);
@@ -598,7 +605,7 @@ impl MainMenu {
             profile_w,
         );
         let frame = [
-            rect[0] + FIT_LEFT * gs,
+            rect[0] + (FIT_LEFT + GAMERPIC_OFFSET) * gs,
             rect[1] + (FIT_H - ICON_SLOT) / 2.0 * gs + look.drop(gs),
             ICON_SLOT * gs,
             ICON_SLOT * gs,
@@ -620,13 +627,21 @@ impl MainMenu {
                 WHITE,
             ),
         }
-        if fired {
+        open_account |= fired;
+        if open_account {
             any_clicked = true;
             self.open_account(key_bindings);
         }
 
-        if let Some(server) = self.server_list.servers.first().cloned() {
-            let join_y = left_bottom - PROFILE_ROW_H - TILE_BUTTON_H;
+        // Only beside the column, not over it.
+        let server = self
+            .server_list
+            .servers
+            .first()
+            .filter(|_| LEFT_PAD + TILE.0 <= side_w)
+            .cloned();
+        if let Some(server) = server {
+            let join_y = side_bottom - PROFILE_ROW_H - TILE_BUTTON_H;
             let tile_y = join_y - TILE.1;
             let tile = [LEFT_PAD * gs, tile_y * gs, TILE.0 * gs, TILE.1 * gs];
             push_backing(buttons.elements, tile, BACKING_ALPHA);
@@ -639,7 +654,15 @@ impl MainMenu {
             });
             push_outline(buttons.elements, tile, gs, WHITE);
             let rect = [LEFT_PAD * gs, join_y * gs, TILE.0 * gs, TILE_BUTTON_H * gs];
-            if buttons.text(rect, Palette::Light, &server.name) {
+            let name = crate::ui::chat::clip_spans(
+                &[crate::ui::text::TextSpan::new(server.name.clone(), WHITE)],
+                TILE.0 - 2.0 * FIT_LEFT,
+                &|spans| spans.iter().map(|span| units(&span.text)).sum(),
+            )
+            .into_iter()
+            .map(|span| span.text)
+            .collect::<String>();
+            if buttons.text(rect, Palette::Light, &name) {
                 any_clicked = true;
                 action = MenuAction::Connect {
                     server: server.address.clone(),
@@ -664,13 +687,18 @@ impl MainMenu {
         // The footer: the copyright bottom left, the version bottom right.
         let footer_y = uh - 1.0 - FOOTER_H;
         let version = format!("v{}", self.version);
-        for (text, right) in [("\u{a9}Mojang AB", false), (version.as_str(), true)] {
+        // `start.copyright`'s backing is 4 wider than its text, `version`'s 2.
+        for (text, pad, right) in [
+            ("\u{a9}Mojang AB", 4.0, false),
+            (version.as_str(), 2.0, true),
+        ] {
             let w = units(text);
             let x = if right { uw - 1.0 - w } else { 1.0 };
             push_backed_text(
                 buttons.elements,
                 [x, footer_y],
                 w,
+                pad,
                 FOOTER_H,
                 gs,
                 text,
@@ -680,8 +708,8 @@ impl MainMenu {
 
         // The pickers' lists hang below them.
         let drop_style = DropdownStyle::bedrock(gs);
-        // Both lists have three rows.
-        let drop_bottom = (CORNER + PICKER + 2.0) * gs + drop_style.list_h(3);
+        let rows = LINKS.len().max(THEMES.len());
+        let drop_bottom = (CORNER + PICKER + 2.0) * gs + drop_style.list_h(rows);
         self.push_links_dropdown(
             &mut elements,
             &mut any_hovered,

@@ -1250,8 +1250,9 @@ impl Renderer {
             .update_favicon_atlas(&self.ctx.device, favicons);
     }
 
-    /// Friend faces reuse the favicon atlas — they're never shown on the same
-    /// screen as server favicons, so they share one string-keyed RGBA atlas.
+    /// Player faces reuse the string-keyed favicon atlas, which holds only
+    /// the last upload; the menu sends faces and favicons together
+    /// (`MainMenu::menu_atlas_images`).
     pub fn update_face_atlas(&mut self, faces: &[(String, Vec<u8>, u32)]) {
         self.update_favicon_atlas(faces);
     }

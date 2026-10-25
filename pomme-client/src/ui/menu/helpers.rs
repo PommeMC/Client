@@ -1083,7 +1083,7 @@ const DROP_FAILED: [f32; 4] = [1.0, 0.45, 0.45, 0.9];
 pub(super) const DROP_LINKS_W: f32 = 74.0;
 pub(super) const DROP_THEME_W: f32 = 82.0;
 
-const LINKS: [(&str, char, &str); 3] = [
+pub(super) const LINKS: [(&str, char, &str); 3] = [
     ("Website", ICON_GLOBE, "https://pomme.rs"),
     ("Discord", ICON_COMMENT, "https://discord.gg/ucBA55bHPR"),
     (
@@ -1092,7 +1092,7 @@ const LINKS: [(&str, char, &str); 3] = [
         "https://github.com/PommeMC/Pomme-Client",
     ),
 ];
-const THEMES: [(&str, PanoramaTheme); 3] = [
+pub(super) const THEMES: [(&str, PanoramaTheme); 3] = [
     ("Java", PanoramaTheme::Java),
     ("Bedrock", PanoramaTheme::Bedrock),
     ("Pomme", PanoramaTheme::Pomme),
