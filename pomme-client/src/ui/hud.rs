@@ -1722,24 +1722,24 @@ fn push_debug_lines(
     }
 }
 
-/// Vanilla `DebugEntryPosition` prints both angles wrapped to [-180, 180).
+/// Vanilla `DebugEntryPosition`: the direction, which way it points, and
+/// both angles wrapped to [-180, 180).
 fn facing_line(y_rot_deg: f32, x_rot_deg: f32) -> String {
+    let (direction, towards) = facing(y_rot_deg);
     format!(
-        "Facing: {} ({:.1} / {:.1})",
-        facing_name(y_rot_deg),
+        "Facing: {direction} ({towards}) ({:.1} / {:.1})",
         wrap_degrees(y_rot_deg),
         wrap_degrees(x_rot_deg)
     )
 }
 
-fn facing_name(y_rot_deg: f32) -> &'static str {
-    let deg = y_rot_deg.rem_euclid(360.0) as u32;
-    match deg {
-        315..=359 | 0..=44 => "South (+Z)",
-        45..=134 => "West (-X)",
-        135..=224 => "North (-Z)",
-        225..=314 => "East (+X)",
-        _ => "South (+Z)",
+/// Vanilla `Direction.fromYRot`.
+fn facing(y_rot_deg: f32) -> (&'static str, &'static str) {
+    match ((y_rot_deg / 90.0 + 0.5).floor() as i32) & 3 {
+        0 => ("south", "Towards positive Z"),
+        1 => ("west", "Towards negative X"),
+        2 => ("north", "Towards negative Z"),
+        _ => ("east", "Towards positive X"),
     }
 }
 
@@ -1749,11 +1749,16 @@ mod tests {
 
     #[test]
     fn facing_angles_wrap_like_vanilla() {
-        assert_eq!(facing_line(400.0, 0.0), "Facing: South (+Z) (40.0 / 0.0)");
+        assert_eq!(
+            facing_line(400.0, 0.0),
+            "Facing: south (Towards positive Z) (40.0 / 0.0)"
+        );
         assert_eq!(
             facing_line(-190.0, 90.0),
-            "Facing: North (-Z) (170.0 / 90.0)"
+            "Facing: north (Towards negative Z) (170.0 / 90.0)"
         );
+        assert_eq!(facing(44.9).0, "south");
+        assert_eq!(facing(45.0).0, "west");
     }
 
     #[test]

@@ -2937,7 +2937,6 @@ pub fn update_game(
             &game.scoreboard,
             game.online_mode,
             gs,
-            &|t, s| r.menu_text_width(t, s),
             &|spans, s| r.menu_spans_width(spans, s),
         );
     }
