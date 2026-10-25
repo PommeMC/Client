@@ -2,13 +2,12 @@ pub mod block_entity_model;
 pub mod boot;
 pub mod camera;
 pub mod chunk;
-mod context;
 pub mod entity_model;
 pub(crate) mod packing;
 pub mod pipelines;
+pub(crate) mod rhi;
 mod screenshot;
 pub(crate) mod shader;
-mod swapchain;
 pub(crate) mod util;
 
 pub(crate) const MAX_FRAMES_IN_FLIGHT: usize = 3;
@@ -23,11 +22,11 @@ use std::sync::Arc;
 use azalea_block::BlockState;
 pub use camera::CloudMode;
 use camera::{Camera, CameraUniform};
-use chunk::atlas::TextureAtlas;
+use chunk::atlas::{AtlasUVMap, TextureAtlas};
 use chunk::buffer::ChunkBufferStore;
-use chunk::mesher::{ChunkMeshData, MeshDispatcher};
+use chunk::mesh_source::MeshSource;
+use chunk::mesher::ChunkMeshData;
 use chunk::moving_blocks::{MovingBlockBuffers, MovingBlockRender};
-use context::VulkanContext;
 use glam::dvec3;
 use pipelines::block_entity::BlockEntityPipeline;
 pub use pipelines::block_entity::BlockEntityRenderInfo;
@@ -45,11 +44,6 @@ pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
-use pyronyx::khr::present_wait::PresentWaitDevice;
-use pyronyx::khr::surface::SurfacePhysicalDevice;
-use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
-use pyronyx::vk;
-use swapchain::Swapchain;
 use thiserror::Error;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -59,22 +53,90 @@ use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
+use crate::renderer::pipelines::held_item::{HandRenderSelection, HeldHand};
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::ui::font::{FontOptions, FontSources};
-use crate::world::block::render_assets::{
-    BlockRenderAssets, BlockRenderView, OwnedBlockRenderView,
-};
+use crate::world::block::render_assets::{BlockRenderAssets, BlockRenderView};
+
+/// The live atlas's layout, so meshes bake in UVs that match it.
+impl MeshSource for Renderer {
+    fn shared_render_assets(&self) -> Arc<BlockRenderAssets> {
+        Arc::clone(&self.render_assets)
+    }
+
+    fn uv_map(&self) -> &AtlasUVMap {
+        &self.atlas.uv_map
+    }
+
+    fn jar_assets_dir(&self) -> &Path {
+        &self.jar_assets_dir
+    }
+
+    fn asset_index(&self) -> &Option<AssetIndex> {
+        &self.asset_index
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum RendererError {
     #[error("failed to initialize GPU context: {0}")]
-    Context(#[from] context::ContextError),
+    Context(#[from] rhi::backend::ContextError),
 
-    #[error("vulkan error: {0}")]
-    Vulkan(#[from] vk::Error),
+    #[error("GPU error: {0}")]
+    Gpu(#[from] rhi::backend::Error),
 
     #[error("failed to initialize Minecraft fonts: {0}")]
     Font(String),
+
+    #[error("failed to build the texture atlas: {0}")]
+    Atlas(String),
+}
+
+/// The loading splash: logo, progress bar and status line.
+pub(crate) fn splash_elements(sw: f32, sh: f32, progress: f32, status: &str) -> Vec<MenuElement> {
+    let gs = (sh / 400.0).max(1.0);
+    let logo_size = 48.0 * gs;
+    let status_size = 8.0 * gs;
+    let bar_w = 200.0 * gs;
+    let bar_h = 6.0 * gs;
+    let bar_border = 1.0 * gs;
+    let cx = sw / 2.0;
+    let cy = sh / 2.0;
+
+    vec![
+        MenuElement::Image {
+            x: cx - logo_size / 2.0,
+            y: cy - logo_size - 16.0 * gs,
+            w: logo_size,
+            h: logo_size,
+            sprite: SpriteId::PommeLogo,
+            tint: [1.0; 4],
+        },
+        MenuElement::Rect {
+            x: cx - bar_w / 2.0 - bar_border,
+            y: cy - bar_border,
+            w: bar_w + bar_border * 2.0,
+            h: bar_h + bar_border * 2.0,
+            corner_radius: (bar_h / 2.0 + bar_border),
+            color: [0.3, 0.3, 0.3, 0.8],
+        },
+        MenuElement::Rect {
+            x: cx - bar_w / 2.0,
+            y: cy,
+            w: bar_w * progress,
+            h: bar_h,
+            corner_radius: bar_h / 2.0,
+            color: [0.39, 0.71, 1.0, 1.0],
+        },
+        MenuElement::Text {
+            x: cx,
+            y: cy + bar_h + 8.0 * gs,
+            text: status.into(),
+            scale: status_size,
+            color: [0.6, 0.6, 0.6, 0.8],
+            centered: true,
+        },
+    ]
 }
 
 #[derive(Clone)]
@@ -100,17 +162,16 @@ pub struct BookPreview {
 
 /// A GUI preview box's `[x, y, w, h]` clamped to the swapchain, as the scissor
 /// rect its 3D content draws within; None when fully off screen.
-fn preview_box_rect(rect: [f32; 4], extent: vk::Extent2D) -> Option<vk::Rect2D> {
-    let x0 = rect[0].max(0.0) as i32;
-    let y0 = rect[1].max(0.0) as i32;
-    let w = (rect[2] as u32).min(extent.width.saturating_sub(x0 as u32));
-    let h = (rect[3] as u32).min(extent.height.saturating_sub(y0 as u32));
-    (w > 0 && h > 0).then_some(vk::Rect2D {
-        offset: vk::Offset2D { x: x0, y: y0 },
-        extent: vk::Extent2D {
-            width: w,
-            height: h,
-        },
+fn preview_box_rect(rect: [f32; 4], extent: rhi::Extent) -> Option<rhi::Rect> {
+    let x = rect[0].max(0.0) as u32;
+    let y = rect[1].max(0.0) as u32;
+    let width = (rect[2] as u32).min(extent.width.saturating_sub(x));
+    let height = (rect[3] as u32).min(extent.height.saturating_sub(y));
+    (width > 0 && height > 0).then_some(rhi::Rect {
+        x,
+        y,
+        width,
+        height,
     })
 }
 
@@ -120,9 +181,13 @@ enum RenderMode<'a> {
     World {
         block_render: BlockRenderView<'a>,
         overlay: Vec<MenuElement>,
-        swing_progress: f32,
-        use_anim: Option<pipelines::held_item::UseAnim>,
-        held_item: Option<pipelines::held_item::HeldItemInfo>,
+        /// The main hand's then the offhand's, as for `held_items`.
+        swing_progress: [f32; 2],
+        use_anim: [Option<pipelines::held_item::UseAnim>; 2],
+        /// The main hand's then the offhand's item.
+        held_items: [Option<pipelines::held_item::HeldItemInfo>; 2],
+        main_hand_right: bool,
+        shown_hands: HandRenderSelection,
         player_team_color: Option<u32>,
         render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
@@ -170,8 +235,8 @@ pub struct RenderTimings {
 }
 
 pub struct Renderer {
-    ctx: VulkanContext,
-    swapchain: Swapchain,
+    ctx: rhi::backend::Context,
+    swapchain: rhi::backend::Swapchain,
     camera: Camera,
 
     render_assets: Arc<BlockRenderAssets>,
@@ -205,14 +270,12 @@ pub struct Renderer {
     moving_block_buffers: MovingBlockBuffers,
     block_entity_pipeline: BlockEntityPipeline,
     chunk_buffers: ChunkBufferStore,
-    render_finished_per_image: Vec<vk::Semaphore>,
+    frames: rhi::backend::Frames,
     screenshot: screenshot::ScreenshotCapture,
     swapchain_dirty: bool,
     /// The native window is gone (Android backgrounded the app), and with it
     /// the surface and swapchain; nothing renders until `resume`.
     suspended: bool,
-    /// Id of the last present tagged via `VK_KHR_present_id`; per swapchain.
-    present_id: u64,
     vsync: bool,
     width: u32,
     height: u32,
@@ -244,7 +307,7 @@ impl Renderer {
             })
         };
 
-        let (ctx, swapchain_state, mut menu_pipeline) =
+        let (ctx, swapchain_state, mut frames, mut menu_pipeline) =
             boot::bring_up(&window, font_sources, Some(bedrock_ui_dir), vsync)?;
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
@@ -253,13 +316,22 @@ impl Renderer {
         let sw = swapchain_extent.width as f32;
         let sh = swapchain_extent.height as f32;
 
-        let splash = |menu: &mut MenuOverlayPipeline, progress: f32, status: &str| {
-            let _ = Self::render_splash(&ctx, &swapchain_state, menu, sw, sh, progress, status);
+        let mut splash = |menu: &mut MenuOverlayPipeline, progress: f32, status: &str| {
+            let _ = Self::render_splash(
+                &ctx,
+                &swapchain_state,
+                &mut frames,
+                menu,
+                sw,
+                sh,
+                progress,
+                status,
+            );
         };
 
         splash(&mut menu_pipeline, 0.0, "Loading block models...");
 
-        let camera = Camera::new(swapchain_state.aspect_ratio());
+        let camera = Camera::new(swapchain_state.extent.aspect_ratio());
         let render_assets = Arc::new(
             render_assets_handle
                 .join()
@@ -272,41 +344,28 @@ impl Renderer {
             chunk::atlas::atlas_texture_names(&render_assets);
         let atlas = TextureAtlas::build(
             &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            &ctx.allocator,
             jar_assets_dir,
             asset_index,
             &texture_names,
             &generated_item_textures,
             None,
-        )?;
+        )
+        .map_err(RendererError::Atlas)?;
 
         splash(&mut menu_pipeline, 0.5, "Creating pipelines...");
 
-        let chunk_pipeline = ChunkPipeline::new(
-            &ctx.device,
-            swapchain_state.render_pass,
-            &ctx.allocator,
-            &atlas,
-        );
+        let chunk_pipeline = ChunkPipeline::new(&ctx.device, swapchain_state.targets(), &atlas);
 
         let hand_pipeline = HandPipeline::new(
             &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            swapchain_state.render_pass,
-            &ctx.allocator,
+            swapchain_state.targets(),
             jar_assets_dir,
             asset_index,
         );
 
         let block_overlay_pipeline = BlockOverlayPipeline::new(
             &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            swapchain_state.render_pass,
-            &ctx.allocator,
+            swapchain_state.targets(),
             jar_assets_dir,
             asset_index,
         );
@@ -315,45 +374,31 @@ impl Renderer {
 
         let sky_pipeline = SkyPipeline::new(
             &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            swapchain_state.render_pass,
-            &ctx.allocator,
+            swapchain_state.targets(),
             jar_assets_dir,
             asset_index,
         );
 
         let weather_pipeline = WeatherPipeline::new(
             &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            swapchain_state.render_pass,
-            &ctx.allocator,
+            swapchain_state.targets(),
             jar_assets_dir,
             asset_index,
         );
 
-        let particle_pipeline = ParticlePipeline::new(
-            &ctx.device,
-            swapchain_state.render_pass,
-            &ctx.allocator,
-            &atlas,
-        );
+        let particle_pipeline =
+            ParticlePipeline::new(&ctx.device, swapchain_state.targets(), &atlas);
 
         let cloud_pipeline = CloudPipeline::new(
             &ctx.device,
-            swapchain_state.render_pass,
-            &ctx.allocator,
+            swapchain_state.targets(),
             jar_assets_dir,
             asset_index,
         );
 
         let panorama_pipeline = PanoramaPipeline::new(
             &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            swapchain_state.render_pass,
-            &ctx.allocator,
+            swapchain_state.targets(),
             pipelines::panorama::resolve_panorama_faces(panorama_dir, jar_assets_dir, asset_index),
         );
 
@@ -362,102 +407,67 @@ impl Renderer {
         // Wide arms until the profile's skin (and its model flag) is fetched.
         let skin_preview = SkinPreviewPipeline::new(
             &ctx.device,
-            swapchain_state.render_pass,
-            &ctx.allocator,
-            hand_pipeline.skin_view(),
+            swapchain_state.targets(),
+            hand_pipeline.skin_texture(),
             hand_pipeline.skin_sampler(),
             false,
         );
 
         let book_preview = BookPreviewPipeline::new(
             &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            swapchain_state.render_pass,
-            &ctx.allocator,
+            swapchain_state.targets(),
             jar_assets_dir,
             asset_index,
         );
 
-        let blur_pipeline = BlurPipeline::new(
-            &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            &ctx.allocator,
-            swapchain_extent.width,
-            swapchain_extent.height,
-            swapchain_state.format.format,
-        );
+        let blur_pipeline =
+            BlurPipeline::new(&ctx.device, swapchain_extent.width, swapchain_extent.height);
         menu_pipeline.set_blur_texture(
             &ctx.device,
-            blur_pipeline.blurred_view(),
+            blur_pipeline.blurred_texture(),
             blur_pipeline.blurred_sampler(),
         );
 
-        let sem_info = vk::SemaphoreCreateInfo::default();
-        let mut render_finished_per_image = Vec::with_capacity(swapchain_state.images.len());
-        for _ in 0..swapchain_state.images.len() {
-            render_finished_per_image.push(ctx.device.create_semaphore(&sem_info, None)?);
-        }
-
         let entity_renderer = EntityRenderer::new(
             &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            swapchain_state.render_pass,
-            &ctx.allocator,
+            swapchain_state.targets(),
             jar_assets_dir,
             asset_index,
             packs,
         );
 
-        let moving_block_buffers = MovingBlockBuffers::new(&ctx.device, &ctx.allocator);
+        let moving_block_buffers = MovingBlockBuffers::new(&ctx.device);
 
         let entity_shadow_pipeline = EntityShadowPipeline::new(
             &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            swapchain_state.render_pass,
-            &ctx.allocator,
+            swapchain_state.targets(),
             jar_assets_dir,
             asset_index,
         );
 
         let block_entity_pipeline = BlockEntityPipeline::new(
             &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            swapchain_state.render_pass,
-            &ctx.allocator,
+            swapchain_state.targets(),
             jar_assets_dir,
             asset_index,
         );
 
         let chunk_border_pipeline = pipelines::chunk_borders::ChunkBorderPipeline::new(
             &ctx.device,
-            swapchain_state.render_pass,
-            &ctx.allocator,
+            swapchain_state.targets(),
         );
 
-        let chunk_buffers = ChunkBufferStore::new(
-            &ctx.device,
-            ctx.physical_device,
-            ctx.graphics_family,
-            &ctx.allocator,
-            ctx.indirect_draw,
-        );
+        let chunk_buffers = ChunkBufferStore::new(&ctx.device, ctx.indirect_draw);
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
-            swapchain_state.render_pass,
-            &ctx.allocator,
+            swapchain_state.targets(),
             &atlas,
         );
 
         let held_item_pipeline = pipelines::held_item::HeldItemPipeline::new(
             &ctx.device,
-            swapchain_state.render_pass,
-            &ctx.allocator,
+            swapchain_state.targets(),
             &atlas,
             jar_assets_dir,
         );
@@ -466,26 +476,17 @@ impl Renderer {
 
         let initial_slot_px =
             pipelines::gui_item_atlas::slot_px_for_screen(sw, sh, font_options.uniform);
-        let gui_item_atlas = build_gui_item_atlas(
-            &ctx.device,
-            &ctx.allocator,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            &menu_pipeline,
-            initial_slot_px,
-        );
+        let gui_item_atlas = build_gui_item_atlas(&ctx.device, &mut menu_pipeline, initial_slot_px);
 
         let gui_item_pipeline = pipelines::gui_item::GuiItemPipeline::new(
             &ctx.device,
-            gui_item_atlas.render_pass(),
+            gui_item_atlas.targets(),
             gui_item_atlas.atlas_px(),
-            &ctx.allocator,
             &atlas,
         );
 
         warm_item_meshes(
             &ctx.device,
-            &ctx.allocator,
             &mut item_entity_pipeline,
             &atlas.uv_map,
             &render_assets,
@@ -522,11 +523,10 @@ impl Renderer {
             gui_item_atlas,
             font_options,
             chunk_buffers,
-            render_finished_per_image,
+            frames,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
             swapchain_dirty: false,
             suspended: false,
-            present_id: 0,
             vsync,
             width: swapchain_extent.width,
             height: swapchain_extent.height,
@@ -534,167 +534,39 @@ impl Renderer {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_splash(
-        ctx: &VulkanContext,
-        swapchain: &Swapchain,
+        ctx: &rhi::backend::Context,
+        swapchain: &rhi::backend::Swapchain,
+        frames: &mut rhi::backend::Frames,
         menu: &mut MenuOverlayPipeline,
         sw: f32,
         sh: f32,
         progress: f32,
         status: &str,
     ) -> Result<(), RendererError> {
-        let fence = ctx.in_flight_fences[0];
-        let image_available = ctx.image_available_semaphores[0];
-        let cmd = ctx.command_buffers[0];
+        let elements = splash_elements(sw, sh, progress, status);
 
-        let gs = (sh / 400.0).max(1.0);
-        let logo_size = 48.0 * gs;
-        let status_size = 8.0 * gs;
-        let bar_w = 200.0 * gs;
-        let bar_h = 6.0 * gs;
-        let bar_border = 1.0 * gs;
-        let cx = sw / 2.0;
-        let cy = sh / 2.0;
-
-        let elements = vec![
-            MenuElement::Image {
-                x: cx - logo_size / 2.0,
-                y: cy - logo_size - 16.0 * gs,
-                w: logo_size,
-                h: logo_size,
-                sprite: SpriteId::PommeLogo,
-                tint: [1.0; 4],
-            },
-            MenuElement::Rect {
-                x: cx - bar_w / 2.0 - bar_border,
-                y: cy - bar_border,
-                w: bar_w + bar_border * 2.0,
-                h: bar_h + bar_border * 2.0,
-                corner_radius: (bar_h / 2.0 + bar_border),
-                color: [0.3, 0.3, 0.3, 0.8],
-            },
-            MenuElement::Rect {
-                x: cx - bar_w / 2.0,
-                y: cy,
-                w: bar_w * progress,
-                h: bar_h,
-                corner_radius: bar_h / 2.0,
-                color: [0.39, 0.71, 1.0, 1.0],
-            },
-            MenuElement::Text {
-                x: cx,
-                y: cy + bar_h + 8.0 * gs,
-                text: status.into(),
-                scale: status_size,
-                color: [0.6, 0.6, 0.6, 0.8],
-                centered: true,
-            },
-        ];
-
-        ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
-
-        let image_index = match ctx.device.acquire_next_image(
-            swapchain.handle,
-            u64::MAX,
-            image_available,
-            vk::Fence::null(),
-        ) {
-            Ok(result) => result.value,
-            Err(_) => return Ok(()),
+        frames.wait(&ctx.device)?;
+        let Ok(rhi::Acquired::Image {
+            index: image_index, ..
+        }) = frames.acquire(&ctx.device, swapchain)
+        else {
+            return Ok(());
         };
+        let encoder = frames.begin(&ctx.device)?;
 
-        ctx.device.reset_fences(&[fence])?;
-        cmd.reset(vk::CommandBufferResetFlags::empty())?;
-
-        let begin_info = vk::CommandBufferBeginInfo {
-            flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
-            ..Default::default()
-        };
-        cmd.begin(&begin_info)?;
-
-        let clear_values = [
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
-                },
-            },
-            vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
-                    stencil: 0,
-                },
-            },
-        ];
-
-        let render_pass_info = vk::RenderPassBeginInfo {
-            render_pass: swapchain.render_pass,
-            framebuffer: swapchain.framebuffers[image_index as usize],
-            render_area: vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: swapchain.extent,
-            },
-            clear_value_count: clear_values.len() as u32,
-            clear_values: clear_values.as_ptr(),
-            ..Default::default()
-        };
-
-        cmd.begin_render_pass(&render_pass_info, vk::SubpassContents::Inline);
-
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: sw,
-            height: sh,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        cmd.set_viewport(0, &[viewport]);
-
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: swapchain.extent,
-        };
-        cmd.set_scissor(0, &[scissor]);
-
-        let empty_uvs: HashMap<String, [f32; 4]> = HashMap::new();
-        menu.draw(
+        let mut pass = encoder.begin_render_pass(
             &ctx.device,
-            &ctx.allocator,
-            cmd,
-            0,
-            sw,
-            sh,
-            &elements,
-            &empty_uvs,
+            &swapchain.pass(image_index, rhi::LoadOp::Clear([0.0, 0.0, 0.0, 1.0])),
         );
-
-        cmd.end_render_pass();
-        cmd.end()?;
-
-        let submit_info = vk::SubmitInfo {
-            wait_semaphore_count: 1,
-            wait_semaphores: &image_available,
-            wait_dst_stage_mask: &vk::PipelineStageFlags::ColorAttachmentOutput,
-
-            command_buffer_count: 1,
-            command_buffers: &cmd.handle(),
-
-            ..Default::default()
-        };
-
-        ctx.graphics_queue.submit(&[submit_info], fence)?;
-
-        ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
-
-        let present_info = vk::PresentInfoKHR {
-            swapchain_count: 1,
-            swapchains: &swapchain.handle,
-            image_indices: &image_index,
-            ..Default::default()
-        };
-
-        let _ = ctx.present_queue.present(&present_info);
-        let _ = ctx.present_queue.wait_idle();
+        let empty_uvs: HashMap<String, [f32; 4]> = HashMap::new();
+        let frame = frames.index();
+        menu.draw(&ctx.device, &mut pass, frame, sw, sh, &elements, &empty_uvs);
+        pass.end();
+        swapchain.ready_to_present(&encoder, image_index);
+        frames.submit_and_present(encoder, ctx, swapchain, image_index)?;
+        ctx.device.wait_idle();
 
         Ok(())
     }
@@ -714,9 +586,9 @@ impl Renderer {
     /// surface and swapchain unless they outlive it, but keeping the device
     /// and every other resource.
     pub fn suspend(&mut self) {
-        let _ = self.ctx.device.wait_idle();
+        self.ctx.device.wait_idle();
         if !KEEPS_SURFACE_WHEN_SUSPENDED {
-            self.swapchain.release_surface(&self.ctx.device);
+            self.swapchain.release_surface(&self.ctx);
             self.ctx.destroy_surface();
         }
         self.suspended = true;
@@ -737,20 +609,6 @@ impl Renderer {
         self.recreate_swapchain()
     }
 
-    /// Whether a suboptimal swapchain needs rebuilding: only once the surface's
-    /// size changed. A phone held sideways is suboptimal on every frame (see
-    /// `choose_pre_transform`), and a same-size rebuild each frame stalls it.
-    fn surface_resized(&self) -> bool {
-        self.ctx
-            .physical_device
-            .get_surface_capabilities(self.ctx.surface)
-            .is_ok_and(|caps| {
-                let extent = caps.current_extent;
-                // Undefined (the window decides) or minimised: nothing to match.
-                extent.width != u32::MAX && extent.width > 0 && extent != self.swapchain.extent
-            })
-    }
-
     pub fn set_vsync(&mut self, vsync: bool) {
         if self.vsync != vsync {
             self.vsync = vsync;
@@ -765,57 +623,27 @@ impl Renderer {
         const PACE_TIMEOUT_NS: u64 = 100_000_000;
 
         self.last_timings.pace_ms = 0.0;
-        if self.suspended
-            || self.swapchain_dirty
-            || self.swapchain.present_mode != vk::PresentModeKHR::Fifo
-        {
+        if self.suspended || self.swapchain_dirty || !self.swapchain.is_fifo() {
             return;
         }
         let t_pace = std::time::Instant::now();
-        if self.ctx.present_wait {
-            if self.present_id < 2 {
-                return;
-            }
-            // Timeouts and surface loss resurface at acquire/present.
-            if let Err(vk::Error::OutOfDateKHR) = self.ctx.device.wait_for_present(
-                self.swapchain.handle,
-                self.present_id - 1,
-                PACE_TIMEOUT_NS,
-            ) {
-                self.swapchain_dirty = true;
-            }
-        } else {
-            // Fallback: GPU completion of the previous frame.
-            let prev = (self.ctx.frame_index + MAX_FRAMES_IN_FLIGHT - 1) % MAX_FRAMES_IN_FLIGHT;
-            let _ = self.ctx.device.wait_for_fences(
-                &[self.ctx.in_flight_fences[prev]],
-                true,
-                PACE_TIMEOUT_NS,
-            );
-        }
+        self.swapchain_dirty |= !self
+            .frames
+            .pace(&self.ctx, &self.swapchain, PACE_TIMEOUT_NS);
         self.last_timings.pace_ms = t_pace.elapsed().as_secs_f32() * 1000.0;
     }
 
     fn recreate_swapchain(&mut self) -> Result<(), RendererError> {
-        let _ = self.ctx.device.wait_idle();
+        self.ctx.device.wait_idle();
 
-        for sem in self.render_finished_per_image.drain(..) {
-            self.ctx.device.destroy_semaphore(sem, None);
-        }
-
-        self.chunk_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-
-        let mut old_swapchain = Swapchain::new(
+        let old_targets = self.swapchain.targets();
+        self.swapchain.rebuild(
             &self.ctx,
+            &mut self.frames,
             self.width,
             self.height,
             self.vsync,
-            self.swapchain.handle,
         )?;
-        std::mem::swap(&mut self.swapchain, &mut old_swapchain);
-        old_swapchain.destroy(&self.ctx.device, &self.ctx.allocator);
-        self.present_id = 0;
 
         // Adopt the swapchain's actual extent (may differ from the requested
         // window size, e.g. macOS fullscreen) so the viewport, menu layout, blur,
@@ -825,65 +653,52 @@ impl Renderer {
         self.camera
             .set_aspect_ratio(self.width as f32 / self.height as f32);
 
-        self.chunk_pipeline = ChunkPipeline::new(
-            &self.ctx.device,
-            self.swapchain.render_pass,
-            &self.ctx.allocator,
-            &self.atlas,
-        );
+        // Pipelines name only their targets' formats, which a resize keeps.
+        let targets = self.swapchain.targets();
+        if targets != old_targets {
+            self.chunk_pipeline.destroy(&self.ctx.device);
+            self.chunk_pipeline = ChunkPipeline::new(&self.ctx.device, targets, &self.atlas);
 
-        self.hand_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.block_overlay_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.sky_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.panorama_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.menu_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.skin_preview
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.book_preview
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.entity_renderer
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.entity_shadow_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.block_entity_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.item_entity_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.held_item_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.weather_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.particle_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.cloud_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.chunk_border_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.blur_pipeline.resize(
-            &self.ctx.device,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            &self.ctx.allocator,
-            self.width,
-            self.height,
-        );
+            self.hand_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.block_overlay_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.sky_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.panorama_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.menu_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.skin_preview
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.book_preview
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.entity_renderer
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.entity_shadow_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.block_entity_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.item_entity_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.held_item_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.weather_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.particle_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.cloud_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.chunk_border_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+        }
+        self.blur_pipeline
+            .resize(&self.ctx.device, self.width, self.height);
         self.menu_pipeline.set_blur_texture(
             &self.ctx.device,
-            self.blur_pipeline.blurred_view(),
+            self.blur_pipeline.blurred_texture(),
             self.blur_pipeline.blurred_sampler(),
         );
-
-        let sem_info = vk::SemaphoreCreateInfo::default();
-        self.render_finished_per_image = Vec::with_capacity(self.swapchain.images.len());
-        for _ in 0..self.swapchain.images.len() {
-            self.render_finished_per_image
-                .push(self.ctx.device.create_semaphore(&sem_info, None)?);
-        }
 
         self.swapchain_dirty = false;
         Ok(())
@@ -1093,8 +908,8 @@ impl Renderer {
         &self.ctx.gpu_name
     }
 
-    pub fn vulkan_version(&self) -> &str {
-        &self.ctx.vulkan_version
+    pub fn api_version(&self) -> &str {
+        &self.ctx.api_version
     }
 
     pub fn loaded_chunk_count(&self) -> u32 {
@@ -1137,22 +952,14 @@ impl Renderer {
     }
 
     pub fn wait_for_all_frames(&self) {
-        let _ = self
-            .ctx
-            .device
-            .wait_for_fences(&self.ctx.in_flight_fences, true, u64::MAX);
+        self.frames.wait_all(&self.ctx.device);
     }
 
     /// Upload a batch of chunk meshes in a single coalesced transfer. Returns,
     /// per mesh that hit pool exhaustion, the section indices dropped (need
     /// re-mesh); empty on success.
     pub fn upload_chunk_meshes(&mut self, meshes: &[ChunkMeshData]) -> Vec<(ChunkPos, Vec<i32>)> {
-        self.chunk_buffers.upload_batch(
-            &self.ctx.device,
-            &self.ctx.allocator,
-            self.ctx.graphics_queue,
-            meshes,
-        )
+        self.chunk_buffers.upload_batch(&self.ctx.device, meshes)
     }
 
     pub fn remove_chunk_mesh(&mut self, pos: &ChunkPos) {
@@ -1166,35 +973,6 @@ impl Renderer {
 
     pub fn render_assets(&self) -> &BlockRenderAssets {
         &self.render_assets
-    }
-
-    pub(crate) fn shared_render_assets(&self) -> Arc<BlockRenderAssets> {
-        Arc::clone(&self.render_assets)
-    }
-
-    pub fn atlas_uv_map(&self) -> &crate::renderer::chunk::atlas::AtlasUVMap {
-        &self.atlas.uv_map
-    }
-
-    /// The session view must use the CPU assets loaded with the current atlas.
-    pub fn create_mesh_dispatcher(
-        &self,
-        render_view: OwnedBlockRenderView,
-        biome_climate: std::sync::Arc<
-            std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
-        >,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
-        cardinal_light: crate::world::block::model::CardinalLightType,
-    ) -> MeshDispatcher {
-        MeshDispatcher::load(
-            render_view,
-            self.atlas.uv_map.clone(),
-            &self.jar_assets_dir,
-            &self.asset_index,
-            packs,
-            biome_climate,
-            cardinal_light.table(),
-        )
     }
 
     pub fn update_chunk_borders(&mut self, min_y: i32, max_y: i32) {
@@ -1213,9 +991,11 @@ impl Renderer {
         window: &Window,
         hide_cursor: bool,
         overlay: Vec<MenuElement>,
-        swing_progress: f32,
-        use_anim: Option<pipelines::held_item::UseAnim>,
-        held_item: Option<(String, f32, azalea_inventory::ItemStackData)>,
+        swing_progress: [f32; 2],
+        use_anim: [Option<pipelines::held_item::UseAnim>; 2],
+        held_items: [Option<(String, f32, azalea_inventory::ItemStackData)>; 2],
+        main_hand_right: bool,
+        shown_hands: HandRenderSelection,
         player_team_color: Option<u32>,
         render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
@@ -1236,17 +1016,22 @@ impl Renderer {
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
         self.camera.set_render_distance(render_distance);
-        let held_item = held_item.map(|(name, light, stack)| {
-            let item_tints =
-                self.render_assets
-                    .item_tint_palette(&name, Some(&stack), player_team_color);
-            let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
-            pipelines::held_item::HeldItemInfo {
-                name,
-                light,
-                item_tints,
-                has_3d_model,
-            }
+        let held_items = held_items.map(|held| {
+            held.map(|(name, light, stack)| {
+                let model = self.render_assets.stack_model_key(&name, &stack);
+                let item_tints =
+                    self.render_assets
+                        .item_tint_palette(&model, Some(&stack), player_team_color);
+                let has_3d_model = self.ensure_item_mesh(&model).is_block_model;
+                pipelines::held_item::HeldItemInfo {
+                    name,
+                    model,
+                    light,
+                    item_tints,
+                    has_3d_model,
+                    charged_crossbow: crate::player::interaction::is_charged_crossbow(&stack),
+                }
+            })
         });
         // Clear to the sky color: the strip between the sky disc's edge and the
         // terrain shows the clear color, so it must match the sky/terrain or it
@@ -1266,7 +1051,9 @@ impl Renderer {
                 overlay,
                 swing_progress,
                 use_anim,
-                held_item,
+                held_items,
+                main_hand_right,
+                shown_hands,
                 player_team_color,
                 render_first_person_hand,
                 destroy_info,
@@ -1316,7 +1103,7 @@ impl Renderer {
         packs: &crate::resource_pack::ResourcePackManager,
         font_options: FontOptions,
     ) {
-        self.ctx.device.wait_idle().unwrap();
+        self.ctx.device.wait_idle();
 
         self.render_assets = Arc::new(BlockRenderAssets::load(
             &self.jar_assets_dir,
@@ -1325,16 +1112,12 @@ impl Renderer {
             Some(packs),
         ));
 
-        self.item_entity_pipeline
-            .clear_meshes(&self.ctx.device, &self.ctx.allocator);
-        self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
+        self.item_entity_pipeline.clear_meshes(&self.ctx.device);
+        self.atlas.destroy(&self.ctx.device);
         let (texture_names, generated_item_textures) =
             chunk::atlas::atlas_texture_names(&self.render_assets);
         self.atlas = TextureAtlas::build(
             &self.ctx.device,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            &self.ctx.allocator,
             &self.jar_assets_dir,
             &self.asset_index,
             &texture_names,
@@ -1355,9 +1138,6 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.entity_renderer.reload_armor_assets(
             &self.ctx.device,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            &self.ctx.allocator,
             &self.jar_assets_dir,
             &self.asset_index,
             packs,
@@ -1367,7 +1147,6 @@ impl Renderer {
 
         warm_item_meshes(
             &self.ctx.device,
-            &self.ctx.allocator,
             &mut self.item_entity_pipeline,
             &self.atlas.uv_map,
             &self.render_assets,
@@ -1387,12 +1166,9 @@ impl Renderer {
         font_options: FontOptions,
     ) {
         self.font_options = font_options;
-        self.ctx.device.wait_idle().unwrap();
+        self.ctx.device.wait_idle();
         if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
             &self.ctx.device,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            &self.ctx.allocator,
             FontSources {
                 jar_assets_dir: &self.jar_assets_dir,
                 asset_index: &self.asset_index,
@@ -1410,13 +1186,8 @@ impl Renderer {
             &self.jar_assets_dir,
             &self.asset_index,
         );
-        self.panorama_pipeline.reload_cubemap(
-            &self.ctx.device,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            &self.ctx.allocator,
-            faces,
-        );
+        self.panorama_pipeline
+            .reload_cubemap(&self.ctx.device, faces);
     }
 
     /// Brings the Bedrock title and button sprites into the menu atlas when
@@ -1425,12 +1196,8 @@ impl Renderer {
         if self.menu_pipeline.has_sprite(SpriteId::BedrockTitle) {
             return;
         }
-        self.ctx.device.wait_idle().unwrap();
         self.menu_pipeline.reload_sprite_atlas(
             &self.ctx.device,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            &self.ctx.allocator,
             &self.jar_assets_dir,
             &self.asset_index,
             Some(bedrock_ui_dir),
@@ -1448,21 +1215,13 @@ impl Renderer {
             Ok(skin) => {
                 // In-flight frames may still reference the old skin texture,
                 // hand mesh, and preview pipeline about to be destroyed.
-                let _ = self.ctx.device.wait_idle();
-                self.hand_pipeline.reload_skin(
-                    &self.ctx.device,
-                    self.ctx.graphics_queue,
-                    self.ctx.command_pool,
-                    &self.ctx.allocator,
-                    &skin,
-                );
-                self.skin_preview
-                    .destroy(&self.ctx.device, &self.ctx.allocator);
+                self.ctx.device.wait_idle();
+                self.hand_pipeline.reload_skin(&self.ctx.device, &skin);
+                self.skin_preview.destroy(&self.ctx.device);
                 self.skin_preview = SkinPreviewPipeline::new(
                     &self.ctx.device,
-                    self.swapchain.render_pass,
-                    &self.ctx.allocator,
-                    self.hand_pipeline.skin_view(),
+                    self.swapchain.targets(),
+                    self.hand_pipeline.skin_texture(),
                     self.hand_pipeline.skin_sampler(),
                     skin.slim,
                 );
@@ -1473,34 +1232,22 @@ impl Renderer {
     }
 
     pub fn update_player_entity_skin(&mut self, uuid: &uuid::Uuid, skin: &SkinData) {
-        self.entity_renderer.update_player_skin(
-            &self.ctx.device,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            &self.ctx.allocator,
-            uuid,
-            skin,
-        );
+        self.entity_renderer
+            .update_player_skin(&self.ctx.device, uuid, skin);
     }
 
     pub fn remove_player_entity_skin(&mut self, uuid: &uuid::Uuid) {
         self.entity_renderer
-            .remove_player_skin(&self.ctx.device, &self.ctx.allocator, uuid);
+            .remove_player_skin(&self.ctx.device, uuid);
     }
 
     pub fn clear_player_entity_skins(&mut self) {
-        self.entity_renderer
-            .clear_player_skins(&self.ctx.device, &self.ctx.allocator);
+        self.entity_renderer.clear_player_skins(&self.ctx.device);
     }
 
     pub fn update_favicon_atlas(&mut self, favicons: &[(String, Vec<u8>, u32)]) {
-        self.menu_pipeline.update_favicon_atlas(
-            &self.ctx.device,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            &self.ctx.allocator,
-            favicons,
-        );
+        self.menu_pipeline
+            .update_favicon_atlas(&self.ctx.device, favicons);
     }
 
     /// Friend faces reuse the favicon atlas — they're never shown on the same
@@ -1513,25 +1260,27 @@ impl Renderer {
     pub fn drain_drawn_inline_objects(
         &mut self,
     ) -> std::collections::hash_map::Drain<'_, String, crate::ui::text::InlineObject> {
-        self.menu_pipeline.drain_drawn_inline_objects()
+        self.menu_pipeline.geometry.drain_drawn_inline_objects()
     }
 
     /// Points an animated inline object at the frame showing now.
     pub fn set_inline_object_frame(&mut self, key: &str, frame_key: &str) {
-        self.menu_pipeline.set_inline_object_frame(key, frame_key);
+        self.menu_pipeline
+            .geometry
+            .set_inline_object_frame(key, frame_key);
     }
 
     pub fn menu_text_width(&self, text: &str, scale: f32) -> f32 {
-        self.menu_pipeline.text_width(text, scale)
+        self.menu_pipeline.geometry.text_width(text, scale)
     }
 
     /// Menu text width in the SGA (`minecraft:alt`) glyphs.
     pub fn menu_text_width_sga(&self, text: &str, scale: f32) -> f32 {
-        self.menu_pipeline.mc_text_width_sga(text, scale)
+        self.menu_pipeline.geometry.mc_text_width_sga(text, scale)
     }
 
     pub fn menu_spans_width(&self, spans: &[crate::ui::text::TextSpan], scale: f32) -> f32 {
-        self.menu_pipeline.spans_width(spans, scale)
+        self.menu_pipeline.geometry.spans_width(spans, scale)
     }
 
     /// Local item-mesh classification and bounds used by dropped-item layout.
@@ -1546,7 +1295,6 @@ impl Renderer {
         let is_block_model = if let Some(model) = self.render_assets.get_item_model(name) {
             self.item_entity_pipeline.ensure_mesh(
                 &self.ctx.device,
-                &self.ctx.allocator,
                 name,
                 model,
                 &self.atlas.uv_map,
@@ -1555,7 +1303,6 @@ impl Renderer {
         } else {
             self.item_entity_pipeline.ensure_flat_mesh(
                 &self.ctx.device,
-                &self.ctx.allocator,
                 name,
                 &self.render_assets.flat_item_layers(name),
                 &self.atlas.uv_map,
@@ -1595,41 +1342,28 @@ impl Renderer {
             self.recreate_swapchain()?;
         }
 
-        let frame = self.ctx.frame_index;
-        let fence = self.ctx.in_flight_fences[frame];
-        let image_available = self.ctx.image_available_semaphores[frame];
-        let cmd = self.ctx.command_buffers[frame];
+        let frame = self.frames.index();
 
         let t_fence = std::time::Instant::now();
-        self.ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
+        self.frames.wait(&self.ctx.device)?;
         let fence_ms = t_fence.elapsed().as_secs_f32() * 1000.0;
 
         // Fence signalled: reclaim chunk slices the GPU is now provably done with,
         // and read back any screenshot copy recorded for this frame index.
         self.chunk_buffers.begin_frame();
-        self.screenshot
-            .collect_ready(frame, &self.ctx.device, &self.ctx.allocator);
+        self.screenshot.collect_ready(frame, &self.ctx.device);
 
         let t_acquire = std::time::Instant::now();
-        let image = match self.ctx.device.acquire_next_image(
-            self.swapchain.handle,
-            u64::MAX,
-            image_available,
-            vk::Fence::null(),
-        ) {
-            Ok(image) => image,
-            Err(vk::Error::OutOfDateKHR) => {
-                self.swapchain_dirty = true;
-                return Ok(());
-            }
-            Err(e) => return Err(e.into()),
-        };
-
-        self.swapchain_dirty |= image.suboptimal && self.surface_resized();
-        let image_index = image.value;
+        let (image_index, suboptimal) =
+            match self.frames.acquire(&self.ctx.device, &self.swapchain)? {
+                rhi::Acquired::Image { index, suboptimal } => (index, suboptimal),
+                rhi::Acquired::OutOfDate => {
+                    self.swapchain_dirty = true;
+                    return Ok(());
+                }
+            };
+        self.swapchain_dirty |= suboptimal && self.swapchain.surface_resized(&self.ctx);
         let acquire_ms = t_acquire.elapsed().as_secs_f32() * 1000.0;
-
-        let render_finished = self.render_finished_per_image[image_index as usize];
 
         if let RenderMode::World {
             ref sky,
@@ -1660,55 +1394,22 @@ impl Renderer {
             window.set_cursor_visible(false);
         }
 
-        self.ctx.device.reset_fences(&[fence])?;
-        cmd.reset(vk::CommandBufferResetFlags::empty())?;
+        let encoder = self.frames.begin(&self.ctx.device)?;
 
-        let begin_info = vk::CommandBufferBeginInfo {
-            flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
-            ..Default::default()
-        };
-        cmd.begin(&begin_info)?;
-
-        let extent = self.swapchain.extent;
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: extent.width as f32,
-            height: extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent,
-        };
+        let scissor = rhi::Rect::covering(self.swapchain.extent);
 
         if matches!(&mode, RenderMode::World { .. }) {
             let frustum = self.camera.frustum_planes();
             // The eye (including the third-person offset) is the origin the chunk
             // vertex shader renders relative to, so the cull must use it too.
             self.chunk_buffers.dispatch_cull(
-                cmd,
+                &encoder,
                 frame,
                 &frustum,
                 self.camera.anchor(),
                 self.camera_render_position(),
             );
         }
-
-        let clear_values = [
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: clear_color,
-                },
-            },
-            vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
-                    stencil: 0,
-                },
-            },
-        ];
 
         let player_team_color = match &mode {
             RenderMode::World {
@@ -1740,6 +1441,9 @@ impl Renderer {
                     } else {
                         None
                     };
+                    if let Some(stack) = item_stack {
+                        *item_name = self.render_assets.stack_model_key(item_name, stack);
+                    }
                     *item_tints = self.render_assets.item_tint_palette(
                         item_name,
                         item_stack.as_ref(),
@@ -1780,21 +1484,14 @@ impl Renderer {
         );
         if target_slot_px != self.gui_item_atlas.slot_px() {
             // Mid-cmd-recording wait_idle: this cmd buffer is unsubmitted so
-            // holds no in-flight references, and `submit_one_time` inside the
+            // holds no in-flight references, and `Device::submit` inside the
             // rebuild uses a separate primary cmd from the same pool.
-            self.ctx.device.wait_idle().ok();
-            self.gui_item_atlas
-                .destroy(&self.ctx.device, &self.ctx.allocator);
-            self.gui_item_atlas = build_gui_item_atlas(
-                &self.ctx.device,
-                &self.ctx.allocator,
-                self.ctx.graphics_queue,
-                self.ctx.command_pool,
-                &self.menu_pipeline,
-                target_slot_px,
-            );
+            self.ctx.device.wait_idle();
+            self.gui_item_atlas.destroy(&self.ctx.device);
+            self.gui_item_atlas =
+                build_gui_item_atlas(&self.ctx.device, &mut self.menu_pipeline, target_slot_px);
             self.gui_item_pipeline
-                .recreate_pipeline(&self.ctx.device, self.gui_item_atlas.render_pass());
+                .recreate_pipeline(&self.ctx.device, self.gui_item_atlas.targets());
             self.gui_item_pipeline
                 .set_atlas_px(self.gui_item_atlas.atlas_px());
         }
@@ -1833,23 +1530,24 @@ impl Renderer {
             }
         }
         if !bake_list.is_empty() {
-            self.gui_item_atlas.begin_bake_pass(cmd);
+            let mut bake = self
+                .gui_item_atlas
+                .begin_bake_pass(&self.ctx.device, &encoder);
             let required_tint_colors = bake_list.iter().map(|job| job.item_tints.len()).sum();
             self.gui_item_pipeline.bind_for_bake_pass(
                 &self.ctx.device,
-                &self.ctx.allocator,
-                cmd,
+                &mut bake,
                 frame,
                 required_tint_colors,
             );
             for job in &bake_list {
                 if job.needs_clear {
-                    self.gui_item_atlas.clear_slot_color(cmd, &job.slot);
+                    self.gui_item_atlas.clear_slot_color(&bake, &job.slot);
                 }
-                cmd.set_scissor(0, &[self.gui_item_atlas.scissor_rect(&job.slot)]);
+                bake.set_scissor_rect(self.gui_item_atlas.scissor_rect(&job.slot));
                 let (sx, sy) = self.gui_item_atlas.slot_origin_pixels(&job.slot);
                 self.gui_item_pipeline.bake_to_slot(
-                    cmd,
+                    &bake,
                     frame,
                     &self.item_entity_pipeline,
                     sx,
@@ -1860,39 +1558,15 @@ impl Renderer {
                     &job.item_tints,
                 );
             }
-            self.gui_item_atlas.end_bake_pass(cmd);
+            self.gui_item_atlas.end_bake_pass(&encoder, bake);
         }
 
-        let use_blur = matches!(&mode, RenderMode::MainMenu { blur, .. } if *blur > 0.01);
-
-        let (rp, fb) = if use_blur {
-            (
-                self.swapchain.render_pass_scene,
-                self.swapchain.framebuffers_scene[image_index as usize],
-            )
-        } else {
-            (
-                self.swapchain.render_pass,
-                self.swapchain.framebuffers[image_index as usize],
-            )
-        };
-
-        let render_pass_info = vk::RenderPassBeginInfo {
-            render_pass: rp,
-            framebuffer: fb,
-            render_area: vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: self.swapchain.extent,
-            },
-            clear_value_count: clear_values.len() as u32,
-            clear_values: clear_values.as_ptr(),
-            ..Default::default()
-        };
-
-        cmd.begin_render_pass(&render_pass_info, vk::SubpassContents::Inline);
-
-        cmd.set_viewport(0, &[viewport]);
-        cmd.set_scissor(0, &[scissor]);
+        let mut pass = encoder.begin_render_pass(
+            &self.ctx.device,
+            &self
+                .swapchain
+                .pass(image_index, rhi::LoadOp::Clear(clear_color)),
+        );
 
         let sw = self.swapchain.extent.width as f32;
         let sh = self.swapchain.extent.height as f32;
@@ -1905,7 +1579,9 @@ impl Renderer {
                 overlay,
                 swing_progress,
                 use_anim,
-                held_item,
+                held_items,
+                main_hand_right,
+                shown_hands,
                 player_team_color: _,
                 render_first_person_hand,
                 destroy_info,
@@ -1928,30 +1604,21 @@ impl Renderer {
                 // is cleared to the water fog color, so skipping them tints the view
                 // when looking up out of geometry.
                 if !*eyes_in_water {
-                    self.sky_pipeline.update_and_draw(
-                        &self.ctx.device,
-                        cmd,
-                        frame,
-                        &self.camera,
-                        sky,
-                    );
+                    self.sky_pipeline
+                        .update_and_draw(&mut pass, frame, &self.camera, sky);
                 }
 
                 let t_cull = std::time::Instant::now();
                 // Solid (no discard) first so it lays down depth and early-Z lets
                 // the front-to-back order reject occluded fragments; cutout after.
-                self.moving_block_buffers.upload(
-                    &self.ctx.device,
-                    &self.ctx.allocator,
-                    frame,
-                    moving_blocks,
-                );
-                self.chunk_pipeline.bind(cmd, frame, false);
-                self.chunk_buffers.draw_indirect(cmd, frame, false);
-                self.moving_block_buffers.draw(cmd, frame, false);
-                self.chunk_pipeline.bind(cmd, frame, true);
-                self.chunk_buffers.draw_indirect(cmd, frame, true);
-                self.moving_block_buffers.draw(cmd, frame, true);
+                self.moving_block_buffers
+                    .upload(&self.ctx.device, frame, moving_blocks);
+                self.chunk_pipeline.bind(&mut pass, frame, false);
+                self.chunk_buffers.draw_indirect(&pass, frame, false);
+                self.moving_block_buffers.draw(&pass, frame, false);
+                self.chunk_pipeline.bind(&mut pass, frame, true);
+                self.chunk_buffers.draw_indirect(&pass, frame, true);
+                self.moving_block_buffers.draw(&pass, frame, true);
                 let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
                 let anchor = self.camera.anchor();
@@ -1959,7 +1626,7 @@ impl Renderer {
 
                 if let Some((block_pos, stage, state)) = destroy_info {
                     self.block_overlay_pipeline.draw(
-                        cmd,
+                        &mut pass,
                         frame,
                         *block_render,
                         *state,
@@ -1975,10 +1642,10 @@ impl Renderer {
                 let ent_cull_dist = (*render_distance * 16) as f32 + 16.0;
 
                 self.entity_shadow_pipeline
-                    .draw(cmd, frame, shadows, anchor, eye);
+                    .draw(&mut pass, frame, shadows, anchor, eye);
 
                 self.entity_renderer.draw(
-                    cmd,
+                    &mut pass,
                     frame,
                     entities,
                     &ent_frustum,
@@ -1988,15 +1655,10 @@ impl Renderer {
                 );
 
                 self.block_entity_pipeline
-                    .draw(cmd, frame, anchor, block_entities);
+                    .draw(&mut pass, frame, anchor, block_entities);
 
-                self.item_entity_pipeline.draw(
-                    &self.ctx.device,
-                    &self.ctx.allocator,
-                    cmd,
-                    frame,
-                    item_entities,
-                );
+                self.item_entity_pipeline
+                    .draw(&self.ctx.device, &mut pass, frame, item_entities);
 
                 // Break particles draw after entities but before translucent
                 // water: they write depth, and pomme's water doesn't, so this
@@ -2004,53 +1666,38 @@ impl Renderer {
                 // particles after all translucents into a depth-sharing
                 // target).
                 self.particle_pipeline
-                    .update_and_draw(cmd, frame, &self.camera, particles);
+                    .update_and_draw(&mut pass, frame, &self.camera, particles);
 
                 // Translucent water draws after opaque terrain and entities so it
                 // blends over them; depth-tested (occluded by geometry in front)
                 // but doesn't write depth. CPU frustum-culled, reusing the entity
                 // frustum/eye.
-                self.chunk_pipeline.bind_water(cmd, frame);
-                self.chunk_buffers.draw_water(
-                    cmd,
-                    self.chunk_pipeline.pipeline_layout,
-                    &ent_frustum,
-                    anchor,
-                    eye,
-                );
+                self.chunk_pipeline.bind_water(&mut pass, frame);
+                self.chunk_buffers
+                    .draw_water(&pass, &ent_frustum, anchor, eye);
 
                 // Clouds draw after opaque world geometry (so terrain occludes
                 // them) and before weather, depth-tested against the scene.
                 if !*eyes_in_water {
-                    self.cloud_pipeline
-                        .update_and_draw(cmd, frame, &self.camera, sky, *cloud_mode);
+                    self.cloud_pipeline.update_and_draw(
+                        &mut pass,
+                        frame,
+                        &self.camera,
+                        sky,
+                        *cloud_mode,
+                    );
                 }
 
                 // Weather draws after opaque world geometry (depth-tested against
                 // terrain) but before the depth clear for the hand pass.
                 self.weather_pipeline
-                    .update_and_draw(cmd, frame, &self.camera, sky, weather);
+                    .update_and_draw(&mut pass, frame, &self.camera, sky, weather);
 
                 if *show_chunk_borders {
-                    self.chunk_border_pipeline.draw(cmd, frame);
+                    self.chunk_border_pipeline.draw(&mut pass, frame);
                 }
 
-                let clear_attachment = vk::ClearAttachment {
-                    aspect_mask: vk::ImageAspectFlags::Depth,
-                    color_attachment: 0,
-                    clear_value: vk::ClearValue {
-                        depth_stencil: vk::ClearDepthStencilValue {
-                            depth: 1.0,
-                            stencil: 0,
-                        },
-                    },
-                };
-                let clear_rect = vk::ClearRect {
-                    rect: scissor,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                };
-                cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
+                pass.clear_depth(scissor);
 
                 if *render_first_person_hand
                     && self.camera.mode == camera::CameraMode::FirstPerson
@@ -2061,37 +1708,54 @@ impl Renderer {
                     // Vanilla applies bobHurt (death + hurt) and bobView to the
                     // first-person arm/item pose stack as well as the world.
                     let view_effect = self.camera.view_effect_matrix();
-                    // Vanilla renderArmWithItem draws the arm only for an empty
-                    // hand; a held item renders alone.
-                    match held_item {
-                        Some(item) => self.held_item_pipeline.update_and_draw(
-                            &self.ctx.device,
-                            &self.ctx.allocator,
-                            cmd,
+                    // Vanilla submitArmWithItem draws the bare arm only for an
+                    // empty main hand; held items render alone, and an empty
+                    // offhand draws nothing. The main arm is the options' one,
+                    // which the server echoes back as `getMainArm`.
+                    // TODO: map (`renderOneHandedMap`/`renderTwoHandedMap`)
+                    // and the crossbow loading pose, once crossbow use is
+                    // tracked.
+                    if shown_hands.main && held_items[0].is_none() {
+                        self.hand_pipeline.update_and_draw(
+                            &mut pass,
                             frame,
                             aspect,
                             hud_fov,
-                            *swing_progress,
-                            *use_anim,
-                            item,
+                            swing_progress[0],
+                            *main_hand_right,
+                            view_effect,
+                        );
+                    }
+                    let shown = [shown_hands.main, shown_hands.off];
+                    let hands: Vec<_> = (0..2)
+                        .filter(|&i| shown[i])
+                        .filter_map(|i| {
+                            Some(HeldHand {
+                                item: held_items[i].as_ref()?,
+                                main_hand: i == 0,
+                                right_arm: *main_hand_right == (i == 0),
+                                swing_progress: swing_progress[i],
+                                use_anim: use_anim[i],
+                            })
+                        })
+                        .collect();
+                    if !hands.is_empty() {
+                        self.held_item_pipeline.update_and_draw(
+                            &self.ctx.device,
+                            &mut pass,
+                            frame,
+                            aspect,
+                            hud_fov,
+                            &hands,
                             &self.item_entity_pipeline,
                             view_effect,
-                        ),
-                        None => self.hand_pipeline.update_and_draw(
-                            cmd,
-                            frame,
-                            aspect,
-                            hud_fov,
-                            *swing_progress,
-                            view_effect,
-                        ),
+                        );
                     }
                 }
 
                 self.menu_pipeline.draw(
                     &self.ctx.device,
-                    &self.ctx.allocator,
-                    cmd,
+                    &mut pass,
                     frame,
                     sw,
                     sh,
@@ -2104,30 +1768,26 @@ impl Renderer {
                 if let Some(p) = player_preview
                     && let Some(rect) = preview_box_rect(p.rect, self.swapchain.extent)
                 {
-                    let clear_rect = vk::ClearRect {
-                        rect,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    };
-                    cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
-                    cmd.set_scissor(0, &[rect]);
-                    self.skin_preview
-                        .draw_in_box(cmd, frame, p, sw, sh, &self.entity_renderer);
-                    cmd.set_scissor(0, &[scissor]);
+                    pass.clear_depth(rect);
+                    pass.set_scissor_rect(rect);
+                    self.skin_preview.draw_in_box(
+                        &mut pass,
+                        frame,
+                        p,
+                        sw,
+                        sh,
+                        &self.entity_renderer,
+                    );
+                    pass.set_scissor_rect(scissor);
                 }
 
                 if let Some(p) = book_preview
                     && let Some(rect) = preview_box_rect(p.rect, self.swapchain.extent)
                 {
-                    let clear_rect = vk::ClearRect {
-                        rect,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    };
-                    cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
-                    cmd.set_scissor(0, &[rect]);
-                    self.book_preview.draw_in_box(cmd, frame, *p, sw, sh);
-                    cmd.set_scissor(0, &[scissor]);
+                    pass.clear_depth(rect);
+                    pass.set_scissor_rect(rect);
+                    self.book_preview.draw_in_box(&mut pass, frame, *p, sw, sh);
+                    pass.set_scissor_rect(scissor);
                 }
 
                 self.last_timings.cull_ms = cull_ms;
@@ -2142,7 +1802,7 @@ impl Renderer {
             } => {
                 let aspect = sw / sh.max(1.0);
                 self.panorama_pipeline
-                    .draw(&self.ctx.device, cmd, frame, *scroll, aspect, 0.0);
+                    .draw(&mut pass, frame, *scroll, aspect, 0.0);
 
                 // A BlurBackdrop marker splits the elements: those before it are
                 // drawn into the scene so the blur pass captures them (the title
@@ -2154,8 +1814,7 @@ impl Renderer {
                 if let Some(i) = split {
                     vbase = self.menu_pipeline.draw_from(
                         &self.ctx.device,
-                        &self.ctx.allocator,
-                        cmd,
+                        &mut pass,
                         frame,
                         sw,
                         sh,
@@ -2166,47 +1825,29 @@ impl Renderer {
                 }
 
                 if *blur > 0.01 {
-                    cmd.end_render_pass();
+                    pass.end();
 
-                    let swapchain_image = self.swapchain.images[image_index as usize];
+                    let swapchain_image = self.swapchain.image(image_index);
                     let iterations = ((*blur * 3.0).ceil() as u32).clamp(1, 4);
                     self.blur_pipeline.execute(
-                        cmd,
+                        &self.ctx.device,
+                        &encoder,
                         swapchain_image,
                         self.swapchain.extent.width,
                         self.swapchain.extent.height,
                         iterations,
                     );
 
-                    let load_rp_info = vk::RenderPassBeginInfo {
-                        render_pass: self.swapchain.render_pass_load,
-                        framebuffer: self.swapchain.framebuffers_load[image_index as usize],
-                        render_area: vk::Rect2D {
-                            offset: vk::Offset2D { x: 0, y: 0 },
-                            extent: self.swapchain.extent,
-                        },
-                        clear_value_count: clear_values.len() as u32,
-                        clear_values: clear_values.as_ptr(),
-                        ..Default::default()
-                    };
-                    cmd.begin_render_pass(&load_rp_info, vk::SubpassContents::Inline);
-                    cmd.set_viewport(0, &[viewport]);
-                    cmd.set_scissor(0, &[scissor]);
+                    pass = encoder.begin_render_pass(
+                        &self.ctx.device,
+                        &self.swapchain.pass(image_index, rhi::LoadOp::Load),
+                    );
                 }
 
                 if let Some(skin) = *skin {
                     self.skin_preview.draw(
-                        &self.ctx.device,
-                        cmd,
-                        frame,
-                        aspect,
-                        skin.at.0,
-                        skin.at.1,
-                        skin.scale,
-                        cursor.0,
-                        cursor.1,
-                        sw,
-                        sh,
+                        &mut pass, frame, aspect, skin.at.0, skin.at.1, skin.scale, cursor.0,
+                        cursor.1, sw, sh,
                     );
                 }
 
@@ -2216,8 +1857,7 @@ impl Renderer {
                 };
                 self.menu_pipeline.draw_from(
                     &self.ctx.device,
-                    &self.ctx.allocator,
-                    cmd,
+                    &mut pass,
                     frame,
                     sw,
                     sh,
@@ -2228,104 +1868,62 @@ impl Renderer {
             }
         }
 
-        cmd.end_render_pass();
+        pass.end();
+        self.swapchain.ready_to_present(&encoder, image_index);
 
-        // Image is now in PresentSrcKHR; grab it before present if F2 was pressed.
+        // The image is ready to present; grab it first if F2 was pressed.
         self.screenshot.record_if_armed(
             &self.ctx.device,
-            &self.ctx.allocator,
-            cmd,
+            &encoder,
             frame,
-            self.swapchain.images[image_index as usize],
+            self.swapchain.image(image_index),
             self.swapchain.extent,
-            self.swapchain.format.format,
+            self.swapchain.is_bgra(),
         );
 
         self.gui_item_atlas.end_frame();
 
-        cmd.end()?;
-
-        let submit_info = vk::SubmitInfo {
-            wait_semaphore_count: 1,
-            wait_semaphores: &image_available,
-            wait_dst_stage_mask: &vk::PipelineStageFlags::ColorAttachmentOutput,
-            command_buffer_count: 1,
-            command_buffers: &cmd.handle(),
-            signal_semaphore_count: 1,
-            signal_semaphores: &render_finished,
-            ..Default::default()
-        };
-
-        self.ctx.graphics_queue.submit(&[submit_info], fence)?;
-
-        let mut present_info = vk::PresentInfoKHR {
-            wait_semaphore_count: 1,
-            wait_semaphores: &render_finished,
-            swapchain_count: 1,
-            swapchains: &self.swapchain.handle,
-            image_indices: &image_index,
-            ..Default::default()
-        };
-        self.present_id += 1;
-        let mut present_id = vk::PresentIdKHR {
-            swapchain_count: 1,
-            present_ids: &self.present_id,
-            ..Default::default()
-        };
-        if self.ctx.present_wait {
-            present_info = present_info.next(&mut present_id);
-        }
-
         let t_present = std::time::Instant::now();
-        match self.ctx.present_queue.present(&present_info) {
-            Ok(()) => {}
-            Err(vk::Error::OutOfDateKHR) => self.swapchain_dirty = true,
-            Err(vk::Error::SuboptimalKHR) => self.swapchain_dirty |= self.surface_resized(),
-            Err(e) => return Err(e.into()),
+        match self
+            .frames
+            .submit_and_present(encoder, &self.ctx, &self.swapchain, image_index)?
+        {
+            rhi::Presented::Done => {}
+            rhi::Presented::OutOfDate => self.swapchain_dirty = true,
+            rhi::Presented::Suboptimal => {
+                self.swapchain_dirty |= self.swapchain.surface_resized(&self.ctx)
+            }
         }
         let present_ms = t_present.elapsed().as_secs_f32() * 1000.0;
         self.last_timings.fence_ms = fence_ms;
         self.last_timings.acquire_ms = acquire_ms;
         self.last_timings.present_ms = present_ms;
-
-        self.ctx.advance_frame();
         Ok(())
     }
 }
 
 fn build_gui_item_atlas(
-    device: &vk::Device,
-    allocator: &Arc<std::sync::Mutex<pomme_gpu_allocator::vulkan::Allocator>>,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    menu: &pipelines::menu_overlay::MenuOverlayPipeline,
+    device: &rhi::backend::Device,
+    menu: &mut pipelines::menu_overlay::MenuOverlayPipeline,
     slot_px: u32,
 ) -> pipelines::gui_item_atlas::GuiItemAtlas {
-    let atlas = pipelines::gui_item_atlas::GuiItemAtlas::new(
-        device,
-        allocator,
-        queue,
-        command_pool,
-        slot_px,
-    );
-    menu.set_item_atlas(device, atlas.color_view(), atlas.sampler());
+    let atlas = pipelines::gui_item_atlas::GuiItemAtlas::new(device, slot_px);
+    menu.set_item_atlas(device, atlas.color_texture(), atlas.sampler());
     atlas
 }
 
 fn warm_item_meshes(
-    device: &vk::Device,
-    allocator: &Arc<std::sync::Mutex<pomme_gpu_allocator::vulkan::Allocator>>,
+    device: &rhi::backend::Device,
     item_entity_pipeline: &mut ItemEntityPipeline,
     uv_map: &chunk::atlas::AtlasUVMap,
     render_assets: &BlockRenderAssets,
 ) {
     for name in render_assets.item_names() {
         if let Some(model) = render_assets.get_item_model(name) {
-            item_entity_pipeline.ensure_mesh(device, allocator, name, model, uv_map);
+            item_entity_pipeline.ensure_mesh(device, name, model, uv_map);
         } else {
             item_entity_pipeline.ensure_flat_mesh(
                 device,
-                allocator,
                 name,
                 &render_assets.flat_item_layers(name),
                 uv_map,
@@ -2640,62 +2238,36 @@ fn strip_alpha_if_opaque(img: &mut [u8], x0: u32, y0: u32, x1: u32, y1: u32) {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
-        let _ = self.ctx.device.wait_idle();
+        self.ctx.device.wait_idle();
 
-        self.screenshot
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.chunk_buffers
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.chunk_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.hand_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.block_overlay_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.sky_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.panorama_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.menu_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.blur_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.skin_preview
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.book_preview
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.entity_renderer
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.entity_shadow_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.moving_block_buffers
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.block_entity_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.chunk_border_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.item_entity_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.held_item_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.weather_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.particle_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.cloud_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.gui_item_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.gui_item_atlas
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
+        self.screenshot.destroy(&self.ctx.device);
+        self.chunk_buffers.destroy(&self.ctx.device);
+        self.chunk_pipeline.destroy(&self.ctx.device);
+        self.hand_pipeline.destroy(&self.ctx.device);
+        self.block_overlay_pipeline.destroy(&self.ctx.device);
+        self.sky_pipeline.destroy(&self.ctx.device);
+        self.panorama_pipeline.destroy(&self.ctx.device);
+        self.menu_pipeline.destroy(&self.ctx.device);
+        self.blur_pipeline.destroy(&self.ctx.device);
+        self.skin_preview.destroy(&self.ctx.device);
+        self.book_preview.destroy(&self.ctx.device);
+        self.entity_renderer.destroy(&self.ctx.device);
+        self.entity_shadow_pipeline.destroy(&self.ctx.device);
+        self.moving_block_buffers.destroy(&self.ctx.device);
+        self.block_entity_pipeline.destroy(&self.ctx.device);
+        self.chunk_border_pipeline.destroy(&self.ctx.device);
+        self.item_entity_pipeline.destroy(&self.ctx.device);
+        self.held_item_pipeline.destroy(&self.ctx.device);
+        self.weather_pipeline.destroy(&self.ctx.device);
+        self.particle_pipeline.destroy(&self.ctx.device);
+        self.cloud_pipeline.destroy(&self.ctx.device);
+        self.gui_item_pipeline.destroy(&self.ctx.device);
+        self.gui_item_atlas.destroy(&self.ctx.device);
+        self.atlas.destroy(&self.ctx.device);
 
-        for sem in self.render_finished_per_image.drain(..) {
-            self.ctx.device.destroy_semaphore(sem, None);
-        }
+        self.frames.destroy(&self.ctx.device);
 
-        self.swapchain
-            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.swapchain.destroy(&self.ctx);
     }
 }
 

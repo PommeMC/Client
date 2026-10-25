@@ -12,6 +12,7 @@ use simdnbt::owned::NbtCompound;
 
 use super::block_wire::{block_entity_nbt, native_block_entity_type};
 use super::chunk_batch::ChunkBatchSizeCalculator;
+use super::handler::send_ordered;
 use super::sender::PacketSender;
 use super::{NetworkEvent, PacketLightData};
 use crate::position::{BlockPos, ChunkPos};
@@ -37,34 +38,46 @@ pub(super) fn handle_raw_chunk_packet(
             } => {
                 let pos = ChunkPos::new(x, z);
                 tracing::trace!("Chunk [{x}, {z}] ({} block entities)", block_entities.len());
-                let _ = event_tx.try_send(NetworkEvent::ChunkLoaded {
-                    pos,
-                    data: Arc::new(sections),
-                    heightmaps: heightmaps
-                        .into_iter()
-                        .filter_map(|(id, data)| Some((HeightmapKind::from_id(id)?, data)))
-                        .collect(),
-                    light: light.into(),
-                });
+                send_ordered(
+                    event_tx,
+                    NetworkEvent::ChunkLoaded {
+                        pos,
+                        data: Arc::new(sections),
+                        heightmaps: heightmaps
+                            .into_iter()
+                            .filter_map(|(id, data)| Some((HeightmapKind::from_id(id)?, data)))
+                            .collect(),
+                        light: light.into(),
+                    },
+                );
                 let entries = block_entities
                     .iter()
                     .filter_map(|be| block_entity(pos, be))
                     .collect();
-                let _ = event_tx.try_send(NetworkEvent::BlockEntitySync {
-                    chunk_pos: pos,
-                    entries,
-                });
+                send_ordered(
+                    event_tx,
+                    NetworkEvent::BlockEntitySync {
+                        chunk_pos: pos,
+                        entries,
+                    },
+                );
             }
             ChunkPacket::Light { x, z, light } => {
-                let _ = event_tx.try_send(NetworkEvent::LightUpdate {
-                    pos: ChunkPos::new(x, z),
-                    light: light.into(),
-                });
+                send_ordered(
+                    event_tx,
+                    NetworkEvent::LightUpdate {
+                        pos: ChunkPos::new(x, z),
+                        light: light.into(),
+                    },
+                );
             }
             ChunkPacket::Forget { x, z } => {
-                let _ = event_tx.try_send(NetworkEvent::ChunkUnloaded {
-                    pos: ChunkPos::new(x, z),
-                });
+                send_ordered(
+                    event_tx,
+                    NetworkEvent::ChunkUnloaded {
+                        pos: ChunkPos::new(x, z),
+                    },
+                );
             }
             ChunkPacket::BatchStart => batch_size_calculator.on_batch_start(),
             ChunkPacket::BatchFinished { size } => {
@@ -79,12 +92,15 @@ pub(super) fn handle_raw_chunk_packet(
                 ));
             }
             ChunkPacket::CacheCenter { x, z } => {
-                let _ = event_tx.try_send(NetworkEvent::ChunkCacheCenter { x, z });
+                send_ordered(event_tx, NetworkEvent::ChunkCacheCenter { x, z });
             }
             ChunkPacket::CacheRadius { radius } => {
-                let _ = event_tx.try_send(NetworkEvent::ServerViewDistance {
-                    distance: radius as u32,
-                });
+                send_ordered(
+                    event_tx,
+                    NetworkEvent::ServerViewDistance {
+                        distance: radius as u32,
+                    },
+                );
             }
         }),
     )

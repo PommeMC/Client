@@ -5,10 +5,10 @@ use std::sync::{Arc, OnceLock};
 use azalea_block::BlockState;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
-    CustomModelData, DyedColor, FireworkExplosion, MapColor, PotionContents,
+    ChargedProjectiles, CustomModelData, DyedColor, FireworkExplosion, MapColor, PotionContents,
 };
 use azalea_registry::Registry as AzaleaRegistry;
-use azalea_registry::builtin::{MobEffect, Potion};
+use azalea_registry::builtin::{ItemKind, MobEffect, Potion};
 use serde::{Deserialize, Serialize};
 
 const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
@@ -180,16 +180,6 @@ impl BlockRenderAssets {
         });
 
         let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index, packs);
-        let baked = baked
-            .into_iter()
-            .map(|(block, variants)| {
-                let variants = variants
-                    .into_iter()
-                    .map(|(k, m)| (k, Arc::new(m)))
-                    .collect();
-                (block, variants)
-            })
-            .collect();
         let baked_items = model::bake_item_models(jar_assets_dir, asset_index, packs);
         let item_models = baked_items.models;
         let flat_item_textures = baked_items.generated_textures;
@@ -221,6 +211,24 @@ impl BlockRenderAssets {
 
     pub fn get_item_model(&self, name: &str) -> Option<&BakedModel> {
         self.item_models.get(name)
+    }
+
+    /// The model `name` draws with for this stack: its loaded variant
+    /// (vanilla `Charge` select property) if it bakes one, else `name`.
+    pub fn stack_model_key(&self, name: &str, stack: &ItemStackData) -> String {
+        let charge = stack
+            .get_component::<ChargedProjectiles>()
+            .filter(|c| !c.items.is_empty())
+            .map(|c| {
+                let rocket = c.items.iter().any(|i| i.kind() == ItemKind::FireworkRocket);
+                if rocket { "rocket" } else { "arrow" }
+            });
+        charge
+            .map(|charge| model::charge_model_key(name, charge))
+            .filter(|key| {
+                self.item_models.contains_key(key) || self.flat_item_texture_keys.contains_key(key)
+            })
+            .unwrap_or_else(|| name.to_string())
     }
 
     /// Every item with a baked 3D model or a generated flat sprite.
@@ -339,27 +347,20 @@ impl BlockRenderAssets {
                 .chain(ft.side_overlay.as_deref())
         });
 
-        let baked_textures = self.baked.values().flat_map(|variants| {
-            variants
-                .values()
-                .flat_map(|model| model.quads.iter().map(|q| q.texture.as_str()))
-        });
-
-        let multipart_textures = self.multipart.values().flat_map(|entries| {
-            entries
-                .iter()
-                .flat_map(|e| e.quads.iter().map(|q| q.texture.as_str()))
-        });
-
-        let item_model_textures = self
-            .item_models
+        let models = self
+            .baked
             .values()
-            .flat_map(|model| model.quads.iter().map(|q| q.texture.as_str()));
+            .flat_map(|variants| variants.values().map(|model| &**model))
+            .chain(
+                self.multipart
+                    .values()
+                    .flat_map(|entries| entries.iter().map(|entry| &*entry.model)),
+            )
+            .chain(self.item_models.values());
+        let quad_textures =
+            models.flat_map(|model| model.quads.iter().map(|quad| quad.texture.name()));
 
-        face_textures
-            .chain(baked_textures)
-            .chain(multipart_textures)
-            .chain(item_model_textures)
+        face_textures.chain(quad_textures)
     }
 }
 
@@ -391,7 +392,7 @@ impl<'a> BlockRenderView<'a> {
         for entry in entries {
             let when = entry.when.iter().map(|(k, v)| (k.as_str(), v.as_str()));
             if constraints_match(&block_state_data.properties, when) {
-                quads.extend(entry.quads.iter());
+                quads.extend(entry.model.quads.iter());
             }
         }
         if quads.is_empty() { None } else { Some(quads) }
@@ -600,7 +601,6 @@ fn save_cache(path: &Path, textures: &HashMap<String, FaceTextures>) {
 mod tint_tests {
     use azalea_inventory::ItemStack;
     use azalea_inventory::components::CustomModelData;
-    use azalea_registry::builtin::ItemKind;
 
     use super::*;
 

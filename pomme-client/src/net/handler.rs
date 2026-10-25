@@ -30,6 +30,9 @@ fn dialog_holder_reference(
 /// full. Blocking stalls this connection's reads and writes until the game
 /// thread drains, so on a multi-thread runtime the worker's other tasks are
 /// handed off first.
+// TODO: a stall past the server's keep-alive timeout (a long window drag on
+// Windows) leaves keep-alives unanswered; vanilla answers them off its main
+// thread even while it is frozen.
 pub(super) fn send_ordered(event_tx: &Sender<NetworkEvent>, event: NetworkEvent) {
     if let Err(TrySendError::Full(event)) = event_tx.try_send(event) {
         let block = || {
@@ -53,10 +56,13 @@ pub fn handle_game_packet(
 ) {
     match packet {
         ClientboundGamePacket::Waypoint(p) => {
-            let _ = event_tx.try_send(NetworkEvent::Waypoint {
-                operation: p.operation,
-                waypoint: p.waypoint.clone(),
-            });
+            send_ordered(
+                event_tx,
+                NetworkEvent::Waypoint {
+                    operation: p.operation,
+                    waypoint: p.waypoint.clone(),
+                },
+            );
         }
         ClientboundGamePacket::UpdateAdvancements(p) => {
             use azalea_protocol::packets::game::c_update_advancements::FrameType;
@@ -104,15 +110,16 @@ pub fn handle_game_packet(
                     )
                 })
                 .collect();
-            let _ = event_tx.try_send(NetworkEvent::AdvancementsUpdate(Box::new(
-                toast::AdvancementsUpdate {
+            send_ordered(
+                event_tx,
+                NetworkEvent::AdvancementsUpdate(Box::new(toast::AdvancementsUpdate {
                     reset: p.reset,
                     added,
                     removed: p.removed.iter().map(|id| id.to_string()).collect(),
                     progress,
                     show_advancements: p.show_advancements,
-                },
-            )));
+                })),
+            );
         }
         ClientboundGamePacket::SetEntityData(p) => {
             super::entity_data::handle_typed_entity_data(p, registry_holder, event_tx);
@@ -123,12 +130,15 @@ pub fn handle_game_packet(
                 p.id,
                 p.required
             );
-            let _ = event_tx.try_send(NetworkEvent::ResourcePackPush {
-                id: p.id,
-                url: p.url.clone(),
-                hash: p.hash.clone(),
-                required: p.required,
-            });
+            send_ordered(
+                event_tx,
+                NetworkEvent::ResourcePackPush {
+                    id: p.id,
+                    url: p.url.clone(),
+                    hash: p.hash.clone(),
+                    required: p.required,
+                },
+            );
             sender.send(ServerboundGamePacket::ResourcePack(
                 azalea_protocol::packets::game::s_resource_pack::ServerboundResourcePack {
                     id: p.id,
@@ -138,7 +148,7 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::ResourcePackPop(p) => {
             tracing::info!("Server popping resource pack {:?}", p.id);
-            let _ = event_tx.try_send(NetworkEvent::ResourcePackPop { id: p.id });
+            send_ordered(event_tx, NetworkEvent::ResourcePackPop { id: p.id });
         }
         ClientboundGamePacket::Commands(p) => {
             let tree = std::sync::Arc::new(CommandTree::from_packet(p));
@@ -148,15 +158,18 @@ pub fn handle_game_packet(
                 tree.root_child_names()
             );
             *shared_tree.lock() = Some(tree.clone());
-            let _ = event_tx.try_send(NetworkEvent::CommandTree { tree });
+            send_ordered(event_tx, NetworkEvent::CommandTree { tree });
         }
         ClientboundGamePacket::ShowDialog(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ShowDialog {
-                dialog: dialog_holder_reference(&p.dialog),
-            });
+            send_ordered(
+                event_tx,
+                NetworkEvent::ShowDialog {
+                    dialog: dialog_holder_reference(&p.dialog),
+                },
+            );
         }
         ClientboundGamePacket::ClearDialog(_) => {
-            let _ = event_tx.try_send(NetworkEvent::ClearDialog);
+            send_ordered(event_tx, NetworkEvent::ClearDialog);
         }
         ClientboundGamePacket::CustomChatCompletions(p) => {
             tracing::debug!(
@@ -326,7 +339,7 @@ pub fn handle_raw_game_packet(
     }
     match parse_level_particles(&mut Reader::new(payload)) {
         Ok(Some(event)) => {
-            let _ = event_tx.try_send(event);
+            send_ordered(event_tx, event);
         }
         Ok(None) => {}
         Err(e) => tracing::warn!("Skipping malformed LevelParticles packet: {e}"),

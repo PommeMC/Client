@@ -60,11 +60,14 @@ fn dispatch(
         BlockPacket::Event {
             pos, action, param, ..
         } => {
-            let _ = event_tx.try_send(NetworkEvent::BlockEvent {
-                pos: block_pos(pos),
-                action_id: action,
-                action_parameter: param,
-            });
+            send_ordered(
+                event_tx,
+                NetworkEvent::BlockEvent {
+                    pos: block_pos(pos),
+                    action_id: action,
+                    action_parameter: param,
+                },
+            );
         }
         BlockPacket::EntityData { pos, kind, tag } => {
             let Some(kind) = native_block_entity_type(kind) else {
@@ -74,20 +77,26 @@ fn dispatch(
             let Some(nbt) = block_entity_nbt(&tag) else {
                 return;
             };
-            let _ = event_tx.try_send(NetworkEvent::BlockEntityUpdate {
-                pos: block_pos(pos),
-                kind,
-                nbt,
-            });
+            send_ordered(
+                event_tx,
+                NetworkEvent::BlockEntityUpdate {
+                    pos: block_pos(pos),
+                    kind,
+                    nbt,
+                },
+            );
         }
         BlockPacket::LevelEvent {
             event, pos, data, ..
         } => {
-            let _ = event_tx.try_send(NetworkEvent::LevelEvent {
-                event_type: event as u32,
-                pos: block_pos(pos),
-                data: data as u32,
-            });
+            send_ordered(
+                event_tx,
+                NetworkEvent::LevelEvent {
+                    event_type: event as u32,
+                    pos: block_pos(pos),
+                    data: data as u32,
+                },
+            );
         }
     }
 }

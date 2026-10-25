@@ -102,7 +102,10 @@ impl Drop for ConnectionHandle {
 }
 
 pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> ConnectionHandle {
-    let (event_tx, event_rx) = crossbeam_channel::bounded(4096);
+    // Chunk events carry their section and light bytes (up to ~150 KB each),
+    // so the queue stays short; a full queue blocks the network task until the
+    // game thread drains it, which it does every frame.
+    let (event_tx, event_rx) = crossbeam_channel::bounded(256);
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<Outbound>();
     let game_packet_tx = packet_tx.clone();
     let packet_tx = PacketSender::new(packet_tx);
@@ -110,7 +113,7 @@ pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> Conn
         if let Err(e) = connect_to_server(args, event_tx.clone(), game_packet_tx, packet_rx).await {
             tracing::error!("Network error: {e}");
             let reason = friendly_error_reason(&e);
-            let _ = event_tx.try_send(NetworkEvent::Disconnected { reason });
+            send_ordered(&event_tx, NetworkEvent::Disconnected { reason });
         }
     });
     ConnectionHandle {
@@ -213,10 +216,13 @@ pub async fn connect_to_server(
     tracing::info!("Entering game state");
     let (key_pair_tx, key_pair_rx) = mpsc::unbounded_channel();
     let biome_colors = extract_biome_climate(&joined.configured.registries);
-    let _ = event_tx.try_send(NetworkEvent::BiomeColors {
-        colors: biome_colors,
-    });
-    let _ = event_tx.try_send(NetworkEvent::Connected);
+    send_ordered(
+        &event_tx,
+        NetworkEvent::BiomeColors {
+            colors: biome_colors,
+        },
+    );
+    send_ordered(&event_tx, NetworkEvent::Connected);
 
     game_loop(
         conn,
@@ -669,12 +675,15 @@ async fn config_sequence(
                     p.id,
                     p.required
                 );
-                let _ = event_tx.try_send(NetworkEvent::ResourcePackPush {
-                    id: p.id,
-                    url: p.url.clone(),
-                    hash: p.hash.clone(),
-                    required: p.required,
-                });
+                send_ordered(
+                    event_tx,
+                    NetworkEvent::ResourcePackPush {
+                        id: p.id,
+                        url: p.url.clone(),
+                        hash: p.hash.clone(),
+                        required: p.required,
+                    },
+                );
                 write_config_packet(
                     conn,
                     ServerboundConfigPacket::ResourcePack(
@@ -688,7 +697,7 @@ async fn config_sequence(
             }
             ClientboundConfigPacket::ResourcePackPop(p) => {
                 tracing::info!("Server popping resource pack {:?}", p.id);
-                let _ = event_tx.try_send(NetworkEvent::ResourcePackPop { id: p.id });
+                send_ordered(event_tx, NetworkEvent::ResourcePackPop { id: p.id });
             }
             _ => {
                 tracing::debug!("Config packet: {:?}", std::mem::discriminant(&packet));
@@ -851,7 +860,10 @@ fn dialog_tags(
 /// Forwards the `minecraft:block` tags of an `update_tags` packet, if it has
 /// any.
 fn forward_tags(event_tx: &Sender<NetworkEvent>, tags: &azalea_protocol::common::tags::TagMap) {
-    let _ = event_tx.try_send(NetworkEvent::ItemTags(super::recipe_wire::item_tags(tags)));
+    send_ordered(
+        event_tx,
+        NetworkEvent::ItemTags(super::recipe_wire::item_tags(tags)),
+    );
     let key: azalea_registry::identifier::Identifier = "minecraft:block".into();
     let Some(tags) = tags.0.get(&key) else {
         return;
@@ -860,7 +872,7 @@ fn forward_tags(event_tx: &Sender<NetworkEvent>, tags: &azalea_protocol::common:
         .iter()
         .map(|tag| (tag.name.to_string(), tag.elements.clone()))
         .collect();
-    let _ = event_tx.try_send(NetworkEvent::BlockTags { tags });
+    send_ordered(event_tx, NetworkEvent::BlockTags { tags });
 }
 
 fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -> Option<String> {
@@ -908,8 +920,14 @@ async fn game_loop(
 
     // Share the registries with the game loop for hashing predicted container
     // clicks.
-    let _ = event_tx.try_send(NetworkEvent::Registries(configured.registries.clone()));
-    let _ = event_tx.try_send(NetworkEvent::DialogRegistry(configured.dialogs.clone()));
+    send_ordered(
+        event_tx,
+        NetworkEvent::Registries(configured.registries.clone()),
+    );
+    send_ordered(
+        event_tx,
+        NetworkEvent::DialogRegistry(configured.dialogs.clone()),
+    );
 
     let translation = super::translate::active();
     let mut inbound_chat = super::chat::InboundChat::new(crate::version::session_protocol() >= 770);
@@ -1046,15 +1064,16 @@ async fn game_loop(
                     .await?;
                     if !std::sync::Arc::ptr_eq(&next.registries, &configured.registries) {
                         chat_types = chat_types_from_registry_holder(&next.registries);
-                        let _ =
-                            event_tx.try_send(NetworkEvent::Registries(next.registries.clone()));
-                        let _ = event_tx.try_send(NetworkEvent::BiomeColors {
-                            colors: extract_biome_climate(&next.registries),
-                        });
+                        send_ordered(event_tx, NetworkEvent::Registries(next.registries.clone()));
+                        send_ordered(
+                            event_tx,
+                            NetworkEvent::BiomeColors {
+                                colors: extract_biome_climate(&next.registries),
+                            },
+                        );
                     }
                     if !std::sync::Arc::ptr_eq(&next.dialogs, &configured.dialogs) {
-                        let _ =
-                            event_tx.try_send(NetworkEvent::DialogRegistry(next.dialogs.clone()));
+                        send_ordered(event_tx, NetworkEvent::DialogRegistry(next.dialogs.clone()));
                     }
                     configured = next;
                     continue;
@@ -1068,8 +1087,10 @@ async fn game_loop(
                     if let Some(tags) = dialog_tags(&p.tags) {
                         configured.dialogs =
                             std::sync::Arc::new(configured.dialogs.with_tags(tags));
-                        let _ = event_tx
-                            .try_send(NetworkEvent::DialogRegistry(configured.dialogs.clone()));
+                        send_ordered(
+                            event_tx,
+                            NetworkEvent::DialogRegistry(configured.dialogs.clone()),
+                        );
                     }
                     forward_tags(event_tx, &p.tags);
                 }

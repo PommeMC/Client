@@ -1,6 +1,4 @@
 use std::ffi::{CStr, c_char};
-use std::mem::ManuallyDrop;
-use std::sync::{Arc, Mutex};
 
 use pomme_gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 #[cfg(debug_assertions)]
@@ -15,7 +13,7 @@ use raw_window_handle::HasWindowHandle;
 use thiserror::Error;
 use winit::window::Window;
 
-use super::MAX_FRAMES_IN_FLIGHT;
+use crate::renderer::rhi::IndirectDrawFeatures;
 
 #[derive(Error, Debug)]
 pub enum ContextError {
@@ -27,6 +25,9 @@ pub enum ContextError {
 
     #[error("allocator error: {0}")]
     Allocator(#[from] pomme_gpu_allocator::AllocationError),
+
+    #[error("{0}")]
+    Texture(String),
 
     #[error("surface error: {0}")]
     HandleError(#[from] raw_window_handle::HandleError),
@@ -49,38 +50,20 @@ const DEVICE_EXTENSIONS: &[&CStr] = &[
     khr::portability_subset::NAME,
 ];
 
-/// The optional features behind the chunk pass's indirect draws.
-#[derive(Clone, Copy, Debug)]
-pub struct IndirectDrawFeatures {
-    /// `vkCmdDrawIndexedIndirectCount` (core in 1.2). Without it the whole
-    /// draw list is drawn, its unfilled slots zeroed into no-op draws.
-    pub count: bool,
-    /// `multiDrawIndirect`. Without it each draw-list slot is its own call.
-    pub multi_draw: bool,
-}
-
 /// Optional, enabled only when the device supports both.
 const PRESENT_WAIT_EXTENSIONS: &[&CStr] = &[khr::present_id::NAME, khr::present_wait::NAME];
 
-pub struct VulkanContext {
+pub struct Context {
     pub instance: vk::Instance,
     pub surface: vk::SurfaceKHR,
-    pub allocator: ManuallyDrop<Arc<Mutex<Allocator>>>,
 
     pub physical_device: vk::PhysicalDevice,
-    pub device: vk::Device,
+    pub device: super::Device,
 
-    pub graphics_queue: vk::Queue,
     pub graphics_family: u32,
     pub present_queue: vk::Queue,
     pub present_family: u32,
 
-    pub command_pool: vk::CommandPool,
-    pub command_buffers: [vk::CommandBuffer; MAX_FRAMES_IN_FLIGHT],
-
-    pub image_available_semaphores: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT],
-    pub in_flight_fences: [vk::Fence; MAX_FRAMES_IN_FLIGHT],
-    pub frame_index: usize,
     pub present_wait: bool,
     pub indirect_draw: IndirectDrawFeatures,
 
@@ -88,10 +71,10 @@ pub struct VulkanContext {
     debug_messenger: vk::DebugUtilsMessengerEXT,
 
     pub gpu_name: String,
-    pub vulkan_version: String,
+    pub api_version: String,
 }
 
-impl VulkanContext {
+impl Context {
     pub fn new(window: &Window) -> Result<Self, ContextError> {
         #[cfg(target_os = "android")]
         let required = [
@@ -180,7 +163,7 @@ impl VulkanContext {
         let (physical_device, graphics_family, present_family) =
             pick_physical_device(&instance, surface)?;
 
-        let (gpu_name, vulkan_version) = {
+        let (gpu_name, api_version) = {
             let props = physical_device.get_properties();
             let name = device_name(&props);
             let v = props.api_version;
@@ -192,7 +175,7 @@ impl VulkanContext {
             );
             (name, ver)
         };
-        tracing::info!("GPU: {gpu_name} ({vulkan_version})");
+        tracing::info!("GPU: {gpu_name} ({api_version})");
 
         let queue_priority = 1.0f32;
 
@@ -289,7 +272,6 @@ impl VulkanContext {
             buffer_device_address: false,
             allocation_sizes: Default::default(),
         })?;
-        let allocator = ManuallyDrop::new(Arc::new(Mutex::new(allocator)));
 
         let pool_info = vk::CommandPoolCreateInfo {
             flags: vk::CommandPoolCreateFlags::ResetCommandBuffer,
@@ -298,50 +280,26 @@ impl VulkanContext {
         };
         let command_pool = device.create_command_pool(&pool_info, None)?;
 
-        let alloc_info = vk::CommandBufferAllocateInfo {
-            command_pool,
-            level: vk::CommandBufferLevel::Primary,
-            command_buffer_count: MAX_FRAMES_IN_FLIGHT as u32,
-            ..Default::default()
-        };
-        let mut command_buffers = [vk::CommandBuffer::default(); MAX_FRAMES_IN_FLIGHT];
-        unsafe { device.allocate_command_buffers(&alloc_info, &mut command_buffers)? };
-
-        let sem_info = vk::SemaphoreCreateInfo::default();
-        let fence_info = vk::FenceCreateInfo {
-            flags: vk::FenceCreateFlags::Signaled,
-            ..Default::default()
-        };
-
-        let mut image_available_semaphores = [vk::Semaphore::default(); MAX_FRAMES_IN_FLIGHT];
-        let mut in_flight_fences = [vk::Fence::default(); MAX_FRAMES_IN_FLIGHT];
-
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            image_available_semaphores[i] = device.create_semaphore(&sem_info, None)?;
-            in_flight_fences[i] = device.create_fence(&fence_info, None)?;
-        }
-
         Ok(Self {
             instance,
             surface,
-            allocator,
             physical_device,
-            device,
-            graphics_queue,
+            device: super::Device::new(
+                device,
+                &physical_device,
+                allocator,
+                graphics_queue,
+                command_pool,
+            ),
             graphics_family,
             present_queue,
             present_family,
-            command_pool,
-            command_buffers,
-            image_available_semaphores,
-            in_flight_fences,
-            frame_index: 0,
             present_wait,
             indirect_draw,
             #[cfg(debug_assertions)]
             debug_messenger,
             gpu_name,
-            vulkan_version,
+            api_version,
         })
     }
 
@@ -357,28 +315,18 @@ impl VulkanContext {
         Ok(())
     }
 
-    pub fn advance_frame(&mut self) {
-        self.frame_index = (self.frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
+    pub(super) fn queues(&self) -> super::Queues {
+        super::Queues {
+            graphics: self.device.queue,
+            present: self.present_queue,
+        }
     }
 }
 
-impl Drop for VulkanContext {
+impl Drop for Context {
     fn drop(&mut self) {
         unsafe {
-            let _ = self.device.wait_idle();
-
-            for &fence in &self.in_flight_fences {
-                self.device.destroy_fence(fence, None);
-            }
-            for &sem in &self.image_available_semaphores {
-                self.device.destroy_semaphore(sem, None);
-            }
-
-            self.device.destroy_command_pool(self.command_pool, None);
-
-            ManuallyDrop::drop(&mut self.allocator);
-
-            self.device.destroy(None);
+            self.device.destroy();
 
             #[cfg(debug_assertions)]
             if self.debug_messenger != vk::DebugUtilsMessengerEXT::null() {

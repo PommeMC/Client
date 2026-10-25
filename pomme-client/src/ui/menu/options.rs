@@ -1507,8 +1507,7 @@ impl MainMenu {
                         self.save_settings(key_bindings);
                     }
                     if label.starts_with("Main Hand:") {
-                        self.skin_main_hand_right = !self.skin_main_hand_right;
-                        self.save_settings(key_bindings);
+                        self.set_main_hand_right(!self.skin_main_hand_right, key_bindings);
                     }
                 }
             }

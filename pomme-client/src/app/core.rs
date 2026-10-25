@@ -23,12 +23,13 @@ use crate::attribute::{AttributeInstance, AttributeKind, AttributeMap};
 use crate::dirs::DataDirs;
 use crate::discord::DiscordPresence;
 use crate::entity::components::{LookDirection, Position, Velocity};
-use crate::net::NetworkEvent;
 use crate::net::connection::ConnectionHandle;
+use crate::net::{DimensionInfo, NetworkEvent};
 use crate::physics::movement;
 use crate::player::LocalPlayer;
 use crate::player::tab_list::{PlayerChatValidation, TabList};
 use crate::renderer::Renderer;
+use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::menu::{
     CREDITS_KEY_CTRL_L, CREDITS_KEY_CTRL_R, CREDITS_KEY_SPACE, CREDITS_KEY_UP, MainMenu, MenuInput,
@@ -358,6 +359,198 @@ fn hurt_entity(game: &mut GameState, id: i32, dir: Option<f32>) {
     }
 }
 
+/// The level's chunk, light and position updates, shared by the windowed
+/// client and the headless chunk benchmark; the caller does any renderer work.
+impl GameState {
+    pub fn select_protocol(&mut self, protocol: i32) {
+        let previous_slot = self.block_registry.block_state_table().table_slot();
+        self.block_registry.select_protocol(protocol);
+        if previous_slot != self.block_registry.block_state_table().table_slot() {
+            self.mesh_dispatcher = self
+                .mesh_dispatcher
+                .recreate_for_version(self.block_registry.owned_render_view());
+        }
+    }
+
+    pub fn set_biome_climate(
+        &mut self,
+        colors: HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
+    ) {
+        tracing::info!("Received {} biome climate entries", colors.len());
+        self.biome_climate = Arc::new(colors);
+        self.mesh_dispatcher
+            .set_biome_climate(Arc::clone(&self.biome_climate));
+    }
+
+    /// Resets the level for a new dimension, with a mesh dispatcher for its
+    /// shading. The caller clears the old meshes.
+    pub fn enter_dimension(
+        &mut self,
+        dim: DimensionInfo,
+        render_distance: u32,
+        mesh_source: &impl MeshSource,
+    ) {
+        let DimensionInfo {
+            height,
+            min_y,
+            has_skylight,
+            cardinal_light,
+            ambient_light,
+            overworld_day,
+            default_clock,
+        } = dim;
+        tracing::info!(
+            "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}, cardinal_light={cardinal_light:?}"
+        );
+        self.cardinal_light = cardinal_light;
+        self.ambient_light = ambient_light;
+        self.overworld_day = overworld_day;
+        self.default_clock = default_clock;
+        self.chunk_store = ChunkStore::new_with_dimension(render_distance, height, min_y);
+        self.light_engine = crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
+        // The old level's block entities, moving blocks among them.
+        self.block_entity_anim = Default::default();
+        self.position_set = false;
+        // Login/respawn recreate vanilla's LocalPlayer, resetting
+        // the XP display sentinel; waypoints persist.
+        self.xp_display_start_tick = i64::MIN;
+        self.controlled_vehicle_id = None;
+        self.riding_vehicle_id = None;
+        self.player.jump_riding_ticks = 0;
+        self.player.jump_riding_scale = 0.0;
+        self.player.reset_hurt_state();
+        // The meshes went with the old level, so their bookkeeping
+        // has to go too, or the new level's camera section reads as
+        // already meshed.
+        self.section_vis.clear();
+        self.section_vis_epoch.clear();
+        self.meshed.clear();
+        self.compiled.clear();
+        self.mesh_dispatcher = mesh_source.create_mesh_dispatcher(
+            self.block_registry.owned_render_view(),
+            Arc::clone(&self.biome_climate),
+            None,
+            cardinal_light,
+        );
+    }
+
+    pub fn load_chunk(
+        &mut self,
+        pos: crate::position::ChunkPos,
+        data: &[u8],
+        heightmaps: &[(crate::world::chunk::HeightmapKind, Box<[u64]>)],
+        light: &crate::net::PacketLightData,
+    ) {
+        let biomes = crate::net::connection::biome_count(&self.registries);
+        if let Err(e) = self.chunk_store.load_chunk(
+            pos,
+            data,
+            heightmaps,
+            biomes,
+            self.block_registry.block_state_table(),
+        ) {
+            tracing::error!("Failed to load chunk [{}, {}]: {e}", pos.x, pos.z);
+            return;
+        }
+        self.light_engine.on_chunk_loaded(
+            &mut self.chunk_store,
+            self.block_registry.block_state_table(),
+            (pos.x, pos.z),
+        );
+        // The column meshes once its queued light applies (vanilla
+        // schedules the rebuild from enableChunkLight, not here).
+        queue_light_apply(self, pos, light, true);
+    }
+
+    pub fn apply_light_update(
+        &mut self,
+        pos: crate::position::ChunkPos,
+        light: &crate::net::PacketLightData,
+    ) {
+        queue_light_apply(self, pos, light, false);
+    }
+
+    /// The caller removes the column's mesh.
+    pub fn unload_chunk(&mut self, pos: crate::position::ChunkPos) {
+        self.chunk_store.unload_chunk(&pos);
+        self.block_entity_anim.drop_chunk(pos.x, pos.z);
+        self.light_engine.on_chunk_unloaded((pos.x, pos.z));
+        self.light_engine
+            .queue_task(crate::world::light::LightTask::Remove {
+                pos: (pos.x, pos.z),
+            });
+        self.content_gen.remove(&pos);
+        self.meshed.remove(&pos);
+        self.compiled.remove(&pos);
+        self.vis_mask.remove(&pos);
+        self.vis_tiers.remove(&pos);
+        self.section_gen.retain(|(p, _), _| *p != pos);
+        self.section_vis.retain(|(p, _), _| *p != pos);
+        self.section_vis_epoch.retain(|(p, _), _| *p != pos);
+    }
+
+    /// Vanilla `handleMovePlayer`. Returns whether the player moved, for the
+    /// caller to reset the camera.
+    pub fn apply_player_position(
+        &mut self,
+        connection: &ConnectionHandle,
+        id: u32,
+        change: &pomme_protocol::entity::PositionMoveRotation,
+        relative: &pomme_protocol::entity::Relative,
+    ) -> bool {
+        let is_passenger = self.riding_vehicle_id.is_some();
+        let correction =
+            resolve_player_position_correction(&self.player, change, relative, is_passenger);
+        if let Some(correction) = &correction {
+            self.player.position = correction.position;
+            self.player.prev_position = correction.prev_position;
+            self.player.velocity = correction.velocity;
+            self.player.look_dir = correction.look_dir;
+            self.player.prev_look_dir = correction.prev_look_dir;
+
+            let to_chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
+            self.chunk_store.set_center(crate::position::ChunkPos::new(
+                to_chunk_coord(correction.position.x),
+                to_chunk_coord(correction.position.z),
+            ));
+
+            if !self.position_set {
+                self.position_set = true;
+                tracing::info!(
+                    "Player position set to ({:.1}, {:.1}, {:.1})",
+                    correction.position.x,
+                    correction.position.y,
+                    correction.position.z
+                );
+            }
+        }
+
+        // Vanilla `handleMovePlayer` acks and echoes the pose even
+        // when mounted (a 26.3 wire folds the two).
+        connection.packet_tx.send(ServerboundGamePacket::AcceptTeleportation(
+            azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation { id },
+        ));
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::MovePlayerPosRot(
+            azalea_protocol::packets::game::s_move_player_pos_rot::ServerboundMovePlayerPosRot {
+                pos: self.player.position.into(),
+                look_direction: self.player.look_dir.into(),
+                flags: Default::default(),
+            },
+        ));
+        self.interaction.on_teleport();
+        correction.is_some()
+    }
+
+    pub fn set_server_view_distance(&mut self, distance: u32) {
+        tracing::info!("Server view distance: {distance}");
+        if let Some(d) = server_view_distance_update(distance, self.last_render_distance) {
+            self.server_render_distance = d;
+        }
+    }
+}
+
 /// Queues a column's packet light for the per-tick apply. Chunk loads enable
 /// the column, standalone light updates are corrections.
 fn queue_light_apply(
@@ -640,6 +833,7 @@ pub struct AppCore {
     pub user: UserData,
     pub presence: Option<DiscordPresence>,
     pub display_mode: DisplayMode,
+    display_mode_override: Option<DisplayMode>,
     /// The windowed size the window opens at (`--width`/`--height`).
     pub window_size: winit::dpi::LogicalSize<u32>,
     pub input: InputState,
@@ -809,6 +1003,7 @@ impl AppCore {
             user,
             presence,
             display_mode,
+            display_mode_override: None,
             window_size,
             input,
             menu,
@@ -879,9 +1074,29 @@ impl AppCore {
         }
     }
 
+    /// Uses `mode` for the window and every sync after, whatever the saved
+    /// one is.
+    pub fn override_display_mode(&mut self, mode: DisplayMode) {
+        self.display_mode = mode;
+        self.display_mode_override = Some(mode);
+    }
+
+    /// The fullscreen key: cycles and saves the display mode, unless an
+    /// override holds it.
+    pub fn toggle_display_mode(&mut self, window: &Window) {
+        if self.display_mode_override.is_some() {
+            return;
+        }
+        let display_mode = self.display_mode.cycle();
+        self.menu
+            .set_display_mode(display_mode, &self.input.key_bindings);
+        self.sync_display_mode(window);
+    }
+
     pub fn sync_display_mode(&mut self, window: &Window) {
-        if self.menu.display_mode != self.display_mode {
-            self.display_mode = self.menu.display_mode;
+        let wanted = self.display_mode_override.unwrap_or(self.menu.display_mode);
+        if wanted != self.display_mode {
+            self.display_mode = wanted;
             self.apply_display_mode(window);
         }
     }
@@ -941,6 +1156,7 @@ impl AppCore {
     /// Every return from a world or server, before the title screen shows.
     /// Vanilla builds a fresh `TitleScreen` here, which rolls a new splash.
     pub fn return_to_menu(&mut self, gfx: &mut Gfx) {
+        self.menu.restore_bench_render_distance();
         self.clear_server_resource_packs(&mut gfx.renderer);
         gfx.renderer.clear_chunk_meshes();
         if let Some(p) = &mut self.presence {
@@ -1356,7 +1572,7 @@ impl AppCore {
         let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
         game.mesh_dispatcher = mesh_dispatcher;
         game.particle_store = crate::particle::ParticleStore::new(
-            renderer.atlas_uv_map().clone(),
+            renderer.uv_map().clone(),
             grass,
             foliage,
             dry_foliage,
@@ -1466,16 +1682,7 @@ impl AppCore {
         // before this frame's ticks.
         while let Ok(event) = rx.try_recv() {
             match event {
-                NetworkEvent::ProtocolSelected { protocol } => {
-                    let previous_slot = game.block_registry.block_state_table().table_slot();
-                    game.block_registry.select_protocol(protocol);
-                    let block_state_table = game.block_registry.block_state_table();
-                    if previous_slot != block_state_table.table_slot() {
-                        game.mesh_dispatcher = game
-                            .mesh_dispatcher
-                            .recreate_for_version(game.block_registry.owned_render_view());
-                    }
-                }
+                NetworkEvent::ProtocolSelected { protocol } => game.select_protocol(protocol),
                 NetworkEvent::Connected => {
                     if let Some(state) = connect_phase.as_deref_mut() {
                         tracing::info!("Connected to server");
@@ -1491,58 +1698,10 @@ impl AppCore {
                         tracker.loading_packets_received();
                     }
                 }
-                NetworkEvent::BiomeColors { colors } => {
-                    tracing::info!("Received {} biome climate entries", colors.len());
-                    game.biome_climate = Arc::new(colors);
-                    game.mesh_dispatcher
-                        .set_biome_climate(Arc::clone(&game.biome_climate));
-                }
-                NetworkEvent::DimensionInfo {
-                    height,
-                    min_y,
-                    has_skylight,
-                    cardinal_light,
-                    ambient_light,
-                    overworld_day,
-                    default_clock,
-                } => {
-                    tracing::info!(
-                        "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}, cardinal_light={cardinal_light:?}"
-                    );
-                    game.cardinal_light = cardinal_light;
-                    game.ambient_light = ambient_light;
-                    game.overworld_day = overworld_day;
-                    game.default_clock = default_clock;
-                    game.chunk_store =
-                        ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
-                    game.light_engine =
-                        crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
-                    // The old level's block entities, moving blocks among them.
-                    game.block_entity_anim = Default::default();
-                    game.position_set = false;
-                    // Login/respawn recreate vanilla's LocalPlayer, resetting
-                    // the XP display sentinel; waypoints persist.
-                    game.xp_display_start_tick = i64::MIN;
-                    game.controlled_vehicle_id = None;
-                    game.riding_vehicle_id = None;
-                    game.player.jump_riding_ticks = 0;
-                    game.player.jump_riding_scale = 0.0;
-                    game.player.reset_hurt_state();
-
+                NetworkEvent::BiomeColors { colors } => game.set_biome_climate(colors),
+                NetworkEvent::DimensionInfo(dim) => {
+                    game.enter_dimension(dim, self.menu.render_distance, &*renderer);
                     renderer.clear_chunk_meshes();
-                    // The meshes went with the old level, so their bookkeeping
-                    // has to go too, or the new level's camera section reads as
-                    // already meshed.
-                    game.section_vis.clear();
-                    game.section_vis_epoch.clear();
-                    game.meshed.clear();
-                    game.compiled.clear();
-                    game.mesh_dispatcher = renderer.create_mesh_dispatcher(
-                        game.block_registry.owned_render_view(),
-                        Arc::clone(&game.biome_climate),
-                        None,
-                        cardinal_light,
-                    );
                 }
                 NetworkEvent::DimensionName { name } => {
                     game.dimension = name;
@@ -1552,47 +1711,10 @@ impl AppCore {
                     data,
                     heightmaps,
                     light,
-                } => {
-                    let biomes = crate::net::connection::biome_count(&game.registries);
-                    if let Err(e) = game.chunk_store.load_chunk(
-                        pos,
-                        &data,
-                        &heightmaps,
-                        biomes,
-                        game.block_registry.block_state_table(),
-                    ) {
-                        tracing::error!("Failed to load chunk [{}, {}]: {e}", pos.x, pos.z);
-                        continue;
-                    }
-                    game.light_engine.on_chunk_loaded(
-                        &mut game.chunk_store,
-                        game.block_registry.block_state_table(),
-                        (pos.x, pos.z),
-                    );
-                    // The column meshes once its queued light applies (vanilla
-                    // schedules the rebuild from enableChunkLight, not here).
-                    queue_light_apply(game, pos, &light, true);
-                }
-                NetworkEvent::LightUpdate { pos, light } => {
-                    queue_light_apply(game, pos, &light, false);
-                }
+                } => game.load_chunk(pos, &data, &heightmaps, &light),
+                NetworkEvent::LightUpdate { pos, light } => game.apply_light_update(pos, &light),
                 NetworkEvent::ChunkUnloaded { pos } => {
-                    game.chunk_store.unload_chunk(&pos);
-                    game.block_entity_anim.drop_chunk(pos.x, pos.z);
-                    game.light_engine.on_chunk_unloaded((pos.x, pos.z));
-                    game.light_engine
-                        .queue_task(crate::world::light::LightTask::Remove {
-                            pos: (pos.x, pos.z),
-                        });
-                    game.content_gen.remove(&pos);
-                    game.meshed.remove(&pos);
-                    game.compiled.remove(&pos);
-                    game.vis_mask.remove(&pos);
-                    game.vis_tiers.remove(&pos);
-                    game.section_gen.retain(|(p, _), _| *p != pos);
-                    game.section_vis.retain(|(p, _), _| *p != pos);
-                    game.section_vis_epoch.retain(|(p, _), _| *p != pos);
-
+                    game.unload_chunk(pos);
                     renderer.remove_chunk_mesh(&pos);
                 }
                 NetworkEvent::ChunkCacheCenter { x, z } => {
@@ -1600,63 +1722,18 @@ impl AppCore {
                     game.chunk_store
                         .set_center(crate::position::ChunkPos::new(x, z));
                 }
-                NetworkEvent::Ping { id } => {
-                    connection.packet_tx.send(ServerboundGamePacket::Pong(
-                        azalea_protocol::packets::game::s_pong::ServerboundPong { id },
-                    ));
-                }
+                NetworkEvent::Ping { id } => AppCore::send_pong(connection, id),
                 NetworkEvent::PlayerPosition {
                     id,
                     change,
                     relative,
                 } => {
-                    let is_passenger = game.riding_vehicle_id.is_some();
-                    if let Some(correction) = resolve_player_position_correction(
-                        &game.player,
-                        &change,
-                        &relative,
-                        is_passenger,
-                    ) {
-                        game.player.position = correction.position;
-                        game.player.prev_position = correction.prev_position;
-                        game.player.velocity = correction.velocity;
-                        game.player.look_dir = correction.look_dir;
-                        game.player.prev_look_dir = correction.prev_look_dir;
-
-                        let to_chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
-                        game.chunk_store.set_center(crate::position::ChunkPos::new(
-                            to_chunk_coord(correction.position.x),
-                            to_chunk_coord(correction.position.z),
-                        ));
+                    if game.apply_player_position(connection, id, &change, &relative) {
                         // The camera is the eye, as `sync_camera_pos` keeps it
                         // every frame; the feet would seed it a block and a half
                         // low until the first in-game frame.
-                        renderer.reset_camera(game.player.eye_pos(), correction.look_dir);
-
-                        if !game.position_set {
-                            game.position_set = true;
-                            tracing::info!(
-                                "Player position set to ({:.1}, {:.1}, {:.1})",
-                                correction.position.x,
-                                correction.position.y,
-                                correction.position.z
-                            );
-                        }
+                        renderer.reset_camera(game.player.eye_pos(), game.player.look_dir);
                     }
-
-                    // Vanilla `handleMovePlayer` acks and echoes the pose even
-                    // when mounted (a 26.3 wire folds the two).
-                    connection.packet_tx.send(ServerboundGamePacket::AcceptTeleportation(
-                        azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation { id },
-                    ));
-                    connection.packet_tx.send(ServerboundGamePacket::MovePlayerPosRot(
-                        azalea_protocol::packets::game::s_move_player_pos_rot::ServerboundMovePlayerPosRot {
-                            pos: game.player.position.into(),
-                            look_direction: game.player.look_dir.into(),
-                            flags: Default::default(),
-                        },
-                    ));
-                    game.interaction.on_teleport();
                 }
                 NetworkEvent::PlayerRotation {
                     y_rot,
@@ -2364,12 +2441,7 @@ impl AppCore {
                     game.player.walk_speed = walking_speed;
                 }
                 NetworkEvent::ServerViewDistance { distance } => {
-                    tracing::info!("Server view distance: {distance}");
-                    if let Some(d) =
-                        server_view_distance_update(distance, game.last_render_distance)
-                    {
-                        game.server_render_distance = d;
-                    }
+                    game.set_server_view_distance(distance)
                 }
                 NetworkEvent::ServerSimulationDistance { distance } => {
                     tracing::info!("Server simulation distance: {distance}");
@@ -2981,7 +3053,7 @@ impl AppCore {
     /// client tick, in the loading phase as well as in game, so a respawn or a
     /// dimension change waits and reports again.
     pub fn tick_level_load(
-        renderer: &Renderer,
+        camera: glam::DVec3,
         connection: &ConnectionHandle,
         game: &mut GameState,
     ) {
@@ -2997,7 +3069,7 @@ impl AppCore {
         let max_y = min_y + game.chunk_store.height() as i32 - 1;
         let outside_build_height = |y: i32| y < min_y || y > max_y;
         // Vanilla reads `gameRenderer.mainCamera().blockPosition()`.
-        let camera_block = renderer.camera_render_position().floor().as_ivec3();
+        let camera_block = camera.floor().as_ivec3();
 
         tracker.tick_client_load(
             now,
@@ -3025,6 +3097,12 @@ impl AppCore {
             .send(ServerboundGamePacket::PlayerLoaded(
                 azalea_protocol::packets::game::s_player_loaded::ServerboundPlayerLoaded,
             ));
+    }
+
+    pub fn send_pong(connection: &ConnectionHandle, id: u32) {
+        connection.packet_tx.send(ServerboundGamePacket::Pong(
+            azalea_protocol::packets::game::s_pong::ServerboundPong { id },
+        ));
     }
 
     /// Marks the end of the client tick (1.21.2+). Must be the last packet of
@@ -3137,13 +3215,13 @@ impl AppCore {
         if game.dead {
             game.player.tick_death();
             let removed_this_tick = game.player.death_animation_finished();
-            let held_stack = game
+            let hand_stacks = game
                 .player
                 .inventory
-                .held_stack(self.input.selected_slot())
-                .cloned();
+                .hand_stacks(self.input.selected_slot())
+                .map(Option::<&_>::cloned);
             game.interaction.tick_using_item(
-                held_stack.as_ref(),
+                hand_stacks.each_ref().map(Option::as_ref),
                 &connection.packet_tx,
                 &self.audio,
                 &game.chunk_store,
@@ -3182,7 +3260,7 @@ impl AppCore {
                 game.player.tick_bob(dx, dz, true);
             }
             game.interaction
-                .tick_dead_player_state(held_stack.as_ref(), !removed_this_tick);
+                .tick_dead_player_state(hand_stacks[0].as_ref(), !removed_this_tick);
 
             let neutral = InputState::released();
             Self::send_abilities_packet(connection, game);
@@ -3220,7 +3298,10 @@ impl AppCore {
                         .inventory
                         .remove_from_selected(self.input.selected_slot(), whole_stack)
                     {
-                        crate::player::interaction::send_use_swing(&connection.packet_tx);
+                        crate::player::interaction::send_use_swing(
+                            &connection.packet_tx,
+                            crate::player::interaction::InteractionHand::MainHand,
+                        );
                     }
                 }
             }
@@ -3304,11 +3385,14 @@ impl AppCore {
 
         // Vanilla `Minecraft.tick`: pick and keybinds run before the entity
         // tick, so interaction packets precede the movement packet.
-        let held_stack = game
+        let hand_stacks = game
             .player
             .inventory
-            .held_stack(input.selected_slot())
-            .cloned();
+            .hand_stacks(input.selected_slot())
+            .map(Option::<&_>::cloned);
+        let hand_stacks = hand_stacks.each_ref().map(Option::as_ref);
+        let held_stack = hand_stacks[0];
+        let creative = crate::player::is_creative(game.player.game_mode);
         let held_item = held_stack
             .as_ref()
             .map(|data| crate::player::inventory::item_resource_name(data.kind));
@@ -3319,11 +3403,11 @@ impl AppCore {
             &game.chunk_store,
             &game.entity_store,
             &game.player.attributes,
-            crate::player::is_creative(game.player.game_mode),
+            creative,
             held_item.as_deref(),
         );
         let legacy_mining = crate::tool::legacy_mining(
-            held_stack.as_ref(),
+            held_stack,
             game.player
                 .inventory
                 .armor_slots()
@@ -3331,10 +3415,20 @@ impl AppCore {
                 .filter_map(|stack| stack.as_present()),
             game.block_registry.protocol(),
         );
-        let place_block = held_item
-            .as_deref()
-            .and_then(|name| game.block_registry.placeable_block_for_item(name));
-        let hands_empty = held_stack.is_none() && game.player.inventory.offhand().is_empty();
+        let hands = hand_stacks.map(|stack| crate::player::interaction::HandItem {
+            stack,
+            place_block: stack.and_then(|s| {
+                game.block_registry
+                    .placeable_block_for_item(&crate::player::inventory::item_resource_name(s.kind))
+            }),
+            worn: worn_for(
+                stack,
+                &game.player.inventory,
+                input.selected_slot(),
+                creative,
+                &game.registries,
+            ),
+        });
         let player_aabb = game.player.bounding_box();
         let mut effects = crate::player::interaction::BreakEffects {
             particles: &mut game.particle_store,
@@ -3352,20 +3446,18 @@ impl AppCore {
             game.player.eye_pos().into(),
             game.player.look_dir,
             game.player.on_ground,
-            crate::player::is_creative(game.player.game_mode),
+            creative,
             game.player.food,
             input.selected_slot(),
-            held_stack.as_ref(),
+            hands,
             &game.player.attributes,
             &game.player.effects,
             game.player.eyes_in_water,
             legacy_mining,
-            place_block,
-            hands_empty,
             &mut effects,
         );
         game.interaction.tick_using_item(
-            held_stack.as_ref(),
+            hand_stacks,
             &connection.packet_tx,
             &self.audio,
             &game.chunk_store,
@@ -3407,7 +3499,7 @@ impl AppCore {
         game.player.drop_spam.tick();
 
         game.interaction
-            .tick_player_state(input.is_cursor_captured(), held_stack.as_ref());
+            .tick_player_state(input.is_cursor_captured(), held_stack);
 
         Self::send_abilities_packet(connection, game);
         Self::send_input_packet(input, connection, game);
@@ -3728,6 +3820,44 @@ pub(crate) fn chunk_lod(
         1
     } else {
         2
+    }
+}
+
+/// The [`Worn`](crate::player::interaction::Worn) for `stack`, if it's a
+/// swappable equippable.
+fn worn_for<'a>(
+    stack: Option<&azalea_inventory::ItemStackData>,
+    inventory: &'a crate::player::inventory::Inventory,
+    selected: u8,
+    creative: bool,
+    registries: &azalea_core::registry_holder::RegistryHolder,
+) -> crate::player::interaction::Worn<'a> {
+    use azalea_core::registry_holder::components::PreventArmorChange;
+    use azalea_inventory::components::{Enchantments, Equippable};
+    use azalea_registry::DataRegistry;
+
+    let Some(equippable) = stack
+        .and_then(|s| s.get_component::<Equippable>())
+        .filter(|e| e.swappable)
+    else {
+        return Default::default();
+    };
+    let worn = inventory.equipped(equippable.slot, selected);
+    let locked = !creative
+        && worn
+            .and_then(|w| w.get_component::<Enchantments>())
+            .is_some_and(|e| {
+                e.levels.keys().any(|enchantment| {
+                    registries
+                        .enchantment
+                        .map
+                        .get_index(enchantment.protocol_id() as usize)
+                        .is_some_and(|(_, data)| data.get::<PreventArmorChange>().is_some())
+                })
+            });
+    crate::player::interaction::Worn {
+        stack: worn,
+        locked,
     }
 }
 

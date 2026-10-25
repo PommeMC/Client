@@ -9,6 +9,7 @@ use thiserror::Error;
 use super::block_entity::StoredBlockEntity;
 use crate::position::{BlockPos, ChunkPos};
 use crate::world::block::BlockStateTable;
+use crate::world::light::DataLayer;
 
 pub(crate) const OVERWORLD_HEIGHT: u32 = 384;
 pub(crate) const OVERWORLD_MIN_Y: i32 = -64;
@@ -45,11 +46,13 @@ pub enum ChunkError {
 
 /// A column's published light, written by the light engine and snapshotted
 /// (via `Arc`) by the mesher. Sections are light sections: one padding
-/// section below the world, `height/16` block sections, one above.
+/// section below the world, `height/16` block sections, one above. Layers
+/// share their bytes with the engine's until it writes them, and uniform
+/// layers hold none.
 #[derive(Clone)]
 pub struct ChunkLightData {
-    pub sky_sections: Vec<Option<Box<[u8; 2048]>>>,
-    pub block_sections: Vec<Option<Box<[u8; 2048]>>>,
+    pub(crate) sky_sections: Vec<Option<DataLayer>>,
+    pub(crate) block_sections: Vec<Option<DataLayer>>,
     pub min_y: i32,
     /// Whether the dimension has skylight; without it sky reads 0 (vanilla's
     /// dummy sky listener).
@@ -77,12 +80,8 @@ impl ChunkLightData {
         }
         let mut local_y = (y - self.min_y).rem_euclid(16);
         loop {
-            if let Some(data) = usize::try_from(index)
-                .ok()
-                .and_then(|i| self.sky_sections.get(i))
-                .and_then(Option::as_deref)
-            {
-                return Self::nibble(data, x, local_y, z);
+            if let Some(layer) = Self::layer(&self.sky_sections, index) {
+                return Self::read(layer, x, local_y, z);
             }
             index += 1;
             if index >= top {
@@ -95,15 +94,9 @@ impl ChunkLightData {
     }
 
     pub fn get_block_light(&self, x: i32, y: i32, z: i32) -> u8 {
-        let index = self.layer_index(y);
-        match usize::try_from(index)
-            .ok()
-            .and_then(|i| self.block_sections.get(i))
-            .and_then(Option::as_deref)
-        {
-            Some(data) => Self::nibble(data, x, (y - self.min_y).rem_euclid(16), z),
-            None => 0,
-        }
+        Self::layer(&self.block_sections, self.layer_index(y)).map_or(0, |layer| {
+            Self::read(layer, x, (y - self.min_y).rem_euclid(16), z)
+        })
     }
 
     /// The layer holding world `y`: index 0 is the section below the world.
@@ -111,34 +104,26 @@ impl ChunkLightData {
         (y - self.min_y).div_euclid(16) + 1
     }
 
-    /// The nibble index of a block in a 16³ light layer (vanilla
-    /// `DataLayer.getIndex`); even indices are a byte's low nibble.
-    fn nibble_index(x: i32, local_y: i32, z: i32) -> usize {
-        local_y as usize * 256 + z.rem_euclid(16) as usize * 16 + x.rem_euclid(16) as usize
+    /// A layer's level at world `x`/`z` and layer-local `y`.
+    fn read(layer: &DataLayer, x: i32, local_y: i32, z: i32) -> u8 {
+        layer.get(x.rem_euclid(16), local_y, z.rem_euclid(16))
+    }
+
+    fn layer(sections: &[Option<DataLayer>], index: i32) -> Option<&DataLayer> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| sections.get(i))
+            .and_then(Option::as_ref)
     }
 
     /// Stores a sky light level, allocating its layer if needed.
     #[cfg(feature = "cpu-bench")]
     pub(crate) fn set_sky_light(&mut self, x: i32, y: i32, z: i32, level: u8) {
-        let i = Self::nibble_index(x, (y - self.min_y).rem_euclid(16), z);
+        let local_y = (y - self.min_y).rem_euclid(16);
         let layer_index = self.layer_index(y) as usize;
-        let layer = self.sky_sections[layer_index].get_or_insert_with(|| Box::new([0; 2048]));
-        let (keep, shift) = if i.is_multiple_of(2) {
-            (0xF0, 0)
-        } else {
-            (0x0F, 4)
-        };
-        layer[i / 2] = (layer[i / 2] & keep) | (level & 0x0F) << shift;
-    }
-
-    fn nibble(data: &[u8; 2048], x: i32, local_y: i32, z: i32) -> u8 {
-        let idx = Self::nibble_index(x, local_y, z);
-        let byte = data[idx / 2];
-        if idx.is_multiple_of(2) {
-            byte & 0x0F
-        } else {
-            (byte >> 4) & 0x0F
-        }
+        self.sky_sections[layer_index]
+            .get_or_insert_with(DataLayer::new)
+            .set(x.rem_euclid(16), local_y, z.rem_euclid(16), level);
     }
 }
 
@@ -307,6 +292,8 @@ fn state_in(sections: &[Section], x: u32, y: i32, z: u32, min_y: i32) -> BlockSt
 #[derive(Debug)]
 pub struct Chunk {
     pub sections: Box<[Section]>,
+    // TODO: only `MotionBlocking` is read (weather); the other kinds the
+    // server sends cost ~0.7 KB per column.
     heightmaps: Vec<Heightmap>,
 }
 
@@ -487,6 +474,8 @@ impl ChunkStore {
         Self {
             // The grid silently drops out-of-range chunks and is never resized,
             // so floor it at the max view distance (~1 MB of slots).
+            // TODO: size to the view distance and rebuild when it changes, like
+            // vanilla `ClientChunkCache.updateViewRadius` (~1 MB at the max).
             grid: ChunkGrid::new(view_distance.max(MAX_VIEW_DISTANCE)),
             height,
             min_y,
@@ -699,6 +688,29 @@ impl ChunkStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sky_light_tells_absent_layers_from_dark_ones() {
+        let light = ChunkLightData {
+            sky_sections: vec![
+                None,
+                Some(DataLayer::new()),
+                None,
+                Some(DataLayer::filled(7)),
+            ],
+            block_sections: vec![None; 4],
+            min_y: 0,
+            has_sky: true,
+            sky_top_section: Some(4),
+        };
+        // A present all-dark layer reads 0.
+        assert_eq!(light.get_sky_light(3, 5, 3), 0);
+        // An absent layer defers up to the next stored layer's bottom plane.
+        assert_eq!(light.get_sky_light(3, 20, 3), 7);
+        // At or above the column's top section is open sky.
+        assert_eq!(light.get_sky_light(3, 48, 3), 15);
+        assert_eq!(light.get_block_light(3, 5, 3), 0);
+    }
 
     #[test]
     fn column_neighborhood_is_the_full_three_by_three() {

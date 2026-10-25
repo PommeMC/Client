@@ -1022,13 +1022,14 @@ fn translate_attack_old_versions() {
     }
 }
 
-/// A 26.2 `interact` (hand + LpVec3 location) becomes the 1.21.11 pair a
-/// vanilla client sends: INTERACT_AT (raw floats, then hand) then INTERACT.
+/// A 26.2 off-hand `interact` (hand + LpVec3 location) becomes the 1.21.11
+/// pair a vanilla client sends: INTERACT_AT (raw floats, then hand) then
+/// INTERACT.
 #[test]
 fn translate_interact_774() {
     let location = DVec3::new(0.5, 1.25, -0.25);
     let frames = translation_for(774)
-        .translate_outbound_game_frame(wire::encode_interact(42, location, true));
+        .translate_outbound_game_frame(wire::encode_interact(42, 1, location, true));
     assert_eq!(frames.len(), 2);
 
     let interact = old_id(774, Direction::Serverbound, "interact") as u8;
@@ -1039,9 +1040,9 @@ fn translate_interact_774() {
         // Bounded by the LpVec3 quantization the 26.2 frame already carries.
         assert!((f64::from(float_at(i)) - expected).abs() < 1e-3);
     }
-    assert_eq!(at[15..], [0, 1]); // main hand, sneaking
+    assert_eq!(at[15..], [1, 1]); // off hand, sneaking
 
-    assert_eq!(frames[1], [interact, 42, 0, 0, 1]);
+    assert_eq!(frames[1], [interact, 42, 0, 1, 1]);
 }
 
 /// 26.2-only serverbound packets with no 1.21.11 equivalent are suppressed

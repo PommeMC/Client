@@ -77,6 +77,7 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         Command::Block { at } => Ok(json!(protocol::block(game, *at))),
         Command::Press(press) => press_key(core, press),
         Command::Bind(bind) => bind_keys(core, bind),
+        Command::Option(options) => set_options(core, options),
         Command::Hover(target) => hover(core, gfx, game, target),
         Command::LookAt { at } => {
             let eye = game.player.eye_pos();
@@ -175,6 +176,14 @@ fn bind_keys(core: &mut AppCore, bind: &protocol::Bind) -> Result<Value, String>
             core.input.key_bindings.set(action, inputs);
         }
         None => core.input.key_bindings.reset(action),
+    }
+    Ok(Value::Null)
+}
+
+fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Value, String> {
+    if let Some(hand) = options.main_hand {
+        core.menu
+            .set_main_hand_right(hand == protocol::Hand::Right, &core.input.key_bindings);
     }
     Ok(Value::Null)
 }

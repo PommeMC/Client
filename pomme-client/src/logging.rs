@@ -15,7 +15,11 @@ pub fn init(log_dir: &Path) -> Option<WorkerGuard> {
         eprintln!("Failed to rotate logs: {e}. latest.log will probably be overwritten.");
     }
     let file_appender = tracing_appender::rolling::never(log_dir, "latest.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    // The default queues 128k lines up front (~4 MB); a file write keeps up
+    // with far fewer, and a full queue drops lines rather than blocking.
+    let (non_blocking, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .buffered_lines_limit(16_384)
+        .finish(file_appender);
 
     let file_filter = EnvFilter::new("debug");
     let stdout_filter =

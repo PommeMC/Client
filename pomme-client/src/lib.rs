@@ -19,6 +19,7 @@ mod discord;
 mod entity;
 #[cfg(feature = "test-harness")]
 mod harness;
+mod headless;
 mod lang;
 mod logging;
 mod mob_effect;
@@ -84,6 +85,11 @@ pub struct Platform {
 }
 
 pub fn run(args: LaunchArgs, platform: Platform) {
+    // mimalloc v3 holds freed memory for a second before returning it to the
+    // OS, so a chunk-load spike lingers; 10 ms (v2's default) returns it
+    // promptly without purging on every free. The bindings don't name
+    // `mi_option_purge_delay`; it is option 15 in both v2 and v3.
+    unsafe { libmimalloc_sys::mi_option_set(15, 10) };
     #[cfg(target_os = "macos")]
     use_bundled_moltenvk();
     if let Some(root) = platform.data_root {
@@ -178,6 +184,19 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         crate::net::chat_security::ProfileKeyServices::prefetch();
     }
 
+    let quick_play = args.quick_play().or_else(|| {
+        args.chunk_bench.map(|_| {
+            app::QuickPlay::Singleplayer(benchmark::bench_world(&data_dirs.game_dir, version))
+        })
+    });
+    if args.headless
+        && let Some(rd) = args.chunk_bench
+    {
+        let play = quick_play.expect("a chunk bench always has a world");
+        let user = headless::user(&args, &play, &data_dirs.game_dir, &rt);
+        std::process::exit(headless::run(rd, play, user, version, &data_dirs, &rt));
+    }
+
     let (user, require_account) = UserData::for_launch(
         args.username,
         args.uuid,
@@ -206,13 +225,10 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         rt,
         presence,
         user,
-        args.quick_access_multiplayer
-            .map(app::QuickPlay::Multiplayer)
-            .or(args
-                .quick_access_singleplayer
-                .map(app::QuickPlay::Singleplayer)),
+        quick_play,
         winit::dpi::LogicalSize::new(args.width, args.height),
-    );
+    )
+    .with_chunk_bench(args.chunk_bench);
     if check_for_update {
         app.check_for_update();
     }
@@ -250,6 +266,9 @@ pub fn run(args: LaunchArgs, platform: Platform) {
     }
     #[cfg(feature = "test-harness")]
     if let Some(code) = app.harness_exit_code() {
+        std::process::exit(code);
+    }
+    if let Some(code) = app.chunk_bench_exit_code() {
         std::process::exit(code);
     }
 }
