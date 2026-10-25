@@ -36,6 +36,7 @@ struct StepFile {
     mouse_down: Option<Mouse>,
     mouse_up: Option<Mouse>,
     press: Option<protocol::Press>,
+    option: Option<protocol::OptionSet>,
     hover: Option<protocol::Hover>,
     wait_ms: Option<u64>,
     screenshot: Option<String>,
@@ -248,6 +249,9 @@ impl StepFile {
         }
         if let Some(press) = self.press {
             steps.push(Step::Run(Command::Press(press)));
+        }
+        if let Some(options) = self.option {
+            steps.push(Step::Run(Command::Option(options)));
         }
         if let Some(hover) = self.hover {
             steps.push(Step::Run(Command::Hover(hover)));
@@ -616,7 +620,7 @@ fn ensure(holds: bool, seen: impl FnOnce() -> String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harness::protocol::ClickKind;
+    use crate::harness::protocol::{ClickKind, Hand, OptionSet};
 
     #[test]
     fn parses_every_step_kind() {
@@ -657,10 +661,18 @@ mod tests {
             mouse_down = "left"
             [[step]]
             expect = { block = "air", at = [0, -59, 4] }
+            [[step]]
+            option = { main_hand = "left" }
             "#,
         )
         .unwrap();
-        assert_eq!(steps.len(), 17);
+        assert_eq!(steps.len(), 18);
+        assert_eq!(
+            steps[17],
+            Step::Run(Command::Option(OptionSet {
+                main_hand: Some(Hand::Left)
+            }))
+        );
         assert_eq!(
             steps[15],
             Step::Run(Command::MouseDown {
@@ -717,5 +729,6 @@ mod tests {
         assert!(err("[[step]]\nchat = \"a\"\nwait_ms = 1").contains("found 2"));
         assert!(err("[[step]]\ncaht = \"a\"").contains("unknown field"));
         assert!(err("[[step]]\nexpect = { slot = 1, itme = \"a\" }").contains("did not match"));
+        assert!(err("[[step]]\noption = { main_hand = \"up\" }").contains("unknown variant"));
     }
 }

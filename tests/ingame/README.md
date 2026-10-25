@@ -83,6 +83,9 @@ hover = { slot = 36 }                         # creative item tab: hotbar slot
 [[step]]
 press = { action = "key.drop", ctrl = true }  # a key binding's default key;
                                               # ctrl is optional
+[[step]]
+option = { main_hand = "left" }               # sets client options, as the
+                                              # options screen does
 
 [[step]]
 wait_ms = 1000
@@ -132,4 +135,4 @@ echo '{"cmd":"inventory"}' | nc 127.0.0.1 25599
 The commands are `status`, `chat` (`text`), `open_inventory`, `close_menu`,
 `click` (`slot`, `op`), `creative_set_slot` (`slot`, `from`), `inventory`,
 `entities`, `advancements`, `player`, `hud`, `sounds`, `block` (`at`), `look_at` (`at`),
-`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, optional `ctrl`), `hover` (`slot` 36-44 or `catalog` cell, in a creative item tab), `chat_log` and `screenshot` (`path`).
+`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, optional `ctrl`), `option` (`main_hand`: `left` or `right`), `hover` (`slot` 36-44 or `catalog` cell, in a creative item tab), `chat_log` and `screenshot` (`path`).

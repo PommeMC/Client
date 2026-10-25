@@ -75,6 +75,7 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         Command::Sounds => to_value(&game.recent_sounds),
         Command::Block { at } => Ok(json!(protocol::block(game, *at))),
         Command::Press(press) => press_key(core, press),
+        Command::Option(options) => set_options(core, options),
         Command::Hover(target) => hover(core, gfx, game, target),
         Command::LookAt { at } => {
             let eye = game.player.eye_pos();
@@ -143,6 +144,13 @@ fn press_key(core: &mut AppCore, press: &protocol::Press) -> Result<Value, Strin
     let action = crate::app::input::Action::from_id(&press.action)
         .ok_or_else(|| format!("no key binding {}", press.action))?;
     core.input.press_action(action, press.ctrl)?;
+    Ok(Value::Null)
+}
+
+fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Value, String> {
+    if let Some(hand) = options.main_hand {
+        core.menu.set_main_hand_right(hand == protocol::Hand::Right);
+    }
     Ok(Value::Null)
 }
 

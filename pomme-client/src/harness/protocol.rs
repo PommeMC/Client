@@ -48,6 +48,8 @@ pub enum Command {
     },
     /// Presses a key binding's default key once, e.g. `key.drop`.
     Press(Press),
+    /// Changes client options through the options screen's own setters.
+    Option(OptionSet),
     /// Moves the cursor over a creative-inventory cell.
     Hover(Hover),
     MouseUp {
@@ -82,6 +84,20 @@ impl From<Mouse> for winit::event::MouseButton {
 pub struct Click {
     pub slot: u16,
     pub op: ClickKind,
+}
+
+/// Client options to change; fields left out keep their value.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptionSet {
+    pub main_hand: Option<Hand>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Hand {
+    Left,
+    Right,
 }
 
 /// A key binding's default key, pressed once, optionally with Ctrl held.
