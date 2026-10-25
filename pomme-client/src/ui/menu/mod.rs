@@ -600,8 +600,6 @@ pub struct MainMenu {
     face_cache: FaceCache,
     last_face_count: usize,
     face_dirty_since: Option<Instant>,
-    /// Whether the menu atlas last held favicons, and faces.
-    atlas_shows: (bool, bool),
     friend_tab: FriendTab,
     add_friend_name: TextFieldState,
     action_error: ActionError,
@@ -778,7 +776,6 @@ impl MainMenu {
             face_cache: Default::default(),
             last_face_count: 0,
             face_dirty_since: None,
-            atlas_shows: (false, false),
             friend_tab: FriendTab::Friends,
             add_friend_name: TextFieldState::new(MAX_FRIEND),
             action_error: Default::default(),
@@ -1199,25 +1196,22 @@ impl MainMenu {
         matches!(self.screen, Screen::Friends)
     }
 
-    /// The favicons and faces the current screen draws, when they changed
-    /// or the screen draws a different kind than the last upload held.
+    /// The favicons and faces the current screen draws, once either changed
+    /// (`set_screen` marks both changed).
     pub fn menu_atlas_images(&mut self) -> Option<Vec<(String, Vec<u8>, u32)>> {
         let bedrock_main = self.is_main_screen() && self.theme == PanoramaTheme::Bedrock;
-        let shows = (
-            bedrock_main || self.is_server_list_screen(),
-            bedrock_main || self.is_friends_screen(),
-        );
-        let favicons = shows.0 && self.favicons_changed();
-        let faces = shows.1 && self.faces_changed();
-        if !favicons && !faces && shows == self.atlas_shows {
+        let favicons = bedrock_main || self.is_server_list_screen();
+        let faces = bedrock_main || self.is_friends_screen();
+        let favicons_changed = favicons && self.favicons_changed();
+        let faces_changed = faces && self.faces_changed();
+        if !favicons_changed && !faces_changed {
             return None;
         }
-        self.atlas_shows = shows;
         let mut images = Vec::new();
-        if shows.0 {
+        if favicons {
             images.extend(self.collect_favicons());
         }
-        if shows.1 {
+        if faces {
             images.extend(self.collect_faces());
         }
         (!images.is_empty()).then_some(images)
@@ -1525,7 +1519,13 @@ mod tests {
                 player_names: Vec::new(),
             },
         );
-        let keys = |menu: &mut MainMenu| {
+        // A change uploads once it has held for the debounce.
+        let settled = |menu: &mut MainMenu| {
+            assert!(menu.menu_atlas_images().is_none());
+            let pending = [&mut menu.favicon_dirty_since, &mut menu.face_dirty_since];
+            for at in pending.into_iter().flatten() {
+                *at -= std::time::Duration::from_secs(1);
+            }
             menu.menu_atlas_images().map(|images| {
                 let mut keys: Vec<_> = images.into_iter().map(|(key, ..)| key).collect();
                 keys.sort();
@@ -1533,12 +1533,12 @@ mod tests {
             })
         };
         let both = Some(vec!["face".to_owned(), "server".to_owned()]);
-        assert_eq!(keys(&mut menu), both);
-        assert_eq!(keys(&mut menu), None);
-        menu.screen = Screen::Friends;
-        assert_eq!(keys(&mut menu), Some(vec!["face".to_owned()]));
-        menu.screen = Screen::Main;
-        assert_eq!(keys(&mut menu), both);
+        assert_eq!(settled(&mut menu), both);
+        assert!(menu.menu_atlas_images().is_none());
+        menu.set_screen(Screen::Friends, &key_bindings);
+        assert_eq!(settled(&mut menu), Some(vec!["face".to_owned()]));
+        menu.set_screen(Screen::Main, &key_bindings);
+        assert_eq!(settled(&mut menu), both);
     }
 
     #[test]

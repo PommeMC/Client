@@ -73,10 +73,10 @@ const DRESSING_H: f32 = 25.0;
 const LEFT_PAD: f32 = 5.0;
 /// `gathering_badge` and `gathering_button`.
 const TILE: (f32, f32) = (100.0, 30.0);
+const TILE_BUTTON_H: f32 = 25.0;
 /// The server the tile features.
 const FEATURED_NAME: &str = "Pomme Dev";
 const FEATURED_ADDRESS: &str = "dev.pomme.rs";
-const TILE_BUTTON_H: f32 = 25.0;
 /// `lower_online_buttons_panel`: a 32 row offset 5% of the column in, then
 /// the profile button's 5 pad.
 const PROFILE_ROW_H: f32 = 32.0;
