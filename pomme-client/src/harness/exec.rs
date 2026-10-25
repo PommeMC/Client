@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use super::protocol::{self, Command, CreativeSetSlot};
 use crate::app::core::AppCore;
+use crate::app::input::{Action, InputKey};
 use crate::app::phases::AppPhase;
 
 /// How long a requested screenshot may take to be written.
@@ -75,6 +76,7 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         Command::Sounds => to_value(&game.recent_sounds),
         Command::Block { at } => Ok(json!(protocol::block(game, *at))),
         Command::Press(press) => press_key(core, press),
+        Command::Bind(bind) => bind_keys(core, bind),
         Command::Option(options) => set_options(core, options),
         Command::Hover(target) => hover(core, gfx, game, target),
         Command::LookAt { at } => {
@@ -139,17 +141,49 @@ pub fn phase_name(phase: &AppPhase) -> &'static str {
     }
 }
 
-/// A key binding's default key through the real key path.
+fn action(id: &str) -> Result<Action, String> {
+    Action::from_id(id).ok_or_else(|| format!("no key binding {id}"))
+}
+
+fn input_key(id: &str) -> Result<InputKey, String> {
+    InputKey::from_input_id(id).map_err(|e| e.to_string())
+}
+
+/// A binding's default key, or a physical key, through the real key path.
 fn press_key(core: &mut AppCore, press: &protocol::Press) -> Result<Value, String> {
-    let action = crate::app::input::Action::from_id(&press.action)
-        .ok_or_else(|| format!("no key binding {}", press.action))?;
-    core.input.press_action(action, press.ctrl)?;
+    let code = match (&press.action, &press.key) {
+        (Some(id), None) => action(id)?
+            .default_key()
+            .ok_or_else(|| format!("{id} has no default key"))?,
+        (None, Some(id)) => match input_key(id)? {
+            InputKey::Keyboard(code) => code,
+            _ => return Err(format!("{id} isn't a keyboard key")),
+        },
+        _ => return Err("press takes one of action or key".into()),
+    };
+    core.input.press_key(code, press.ctrl);
+    Ok(Value::Null)
+}
+
+fn bind_keys(core: &mut AppCore, bind: &protocol::Bind) -> Result<Value, String> {
+    let action = action(&bind.action)?;
+    match &bind.keys {
+        Some(keys) => {
+            let inputs = keys
+                .iter()
+                .map(|id| input_key(id))
+                .collect::<Result<_, _>>()?;
+            core.input.key_bindings.set(action, inputs);
+        }
+        None => core.input.key_bindings.reset(action),
+    }
     Ok(Value::Null)
 }
 
 fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Value, String> {
     if let Some(hand) = options.main_hand {
-        core.menu.set_main_hand_right(hand == protocol::Hand::Right);
+        core.menu
+            .set_main_hand_right(hand == protocol::Hand::Right, &core.input.key_bindings);
     }
     Ok(Value::Null)
 }

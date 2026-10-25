@@ -3,6 +3,7 @@ use std::fmt;
 use serde_json::{Map, Value};
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 
+use crate::app::input::{Action, InputKey, KeyBindings, NOT_BOUND};
 use crate::assets::{AssetId, identifier_chars};
 
 /// A vanilla text component, decoded by pomme because azalea's decoder drops
@@ -256,20 +257,35 @@ impl Component {
     }
 
     /// Visits each text run with its resolved style (vanilla
-    /// `FormattedText.visit` with style inheritance).
+    /// `FormattedText.visit` with style inheritance), using default bindings.
     pub fn visit_text(
         &self,
         parent: &ResolvedStyle,
         visitor: &mut impl FnMut(&str, &ResolvedStyle),
     ) {
-        self.visit(parent, false, visitor);
+        self.visit_text_with_bindings(parent, &KeyBindings::default(), visitor);
+    }
+
+    /// Styled traversal using the current effective input bindings.
+    pub fn visit_text_with_bindings(
+        &self,
+        parent: &ResolvedStyle,
+        bindings: &KeyBindings,
+        visitor: &mut impl FnMut(&str, &ResolvedStyle),
+    ) {
+        self.visit(parent, false, bindings, visitor);
     }
 
     /// Vanilla `getString`: like the styled visit, but an object contributes
     /// its description instead of a placeholder.
     pub fn plain_text(&self) -> String {
+        self.plain_text_with_bindings(&KeyBindings::default())
+    }
+
+    /// Plain text with the same effective bindings as the styled traversal.
+    pub fn plain_text_with_bindings(&self, bindings: &KeyBindings) -> String {
         let mut out = String::new();
-        self.visit(&ResolvedStyle::default(), true, &mut |text, _| {
+        self.visit(&ResolvedStyle::default(), true, bindings, &mut |text, _| {
             out.push_str(text)
         });
         out
@@ -279,6 +295,7 @@ impl Component {
         &self,
         parent: &ResolvedStyle,
         plain: bool,
+        bindings: &KeyBindings,
         visitor: &mut impl FnMut(&str, &ResolvedStyle),
     ) {
         let style = parent.merged(&self.style);
@@ -292,15 +309,15 @@ impl Component {
                 let template = crate::lang::translate(key)
                     .or(fallback.as_deref())
                     .unwrap_or(key.as_str());
-                visit_translation(template, args, &style, plain, visitor);
+                visit_translation(template, args, &style, plain, bindings, visitor);
             }
-            Content::Keybind(key) => emit(&keybind_display_name(key), &style, visitor),
+            Content::Keybind(key) => emit(&keybind_display_name(key, bindings), &style, visitor),
             // Unresolved score/NBT contents render nothing; an unresolved
             // selector renders its source, as in vanilla.
             Content::Score { .. } | Content::Nbt(_) => {}
             Content::Selector { pattern, .. } => emit(pattern, &style, visitor),
             Content::Object { fallback, .. } if plain => match fallback {
-                Some(fallback) => fallback.visit(&style, plain, visitor),
+                Some(fallback) => fallback.visit(&style, plain, bindings, visitor),
                 None => emit(&default_object_fallback(&self.content), &style, visitor),
             },
             Content::Object { value, .. } => {
@@ -310,7 +327,7 @@ impl Component {
             }
         }
         for sibling in &self.siblings {
-            sibling.visit(&style, plain, visitor);
+            sibling.visit(&style, plain, bindings, visitor);
         }
     }
 }
@@ -621,6 +638,7 @@ fn visit_translation(
     args: &[Argument],
     style: &ResolvedStyle,
     plain: bool,
+    bindings: &KeyBindings,
     visitor: &mut impl FnMut(&str, &ResolvedStyle),
 ) {
     let Ok(tokens) = parse_translation_template(template, args.len()) else {
@@ -634,7 +652,7 @@ fn visit_translation(
             TranslationToken::Argument(index) => match &args[index] {
                 Argument::Bool(v) => emit(if *v { "true" } else { "false" }, style, visitor),
                 Argument::Number(v) | Argument::String(v) => emit(v, style, visitor),
-                Argument::Component(v) => v.visit(style, plain, visitor),
+                Argument::Component(v) => v.visit(style, plain, bindings, visitor),
             },
         }
     }
@@ -642,14 +660,16 @@ fn visit_translation(
 
 /// Vanilla `KeyMapping.createNameSupplier`: the bound key's name, or the
 /// translated id for an unknown mapping.
-fn keybind_display_name(key: &str) -> String {
-    // TODO: Use a shared binding resolver to resolve configured KeyBindings and
-    // defaults for chat keybind components, instead of these static default labels.
-    match crate::app::input::keybind_label(key) {
-        Some((translation, fallback)) => crate::lang::translate(translation).unwrap_or(fallback),
-        None => crate::lang::translate(key).unwrap_or(key),
+fn keybind_display_name<'a>(key: &'a str, bindings: &KeyBindings) -> std::borrow::Cow<'a, str> {
+    match Action::from_id(key) {
+        // Chat presents a single key, so use the first effective assignment.
+        Some(action) => bindings
+            .inputs_for_action(action)
+            .next()
+            .map(InputKey::display_name)
+            .unwrap_or_else(|| NOT_BOUND.resolve()),
+        None => std::borrow::Cow::Borrowed(crate::lang::translate(key).unwrap_or(key)),
     }
-    .to_owned()
 }
 
 fn emit(text: &str, style: &ResolvedStyle, visitor: &mut impl FnMut(&str, &ResolvedStyle)) {
@@ -1417,6 +1437,68 @@ mod tests {
             rendered.push_str(text)
         });
         assert_eq!(rendered, "Space");
+    }
+
+    #[test]
+    fn keybind_component_uses_configured_inputs_in_nested_runs() {
+        use winit::event::MouseButton;
+        use winit::keyboard::KeyCode;
+
+        use crate::app::input::{Action, InputKey, KeyBindings};
+
+        let component = Component::from_value(&serde_json::json!({
+            "translate": "missing.keybind.test", "fallback": "Press %s", "bold": true,
+            "with": [{"keybind": "key.jump"}],
+            "extra": [{"text": " or ", "extra": [{"keybind": "key.attack"}]}]
+        }))
+        .unwrap();
+        let mut bindings = KeyBindings::default();
+        bindings.set(Action::Jump, vec![InputKey::Keyboard(KeyCode::KeyJ)]);
+        bindings.set(
+            Action::Destroy,
+            vec![
+                InputKey::Mouse(MouseButton::Right),
+                InputKey::Keyboard(KeyCode::KeyK),
+            ],
+        );
+        let spans =
+            crate::ui::text::format_component_spans_with_bindings(&component, [1.0; 4], &bindings);
+        assert_eq!(
+            crate::ui::text::span_text(&spans),
+            "Press J or Right Button"
+        );
+        assert!(spans.iter().all(|span| span.bold));
+        assert_eq!(
+            component.plain_text_with_bindings(&bindings),
+            "Press J or Right Button"
+        );
+    }
+
+    #[test]
+    fn keybind_component_unbound_and_fixed_inputs() {
+        use crate::app::input::{Action, KeyBindings, NOT_BOUND};
+
+        let mut bindings = KeyBindings::default();
+        bindings.set(Action::Jump, Vec::new());
+        bindings.set(Action::OpenMenu, Vec::new());
+        let jump = Component::new(Content::Keybind("key.jump".into()));
+        assert_eq!(
+            jump.plain_text_with_bindings(&bindings),
+            NOT_BOUND.resolve()
+        );
+        let menu = Component::new(Content::Keybind("key.menu".into()));
+        assert_eq!(menu.plain_text_with_bindings(&bindings), "Escape");
+    }
+
+    #[test]
+    fn keybind_component_unknown_ids_use_translation_or_raw_id() {
+        for key in ["unknown.keybind.test", "key.friends", "key.debug.crash"] {
+            let component = Component::new(Content::Keybind(key.into()));
+            assert_eq!(
+                component.plain_text(),
+                crate::lang::translate(key).unwrap_or(key)
+            );
+        }
     }
 
     #[test]

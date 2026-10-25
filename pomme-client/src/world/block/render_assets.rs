@@ -180,16 +180,6 @@ impl BlockRenderAssets {
         });
 
         let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index, packs);
-        let baked = baked
-            .into_iter()
-            .map(|(block, variants)| {
-                let variants = variants
-                    .into_iter()
-                    .map(|(k, m)| (k, Arc::new(m)))
-                    .collect();
-                (block, variants)
-            })
-            .collect();
         let baked_items = model::bake_item_models(jar_assets_dir, asset_index, packs);
         let item_models = baked_items.models;
         let flat_item_textures = baked_items.generated_textures;
@@ -339,27 +329,20 @@ impl BlockRenderAssets {
                 .chain(ft.side_overlay.as_deref())
         });
 
-        let baked_textures = self.baked.values().flat_map(|variants| {
-            variants
-                .values()
-                .flat_map(|model| model.quads.iter().map(|q| q.texture.as_str()))
-        });
-
-        let multipart_textures = self.multipart.values().flat_map(|entries| {
-            entries
-                .iter()
-                .flat_map(|e| e.quads.iter().map(|q| q.texture.as_str()))
-        });
-
-        let item_model_textures = self
-            .item_models
+        let models = self
+            .baked
             .values()
-            .flat_map(|model| model.quads.iter().map(|q| q.texture.as_str()));
+            .flat_map(|variants| variants.values().map(|model| &**model))
+            .chain(
+                self.multipart
+                    .values()
+                    .flat_map(|entries| entries.iter().map(|entry| &*entry.model)),
+            )
+            .chain(self.item_models.values());
+        let quad_textures =
+            models.flat_map(|model| model.quads.iter().map(|quad| quad.texture.name()));
 
-        face_textures
-            .chain(baked_textures)
-            .chain(multipart_textures)
-            .chain(item_model_textures)
+        face_textures.chain(quad_textures)
     }
 }
 
@@ -391,7 +374,7 @@ impl<'a> BlockRenderView<'a> {
         for entry in entries {
             let when = entry.when.iter().map(|(k, v)| (k.as_str(), v.as_str()));
             if constraints_match(&block_state_data.properties, when) {
-                quads.extend(entry.quads.iter());
+                quads.extend(entry.model.quads.iter());
             }
         }
         if quads.is_empty() { None } else { Some(quads) }

@@ -12,6 +12,7 @@ use pomme_protocol::container::{self, ContainerPacket};
 use pomme_protocol::{ClientRegistry, item};
 
 use super::NetworkEvent;
+use super::handler::send_ordered;
 use super::translate::native_id;
 
 /// Decodes a container packet; `None` for any other packet.
@@ -23,7 +24,7 @@ pub(super) fn handle_raw_container_packet(
     Some(
         super::read_raw_packet(packet_id, payload, container::read)?.map(|packet| {
             if let Some(event) = event(packet) {
-                let _ = event_tx.try_send(event);
+                send_ordered(event_tx, event);
             }
         }),
     )

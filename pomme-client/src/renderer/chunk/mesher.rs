@@ -206,6 +206,32 @@ struct MeshSink {
 }
 
 impl MeshSink {
+    /// The finished section, sized exactly, with cutout indices after solid
+    /// (recording the split), the section-local AABB from the float positions
+    /// and the vertices quantized so upload is a plain memcpy; `None` if it
+    /// drew nothing. Leaves the sink empty for the next section.
+    fn finish(&mut self, section_index: i32) -> Option<SectionMesh> {
+        let section = (!self.solid.is_empty() || !self.cutout.is_empty() || !self.water.is_empty())
+            .then(|| {
+                let mut indices = Vec::with_capacity(self.solid.len() + self.cutout.len());
+                indices.extend_from_slice(&self.solid);
+                indices.extend_from_slice(&self.cutout);
+                SectionMesh {
+                    section_index,
+                    vertices: self.vertices.iter().map(pack_vertex).collect(),
+                    aabb: section_aabb(&self.vertices),
+                    indices,
+                    solid_index_count: self.solid.len() as u32,
+                    water_indices: self.water.clone(),
+                }
+            });
+        self.vertices.clear();
+        self.solid.clear();
+        self.cutout.clear();
+        self.water.clear();
+        section
+    }
+
     /// Index list a quad's triangles go in: solid sprites render in the
     /// no-discard pass, everything else in the discard (cutout) pass.
     fn indices_for(&mut self, opaque: bool) -> &mut Vec<u32> {
@@ -634,31 +660,25 @@ pub fn int_to_rgb(color: i32) -> [f32; 3] {
 const SECTION_VERTEX_HINT: usize = 2048;
 const SECTION_INDEX_HINT: usize = 3072;
 
-/// Recycles section vertex/index `Vec`s so workers reuse them instead of
-/// allocating/freeing through the OS each mesh (vanilla reuses its
-/// `ByteBufferBuilder`s the same way). Bounded: returns past capacity are
-/// dropped, takes past it allocate.
+/// Recycles each worker's section scratch (float vertices and solid indices)
+/// so meshing doesn't allocate per section (vanilla reuses its
+/// `ByteBufferBuilder`s the same way). Holds one set per worker; a `Vec`
+/// grown far past its hint is shrunk on return so one dense section doesn't
+/// keep it large. Finished meshes are sized exactly and not pooled.
 struct BufferPool {
-    // Float scratch the workers mesh into; never leaves the worker (packed at
-    // section finalize).
     scratch_tx: crossbeam_channel::Sender<Vec<TerrainVertex>>,
     scratch_rx: crossbeam_channel::Receiver<Vec<TerrainVertex>>,
-    vtx_tx: crossbeam_channel::Sender<Vec<PackedVertex>>,
-    vtx_rx: crossbeam_channel::Receiver<Vec<PackedVertex>>,
     idx_tx: crossbeam_channel::Sender<Vec<u32>>,
     idx_rx: crossbeam_channel::Receiver<Vec<u32>>,
 }
 
 impl BufferPool {
-    fn new(capacity: usize) -> Self {
-        let (scratch_tx, scratch_rx) = crossbeam_channel::bounded(capacity);
-        let (vtx_tx, vtx_rx) = crossbeam_channel::bounded(capacity);
-        let (idx_tx, idx_rx) = crossbeam_channel::bounded(capacity);
+    fn new(workers: usize) -> Self {
+        let (scratch_tx, scratch_rx) = crossbeam_channel::bounded(workers);
+        let (idx_tx, idx_rx) = crossbeam_channel::bounded(workers);
         Self {
             scratch_tx,
             scratch_rx,
-            vtx_tx,
-            vtx_rx,
             idx_tx,
             idx_rx,
         }
@@ -670,9 +690,12 @@ impl BufferPool {
         rx.try_recv().unwrap_or_else(|_| Vec::with_capacity(hint))
     }
 
-    fn give<T>(tx: &crossbeam_channel::Sender<Vec<T>>, mut buf: Vec<T>) {
+    fn give<T>(tx: &crossbeam_channel::Sender<Vec<T>>, mut buf: Vec<T>, hint: usize) {
         if buf.capacity() > 0 {
             buf.clear();
+            if buf.capacity() > 4 * hint {
+                buf.shrink_to(hint);
+            }
             let _ = tx.try_send(buf);
         }
     }
@@ -681,24 +704,16 @@ impl BufferPool {
         Self::take(&self.scratch_rx, SECTION_VERTEX_HINT)
     }
 
-    fn take_vertices(&self) -> Vec<PackedVertex> {
-        Self::take(&self.vtx_rx, SECTION_VERTEX_HINT)
-    }
-
     fn take_indices(&self) -> Vec<u32> {
         Self::take(&self.idx_rx, SECTION_INDEX_HINT)
     }
 
     fn recycle_scratch(&self, vertices: Vec<TerrainVertex>) {
-        Self::give(&self.scratch_tx, vertices);
-    }
-
-    fn recycle_vertices(&self, vertices: Vec<PackedVertex>) {
-        Self::give(&self.vtx_tx, vertices);
+        Self::give(&self.scratch_tx, vertices, SECTION_VERTEX_HINT);
     }
 
     fn recycle_indices(&self, indices: Vec<u32>) {
-        Self::give(&self.idx_tx, indices);
+        Self::give(&self.idx_tx, indices, SECTION_INDEX_HINT);
     }
 }
 
@@ -829,16 +844,7 @@ impl MeshDispatcher {
             dry_foliage_colormap,
             biome_climate,
             cardinal_lighting,
-            pool: Arc::new(BufferPool::new(1024)),
-        }
-    }
-
-    /// Return an uploaded (or stale) mesh's section buffers to the pool for
-    /// reuse.
-    pub fn recycle(&self, mesh: ChunkMeshData) {
-        for sec in mesh.sections {
-            self.pool.recycle_vertices(sec.vertices);
-            self.pool.recycle_indices(sec.indices);
+            pool: Arc::new(BufferPool::new(worker_count)),
         }
     }
 
@@ -1671,21 +1677,10 @@ fn mesh_chunk_snapshot(
     let world_z = pos.z * 16;
 
     let section_count = ((max_y - min_y) / 16).max(0);
-    // Clamp the request; only these sections are meshed. The Vec still spans the
-    // whole column so blocks route by absolute section index.
+    // Clamp the request; only these sections are meshed.
     let range = sections_to_mesh.start.max(0)..sections_to_mesh.end.min(section_count);
     let by_start = min_y + range.start * 16;
     let by_end = min_y + range.end * 16;
-
-    let mut sinks: Vec<MeshSink> = (0..section_count).map(|_| MeshSink::default()).collect();
-    // In-range sections get recycled buffers (capacity retained from earlier
-    // meshes) so the worker fills them without going through the OS allocator.
-    // The cutout list stays un-pooled (empty for the common all-solid section).
-    for si in range.clone() {
-        let sink = &mut sinks[si as usize];
-        sink.vertices = pool.take_scratch();
-        sink.solid = pool.take_indices();
-    }
 
     snapshot.blocks = Some(BlockSlice::build(
         &snapshot.chunks,
@@ -1700,133 +1695,110 @@ fn mesh_chunk_snapshot(
     )));
     let snapshot = &*snapshot;
 
+    // One section at a time, so a worker holds one sink's buffers, not a
+    // column's.
     let mut visibility = Vec::with_capacity(range.len());
-    let mut hidden = vec![false; section_count as usize];
+    let mut sections = Vec::new();
+    let mut sink = MeshSink {
+        vertices: pool.take_scratch(),
+        solid: pool.take_indices(),
+        ..MeshSink::default()
+    };
     for si in range.clone() {
+        let section_y = min_y + si * 16;
         if lod > 0 {
             // LOD > 0 (distant): treat as fully see-through. Cave culling is a
             // near-field win; the long-range pass is deferred.
             visibility.push((si, VisibilitySet::all()));
-            continue;
+        } else {
+            let at = |x: i32, y: i32, z: i32| {
+                snapshot.get_block_state(world_x + x, section_y + y, world_z + z)
+            };
+            visibility.push((
+                si,
+                compute_visibility(|x, y, z| {
+                    registry.is_opaque_full_cube(at(x as i32, y as i32, z as i32))
+                }),
+            ));
+            if section_hidden(registry, at) {
+                continue;
+            }
         }
-        let section_y = min_y + si * 16;
-        let at = |x: i32, y: i32, z: i32| {
-            snapshot.get_block_state(world_x + x, section_y + y, world_z + z)
-        };
-        visibility.push((
-            si,
-            compute_visibility(|x, y, z| {
-                registry.is_opaque_full_cube(at(x as i32, y as i32, z as i32))
-            }),
-        ));
-        hidden[si as usize] = section_hidden(registry, at);
-    }
+        let mut local_z = 0i32;
+        while local_z < 16 {
+            let mut local_x = 0i32;
+            while local_x < 16 {
+                let bx = world_x + local_x;
+                let bz = world_z + local_z;
 
-    let mut local_z = 0i32;
-    while local_z < 16 {
-        let mut local_x = 0i32;
-        while local_x < 16 {
-            let bx = world_x + local_x;
-            let bz = world_z + local_z;
-
-            let mut by = by_start;
-            while by < by_end {
-                let si = (by - min_y) / 16;
-                if hidden[si as usize] {
-                    by = min_y + (si + 1) * 16;
-                    continue;
-                }
-                let mut state = snapshot.get_block_state(bx, by, bz);
-                let mut kind = classify_block(snapshot.block_state_table.block_state_data(state));
-                // Checks for non air block in the cube region to represent the area if the
-                // picked block is air
-                if lod > 0 && matches!(kind, BlockKind::Air) {
-                    let end_y = (by + step).min(by_end);
-                    for try_y in (by + 1)..end_y {
-                        let s = snapshot.get_block_state(bx, try_y, bz);
-                        let k = classify_block(snapshot.block_state_table.block_state_data(s));
-                        if !matches!(k, BlockKind::Air) {
-                            state = s;
-                            kind = k;
-                            break;
+                let mut by = section_y;
+                while by < section_y + 16 {
+                    let mut state = snapshot.get_block_state(bx, by, bz);
+                    let mut kind =
+                        classify_block(snapshot.block_state_table.block_state_data(state));
+                    // Checks for non air block in the cube region to represent the area if the
+                    // picked block is air
+                    if lod > 0 && matches!(kind, BlockKind::Air) {
+                        for try_y in (by + 1)..(by + step) {
+                            let s = snapshot.get_block_state(bx, try_y, bz);
+                            let k = classify_block(snapshot.block_state_table.block_state_data(s));
+                            if !matches!(k, BlockKind::Air) {
+                                state = s;
+                                kind = k;
+                                break;
+                            }
                         }
                     }
-                }
 
-                if matches!(kind, BlockKind::Air) {
-                    by += step;
-                    continue;
-                }
-
-                // Route this block's geometry to its 16-tall section. Clamped so
-                // a non-16-aligned world height can't index past the last section.
-                let s =
-                    (((by - min_y) / 16) as usize).min((section_count as usize).saturating_sub(1));
-                let sink = &mut sinks[s];
-
-                // Section-local base (matching the origin buffer.rs derives), so
-                // vertex positions never pass through absolute f32 world space.
-                let block_pos = [
-                    (bx - world_x) as f32,
-                    (by - (min_y + s as i32 * 16)) as f32,
-                    (bz - world_z) as f32,
-                ];
-                let model_offset = snapshot
-                    .block_state_table
-                    .block_state_data(state)
-                    .block_position_offset(bx, bz);
-                let model_pos = (glam::Vec3::from(block_pos) + model_offset.as_vec3()).to_array();
-
-                if lod > 0 {
-                    emit_lod_cube(
-                        sink, block_pos, state, snapshot, registry, uv_map, bx, by, bz, step,
-                    );
-                } else if let BlockKind::Water | BlockKind::Lava = kind {
-                    emit_fluid(
-                        sink, kind, block_pos, state, snapshot, registry, uv_map, bx, by, bz,
-                    );
-                } else if !emit_block_model(
-                    sink, model_pos, state, snapshot, registry, uv_map, bx, by, bz,
-                ) {
-                    let id = snapshot.block_state_table.block_state_data(state).id();
-                    if logged_missing.insert(id) {
-                        tracing::warn!("Missing model: {id}");
+                    if matches!(kind, BlockKind::Air) {
+                        by += step;
+                        continue;
                     }
-                }
-                by += step;
-            }
-            local_x += step;
-        }
-        local_z += step;
-    }
 
-    // Finalize each non-empty section: concatenate cutout indices after solid
-    // (recording the split), take the section-local AABB from the float
-    // positions, then quantize so upload is a plain memcpy. Empty in-range
-    // sections recycle their buffers rather than dropping the retained
-    // capacity.
-    let mut sections = Vec::with_capacity(sinks.len());
-    for (i, mut sink) in sinks.into_iter().enumerate() {
-        if sink.solid.is_empty() && sink.cutout.is_empty() && sink.water.is_empty() {
-            pool.recycle_scratch(sink.vertices);
-            pool.recycle_indices(sink.solid);
-            continue;
+                    // Section-local base (matching the origin buffer.rs derives), so
+                    // vertex positions never pass through absolute f32 world space.
+                    let block_pos = [
+                        (bx - world_x) as f32,
+                        (by - section_y) as f32,
+                        (bz - world_z) as f32,
+                    ];
+                    let model_offset = snapshot
+                        .block_state_table
+                        .block_state_data(state)
+                        .block_position_offset(bx, bz);
+                    let model_pos =
+                        (glam::Vec3::from(block_pos) + model_offset.as_vec3()).to_array();
+
+                    if lod > 0 {
+                        emit_lod_cube(
+                            &mut sink, block_pos, state, snapshot, registry, uv_map, bx, by, bz,
+                            step,
+                        );
+                    } else if let BlockKind::Water | BlockKind::Lava = kind {
+                        emit_fluid(
+                            &mut sink, kind, block_pos, state, snapshot, registry, uv_map, bx, by,
+                            bz,
+                        );
+                    } else if !emit_block_model(
+                        &mut sink, model_pos, state, snapshot, registry, uv_map, bx, by, bz,
+                    ) {
+                        let id = snapshot.block_state_table.block_state_data(state).id();
+                        if logged_missing.insert(id) {
+                            tracing::warn!("Missing model: {id}");
+                        }
+                    }
+                    by += step;
+                }
+                local_x += step;
+            }
+            local_z += step;
         }
-        let solid_index_count = sink.solid.len() as u32;
-        sink.solid.extend_from_slice(&sink.cutout);
-        let aabb = section_aabb(&sink.vertices);
-        let mut packed = pool.take_vertices();
-        packed.extend(sink.vertices.iter().map(pack_vertex));
-        pool.recycle_scratch(sink.vertices);
-        sections.push(SectionMesh {
-            section_index: i as i32,
-            vertices: packed,
-            aabb,
-            indices: sink.solid,
-            solid_index_count,
-            water_indices: sink.water,
-        });
+        if let Some(section) = sink.finish(si) {
+            sections.push(section);
+        }
     }
+    pool.recycle_scratch(sink.vertices);
+    pool.recycle_indices(sink.solid);
 
     ChunkMeshData {
         pos,
@@ -1899,7 +1871,7 @@ fn emit_baked_model(
             }
         }
 
-        let region = uv_map.get_region(&quad.texture);
+        let region = uv_map.region(quad.texture);
         let tint = tint_color(quad.tint, snapshot, state, bx, by, bz);
         let lights = if let Some(dir) = quad.cullface {
             compute_face_ao(snapshot, registry, bx, by, bz, dir, quad.shade_face)
@@ -2341,7 +2313,7 @@ fn emit_multipart(
             }
         }
 
-        let region = uv_map.get_region(&quad.texture);
+        let region = uv_map.region(quad.texture);
         let tint = tint_color(quad.tint, snapshot, state, bx, by, bz);
         emit_face(
             sink,

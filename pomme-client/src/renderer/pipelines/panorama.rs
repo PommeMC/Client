@@ -26,8 +26,6 @@ pub struct PanoramaPipeline {
     cube_view: vk::ImageView,
     cube_sampler: vk::Sampler,
     cube_allocation: Option<Allocation>,
-    staging_buffer: vk::Buffer,
-    staging_allocation: Option<Allocation>,
     has_cubemap: bool,
     /// The files behind the current cubemap, so a reload to the same set is a
     /// no-op.
@@ -107,15 +105,8 @@ impl PanoramaPipeline {
             "panorama_params",
         );
 
-        let (
-            cube_image,
-            cube_view,
-            cube_sampler,
-            cube_alloc_mem,
-            staging_buffer,
-            staging_alloc_mem,
-            has_cubemap,
-        ) = load_cubemap(device, queue, command_pool, allocator, faces.as_ref());
+        let (cube_image, cube_view, cube_sampler, cube_alloc_mem, has_cubemap) =
+            load_cubemap(device, queue, command_pool, allocator, faces.as_ref());
 
         let image_info = vk::DescriptorImageInfo {
             sampler: cube_sampler,
@@ -146,8 +137,6 @@ impl PanoramaPipeline {
             cube_view,
             cube_sampler,
             cube_allocation: Some(cube_alloc_mem),
-            staging_buffer,
-            staging_allocation: Some(staging_alloc_mem),
             has_cubemap,
             faces,
         }
@@ -203,29 +192,16 @@ impl PanoramaPipeline {
                 alloc.free(a).ok();
             }
             device.destroy_image(self.cube_image, None);
-            if let Some(a) = self.staging_allocation.take() {
-                alloc.free(a).ok();
-            }
-            device.destroy_buffer(self.staging_buffer, None);
         }
 
-        let (
-            cube_image,
-            cube_view,
-            cube_sampler,
-            cube_alloc,
-            staging_buffer,
-            staging_alloc,
-            has_cubemap,
-        ) = load_cubemap(device, queue, command_pool, allocator, faces.as_ref());
+        let (cube_image, cube_view, cube_sampler, cube_alloc, has_cubemap) =
+            load_cubemap(device, queue, command_pool, allocator, faces.as_ref());
 
         self.faces = faces;
         self.cube_image = cube_image;
         self.cube_view = cube_view;
         self.cube_sampler = cube_sampler;
         self.cube_allocation = Some(cube_alloc);
-        self.staging_buffer = staging_buffer;
-        self.staging_allocation = Some(staging_alloc);
         self.has_cubemap = has_cubemap;
 
         let image_info = vk::DescriptorImageInfo {
@@ -265,11 +241,6 @@ impl PanoramaPipeline {
             alloc.free(a).ok();
         }
         device.destroy_image(self.cube_image, None);
-
-        if let Some(a) = self.staging_allocation.take() {
-            alloc.free(a).ok();
-        }
-        device.destroy_buffer(self.staging_buffer, None);
 
         drop(alloc);
 
@@ -332,15 +303,7 @@ fn load_cubemap(
     command_pool: vk::CommandPool,
     allocator: &Arc<Mutex<Allocator>>,
     face_paths: Option<&[PathBuf; 6]>,
-) -> (
-    vk::Image,
-    vk::ImageView,
-    vk::Sampler,
-    Allocation,
-    vk::Buffer,
-    Allocation,
-    bool,
-) {
+) -> (vk::Image, vk::ImageView, vk::Sampler, Allocation, bool) {
     let Some(face_paths) = face_paths else {
         tracing::info!("Panorama faces not found, skipping cubemap");
         return create_fallback_cubemap(device, allocator);
@@ -386,6 +349,7 @@ fn load_cubemap(
         face_w,
         face_h,
     );
+    util::free_staging(device, allocator, staging_buffer, staging_allocation);
 
     let mip_levels = mip_levels_for(face_w, face_h);
     let view = create_cubemap_view(device, image, mip_levels);
@@ -406,15 +370,7 @@ fn load_cubemap(
 
     tracing::info!("Panorama cubemap loaded: {face_w}x{face_h} per face, {mip_levels} mip levels");
 
-    (
-        image,
-        view,
-        sampler,
-        allocation,
-        staging_buffer,
-        staging_allocation,
-        true,
-    )
+    (image, view, sampler, allocation, true)
 }
 
 fn mip_levels_for(w: u32, h: u32) -> u32 {
@@ -719,20 +675,9 @@ fn upload_cubemap(
 fn create_fallback_cubemap(
     device: &vk::Device,
     allocator: &Arc<Mutex<Allocator>>,
-) -> (
-    vk::Image,
-    vk::ImageView,
-    vk::Sampler,
-    Allocation,
-    vk::Buffer,
-    Allocation,
-    bool,
-) {
-    let pixels = vec![0u8; 4 * 6];
+) -> (vk::Image, vk::ImageView, vk::Sampler, Allocation, bool) {
     let (image, allocation) = create_cubemap_image(device, allocator, 1, 1);
     let view = create_cubemap_view(device, image, 1);
-    let (staging_buffer, staging_allocation) =
-        util::create_staging_buffer(device, allocator, &pixels, "panorama_fallback_staging");
 
     let sampler_info = vk::SamplerCreateInfo {
         mag_filter: vk::Filter::Linear,
@@ -743,15 +688,7 @@ fn create_fallback_cubemap(
         .create_sampler(&sampler_info, None)
         .expect("failed to create fallback sampler");
 
-    (
-        image,
-        view,
-        sampler,
-        allocation,
-        staging_buffer,
-        staging_allocation,
-        false,
-    )
+    (image, view, sampler, allocation, false)
 }
 
 fn create_pipeline(

@@ -30,7 +30,11 @@ pub fn enabled(args: &crate::LaunchArgs) -> bool {
     if args.harness_script.is_some() {
         return false;
     }
-    RELEASE.is_some() && cfg!(not(mobile)) && args.launch_token.is_none()
+    // A `--chunk-bench` run measures the binary it was started with.
+    RELEASE.is_some()
+        && cfg!(not(mobile))
+        && args.launch_token.is_none()
+        && args.chunk_bench.is_none()
 }
 
 /// Installs a newer release over this one, returning the binary to relaunch,

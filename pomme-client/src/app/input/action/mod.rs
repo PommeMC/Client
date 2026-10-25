@@ -2,8 +2,10 @@
 
 use std::borrow::Cow;
 
+#[cfg(any(test, feature = "test-harness"))]
 use winit::keyboard::KeyCode;
 
+#[cfg(any(test, feature = "test-harness"))]
 use super::InputKey::Keyboard;
 use super::{ActionId, DisplayText, InputKey, StringId};
 
@@ -63,8 +65,8 @@ impl Action {
         self.metadata().fixed_inputs
     }
 
-    /// The first default or fixed keyboard key, for the live input paths
-    /// that still read keys directly.
+    /// The first default or fixed keyboard key, for harness input synthesis.
+    #[cfg(any(test, feature = "test-harness"))]
     pub fn default_key(self) -> Option<KeyCode> {
         self.defaults()
             .iter()

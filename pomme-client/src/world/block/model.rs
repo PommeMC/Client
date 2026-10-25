@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use glam::{Mat3, Mat4, Quat, Vec3};
 use serde::Deserialize;
@@ -421,11 +422,56 @@ impl CardinalLightType {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// A texture name interned once per process, so a quad holds two bytes
+/// instead of its own `String` and a mesh finds its atlas region by index
+/// (`AtlasUVMap::region`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TextureId(u16);
+
+#[derive(Default)]
+struct TextureNames {
+    names: Vec<&'static str>,
+    ids: HashMap<&'static str, u16>,
+}
+
+/// Names are leaked: a few thousand distinct textures, for the whole run.
+static TEXTURE_NAMES: LazyLock<RwLock<TextureNames>> = LazyLock::new(Default::default);
+
+impl TextureId {
+    pub fn intern(name: &str) -> Self {
+        if let Some(&id) = TEXTURE_NAMES.read().unwrap().ids.get(name) {
+            return Self(id);
+        }
+        let mut table = TEXTURE_NAMES.write().unwrap();
+        if let Some(&id) = table.ids.get(name) {
+            return Self(id);
+        }
+        let id = u16::try_from(table.names.len()).expect("over 65536 texture names");
+        let name: &'static str = Box::leak(name.into());
+        table.names.push(name);
+        table.ids.insert(name, id);
+        Self(id)
+    }
+
+    pub fn name(self) -> &'static str {
+        TEXTURE_NAMES.read().unwrap().names[self.index()]
+    }
+
+    pub fn index(self) -> usize {
+        usize::from(self.0)
+    }
+
+    /// Every name interned so far, by id.
+    pub fn all_names() -> Vec<&'static str> {
+        TEXTURE_NAMES.read().unwrap().names.clone()
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct BakedQuad {
     pub positions: [[f32; 3]; 4],
     pub uvs: [[f32; 2]; 4],
-    pub texture: String,
+    pub texture: TextureId,
     pub cullface: Option<Direction>,
     pub tint: super::render_assets::Tint,
     /// Raw vanilla face `tintindex`. Terrain resolves this through `tint`,
@@ -438,7 +484,7 @@ pub struct BakedQuad {
     pub shade_face: Option<Direction>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub struct BakedModel {
     pub quads: Vec<BakedQuad>,
     pub is_full_cube: bool,
@@ -447,7 +493,7 @@ pub struct BakedModel {
 #[derive(Clone)]
 pub struct MultipartEntry {
     pub when: HashMap<String, String>,
-    pub quads: Vec<BakedQuad>,
+    pub model: Arc<BakedModel>,
 }
 
 pub fn load_all_block_textures(
@@ -484,7 +530,7 @@ pub fn load_all_block_textures(
     results
 }
 
-type BakedModelMap = HashMap<String, HashMap<String, BakedModel>>;
+type BakedModelMap = HashMap<String, HashMap<String, Arc<BakedModel>>>;
 type MultipartMap = HashMap<String, Vec<MultipartEntry>>;
 
 pub fn bake_all_models(
@@ -492,7 +538,7 @@ pub fn bake_all_models(
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> (BakedModelMap, MultipartMap) {
-    let mut results: HashMap<String, HashMap<String, BakedModel>> = HashMap::new();
+    let mut results: BakedModelMap = HashMap::new();
     let mut multipart_results: HashMap<String, Vec<MultipartEntry>> = HashMap::new();
     let mut model_cache = HashMap::new();
     let mut total = 0u32;
@@ -503,44 +549,48 @@ pub fn bake_all_models(
         packs,
         |block_name, blockstate| {
             total += 1;
-            let mut variants_map: HashMap<String, BakedModel> = HashMap::new();
+            let mut variants_map: HashMap<String, Arc<BakedModel>> = HashMap::new();
+            // Variants (and multipart cases) naming the same model, rotation
+            // and uvlock share one bake. Per block, since tints are.
+            let mut shared: HashMap<(String, i32, i32, bool), Arc<BakedModel>> = HashMap::new();
+            let mut bake = |model_ref: &ModelRef| {
+                let key = (
+                    model_ref.model.clone(),
+                    model_ref.x,
+                    model_ref.y,
+                    model_ref.uvlock,
+                );
+                if let Some(baked) = shared.get(&key) {
+                    return Some(Arc::clone(baked));
+                }
+                let resolved = resolve_model(
+                    &model_ref.model,
+                    jar_assets_dir,
+                    asset_index,
+                    &mut model_cache,
+                    packs,
+                );
+                let mut baked =
+                    bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)?;
+                apply_block_tints(&mut baked, block_name);
+                let baked = Arc::new(baked);
+                shared.insert(key, Arc::clone(&baked));
+                Some(baked)
+            };
 
             if let Some(variants) = &blockstate.variants {
                 for (variant_key, variant_entry) in variants {
-                    let model_ref = variant_entry.first()?;
-                    let resolved = resolve_model(
-                        &model_ref.model,
-                        jar_assets_dir,
-                        asset_index,
-                        &mut model_cache,
-                        packs,
-                    );
-                    if let Some(mut baked) =
-                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)
-                    {
-                        apply_block_tints(&mut baked, block_name);
+                    if let Some(baked) = bake(variant_entry.first()?) {
                         variants_map.insert(variant_key.clone(), baked);
                     }
                 }
             } else if let Some(multipart) = &blockstate.multipart {
                 let mut entries = Vec::new();
                 for case in multipart {
-                    let model_ref = case.apply.first()?;
-                    let resolved = resolve_model(
-                        &model_ref.model,
-                        jar_assets_dir,
-                        asset_index,
-                        &mut model_cache,
-                        packs,
-                    );
-                    if let Some(mut baked) =
-                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)
-                    {
-                        apply_block_tints(&mut baked, block_name);
-                        let when = parse_when_condition(&case.when);
+                    if let Some(baked) = bake(case.apply.first()?) {
                         entries.push(MultipartEntry {
-                            when,
-                            quads: baked.quads,
+                            when: parse_when_condition(&case.when),
+                            model: baked,
                         });
                     }
                 }
@@ -1157,7 +1207,7 @@ fn add_chest_cube(
             uvs: spec
                 .uv_pixels
                 .map(|[u_px, v_px]| [u_px / TEX_SIZE, v_px / TEX_SIZE]),
-            texture: texture.to_string(),
+            texture: TextureId::intern(texture),
             cullface: None,
             tint: super::render_assets::Tint::None,
             tint_index: None,
@@ -1793,7 +1843,7 @@ fn bake_resolved_model(
             quads.push(BakedQuad {
                 positions,
                 uvs,
-                texture: texture_name,
+                texture: TextureId::intern(&texture_name),
                 cullface,
                 tint: quad_tint,
                 tint_index: face_def
@@ -2261,7 +2311,7 @@ mod tests {
         let mut quad = BakedQuad {
             positions: face_positions(Direction::Up, [0.0; 3], [1.0; 3]),
             uvs: [[0.0; 2]; 4],
-            texture: "block/stone".to_string(),
+            texture: TextureId::intern("block/stone"),
             cullface: None,
             tint: Tint::None,
             tint_index: None,
@@ -2571,7 +2621,7 @@ mod tests {
                 BakedQuad {
                     positions: [[0.0; 3]; 4],
                     uvs: [[0.0; 2]; 4],
-                    texture: "fern".to_string(),
+                    texture: TextureId::intern("fern"),
                     cullface: None,
                     tint: Tint::None,
                     tint_index: Some(0),
@@ -2581,7 +2631,7 @@ mod tests {
                 BakedQuad {
                     positions: [[0.0; 3]; 4],
                     uvs: [[0.0; 2]; 4],
-                    texture: "fern_overlay".to_string(),
+                    texture: TextureId::intern("fern_overlay"),
                     cullface: None,
                     tint: Tint::None,
                     tint_index: None,
@@ -3018,7 +3068,12 @@ mod tests {
         let resolved = resolve_model("block/test_core", &root, &None, &mut cache, None);
         let baked = bake_resolved_model(&resolved, 0, 0, Tint::None).unwrap();
         assert_eq!(baked.quads.len(), 6);
-        assert!(baked.quads.iter().all(|quad| quad.texture == "test_core"));
+        assert!(
+            baked
+                .quads
+                .iter()
+                .all(|quad| quad.texture.name() == "test_core")
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use azalea_chat::FormattedText;
 use azalea_chat::style::Style;
 
+use crate::app::input::KeyBindings;
 use crate::chat_component::{Component, ResolvedStyle};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -182,6 +183,20 @@ pub fn format_component_spans(component: &Component, base_color: [f32; 4]) -> Ve
     format_component_spans_with_parent(component, &ResolvedStyle::default(), base_color)
 }
 
+/// Flatten a component using the app's current effective key bindings.
+pub fn format_component_spans_with_bindings(
+    component: &Component,
+    base_color: [f32; 4],
+    bindings: &KeyBindings,
+) -> Vec<TextSpan> {
+    format_component_spans_with_parent_and_bindings(
+        component,
+        &ResolvedStyle::default(),
+        base_color,
+        bindings,
+    )
+}
+
 /// [`format_component_spans`] under an inherited parent style, which the
 /// component's own explicit style overrides (vanilla appending it to a styled
 /// parent).
@@ -190,8 +205,23 @@ pub fn format_component_spans_with_parent(
     parent: &ResolvedStyle,
     base_color: [f32; 4],
 ) -> Vec<TextSpan> {
+    format_component_spans_with_parent_and_bindings(
+        component,
+        parent,
+        base_color,
+        &KeyBindings::default(),
+    )
+}
+
+/// Styled traversal with both an inherited style and current input bindings.
+pub fn format_component_spans_with_parent_and_bindings(
+    component: &Component,
+    parent: &ResolvedStyle,
+    base_color: [f32; 4],
+    bindings: &KeyBindings,
+) -> Vec<TextSpan> {
     let mut spans = Vec::new();
-    component.visit_text(parent, &mut |text, style| {
+    component.visit_text_with_bindings(parent, bindings, &mut |text, style| {
         let color = style.color.map(rgb24).unwrap_or(base_color);
         spans.push(TextSpan {
             text: text.to_owned(),

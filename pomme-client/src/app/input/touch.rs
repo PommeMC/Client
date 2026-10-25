@@ -431,16 +431,6 @@ mod tests {
         assert_eq!(c.stick(), Some(Vec2::new(1.0, 0.0)));
     }
 
-    /// A tap presses its action's key, so every tapped action needs one.
-    #[test]
-    fn tapped_actions_have_a_key() {
-        for button in TouchButton::ALL {
-            if let Some(action) = button.tapped_action() {
-                assert!(action.default_key().is_some(), "{action:?}");
-            }
-        }
-    }
-
     #[test]
     fn buttons_and_hotbar_fire_on_press() {
         let (mut c, t) = (TouchControls::default(), Instant::now());

@@ -10,6 +10,7 @@ use pomme_protocol::scoreboard::{
 
 use super::NetworkEvent;
 use super::chat::component_spans;
+use super::handler::send_ordered;
 use crate::ui::hud::{CollisionRule, ScoreNumberFormat};
 
 /// `DisplaySlot.SIDEBAR`'s id.
@@ -24,7 +25,7 @@ pub(super) fn handle_raw_scoreboard_packet(
     Some(
         super::read_raw_packet(packet_id, payload, scoreboard::read)?.map(|packet| {
             if let Some(event) = event(packet) {
-                let _ = event_tx.try_send(event);
+                send_ordered(event_tx, event);
             }
         }),
     )

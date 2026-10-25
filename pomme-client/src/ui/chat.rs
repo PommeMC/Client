@@ -11,6 +11,7 @@ use simdnbt::owned::{NbtCompound, NbtTag};
 
 use super::common;
 use super::common::LINE_HEIGHT;
+use crate::app::input::KeyBindings;
 use crate::chat_component::{
     Argument, ClickEvent, Component, HoverEvent, ResolvedStyle, list_elements, normalize_identifier,
 };
@@ -21,8 +22,8 @@ use crate::net::commands::{
 use crate::net::sender::ChatMark;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 use crate::ui::text::{
-    TextSpan, format_component_spans, format_component_spans_with_parent, parse_uuid_value,
-    with_alpha,
+    TextSpan, format_component_spans, format_component_spans_with_bindings,
+    format_component_spans_with_parent_and_bindings, parse_uuid_value, with_alpha,
 };
 use crate::ui::text_edit::{
     SystemClipboard, TextFieldState, TextInputEvent, truncate_to_utf16, utf16_len,
@@ -372,6 +373,7 @@ pub struct ChatBuildContext<'a> {
     pub covered: bool,
     pub command_tree: Option<&'a CommandTree>,
     pub advanced_item_tooltips: bool,
+    pub key_bindings: &'a KeyBindings,
     pub text_width_fn: &'a dyn Fn(&str, f32) -> f32,
     pub spans_width_fn: &'a dyn Fn(&[TextSpan], f32) -> f32,
 }
@@ -1683,6 +1685,7 @@ impl ChatState {
             covered,
             command_tree,
             advanced_item_tooltips,
+            key_bindings,
             text_width_fn,
             spans_width_fn,
         } = context;
@@ -1954,6 +1957,7 @@ impl ChatState {
                     screen_h,
                     gs,
                     advanced_item_tooltips,
+                    key_bindings,
                     &width0,
                 );
             }
@@ -2060,6 +2064,7 @@ impl ChatState {
                     screen_h,
                     gs,
                     advanced_item_tooltips,
+                    key_bindings,
                     &width0,
                 );
             }
@@ -2450,18 +2455,23 @@ fn push_hover_tooltip(
     screen_h: f32,
     gs: f32,
     advanced_item_tooltips: bool,
+    bindings: &KeyBindings,
     width0: &dyn Fn(&[TextSpan]) -> f32,
 ) {
     let lines = match hover {
         HoverEvent::Text(component) => {
             let max_width = ((screen_w / gs).ceil() / 2.0).floor().max(200.0);
-            wrapped_tooltip_lines(component, max_width, width0)
+            wrapped_tooltip_lines_with_bindings(component, max_width, width0, bindings)
         }
         // TODO: a `show_item` hover keeps only its JSON shape
         // (`HoverEvent::Item`), so its components lose payload types and Java
         // number text; the dialog's item body passes its raw tag.
-        HoverEvent::Item(value) => item_tooltip_lines(value, None, advanced_item_tooltips),
-        HoverEvent::Entity(value) if advanced_item_tooltips => entity_tooltip_lines(value),
+        HoverEvent::Item(value) => {
+            item_tooltip_lines_with_bindings(value, None, advanced_item_tooltips, bindings)
+        }
+        HoverEvent::Entity(value) if advanced_item_tooltips => {
+            entity_tooltip_lines(value, bindings)
+        }
         HoverEvent::Entity(_) => Vec::new(),
     };
     if !lines.is_empty() {
@@ -2490,7 +2500,16 @@ pub(crate) fn wrapped_tooltip_lines(
     max_width: f32,
     width0: &dyn Fn(&[TextSpan]) -> f32,
 ) -> Vec<TooltipLine> {
-    let spans = format_component_spans(component, common::WHITE);
+    wrapped_tooltip_lines_with_bindings(component, max_width, width0, &KeyBindings::default())
+}
+
+fn wrapped_tooltip_lines_with_bindings(
+    component: &Component,
+    max_width: f32,
+    width0: &dyn Fn(&[TextSpan]) -> f32,
+    bindings: &KeyBindings,
+) -> Vec<TooltipLine> {
+    let spans = format_component_spans_with_bindings(component, common::WHITE, bindings);
     wrap_spans(&spans, max_width, width0)
         .into_iter()
         .map(|spans| TooltipLine {
@@ -2501,7 +2520,18 @@ pub(crate) fn wrapped_tooltip_lines(
 }
 
 pub(crate) fn component_tooltip_lines(component: &Component) -> Vec<TooltipLine> {
-    span_tooltip_lines(format_component_spans(component, common::WHITE))
+    component_tooltip_lines_with_bindings(component, &KeyBindings::default())
+}
+
+fn component_tooltip_lines_with_bindings(
+    component: &Component,
+    bindings: &KeyBindings,
+) -> Vec<TooltipLine> {
+    span_tooltip_lines(format_component_spans_with_bindings(
+        component,
+        common::WHITE,
+        bindings,
+    ))
 }
 
 /// One tooltip line per `\n`-separated run, unwrapped.
@@ -2535,7 +2565,7 @@ fn span_tooltip_lines(spans: Vec<TextSpan>) -> Vec<TooltipLine> {
     lines
 }
 
-fn entity_tooltip_lines(value: &serde_json::Value) -> Vec<TooltipLine> {
+fn entity_tooltip_lines(value: &serde_json::Value, bindings: &KeyBindings) -> Vec<TooltipLine> {
     let Some(map) = value.as_object() else {
         return vec![TooltipLine::new(value.to_string(), common::WHITE)];
     };
@@ -2543,7 +2573,7 @@ fn entity_tooltip_lines(value: &serde_json::Value) -> Vec<TooltipLine> {
     if let Some(name) = map.get("name")
         && let Ok(component) = Component::from_value(name)
     {
-        lines.extend(component_tooltip_lines(&component));
+        lines.extend(component_tooltip_lines_with_bindings(&component, bindings));
     }
 
     if let Some(id) = map.get("id").and_then(serde_json::Value::as_str) {
@@ -2553,10 +2583,13 @@ fn entity_tooltip_lines(value: &serde_json::Value) -> Vec<TooltipLine> {
             format!("entity.{namespace}.{}", path.replace('/', ".")),
             Vec::new(),
         );
-        lines.extend(component_tooltip_lines(&Component::translate(
-            "gui.entity_tooltip.type",
-            vec![Argument::Component(Box::new(description))],
-        )));
+        lines.extend(component_tooltip_lines_with_bindings(
+            &Component::translate(
+                "gui.entity_tooltip.type",
+                vec![Argument::Component(Box::new(description))],
+            ),
+            bindings,
+        ));
     }
     if let Some(uuid) = map.get("uuid").and_then(parse_uuid_value) {
         lines.push(TooltipLine::new(uuid.to_string(), common::WHITE));
@@ -2571,6 +2604,15 @@ pub(crate) fn item_tooltip_lines(
     value: &serde_json::Value,
     raw_components: Option<&NbtCompound>,
     advanced: bool,
+) -> Vec<TooltipLine> {
+    item_tooltip_lines_with_bindings(value, raw_components, advanced, &KeyBindings::default())
+}
+
+fn item_tooltip_lines_with_bindings(
+    value: &serde_json::Value,
+    raw_components: Option<&NbtCompound>,
+    advanced: bool,
+    bindings: &KeyBindings,
 ) -> Vec<TooltipLine> {
     let Some(map) = value.as_object() else {
         return vec![TooltipLine::new(value.to_string(), common::WHITE)];
@@ -2629,10 +2671,11 @@ pub(crate) fn item_tooltip_lines(
             italic: custom_name.is_some(),
             ..ResolvedStyle::default()
         };
-        span_tooltip_lines(format_component_spans_with_parent(
+        span_tooltip_lines(format_component_spans_with_parent_and_bindings(
             name,
             &parent,
             common::WHITE,
+            bindings,
         ))
     } else {
         vec![TooltipLine::new(default_name, common::rgb(rarity_rgb))]
@@ -2673,7 +2716,7 @@ pub(crate) fn item_tooltip_lines(
                 .unwrap_or_default(),
         };
         for line in &lore {
-            lines.extend(component_tooltip_lines(line));
+            lines.extend(component_tooltip_lines_with_bindings(line, bindings));
         }
     }
 
@@ -2710,7 +2753,7 @@ pub(crate) fn item_tooltip_lines(
                         Argument::Number(max_damage.to_string()),
                     ],
                 );
-                lines.extend(component_tooltip_lines(&component));
+                lines.extend(component_tooltip_lines_with_bindings(&component, bindings));
             } else {
                 lines.push(TooltipLine::new(
                     format!("Durability: {remaining} / {max_damage}"),
@@ -2726,7 +2769,7 @@ pub(crate) fn item_tooltip_lines(
                     "item.components",
                     vec![Argument::Number(component_count.to_string())],
                 );
-                let mut tooltip = component_tooltip_lines(&component);
+                let mut tooltip = component_tooltip_lines_with_bindings(&component, bindings);
                 for line in &mut tooltip {
                     for span in &mut line.spans {
                         span.color = common::rgb(0x555555);
@@ -3796,6 +3839,7 @@ mod tests {
                 covered: false,
                 command_tree: None,
                 advanced_item_tooltips: false,
+                key_bindings: &KeyBindings::default(),
                 text_width_fn: &text_width,
                 spans_width_fn: &spans_width,
             },
@@ -3905,12 +3949,65 @@ mod tests {
     }
 
     #[test]
+    fn hover_components_use_current_bindings_in_nested_runs() {
+        use winit::keyboard::KeyCode;
+
+        use crate::app::input::{Action, InputKey};
+
+        let nested = serde_json::json!({
+            "translate": "missing.hover.keybind.test", "fallback": "%s", "bold": true,
+            "with": [{"keybind": "key.jump"}],
+            "extra": [{"keybind": "key.jump"}]
+        });
+        let hovers = [
+            HoverEvent::Text(Box::new(Component::from_value(&nested).unwrap())),
+            HoverEvent::Item(serde_json::json!({
+                "id": "minecraft:diamond_sword",
+                "components": {"minecraft:custom_name": nested, "minecraft:lore": [nested]}
+            })),
+            HoverEvent::Entity(serde_json::json!({"name": nested})),
+        ];
+        let mut bindings = KeyBindings::default();
+        for (key, expected) in [(KeyCode::KeyJ, "JJ"), (KeyCode::KeyK, "KK")] {
+            bindings.set(Action::Jump, vec![InputKey::Keyboard(key)]);
+            for hover in &hovers {
+                let mut elements = Vec::new();
+                push_hover_tooltip(
+                    &mut elements,
+                    hover,
+                    (0.0, 0.0),
+                    640.0,
+                    360.0,
+                    1.0,
+                    matches!(hover, HoverEvent::Entity(_)),
+                    &bindings,
+                    &width,
+                );
+                let MenuElement::TooltipLines { lines, .. } = &elements[0] else {
+                    panic!("expected hover tooltip");
+                };
+                assert!(lines.iter().all(|line| line_text(&line.spans) == expected));
+                assert!(
+                    lines
+                        .iter()
+                        .flat_map(|line| &line.spans)
+                        .all(|span| span.bold)
+                );
+                if matches!(hover, HoverEvent::Item(_)) {
+                    assert_eq!(lines.len(), 2);
+                    assert!(lines[0].spans.iter().all(|span| span.italic));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn show_entity_reads_int_array_uuid() {
         let value = serde_json::json!({
             "id": "minecraft:pig",
             "uuid": [0x00112233_i64, 0x44556677, -2003195205, -857870593]
         });
-        let lines = entity_tooltip_lines(&value);
+        let lines = entity_tooltip_lines(&value, &KeyBindings::default());
         let uuid = lines.last().unwrap();
         assert_eq!(
             line_text(&uuid.spans),

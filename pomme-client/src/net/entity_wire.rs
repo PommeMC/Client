@@ -25,11 +25,7 @@ pub(super) fn handle_raw_entity_packet(
     Some(
         super::read_raw_packet(packet_id, payload, entity::read)?.map(|packet| {
             if let Some(event) = event(packet) {
-                if matches!(event, NetworkEvent::EntityMotion { .. }) {
-                    send_ordered(event_tx, event);
-                } else {
-                    let _ = event_tx.try_send(event);
-                }
+                send_ordered(event_tx, event);
             }
         }),
     )

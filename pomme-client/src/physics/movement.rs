@@ -4,7 +4,6 @@
 
 use azalea_block::BlockState;
 use glam::{DVec3, dvec3};
-use winit::keyboard::KeyCode;
 
 use super::aabb::Aabb;
 use super::block_shape::CollisionContext;
@@ -721,7 +720,7 @@ fn update_sprint_state(
         player.sprint_toggle_timer -= 1;
     }
     let current_shift = input.performing_action(input::Action::Sneak);
-    let current_backward = input.key_pressed(KeyCode::KeyS)
+    let current_backward = input.action_held(input::Action::Backward)
         || input
             .analog_movement_axes()
             .map(|vec| vec.y < -input::STICK_MOVEMENT_THRESHOLD)
@@ -1154,16 +1153,16 @@ fn move_vector(input: &InputState) -> (f32, f32) {
     } else {
         let mut forward = 0.0_f32;
         let mut strafe = 0.0_f32;
-        if input.key_pressed(KeyCode::KeyW) {
+        if input.action_held(input::Action::Forward) {
             forward += 1.0;
         }
-        if input.key_pressed(KeyCode::KeyS) {
+        if input.action_held(input::Action::Backward) {
             forward -= 1.0;
         }
-        if input.key_pressed(KeyCode::KeyA) {
+        if input.action_held(input::Action::StrafeLeft) {
             strafe += 1.0;
         }
-        if input.key_pressed(KeyCode::KeyD) {
+        if input.action_held(input::Action::StrafeRight) {
             strafe -= 1.0;
         }
         normalize_vec2(strafe, forward)
@@ -1517,6 +1516,8 @@ fn fix_entity_within_piston_base(
 
 #[cfg(test)]
 mod tests {
+    use winit::keyboard::KeyCode;
+
     use super::*;
     use crate::player::{CROUCH_EYE_HEIGHT, STANDING_EYE_HEIGHT};
     use crate::world::block_entity_anim::BlockEntityAnimStore;
@@ -2524,6 +2525,34 @@ mod tests {
         assert!(has_forward_impulse(&input));
         input.set_key_pressed_for_test(KeyCode::KeyS, true);
         assert!(!has_forward_impulse(&input));
+    }
+
+    #[test]
+    fn rebound_movement_replaces_defaults_and_cancels_forward_impulse() {
+        let mut input = InputState::released();
+        input.key_bindings.set(
+            input::Action::Forward,
+            vec![input::InputKey::Keyboard(KeyCode::KeyI)],
+        );
+        input.key_bindings.set(
+            input::Action::Backward,
+            vec![input::InputKey::Keyboard(KeyCode::KeyK)],
+        );
+        input.set_key_pressed_for_test(KeyCode::KeyW, true);
+        assert_eq!(movement_input(&input, false, 1.0), (0.0, 0.0));
+
+        input.set_key_pressed_for_test(KeyCode::KeyI, true);
+        assert_eq!(movement_input(&input, false, 1.0), (INPUT_DAMPING, 0.0));
+        assert!(has_forward_impulse(&input));
+        input.set_key_pressed_for_test(KeyCode::KeyK, true);
+        assert_eq!(movement_input(&input, false, 1.0), (0.0, 0.0));
+        assert!(!has_forward_impulse(&input));
+
+        let mut player = LocalPlayer::new();
+        player.sprint_toggle_timer = 4;
+        player.was_forward_pressed = true;
+        update_sprint_state(&mut player, &input, false, false, None);
+        assert_eq!(player.sprint_toggle_timer, 0);
     }
 
     #[test]

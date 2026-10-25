@@ -416,7 +416,7 @@ actions! {
         translation_id: None,
         fallback: "Next Hotbar Slot",
         category: Inventory,
-        // TODO: List once live input reads the binding instead of RightTrigger.
+        // Controller-only, with no vanilla mapping, so off the Key Binds screen.
         listed: false,
         defaults: [Controller(Button::RightTrigger)],
     },
@@ -425,7 +425,7 @@ actions! {
         translation_id: None,
         fallback: "Previous Hotbar Slot",
         category: Inventory,
-        // TODO: List once live input reads the binding instead of LeftTrigger.
+        // Controller-only, with no vanilla mapping, so off the Key Binds screen.
         listed: false,
         defaults: [Controller(Button::LeftTrigger)],
     },

@@ -115,6 +115,7 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         // Sub-screens reached from here (Language/Accessibility/Chat) return
         // to Options.
@@ -169,6 +170,7 @@ impl MainMenu {
             false,
             &[],
             text_width_fn,
+            key_bindings,
         )
     }
 
@@ -224,6 +226,7 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let fullscreen_label = match self.display_mode {
             DisplayMode::Windowed => "Fullscreen: Windowed",
@@ -339,6 +342,7 @@ impl MainMenu {
             true,
             &[],
             text_width_fn,
+            key_bindings,
         )
     }
 
@@ -348,6 +352,7 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let rows: Vec<OptRow> = vec![
             OptRow::Pair("Mouse Settings...", "Key Binds..."),
@@ -382,6 +387,7 @@ impl MainMenu {
             true,
             &[],
             text_width_fn,
+            key_bindings,
         )
     }
 
@@ -391,6 +397,7 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let sensitivity_label = if self.sensitivity <= 0.0 {
             "Sensitivity: *yawn*".to_string()
@@ -427,6 +434,7 @@ impl MainMenu {
             true,
             &[],
             text_width_fn,
+            key_bindings,
         )
     }
 
@@ -436,6 +444,7 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
+        key_bindings: &mut KeyBindings,
     ) -> MainMenuResult {
         let capturing = input.binding_capture || self.action_binding.is_some();
         if let Some(action) = self.action_binding
@@ -447,9 +456,9 @@ impl MainMenu {
             } else {
                 vec![pressed]
             };
-            self.key_bindings.set(action, inputs);
+            key_bindings.set(action, inputs);
             self.end_binding_capture();
-            self.save_settings();
+            self.save_settings(key_bindings);
         }
         // The accepting press must not also activate a widget or navigate back;
         // scrolling still works, as in vanilla.
@@ -462,7 +471,7 @@ impl MainMenu {
         let input = if capturing { &neutral_input } else { input };
 
         if input.escape {
-            self.set_screen(Screen::OptionsControls);
+            self.set_screen(Screen::OptionsControls, key_bindings);
             return empty_result(1.0);
         }
 
@@ -476,8 +485,7 @@ impl MainMenu {
         self.focus_advance(input);
         let ctx = &mut self.make_focus_ctx(input);
 
-        let mut entries: Vec<_> = self
-            .key_bindings
+        let mut entries: Vec<_> = key_bindings
             .iter()
             .filter(|binding| binding.action.listed())
             .map(|binding| {
@@ -485,7 +493,7 @@ impl MainMenu {
                 (
                     action,
                     binding.inputs.first().copied(),
-                    self.key_bindings.is_default(action),
+                    key_bindings.is_default(action),
                 )
             })
             .collect();
@@ -652,8 +660,8 @@ impl MainMenu {
                     "Reset",
                     !is_default,
                 ) {
-                    self.key_bindings.reset(action);
-                    self.save_settings();
+                    key_bindings.reset(action);
+                    self.save_settings(key_bindings);
                     any_clicked = true;
                 }
                 if !collisions.is_empty() {
@@ -683,10 +691,10 @@ impl MainMenu {
             footer_w,
             gs,
             "Reset Keys",
-            !self.key_bindings.all_default(),
+            !key_bindings.all_default(),
         ) {
-            self.key_bindings.reset_all();
-            self.save_settings();
+            key_bindings.reset_all();
+            self.save_settings(key_bindings);
             any_clicked = true;
         }
 
@@ -702,7 +710,7 @@ impl MainMenu {
             "Done",
             true,
         ) {
-            self.set_screen(Screen::OptionsControls);
+            self.set_screen(Screen::OptionsControls, key_bindings);
             let mut result = empty_result(1.0);
             result.clicked_button = true;
             return result;
@@ -723,6 +731,7 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let o = self.chat_options;
         let chat = format!("{CHAT_VISIBILITY} {}", o.visibility.label());
@@ -792,6 +801,7 @@ impl MainMenu {
             true,
             tooltips,
             text_width_fn,
+            key_bindings,
         )
     }
 
@@ -802,6 +812,7 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let force_unicode = format!("{FORCE_UNICODE_FONT} {}", on_off(self.force_unicode_font));
         let japanese_variants = format!(
@@ -826,6 +837,7 @@ impl MainMenu {
             true,
             tooltips,
             text_width_fn,
+            key_bindings,
         )
     }
 
@@ -835,6 +847,7 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let fov_effect_label = if self.fov_effect_scale <= 0.0 {
             "FOV Effects: OFF".to_string()
@@ -908,6 +921,7 @@ impl MainMenu {
             true,
             &[],
             text_width_fn,
+            key_bindings,
         )
     }
 
@@ -917,6 +931,7 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let pct = |v: f32| -> String {
             let p = (v * 100.0).round() as u32;
@@ -980,6 +995,7 @@ impl MainMenu {
             true,
             &[],
             text_width_fn,
+            key_bindings,
         )
     }
 
@@ -989,6 +1005,7 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let cape = if self.skin_cape {
             "Cape: ON"
@@ -1056,6 +1073,7 @@ impl MainMenu {
             true,
             &[],
             text_width_fn,
+            key_bindings,
         )
     }
 
@@ -1065,6 +1083,7 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let online_status_label = if self.show_online_status {
             "Show Online Status: ON"
@@ -1117,6 +1136,7 @@ impl MainMenu {
             true,
             tooltips,
             text_width_fn,
+            key_bindings,
         )
     }
 
@@ -1135,9 +1155,10 @@ impl MainMenu {
         header_footer: bool,
         tooltips: &[(&str, &str)],
         text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         if input.escape {
-            self.set_screen(back.clone_screen());
+            self.set_screen(back.clone_screen(), key_bindings);
             return empty_result(2.0);
         }
 
@@ -1355,7 +1376,7 @@ impl MainMenu {
                         if matches!(target, Screen::OptionsResourcePacks) {
                             self.rescan_packs = true;
                         }
-                        self.set_screen(target.clone_screen());
+                        self.set_screen(target.clone_screen(), key_bindings);
                         if matches!(self.screen, Screen::OptionsResourcePacks) {
                             self.focused_field = Some(0);
                             self.pack_search.set_focused(true);
@@ -1366,127 +1387,127 @@ impl MainMenu {
                         let max =
                             crate::ui::hud::gui_scale(sw, sh, 0, self.force_unicode_font) as u32;
                         self.gui_scale_setting = (self.gui_scale_setting + 1) % (max + 1);
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Fullscreen:") {
-                        self.set_display_mode(self.display_mode.cycle());
+                        self.set_display_mode(self.display_mode.cycle(), key_bindings);
                     }
                     if label.starts_with("Clouds:") {
                         self.cloud_mode = self.cloud_mode.cycle();
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Attack Indicator:") {
                         self.attack_indicator = self.attack_indicator.cycle();
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("View Bobbing:") {
                         self.view_bobbing = !self.view_bobbing;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Show Autosave Indicator:") {
                         self.show_autosave_indicator = !self.show_autosave_indicator;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("VSync:") {
                         self.vsync = !self.vsync;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Show Subtitles:") {
                         self.show_subtitles = !self.show_subtitles;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with(FORCE_UNICODE_FONT) {
                         self.force_unicode_font = !self.force_unicode_font;
                         self.reload_fonts = true;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with(JAPANESE_GLYPH_VARIANTS) {
                         self.japanese_glyph_variants = !self.japanese_glyph_variants;
                         self.reload_fonts = true;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with(INVERT_MOUSE_X) {
                         self.invert_mouse_x = !self.invert_mouse_x;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with(INVERT_MOUSE_Y) {
                         self.invert_mouse_y = !self.invert_mouse_y;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Vignette:") {
                         self.vignette = !self.vignette;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Entity Shadows:") {
                         self.entity_shadows = !self.entity_shadows;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Show Online Status:") {
                         self.show_online_status = !self.show_online_status;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Show Current Server:") {
                         self.show_current_server = !self.show_current_server;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with(CHAT_VISIBILITY) {
                         self.chat_options.visibility = self.chat_options.visibility.cycle();
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with(CHAT_COLORS) {
                         self.chat_options.colors = !self.chat_options.colors;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with(CHAT_LINKS) {
                         self.chat_options.links = !self.chat_options.links;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with(CHAT_LINKS_PROMPT) {
                         self.chat_options.links_prompt = !self.chat_options.links_prompt;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with(AUTO_SUGGESTIONS) {
                         self.chat_options.auto_suggestions = !self.chat_options.auto_suggestions;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with(ONLY_SHOW_SECURE_CHAT) {
                         self.chat_options.only_secure = !self.chat_options.only_secure;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with(SAVE_CHAT_DRAFTS) {
                         self.chat_options.save_drafts = !self.chat_options.save_drafts;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Cape:") {
                         self.skin_cape = !self.skin_cape;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Jacket:") {
                         self.skin_jacket = !self.skin_jacket;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Left Sleeve:") {
                         self.skin_left_sleeve = !self.skin_left_sleeve;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Right Sleeve:") {
                         self.skin_right_sleeve = !self.skin_right_sleeve;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Left Pants Leg:") {
                         self.skin_left_pants = !self.skin_left_pants;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Right Pants Leg:") {
                         self.skin_right_pants = !self.skin_right_pants;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Hat:") {
                         self.skin_hat = !self.skin_hat;
-                        self.save_settings();
+                        self.save_settings(key_bindings);
                     }
                     if label.starts_with("Main Hand:") {
-                        self.set_main_hand_right(!self.skin_main_hand_right);
+                        self.set_main_hand_right(!self.skin_main_hand_right, key_bindings);
                     }
                 }
             }
@@ -1590,7 +1611,7 @@ impl MainMenu {
         any_hovered |= done_h;
         if (clicked && done_h) || (done_focused && ctx.activate) {
             any_clicked = true;
-            self.set_screen(back);
+            self.set_screen(back, key_bindings);
         }
         self.finish_focus(&ctx);
 
@@ -1609,12 +1630,13 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         use crate::resource_pack::PackSource;
 
         if input.escape {
             self.pack_search.clear();
-            self.set_screen(Screen::Options);
+            self.set_screen(Screen::Options, key_bindings);
             return empty_result(2.0);
         }
 
@@ -1889,7 +1911,7 @@ impl MainMenu {
         any_hovered |= h;
         if clicked && h {
             self.pack_search.clear();
-            self.set_screen(Screen::Options);
+            self.set_screen(Screen::Options, key_bindings);
         }
 
         MainMenuResult {
@@ -1901,6 +1923,7 @@ impl MainMenu {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_options_stub(
         &mut self,
         sw: f32,
@@ -1909,9 +1932,10 @@ impl MainMenu {
         title: &str,
         back: Screen,
         footer_nav: Option<(&str, Screen)>,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         if input.escape {
-            self.set_screen(back.clone_screen());
+            self.set_screen(back.clone_screen(), key_bindings);
             return empty_result(2.0);
         }
 
@@ -1954,7 +1978,7 @@ impl MainMenu {
                 )
             };
             if push(x, label) {
-                self.set_screen(target);
+                self.set_screen(target, key_bindings);
             }
             push(x + w + gap, "Done")
         } else {
@@ -1969,7 +1993,7 @@ impl MainMenu {
             )
         };
         if done {
-            self.set_screen(back);
+            self.set_screen(back, key_bindings);
         }
         self.finish_focus(&ctx);
 
@@ -2124,8 +2148,9 @@ mod tests {
 
     #[test]
     fn binding_capture_replaces_all_inputs_without_activating_done() {
-        let mut menu = test_menu("pomme-keybind-capture-test");
-        menu.set_screen(Screen::OptionsKeybinds);
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-keybind-capture-test", &mut key_bindings);
+        menu.set_screen(Screen::OptionsKeybinds, &key_bindings);
         menu.action_binding = Some(Action::Jump);
         menu.build_options_keybinds(
             800.0,
@@ -2142,24 +2167,29 @@ mod tests {
                 ..MenuInput::default()
             },
             &|_, _| 0.0,
+            &mut key_bindings,
         );
         assert!(matches!(menu.screen, Screen::OptionsKeybinds));
         assert!(menu.action_binding.is_none());
-        let entry = menu
-            .key_bindings
-            .iter()
-            .find(|entry| entry.action == Action::Jump)
-            .unwrap();
         assert!(matches!(
-            entry.inputs,
+            jump_inputs(&key_bindings),
             [InputKey::Mouse(winit::event::MouseButton::Left)]
         ));
     }
 
+    fn jump_inputs(key_bindings: &KeyBindings) -> &[InputKey] {
+        key_bindings
+            .iter()
+            .find(|entry| entry.action == Action::Jump)
+            .unwrap()
+            .inputs
+    }
+
     #[test]
     fn escape_capture_unbinds_instead_of_navigating_back() {
-        let mut menu = test_menu("pomme-keybind-unbind-test");
-        menu.set_screen(Screen::OptionsKeybinds);
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-keybind-unbind-test", &mut key_bindings);
+        menu.set_screen(Screen::OptionsKeybinds, &key_bindings);
         menu.action_binding = Some(Action::Jump);
         menu.build_options_keybinds(
             800.0,
@@ -2171,17 +2201,11 @@ mod tests {
                 ..MenuInput::default()
             },
             &|_, _| 0.0,
+            &mut key_bindings,
         );
         assert!(matches!(menu.screen, Screen::OptionsKeybinds));
         assert!(menu.action_binding.is_none());
-        assert!(
-            menu.key_bindings
-                .iter()
-                .find(|entry| entry.action == Action::Jump)
-                .unwrap()
-                .inputs
-                .is_empty()
-        );
+        assert!(jump_inputs(&key_bindings).is_empty());
         menu.build_options_keybinds(
             800.0,
             600.0,
@@ -2190,12 +2214,18 @@ mod tests {
                 ..MenuInput::default()
             },
             &|_, _| 0.0,
+            &mut key_bindings,
         );
         assert!(matches!(menu.screen, Screen::OptionsControls));
     }
 
     /// Clicks `cursor` on an 800-wide Key Binds screen at GUI scale 1.
-    fn click_keybinds(menu: &mut MainMenu, sh: f32, cursor: (f32, f32)) {
+    fn click_keybinds(
+        menu: &mut MainMenu,
+        sh: f32,
+        cursor: (f32, f32),
+        key_bindings: &mut KeyBindings,
+    ) {
         menu.build_options_keybinds(
             800.0,
             sh,
@@ -2205,29 +2235,36 @@ mod tests {
                 ..MenuInput::default()
             },
             &|_, _| 0.0,
+            key_bindings,
         );
     }
 
     #[test]
     fn reset_buttons_restore_defaults() {
-        let mut menu = test_menu("pomme-keybind-reset-test");
-        menu.set_screen(Screen::OptionsKeybinds);
-        menu.key_bindings.set(Action::Jump, Vec::new());
-        menu.key_bindings.set(Action::DropItem, Vec::new());
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-keybind-reset-test", &mut key_bindings);
+        menu.set_screen(Screen::OptionsKeybinds, &key_bindings);
+        key_bindings.set(Action::Jump, Vec::new());
+        key_bindings.set(Action::DropItem, Vec::new());
         // Jump is the first Movement entry: list top 33, + 2, + a category row.
-        click_keybinds(&mut menu, 600.0, (540.0, 65.0));
-        assert!(menu.key_bindings.is_default(Action::Jump));
-        assert!(!menu.key_bindings.all_default());
+        click_keybinds(&mut menu, 600.0, (540.0, 65.0), &mut key_bindings);
+        assert!(key_bindings.is_default(Action::Jump));
+        assert!(!key_bindings.all_default());
         // Reset Keys, left of centre in the footer.
-        click_keybinds(&mut menu, 600.0, (300.0, 575.0));
-        assert!(menu.key_bindings.all_default());
+        click_keybinds(&mut menu, 600.0, (300.0, 575.0), &mut key_bindings);
+        assert!(key_bindings.all_default());
     }
 
     #[test]
     fn collisions_mark_both_rows_unless_both_default() {
-        let stripes = |menu: &mut MainMenu| {
-            let result =
-                menu.build_options_keybinds(800.0, 2000.0, &MenuInput::default(), &|_, _| 0.0);
+        let stripes = |menu: &mut MainMenu, key_bindings: &mut KeyBindings| {
+            let result = menu.build_options_keybinds(
+                800.0,
+                2000.0,
+                &MenuInput::default(),
+                &|_, _| 0.0,
+                key_bindings,
+            );
             result
                 .elements
                 .iter()
@@ -2236,34 +2273,37 @@ mod tests {
                 )
                 .count()
         };
-        let mut menu = test_menu("pomme-keybind-collision-test");
-        menu.set_screen(Screen::OptionsKeybinds);
-        assert_eq!(stripes(&mut menu), 0);
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-keybind-collision-test", &mut key_bindings);
+        menu.set_screen(Screen::OptionsKeybinds, &key_bindings);
+        assert_eq!(stripes(&mut menu, &mut key_bindings), 0);
         // Jump keeps its default Space; Drop moving onto it marks both.
-        menu.key_bindings.set(
+        key_bindings.set(
             Action::DropItem,
             vec![InputKey::Keyboard(winit::keyboard::KeyCode::Space)],
         );
-        assert_eq!(stripes(&mut menu), 2);
+        assert_eq!(stripes(&mut menu, &mut key_bindings), 2);
     }
 
     #[test]
     fn rows_scrolled_under_the_header_ignore_clicks() {
-        let mut menu = test_menu("pomme-keybind-hidden-row-test");
-        menu.set_screen(Screen::OptionsKeybinds);
-        menu.key_bindings.set(Action::Jump, Vec::new());
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-keybind-hidden-row-test", &mut key_bindings);
+        menu.set_screen(Screen::OptionsKeybinds, &key_bindings);
+        key_bindings.set(Action::Jump, Vec::new());
         menu.scroll_offset = 40.0;
         // Jump's Reset now sits at y 15..35, under the header.
-        click_keybinds(&mut menu, 200.0, (540.0, 20.0));
-        assert!(!menu.key_bindings.is_default(Action::Jump));
-        click_keybinds(&mut menu, 200.0, (540.0, 34.0));
-        assert!(menu.key_bindings.is_default(Action::Jump));
+        click_keybinds(&mut menu, 200.0, (540.0, 20.0), &mut key_bindings);
+        assert!(!key_bindings.is_default(Action::Jump));
+        click_keybinds(&mut menu, 200.0, (540.0, 34.0), &mut key_bindings);
+        assert!(key_bindings.is_default(Action::Jump));
     }
 
     /// A grid of one `Pair` row at 800x600: the left widget spans x 245..395
     /// and the right one 405..555, both at y 300.
     struct Grid {
         menu: MainMenu,
+        key_bindings: KeyBindings,
         rows: [OptRow<'static>; 1],
         nav: Vec<(&'static str, Screen)>,
         sliders: Vec<(&'static str, f32)>,
@@ -2272,8 +2312,10 @@ mod tests {
 
     impl Grid {
         fn new(left: &'static str, right: &'static str) -> Self {
+            let mut key_bindings = KeyBindings::default();
             Self {
-                menu: test_menu("pomme-options-focus-test"),
+                menu: test_menu("pomme-options-focus-test", &mut key_bindings),
+                key_bindings,
                 rows: [OptRow::Pair(left, right)],
                 nav: Vec::new(),
                 sliders: Vec::new(),
@@ -2302,6 +2344,7 @@ mod tests {
                 false,
                 &[],
                 &text_width,
+                &self.key_bindings,
             )
         }
 
@@ -2338,6 +2381,35 @@ mod tests {
         MenuInput {
             tab: true,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn entity_shadows_toggle_preserves_saved_key_bindings() {
+        let dir =
+            std::env::temp_dir().join(format!("pomme-entity-shadows-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let _cleanup = scopeguard::guard((), |_| {
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+        let mut grid = Grid::new("Entity Shadows: ON", "Other");
+        grid.menu.settings_dir = dir.clone();
+        grid.menu.entity_shadows = true;
+        grid.key_bindings
+            .set(Action::Jump, vec![InputKey::Keyboard(KeyCode::KeyJ)]);
+        grid.key_bindings.set(Action::DropItem, Vec::new());
+
+        for enabled in [false, true] {
+            assert!(grid.frame(&click(300.0)).clicked_button);
+            assert_eq!(grid.menu.entity_shadows, enabled);
+            let saved: Settings =
+                serde_json::from_str(&std::fs::read_to_string(dir.join("options.json")).unwrap())
+                    .unwrap();
+            assert_eq!(saved.entity_shadows, enabled);
+            assert_eq!(
+                serde_json::to_value(&saved.key_bindings).unwrap(),
+                serde_json::to_value(&grid.key_bindings).unwrap()
+            );
         }
     }
 
@@ -2495,20 +2567,21 @@ mod tests {
     /// checks each screen's rows against its disabled list.
     #[test]
     fn disabled_prefixes_cover_every_options_screen() {
-        let mut menu = test_menu("pomme-options-coverage-test");
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-options-coverage-test", &mut key_bindings);
         let input = MenuInput::default();
         let text_width = |_: &str, _: f32| 0.0;
         let tw: common::TextWidthFn = &text_width;
         let (sw, sh) = (1920.0, 1080.0);
 
-        menu.build_options(sw, sh, &input, tw);
-        menu.build_options_video(sw, sh, &input, tw);
-        menu.build_options_controls(sw, sh, &input, tw);
-        menu.build_options_mouse(sw, sh, &input, tw);
-        menu.build_options_chat(sw, sh, &input, tw);
-        menu.build_options_accessibility(sw, sh, &input, tw);
-        menu.build_options_music(sw, sh, &input, tw);
-        menu.build_options_skin(sw, sh, &input, tw);
-        menu.build_options_online(sw, sh, &input, tw);
+        menu.build_options_mouse(sw, sh, &input, tw, &key_bindings);
+        menu.build_options(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_video(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_controls(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_chat(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_accessibility(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_music(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_skin(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_online(sw, sh, &input, tw, &key_bindings);
     }
 }

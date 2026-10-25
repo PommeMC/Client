@@ -89,6 +89,10 @@ impl Difficulty {
     }
 }
 
+pub fn saves_dir(game_dir: &Path) -> PathBuf {
+    game_dir.join("saves")
+}
+
 /// Vanilla `WorldOptions.parseSeed`: a decimal long when the text parses as
 /// one, otherwise Java's string hash. `None` means the caller should pick a
 /// random seed.

@@ -56,6 +56,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: impl Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gs = self.gui_scale(screen_w, screen_h);
         let cursor = input.cursor;
@@ -122,9 +123,9 @@ impl MainMenu {
                 any_clicked = true;
                 match *label {
                     "Singleplayer" => {
-                        self.open_world_list(gs, &|t: &str| text_width_fn(t, fs));
+                        self.open_world_list(gs, &|t: &str| text_width_fn(t, fs), key_bindings);
                     }
-                    "Multiplayer" => self.set_screen(Screen::ServerList),
+                    "Multiplayer" => self.set_screen(Screen::ServerList, key_bindings),
                     _ => {}
                 }
             }
@@ -175,11 +176,11 @@ impl MainMenu {
             ) {
                 any_clicked = true;
                 match sprite {
-                    SpriteId::IconFriends if signed_in => self.open_friends(),
-                    SpriteId::IconFriends => self.open_account(),
+                    SpriteId::IconFriends if signed_in => self.open_friends(key_bindings),
+                    SpriteId::IconFriends => self.open_account(key_bindings),
                     SpriteId::IconAccessibility => {
                         self.settings_back = Screen::Main;
-                        self.set_screen(Screen::OptionsAccessibility);
+                        self.set_screen(Screen::OptionsAccessibility, key_bindings);
                     }
                     _ => {}
                 }
@@ -203,7 +204,7 @@ impl MainMenu {
             true,
         ) {
             any_clicked = true;
-            self.open_options();
+            self.open_options(key_bindings);
         }
         if push_button_f(
             &mut elements,
@@ -293,7 +294,7 @@ impl MainMenu {
             if clicked {
                 any_clicked = true;
                 self.settings_back = Screen::Main;
-                self.set_screen(Screen::OptionsCredits);
+                self.set_screen(Screen::OptionsCredits, key_bindings);
             }
         }
 

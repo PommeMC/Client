@@ -1126,6 +1126,7 @@ impl MainMenu {
         elements: &mut Vec<MenuElement>,
         screen_w: f32,
         screen_h: f32,
+        key_bindings: &KeyBindings,
     ) -> Option<MenuAction> {
         let mut action = None;
         let mut committed = false;
@@ -1147,7 +1148,7 @@ impl MainMenu {
             }
         }
         if committed {
-            self.save_settings();
+            self.save_settings(key_bindings);
         }
         action
     }

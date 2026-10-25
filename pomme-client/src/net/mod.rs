@@ -101,6 +101,21 @@ pub enum Weather {
     ThunderLevel(f32),
 }
 
+/// A dimension type's fields the client uses, from login and respawn.
+pub struct DimensionInfo {
+    pub height: u32,
+    pub min_y: i32,
+    pub has_skylight: bool,
+    pub cardinal_light: crate::world::block::model::CardinalLightType,
+    /// Dimension-type `ambient_light`, the lightmap's floor.
+    pub ambient_light: f32,
+    /// The dimension's `timelines` include the overworld day, which dims
+    /// its sky light at night.
+    pub overworld_day: bool,
+    /// The `world_clock` driving this dimension's day time.
+    pub default_clock: Option<String>,
+}
+
 pub enum NetworkEvent {
     /// Ordered before login/configuration events on both transports.
     ProtocolSelected {
@@ -120,19 +135,7 @@ pub enum NetworkEvent {
     },
     /// `LEVEL_CHUNKS_LOAD_START`: the server has started sending the level.
     LevelChunksLoadStart,
-    DimensionInfo {
-        height: u32,
-        min_y: i32,
-        has_skylight: bool,
-        cardinal_light: crate::world::block::model::CardinalLightType,
-        /// Dimension-type `ambient_light`, the lightmap's floor.
-        ambient_light: f32,
-        /// The dimension's `timelines` include the overworld day, which dims
-        /// its sky light at night.
-        overworld_day: bool,
-        /// The `world_clock` driving this dimension's day time.
-        default_clock: Option<String>,
-    },
+    DimensionInfo(DimensionInfo),
     ChunkLoaded {
         pos: ChunkPos,
         data: Arc<Box<[u8]>>,
@@ -236,11 +239,13 @@ pub enum NetworkEvent {
         item: ItemStack,
     },
     ChatMessage {
-        spans: Vec<crate::ui::text::TextSpan>,
-        /// Same bound chat type rendered from the signed body with unsigned
+        /// Preserves keybind references for resolution using the app's current
+        /// bindings.
+        component: Box<crate::chat_component::Component>,
+        /// Same bound chat type decorated from the signed body with unsigned
         /// content removed, for Vanilla's `onlyShowSecureChat` path.
-        secure_spans: Option<Vec<crate::ui::text::TextSpan>>,
-        missing_profile_spans: Option<Vec<crate::ui::text::TextSpan>>,
+        secure_component: Option<Box<crate::chat_component::Component>>,
+        missing_profile_component: Option<Box<crate::chat_component::Component>>,
         signature: Option<[u8; 256]>,
         sender_uuid: Option<uuid::Uuid>,
         signed_body: Option<crate::net::chat_security::SignedChatBody>,
@@ -251,7 +256,7 @@ pub enum NetworkEvent {
         signature: [u8; 256],
     },
     ActionBar {
-        spans: Vec<crate::ui::text::TextSpan>,
+        component: crate::chat_component::Component,
     },
     ServerLinks {
         links: Vec<crate::ui::server_dialog::ServerLink>,

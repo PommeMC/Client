@@ -24,14 +24,19 @@ const COL_GREY: [f32; 4] = [0.502, 0.502, 0.502, 1.0];
 const COL_HARDCORE: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 
 impl MainMenu {
-    pub(super) fn open_world_list(&mut self, gs: f32, wf: &dyn Fn(&str) -> f32) {
+    pub(super) fn open_world_list(
+        &mut self,
+        gs: f32,
+        wf: &dyn Fn(&str) -> f32,
+        key_bindings: &KeyBindings,
+    ) {
         self.rescan_worlds();
         // Vanilla skips an empty list entirely and opens the create screen.
         if self.world_list.worlds.is_empty() {
-            self.open_create_world(gs, wf);
+            self.open_create_world(gs, wf, key_bindings);
             return;
         }
-        self.set_screen(Screen::WorldList);
+        self.set_screen(Screen::WorldList, key_bindings);
         self.scroll_offset = 0.0;
         self.selected_world = None;
         self.world_search.clear();
@@ -47,6 +52,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
@@ -63,7 +69,7 @@ impl MainMenu {
             self.rescan_worlds();
         }
         if input.escape {
-            self.set_screen(Screen::Main);
+            self.set_screen(Screen::Main, key_bindings);
             return empty_result(2.0);
         }
 
@@ -323,7 +329,7 @@ impl MainMenu {
             "Create New World",
             true,
         ) {
-            self.open_create_world(gs, &|t: &str| text_width_fn(t, fs));
+            self.open_create_world(gs, &|t: &str| text_width_fn(t, fs), key_bindings);
         }
         if push_button_f(
             &mut elements,
@@ -340,7 +346,7 @@ impl MainMenu {
             has_sel,
         ) && let Some(folder) = self.selected_world.clone()
         {
-            self.open_edit_world(folder, gs, &|t: &str| text_width_fn(t, fs));
+            self.open_edit_world(folder, gs, &|t: &str| text_width_fn(t, fs), key_bindings);
         }
         if push_button_f(
             &mut elements,
@@ -357,7 +363,7 @@ impl MainMenu {
             has_sel,
         ) && let Some(folder) = self.selected_world.clone()
         {
-            self.set_screen(Screen::ConfirmDeleteWorld(folder));
+            self.set_screen(Screen::ConfirmDeleteWorld(folder), key_bindings);
         }
         tipped(
             &mut elements,
@@ -382,7 +388,7 @@ impl MainMenu {
             "Back",
             true,
         ) {
-            self.set_screen(Screen::Main);
+            self.set_screen(Screen::Main, key_bindings);
         }
 
         self.finish_focus(&ctx);
@@ -577,12 +583,17 @@ const EDIT_SPACING: f32 = 5.0;
 const EDIT_SPACER: f32 = 20.0;
 
 impl MainMenu {
-    pub(super) fn open_create_world(&mut self, gs: f32, wf: &dyn Fn(&str) -> f32) {
+    pub(super) fn open_create_world(
+        &mut self,
+        gs: f32,
+        wf: &dyn Fn(&str) -> f32,
+        key_bindings: &KeyBindings,
+    ) {
         self.create = CreateWorldState::default();
         self.world_name
             .set_value("New World", (NAME_FIELD_W - FIELD_TEXT_PAD) * gs, wf);
         self.world_seed.clear();
-        self.set_screen(Screen::CreateWorld);
+        self.set_screen(Screen::CreateWorld, key_bindings);
         self.focused_field = Some(0);
         self.world_name.set_focused(true);
     }
@@ -593,6 +604,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gs = self.gui_scale(screen_w, screen_h);
         let fs = common::FONT_SIZE * gs;
@@ -604,7 +616,7 @@ impl MainMenu {
         let cx = screen_w / 2.0;
 
         if input.escape {
-            self.leave_create_world();
+            self.leave_create_world(key_bindings);
             return empty_result(2.0);
         }
 
@@ -886,7 +898,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
-            self.create_world();
+            self.create_world(key_bindings);
         }
         if push_button(
             &mut elements,
@@ -901,7 +913,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
-            self.leave_create_world();
+            self.leave_create_world(key_bindings);
         }
 
         MainMenuResult {
@@ -961,16 +973,16 @@ impl MainMenu {
 
     /// Back to whatever opened this: the list, or the title screen when there
     /// were no worlds to list.
-    fn leave_create_world(&mut self) {
+    fn leave_create_world(&mut self, key_bindings: &KeyBindings) {
         let back = if self.world_list.worlds.is_empty() {
             Screen::Main
         } else {
             Screen::WorldList
         };
-        self.set_screen(back);
+        self.set_screen(back, key_bindings);
     }
 
-    fn create_world(&mut self) {
+    fn create_world(&mut self, key_bindings: &KeyBindings) {
         let name = self.world_name.value().trim();
         let (game_mode, hardcore) = self.create.mode.stored();
         let summary = crate::ui::world_list::WorldSummary {
@@ -988,7 +1000,7 @@ impl MainMenu {
         if let Err(e) = self.world_list.create(summary) {
             tracing::error!("Failed to create world: {e}");
         }
-        self.set_screen(Screen::WorldList);
+        self.set_screen(Screen::WorldList, key_bindings);
     }
 
     /// Vanilla recomputes this per keystroke; per frame would stat the disk for
@@ -1004,9 +1016,15 @@ impl MainMenu {
 }
 
 impl MainMenu {
-    pub(super) fn open_edit_world(&mut self, folder: String, gs: f32, wf: &dyn Fn(&str) -> f32) {
+    pub(super) fn open_edit_world(
+        &mut self,
+        folder: String,
+        gs: f32,
+        wf: &dyn Fn(&str) -> f32,
+        key_bindings: &KeyBindings,
+    ) {
         let name = self.world_display_name(&folder);
-        self.set_screen(Screen::EditWorld(folder));
+        self.set_screen(Screen::EditWorld(folder), key_bindings);
         self.world_name
             .set_value(&name, (FORM_W - FIELD_TEXT_PAD) * gs, wf);
         self.focused_field = Some(0);
@@ -1021,6 +1039,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let Some(folder) = self.screen_folder() else {
             return empty_result(2.0);
@@ -1037,7 +1056,7 @@ impl MainMenu {
         let clicked = input.clicked;
 
         if input.escape {
-            self.set_screen(Screen::WorldList);
+            self.set_screen(Screen::WorldList, key_bindings);
             return empty_result(2.0);
         }
 
@@ -1156,7 +1175,7 @@ impl MainMenu {
             if let Err(e) = self.world_list.rename(&folder, &name) {
                 tracing::error!("Failed to rename world: {e}");
             }
-            self.set_screen(Screen::WorldList);
+            self.set_screen(Screen::WorldList, key_bindings);
         }
         if button(
             &mut elements,
@@ -1168,7 +1187,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
-            self.set_screen(Screen::WorldList);
+            self.set_screen(Screen::WorldList, key_bindings);
         }
 
         push_bottom_text(
@@ -1194,6 +1213,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let Some(folder) = self.screen_folder() else {
             return empty_result(2.0);
@@ -1220,7 +1240,7 @@ impl MainMenu {
             self.selected_world = None;
         }
         if choice.is_some() {
-            self.set_screen(Screen::WorldList);
+            self.set_screen(Screen::WorldList, key_bindings);
         }
         result
     }

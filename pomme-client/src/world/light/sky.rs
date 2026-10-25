@@ -5,6 +5,7 @@
 //! section borders.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use azalea_block::BlockState;
 
@@ -124,15 +125,14 @@ impl StorageHooks for SkyStorage {
 /// Vanilla `repeatFirstLayer`: broadcast the layer's bottom 16x16 plane up
 /// all 16 layers.
 fn repeat_first_layer(data: &DataLayer) -> DataLayer {
-    if data.is_homogeneous() {
+    let Some(source) = data.as_bytes() else {
         return data.clone();
-    }
-    let source = data.to_bytes();
-    let mut out = Box::new([0u8; LAYER_BYTES]);
+    };
+    let mut out = [0u8; LAYER_BYTES];
     for layer in 0..16 {
         out[layer * 128..(layer + 1) * 128].copy_from_slice(&source[..128]);
     }
-    DataLayer::from_bytes(out)
+    DataLayer::from_bytes(Arc::new(out))
 }
 
 pub(crate) struct SkyLightEngine {

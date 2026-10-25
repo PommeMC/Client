@@ -46,8 +46,10 @@ pub enum Command {
     MouseDown {
         button: Mouse,
     },
-    /// Presses a key binding's default key once, e.g. `key.drop`.
+    /// Presses a key once: a key binding's default key, or a physical key.
     Press(Press),
+    /// Assigns inputs to a key binding for this session, unsaved.
+    Bind(Bind),
     /// Changes client options through the options screen's own setters.
     Option(OptionSet),
     /// Moves the cursor over a creative-inventory cell.
@@ -100,13 +102,25 @@ pub enum Hand {
     Right,
 }
 
-/// A key binding's default key, pressed once, optionally with Ctrl held.
+/// One of a key binding's default key (`action`, e.g. `key.drop`) or a
+/// physical key (`key`, an input id such as `key.keyboard.j`), pressed once,
+/// optionally with Ctrl held.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Press {
-    pub action: String,
+    pub action: Option<String>,
+    pub key: Option<String>,
     #[serde(default)]
     pub ctrl: bool,
+}
+
+/// Key binding `action` set to `keys` (input ids), or back to its defaults
+/// when `keys` is absent.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Bind {
+    pub action: String,
+    pub keys: Option<Vec<String>>,
 }
 
 /// A creative item-tab cell: one of `slot` (hotbar, 36-44) or `catalog`.

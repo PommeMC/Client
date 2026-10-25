@@ -158,10 +158,11 @@ impl MainMenu {
         sw: f32,
         sh: f32,
         input: &MenuInput,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let back = self.settings_back.clone_screen();
         if input.escape {
-            self.set_screen(back);
+            self.set_screen(back, key_bindings);
             return empty_result(2.0);
         }
 
@@ -209,7 +210,7 @@ impl MainMenu {
                     Some(url) => {
                         crate::util::open_url(url);
                     }
-                    None => self.open_credits_roll(),
+                    None => self.open_credits_roll(key_bindings),
                 }
             }
         }
@@ -223,7 +224,7 @@ impl MainMenu {
             cx,
             gs,
         ) {
-            self.set_screen(back);
+            self.set_screen(back, key_bindings);
         }
         self.finish_focus(&ctx);
 
@@ -238,8 +239,8 @@ impl MainMenu {
 
     /// The roll's only entry, so it can clear the key latch the way a fresh
     /// `WinScreen` starts with nothing held.
-    fn open_credits_roll(&mut self) {
-        self.set_screen(Screen::CreditsRoll);
+    fn open_credits_roll(&mut self, key_bindings: &KeyBindings) {
+        self.set_screen(Screen::CreditsRoll, key_bindings);
         self.credits_scroll = LOGO_LEAD_IN;
         self.credits_keys = 0;
     }
@@ -253,10 +254,11 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let lines = credits();
         if input.escape || lines.is_empty() {
-            self.set_screen(Screen::OptionsCredits);
+            self.set_screen(Screen::OptionsCredits, key_bindings);
             return empty_result(2.0);
         }
 
@@ -281,7 +283,7 @@ impl MainMenu {
         let sh_units = sh / gs;
         let total_scroll_length = lines.len() as f32 * LINE_H;
         if self.credits_scroll > total_scroll_length + 2.0 * sh_units + 24.0 {
-            self.set_screen(Screen::OptionsCredits);
+            self.set_screen(Screen::OptionsCredits, key_bindings);
             return empty_result(2.0);
         }
 

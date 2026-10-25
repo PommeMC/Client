@@ -36,6 +36,7 @@ struct StepFile {
     mouse_down: Option<Mouse>,
     mouse_up: Option<Mouse>,
     press: Option<protocol::Press>,
+    bind: Option<protocol::Bind>,
     option: Option<protocol::OptionSet>,
     hover: Option<protocol::Hover>,
     wait_ms: Option<u64>,
@@ -249,6 +250,9 @@ impl StepFile {
         }
         if let Some(press) = self.press {
             steps.push(Step::Run(Command::Press(press)));
+        }
+        if let Some(bind) = self.bind {
+            steps.push(Step::Run(Command::Bind(bind)));
         }
         if let Some(options) = self.option {
             steps.push(Step::Run(Command::Option(options)));
@@ -620,7 +624,7 @@ fn ensure(holds: bool, seen: impl FnOnce() -> String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harness::protocol::{ClickKind, Hand, OptionSet};
+    use crate::harness::protocol::{Bind, ClickKind, Hand, OptionSet, Press};
 
     #[test]
     fn parses_every_step_kind() {
@@ -662,15 +666,34 @@ mod tests {
             [[step]]
             expect = { block = "air", at = [0, -59, 4] }
             [[step]]
+            bind = { action = "key.drop", keys = ["key.keyboard.j"] }
+            [[step]]
+            press = { key = "key.keyboard.j" }
+            [[step]]
             option = { main_hand = "left" }
             "#,
         )
         .unwrap();
-        assert_eq!(steps.len(), 18);
+        assert_eq!(steps.len(), 20);
         assert_eq!(
-            steps[17],
+            steps[19],
             Step::Run(Command::Option(OptionSet {
                 main_hand: Some(Hand::Left)
+            }))
+        );
+        assert_eq!(
+            steps[17],
+            Step::Run(Command::Bind(Bind {
+                action: "key.drop".into(),
+                keys: Some(vec!["key.keyboard.j".into()]),
+            }))
+        );
+        assert_eq!(
+            steps[18],
+            Step::Run(Command::Press(Press {
+                action: None,
+                key: Some("key.keyboard.j".into()),
+                ctrl: false,
             }))
         );
         assert_eq!(

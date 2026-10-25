@@ -558,10 +558,10 @@ pub struct SignedChatBody {
     pub salt: i64,
     pub last_seen: Vec<[u8; 256]>,
     pub message_index: i32,
-    pub modified: bool,
-    /// `modified` as `onlyShowSecureChat` sees it, decorated without the
-    /// unsigned content.
-    pub modified_when_unsigned_hidden: bool,
+    /// Unfiltered trust inputs, resolved with the receipt-time input bindings.
+    pub decorated_content: Box<crate::chat_component::Component>,
+    pub decorated_signed_content: Box<crate::chat_component::Component>,
+    pub modified_style: bool,
     pub fully_filtered: bool,
 }
 
@@ -845,8 +845,9 @@ L59jqlQpPBBT3EAbN66KEao=
             salt: -4,
             last_seen: last_seen.to_vec(),
             message_index: 3,
-            modified: false,
-            modified_when_unsigned_hidden: false,
+            decorated_content: Box::new(crate::chat_component::Component::text("hi")),
+            decorated_signed_content: Box::new(crate::chat_component::Component::text("hi")),
+            modified_style: false,
             fully_filtered: false,
         };
         assert!(verify_player_message(&remote, sender, &body, &signature));

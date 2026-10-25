@@ -7,6 +7,7 @@ use pyronyx::vk;
 
 use crate::assets::{AssetId, AssetIndex};
 use crate::renderer::util;
+use crate::world::block::model::TextureId;
 use crate::world::block::render_assets::BlockRenderAssets;
 
 #[derive(Debug, Clone, Copy)]
@@ -38,6 +39,9 @@ pub struct AtlasRegion {
 #[derive(Clone)]
 pub struct AtlasUVMap {
     regions: HashMap<String, AtlasRegion>,
+    /// `regions` by `TextureId`, for the ids interned before the atlas was
+    /// built; later ones fall back to the name lookup.
+    by_texture: Vec<AtlasRegion>,
     sprite_alpha_masks: HashMap<String, SpriteAlphaMask>,
     /// Level-0 rectangles by sprite index, as `(x, y, width, height)`.
     rects: Vec<[u32; 4]>,
@@ -45,8 +49,34 @@ pub struct AtlasUVMap {
 }
 
 impl AtlasUVMap {
+    fn new(
+        regions: HashMap<String, AtlasRegion>,
+        sprite_alpha_masks: HashMap<String, SpriteAlphaMask>,
+        rects: Vec<[u32; 4]>,
+        missing: AtlasRegion,
+    ) -> Self {
+        let by_texture = TextureId::all_names()
+            .into_iter()
+            .map(|name| regions.get(name).copied().unwrap_or(missing))
+            .collect();
+        Self {
+            regions,
+            by_texture,
+            sprite_alpha_masks,
+            rects,
+            missing,
+        }
+    }
+
     pub fn get_region(&self, name: &str) -> AtlasRegion {
         self.regions.get(name).copied().unwrap_or(self.missing)
+    }
+
+    pub fn region(&self, texture: TextureId) -> AtlasRegion {
+        self.by_texture
+            .get(texture.index())
+            .copied()
+            .unwrap_or_else(|| self.get_region(texture.name()))
     }
 
     pub fn has_region(&self, name: &str) -> bool {
@@ -94,8 +124,6 @@ pub struct TextureAtlas {
     pub uv_map: AtlasUVMap,
     allocation: Option<Allocation>,
     sprite_rects_allocation: Option<Allocation>,
-    staging_buffer: vk::Buffer,
-    staging_allocation: Option<Allocation>,
 }
 
 const MISSING_TILE: u32 = 16;
@@ -545,6 +573,7 @@ impl TextureAtlas {
             atlas_size,
             mip_levels,
         );
+        util::free_staging(device, allocator, staging_buffer, staging_allocation);
 
         let sampler = unsafe { util::create_nearest_sampler_mipmapped(device, mip_levels) };
 
@@ -561,8 +590,6 @@ impl TextureAtlas {
             uv_map,
             allocation: Some(allocation),
             sprite_rects_allocation: Some(sprite_rects_allocation),
-            staging_buffer,
-            staging_allocation: Some(staging_allocation),
         })
     }
 
@@ -658,12 +685,7 @@ impl TextureAtlas {
             }
         }
 
-        let uv_map = AtlasUVMap {
-            regions,
-            sprite_alpha_masks,
-            rects,
-            missing: missing_region,
-        };
+        let uv_map = AtlasUVMap::new(regions, sprite_alpha_masks, rects, missing_region);
 
         AtlasCpu {
             uv_map,
@@ -690,15 +712,10 @@ impl TextureAtlas {
 
         device.destroy_image(self.image, None);
 
-        for (buffer, allocation) in [
-            (self.staging_buffer, self.staging_allocation.take()),
-            (self.sprite_rects, self.sprite_rects_allocation.take()),
-        ] {
-            if let Some(alloc) = allocation {
-                allocator.lock().unwrap().free(alloc).ok();
-            }
-            device.destroy_buffer(buffer, None);
+        if let Some(alloc) = self.sprite_rects_allocation.take() {
+            allocator.lock().unwrap().free(alloc).ok();
         }
+        device.destroy_buffer(self.sprite_rects, None);
     }
 }
 
@@ -1205,6 +1222,25 @@ mod tests {
     use super::*;
     use crate::test_util::test_temp_dir;
 
+    #[test]
+    fn texture_ids_find_the_region_their_name_does() {
+        let built = TextureId::intern("test/region_before_build");
+        assert_eq!(TextureId::intern("test/region_before_build"), built);
+        assert_eq!(built.name(), "test/region_before_build");
+
+        let missing = pixel_region(0, 0, 1, 1, 16);
+        let named = pixel_region(4, 4, 4, 4, 16);
+        let late_named = pixel_region(8, 8, 4, 4, 16);
+        let regions = HashMap::from([
+            ("test/region_before_build".to_owned(), named),
+            ("test/region_after_build".to_owned(), late_named),
+        ]);
+        let uv_map = AtlasUVMap::new(regions, HashMap::new(), Vec::new(), missing);
+        // Interned after the map was built: found through the name instead.
+        let late = TextureId::intern("test/region_after_build");
+        assert_eq!(uv_map.region(built).pixel_rect, named.pixel_rect);
+        assert_eq!(uv_map.region(late).pixel_rect, late_named.pixel_rect);
+    }
     fn alpha_index(x: usize, y: usize, width: usize) -> usize {
         (y * width + x) * 4 + 3
     }

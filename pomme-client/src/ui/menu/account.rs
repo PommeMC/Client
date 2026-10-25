@@ -18,9 +18,9 @@ pub(super) enum SignIn {
 }
 
 impl MainMenu {
-    pub(super) fn open_account(&mut self) {
+    pub(super) fn open_account(&mut self, key_bindings: &KeyBindings) {
         self.cancel_sign_in();
-        self.set_screen(Screen::Account);
+        self.set_screen(Screen::Account, key_bindings);
     }
 
     fn start_sign_in(&mut self) {
@@ -33,6 +33,12 @@ impl MainMenu {
             .await
             .map(Some)
         });
+    }
+
+    /// Still signed out, with no sign-in under way: the stored account is
+    /// missing or failed to restore.
+    pub(crate) fn no_account_to_restore(&self) -> bool {
+        self.account_gated() && matches!(*self.sign_in.read(), SignIn::Idle | SignIn::Failed(_))
     }
 
     /// Signs in as the stored account without asking; with none, the
@@ -63,9 +69,9 @@ impl MainMenu {
         crate::account::forget(&*self.account_store, uuid);
     }
 
-    fn close_account(&mut self) {
+    fn close_account(&mut self, key_bindings: &KeyBindings) {
         self.cancel_sign_in();
-        self.set_screen(Screen::Main);
+        self.set_screen(Screen::Main, key_bindings);
     }
 
     fn cancel_sign_in(&mut self) {
@@ -80,11 +86,12 @@ impl MainMenu {
         screen_w: f32,
         screen_h: f32,
         input: &MenuInput,
+        key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gated = self.account_gated();
         let leave = if gated { "Quit" } else { "Back" };
         if input.escape && !gated {
-            self.close_account();
+            self.close_account(key_bindings);
             return empty_result(2.0);
         }
         if matches!(*self.sign_in.read(), SignIn::Done(_)) {
@@ -92,7 +99,7 @@ impl MainMenu {
                 unreachable!()
             };
             self.sign_in_task = None;
-            self.set_screen(Screen::Main);
+            self.set_screen(Screen::Main, key_bindings);
             let mut result = empty_result(2.0);
             result.action = MenuAction::Account(Some(account));
             return result;
@@ -213,7 +220,7 @@ impl MainMenu {
             }
             Some("Sign Out") => action = MenuAction::Account(None),
             Some("Cancel") => self.cancel_sign_in(),
-            Some("Back") => self.close_account(),
+            Some("Back") => self.close_account(key_bindings),
             Some("Quit") => action = MenuAction::Quit,
             _ => {}
         }
@@ -253,8 +260,9 @@ mod tests {
 
     #[test]
     fn the_person_icon_opens_the_account_screen() {
-        let mut menu = test_menu("pomme-account-icon-test");
-        let main = menu.build(W, H, &MenuInput::default(), text_width);
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-account-icon-test", &mut key_bindings);
+        let main = menu.build(W, H, &MenuInput::default(), &mut key_bindings, text_width);
         let icon = main
             .elements
             .iter()
@@ -268,29 +276,30 @@ mod tests {
             clicked: true,
             ..Default::default()
         };
-        menu.build(W, H, &click, text_width);
-        let account = menu.build(W, H, &MenuInput::default(), text_width);
+        menu.build(W, H, &click, &mut key_bindings, text_width);
+        let account = menu.build(W, H, &MenuInput::default(), &mut key_bindings, text_width);
         assert!(texts(&account).contains(&"Sign In"));
         assert!(texts(&account).contains(&"Back"));
     }
 
     #[test]
     fn a_required_account_holds_the_menu_until_sign_in() {
-        let mut menu = test_menu("pomme-account-gate-test");
-        menu.require_account();
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-account-gate-test", &mut key_bindings);
+        menu.require_account(&key_bindings);
         let escape = MenuInput {
             escape: true,
             ..Default::default()
         };
-        menu.build(W, H, &escape, text_width);
-        let gate = menu.build(W, H, &MenuInput::default(), text_width);
+        menu.build(W, H, &escape, &mut key_bindings, text_width);
+        let gate = menu.build(W, H, &MenuInput::default(), &mut key_bindings, text_width);
         assert!(texts(&gate).contains(&"Pomme needs a Minecraft account."));
         assert!(texts(&gate).contains(&"Quit"));
         assert!(!texts(&gate).contains(&"Back"));
 
-        menu.set_account("Tester".into(), Some("token".into()));
-        menu.set_screen(Screen::Main);
-        menu.set_account("Tester".into(), None);
+        menu.set_account("Tester".into(), Some("token".into()), &key_bindings);
+        menu.set_screen(Screen::Main, &key_bindings);
+        menu.set_account("Tester".into(), None, &key_bindings);
         assert!(matches!(menu.screen, Screen::Account));
     }
 }

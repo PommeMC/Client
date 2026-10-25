@@ -14,13 +14,13 @@ use thiserror::Error;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::KeyCode;
 use winit::window::{Window, WindowId};
 
 use crate::app::core::AppCore;
+use crate::app::input::Action;
 use crate::app::input::touch::TouchLayout;
 use crate::app::phases::connecting::{ConnectingUpdateResult, update_connecting};
-use crate::app::phases::in_game::{GameState, GameUpdateResult, update_game};
+use crate::app::phases::in_game::{GameState, GameUpdateResult, start_chunk_load, update_game};
 use crate::app::phases::in_menu::{self, MenuUpdateResult, update_menu};
 use crate::app::phases::saving::update_saving;
 use crate::app::phases::{AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
@@ -43,7 +43,7 @@ pub enum WindowError {
     Renderer(#[from] renderer::RendererError),
 }
 
-const TICK_RATE: f32 = 1.0 / 20.0;
+pub(crate) const TICK_RATE: f32 = 1.0 / 20.0;
 const TICK_RATE_MS: u32 = 1000 / 20;
 const POSITION_SEND_INTERVAL: u32 = 20;
 const POSITION_THRESHOLD_SQ: f64 = 4.0e-8;
@@ -64,6 +64,17 @@ pub struct App {
     soft_keyboard: bool,
     #[cfg(feature = "test-harness")]
     harness: Option<crate::harness::Harness>,
+    chunk_bench: Option<ChunkBenchLaunch>,
+}
+
+/// Where a `--chunk-bench` run is.
+#[derive(Clone, Copy)]
+enum ChunkBenchLaunch {
+    /// The render distance to benchmark, until in game.
+    Waiting(u32),
+    Running,
+    /// The process exit code.
+    Ended(i32),
 }
 
 /// Port of vanilla `FramerateLimiter`: paces to a target fps by sleeping most
@@ -183,8 +194,8 @@ fn start_connecting(
     let block_definitions = Rc::clone(&core.block_definitions);
     let connection = spawn_connection(&core.tokio_rt, connect_args);
     let game = GameState::new(
-        &gfx.renderer,
-        &core.resource_packs,
+        &*gfx.renderer,
+        Some(&core.resource_packs),
         core.menu.render_distance,
         world.is_some(),
         core.menu.chat_options,
@@ -229,7 +240,125 @@ impl App {
             fps_limiter: FramerateLimiter::new(),
             #[cfg(feature = "test-harness")]
             harness: None,
+            chunk_bench: None,
         }
+    }
+
+    /// A `--chunk-bench` run: borderless, as most players play, never paused
+    /// for losing focus, and joining at the benchmark's render distance so an
+    /// integrated server sends that far.
+    pub fn with_chunk_bench(mut self, rd: Option<u32>) -> Self {
+        if let Some(rd) = rd {
+            self.core.menu.set_bench_render_distance(rd);
+            self.core.pause_on_lost_focus = false;
+            self.core
+                .override_display_mode(core::DisplayMode::Borderless);
+        }
+        self.chunk_bench = rd.map(ChunkBenchLaunch::Waiting);
+        self
+    }
+
+    /// The `--chunk-bench` run's exit code: 1 if the game quit before the run
+    /// ended.
+    pub fn chunk_bench_exit_code(&self) -> Option<i32> {
+        self.chunk_bench.map(|launch| match launch {
+            ChunkBenchLaunch::Ended(code) => code,
+            _ => 1,
+        })
+    }
+
+    /// Starts the `--chunk-bench` run once in game, and quits when it ends
+    /// or the connection does.
+    fn tick_chunk_bench(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(launch) = self.chunk_bench else {
+            return;
+        };
+        let next = match (launch, self.phase.get_mut()) {
+            (
+                ChunkBenchLaunch::Waiting(rd),
+                AppPhase::InGame {
+                    gfx,
+                    connection,
+                    game,
+                    ..
+                },
+            ) => {
+                start_chunk_load(&mut self.core, gfx, connection, game, rd);
+                ChunkBenchLaunch::Running
+            }
+            (ChunkBenchLaunch::Running, AppPhase::InGame { game, .. }) => {
+                match (&game.chunk_load_bench, &game.chunk_load_result) {
+                    (Some(_), _) => return,
+                    (None, Some(_)) => ChunkBenchLaunch::Ended(0),
+                    // Cancelled with Esc.
+                    (None, None) => ChunkBenchLaunch::Ended(1),
+                }
+            }
+            // The quick play failed to open or connect, or is held for a
+            // sign-in that has nothing to restore.
+            (ChunkBenchLaunch::Waiting(_), AppPhase::InMenu { .. })
+                if self.core.deferred_quick_play.is_none()
+                    || self.core.menu.no_account_to_restore() =>
+            {
+                ChunkBenchLaunch::Ended(1)
+            }
+            (ChunkBenchLaunch::Running, _) => ChunkBenchLaunch::Ended(1),
+            _ => return,
+        };
+        self.chunk_bench = Some(next);
+        if matches!(next, ChunkBenchLaunch::Ended(_)) {
+            self.quit(event_loop);
+        }
+    }
+
+    /// Closes the game, saving the world first in singleplayer.
+    fn quit(&mut self, event_loop: &ActiveEventLoop) {
+        // A world saves on the way out, so the window stays up for it
+        // rather than vanishing while the process finishes writing.
+        self.phase.transition(|app| match app {
+            AppPhase::Connecting {
+                gfx,
+                panorama,
+                connection,
+                world: world @ Some(_),
+                ..
+            } => leave_world(
+                &mut self.core,
+                gfx,
+                panorama,
+                connection,
+                world,
+                AfterSaving::Quit,
+            ),
+            AppPhase::InGame {
+                gfx,
+                connection,
+                world: world @ Some(_),
+                ..
+            } => leave_world(
+                &mut self.core,
+                gfx,
+                Panorama::new(),
+                connection,
+                world,
+                AfterSaving::Quit,
+            ),
+            AppPhase::SavingWorld {
+                gfx,
+                panorama,
+                world,
+                ..
+            } => AppPhase::SavingWorld {
+                gfx,
+                panorama,
+                world,
+                then: AfterSaving::Quit,
+            },
+            app => {
+                event_loop.exit();
+                app
+            }
+        });
     }
 
     /// Updates a release build to the newest release before the menu.
@@ -241,7 +370,9 @@ impl App {
     /// Holds the menu, and any quick play, until an account is signed in,
     /// restoring the stored one in the background meanwhile.
     pub fn require_account(&mut self) {
-        self.core.menu.require_account();
+        self.core
+            .menu
+            .require_account(&self.core.input.key_bindings);
         self.core.menu.restore_account();
     }
 
@@ -328,8 +459,9 @@ fn create_window(
 
 impl ApplicationHandler for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.core.menu.restore_bench_render_distance();
         // Minecraft.exitWorldAndClose runs screen().removed() before close().
-        self.core.menu.flush_settings();
+        self.core.menu.flush_settings(&self.core.input.key_bindings);
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
@@ -486,52 +618,7 @@ impl ApplicationHandler for App {
         self.core.input.set_binding_capture(binding_capture);
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
-                // A world saves on the way out, so the window stays up for it
-                // rather than vanishing while the process finishes writing.
-                self.phase.transition(|app| match app {
-                    AppPhase::Connecting {
-                        gfx,
-                        panorama,
-                        connection,
-                        world: world @ Some(_),
-                        ..
-                    } => leave_world(
-                        &mut self.core,
-                        gfx,
-                        panorama,
-                        connection,
-                        world,
-                        AfterSaving::Quit,
-                    ),
-                    AppPhase::InGame {
-                        gfx,
-                        connection,
-                        world: world @ Some(_),
-                        ..
-                    } => leave_world(
-                        &mut self.core,
-                        gfx,
-                        Panorama::new(),
-                        connection,
-                        world,
-                        AfterSaving::Quit,
-                    ),
-                    AppPhase::SavingWorld {
-                        gfx,
-                        panorama,
-                        world,
-                        ..
-                    } => AppPhase::SavingWorld {
-                        gfx,
-                        panorama,
-                        world,
-                        then: AfterSaving::Quit,
-                    },
-                    app => {
-                        event_loop.exit();
-                        app
-                    }
-                });
+                self.quit(event_loop);
             }
             WindowEvent::Resized(new_size) => {
                 if let Some(app_rt) = self.phase.gfx_mut() {
@@ -554,20 +641,28 @@ impl ApplicationHandler for App {
                     if let Some(Gfx { window, .. }) = app.gfx_mut()
                         && event.state.is_pressed()
                         && !event.repeat
-                        && !self.core.input.key_pressed(KeyCode::F3)
-                        && key == Some(KeyCode::F11)
+                        && !self.core.input.action_held(Action::DebugModifier)
+                        && let Some(code) = key
+                        && self
+                            .core
+                            .input
+                            .key_bindings
+                            .matches_key(Action::ToggleFullscreen, code)
                     {
-                        let display_mode = self.core.display_mode.cycle();
-                        self.core.menu.set_display_mode(display_mode);
-                        self.core.sync_display_mode(window);
+                        self.core.toggle_display_mode(window);
                     }
                     // F2 screenshot works in every phase, like vanilla.
                     // TODO: Ctrl+F2 panoramic screenshot
                     if let Some(Gfx { renderer, .. }) = app.gfx_mut()
                         && event.state.is_pressed()
                         && !event.repeat
-                        && !self.core.input.key_pressed(KeyCode::F3)
-                        && key == Some(KeyCode::F2)
+                        && !self.core.input.action_held(Action::DebugModifier)
+                        && let Some(code) = key
+                        && self
+                            .core
+                            .input
+                            .key_bindings
+                            .matches_key(Action::Screenshot, code)
                     {
                         renderer.request_screenshot();
                     }
@@ -610,7 +705,14 @@ impl ApplicationHandler for App {
                                     game,
                                     world,
                                 }
-                            } else if event.state.is_pressed() && key == Some(KeyCode::Escape) {
+                            } else if event.state.is_pressed()
+                                && let Some(code) = key
+                                && self
+                                    .core
+                                    .input
+                                    .key_bindings
+                                    .matches_key(Action::Close, code)
+                            {
                                 leave_world(
                                     &mut self.core,
                                     gfx,
@@ -642,8 +744,14 @@ impl ApplicationHandler for App {
                                 && let Some(code) = key
                             {
                                 if game.options_from_game {
-                                    let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                    if !game.handle_debug_key(code, f3_held, &connection) {
+                                    let f3_held =
+                                        self.core.input.action_held(Action::DebugModifier);
+                                    if !game.handle_debug_key(
+                                        code,
+                                        f3_held,
+                                        &self.core.input.key_bindings,
+                                        &connection,
+                                    ) {
                                         self.core.input.on_menu_key_event(&event);
                                     }
                                 } else if game.server_dialog.is_some()
@@ -660,7 +768,12 @@ impl ApplicationHandler for App {
                                     );
                                 } else if game.chat.is_open() {
                                     match code {
-                                        KeyCode::Escape => {
+                                        _ if self
+                                            .core
+                                            .input
+                                            .key_bindings
+                                            .matches_key(Action::Close, code) =>
+                                        {
                                             let closed = game.escape_chat();
                                             self.core
                                                 .input
@@ -673,15 +786,26 @@ impl ApplicationHandler for App {
                                             }
                                         }
                                         _ => {
-                                            let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                            if !game.handle_debug_key(code, f3_held, &connection) {
+                                            let f3_held =
+                                                self.core.input.action_held(Action::DebugModifier);
+                                            if !game.handle_debug_key(
+                                                code,
+                                                f3_held,
+                                                &self.core.input.key_bindings,
+                                                &connection,
+                                            ) {
                                                 self.core.input.on_menu_key_event(&event);
                                             }
                                         }
                                     }
                                 } else if game.creative_inventory_open {
                                     match code {
-                                        KeyCode::Escape => {
+                                        _ if self
+                                            .core
+                                            .input
+                                            .key_bindings
+                                            .matches_key(Action::Close, code) =>
+                                        {
                                             game.close_creative_inventory();
                                             self.core
                                                 .input
@@ -690,8 +814,14 @@ impl ApplicationHandler for App {
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
                                         _ => {
-                                            let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                            if !game.handle_debug_key(code, f3_held, &connection) {
+                                            let f3_held =
+                                                self.core.input.action_held(Action::DebugModifier);
+                                            if !game.handle_debug_key(
+                                                code,
+                                                f3_held,
+                                                &self.core.input.key_bindings,
+                                                &connection,
+                                            ) {
                                                 self.core.input.on_menu_key_event(&event);
                                             }
                                         }
@@ -700,17 +830,30 @@ impl ApplicationHandler for App {
                                     // A container text field (anvil rename) has
                                     // focus; keys type into it. Escape still
                                     // closes via the OpenMenu action.
-                                    let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                    if !game.handle_debug_key(code, f3_held, &connection) {
+                                    let f3_held =
+                                        self.core.input.action_held(Action::DebugModifier);
+                                    if !game.handle_debug_key(
+                                        code,
+                                        f3_held,
+                                        &self.core.input.key_bindings,
+                                        &connection,
+                                    ) {
                                         self.core.input.on_menu_key_event(&event);
                                     }
                                 } else {
                                     match code {
                                         // F3+Esc pauses without opening the
                                         // menu (vanilla pauseGame(true)).
-                                        KeyCode::Escape
-                                            if self.core.input.key_pressed(KeyCode::F3)
-                                                && game.input_live() =>
+                                        _ if self
+                                            .core
+                                            .input
+                                            .key_bindings
+                                            .matches_key(Action::Close, code)
+                                            && self
+                                                .core
+                                                .input
+                                                .action_held(Action::DebugModifier)
+                                            && game.input_live() =>
                                         {
                                             game.paused = true;
                                             game.pause_screen =
@@ -722,25 +865,64 @@ impl ApplicationHandler for App {
                                             self.core
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
-                                        KeyCode::Escape
-                                            if game.death_confirm
-                                                && crate::ui::death::buttons_ready(
-                                                    game.death_confirm_ticks,
-                                                ) =>
+                                        _ if self
+                                            .core
+                                            .input
+                                            .key_bindings
+                                            .matches_key(Action::Close, code)
+                                            && game.death_confirm
+                                            && crate::ui::death::buttons_ready(
+                                                game.death_confirm_ticks,
+                                            ) =>
                                         {
                                             game.death_confirm = false;
                                             self.core.send_respawn(&connection, &mut game);
                                         }
                                         _ => {
-                                            let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                            game.handle_debug_key(code, f3_held, &connection);
+                                            let f3_held =
+                                                self.core.input.action_held(Action::DebugModifier);
+                                            game.handle_debug_key(
+                                                code,
+                                                f3_held,
+                                                &self.core.input.key_bindings,
+                                                &connection,
+                                            );
                                         }
                                     }
                                 }
-                            } else if !event.state.is_pressed() && key == Some(KeyCode::F3) {
+                            } else if !event.state.is_pressed()
+                                && let Some(code) = key
+                                && (self
+                                    .core
+                                    .input
+                                    .key_bindings
+                                    .matches_key(Action::DebugModifier, code)
+                                    || self
+                                        .core
+                                        .input
+                                        .key_bindings
+                                        .matches_key(Action::ToggleOverlay, code))
+                            {
                                 // Overlay toggles on F3 release, unless a chord
                                 // consumed it; runs in every in-game sub-state.
-                                game.handle_f3_release(&connection);
+                                let overlay = self
+                                    .core
+                                    .input
+                                    .key_bindings
+                                    .matches_key(Action::ToggleOverlay, code);
+                                let modifier_held =
+                                    self.core.input.action_held(Action::DebugModifier);
+                                let modifier = self
+                                    .core
+                                    .input
+                                    .key_bindings
+                                    .matches_key(Action::DebugModifier, code);
+                                game.handle_f3_release(
+                                    overlay,
+                                    modifier,
+                                    modifier_held,
+                                    &connection,
+                                );
                             }
 
                             AppPhase::InGame {
@@ -955,7 +1137,7 @@ impl ApplicationHandler for App {
                                 AfterSaving::Menu,
                             ),
                             ConnectingUpdateResult::Disconnected { reason } => {
-                                core.menu.show_disconnect(reason);
+                                core.menu.show_disconnect(reason, &core.input.key_bindings);
 
                                 leave_world(
                                     core,
@@ -1015,7 +1197,7 @@ impl ApplicationHandler for App {
                                 AfterSaving::Menu,
                             ),
                             GameUpdateResult::Disconnected { reason } => {
-                                core.menu.show_disconnect(reason);
+                                core.menu.show_disconnect(reason, &core.input.key_bindings);
 
                                 leave_world(
                                     core,
@@ -1059,6 +1241,7 @@ impl ApplicationHandler for App {
                 }
 
                 core.input.end_frame();
+                self.tick_chunk_bench(event_loop);
 
                 // Desktop is left alone: allowing IME there moves typing from
                 // key events to IME events.
