@@ -8,7 +8,7 @@ use crate::ui::menu::MenuAction;
 pub enum MenuUpdateResult {
     None,
     Connect {
-        connect_args: ConnectArgs,
+        connect_args: Box<ConnectArgs>,
         world: Option<World>,
     },
     Quit,
@@ -35,14 +35,14 @@ pub fn open_world(core: &mut AppCore, folder: &str) -> MenuUpdateResult {
     core.audio.stop_menu_music();
     let username = core.user.username.clone();
     MenuUpdateResult::Connect {
-        connect_args: connect_args(
+        connect_args: Box::new(connect_args(
             core,
             Transport::Memory {
                 end: client_end,
                 protocol: singleplayer::PROTOCOL,
             },
             username,
-        ),
+        )),
         world: Some(world),
     }
 }
@@ -53,14 +53,14 @@ pub fn quick_play(core: &mut AppCore, play: QuickPlay) -> MenuUpdateResult {
         QuickPlay::Multiplayer(server) => MenuUpdateResult::Connect {
             // TODO: read the saved server list's protocol for this address to
             // skip the join-time probe.
-            connect_args: connect_args(
+            connect_args: Box::new(connect_args(
                 core,
                 Transport::Remote {
                     server,
                     protocol: None,
                 },
                 core.user.username.clone(),
-            ),
+            )),
             world: None,
         },
         QuickPlay::Singleplayer(folder) => open_world(core, &folder),
@@ -75,6 +75,7 @@ pub fn connect_args(core: &AppCore, transport: Transport, username: String) -> C
         access_token: core.user.access_token.clone(),
         view_distance: core.view_distance(),
         chat_options: core.menu.chat_options,
+        skin_options: core.menu.skin_options(),
     }
 }
 
@@ -191,7 +192,11 @@ pub fn update_menu(
             core.audio.stop_menu_music();
 
             return MenuUpdateResult::Connect {
-                connect_args: connect_args(core, Transport::Remote { server, protocol }, username),
+                connect_args: Box::new(connect_args(
+                    core,
+                    Transport::Remote { server, protocol },
+                    username,
+                )),
                 world: None,
             };
         }

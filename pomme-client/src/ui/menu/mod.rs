@@ -568,6 +568,35 @@ fn atlas_dirty(count: usize, last: &mut usize, since: &mut Option<Instant>) -> b
     }
 }
 
+/// The skin customization options the server is told about: which model
+/// parts show, and the main hand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SkinOptions {
+    pub cape: bool,
+    pub jacket: bool,
+    pub left_sleeve: bool,
+    pub right_sleeve: bool,
+    pub left_pants: bool,
+    pub right_pants: bool,
+    pub hat: bool,
+    pub main_hand_right: bool,
+}
+
+impl Default for SkinOptions {
+    fn default() -> Self {
+        Self {
+            cape: true,
+            jacket: true,
+            left_sleeve: true,
+            right_sleeve: true,
+            left_pants: true,
+            right_pants: true,
+            hat: true,
+            main_hand_right: true,
+        }
+    }
+}
+
 pub struct MainMenu {
     action_binding: Option<Action>,
     username: String,
@@ -1056,6 +1085,19 @@ impl MainMenu {
 
     pub fn main_hand_right(&self) -> bool {
         self.skin_main_hand_right
+    }
+
+    pub fn skin_options(&self) -> SkinOptions {
+        SkinOptions {
+            cape: self.skin_cape,
+            jacket: self.skin_jacket,
+            left_sleeve: self.skin_left_sleeve,
+            right_sleeve: self.skin_right_sleeve,
+            left_pants: self.skin_left_pants,
+            right_pants: self.skin_right_pants,
+            hat: self.skin_hat,
+            main_hand_right: self.skin_main_hand_right,
+        }
     }
 
     pub fn set_main_hand_right(&mut self, right: bool, key_bindings: &KeyBindings) {

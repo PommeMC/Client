@@ -6835,3 +6835,17 @@ fn lifecycle_packets_match_azalea() {
     };
     assert_eq!(plain(&reason), "bye");
 }
+
+#[test]
+fn client_information_reports_the_skin_options() {
+    use azalea_entity::HumanoidArm;
+    let skin = crate::ui::menu::SkinOptions {
+        hat: false,
+        main_hand_right: false,
+        ..Default::default()
+    };
+    let info = super::client_information(8, crate::ui::chat::ChatOptions::default(), skin);
+    assert_eq!(info.main_hand, HumanoidArm::Left);
+    assert!(!info.model_customization.hat);
+    assert!(info.model_customization.cape);
+}

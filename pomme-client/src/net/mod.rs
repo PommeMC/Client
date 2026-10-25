@@ -641,9 +641,11 @@ pub enum NetworkEvent {
 /// The client information pomme reports. The configuration and game phase
 /// packets wrap the same struct under different field names, and 1.20.1 sends
 /// it in the game phase only, so all three sites share this.
+/// Vanilla `Options.buildPlayerInformation`.
 pub fn client_information(
     view_distance: u8,
     chat_options: crate::ui::chat::ChatOptions,
+    skin: crate::ui::menu::SkinOptions,
 ) -> azalea_protocol::common::client_information::ClientInformation {
     use azalea_entity::HumanoidArm;
     use azalea_protocol::common::client_information::*;
@@ -658,15 +660,19 @@ pub fn client_information(
         chat_visibility,
         chat_colors: chat_options.colors,
         model_customization: ModelCustomization {
-            cape: true,
-            jacket: true,
-            left_sleeve: true,
-            right_sleeve: true,
-            left_pants: true,
-            right_pants: true,
-            hat: true,
+            cape: skin.cape,
+            jacket: skin.jacket,
+            left_sleeve: skin.left_sleeve,
+            right_sleeve: skin.right_sleeve,
+            left_pants: skin.left_pants,
+            right_pants: skin.right_pants,
+            hat: skin.hat,
         },
-        main_hand: HumanoidArm::Right,
+        main_hand: if skin.main_hand_right {
+            HumanoidArm::Right
+        } else {
+            HumanoidArm::Left
+        },
         text_filtering_enabled: false,
         allows_listing: true,
         particle_status: ParticleStatus::All,

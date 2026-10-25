@@ -85,6 +85,7 @@ pub struct ConnectArgs {
     pub access_token: Option<String>,
     pub view_distance: u8,
     pub chat_options: crate::ui::chat::ChatOptions,
+    pub skin_options: crate::ui::menu::SkinOptions,
 }
 
 pub struct ConnectionHandle {
@@ -136,6 +137,7 @@ pub async fn connect_to_server(
         access_token,
         view_distance,
         chat_options,
+        skin_options,
     } = args;
 
     let (mut conn, wire) = match transport {
@@ -204,6 +206,7 @@ pub async fn connect_to_server(
                 &mut conn,
                 view_distance,
                 chat_options,
+                skin_options,
                 &event_tx,
                 &mut game_packet_rx,
                 None,
@@ -234,6 +237,7 @@ pub async fn connect_to_server(
             joined,
             view_distance,
             chat_options,
+            skin_options,
             chat: ChatSender::new(profile_id, uuid, access_token, key_pair_tx),
             key_pair_rx,
         },
@@ -470,6 +474,7 @@ async fn config_sequence(
     conn: &mut Conn,
     view_distance: u8,
     chat_options: crate::ui::chat::ChatOptions,
+    skin_options: crate::ui::menu::SkinOptions,
     event_tx: &Sender<NetworkEvent>,
     outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
     // `Some` on a mid-session reconfiguration: the previous registries,
@@ -502,7 +507,11 @@ async fn config_sequence(
             conn,
             ServerboundConfigPacket::ClientInformation(
                 s_client_information::ServerboundClientInformation {
-                    information: super::client_information(view_distance, chat_options),
+                    information: super::client_information(
+                        view_distance,
+                        chat_options,
+                        skin_options,
+                    ),
                 },
             ),
         )
@@ -889,6 +898,7 @@ struct GameLoopArgs {
     joined: Joined,
     view_distance: u8,
     chat_options: crate::ui::chat::ChatOptions,
+    skin_options: crate::ui::menu::SkinOptions,
     chat: ChatSender,
     key_pair_rx: mpsc::UnboundedReceiver<Option<std::sync::Arc<ProfileKeyPair>>>,
 }
@@ -905,6 +915,7 @@ async fn game_loop(
         joined,
         view_distance,
         chat_options,
+        skin_options,
         mut chat,
         mut key_pair_rx,
     } = args;
@@ -938,7 +949,11 @@ async fn game_loop(
         // them in the configuration phase (ClientPacketListener.handleLogin).
         let info = ServerboundGamePacket::ClientInformation(
             azalea_protocol::packets::game::s_client_information::ServerboundClientInformation {
-                client_information: super::client_information(view_distance, chat_options),
+                client_information: super::client_information(
+                    view_distance,
+                    chat_options,
+                    skin_options,
+                ),
             },
         );
         write_game_frame(&mut conn.writer, translation, serialize_frame(&info)?).await?;
@@ -1057,6 +1072,7 @@ async fn game_loop(
                         &mut conn,
                         view_distance,
                         chat_options,
+                        skin_options,
                         event_tx,
                         &mut outbound_rx,
                         Some(&configured),
@@ -1339,6 +1355,7 @@ mod tests {
                 access_token: None,
                 view_distance: 8,
                 chat_options: crate::ui::chat::ChatOptions::default(),
+                skin_options: crate::ui::menu::SkinOptions::default(),
             },
             event_tx,
             packet_tx,
@@ -1391,6 +1408,7 @@ mod tests {
                 access_token: None,
                 view_distance: 8,
                 chat_options: crate::ui::chat::ChatOptions::default(),
+                skin_options: crate::ui::menu::SkinOptions::default(),
             },
             event_tx,
             packet_tx,

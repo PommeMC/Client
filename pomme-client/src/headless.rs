@@ -23,7 +23,7 @@ use crate::renderer::RenderTimings;
 use crate::renderer::chunk::mesh_source::CpuMeshAssets;
 use crate::singleplayer::World;
 use crate::ui::chat::ChatOptions;
-use crate::ui::menu::saved_chunk_detail;
+use crate::ui::menu::{SkinOptions, saved_chunk_detail};
 use crate::ui::world_list::WorldList;
 use crate::user::UserData;
 use crate::world::block::block_registry::BlockDefinitions;
@@ -71,6 +71,7 @@ pub fn run(
         AssetIndex::load(&dirs.indexes_dir, &dirs.objects_dir, version),
     );
     let chat_options = ChatOptions::default();
+    let skin_options = SkinOptions::default();
     let connection = spawn_connection(
         rt,
         ConnectArgs {
@@ -80,6 +81,7 @@ pub fn run(
             access_token: user.access_token,
             view_distance: rd as u8,
             chat_options,
+            skin_options,
         },
     );
     let mut game = GameState::new(
@@ -88,6 +90,7 @@ pub fn run(
         rd,
         world.is_some(),
         chat_options,
+        skin_options,
         Rc::new(BlockDefinitions::new()),
         crate::version::selected_protocol(),
     );
@@ -152,6 +155,7 @@ fn drive(
     dirs: &DataDirs,
 ) -> i32 {
     let chunk_detail = saved_chunk_detail(&dirs.game_dir);
+    let skin_options = game.last_skin_options;
     // Columns with at least one non-empty section, as the GPU buffers count
     // them.
     let mut drawn: HashMap<ChunkPos, u32> = HashMap::new();
@@ -271,7 +275,7 @@ fn drive(
                 BenchMode::Headless,
                 *game.player.position,
             ));
-            game.sync_client_information(connection, CHUNK_LOAD_MIN_RD, chat_options);
+            game.sync_client_information(connection, CHUNK_LOAD_MIN_RD, chat_options, skin_options);
         }
         // Taken for the step, as in `update_game`, so a new distance can be
         // sent; `drain_meshes` records the mesh timings into it meanwhile.
@@ -284,7 +288,7 @@ fn drive(
             ) {
                 ChunkLoadStep::Wait => {}
                 ChunkLoadStep::Load(rd) => {
-                    game.sync_client_information(connection, rd, chat_options);
+                    game.sync_client_information(connection, rd, chat_options, skin_options);
                 }
                 ChunkLoadStep::Done(result) => {
                     result.save(&dirs.game_dir);

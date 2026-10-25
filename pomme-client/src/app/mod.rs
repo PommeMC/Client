@@ -199,6 +199,7 @@ fn start_connecting(
         core.menu.render_distance,
         world.is_some(),
         core.menu.chat_options,
+        core.menu.skin_options(),
         block_definitions,
         protocol,
     );
@@ -557,7 +558,7 @@ impl ApplicationHandler for App {
                     MenuUpdateResult::Connect {
                         connect_args,
                         world,
-                    } => start_connecting(&mut self.core, gfx, panorama, connect_args, world),
+                    } => start_connecting(&mut self.core, gfx, panorama, *connect_args, world),
                     _ => AppPhase::InMenu { gfx, panorama },
                 }
             }
@@ -1093,7 +1094,7 @@ impl ApplicationHandler for App {
                             MenuUpdateResult::Connect {
                                 connect_args,
                                 world,
-                            } => start_connecting(core, gfx, panorama, connect_args, world),
+                            } => start_connecting(core, gfx, panorama, *connect_args, world),
                             MenuUpdateResult::Quit => {
                                 event_loop.exit();
                                 AppPhase::InMenu { gfx, panorama }
