@@ -132,7 +132,7 @@ pub async fn install(
             url: format!("{RESOURCES_BASE_URL}/{}/{}", &obj.hash[..2], obj.hash),
             path: object_path(&objects_dir, &obj.hash),
             size: obj.size,
-            sha1: obj.hash.clone(),
+            expected: obj.hash.clone(),
             hash: Hash::Sha1,
         })
         .collect();
@@ -200,12 +200,12 @@ fn reporter(
     }
 }
 
-/// One file to download to `path`, checked against `sha1`.
+/// One file to download to `path`, checked against its `expected` hash.
 pub(crate) struct Fetch {
     pub url: String,
     pub path: PathBuf,
     pub size: u64,
-    pub sha1: String,
+    pub expected: String,
     pub hash: Hash,
 }
 
@@ -230,7 +230,7 @@ pub(crate) async fn download_all(
     let spawn = |tasks: &mut tokio::task::JoinSet<_>, file: Fetch| {
         let http = http.clone();
         tasks.spawn(async move {
-            let bytes = fetch_verified(&http, &file.url, &file.sha1, file.hash).await?;
+            let bytes = fetch_verified(&http, &file.url, &file.expected, file.hash).await?;
             write_atomic(&file.path, &bytes).await?;
             Ok::<u64, String>(file.size)
         });
@@ -283,19 +283,19 @@ async fn fetch(http: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
     Ok(bytes.map_err(|e| e.to_string())?.to_vec())
 }
 
-/// The body of `url`, which must hash to `sha1`.
+/// The body of `url`, which must hash to `expected` by `hash`.
 async fn fetch_verified(
     http: &reqwest::Client,
     url: &str,
-    sha1: &str,
+    expected: &str,
     hash: Hash,
 ) -> Result<Vec<u8>, String> {
     with_retries(url, || async {
         let bytes = fetch(http, url).await?;
-        if hash.of(&bytes) == sha1 {
+        if hash.of(&bytes) == expected {
             Ok(bytes)
         } else {
-            Err("the download didn't match its sha1".into())
+            Err("the download didn't match its hash".into())
         }
     })
     .await

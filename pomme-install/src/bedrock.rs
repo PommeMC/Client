@@ -45,8 +45,8 @@ pub fn is_installed(root: &Path) -> bool {
     dir(root).join(MARKER).exists()
 }
 
-/// Downloads whatever of the pinned release is missing or damaged into
-/// `dir(root)`, reporting through `on_progress`.
+/// Downloads whatever of the pinned release is missing into `dir(root)`,
+/// reporting through `on_progress`.
 pub async fn install(
     http: &reqwest::Client,
     root: &Path,
@@ -85,7 +85,7 @@ fn fetches(tree: Tree, folder: &str, out: &Path) -> Result<Vec<Fetch>, String> {
                 ),
                 path: out.join(folder).join(path),
                 size: entry.size,
-                sha1: entry.sha,
+                expected: entry.sha,
                 hash: Hash::GitBlob,
             })
         })
@@ -127,7 +127,7 @@ mod tests {
             files[0].path,
             out.join("resource_pack/textures/ui").join("bubble/bg.png")
         );
-        assert_eq!((files[0].size, files[0].sha1.as_str()), (3, "ab"));
+        assert_eq!((files[0].size, files[0].expected.as_str()), (3, "ab"));
     }
 
     #[test]
