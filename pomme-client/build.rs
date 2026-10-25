@@ -34,6 +34,8 @@ fn main() {
     let shader_dir = Path::new("src/renderer/shaders");
     let out_dir = std::env::var("OUT_DIR").unwrap();
 
+    compress_block_data(Path::new(&out_dir));
+
     println!("cargo:rerun-if-changed=src/renderer/chunk/packing_consts.rs");
     fs::write(
         Path::new(&out_dir).join("packing.glsl"),
@@ -134,6 +136,30 @@ fn main() {
         let out_name = format!("{file}.spv");
         let out_path = Path::new(&out_dir).join(&out_name);
         fs::write(&out_path, artifact.as_binary_u8())
+            .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
+    }
+}
+
+/// Deflates every block data table into `OUT_DIR/block-data/`, which
+/// `world::block` embeds: the JSON is mostly repeated shape and state data
+/// and compresses about twentyfold.
+fn compress_block_data(out_dir: &Path) {
+    use std::io::Read;
+
+    let data_dir = Path::new("src/world/block/data");
+    println!("cargo:rerun-if-changed={}", data_dir.display());
+    let out = out_dir.join("block-data");
+    fs::create_dir_all(&out).expect("failed to create the block data dir");
+    for entry in fs::read_dir(data_dir).expect("failed to read the block data dir") {
+        let path = entry.expect("failed to read a block data entry").path();
+        let json =
+            fs::read(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+        let mut deflated = Vec::new();
+        flate2::read::DeflateEncoder::new(&json[..], flate2::Compression::best())
+            .read_to_end(&mut deflated)
+            .expect("failed to deflate block data");
+        let out_path = out.join(path.file_name().expect("block data file name"));
+        fs::write(&out_path, deflated)
             .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
     }
 }

@@ -20,6 +20,7 @@ cpu-bench = ["dep:criterion"]
 test-harness = ["dep:toml"]
 
 [build-dependencies]
+flate2 = "1"
 shaderc = "0.10"
 
 [target.'cfg(windows)'.build-dependencies]

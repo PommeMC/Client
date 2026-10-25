@@ -545,9 +545,29 @@ impl<T: Copy> PerState<T> {
 /// own code.
 struct EmbeddedBlocks {
     protocol: i32,
-    blocks: &'static str,
-    state: &'static str,
-    piston: &'static str,
+    /// Deflated by `build.rs` (see [`embedded_data`]); read through
+    /// [`parse_embedded`].
+    blocks: &'static [u8],
+    state: &'static [u8],
+    piston: &'static [u8],
+}
+
+/// Inflates one of an [`EmbeddedBlocks`]' tables and parses it.
+fn parse_embedded<T: serde::de::DeserializeOwned>(deflated: &[u8]) -> T {
+    use std::io::Read;
+
+    let mut json = Vec::new();
+    flate2::read::DeflateDecoder::new(deflated)
+        .read_to_end(&mut json)
+        .expect("embedded block data inflates");
+    serde_json::from_slice(&json).expect("embedded block data parses")
+}
+
+/// The deflated copy of `data/<name>` that `build.rs` writes.
+macro_rules! embedded_data {
+    ($($name:expr),+) => {
+        include_bytes!(concat!(env!("OUT_DIR"), "/block-data/", $($name),+))
+    };
 }
 
 /// The `blocks-<v>.json`, `state-<v>.json` and `piston-<v>.json` tables for
@@ -557,9 +577,9 @@ macro_rules! embedded_blocks {
     ($protocol:expr, $version:literal) => {
         EmbeddedBlocks {
             protocol: $protocol,
-            blocks: include_str!(concat!("data/blocks-", $version, ".json")),
-            state: include_str!(concat!("data/state-", $version, ".json")),
-            piston: include_str!(concat!("data/piston-", $version, ".json")),
+            blocks: embedded_data!("blocks-", $version, ".json"),
+            state: embedded_data!("state-", $version, ".json"),
+            piston: embedded_data!("piston-", $version, ".json"),
         }
     };
 }
@@ -640,19 +660,16 @@ fn block_data_slot(protocol: i32) -> Option<usize> {
 
 fn load_behaviors() -> &'static HashMap<String, BehaviorEntry> {
     static BEHAVIORS: OnceLock<HashMap<String, BehaviorEntry>> = OnceLock::new();
-    BEHAVIORS.get_or_init(|| {
-        serde_json::from_str(include_str!("data/block_behavior.json"))
-            .expect("invalid block-behavior data")
-    })
+    BEHAVIORS.get_or_init(|| parse_embedded(embedded_data!("block_behavior.json")))
 }
 
 /// A version's per-block piston data, dumped by `just stategen`.
 fn load_piston_data(data: &EmbeddedBlocks) -> HashMap<String, PistonEntry> {
-    serde_json::from_str(data.piston).expect("invalid piston data")
+    parse_embedded(data.piston)
 }
 
 fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
-    let file: BlockFile = serde_json::from_str(data.blocks).expect("invalid block-state data");
+    let file: BlockFile = parse_embedded(data.blocks);
     assert_eq!(
         pomme_protocol::ProtocolVersion::from_name(&file.version).map(|v| v.protocol),
         Some(data.protocol),
@@ -661,7 +678,7 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
         data.protocol
     );
     let piston_data = load_piston_data(data);
-    let state_file: StateFile = serde_json::from_str(data.state).expect("invalid state data");
+    let state_file: StateFile = parse_embedded(data.state);
     assert_eq!(
         state_file.version, file.version,
         "state data is for a different version"
@@ -1953,7 +1970,7 @@ mod tests {
     #[test]
     fn piston_tables_match_their_versions() {
         for data in BLOCK_DATA {
-            let file: BlockFile = serde_json::from_str(data.blocks).unwrap();
+            let file: BlockFile = parse_embedded(data.blocks);
             let names: HashSet<&str> = file.blocks.iter().map(|b| b.name.as_str()).collect();
             let piston = load_piston_data(data);
             for key in piston.keys() {
@@ -1982,7 +1999,7 @@ mod tests {
         let behaviors = load_behaviors();
         let mut known = HashSet::new();
         for data in BLOCK_DATA {
-            let file: BlockFile = serde_json::from_str(data.blocks).unwrap();
+            let file: BlockFile = parse_embedded(data.blocks);
             for block in &file.blocks {
                 assert!(
                     behaviors.contains_key(&block.name),

@@ -528,7 +528,6 @@ struct Ids767 {
     /// The four `move_player_*` ids whose flags byte must drop to onGround.
     move_player_ids: [u32; 4],
     client_information_id: u32,
-    client_information_old_id: u32,
 }
 
 impl Ids767 {
@@ -1285,6 +1284,7 @@ impl Translation {
         let Some(id) = wire::read_varint(&frame, &mut pos) else {
             return Vec::new();
         };
+        let old = ids.outbound.get(id as usize).copied().flatten();
         if let Some(v777) = &ids.v777 {
             if id == v777.swing_id {
                 return translate_swing_777(v777.punch_old_id, &frame[pos..]);
@@ -1360,8 +1360,10 @@ impl Translation {
             if id == v767.player_input_id {
                 return translate_player_input(v767.player_input_old_id, &frame[pos..]);
             }
-            if id == v767.client_information_id {
-                return strip_last_byte(v767.client_information_old_id, &frame[pos..]);
+            if id == v767.client_information_id
+                && let Some(old) = old
+            {
+                return strip_last_byte(old, &frame[pos..]);
             }
             if v767.move_player_ids.contains(&id)
                 && let Some(flags) = frame.last_mut()
@@ -1372,7 +1374,7 @@ impl Translation {
                 *flags &= 1;
             }
         }
-        match ids.outbound.get(id as usize).copied().flatten() {
+        match old {
             Some(old) if old == id => vec![frame],
             Some(old) => {
                 let mut out = Vec::with_capacity(frame.len() + 1);
@@ -1664,12 +1666,6 @@ impl GameIds {
                 ]
                 .map(|n| id(Serverbound, n)),
                 client_information_id: id(Serverbound, "client_information"),
-                client_information_old_id: required_id(
-                    table,
-                    Phase::Game,
-                    Serverbound,
-                    "client_information",
-                ),
             }),
             v766: (protocol <= 766).then(|| Ids766 {
                 projectile_power_id: id(Clientbound, "projectile_power"),
