@@ -493,7 +493,7 @@ pub struct BakedModel {
 #[derive(Clone)]
 pub struct MultipartEntry {
     pub when: HashMap<String, String>,
-    pub quads: Arc<[BakedQuad]>,
+    pub model: Arc<BakedModel>,
 }
 
 pub fn load_all_block_textures(
@@ -590,7 +590,7 @@ pub fn bake_all_models(
                     if let Some(baked) = bake(case.apply.first()?) {
                         entries.push(MultipartEntry {
                             when: parse_when_condition(&case.when),
-                            quads: baked.quads.as_slice().into(),
+                            model: baked,
                         });
                     }
                 }

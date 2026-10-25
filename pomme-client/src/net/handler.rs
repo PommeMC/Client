@@ -30,6 +30,9 @@ fn dialog_holder_reference(
 /// full. Blocking stalls this connection's reads and writes until the game
 /// thread drains, so on a multi-thread runtime the worker's other tasks are
 /// handed off first.
+// TODO: a stall past the server's keep-alive timeout (a long window drag on
+// Windows) leaves keep-alives unanswered; vanilla answers them off its main
+// thread even while it is frozen.
 pub(super) fn send_ordered(event_tx: &Sender<NetworkEvent>, event: NetworkEvent) {
     if let Err(TrySendError::Full(event)) = event_tx.try_send(event) {
         let block = || {

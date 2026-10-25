@@ -1220,6 +1220,7 @@ fn pack(sources: &[Source], atlas_size: u32, mip_align: u32) -> (PackResult, boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::test_temp_dir;
 
     #[test]
     fn texture_ids_find_the_region_their_name_does() {
@@ -1240,8 +1241,6 @@ mod tests {
         assert_eq!(uv_map.region(built).pixel_rect, named.pixel_rect);
         assert_eq!(uv_map.region(late).pixel_rect, late_named.pixel_rect);
     }
-    use crate::test_util::test_temp_dir;
-
     fn alpha_index(x: usize, y: usize, width: usize) -> usize {
         (y * width + x) * 4 + 3
     }
