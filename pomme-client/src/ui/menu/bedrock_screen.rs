@@ -9,7 +9,7 @@
 //!   Friends and Servers tabs) exists.
 //! - Realms and Marketplace draw but do nothing; the Marketplace art, its
 //!   "Add-ons!" ribbon and the inbox button are online content.
-//! - The featured server tile shows the first saved server.
+//! - The featured server tile shows Pomme's dev server.
 //! - Pomme's link and theme pickers sit in the top-left corner.
 
 use super::*;
@@ -73,6 +73,9 @@ const DRESSING_H: f32 = 25.0;
 const LEFT_PAD: f32 = 5.0;
 /// `gathering_badge` and `gathering_button`.
 const TILE: (f32, f32) = (100.0, 30.0);
+/// The server the tile features.
+const FEATURED_NAME: &str = "Pomme Dev";
+const FEATURED_ADDRESS: &str = "dev.pomme.rs";
 const TILE_BUTTON_H: f32 = 25.0;
 /// `lower_online_buttons_panel`: a 32 row offset 5% of the column in, then
 /// the profile button's 5 pad.
@@ -634,13 +637,13 @@ impl MainMenu {
         }
 
         // Only beside the column, not over it.
-        let server = self
-            .server_list
-            .servers
-            .first()
-            .filter(|_| LEFT_PAD + TILE.0 <= side_w)
-            .cloned();
-        if let Some(server) = server {
+        if LEFT_PAD + TILE.0 <= side_w {
+            let server = ServerEntry {
+                name: FEATURED_NAME.to_owned(),
+                address: FEATURED_ADDRESS.to_owned(),
+                protocol: None,
+                extra: Default::default(),
+            };
             let join_y = side_bottom - PROFILE_ROW_H - TILE_BUTTON_H;
             let tile_y = join_y - TILE.1;
             let tile = [LEFT_PAD * gs, tile_y * gs, TILE.0 * gs, TILE.1 * gs];
@@ -654,15 +657,7 @@ impl MainMenu {
             });
             push_outline(buttons.elements, tile, gs, WHITE);
             let rect = [LEFT_PAD * gs, join_y * gs, TILE.0 * gs, TILE_BUTTON_H * gs];
-            let name = crate::ui::chat::clip_spans(
-                &[crate::ui::text::TextSpan::new(server.name.clone(), WHITE)],
-                TILE.0 - 2.0 * FIT_LEFT,
-                &|spans| spans.iter().map(|span| units(&span.text)).sum(),
-            )
-            .into_iter()
-            .map(|span| span.text)
-            .collect::<String>();
-            if buttons.text(rect, Palette::Light, &name) {
+            if buttons.text(rect, Palette::Light, &server.name) {
                 any_clicked = true;
                 action = MenuAction::Connect {
                     server: server.address.clone(),

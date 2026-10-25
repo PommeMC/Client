@@ -3286,7 +3286,7 @@ pub(crate) fn wrap_spans(
 /// Vanilla `ComponentRenderUtils.clipText`: the longest prefix whose width
 /// fits `max_w` less the ellipsis (`Font.substrByWidth`), then an unstyled
 /// "...". Widths are gui units, measured by `width0` as in [`wrap_spans`].
-pub(crate) fn clip_spans(
+fn clip_spans(
     spans: &[TextSpan],
     max_w: f32,
     width0: &dyn Fn(&[TextSpan]) -> f32,
