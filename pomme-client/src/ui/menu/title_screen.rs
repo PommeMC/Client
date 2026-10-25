@@ -55,7 +55,7 @@ const COPYRIGHT: &str = "Copyright Mojang AB. Do not distribute!";
 /// Dropdown widths, wide enough for the longest label at `DropdownStyle`'s
 /// 10-unit pad plus 11-unit icon.
 const DROP_LINKS_W: f32 = 74.0;
-const DROP_THEME_W: f32 = 66.0;
+const DROP_THEME_W: f32 = 82.0;
 
 impl MainMenu {
     #[allow(clippy::too_many_lines)]
