@@ -1,4 +1,4 @@
-//! Vanilla `TitleScreen`, drawn when the theme switcher is set to Default.
+//! Vanilla `TitleScreen`, drawn when the theme switcher is set to Java.
 //! The Bedrock theme draws it too, with Bedrock's logo in place of the Java
 //! one.
 //!

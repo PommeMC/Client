@@ -230,7 +230,7 @@ impl Default for Settings {
             cloud_mode: 2,
             attack_indicator: 1,
             display_mode: 0,
-            theme: 0,
+            theme: PanoramaTheme::Java.to_u8(),
             chat: ChatOptions::default(),
             force_unicode_font: false,
             japanese_glyph_variants: default_japanese_glyph_variants(),
@@ -277,7 +277,7 @@ use super::server_list::{
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanoramaTheme {
     Pomme,
-    Default,
+    Java,
     Bedrock,
 }
 
@@ -285,16 +285,16 @@ impl PanoramaTheme {
     pub fn to_u8(self) -> u8 {
         match self {
             Self::Pomme => 0,
-            Self::Default => 1,
+            Self::Java => 1,
             Self::Bedrock => 2,
         }
     }
 
     pub fn from_u8(value: u8) -> Self {
         match value {
-            1 => Self::Default,
+            0 => Self::Pomme,
             2 => Self::Bedrock,
-            _ => Self::Pomme,
+            _ => Self::Java,
         }
     }
 
@@ -303,7 +303,7 @@ impl PanoramaTheme {
     /// its downloaded UI textures.
     pub fn panorama_dir(self, dirs: &crate::dirs::DataDirs) -> std::path::PathBuf {
         match self {
-            Self::Default => dirs.jar_assets_dir.clone(),
+            Self::Java => dirs.jar_assets_dir.clone(),
             Self::Pomme => dirs.pomme_assets_dir.join("panoramas"),
             Self::Bedrock => dirs.bedrock_ui_dir(),
         }
@@ -870,7 +870,7 @@ impl MainMenu {
         // Saved on Bedrock but its files are gone: start on Default and pick
         // Bedrock again, which downloads them and then switches.
         if menu.theme == PanoramaTheme::Bedrock && !menu.bedrock_installed() {
-            menu.theme = PanoramaTheme::Default;
+            menu.theme = PanoramaTheme::Java;
             menu.pick_theme(PanoramaTheme::Bedrock);
         }
         menu
@@ -1594,7 +1594,7 @@ mod tests {
 
         for theme in [
             PanoramaTheme::Pomme,
-            PanoramaTheme::Default,
+            PanoramaTheme::Java,
             PanoramaTheme::Bedrock,
         ] {
             let settings = Settings {

@@ -1040,9 +1040,9 @@ const LINKS: [(&str, char, &str); 3] = [
     ),
 ];
 const THEMES: [(&str, PanoramaTheme); 3] = [
-    ("Pomme", PanoramaTheme::Pomme),
-    ("Default", PanoramaTheme::Default),
+    ("Java", PanoramaTheme::Java),
     ("Bedrock", PanoramaTheme::Bedrock),
+    ("Pomme", PanoramaTheme::Pomme),
 ];
 
 /// The Bedrock theme's textures, downloaded the first time it's picked.
