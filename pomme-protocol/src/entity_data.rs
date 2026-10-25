@@ -78,8 +78,9 @@ const ENUM: Shape = VarInt;
 
 /// The 26.2 serializers by id, in `EntityDataSerializers`' static-block
 /// registration order (`EntityDataSerializers.java:166-210`), which differs
-/// from the field order.
-pub static SERIALIZERS_26_2: &[Serializer] = &[
+/// from the field order; `$extra` are a later version's appended ones.
+macro_rules! serializers_26_2 {
+    ($($extra:expr),*) => { &[
     S::Byte,
     S::Int,
     S::Long,
@@ -154,7 +155,14 @@ pub static SERIALIZERS_26_2: &[Serializer] = &[
     S::Skip(Ref(&RESOLVABLE_PROFILE)),
     // HUMANOID_ARM
     S::Skip(ENUM),
-];
+    $($extra),*
+] };
+}
+
+pub static SERIALIZERS_26_2: &[Serializer] = serializers_26_2!();
+
+/// 26.3 appended `DYE_COLOR` (`DyeColor.STREAM_CODEC`, an `idMapper` enum).
+pub static SERIALIZERS_26_3: &[Serializer] = serializers_26_2!(S::Skip(ENUM));
 
 impl ItemCodec {
     /// `ClientboundSetEntityDataPacket.unpack`: entries up to the end marker.
@@ -245,6 +253,7 @@ mod tests {
     #[test]
     fn table_covers_every_serializer() {
         assert_eq!(SERIALIZERS_26_2.len(), 43);
+        assert_eq!(SERIALIZERS_26_3.len(), 44);
     }
 
     #[test]

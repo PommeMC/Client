@@ -2560,16 +2560,17 @@ fn entity_data_unmapped_item_empties_777() {
     assert_eq!(entries.len(), 2);
 }
 
-/// On the verbatim-tail fallback an unmapped item can't be skipped, so the
-/// stack empties and the list ends there.
+/// 26.3's item grammar sizes an unmapped item's components (`damage`, 5), so
+/// the stack empties and the list carries on past it.
 #[test]
-fn entity_data_unmapped_item_with_components_ends_list_777() {
+fn entity_data_unmapped_item_with_components_keeps_the_list_777() {
     let entries = entity_data_entries(777, &[8, 7, 1, 0xAC, 1, 1, 0, 3, 5, 9, 1, 7]);
     assert!(matches!(
         entity_data_stack(&entries[0]),
         azalea_inventory::ItemStack::Empty
     ));
-    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[1].index, 9);
 }
 
 /// `translate_item_765` leaves the wire item id for the typed pass, so
@@ -2619,6 +2620,53 @@ fn translate_container_set_slot_765() {
             state_id: 2,
             slot: 1,
             item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+        }
+    );
+}
+
+/// 26.3's item and component ids shift past 26.2's; a slot holding a dyed
+/// diamond lands in native ids, decoded by pomme's own container reader.
+#[test]
+fn translate_container_set_slot_777() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let wire_table = RegistryTable::for_protocol(777).unwrap();
+    let native_table = RegistryTable::native();
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(777, Direction::Clientbound, "container_set_slot"),
+    );
+    old.extend_from_slice(&[0, 4]); // container, state id
+    old.extend_from_slice(&36i16.to_be_bytes());
+    old.push(1); // count
+    wire::write_varint(
+        &mut old,
+        registry_id(wire_table, ClientRegistry::Item, "diamond"),
+    );
+    old.extend_from_slice(&[1, 0]); // one added, none removed
+    wire::write_varint(
+        &mut old,
+        registry_id(wire_table, ClientRegistry::DataComponentType, "dyed_color"),
+    );
+    old.extend_from_slice(&0x123456i32.to_be_bytes());
+
+    let mut item = pomme_stack(azalea_registry::builtin::ItemKind::Diamond, 1).unwrap();
+    item.patch.added.push((
+        registry_id(
+            native_table,
+            ClientRegistry::DataComponentType,
+            "dyed_color",
+        ),
+        0x123456i32.to_be_bytes().into(),
+    ));
+    assert_eq!(
+        translate_and_read(777, old, "container_set_slot", container::read),
+        ContainerPacket::Slot {
+            container_id: 0,
+            state_id: 4,
+            slot: 36,
+            item: Some(item)
         }
     );
 }
@@ -4693,8 +4741,8 @@ fn translate_player_chat_777() {
 }
 
 /// A 26.3 component whose value layout changed (`pot_decorations` became
-/// four optional item templates) can't be sized with 26.2's codec, so the
-/// particle carrying it drops rather than misparsing.
+/// four optional item templates) is sized by 26.3's item grammar, so the
+/// particle carrying it still arrives.
 #[test]
 fn translate_changed_component_777() {
     use pomme_protocol::{ClientRegistry, RegistryTable};
@@ -4723,10 +4771,11 @@ fn translate_changed_component_777() {
     write_doubles(&mut old, [1.0, 65.0, -2.0]);
     write_floats(&mut old, [0.0; 6]);
     old.extend_from_slice(&[1, 0]); // count, randomization
+    // Pomme reads only the particle's type, so its payload passes through.
     assert!(
         translation_for(777)
             .translate_game_frame(old.into_boxed_slice())
-            .is_none()
+            .is_some()
     );
 }
 
