@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use azalea_block::BlockState;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
-    Consumable, Food, ItemUseAnimation, MinimumAttackCharge, UseEffects,
+    ChargedProjectiles, Consumable, Food, ItemUseAnimation, MinimumAttackCharge, UseEffects,
 };
 use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
 use azalea_protocol::packets::game::ServerboundGamePacket;
@@ -28,7 +28,7 @@ use crate::physics::aabb::{self, Aabb, Axis, Face};
 use crate::physics::block_shape::{self, LocalBox};
 use crate::player::inventory::item_resource_name;
 use crate::position::BlockPos;
-use crate::renderer::pipelines::held_item::UseAnim;
+use crate::renderer::pipelines::held_item::{HandRenderSelection, UseAnim};
 use crate::tool::{LegacyMiningEnchantments, stack_tool, sword_instantly_mines_legacy};
 use crate::world::block::BlockStateTable;
 use crate::world::block::block_registry::BlockRegistry;
@@ -1093,6 +1093,19 @@ impl InteractionState {
             .is_some_and(|a| !a.use_effects.can_sprint)
     }
 
+    /// Which hands first person draws for these held stacks.
+    pub fn hands_to_render(
+        &self,
+        main: Option<&ItemStackData>,
+        off: Option<&ItemStackData>,
+    ) -> HandRenderSelection {
+        let using = self
+            .using_item
+            .as_ref()
+            .map(|active| (InteractionHand::MainHand, active.kind));
+        hand_render_selection(main, off, using)
+    }
+
     /// First-person use-animation state for the held-item renderer, vanilla
     /// `ItemInHandRenderer.applyEatTransform` inputs. `None` unless an
     /// eat/drink use is active with ticks remaining.
@@ -1600,6 +1613,49 @@ pub(crate) fn play_break_sound_for_id(audio: &AudioEngine, id: &str, pos: BlockP
     );
 }
 
+/// Vanilla `ItemInHandRenderer.evaluateWhichHandsToRender` and
+/// `selectionUsingItemWhileHoldingBowLike`, plus `submitArmWithItem`'s
+/// `isScoping` early return, which hides both hands. `using` is the used hand
+/// and item while an item use is active.
+fn hand_render_selection(
+    main: Option<&ItemStackData>,
+    off: Option<&ItemStackData>,
+    using: Option<(InteractionHand, ItemKind)>,
+) -> HandRenderSelection {
+    if using.is_some_and(|(_, kind)| kind == ItemKind::Spyglass) {
+        return HandRenderSelection::NONE;
+    }
+    let holds = |kind| [main, off].iter().flatten().any(|s| s.kind == kind);
+    if !holds(ItemKind::Bow) && !holds(ItemKind::Crossbow) {
+        return HandRenderSelection::BOTH;
+    }
+    if let Some((hand, kind)) = using {
+        if matches!(kind, ItemKind::Bow | ItemKind::Crossbow) {
+            return match hand {
+                InteractionHand::MainHand => HandRenderSelection::MAIN_ONLY,
+                InteractionHand::OffHand => HandRenderSelection::OFF_ONLY,
+            };
+        }
+        return if hand == InteractionHand::MainHand && is_charged_crossbow(off) {
+            HandRenderSelection::MAIN_ONLY
+        } else {
+            HandRenderSelection::BOTH
+        };
+    }
+    if is_charged_crossbow(main) {
+        return HandRenderSelection::MAIN_ONLY;
+    }
+    HandRenderSelection::BOTH
+}
+
+/// Vanilla `ItemInHandRenderer.isChargedCrossbow` / `CrossbowItem.isCharged`.
+fn is_charged_crossbow(stack: Option<&ItemStackData>) -> bool {
+    stack.is_some_and(|s| {
+        s.kind == ItemKind::Crossbow
+            && stack_component::<ChargedProjectiles>(s).is_some_and(|c| !c.items.is_empty())
+    })
+}
+
 /// The stack's component override if the server set one, else the item's
 /// default.
 fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Option<T> {
@@ -1923,6 +1979,65 @@ mod tests {
             panic!("expected SetCarriedItem");
         };
         assert_eq!(packet.slot, 5);
+    }
+
+    #[test]
+    fn hand_render_selection_matches_vanilla() {
+        use azalea_inventory::ItemStack;
+
+        let stack = |kind| ItemStackData::new(kind, 1);
+        let charged = ItemStack::new(ItemKind::Crossbow, 1)
+            .with_component(ChargedProjectiles {
+                items: vec![ItemStack::new(ItemKind::Arrow, 1)],
+            })
+            .as_present()
+            .cloned()
+            .unwrap();
+        let (stone, bow, crossbow, totem) = (
+            stack(ItemKind::Stone),
+            stack(ItemKind::Bow),
+            stack(ItemKind::Crossbow),
+            stack(ItemKind::TotemOfUndying),
+        );
+        let main = InteractionHand::MainHand;
+        let off = InteractionHand::OffHand;
+        let cases = [
+            (&stone, &totem, None, HandRenderSelection::BOTH),
+            (&charged, &totem, None, HandRenderSelection::MAIN_ONLY),
+            (&crossbow, &totem, None, HandRenderSelection::BOTH),
+            (&stone, &charged, None, HandRenderSelection::BOTH),
+            (
+                &stone,
+                &charged,
+                Some((main, ItemKind::Apple)),
+                HandRenderSelection::MAIN_ONLY,
+            ),
+            (
+                &stone,
+                &bow,
+                Some((off, ItemKind::Bow)),
+                HandRenderSelection::OFF_ONLY,
+            ),
+            (
+                &bow,
+                &totem,
+                Some((main, ItemKind::Bow)),
+                HandRenderSelection::MAIN_ONLY,
+            ),
+            (
+                &stack(ItemKind::Spyglass),
+                &totem,
+                Some((main, ItemKind::Spyglass)),
+                HandRenderSelection::NONE,
+            ),
+        ];
+        for (i, (main, off, using, expected)) in cases.into_iter().enumerate() {
+            assert_eq!(
+                hand_render_selection(Some(main), Some(off), using),
+                expected,
+                "case {i}"
+            );
+        }
     }
 
     #[test]

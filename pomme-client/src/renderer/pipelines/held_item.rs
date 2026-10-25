@@ -38,6 +38,33 @@ pub struct UseAnim {
     pub duration: f32,
 }
 
+/// Vanilla `ItemInHandRenderer.HandRenderSelection`: which hands first
+/// person draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HandRenderSelection {
+    pub main: bool,
+    pub off: bool,
+}
+
+impl HandRenderSelection {
+    pub const BOTH: Self = Self {
+        main: true,
+        off: true,
+    };
+    pub const MAIN_ONLY: Self = Self {
+        main: true,
+        off: false,
+    };
+    pub const OFF_ONLY: Self = Self {
+        main: false,
+        off: true,
+    };
+    pub const NONE: Self = Self {
+        main: false,
+        off: false,
+    };
+}
+
 pub struct HeldItemPipeline {
     pipeline: vk::Pipeline,
     shared: ItemPipelineShared,

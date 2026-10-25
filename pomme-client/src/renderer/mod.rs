@@ -60,7 +60,7 @@ use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
-use crate::renderer::pipelines::held_item::HeldHand;
+use crate::renderer::pipelines::held_item::{HandRenderSelection, HeldHand};
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::ui::font::{FontOptions, FontSources};
 use crate::world::block::render_assets::{BlockRenderAssets, BlockRenderView};
@@ -144,6 +144,7 @@ enum RenderMode<'a> {
         /// The main hand's then the offhand's item.
         held_items: [Option<pipelines::held_item::HeldItemInfo>; 2],
         main_hand_right: bool,
+        shown_hands: HandRenderSelection,
         player_team_color: Option<u32>,
         render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
@@ -1200,6 +1201,7 @@ impl Renderer {
         use_anim: Option<pipelines::held_item::UseAnim>,
         held_items: [Option<(String, f32, azalea_inventory::ItemStackData)>; 2],
         main_hand_right: bool,
+        shown_hands: HandRenderSelection,
         player_team_color: Option<u32>,
         render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
@@ -1254,6 +1256,7 @@ impl Renderer {
                 use_anim,
                 held_items,
                 main_hand_right,
+                shown_hands,
                 player_team_color,
                 render_first_person_hand,
                 destroy_info,
@@ -1876,6 +1879,7 @@ impl Renderer {
                 use_anim,
                 held_items,
                 main_hand_right,
+                shown_hands,
                 player_team_color: _,
                 render_first_person_hand,
                 destroy_info,
@@ -2033,11 +2037,14 @@ impl Renderer {
                     let view_effect = self.camera.view_effect_matrix();
                     // Vanilla submitArmWithItem draws the bare arm only for an
                     // empty main hand; held items render alone, and an empty
-                    // offhand draws nothing.
+                    // offhand draws nothing. The main arm is the options' one,
+                    // which the server echoes back as `getMainArm`.
                     // TODO: mirror the bare arm for a left main hand
                     // (`renderPlayerArm`'s arm side).
+                    // TODO: map (`renderOneHandedMap`/`renderTwoHandedMap`)
+                    // and crossbow arm poses.
                     let [main_hand, off_hand] = held_items;
-                    if main_hand.is_none() {
+                    if shown_hands.main && main_hand.is_none() {
                         self.hand_pipeline.update_and_draw(
                             cmd,
                             frame,
@@ -2049,18 +2056,25 @@ impl Renderer {
                     }
                     // TODO: the offhand's own swing and use animations
                     // (`swingingArm`, `getUsedItemHand`) once it can be used.
-                    let main = main_hand.as_ref().map(|item| HeldHand {
-                        item,
-                        right_arm: *main_hand_right,
-                        swing_progress: *swing_progress,
-                        use_anim: *use_anim,
-                    });
-                    let off = off_hand.as_ref().map(|item| HeldHand {
-                        item,
-                        right_arm: !*main_hand_right,
-                        swing_progress: 0.0,
-                        use_anim: None,
-                    });
+                    let main =
+                        main_hand
+                            .as_ref()
+                            .filter(|_| shown_hands.main)
+                            .map(|item| HeldHand {
+                                item,
+                                right_arm: *main_hand_right,
+                                swing_progress: *swing_progress,
+                                use_anim: *use_anim,
+                            });
+                    let off = off_hand
+                        .as_ref()
+                        .filter(|_| shown_hands.off)
+                        .map(|item| HeldHand {
+                            item,
+                            right_arm: !*main_hand_right,
+                            swing_progress: 0.0,
+                            use_anim: None,
+                        });
                     let hands: Vec<_> = main.into_iter().chain(off).collect();
                     if !hands.is_empty() {
                         self.held_item_pipeline.update_and_draw(
