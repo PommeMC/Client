@@ -203,7 +203,7 @@ impl Swapchain {
         self.images.len()
     }
 
-    /// What pipelines drawing into the swapchain draw into.
+    /// The targets of pipelines that draw into the swapchain.
     pub fn targets(&self) -> super::PipelineTargets {
         super::PipelineTargets {
             color: self.format.format,

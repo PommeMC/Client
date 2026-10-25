@@ -10,7 +10,7 @@ pub struct BlurPipeline {
     sampler: rhi::backend::Sampler,
     pipeline: rhi::backend::RenderPipeline,
     pipeline_layout: rhi::backend::PipelineLayout,
-    desc_layout: rhi::backend::BindGroupLayout,
+    texture_layout: rhi::backend::BindGroupLayout,
     set_read_a: rhi::backend::BindGroup,
     set_read_b: rhi::backend::BindGroup,
     width: u32,
@@ -27,10 +27,10 @@ impl BlurPipeline {
 
         let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR);
 
-        let desc_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
+        let texture_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
         let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
-            &[desc_layout],
+            &[texture_layout],
             Some(rhi::PushConstants {
                 visibility: rhi::ShaderStages::FRAGMENT,
                 size: 8,
@@ -47,9 +47,9 @@ impl BlurPipeline {
         );
 
         let set_read_a =
-            util::create_texture_group(device, desc_layout, texture_a.handle(), sampler);
+            util::create_texture_group(device, texture_layout, texture_a.handle(), sampler);
         let set_read_b =
-            util::create_texture_group(device, desc_layout, texture_b.handle(), sampler);
+            util::create_texture_group(device, texture_layout, texture_b.handle(), sampler);
 
         Self {
             texture_a,
@@ -57,7 +57,7 @@ impl BlurPipeline {
             sampler,
             pipeline,
             pipeline_layout,
-            desc_layout,
+            texture_layout,
             set_read_a,
             set_read_b,
             width: blur_w,
@@ -91,11 +91,6 @@ impl BlurPipeline {
                 TextureUse::Undefined,
                 TextureUse::CopyDst,
             ),
-            TextureTransition::color(
-                self.texture_b.handle(),
-                TextureUse::Undefined,
-                TextureUse::ShaderRead,
-            ),
         ]);
 
         encoder.blit(
@@ -123,12 +118,20 @@ impl BlurPipeline {
         let v_dir: [f32; 2] = [0.0, 1.0 / bh as f32];
 
         for _ in 0..iterations {
-            // Horizontal: read A → write B
-            let into_b = self.texture_b.handle();
-            self.blur_pass(device, encoder, into_b, self.set_read_a, h_dir);
-            // Vertical: read B → write A
-            let into_a = self.texture_a.handle();
-            self.blur_pass(device, encoder, into_a, self.set_read_b, v_dir);
+            self.blur_pass(
+                device,
+                encoder,
+                self.texture_b.handle(),
+                self.set_read_a,
+                h_dir,
+            );
+            self.blur_pass(
+                device,
+                encoder,
+                self.texture_a.handle(),
+                self.set_read_b,
+                v_dir,
+            );
         }
     }
 
@@ -183,12 +186,12 @@ impl BlurPipeline {
 
         self.set_read_a.replace(
             device,
-            self.desc_layout,
+            self.texture_layout,
             &util::texture_binding(self.texture_a.handle(), self.sampler),
         );
         self.set_read_b.replace(
             device,
-            self.desc_layout,
+            self.texture_layout,
             &util::texture_binding(self.texture_b.handle(), self.sampler),
         );
 
@@ -207,7 +210,7 @@ impl BlurPipeline {
         self.pipeline_layout.destroy(device);
         self.set_read_a.destroy(device);
         self.set_read_b.destroy(device);
-        self.desc_layout.destroy(device);
+        self.texture_layout.destroy(device);
         self.sampler.destroy(device);
     }
 }

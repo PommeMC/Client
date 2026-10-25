@@ -7,7 +7,6 @@ layout(early_fragment_tests) in;
 #include "fog.glsl"
 #include "atlas_sprite.glsl"
 
-
 layout(location = 0) in vec2 v_sprite_uv;
 layout(location = 1) in float v_light;
 layout(location = 2) in vec3 v_tint;

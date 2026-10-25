@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
-use std::sync::{Mutex, MutexGuard};
+use std::ops::BitOr;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::{io, slice};
 
 use pomme_gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
@@ -42,32 +43,9 @@ handle_type!(
 handle_type!(PipelineLayout(vk::PipelineLayout), destroy_pipeline_layout);
 handle_type!(Sampler(vk::Sampler), destroy_sampler);
 
-pub fn create_bind_group_layout(
-    device: &Device,
-    entries: &[BindGroupLayoutEntry],
-) -> BindGroupLayout {
-    let bindings: Vec<_> = entries
-        .iter()
-        .enumerate()
-        .map(|(binding, entry)| vk::DescriptorSetLayoutBinding {
-            binding: binding as u32,
-            descriptor_type: descriptor_type(entry.ty),
-            descriptor_count: 1,
-            stage_flags: stage_flags(entry.visibility),
-            ..Default::default()
-        })
-        .collect();
-    let info = vk::DescriptorSetLayoutCreateInfo {
-        binding_count: bindings.len() as u32,
-        bindings: bindings.as_ptr(),
-        ..Default::default()
-    };
-    BindGroupLayout(
-        device
-            .raw
-            .create_descriptor_set_layout(&info, None)
-            .expect("failed to create descriptor set layout"),
-    )
+/// Locks `mutex`, carrying on past a panic in an earlier holder.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 mod context;
@@ -204,9 +182,7 @@ impl Device {
     }
 
     fn allocator(&self) -> MutexGuard<'_, Allocator> {
-        self.allocator
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock(&self.allocator)
     }
 
     /// Frees what the device made, then the device, once the GPU is idle.
@@ -380,21 +356,32 @@ fn allocate(
         .map_err(|error| format!("failed to allocate memory for {label}: {error}"))
 }
 
+/// The union of the flags in `table` whose bit `has`.
+fn union_flags<B, F: BitOr<Output = F>>(
+    empty: F,
+    table: impl IntoIterator<Item = (B, F)>,
+    has: impl Fn(B) -> bool,
+) -> F {
+    table
+        .into_iter()
+        .filter_map(|(bit, flag)| has(bit).then_some(flag))
+        .fold(empty, |flags, flag| flags | flag)
+}
+
 fn buffer_usage_flags(usage: BufferUsages) -> vk::BufferUsageFlags {
-    [
-        (BufferUsages::VERTEX, vk::BufferUsageFlags::VertexBuffer),
-        (BufferUsages::INDEX, vk::BufferUsageFlags::IndexBuffer),
-        (BufferUsages::UNIFORM, vk::BufferUsageFlags::UniformBuffer),
-        (BufferUsages::STORAGE, vk::BufferUsageFlags::StorageBuffer),
-        (BufferUsages::INDIRECT, vk::BufferUsageFlags::IndirectBuffer),
-        (BufferUsages::COPY_SRC, vk::BufferUsageFlags::TransferSrc),
-        (BufferUsages::COPY_DST, vk::BufferUsageFlags::TransferDst),
-    ]
-    .into_iter()
-    .filter(|&(usage_bit, _)| usage.contains(usage_bit))
-    .fold(vk::BufferUsageFlags::empty(), |flags, (_, flag)| {
-        flags | flag
-    })
+    union_flags(
+        vk::BufferUsageFlags::empty(),
+        [
+            (BufferUsages::VERTEX, vk::BufferUsageFlags::VertexBuffer),
+            (BufferUsages::INDEX, vk::BufferUsageFlags::IndexBuffer),
+            (BufferUsages::UNIFORM, vk::BufferUsageFlags::UniformBuffer),
+            (BufferUsages::STORAGE, vk::BufferUsageFlags::StorageBuffer),
+            (BufferUsages::INDIRECT, vk::BufferUsageFlags::IndirectBuffer),
+            (BufferUsages::COPY_SRC, vk::BufferUsageFlags::TransferSrc),
+            (BufferUsages::COPY_DST, vk::BufferUsageFlags::TransferDst),
+        ],
+        |bit| usage.contains(bit),
+    )
 }
 
 /// A texture, its view of every level and layer, and the memory it owns.
@@ -545,17 +532,16 @@ fn texture_usage_flags(usage: TextureUsages, format: TextureFormat) -> vk::Image
         TextureFormat::Depth32Float => vk::ImageUsageFlags::DepthStencilAttachment,
         _ => vk::ImageUsageFlags::ColorAttachment,
     };
-    [
-        (TextureUsages::COPY_SRC, vk::ImageUsageFlags::TransferSrc),
-        (TextureUsages::COPY_DST, vk::ImageUsageFlags::TransferDst),
-        (TextureUsages::TEXTURE_BINDING, vk::ImageUsageFlags::Sampled),
-        (TextureUsages::RENDER_ATTACHMENT, attachment),
-    ]
-    .into_iter()
-    .filter(|&(usage_bit, _)| usage.contains(usage_bit))
-    .fold(vk::ImageUsageFlags::empty(), |flags, (_, flag)| {
-        flags | flag
-    })
+    union_flags(
+        vk::ImageUsageFlags::empty(),
+        [
+            (TextureUsages::COPY_SRC, vk::ImageUsageFlags::TransferSrc),
+            (TextureUsages::COPY_DST, vk::ImageUsageFlags::TransferDst),
+            (TextureUsages::TEXTURE_BINDING, vk::ImageUsageFlags::Sampled),
+            (TextureUsages::RENDER_ATTACHMENT, attachment),
+        ],
+        |bit| usage.contains(bit),
+    )
 }
 
 pub fn create_sampler(device: &Device, desc: &SamplerDesc) -> Sampler {
@@ -677,6 +663,34 @@ fn write_bind_group(
         )
         .collect();
     device.raw.update_descriptor_sets(&writes, &[]);
+}
+
+pub fn create_bind_group_layout(
+    device: &Device,
+    entries: &[BindGroupLayoutEntry],
+) -> BindGroupLayout {
+    let bindings: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .map(|(binding, entry)| vk::DescriptorSetLayoutBinding {
+            binding: binding as u32,
+            descriptor_type: descriptor_type(entry.ty),
+            descriptor_count: 1,
+            stage_flags: stage_flags(entry.visibility),
+            ..Default::default()
+        })
+        .collect();
+    let info = vk::DescriptorSetLayoutCreateInfo {
+        binding_count: bindings.len() as u32,
+        bindings: bindings.as_ptr(),
+        ..Default::default()
+    };
+    BindGroupLayout(
+        device
+            .raw
+            .create_descriptor_set_layout(&info, None)
+            .expect("failed to create descriptor set layout"),
+    )
 }
 
 pub fn create_pipeline_layout(
@@ -1498,16 +1512,15 @@ fn descriptor_type(ty: BindingType) -> vk::DescriptorType {
 }
 
 fn stage_flags(stages: ShaderStages) -> vk::ShaderStageFlags {
-    [
-        (ShaderStages::VERTEX, vk::ShaderStageFlags::Vertex),
-        (ShaderStages::FRAGMENT, vk::ShaderStageFlags::Fragment),
-        (ShaderStages::COMPUTE, vk::ShaderStageFlags::Compute),
-    ]
-    .into_iter()
-    .filter(|&(stage, _)| stages.contains(stage))
-    .fold(vk::ShaderStageFlags::empty(), |flags, (_, flag)| {
-        flags | flag
-    })
+    union_flags(
+        vk::ShaderStageFlags::empty(),
+        [
+            (ShaderStages::VERTEX, vk::ShaderStageFlags::Vertex),
+            (ShaderStages::FRAGMENT, vk::ShaderStageFlags::Fragment),
+            (ShaderStages::COMPUTE, vk::ShaderStageFlags::Compute),
+        ],
+        |bit| stages.contains(bit),
+    )
 }
 
 fn color_blend_attachment(blend: Option<BlendState>) -> vk::PipelineColorBlendAttachmentState {
@@ -1863,9 +1876,7 @@ impl RenderTargets {
     }
 
     fn cache(&self) -> MutexGuard<'_, TargetCache> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock(&self.0)
     }
 }
 
@@ -2009,10 +2020,7 @@ impl BindGroupPools {
         device: &vk::Device,
         layout: vk::DescriptorSetLayout,
     ) -> (vk::DescriptorSet, vk::DescriptorPool) {
-        let mut pools = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut pools = lock(&self.0);
         let allocate = |pool| {
             let info = vk::DescriptorSetAllocateInfo {
                 descriptor_pool: pool,
@@ -2053,12 +2061,7 @@ impl BindGroupPools {
     }
 
     fn destroy(&self, device: &vk::Device) {
-        for pool in self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain(..)
-        {
+        for pool in lock(&self.0).drain(..) {
             device.destroy_descriptor_pool(pool, None);
         }
     }

@@ -14,7 +14,7 @@ use super::skin_preview::{
     push_preview_style, write_uniform,
 };
 use crate::assets::{AssetIndex, load_image, resolve_asset_path};
-use crate::renderer::{BookPreview, MAX_FRAMES_IN_FLIGHT, rhi, util};
+use crate::renderer::{BookPreview, rhi, util};
 
 /// Base mesh of one book part, posed per frame.
 struct Part {
@@ -85,17 +85,12 @@ impl BookPreviewPipeline {
 
         let parts = build_parts();
         let vert_count: u32 = parts.iter().map(|p| p.verts.len() as u32).sum();
-        let zeroed = vec![0u8; vert_count as usize * std::mem::size_of::<Vertex>()];
-        let vertex_buffers = (0..MAX_FRAMES_IN_FLIGHT)
-            .map(|_| {
-                rhi::backend::Buffer::with_data(
-                    device,
-                    "book_vertices",
-                    &zeroed,
-                    rhi::BufferUsages::VERTEX,
-                )
-            })
-            .collect();
+        let vertex_buffers = util::create_per_frame_host_buffers(
+            device,
+            (vert_count as usize * size_of::<Vertex>()) as u64,
+            rhi::BufferUsages::VERTEX,
+            "book_vertices",
+        );
 
         Self {
             pipeline,

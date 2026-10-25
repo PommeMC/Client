@@ -259,9 +259,8 @@ pub struct SkyPipeline {
     _dark_disc_offset: u32,
     _dark_disc_count: u32,
     sun: rhi::backend::Texture,
-    sun_sampler: rhi::backend::Sampler,
+    sampler: rhi::backend::Sampler,
     moons: Vec<rhi::backend::Texture>,
-    moon_sampler: rhi::backend::Sampler,
 }
 
 impl SkyPipeline {
@@ -298,8 +297,8 @@ impl SkyPipeline {
             asset_index,
             "minecraft/textures/environment/celestial/sun.png",
         );
-        let sun_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR);
-        let sun_set = util::create_texture_group(device, tex_layout, sun.handle(), sun_sampler);
+        let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR);
+        let sun_set = util::create_texture_group(device, tex_layout, sun.handle(), sampler);
 
         let moon_phase_paths = [
             "minecraft/textures/environment/celestial/moon/full_moon.png",
@@ -311,13 +310,11 @@ impl SkyPipeline {
             "minecraft/textures/environment/celestial/moon/first_quarter.png",
             "minecraft/textures/environment/celestial/moon/waxing_gibbous.png",
         ];
-        let moon_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR);
         let mut moons = Vec::with_capacity(8);
         let mut moon_sets = [rhi::backend::BindGroup::default(); 8];
         for (i, &path) in moon_phase_paths.iter().enumerate() {
             let moon = util::load_asset_texture(device, jar_assets_dir, asset_index, path);
-            moon_sets[i] =
-                util::create_texture_group(device, tex_layout, moon.handle(), moon_sampler);
+            moon_sets[i] = util::create_texture_group(device, tex_layout, moon.handle(), sampler);
             moons.push(moon);
         }
 
@@ -360,9 +357,8 @@ impl SkyPipeline {
             _dark_disc_offset: geom.dark_disc_offset,
             _dark_disc_count: geom.dark_disc_count,
             sun,
-            sun_sampler,
+            sampler,
             moons,
-            moon_sampler,
         }
     }
 
@@ -474,10 +470,9 @@ impl SkyPipeline {
         util::destroy_buffers(device, &mut self.ubo_buffers);
         std::mem::take(&mut self.vertex_buffer).destroy(device);
 
-        self.sun_sampler.destroy(device);
+        self.sampler.destroy(device);
         std::mem::take(&mut self.sun).destroy(device);
 
-        self.moon_sampler.destroy(device);
         for moon in self.moons.drain(..) {
             moon.destroy(device);
         }

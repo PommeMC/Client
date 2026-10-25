@@ -17,11 +17,11 @@ pub struct ChunkPipeline {
     /// Cutout terrain: alpha-test discard. Drawn after solid.
     pub pipeline_cutout: rhi::backend::RenderPipeline,
     /// Translucent water variant: alpha blending on, depth write off. Shares
-    /// the terrain pipelines' layout and descriptor sets.
+    /// the terrain pipelines' layout and bind groups.
     pub water_pipeline: rhi::backend::RenderPipeline,
     pub pipeline_layout: rhi::backend::PipelineLayout,
-    pub descriptor_set_layout_camera: rhi::backend::BindGroupLayout,
-    pub descriptor_set_layout_atlas: rhi::backend::BindGroupLayout,
+    pub camera_layout: rhi::backend::BindGroupLayout,
+    pub atlas_layout: rhi::backend::BindGroupLayout,
     pub camera_sets: Vec<rhi::backend::BindGroup>,
     pub atlas_set: rhi::backend::BindGroup,
     camera_buffers: Vec<rhi::backend::Buffer>,
@@ -61,8 +61,8 @@ impl ChunkPipeline {
             pipeline_cutout,
             water_pipeline,
             pipeline_layout,
-            descriptor_set_layout_camera: camera_layout,
-            descriptor_set_layout_atlas: atlas_layout,
+            camera_layout,
+            atlas_layout,
             camera_sets,
             atlas_set: rhi::backend::BindGroup::default(),
             camera_buffers,
@@ -80,7 +80,7 @@ impl ChunkPipeline {
         let [texture, sampler] = util::texture_binding(atlas.texture.handle(), atlas.sampler);
         self.atlas_set.replace(
             device,
-            self.descriptor_set_layout_atlas,
+            self.atlas_layout,
             &[
                 texture,
                 sampler,
@@ -104,7 +104,7 @@ impl ChunkPipeline {
         self.bind_with(pass, pipeline, frame);
     }
 
-    /// Bind the translucent water pipeline (same descriptor sets as `bind`).
+    /// Bind the translucent water pipeline (same bind groups as `bind`).
     pub fn bind_water(&self, pass: &mut rhi::backend::RenderPassEncoder, frame: usize) {
         self.bind_with(pass, self.water_pipeline, frame);
     }
@@ -128,8 +128,8 @@ impl ChunkPipeline {
         self.pipeline_layout.destroy(device);
         util::destroy_bind_groups(device, self.camera_sets.drain(..));
         self.atlas_set.destroy(device);
-        self.descriptor_set_layout_camera.destroy(device);
-        self.descriptor_set_layout_atlas.destroy(device);
+        self.camera_layout.destroy(device);
+        self.atlas_layout.destroy(device);
     }
 }
 

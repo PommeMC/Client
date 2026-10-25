@@ -1529,8 +1529,12 @@ impl MenuOverlayPipeline {
         let pipeline = create_pipeline(device, targets, pipeline_layout, false);
         let invert_pipeline = create_pipeline(device, targets, pipeline_layout, true);
 
-        let (globals_sets, globals_buffers) =
-            util::create_uniform_sets(device, globals_layout, 8, "menu_globals");
+        let (globals_sets, globals_buffers) = util::create_uniform_sets(
+            device,
+            globals_layout,
+            size_of::<[f32; 2]>() as u64,
+            "menu_globals",
+        );
 
         let font = rhi::backend::Texture::new(
             device,

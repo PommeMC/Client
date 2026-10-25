@@ -15,6 +15,8 @@ const INDEX_SIZE: u64 = size_of::<u32>() as u64;
 const BYTES_PER_BUCKET: u64 =
     BUCKET_VERTICES as u64 * VERTEX_SIZE + BUCKET_INDICES as u64 * INDEX_SIZE;
 const MIN_BUCKETS: u32 = 128;
+const MAX_BUCKETS: u32 = 2048;
+const VRAM_BUDGET_FRACTION: f64 = 0.25;
 
 /// The cull pass's bindings: meta, frustum, solid indirect/count, cutout
 /// indirect/count.
@@ -28,8 +30,6 @@ const CULL_BINDINGS: &[rhi::BindGroupLayoutEntry] = &[
 ];
 const COUNT_SIZE: u64 = 4;
 const FRUSTUM_SIZE: u64 = size_of::<FrustumData>() as u64;
-const MAX_BUCKETS: u32 = 2048;
-const VRAM_BUDGET_FRACTION: f64 = 0.25;
 /// Per-section fade-in length, shared by the opaque indirect path and water.
 const FADE_DURATION_MS: f32 = 1000.0;
 /// Columns within this squared X/Z distance of the camera render opaque
@@ -438,8 +438,8 @@ pub struct ChunkBufferStore {
 
     compute_pipeline: rhi::backend::ComputePipeline,
     compute_layout: rhi::backend::PipelineLayout,
-    compute_desc_layout: rhi::backend::BindGroupLayout,
-    compute_sets: Vec<rhi::backend::BindGroup>,
+    cull_layout: rhi::backend::BindGroupLayout,
+    cull_sets: Vec<rhi::backend::BindGroup>,
 
     meta_buffers: Vec<rhi::backend::Buffer>,
     // Solid (no-discard, early-Z) draw list, written by the cull shader.
@@ -523,7 +523,7 @@ impl ChunkBufferStore {
 
         // Per-section packing yields many more draws than buckets, so pre-size
         // generously: growth (`ensure_meta_capacity`) needs a `device.wait_idle`
-        // to safely rewrite the descriptor sets, and we don't want that stall
+        // to safely rewrite the bind groups, and we don't want that stall
         // firing mid-stream. The remaining grow path stays as a rare safety net.
         let max_meta = (total_buckets * 16).max(8192) as usize;
         let meta_size = (max_meta * size_of::<ChunkMeta>()) as u64;
@@ -562,9 +562,8 @@ impl ChunkBufferStore {
             })
             .collect();
 
-        let compute_desc_layout = rhi::backend::create_bind_group_layout(device, CULL_BINDINGS);
-        let compute_layout =
-            rhi::backend::create_pipeline_layout(device, &[compute_desc_layout], None);
+        let cull_layout = rhi::backend::create_bind_group_layout(device, CULL_BINDINGS);
+        let compute_layout = rhi::backend::create_pipeline_layout(device, &[cull_layout], None);
 
         let compute_pipeline = rhi::backend::create_compute_pipeline(
             device,
@@ -592,8 +591,8 @@ impl ChunkBufferStore {
             meta_upload_pending: 0,
             compute_pipeline,
             compute_layout,
-            compute_desc_layout,
-            compute_sets: vec![rhi::backend::BindGroup::default(); MAX_FRAMES_IN_FLIGHT],
+            cull_layout,
+            cull_sets: vec![rhi::backend::BindGroup::default(); MAX_FRAMES_IN_FLIGHT],
             meta_buffers,
             indirect_buffers,
             count_buffers,
@@ -623,7 +622,7 @@ impl ChunkBufferStore {
                 (4, storage(&self.indirect_cutout_buffers[i], indirect_size)),
                 (5, storage(&self.count_cutout_buffers[i], COUNT_SIZE)),
             ];
-            self.compute_sets[i].replace(device, self.compute_desc_layout, &bindings);
+            self.cull_sets[i].replace(device, self.cull_layout, &bindings);
         }
     }
 
@@ -969,7 +968,7 @@ impl ChunkBufferStore {
             .max(self.max_meta * 2);
 
         // The meta/indirect buffers are referenced by every in-flight frame's
-        // descriptor set; wait the GPU out before freeing them.
+        // bind group; wait the GPU out before freeing them.
         device.wait_idle();
 
         for buffers in [
@@ -1162,7 +1161,7 @@ impl ChunkBufferStore {
 
         encoder.dispatch(
             &self.compute_pipeline,
-            self.compute_sets[frame],
+            self.cull_sets[frame],
             [count.div_ceil(64), 1, 1],
         );
         encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect);
@@ -1330,8 +1329,8 @@ impl ChunkBufferStore {
 
         self.compute_pipeline.destroy(device);
         self.compute_layout.destroy(device);
-        util::destroy_bind_groups(device, self.compute_sets.drain(..));
-        self.compute_desc_layout.destroy(device);
+        util::destroy_bind_groups(device, self.cull_sets.drain(..));
+        self.cull_layout.destroy(device);
     }
 }
 

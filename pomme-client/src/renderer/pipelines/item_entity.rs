@@ -74,10 +74,10 @@ const ITEM_TINTS: &[rhi::BindGroupLayoutEntry] = &[rhi::BindGroupLayoutEntry::st
 )];
 
 /// The item pipelines' bind groups: camera, atlas, tint palette.
-pub(super) const ITEM_BIND_GROUPS: [&[rhi::BindGroupLayoutEntry]; 3] =
+const ITEM_BIND_GROUPS: [&[rhi::BindGroupLayoutEntry]; 3] =
     [util::VERTEX_UNIFORM, util::FRAGMENT_TEXTURE, ITEM_TINTS];
 /// item_push.glsl's block. Vulkan guarantees at least 128 push bytes.
-pub(super) const ITEM_PUSH_CONSTANTS: rhi::PushConstants = rhi::PushConstants {
+const ITEM_PUSH_CONSTANTS: rhi::PushConstants = rhi::PushConstants {
     visibility: rhi::ShaderStages::VERTEX_FRAGMENT,
     size: 128,
 };
@@ -88,7 +88,7 @@ pub(super) struct ItemTintRange {
     pub count: u32,
 }
 
-pub(super) struct TintPaletteArena {
+struct TintPaletteArena {
     layout: rhi::backend::BindGroupLayout,
     sets: Vec<rhi::backend::BindGroup>,
     buffers: Vec<Option<rhi::backend::Buffer>>,
@@ -98,7 +98,7 @@ pub(super) struct TintPaletteArena {
 }
 
 impl TintPaletteArena {
-    pub(super) fn new(
+    fn new(
         device: &rhi::backend::Device,
         layout: rhi::backend::BindGroupLayout,
         label: &str,
@@ -147,17 +147,12 @@ impl TintPaletteArena {
         self.capacities[frame] = capacity;
     }
 
-    pub(super) fn begin_frame(
-        &mut self,
-        device: &rhi::backend::Device,
-        frame: usize,
-        required_colors: usize,
-    ) {
+    fn begin_frame(&mut self, device: &rhi::backend::Device, frame: usize, required_colors: usize) {
         self.ensure_capacity(device, frame, required_colors.max(1));
         self.cursors[frame] = 0;
     }
 
-    pub(super) fn push(&mut self, frame: usize, colors: &[u32]) -> ItemTintRange {
+    fn push(&mut self, frame: usize, colors: &[u32]) -> ItemTintRange {
         if colors.is_empty() {
             return ItemTintRange::default();
         }
@@ -173,11 +168,11 @@ impl TintPaletteArena {
         }
     }
 
-    pub(super) fn set(&self, frame: usize) -> rhi::backend::BindGroup {
+    fn set(&self, frame: usize) -> rhi::backend::BindGroup {
         self.sets[frame]
     }
 
-    pub(super) fn destroy(&mut self, device: &rhi::backend::Device) {
+    fn destroy(&mut self, device: &rhi::backend::Device) {
         for buffer in self.buffers.iter_mut().filter_map(Option::take) {
             buffer.destroy(device);
         }
@@ -185,7 +180,7 @@ impl TintPaletteArena {
     }
 }
 
-/// Descriptor layouts, per-frame camera UBOs, atlas set, and tint palette
+/// Bind group layouts, per-frame camera UBOs, the atlas group and tint palette
 /// storage shared by pipelines that draw item meshes with the item shaders.
 pub(super) struct ItemPipelineShared {
     pub pipeline_layout: rhi::backend::PipelineLayout,

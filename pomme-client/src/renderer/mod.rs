@@ -1858,7 +1858,7 @@ impl Renderer {
         pass.end();
         self.swapchain.ready_to_present(&encoder, image_index);
 
-        // Image is now in PresentSrcKHR; grab it before present if F2 was pressed.
+        // The image is ready to present; grab it first if F2 was pressed.
         self.screenshot.record_if_armed(
             &self.ctx.device,
             &encoder,

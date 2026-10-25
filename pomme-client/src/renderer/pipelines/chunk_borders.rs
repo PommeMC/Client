@@ -16,8 +16,8 @@ const MAX_VERTICES: usize = 4096;
 pub struct ChunkBorderPipeline {
     pipeline: rhi::backend::RenderPipeline,
     pipeline_layout: rhi::backend::PipelineLayout,
-    desc_layout: rhi::backend::BindGroupLayout,
-    desc_sets: Vec<rhi::backend::BindGroup>,
+    camera_layout: rhi::backend::BindGroupLayout,
+    camera_sets: Vec<rhi::backend::BindGroup>,
     camera_buffers: Vec<rhi::backend::Buffer>,
     vertex_buffers: Vec<rhi::backend::Buffer>,
     lines: Vec<LineVertex>,
@@ -27,14 +27,14 @@ pub struct ChunkBorderPipeline {
 
 impl ChunkBorderPipeline {
     pub fn new(device: &rhi::backend::Device, targets: rhi::backend::PipelineTargets) -> Self {
-        let desc_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
-        let pipeline_layout = rhi::backend::create_pipeline_layout(device, &[desc_layout], None);
+        let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
+        let pipeline_layout = rhi::backend::create_pipeline_layout(device, &[camera_layout], None);
 
         let pipeline = create_pipeline(device, targets, pipeline_layout);
 
-        let (desc_sets, camera_buffers) = util::create_uniform_sets(
+        let (camera_sets, camera_buffers) = util::create_uniform_sets(
             device,
-            desc_layout,
+            camera_layout,
             size_of::<CameraUniform>() as u64,
             "chunk_border_cam",
         );
@@ -49,8 +49,8 @@ impl ChunkBorderPipeline {
         Self {
             pipeline,
             pipeline_layout,
-            desc_layout,
-            desc_sets,
+            camera_layout,
+            camera_sets,
             camera_buffers,
             vertex_buffers,
             lines: Vec::new(),
@@ -161,7 +161,7 @@ impl ChunkBorderPipeline {
             self.vertex_buffers[frame].write(bytes);
         }
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, self.desc_sets[frame]);
+        pass.set_bind_group(0, self.camera_sets[frame]);
         pass.set_vertex_buffer(0, self.vertex_buffers[frame].handle());
         pass.draw(self.lines.len() as u32, 1, 0, 0);
     }
@@ -172,8 +172,8 @@ impl ChunkBorderPipeline {
 
         self.pipeline.destroy(device);
         self.pipeline_layout.destroy(device);
-        util::destroy_bind_groups(device, self.desc_sets.drain(..));
-        self.desc_layout.destroy(device);
+        util::destroy_bind_groups(device, self.camera_sets.drain(..));
+        self.camera_layout.destroy(device);
     }
 }
 

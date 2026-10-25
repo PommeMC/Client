@@ -4,25 +4,16 @@ use glam::{Mat4, Vec3};
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::pipelines::item_entity::{
-    self, ITEM_BIND_GROUPS, ITEM_PUSH_CONSTANTS, ItemEntityPipeline, TintPaletteArena,
-    push_model_light,
+    self, ItemEntityPipeline, ItemPipelineShared, push_model_light,
 };
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi};
 use crate::world::block::model::DisplayTransform;
 
 pub struct GuiItemPipeline {
     pipeline: rhi::backend::RenderPipeline,
-    pipeline_layout: rhi::backend::PipelineLayout,
-    camera_layout: rhi::backend::BindGroupLayout,
-    atlas_layout: rhi::backend::BindGroupLayout,
-    tint_layout: rhi::backend::BindGroupLayout,
-    camera_sets: Vec<rhi::backend::BindGroup>,
-    atlas_set: rhi::backend::BindGroup,
-    camera_buffers: Vec<rhi::backend::Buffer>,
+    shared: ItemPipelineShared,
     /// The atlas size each frame's camera buffer was last written for.
     camera_px: [Option<u32>; MAX_FRAMES_IN_FLIGHT],
-    tint_arena: TintPaletteArena,
-    sampler: rhi::backend::Sampler,
     atlas_px: u32,
 }
 
@@ -33,47 +24,17 @@ impl GuiItemPipeline {
         atlas_px: u32,
         atlas: &TextureAtlas,
     ) -> Self {
-        let [camera_layout, atlas_layout, tint_layout] =
-            ITEM_BIND_GROUPS.map(|entries| rhi::backend::create_bind_group_layout(device, entries));
-
-        let pipeline_layout = rhi::backend::create_pipeline_layout(
-            device,
-            &[camera_layout, atlas_layout, tint_layout],
-            Some(ITEM_PUSH_CONSTANTS),
-        );
-
+        let shared = ItemPipelineShared::new(device, atlas, "gui_item");
         let pipeline = item_entity::create_pipeline_with_front_face(
             device,
             atlas_targets,
-            pipeline_layout,
+            shared.pipeline_layout,
             rhi::FrontFace::Cw,
         );
-
-        let (camera_sets, camera_buffers) = util::create_uniform_sets(
-            device,
-            camera_layout,
-            size_of::<CameraUniform>() as u64,
-            "gui_item_camera",
-        );
-
-        let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
-
-        let atlas_set =
-            util::create_texture_group(device, atlas_layout, atlas.texture.handle(), sampler);
-        let tint_arena = TintPaletteArena::new(device, tint_layout, "gui_item");
-
         Self {
             pipeline,
-            pipeline_layout,
-            camera_layout,
-            atlas_layout,
-            tint_layout,
-            camera_sets,
-            atlas_set,
-            camera_buffers,
+            shared,
             camera_px: [None; MAX_FRAMES_IN_FLIGHT],
-            tint_arena,
-            sampler,
             atlas_px,
         }
     }
@@ -91,7 +52,7 @@ impl GuiItemPipeline {
         self.pipeline = item_entity::create_pipeline_with_front_face(
             device,
             atlas_targets,
-            self.pipeline_layout,
+            self.shared.pipeline_layout,
             rhi::FrontFace::Cw,
         );
     }
@@ -107,17 +68,12 @@ impl GuiItemPipeline {
         // `invertY=true`).
         let view_proj =
             proj::directx::orthographic(0.0, atlas_px, atlas_px, 0.0, -10000.0, 10000.0);
-        let uniform = CameraUniform::with_view_proj(view_proj);
-        let bytes = bytemuck::bytes_of(&uniform);
-        self.camera_buffers[frame].write(bytes);
+        self.shared
+            .update_camera(frame, &CameraUniform::with_view_proj(view_proj));
     }
 
     pub fn rebind_atlas(&mut self, device: &rhi::backend::Device, atlas: &TextureAtlas) {
-        self.atlas_set.replace(
-            device,
-            self.atlas_layout,
-            &util::texture_binding(atlas.texture.handle(), self.sampler),
-        );
+        self.shared.rebind_atlas(device, atlas);
     }
 
     pub fn bind_for_bake_pass(
@@ -127,17 +83,9 @@ impl GuiItemPipeline {
         frame: usize,
         required_colors: usize,
     ) {
-        self.tint_arena.begin_frame(device, frame, required_colors);
+        self.shared.begin_tint_frame(device, frame, required_colors);
         self.write_atlas_ortho(frame);
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_groups(
-            0,
-            &[
-                self.camera_sets[frame],
-                self.atlas_set,
-                self.tint_arena.set(frame),
-            ],
-        );
+        self.shared.bind(pass, frame, self.pipeline);
     }
 
     /// Records into a pass [`Self::bind_for_bake_pass`] has bound.
@@ -166,7 +114,7 @@ impl GuiItemPipeline {
             display,
         );
 
-        let tint_range = self.tint_arena.push(frame, item_tints);
+        let tint_range = self.shared.push_tints(frame, item_tints);
         pass.set_vertex_buffer(0, buffer);
         push_model_light(pass, &model, 1.0, tint_range);
         pass.draw(vertex_count, 1, 0, 0);
@@ -174,15 +122,7 @@ impl GuiItemPipeline {
 
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
         self.pipeline.destroy(device);
-        self.pipeline_layout.destroy(device);
-        self.tint_arena.destroy(device);
-        util::destroy_bind_groups(device, self.camera_sets.drain(..));
-        self.atlas_set.destroy(device);
-        self.camera_layout.destroy(device);
-        self.atlas_layout.destroy(device);
-        self.tint_layout.destroy(device);
-        self.sampler.destroy(device);
-        util::destroy_buffers(device, &mut self.camera_buffers);
+        self.shared.destroy(device);
     }
 }
 

@@ -9,7 +9,7 @@ use glam::{DVec3, Vec3};
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::physics::block_shape::{LocalBox, is_collision_shape_full_block, outline_shape};
 use crate::renderer::camera::CameraUniform;
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
+use crate::renderer::{rhi, shader, util};
 use crate::world::block::{BlockStateData, BlockStateTable};
 use crate::world::block_entity::is_invisible_block;
 use crate::world::chunk::ChunkStore;
@@ -97,25 +97,12 @@ impl EntityShadowPipeline {
         let texture_set =
             util::create_texture_group(device, texture_layout, texture.handle(), texture_sampler);
 
-        let placeholder = vec![
-            ShadowVertex {
-                position: [0.0; 3],
-                color: [0.0; 4],
-                uv: [0.0; 2],
-            };
-            MAX_SHADOW_VERTS
-        ];
-        let bytes = bytemuck::cast_slice::<ShadowVertex, u8>(&placeholder);
-        let vertex_buffers = (0..MAX_FRAMES_IN_FLIGHT)
-            .map(|_| {
-                rhi::backend::Buffer::with_data(
-                    device,
-                    "entity_shadow_vertices",
-                    bytes,
-                    rhi::BufferUsages::VERTEX,
-                )
-            })
-            .collect();
+        let vertex_buffers = util::create_per_frame_host_buffers(
+            device,
+            (MAX_SHADOW_VERTS * size_of::<ShadowVertex>()) as u64,
+            rhi::BufferUsages::VERTEX,
+            "entity_shadow_vertices",
+        );
 
         Self {
             pipeline,
