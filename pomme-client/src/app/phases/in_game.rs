@@ -1191,7 +1191,6 @@ impl GameState {
         let dropped = renderer.upload_chunk_meshes(&batch);
         self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
         self.clear_dropped_meshed(dropped);
-        self.recycle_meshes(batch);
     }
 
     /// The frame's ready meshes, stale ones dropped and the rest's CPU-side
@@ -1219,7 +1218,6 @@ impl GameState {
                     mesh.content_gen < self.content_gen.get(&mesh.pos).copied().unwrap_or(0)
                 };
             if stale {
-                self.mesh_dispatcher.recycle(mesh);
                 continue;
             }
             if let Some(t) = &mesh.timing {
@@ -1241,13 +1239,6 @@ impl GameState {
         }
         self.last_update_phases.mesh_drain_ms = drain_start.elapsed().as_secs_f32() * 1000.0;
         batch
-    }
-
-    /// Returns the meshes' buffers to the worker pool for reuse.
-    pub fn recycle_meshes(&mut self, batch: Vec<ChunkMeshData>) {
-        for mesh in batch {
-            self.mesh_dispatcher.recycle(mesh);
-        }
     }
 
     /// Vanilla `SectionUpdateTracker.hasAllNeighbors` plus
@@ -1326,7 +1317,6 @@ impl GameState {
         self.apply_mesh_bookkeeping(&mut mesh);
         let dropped = renderer.upload_chunk_meshes(std::slice::from_ref(&mesh));
         self.clear_dropped_meshed(dropped);
-        self.mesh_dispatcher.recycle(mesh);
     }
 
     /// Drive the cave-cull occlusion walk: apply a finished async walk to the

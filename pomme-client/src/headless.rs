@@ -248,7 +248,6 @@ fn drive(
                 drawn.remove(&mesh.pos);
             }
         }
-        game.recycle_meshes(batch);
         game.mesh_dispatcher
             .set_camera_position(*game.player.position);
 

@@ -85,6 +85,11 @@ pub struct Platform {
 }
 
 pub fn run(args: LaunchArgs, platform: Platform) {
+    // mimalloc v3 holds freed memory for a second before returning it to the
+    // OS, so a chunk-load spike lingers; 10 ms (v2's default) returns it
+    // promptly without purging on every free. The bindings don't name
+    // `mi_option_purge_delay`; it is option 15 in both v2 and v3.
+    unsafe { libmimalloc_sys::mi_option_set(15, 10) };
     #[cfg(target_os = "macos")]
     use_bundled_moltenvk();
     if let Some(root) = platform.data_root {

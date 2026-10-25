@@ -49,6 +49,8 @@ tracing-appender = "0.2"
 # across threads, and the default system heap's global lock serializes that and
 # stalls the main thread. Mirrors vanilla (JVM TLABs + LWJGL's jemalloc).
 mimalloc = "0.1"
+# `mi_option_set`, to return freed memory sooner (lib.rs).
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
 pomme-gpu-allocator = { path = "../pomme-gpu-allocator" }
 pomme-dirs = { path = "../pomme-dirs" }
 pomme-protocol = { path = "../pomme-protocol" }
