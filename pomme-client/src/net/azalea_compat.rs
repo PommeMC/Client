@@ -2090,6 +2090,67 @@ fn translate_move_player_flags_767() {
     );
 }
 
+/// 1.21.2 appended `particleStatus` to `client_information`; older servers
+/// get it stripped in the game phase and in configuration.
+#[test]
+fn strip_particle_status_767() {
+    use azalea_protocol::packets::config::{ServerboundConfigPacket, s_client_information};
+    use azalea_protocol::packets::game::s_client_information as game_client_information;
+
+    let information = super::client_information(
+        8,
+        crate::ui::chat::ChatOptions::default(),
+        crate::ui::menu::SkinOptions::default(),
+    );
+    let body = |frame: &[u8]| {
+        let mut pos = 0;
+        wire::read_varint(frame, &mut pos).unwrap();
+        // The last byte is `ParticleStatus::All`.
+        assert_eq!(frame.last(), Some(&0));
+        frame[pos..frame.len() - 1].to_vec()
+    };
+    let with_id = |id: u32, body: &[u8]| {
+        let mut out = Vec::new();
+        wire::write_varint(&mut out, id);
+        out.extend_from_slice(body);
+        out
+    };
+
+    let game = Vec::from(
+        azalea_protocol::write::serialize_packet(&ServerboundGamePacket::ClientInformation(
+            game_client_information::ServerboundClientInformation {
+                client_information: information.clone(),
+            },
+        ))
+        .unwrap(),
+    );
+    let game_body = body(&game);
+    for protocol in [767, 763] {
+        let old = old_id(protocol, Direction::Serverbound, "client_information");
+        assert_eq!(
+            translation_for(protocol).translate_outbound_game_frame(game.clone()),
+            [with_id(old, &game_body)],
+            "{protocol}"
+        );
+    }
+
+    let config = Vec::from(
+        azalea_protocol::write::serialize_packet(&ServerboundConfigPacket::ClientInformation(
+            s_client_information::ServerboundClientInformation { information },
+        ))
+        .unwrap(),
+    );
+    let config_body = body(&config);
+    for protocol in [767, 764] {
+        let old = config_id(protocol, Direction::Serverbound, "client_information");
+        assert_eq!(
+            translation_for(protocol).translate_outbound_config_frame(config.clone()),
+            Some(with_id(old, &config_body)),
+            "{protocol}"
+        );
+    }
+}
+
 /// 1.21 turned `update_attributes` modifier UUIDs into resource locations;
 /// the shim synthesizes a hex name.
 #[test]
@@ -2673,7 +2734,7 @@ fn translate_game_login_765() {
 fn translate_config_ids_765() {
     let t = translation_for(765);
     assert!(t.translates_config());
-    assert!(!translation_for(766).translates_config());
+    assert!(!translation_for(768).translates_config());
 
     // Inbound finish_configuration lands on its 26.2 id.
     let mut old = Vec::new();

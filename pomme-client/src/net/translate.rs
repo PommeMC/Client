@@ -214,6 +214,8 @@
 //!   unmounted frames are discarded server-side
 //! - `client_tick_end` doesn't exist; its suppression is expected and logged
 //!   quietly
+//! - serverbound `client_information` lacks the trailing `particleStatus` enum
+//!   1.21.2 appended; it is stripped in both phases
 //! - `AbstractArrow` gained `in_ground` at index 10, so an arrow sends its
 //!   effect color at 10 and a trident its loyalty/foil at 10/11, where 26.2
 //!   reads 11 and 11/12. The indices pass through unshifted, which costs
@@ -394,8 +396,9 @@ pub struct Translation {
     no_config_phase: bool,
 }
 
-/// Configuration-phase id tables and the registry-data rewrite for wire
-/// versions whose config protocol diverged (765 and older).
+/// Configuration-phase id tables and payload rewrites for wire versions whose
+/// config protocol diverged: ids and registry data up to 765, and
+/// `client_information`'s layout up to 767.
 struct ConfigIds {
     /// Wire-version clientbound id -> native id; `None` drops the frame.
     inbound: Box<[Option<u32>]>,
@@ -407,6 +410,8 @@ struct ConfigIds {
     /// 764's config payload rewrites: disconnect's JSON component and the
     /// unsplit resource_pack (both phases share the layouts).
     v764: Option<ConfigIds764>,
+    /// Native `client_information` id, which loses 1.21.2's `particleStatus`.
+    v767_client_information_id: Option<u32>,
 }
 
 /// Native config-space ids for the 764 payload rewrites.
@@ -519,6 +524,8 @@ struct Ids767 {
     player_input_old_id: u32,
     /// The four `move_player_*` ids whose flags byte must drop to onGround.
     move_player_ids: [u32; 4],
+    client_information_id: u32,
+    client_information_old_id: u32,
 }
 
 impl Ids767 {
@@ -954,7 +961,7 @@ impl Translation {
         raw
     }
 
-    /// Whether configuration frames need translation (765 and older).
+    /// Whether configuration frames need translation (767 and older).
     pub fn translates_config(&self) -> bool {
         self.config_ids.is_some()
     }
@@ -1032,23 +1039,27 @@ impl Translation {
     }
 
     /// Translates a native-layout serverbound configuration frame into the
-    /// wire version's; `None` suppresses it. Only 764's resource_pack reply
-    /// changes layout; everything else is an id remap.
+    /// wire version's; `None` suppresses it. 764's resource_pack reply and
+    /// 767's client_information change layout; everything else is an id
+    /// remap.
     pub fn translate_outbound_config_frame(&self, frame: Vec<u8>) -> Option<Vec<u8>> {
         let Some(ids) = &self.config_ids else {
             return Some(frame);
         };
         let mut pos = 0;
         let id = wire::read_varint(&frame, &mut pos)?;
+        let old = ids.outbound.get(id as usize).copied().flatten();
         if ids
             .v764
             .as_ref()
             .is_some_and(|v| id == v.resource_pack_response_id)
         {
-            let old = ids.outbound.get(id as usize).copied().flatten()?;
-            return translate_resource_pack_response_764(old, &frame[pos..]).pop();
+            return translate_resource_pack_response_764(old?, &frame[pos..]).pop();
         }
-        match ids.outbound.get(id as usize).copied().flatten() {
+        if ids.v767_client_information_id == Some(id) {
+            return strip_last_byte(old?, &frame[pos..]).pop();
+        }
+        match old {
             Some(old) if old == id => Some(frame),
             Some(old) => {
                 let mut out = Vec::with_capacity(frame.len() + 1);
@@ -1318,7 +1329,7 @@ impl Translation {
                 return translate_creative_slot_765(v765.creative_slot_old_id, &frame[pos..]);
             }
             if id == v765.chat_command_signed_id {
-                return strip_last_seen_checksum(v765.chat_command_old_id, &frame[pos..]);
+                return strip_last_byte(v765.chat_command_old_id, &frame[pos..]);
             }
             if id == v765.chat_command_id {
                 return translate_chat_command_765(v765.chat_command_old_id, &frame[pos..]);
@@ -1326,12 +1337,12 @@ impl Translation {
         }
         if let Some(v769) = &ids.v769 {
             if id == v769.chat_id {
-                return strip_last_seen_checksum(v769.chat_old_id, &frame[pos..]);
+                return strip_last_byte(v769.chat_old_id, &frame[pos..]);
             }
             if id == v769.chat_command_signed_id
                 && let Some(old_id) = v769.chat_command_signed_old_id
             {
-                return strip_last_seen_checksum(old_id, &frame[pos..]);
+                return strip_last_byte(old_id, &frame[pos..]);
             }
             if id == v769.container_click_id {
                 return translate_container_click(v769.container_click_old_id, &frame[pos..]);
@@ -1345,6 +1356,9 @@ impl Translation {
         if let Some(v767) = &ids.v767 {
             if id == v767.player_input_id {
                 return translate_player_input(v767.player_input_old_id, &frame[pos..]);
+            }
+            if id == v767.client_information_id {
+                return strip_last_byte(v767.client_information_old_id, &frame[pos..]);
             }
             if v767.move_player_ids.contains(&id)
                 && let Some(flags) = frame.last_mut()
@@ -1646,6 +1660,13 @@ impl GameIds {
                     "move_player_status_only",
                 ]
                 .map(|n| id(Serverbound, n)),
+                client_information_id: id(Serverbound, "client_information"),
+                client_information_old_id: required_id(
+                    table,
+                    Phase::Game,
+                    Serverbound,
+                    "client_information",
+                ),
             }),
             v766: (protocol <= 766).then(|| Ids766 {
                 projectile_power_id: id(Clientbound, "projectile_power"),
@@ -1866,13 +1887,14 @@ fn id_map(
 }
 
 impl ConfigIds {
-    /// Name-matched configuration id tables; `None` when every id maps to
-    /// itself or nothing (766 up: later versions only appended).
+    /// Name-matched configuration id tables; `None` from 768 up, where every
+    /// id maps to itself or nothing (later versions only appended) and no
+    /// payload changed.
     fn build(protocol: i32, table: &PacketTable, native: &PacketTable) -> Option<ConfigIds> {
         use Direction::{Clientbound, Serverbound};
         let inbound = id_map(table, native, Phase::Configuration, Clientbound);
         let outbound = id_map(native, table, Phase::Configuration, Serverbound);
-        if identity_maps(&inbound, &outbound) {
+        if protocol > 767 && identity_maps(&inbound, &outbound) {
             return None;
         }
         let id = |dir, name| required_id(native, Phase::Configuration, dir, name);
@@ -1885,6 +1907,8 @@ impl ConfigIds {
                 resource_pack_push_id: id(Clientbound, "resource_pack_push"),
                 resource_pack_response_id: id(Serverbound, "resource_pack"),
             }),
+            v767_client_information_id: (protocol <= 767)
+                .then(|| id(Serverbound, "client_information")),
         })
     }
 }
@@ -2215,11 +2239,12 @@ fn translate_creative_slot_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     }
 }
 
-/// Serverbound `chat` or `chat_command_signed` for 1.21.4 and older (1.20.4's
-/// `chat_command` has the signed layout): drops the trailing last-seen
-/// checksum byte 1.21.5 added.
-fn strip_last_seen_checksum(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
-    let Some((&_checksum, body)) = payload.split_last() else {
+/// A serverbound packet whose newer layout appended one byte: the last-seen
+/// checksum 1.21.5 added to `chat` and `chat_command_signed` (1.20.4's
+/// `chat_command` has the signed layout), or the `particleStatus` 1.21.2
+/// added to `client_information`.
+fn strip_last_byte(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let Some((_, body)) = payload.split_last() else {
         return Vec::new();
     };
     let mut out = Vec::with_capacity(body.len() + 5);
