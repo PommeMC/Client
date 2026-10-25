@@ -1207,8 +1207,8 @@ async fn write_game_frame(
 }
 
 /// Writes one native-layout configuration packet, translating it for other
-/// wire versions (765 down: id remap plus suppression of packets the wire
-/// version lacks).
+/// wire versions (767 down: id remaps, suppression of packets the wire version
+/// lacks, and the few layout rewrites in `translate_outbound_config_frame`).
 async fn write_config_packet(
     conn: &mut Conn,
     packet: ServerboundConfigPacket,

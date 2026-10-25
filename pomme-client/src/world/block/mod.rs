@@ -1899,6 +1899,13 @@ mod tests {
         for data in BLOCK_DATA {
             let table = build_table(data);
             for state in &table {
+                // 26.3 dropped `blocksMotion`.
+                assert_eq!(
+                    state.blocks_motion.is_some(),
+                    data.protocol < 777,
+                    "{}",
+                    data.protocol
+                );
                 assert!(state.legacy_solid.is_some(), "{}", data.protocol);
                 assert!(state.replaceable.is_some(), "{}", data.protocol);
                 assert!(state.full_face_sturdy.is_some(), "{}", data.protocol);

@@ -412,6 +412,9 @@ struct ConfigIds {
     v764: Option<ConfigIds764>,
     /// Native `client_information` id, which loses 1.21.2's `particleStatus`.
     v767_client_information_id: Option<u32>,
+    /// Whether every id maps to itself (766 and 767, kept only for the
+    /// outbound rewrite), so inbound frames pass through untouched.
+    inbound_identity: bool,
 }
 
 /// Native config-space ids for the 764 payload rewrites.
@@ -996,7 +999,7 @@ impl Translation {
     /// empty = dropped. 765's single registry_data packet fans out into one
     /// frame per registry.
     pub fn translate_config_frame(&self, raw: Box<[u8]>) -> Vec<Box<[u8]>> {
-        let Some(ids) = &self.config_ids else {
+        let Some(ids) = self.config_ids.as_ref().filter(|ids| !ids.inbound_identity) else {
             return vec![raw];
         };
         let mut pos = 0;
@@ -1887,14 +1890,16 @@ fn id_map(
 }
 
 impl ConfigIds {
-    /// Name-matched configuration id tables; `None` from 768 up, where every
-    /// id maps to itself or nothing (later versions only appended) and no
-    /// payload changed.
+    /// Name-matched configuration id tables; `None` when every id maps to
+    /// itself or nothing (from 766 up later versions only appended, and 763
+    /// has no configuration phase), except on 766 and 767, whose
+    /// `client_information` still needs its layout rewritten.
     fn build(protocol: i32, table: &PacketTable, native: &PacketTable) -> Option<ConfigIds> {
         use Direction::{Clientbound, Serverbound};
         let inbound = id_map(table, native, Phase::Configuration, Clientbound);
         let outbound = id_map(native, table, Phase::Configuration, Serverbound);
-        if protocol > 767 && identity_maps(&inbound, &outbound) {
+        let inbound_identity = identity_maps(&inbound, &outbound);
+        if inbound_identity && !(766..=767).contains(&protocol) {
             return None;
         }
         let id = |dir, name| required_id(native, Phase::Configuration, dir, name);
@@ -1909,6 +1914,7 @@ impl ConfigIds {
             }),
             v767_client_information_id: (protocol <= 767)
                 .then(|| id(Serverbound, "client_information")),
+            inbound_identity,
         })
     }
 }

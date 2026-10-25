@@ -2102,17 +2102,14 @@ fn strip_particle_status_767() {
         crate::ui::chat::ChatOptions::default(),
         crate::ui::menu::SkinOptions::default(),
     );
-    let body = |frame: &[u8]| {
-        let mut pos = 0;
-        wire::read_varint(frame, &mut pos).unwrap();
-        // The last byte is `ParticleStatus::All`.
-        assert_eq!(frame.last(), Some(&0));
-        frame[pos..frame.len() - 1].to_vec()
-    };
-    let with_id = |id: u32, body: &[u8]| {
+    // 1.21.1's `ClientInformation.write`: language, view distance, chat
+    // visibility (FULL), chat colors, every skin part, main hand (RIGHT), text
+    // filtering, allows listing.
+    let old_body = [5, b'e', b'n', b'_', b'u', b's', 8, 0, 1, 0x7f, 1, 0, 1];
+    let with_id = |id: u32| {
         let mut out = Vec::new();
         wire::write_varint(&mut out, id);
-        out.extend_from_slice(body);
+        out.extend_from_slice(&old_body);
         out
     };
 
@@ -2124,12 +2121,11 @@ fn strip_particle_status_767() {
         ))
         .unwrap(),
     );
-    let game_body = body(&game);
     for protocol in [767, 763] {
         let old = old_id(protocol, Direction::Serverbound, "client_information");
         assert_eq!(
             translation_for(protocol).translate_outbound_game_frame(game.clone()),
-            [with_id(old, &game_body)],
+            [with_id(old)],
             "{protocol}"
         );
     }
@@ -2140,12 +2136,11 @@ fn strip_particle_status_767() {
         ))
         .unwrap(),
     );
-    let config_body = body(&config);
     for protocol in [767, 764] {
         let old = config_id(protocol, Direction::Serverbound, "client_information");
         assert_eq!(
             translation_for(protocol).translate_outbound_config_frame(config.clone()),
-            Some(with_id(old, &config_body)),
+            Some(with_id(old)),
             "{protocol}"
         );
     }
@@ -2734,7 +2729,9 @@ fn translate_game_login_765() {
 fn translate_config_ids_765() {
     let t = translation_for(765);
     assert!(t.translates_config());
+    assert!(translation_for(767).translates_config());
     assert!(!translation_for(768).translates_config());
+    assert!(!translation_for(763).translates_config());
 
     // Inbound finish_configuration lands on its 26.2 id.
     let mut old = Vec::new();
