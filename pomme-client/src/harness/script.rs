@@ -21,6 +21,12 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 struct ScriptFile {
     #[serde(rename = "step")]
     steps: Vec<StepFile>,
+    /// The versions the script is valid on; `tools/ingame-test` reads them
+    /// to skip it elsewhere.
+    #[serde(default, rename = "min_version")]
+    _min_version: Option<String>,
+    #[serde(default, rename = "max_version")]
+    _max_version: Option<String>,
 }
 
 /// One `[[step]]` table: exactly one action, plus an optional timeout.

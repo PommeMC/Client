@@ -1,11 +1,14 @@
-//! Runs pomme's in-game test scripts (`tests/ingame/**/*.toml`) against a local
-//! vanilla 26.2 server: downloads and verifies the server jar once, starts it
-//! offline with the test player opped, then runs a harness client per script.
+//! Runs pomme's in-game test scripts (`tests/ingame/**/*.toml`) against local
+//! vanilla servers: downloads and verifies each version's server jar once,
+//! starts it offline with the test player opped, then runs a harness client
+//! per script.
 //!
-//! `ingame-test [--jobs N] [scripts...]` runs the named scripts or folders
-//! (all when none, e.g. `entities` or `entities/data`) on N workers, each
-//! with its own server and world;
-//! `ingame-test --server-only` starts the server for live socket sessions.
+//! `ingame-test [--jobs N] [--version V]... [--versions all] [scripts...]`
+//! runs the named scripts or folders (all when none, e.g. `entities` or
+//! `entities/data`) on N workers per version, each with its own server and
+//! world, against the native version unless `--version` or `--versions all`
+//! picks others; `ingame-test --server-only` starts a server for live socket
+//! sessions.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -14,14 +17,9 @@ use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use md5::Digest as _;
+use pomme_protocol::version::{self, ProtocolVersion};
 
-/// The version the server runs and the client joins as.
-const VERSION: &str = "26.2";
-/// The 26.2 server's sha1 from its `version.json` (`downloads.server`),
-/// which also names its download.
-const SERVER_SHA1: &str = "823e2250d24b3ddac457a60c92a6a941943fcd6a";
-/// 26.2's `javaVersion.majorVersion`.
-const JAVA_MAJOR: u32 = 25;
+const MANIFEST_URL: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const PLAYER: &str = "Tester";
 const HOST: &str = "127.0.0.1";
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(180);
@@ -34,11 +32,18 @@ const SCRIPT_DIR: &str = "tests/ingame";
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let versions = match take_versions(&mut args) {
+        Ok(versions) => versions,
+        Err(e) => {
+            eprintln!("ingame-test: {e}");
+            return ExitCode::from(2);
+        }
+    };
     // Just the verified server jar, for tools that run vanilla's code.
     if take_flag(&mut args, "--fetch-server") {
-        return match server_jar(&Path::new(OUT_DIR).join("server")) {
-            Ok(jar) => {
-                println!("{}", jar.display());
+        return match server_jar(&versions[0]) {
+            Ok(server) => {
+                println!("{}", server.jar.display());
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -56,7 +61,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(server_only, jobs, &args) {
+    match run(&versions, server_only, jobs, &args) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(e) => {
@@ -83,33 +88,126 @@ fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
     })
 }
 
-/// Whether every script passed.
-fn run(server_only: bool, jobs: usize, names: &[String]) -> Result<bool, String> {
+/// The versions `--version` (repeatable) and `--versions all` pick, else the
+/// native one.
+fn take_versions(args: &mut Vec<String>) -> Result<Vec<ProtocolVersion>, String> {
+    let mut versions = match take_value(args, "--versions").as_deref() {
+        None => Vec::new(),
+        Some("all") => version::tested_versions(),
+        Some(other) => return Err(format!("--versions takes `all`, not {other:?}")),
+    };
+    while let Some(name) = take_value(args, "--version") {
+        let found = ProtocolVersion::from_name(&name)
+            .filter(|v| version::joinable(v.protocol))
+            .ok_or_else(|| format!("{name:?} isn't a joinable version"))?;
+        if !versions.contains(&found) {
+            versions.push(found);
+        }
+    }
+    if versions.is_empty() {
+        versions.push(version::NATIVE);
+    }
+    Ok(versions)
+}
+
+/// Whether every script passed on every version.
+fn run(
+    versions: &[ProtocolVersion],
+    server_only: bool,
+    jobs: usize,
+    names: &[String],
+) -> Result<bool, String> {
     let scripts = scripts(Path::new(SCRIPT_DIR), names)?;
-    let server_dir = Path::new(OUT_DIR).join("server");
-    let jar = server_jar(&server_dir)?;
-    let java = java()?;
 
     if server_only {
-        let mut server = Server::start(&java, &jar, &server_dir)?;
-        println!("Vanilla server ready on {HOST}:{}", server.port);
+        let version = versions[0];
+        let server = server_jar(&version)?;
+        let java = java(server.java_major)?;
+        let mut server = Server::start(&java, &server.jar, &server.dir)?;
+        println!(
+            "Vanilla {} server ready on {HOST}:{}",
+            version.name, server.port
+        );
         println!(
             "Join with: just client-dev --features test-harness -- {} --harness-port <port>",
-            join_args(server.port).join(" ")
+            join_args(&version, server.port).join(" ")
         );
         server.wait();
         return Ok(true);
     }
 
     build_client()?;
-    let queue = Mutex::new(scripts.iter());
+    let mut failed = Vec::new();
+    let mut total = 0;
+    for version in versions {
+        let (runnable, skipped): (Vec<_>, Vec<_>) = scripts
+            .iter()
+            .map(|script| (script, script_runs_on(script, version)))
+            .partition(|(_, runs)| matches!(runs, Ok(true)));
+        for (script, runs) in skipped {
+            runs?;
+            println!(
+                "SKIP {} {}",
+                version.name,
+                script_name(Path::new(SCRIPT_DIR), script)
+            );
+        }
+        let runnable: Vec<&PathBuf> = runnable.into_iter().map(|(script, _)| script).collect();
+        total += runnable.len();
+        failed.extend(run_version(version, &runnable, jobs)?);
+    }
+    failed.sort();
+    println!("\n{} of {total} scripts passed", total - failed.len());
+    for script in &failed {
+        println!("  FAILED {script}");
+    }
+    Ok(failed.is_empty())
+}
+
+/// Runs `scripts` against one version's servers; the failed ones, as
+/// `<version> <script>`.
+fn run_version(
+    version: &ProtocolVersion,
+    scripts: &[&PathBuf],
+    jobs: usize,
+) -> Result<Vec<String>, String> {
+    let Some((first, rest)) = scripts.split_first() else {
+        return Ok(Vec::new());
+    };
+    let jar = server_jar(version)?;
+    let java = java(jar.java_major)?;
+    let worker_dir = |n: usize| {
+        Path::new(OUT_DIR)
+            .join("workers")
+            .join(version.name)
+            .join(n.to_string())
+    };
     let failed = Mutex::new(Vec::new());
+    let run = |script: &Path, server: &mut Server, game_dir: &Path| -> Result<(), String> {
+        if !run_script(script, version, server.port, game_dir)? {
+            let name = script_name(Path::new(SCRIPT_DIR), script);
+            failed
+                .lock()
+                .unwrap()
+                .push(format!("{} {name}", version.name));
+        }
+        server.reset_player()
+    };
+
+    // The first client installs the version's assets into the shared
+    // folders, so it runs alone rather than racing the others' installs.
+    let dir = worker_dir(0);
+    let mut server = Server::start(&java, &jar.jar, &dir)?;
+    run(first, &mut server, &dir.join("client"))?;
+    drop(server);
+
+    let queue = Mutex::new(rest.iter());
     std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..jobs.min(scripts.len()))
+        let workers: Vec<_> = (0..jobs.min(rest.len()))
             .map(|n| {
-                let (queue, failed, java, jar) = (&queue, &failed, &java, &jar);
+                let (queue, run, java, jar) = (&queue, &run, &java, &jar.jar);
                 scope.spawn(move || -> Result<(), String> {
-                    let dir = Path::new(OUT_DIR).join("workers").join(n.to_string());
+                    let dir = worker_dir(n);
                     let mut server = Server::start(java, jar, &dir)?;
                     let game_dir = dir.join("client");
                     loop {
@@ -117,10 +215,7 @@ fn run(server_only: bool, jobs: usize, names: &[String]) -> Result<bool, String>
                         let Some(script) = next else {
                             return Ok(());
                         };
-                        if !run_script(script, server.port, &game_dir)? {
-                            failed.lock().unwrap().push(script.display().to_string());
-                        }
-                        server.reset_player()?;
+                        run(script, &mut server, &game_dir)?;
                     }
                 })
             })
@@ -129,17 +224,7 @@ fn run(server_only: bool, jobs: usize, names: &[String]) -> Result<bool, String>
             .into_iter()
             .try_for_each(|worker| worker.join().expect("worker panicked"))
     })?;
-    let mut failed = failed.into_inner().unwrap();
-    failed.sort();
-    println!(
-        "\n{} of {} scripts passed",
-        scripts.len() - failed.len(),
-        scripts.len()
-    );
-    for script in &failed {
-        println!("  FAILED {script}");
-    }
-    Ok(failed.is_empty())
+    Ok(failed.into_inner().unwrap())
 }
 
 /// The named scripts and folders under `root`, or every script in it.
@@ -187,51 +272,129 @@ fn script_name(root: &Path, script: &Path) -> String {
         .replace('\\', "/")
 }
 
-/// The verified server jar, downloaded on first use.
-fn server_jar(dir: &Path) -> Result<PathBuf, String> {
+/// Whether `script` runs on `version`: its optional top-level `min_version`
+/// and `max_version` bound the versions it's valid on.
+fn script_runs_on(script: &Path, version: &ProtocolVersion) -> Result<bool, String> {
+    let text = std::fs::read_to_string(script).map_err(|e| format!("{}: {e}", script.display()))?;
+    let table: toml::Table = text
+        .parse()
+        .map_err(|e| format!("{}: {e}", script.display()))?;
+    in_range(&table, version).map_err(|e| format!("{}: {e}", script.display()))
+}
+
+/// Whether `version` lies within `table`'s `min_version`/`max_version`.
+fn in_range(table: &toml::Table, version: &ProtocolVersion) -> Result<bool, String> {
+    // VERSIONS is newest first, so an older version has a larger index.
+    let age = |name: &str| version::VERSIONS.iter().position(|v| v.name == name);
+    let bound = |key: &str| -> Result<Option<usize>, String> {
+        match table.get(key) {
+            None => Ok(None),
+            Some(toml::Value::String(name)) => age(name)
+                .map(Some)
+                .ok_or_else(|| format!("{key} {name:?} isn't a listed version")),
+            Some(_) => Err(format!("{key} must be a version name")),
+        }
+    };
+    let age_of = age(version.name).expect("a listed version");
+    let newer_than_min = bound("min_version")?.is_none_or(|min| age_of <= min);
+    let older_than_max = bound("max_version")?.is_none_or(|max| age_of >= max);
+    Ok(newer_than_min && older_than_max)
+}
+
+/// A version's verified server jar, its dir and the Java major it needs.
+struct ServerJar {
+    dir: PathBuf,
+    jar: PathBuf,
+    java_major: u32,
+}
+
+/// The verified server jar for `version`, downloaded on first use. The
+/// version's metadata (download url, sha1, Java major) is looked up in
+/// Mojang's version manifest once and cached next to the jar.
+fn server_jar(version: &ProtocolVersion) -> Result<ServerJar, String> {
+    let dir = Path::new(OUT_DIR).join("servers").join(version.name);
+    let meta_path = dir.join("version.json");
+    let meta: serde_json::Value = match std::fs::read(&meta_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
+        Err(_) => {
+            let meta = version_meta(version.name)?;
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            std::fs::write(&meta_path, meta.to_string()).map_err(|e| e.to_string())?;
+            meta
+        }
+    };
+    let server = &meta["downloads"]["server"];
+    let (Some(url), Some(sha1_hex)) = (server["url"].as_str(), server["sha1"].as_str()) else {
+        return Err(format!("{} has no server download", version.name));
+    };
+    let java_major = meta["javaVersion"]["majorVersion"]
+        .as_u64()
+        .ok_or_else(|| format!("{} names no Java version", version.name))?
+        as u32;
     let jar = dir.join("server.jar");
-    if std::fs::read(&jar).is_ok_and(|bytes| sha1(&bytes) == SERVER_SHA1) {
-        return Ok(jar);
+    if !std::fs::read(&jar).is_ok_and(|bytes| sha1(&bytes) == sha1_hex) {
+        println!("Downloading the vanilla {} server...", version.name);
+        let bytes = fetch(url)?;
+        if sha1(&bytes) != sha1_hex {
+            return Err(format!(
+                "the {} server jar doesn't match its sha1",
+                version.name
+            ));
+        }
+        std::fs::write(&jar, &bytes).map_err(|e| e.to_string())?;
     }
-    println!("Downloading the vanilla {VERSION} server...");
-    let url = format!("https://piston-data.mojang.com/v1/objects/{SERVER_SHA1}/server.jar");
-    let bytes = reqwest::blocking::get(url)
+    Ok(ServerJar {
+        dir,
+        jar,
+        java_major,
+    })
+}
+
+/// `name`'s version JSON, through Mojang's version manifest.
+fn version_meta(name: &str) -> Result<serde_json::Value, String> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fetch(MANIFEST_URL)?).map_err(|e| e.to_string())?;
+    let url = manifest["versions"]
+        .as_array()
+        .and_then(|all| all.iter().find(|v| v["id"] == name))
+        .and_then(|v| v["url"].as_str())
+        .ok_or_else(|| format!("{name} isn't in Mojang's version manifest"))?;
+    serde_json::from_slice(&fetch(url)?).map_err(|e| e.to_string())
+}
+
+fn fetch(url: &str) -> Result<Vec<u8>, String> {
+    reqwest::blocking::get(url)
         .and_then(|r| r.error_for_status())
         .and_then(|r| r.bytes())
-        .map_err(|e| format!("downloading the server: {e}"))?;
-    if sha1(&bytes) != SERVER_SHA1 {
-        return Err("the downloaded server jar doesn't match its sha1".into());
-    }
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    std::fs::write(&jar, &bytes).map_err(|e| e.to_string())?;
-    Ok(jar)
+        .map(|bytes| bytes.to_vec())
+        .map_err(|e| format!("downloading {url}: {e}"))
 }
 
 fn sha1(bytes: &[u8]) -> String {
     sha1_smol::Sha1::from(bytes).digest().to_string()
 }
 
-/// `$JAVA_HOME/bin/java`, else `java` on PATH, checked to be Java 25+.
-fn java() -> Result<PathBuf, String> {
-    let java = std::env::var_os("JAVA_HOME")
+/// A java for a server needing Java `major`: `$JAVA_HOME_<major>`, else
+/// `$JAVA_HOME`, else `java` on PATH, checked to be at least that major.
+fn java(major: u32) -> Result<PathBuf, String> {
+    let java = std::env::var_os(format!("JAVA_HOME_{major}"))
+        .or_else(|| std::env::var_os("JAVA_HOME"))
         .map(|home| Path::new(&home).join("bin").join("java"))
         .unwrap_or_else(|| "java".into());
-    let output = Command::new(&java).arg("-version").output().map_err(|e| {
-        format!(
-            "running {}: {e} (install Java {JAVA_MAJOR})",
-            java.display()
-        )
-    })?;
+    let output = Command::new(&java)
+        .arg("-version")
+        .output()
+        .map_err(|e| format!("running {}: {e} (install Java {major})", java.display()))?;
     // `openjdk version "25.0.2" ...` on stderr.
     let banner = String::from_utf8_lossy(&output.stderr);
-    let major = banner
+    let found = banner
         .split('"')
         .nth(1)
         .and_then(|v| v.split('.').next()?.parse::<u32>().ok());
-    match major {
-        Some(major) if major >= JAVA_MAJOR => Ok(java),
+    match found {
+        Some(found) if found >= major => Ok(java),
         _ => Err(format!(
-            "{VERSION}'s server needs Java {JAVA_MAJOR}+, found: {}",
+            "this server needs Java {major}+ (JAVA_HOME_{major} or JAVA_HOME), found: {}",
             banner.lines().next().unwrap_or("nothing")
         )),
     }
@@ -292,11 +455,16 @@ fn build_client() -> Result<(), String> {
         .ok_or_else(|| "building the client failed".into())
 }
 
-/// Runs one script in a harness client, logging to `client.log` in its
-/// output dir; whether it passed.
-fn run_script(script: &Path, port: u16, game_dir: &Path) -> Result<bool, String> {
+/// Runs one script in a harness client joining `version`, logging to
+/// `client.log` in its output dir; whether it passed.
+fn run_script(
+    script: &Path,
+    version: &ProtocolVersion,
+    port: u16,
+    game_dir: &Path,
+) -> Result<bool, String> {
     let name = script_name(Path::new(SCRIPT_DIR), script);
-    let out = Path::new(OUT_DIR).join(&name);
+    let out = Path::new(OUT_DIR).join(version.name).join(&name);
     std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
     let log_path = out.join("client.log");
     let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
@@ -304,7 +472,7 @@ fn run_script(script: &Path, port: u16, game_dir: &Path) -> Result<bool, String>
         Path::new("target/debug").join(format!("pomme-client{}", std::env::consts::EXE_SUFFIX));
     let started = Instant::now();
     let status = Command::new(&client)
-        .args(join_args(port))
+        .args(join_args(version, port))
         .arg("--game-dir")
         .arg(game_dir)
         .arg("--harness-script")
@@ -317,19 +485,20 @@ fn run_script(script: &Path, port: u16, game_dir: &Path) -> Result<bool, String>
         .map_err(|e| format!("starting {}: {e}", client.display()))?;
     let secs = started.elapsed().as_secs_f32();
     let passed = status.success();
+    let v = version.name;
     if passed {
-        println!("PASS {name} ({secs:.1}s)");
+        println!("PASS {v} {name} ({secs:.1}s)");
     } else {
-        println!("FAIL {name} ({secs:.1}s), see {}", log_path.display());
+        println!("FAIL {v} {name} ({secs:.1}s), see {}", log_path.display());
     }
     Ok(passed)
 }
 
 /// The client flags that join the test server as the test player.
-fn join_args(port: u16) -> Vec<String> {
+fn join_args(version: &ProtocolVersion, port: u16) -> Vec<String> {
     [
         "--version",
-        VERSION,
+        version.name,
         "--username",
         PLAYER,
         "--quick-access-multiplayer",
@@ -465,6 +634,21 @@ impl Drop for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_gates_bound_both_ends() {
+        let gate = |toml: &str, name: &str| {
+            let table: toml::Table = toml.parse().unwrap();
+            in_range(&table, &ProtocolVersion::from_name(name).unwrap())
+        };
+        assert_eq!(gate("", "1.20.1"), Ok(true));
+        assert_eq!(gate("min_version = \"1.20.5\"", "1.20.5"), Ok(true));
+        assert_eq!(gate("min_version = \"1.20.5\"", "26.3"), Ok(true));
+        assert_eq!(gate("min_version = \"1.20.5\"", "1.20.4"), Ok(false));
+        assert_eq!(gate("max_version = \"1.21.1\"", "1.21.3"), Ok(false));
+        assert_eq!(gate("max_version = \"1.21.1\"", "1.20.1"), Ok(true));
+        assert!(gate("min_version = \"1.8.9\"", "26.2").is_err());
+    }
 
     #[test]
     fn scripts_resolve_by_folder_and_name() {

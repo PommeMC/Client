@@ -817,19 +817,8 @@ impl Ids763 {
     }
 }
 
-/// Protocols the wire translation fully covers. A version with embedded
-/// tables but no entry here (the staging state while its translation is
-/// built) pings with the right version but stays un-joinable.
-const TRANSLATED: &[i32] = &[
-    777, 775, 774, 773, 772, 771, 770, 769, 768, 767, 766, 765, 764, 763,
-];
-
-/// Whether a server speaking `protocol` can be joined: the native version,
-/// or another one with a complete wire translation. Gates both
-/// wire-version negotiation and the server list's compatibility marker.
-pub fn joinable(protocol: i32) -> bool {
-    protocol == NATIVE.protocol || TRANSLATED.contains(&protocol)
-}
+use pomme_protocol::version::TRANSLATED;
+pub use pomme_protocol::version::joinable;
 
 /// A wire id in `registry` as the native version numbers it: remapped for a
 /// translated session, unchanged for a native one.

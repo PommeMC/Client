@@ -1,0 +1,28 @@
+# Joining works end to end: chunks arrive (the floor exists and holds the
+# player up) and a chat command round-trips, in a corner no other script
+# builds in. Valid on every version, so the
+# multi-version sweep catches a translation that breaks the join itself.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/tp @s -39.5 -57 -39.5 0 0"
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+expect = { block = "grass_block", at = [-40, -61, -40] }
+
+[[step]]
+expect = { player = { position = [-39.5, -60.0, -39.5] } }
+
+[[step]]
+chat = "/say pomme joined"
+
+[[step]]
+expect = { chat = "pomme joined" }

@@ -1,6 +1,7 @@
 # In-game tests
 
-Scripted tests that run a real client against a local vanilla 26.2 server, for
+Scripted tests that run a real client against a local vanilla server (26.2,
+the native version, unless you pick others), for
 behaviour unit tests can't reach: items arriving with their components,
 inventory clicks, entity data, advancements, and what ends up on screen.
 
@@ -18,7 +19,14 @@ just ingame-test                          # every script
 just ingame-test entities                 # every script in a folder
 just ingame-test player/armor_equip       # one script
 just ingame-test --jobs 2                 # two at once (default 6)
+just ingame-test --version 1.21.1         # against another version (repeatable)
+just ingame-test --versions all world     # every tested version, one folder
 ```
+
+`--versions all` is one version per joinable protocol, its newest patch
+(`pomme_protocol::version::tested_versions`, 26.3 down to 1.20.1). A full
+sweep takes a while: each version downloads its server jar once, and the client
+installs that version's assets on its first join.
 
 Scripts live in a folder per area (`blocks`, `entities`, `items`, `player`,
 `ui`, `world`); a new one goes in the folder it tests. A script's name is its
@@ -26,19 +34,36 @@ path without `.toml`.
 
 The runner (`tools/ingame-test`):
 
-1. Downloads the vanilla 26.2 server jar into `target/ingame/server/` once,
-   checking its sha1.
+1. Looks each version up in Mojang's version manifest and downloads its
+   server jar into `target/ingame/servers/<version>/` once, checking its sha1.
 2. Starts it on a fresh flat world in offline mode, with the test player
-   `Tester` opped. This needs Java 25 (`JAVA_HOME` or `java` on `PATH`).
-3. Runs a debug client per script, then resets the player for the next one.
+   `Tester` opped. Each version needs the Java its `version.json` names
+   (17 for 1.20.x, 21 for 1.21.x, 25 for 26.x): `JAVA_HOME_<major>` if set,
+   else `JAVA_HOME`, else `java` on `PATH`. A newer Java runs older servers.
+3. Runs a debug client per script, joining as that version, then resets the
+   player for the next one.
 
-With `--jobs N`, N workers each start their own server and world under
-`target/ingame/workers/<n>/` and take scripts from a shared queue. Their
-clients use a game dir there too, so a run never touches your own options.
+With `--jobs N`, N workers per version each start their own server and world
+under `target/ingame/workers/<version>/<n>/` and take scripts from a shared
+queue. Their clients use a game dir there too, so a run never touches your own
+options.
 
 Each script writes `report.json`, its screenshots and the client's output
-(`client.log`) to `target/ingame/<script>/`, e.g. `target/ingame/entities/data/`.
-The run fails if any script does.
+(`client.log`) to `target/ingame/<version>/<script>/`, e.g.
+`target/ingame/26.2/entities/data/`. The run fails if any script does.
+
+A script whose commands don't exist on older servers (item component syntax
+like `stone[custom_name=...]` is 1.20.5+) declares the versions it's valid on,
+above its first step, with a comment saying why:
+
+```toml
+# Item components in commands arrived in 1.20.5.
+min_version = "1.20.5"
+```
+
+`max_version` works the same way. Scripts outside the range print `SKIP` for
+that version. Gate only for what the server can't do; a script failing because
+of a client bug stays a failure.
 
 ## The harness
 

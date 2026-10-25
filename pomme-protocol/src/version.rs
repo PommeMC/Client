@@ -168,6 +168,36 @@ pub(crate) fn embedded_get<T>(
     Some(cells[slot].get_or_init(|| build(&EMBEDDED[slot])))
 }
 
+/// Protocols the client's wire translation fully covers. A version with
+/// embedded tables but no entry here (the staging state while its
+/// translation is built) pings with the right version but stays un-joinable.
+pub const TRANSLATED: &[i32] = &[
+    777, 775, 774, 773, 772, 771, 770, 769, 768, 767, 766, 765, 764, 763,
+];
+
+/// Whether a server speaking `protocol` can be joined: the native version,
+/// or another one with a complete wire translation. Gates both
+/// wire-version negotiation and the server list's compatibility marker.
+pub fn joinable(protocol: i32) -> bool {
+    protocol == NATIVE.protocol || TRANSLATED.contains(&protocol)
+}
+
+/// One version per joinable protocol, its newest listed patch, newest first:
+/// the versions the in-game tests run against.
+pub fn tested_versions() -> Vec<ProtocolVersion> {
+    let mut versions: Vec<ProtocolVersion> = Vec::new();
+    for version in VERSIONS {
+        if joinable(version.protocol)
+            && versions
+                .last()
+                .is_none_or(|v| v.protocol != version.protocol)
+        {
+            versions.push(*version);
+        }
+    }
+    versions
+}
+
 impl ProtocolVersion {
     pub fn from_name(name: &str) -> Option<Self> {
         VERSIONS.iter().copied().find(|v| v.name == name)
@@ -183,6 +213,18 @@ impl ProtocolVersion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tested_versions_are_the_newest_patch_of_each_joinable_protocol() {
+        let names: Vec<&str> = tested_versions().iter().map(|v| v.name).collect();
+        assert_eq!(
+            names,
+            [
+                "26.3", "26.2", "26.1.2", "1.21.11", "1.21.10", "1.21.8", "1.21.6", "1.21.5",
+                "1.21.4", "1.21.3", "1.21.1", "1.20.6", "1.20.4", "1.20.2", "1.20.1",
+            ]
+        );
+    }
 
     #[test]
     fn lookups() {

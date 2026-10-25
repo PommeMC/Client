@@ -10,113 +10,113 @@ chat = "/gamemode survival"
 
 # Mud is 14 pixels tall.
 [[step]]
-chat = "/setblock 20 -60 0 minecraft:mud"
+chat = "/setblock -20 -60 -20 minecraft:mud"
 
 [[step]]
-chat = "/tp @s 20.5 -57 0.5 0 0"
+chat = "/tp @s -19.5 -57 -19.5 0 0"
 
 [[step]]
 wait_ms = 1500
 
 [[step]]
-expect = { player = { position = [20.5, -59.125, 0.5] } }
+expect = { player = { position = [-19.5, -59.125, -19.5] } }
 
 # A closed bottom trapdoor is 3 pixels tall.
 [[step]]
-chat = "/setblock 24 -60 0 minecraft:oak_trapdoor[half=bottom,open=false]"
+chat = "/setblock -24 -60 -20 minecraft:oak_trapdoor[half=bottom,open=false]"
 
 [[step]]
-chat = "/tp @s 24.5 -57 0.5 0 0"
+chat = "/tp @s -23.5 -57 -19.5 0 0"
 
 [[step]]
 wait_ms = 1500
 
 [[step]]
-expect = { player = { position = [24.5, -59.8125, 0.5] } }
+expect = { player = { position = [-23.5, -59.8125, -19.5] } }
 
 # A fence post is 1.5 blocks tall.
 [[step]]
-chat = "/setblock 28 -60 0 minecraft:oak_fence"
+chat = "/setblock -28 -60 -20 minecraft:oak_fence"
 
 [[step]]
-chat = "/tp @s 28.5 -57 0.5 0 0"
+chat = "/tp @s -27.5 -57 -19.5 0 0"
 
 [[step]]
 wait_ms = 1500
 
 [[step]]
-expect = { player = { position = [28.5, -58.5, 0.5] } }
+expect = { player = { position = [-27.5, -58.5, -19.5] } }
 
 # An open gate has no collision.
 [[step]]
-chat = "/setblock 32 -60 0 minecraft:oak_fence_gate[open=true]"
+chat = "/setblock -32 -60 -20 minecraft:oak_fence_gate[open=true]"
 
 [[step]]
-chat = "/tp @s 32.5 -57 0.5 0 0"
+chat = "/tp @s -31.5 -57 -19.5 0 0"
 
 [[step]]
 wait_ms = 1500
 
 [[step]]
-expect = { player = { position = [32.5, -60.0, 0.5] } }
+expect = { player = { position = [-31.5, -60.0, -19.5] } }
 
 # A light block has no collision.
 [[step]]
-chat = "/setblock 36 -60 0 minecraft:light"
+chat = "/setblock -36 -60 -20 minecraft:light"
 
 [[step]]
-chat = "/tp @s 36.5 -57 0.5 0 0"
+chat = "/tp @s -35.5 -57 -19.5 0 0"
 
 [[step]]
 wait_ms = 1500
 
 [[step]]
-expect = { player = { position = [36.5, -60.0, 0.5] } }
+expect = { player = { position = [-35.5, -60.0, -19.5] } }
 
 # An open door is a 3 pixel slab on its hinge side; this lands clear of it.
 [[step]]
-chat = "/setblock 40 -60 0 minecraft:oak_door[facing=north,open=true,hinge=left,half=lower]"
+chat = "/setblock -40 -60 -20 minecraft:oak_door[facing=north,open=true,hinge=left,half=lower]"
 
 [[step]]
-chat = "/setblock 40 -59 0 minecraft:oak_door[facing=north,open=true,hinge=left,half=upper]"
+chat = "/setblock -40 -59 -20 minecraft:oak_door[facing=north,open=true,hinge=left,half=upper]"
 
 [[step]]
-chat = "/tp @s 40.8 -57 0.5 0 0"
+chat = "/tp @s -39.2 -57 -19.5 0 0"
 
 [[step]]
 wait_ms = 1500
 
 [[step]]
-expect = { player = { position = [40.8, -60.0, 0.5] } }
+expect = { player = { position = [-39.2, -60.0, -19.5] } }
 
 # An unconnected pane is a 2 pixel post; this lands beside it.
 [[step]]
-chat = "/setblock 44 -60 0 minecraft:glass_pane"
+chat = "/setblock -44 -60 -20 minecraft:glass_pane"
 
 [[step]]
-chat = "/tp @s 44.1 -57 0.5 0 0"
+chat = "/tp @s -43.9 -57 -19.5 0 0"
 
 [[step]]
 wait_ms = 1500
 
 [[step]]
-expect = { player = { position = [44.1, -60.0, 0.5] } }
+expect = { player = { position = [-43.9, -60.0, -19.5] } }
 
 # A rod lying north-south is 10 pixels up its middle.
 [[step]]
-chat = "/setblock 48 -60 0 minecraft:lightning_rod[facing=north]"
+chat = "/setblock -48 -60 -20 minecraft:lightning_rod[facing=north]"
 
 [[step]]
-chat = "/tp @s 48.5 -57 0.5 0 0"
+chat = "/tp @s -47.5 -57 -19.5 0 0"
 
 [[step]]
 wait_ms = 1500
 
 [[step]]
-expect = { player = { position = [48.5, -59.375, 0.5] } }
+expect = { player = { position = [-47.5, -59.375, -19.5] } }
 
 [[step]]
-chat = "/fill 20 -60 0 48 -59 0 minecraft:air"
+chat = "/fill -48 -60 -20 -20 -59 -20 minecraft:air"
 
 [[step]]
 chat = "/tp @s 0.5 -60 0.5"
