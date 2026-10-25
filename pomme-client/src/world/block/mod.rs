@@ -24,7 +24,7 @@ pub use block_registry::{Block, BlockData};
 pub(crate) use block_state_table::BlockStateTable;
 use glam::{DVec3, dvec3};
 
-use crate::physics::block_shape::{LocalBox, compute_outline, compute_shape};
+use crate::physics::block_shape::LocalBox;
 use crate::position::BlockPos;
 
 /// Compact per-state property map: `(key, value)` pairs sorted by key. States
@@ -203,8 +203,8 @@ pub(crate) struct BlockStateData {
     collides: bool,
     special_collision: SpecialCollision,
     /// Vanilla state semantics dumped by `just stategen`, read by follow-up
-    /// branches; `None` where the table predates the probe or the version
-    /// lacks it (`blocksMotion` is gone in 26.3).
+    /// branches; `None` where the version lacks it (`blocksMotion` is gone in
+    /// 26.3).
     #[allow(dead_code)]
     blocks_motion: Option<bool>,
     #[allow(dead_code)]
@@ -217,8 +217,7 @@ pub(crate) struct BlockStateData {
     full_face_sturdy: Option<u8>,
     /// Vanilla `hasLargeCollisionShape`: the collision shape leaves the cell.
     large_collision_shape: bool,
-    /// Whether the collision/outline shape follows `getOffset(pos)`; always
-    /// false for tables without generated shapes.
+    /// Whether the collision/outline shape follows `getOffset(pos)`.
     collision_shape_uses_offset: bool,
     outline_shape_uses_offset: bool,
     position_offset: Option<PositionOffset>,
@@ -288,7 +287,7 @@ impl BlockStateData {
             .unwrap_or_else(|| calculate_solid(self.shape))
     }
 
-    /// Vanilla `BlockState.getOffset(pos)`; zero for tables without offsets.
+    /// Vanilla `BlockState.getOffset(pos)`; zero for states without one.
     pub(crate) fn block_position_offset(&self, x: i32, z: i32) -> DVec3 {
         self.position_offset
             .map_or(DVec3::ZERO, |offset| offset.at(x, z))
@@ -457,8 +456,8 @@ struct StateEntry {
     u: PerState<u8>,
     /// `hasCollision`; block-level in vanilla, so always a scalar.
     c: u8,
-    /// `blocksMotion`, `isSolid`, `canBeReplaced` and full-face sturdy bits;
-    /// each absent from tables that predate it.
+    /// `blocksMotion` (absent from 26.3 on), `isSolid`, `canBeReplaced` and
+    /// full-face sturdy bits.
     #[serde(default)]
     m: Option<PerState<u8>>,
     #[serde(default)]
@@ -488,8 +487,7 @@ struct StateEntry {
     f: Option<serde_json::Value>,
 }
 
-/// The generated shape and offset fields of a [`StateEntry`], which tables
-/// carry all together or not at all.
+/// The generated shape and offset fields of a [`StateEntry`].
 struct GeneratedShapeFields<'a> {
     collision_offset: &'a PerState<u8>,
     outline_offset: &'a PerState<u8>,
@@ -501,12 +499,12 @@ struct GeneratedShapeFields<'a> {
 }
 
 impl StateEntry {
-    fn generated_shapes(&self) -> Option<GeneratedShapeFields<'_>> {
+    fn generated_shapes(&self) -> GeneratedShapeFields<'_> {
         match (
             &self.co, &self.oo, &self.q, &self.h, &self.y, &self.s, &self.r,
         ) {
             (Some(co), Some(oo), Some(q), Some(h), Some(y), Some(s), Some(r)) => {
-                Some(GeneratedShapeFields {
+                GeneratedShapeFields {
                     collision_offset: co,
                     outline_offset: oo,
                     offset_type: q,
@@ -514,10 +512,12 @@ impl StateEntry {
                     max_vertical: y,
                     collision: s,
                     outline: r,
-                })
+                }
             }
-            (None, None, None, None, None, None, None) => None,
-            _ => panic!("{}: partial generated shape fields", self.name),
+            _ => panic!(
+                "{}: missing generated shape fields; run `just stategen`",
+                self.name
+            ),
         }
     }
 }
@@ -682,17 +682,16 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
             .map(|hex| decode_face_mask(hex))
             .collect(),
     );
-    let generated_shapes: Option<Vec<&'static [LocalBox]>> = if state_file.shapes.is_empty() {
-        None
-    } else {
-        Some(
-            state_file
-                .shapes
-                .iter()
-                .map(|coords| decode_block_shape(coords))
-                .collect(),
-        )
-    };
+    assert!(
+        !state_file.shapes.is_empty(),
+        "{}: no shape dictionary; run `just stategen`",
+        state_file.version
+    );
+    let shapes: Vec<&'static [LocalBox]> = state_file
+        .shapes
+        .iter()
+        .map(|coords| decode_block_shape(coords))
+        .collect();
     // The same handful of 6-mask tuples repeats across thousands of states;
     // dedupe them into leaked statics so each state stores one pointer.
     let mut tuples: HashMap<[u32; 6], &'static [FaceMask; 6]> = HashMap::new();
@@ -765,50 +764,23 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
             let i = offset as usize;
             let flag = |field: &Option<PerState<u8>>| field.as_ref().map(|f| f.get(i) != 0);
             let generated = state_entry.generated_shapes();
-            assert_eq!(
-                generated.is_some(),
-                generated_shapes.is_some(),
-                "{}: generated shape fields don't match the shape dictionary",
-                block.name
-            );
-            let (
-                shape,
-                outline,
-                collision_shape_uses_offset,
-                outline_shape_uses_offset,
-                position_offset,
-            ) = match (&generated_shapes, generated) {
-                (Some(shapes), Some(g)) => {
-                    let collision = shapes[g.collision.get(i) as usize];
-                    let outline = shapes[g.outline.get(i) as usize];
-                    let kind = match g.offset_type.get(i) {
-                        0 => None,
-                        1 => Some(PositionOffsetKind::Xz),
-                        2 => Some(PositionOffsetKind::Xyz),
-                        value => panic!("{}: invalid position offset type {value}", block.name),
-                    };
-                    (
-                        (!is_full_cube_shape(collision)).then_some(collision),
-                        (outline != collision).then_some(outline),
-                        g.collision_offset.get(i) != 0,
-                        g.outline_offset.get(i) != 0,
-                        kind.map(|kind| {
-                            PositionOffset::new(
-                                kind,
-                                g.max_horizontal.get(i),
-                                g.max_vertical.get(i),
-                            )
-                        }),
-                    )
-                }
-                _ => (
-                    compute_shape(name, &properties).map(leak_boxes),
-                    compute_outline(name, &properties).map(leak_boxes),
-                    false,
-                    false,
-                    None,
-                ),
-            };
+            let collision = shapes[generated.collision.get(i) as usize];
+            let outline = shapes[generated.outline.get(i) as usize];
+            let shape = (!is_full_cube_shape(collision)).then_some(collision);
+            let outline = (outline != collision).then_some(outline);
+            let position_offset = match generated.offset_type.get(i) {
+                0 => None,
+                1 => Some(PositionOffsetKind::Xz),
+                2 => Some(PositionOffsetKind::Xyz),
+                value => panic!("{}: invalid position offset type {value}", block.name),
+            }
+            .map(|kind| {
+                PositionOffset::new(
+                    kind,
+                    generated.max_horizontal.get(i),
+                    generated.max_vertical.get(i),
+                )
+            });
             let light = LightProps {
                 emission: state_entry.e.get(i),
                 dampening: state_entry.d.get(i),
@@ -838,8 +810,8 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
                             b[..3].iter().any(|&v| v < 0.0) || b[3..].iter().any(|&v| v > 1.0)
                         })
                     }),
-                collision_shape_uses_offset,
-                outline_shape_uses_offset,
+                collision_shape_uses_offset: generated.collision_offset.get(i) != 0,
+                outline_shape_uses_offset: generated.outline_offset.get(i) != 0,
                 position_offset,
                 fluid,
                 light,
@@ -1920,17 +1892,24 @@ mod tests {
         );
     }
 
-    /// Tables generated before the semantics probes report them as unknown
-    /// rather than guessing.
+    /// Every version's table comes from `just stategen`, so none falls back to
+    /// full cubes: translated sessions collide with that version's own shapes.
     #[test]
-    fn legacy_tables_leave_semantics_unknown() {
-        let data = BLOCK_DATA.iter().find(|data| data.protocol == 775).unwrap();
-        for state in build_table(data) {
-            assert_eq!(state.blocks_motion, None);
-            assert_eq!(state.legacy_solid, None);
-            assert_eq!(state.replaceable, None);
-            assert_eq!(state.full_face_sturdy, None);
-            assert!(state.position_offset.is_none());
+    fn every_table_has_generated_shapes_and_semantics() {
+        for data in BLOCK_DATA {
+            let table = build_table(data);
+            for state in &table {
+                assert!(state.legacy_solid.is_some(), "{}", data.protocol);
+                assert!(state.replaceable.is_some(), "{}", data.protocol);
+                assert!(state.full_face_sturdy.is_some(), "{}", data.protocol);
+            }
+            let mud = table.iter().find(|state| state.id() == "mud").unwrap();
+            assert_eq!(
+                mud.collision_boxes(),
+                Some(&[[0.0, 0.0, 0.0, 1.0, 0.875, 1.0]][..]),
+                "{}",
+                data.protocol
+            );
         }
     }
 
