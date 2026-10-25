@@ -60,7 +60,7 @@ use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
-use crate::renderer::pipelines::held_item::HeldHand;
+use crate::renderer::pipelines::held_item::{HandRenderSelection, HeldHand};
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::ui::font::{FontOptions, FontSources};
 use crate::world::block::render_assets::{BlockRenderAssets, BlockRenderView};
@@ -145,6 +145,7 @@ enum RenderMode<'a> {
         /// The main hand's then the offhand's item.
         held_items: [Option<pipelines::held_item::HeldItemInfo>; 2],
         main_hand_right: bool,
+        shown_hands: HandRenderSelection,
         player_team_color: Option<u32>,
         render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
@@ -1201,6 +1202,7 @@ impl Renderer {
         use_anim: [Option<pipelines::held_item::UseAnim>; 2],
         held_items: [Option<(String, f32, azalea_inventory::ItemStackData)>; 2],
         main_hand_right: bool,
+        shown_hands: HandRenderSelection,
         player_team_color: Option<u32>,
         render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
@@ -1223,15 +1225,18 @@ impl Renderer {
         self.camera.set_render_distance(render_distance);
         let held_items = held_items.map(|held| {
             held.map(|(name, light, stack)| {
+                let model = self.render_assets.stack_model_key(&name, &stack);
                 let item_tints =
                     self.render_assets
-                        .item_tint_palette(&name, Some(&stack), player_team_color);
-                let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
+                        .item_tint_palette(&model, Some(&stack), player_team_color);
+                let has_3d_model = self.ensure_item_mesh(&model).is_block_model;
                 pipelines::held_item::HeldItemInfo {
                     name,
+                    model,
                     light,
                     item_tints,
                     has_3d_model,
+                    charged_crossbow: crate::player::interaction::is_charged_crossbow(&stack),
                 }
             })
         });
@@ -1255,6 +1260,7 @@ impl Renderer {
                 use_anim,
                 held_items,
                 main_hand_right,
+                shown_hands,
                 player_team_color,
                 render_first_person_hand,
                 destroy_info,
@@ -1710,6 +1716,9 @@ impl Renderer {
                     } else {
                         None
                     };
+                    if let Some(stack) = item_stack {
+                        *item_name = self.render_assets.stack_model_key(item_name, stack);
+                    }
                     *item_tints = self.render_assets.item_tint_palette(
                         item_name,
                         item_stack.as_ref(),
@@ -1877,6 +1886,7 @@ impl Renderer {
                 use_anim,
                 held_items,
                 main_hand_right,
+                shown_hands,
                 player_team_color: _,
                 render_first_person_hand,
                 destroy_info,
@@ -2034,23 +2044,29 @@ impl Renderer {
                     let view_effect = self.camera.view_effect_matrix();
                     // Vanilla submitArmWithItem draws the bare arm only for an
                     // empty main hand; held items render alone, and an empty
-                    // offhand draws nothing.
-                    // TODO: mirror the bare arm for a left main hand
-                    // (`renderPlayerArm`'s arm side).
-                    if held_items[0].is_none() {
+                    // offhand draws nothing. The main arm is the options' one,
+                    // which the server echoes back as `getMainArm`.
+                    // TODO: map (`renderOneHandedMap`/`renderTwoHandedMap`)
+                    // and the crossbow loading pose, once crossbow use is
+                    // tracked.
+                    if shown_hands.main && held_items[0].is_none() {
                         self.hand_pipeline.update_and_draw(
                             cmd,
                             frame,
                             aspect,
                             hud_fov,
                             swing_progress[0],
+                            *main_hand_right,
                             view_effect,
                         );
                     }
+                    let shown = [shown_hands.main, shown_hands.off];
                     let hands: Vec<_> = (0..2)
+                        .filter(|&i| shown[i])
                         .filter_map(|i| {
                             Some(HeldHand {
                                 item: held_items[i].as_ref()?,
+                                main_hand: i == 0,
                                 right_arm: *main_hand_right == (i == 0),
                                 swing_progress: swing_progress[i],
                                 use_anim: use_anim[i],

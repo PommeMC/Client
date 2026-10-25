@@ -1,5 +1,6 @@
 # First person draws the offhand item in the left hand, mirroring the main
-# hand's item on the right.
+# hand's item on the right, and hides it behind a charged crossbow; a
+# left-handed player's bare arm is on the left.
 
 [[step]]
 wait_ms = 2000
@@ -34,5 +35,37 @@ wait_ms = 500
 [[step]]
 screenshot = "both_hands"
 
+# A charged crossbow in the main hand hides the offhand.
+[[step]]
+chat = "/clear @s minecraft:stone"
+
+[[step]]
+chat = "/give @s minecraft:crossbow[charged_projectiles=[{id:\"minecraft:arrow\"}]]"
+
+[[step]]
+expect = { slot = 36, item = "crossbow" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "charged_crossbow"
+
 [[step]]
 chat = "/clear @s"
+
+# Left-handed, the empty main hand's bare arm is on the left.
+[[step]]
+expect = { slot = 36, item = "air" }
+
+[[step]]
+option = { main_hand = "left" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "left_arm"
+
+[[step]]
+option = { main_hand = "right" }

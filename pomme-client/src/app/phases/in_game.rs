@@ -4105,6 +4105,11 @@ pub fn update_game(
     } else {
         core.menu.render_distance
     };
+    let inventory = &game.player.inventory;
+    let main_stack = &inventory.hotbar_slots()[core.input.selected_slot() as usize];
+    let shown_hands = game
+        .interaction
+        .hands_to_render(main_stack.as_present(), inventory.offhand().as_present());
     let held_items = if benchmark_running {
         [None, None]
     } else {
@@ -4116,11 +4121,7 @@ pub fn update_game(
             }
             _ => None,
         };
-        let inventory = &game.player.inventory;
-        [
-            held(&inventory.hotbar_slots()[core.input.selected_slot() as usize]),
-            held(inventory.offhand()),
-        ]
+        [held(main_stack), held(inventory.offhand())]
     };
     // Last element pushed: vanilla draws the saving indicator on its own
     // stratum above screens, with the GUI hidden (F1) included.
@@ -4148,6 +4149,7 @@ pub fn update_game(
         use_anim,
         held_items,
         core.menu.main_hand_right(),
+        shown_hands,
         game.scoreboard.member_team_color(&core.user.username),
         renders_first_person_hand(game),
         destroy_info,
