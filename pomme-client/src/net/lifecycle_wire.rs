@@ -79,21 +79,33 @@ pub(super) fn login_events(
     event_tx: &Sender<NetworkEvent>,
 ) {
     spawn_events(&login.spawn, registry_holder, event_tx);
-    let _ = event_tx.try_send(NetworkEvent::ServerViewDistance {
-        distance: login.chunk_radius,
-    });
-    let _ = event_tx.try_send(NetworkEvent::ServerSimulationDistance {
-        distance: login.simulation_distance,
-    });
-    let _ = event_tx.try_send(NetworkEvent::PlayerLogin {
-        entity_id: login.player_id,
-        hardcore: login.hardcore,
-        show_death_screen: login.show_death_screen,
-        online_mode: login.online_mode,
-    });
-    let _ = event_tx.try_send(NetworkEvent::SecureChatEnforced {
-        enforced: ProfileKeyServices::get().is_some() && login.enforces_secure_chat,
-    });
+    send_ordered(
+        event_tx,
+        NetworkEvent::ServerViewDistance {
+            distance: login.chunk_radius,
+        },
+    );
+    send_ordered(
+        event_tx,
+        NetworkEvent::ServerSimulationDistance {
+            distance: login.simulation_distance,
+        },
+    );
+    send_ordered(
+        event_tx,
+        NetworkEvent::PlayerLogin {
+            entity_id: login.player_id,
+            hardcore: login.hardcore,
+            show_death_screen: login.show_death_screen,
+            online_mode: login.online_mode,
+        },
+    );
+    send_ordered(
+        event_tx,
+        NetworkEvent::SecureChatEnforced {
+            enforced: ProfileKeyServices::get().is_some() && login.enforces_secure_chat,
+        },
+    );
 }
 
 fn handle(
@@ -108,14 +120,17 @@ fn handle(
             spawn,
             data_to_keep,
         } => {
-            let _ = event_tx.try_send(NetworkEvent::PlayerRespawned {
-                keep_entity_data: data_to_keep & 2 != 0,
-                keep_attribute_modifiers: data_to_keep & 1 != 0,
-            });
+            send_ordered(
+                event_tx,
+                NetworkEvent::PlayerRespawned {
+                    keep_entity_data: data_to_keep & 2 != 0,
+                    keep_attribute_modifiers: data_to_keep & 1 != 0,
+                },
+            );
             spawn_events(&spawn, registry_holder, event_tx);
             // Vanilla recreates the player on respawn; the server re-sends any
             // effects kept across it.
-            let _ = event_tx.try_send(NetworkEvent::ClearMobEffects);
+            send_ordered(event_tx, NetworkEvent::ClearMobEffects);
         }
         LifecyclePacket::KeepAlive(id) => {
             sender.send(ServerboundGamePacket::KeepAlive(ServerboundKeepAlive {
@@ -128,7 +143,7 @@ fn handle(
         LifecyclePacket::Disconnect(reason) => {
             let reason = disconnect_reason(&reason);
             tracing::warn!("Disconnected: {reason}");
-            let _ = event_tx.try_send(NetworkEvent::Disconnected { reason });
+            send_ordered(event_tx, NetworkEvent::Disconnected { reason });
         }
         // Acknowledged on the game thread once the correction is applied.
         LifecyclePacket::PlayerPosition {
@@ -168,13 +183,19 @@ fn handle(
                     Some((name.to_string(), state.total_ticks as u64))
                 })
                 .collect();
-            let _ = event_tx.try_send(NetworkEvent::TimeUpdate {
-                game_time: game_time as u64,
-                clocks,
-            });
+            send_ordered(
+                event_tx,
+                NetworkEvent::TimeUpdate {
+                    game_time: game_time as u64,
+                    clocks,
+                },
+            );
         }
         LifecyclePacket::SimulationDistance(distance) => {
-            let _ = event_tx.try_send(NetworkEvent::ServerSimulationDistance { distance });
+            send_ordered(
+                event_tx,
+                NetworkEvent::ServerSimulationDistance { distance },
+            );
         }
     }
 }
@@ -191,21 +212,27 @@ fn spawn_events(
         .get_index(spawn.dimension_type as usize)
     {
         Some((_, dim)) => {
-            let _ = event_tx.try_send(dimension_info(dim));
+            send_ordered(event_tx, dimension_info(dim));
         }
         None => tracing::error!("Unknown dimension_type {}", spawn.dimension_type),
     }
-    let _ = event_tx.try_send(NetworkEvent::DimensionName {
-        name: spawn.dimension.clone(),
-    });
-    let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
-        game_mode: super::game_type(spawn.game_type.into()),
-        previous: Some(
-            spawn
-                .previous_game_type
-                .map(|id| super::game_type(id.into())),
-        ),
-    });
+    send_ordered(
+        event_tx,
+        NetworkEvent::DimensionName {
+            name: spawn.dimension.clone(),
+        },
+    );
+    send_ordered(
+        event_tx,
+        NetworkEvent::GameModeChanged {
+            game_mode: super::game_type(spawn.game_type.into()),
+            previous: Some(
+                spawn
+                    .previous_game_type
+                    .map(|id| super::game_type(id.into())),
+            ),
+        },
+    );
 }
 
 /// Dimension info from a login/respawn registry entry. Fields that azalea does

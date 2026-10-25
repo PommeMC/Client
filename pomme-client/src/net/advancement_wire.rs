@@ -8,6 +8,7 @@ use pomme_protocol::ClientRegistry;
 use pomme_protocol::codec::{DecodeResult, MAX_STRING_LENGTH, Reader};
 use pomme_protocol::item::ItemCodec;
 
+use super::handler::send_ordered;
 use super::{NetworkEvent, item_codec};
 use crate::chat_component::Component;
 use crate::ui::text::format_component_spans;
@@ -30,7 +31,7 @@ pub(super) fn handle_raw_advancements(
         return None;
     }
     Some(read_update(payload).map(|update| {
-        let _ = event_tx.try_send(NetworkEvent::AdvancementsUpdate(Box::new(update)));
+        send_ordered(event_tx, NetworkEvent::AdvancementsUpdate(Box::new(update)));
     }))
 }
 
