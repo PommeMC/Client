@@ -1312,9 +1312,10 @@ fn find_first_item_model_node(json: &serde_json::Value) -> Option<&serde_json::V
 /// A loaded crossbow's `charge_type` cases bake separately (see
 /// [`charge_model_key`]).
 ///
-/// TODO: other stacks that carry these components (trimmed armor) still draw
-/// this branch; that needs per-stack selection, plus the
-/// `paletted_permutations` atlas source for the trim textures.
+/// TODO: this branch still draws for loaded crossbows outside first person
+/// and GUI icons (dropped items, third person, the bundle tooltip, chat
+/// hovers), and for trimmed armor, which also needs the
+/// `paletted_permutations` atlas source for its trim textures.
 fn default_stack_branch(mut node: &serde_json::Value) -> &serde_json::Value {
     const COMPONENT_PROPERTIES: [&str; 3] = ["trim_material", "charge_type", "block_state"];
     while node_type(node) == Some("select")
