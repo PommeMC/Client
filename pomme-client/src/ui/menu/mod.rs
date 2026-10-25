@@ -722,6 +722,8 @@ pub struct MainMenu {
     settings_dir: PathBuf,
     /// Set by slider drags, written by `flush_settings`.
     settings_dirty: bool,
+    /// The options were saved, so the game should broadcast them.
+    options_saved: bool,
     bench_render_distance: crate::benchmark::BenchRenderDistance,
     /// The title screen's splash line, rolled at launch and on every return
     /// from a world like vanilla's fresh `TitleScreen`. `None` renders nothing.
@@ -868,6 +870,7 @@ impl MainMenu {
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             settings_dirty: false,
+            options_saved: false,
             bench_render_distance: Default::default(),
             splash: None,
             menu_open_time: None,
@@ -900,7 +903,12 @@ impl MainMenu {
     }
 
     fn set_screen(&mut self, screen: Screen, key_bindings: &KeyBindings) {
-        self.flush_settings(key_bindings);
+        // Vanilla's options screens save as they're removed.
+        if self.is_options_screen() {
+            self.save_options(key_bindings);
+        } else {
+            self.flush_settings(key_bindings);
+        }
         // Vanilla opens Key Binds with a fresh list and returns to Controls's
         // own; neither should inherit the other's offset.
         if matches!(screen, Screen::OptionsKeybinds)
@@ -1013,6 +1021,17 @@ impl MainMenu {
     }
 
     /// Writes pending slider changes, vanilla `OptionsSubScreen.removed()`.
+    /// Vanilla `Options.save`: writes the settings, then the game broadcasts
+    /// the client information.
+    pub(crate) fn save_options(&mut self, key_bindings: &KeyBindings) {
+        self.flush_settings(key_bindings);
+        self.options_saved = true;
+    }
+
+    pub fn take_options_saved(&mut self) -> bool {
+        std::mem::take(&mut self.options_saved)
+    }
+
     pub fn flush_settings(&mut self, key_bindings: &KeyBindings) {
         if self.settings_dirty {
             self.save_settings(key_bindings);
@@ -1468,6 +1487,22 @@ fn test_menu(dir: &str, key_bindings: &mut KeyBindings) -> MainMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn options_save_as_their_screen_closes() {
+        let dir = std::env::temp_dir().join(format!("pomme-options-save-{}", std::process::id()));
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu(dir.to_str().unwrap(), &mut key_bindings);
+        menu.open_options(&key_bindings);
+        menu.set_screen(Screen::OptionsSkinCustomization, &key_bindings);
+        assert!(menu.take_options_saved(), "leaving Options saves");
+        menu.set_main_hand_right(false, &key_bindings);
+        assert!(!menu.take_options_saved(), "a change alone doesn't");
+        menu.set_screen(Screen::Options, &key_bindings);
+        assert!(menu.take_options_saved());
+        assert!(!menu.take_options_saved());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn a_chunk_bench_saves_the_players_render_distance_and_reads_their_chunk_detail() {

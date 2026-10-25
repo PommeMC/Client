@@ -4291,10 +4291,11 @@ pub fn update_game(
         PauseAction::None => {}
     }
 
-    // Vanilla `Options.save` broadcasts on every change, wherever it was made.
+    // Vanilla `Options.broadcastOptions`, which sends only what changed.
     let (chat_options, skin_options) = (core.menu.chat_options, core.menu.skin_options());
-    if core.menu.render_distance != game.last_render_distance
-        || game.client_options_changed(chat_options, skin_options)
+    if core.menu.take_options_saved()
+        && (core.menu.render_distance != game.last_render_distance
+            || game.client_options_changed(chat_options, skin_options))
     {
         game.sync_client_information(
             connection,

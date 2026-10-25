@@ -180,11 +180,13 @@ fn bind_keys(core: &mut AppCore, bind: &protocol::Bind) -> Result<Value, String>
     Ok(Value::Null)
 }
 
+/// Sets options as their screen would, then saves them as it does closing.
 fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Value, String> {
     if let Some(hand) = options.main_hand {
         core.menu
             .set_main_hand_right(hand == protocol::Hand::Right, &core.input.key_bindings);
     }
+    core.menu.save_options(&core.input.key_bindings);
     Ok(Value::Null)
 }
 
