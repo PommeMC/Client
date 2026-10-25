@@ -9,6 +9,7 @@ use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::ItemCodec;
 use pomme_protocol::{Direction, PacketTable, Phase};
 
+use super::handler::send_ordered;
 use crate::net::NetworkEvent;
 use crate::player::inventory::item_resource_name;
 use crate::recipe::{
@@ -118,21 +119,21 @@ pub fn handle_raw_recipe_packet(
                     .map(|entry| toast_entry(&entry.contents.display))
                     .collect::<Vec<_>>();
                 if !toasts.is_empty() {
-                    let _ = event_tx.try_send(NetworkEvent::RecipeToastAdd { entries: toasts });
+                    send_ordered(event_tx, NetworkEvent::RecipeToastAdd { entries: toasts });
                 }
-                let _ = event_tx.try_send(NetworkEvent::RecipeBookAdd { entries, replace });
+                send_ordered(event_tx, NetworkEvent::RecipeBookAdd { entries, replace });
             }
             Parsed::Remove(ids) => {
-                let _ = event_tx.try_send(NetworkEvent::RecipeBookRemove { ids });
+                send_ordered(event_tx, NetworkEvent::RecipeBookRemove { ids });
             }
             Parsed::Settings(settings) => {
-                let _ = event_tx.try_send(NetworkEvent::RecipeBookSettings(settings));
+                send_ordered(event_tx, NetworkEvent::RecipeBookSettings(settings));
             }
             Parsed::Update(data) => {
-                let _ = event_tx.try_send(NetworkEvent::RecipeData(data));
+                send_ordered(event_tx, NetworkEvent::RecipeData(data));
             }
             Parsed::Ghost(ghost) => {
-                let _ = event_tx.try_send(NetworkEvent::GhostRecipe(ghost));
+                send_ordered(event_tx, NetworkEvent::GhostRecipe(ghost));
             }
         }
         Ok(())

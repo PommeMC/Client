@@ -7,6 +7,7 @@ pub struct DataDirs {
     pub indexes_dir: PathBuf,
     pub objects_dir: PathBuf,
     pub pomme_assets_dir: PathBuf,
+    pub bedrock_assets_dir: PathBuf,
     pub jar_assets_dir: PathBuf,
     pub game_dir: PathBuf,
     pub cache_dir: PathBuf,
@@ -45,6 +46,7 @@ impl DataDirs {
             objects_dir,
             jar_assets_dir,
             pomme_assets_dir: layout.pomme_assets(),
+            bedrock_assets_dir: layout.bedrock_assets(),
             game_dir,
             cache_dir: layout.cache(version),
         }
@@ -57,5 +59,10 @@ impl DataDirs {
     /// `version`'s assets are downloaded, so the client can start on them.
     pub fn is_installed(&self, version: &str) -> bool {
         pomme_install::is_installed(&self.assets_dir, &self.versions_dir, version)
+    }
+
+    /// The downloaded Bedrock UI textures the Bedrock theme draws.
+    pub fn bedrock_ui_dir(&self) -> PathBuf {
+        pomme_install::bedrock::dir(&self.bedrock_assets_dir).join(pomme_install::bedrock::UI_DIR)
     }
 }

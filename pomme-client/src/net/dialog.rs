@@ -12,6 +12,7 @@ use super::NetworkEvent;
 use super::chat::{
     ensure_end, read_bool, read_component, read_nbt_tag, read_string, read_varint_req,
 };
+use super::handler::send_ordered;
 use crate::chat_component::Component;
 use crate::ui::server_dialog::{DialogReference, ServerLink};
 
@@ -53,7 +54,7 @@ pub fn handle_raw_dialog_packet(phase: Phase, raw: &[u8], event_tx: &Sender<Netw
     };
     match event.and_then(|event| ensure_end(raw, pos, name).map(|()| event)) {
         Ok(event) => {
-            let _ = event_tx.try_send(event);
+            send_ordered(event_tx, event);
         }
         Err(error) => tracing::warn!("Skipping malformed {name} packet: {error}"),
     }

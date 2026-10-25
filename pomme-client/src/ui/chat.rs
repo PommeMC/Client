@@ -23,7 +23,8 @@ use crate::net::sender::ChatMark;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 use crate::ui::text::{
     TextSpan, format_component_spans, format_component_spans_with_bindings,
-    format_component_spans_with_parent_and_bindings, parse_uuid_value, with_alpha,
+    format_component_spans_with_parent_and_bindings, legacy_format_spans, parse_uuid_value,
+    with_alpha,
 };
 use crate::ui::text_edit::{
     SystemClipboard, TextFieldState, TextInputEvent, truncate_to_utf16, utf16_len,
@@ -3146,93 +3147,6 @@ fn slice_spans(spans: &[TextSpan], start: usize, end: usize) -> Vec<TextSpan> {
     out
 }
 
-fn legacy_color(code: char) -> Option<[f32; 4]> {
-    legacy_rgb(code).map(common::rgb)
-}
-
-/// The color of legacy formatting code `code` (`ChatFormatting`'s `0`-`f`).
-pub(crate) fn legacy_rgb(code: char) -> Option<u32> {
-    Some(match code.to_ascii_lowercase() {
-        '0' => 0x000000,
-        '1' => 0x0000aa,
-        '2' => 0x00aa00,
-        '3' => 0x00aaaa,
-        '4' => 0xaa0000,
-        '5' => 0xaa00aa,
-        '6' => 0xffaa00,
-        '7' => 0xaaaaaa,
-        '8' => 0x555555,
-        '9' => 0x5555ff,
-        'a' => 0x55ff55,
-        'b' => 0x55ffff,
-        'c' => 0xff5555,
-        'd' => 0xff55ff,
-        'e' => 0xffff55,
-        'f' => 0xffffff,
-        _ => return None,
-    })
-}
-
-/// Vanilla `StringDecomposer.iterateFormatted` over each span: legacy codes
-/// never carry into the next span, whose own style is both the current and
-/// the reset style.
-fn legacy_format_spans(spans: &[TextSpan], colors_enabled: bool) -> Vec<TextSpan> {
-    let mut out = Vec::new();
-    for base in spans {
-        let mut current = base.with_text(String::new());
-        let mut buffer = String::new();
-        let flush = |out: &mut Vec<TextSpan>, current: &TextSpan, buffer: &mut String| {
-            if !buffer.is_empty() {
-                out.push(current.with_text(std::mem::take(buffer)));
-            }
-        };
-
-        let mut chars = base.text.chars();
-        while let Some(ch) = chars.next() {
-            if ch != '\u{00a7}' {
-                buffer.push(ch);
-                continue;
-            }
-            let Some(code) = chars.next() else {
-                // A trailing section sign ends the iteration, unemitted.
-                break;
-            };
-            let lower = code.to_ascii_lowercase();
-            let recognized =
-                legacy_color(lower).is_some() || matches!(lower, 'k' | 'l' | 'm' | 'n' | 'o' | 'r');
-            if !recognized {
-                // StringDecomposer consumes even an unknown code pair.
-                continue;
-            }
-            flush(&mut out, &current, &mut buffer);
-            if !colors_enabled {
-                // Chat Colors off strips the code but keeps the base style.
-                continue;
-            }
-            if let Some(color) = legacy_color(lower) {
-                current.color = color;
-                current.bold = false;
-                current.italic = false;
-                current.strikethrough = false;
-                current.underline = false;
-                current.obfuscated = false;
-                continue;
-            }
-            match lower {
-                'k' => current.obfuscated = true,
-                'l' => current.bold = true,
-                'm' => current.strikethrough = true,
-                'n' => current.underline = true,
-                'o' => current.italic = true,
-                'r' => current = base.with_text(String::new()),
-                _ => unreachable!(),
-            }
-        }
-        flush(&mut out, &current, &mut buffer);
-    }
-    out
-}
-
 /// Word-wraps styled spans to `max_w` gui-space units like vanilla
 /// `Font.split`: `width0` measures styled runs at gui-scale 1, so fonts, bold
 /// and inline objects count as in `StringSplitter`. Returns one
@@ -4769,32 +4683,6 @@ mod tests {
         };
         assert_eq!(options.wrap_width_px(), 457.0);
         assert_eq!(options.render_width_px(), 458.0);
-    }
-
-    #[test]
-    fn legacy_formatting_matches_vanilla_segment_reset_rules() {
-        let white = common::WHITE;
-        let spans = legacy_format_spans(&[span("a§cb§lc§rd", white)], true);
-        assert_eq!(line_text(&spans), "abcd");
-        assert_eq!(spans.len(), 4);
-        assert_eq!(spans[0].color, white);
-        assert_eq!(spans[1].color, common::rgb(0xff5555));
-        assert!(!spans[1].bold);
-        assert_eq!(spans[2].color, common::rgb(0xff5555));
-        assert!(spans[2].bold);
-        assert_eq!(spans[3].color, white);
-        assert!(!spans[3].bold);
-    }
-
-    #[test]
-    fn chat_colors_off_strips_only_legacy_codes() {
-        let mut base = span("a§cb§lc§rd", common::rgb(0x55ffff));
-        base.italic = true;
-        let spans = legacy_format_spans(&[base], false);
-        assert_eq!(line_text(&spans), "abcd");
-        assert!(spans.iter().all(|span| span.color == common::rgb(0x55ffff)));
-        assert!(spans.iter().all(|span| span.italic));
-        assert!(spans.iter().all(|span| !span.bold));
     }
 
     #[test]

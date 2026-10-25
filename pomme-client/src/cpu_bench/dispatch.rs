@@ -52,10 +52,7 @@ pub fn bench(c: &mut Criterion, assets: &Assets) {
                 let mut received = 0;
                 while received < columns.len() {
                     let before = received;
-                    for mesh in dispatcher.drain_results() {
-                        received += 1;
-                        dispatcher.recycle(mesh);
-                    }
+                    received += dispatcher.drain_results().count();
                     if received == before {
                         std::thread::yield_now();
                     }

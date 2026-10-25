@@ -14,7 +14,8 @@ layout(set = 0, binding = 0) uniform SkyUBO {
     float _pad;
 };
 
-layout(set = 1, binding = 0) uniform sampler2D celestial_tex;
+layout(set = 1, binding = 0) uniform texture2D celestial_tex;
+layout(set = 1, binding = 1) uniform sampler celestial_tex_sampler;
 
 layout(push_constant) uniform PushConstants {
     uint mode;
@@ -32,7 +33,7 @@ void main() {
         if (b < 0.01) discard;
         out_color = vec4(b, b, b, b);
     } else if (mode == 2) {
-        vec4 color = texture(celestial_tex, v_uv);
+        vec4 color = texture(sampler2D(celestial_tex, celestial_tex_sampler), v_uv);
         if (color.a < 0.1) discard;
         out_color = vec4(color.rgb, color.a * celestial_alpha);
     } else if (mode == 3) {
@@ -40,7 +41,7 @@ void main() {
         float u_off = float(phase % 4) * 0.25;
         float v_off = float(phase / 4) * 0.5;
         vec2 moon_uv = vec2(u_off + v_uv.x * 0.25, v_off + v_uv.y * 0.5);
-        vec4 color = texture(celestial_tex, moon_uv);
+        vec4 color = texture(sampler2D(celestial_tex, celestial_tex_sampler), moon_uv);
         if (color.a < 0.1) discard;
         out_color = vec4(color.rgb, color.a * celestial_alpha * moon_brightness);
     } else if (mode == 4) {

@@ -3,17 +3,13 @@
 //! entity.
 
 use std::path::Path;
-use std::slice;
-use std::sync::{Arc, Mutex};
 
 use glam::{DVec3, Vec3};
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::physics::block_shape::{LocalBox, is_collision_shape_full_block, outline_shape};
 use crate::renderer::camera::CameraUniform;
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::renderer::{rhi, shader, util};
 use crate::world::block::{BlockStateData, BlockStateTable};
 use crate::world::block_entity::is_invisible_block;
 use crate::world::chunk::ChunkStore;
@@ -59,215 +55,87 @@ const MAX_SHADOW_VERTS: usize = MAX_SHADOW_QUADS * VERTS_PER_QUAD;
 const MAX_SHADOW_RADIUS: f32 = 32.0;
 
 pub struct EntityShadowPipeline {
-    pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    camera_layout: vk::DescriptorSetLayout,
-    texture_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    camera_sets: Vec<vk::DescriptorSet>,
-    texture_set: vk::DescriptorSet,
-    camera_buffers: Vec<vk::Buffer>,
-    camera_allocations: Vec<Allocation>,
-    vertex_buffers: Vec<vk::Buffer>,
-    vertex_allocations: Vec<Allocation>,
-    texture_image: vk::Image,
-    texture_view: vk::ImageView,
-    texture_sampler: vk::Sampler,
-    texture_allocation: Allocation,
+    pipeline: rhi::backend::RenderPipeline,
+    pipeline_layout: rhi::backend::PipelineLayout,
+    camera_layout: rhi::backend::BindGroupLayout,
+    texture_layout: rhi::backend::BindGroupLayout,
+    camera_sets: Vec<rhi::backend::BindGroup>,
+    texture_set: rhi::backend::BindGroup,
+    camera_buffers: Vec<rhi::backend::Buffer>,
+    vertex_buffers: Vec<rhi::backend::Buffer>,
+    texture: rhi::backend::Texture,
+    texture_sampler: rhi::backend::Sampler,
     /// This frame's vertices, kept between frames for its capacity.
     verts: Vec<ShadowVertex>,
 }
 
 impl EntityShadowPipeline {
     pub fn new(
-        device: &vk::Device,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        render_pass: vk::RenderPass,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
     ) -> Self {
-        let camera_layout = util::create_descriptor_set_layout(
+        let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
+        let texture_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
+        let pipeline_layout =
+            rhi::backend::create_pipeline_layout(device, &[camera_layout, texture_layout], None);
+
+        let pipeline = create_pipeline(device, targets, pipeline_layout);
+
+        let (camera_sets, camera_buffers) = util::create_uniform_sets(
             device,
-            vk::DescriptorType::UniformBuffer,
-            vk::ShaderStageFlags::Vertex,
-        );
-        let texture_layout = util::create_descriptor_set_layout(
-            device,
-            vk::DescriptorType::CombinedImageSampler,
-            vk::ShaderStageFlags::Fragment,
-        );
-
-        let layouts = [camera_layout, texture_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: layouts.len() as u32,
-            set_layouts: layouts.as_ptr(),
-            push_constant_range_count: 0,
-            push_constant_ranges: std::ptr::null(),
-            ..Default::default()
-        };
-        let pipeline_layout = device
-            .create_pipeline_layout(&layout_info, None)
-            .expect("failed to create entity shadow pipeline layout");
-
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout);
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: (MAX_FRAMES_IN_FLIGHT + 1) as u32,
-            pool_size_count: pool_sizes.len() as u32,
-            pool_sizes: pool_sizes.as_ptr(),
-            ..Default::default()
-        };
-        let descriptor_pool = device
-            .create_descriptor_pool(&pool_info, None)
-            .expect("failed to create entity shadow descriptor pool");
-
-        let cam_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| camera_layout).collect();
-        let cam_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: cam_layouts.len() as u32,
-            set_layouts: cam_layouts.as_ptr(),
-            ..Default::default()
-        };
-        let mut camera_sets = vec![vk::DescriptorSet::null(); cam_layouts.len()];
-        device
-            .allocate_descriptor_sets(&cam_alloc_info, &mut camera_sets)
-            .expect("failed to allocate entity shadow camera sets");
-
-        let tex_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: 1,
-            set_layouts: &texture_layout,
-            ..Default::default()
-        };
-        let mut texture_set = vk::DescriptorSet::null();
-        device
-            .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut texture_set))
-            .expect("failed to allocate entity shadow texture set");
-
-        let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut camera_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-
-        for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
-                device,
-                allocator,
-                size_of::<CameraUniform>() as u64,
-                "entity_shadow_camera",
-            );
-            let buffer_info = vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: size_of::<CameraUniform>() as u64,
-            };
-            let write = vk::WriteDescriptorSet {
-                dst_set: set,
-                dst_binding: 0,
-                descriptor_type: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
-                buffer_info: &buffer_info,
-                ..Default::default()
-            };
-            device.update_descriptor_sets(&[write], &[]);
-            camera_buffers.push(buf);
-            camera_allocations.push(alloc);
-        }
-
-        let (texture_image, texture_view, texture_allocation) = load_shadow_texture(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            jar_assets_dir,
-            asset_index,
+            camera_layout,
+            size_of::<CameraUniform>() as u64,
+            "entity_shadow_camera",
         );
 
-        let texture_sampler = unsafe { util::create_linear_sampler(device) };
+        let texture = load_shadow_texture(device, jar_assets_dir, asset_index);
 
-        let image_info = vk::DescriptorImageInfo {
-            sampler: texture_sampler,
-            image_view: texture_view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let tex_write = vk::WriteDescriptorSet {
-            dst_set: texture_set,
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 1,
-            buffer_info: std::ptr::null(),
-            image_info: &image_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[tex_write], &[]);
+        let texture_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR);
 
-        let placeholder = vec![
-            ShadowVertex {
-                position: [0.0; 3],
-                color: [0.0; 4],
-                uv: [0.0; 2],
-            };
-            MAX_SHADOW_VERTS
-        ];
-        let bytes = bytemuck::cast_slice::<ShadowVertex, u8>(&placeholder);
-        let mut vertex_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut vertex_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let (buf, alloc) = util::create_mapped_buffer(
-                device,
-                allocator,
-                bytes,
-                vk::BufferUsageFlags::VertexBuffer,
-                "entity_shadow_vertices",
-            );
-            vertex_buffers.push(buf);
-            vertex_allocations.push(alloc);
-        }
+        let texture_set =
+            util::create_texture_group(device, texture_layout, texture.handle(), texture_sampler);
+
+        let vertex_buffers = util::create_per_frame_host_buffers(
+            device,
+            (MAX_SHADOW_VERTS * size_of::<ShadowVertex>()) as u64,
+            rhi::BufferUsages::VERTEX,
+            "entity_shadow_vertices",
+        );
 
         Self {
             pipeline,
             pipeline_layout,
             camera_layout,
             texture_layout,
-            descriptor_pool,
             camera_sets,
             texture_set,
             camera_buffers,
-            camera_allocations,
             vertex_buffers,
-            vertex_allocations,
-            texture_image,
-            texture_view,
+            texture,
             texture_sampler,
-            texture_allocation,
             verts: Vec::with_capacity(MAX_SHADOW_VERTS),
         }
     }
 
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
+    pub fn recreate_pipeline(
+        &mut self,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
+    ) {
+        self.pipeline.destroy(device);
+        self.pipeline = create_pipeline(device, targets, self.pipeline_layout);
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
         let bytes = bytemuck::bytes_of(uniform);
-        self.camera_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
-            .copy_from_slice(bytes);
+        self.camera_buffers[frame].write(bytes);
     }
 
     pub fn draw(
         &mut self,
-        cmd: vk::CommandBuffer,
+        pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
         scene: &ShadowScene,
         anchor: DVec3,
@@ -284,48 +152,26 @@ impl EntityShadowPipeline {
         }
 
         let bytes = bytemuck::cast_slice::<ShadowVertex, u8>(&self.verts);
-        self.vertex_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
-            .copy_from_slice(bytes);
+        self.vertex_buffers[frame].write(bytes);
 
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.camera_sets[frame], self.texture_set],
-            &[],
-        );
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame]], &[0]);
-        cmd.draw(self.verts.len() as u32, 1, 0, 0);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_groups(0, &[self.camera_sets[frame], self.texture_set]);
+        pass.set_vertex_buffer(0, self.vertex_buffers[frame].handle());
+        pass.draw(self.verts.len() as u32, 1, 0, 0);
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let mut alloc = allocator.lock().unwrap();
-        for buffer in self
-            .camera_buffers
-            .drain(..)
-            .chain(self.vertex_buffers.drain(..))
-        {
-            device.destroy_buffer(buffer, None);
-        }
-        for allocation in self
-            .camera_allocations
-            .drain(..)
-            .chain(self.vertex_allocations.drain(..))
-            .chain([std::mem::take(&mut self.texture_allocation)])
-        {
-            alloc.free(allocation).ok();
-        }
-        drop(alloc);
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        util::destroy_buffers(device, &mut self.camera_buffers);
+        util::destroy_buffers(device, &mut self.vertex_buffers);
+        std::mem::take(&mut self.texture).destroy(device);
 
-        device.destroy_sampler(self.texture_sampler, None);
-        device.destroy_image_view(self.texture_view, None);
-        device.destroy_image(self.texture_image, None);
-        device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_descriptor_pool(self.descriptor_pool, None);
-        device.destroy_descriptor_set_layout(self.camera_layout, None);
-        device.destroy_descriptor_set_layout(self.texture_layout, None);
+        self.texture_sampler.destroy(device);
+        self.pipeline.destroy(device);
+        self.pipeline_layout.destroy(device);
+        util::destroy_bind_groups(device, self.camera_sets.drain(..));
+        self.texture_set.destroy(device);
+        self.camera_layout.destroy(device);
+        self.texture_layout.destroy(device);
     }
 }
 
@@ -451,13 +297,10 @@ fn bounds(boxes: &[LocalBox]) -> Option<LocalBox> {
 }
 
 fn load_shadow_texture(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
+    device: &rhi::backend::Device,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
-) -> (vk::Image, vk::ImageView, Allocation) {
+) -> rhi::backend::Texture {
     let key = "minecraft/textures/misc/shadow.png";
     let path = resolve_asset_path(jar_assets_dir, asset_index, key);
     let (pixels, w, h) = if let Some((p, width, height)) = util::load_png(&path) {
@@ -481,166 +324,32 @@ fn load_shadow_texture(
         (p, 64, 64)
     };
 
-    let (image, view, allocation) =
-        util::create_gpu_image(device, allocator, w, h, "entity_shadow_texture");
-    let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, &pixels, "entity_shadow_staging");
-
-    util::upload_image(device, queue, command_pool, staging_buf, image, w, h);
-
-    device.destroy_buffer(staging_buf, None);
-    let _ = allocator.lock().unwrap().free(staging_alloc);
-
-    (image, view, allocation)
+    util::create_sampled_texture(device, "entity_shadow_texture", &pixels, w, h)
 }
 
 fn create_pipeline(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-) -> vk::Pipeline {
-    let vert_spv = shader::include_spirv!("entity_shadow.vert.spv");
-    let frag_spv = shader::include_spirv!("entity_shadow.frag.spv");
-
-    let vert_module = shader::create_shader_module(device, vert_spv);
-    let frag_module = shader::create_shader_module(device, frag_spv);
-
-    let stages = [
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Vertex,
-            module: vert_module,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Fragment,
-            module: frag_module,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-    ];
-
-    let binding_desc = vk::VertexInputBindingDescription {
-        binding: 0,
-        stride: size_of::<ShadowVertex>() as u32,
-        input_rate: vk::VertexInputRate::Vertex,
-    };
-
-    let attr_descs = [
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32B32Sfloat,
-            offset: 0,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R32G32B32A32Sfloat,
-            offset: 12,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 2,
-            binding: 0,
-            format: vk::Format::R32G32Sfloat,
-            offset: 28,
-        },
-    ];
-
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo {
-        vertex_binding_description_count: 1,
-        vertex_binding_descriptions: &binding_desc,
-        vertex_attribute_description_count: attr_descs.len() as u32,
-        vertex_attribute_descriptions: attr_descs.as_ptr(),
-        ..Default::default()
-    };
-
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
-        topology: vk::PrimitiveTopology::TriangleList,
-        ..Default::default()
-    };
-
-    let viewport_state = vk::PipelineViewportStateCreateInfo {
-        viewport_count: 1,
-        scissor_count: 1,
-        ..Default::default()
-    };
-
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo {
-        polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeFlags::None,
-        front_face: vk::FrontFace::CounterClockwise,
-        line_width: 1.0,
-        ..Default::default()
-    };
-
-    let multisampling = vk::PipelineMultisampleStateCreateInfo {
-        rasterization_samples: vk::SampleCountFlags::Type1,
-        ..Default::default()
-    };
-
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
-        depth_test_enable: vk::TRUE,
-        depth_write_enable: vk::FALSE,
-        depth_compare_op: vk::CompareOp::LessOrEqual,
-        ..Default::default()
-    };
-
-    let blend_attachment = vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::TRUE,
-        src_color_blend_factor: vk::BlendFactor::SrcAlpha,
-        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
-        color_blend_op: vk::BlendOp::Add,
-        src_alpha_blend_factor: vk::BlendFactor::One,
-        dst_alpha_blend_factor: vk::BlendFactor::Zero,
-        alpha_blend_op: vk::BlendOp::Add,
-        color_write_mask: vk::ColorComponentFlags::RGBA,
-    };
-
-    let color_blending = vk::PipelineColorBlendStateCreateInfo {
-        attachment_count: 1,
-        attachments: &blend_attachment,
-        ..Default::default()
-    };
-
-    let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
-    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
-        dynamic_state_count: dynamic_states.len() as u32,
-        dynamic_states: dynamic_states.as_ptr(),
-        ..Default::default()
-    };
-
-    let pipeline_info = [vk::GraphicsPipelineCreateInfo {
-        stage_count: stages.len() as u32,
-        stages: stages.as_ptr(),
-        vertex_input_state: &vertex_input,
-        input_assembly_state: &input_assembly,
-        viewport_state: &viewport_state,
-        rasterization_state: &rasterizer,
-        multisample_state: &multisampling,
-        depth_stencil_state: &depth_stencil,
-        color_blend_state: &color_blending,
-        dynamic_state: &dynamic_state,
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
+) -> rhi::backend::RenderPipeline {
+    rhi::backend::create_render_pipeline(
+        device,
+        targets,
         layout,
-        render_pass,
-        subpass: 0,
-        ..Default::default()
-    }];
-
-    let mut pipelines = vec![vk::Pipeline::null()];
-    device
-        .create_graphics_pipelines(
-            vk::PipelineCache::null(),
-            &pipeline_info,
-            None,
-            &mut pipelines,
-        )
-        .expect("failed to create entity shadow graphics pipeline");
-
-    device.destroy_shader_module(vert_module, None);
-    device.destroy_shader_module(frag_module, None);
-
-    pipelines[0]
+        &rhi::RenderPipelineDesc {
+            depth: Some(rhi::DepthState::READ_ONLY),
+            blend: Some(rhi::BlendState::OVER_REPLACE_ALPHA),
+            ..rhi::RenderPipelineDesc::new(
+                "entity shadow",
+                shader::include_shader!("entity_shadow.vert"),
+                shader::include_shader!("entity_shadow.frag"),
+                &[rhi::vertex_buffer!(
+                    ShadowVertex,
+                    [Float32x3, Float32x4, Float32x2]
+                )],
+            )
+        },
+    )
 }
 
 #[cfg(test)]

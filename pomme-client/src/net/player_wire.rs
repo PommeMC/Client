@@ -7,6 +7,7 @@ use crossbeam_channel::Sender;
 use pomme_protocol::codec::DecodeResult;
 use pomme_protocol::player::{self, PlayerPacket};
 
+use super::handler::send_ordered;
 use super::{NetworkEvent, Weather};
 use crate::attribute::{
     AttributeKind, AttributeModifier, AttributeModifierOperation, AttributeSnapshot,
@@ -29,7 +30,7 @@ pub(super) fn handle_raw_player_packet(
     Some(
         super::read_raw_packet(packet_id, payload, player::read)?.map(|packet| {
             if let Some(event) = event(packet) {
-                let _ = event_tx.try_send(event);
+                send_ordered(event_tx, event);
             }
         }),
     )

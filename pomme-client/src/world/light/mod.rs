@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use azalea_block::BlockState;
 use block::BlockLightEngine;
-use data::{DataLayer, LAYER_BYTES};
+pub(crate) use data::DataLayer;
+use data::LAYER_BYTES;
 use engine::LightEngine;
 use sky::SkyLightEngine;
 use sources::ChunkSkyLightSources;
@@ -71,7 +72,7 @@ pub(crate) fn has_different_light_properties(
 /// mirroring vanilla `readSectionList`: present bytes, explicitly empty, or
 /// untouched.
 pub(crate) enum SectionEntry {
-    Data(Box<[u8; LAYER_BYTES]>),
+    Data(Arc<[u8; LAYER_BYTES]>),
     Empty,
     Skip,
 }
@@ -80,7 +81,7 @@ impl SectionEntry {
     /// The layer to queue, or `None` for untouched sections.
     fn to_layer(&self) -> Option<DataLayer> {
         match self {
-            SectionEntry::Data(bytes) => Some(DataLayer::from_bytes(bytes.clone())),
+            SectionEntry::Data(bytes) => Some(DataLayer::from_bytes(Arc::clone(bytes))),
             SectionEntry::Empty => Some(DataLayer::new()),
             SectionEntry::Skip => None,
         }
@@ -122,9 +123,9 @@ pub(crate) fn section_entries(
             if y_mask.get(i) {
                 let entry = match updates.get(next) {
                     Some(bytes) if bytes.len() == LAYER_BYTES => {
-                        let mut data = Box::new([0u8; LAYER_BYTES]);
+                        let mut data = [0u8; LAYER_BYTES];
                         data.copy_from_slice(bytes);
-                        SectionEntry::Data(data)
+                        SectionEntry::Data(Arc::new(data))
                     }
                     _ => SectionEntry::Skip,
                 };
@@ -330,16 +331,12 @@ impl LevelLightEngine {
         let mut sky_sections = vec![None; count];
         let mut block_sections = vec![None; count];
         for (index, slot) in block_sections.iter_mut().enumerate() {
-            *slot = self
-                .block
-                .storage
-                .layer(key_at(index))
-                .map(DataLayer::to_bytes);
+            *slot = self.block.storage.layer(key_at(index)).cloned();
         }
         let mut sky_top_section = None;
         if let Some(sky) = &mut self.sky {
             for (index, slot) in sky_sections.iter_mut().enumerate() {
-                *slot = sky.storage.layer(key_at(index)).map(DataLayer::to_bytes);
+                *slot = sky.storage.layer(key_at(index)).cloned();
             }
             sky_top_section = sky
                 .sky
@@ -561,7 +558,7 @@ impl LevelLightEngine {
                 LayerKind::Block => &mut column.block_sections[index as usize],
                 LayerKind::Sky => &mut column.sky_sections[index as usize],
             };
-            *slot = storage.layer(key).map(DataLayer::to_bytes);
+            *slot = storage.layer(key).cloned();
             // A column's top only moves when one of its own sections
             // changed, so refreshing it per changed key keeps it current.
             if let Some(sky) = sky {

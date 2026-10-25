@@ -4,6 +4,7 @@ use azalea_inventory::ItemStack;
 use glam::DVec3;
 
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
+use crate::entity::wrap_degrees;
 use crate::mob_effect::ActiveMobEffects;
 use crate::position::BlockPos;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -435,14 +436,31 @@ pub struct AttackIndicatorState {
     /// Vanilla `getAttackStrengthScale(0.0)`.
     pub scale: f32,
     pub show_full: bool,
-    pub main_hand_right: bool,
 }
 
 const HOTBAR_W: f32 = 182.0;
 const HOTBAR_H: f32 = 22.0;
 const SELECTION_W: f32 = 24.0;
-const SELECTION_H: f32 = 24.0;
+const SELECTION_H: f32 = 23.0;
 const SLOT_STRIDE: f32 = 20.0;
+
+/// Vanilla `Hud.extractItemHotbar`'s offhand slot, on the offhand arm's side
+/// of the hotbar: its sprite, the sprite's x and the item's x.
+fn offhand_slot(cx: f32, gs: f32, main_hand_right: bool) -> (SpriteId, f32, f32) {
+    if main_hand_right {
+        (
+            SpriteId::HotbarOffhandLeft,
+            (cx - (91.0 + 29.0) * gs).round(),
+            (cx - (91.0 + 26.0) * gs).round(),
+        )
+    } else {
+        (
+            SpriteId::HotbarOffhandRight,
+            (cx + 91.0 * gs).round(),
+            (cx + (91.0 + 10.0) * gs).round(),
+        )
+    }
+}
 const ICON_SIZE: f32 = 9.0;
 const ICON_STRIDE: f32 = 8.0;
 const XP_BAR_W: f32 = 182.0;
@@ -594,6 +612,8 @@ pub fn build_hud(
     bar: ContextualBarKind<'_>,
     game_mode: u8,
     hotbar: &[ItemStack],
+    offhand: &ItemStack,
+    main_hand_right: bool,
     tool_highlight_timer: u32,
     action_bar: Option<(&[TextSpan], u64)>,
     spans_width_fn: super::common::SpansWidthFn<'_>,
@@ -651,23 +671,35 @@ pub fn build_hud(
         });
 
         let item_size = 16.0 * gs;
+        let item_y = (hotbar_y + 3.0 * gs).round();
         for (i, item) in hotbar.iter().enumerate().take(9) {
             if let ItemStack::Present(data) = item {
                 let ix = (hotbar_x + 3.0 * gs + i as f32 * SLOT_STRIDE * gs).round();
-                let iy = (hotbar_y + 3.0 * gs).round();
-                push_item_icon(elements, ix, iy, item_size, gs, data);
+                push_item_icon(elements, ix, item_y, item_size, gs, data);
             }
+        }
+
+        if let ItemStack::Present(data) = offhand {
+            let (sprite, sprite_x, item_x) = offhand_slot(cx, gs, main_hand_right);
+            elements.push(MenuElement::Image {
+                x: sprite_x,
+                y: (screen_h - 23.0 * gs).round(),
+                w: 29.0 * gs,
+                h: 24.0 * gs,
+                sprite,
+                tint: WHITE,
+            });
+            push_item_icon(elements, item_x, item_y, item_size, gs, data);
         }
     }
 
     // Vanilla `Hud.extractItemHotbar`: 18x18 indicator on the main-hand side
     // of the hotbar, bottom-up fill, plain alpha (no invert, no full-charge
     // sprite). Spectators get the SpectatorGui hotbar instead
-    // (`extractHotbarAndDecorations`). TODO: `skin_main_hand_right` isn't
-    // sent in ClientInformation yet (hardcoded Right in net/connection.rs).
+    // (`extractHotbarAndDecorations`).
     if game_mode != 3 && attack.mode == AttackIndicatorMode::Hotbar && attack.scale < 1.0 {
         let y = (screen_h - 20.0 * gs).round();
-        let x = if attack.main_hand_right {
+        let x = if main_hand_right {
             (cx + (91.0 + 6.0) * gs).round()
         } else {
             (cx - (91.0 + 22.0) * gs).round()
@@ -1589,9 +1621,6 @@ pub fn build_debug_overlay(
     let bz = pos.z.floor() as i32;
     let cx = bx.div_euclid(16);
     let cz = bz.div_euclid(16);
-    let facing = facing_name(info.y_rot_deg);
-    let y_rot_deg = info.y_rot_deg;
-    let x_rot_deg = info.x_rot_deg;
 
     let mut left_lines: Vec<String> = vec![
         format!("Pomme ({}fps)", info.fps),
@@ -1605,7 +1634,7 @@ pub fn build_debug_overlay(
             cx,
             cz
         ),
-        format!("Facing: {} ({:.1} / {:.1})", facing, y_rot_deg, x_rot_deg),
+        facing_line(info.y_rot_deg, info.x_rot_deg),
         String::new(),
         format!("Chunks: {} loaded", info.chunk_count),
         format!(
@@ -1693,20 +1722,65 @@ fn push_debug_lines(
     }
 }
 
-fn facing_name(y_rot_deg: f32) -> &'static str {
-    let deg = y_rot_deg.rem_euclid(360.0) as u32;
-    match deg {
-        315..=359 | 0..=44 => "South (+Z)",
-        45..=134 => "West (-X)",
-        135..=224 => "North (-Z)",
-        225..=314 => "East (+X)",
-        _ => "South (+Z)",
+/// Vanilla `DebugEntryPosition`: the direction, which way it points, and
+/// both angles wrapped to [-180, 180).
+fn facing_line(y_rot_deg: f32, x_rot_deg: f32) -> String {
+    let (direction, towards) = facing(y_rot_deg);
+    format!(
+        "Facing: {direction} ({towards}) ({:.1} / {:.1})",
+        wrap_degrees(y_rot_deg),
+        wrap_degrees(x_rot_deg)
+    )
+}
+
+/// Vanilla `Direction.fromYRot`.
+fn facing(y_rot_deg: f32) -> (&'static str, &'static str) {
+    match ((y_rot_deg / 90.0 + 0.5).floor() as i32) & 3 {
+        0 => ("south", "Towards positive Z"),
+        1 => ("west", "Towards negative X"),
+        2 => ("north", "Towards negative Z"),
+        _ => ("east", "Towards positive X"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn facing_angles_wrap_like_vanilla() {
+        assert_eq!(
+            facing_line(400.0, 0.0),
+            "Facing: south (Towards positive Z) (40.0 / 0.0)"
+        );
+        assert_eq!(
+            facing_line(-190.0, 90.0),
+            "Facing: north (Towards negative Z) (170.0 / 90.0)"
+        );
+        assert_eq!(facing(44.9).0, "south");
+        assert_eq!(facing(45.0).0, "west");
+    }
+
+    #[test]
+    fn offhand_slot_sits_on_the_offhand_arms_side() {
+        let cx = 400.0;
+        assert_eq!(
+            offhand_slot(cx, 1.0, true),
+            (SpriteId::HotbarOffhandLeft, 280.0, 283.0)
+        );
+        assert_eq!(
+            offhand_slot(cx, 1.0, false),
+            (SpriteId::HotbarOffhandRight, 491.0, 501.0)
+        );
+        assert_eq!(
+            offhand_slot(cx, 2.0, true),
+            (SpriteId::HotbarOffhandLeft, 160.0, 166.0)
+        );
+        assert_eq!(
+            offhand_slot(cx, 2.0, false),
+            (SpriteId::HotbarOffhandRight, 582.0, 602.0)
+        );
+    }
 
     #[test]
     fn gui_scale_matches_window_calculate_scale() {

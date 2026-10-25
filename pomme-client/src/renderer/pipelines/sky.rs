@@ -1,14 +1,11 @@
 use std::f32::consts::{PI, TAU};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 use glam::{FloatExt, Vec3};
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
 
-use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::assets::AssetIndex;
 use crate::renderer::camera::Camera;
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::renderer::{rhi, shader, util};
 
 const STAR_COUNT: u32 = 1500;
 const SUN_SIZE: f32 = 30.0;
@@ -241,19 +238,16 @@ impl SkyState {
 }
 
 pub struct SkyPipeline {
-    pipeline: vk::Pipeline,
-    overlay_pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    ubo_layout: vk::DescriptorSetLayout,
-    tex_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    ubo_sets: Vec<vk::DescriptorSet>,
-    sun_set: vk::DescriptorSet,
-    moon_sets: [vk::DescriptorSet; 8],
-    ubo_buffers: Vec<vk::Buffer>,
-    ubo_allocations: Vec<Allocation>,
-    vertex_buffer: vk::Buffer,
-    vertex_allocation: Allocation,
+    pipeline: rhi::backend::RenderPipeline,
+    overlay_pipeline: rhi::backend::RenderPipeline,
+    pipeline_layout: rhi::backend::PipelineLayout,
+    ubo_layout: rhi::backend::BindGroupLayout,
+    tex_layout: rhi::backend::BindGroupLayout,
+    ubo_sets: Vec<rhi::backend::BindGroup>,
+    sun_set: rhi::backend::BindGroup,
+    moon_sets: [rhi::backend::BindGroup; 8],
+    ubo_buffers: Vec<rhi::backend::Buffer>,
+    vertex_buffer: rhi::backend::Buffer,
     top_disc_offset: u32,
     top_disc_count: u32,
     star_offset: u32,
@@ -264,141 +258,47 @@ pub struct SkyPipeline {
     sunrise_count: u32,
     _dark_disc_offset: u32,
     _dark_disc_count: u32,
-    sun_image: vk::Image,
-    sun_view: vk::ImageView,
-    sun_sampler: vk::Sampler,
-    sun_allocation: Allocation,
-    moon_images: [vk::Image; 8],
-    moon_views: [vk::ImageView; 8],
-    moon_sampler: vk::Sampler,
-    moon_allocations: Vec<Allocation>,
+    sun: rhi::backend::Texture,
+    sampler: rhi::backend::Sampler,
+    moons: Vec<rhi::backend::Texture>,
 }
 
 impl SkyPipeline {
     pub fn new(
-        device: &vk::Device,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        render_pass: vk::RenderPass,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
     ) -> Self {
-        let ubo_layout = util::create_descriptor_set_layout(
+        let ubo_layout =
+            rhi::backend::create_bind_group_layout(device, util::VERTEX_FRAGMENT_UNIFORM);
+        let tex_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
+        let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
-            vk::DescriptorType::UniformBuffer,
-            vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
+            &[ubo_layout, tex_layout],
+            Some(rhi::PushConstants {
+                visibility: rhi::ShaderStages::VERTEX_FRAGMENT,
+                size: 4,
+            }),
         );
-        let tex_layout = util::create_descriptor_set_layout(
+
+        let (pipeline, overlay_pipeline) = create_pipelines(device, targets, pipeline_layout);
+
+        let (ubo_sets, ubo_buffers) = util::create_uniform_sets(
             device,
-            vk::DescriptorType::CombinedImageSampler,
-            vk::ShaderStageFlags::Fragment,
+            ubo_layout,
+            std::mem::size_of::<SkyUniform>() as u64,
+            "sky_uniform",
         );
 
-        let push_range = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
-            offset: 0,
-            size: 4,
-        };
-        let layouts = [ubo_layout, tex_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: layouts.len() as u32,
-            set_layouts: layouts.as_ptr(),
-            push_constant_range_count: 1,
-            push_constant_ranges: &push_range,
-            ..Default::default()
-        };
-        let pipeline_layout = device
-            .create_pipeline_layout(&layout_info, None)
-            .expect("failed to create sky pipeline layout");
-
-        let (pipeline, overlay_pipeline) = create_pipelines(device, render_pass, pipeline_layout);
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 9, // 1 sun + 8 moon phases
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: (MAX_FRAMES_IN_FLIGHT + 9) as u32,
-            pool_size_count: pool_sizes.len() as u32,
-            pool_sizes: pool_sizes.as_ptr(),
-            ..Default::default()
-        };
-        let descriptor_pool = device
-            .create_descriptor_pool(&pool_info, None)
-            .expect("failed to create sky descriptor pool");
-
-        let ubo_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| ubo_layout).collect();
-        let ubo_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: ubo_layouts.len() as u32,
-            set_layouts: ubo_layouts.as_ptr(),
-            ..Default::default()
-        };
-        let mut ubo_sets = vec![vk::DescriptorSet::null(); ubo_layouts.len()];
-        device
-            .allocate_descriptor_sets(&ubo_alloc_info, &mut ubo_sets)
-            .expect("failed to allocate sky ubo sets");
-
-        let tex_layouts: Vec<_> = (0..9).map(|_| tex_layout).collect(); // 1 sun + 8 moon
-        let tex_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: tex_layouts.len() as u32,
-            set_layouts: tex_layouts.as_ptr(),
-            ..Default::default()
-        };
-        let mut tex_sets = vec![vk::DescriptorSet::null(); tex_layouts.len()];
-        device
-            .allocate_descriptor_sets(&tex_alloc_info, &mut tex_sets)
-            .expect("failed to allocate sky texture sets");
-        let sun_set = tex_sets[0];
-        let moon_sets: [vk::DescriptorSet; 8] = tex_sets[1..9].try_into().unwrap();
-
-        let mut ubo_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut ubo_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-
-        for &set in &ubo_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
-                device,
-                allocator,
-                std::mem::size_of::<SkyUniform>() as u64,
-                "sky_uniform",
-            );
-            let buffer_info = vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: std::mem::size_of::<SkyUniform>() as u64,
-            };
-            let write = vk::WriteDescriptorSet {
-                dst_set: set,
-                dst_binding: 0,
-                descriptor_type: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
-                buffer_info: &buffer_info,
-                ..Default::default()
-            };
-            device.update_descriptor_sets(&[write], &[]);
-            ubo_buffers.push(buf);
-            ubo_allocations.push(alloc);
-        }
-
-        let (sun_image, sun_view, sun_allocation) = load_celestial_texture(
+        let sun = util::load_asset_texture(
             device,
-            queue,
-            command_pool,
-            allocator,
             jar_assets_dir,
             asset_index,
             "minecraft/textures/environment/celestial/sun.png",
         );
-        let sun_sampler = unsafe { util::create_linear_sampler(device) };
-        bind_texture_set(device, sun_set, sun_view, sun_sampler);
+        let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR);
+        let sun_set = util::create_texture_group(device, tex_layout, sun.handle(), sampler);
 
         let moon_phase_paths = [
             "minecraft/textures/environment/celestial/moon/full_moon.png",
@@ -410,34 +310,21 @@ impl SkyPipeline {
             "minecraft/textures/environment/celestial/moon/first_quarter.png",
             "minecraft/textures/environment/celestial/moon/waxing_gibbous.png",
         ];
-        let moon_sampler = unsafe { util::create_linear_sampler(device) };
-        let mut moon_images = [vk::Image::null(); 8];
-        let mut moon_views = [vk::ImageView::null(); 8];
-        let mut moon_allocations = Vec::with_capacity(8);
+        let mut moons = Vec::with_capacity(8);
+        let mut moon_sets = [rhi::backend::BindGroup::default(); 8];
         for (i, &path) in moon_phase_paths.iter().enumerate() {
-            let (img, view, alloc) = load_celestial_texture(
-                device,
-                queue,
-                command_pool,
-                allocator,
-                jar_assets_dir,
-                asset_index,
-                path,
-            );
-            moon_images[i] = img;
-            moon_views[i] = view;
-            moon_allocations.push(alloc);
-            bind_texture_set(device, moon_sets[i], view, moon_sampler);
+            let moon = util::load_asset_texture(device, jar_assets_dir, asset_index, path);
+            moon_sets[i] = util::create_texture_group(device, tex_layout, moon.handle(), sampler);
+            moons.push(moon);
         }
 
         let geom = build_all_geometry();
         let vertex_bytes = bytemuck::cast_slice::<SkyVertex, u8>(&geom.vertices);
-        let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
+        let vertex_buffer = rhi::backend::Buffer::with_data(
             device,
-            allocator,
-            vertex_bytes,
-            vk::BufferUsageFlags::VertexBuffer,
             "sky_vertices",
+            vertex_bytes,
+            rhi::BufferUsages::VERTEX,
         );
 
         tracing::info!(
@@ -454,14 +341,11 @@ impl SkyPipeline {
             pipeline_layout,
             ubo_layout,
             tex_layout,
-            descriptor_pool,
             ubo_sets,
             sun_set,
             moon_sets,
             ubo_buffers,
-            ubo_allocations,
             vertex_buffer,
-            vertex_allocation,
             top_disc_offset: geom.top_disc_offset,
             top_disc_count: geom.top_disc_count,
             star_offset: geom.star_offset,
@@ -472,26 +356,19 @@ impl SkyPipeline {
             sunrise_count: geom.sunrise_count,
             _dark_disc_offset: geom.dark_disc_offset,
             _dark_disc_count: geom.dark_disc_count,
-            sun_image,
-            sun_view,
-            sun_sampler,
-            sun_allocation,
-            moon_images,
-            moon_views,
-            moon_sampler,
-            moon_allocations,
+            sun,
+            sampler,
+            moons,
         }
     }
 
     pub fn update_and_draw(
         &mut self,
-        device: &vk::Device,
-        cmd: vk::CommandBuffer,
+        pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
         camera: &Camera,
         sky: &SkyState,
     ) {
-        let _ = device;
         let day_tick = sky.day_tick();
 
         let t = (day_tick - 6000.0).rem_euclid(TICKS_PER_DAY) / TICKS_PER_DAY;
@@ -532,31 +409,25 @@ impl SkyPipeline {
         };
 
         let bytes = bytemuck::bytes_of(&uniform);
-        self.ubo_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
-            .copy_from_slice(bytes);
+        self.ubo_buffers[frame].write(bytes);
 
-        let push_stages = vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment;
-        let push_mode = |cmd: vk::CommandBuffer, mode: u32| {
-            cmd.push_constants(
-                self.pipeline_layout,
-                push_stages,
+        let push_mode = |pass: &rhi::backend::RenderPassEncoder, mode: u32| {
+            pass.set_push_constants(
+                rhi::ShaderStages::VERTEX_FRAGMENT,
                 0,
                 bytemuck::bytes_of(&mode),
             );
         };
+        let bind = |pass: &mut rhi::backend::RenderPassEncoder,
+                    pipeline: rhi::backend::RenderPipeline| {
+            pass.set_pipeline(&pipeline);
+            pass.set_vertex_buffer(0, self.vertex_buffer.handle());
+            pass.set_bind_groups(0, &[self.ubo_sets[frame], self.sun_set]);
+        };
 
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.ubo_sets[frame], self.sun_set],
-            &[],
-        );
-
-        push_mode(cmd, 0);
-        cmd.draw(self.top_disc_count, 1, self.top_disc_offset, 0);
+        bind(pass, self.pipeline);
+        push_mode(pass, 0);
+        pass.draw(self.top_disc_count, 1, self.top_disc_offset, 0);
 
         // The chunk-load benchmark's top-down view keeps the sky backdrop but drops
         // the sun, moon, stars, and sunrise glow so only terrain reads.
@@ -565,98 +436,55 @@ impl SkyPipeline {
         }
 
         if sunrise_argb[3] > 0.001 {
-            push_mode(cmd, 5);
-            cmd.draw(self.sunrise_count, 1, self.sunrise_offset, 0);
+            push_mode(pass, 5);
+            pass.draw(self.sunrise_count, 1, self.sunrise_offset, 0);
         }
 
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.overlay_pipeline);
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.ubo_sets[frame], self.sun_set],
-            &[],
-        );
+        bind(pass, self.overlay_pipeline);
+        push_mode(pass, 2);
+        pass.draw(6, 1, self.sun_offset, 0);
 
-        push_mode(cmd, 2);
-        cmd.draw(6, 1, self.sun_offset, 0);
-
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            1,
-            &[self.moon_sets[moon_phase_idx]],
-            &[],
-        );
-        push_mode(cmd, 3);
-        cmd.draw(6, 1, self.moon_offset, 0);
+        pass.set_bind_group(1, self.moon_sets[moon_phase_idx]);
+        push_mode(pass, 3);
+        pass.draw(6, 1, self.moon_offset, 0);
 
         if star_brightness > 0.01 {
-            push_mode(cmd, 1);
-            cmd.draw(self.star_count, 1, self.star_offset, 0);
+            push_mode(pass, 1);
+            pass.draw(self.star_count, 1, self.star_offset, 0);
         }
     }
 
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline(self.overlay_pipeline, None);
-        let (p, o) = create_pipelines(device, render_pass, self.pipeline_layout);
+    pub fn recreate_pipeline(
+        &mut self,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
+    ) {
+        self.pipeline.destroy(device);
+        self.overlay_pipeline.destroy(device);
+        let (p, o) = create_pipelines(device, targets, self.pipeline_layout);
         self.pipeline = p;
         self.overlay_pipeline = o;
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let mut alloc = allocator.lock().unwrap();
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            device.destroy_buffer(self.ubo_buffers[i], None);
-            alloc
-                .free(std::mem::replace(&mut self.ubo_allocations[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        util::destroy_buffers(device, &mut self.ubo_buffers);
+        std::mem::take(&mut self.vertex_buffer).destroy(device);
+
+        self.sampler.destroy(device);
+        std::mem::take(&mut self.sun).destroy(device);
+
+        for moon in self.moons.drain(..) {
+            moon.destroy(device);
         }
 
-        device.destroy_buffer(self.vertex_buffer, None);
-        alloc
-            .free(std::mem::replace(&mut self.vertex_allocation, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
-
-        let mut destroy_texture =
-            |view: &mut vk::ImageView, image: &mut vk::Image, allocation: &mut Allocation| {
-                device.destroy_image_view(*view, None);
-                alloc
-                    .free(std::mem::replace(allocation, unsafe { std::mem::zeroed() }))
-                    .ok();
-                device.destroy_image(*image, None);
-            };
-
-        device.destroy_sampler(self.sun_sampler, None);
-        destroy_texture(
-            &mut self.sun_view,
-            &mut self.sun_image,
-            &mut self.sun_allocation,
-        );
-
-        device.destroy_sampler(self.moon_sampler, None);
-        for i in 0..8 {
-            destroy_texture(
-                &mut self.moon_views[i],
-                &mut self.moon_images[i],
-                &mut self.moon_allocations[i],
-            );
-        }
-
-        drop(alloc);
-
-        device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline(self.overlay_pipeline, None);
-        device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_descriptor_pool(self.descriptor_pool, None);
-        device.destroy_descriptor_set_layout(self.ubo_layout, None);
-        device.destroy_descriptor_set_layout(self.tex_layout, None);
+        self.pipeline.destroy(device);
+        self.overlay_pipeline.destroy(device);
+        self.pipeline_layout.destroy(device);
+        util::destroy_bind_groups(device, self.ubo_sets.drain(..));
+        self.sun_set.destroy(device);
+        util::destroy_bind_groups(device, self.moon_sets);
+        self.ubo_layout.destroy(device);
+        self.tex_layout.destroy(device);
     }
 }
 
@@ -980,225 +808,31 @@ fn build_sunrise_fan(verts: &mut Vec<SkyVertex>) {
     }
 }
 
-fn load_celestial_texture(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    key: &str,
-) -> (vk::Image, vk::ImageView, Allocation) {
-    let path = resolve_asset_path(jar_assets_dir, asset_index, key);
-    let (pixels, w, h) = util::load_png(&path).unwrap_or_else(|| {
-        tracing::warn!("Failed to load {key}, using fallback");
-        (vec![255u8; 16 * 16 * 4], 16, 16)
-    });
-
-    let (image, view, allocation) = util::create_gpu_image(device, allocator, w, h, key);
-    let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, &pixels, &format!("{key}_staging"));
-
-    util::upload_image(device, queue, command_pool, staging_buf, image, w, h);
-
-    device.destroy_buffer(staging_buf, None);
-    allocator.lock().unwrap().free(staging_alloc).ok();
-
-    tracing::info!("Sky: loaded {key} ({w}x{h})");
-    (image, view, allocation)
-}
-
-fn bind_texture_set(
-    device: &vk::Device,
-    set: vk::DescriptorSet,
-    view: vk::ImageView,
-    sampler: vk::Sampler,
-) {
-    let image_info = vk::DescriptorImageInfo {
-        sampler,
-        image_view: view,
-        image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-    };
-    let write = vk::WriteDescriptorSet {
-        dst_set: set,
-        dst_binding: 0,
-        descriptor_type: vk::DescriptorType::CombinedImageSampler,
-        descriptor_count: 1,
-        image_info: &image_info,
-        ..Default::default()
-    };
-    device.update_descriptor_sets(&[write], &[]);
-}
-
 fn create_pipelines(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-) -> (vk::Pipeline, vk::Pipeline) {
-    let vert_spv = shader::include_spirv!("sky.vert.spv");
-    let frag_spv = shader::include_spirv!("sky.frag.spv");
-
-    let vert_module = shader::create_shader_module(device, vert_spv);
-    let frag_module = shader::create_shader_module(device, frag_spv);
-
-    let stages = [
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Vertex,
-            module: vert_module,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Fragment,
-            module: frag_module,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-    ];
-
-    let binding_descs = [vk::VertexInputBindingDescription {
-        binding: 0,
-        stride: std::mem::size_of::<SkyVertex>() as u32,
-        input_rate: vk::VertexInputRate::Vertex,
-    }];
-
-    let attr_descs = [
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32B32Sfloat,
-            offset: 0,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R32G32Sfloat,
-            offset: 12,
-        },
-    ];
-
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo {
-        vertex_binding_description_count: binding_descs.len() as u32,
-        vertex_binding_descriptions: binding_descs.as_ptr(),
-        vertex_attribute_description_count: attr_descs.len() as u32,
-        vertex_attribute_descriptions: attr_descs.as_ptr(),
-        ..Default::default()
-    };
-
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
-        topology: vk::PrimitiveTopology::TriangleList,
-        ..Default::default()
-    };
-
-    let viewport_state = vk::PipelineViewportStateCreateInfo {
-        viewport_count: 1,
-        scissor_count: 1,
-        ..Default::default()
-    };
-
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo {
-        polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeFlags::None,
-        front_face: vk::FrontFace::CounterClockwise,
-        line_width: 1.0,
-        ..Default::default()
-    };
-
-    let multisampling = vk::PipelineMultisampleStateCreateInfo {
-        rasterization_samples: vk::SampleCountFlags::Type1,
-        ..Default::default()
-    };
-
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
-        depth_test_enable: vk::FALSE,
-        depth_write_enable: vk::FALSE,
-        ..Default::default()
-    };
-
-    let translucent_blend = vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::TRUE,
-        src_color_blend_factor: vk::BlendFactor::SrcAlpha,
-        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
-        color_blend_op: vk::BlendOp::Add,
-        src_alpha_blend_factor: vk::BlendFactor::One,
-        dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
-        alpha_blend_op: vk::BlendOp::Add,
-        color_write_mask: vk::ColorComponentFlags::RGBA,
-    };
-
-    let overlay_blend = vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::TRUE,
-        src_color_blend_factor: vk::BlendFactor::SrcAlpha,
-        dst_color_blend_factor: vk::BlendFactor::One,
-        color_blend_op: vk::BlendOp::Add,
-        src_alpha_blend_factor: vk::BlendFactor::One,
-        dst_alpha_blend_factor: vk::BlendFactor::Zero,
-        alpha_blend_op: vk::BlendOp::Add,
-        color_write_mask: vk::ColorComponentFlags::RGBA,
-    };
-
-    let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
-    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
-        dynamic_state_count: dynamic_states.len() as u32,
-        dynamic_states: dynamic_states.as_ptr(),
-        ..Default::default()
-    };
-
-    let translucent_blending = vk::PipelineColorBlendStateCreateInfo {
-        attachment_count: 1,
-        attachments: &translucent_blend,
-        ..Default::default()
-    };
-    let overlay_blending = vk::PipelineColorBlendStateCreateInfo {
-        attachment_count: 1,
-        attachments: &overlay_blend,
-        ..Default::default()
-    };
-
-    let infos = [
-        vk::GraphicsPipelineCreateInfo {
-            stage_count: stages.len() as u32,
-            stages: stages.as_ptr(),
-            vertex_input_state: &vertex_input,
-            input_assembly_state: &input_assembly,
-            viewport_state: &viewport_state,
-            rasterization_state: &rasterizer,
-            multisample_state: &multisampling,
-            depth_stencil_state: &depth_stencil,
-            color_blend_state: &translucent_blending,
-            dynamic_state: &dynamic_state,
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
+) -> (rhi::backend::RenderPipeline, rhi::backend::RenderPipeline) {
+    let create = |label, blend| {
+        rhi::backend::create_render_pipeline(
+            device,
+            targets,
             layout,
-            render_pass,
-            subpass: 0,
-            ..Default::default()
-        },
-        vk::GraphicsPipelineCreateInfo {
-            stage_count: stages.len() as u32,
-            stages: stages.as_ptr(),
-            vertex_input_state: &vertex_input,
-            input_assembly_state: &input_assembly,
-            viewport_state: &viewport_state,
-            rasterization_state: &rasterizer,
-            multisample_state: &multisampling,
-            depth_stencil_state: &depth_stencil,
-            color_blend_state: &overlay_blending,
-            dynamic_state: &dynamic_state,
-            layout,
-            render_pass,
-            subpass: 0,
-            ..Default::default()
-        },
-    ];
-
-    let mut pipelines = [vk::Pipeline::null(), vk::Pipeline::null()];
-    device
-        .create_graphics_pipelines(vk::PipelineCache::null(), &infos, None, &mut pipelines)
-        .expect("failed to create sky pipelines");
-
-    device.destroy_shader_module(vert_module, None);
-    device.destroy_shader_module(frag_module, None);
-
-    (pipelines[0], pipelines[1])
+            &rhi::RenderPipelineDesc {
+                blend: Some(blend),
+                ..rhi::RenderPipelineDesc::new(
+                    label,
+                    shader::include_shader!("sky.vert"),
+                    shader::include_shader!("sky.frag"),
+                    &[rhi::vertex_buffer!(SkyVertex, [Float32x3, Float32x2])],
+                )
+            },
+        )
+    };
+    (
+        create("sky", rhi::BlendState::TRANSLUCENT),
+        create("sky overlay", rhi::BlendState::OVERLAY),
+    )
 }
 
 #[cfg(test)]

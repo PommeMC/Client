@@ -24,7 +24,9 @@ use crate::entity::components::{LookDirection, Position};
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
 use crate::player::LocalPlayer;
-use crate::player::interaction::{HitResult, InteractionState};
+use crate::player::interaction::{
+    HANDS, HitResult, InteractionHand, InteractionState, send_use_swing,
+};
 use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
 use crate::position::{BlockPos, ChunkPos};
@@ -146,6 +148,8 @@ pub struct GameState {
     pub death_screen_open: bool,
     pub show_death_screen: bool,
     pub hardcore: bool,
+    /// The login packet's `onlineMode`: the tab list shows player heads.
+    pub online_mode: bool,
     pub death_message: String,
     pub death_screen_ticks: u32,
     pub death_confirm: bool,
@@ -277,6 +281,7 @@ pub struct GameState {
     pub last_render_distance: u32,
     pub last_chat_visibility: crate::ui::chat::ChatVisibilitySetting,
     pub last_chat_colors: bool,
+    pub last_skin_options: crate::ui::menu::SkinOptions,
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
@@ -349,12 +354,14 @@ impl GameState {
         self.recent_sounds.push_back(sound.event_name().to_owned());
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         mesh_source: &impl MeshSource,
         resource_packs: Option<&ResourcePackManager>,
         render_distance: u32,
         singleplayer: bool,
         chat_options: crate::ui::chat::ChatOptions,
+        skin_options: crate::ui::menu::SkinOptions,
         block_definitions: Rc<BlockDefinitions>,
         protocol: i32,
     ) -> Self {
@@ -392,6 +399,7 @@ impl GameState {
             last_render_distance: render_distance,
             last_chat_visibility: chat_options.visibility,
             last_chat_colors: chat_options.colors,
+            last_skin_options: skin_options,
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
@@ -419,6 +427,7 @@ impl GameState {
             death_screen_open: false,
             show_death_screen: true,
             hardcore: false,
+            online_mode: false,
             death_message: String::new(),
             death_screen_ticks: 0,
             death_confirm: false,
@@ -1002,11 +1011,16 @@ impl GameState {
         ]);
     }
 
-    /// Whether the chat options `ClientInformation` carries differ from the
-    /// last ones sent.
-    fn chat_information_changed(&self, chat_options: crate::ui::chat::ChatOptions) -> bool {
+    /// Whether the chat or skin options `ClientInformation` carries differ
+    /// from the last ones sent.
+    fn client_options_changed(
+        &self,
+        chat_options: crate::ui::chat::ChatOptions,
+        skin_options: crate::ui::menu::SkinOptions,
+    ) -> bool {
         self.last_chat_visibility != chat_options.visibility
             || self.last_chat_colors != chat_options.colors
+            || self.last_skin_options != skin_options
     }
 
     pub fn sync_client_information(
@@ -1014,20 +1028,23 @@ impl GameState {
         connection: &ConnectionHandle,
         render_distance: u32,
         chat_options: crate::ui::chat::ChatOptions,
+        skin_options: crate::ui::menu::SkinOptions,
     ) {
         let render_changed = self.last_render_distance != render_distance;
-        let chat_changed = self.chat_information_changed(chat_options);
+        let options_changed = self.client_options_changed(chat_options, skin_options);
         self.last_render_distance = render_distance;
         self.last_chat_visibility = chat_options.visibility;
         self.last_chat_colors = chat_options.colors;
+        self.last_skin_options = skin_options;
         if render_changed {
             tracing::info!("Render distance changed to {render_distance}");
         }
-        if chat_changed {
+        if options_changed {
             tracing::info!(
                 visibility = ?chat_options.visibility,
                 colors = chat_options.colors,
-                "Chat client information changed"
+                skin = ?skin_options,
+                "Client information options changed"
             );
         }
 
@@ -1038,6 +1055,7 @@ impl GameState {
                     client_information: crate::net::client_information(
                         render_distance as u8,
                         chat_options,
+                        skin_options,
                     ),
                 },
             ));
@@ -1160,7 +1178,6 @@ impl GameState {
         let dropped = renderer.upload_chunk_meshes(&batch);
         self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
         self.clear_dropped_meshed(dropped);
-        self.recycle_meshes(batch);
     }
 
     /// The frame's ready meshes, stale ones dropped and the rest's CPU-side
@@ -1182,7 +1199,6 @@ impl GameState {
             let stale = self.chunk_store.get_chunk(&mesh.pos).is_none()
                 || self.mesh_columns.incarnation(mesh.pos) != Some(mesh.incarnation);
             if stale {
-                self.mesh_dispatcher.recycle(mesh);
                 continue;
             }
             if let Some(t) = &mesh.timing {
@@ -1204,13 +1220,6 @@ impl GameState {
         }
         self.last_update_phases.mesh_drain_ms = drain_start.elapsed().as_secs_f32() * 1000.0;
         batch
-    }
-
-    /// Returns the meshes' buffers to the worker pool for reuse.
-    pub fn recycle_meshes(&mut self, batch: Vec<ChunkMeshData>) {
-        for mesh in batch {
-            self.mesh_dispatcher.recycle(mesh);
-        }
     }
 
     /// Vanilla `SectionUpdateTracker.hasAllNeighbors` plus
@@ -1289,7 +1298,6 @@ impl GameState {
         self.apply_mesh_bookkeeping(&mut mesh);
         let dropped = renderer.upload_chunk_meshes(std::slice::from_ref(&mesh));
         self.clear_dropped_meshed(dropped);
-        self.mesh_dispatcher.recycle(mesh);
     }
 
     /// Drive the cave-cull occlusion walk: apply a finished async walk to the
@@ -1817,7 +1825,7 @@ pub fn start_chunk_load(
         core.menu.chunk_detail,
         BenchMode::Windowed {
             gpu: gfx.renderer.gpu_name().to_owned(),
-            vulkan: gfx.renderer.vulkan_version().to_owned(),
+            vulkan: gfx.renderer.api_version().to_owned(),
             resolution: (gfx.renderer.screen_width(), gfx.renderer.screen_height()),
         },
         *game.player.position,
@@ -1837,14 +1845,24 @@ fn apply_render_distance(
     rd: u32,
 ) {
     core.menu.set_bench_render_distance(rd);
-    game.sync_client_information(connection, rd, core.menu.chat_options);
+    game.sync_client_information(
+        connection,
+        rd,
+        core.menu.chat_options,
+        core.menu.skin_options(),
+    );
 }
 
 /// Puts back the render distance the chunk-load benchmark replaced, on the
 /// server too.
 fn end_chunk_load(core: &mut AppCore, game: &mut GameState, connection: &ConnectionHandle) {
     if let Some(rd) = core.menu.restore_bench_render_distance() {
-        game.sync_client_information(connection, rd, core.menu.chat_options);
+        game.sync_client_information(
+            connection,
+            rd,
+            core.menu.chat_options,
+            core.menu.skin_options(),
+        );
     }
 }
 
@@ -2451,11 +2469,9 @@ pub fn update_game(
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
     core.input.menu_capture = game.gui_open() || game.death_screen_open;
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
-    core.sync_game_dynamic_atlas(
-        game,
-        &mut gfx.renderer,
-        core.input.spectator && game.spectator.is_menu_active(),
-    );
+    let faces_shown = (core.input.spectator && game.spectator.is_menu_active())
+        || (game.online_mode && core.input.performing_action(input::Action::ViewPlayerList));
+    core.sync_game_dynamic_atlas(game, &mut gfx.renderer, faces_shown);
 
     // The F3+F4 switcher shows the mouse cursor while open.
     let switcher_open = game.game_mode_switcher.is_some();
@@ -2579,7 +2595,7 @@ pub fn update_game(
                 (visible, 0, hidden)
             }),
             gpu_name: gfx.renderer.gpu_name(),
-            vulkan_version: gfx.renderer.vulkan_version(),
+            vulkan_version: gfx.renderer.api_version(),
             screen_w: gfx.renderer.screen_width(),
             screen_h: gfx.renderer.screen_height(),
             timings: Some(hud::FrameTimings {
@@ -2760,7 +2776,6 @@ pub fn update_game(
             mode: core.menu.attack_indicator,
             scale,
             show_full,
-            main_hand_right: core.menu.main_hand_right(),
         };
         if crate::player::is_spectator(game.player.game_mode) {
             crate::ui::spectator_menu::build_spectator_menu(
@@ -2792,6 +2807,8 @@ pub fn update_game(
             bar,
             game.player.game_mode,
             game.player.inventory.hotbar_slots(),
+            game.player.inventory.offhand(),
+            core.menu.main_hand_right(),
             game.tool_highlight_timer,
             game.action_bar
                 .as_ref()
@@ -2842,8 +2859,8 @@ pub fn update_game(
             sw,
             &game.tab_list,
             &game.scoreboard,
+            game.online_mode,
             gs,
-            &|t, s| r.menu_text_width(t, s),
             &|spans, s| r.menu_spans_width(spans, s),
         );
     }
@@ -3637,7 +3654,7 @@ pub fn update_game(
             // arm swing; only the packet is sent here, as for the world drop.
             crate::ui::creative_inventory::CreativeAction::DropItem(item) => {
                 drop_creative_item(game, connection, item);
-                crate::player::interaction::send_use_swing(&connection.packet_tx);
+                send_use_swing(&connection.packet_tx, InteractionHand::MainHand);
             }
             crate::ui::creative_inventory::CreativeAction::DropSlot {
                 slot,
@@ -3646,7 +3663,7 @@ pub fn update_game(
             } => {
                 set_creative_slot(game, connection, slot, remaining);
                 drop_creative_item(game, connection, dropped);
-                crate::player::interaction::send_use_swing(&connection.packet_tx);
+                send_use_swing(&connection.packet_tx, InteractionHand::MainHand);
             }
             crate::ui::creative_inventory::CreativeAction::None => {}
         }
@@ -3771,8 +3788,8 @@ pub fn update_game(
         core.input.clear_just_pressed_actions();
     }
 
-    let swing_progress = game.interaction.get_swing_progress(partial_tick);
-    let use_anim = game.interaction.use_animation(partial_tick);
+    let swing_progress = HANDS.map(|hand| game.interaction.swing_progress(hand, partial_tick));
+    let use_anim = HANDS.map(|hand| game.interaction.use_animation(hand, partial_tick));
     let destroy_info = game.interaction.destroy_stage().map(|(pos, stage)| {
         let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
         (pos, stage, state)
@@ -4036,20 +4053,23 @@ pub fn update_game(
     } else {
         core.menu.render_distance
     };
-    let held_item = if benchmark_running {
-        None
+    let inventory = &game.player.inventory;
+    let main_stack = &inventory.hotbar_slots()[core.input.selected_slot() as usize];
+    let shown_hands = game
+        .interaction
+        .hands_to_render(main_stack.as_present(), inventory.offhand().as_present());
+    let held_items = if benchmark_running {
+        [None, None]
     } else {
-        match game.player.inventory.hotbar_slots()[core.input.selected_slot() as usize] {
-            azalea_inventory::ItemStack::Present(ref data) => {
+        let light = get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
+        let held = |stack: &azalea_inventory::ItemStack| match stack {
+            azalea_inventory::ItemStack::Present(data) => {
                 let name = crate::player::inventory::item_resource_name(data.kind);
-                (name != "air").then(|| {
-                    let light =
-                        get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
-                    (name, light, data.clone())
-                })
+                (name != "air").then(|| (name, light, data.clone()))
             }
             _ => None,
-        }
+        };
+        [held(main_stack), held(inventory.offhand())]
     };
     // Last element pushed: vanilla draws the saving indicator on its own
     // stratum above screens, with the GUI hidden (F1) included.
@@ -4075,7 +4095,9 @@ pub fn update_game(
         elements,
         swing_progress,
         use_anim,
-        held_item,
+        held_items,
+        core.menu.main_hand_right(),
+        shown_hands,
         game.scoreboard.member_team_color(&core.user.username),
         renders_first_person_hand(game),
         destroy_info,
@@ -4201,19 +4223,23 @@ pub fn update_game(
         PauseAction::None => {}
     }
 
+    // Vanilla `Options.broadcastOptions`, which sends only what changed.
+    let (chat_options, skin_options) = (core.menu.chat_options, core.menu.skin_options());
+    if core.menu.take_options_saved()
+        && (core.menu.render_distance != game.last_render_distance
+            || game.client_options_changed(chat_options, skin_options))
+    {
+        game.sync_client_information(
+            connection,
+            core.menu.render_distance,
+            chat_options,
+            skin_options,
+        );
+    }
     if game.options_from_game {
         // TODO: a resource-pack toggle's `menu.reload_assets` is only applied
         // once back on the title screen.
         core.apply_font_options(&mut gfx.renderer);
-        if core.menu.render_distance != game.last_render_distance
-            || game.chat_information_changed(core.menu.chat_options)
-        {
-            game.sync_client_information(
-                connection,
-                core.menu.render_distance,
-                core.menu.chat_options,
-            );
-        }
         if !core.menu.is_options_screen() {
             game.options_from_game = false;
             // Chat Settings opened from chat return to it, unpaused.

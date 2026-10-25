@@ -2,7 +2,8 @@
 
 #include "fog.glsl"
 
-layout(set = 1, binding = 0) uniform sampler2D entity_tex;
+layout(set = 1, binding = 0) uniform texture2D entity_tex;
+layout(set = 1, binding = 1) uniform sampler entity_tex_sampler;
 
 layout(location = 0) in vec2 v_tex_coords;
 layout(location = 1) in vec4 v_tint;
@@ -14,7 +15,7 @@ layout(location = 5) in float v_alpha_cutoff;
 layout(location = 0) out vec4 out_color;
 
 void main() {
-    vec4 color = texture(entity_tex, v_tex_coords);
+    vec4 color = texture(sampler2D(entity_tex, entity_tex_sampler), v_tex_coords);
     if (color.a < v_alpha_cutoff) discard;
     vec4 lit = color * v_tint;
     lit.rgb = mix(v_overlay.rgb, lit.rgb, v_overlay.a);

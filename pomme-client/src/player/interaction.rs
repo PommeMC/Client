@@ -3,16 +3,18 @@ use std::collections::HashMap;
 use azalea_block::BlockState;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
-    Consumable, Food, ItemUseAnimation, MinimumAttackCharge, UseEffects,
+    BlocksAttacks, ChargedProjectiles, Consumable, Equippable, Food, ItemUseAnimation,
+    KineticWeapon, MinimumAttackCharge, UseEffects,
 };
 use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
 use azalea_protocol::packets::game::ServerboundGamePacket;
-use azalea_protocol::packets::game::s_interact::InteractionHand;
+pub use azalea_protocol::packets::game::s_interact::InteractionHand;
 use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerAction};
 use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
 use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
-use azalea_registry::builtin::ItemKind;
+use azalea_registry::HolderSet;
+use azalea_registry::builtin::{EntityKind, ItemKind};
 use glam::{DVec3, Vec3};
 use pomme_protocol::wire;
 
@@ -28,7 +30,7 @@ use crate::physics::aabb::{self, Aabb, Axis, Face};
 use crate::physics::block_shape::{self, LocalBox};
 use crate::player::inventory::item_resource_name;
 use crate::position::BlockPos;
-use crate::renderer::pipelines::held_item::UseAnim;
+use crate::renderer::pipelines::held_item::{HandRenderSelection, UseAnim};
 use crate::tool::{LegacyMiningEnchantments, stack_tool, sword_instantly_mines_legacy};
 use crate::world::block::BlockStateTable;
 use crate::world::block::block_registry::BlockRegistry;
@@ -75,6 +77,35 @@ pub enum HitResult {
     Entity(EntityHitResult),
 }
 
+/// Vanilla `InteractionHand.values()`, the order `startUseItem` tries them.
+pub const HANDS: [InteractionHand; 2] = [InteractionHand::MainHand, InteractionHand::OffHand];
+
+/// What one hand holds for a right click: its stack and the block it places.
+#[derive(Debug, Clone, Copy)]
+pub struct HandItem<'a> {
+    pub stack: Option<&'a ItemStackData>,
+    pub place_block: Option<BlockState>,
+    pub worn: Worn<'a>,
+}
+
+/// What a hand's swappable equippable would swap with, vanilla
+/// `Equippable.swapWithEquipmentSlot`'s worn stack.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Worn<'a> {
+    pub stack: Option<&'a ItemStackData>,
+    /// Held by a `prevent_armor_change` enchantment outside creative.
+    pub locked: bool,
+}
+
+/// Vanilla `InteractionResult` as `startUseItem` reads it; `swing` is a
+/// `SwingSource.CLIENT` success.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum UseResult {
+    Success { swing: bool },
+    Pass,
+    Fail,
+}
+
 /// Last server-known state for a locally-predicted block change, matching
 /// vanilla `BlockStatePredictionHandler.ServerVerifiedState`.
 struct ServerVerifiedState {
@@ -83,10 +114,12 @@ struct ServerVerifiedState {
     player_pos: DVec3,
 }
 
-/// An in-progress main-hand item use (eating/drinking), vanilla
+/// An in-progress item use (eating/drinking), vanilla
 /// `LivingEntity.useItem` + `useItemRemaining` plus the `Consumable`
 /// component data resolved at start.
 struct ActiveUse {
+    /// Vanilla `LocalPlayer.usingItemHand`.
+    hand: InteractionHand,
     kind: ItemKind,
     anim: ItemUseAnimation,
     /// Bundle entries left to drop, predicted like vanilla's local
@@ -121,6 +154,7 @@ pub struct InteractionState {
     use_delay: u32,
     using_item: Option<ActiveUse>,
     swinging: bool,
+    swinging_arm: InteractionHand,
     swing_time: i32,
     attack_anim: f32,
     o_attack_anim: f32,
@@ -156,6 +190,7 @@ impl InteractionState {
             use_delay: 0,
             using_item: None,
             swinging: false,
+            swinging_arm: InteractionHand::MainHand,
             swing_time: 0,
             attack_anim: 0.0,
             o_attack_anim: 0.0,
@@ -281,7 +316,12 @@ impl InteractionState {
         Some((self.destroy_pos, stage.min(9)))
     }
 
-    pub fn get_swing_progress(&self, partial_tick: f32) -> f32 {
+    /// Vanilla `ItemInHandRenderer`'s attack value: `getAttackAnim` for the
+    /// swinging arm's hand, 0 for the other.
+    pub fn swing_progress(&self, hand: InteractionHand, partial_tick: f32) -> f32 {
+        if hand != self.swinging_arm {
+            return 0.0;
+        }
         let mut diff = self.attack_anim - self.o_attack_anim;
         if diff < 0.0 {
             diff += 1.0;
@@ -289,23 +329,24 @@ impl InteractionState {
         self.o_attack_anim + diff * partial_tick
     }
 
-    fn start_swing(&mut self) {
+    fn start_swing(&mut self, hand: InteractionHand) {
         if !self.swinging || self.swing_time >= SWING_DURATION / 2 || self.swing_time < 0 {
             self.swing_time = -1;
             self.swinging = true;
+            self.swinging_arm = hand;
         }
     }
 
     /// An attack or mining swing, always reported to the server.
     fn swing(&mut self, sender: &PacketSender) {
-        self.start_swing();
-        send_swing(sender);
+        self.start_swing(InteractionHand::MainHand);
+        send_swing(sender, InteractionHand::MainHand);
     }
 
     /// A swing from using an item or entity; see [`send_use_swing`].
-    fn swing_use(&mut self, sender: &PacketSender) {
-        self.start_swing();
-        send_use_swing(sender);
+    fn swing_use(&mut self, sender: &PacketSender, hand: InteractionHand) {
+        self.start_swing(hand);
+        send_use_swing(sender, hand);
     }
 
     fn update_swing(&mut self) {
@@ -391,16 +432,15 @@ impl InteractionState {
         creative: bool,
         food: u32,
         selected_slot: u8,
-        held_stack: Option<&ItemStackData>,
+        hands: [HandItem; 2],
         attributes: &AttributeMap,
         mob_effects: &ActiveMobEffects,
         eyes_in_water: bool,
         legacy_mining: LegacyMiningEnchantments,
-        place_block: Option<BlockState>,
-        hands_empty: bool,
         effects: &mut BreakEffects,
     ) -> Vec<BlockPos> {
         let mut dirty_chunks = Vec::new();
+        let held_stack = hands[0].stack;
 
         // Vanilla `Minecraft.tick`: `rightClickDelay` first, then
         // `gameMode.tick` syncs the carried slot.
@@ -449,8 +489,6 @@ impl InteractionState {
         } else if input.action_just_pressed(input::Action::Use)
             || (input.performing_action(input::Action::Use) && self.use_delay == 0)
         {
-            let sneaking = input.performing_action(input::Action::Sneak);
-            let suppress_block_use = sneaking && !hands_empty;
             let success = self.start_use_item(
                 block_registry,
                 sender,
@@ -460,12 +498,10 @@ impl InteractionState {
                 player_aabb,
                 eye_pos,
                 look,
-                place_block,
-                held_stack,
+                hands,
                 food,
                 creative,
-                sneaking,
-                suppress_block_use,
+                input.performing_action(input::Action::Sneak),
                 effects,
                 &mut dirty_chunks,
             );
@@ -714,9 +750,9 @@ impl InteractionState {
         self.swing(sender);
     }
 
-    /// Vanilla `Minecraft.startUseItem`: the block interaction goes first,
-    /// falling through to `use_item` when nothing on the block consumed the
-    /// click. Returns `true` if a use interaction was sent.
+    /// Vanilla `Minecraft.startUseItem`: each hand in turn tries the target
+    /// and then its own item, stopping at the first success; a failed block
+    /// use stops both. Returns `true` if a hand succeeded.
     #[allow(clippy::too_many_arguments)]
     fn start_use_item(
         &mut self,
@@ -728,12 +764,10 @@ impl InteractionState {
         player_aabb: Aabb,
         eye_pos: DVec3,
         look: LookDirection,
-        place_block: Option<BlockState>,
-        held_stack: Option<&ItemStackData>,
+        hands: [HandItem; 2],
         food: u32,
         creative: bool,
         sneaking: bool,
-        suppress_block_use: bool,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) -> bool {
@@ -743,81 +777,124 @@ impl InteractionState {
 
         self.use_delay = USE_DELAY;
 
-        // Vanilla `startUseItem` checks the entity target before block/item
-        // use and sends one interact packet; the server does the rest
-        // (trading, feeding, leads, the villager head-shake).
-        // TODO: consuming unconditionally is an approximation; vanilla falls
-        // through to `useItem` when the client-side `interactOn` returns PASS
-        // (e.g. eating while the crosshair rests on a passive mob).
-        if let Some(HitResult::Entity(hit)) = self.target {
-            sender.send_raw(wire::encode_interact(
-                hit.entity_id,
-                hit.location - hit.entity_pos,
-                sneaking,
-            ));
-            self.swing_use(sender);
-            return true;
-        }
-
-        let hit_block = if let Some(HitResult::Block(hit)) = self.target {
-            self.seq += 1;
-            sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
-                hand: InteractionHand::MainHand,
-                block_hit: BlockHit {
-                    block_pos: hit.block_pos.into(),
-                    direction: hit.face.into(),
-                    location: azalea_core::position::Vec3::new(
-                        hit.hit_point.x,
-                        hit.hit_point.y,
-                        hit.hit_point.z,
-                    ),
-                    // TODO: true when the ray started inside the shape, which
-                    // scaffolding placement reads.
-                    inside: false,
-                    world_border: false,
-                },
-                seq: self.seq,
-            }));
-            // A menu-opening block consumes the click (vanilla `useWithoutItem`)
-            // unless sneaking with something in hand.
-            // TODO: other interactive blocks (brewing stand, dispenser, ...)
-            // should consume the click here too once their menus render.
-            if !suppress_block_use {
-                let target =
-                    chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
-                if opens_menu(block_registry.block_state_data(target).id()) {
-                    return true;
+        // Vanilla `performUseItemOn`: sneaking with anything in either hand
+        // skips the block's own use.
+        let suppress_block_use = sneaking && hands.iter().any(|h| h.stack.is_some());
+        for (hand, held) in HANDS.into_iter().zip(hands) {
+            let result = match self.target {
+                // One interact packet; the server does the rest (trading,
+                // feeding, leads, the villager head-shake).
+                // TODO: succeeding unconditionally is an approximation;
+                // vanilla falls through to `useItem` when the client-side
+                // `interactOn` returns PASS (e.g. eating while the crosshair
+                // rests on a passive mob).
+                Some(HitResult::Entity(hit)) => {
+                    sender.send_raw(wire::encode_interact(
+                        hit.entity_id,
+                        hand as u32,
+                        hit.location - hit.entity_pos,
+                        sneaking,
+                    ));
+                    UseResult::Success { swing: true }
                 }
-            }
-            if place_block.is_some() {
-                self.swing_use(sender);
-                self.predict_place(
-                    block_registry.block_state_table(),
-                    hit,
-                    place_block,
+                Some(HitResult::Block(hit)) => self.use_item_on(
+                    block_registry,
+                    sender,
                     chunks,
+                    hit,
+                    hand,
+                    held.place_block,
+                    suppress_block_use,
                     player_pos,
                     player_aabb,
                     dirty_chunks,
-                );
+                ),
+                None => UseResult::Pass,
+            };
+            // A passing block use falls through to `useItem`, which is how
+            // eating at the ground works.
+            let result = match (result, held.stack) {
+                (UseResult::Fail, _) => return false,
+                (UseResult::Pass, Some(stack)) => self.use_item(
+                    sender, audio, chunks, player_pos, eye_pos, look, hand, stack, held.worn, food,
+                    creative, effects,
+                ),
+                (result, _) => result,
+            };
+            if let UseResult::Success { swing } = result {
+                if swing {
+                    self.swing_use(sender, hand);
+                }
                 return true;
             }
-            true
-        } else {
-            false
-        };
-
-        // A non-block item passes the block interaction, so vanilla falls
-        // through to `useItem` (this is how eating at the ground works).
-        self.use_item(
-            sender, audio, chunks, player_pos, eye_pos, look, held_stack, food, creative, effects,
-        ) || hit_block
+        }
+        false
     }
 
-    /// Vanilla `MultiPlayerGameMode.useItem` + `Consumable.startConsuming`:
-    /// sends `ServerboundUseItem` for any held item (the server decides what
-    /// it does; pearls and snowballs work through this too) and begins the
-    /// local use timer when the item is consumable and edible right now.
+    /// Vanilla `MultiPlayerGameMode.useItemOn`: the block's own use (main
+    /// hand only, as `useWithoutItem`) and then the item's placement.
+    #[allow(clippy::too_many_arguments)]
+    fn use_item_on(
+        &mut self,
+        block_registry: &BlockRegistry,
+        sender: &PacketSender,
+        chunks: &ChunkStore,
+        hit: BlockHitResult,
+        hand: InteractionHand,
+        place_block: Option<BlockState>,
+        suppress_block_use: bool,
+        player_pos: DVec3,
+        player_aabb: Aabb,
+        dirty_chunks: &mut Vec<BlockPos>,
+    ) -> UseResult {
+        self.seq += 1;
+        sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
+            hand,
+            block_hit: BlockHit {
+                block_pos: hit.block_pos.into(),
+                direction: hit.face.into(),
+                location: azalea_core::position::Vec3::new(
+                    hit.hit_point.x,
+                    hit.hit_point.y,
+                    hit.hit_point.z,
+                ),
+                // TODO: true when the ray started inside the shape, which
+                // scaffolding placement reads.
+                inside: false,
+                world_border: false,
+            },
+            seq: self.seq,
+        }));
+        // TODO: other interactive blocks (brewing stand, dispenser, ...)
+        // should consume the click here too once their menus render.
+        if hand == InteractionHand::MainHand && !suppress_block_use {
+            let target = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
+            if opens_menu(block_registry.block_state_data(target).id()) {
+                return UseResult::Success { swing: true };
+            }
+        }
+        // TODO: other `Item.useOn` successes (hoes, flint and steel, bone
+        // meal, ...) pass here and fall through to `useItem`.
+        if place_block.is_none() {
+            return UseResult::Pass;
+        }
+        self.predict_place(
+            block_registry.block_state_table(),
+            hit,
+            place_block,
+            chunks,
+            player_pos,
+            player_aabb,
+            dirty_chunks,
+        );
+        UseResult::Success { swing: true }
+    }
+
+    /// Vanilla `MultiPlayerGameMode.useItem` + `Item.use`: sends
+    /// `ServerboundUseItem` for any held item (the server decides what it
+    /// does) and predicts the result, beginning the local use timer when the
+    /// item is consumable and edible right now.
+    // TODO: item cooldowns, which make vanilla's `useItem` pass.
     #[allow(clippy::too_many_arguments)]
     fn use_item(
         &mut self,
@@ -827,18 +904,16 @@ impl InteractionState {
         player_pos: DVec3,
         eye_pos: DVec3,
         look: LookDirection,
-        held_stack: Option<&ItemStackData>,
+        hand: InteractionHand,
+        stack: &ItemStackData,
+        worn: Worn,
         food: u32,
         creative: bool,
         effects: &mut BreakEffects,
-    ) -> bool {
-        let Some(stack) = held_stack else {
-            return false;
-        };
-
+    ) -> UseResult {
         self.seq += 1;
         sender.send(ServerboundGamePacket::UseItem(ServerboundUseItem {
-            hand: InteractionHand::MainHand,
+            hand,
             seq: self.seq,
             y_rot: look.y_rot_deg(),
             x_rot: look.x_rot_deg(),
@@ -846,25 +921,26 @@ impl InteractionState {
 
         // `BundleItem`: a 200-tick use. Its BUNDLE animation is the plain
         // swing pose, which `None` already draws.
-        if crate::ui::bundle::is_bundle(stack)
-            && let Some(contents) = crate::ui::bundle::contents(stack)
-        {
-            self.using_item = Some(ActiveUse {
-                kind: stack.kind,
-                anim: ItemUseAnimation::None,
-                bundle: Some(contents.items.len()),
-                sound: SoundRef::event("item.bundle.drop_contents"),
-                has_particles: false,
-                texture: format!("item/{}", item_resource_name(stack.kind)),
-                use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
-                duration: 200,
-                remaining: 200,
-            });
-            return true;
+        if crate::ui::bundle::is_bundle(stack) {
+            if let Some(contents) = crate::ui::bundle::contents(stack) {
+                self.using_item = Some(ActiveUse {
+                    hand,
+                    kind: stack.kind,
+                    anim: ItemUseAnimation::None,
+                    bundle: Some(contents.items.len()),
+                    sound: SoundRef::event("item.bundle.drop_contents"),
+                    has_particles: false,
+                    texture: format!("item/{}", item_resource_name(stack.kind)),
+                    use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
+                    duration: 200,
+                    remaining: 200,
+                });
+            }
+            return UseResult::Success { swing: true };
         }
 
         let Some(consumable) = stack_component::<Consumable>(stack) else {
-            return true;
+            return item_use_result(stack, worn);
         };
         // Vanilla `Consumable.canConsume` → `Player.canEat`: food needs
         // hunger unless it can always be eaten; creative players (vanilla
@@ -872,11 +948,12 @@ impl InteractionState {
         if let Some(f) = stack_component::<Food>(stack)
             && !(creative || f.can_always_eat || food < MAX_FOOD_LEVEL)
         {
-            return true;
+            return UseResult::Fail;
         }
 
         let duration = (consumable.consume_seconds * 20.0) as i32;
         let active = ActiveUse {
+            hand,
             kind: stack.kind,
             anim: consumable.animation,
             bundle: None,
@@ -903,7 +980,7 @@ impl InteractionState {
                 look,
             );
         }
-        true
+        UseResult::Success { swing: false }
     }
 
     /// A respawn constructs a fresh LocalPlayer in vanilla. Reset only the
@@ -912,6 +989,7 @@ impl InteractionState {
     pub fn reset_player_transients_for_respawn(&mut self) {
         self.using_item = None;
         self.swinging = false;
+        self.swinging_arm = InteractionHand::MainHand;
         self.swing_time = 0;
         self.attack_anim = 0.0;
         self.o_attack_anim = 0.0;
@@ -937,7 +1015,7 @@ impl InteractionState {
     #[allow(clippy::too_many_arguments)]
     pub fn tick_using_item(
         &mut self,
-        held_stack: Option<&ItemStackData>,
+        hand_stacks: [Option<&ItemStackData>; 2],
         sender: &PacketSender,
         audio: &AudioEngine,
         chunks: &ChunkStore,
@@ -947,7 +1025,14 @@ impl InteractionState {
         effects: &mut BreakEffects,
     ) {
         self.update_using_item(
-            held_stack, sender, audio, chunks, player_pos, eye_pos, look, effects,
+            hand_stacks,
+            sender,
+            audio,
+            chunks,
+            player_pos,
+            eye_pos,
+            look,
+            effects,
         );
     }
 
@@ -967,14 +1052,15 @@ impl InteractionState {
     }
 
     /// Per-tick item-use heartbeat, vanilla `LivingEntity.updatingUsingItem`
-    /// / `updateUsingItem`: stop silently if the held stack changed, emit the
-    /// periodic bite sound/particles, count the timer down. Completion is
-    /// server-authoritative (entity event 9 → `complete_using`); the timer
-    /// just runs negative until the server acts.
+    /// / `updateUsingItem`: stop silently if the used hand's stack changed,
+    /// emit the periodic bite sound/particles, count the timer down.
+    /// Completion is server-authoritative (entity event 9 →
+    /// `complete_using`); the timer just runs negative until the server
+    /// acts.
     #[allow(clippy::too_many_arguments)]
     fn update_using_item(
         &mut self,
-        held_stack: Option<&ItemStackData>,
+        hand_stacks: [Option<&ItemStackData>; 2],
         sender: &PacketSender,
         audio: &AudioEngine,
         chunks: &ChunkStore,
@@ -986,6 +1072,7 @@ impl InteractionState {
         let Some(active) = &self.using_item else {
             return;
         };
+        let held_stack = hand_stacks[active.hand as usize];
         if held_stack.map(|s| s.kind) != Some(active.kind) {
             self.using_item = None;
             return;
@@ -1093,12 +1180,26 @@ impl InteractionState {
             .is_some_and(|a| !a.use_effects.can_sprint)
     }
 
+    /// Which hands first person draws for these held stacks.
+    pub fn hands_to_render(
+        &self,
+        main: Option<&ItemStackData>,
+        off: Option<&ItemStackData>,
+    ) -> HandRenderSelection {
+        let using = self
+            .using_item
+            .as_ref()
+            .map(|active| (active.hand, active.kind));
+        hand_render_selection(main, off, using)
+    }
+
     /// First-person use-animation state for the held-item renderer, vanilla
-    /// `ItemInHandRenderer.applyEatTransform` inputs. `None` unless an
-    /// eat/drink use is active with ticks remaining.
-    pub fn use_animation(&self, partial_tick: f32) -> Option<UseAnim> {
+    /// `ItemInHandRenderer.applyEatTransform` inputs. `None` unless `hand`
+    /// is in an eat/drink use with ticks remaining.
+    pub fn use_animation(&self, hand: InteractionHand, partial_tick: f32) -> Option<UseAnim> {
         let active = self.using_item.as_ref()?;
-        if active.remaining <= 0
+        if active.hand != hand
+            || active.remaining <= 0
             || !matches!(active.anim, ItemUseAnimation::Eat | ItemUseAnimation::Drink)
         {
             return None;
@@ -1447,6 +1548,52 @@ fn same_item_same_components(a: Option<&ItemStackData>, b: Option<&ItemStackData
     }
 }
 
+/// Vanilla `Item.use` past the consumable and bundle cases: the component
+/// uses, then the `Item` subclasses whose use always succeeds.
+// TODO: the conditional subclass uses (buckets, bottles, boats, spawn eggs,
+// eyes of ender, gliding fireworks, items on a stick) and the failures of
+// bows, crossbows, tridents and knowledge books.
+fn item_use_result(stack: &ItemStackData, worn: Worn) -> UseResult {
+    if let Some(equippable) = stack_component::<Equippable>(stack).filter(|e| e.swappable) {
+        return equip_swap_result(&equippable, stack, worn);
+    }
+    if stack_component::<BlocksAttacks>(stack).is_some()
+        || stack_component::<KineticWeapon>(stack).is_some()
+    {
+        return UseResult::Success { swing: false };
+    }
+    match item_resource_name(stack.kind).as_str() {
+        "snowball" | "egg" | "blue_egg" | "brown_egg" | "ender_pearl" | "experience_bottle"
+        | "splash_potion" | "lingering_potion" | "wind_charge" | "fishing_rod"
+        | "writable_book" | "written_book" | "map" | "knowledge_book" => {
+            UseResult::Success { swing: true }
+        }
+        "bow" | "crossbow" | "trident" | "spyglass" | "goat_horn" => {
+            UseResult::Success { swing: false }
+        }
+        _ => UseResult::Pass,
+    }
+}
+
+/// Vanilla `Equippable.swapWithEquipmentSlot` for a player, whose
+/// `canUseSlot` is always true.
+fn equip_swap_result(equippable: &Equippable, stack: &ItemStackData, worn: Worn) -> UseResult {
+    // TODO: a tag of allowed entities is taken to include the player.
+    if let Some(HolderSet::Direct { contents }) = &equippable.allowed_entities
+        && !contents.contains(&EntityKind::Player)
+    {
+        return UseResult::Pass;
+    }
+    if worn.locked
+        || worn
+            .stack
+            .is_some_and(|w| w.is_same_item_and_components(stack))
+    {
+        return UseResult::Fail;
+    }
+    UseResult::Success { swing: true }
+}
+
 /// Whether right-clicking this block opens a menu we render (so the use
 /// click is consumed: no block placement, no item use).
 fn opens_menu(id: &str) -> bool {
@@ -1598,6 +1745,47 @@ pub(crate) fn play_break_sound_for_id(audio: &AudioEngine, id: &str, pos: BlockP
         (s.volume + 1.0) / 2.0,
         s.pitch * 0.8,
     );
+}
+
+/// Vanilla `ItemInHandRenderer.evaluateWhichHandsToRender` and
+/// `selectionUsingItemWhileHoldingBowLike`, plus `submitArmWithItem`'s
+/// `isScoping` early return, which hides both hands. `using` is the used hand
+/// and item while an item use is active.
+fn hand_render_selection(
+    main: Option<&ItemStackData>,
+    off: Option<&ItemStackData>,
+    using: Option<(InteractionHand, ItemKind)>,
+) -> HandRenderSelection {
+    if using.is_some_and(|(_, kind)| kind == ItemKind::Spyglass) {
+        return HandRenderSelection::NONE;
+    }
+    let holds = |kind| [main, off].iter().flatten().any(|s| s.kind == kind);
+    if !holds(ItemKind::Bow) && !holds(ItemKind::Crossbow) {
+        return HandRenderSelection::BOTH;
+    }
+    if let Some((hand, kind)) = using {
+        if matches!(kind, ItemKind::Bow | ItemKind::Crossbow) {
+            return match hand {
+                InteractionHand::MainHand => HandRenderSelection::MAIN_ONLY,
+                InteractionHand::OffHand => HandRenderSelection::OFF_ONLY,
+            };
+        }
+        return if hand == InteractionHand::MainHand && off.is_some_and(is_charged_crossbow) {
+            HandRenderSelection::MAIN_ONLY
+        } else {
+            HandRenderSelection::BOTH
+        };
+    }
+    if main.is_some_and(is_charged_crossbow) {
+        return HandRenderSelection::MAIN_ONLY;
+    }
+    HandRenderSelection::BOTH
+}
+
+/// Vanilla `ItemInHandRenderer.isChargedCrossbow` / `CrossbowItem.isCharged`.
+pub(crate) fn is_charged_crossbow(stack: &ItemStackData) -> bool {
+    stack.kind == ItemKind::Crossbow
+        && stack_component::<ChargedProjectiles>(stack).is_some_and(|c| !c.items.is_empty())
 }
 
 /// The stack's component override if the server set one, else the item's
@@ -1860,17 +2048,15 @@ fn send_action(
 
 /// Reports a swing from using an item, block or entity where the wire
 /// version does (`Translation::reports_use_swings`).
-pub(crate) fn send_use_swing(sender: &PacketSender) {
+pub(crate) fn send_use_swing(sender: &PacketSender, hand: InteractionHand) {
     if crate::net::translate::active().is_none_or(|t| t.reports_use_swings()) {
-        send_swing(sender);
+        send_swing(sender, hand);
     }
 }
 
-pub(crate) fn send_swing(sender: &PacketSender) {
+pub(crate) fn send_swing(sender: &PacketSender, hand: InteractionHand) {
     use azalea_protocol::packets::game::s_swing::ServerboundSwing;
-    sender.send(ServerboundGamePacket::Swing(ServerboundSwing {
-        hand: InteractionHand::MainHand,
-    }));
+    sender.send(ServerboundGamePacket::Swing(ServerboundSwing { hand }));
 }
 
 /// Q / Ctrl+Q, vanilla `LocalPlayer.drop`'s player-action packet.
@@ -1926,15 +2112,67 @@ mod tests {
     }
 
     #[test]
-    fn respawn_resets_player_owned_interaction_transients() {
-        let mut state = InteractionState::new();
-        state.swinging = true;
-        state.swing_time = 4;
-        state.attack_anim = 0.8;
-        state.o_attack_anim = 0.6;
-        state.attack_strength_ticker = 7;
-        state.last_item_in_main_hand = Some(ItemStackData::new(ItemKind::Stone, 1));
-        state.using_item = Some(ActiveUse {
+    fn hand_render_selection_matches_vanilla() {
+        use azalea_inventory::ItemStack;
+
+        let stack = |kind| ItemStackData::new(kind, 1);
+        let charged = ItemStack::new(ItemKind::Crossbow, 1)
+            .with_component(ChargedProjectiles {
+                items: vec![ItemStack::new(ItemKind::Arrow, 1)],
+            })
+            .as_present()
+            .cloned()
+            .unwrap();
+        let (stone, bow, crossbow, totem) = (
+            stack(ItemKind::Stone),
+            stack(ItemKind::Bow),
+            stack(ItemKind::Crossbow),
+            stack(ItemKind::TotemOfUndying),
+        );
+        let main = InteractionHand::MainHand;
+        let off = InteractionHand::OffHand;
+        let cases = [
+            (&stone, &totem, None, HandRenderSelection::BOTH),
+            (&charged, &totem, None, HandRenderSelection::MAIN_ONLY),
+            (&crossbow, &totem, None, HandRenderSelection::BOTH),
+            (&stone, &charged, None, HandRenderSelection::BOTH),
+            (
+                &stone,
+                &charged,
+                Some((main, ItemKind::Apple)),
+                HandRenderSelection::MAIN_ONLY,
+            ),
+            (
+                &stone,
+                &bow,
+                Some((off, ItemKind::Bow)),
+                HandRenderSelection::OFF_ONLY,
+            ),
+            (
+                &bow,
+                &totem,
+                Some((main, ItemKind::Bow)),
+                HandRenderSelection::MAIN_ONLY,
+            ),
+            (
+                &stack(ItemKind::Spyglass),
+                &totem,
+                Some((main, ItemKind::Spyglass)),
+                HandRenderSelection::NONE,
+            ),
+        ];
+        for (i, (main, off, using, expected)) in cases.into_iter().enumerate() {
+            assert_eq!(
+                hand_render_selection(Some(main), Some(off), using),
+                expected,
+                "case {i}"
+            );
+        }
+    }
+
+    fn eating_apple(hand: InteractionHand) -> ActiveUse {
+        ActiveUse {
+            hand,
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
             bundle: None,
@@ -1944,7 +2182,82 @@ mod tests {
             use_effects: UseEffects::default(),
             duration: 32,
             remaining: 12,
-        });
+        }
+    }
+
+    #[test]
+    fn only_the_swinging_arm_swings() {
+        let mut state = InteractionState::new();
+        state.start_swing(InteractionHand::OffHand);
+        state.update_swing();
+        state.update_swing();
+        assert!(state.swing_progress(InteractionHand::OffHand, 1.0) > 0.0);
+        assert_eq!(state.swing_progress(InteractionHand::MainHand, 1.0), 0.0);
+    }
+
+    #[test]
+    fn only_the_used_hand_animates() {
+        let mut state = InteractionState::new();
+        state.using_item = Some(eating_apple(InteractionHand::OffHand));
+        assert!(state.use_animation(InteractionHand::OffHand, 0.0).is_some());
+        assert!(
+            state
+                .use_animation(InteractionHand::MainHand, 0.0)
+                .is_none()
+        );
+    }
+
+    /// Vanilla `Item.use`: a plain item passes so the other hand gets a go;
+    /// throwables swing, shields and bows start a use without one; armor
+    /// fails when the same piece is worn or the worn one is bound.
+    #[test]
+    fn item_use_results_follow_item_use() {
+        let result = |kind| item_use_result(&ItemStackData::new(kind, 1), Worn::default());
+        assert_eq!(result(ItemKind::Stone), UseResult::Pass);
+        assert_eq!(
+            result(ItemKind::Snowball),
+            UseResult::Success { swing: true }
+        );
+        assert_eq!(
+            result(ItemKind::Shield),
+            UseResult::Success { swing: false }
+        );
+        assert_eq!(result(ItemKind::Bow), UseResult::Success { swing: false });
+        assert_eq!(
+            result(ItemKind::DiamondHelmet),
+            UseResult::Success { swing: true }
+        );
+
+        let helmet = ItemStackData::new(ItemKind::IronHelmet, 1);
+        let worn = |stack, locked| Worn {
+            stack: Some(stack),
+            locked,
+        };
+        let other = ItemStackData::new(ItemKind::GoldenHelmet, 1);
+        assert_eq!(
+            item_use_result(&helmet, worn(&helmet, false)),
+            UseResult::Fail
+        );
+        assert_eq!(
+            item_use_result(&helmet, worn(&other, true)),
+            UseResult::Fail
+        );
+        assert_eq!(
+            item_use_result(&helmet, worn(&other, false)),
+            UseResult::Success { swing: true }
+        );
+    }
+
+    #[test]
+    fn respawn_resets_player_owned_interaction_transients() {
+        let mut state = InteractionState::new();
+        state.swinging = true;
+        state.swing_time = 4;
+        state.attack_anim = 0.8;
+        state.o_attack_anim = 0.6;
+        state.attack_strength_ticker = 7;
+        state.last_item_in_main_hand = Some(ItemStackData::new(ItemKind::Stone, 1));
+        state.using_item = Some(eating_apple(InteractionHand::MainHand));
 
         state.reset_player_transients_for_respawn();
 
@@ -1960,17 +2273,7 @@ mod tests {
     #[test]
     fn synced_using_item_flag_clears_server_stopped_use() {
         let mut state = InteractionState::new();
-        state.using_item = Some(ActiveUse {
-            kind: ItemKind::Apple,
-            anim: ItemUseAnimation::Eat,
-            bundle: None,
-            sound: SoundRef::event("entity.generic.eat"),
-            has_particles: true,
-            texture: "item/apple".to_string(),
-            use_effects: UseEffects::default(),
-            duration: 32,
-            remaining: 12,
-        });
+        state.using_item = Some(eating_apple(InteractionHand::MainHand));
 
         state.sync_using_item_flag(true);
         assert!(state.using_item.is_some());

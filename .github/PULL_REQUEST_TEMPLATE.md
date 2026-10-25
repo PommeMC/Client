@@ -19,7 +19,7 @@ Ticking a box applies the matching label. The wording is matched exactly by
 
 ## Reference
 
-<!-- Classes under reference/26.2/decompiled this was checked against, or n/a
+<!-- Classes under reference/26.3/decompiled this was checked against, or n/a
      for launcher/tooling/chores. -->
 
 ## Testing

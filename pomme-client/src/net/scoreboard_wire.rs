@@ -10,6 +10,7 @@ use pomme_protocol::scoreboard::{
 
 use super::NetworkEvent;
 use super::chat::component_spans;
+use super::handler::send_ordered;
 use crate::ui::hud::{CollisionRule, ScoreNumberFormat};
 
 /// `DisplaySlot.SIDEBAR`'s id.
@@ -24,7 +25,7 @@ pub(super) fn handle_raw_scoreboard_packet(
     Some(
         super::read_raw_packet(packet_id, payload, scoreboard::read)?.map(|packet| {
             if let Some(event) = event(packet) {
-                let _ = event_tx.try_send(event);
+                send_ordered(event_tx, event);
             }
         }),
     )
@@ -141,7 +142,7 @@ fn styled_color(nbt: &[u8]) -> Option<[f32; 4]> {
 /// out-of-range ids fall back to BLACK (`ByIdMap` ZERO).
 fn team_color(id: u32) -> u32 {
     char::from_digit(id, 16)
-        .and_then(crate::ui::chat::legacy_rgb)
+        .and_then(crate::ui::text::legacy_rgb)
         .unwrap_or(0x000000)
 }
 

@@ -14,7 +14,7 @@ use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::entity_data::{DataValue, Value, Variant};
 use pomme_protocol::item::ItemCodec;
 
-use super::handler::variant_index;
+use super::handler::{send_ordered, variant_index};
 use super::{NetworkEvent, item_codec};
 use crate::entity::MetaValue;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
@@ -86,14 +86,17 @@ fn send_item_data(id: i32, stack: &ItemStackData, event_tx: &Sender<NetworkEvent
         .get_component::<azalea_inventory::components::Damage>()
         .map(|component| component.amount)
         .unwrap_or(0);
-    let _ = event_tx.try_send(NetworkEvent::EntityItemData {
-        id,
-        item_name: crate::player::inventory::item_resource_name(stack.kind),
-        item_id: stack.kind.to_u32(),
-        damage,
-        count: stack.count,
-        stack: stack.clone(),
-    });
+    send_ordered(
+        event_tx,
+        NetworkEvent::EntityItemData {
+            id,
+            item_name: crate::player::inventory::item_resource_name(stack.kind),
+            item_id: stack.kind.to_u32(),
+            damage,
+            count: stack.count,
+            stack: stack.clone(),
+        },
+    );
 }
 
 fn send_data_value(
@@ -189,7 +192,7 @@ fn send_data_value(
             return;
         }
     };
-    let _ = event_tx.try_send(event);
+    send_ordered(event_tx, event);
 }
 
 /// Scalar values are forwarded raw; the store resolves their meaning per
@@ -204,7 +207,7 @@ fn send_scalar(id: i32, index: u8, value: &Value, event_tx: &Sender<NetworkEvent
         Value::Long(v) => MetaValue::Long(*v),
         _ => return,
     };
-    let _ = event_tx.try_send(NetworkEvent::EntityData { id, index, value });
+    send_ordered(event_tx, NetworkEvent::EntityData { id, index, value });
 }
 
 /// The values [`send_data_value`] reads, from azalea's decode.

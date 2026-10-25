@@ -8,6 +8,7 @@ use pomme_protocol::sound::{self, SoundEvent, SoundPacket};
 use pomme_protocol::{ClientRegistry, RegistryTable};
 
 use super::NetworkEvent;
+use super::handler::send_ordered;
 use super::translate::native_id;
 use crate::audio::SoundRef;
 use crate::entity::components::Position;
@@ -21,7 +22,7 @@ pub(super) fn handle_raw_sound_packet(
     Some(
         super::read_raw_packet(packet_id, payload, sound::read)?.map(|packet| {
             if let Some(event) = event(packet) {
-                let _ = event_tx.try_send(event);
+                send_ordered(event_tx, event);
             }
         }),
     )

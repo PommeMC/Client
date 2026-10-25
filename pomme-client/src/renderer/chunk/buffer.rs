@@ -1,14 +1,12 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::mem::offset_of;
 
 use glam::DVec3;
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
 
 use super::mesher::{ChunkAABB, ChunkMeshData, PackedVertex, SectionMesh};
 use crate::position::ChunkPos;
-use crate::renderer::context::IndirectDrawFeatures;
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::renderer::rhi::IndirectDrawFeatures;
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
 
 const BUCKET_VERTICES: u32 = 32768;
 const BUCKET_INDICES: u32 = 49152;
@@ -19,6 +17,19 @@ const BYTES_PER_BUCKET: u64 =
 const MIN_BUCKETS: u32 = 128;
 const MAX_BUCKETS: u32 = 2048;
 const VRAM_BUDGET_FRACTION: f64 = 0.25;
+
+/// The cull pass's bindings: meta, frustum, solid indirect/count, cutout
+/// indirect/count.
+const CULL_BINDINGS: &[rhi::BindGroupLayoutEntry] = &[
+    rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
+    rhi::BindGroupLayoutEntry::uniform(rhi::ShaderStages::COMPUTE),
+    rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
+    rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
+    rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
+    rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
+];
+const COUNT_SIZE: u64 = 4;
+const FRUSTUM_SIZE: u64 = size_of::<FrustumData>() as u64;
 /// Per-section fade-in length, shared by the opaque indirect path and water.
 const FADE_DURATION_MS: f32 = 1000.0;
 /// Columns within this squared X/Z distance of the camera render opaque
@@ -97,21 +108,7 @@ impl FreeList {
     }
 }
 
-fn compute_bucket_count(physical_device: vk::PhysicalDevice) -> u32 {
-    let mem_props = physical_device.get_memory_properties();
-    let mut device_local_bytes: u64 = 0;
-    for i in 0..mem_props.memory_type_count as usize {
-        let mem_type = mem_props.memory_types[i];
-        if mem_type
-            .property_flags
-            .contains(vk::MemoryPropertyFlags::DeviceLocal)
-        {
-            let heap = mem_props.memory_heaps[mem_type.heap_index as usize];
-            if heap.size > device_local_bytes {
-                device_local_bytes = heap.size;
-            }
-        }
-    }
+fn compute_bucket_count(device_local_bytes: u64) -> u32 {
     let budget = (device_local_bytes as f64 * VRAM_BUDGET_FRACTION) as u64;
     let buckets = (budget / BYTES_PER_BUCKET) as u32;
     let count = buckets.clamp(MIN_BUCKETS, MAX_BUCKETS);
@@ -156,84 +153,62 @@ impl ChunkMeta {
     }
 }
 
-/// Copy already-packed `verts` into `dst` starting at byte `off`.
-fn write_verts(dst: &mut [u8], off: usize, verts: &[PackedVertex]) {
-    let bytes: &[u8] = bytemuck::cast_slice(verts);
-    dst[off..off + bytes.len()].copy_from_slice(bytes);
-}
-
-/// Vertex input for the chunk pipeline: binding 0 is the packed per-vertex
-/// pool, binding 1 is the meta buffer read per-instance (origin + fade),
+/// Vertex input for the chunk pipeline: buffer 0 is the packed per-vertex
+/// pool, buffer 1 is the meta buffer read per-instance (origin + fade),
 /// indexed by the `first_instance` the cull shader writes.
-pub fn chunk_vertex_bindings() -> [vk::VertexInputBindingDescription; 2] {
+pub const CHUNK_VERTEX_BUFFERS: [rhi::VertexBufferLayout<'static>; 2] = {
+    const POS: u32 = offset_of!(PackedVertex, pos) as u32;
     [
-        vk::VertexInputBindingDescription {
-            binding: 0,
+        rhi::VertexBufferLayout {
             stride: size_of::<PackedVertex>() as u32,
-            input_rate: vk::VertexInputRate::Vertex,
+            step_mode: rhi::VertexStepMode::Vertex,
+            attributes: &[
+                // pos, split into xy + z lanes
+                rhi::VertexAttribute {
+                    location: 0,
+                    format: rhi::VertexFormat::Unorm16x2,
+                    offset: POS,
+                },
+                rhi::VertexAttribute {
+                    location: 1,
+                    format: rhi::VertexFormat::Unorm16,
+                    offset: POS + 4,
+                },
+                rhi::VertexAttribute {
+                    location: 2,
+                    format: rhi::VertexFormat::Uint16x2,
+                    offset: offset_of!(PackedVertex, uv) as u32,
+                },
+                rhi::VertexAttribute {
+                    location: 3,
+                    format: rhi::VertexFormat::Uint16,
+                    offset: offset_of!(PackedVertex, sprite) as u32,
+                },
+                rhi::VertexAttribute {
+                    location: 4,
+                    format: rhi::VertexFormat::Unorm8x4,
+                    offset: offset_of!(PackedVertex, light_tint) as u32,
+                },
+            ],
         },
-        vk::VertexInputBindingDescription {
-            binding: 1,
+        rhi::VertexBufferLayout {
             stride: size_of::<ChunkMeta>() as u32,
-            input_rate: vk::VertexInputRate::Instance,
+            step_mode: rhi::VertexStepMode::Instance,
+            attributes: &[
+                rhi::VertexAttribute {
+                    location: 5,
+                    format: rhi::VertexFormat::Sint32x3,
+                    offset: offset_of!(ChunkMeta, origin) as u32,
+                },
+                rhi::VertexAttribute {
+                    location: 6,
+                    format: rhi::VertexFormat::Float32,
+                    offset: offset_of!(ChunkMeta, visibility) as u32,
+                },
+            ],
         },
     ]
-}
-
-pub fn chunk_vertex_attributes() -> [vk::VertexInputAttributeDescription; 7] {
-    let pos_off = std::mem::offset_of!(PackedVertex, pos) as u32;
-    let uv_off = std::mem::offset_of!(PackedVertex, uv) as u32;
-    let sprite_off = std::mem::offset_of!(PackedVertex, sprite) as u32;
-    let light_tint_off = std::mem::offset_of!(PackedVertex, light_tint) as u32;
-    let origin_off = std::mem::offset_of!(ChunkMeta, origin) as u32;
-    let vis_off = std::mem::offset_of!(ChunkMeta, visibility) as u32;
-    [
-        // binding 0 — packed vertex (pos split into xy + z lanes)
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R16G16Unorm,
-            offset: pos_off,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R16Unorm,
-            offset: pos_off + 4,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 2,
-            binding: 0,
-            format: vk::Format::R16G16Uint,
-            offset: uv_off,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 3,
-            binding: 0,
-            format: vk::Format::R16Uint,
-            offset: sprite_off,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 4,
-            binding: 0,
-            format: vk::Format::R8G8B8A8Unorm,
-            offset: light_tint_off,
-        },
-        // binding 1 — per-instance meta (origin + fade)
-        vk::VertexInputAttributeDescription {
-            location: 5,
-            binding: 1,
-            format: vk::Format::R32G32B32Sint,
-            offset: origin_off,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 6,
-            binding: 1,
-            format: vk::Format::R32Sfloat,
-            offset: vis_off,
-        },
-    ]
-}
+};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -433,18 +408,10 @@ pub struct ChunkBufferStore {
     /// Capacity (in draws) of the per-frame meta/indirect buffers. Grown on
     /// demand because per-section packing yields many more draws than buckets.
     max_meta: usize,
-    vertex_buffer: vk::Buffer,
-    vertex_alloc: Allocation,
-    index_buffer: vk::Buffer,
-    index_alloc: Allocation,
-    staging_buffer: vk::Buffer,
-    staging_alloc: Allocation,
+    vertex_buffer: rhi::backend::Buffer,
+    index_buffer: rhi::backend::Buffer,
+    staging_buffer: rhi::backend::Buffer,
     staging_size: u64,
-    transfer_pool: vk::CommandPool,
-    transfer_cmd: vk::CommandBuffer,
-    /// Signals completion of a batched staging->device transfer. Reused (reset
-    /// before each submit) so a frame's uploads sync once instead of per-mesh.
-    transfer_fence: vk::Fence,
     use_staging: bool,
 
     /// Exact-size sub-allocators over the vertex and index pools (in elements).
@@ -469,27 +436,22 @@ pub struct ChunkBufferStore {
     /// frame; at steady state the per-frame meta copy stops.
     meta_upload_pending: u32,
 
-    compute_pipeline: vk::Pipeline,
-    compute_layout: vk::PipelineLayout,
-    compute_desc_layout: vk::DescriptorSetLayout,
-    compute_pool: vk::DescriptorPool,
-    compute_sets: Vec<vk::DescriptorSet>,
+    compute_pipeline: rhi::backend::ComputePipeline,
+    compute_layout: rhi::backend::PipelineLayout,
+    cull_layout: rhi::backend::BindGroupLayout,
+    cull_sets: Vec<rhi::backend::BindGroup>,
 
-    meta_buffers: Vec<vk::Buffer>,
-    meta_allocs: Vec<Allocation>,
+    meta_buffers: Vec<rhi::backend::Buffer>,
     // Solid (no-discard, early-Z) draw list, written by the cull shader.
-    indirect_buffers: Vec<vk::Buffer>,
-    indirect_allocs: Vec<Allocation>,
-    count_buffers: Vec<vk::Buffer>,
-    count_allocs: Vec<Allocation>,
+    indirect_buffers: Vec<rhi::backend::Buffer>,
+    count_buffers: Vec<rhi::backend::Buffer>,
     // Cutout (discard) draw list. Same sections, the back of each section's
     // index slice; drawn in a second pass after solid lays down depth.
-    indirect_cutout_buffers: Vec<vk::Buffer>,
-    indirect_cutout_allocs: Vec<Allocation>,
-    count_cutout_buffers: Vec<vk::Buffer>,
-    count_cutout_allocs: Vec<Allocation>,
-    frustum_buffers: Vec<vk::Buffer>,
-    frustum_allocs: Vec<Allocation>,
+    indirect_cutout_buffers: Vec<rhi::backend::Buffer>,
+    count_cutout_buffers: Vec<rhi::backend::Buffer>,
+    /// Both draw counts, copied after each cull for the debug overlay.
+    count_readbacks: Vec<rhi::backend::Buffer>,
+    frustum_buffers: Vec<rhi::backend::Buffer>,
     fade_enabled: bool,
     /// Post-cull section draw count read back from the GPU (lags a few frames);
     /// exposed for the debug overlay so occlusion's effect is visible.
@@ -505,53 +467,28 @@ pub struct ChunkBufferStore {
 }
 
 impl ChunkBufferStore {
-    pub fn new(
-        device: &vk::Device,
-        physical_device: vk::PhysicalDevice,
-        graphics_family: u32,
-        allocator: &Arc<Mutex<Allocator>>,
-        indirect_draw: IndirectDrawFeatures,
-    ) -> Self {
-        let total_buckets = compute_bucket_count(physical_device);
+    pub fn new(device: &rhi::backend::Device, indirect_draw: IndirectDrawFeatures) -> Self {
+        let total_buckets = compute_bucket_count(device.device_local_bytes);
         let vertex_size = total_buckets as u64 * BUCKET_VERTICES as u64 * VERTEX_SIZE;
         let index_size = total_buckets as u64 * BUCKET_INDICES as u64 * INDEX_SIZE;
 
-        let dev_props = physical_device.get_properties();
-        let use_staging = dev_props.device_type == vk::PhysicalDeviceType::DiscreteGpu;
+        let use_staging = device.discrete;
 
-        let (vertex_buffer, vertex_alloc, index_buffer, index_alloc) = if use_staging {
-            let (vb, va) = util::create_device_buffer(
-                device,
-                allocator,
-                vertex_size,
-                vk::BufferUsageFlags::VertexBuffer,
-                "vertex_pool",
-            );
-            let (ib, ia) = util::create_device_buffer(
-                device,
-                allocator,
-                index_size,
-                vk::BufferUsageFlags::IndexBuffer,
-                "index_pool",
-            );
-            (vb, va, ib, ia)
-        } else {
-            let (vb, va) = util::create_host_buffer(
-                device,
-                allocator,
-                vertex_size,
-                vk::BufferUsageFlags::VertexBuffer,
-                "vertex_pool",
-            );
-            let (ib, ia) = util::create_host_buffer(
-                device,
-                allocator,
-                index_size,
-                vk::BufferUsageFlags::IndexBuffer,
-                "index_pool",
-            );
-            (vb, va, ib, ia)
+        let create_pool = |label: &str, size: u64, usage: rhi::BufferUsages| {
+            if use_staging {
+                rhi::backend::Buffer::new(
+                    device,
+                    label,
+                    size,
+                    usage | rhi::BufferUsages::COPY_DST,
+                    rhi::MemoryLocation::Device,
+                )
+            } else {
+                rhi::backend::Buffer::new(device, label, size, usage, rhi::MemoryLocation::Host)
+            }
         };
+        let vertex_buffer = create_pool("vertex_pool", vertex_size, rhi::BufferUsages::VERTEX);
+        let index_buffer = create_pool("index_pool", index_size, rhi::BufferUsages::INDEX);
 
         // Discrete GPUs batch a frame's uploads through this buffer in one
         // transfer, so size it to hold several columns and keep sub-flushes rare.
@@ -561,38 +498,13 @@ impl ChunkBufferStore {
         } else {
             BYTES_PER_BUCKET * 4
         };
-        let (staging_buffer, staging_alloc) = util::create_host_buffer(
+        let staging_buffer = rhi::backend::Buffer::new(
             device,
-            allocator,
-            staging_size,
-            vk::BufferUsageFlags::TransferSrc,
             "staging",
+            staging_size,
+            rhi::BufferUsages::COPY_SRC,
+            rhi::MemoryLocation::Host,
         );
-
-        let pool_info = vk::CommandPoolCreateInfo {
-            queue_family_index: graphics_family,
-            flags: vk::CommandPoolCreateFlags::Transient
-                | vk::CommandPoolCreateFlags::ResetCommandBuffer,
-            ..Default::default()
-        };
-        let transfer_pool = device
-            .create_command_pool(&pool_info, None)
-            .expect("failed to create transfer pool");
-        let cmd_info = vk::CommandBufferAllocateInfo {
-            command_pool: transfer_pool,
-            level: vk::CommandBufferLevel::Primary,
-            command_buffer_count: 1,
-            ..Default::default()
-        };
-        let mut transfer_cmd = vk::CommandBuffer::null();
-        unsafe {
-            device.allocate_command_buffers(&cmd_info, std::slice::from_mut(&mut transfer_cmd))
-        }
-        .expect("failed to alloc transfer cmd");
-
-        let transfer_fence = device
-            .create_fence(&vk::FenceCreateInfo::default(), None)
-            .expect("failed to create transfer fence");
 
         tracing::info!(
             "Chunk buffers: {} (vertex={} MB, index={} MB, staging={} KB)",
@@ -611,241 +523,62 @@ impl ChunkBufferStore {
 
         // Per-section packing yields many more draws than buckets, so pre-size
         // generously: growth (`ensure_meta_capacity`) needs a `device.wait_idle`
-        // to safely rewrite the descriptor sets, and we don't want that stall
+        // to safely rewrite the bind groups, and we don't want that stall
         // firing mid-stream. The remaining grow path stays as a rare safety net.
         let max_meta = (total_buckets * 16).max(8192) as usize;
         let meta_size = (max_meta * size_of::<ChunkMeta>()) as u64;
         let indirect_size = (max_meta * size_of::<DrawCommand>()) as u64;
-        let count_size = 4u64;
-        let frustum_size = size_of::<FrustumData>() as u64;
 
-        let mut meta_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut meta_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut indirect_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut indirect_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut count_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut count_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut indirect_cutout_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut indirect_cutout_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut count_cutout_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut count_cutout_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut frustum_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut frustum_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let (meta_buffers, indirect_buffers, indirect_cutout_buffers) =
+            create_draw_list_buffers(device, meta_size, indirect_size);
+        let frustum_buffers = util::create_per_frame_host_buffers(
+            device,
+            FRUSTUM_SIZE,
+            rhi::BufferUsages::UNIFORM,
+            "frustum_ubo",
+        );
 
-        // Zeroed so the first readback (before any cull has written the slot)
-        // sees a real count, not whatever the allocation held.
-        let create_count_buffer = |name: &str| {
-            let (b, mut a) = util::create_host_buffer(
+        let create_count_buffers = |name: &str| {
+            util::create_per_frame_host_buffers(
                 device,
-                allocator,
-                count_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                COUNT_SIZE,
+                rhi::BufferUsages::STORAGE
+                    | rhi::BufferUsages::INDIRECT
+                    | rhi::BufferUsages::COPY_SRC,
                 name,
-            );
-            a.mapped_slice_mut().unwrap()[..count_size as usize].fill(0);
-            (b, a)
-        };
-
-        for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let (b, a) = util::create_host_buffer(
-                device,
-                allocator,
-                meta_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::VertexBuffer,
-                "chunk_meta",
-            );
-            meta_buffers.push(b);
-            meta_allocs.push(a);
-
-            let (b, a) = util::create_host_buffer(
-                device,
-                allocator,
-                indirect_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
-                "indirect_cmds",
-            );
-            indirect_buffers.push(b);
-            indirect_allocs.push(a);
-
-            let (b, a) = create_count_buffer("draw_count");
-            count_buffers.push(b);
-            count_allocs.push(a);
-
-            let (b, a) = util::create_host_buffer(
-                device,
-                allocator,
-                indirect_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
-                "indirect_cmds_cutout",
-            );
-            indirect_cutout_buffers.push(b);
-            indirect_cutout_allocs.push(a);
-
-            let (b, a) = create_count_buffer("draw_count_cutout");
-            count_cutout_buffers.push(b);
-            count_cutout_allocs.push(a);
-
-            let (b, a) = util::create_host_buffer(
-                device,
-                allocator,
-                frustum_size,
-                vk::BufferUsageFlags::UniformBuffer,
-                "frustum_ubo",
-            );
-            frustum_buffers.push(b);
-            frustum_allocs.push(a);
-        }
-
-        let compute_desc_layout = create_cull_desc_layout(device);
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: 1,
-            set_layouts: &compute_desc_layout,
-            ..Default::default()
-        };
-        let compute_layout = device
-            .create_pipeline_layout(&layout_info, None)
-            .expect("failed to create compute pipeline layout");
-
-        let comp_spv = shader::include_spirv!("cull.comp.spv");
-        let comp_module = shader::create_shader_module(device, comp_spv);
-        let stage = vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Compute,
-            module: comp_module,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        };
-        let pipe_info = [vk::ComputePipelineCreateInfo {
-            stage,
-            layout: compute_layout,
-            ..Default::default()
-        }];
-        let mut compute_pipeline = vk::Pipeline::null();
-        device
-            .create_compute_pipelines(
-                vk::PipelineCache::null(),
-                &pipe_info,
-                None,
-                std::slice::from_mut(&mut compute_pipeline),
             )
-            .expect("failed to create cull pipeline");
-        device.destroy_shader_module(comp_module, None);
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::StorageBuffer,
-                // meta + solid indirect/count + cutout indirect/count = 5 per frame.
-                descriptor_count: 5 * MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: MAX_FRAMES_IN_FLIGHT as u32,
-            pool_size_count: pool_sizes.len() as u32,
-            pool_sizes: pool_sizes.as_ptr(),
-            ..Default::default()
         };
-        let compute_pool = device
-            .create_descriptor_pool(&pool_info, None)
-            .expect("failed to create cull desc pool");
-
-        let layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT)
-            .map(|_| compute_desc_layout)
+        let count_buffers = create_count_buffers("draw_count");
+        let count_cutout_buffers = create_count_buffers("draw_count_cutout");
+        let count_readbacks = (0..MAX_FRAMES_IN_FLIGHT)
+            .map(|_| {
+                rhi::backend::Buffer::new(
+                    device,
+                    "draw_count_readback",
+                    2 * COUNT_SIZE,
+                    rhi::BufferUsages::COPY_DST,
+                    rhi::MemoryLocation::Readback,
+                )
+            })
             .collect();
-        let alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool: compute_pool,
-            descriptor_set_count: layouts.len() as u32,
-            set_layouts: layouts.as_ptr(),
-            ..Default::default()
-        };
-        let mut compute_sets = vec![vk::DescriptorSet::null(); layouts.len()];
-        device
-            .allocate_descriptor_sets(&alloc_info, &mut compute_sets)
-            .expect("failed to allocate cull desc sets");
 
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            let (meta_info, mut meta_write) = desc_write(
-                compute_sets[i],
-                0,
-                vk::DescriptorType::StorageBuffer,
-                meta_buffers[i],
-                meta_size,
-            );
+        let cull_layout = rhi::backend::create_bind_group_layout(device, CULL_BINDINGS);
+        let compute_layout = rhi::backend::create_pipeline_layout(device, &[cull_layout], None);
 
-            let (frustum_info, mut frustum_write) = desc_write(
-                compute_sets[i],
-                1,
-                vk::DescriptorType::UniformBuffer,
-                frustum_buffers[i],
-                frustum_size,
-            );
+        let compute_pipeline = rhi::backend::create_compute_pipeline(
+            device,
+            compute_layout,
+            "cull",
+            shader::include_shader!("cull.comp"),
+        );
 
-            let (indirect_info, mut indirect_write) = desc_write(
-                compute_sets[i],
-                2,
-                vk::DescriptorType::StorageBuffer,
-                indirect_buffers[i],
-                indirect_size,
-            );
-
-            let (count_info, mut count_write) = desc_write(
-                compute_sets[i],
-                3,
-                vk::DescriptorType::StorageBuffer,
-                count_buffers[i],
-                count_size,
-            );
-
-            let (indirect_c_info, mut indirect_c_write) = desc_write(
-                compute_sets[i],
-                4,
-                vk::DescriptorType::StorageBuffer,
-                indirect_cutout_buffers[i],
-                indirect_size,
-            );
-
-            let (count_c_info, mut count_c_write) = desc_write(
-                compute_sets[i],
-                5,
-                vk::DescriptorType::StorageBuffer,
-                count_cutout_buffers[i],
-                count_size,
-            );
-
-            meta_write.buffer_info = meta_info.as_ptr();
-            frustum_write.buffer_info = frustum_info.as_ptr();
-            indirect_write.buffer_info = indirect_info.as_ptr();
-            count_write.buffer_info = count_info.as_ptr();
-            indirect_c_write.buffer_info = indirect_c_info.as_ptr();
-            count_c_write.buffer_info = count_c_info.as_ptr();
-
-            let writes = [
-                meta_write,
-                frustum_write,
-                indirect_write,
-                count_write,
-                indirect_c_write,
-                count_c_write,
-            ];
-
-            device.update_descriptor_sets(&writes, &[]);
-        }
-
-        Self {
+        let mut this = Self {
             indirect_draw,
             max_meta,
             vertex_buffer,
-            vertex_alloc,
             index_buffer,
-            index_alloc,
             staging_buffer,
-            staging_alloc,
             staging_size,
-            transfer_pool,
-            transfer_cmd,
-            transfer_fence,
             use_staging,
             vtx_free,
             idx_free,
@@ -858,25 +591,38 @@ impl ChunkBufferStore {
             meta_upload_pending: 0,
             compute_pipeline,
             compute_layout,
-            compute_desc_layout,
-            compute_pool,
-            compute_sets,
+            cull_layout,
+            cull_sets: vec![rhi::backend::BindGroup::default(); MAX_FRAMES_IN_FLIGHT],
             meta_buffers,
-            meta_allocs,
             indirect_buffers,
-            indirect_allocs,
             count_buffers,
-            count_allocs,
             indirect_cutout_buffers,
-            indirect_cutout_allocs,
             count_cutout_buffers,
-            count_cutout_allocs,
+            count_readbacks,
             frustum_buffers,
-            frustum_allocs,
             fade_enabled: false,
             last_draw_count: 0,
             frame_seq: 0,
             pending_free: VecDeque::new(),
+        };
+        this.rebind_cull(device, meta_size, indirect_size);
+        this
+    }
+
+    /// Points each frame's cull group at that frame's buffers.
+    fn rebind_cull(&mut self, device: &rhi::backend::Device, meta_size: u64, indirect_size: u64) {
+        let storage = rhi::backend::BindingResource::storage;
+        let uniform = rhi::backend::BindingResource::uniform;
+        for i in 0..MAX_FRAMES_IN_FLIGHT {
+            let bindings = [
+                (0, storage(&self.meta_buffers[i], meta_size)),
+                (1, uniform(&self.frustum_buffers[i], FRUSTUM_SIZE)),
+                (2, storage(&self.indirect_buffers[i], indirect_size)),
+                (3, storage(&self.count_buffers[i], COUNT_SIZE)),
+                (4, storage(&self.indirect_cutout_buffers[i], indirect_size)),
+                (5, storage(&self.count_cutout_buffers[i], COUNT_SIZE)),
+            ];
+            self.cull_sets[i].replace(device, self.cull_layout, &bindings);
         }
     }
 
@@ -886,44 +632,24 @@ impl ChunkBufferStore {
         self.last_draw_count
     }
 
-    /// Submit the accumulated staging copies as a single transfer and block on
-    /// a fence until it completes. One fence wait per call replaces the old
-    /// per-mesh `queue.wait_idle`, so a frame's uploads synchronize once
-    /// instead of once per mesh.
+    /// Submit the accumulated staging copies as a single transfer and wait for
+    /// it, so a frame's uploads synchronize once instead of once per mesh.
     fn flush_transfer(
         &mut self,
-        device: &vk::Device,
-        queue: vk::Queue,
-        copy_v: &[vk::BufferCopy],
-        copy_i: &[vk::BufferCopy],
+        device: &rhi::backend::Device,
+        copy_v: &[rhi::BufferCopy],
+        copy_i: &[rhi::BufferCopy],
     ) {
         if copy_v.is_empty() && copy_i.is_empty() {
             return;
         }
-        let begin = vk::CommandBufferBeginInfo {
-            flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
-            ..Default::default()
-        };
-        self.transfer_cmd.begin(&begin).unwrap();
-        if !copy_v.is_empty() {
-            self.transfer_cmd
-                .copy_buffer(self.staging_buffer, self.vertex_buffer, copy_v);
-        }
-        if !copy_i.is_empty() {
-            self.transfer_cmd
-                .copy_buffer(self.staging_buffer, self.index_buffer, copy_i);
-        }
-        self.transfer_cmd.end().unwrap();
-        let submit = [vk::SubmitInfo {
-            command_buffer_count: 1,
-            command_buffers: &self.transfer_cmd.handle(),
-            ..Default::default()
-        }];
-        device.reset_fences(&[self.transfer_fence]).unwrap();
-        queue.submit(&submit, self.transfer_fence).unwrap();
-        device
-            .wait_for_fences(&[self.transfer_fence], true, u64::MAX)
-            .unwrap();
+        device.submit(|encoder| {
+            for (dst, copies) in [(&self.vertex_buffer, copy_v), (&self.index_buffer, copy_i)] {
+                if !copies.is_empty() {
+                    encoder.copy_buffer(self.staging_buffer.handle(), dst.handle(), copies);
+                }
+            }
+        });
     }
 
     /// Upload a batch of mesh results, each replacing the sections in its
@@ -935,9 +661,7 @@ impl ChunkBufferStore {
     /// need re-meshing.
     pub fn upload_batch(
         &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        queue: vk::Queue,
+        device: &rhi::backend::Device,
         meshes: &[ChunkMeshData],
     ) -> Vec<(ChunkPos, Vec<i32>)> {
         let mut needs_remesh: Vec<(ChunkPos, Vec<i32>)> = Vec::new();
@@ -960,12 +684,23 @@ impl ChunkBufferStore {
             origin: [i32; 3],
         }
 
+        impl Plan<'_> {
+            /// Writes the opaque then water indices at byte `off`, returning
+            /// how many bytes that took.
+            fn write_indices(&self, buffer: &mut rhi::backend::Buffer, off: usize) -> usize {
+                let opaque: &[u8] = bytemuck::cast_slice(self.indices);
+                buffer.write_at(off, opaque);
+                buffer.write_at(off + opaque.len(), bytemuck::cast_slice(self.water_indices));
+                opaque.len() + size_of_val(self.water_indices)
+            }
+        }
+
         // Retired slices only reclaim in `begin_frame`; if rendering is paused
         // while meshing continues (e.g. minimized window) the backlog grows
         // unbounded. Past a sane bound, force a GPU wait and reclaim it all.
         const PENDING_FREE_DRAIN_THRESHOLD: usize = 8192;
         if self.pending_free.len() > PENDING_FREE_DRAIN_THRESHOLD {
-            device.wait_idle().ok();
+            device.wait_idle();
             while let Some((_, slice)) = self.pending_free.pop_front() {
                 self.free_slice(slice);
             }
@@ -974,8 +709,8 @@ impl ChunkBufferStore {
         let staging_half = self.staging_size as usize / 2;
         // Copies accumulated for the current (not-yet-submitted) transfer, and the
         // running write cursors into each half of the staging buffer.
-        let mut copy_v: Vec<vk::BufferCopy> = Vec::new();
-        let mut copy_i: Vec<vk::BufferCopy> = Vec::new();
+        let mut copy_v: Vec<rhi::BufferCopy> = Vec::new();
+        let mut copy_i: Vec<rhi::BufferCopy> = Vec::new();
         let mut stg_v = 0usize;
         let mut stg_i = 0usize;
 
@@ -1128,54 +863,41 @@ impl ChunkBufferStore {
                 // This mesh alone fits a half (checked above), so a flush always
                 // makes room: submit the pending transfer and reset the cursors.
                 if stg_v + mv > staging_half || stg_i + mi > staging_half {
-                    self.flush_transfer(device, queue, &copy_v, &copy_i);
+                    self.flush_transfer(device, &copy_v, &copy_i);
                     copy_v.clear();
                     copy_i.clear();
                     stg_v = 0;
                     stg_i = 0;
                 }
-                let buf = self.staging_alloc.mapped_slice_mut().unwrap();
                 for p in &plans {
-                    write_verts(buf, stg_v, p.verts);
+                    self.staging_buffer
+                        .write_at(stg_v, bytemuck::cast_slice(p.verts));
                     let vbytes = p.verts.len() * VERTEX_SIZE as usize;
-                    copy_v.push(vk::BufferCopy {
+                    copy_v.push(rhi::BufferCopy {
                         src_offset: stg_v as u64,
                         dst_offset: p.vtx_off as u64 * VERTEX_SIZE,
                         size: vbytes as u64,
                     });
                     stg_v += vbytes;
 
-                    let opaque: &[u8] = bytemuck::cast_slice(p.indices);
-                    let water: &[u8] = bytemuck::cast_slice(p.water_indices);
                     let off = staging_half + stg_i;
-                    buf[off..off + opaque.len()].copy_from_slice(opaque);
-                    buf[off + opaque.len()..off + opaque.len() + water.len()]
-                        .copy_from_slice(water);
-                    copy_i.push(vk::BufferCopy {
+                    let ibytes = p.write_indices(&mut self.staging_buffer, off);
+                    copy_i.push(rhi::BufferCopy {
                         src_offset: off as u64,
                         dst_offset: p.idx_off as u64 * INDEX_SIZE,
-                        size: (opaque.len() + water.len()) as u64,
+                        size: ibytes as u64,
                     });
-                    stg_i += opaque.len() + water.len();
+                    stg_i += ibytes;
                 }
             } else {
-                {
-                    let vbuf = self.vertex_alloc.mapped_slice_mut().unwrap();
-                    for p in &plans {
-                        let base = p.vtx_off as usize * VERTEX_SIZE as usize;
-                        write_verts(vbuf, base, p.verts);
-                    }
-                }
-                {
-                    let ibuf = self.index_alloc.mapped_slice_mut().unwrap();
-                    for p in &plans {
-                        let opaque: &[u8] = bytemuck::cast_slice(p.indices);
-                        let water: &[u8] = bytemuck::cast_slice(p.water_indices);
-                        let off = p.idx_off as usize * INDEX_SIZE as usize;
-                        ibuf[off..off + opaque.len()].copy_from_slice(opaque);
-                        ibuf[off + opaque.len()..off + opaque.len() + water.len()]
-                            .copy_from_slice(water);
-                    }
+                for p in &plans {
+                    let base = p.vtx_off as usize * VERTEX_SIZE as usize;
+                    self.vertex_buffer
+                        .write_at(base, bytemuck::cast_slice(p.verts));
+                    p.write_indices(
+                        &mut self.index_buffer,
+                        p.idx_off as usize * INDEX_SIZE as usize,
+                    );
                 }
             }
 
@@ -1226,23 +948,18 @@ impl ChunkBufferStore {
 
         // Flush whatever remains accumulated from the last (or only) batch.
         if self.use_staging {
-            self.flush_transfer(device, queue, &copy_v, &copy_i);
+            self.flush_transfer(device, &copy_v, &copy_i);
         }
 
         let total_sections: usize = self.chunks.values().map(|c| c.sections.len()).sum();
-        self.ensure_meta_capacity(device, allocator, total_sections);
+        self.ensure_meta_capacity(device, total_sections);
 
         needs_remesh
     }
 
     /// Grow the per-frame meta and indirect buffers so they can hold `needed`
     /// section draws. No-op while capacity suffices.
-    fn ensure_meta_capacity(
-        &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        needed: usize,
-    ) {
+    fn ensure_meta_capacity(&mut self, device: &rhi::backend::Device, needed: usize) {
         if needed <= self.max_meta {
             return;
         }
@@ -1251,93 +968,25 @@ impl ChunkBufferStore {
             .max(self.max_meta * 2);
 
         // The meta/indirect buffers are referenced by every in-flight frame's
-        // descriptor set; wait the GPU out before freeing them.
-        device.wait_idle().ok();
+        // bind group; wait the GPU out before freeing them.
+        device.wait_idle();
 
-        {
-            let mut alloc = allocator.lock().unwrap();
-            for i in 0..MAX_FRAMES_IN_FLIGHT {
-                device.destroy_buffer(self.meta_buffers[i], None);
-                alloc
-                    .free(std::mem::replace(&mut self.meta_allocs[i], unsafe {
-                        std::mem::zeroed()
-                    }))
-                    .ok();
-                device.destroy_buffer(self.indirect_buffers[i], None);
-                alloc
-                    .free(std::mem::replace(&mut self.indirect_allocs[i], unsafe {
-                        std::mem::zeroed()
-                    }))
-                    .ok();
-                device.destroy_buffer(self.indirect_cutout_buffers[i], None);
-                alloc
-                    .free(std::mem::replace(
-                        &mut self.indirect_cutout_allocs[i],
-                        unsafe { std::mem::zeroed() },
-                    ))
-                    .ok();
-            }
+        for buffers in [
+            &mut self.meta_buffers,
+            &mut self.indirect_buffers,
+            &mut self.indirect_cutout_buffers,
+        ] {
+            util::destroy_buffers(device, buffers);
         }
 
         let meta_size = (new_max * size_of::<ChunkMeta>()) as u64;
         let indirect_size = (new_max * size_of::<DrawCommand>()) as u64;
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            let (b, a) = util::create_host_buffer(
-                device,
-                allocator,
-                meta_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::VertexBuffer,
-                "chunk_meta",
-            );
-            self.meta_buffers[i] = b;
-            self.meta_allocs[i] = a;
-
-            let (b, a) = util::create_host_buffer(
-                device,
-                allocator,
-                indirect_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
-                "indirect_cmds",
-            );
-            self.indirect_buffers[i] = b;
-            self.indirect_allocs[i] = a;
-
-            let (b, a) = util::create_host_buffer(
-                device,
-                allocator,
-                indirect_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
-                "indirect_cmds_cutout",
-            );
-            self.indirect_cutout_buffers[i] = b;
-            self.indirect_cutout_allocs[i] = a;
-
-            let (meta_info, mut meta_write) = desc_write(
-                self.compute_sets[i],
-                0,
-                vk::DescriptorType::StorageBuffer,
-                self.meta_buffers[i],
-                meta_size,
-            );
-            let (indirect_info, mut indirect_write) = desc_write(
-                self.compute_sets[i],
-                2,
-                vk::DescriptorType::StorageBuffer,
-                self.indirect_buffers[i],
-                indirect_size,
-            );
-            let (indirect_c_info, mut indirect_c_write) = desc_write(
-                self.compute_sets[i],
-                4,
-                vk::DescriptorType::StorageBuffer,
-                self.indirect_cutout_buffers[i],
-                indirect_size,
-            );
-            meta_write.buffer_info = meta_info.as_ptr();
-            indirect_write.buffer_info = indirect_info.as_ptr();
-            indirect_c_write.buffer_info = indirect_c_info.as_ptr();
-            device.update_descriptor_sets(&[meta_write, indirect_write, indirect_c_write], &[]);
-        }
+        (
+            self.meta_buffers,
+            self.indirect_buffers,
+            self.indirect_cutout_buffers,
+        ) = create_draw_list_buffers(device, meta_size, indirect_size);
+        self.rebind_cull(device, meta_size, indirect_size);
 
         self.max_meta = new_max;
     }
@@ -1426,7 +1075,7 @@ impl ChunkBufferStore {
     /// matches the vertex shader's.
     pub fn dispatch_cull(
         &mut self,
-        cmd: vk::CommandBuffer,
+        encoder: &rhi::backend::CommandEncoder,
         frame: usize,
         frustum: &[[f32; 4]; 6],
         anchor: DVec3,
@@ -1472,8 +1121,7 @@ impl ChunkBufferStore {
         // haven't yet seen the current draw list. Steady state stops copying.
         if self.meta_upload_pending > 0 {
             let meta_bytes = bytemuck::cast_slice(&self.cached_meta);
-            self.meta_allocs[frame].mapped_slice_mut().unwrap()[..meta_bytes.len()]
-                .copy_from_slice(meta_bytes);
+            self.meta_buffers[frame].write(meta_bytes);
             self.meta_upload_pending -= 1;
         }
 
@@ -1485,57 +1133,58 @@ impl ChunkBufferStore {
             _pad: 0.0,
         };
         let frustum_bytes = bytemuck::bytes_of(&frustum_data);
-        self.frustum_allocs[frame].mapped_slice_mut().unwrap()[..frustum_bytes.len()]
-            .copy_from_slice(frustum_bytes);
+        self.frustum_buffers[frame].write(frustum_bytes);
 
         // This frame slot's GPU work has completed (fence-waited at frame start),
-        // so the count buffers still hold their previous cull result; capture the
-        // total (solid + cutout draws) for the debug overlay before clearing them.
-        {
-            let read_and_clear = |a: &mut Allocation| {
-                let s = a.mapped_slice_mut().unwrap();
-                let n = u32::from_ne_bytes([s[0], s[1], s[2], s[3]]);
-                s[..4].copy_from_slice(&0u32.to_ne_bytes());
-                n
-            };
-            self.last_draw_count = read_and_clear(&mut self.count_allocs[frame])
-                + read_and_clear(&mut self.count_cutout_allocs[frame]);
+        // so its readback holds the previous cull's total (solid + cutout draws).
+        self.last_draw_count = self.count_readbacks[frame].read(|bytes| {
+            let counts: [u32; 2] = bytemuck::pod_read_unaligned(&bytes[..8]);
+            counts[0] + counts[1]
+        });
+        for buffer in [
+            &mut self.count_buffers[frame],
+            &mut self.count_cutout_buffers[frame],
+        ] {
+            buffer.write(&0u32.to_ne_bytes());
         }
 
         // Without drawIndirectCount the whole indirect buffer is drawn, so slots
         // the cull shader leaves unfilled must read as no-op draws, not stale data.
         if !self.indirect_draw.count {
-            for a in [
-                &mut self.indirect_allocs[frame],
-                &mut self.indirect_cutout_allocs[frame],
+            for buffer in [
+                &mut self.indirect_buffers[frame],
+                &mut self.indirect_cutout_buffers[frame],
             ] {
-                a.mapped_slice_mut().unwrap().fill(0);
+                buffer.zero();
             }
         }
 
-        cmd.bind_pipeline(vk::PipelineBindPoint::Compute, self.compute_pipeline);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Compute,
-            self.compute_layout,
-            0,
-            &[self.compute_sets[frame]],
-            &[],
+        encoder.dispatch(
+            &self.compute_pipeline,
+            self.cull_sets[frame],
+            [count.div_ceil(64), 1, 1],
         );
-        cmd.dispatch(count.div_ceil(64), 1, 1);
-
-        let barrier = vk::MemoryBarrier {
-            src_access_mask: vk::AccessFlags::ShaderWrite,
-            dst_access_mask: vk::AccessFlags::IndirectCommandRead,
-            ..Default::default()
-        };
-        cmd.pipeline_barrier(
-            vk::PipelineStageFlags::ComputeShader,
-            vk::PipelineStageFlags::DrawIndirect,
-            vk::DependencyFlags::empty(),
-            &[barrier],
-            &[],
-            &[],
-        );
+        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect);
+        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::CopySrc);
+        let readback = self.count_readbacks[frame].handle();
+        for (i, count) in [
+            &self.count_buffers[frame],
+            &self.count_cutout_buffers[frame],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            encoder.copy_buffer(
+                count.handle(),
+                readback,
+                &[rhi::BufferCopy {
+                    src_offset: 0,
+                    dst_offset: i as u64 * COUNT_SIZE,
+                    size: COUNT_SIZE,
+                }],
+            );
+        }
+        encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::HostRead);
 
         if !self.fade_enabled {
             self.fade_enabled = true;
@@ -1546,7 +1195,12 @@ impl ChunkBufferStore {
     /// pass's draw list (drawn after `solid`, which lays down depth); the
     /// caller binds the matching pipeline first. Both layers share the
     /// vertex/index/meta buffers and the cull-written draw lists.
-    pub fn draw_indirect(&self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
+    pub fn draw_indirect(
+        &self,
+        pass: &rhi::backend::RenderPassEncoder,
+        frame: usize,
+        cutout: bool,
+    ) {
         if self.chunks.is_empty() {
             return;
         }
@@ -1558,25 +1212,29 @@ impl ChunkBufferStore {
             .sum::<u32>();
         let (indirect, count) = if cutout {
             (
-                self.indirect_cutout_buffers[frame],
-                self.count_cutout_buffers[frame],
+                self.indirect_cutout_buffers[frame].handle(),
+                self.count_cutout_buffers[frame].handle(),
             )
         } else {
-            (self.indirect_buffers[frame], self.count_buffers[frame])
+            (
+                self.indirect_buffers[frame].handle(),
+                self.count_buffers[frame].handle(),
+            )
         };
 
         // Binding 0: packed vertex pool. Binding 1: the meta buffer, read per
         // instance for the section origin + fade (indexed by `first_instance`).
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffer, self.meta_buffers[frame]], &[0, 0]);
-        cmd.bind_index_buffer(self.index_buffer, 0, vk::IndexType::Uint32);
+        pass.set_vertex_buffer(0, self.vertex_buffer.handle());
+        pass.set_vertex_buffer(1, self.meta_buffers[frame].handle());
+        pass.set_index_buffer(self.index_buffer.handle());
         let stride = size_of::<DrawCommand>() as u32;
         if self.indirect_draw.count {
-            cmd.draw_indexed_indirect_count(indirect, 0, count, 0, max_draws, stride);
+            pass.draw_indexed_indirect_count(indirect, count, max_draws, stride);
         } else if self.indirect_draw.multi_draw {
-            cmd.draw_indexed_indirect(indirect, 0, max_draws, stride);
+            pass.draw_indexed_indirect(indirect, 0, max_draws, stride);
         } else {
             for i in 0..max_draws {
-                cmd.draw_indexed_indirect(indirect, (i * stride) as u64, 1, stride);
+                pass.draw_indexed_indirect(indirect, (i * stride) as u64, 1, stride);
             }
         }
     }
@@ -1610,8 +1268,7 @@ impl ChunkBufferStore {
     /// order.
     pub fn draw_water(
         &self,
-        cmd: vk::CommandBuffer,
-        layout: vk::PipelineLayout,
+        pass: &rhi::backend::RenderPassEncoder,
         frustum: &[[f32; 4]; 6],
         anchor: DVec3,
         eye: DVec3,
@@ -1620,8 +1277,8 @@ impl ChunkBufferStore {
             return;
         }
 
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
-        cmd.bind_index_buffer(self.index_buffer, 0, vk::IndexType::Uint32);
+        pass.set_vertex_buffer(0, self.vertex_buffer.handle());
+        pass.set_index_buffer(self.index_buffer.handle());
 
         let now = std::time::Instant::now();
         for (pos, alloc) in self.chunks.iter() {
@@ -1637,13 +1294,12 @@ impl ChunkBufferStore {
                 let vis = Self::section_visibility(nearby, sec, now);
                 let rel = (origin_dvec(sec.origin) - anchor).as_vec3();
                 let origin_fade = [rel.x, rel.y, rel.z, vis];
-                cmd.push_constants(
-                    layout,
-                    vk::ShaderStageFlags::Vertex,
+                pass.set_push_constants(
+                    rhi::ShaderStages::VERTEX,
                     0,
                     bytemuck::bytes_of(&origin_fade),
                 );
-                cmd.draw_indexed(
+                pass.draw_indexed(
                     sec.water_index_count,
                     1,
                     sec.water_first_index,
@@ -1654,161 +1310,59 @@ impl ChunkBufferStore {
         }
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let mut alloc = allocator.lock().unwrap();
-
-        device.destroy_buffer(self.vertex_buffer, None);
-        device.destroy_buffer(self.index_buffer, None);
-
-        alloc
-            .free(std::mem::replace(&mut self.vertex_alloc, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
-        alloc
-            .free(std::mem::replace(&mut self.index_alloc, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
-
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            device.destroy_buffer(self.meta_buffers[i], None);
-            device.destroy_buffer(self.indirect_buffers[i], None);
-            device.destroy_buffer(self.count_buffers[i], None);
-            device.destroy_buffer(self.indirect_cutout_buffers[i], None);
-            device.destroy_buffer(self.count_cutout_buffers[i], None);
-            device.destroy_buffer(self.frustum_buffers[i], None);
-
-            alloc
-                .free(std::mem::replace(&mut self.meta_allocs[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
-            alloc
-                .free(std::mem::replace(&mut self.indirect_allocs[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
-            alloc
-                .free(std::mem::replace(&mut self.count_allocs[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
-            alloc
-                .free(std::mem::replace(
-                    &mut self.indirect_cutout_allocs[i],
-                    unsafe { std::mem::zeroed() },
-                ))
-                .ok();
-            alloc
-                .free(std::mem::replace(
-                    &mut self.count_cutout_allocs[i],
-                    unsafe { std::mem::zeroed() },
-                ))
-                .ok();
-            alloc
-                .free(std::mem::replace(&mut self.frustum_allocs[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        for buffer in [&mut self.vertex_buffer, &mut self.index_buffer] {
+            std::mem::take(buffer).destroy(device);
         }
-        device.destroy_buffer(self.staging_buffer, None);
-        alloc
-            .free(std::mem::replace(&mut self.staging_alloc, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
-        drop(alloc);
+        for buffers in [
+            &mut self.meta_buffers,
+            &mut self.indirect_buffers,
+            &mut self.count_buffers,
+            &mut self.indirect_cutout_buffers,
+            &mut self.count_cutout_buffers,
+            &mut self.count_readbacks,
+            &mut self.frustum_buffers,
+        ] {
+            util::destroy_buffers(device, buffers);
+        }
+        std::mem::take(&mut self.staging_buffer).destroy(device);
 
-        device.destroy_fence(self.transfer_fence, None);
-        device.destroy_command_pool(self.transfer_pool, None);
-        device.destroy_pipeline(self.compute_pipeline, None);
-        device.destroy_pipeline_layout(self.compute_layout, None);
-        device.destroy_descriptor_pool(self.compute_pool, None);
-        device.destroy_descriptor_set_layout(self.compute_desc_layout, None);
+        self.compute_pipeline.destroy(device);
+        self.compute_layout.destroy(device);
+        util::destroy_bind_groups(device, self.cull_sets.drain(..));
+        self.cull_layout.destroy(device);
     }
 }
 
-fn create_cull_desc_layout(device: &vk::Device) -> vk::DescriptorSetLayout {
-    let bindings = [
-        vk::DescriptorSetLayoutBinding {
-            binding: 0,
-            descriptor_type: vk::DescriptorType::StorageBuffer,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlags::Compute,
-            ..Default::default()
-        },
-        vk::DescriptorSetLayoutBinding {
-            binding: 1,
-            descriptor_type: vk::DescriptorType::UniformBuffer,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlags::Compute,
-            ..Default::default()
-        },
-        vk::DescriptorSetLayoutBinding {
-            binding: 2,
-            descriptor_type: vk::DescriptorType::StorageBuffer,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlags::Compute,
-            ..Default::default()
-        },
-        vk::DescriptorSetLayoutBinding {
-            binding: 3,
-            descriptor_type: vk::DescriptorType::StorageBuffer,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlags::Compute,
-            ..Default::default()
-        },
-        vk::DescriptorSetLayoutBinding {
-            binding: 4,
-            descriptor_type: vk::DescriptorType::StorageBuffer,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlags::Compute,
-            ..Default::default()
-        },
-        vk::DescriptorSetLayoutBinding {
-            binding: 5,
-            descriptor_type: vk::DescriptorType::StorageBuffer,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlags::Compute,
-            ..Default::default()
-        },
-    ];
-    let info = vk::DescriptorSetLayoutCreateInfo {
-        binding_count: bindings.len() as u32,
-        bindings: bindings.as_ptr(),
-        ..Default::default()
-    };
-    device
-        .create_descriptor_set_layout(&info, None)
-        .expect("failed to create cull desc layout")
-}
-
-fn desc_write(
-    set: vk::DescriptorSet,
-    binding: u32,
-    ty: vk::DescriptorType,
-    buffer: vk::Buffer,
-    range: u64,
+/// The per-frame meta and solid/cutout indirect buffers, the ones
+/// `ensure_meta_capacity` regrows.
+fn create_draw_list_buffers(
+    device: &rhi::backend::Device,
+    meta_size: u64,
+    indirect_size: u64,
 ) -> (
-    [vk::DescriptorBufferInfo; 1],
-    vk::WriteDescriptorSet<'static>,
+    Vec<rhi::backend::Buffer>,
+    Vec<rhi::backend::Buffer>,
+    Vec<rhi::backend::Buffer>,
 ) {
-    let info = [vk::DescriptorBufferInfo {
-        buffer,
-        offset: 0,
-        range,
-    }];
-
-    let write = vk::WriteDescriptorSet {
-        dst_set: set,
-        dst_binding: binding,
-        descriptor_count: 1,
-        descriptor_type: ty,
-        ..Default::default()
+    let indirect = |name: &str| {
+        util::create_per_frame_host_buffers(
+            device,
+            indirect_size,
+            rhi::BufferUsages::STORAGE | rhi::BufferUsages::INDIRECT,
+            name,
+        )
     };
-
-    (info, write)
+    (
+        util::create_per_frame_host_buffers(
+            device,
+            meta_size,
+            rhi::BufferUsages::STORAGE | rhi::BufferUsages::VERTEX,
+            "chunk_meta",
+        ),
+        indirect("indirect_cmds"),
+        indirect("indirect_cmds_cutout"),
+    )
 }
 
 #[cfg(test)]

@@ -85,6 +85,7 @@ pub struct ConnectArgs {
     pub access_token: Option<String>,
     pub view_distance: u8,
     pub chat_options: crate::ui::chat::ChatOptions,
+    pub skin_options: crate::ui::menu::SkinOptions,
 }
 
 pub struct ConnectionHandle {
@@ -102,7 +103,10 @@ impl Drop for ConnectionHandle {
 }
 
 pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> ConnectionHandle {
-    let (event_tx, event_rx) = crossbeam_channel::bounded(4096);
+    // Chunk events carry their section and light bytes (up to ~150 KB each),
+    // so the queue stays short; a full queue blocks the network task until the
+    // game thread drains it, which it does every frame.
+    let (event_tx, event_rx) = crossbeam_channel::bounded(256);
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<Outbound>();
     let game_packet_tx = packet_tx.clone();
     let packet_tx = PacketSender::new(packet_tx);
@@ -110,7 +114,7 @@ pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> Conn
         if let Err(e) = connect_to_server(args, event_tx.clone(), game_packet_tx, packet_rx).await {
             tracing::error!("Network error: {e}");
             let reason = friendly_error_reason(&e);
-            let _ = event_tx.try_send(NetworkEvent::Disconnected { reason });
+            send_ordered(&event_tx, NetworkEvent::Disconnected { reason });
         }
     });
     ConnectionHandle {
@@ -133,6 +137,7 @@ pub async fn connect_to_server(
         access_token,
         view_distance,
         chat_options,
+        skin_options,
     } = args;
 
     let (mut conn, wire) = match transport {
@@ -201,6 +206,7 @@ pub async fn connect_to_server(
                 &mut conn,
                 view_distance,
                 chat_options,
+                skin_options,
                 &event_tx,
                 &mut game_packet_rx,
                 None,
@@ -213,10 +219,13 @@ pub async fn connect_to_server(
     tracing::info!("Entering game state");
     let (key_pair_tx, key_pair_rx) = mpsc::unbounded_channel();
     let biome_colors = extract_biome_climate(&joined.configured.registries);
-    let _ = event_tx.try_send(NetworkEvent::BiomeColors {
-        colors: biome_colors,
-    });
-    let _ = event_tx.try_send(NetworkEvent::Connected);
+    send_ordered(
+        &event_tx,
+        NetworkEvent::BiomeColors {
+            colors: biome_colors,
+        },
+    );
+    send_ordered(&event_tx, NetworkEvent::Connected);
 
     game_loop(
         conn,
@@ -228,6 +237,7 @@ pub async fn connect_to_server(
             joined,
             view_distance,
             chat_options,
+            skin_options,
             chat: ChatSender::new(profile_id, uuid, access_token, key_pair_tx),
             key_pair_rx,
         },
@@ -464,6 +474,7 @@ async fn config_sequence(
     conn: &mut Conn,
     view_distance: u8,
     chat_options: crate::ui::chat::ChatOptions,
+    skin_options: crate::ui::menu::SkinOptions,
     event_tx: &Sender<NetworkEvent>,
     outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
     // `Some` on a mid-session reconfiguration: the previous registries,
@@ -496,7 +507,11 @@ async fn config_sequence(
             conn,
             ServerboundConfigPacket::ClientInformation(
                 s_client_information::ServerboundClientInformation {
-                    information: super::client_information(view_distance, chat_options),
+                    information: super::client_information(
+                        view_distance,
+                        chat_options,
+                        skin_options,
+                    ),
                 },
             ),
         )
@@ -669,12 +684,15 @@ async fn config_sequence(
                     p.id,
                     p.required
                 );
-                let _ = event_tx.try_send(NetworkEvent::ResourcePackPush {
-                    id: p.id,
-                    url: p.url.clone(),
-                    hash: p.hash.clone(),
-                    required: p.required,
-                });
+                send_ordered(
+                    event_tx,
+                    NetworkEvent::ResourcePackPush {
+                        id: p.id,
+                        url: p.url.clone(),
+                        hash: p.hash.clone(),
+                        required: p.required,
+                    },
+                );
                 write_config_packet(
                     conn,
                     ServerboundConfigPacket::ResourcePack(
@@ -688,7 +706,7 @@ async fn config_sequence(
             }
             ClientboundConfigPacket::ResourcePackPop(p) => {
                 tracing::info!("Server popping resource pack {:?}", p.id);
-                let _ = event_tx.try_send(NetworkEvent::ResourcePackPop { id: p.id });
+                send_ordered(event_tx, NetworkEvent::ResourcePackPop { id: p.id });
             }
             _ => {
                 tracing::debug!("Config packet: {:?}", std::mem::discriminant(&packet));
@@ -851,7 +869,10 @@ fn dialog_tags(
 /// Forwards the `minecraft:block` tags of an `update_tags` packet, if it has
 /// any.
 fn forward_tags(event_tx: &Sender<NetworkEvent>, tags: &azalea_protocol::common::tags::TagMap) {
-    let _ = event_tx.try_send(NetworkEvent::ItemTags(super::recipe_wire::item_tags(tags)));
+    send_ordered(
+        event_tx,
+        NetworkEvent::ItemTags(super::recipe_wire::item_tags(tags)),
+    );
     let key: azalea_registry::identifier::Identifier = "minecraft:block".into();
     let Some(tags) = tags.0.get(&key) else {
         return;
@@ -860,7 +881,7 @@ fn forward_tags(event_tx: &Sender<NetworkEvent>, tags: &azalea_protocol::common:
         .iter()
         .map(|tag| (tag.name.to_string(), tag.elements.clone()))
         .collect();
-    let _ = event_tx.try_send(NetworkEvent::BlockTags { tags });
+    send_ordered(event_tx, NetworkEvent::BlockTags { tags });
 }
 
 fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -> Option<String> {
@@ -877,6 +898,7 @@ struct GameLoopArgs {
     joined: Joined,
     view_distance: u8,
     chat_options: crate::ui::chat::ChatOptions,
+    skin_options: crate::ui::menu::SkinOptions,
     chat: ChatSender,
     key_pair_rx: mpsc::UnboundedReceiver<Option<std::sync::Arc<ProfileKeyPair>>>,
 }
@@ -893,6 +915,7 @@ async fn game_loop(
         joined,
         view_distance,
         chat_options,
+        skin_options,
         mut chat,
         mut key_pair_rx,
     } = args;
@@ -908,8 +931,14 @@ async fn game_loop(
 
     // Share the registries with the game loop for hashing predicted container
     // clicks.
-    let _ = event_tx.try_send(NetworkEvent::Registries(configured.registries.clone()));
-    let _ = event_tx.try_send(NetworkEvent::DialogRegistry(configured.dialogs.clone()));
+    send_ordered(
+        event_tx,
+        NetworkEvent::Registries(configured.registries.clone()),
+    );
+    send_ordered(
+        event_tx,
+        NetworkEvent::DialogRegistry(configured.dialogs.clone()),
+    );
 
     let translation = super::translate::active();
     let mut inbound_chat = super::chat::InboundChat::new(crate::version::session_protocol() >= 770);
@@ -920,7 +949,11 @@ async fn game_loop(
         // them in the configuration phase (ClientPacketListener.handleLogin).
         let info = ServerboundGamePacket::ClientInformation(
             azalea_protocol::packets::game::s_client_information::ServerboundClientInformation {
-                client_information: super::client_information(view_distance, chat_options),
+                client_information: super::client_information(
+                    view_distance,
+                    chat_options,
+                    skin_options,
+                ),
             },
         );
         write_game_frame(&mut conn.writer, translation, serialize_frame(&info)?).await?;
@@ -1039,6 +1072,7 @@ async fn game_loop(
                         &mut conn,
                         view_distance,
                         chat_options,
+                        skin_options,
                         event_tx,
                         &mut outbound_rx,
                         Some(&configured),
@@ -1046,15 +1080,16 @@ async fn game_loop(
                     .await?;
                     if !std::sync::Arc::ptr_eq(&next.registries, &configured.registries) {
                         chat_types = chat_types_from_registry_holder(&next.registries);
-                        let _ =
-                            event_tx.try_send(NetworkEvent::Registries(next.registries.clone()));
-                        let _ = event_tx.try_send(NetworkEvent::BiomeColors {
-                            colors: extract_biome_climate(&next.registries),
-                        });
+                        send_ordered(event_tx, NetworkEvent::Registries(next.registries.clone()));
+                        send_ordered(
+                            event_tx,
+                            NetworkEvent::BiomeColors {
+                                colors: extract_biome_climate(&next.registries),
+                            },
+                        );
                     }
                     if !std::sync::Arc::ptr_eq(&next.dialogs, &configured.dialogs) {
-                        let _ =
-                            event_tx.try_send(NetworkEvent::DialogRegistry(next.dialogs.clone()));
+                        send_ordered(event_tx, NetworkEvent::DialogRegistry(next.dialogs.clone()));
                     }
                     configured = next;
                     continue;
@@ -1068,8 +1103,10 @@ async fn game_loop(
                     if let Some(tags) = dialog_tags(&p.tags) {
                         configured.dialogs =
                             std::sync::Arc::new(configured.dialogs.with_tags(tags));
-                        let _ = event_tx
-                            .try_send(NetworkEvent::DialogRegistry(configured.dialogs.clone()));
+                        send_ordered(
+                            event_tx,
+                            NetworkEvent::DialogRegistry(configured.dialogs.clone()),
+                        );
                     }
                     forward_tags(event_tx, &p.tags);
                 }
@@ -1318,6 +1355,7 @@ mod tests {
                 access_token: None,
                 view_distance: 8,
                 chat_options: crate::ui::chat::ChatOptions::default(),
+                skin_options: crate::ui::menu::SkinOptions::default(),
             },
             event_tx,
             packet_tx,
@@ -1370,6 +1408,7 @@ mod tests {
                 access_token: None,
                 view_distance: 8,
                 chat_options: crate::ui::chat::ChatOptions::default(),
+                skin_options: crate::ui::menu::SkinOptions::default(),
             },
             event_tx,
             packet_tx,

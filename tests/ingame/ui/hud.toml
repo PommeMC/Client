@@ -55,5 +55,15 @@ chat = "/bossbar remove pomme:test"
 [[step]]
 expect = { hud = { boss_bars = [] } }
 
+# Vanilla's font decomposes legacy codes in every string, not only chat.
+[[step]]
+chat = "/title @a title \"\\u00a7cRed \\u00a7lBold\""
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "legacy_codes"
+
 [[step]]
 chat = "/title @a reset"

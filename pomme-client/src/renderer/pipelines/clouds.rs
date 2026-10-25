@@ -1,12 +1,9 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::camera::{Camera, CameraUniform, CloudMode, MIN_FAR};
 use crate::renderer::pipelines::sky::SkyState;
+use crate::renderer::rhi::{self, VertexFormat};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 /// World-space Y of the cloud layer bottom (vanilla overworld `cloud_height`).
@@ -107,16 +104,13 @@ impl CloudGrid {
 }
 
 pub struct CloudPipeline {
-    fancy_pipeline: vk::Pipeline,
-    flat_pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    camera_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    camera_sets: Vec<vk::DescriptorSet>,
-    camera_buffers: Vec<vk::Buffer>,
-    camera_allocations: Vec<Option<Allocation>>,
-    instance_buffers: Vec<vk::Buffer>,
-    instance_allocations: Vec<Option<Allocation>>,
+    fancy_pipeline: rhi::backend::RenderPipeline,
+    flat_pipeline: rhi::backend::RenderPipeline,
+    pipeline_layout: rhi::backend::PipelineLayout,
+    camera_layout: rhi::backend::BindGroupLayout,
+    camera_sets: Vec<rhi::backend::BindGroup>,
+    camera_buffers: Vec<rhi::backend::Buffer>,
+    instance_buffers: Vec<rhi::backend::Buffer>,
 
     grid: Option<CloudGrid>,
 
@@ -133,107 +127,37 @@ pub struct CloudPipeline {
 
 impl CloudPipeline {
     pub fn new(
-        device: &vk::Device,
-        render_pass: vk::RenderPass,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
     ) -> Self {
-        let camera_layout = util::create_descriptor_set_layout(
+        let camera_layout =
+            rhi::backend::create_bind_group_layout(device, util::VERTEX_FRAGMENT_UNIFORM);
+        let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
-            vk::DescriptorType::UniformBuffer,
-            vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
+            &[camera_layout],
+            Some(rhi::PushConstants {
+                visibility: rhi::ShaderStages::VERTEX_FRAGMENT,
+                size: std::mem::size_of::<CloudPush>() as u32,
+            }),
         );
 
-        let push_range = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
-            offset: 0,
-            size: std::mem::size_of::<CloudPush>() as u32,
-        };
-        let layouts = [camera_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: layouts.len() as u32,
-            set_layouts: layouts.as_ptr(),
-            push_constant_range_count: 1,
-            push_constant_ranges: &push_range,
-            ..Default::default()
-        };
-        let pipeline_layout = device
-            .create_pipeline_layout(&layout_info, None)
-            .expect("failed to create cloud pipeline layout");
+        let (fancy_pipeline, flat_pipeline) = create_pipelines(device, targets, pipeline_layout);
 
-        let (fancy_pipeline, flat_pipeline) =
-            create_pipelines(device, render_pass, pipeline_layout);
+        let (camera_sets, camera_buffers) = util::create_uniform_sets(
+            device,
+            camera_layout,
+            std::mem::size_of::<CameraUniform>() as u64,
+            "cloud_camera",
+        );
 
-        let pool_sizes = [vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::UniformBuffer,
-            descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-        }];
-        let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: MAX_FRAMES_IN_FLIGHT as u32,
-            pool_size_count: pool_sizes.len() as u32,
-            pool_sizes: pool_sizes.as_ptr(),
-            ..Default::default()
-        };
-        let descriptor_pool = device
-            .create_descriptor_pool(&pool_info, None)
-            .expect("failed to create cloud descriptor pool");
-
-        let camera_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| camera_layout).collect();
-        let camera_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: camera_layouts.len() as u32,
-            set_layouts: camera_layouts.as_ptr(),
-            ..Default::default()
-        };
-        let mut camera_sets = vec![vk::DescriptorSet::null(); camera_layouts.len()];
-        device
-            .allocate_descriptor_sets(&camera_alloc_info, &mut camera_sets)
-            .expect("failed to allocate cloud camera sets");
-
-        let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut camera_allocations: Vec<Option<Allocation>> =
-            Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
-                device,
-                allocator,
-                std::mem::size_of::<CameraUniform>() as u64,
-                "cloud_camera",
-            );
-            let buffer_info = vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: std::mem::size_of::<CameraUniform>() as u64,
-            };
-            let write = vk::WriteDescriptorSet {
-                dst_set: set,
-                dst_binding: 0,
-                descriptor_type: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
-                buffer_info: &buffer_info,
-                ..Default::default()
-            };
-            device.update_descriptor_sets(&[write], &[]);
-            camera_buffers.push(buf);
-            camera_allocations.push(Some(alloc));
-        }
-
-        let mut instance_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut instance_allocations: Vec<Option<Allocation>> =
-            Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let instance_bytes = (MAX_FACES * std::mem::size_of::<CloudFace>()) as u64;
-        for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let (buf, alloc) = util::create_host_buffer(
-                device,
-                allocator,
-                instance_bytes,
-                vk::BufferUsageFlags::VertexBuffer,
-                "cloud_faces",
-            );
-            instance_buffers.push(buf);
-            instance_allocations.push(Some(alloc));
-        }
+        let instance_buffers = util::create_per_frame_host_buffers(
+            device,
+            (MAX_FACES * std::mem::size_of::<CloudFace>()) as u64,
+            rhi::BufferUsages::VERTEX,
+            "cloud_faces",
+        );
 
         let grid = load_cloud_grid(jar_assets_dir, asset_index);
 
@@ -242,12 +166,9 @@ impl CloudPipeline {
             flat_pipeline,
             pipeline_layout,
             camera_layout,
-            descriptor_pool,
             camera_sets,
             camera_buffers,
-            camera_allocations,
             instance_buffers,
-            instance_allocations,
             grid,
             faces: Vec::new(),
             dirty: vec![false; MAX_FRAMES_IN_FLIGHT],
@@ -261,14 +182,12 @@ impl CloudPipeline {
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
         let bytes = bytemuck::bytes_of(uniform);
-        if let Some(alloc) = self.camera_allocations[frame].as_mut() {
-            alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
-        }
+        self.camera_buffers[frame].write(bytes);
     }
 
     pub fn update_and_draw(
         &mut self,
-        cmd: vk::CommandBuffer,
+        pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
         camera: &Camera,
         sky: &SkyState,
@@ -335,9 +254,7 @@ impl CloudPipeline {
 
         if self.dirty[frame] {
             let bytes = bytemuck::cast_slice::<CloudFace, u8>(&self.faces);
-            if let Some(alloc) = self.instance_allocations[frame].as_mut() {
-                alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
-            }
+            self.instance_buffers[frame].write(bytes);
             self.dirty[frame] = false;
         }
 
@@ -355,23 +272,16 @@ impl CloudPipeline {
         } else {
             self.flat_pipeline
         };
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, pipeline);
-        cmd.bind_vertex_buffers(0, &[self.instance_buffers[frame]], &[0]);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.camera_sets[frame]],
-            &[],
-        );
-        cmd.push_constants(
-            self.pipeline_layout,
-            vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, self.instance_buffers[frame].handle());
+        pass.set_bind_group(0, self.camera_sets[frame]);
+        pass.set_push_constants(
+            rhi::ShaderStages::VERTEX_FRAGMENT,
             0,
             bytemuck::bytes_of(&push),
         );
         // Six vertices (two triangles) per face, one instance per face.
-        cmd.draw(6, self.faces.len() as u32, 0, 0);
+        pass.draw(6, self.faces.len() as u32, 0, 0);
     }
 
     fn build_mesh(&mut self, cell_x: i32, cell_z: i32, mode: CloudMode, rel: RelativePos) {
@@ -417,32 +327,26 @@ impl CloudPipeline {
         }
     }
 
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.fancy_pipeline, None);
-        device.destroy_pipeline(self.flat_pipeline, None);
+    pub fn recreate_pipeline(
+        &mut self,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
+    ) {
+        self.fancy_pipeline.destroy(device);
+        self.flat_pipeline.destroy(device);
         (self.fancy_pipeline, self.flat_pipeline) =
-            create_pipelines(device, render_pass, self.pipeline_layout);
+            create_pipelines(device, targets, self.pipeline_layout);
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let mut alloc = allocator.lock().unwrap();
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            device.destroy_buffer(self.camera_buffers[i], None);
-            if let Some(a) = self.camera_allocations[i].take() {
-                alloc.free(a).ok();
-            }
-            device.destroy_buffer(self.instance_buffers[i], None);
-            if let Some(a) = self.instance_allocations[i].take() {
-                alloc.free(a).ok();
-            }
-        }
-        drop(alloc);
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        util::destroy_buffers(device, &mut self.camera_buffers);
+        util::destroy_buffers(device, &mut self.instance_buffers);
 
-        device.destroy_pipeline(self.fancy_pipeline, None);
-        device.destroy_pipeline(self.flat_pipeline, None);
-        device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_descriptor_pool(self.descriptor_pool, None);
-        device.destroy_descriptor_set_layout(self.camera_layout, None);
+        self.fancy_pipeline.destroy(device);
+        self.flat_pipeline.destroy(device);
+        self.pipeline_layout.destroy(device);
+        util::destroy_bind_groups(device, self.camera_sets.drain(..));
+        self.camera_layout.destroy(device);
     }
 }
 
@@ -541,147 +445,54 @@ fn load_cloud_grid(jar_assets_dir: &Path, asset_index: &Option<AssetIndex>) -> O
 }
 
 fn create_pipelines(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-) -> (vk::Pipeline, vk::Pipeline) {
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
+) -> (rhi::backend::RenderPipeline, rhi::backend::RenderPipeline) {
     (
-        create_pipeline(device, render_pass, layout, vk::CullModeFlags::Back),
-        create_pipeline(device, render_pass, layout, vk::CullModeFlags::None),
+        create_pipeline(device, targets, layout, rhi::CullMode::Back),
+        create_pipeline(device, targets, layout, rhi::CullMode::None),
     )
 }
 
 fn create_pipeline(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-    cull_mode: vk::CullModeFlags,
-) -> vk::Pipeline {
-    let vert_spv = shader::include_spirv!("clouds.vert.spv");
-    let frag_spv = shader::include_spirv!("clouds.frag.spv");
-    let vert_mod = shader::create_shader_module(device, vert_spv);
-    let frag_mod = shader::create_shader_module(device, frag_spv);
-
-    let stages = [
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Vertex,
-            module: vert_mod,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Fragment,
-            module: frag_mod,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-    ];
-
-    // One per-instance binding: each instance is a packed cloud face, expanded to
-    // a quad by the vertex shader via gl_VertexIndex.
-    let binding_descs = [vk::VertexInputBindingDescription {
-        binding: 0,
-        stride: std::mem::size_of::<CloudFace>() as u32,
-        input_rate: vk::VertexInputRate::Instance,
-    }];
-    let attr_descs = [
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R16G16Sint,
-            offset: 0,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R8G8Uint,
-            offset: 4,
-        },
-    ];
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo {
-        vertex_binding_description_count: binding_descs.len() as u32,
-        vertex_binding_descriptions: binding_descs.as_ptr(),
-        vertex_attribute_description_count: attr_descs.len() as u32,
-        vertex_attribute_descriptions: attr_descs.as_ptr(),
-        ..Default::default()
-    };
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
-        topology: vk::PrimitiveTopology::TriangleList,
-        ..Default::default()
-    };
-    let viewport_state = vk::PipelineViewportStateCreateInfo {
-        viewport_count: 1,
-        scissor_count: 1,
-        ..Default::default()
-    };
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo {
-        polygon_mode: vk::PolygonMode::Fill,
-        cull_mode,
-        front_face: vk::FrontFace::CounterClockwise,
-        line_width: 1.0,
-        ..Default::default()
-    };
-    let multisampling = vk::PipelineMultisampleStateCreateInfo {
-        rasterization_samples: vk::SampleCountFlags::Type1,
-        ..Default::default()
-    };
-    // Depth-test against the world so terrain occludes clouds. Write depth too:
-    // clouds are near-opaque (0.8 alpha) and 3D boxes overlap, so depth writes
-    // keep the nearest cloud face and avoid double-blending the layer.
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
-        depth_test_enable: vk::TRUE,
-        depth_write_enable: vk::TRUE,
-        depth_compare_op: vk::CompareOp::Less,
-        ..Default::default()
-    };
-    let blend_attachment = vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::TRUE,
-        src_color_blend_factor: vk::BlendFactor::SrcAlpha,
-        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
-        color_blend_op: vk::BlendOp::Add,
-        src_alpha_blend_factor: vk::BlendFactor::One,
-        dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
-        alpha_blend_op: vk::BlendOp::Add,
-        color_write_mask: vk::ColorComponentFlags::RGBA,
-    };
-    let color_blending = vk::PipelineColorBlendStateCreateInfo {
-        attachment_count: 1,
-        attachments: &blend_attachment,
-        ..Default::default()
-    };
-    let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
-    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
-        dynamic_state_count: dynamic_states.len() as u32,
-        dynamic_states: dynamic_states.as_ptr(),
-        ..Default::default()
-    };
-
-    let info = [vk::GraphicsPipelineCreateInfo {
-        stage_count: stages.len() as u32,
-        stages: stages.as_ptr(),
-        vertex_input_state: &vertex_input,
-        input_assembly_state: &input_assembly,
-        viewport_state: &viewport_state,
-        rasterization_state: &rasterizer,
-        multisample_state: &multisampling,
-        depth_stencil_state: &depth_stencil,
-        color_blend_state: &color_blending,
-        dynamic_state: &dynamic_state,
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
+    cull_mode: rhi::CullMode,
+) -> rhi::backend::RenderPipeline {
+    // Each instance is a packed cloud face, expanded to a quad by the vertex
+    // shader via gl_VertexIndex.
+    rhi::backend::create_render_pipeline(
+        device,
+        targets,
         layout,
-        render_pass,
-        subpass: 0,
-        ..Default::default()
-    }];
-
-    let mut pipeline = [vk::Pipeline::null()];
-    device
-        .create_graphics_pipelines(vk::PipelineCache::null(), &info, None, &mut pipeline)
-        .expect("failed to create cloud pipeline");
-
-    device.destroy_shader_module(vert_mod, None);
-    device.destroy_shader_module(frag_mod, None);
-
-    pipeline[0]
+        &rhi::RenderPipelineDesc {
+            cull_mode,
+            // Depth-test against the world so terrain occludes clouds. Write
+            // depth too: clouds are near-opaque (0.8 alpha) and 3D boxes
+            // overlap, so depth writes keep the nearest cloud face and avoid
+            // double-blending the layer.
+            depth: Some(rhi::DepthState {
+                compare: rhi::CompareFunction::Less,
+                ..rhi::DepthState::WRITE
+            }),
+            blend: Some(rhi::BlendState::TRANSLUCENT),
+            ..rhi::RenderPipelineDesc::new(
+                "clouds",
+                shader::include_shader!("clouds.vert"),
+                shader::include_shader!("clouds.frag"),
+                &[rhi::VertexBufferLayout {
+                    stride: size_of::<CloudFace>() as u32,
+                    step_mode: rhi::VertexStepMode::Instance,
+                    attributes: &rhi::packed_attributes(
+                        0,
+                        [VertexFormat::Sint16x2, VertexFormat::Uint8x2],
+                    ),
+                }],
+            )
+        },
+    )
 }
 
 #[cfg(test)]
