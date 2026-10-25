@@ -141,26 +141,30 @@ pub fn refresh_friends(
                     .chain(&lists.outgoing)
                     .map(|f| f.uuid.clone());
                 for uuid in uuids {
-                    if uuid.is_empty() || faces.read().contains_key(&uuid) {
-                        continue;
-                    }
-                    let faces = Arc::clone(&faces);
-                    rt.spawn(async move {
-                        if let Ok(skin) = crate::renderer::fetch_skin_texture(&uuid).await
-                            && let Some(face) =
-                                crate::renderer::pipelines::menu_overlay::extract_face_8x8(
-                                    &skin.pixels,
-                                    skin.width,
-                                    skin.height,
-                                )
-                        {
-                            faces.write().insert(uuid, face);
-                        }
-                    });
+                    fetch_face(&rt, uuid, &faces);
                 }
                 *data.write() = FriendsState::Loaded(lists);
             }
             Err(e) => *data.write() = FriendsState::Failed(e),
+        }
+    });
+}
+
+/// Fetches `uuid`'s 8x8 face into `faces` unless it's there already.
+pub fn fetch_face(rt: &tokio::runtime::Runtime, uuid: String, faces: &FaceCache) {
+    if uuid.is_empty() || faces.read().contains_key(&uuid) {
+        return;
+    }
+    let faces = Arc::clone(faces);
+    rt.spawn(async move {
+        if let Ok(skin) = crate::renderer::fetch_skin_texture(&uuid).await
+            && let Some(face) = crate::renderer::pipelines::menu_overlay::extract_face_8x8(
+                &skin.pixels,
+                skin.width,
+                skin.height,
+            )
+        {
+            faces.write().insert(uuid, face);
         }
     });
 }

@@ -6,6 +6,7 @@
 //!   minecraft/assets/     Mojang's asset index and objects
 //!   minecraft/versions/   each version's json, jar and extracted assets
 //!   pomme-assets/         Pomme's branded assets
+//!   bedrock/<tag>/        Bedrock's resource pack, for the Bedrock theme
 //!   profiles/<name>/      options, servers, saves, packs and mods
 //!   cache/<version>/      rebuildable, safe to delete
 //!   launcher/             launcher-only state
@@ -45,6 +46,10 @@ impl Layout {
 
     pub fn pomme_assets(&self) -> PathBuf {
         self.root.join("pomme-assets")
+    }
+
+    pub fn bedrock_assets(&self) -> PathBuf {
+        self.root.join("bedrock")
     }
 
     pub fn profiles(&self) -> PathBuf {

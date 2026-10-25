@@ -1,0 +1,111 @@
+# A right click whose main hand item does nothing falls through to the
+# offhand, which places its block and swings the left arm; so does one
+# whose armor swap fails.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:dirt 2"
+
+[[step]]
+expect = { slot = 36, item = "dirt", count = 2 }
+
+[[step]]
+press = { action = "key.swapOffhand" }
+
+[[step]]
+expect = { slot = 45, item = "dirt", count = 2 }
+
+[[step]]
+chat = "/give @s minecraft:stick"
+
+[[step]]
+expect = { slot = 36, item = "stick" }
+
+[[step]]
+chat = "/tp @s 0.5 -60 0.5 0 0"
+
+[[step]]
+look_at = [0.5, -60.0, 2.5]
+
+[[step]]
+mouse_down = "right"
+
+# Released before the 4-tick repeat could place a second block.
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+screenshot = "offhand_swing"
+
+[[step]]
+expect = { block = "dirt", at = [0, -60, 2] }
+
+[[step]]
+expect = { slot = 45, item = "dirt", count = 1 }
+
+[[step]]
+expect = { slot = 36, item = "stick" }
+
+[[step]]
+chat = "/setblock 0 -60 2 minecraft:air"
+
+# Wearing the same helmet, the main hand's swap fails and the offhand's
+# dirt goes down instead.
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:dirt"
+
+[[step]]
+expect = { slot = 36, item = "dirt" }
+
+[[step]]
+press = { action = "key.swapOffhand" }
+
+[[step]]
+expect = { slot = 45, item = "dirt" }
+
+[[step]]
+chat = "/item replace entity @s armor.head with minecraft:iron_helmet"
+
+[[step]]
+expect = { slot = 5, item = "iron_helmet" }
+
+[[step]]
+chat = "/give @s minecraft:iron_helmet"
+
+[[step]]
+expect = { slot = 36, item = "iron_helmet" }
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { block = "dirt", at = [0, -60, 2] }
+
+[[step]]
+expect = { slot = 36, item = "iron_helmet" }
+
+[[step]]
+chat = "/setblock 0 -60 2 minecraft:air"
+
+[[step]]
+chat = "/clear @s"

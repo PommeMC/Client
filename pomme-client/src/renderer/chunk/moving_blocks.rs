@@ -3,14 +3,9 @@
 //! with a one-instance origin per block, like vanilla's `solidMovingBlock` and
 //! `cutoutMovingBlock` render types.
 
-use std::sync::{Arc, Mutex};
-
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
-
 use super::buffer::ChunkMeta;
 use super::mesher::{MovingBlockMesh, PackedVertex};
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi};
 
 /// One moving block's mesh and the cell its vertices are relative to.
 pub struct MovingBlockRender {
@@ -33,26 +28,28 @@ struct Draw {
 /// A host-visible buffer that's replaced by a bigger one when a frame needs
 /// more room.
 struct Mapped {
-    buffer: vk::Buffer,
-    allocation: Allocation,
+    buffer: rhi::backend::Buffer,
     capacity: usize,
-    usage: vk::BufferUsageFlags,
+    usage: rhi::BufferUsages,
     name: &'static str,
 }
 
 impl Mapped {
     fn new(
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
         capacity: usize,
-        usage: vk::BufferUsageFlags,
+        usage: rhi::BufferUsages,
         name: &'static str,
     ) -> Self {
-        let (buffer, allocation) =
-            util::create_host_buffer(device, allocator, capacity as u64, usage, name);
+        let buffer = rhi::backend::Buffer::new(
+            device,
+            name,
+            capacity as u64,
+            usage,
+            rhi::MemoryLocation::Host,
+        );
         Self {
             buffer,
-            allocation,
             capacity,
             usage,
             name,
@@ -61,23 +58,17 @@ impl Mapped {
 
     /// Writes `bytes`, first growing the buffer if they don't fit. Only safe
     /// once this frame's fence has signalled.
-    fn write(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>, bytes: &[u8]) {
+    fn write(&mut self, device: &rhi::backend::Device, bytes: &[u8]) {
         if bytes.len() > self.capacity {
             let capacity = bytes.len().max(self.capacity * 2);
-            let old = std::mem::replace(
-                self,
-                Self::new(device, allocator, capacity, self.usage, self.name),
-            );
-            old.destroy(device, allocator);
+            let old = std::mem::replace(self, Self::new(device, capacity, self.usage, self.name));
+            old.destroy(device);
         }
-        if let Some(mapped) = self.allocation.mapped_slice_mut() {
-            mapped[..bytes.len()].copy_from_slice(bytes);
-        }
+        self.buffer.write(bytes);
     }
 
-    fn destroy(self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        device.destroy_buffer(self.buffer, None);
-        allocator.lock().unwrap().free(self.allocation).ok();
+    fn destroy(self, device: &rhi::backend::Device) {
+        self.buffer.destroy(device);
     }
 }
 
@@ -93,28 +84,25 @@ pub struct MovingBlockBuffers {
 }
 
 impl MovingBlockBuffers {
-    pub fn new(device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) -> Self {
+    pub fn new(device: &rhi::backend::Device) -> Self {
         let frames = (0..MAX_FRAMES_IN_FLIGHT)
             .map(|_| FrameBuffers {
                 vertices: Mapped::new(
                     device,
-                    allocator,
                     INITIAL_BLOCKS * 24 * 4 * size_of::<PackedVertex>(),
-                    vk::BufferUsageFlags::VertexBuffer,
+                    rhi::BufferUsages::VERTEX,
                     "moving_block_vertices",
                 ),
                 indices: Mapped::new(
                     device,
-                    allocator,
                     INITIAL_BLOCKS * 24 * 6 * size_of::<u32>(),
-                    vk::BufferUsageFlags::IndexBuffer,
+                    rhi::BufferUsages::INDEX,
                     "moving_block_indices",
                 ),
                 meta: Mapped::new(
                     device,
-                    allocator,
                     INITIAL_BLOCKS * size_of::<ChunkMeta>(),
-                    vk::BufferUsageFlags::VertexBuffer,
+                    rhi::BufferUsages::VERTEX,
                     "moving_block_meta",
                 ),
             })
@@ -128,8 +116,7 @@ impl MovingBlockBuffers {
     /// Copies this frame's blocks into `frame`'s buffers, after its fence.
     pub fn upload(
         &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
         frame: usize,
         blocks: &[MovingBlockRender],
     ) {
@@ -153,24 +140,23 @@ impl MovingBlockBuffers {
         let buffers = &mut self.frames[frame];
         buffers
             .vertices
-            .write(device, allocator, bytemuck::cast_slice(&vertices));
+            .write(device, bytemuck::cast_slice(&vertices));
         buffers
             .indices
-            .write(device, allocator, bytemuck::cast_slice(&indices));
-        buffers
-            .meta
-            .write(device, allocator, bytemuck::cast_slice(&meta));
+            .write(device, bytemuck::cast_slice(&indices));
+        buffers.meta.write(device, bytemuck::cast_slice(&meta));
     }
 
     /// Draws the uploaded blocks' solid or cutout quads; the caller binds the
     /// matching chunk pipeline first.
-    pub fn draw(&self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
+    pub fn draw(&self, pass: &rhi::backend::RenderPassEncoder, frame: usize, cutout: bool) {
         if self.draws.is_empty() {
             return;
         }
         let buffers = &self.frames[frame];
-        cmd.bind_vertex_buffers(0, &[buffers.vertices.buffer, buffers.meta.buffer], &[0, 0]);
-        cmd.bind_index_buffer(buffers.indices.buffer, 0, vk::IndexType::Uint32);
+        pass.set_vertex_buffer(0, buffers.vertices.buffer.handle());
+        pass.set_vertex_buffer(1, buffers.meta.buffer.handle());
+        pass.set_index_buffer(buffers.indices.buffer.handle());
         for (instance, draw) in self.draws.iter().enumerate() {
             let (first, count) = if cutout {
                 (draw.first_index + draw.solid_count, draw.cutout_count)
@@ -178,15 +164,15 @@ impl MovingBlockBuffers {
                 (draw.first_index, draw.solid_count)
             };
             if count > 0 {
-                cmd.draw_indexed(count, 1, first, draw.vertex_offset, instance as u32);
+                pass.draw_indexed(count, 1, first, draw.vertex_offset, instance as u32);
             }
         }
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
         for frame in self.frames.drain(..) {
             for buffer in [frame.vertices, frame.indices, frame.meta] {
-                buffer.destroy(device, allocator);
+                buffer.destroy(device);
             }
         }
     }

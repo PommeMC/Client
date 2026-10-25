@@ -1,16 +1,11 @@
 #version 450
 
+#include "item_push.glsl"
 #include "fog.glsl"
 
 #include "camera_ubo.glsl"
 
 #include "item_tint.glsl"
-
-layout(push_constant) uniform PushConstants {
-    mat4 model;
-    layout(offset = 72) uint item_tint_base;
-    layout(offset = 76) uint item_tint_count;
-};
 
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec2 tex_coords;

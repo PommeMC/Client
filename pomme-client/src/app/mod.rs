@@ -517,6 +517,7 @@ impl ApplicationHandler for App {
                     &self.core.data_dirs.cache_dir,
                     self.core.menu.vsync,
                     &self.core.menu.theme().panorama_dir(&self.core.data_dirs),
+                    &self.core.data_dirs.bedrock_ui_dir(),
                 ) {
                     Ok(r) => r,
                     Err(e) => {
@@ -535,6 +536,7 @@ impl ApplicationHandler for App {
 
                 if let Some(uuid) = pending_skin_uuid.take() {
                     renderer.load_player_skin(&uuid, &self.core.tokio_rt);
+                    self.core.menu.set_player_face(Some(&uuid));
                 }
 
                 self.core.apply_cursor_grab(&window, None);

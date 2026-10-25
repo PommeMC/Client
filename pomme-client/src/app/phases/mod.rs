@@ -219,7 +219,7 @@ pub fn draw_status(
 
     if let Err(e) =
         gfx.renderer
-            .render_menu(&gfx.window, panorama.scroll(), 2.0, elements, cursor, false)
+            .render_menu(&gfx.window, panorama.scroll(), 2.0, elements, cursor, None)
     {
         tracing::error!("Render error: {e}");
     }

@@ -1,0 +1,71 @@
+# First person draws the offhand item in the left hand, mirroring the main
+# hand's item on the right, and hides it behind a charged crossbow; a
+# left-handed player's bare arm is on the left.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:totem_of_undying"
+
+[[step]]
+expect = { slot = 36, item = "totem_of_undying" }
+
+[[step]]
+press = { action = "key.swapOffhand" }
+
+[[step]]
+expect = { slot = 45, item = "totem_of_undying" }
+
+[[step]]
+chat = "/give @s minecraft:stone"
+
+[[step]]
+expect = { slot = 36, item = "stone" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "both_hands"
+
+# A charged crossbow in the main hand hides the offhand.
+[[step]]
+chat = "/clear @s minecraft:stone"
+
+[[step]]
+chat = "/give @s minecraft:crossbow[charged_projectiles=[{id:\"minecraft:arrow\"}]]"
+
+[[step]]
+expect = { slot = 36, item = "crossbow" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "charged_crossbow"
+
+[[step]]
+chat = "/clear @s"
+
+# Left-handed, the empty main hand's bare arm is on the left.
+[[step]]
+expect = { slot = 36, item = "air" }
+
+[[step]]
+option = { main_hand = "left" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "left_arm"
+
+[[step]]
+option = { main_hand = "right" }

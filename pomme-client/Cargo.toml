@@ -98,7 +98,7 @@ gilrs = "0.11.2"
 
 # arboard has no Android or iOS backend; pyronyx's window-handle helpers don't
 # compile for Android and have no iOS arm (see
-# `renderer::context::window_surface`).
+# `renderer::rhi::vulkan::context::window_surface`).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 pyronyx = { workspace = true, features = ["rwh_06"] }
 arboard = { version = "3", features = ["wayland-data-control"] }

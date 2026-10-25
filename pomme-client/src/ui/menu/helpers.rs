@@ -216,6 +216,41 @@ impl FocusCtx {
         }
         self.focus == Some(idx)
     }
+
+    /// Claims a focus slot for a button at `rect` and reports how it's being
+    /// used this frame. Fires on a click on it, or Enter/Space while focused.
+    pub(super) fn button(
+        &mut self,
+        any_hovered: &mut bool,
+        cursor: (f32, f32),
+        clicked: bool,
+        rect: [f32; 4],
+        enabled: bool,
+    ) -> ButtonUse {
+        let hit = common::hit_test(cursor, rect);
+        let hovered = enabled && hit;
+        let focused = self.focused(enabled, hovered);
+        *any_hovered |= hovered;
+        let keyboard = focused && self.activate;
+        if keyboard {
+            self.fired = true;
+        }
+        ButtonUse {
+            hit,
+            hovered,
+            focused,
+            activated: (hovered && clicked) || keyboard,
+        }
+    }
+}
+
+/// How a button is used this frame, from [`FocusCtx::button`].
+pub(super) struct ButtonUse {
+    /// The cursor is on it, whether or not it's enabled.
+    pub(super) hit: bool,
+    pub(super) hovered: bool,
+    pub(super) focused: bool,
+    pub(super) activated: bool,
 }
 
 /// A focusable vanilla-style button. Assigns itself the next focus index,
@@ -271,9 +306,8 @@ pub(super) fn push_button_label_f(
     enabled: bool,
     scroll: Option<&common::LabelScroll<'_>>,
 ) -> bool {
-    let real_hovered = enabled && common::hit_test(cursor, [x, y, w, h]);
-    let focused = ctx.focused(enabled, real_hovered);
-    let draw_cursor = focus_cursor(focused, real_hovered, x, y, w, h, cursor);
+    let button = ctx.button(any_hovered, cursor, clicked, [x, y, w, h], enabled);
+    let draw_cursor = focus_cursor(button.focused, button.hovered, x, y, w, h, cursor);
     common::push_button_label(
         elements,
         draw_cursor,
@@ -287,12 +321,7 @@ pub(super) fn push_button_label_f(
         enabled,
         scroll,
     );
-    *any_hovered |= real_hovered;
-    let keyboard = focused && ctx.activate;
-    if keyboard {
-        ctx.fired = true;
-    }
-    (real_hovered && clicked) || keyboard
+    button.activated
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -590,21 +619,46 @@ pub(super) fn push_bottom_text(
 
 pub(super) struct DropdownStyle {
     pub(super) item_h: f32,
+    /// Bedrock's dropdown look in place of Pomme's.
+    bedrock: bool,
+    /// Between the background's edge and the rows.
+    inset: f32,
+    gs: f32,
     radius: f32,
     font: f32,
     icon_scale: f32,
     pad: f32,
+    bar_h: f32,
 }
 
 impl DropdownStyle {
     pub(super) fn new(gs: f32) -> Self {
         Self {
             item_h: 28.0 * gs,
+            bedrock: false,
+            inset: 0.0,
+            gs,
             radius: 5.0 * gs,
             font: 9.0 * gs,
             icon_scale: 11.0 * gs,
             pad: 10.0 * gs,
+            bar_h: 2.0 * gs,
         }
+    }
+
+    /// Bedrock's `common.dropdown`: `settings_common.radio_with_label` rows
+    /// 17 tall, 2 inside a `dropdown_background`.
+    pub(super) fn bedrock(gs: f32) -> Self {
+        Self {
+            item_h: 17.0 * gs,
+            bedrock: true,
+            inset: 2.0 * gs,
+            ..Self::new(gs)
+        }
+    }
+
+    pub(super) fn list_h(&self, rows: usize) -> f32 {
+        rows as f32 * self.item_h + 2.0 * self.inset
     }
 
     /// Draws an open list with its bottom edge at `drop_bottom` and returns
@@ -627,39 +681,40 @@ impl DropdownStyle {
         if !*open {
             return None;
         }
-        let total_h = items.len() as f32 * self.item_h;
+        let total_h = self.list_h(items.len());
         let drop_y_top = drop_bottom - total_h;
-        self.draw_background(elements, drop_x, drop_y_top, drop_w, total_h);
+        let list = [drop_x, drop_y_top, drop_w, total_h];
+        self.draw_background(elements, list);
         let mut picked = None;
         for (i, item) in items.iter().enumerate() {
-            let hovered = self.draw_item(
-                elements,
-                any_hovered,
-                cursor,
-                drop_x,
-                drop_y_top,
-                drop_w,
-                i,
-                items.len(),
-                item.label,
-                item.icon,
-                DROP_TEXT_BRIGHT,
-                item.color,
-            );
+            let rect = [
+                drop_x + self.inset,
+                drop_y_top + self.inset + i as f32 * self.item_h,
+                drop_w - 2.0 * self.inset,
+                self.item_h,
+            ];
+            let hovered = common::hit_test(cursor, rect);
+            *any_hovered |= hovered;
+            let ends = i == 0 || i == items.len() - 1;
+            self.draw_item(elements, rect, ends, item, hovered);
             if clicked && hovered {
                 picked = Some(i);
             }
         }
         // A row click closes; so does a click outside the list and its anchor.
-        let outside = !common::hit_test(cursor, [drop_x, drop_y_top, drop_w, total_h])
-            && !common::hit_test(cursor, anchor);
+        let outside = !common::hit_test(cursor, list) && !common::hit_test(cursor, anchor);
         if picked.is_some() || (clicked && outside) {
             *open = false;
         }
         picked
     }
 
-    fn draw_background(&self, elements: &mut Vec<MenuElement>, x: f32, y: f32, w: f32, h: f32) {
+    fn draw_background(&self, elements: &mut Vec<MenuElement>, rect: [f32; 4]) {
+        if self.bedrock {
+            super::bedrock_screen::push_dropdown_background(elements, rect, self.gs);
+            return;
+        }
+        let [x, y, w, h] = rect;
         elements.push(MenuElement::Rect {
             x,
             y,
@@ -670,63 +725,68 @@ impl DropdownStyle {
         });
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// `ends` is the list's first or last row, whose hover rounds its corners.
     fn draw_item(
         &self,
         elements: &mut Vec<MenuElement>,
-        any_hovered: &mut bool,
-        cursor: (f32, f32),
-        drop_x: f32,
-        drop_y: f32,
-        drop_w: f32,
-        index: usize,
-        count: usize,
-        label: &str,
-        icon: Option<(char, [f32; 4])>,
-        hover_color: [f32; 4],
-        normal_color: [f32; 4],
-    ) -> bool {
-        let iy = drop_y + index as f32 * self.item_h;
-        let rect = [drop_x, iy, drop_w, self.item_h];
-        let hovered = common::hit_test(cursor, rect);
-        *any_hovered |= hovered;
+        rect: [f32; 4],
+        ends: bool,
+        item: &DropItem,
+        hovered: bool,
+    ) {
+        let [x, y, w, h] = rect;
+        if self.bedrock {
+            super::bedrock_screen::push_dropdown_row(elements, rect, self.gs, item, hovered);
+        } else {
+            if hovered {
+                elements.push(MenuElement::Rect {
+                    x,
+                    y,
+                    w,
+                    h,
+                    corner_radius: if ends { self.radius } else { 0.0 },
+                    color: [1.0, 1.0, 1.0, 0.08],
+                });
+            }
 
-        if hovered {
-            let r = if index == 0 || index == count - 1 {
-                self.radius
-            } else {
-                0.0
-            };
-            elements.push(MenuElement::Rect {
-                x: drop_x,
-                y: iy,
-                w: drop_w,
-                h: self.item_h,
-                corner_radius: r,
-                color: [1.0, 1.0, 1.0, 0.08],
+            if let Some((icon_char, icon_col)) = item.icon {
+                elements.push(MenuElement::Icon {
+                    x: x + self.pad + self.icon_scale / 2.0,
+                    y: y + h / 2.0,
+                    icon: icon_char,
+                    scale: self.icon_scale,
+                    color: if hovered { DROP_TEXT_BRIGHT } else { icon_col },
+                });
+            }
+
+            elements.push(MenuElement::Text {
+                x: x + self.pad + self.icon_scale + 6.0,
+                y: y + (h - self.font) / 2.0,
+                text: item.label.to_string(),
+                scale: self.font,
+                color: if hovered {
+                    DROP_TEXT_BRIGHT
+                } else {
+                    item.color
+                },
+                centered: false,
             });
         }
 
-        if let Some((icon_char, icon_col)) = icon {
-            elements.push(MenuElement::Icon {
-                x: drop_x + self.pad + self.icon_scale / 2.0,
-                y: iy + self.item_h / 2.0,
-                icon: icon_char,
-                scale: self.icon_scale,
-                color: if hovered { hover_color } else { icon_col },
-            });
+        if let Some(progress) = item.progress {
+            let (x, w) = (x + self.pad, w - 2.0 * self.pad);
+            let y = y + h - self.bar_h - self.pad / 2.0;
+            for (w, color) in [(w, [1.0, 1.0, 1.0, 0.1]), (w * progress, DROP_ACCENT)] {
+                elements.push(MenuElement::Rect {
+                    x,
+                    y,
+                    w,
+                    h: self.bar_h,
+                    corner_radius: self.bar_h / 2.0,
+                    color,
+                });
+            }
         }
-
-        elements.push(MenuElement::Text {
-            x: drop_x + self.pad + self.icon_scale + 6.0,
-            y: iy + (self.item_h - self.font) / 2.0,
-            text: label.to_string(),
-            scale: self.font,
-            color: if hovered { hover_color } else { normal_color },
-            centered: false,
-        });
-
-        hovered
     }
 }
 
@@ -740,6 +800,11 @@ pub(super) struct DropItem {
     pub(super) label: &'static str,
     pub(super) icon: Option<(char, [f32; 4])>,
     pub(super) color: [f32; 4],
+    /// One of the list's choices, and whether it's the current one: Bedrock
+    /// draws it as a radio button.
+    pub(super) radio: Option<bool>,
+    /// Drawn as a bar along the row's bottom.
+    pub(super) progress: Option<f32>,
 }
 
 pub(super) fn smoothstep(t: f32) -> f32 {
@@ -1011,8 +1076,14 @@ const DROP_TEXT: [f32; 4] = [0.89, 0.90, 0.96, 0.85];
 const DROP_TEXT_BRIGHT: [f32; 4] = [0.94, 0.95, 0.98, 1.0];
 const DROP_ACCENT: [f32; 4] = [0.39, 0.71, 1.0, 0.9];
 const DROP_LINK_ICON: [f32; 4] = [0.6, 0.7, 0.85, 0.8];
+const DROP_FAILED: [f32; 4] = [1.0, 0.45, 0.45, 0.9];
 
-const LINKS: [(&str, char, &str); 3] = [
+/// Dropdown widths in GUI units, wide enough for the longest label at
+/// `DropdownStyle`'s 10-unit pad plus 11-unit icon.
+pub(super) const DROP_LINKS_W: f32 = 74.0;
+pub(super) const DROP_THEME_W: f32 = 82.0;
+
+pub(super) const LINKS: [(&str, char, &str); 3] = [
     ("Website", ICON_GLOBE, "https://pomme.rs"),
     ("Discord", ICON_COMMENT, "https://discord.gg/ucBA55bHPR"),
     (
@@ -1021,10 +1092,21 @@ const LINKS: [(&str, char, &str); 3] = [
         "https://github.com/PommeMC/Pomme-Client",
     ),
 ];
-const THEMES: [(&str, PanoramaTheme); 2] = [
+pub(super) const THEMES: [(&str, PanoramaTheme); 3] = [
+    ("Java", PanoramaTheme::Java),
+    ("Bedrock", PanoramaTheme::Bedrock),
     ("Pomme", PanoramaTheme::Pomme),
-    ("Default", PanoramaTheme::Default),
 ];
+
+/// The Bedrock theme's textures, downloaded the first time it's picked.
+#[derive(Clone, Copy)]
+pub(super) enum BedrockDownload {
+    Idle,
+    /// The fraction done.
+    Running(f32),
+    Failed,
+    Done,
+}
 
 /// The Pomme link and theme dropdowns and the theme wipe, shared by both
 /// title screens.
@@ -1057,6 +1139,8 @@ impl MainMenu {
             label,
             icon: Some((icon, DROP_LINK_ICON)),
             color: DROP_TEXT,
+            radio: None,
+            progress: None,
         });
         if let Some(i) = style.push_list(
             elements,
@@ -1075,7 +1159,8 @@ impl MainMenu {
     }
 
     /// Picking a different theme starts the wipe; the swap itself lands in
-    /// `drive_theme_transition` once the strips have closed.
+    /// `drive_theme_transition` once the strips have closed. Bedrock's files
+    /// download first, the row showing how far along they are.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push_theme_dropdown(
         &mut self,
@@ -1089,12 +1174,25 @@ impl MainMenu {
         drop_bottom: f32,
         drop_w: f32,
     ) {
+        let download = *self.bedrock.lock();
         let items = THEMES.map(|(label, theme)| {
             let selected = theme == self.theme;
+            let (icon, progress) = match download {
+                _ if selected => (Some((ICON_CHECK, DROP_ACCENT)), None),
+                BedrockDownload::Running(done) if theme == PanoramaTheme::Bedrock => {
+                    (Some((ICON_DOWNLOAD, DROP_ACCENT)), Some(done))
+                }
+                BedrockDownload::Failed if theme == PanoramaTheme::Bedrock => {
+                    (Some((ICON_RETRY, DROP_FAILED)), None)
+                }
+                _ => (None, None),
+            };
             DropItem {
                 label,
-                icon: selected.then_some((ICON_CHECK, DROP_ACCENT)),
+                icon,
                 color: if selected { DROP_ACCENT } else { DROP_TEXT },
+                radio: Some(selected),
+                progress,
             }
         });
         if let Some(i) = style.push_list(
@@ -1110,12 +1208,64 @@ impl MainMenu {
             &items,
         ) && THEMES[i].1 != self.theme
         {
+            self.pick_theme(THEMES[i].1);
+        }
+    }
+
+    pub(super) fn bedrock_installed(&self) -> bool {
+        pomme_install::bedrock::is_installed(&self.bedrock_dir)
+    }
+
+    pub(super) fn pick_theme(&mut self, theme: PanoramaTheme) {
+        self.bedrock_pending = theme == PanoramaTheme::Bedrock;
+        if self.bedrock_pending && !self.bedrock_installed() {
+            self.download_bedrock();
+        } else {
             self.transition = Some(ThemeTransition {
                 start: Instant::now(),
-                target: THEMES[i].1,
+                target: theme,
                 reloaded: false,
                 open_start: None,
             });
+        }
+    }
+
+    fn download_bedrock(&mut self) {
+        let state = Arc::clone(&self.bedrock);
+        {
+            let mut download = state.lock();
+            if matches!(*download, BedrockDownload::Running(_)) {
+                return;
+            }
+            *download = BedrockDownload::Running(0.0);
+        }
+        let root = self.bedrock_dir.clone();
+        self.rt.spawn(async move {
+            let report =
+                |p: pomme_install::Progress| *state.lock() = BedrockDownload::Running(p.fraction());
+            let result =
+                pomme_install::bedrock::install(crate::net::http::client(), &root, &report).await;
+            *state.lock() = match result {
+                Ok(()) => BedrockDownload::Done,
+                Err(reason) => {
+                    tracing::warn!("Bedrock theme download failed: {reason}");
+                    BedrockDownload::Failed
+                }
+            };
+        });
+    }
+
+    /// Starts the wipe into Bedrock once its download lands, unless another
+    /// theme was picked meanwhile.
+    fn finish_bedrock_download(&mut self) {
+        let mut download = self.bedrock.lock();
+        if !matches!(*download, BedrockDownload::Done) {
+            return;
+        }
+        *download = BedrockDownload::Idle;
+        drop(download);
+        if self.bedrock_pending && self.transition.is_none() {
+            self.pick_theme(PanoramaTheme::Bedrock);
         }
     }
 
@@ -1128,6 +1278,7 @@ impl MainMenu {
         screen_h: f32,
         key_bindings: &KeyBindings,
     ) -> Option<MenuAction> {
+        self.finish_bedrock_download();
         let mut action = None;
         let mut committed = false;
         if let Some(ref mut tr) = self.transition {

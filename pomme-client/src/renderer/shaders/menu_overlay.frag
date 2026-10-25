@@ -5,15 +5,25 @@ layout(set = 0, binding = 0) uniform Globals {
     float screen_h;
 };
 
-layout(set = 1, binding = 0) uniform sampler2D font_tex;
-layout(set = 1, binding = 1) uniform sampler2D sprite_tex;
-layout(set = 1, binding = 2) uniform sampler2D item_tex;
-layout(set = 1, binding = 3) uniform sampler2DArray mc_font_tex;
-layout(set = 1, binding = 4) uniform sampler2D blur_tex;
-layout(set = 1, binding = 5) uniform sampler2D favicon_tex;
-layout(set = 1, binding = 6) uniform sampler2D overlay_tex;
-layout(set = 1, binding = 7) uniform sampler2D underwater_tex;
-layout(set = 1, binding = 8) uniform sampler2DArray mc_font_color_tex;
+// Slot n's texture is at binding n, its sampler at binding 9 + n.
+layout(set = 1, binding = 0) uniform texture2D font_tex;
+layout(set = 1, binding = 9) uniform sampler font_tex_sampler;
+layout(set = 1, binding = 1) uniform texture2D sprite_tex;
+layout(set = 1, binding = 10) uniform sampler sprite_tex_sampler;
+layout(set = 1, binding = 2) uniform texture2D item_tex;
+layout(set = 1, binding = 11) uniform sampler item_tex_sampler;
+layout(set = 1, binding = 3) uniform texture2DArray mc_font_tex;
+layout(set = 1, binding = 12) uniform sampler mc_font_tex_sampler;
+layout(set = 1, binding = 4) uniform texture2D blur_tex;
+layout(set = 1, binding = 13) uniform sampler blur_tex_sampler;
+layout(set = 1, binding = 5) uniform texture2D favicon_tex;
+layout(set = 1, binding = 14) uniform sampler favicon_tex_sampler;
+layout(set = 1, binding = 6) uniform texture2D overlay_tex;
+layout(set = 1, binding = 15) uniform sampler overlay_tex_sampler;
+layout(set = 1, binding = 7) uniform texture2D underwater_tex;
+layout(set = 1, binding = 16) uniform sampler underwater_tex_sampler;
+layout(set = 1, binding = 8) uniform texture2DArray mc_font_color_tex;
+layout(set = 1, binding = 17) uniform sampler mc_font_color_tex_sampler;
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) in vec4 v_color;
@@ -37,7 +47,7 @@ void main() {
 
     if (v_mode > 8.5) {
         // Underwater tint: standard alpha blend over the scene.
-        vec4 tex = texture(underwater_tex, v_uv);
+        vec4 tex = texture(sampler2D(underwater_tex, underwater_tex_sampler), v_uv);
         out_color = vec4(tex.rgb * v_color.rgb * tex.a * v_color.a, tex.a * v_color.a);
         return;
     }
@@ -50,7 +60,7 @@ void main() {
         // converting the gamma-space factor to linear keeps the darkening
         // identical on the sRGB target. (dst alpha is scaled too, unlike
         // vanilla; the swapchain composite ignores alpha.)
-        float tex_gamma = pow(texture(overlay_tex, v_uv).r, 1.0 / 2.2);
+        float tex_gamma = pow(texture(sampler2D(overlay_tex, overlay_tex_sampler), v_uv).r, 1.0 / 2.2);
         float src = tex_gamma * v_color.r;
         out_color = vec4(0.0, 0.0, 0.0, 1.0 - pow(1.0 - src, 2.2));
         return;
@@ -58,14 +68,14 @@ void main() {
 
     if (v_mode > 6.5) {
         // Camera overlay (pumpkin blur): standard alpha blend.
-        vec4 tex = texture(overlay_tex, v_uv);
+        vec4 tex = texture(sampler2D(overlay_tex, overlay_tex_sampler), v_uv);
         out_color = vec4(tex.rgb * v_color.rgb * tex.a * v_color.a, tex.a * v_color.a);
         return;
     }
 
     if (v_mode > 5.5) {
         // The tint is gamma-space like glyph colors; linearize it the same way.
-        vec4 tex = texture(favicon_tex, v_uv);
+        vec4 tex = texture(sampler2D(favicon_tex, favicon_tex_sampler), v_uv);
         vec3 tint = pow(v_color.rgb, vec3(2.2));
         out_color = vec4(tex.rgb * tint * tex.a * v_color.a, tex.a * v_color.a);
         return;
@@ -78,7 +88,7 @@ void main() {
         float alpha = 1.0 - smoothstep(-1.0, 1.0, d);
 
         vec2 screen_uv = gl_FragCoord.xy / vec2(screen_w, screen_h);
-        vec4 blurred = texture(blur_tex, screen_uv);
+        vec4 blurred = texture(sampler2D(blur_tex, blur_tex_sampler), screen_uv);
 
         vec3 tinted = blurred.rgb * v_color.rgb;
         float a = v_color.a * alpha;
@@ -97,29 +107,29 @@ void main() {
         vec3 linear_color = pow(v_color.rgb, vec3(2.2));
         // Colored glyphs are mode 4.25, gray 4.0.
         if (v_mode > 4.125) {
-            vec4 tex = texture(mc_font_color_tex, vec3(v_uv, v_rect_size.x));
+            vec4 tex = texture(sampler2DArray(mc_font_color_tex, mc_font_color_tex_sampler), vec3(v_uv, v_rect_size.x));
             out_color = vec4(tex.rgb * linear_color * tex.a * v_color.a, tex.a * v_color.a);
         } else {
-            float coverage = texture(mc_font_tex, vec3(v_uv, v_rect_size.x)).r;
+            float coverage = texture(sampler2DArray(mc_font_tex, mc_font_tex_sampler), vec3(v_uv, v_rect_size.x)).r;
             out_color = vec4(linear_color * coverage * v_color.a, coverage * v_color.a);
         }
         return;
     }
 
     if (v_mode > 2.5) {
-        vec4 tex = texture(item_tex, v_uv);
+        vec4 tex = texture(sampler2D(item_tex, item_tex_sampler), v_uv);
         out_color = vec4(tex.rgb * v_color.rgb * v_color.a, tex.a * v_color.a);
         return;
     }
 
     if (v_mode > 1.5) {
-        vec4 tex = texture(sprite_tex, v_uv);
+        vec4 tex = texture(sampler2D(sprite_tex, sprite_tex_sampler), v_uv);
         out_color = vec4(tex.rgb * v_color.rgb * tex.a * v_color.a, tex.a * v_color.a);
         return;
     }
 
     if (v_mode > 0.5) {
-        vec4 tex = texture(font_tex, v_uv);
+        vec4 tex = texture(sampler2D(font_tex, font_tex_sampler), v_uv);
         out_color = vec4(v_color.rgb * tex.a, v_color.a * tex.a);
         return;
     }

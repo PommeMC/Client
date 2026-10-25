@@ -99,6 +99,16 @@ impl DisplayTransform {
         scale: Vec3::ONE,
     };
 
+    /// Vanilla `ItemTransform.apply`'s left-hand fix: X translation and the
+    /// Y and Z rotations mirrored.
+    pub(crate) fn mirrored(self) -> Self {
+        Self {
+            rotation: self.rotation * Vec3::new(1.0, -1.0, -1.0),
+            translation: self.translation * Vec3::new(-1.0, 1.0, 1.0),
+            scale: self.scale,
+        }
+    }
+
     pub(crate) fn to_matrix(self) -> Mat4 {
         Mat4::from_translation(self.translation)
             * Mat4::from_rotation_x(self.rotation.x.to_radians())
@@ -943,6 +953,11 @@ pub fn bake_item_models(
             continue;
         }
         bake(item_name, &parts);
+        for (charge, node) in charge_type_cases(&json) {
+            let mut parts = Vec::new();
+            collect_parts_from_node(node, None, &mut parts);
+            bake(&charge_model_key(item_name, charge), &parts);
+        }
         // The bundle's selected-item model composes these around the
         // selected stack at draw time.
         if let Some(layers) = selected_bundle_layers(&json) {
@@ -1294,17 +1309,17 @@ fn find_first_item_model_node(json: &serde_json::Value) -> Option<&serde_json::V
 /// (no `trim`), `Charge` (no `charged_projectiles`, `NONE`) and
 /// `ItemBlockState` (no `block_state`) never match for a plain stack.
 ///
-/// TODO: pomme bakes one model per item, so stacks that do carry these
-/// components (trimmed armor, a loaded crossbow) still draw this branch;
-/// that needs per-stack selection, plus the `paletted_permutations` atlas
-/// source for the trim textures.
+/// A loaded crossbow's `charge_type` cases bake separately (see
+/// [`charge_model_key`]).
+///
+/// TODO: this branch still draws for loaded crossbows outside first person
+/// and GUI icons (dropped items, third person, the bundle tooltip, chat
+/// hovers), and for trimmed armor, which also needs the
+/// `paletted_permutations` atlas source for its trim textures.
 fn default_stack_branch(mut node: &serde_json::Value) -> &serde_json::Value {
     const COMPONENT_PROPERTIES: [&str; 3] = ["trim_material", "charge_type", "block_state"];
     while node_type(node) == Some("select")
-        && node
-            .get("property")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|property| COMPONENT_PROPERTIES.contains(&strip_mc_prefix(property)))
+        && node_property(node).is_some_and(|property| COMPONENT_PROPERTIES.contains(&property))
         && let Some(fallback) = node.get("fallback")
     {
         node = fallback;
@@ -1331,6 +1346,46 @@ fn node_type(node: &serde_json::Value) -> Option<&str> {
         .map(strip_mc_prefix)
 }
 
+/// The item-model key a root `minecraft:charge_type` select's case bakes
+/// under, for a stack loaded with `charge` (vanilla `Charge`: `arrow` or
+/// `rocket`).
+pub fn charge_model_key(item_name: &str, charge: &str) -> String {
+    format!("__pomme_{item_name}_charge_{charge}")
+}
+
+/// Each `when` of an item definition's root `minecraft:charge_type` select,
+/// with its model node.
+fn charge_type_cases(json: &serde_json::Value) -> Vec<(&str, &serde_json::Value)> {
+    let Some(root) = json.get("model").filter(|root| {
+        node_type(root) == Some("select") && node_property(root) == Some("charge_type")
+    }) else {
+        return Vec::new();
+    };
+    let cases = root.get("cases").and_then(serde_json::Value::as_array);
+    cases
+        .into_iter()
+        .flatten()
+        .filter_map(|case| Some((case.get("when")?, case.get("model")?)))
+        .flat_map(|(when, model)| {
+            let whens = match when {
+                serde_json::Value::Array(whens) => whens.iter().collect(),
+                when => vec![when],
+            };
+            whens
+                .into_iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(move |when| (when, model))
+        })
+        .collect()
+}
+
+/// A select or condition node's `property`, without the `minecraft:` prefix.
+fn node_property(node: &serde_json::Value) -> Option<&str> {
+    node.get("property")
+        .and_then(serde_json::Value::as_str)
+        .map(strip_mc_prefix)
+}
+
 /// The item-model key the bundle's selected layers bake under: behind the
 /// selected stack, or in front of it.
 pub fn selected_bundle_layer_key(item_name: &str, front: bool) -> String {
@@ -1345,11 +1400,7 @@ pub fn selected_bundle_layer_key(item_name: &str, front: bool) -> String {
 fn selected_bundle_layers(json: &serde_json::Value) -> Option<[Vec<ModelPart>; 2]> {
     fn find_condition(node: &serde_json::Value) -> Option<&serde_json::Value> {
         let is_condition = node_type(node) == Some("condition")
-            && node
-                .get("property")
-                .and_then(|p| p.as_str())
-                .map(strip_mc_prefix)
-                == Some("bundle/has_selected_item");
+            && node_property(node) == Some("bundle/has_selected_item");
         if is_condition {
             return Some(node);
         }
@@ -2851,6 +2902,33 @@ mod tests {
             }
         });
         assert_resolves_to(&json, "item/crossbow");
+    }
+
+    #[test]
+    fn charge_type_cases_list_each_loaded_model() {
+        let json = serde_json::json!({"model": {
+            "type": "minecraft:select",
+            "property": "minecraft:charge_type",
+            "cases": [
+                {"when": "arrow", "model": {"type": "minecraft:model", "model": "item/a"}},
+                {"when": ["rocket", "other"], "model": {"type": "minecraft:model", "model": "item/r"}}
+            ],
+            "fallback": {"type": "minecraft:model", "model": "item/x"}
+        }});
+        let cases: Vec<_> = charge_type_cases(&json)
+            .into_iter()
+            .map(|(when, node)| (when, node["model"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            cases,
+            [
+                ("arrow", "item/a"),
+                ("rocket", "item/r"),
+                ("other", "item/r")
+            ]
+        );
+        let trim = serde_json::json!({"model": {"type": "minecraft:select", "property": "minecraft:trim_material", "cases": []}});
+        assert!(charge_type_cases(&trim).is_empty());
     }
 
     #[test]

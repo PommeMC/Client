@@ -1,4 +1,5 @@
 mod account;
+mod bedrock_screen;
 mod credits;
 mod friends_screen;
 pub(crate) mod helpers;
@@ -21,9 +22,9 @@ use crate::app::input::{Action, KeyBindings};
 use crate::audio::SoundCategory;
 use crate::renderer::CloudMode;
 use crate::renderer::pipelines::menu_overlay::{
-    ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_GEAR, ICON_GLOBE, ICON_LANGUAGE, ICON_LINK,
-    ICON_PAINTBRUSH, ICON_UNIVERSAL_ACCESS, ICON_USER, ICON_USERS, MenuElement, SpriteId,
-    TooltipLine,
+    ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_DOWNLOAD, ICON_GEAR, ICON_GLOBE, ICON_LANGUAGE,
+    ICON_LINK, ICON_PAINTBRUSH, ICON_RETRY, ICON_UNIVERSAL_ACCESS, ICON_USER, ICON_USERS,
+    MenuElement, SpriteId, TooltipLine,
 };
 use crate::ui::chat::ChatOptions;
 use crate::ui::font::FontOptions;
@@ -230,7 +231,7 @@ impl Default for Settings {
             cloud_mode: 2,
             attack_indicator: 1,
             display_mode: 0,
-            theme: 0,
+            theme: PanoramaTheme::Java.to_u8(),
             chat: ChatOptions::default(),
             force_unicode_font: false,
             japanese_glyph_variants: default_japanese_glyph_variants(),
@@ -277,30 +278,35 @@ use super::server_list::{
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanoramaTheme {
     Pomme,
-    Default,
+    Java,
+    Bedrock,
 }
 
 impl PanoramaTheme {
     pub fn to_u8(self) -> u8 {
         match self {
             Self::Pomme => 0,
-            Self::Default => 1,
+            Self::Java => 1,
+            Self::Bedrock => 2,
         }
     }
 
     pub fn from_u8(value: u8) -> Self {
         match value {
-            1 => Self::Default,
-            _ => Self::Pomme,
+            0 => Self::Pomme,
+            2 => Self::Bedrock,
+            _ => Self::Java,
         }
     }
 
     /// The panorama cubemap each theme draws: vanilla's ships in the version
-    /// jar, Pomme's alongside the rest of the branded assets.
+    /// jar, Pomme's alongside the rest of the branded assets, Bedrock's with
+    /// its downloaded UI textures.
     pub fn panorama_dir(self, dirs: &crate::dirs::DataDirs) -> std::path::PathBuf {
         match self {
-            Self::Default => dirs.jar_assets_dir.clone(),
+            Self::Java => dirs.jar_assets_dir.clone(),
             Self::Pomme => dirs.pomme_assets_dir.join("panoramas"),
+            Self::Bedrock => dirs.bedrock_ui_dir(),
         }
     }
 }
@@ -641,6 +647,16 @@ pub struct MainMenu {
     settings_back: Screen,
     theme: PanoramaTheme,
     transition: Option<ThemeTransition>,
+    /// Where `pomme_install::bedrock` installs the Bedrock theme's files.
+    bedrock_dir: PathBuf,
+    bedrock: Arc<parking_lot::Mutex<BedrockDownload>>,
+    /// Bedrock was the last theme picked, so its download switches to it.
+    bedrock_pending: bool,
+    /// Where the Bedrock title screen last placed its skin model.
+    bedrock_skin: Option<crate::renderer::MenuSkin>,
+    /// The signed-in player's undashed UUID, whose face the Bedrock Profile
+    /// button shows.
+    player_face: Option<String>,
     scroll_offset: f32,
     /// Which text field of the current form has keyboard focus (index within
     /// the form). Separate from `focus` (button/widget focus ring).
@@ -754,6 +770,7 @@ const MAX_SEARCH: usize = 128;
 impl MainMenu {
     pub fn new(
         game_dir: &Path,
+        bedrock_dir: PathBuf,
         rt: Arc<tokio::runtime::Runtime>,
         username: String,
         version: String,
@@ -766,7 +783,7 @@ impl MainMenu {
         let ping_results: PingResults = Default::default();
         let settings = load_settings(game_dir);
         *key_bindings = settings.key_bindings;
-        Self {
+        let mut menu = Self {
             action_binding: None,
             username,
             version,
@@ -804,6 +821,11 @@ impl MainMenu {
             settings_back: Screen::Options,
             theme: PanoramaTheme::from_u8(settings.theme),
             transition: None,
+            bedrock_dir,
+            bedrock: Arc::new(parking_lot::Mutex::new(BedrockDownload::Idle)),
+            bedrock_pending: false,
+            bedrock_skin: None,
+            player_face: None,
             scroll_offset: 0.0,
             focused_field: None,
             last_field_click_time: Instant::now(),
@@ -884,7 +906,14 @@ impl MainMenu {
             reload_assets: false,
             reload_fonts: false,
             pack_search: TextFieldState::new(MAX_SEARCH),
+        };
+        // Saved on Bedrock but its files are gone: start on Default and pick
+        // Bedrock again, which downloads them and then switches.
+        if menu.theme == PanoramaTheme::Bedrock && !menu.bedrock_installed() {
+            menu.theme = PanoramaTheme::Java;
+            menu.pick_theme(PanoramaTheme::Bedrock);
         }
+        menu
     }
 
     /// Chat Settings opened from chat; leaving them leaves the menu, back to
@@ -939,6 +968,15 @@ impl MainMenu {
     /// `Mth::square`).
     pub fn fov_effect(&self) -> f32 {
         self.fov_effect_scale * self.fov_effect_scale
+    }
+
+    /// The player whose skin the title screen shows, `None` without a
+    /// profile. Starts fetching their face for the Bedrock Profile button.
+    pub(crate) fn set_player_face(&mut self, uuid: Option<&uuid::Uuid>) {
+        self.player_face = uuid.map(|uuid| uuid.simple().to_string());
+        if let Some(uuid) = &self.player_face {
+            friends::fetch_face(&self.rt, uuid.clone(), &self.face_cache);
+        }
     }
 
     /// The account the menu shows and joins with.
@@ -1177,10 +1215,20 @@ impl MainMenu {
         self.theme
     }
 
-    /// The rotating 3D skin is Pomme's own chrome; the vanilla title screen
-    /// has no such thing.
-    pub fn show_skin_preview(&self) -> bool {
-        self.is_main_screen() && self.theme == PanoramaTheme::Pomme
+    /// The title screen's rotating 3D skin. Pomme's and Bedrock's screens
+    /// have one; the vanilla title screen has no such thing.
+    pub fn skin_preview(&self) -> Option<crate::renderer::MenuSkin> {
+        if !self.is_main_screen() {
+            return None;
+        }
+        match self.theme {
+            PanoramaTheme::Pomme => Some(crate::renderer::MenuSkin {
+                at: (0.7, 0.5),
+                scale: 1.0,
+            }),
+            PanoramaTheme::Bedrock => self.bedrock_skin,
+            PanoramaTheme::Java => None,
+        }
     }
 
     /// Picks the title screen's splash line. Separate from `new` because the
@@ -1201,15 +1249,36 @@ impl MainMenu {
         );
     }
 
-    pub fn is_server_list_screen(&self) -> bool {
+    fn is_server_list_screen(&self) -> bool {
         matches!(self.screen, Screen::ServerList)
     }
 
-    pub fn is_friends_screen(&self) -> bool {
+    fn is_friends_screen(&self) -> bool {
         matches!(self.screen, Screen::Friends)
     }
 
-    pub fn favicons_changed(&mut self) -> bool {
+    /// The favicons and faces the current screen draws, once either changed
+    /// (`set_screen` marks both changed).
+    pub fn menu_atlas_images(&mut self) -> Option<Vec<(String, Vec<u8>, u32)>> {
+        let bedrock_main = self.is_main_screen() && self.theme == PanoramaTheme::Bedrock;
+        let favicons = bedrock_main || self.is_server_list_screen();
+        let faces = bedrock_main || self.is_friends_screen();
+        let favicons_changed = favicons && self.favicons_changed();
+        let faces_changed = faces && self.faces_changed();
+        if !favicons_changed && !faces_changed {
+            return None;
+        }
+        let mut images = Vec::new();
+        if favicons {
+            images.extend(self.collect_favicons());
+        }
+        if faces {
+            images.extend(self.collect_faces());
+        }
+        (!images.is_empty()).then_some(images)
+    }
+
+    fn favicons_changed(&mut self) -> bool {
         let count = self
             .ping_results
             .read()
@@ -1231,7 +1300,7 @@ impl MainMenu {
         )
     }
 
-    pub fn collect_favicons(&self) -> Vec<(String, Vec<u8>, u32)> {
+    fn collect_favicons(&self) -> Vec<(String, Vec<u8>, u32)> {
         let results = self.ping_results.read();
         results
             .iter()
@@ -1250,12 +1319,12 @@ impl MainMenu {
             .collect()
     }
 
-    pub fn faces_changed(&mut self) -> bool {
+    fn faces_changed(&mut self) -> bool {
         let count = self.face_cache.read().len();
         atlas_dirty(count, &mut self.last_face_count, &mut self.face_dirty_since)
     }
 
-    pub fn collect_faces(&self) -> Vec<(String, Vec<u8>, u32)> {
+    fn collect_faces(&self) -> Vec<(String, Vec<u8>, u32)> {
         self.face_cache
             .read()
             .iter()
@@ -1474,6 +1543,7 @@ fn test_menu(dir: &str, key_bindings: &mut KeyBindings) -> MainMenu {
     );
     let mut menu = MainMenu::new(
         std::path::Path::new(dir),
+        std::path::Path::new(dir).join("bedrock"),
         rt,
         "tester".into(),
         "26.2".into(),
@@ -1502,6 +1572,50 @@ mod tests {
         assert!(menu.take_options_saved());
         assert!(!menu.take_options_saved());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_bedrock_title_screen_uploads_faces_and_favicons_together() {
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-menu-atlas-test", &mut key_bindings);
+        menu.theme = PanoramaTheme::Bedrock;
+        menu.face_cache
+            .write()
+            .insert("face".into(), vec![0; 8 * 8 * 4]);
+        menu.ping_results.write().insert(
+            "server".into(),
+            PingState::Success {
+                motd: Vec::new(),
+                online: 0,
+                max: 0,
+                latency_ms: 0,
+                version: String::new(),
+                protocol: 0,
+                compat: Compat::Native,
+                favicon_rgba: Some(vec![0; 64 * 64 * 4]),
+                player_names: Vec::new(),
+            },
+        );
+        // A change uploads once it has held for the debounce.
+        let settled = |menu: &mut MainMenu| {
+            assert!(menu.menu_atlas_images().is_none());
+            let pending = [&mut menu.favicon_dirty_since, &mut menu.face_dirty_since];
+            for at in pending.into_iter().flatten() {
+                *at -= std::time::Duration::from_secs(1);
+            }
+            menu.menu_atlas_images().map(|images| {
+                let mut keys: Vec<_> = images.into_iter().map(|(key, ..)| key).collect();
+                keys.sort();
+                keys
+            })
+        };
+        let both = Some(vec!["face".to_owned(), "server".to_owned()]);
+        assert_eq!(settled(&mut menu), both);
+        assert!(menu.menu_atlas_images().is_none());
+        menu.set_screen(Screen::Friends, &key_bindings);
+        assert_eq!(settled(&mut menu), Some(vec!["face".to_owned()]));
+        menu.set_screen(Screen::Main, &key_bindings);
+        assert_eq!(settled(&mut menu), both);
     }
 
     #[test]
@@ -1647,7 +1761,11 @@ mod tests {
         let legacy: Settings = serde_json::from_value(legacy).unwrap();
         assert_eq!(PanoramaTheme::from_u8(legacy.theme), PanoramaTheme::Pomme);
 
-        for theme in [PanoramaTheme::Pomme, PanoramaTheme::Default] {
+        for theme in [
+            PanoramaTheme::Pomme,
+            PanoramaTheme::Java,
+            PanoramaTheme::Bedrock,
+        ] {
             let settings = Settings {
                 theme: theme.to_u8(),
                 ..Settings::default()

@@ -1,4 +1,4 @@
-//! Vanilla `TitleScreen`, drawn when the theme switcher is set to Default.
+//! Vanilla `TitleScreen`, drawn when the theme switcher is set to Java.
 //!
 //! Positions come straight from `TitleScreen.init` / `LogoRenderer` /
 //! `SplashRenderer` in GUI units and are multiplied by the GUI scale, so the
@@ -42,11 +42,6 @@ const ICON_SPRITE: f32 = 15.0;
 const FOOTER_OFFSET: f32 = 10.0;
 
 const COPYRIGHT: &str = "Copyright Mojang AB. Do not distribute!";
-
-/// Dropdown widths, wide enough for the longest label at `DropdownStyle`'s
-/// 10-unit pad plus 11-unit icon.
-const DROP_LINKS_W: f32 = 74.0;
-const DROP_THEME_W: f32 = 66.0;
 
 impl MainMenu {
     #[allow(clippy::too_many_lines)]
@@ -95,7 +90,13 @@ impl MainMenu {
             tint: WHITE,
         });
 
-        self.push_splash(&mut elements, cx, gs, &text_width_fn);
+        self.push_splash(
+            &mut elements,
+            (cx + SPLASH_WIDTH_OFFSET * gs, SPLASH_HEIGHT_OFFSET * gs),
+            gs,
+            &text_width_fn,
+            true,
+        );
 
         // Realms is never enabled.
         let rows: [(&str, bool); 3] = [
@@ -339,13 +340,16 @@ impl MainMenu {
         }
     }
 
-    /// `SplashRenderer.extractRenderState`.
-    fn push_splash(
+    /// `SplashRenderer.extractRenderState`, rotated about `pivot`. Java fits
+    /// the splash to a fixed width; Bedrock's (`fit` false) keeps the text's
+    /// own size and only pulses.
+    pub(super) fn push_splash(
         &self,
         elements: &mut Vec<MenuElement>,
-        cx: f32,
+        pivot: (f32, f32),
         gs: f32,
         text_width_fn: &impl Fn(&str, f32) -> f32,
+        fit: bool,
     ) {
         let Some(ref splash) = self.splash else {
             return;
@@ -355,9 +359,12 @@ impl MainMenu {
         let text_w = text_width_fn(splash, common::FONT_SIZE);
         let millis = self.created.elapsed().as_millis() % 1000;
         let phase = 1.8 - ((millis as f32 / 1000.0 * TAU).sin() * 0.1).abs();
-        let text_scale = phase * 100.0 / (text_w + 32.0);
+        let text_scale = if fit {
+            phase * 100.0 / (text_w + 32.0)
+        } else {
+            phase / 1.8
+        };
 
-        let pivot = (cx + SPLASH_WIDTH_OFFSET * gs, SPLASH_HEIGHT_OFFSET * gs);
         let scale = common::FONT_SIZE * gs * text_scale;
         elements.push(MenuElement::McTextRotated {
             // `accept(LEFT, -textWidth / 2, -8, ...)` in the scaled frame.
@@ -391,18 +398,20 @@ fn push_icon_button(
     screen_h: f32,
     tooltip: &str,
 ) -> bool {
-    let hit = common::hit_test(cursor, [x, y, size, size]);
-    let focused = ctx.focused(enabled, hit);
-    let hovered = enabled && hit;
-    push_icon_widget(elements, x, y, size, gs, face, enabled, hovered || focused);
-    *any_hovered |= hovered;
-    let keyboard = focused && ctx.activate;
-    if keyboard {
-        ctx.fired = true;
-    }
+    let button = ctx.button(any_hovered, cursor, clicked, [x, y, size, size], enabled);
+    push_icon_widget(
+        elements,
+        x,
+        y,
+        size,
+        gs,
+        face,
+        enabled,
+        button.hovered || button.focused,
+    );
     // Vanilla keys tooltips off `isHovered`, which ignores `active`.
-    if hit {
+    if button.hit {
         common::push_tooltip(elements, cursor, screen_w, screen_h, gs, tooltip);
     }
-    (hovered && clicked) || keyboard
+    button.activated
 }

@@ -1,14 +1,11 @@
 use std::collections::HashMap;
-use std::slice;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use glam::Mat4;
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
 
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, SpriteAlphaMask, TextureAtlas};
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
 use crate::world::block::model::{BakedModel, Direction, direction_from_positions};
 
 /// Item-only vertex format. Vanilla's ENTITY item format keeps UV0 as floats
@@ -26,50 +23,8 @@ struct ItemVertex {
 }
 
 impl ItemVertex {
-    const STRIDE: u32 = size_of::<Self>() as u32;
-
-    fn binding_description() -> vk::VertexInputBindingDescription {
-        vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: Self::STRIDE,
-            input_rate: vk::VertexInputRate::Vertex,
-        }
-    }
-
-    fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 5] {
-        [
-            vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32B32Sfloat,
-                offset: 0,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: vk::Format::R32G32Sfloat,
-                offset: 12,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 2,
-                binding: 0,
-                format: vk::Format::R8G8B8A8Unorm,
-                offset: 20,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 3,
-                binding: 0,
-                format: vk::Format::R8G8B8A8Snorm,
-                offset: 24,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 4,
-                binding: 0,
-                format: vk::Format::R32Uint,
-                offset: 28,
-            },
-        ]
-    }
+    const BUFFER: rhi::VertexBufferLayout<'static> =
+        rhi::vertex_buffer!(Self, [Float32x3, Float32x2, Unorm8x4, Snorm8x4, Uint32]);
 }
 
 fn pack_normal(normal: glam::Vec3) -> [i8; 4] {
@@ -103,8 +58,7 @@ pub struct ItemMeshInfo {
 }
 
 struct MeshEntry {
-    buffer: vk::Buffer,
-    allocation: Allocation,
+    buffer: rhi::backend::Buffer,
     vertex_count: u32,
     is_3d_model: bool,
     /// Vanilla `BakedQuad.MaterialInfo`: a sprite with partial alpha draws on
@@ -114,129 +68,99 @@ struct MeshEntry {
     bounds_max: glam::Vec3,
 }
 
+/// The per-frame tint palette a [`TintPaletteArena`] binds.
+const ITEM_TINTS: &[rhi::BindGroupLayoutEntry] = &[rhi::BindGroupLayoutEntry::storage(
+    rhi::ShaderStages::VERTEX,
+)];
+
+/// The item pipelines' bind groups: camera, atlas, tint palette.
+const ITEM_BIND_GROUPS: [&[rhi::BindGroupLayoutEntry]; 3] =
+    [util::VERTEX_UNIFORM, util::FRAGMENT_TEXTURE, ITEM_TINTS];
+/// item_push.glsl's block. Vulkan guarantees at least 128 push bytes.
+const ITEM_PUSH_CONSTANTS: rhi::PushConstants = rhi::PushConstants {
+    visibility: rhi::ShaderStages::VERTEX_FRAGMENT,
+    size: 128,
+};
+
 #[derive(Clone, Copy, Default)]
 pub(super) struct ItemTintRange {
     pub base: u32,
     pub count: u32,
 }
 
-pub(super) struct TintPaletteArena {
-    sets: Vec<vk::DescriptorSet>,
-    buffers: Vec<vk::Buffer>,
-    allocations: Vec<Option<Allocation>>,
+struct TintPaletteArena {
+    layout: rhi::backend::BindGroupLayout,
+    sets: Vec<rhi::backend::BindGroup>,
+    buffers: Vec<Option<rhi::backend::Buffer>>,
     capacities: Vec<usize>,
     cursors: Vec<usize>,
     label: String,
 }
 
 impl TintPaletteArena {
-    pub(super) fn new(
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        descriptor_pool: vk::DescriptorPool,
-        layout: vk::DescriptorSetLayout,
+    fn new(
+        device: &rhi::backend::Device,
+        layout: rhi::backend::BindGroupLayout,
         label: &str,
     ) -> Self {
-        let layouts = [layout; MAX_FRAMES_IN_FLIGHT];
-        let alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: layouts.len() as u32,
-            set_layouts: layouts.as_ptr(),
-            ..Default::default()
-        };
-        let mut sets = vec![vk::DescriptorSet::null(); layouts.len()];
-        device
-            .allocate_descriptor_sets(&alloc_info, &mut sets)
-            .unwrap_or_else(|_| panic!("failed to allocate {label} tint sets"));
-
         let mut arena = Self {
-            sets,
-            buffers: vec![vk::Buffer::null(); MAX_FRAMES_IN_FLIGHT],
-            allocations: (0..MAX_FRAMES_IN_FLIGHT).map(|_| None).collect(),
+            layout,
+            sets: vec![rhi::backend::BindGroup::default(); MAX_FRAMES_IN_FLIGHT],
+            buffers: (0..MAX_FRAMES_IN_FLIGHT).map(|_| None).collect(),
             capacities: vec![0; MAX_FRAMES_IN_FLIGHT],
             cursors: vec![0; MAX_FRAMES_IN_FLIGHT],
             label: label.to_string(),
         };
         for frame in 0..MAX_FRAMES_IN_FLIGHT {
-            arena.ensure_capacity(device, allocator, frame, 1);
+            arena.ensure_capacity(device, frame, 1);
         }
         arena
     }
 
-    fn ensure_capacity(
-        &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        frame: usize,
-        required: usize,
-    ) {
+    fn ensure_capacity(&mut self, device: &rhi::backend::Device, frame: usize, required: usize) {
         if self.capacities[frame] >= required.max(1) {
             return;
         }
         let capacity = required.max(1).next_power_of_two();
-        if self.buffers[frame] != vk::Buffer::null() {
-            device.destroy_buffer(self.buffers[frame], None);
-            if let Some(allocation) = self.allocations[frame].take() {
-                allocator
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .free(allocation)
-                    .ok();
-            }
+        if let Some(buffer) = self.buffers[frame].take() {
+            buffer.destroy(device);
         }
-        let (buffer, allocation) = util::create_host_buffer(
+        let buffer = rhi::backend::Buffer::new(
             device,
-            allocator,
-            (capacity * size_of::<u32>()) as u64,
-            vk::BufferUsageFlags::StorageBuffer,
             &format!("{}_tints_{frame}", self.label),
+            (capacity * size_of::<u32>()) as u64,
+            rhi::BufferUsages::STORAGE,
+            rhi::MemoryLocation::Host,
         );
-        let buffer_info = vk::DescriptorBufferInfo {
-            buffer,
-            offset: 0,
-            range: (capacity * size_of::<u32>()) as u64,
-        };
-        let write = vk::WriteDescriptorSet {
-            dst_set: self.sets[frame],
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::StorageBuffer,
-            descriptor_count: 1,
-            buffer_info: &buffer_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[write], &[]);
-        self.buffers[frame] = buffer;
-        self.allocations[frame] = Some(allocation);
+        self.sets[frame].replace(
+            device,
+            self.layout,
+            &[(
+                0,
+                rhi::backend::BindingResource::storage(
+                    &buffer,
+                    (capacity * size_of::<u32>()) as u64,
+                ),
+            )],
+        );
+        self.buffers[frame] = Some(buffer);
         self.capacities[frame] = capacity;
     }
 
-    pub(super) fn begin_frame(
-        &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        frame: usize,
-        required_colors: usize,
-    ) {
-        self.ensure_capacity(device, allocator, frame, required_colors.max(1));
+    fn begin_frame(&mut self, device: &rhi::backend::Device, frame: usize, required_colors: usize) {
+        self.ensure_capacity(device, frame, required_colors.max(1));
         self.cursors[frame] = 0;
     }
 
-    pub(super) fn push(&mut self, frame: usize, colors: &[u32]) -> ItemTintRange {
+    fn push(&mut self, frame: usize, colors: &[u32]) -> ItemTintRange {
         if colors.is_empty() {
             return ItemTintRange::default();
         }
         let base = self.cursors[frame];
         let end = base + colors.len();
         debug_assert!(end <= self.capacities[frame]);
-        let allocation = self.allocations[frame]
-            .as_mut()
-            .expect("tint buffer allocated");
-        let bytes = bytemuck::cast_slice(colors);
-        let offset = base * size_of::<u32>();
-        allocation
-            .mapped_slice_mut()
-            .expect("tint palette allocation is host-visible")[offset..offset + bytes.len()]
-            .copy_from_slice(bytes);
+        let buffer = self.buffers[frame].as_mut().expect("tint buffer allocated");
+        buffer.write_at(base * size_of::<u32>(), bytemuck::cast_slice(colors));
         self.cursors[frame] = end;
         ItemTintRange {
             base: base as u32,
@@ -244,303 +168,156 @@ impl TintPaletteArena {
         }
     }
 
-    pub(super) fn set(&self, frame: usize) -> vk::DescriptorSet {
+    fn set(&self, frame: usize) -> rhi::backend::BindGroup {
         self.sets[frame]
     }
 
-    pub(super) fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        for frame in 0..MAX_FRAMES_IN_FLIGHT {
-            if self.buffers[frame] != vk::Buffer::null() {
-                device.destroy_buffer(self.buffers[frame], None);
-            }
-            if let Some(allocation) = self.allocations[frame].take() {
-                allocator
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .free(allocation)
-                    .ok();
-            }
+    fn destroy(&mut self, device: &rhi::backend::Device) {
+        for buffer in self.buffers.iter_mut().filter_map(Option::take) {
+            buffer.destroy(device);
         }
+        util::destroy_bind_groups(device, self.sets.drain(..));
     }
 }
 
-/// Descriptor layouts, per-frame camera UBOs, atlas set, and tint palette
+/// Bind group layouts, per-frame camera UBOs, the atlas group and tint palette
 /// storage shared by pipelines that draw item meshes with the item shaders.
 pub(super) struct ItemPipelineShared {
-    pub pipeline_layout: vk::PipelineLayout,
-    camera_layout: vk::DescriptorSetLayout,
-    atlas_layout: vk::DescriptorSetLayout,
-    tint_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    camera_sets: Vec<vk::DescriptorSet>,
-    atlas_set: vk::DescriptorSet,
-    atlas_sampler: vk::Sampler,
-    camera_buffers: Vec<vk::Buffer>,
-    camera_allocations: Vec<Option<Allocation>>,
+    pub pipeline_layout: rhi::backend::PipelineLayout,
+    camera_layout: rhi::backend::BindGroupLayout,
+    atlas_layout: rhi::backend::BindGroupLayout,
+    tint_layout: rhi::backend::BindGroupLayout,
+    camera_sets: Vec<rhi::backend::BindGroup>,
+    atlas_set: rhi::backend::BindGroup,
+    atlas_sampler: rhi::backend::Sampler,
+    camera_buffers: Vec<rhi::backend::Buffer>,
     tint_arena: TintPaletteArena,
 }
 
-fn write_atlas_descriptor(
-    device: &vk::Device,
-    set: vk::DescriptorSet,
-    atlas: &TextureAtlas,
-    sampler: vk::Sampler,
-) {
-    let image_info = vk::DescriptorImageInfo {
-        sampler,
-        image_view: atlas.view,
-        image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-    };
-    let write = vk::WriteDescriptorSet {
-        dst_set: set,
-        dst_binding: 0,
-        descriptor_type: vk::DescriptorType::CombinedImageSampler,
-        descriptor_count: 1,
-        image_info: &image_info,
-        ..Default::default()
-    };
-    device.update_descriptor_sets(&[write], &[]);
-}
-
 impl ItemPipelineShared {
-    pub(super) fn new(
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        atlas: &TextureAtlas,
-        label: &str,
-    ) -> Self {
-        let camera_layout = util::create_descriptor_set_layout(
+    pub(super) fn new(device: &rhi::backend::Device, atlas: &TextureAtlas, label: &str) -> Self {
+        let [camera_layout, atlas_layout, tint_layout] =
+            ITEM_BIND_GROUPS.map(|entries| rhi::backend::create_bind_group_layout(device, entries));
+
+        let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
-            vk::DescriptorType::UniformBuffer,
-            vk::ShaderStageFlags::Vertex,
-        );
-        let atlas_layout = util::create_descriptor_set_layout(
-            device,
-            vk::DescriptorType::CombinedImageSampler,
-            vk::ShaderStageFlags::Fragment,
-        );
-        let tint_layout = util::create_descriptor_set_layout(
-            device,
-            vk::DescriptorType::StorageBuffer,
-            vk::ShaderStageFlags::Vertex,
+            &[camera_layout, atlas_layout, tint_layout],
+            Some(ITEM_PUSH_CONSTANTS),
         );
 
-        let push_range = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
-            offset: 0,
-            // 64-byte model + fragment light + world-light selector + padded
-            // mat3 normal matrix. Vulkan guarantees at least 128 push bytes.
-            size: 128,
-        };
-        let layouts = [camera_layout, atlas_layout, tint_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: layouts.len() as u32,
-            set_layouts: layouts.as_ptr(),
-            push_constant_range_count: 1,
-            push_constant_ranges: &push_range,
-            ..Default::default()
-        };
-        let pipeline_layout = device
-            .create_pipeline_layout(&layout_info, None)
-            .unwrap_or_else(|_| panic!("failed to create {label} pipeline layout"));
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::StorageBuffer,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: (MAX_FRAMES_IN_FLIGHT * 2 + 1) as u32,
-            pool_size_count: pool_sizes.len() as u32,
-            pool_sizes: pool_sizes.as_ptr(),
-            ..Default::default()
-        };
-        let descriptor_pool = device
-            .create_descriptor_pool(&pool_info, None)
-            .unwrap_or_else(|_| panic!("failed to create {label} descriptor pool"));
-
-        let camera_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| camera_layout).collect();
-        let camera_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: camera_layouts.len() as u32,
-            set_layouts: camera_layouts.as_ptr(),
-            ..Default::default()
-        };
-        let mut camera_sets = vec![vk::DescriptorSet::null(); camera_layouts.len()];
-        device
-            .allocate_descriptor_sets(&camera_alloc_info, &mut camera_sets)
-            .unwrap_or_else(|_| panic!("failed to allocate {label} camera sets"));
-
-        let atlas_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: 1,
-            set_layouts: &atlas_layout,
-            ..Default::default()
-        };
-        let mut atlas_set = vk::DescriptorSet::null();
-        device
-            .allocate_descriptor_sets(&atlas_alloc_info, slice::from_mut(&mut atlas_set))
-            .unwrap_or_else(|_| panic!("failed to allocate {label} atlas set"));
+        let (camera_sets, camera_buffers) = util::create_uniform_sets(
+            device,
+            camera_layout,
+            size_of::<CameraUniform>() as u64,
+            &format!("{label}_camera"),
+        );
         // Vanilla's items atlas has no mip chain, so generated items sample
         // level 0. TODO: block-model items draw from the mipmapped blocks atlas
         // in vanilla; pomme samples those at level 0 too.
-        let atlas_sampler = unsafe { util::create_nearest_sampler(device) };
+        let atlas_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
 
-        let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut camera_allocations: Vec<Option<Allocation>> =
-            Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-
-        for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
-                device,
-                allocator,
-                size_of::<CameraUniform>() as u64,
-                &format!("{label}_camera"),
-            );
-            let buffer_info = vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: size_of::<CameraUniform>() as u64,
-            };
-            let write = vk::WriteDescriptorSet {
-                dst_set: set,
-                dst_binding: 0,
-                descriptor_type: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
-                buffer_info: &buffer_info,
-                ..Default::default()
-            };
-            device.update_descriptor_sets(&[write], &[]);
-            camera_buffers.push(buf);
-            camera_allocations.push(Some(alloc));
-        }
-
-        let tint_arena =
-            TintPaletteArena::new(device, allocator, descriptor_pool, tint_layout, label);
-        let this = Self {
+        let tint_arena = TintPaletteArena::new(device, tint_layout, label);
+        let mut this = Self {
             pipeline_layout,
             camera_layout,
             atlas_layout,
             tint_layout,
-            descriptor_pool,
             camera_sets,
-            atlas_set,
+            atlas_set: rhi::backend::BindGroup::default(),
             atlas_sampler,
             camera_buffers,
-            camera_allocations,
             tint_arena,
         };
         this.rebind_atlas(device, atlas);
         this
     }
 
-    pub(super) fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
-        write_atlas_descriptor(device, self.atlas_set, atlas, self.atlas_sampler);
+    pub(super) fn rebind_atlas(&mut self, device: &rhi::backend::Device, atlas: &TextureAtlas) {
+        self.atlas_set.replace(
+            device,
+            self.atlas_layout,
+            &util::texture_binding(atlas.texture.handle(), self.atlas_sampler),
+        );
     }
 
     pub(super) fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
         let bytes = bytemuck::bytes_of(uniform);
-        if let Some(alloc) = self.camera_allocations[frame].as_mut() {
-            alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
-        }
+        self.camera_buffers[frame].write(bytes);
     }
 
-    pub(super) fn bind(&self, cmd: vk::CommandBuffer, frame: usize, pipeline: vk::Pipeline) {
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, pipeline);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
+    pub(super) fn bind(
+        &self,
+        pass: &mut rhi::backend::RenderPassEncoder,
+        frame: usize,
+        pipeline: rhi::backend::RenderPipeline,
+    ) {
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_groups(
             0,
             &[
                 self.camera_sets[frame],
                 self.atlas_set,
                 self.tint_arena.set(frame),
             ],
-            &[],
         );
     }
 
     pub(super) fn begin_tint_frame(
         &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
         frame: usize,
         required_colors: usize,
     ) {
-        self.tint_arena
-            .begin_frame(device, allocator, frame, required_colors);
+        self.tint_arena.begin_frame(device, frame, required_colors);
     }
 
     pub(super) fn push_tints(&mut self, frame: usize, colors: &[u32]) -> ItemTintRange {
         self.tint_arena.push(frame, colors)
     }
 
-    pub(super) fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            device.destroy_buffer(self.camera_buffers[i], None);
-            if let Some(alloc) = self.camera_allocations[i].take() {
-                allocator.lock().unwrap().free(alloc).ok();
-            }
-        }
+    pub(super) fn destroy(&mut self, device: &rhi::backend::Device) {
+        util::destroy_buffers(device, &mut self.camera_buffers);
 
-        self.tint_arena.destroy(device, allocator);
-        device.destroy_sampler(self.atlas_sampler, None);
-        device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_descriptor_pool(self.descriptor_pool, None);
-        device.destroy_descriptor_set_layout(self.camera_layout, None);
-        device.destroy_descriptor_set_layout(self.atlas_layout, None);
-        device.destroy_descriptor_set_layout(self.tint_layout, None);
+        self.tint_arena.destroy(device);
+        self.atlas_sampler.destroy(device);
+        self.pipeline_layout.destroy(device);
+        util::destroy_bind_groups(device, self.camera_sets.drain(..));
+        self.atlas_set.destroy(device);
+        self.camera_layout.destroy(device);
+        self.atlas_layout.destroy(device);
+        self.tint_layout.destroy(device);
     }
 }
 
 pub(super) fn push_model_light(
-    cmd: vk::CommandBuffer,
-    layout: vk::PipelineLayout,
+    pass: &rhi::backend::RenderPassEncoder,
     model: &Mat4,
     light: f32,
     item_tints: ItemTintRange,
 ) {
     let mvp_data = model.to_cols_array();
-    cmd.push_constants(
-        layout,
-        vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
+    pass.set_push_constants(
+        rhi::ShaderStages::VERTEX_FRAGMENT,
         0,
         bytemuck::bytes_of(&mvp_data),
     );
-    cmd.push_constants(
-        layout,
-        vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
+    pass.set_push_constants(
+        rhi::ShaderStages::VERTEX_FRAGMENT,
         64,
         bytemuck::bytes_of(&light),
     );
     let tint_range = [item_tints.base, item_tints.count];
-    cmd.push_constants(
-        layout,
-        vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
+    pass.set_push_constants(
+        rhi::ShaderStages::VERTEX_FRAGMENT,
         72,
         bytemuck::bytes_of(&tint_range),
     );
 }
 
-fn push_world_lighting(
-    cmd: vk::CommandBuffer,
-    layout: vk::PipelineLayout,
-    model: &Mat4,
-    nether: bool,
-) {
+fn push_world_lighting(pass: &rhi::backend::RenderPassEncoder, model: &Mat4, nether: bool) {
     let nether = if nether { 1.0_f32 } else { 0.0_f32 };
-    cmd.push_constants(
-        layout,
-        vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
+    pass.set_push_constants(
+        rhi::ShaderStages::VERTEX_FRAGMENT,
         68,
         bytemuck::bytes_of(&nether),
     );
@@ -551,9 +328,8 @@ fn push_world_lighting(
         cols[0], cols[1], cols[2], 0.0, cols[3], cols[4], cols[5], 0.0, cols[6], cols[7], cols[8],
         0.0,
     ];
-    cmd.push_constants(
-        layout,
-        vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
+    pass.set_push_constants(
+        rhi::ShaderStages::VERTEX_FRAGMENT,
         80,
         bytemuck::bytes_of(&padded_cols),
     );
@@ -561,23 +337,21 @@ fn push_world_lighting(
 
 pub struct ItemEntityPipeline {
     /// Vanilla `ITEM_CUTOUT`: alpha-tested, no blending.
-    cutout: vk::Pipeline,
+    cutout: rhi::backend::RenderPipeline,
     /// Vanilla `ITEM_TRANSLUCENT`: alpha-tested and blended.
-    translucent: vk::Pipeline,
+    translucent: rhi::backend::RenderPipeline,
     shared: ItemPipelineShared,
     meshes: HashMap<String, MeshEntry>,
 }
 
 impl ItemEntityPipeline {
     pub fn new(
-        device: &vk::Device,
-        render_pass: vk::RenderPass,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
         atlas: &TextureAtlas,
     ) -> Self {
-        let shared = ItemPipelineShared::new(device, allocator, atlas, "item_entity");
-        let (cutout, translucent) =
-            create_world_pipelines(device, render_pass, shared.pipeline_layout);
+        let shared = ItemPipelineShared::new(device, atlas, "item_entity");
+        let (cutout, translucent) = create_world_pipelines(device, targets, shared.pipeline_layout);
 
         Self {
             cutout,
@@ -593,27 +367,24 @@ impl ItemEntityPipeline {
 
     fn insert_mesh(
         &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
         name: &str,
         vertices: &[ItemVertex],
         is_3d_model: bool,
         translucent: bool,
     ) {
         let bytes = bytemuck::cast_slice(vertices);
-        let (buffer, allocation) = util::create_mapped_buffer(
+        let buffer = rhi::backend::Buffer::with_data(
             device,
-            allocator,
-            bytes,
-            vk::BufferUsageFlags::VertexBuffer,
             &format!("item_{name}"),
+            bytes,
+            rhi::BufferUsages::VERTEX,
         );
         let (bounds_min, bounds_max) = mesh_bounds(vertices);
         self.meshes.insert(
             name.to_string(),
             MeshEntry {
                 buffer,
-                allocation,
                 vertex_count: vertices.len() as u32,
                 is_3d_model,
                 translucent,
@@ -632,14 +403,15 @@ impl ItemEntityPipeline {
         })
     }
 
-    pub fn mesh_handle(&self, name: &str) -> Option<(vk::Buffer, u32)> {
-        self.meshes.get(name).map(|m| (m.buffer, m.vertex_count))
+    pub fn mesh_handle(&self, name: &str) -> Option<(rhi::backend::BufferHandle, u32)> {
+        self.meshes
+            .get(name)
+            .map(|m| (m.buffer.handle(), m.vertex_count))
     }
 
     pub fn ensure_mesh(
         &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
         name: &str,
         model: &BakedModel,
         uv_map: &AtlasUVMap,
@@ -653,14 +425,13 @@ impl ItemEntityPipeline {
                 .quads
                 .iter()
                 .any(|quad| uv_map.region(quad.texture).translucent);
-            self.insert_mesh(device, allocator, name, &vertices, true, translucent);
+            self.insert_mesh(device, name, &vertices, true, translucent);
         }
     }
 
     pub fn ensure_flat_mesh(
         &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
         name: &str,
         layers: &[Option<String>],
         uv_map: &AtlasUVMap,
@@ -689,7 +460,7 @@ impl ItemEntityPipeline {
             vertices.append(&mut layer_vertices);
         }
         if !vertices.is_empty() {
-            self.insert_mesh(device, allocator, name, &vertices, false, translucent);
+            self.insert_mesh(device, name, &vertices, false, translucent);
         }
     }
 
@@ -697,9 +468,8 @@ impl ItemEntityPipeline {
     /// are ordered.
     pub fn draw(
         &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        cmd: vk::CommandBuffer,
+        device: &rhi::backend::Device,
+        pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
         items: &[ItemRenderInfo],
     ) {
@@ -708,8 +478,7 @@ impl ItemEntityPipeline {
         }
 
         let required_colors = items.iter().map(|item| item.tints.len()).sum();
-        self.shared
-            .begin_tint_frame(device, allocator, frame, required_colors);
+        self.shared.begin_tint_frame(device, frame, required_colors);
         let tint_ranges: Vec<_> = items
             .iter()
             .map(|item| self.shared.push_tints(frame, &item.tints))
@@ -725,54 +494,46 @@ impl ItemEntityPipeline {
                     continue;
                 }
                 if !bound {
-                    self.shared.bind(cmd, frame, pipeline);
+                    self.shared.bind(pass, frame, pipeline);
                     bound = true;
                 }
-                cmd.bind_vertex_buffers(0, &[mesh.buffer], &[0]);
-                push_model_light(
-                    cmd,
-                    self.shared.pipeline_layout,
-                    &item.model_matrix,
-                    item.light,
-                    tint_range,
-                );
-                push_world_lighting(
-                    cmd,
-                    self.shared.pipeline_layout,
-                    &item.model_matrix,
-                    item.nether_lighting,
-                );
-                cmd.draw(mesh.vertex_count, 1, 0, 0);
+                pass.set_vertex_buffer(0, mesh.buffer.handle());
+                push_model_light(pass, &item.model_matrix, item.light, tint_range);
+                push_world_lighting(pass, &item.model_matrix, item.nether_lighting);
+                pass.draw(mesh.vertex_count, 1, 0, 0);
             }
         }
     }
 
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
+    pub fn recreate_pipeline(
+        &mut self,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
+    ) {
         self.destroy_pipelines(device);
         (self.cutout, self.translucent) =
-            create_world_pipelines(device, render_pass, self.shared.pipeline_layout);
+            create_world_pipelines(device, targets, self.shared.pipeline_layout);
     }
 
-    fn destroy_pipelines(&self, device: &vk::Device) {
-        device.destroy_pipeline(self.cutout, None);
-        device.destroy_pipeline(self.translucent, None);
+    fn destroy_pipelines(&self, device: &rhi::backend::Device) {
+        self.cutout.destroy(device);
+        self.translucent.destroy(device);
     }
 
-    pub fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
+    pub fn rebind_atlas(&mut self, device: &rhi::backend::Device, atlas: &TextureAtlas) {
         self.shared.rebind_atlas(device, atlas);
     }
 
-    pub fn clear_meshes(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+    pub fn clear_meshes(&mut self, device: &rhi::backend::Device) {
         for (_, entry) in self.meshes.drain() {
-            device.destroy_buffer(entry.buffer, None);
-            allocator.lock().unwrap().free(entry.allocation).ok();
+            entry.buffer.destroy(device);
         }
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        self.clear_meshes(device, allocator);
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        self.clear_meshes(device);
         self.destroy_pipelines(device);
-        self.shared.destroy(device, allocator);
+        self.shared.destroy(device);
     }
 }
 
@@ -1077,174 +838,68 @@ fn build_flat_quad(region: AtlasRegion, tint_index: Option<u32>) -> Vec<ItemVert
 }
 
 pub(super) fn create_pipeline(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-) -> vk::Pipeline {
-    create_pipeline_impl(
-        device,
-        render_pass,
-        layout,
-        vk::FrontFace::CounterClockwise,
-        false,
-        true,
-    )
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
+) -> rhi::backend::RenderPipeline {
+    create_pipeline_impl(device, targets, layout, rhi::FrontFace::Ccw, false, true)
 }
 
 /// The dropped-item pipelines: `(cutout, translucent)`.
 fn create_world_pipelines(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-) -> (vk::Pipeline, vk::Pipeline) {
-    let world = |blend| {
-        create_pipeline_impl(
-            device,
-            render_pass,
-            layout,
-            vk::FrontFace::CounterClockwise,
-            true,
-            blend,
-        )
-    };
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
+) -> (rhi::backend::RenderPipeline, rhi::backend::RenderPipeline) {
+    let world =
+        |blend| create_pipeline_impl(device, targets, layout, rhi::FrontFace::Ccw, true, blend);
     (world(false), world(true))
 }
 
 pub(super) fn create_pipeline_with_front_face(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-    front_face: vk::FrontFace,
-) -> vk::Pipeline {
-    create_pipeline_impl(device, render_pass, layout, front_face, false, true)
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
+    front_face: rhi::FrontFace,
+) -> rhi::backend::RenderPipeline {
+    create_pipeline_impl(device, targets, layout, front_face, false, true)
 }
 
 fn create_pipeline_impl(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-    front_face: vk::FrontFace,
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
+    front_face: rhi::FrontFace,
     world_lighting: bool,
     blend: bool,
-) -> vk::Pipeline {
-    let vert_spv: &[u8] = if world_lighting {
-        &shader::include_spirv!("item_entity_world.vert.spv")[..]
+) -> rhi::backend::RenderPipeline {
+    let vertex_shader: rhi::Shader = if world_lighting {
+        shader::include_shader!("item_entity_world.vert")
     } else {
-        &shader::include_spirv!("item_entity.vert.spv")[..]
+        shader::include_shader!("item_entity.vert")
     };
-    let frag_spv = shader::include_spirv!("item_entity.frag.spv");
-    let vert_mod = shader::create_shader_module(device, vert_spv);
-    let frag_mod = shader::create_shader_module(device, frag_spv);
-
-    let stages = [
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Vertex,
-            module: vert_mod,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Fragment,
-            module: frag_mod,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-    ];
-
-    let binding = ItemVertex::binding_description();
-    let attrs = ItemVertex::attribute_descriptions();
-
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo {
-        vertex_binding_description_count: 1,
-        vertex_binding_descriptions: &binding,
-        vertex_attribute_description_count: attrs.len() as u32,
-        vertex_attribute_descriptions: attrs.as_ptr(),
-        ..Default::default()
-    };
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
-        topology: vk::PrimitiveTopology::TriangleList,
-        ..Default::default()
-    };
-    let viewport_state = vk::PipelineViewportStateCreateInfo {
-        viewport_count: 1,
-        scissor_count: 1,
-        ..Default::default()
-    };
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo {
-        polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeFlags::Back,
-        front_face,
-        line_width: 1.0,
-        ..Default::default()
-    };
-    let multisampling = vk::PipelineMultisampleStateCreateInfo {
-        rasterization_samples: vk::SampleCountFlags::Type1,
-        ..Default::default()
-    };
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
-        depth_test_enable: vk::TRUE,
-        depth_write_enable: vk::TRUE,
-        // Vanilla 26.2's DepthStencilState.DEFAULT is inclusive
-        // GREATER_THAN_OR_EQUAL under reversed-Z. Pomme uses conventional
-        // depth here, so the equivalent comparison is LESS_OR_EQUAL. The
-        // equality case matters where generated front/back planes meet their
-        // per-pixel extrusion walls at the exact same depth.
-        depth_compare_op: vk::CompareOp::LessOrEqual,
-        ..Default::default()
-    };
-    let blend_attachment = vk::PipelineColorBlendAttachmentState {
-        blend_enable: if blend { vk::TRUE } else { vk::FALSE },
-        src_color_blend_factor: vk::BlendFactor::SrcAlpha,
-        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
-        color_blend_op: vk::BlendOp::Add,
-        src_alpha_blend_factor: vk::BlendFactor::One,
-        dst_alpha_blend_factor: vk::BlendFactor::Zero,
-        alpha_blend_op: vk::BlendOp::Add,
-        color_write_mask: vk::ColorComponentFlags::RGBA,
-    };
-    let color_blending = vk::PipelineColorBlendStateCreateInfo {
-        attachment_count: 1,
-        attachments: &blend_attachment,
-        ..Default::default()
-    };
-    let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
-    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
-        dynamic_state_count: dynamic_states.len() as u32,
-        dynamic_states: dynamic_states.as_ptr(),
-        ..Default::default()
-    };
-
-    let info = [vk::GraphicsPipelineCreateInfo {
-        stage_count: stages.len() as u32,
-        stages: stages.as_ptr(),
-        vertex_input_state: &vertex_input,
-        input_assembly_state: &input_assembly,
-        viewport_state: &viewport_state,
-        rasterization_state: &rasterizer,
-        multisample_state: &multisampling,
-        depth_stencil_state: &depth_stencil,
-        color_blend_state: &color_blending,
-        dynamic_state: &dynamic_state,
+    rhi::backend::create_render_pipeline(
+        device,
+        targets,
         layout,
-        render_pass,
-        subpass: 0,
-        ..Default::default()
-    }];
-
-    let mut pipeline = vk::Pipeline::null();
-    device
-        .create_graphics_pipelines(
-            vk::PipelineCache::null(),
-            &info,
-            None,
-            slice::from_mut(&mut pipeline),
-        )
-        .expect("failed to create item entity pipeline");
-
-    device.destroy_shader_module(vert_mod, None);
-    device.destroy_shader_module(frag_mod, None);
-
-    pipeline
+        &rhi::RenderPipelineDesc {
+            cull_mode: rhi::CullMode::Back,
+            front_face,
+            // Vanilla 26.2's DepthStencilState.DEFAULT is inclusive
+            // GREATER_THAN_OR_EQUAL under reversed-Z. Pomme uses conventional
+            // depth here, so the equivalent comparison is LESS_OR_EQUAL. The
+            // equality case matters where generated front/back planes meet
+            // their per-pixel extrusion walls at the exact same depth.
+            depth: Some(rhi::DepthState::WRITE),
+            blend: blend.then_some(rhi::BlendState::OVER_REPLACE_ALPHA),
+            ..rhi::RenderPipelineDesc::new(
+                "item entity",
+                vertex_shader,
+                shader::include_shader!("item_entity.frag"),
+                &[ItemVertex::BUFFER],
+            )
+        },
+    )
 }
 
 #[cfg(test)]

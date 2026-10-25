@@ -5,12 +5,8 @@
 //! screen-space projection.
 
 use std::path::Path;
-use std::slice;
-use std::sync::{Arc, Mutex};
 
 use glam::{Mat4, Vec3, Vec4};
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
 
 use super::entity_renderer::WHITE_TINT;
 use super::skin_preview::{
@@ -18,7 +14,7 @@ use super::skin_preview::{
     push_preview_style, write_uniform,
 };
 use crate::assets::{AssetIndex, load_image, resolve_asset_path};
-use crate::renderer::{BookPreview, MAX_FRAMES_IN_FLIGHT, util};
+use crate::renderer::{BookPreview, rhi, util};
 
 /// Base mesh of one book part, posed per frame.
 struct Part {
@@ -28,130 +24,43 @@ struct Part {
 }
 
 pub struct BookPreviewPipeline {
-    pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    mvp_layout: vk::DescriptorSetLayout,
-    tex_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    mvp_sets: Vec<vk::DescriptorSet>,
-    mvp_buffers: Vec<vk::Buffer>,
-    mvp_allocations: Vec<Allocation>,
-    tex_set: vk::DescriptorSet,
-    texture: vk::Image,
-    texture_view: vk::ImageView,
-    texture_allocation: Allocation,
-    sampler: vk::Sampler,
-    vertex_buffers: Vec<vk::Buffer>,
-    vertex_allocations: Vec<Allocation>,
+    pipeline: rhi::backend::RenderPipeline,
+    pipeline_layout: rhi::backend::PipelineLayout,
+    mvp_layout: rhi::backend::BindGroupLayout,
+    tex_layout: rhi::backend::BindGroupLayout,
+    mvp_sets: Vec<rhi::backend::BindGroup>,
+    mvp_buffers: Vec<rhi::backend::Buffer>,
+    tex_set: rhi::backend::BindGroup,
+    texture: rhi::backend::Texture,
+    sampler: rhi::backend::Sampler,
+    vertex_buffers: Vec<rhi::backend::Buffer>,
     parts: Vec<Part>,
     vert_count: u32,
 }
 
 impl BookPreviewPipeline {
     pub fn new(
-        device: &vk::Device,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        render_pass: vk::RenderPass,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
     ) -> Self {
-        let mvp_layout = util::create_descriptor_set_layout(
+        let mvp_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
+        let tex_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
+        let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
-            vk::DescriptorType::UniformBuffer,
-            vk::ShaderStageFlags::Vertex,
-        );
-        let tex_layout = util::create_descriptor_set_layout(
-            device,
-            vk::DescriptorType::CombinedImageSampler,
-            vk::ShaderStageFlags::Fragment,
+            &[mvp_layout, tex_layout],
+            Some(preview_push_constant_range()),
         );
 
-        let layouts = [mvp_layout, tex_layout];
-        let push_range = preview_push_constant_range();
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: layouts.len() as u32,
-            set_layouts: layouts.as_ptr(),
-            push_constant_range_count: 1,
-            push_constant_ranges: &push_range,
-            ..Default::default()
-        };
-        let pipeline_layout = device
-            .create_pipeline_layout(&layout_info, None)
-            .expect("failed to create book preview pipeline layout");
+        let pipeline = create_pipeline(device, targets, pipeline_layout);
 
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout);
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: (MAX_FRAMES_IN_FLIGHT + 1) as u32,
-            pool_size_count: pool_sizes.len() as u32,
-            pool_sizes: pool_sizes.as_ptr(),
-            ..Default::default()
-        };
-        let descriptor_pool = device
-            .create_descriptor_pool(&pool_info, None)
-            .expect("failed to create book preview descriptor pool");
-
-        let mvp_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| mvp_layout).collect();
-        let mvp_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: mvp_layouts.len() as u32,
-            set_layouts: mvp_layouts.as_ptr(),
-            ..Default::default()
-        };
-        let mut mvp_sets = vec![vk::DescriptorSet::null(); mvp_layouts.len()];
-        device
-            .allocate_descriptor_sets(&mvp_alloc_info, &mut mvp_sets)
-            .expect("failed to allocate book preview mvp sets");
-
-        let tex_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: 1,
-            set_layouts: &tex_layout,
-            ..Default::default()
-        };
-        let mut tex_set = vk::DescriptorSet::null();
-        device
-            .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut tex_set))
-            .expect("failed to allocate book preview tex set");
-
-        let mut mvp_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut mvp_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        for set in &mvp_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
-                device,
-                allocator,
-                std::mem::size_of::<Uniform>() as u64,
-                "book_mvp",
-            );
-            let buffer_info = vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: std::mem::size_of::<Uniform>() as u64,
-            };
-            let write = vk::WriteDescriptorSet {
-                dst_set: *set,
-                dst_binding: 0,
-                descriptor_type: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
-                buffer_info: &buffer_info,
-                ..Default::default()
-            };
-            device.update_descriptor_sets(&[write], &[]);
-            mvp_buffers.push(buf);
-            mvp_allocations.push(alloc);
-        }
+        let (mvp_sets, mvp_buffers) = util::create_uniform_sets(
+            device,
+            mvp_layout,
+            std::mem::size_of::<Uniform>() as u64,
+            "book_mvp",
+        );
 
         let path = resolve_asset_path(
             jar_assets_dir,
@@ -169,63 +78,31 @@ impl BookPreviewPipeline {
                 (vec![255, 0, 255, 255], 1, 1)
             }
         };
-        let (texture, texture_view, texture_allocation) =
-            util::create_gpu_image(device, allocator, tex_w, tex_h, "book_texture");
-        let (staging, staging_alloc) =
-            util::create_staging_buffer(device, allocator, &pixels, "book_texture_staging");
-        util::upload_image(device, queue, command_pool, staging, texture, tex_w, tex_h);
-        device.destroy_buffer(staging, None);
-        allocator.lock().unwrap().free(staging_alloc).ok();
+        let texture = util::create_sampled_texture(device, "book_texture", &pixels, tex_w, tex_h);
 
-        let sampler = unsafe { util::create_nearest_sampler(device) };
-        let image_info = vk::DescriptorImageInfo {
-            sampler,
-            image_view: texture_view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let tex_write = vk::WriteDescriptorSet {
-            dst_set: tex_set,
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 1,
-            image_info: &image_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[tex_write], &[]);
+        let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
+        let tex_set = util::create_texture_group(device, tex_layout, texture.handle(), sampler);
 
         let parts = build_parts();
         let vert_count: u32 = parts.iter().map(|p| p.verts.len() as u32).sum();
-        let zeroed = vec![0u8; vert_count as usize * std::mem::size_of::<Vertex>()];
-        let mut vertex_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut vertex_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let (buf, alloc) = util::create_mapped_buffer(
-                device,
-                allocator,
-                &zeroed,
-                vk::BufferUsageFlags::VertexBuffer,
-                "book_vertices",
-            );
-            vertex_buffers.push(buf);
-            vertex_allocations.push(alloc);
-        }
+        let vertex_buffers = util::create_per_frame_host_buffers(
+            device,
+            (vert_count as usize * size_of::<Vertex>()) as u64,
+            rhi::BufferUsages::VERTEX,
+            "book_vertices",
+        );
 
         Self {
             pipeline,
             pipeline_layout,
             mvp_layout,
             tex_layout,
-            descriptor_pool,
             mvp_sets,
             mvp_buffers,
-            mvp_allocations,
             tex_set,
             texture,
-            texture_view,
-            texture_allocation,
             sampler,
             vertex_buffers,
-            vertex_allocations,
             parts,
             vert_count,
         }
@@ -237,7 +114,7 @@ impl BookPreviewPipeline {
     /// `setupAnim`.
     pub fn draw_in_box(
         &mut self,
-        cmd: vk::CommandBuffer,
+        pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
         p: BookPreview,
         sw: f32,
@@ -257,7 +134,7 @@ impl BookPreviewPipeline {
             Vec4::new(0.0, 0.0, s / 2000.0, 0.0),
             Vec4::new(bx, by, 0.5, 1.0),
         );
-        write_uniform(&mut self.mvp_allocations[frame], &clip);
+        write_uniform(&mut self.mvp_buffers[frame], &clip);
 
         // GuiBookModelRenderer.renderToTexture's pose chain.
         let open = p.open;
@@ -289,73 +166,47 @@ impl BookPreviewPipeline {
         ];
         let x_offsets = [0.0, 0.0, 0.0, page_x, page_x, page_x, page_x];
 
-        let byte_len = self.vert_count as usize * std::mem::size_of::<Vertex>();
-        let mapped = self.vertex_allocations[frame].mapped_slice_mut().unwrap();
-        let out: &mut [Vertex] = bytemuck::cast_slice_mut(&mut mapped[..byte_len]);
-        let mut cursor = 0usize;
+        let mut verts = Vec::with_capacity(self.vert_count as usize);
         for (i, part) in self.parts.iter().enumerate() {
             // ModelPart.translateAndRotate: offsets are pixels / 16.
             let m = pose
                 * Mat4::from_translation((part.offset + Vec3::new(x_offsets[i], 0.0, 0.0)) / 16.0)
                 * Mat4::from_rotation_y(y_rots[i]);
-            for v in &part.verts {
-                out[cursor] = Vertex {
-                    position: m.transform_point3(Vec3::from(v.position)).into(),
-                    uv: v.uv,
-                };
-                cursor += 1;
-            }
+            verts.extend(part.verts.iter().map(|v| Vertex {
+                position: m.transform_point3(Vec3::from(v.position)).into(),
+                uv: v.uv,
+            }));
         }
+        self.vertex_buffers[frame].write(bytemuck::cast_slice(&verts));
 
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-        push_preview_style(cmd, self.pipeline_layout, WHITE_TINT, PREVIEW_ALPHA_CUTOFF);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.mvp_sets[frame], self.tex_set],
-            &[],
-        );
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame]], &[0]);
-        cmd.draw(self.vert_count, 1, 0, 0);
+        pass.set_pipeline(&self.pipeline);
+        push_preview_style(pass, WHITE_TINT, PREVIEW_ALPHA_CUTOFF);
+        pass.set_bind_groups(0, &[self.mvp_sets[frame], self.tex_set]);
+        pass.set_vertex_buffer(0, self.vertex_buffers[frame].handle());
+        pass.draw(self.vert_count, 1, 0, 0);
     }
 
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
+    pub fn recreate_pipeline(
+        &mut self,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
+    ) {
+        self.pipeline.destroy(device);
+        self.pipeline = create_pipeline(device, targets, self.pipeline_layout);
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let mut alloc = allocator.lock().unwrap();
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            device.destroy_buffer(self.mvp_buffers[i], None);
-            device.destroy_buffer(self.vertex_buffers[i], None);
-            alloc
-                .free(std::mem::replace(&mut self.mvp_allocations[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
-            alloc
-                .free(std::mem::replace(&mut self.vertex_allocations[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
-        }
-        device.destroy_image_view(self.texture_view, None);
-        device.destroy_image(self.texture, None);
-        alloc
-            .free(std::mem::replace(&mut self.texture_allocation, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
-        drop(alloc);
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        util::destroy_buffers(device, &mut self.mvp_buffers);
+        util::destroy_buffers(device, &mut self.vertex_buffers);
+        std::mem::take(&mut self.texture).destroy(device);
 
-        device.destroy_sampler(self.sampler, None);
-        device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_descriptor_pool(self.descriptor_pool, None);
-        device.destroy_descriptor_set_layout(self.mvp_layout, None);
-        device.destroy_descriptor_set_layout(self.tex_layout, None);
+        self.sampler.destroy(device);
+        self.pipeline.destroy(device);
+        self.pipeline_layout.destroy(device);
+        util::destroy_bind_groups(device, self.mvp_sets.drain(..));
+        self.tex_set.destroy(device);
+        self.mvp_layout.destroy(device);
+        self.tex_layout.destroy(device);
     }
 }
 

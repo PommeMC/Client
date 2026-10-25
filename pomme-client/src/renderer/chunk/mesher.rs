@@ -3,11 +3,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use azalea_block::BlockState;
-use pyronyx::vk;
 
 use super::occlusion_graph::{VisibilitySet, compute_visibility};
 use crate::position::ChunkPos;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
+use crate::renderer::rhi;
 use crate::world::block::model::{
     BakedModel, CardinalLighting, Direction, face_positions, face_uvs,
 };
@@ -37,38 +37,8 @@ struct TerrainVertex {
 }
 
 impl ChunkVertex {
-    pub const STRIDE: u32 = size_of::<Self>() as u32;
-
-    pub fn binding_description() -> vk::VertexInputBindingDescription {
-        vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: Self::STRIDE,
-            input_rate: vk::VertexInputRate::Vertex,
-        }
-    }
-
-    pub fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 3] {
-        [
-            vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32B32Sfloat,
-                offset: 0,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: vk::Format::R16G16Unorm,
-                offset: 12,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 2,
-                binding: 0,
-                format: vk::Format::R8G8B8A8Unorm,
-                offset: 16,
-            },
-        ]
-    }
+    pub const BUFFER: rhi::VertexBufferLayout<'static> =
+        rhi::vertex_buffer!(Self, [Float32x3, Unorm16x2, Unorm8x4]);
 }
 
 include!("packing_consts.rs");

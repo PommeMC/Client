@@ -3,7 +3,7 @@ use crate::app::core::AppCore;
 use crate::app::phases::{Gfx, Panorama};
 use crate::net::connection::{ConnectArgs, Transport};
 use crate::singleplayer::{self, World};
-use crate::ui::menu::MenuAction;
+use crate::ui::menu::{MenuAction, PanoramaTheme};
 
 pub enum MenuUpdateResult {
     None,
@@ -120,18 +120,8 @@ pub fn update_menu(
         gfx.window.set_cursor(cursor_icon);
     }
 
-    if core.menu.is_server_list_screen() && core.menu.favicons_changed() {
-        let favicons = core.menu.collect_favicons();
-        if !favicons.is_empty() {
-            gfx.renderer.update_favicon_atlas(&favicons);
-        }
-    }
-
-    if core.menu.is_friends_screen() && core.menu.faces_changed() {
-        let faces = core.menu.collect_faces();
-        if !faces.is_empty() {
-            gfx.renderer.update_face_atlas(&faces);
-        }
+    if let Some(images) = core.menu.menu_atlas_images() {
+        gfx.renderer.update_favicon_atlas(&images);
     }
 
     // TODO: menu screens (a server MOTD, say) draw object glyphs as their
@@ -145,7 +135,7 @@ pub fn update_menu(
         result.blur,
         result.elements,
         core.input.cursor_pos(),
-        core.menu.show_skin_preview(),
+        core.menu.skin_preview(),
     ) {
         tracing::error!("Render error: {e}");
     }
@@ -204,6 +194,10 @@ pub fn update_menu(
         MenuAction::ChangeTheme(theme) => {
             gfx.renderer
                 .reload_panorama(&theme.panorama_dir(&core.data_dirs));
+            if theme == PanoramaTheme::Bedrock {
+                gfx.renderer
+                    .load_bedrock_sprites(&core.data_dirs.bedrock_ui_dir());
+            }
             core.menu.start_transition_open();
         }
         MenuAction::Account(account) => {
@@ -225,6 +219,8 @@ pub fn update_menu(
                 gfx.renderer
                     .load_player_skin(&core.user.uuid, &core.tokio_rt);
             }
+            core.menu
+                .set_player_face(core.user.has_profile.then_some(&core.user.uuid));
             if account.is_some()
                 && let Some(play) = core.deferred_quick_play.take()
             {

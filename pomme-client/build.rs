@@ -72,6 +72,7 @@ fn main() {
         "camera_ubo.glsl",
         "atlas_sprite.glsl",
         "item_tint.glsl",
+        "item_push.glsl",
     ] {
         println!(
             "cargo:rerun-if-changed={}",

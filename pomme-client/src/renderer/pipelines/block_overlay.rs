@@ -1,18 +1,14 @@
 use std::f32::consts::{FRAC_PI_2, PI};
 use std::path::Path;
-use std::slice;
-use std::sync::{Arc, Mutex};
 
 use azalea_block::BlockState;
 use glam::{Quat, Vec3};
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::position::BlockPos;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::{CUBE_FACE_DIRS, cube_face_geometry};
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
 use crate::world::block::BlockStateData;
 use crate::world::block::model::{BakedQuad, Direction, direction_from_positions};
 use crate::world::block::render_assets::BlockRenderView;
@@ -38,161 +34,51 @@ struct OverlayPush {
 }
 
 pub struct BlockOverlayPipeline {
-    pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    camera_layout: vk::DescriptorSetLayout,
-    texture_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    camera_sets: Vec<vk::DescriptorSet>,
-    texture_set: vk::DescriptorSet,
-    camera_buffers: Vec<vk::Buffer>,
-    camera_allocations: Vec<Allocation>,
-    vertex_buffers: Vec<vk::Buffer>,
-    vertex_allocations: Vec<Allocation>,
-    atlas_image: vk::Image,
-    atlas_view: vk::ImageView,
-    atlas_sampler: vk::Sampler,
-    atlas_allocation: Allocation,
+    pipeline: rhi::backend::RenderPipeline,
+    pipeline_layout: rhi::backend::PipelineLayout,
+    camera_layout: rhi::backend::BindGroupLayout,
+    texture_layout: rhi::backend::BindGroupLayout,
+    camera_sets: Vec<rhi::backend::BindGroup>,
+    texture_set: rhi::backend::BindGroup,
+    camera_buffers: Vec<rhi::backend::Buffer>,
+    vertex_buffers: Vec<rhi::backend::Buffer>,
+    atlas: rhi::backend::Texture,
+    atlas_sampler: rhi::backend::Sampler,
 }
 
 impl BlockOverlayPipeline {
     pub fn new(
-        device: &vk::Device,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        render_pass: vk::RenderPass,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
     ) -> Self {
-        let camera_layout = util::create_descriptor_set_layout(
+        let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
+        let texture_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
+        let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
-            vk::DescriptorType::UniformBuffer,
-            vk::ShaderStageFlags::Vertex,
-        );
-        let texture_layout = util::create_descriptor_set_layout(
-            device,
-            vk::DescriptorType::CombinedImageSampler,
-            vk::ShaderStageFlags::Fragment,
-        );
-
-        let push_range = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::Fragment,
-            offset: 0,
-            size: size_of::<OverlayPush>() as u32,
-        };
-        let layouts = [camera_layout, texture_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: layouts.len() as u32,
-            set_layouts: layouts.as_ptr(),
-            push_constant_range_count: 1,
-            push_constant_ranges: &push_range,
-            ..Default::default()
-        };
-        let pipeline_layout = device
-            .create_pipeline_layout(&layout_info, None)
-            .expect("failed to create block overlay pipeline layout");
-
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout);
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: (MAX_FRAMES_IN_FLIGHT + 1) as u32,
-            pool_size_count: pool_sizes.len() as u32,
-            pool_sizes: pool_sizes.as_ptr(),
-            ..Default::default()
-        };
-        let descriptor_pool = device
-            .create_descriptor_pool(&pool_info, None)
-            .expect("failed to create block overlay descriptor pool");
-
-        let cam_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| camera_layout).collect();
-        let cam_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: cam_layouts.len() as u32,
-            set_layouts: cam_layouts.as_ptr(),
-            ..Default::default()
-        };
-        let mut camera_sets = vec![vk::DescriptorSet::null(); cam_layouts.len()];
-        device
-            .allocate_descriptor_sets(&cam_alloc_info, &mut camera_sets)
-            .expect("failed to allocate block overlay camera sets");
-
-        let tex_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: 1,
-            set_layouts: &texture_layout,
-            ..Default::default()
-        };
-        let mut texture_set = vk::DescriptorSet::null();
-        device
-            .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut texture_set))
-            .expect("failed to allocate block overlay texture set");
-
-        let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut camera_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-
-        for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
-                device,
-                allocator,
-                size_of::<CameraUniform>() as u64,
-                "block_overlay_camera",
-            );
-            let buffer_info = vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: size_of::<CameraUniform>() as u64,
-            };
-            let write = vk::WriteDescriptorSet {
-                dst_set: set,
-                dst_binding: 0,
-                descriptor_type: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
-                buffer_info: &buffer_info,
-                image_info: std::ptr::null(),
-                ..Default::default()
-            };
-            device.update_descriptor_sets(&[write], &[]);
-            camera_buffers.push(buf);
-            camera_allocations.push(alloc);
-        }
-
-        let (atlas_image, atlas_view, atlas_allocation) = load_destroy_atlas(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            jar_assets_dir,
-            asset_index,
+            &[camera_layout, texture_layout],
+            Some(rhi::PushConstants {
+                visibility: rhi::ShaderStages::FRAGMENT,
+                size: size_of::<OverlayPush>() as u32,
+            }),
         );
 
-        let atlas_sampler = unsafe { util::create_nearest_sampler(device) };
+        let pipeline = create_pipeline(device, targets, pipeline_layout);
 
-        let image_info = vk::DescriptorImageInfo {
-            sampler: atlas_sampler,
-            image_view: atlas_view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let tex_write = vk::WriteDescriptorSet {
-            dst_set: texture_set,
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 1,
-            buffer_info: std::ptr::null(),
-            image_info: &image_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[tex_write], &[]);
+        let (camera_sets, camera_buffers) = util::create_uniform_sets(
+            device,
+            camera_layout,
+            size_of::<CameraUniform>() as u64,
+            "block_overlay_camera",
+        );
+
+        let atlas = load_destroy_atlas(device, jar_assets_dir, asset_index);
+
+        let atlas_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
+
+        let texture_set =
+            util::create_texture_group(device, texture_layout, atlas.handle(), atlas_sampler);
 
         let placeholder = vec![
             OverlayVertex {
@@ -202,49 +88,40 @@ impl BlockOverlayPipeline {
             MAX_OVERLAY_VERTS
         ];
         let bytes = bytemuck::cast_slice::<OverlayVertex, u8>(&placeholder);
-        let mut vertex_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut vertex_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let (buf, alloc) = util::create_mapped_buffer(
-                device,
-                allocator,
-                bytes,
-                vk::BufferUsageFlags::VertexBuffer,
-                "block_overlay_vertices",
-            );
-            vertex_buffers.push(buf);
-            vertex_allocations.push(alloc);
-        }
+        let vertex_buffers = (0..MAX_FRAMES_IN_FLIGHT)
+            .map(|_| {
+                rhi::backend::Buffer::with_data(
+                    device,
+                    "block_overlay_vertices",
+                    bytes,
+                    rhi::BufferUsages::VERTEX,
+                )
+            })
+            .collect();
 
         Self {
             pipeline,
             pipeline_layout,
             camera_layout,
             texture_layout,
-            descriptor_pool,
             camera_sets,
             texture_set,
             camera_buffers,
-            camera_allocations,
             vertex_buffers,
-            vertex_allocations,
-            atlas_image,
-            atlas_view,
+            atlas,
             atlas_sampler,
-            atlas_allocation,
         }
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
         let bytes = bytemuck::bytes_of(uniform);
-        self.camera_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
-            .copy_from_slice(bytes);
+        self.camera_buffers[frame].write(bytes);
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
-        cmd: vk::CommandBuffer,
+        pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
         registry: BlockRenderView<'_>,
         state: BlockState,
@@ -258,71 +135,41 @@ impl BlockOverlayPipeline {
         }
         // TODO: one overlay per frame; multiple draws would need a write cursor.
         let bytes = bytemuck::cast_slice::<OverlayVertex, u8>(&vertices);
-        self.vertex_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
-            .copy_from_slice(bytes);
+        self.vertex_buffers[frame].write(bytes);
 
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+        pass.set_pipeline(&self.pipeline);
         let push = OverlayPush {
             v_base: stage as f32 / STAGE_COUNT as f32,
             v_scale: 1.0 / STAGE_COUNT as f32,
         };
-        cmd.push_constants(
-            self.pipeline_layout,
-            vk::ShaderStageFlags::Fragment,
-            0,
-            bytemuck::bytes_of(&push),
-        );
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.camera_sets[frame], self.texture_set],
-            &[],
-        );
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame]], &[0]);
-        cmd.draw(vertices.len() as u32, 1, 0, 0);
+        pass.set_push_constants(rhi::ShaderStages::FRAGMENT, 0, bytemuck::bytes_of(&push));
+        pass.set_bind_groups(0, &[self.camera_sets[frame], self.texture_set]);
+        pass.set_vertex_buffer(0, self.vertex_buffers[frame].handle());
+        pass.draw(vertices.len() as u32, 1, 0, 0);
     }
 
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
+    pub fn recreate_pipeline(
+        &mut self,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
+    ) {
+        self.pipeline.destroy(device);
+        self.pipeline = create_pipeline(device, targets, self.pipeline_layout);
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let mut alloc = allocator.lock().unwrap();
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            device.destroy_buffer(self.camera_buffers[i], None);
-            alloc
-                .free(std::mem::replace(&mut self.camera_allocations[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        util::destroy_buffers(device, &mut self.camera_buffers);
+        util::destroy_buffers(device, &mut self.vertex_buffers);
 
-            device.destroy_buffer(self.vertex_buffers[i], None);
-            alloc
-                .free(std::mem::replace(&mut self.vertex_allocations[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
-        }
+        self.atlas_sampler.destroy(device);
+        std::mem::take(&mut self.atlas).destroy(device);
 
-        device.destroy_sampler(self.atlas_sampler, None);
-        device.destroy_image_view(self.atlas_view, None);
-
-        alloc
-            .free(std::mem::replace(&mut self.atlas_allocation, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
-        device.destroy_image(self.atlas_image, None);
-
-        drop(alloc);
-
-        device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_descriptor_pool(self.descriptor_pool, None);
-        device.destroy_descriptor_set_layout(self.camera_layout, None);
-        device.destroy_descriptor_set_layout(self.texture_layout, None);
+        self.pipeline.destroy(device);
+        self.pipeline_layout.destroy(device);
+        util::destroy_bind_groups(device, self.camera_sets.drain(..));
+        self.texture_set.destroy(device);
+        self.camera_layout.destroy(device);
+        self.texture_layout.destroy(device);
     }
 }
 
@@ -439,13 +286,10 @@ fn face_rotation(dir: Direction) -> Quat {
 }
 
 fn load_destroy_atlas(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
+    device: &rhi::backend::Device,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
-) -> (vk::Image, vk::ImageView, Allocation) {
+) -> rhi::backend::Texture {
     let mut atlas_pixels = Vec::new();
     let mut tile_size = 16u32;
 
@@ -466,180 +310,50 @@ fn load_destroy_atlas(
     let atlas_w = tile_size;
     let atlas_h = tile_size * STAGE_COUNT;
 
-    let (image, view, allocation) =
-        util::create_gpu_image(device, allocator, atlas_w, atlas_h, "destroy_atlas");
-    let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, &atlas_pixels, "destroy_atlas_staging");
-
-    util::upload_image(
-        device,
-        queue,
-        command_pool,
-        staging_buf,
-        image,
-        atlas_w,
-        atlas_h,
-    );
-
-    device.destroy_buffer(staging_buf, None);
-    let _ = allocator.lock().unwrap().free(staging_alloc);
+    let texture =
+        util::create_sampled_texture(device, "destroy_atlas", &atlas_pixels, atlas_w, atlas_h);
 
     tracing::info!("Block overlay: loaded {STAGE_COUNT} destroy stages ({atlas_w}x{atlas_h})");
 
-    (image, view, allocation)
+    texture
 }
 
 fn create_pipeline(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-) -> vk::Pipeline {
-    let vert_spv = shader::include_spirv!("block_overlay.vert.spv");
-    let frag_spv = shader::include_spirv!("block_overlay.frag.spv");
-
-    let vert_module = shader::create_shader_module(device, vert_spv);
-    let frag_module = shader::create_shader_module(device, frag_spv);
-
-    let stages = [
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Vertex,
-            module: vert_module,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Fragment,
-            module: frag_module,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-    ];
-
-    let binding_desc = vk::VertexInputBindingDescription {
-        binding: 0,
-        stride: size_of::<OverlayVertex>() as u32,
-        input_rate: vk::VertexInputRate::Vertex,
-    };
-
-    let attr_descs = [
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32B32Sfloat,
-            offset: 0,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R32G32Sfloat,
-            offset: 12,
-        },
-    ];
-
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo {
-        vertex_binding_description_count: 1,
-        vertex_binding_descriptions: &binding_desc,
-        vertex_attribute_description_count: attr_descs.len() as u32,
-        vertex_attribute_descriptions: attr_descs.as_ptr(),
-        ..Default::default()
-    };
-
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
-        topology: vk::PrimitiveTopology::TriangleList,
-        ..Default::default()
-    };
-
-    let viewport_state = vk::PipelineViewportStateCreateInfo {
-        viewport_count: 1,
-        scissor_count: 1,
-        ..Default::default()
-    };
-
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo {
-        polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeFlags::None,
-        front_face: vk::FrontFace::CounterClockwise,
-        line_width: 1.0,
-        // No inflation, so this camera-ward offset is what wins the depth test.
-        // Mirror vanilla's constant-heavy crumbling offset (units 10, slope 1):
-        // a large slope pulls edge-on side faces in front of occluding neighbors.
-        depth_bias_enable: vk::TRUE,
-        depth_bias_constant_factor: -10.0,
-        depth_bias_slope_factor: -1.0,
-        ..Default::default()
-    };
-
-    let multisampling = vk::PipelineMultisampleStateCreateInfo {
-        rasterization_samples: vk::SampleCountFlags::Type1,
-        ..Default::default()
-    };
-
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
-        depth_test_enable: vk::TRUE,
-        depth_write_enable: vk::FALSE,
-        depth_compare_op: vk::CompareOp::LessOrEqual,
-        ..Default::default()
-    };
-
-    let blend_attachment = vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::TRUE,
-        src_color_blend_factor: vk::BlendFactor::DstColor,
-        dst_color_blend_factor: vk::BlendFactor::SrcColor,
-        color_blend_op: vk::BlendOp::Add,
-        src_alpha_blend_factor: vk::BlendFactor::One,
-        dst_alpha_blend_factor: vk::BlendFactor::Zero,
-        alpha_blend_op: vk::BlendOp::Add,
-        color_write_mask: vk::ColorComponentFlags::RGBA,
-    };
-
-    let color_blending = vk::PipelineColorBlendStateCreateInfo {
-        attachment_count: 1,
-        attachments: &blend_attachment,
-        ..Default::default()
-    };
-
-    let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
-
-    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
-        dynamic_state_count: dynamic_states.len() as u32,
-        dynamic_states: dynamic_states.as_ptr(),
-        ..Default::default()
-    };
-
-    let pipeline_info = [vk::GraphicsPipelineCreateInfo {
-        stage_count: stages.len() as u32,
-        stages: stages.as_ptr(),
-
-        vertex_input_state: &vertex_input,
-        input_assembly_state: &input_assembly,
-        viewport_state: &viewport_state,
-        rasterization_state: &rasterizer,
-        multisample_state: &multisampling,
-        depth_stencil_state: &depth_stencil,
-        color_blend_state: &color_blending,
-        dynamic_state: &dynamic_state,
-
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
+) -> rhi::backend::RenderPipeline {
+    rhi::backend::create_render_pipeline(
+        device,
+        targets,
         layout,
-        render_pass,
-        subpass: 0,
-
-        ..Default::default()
-    }];
-
-    let mut pipeline = vk::Pipeline::null();
-    device
-        .create_graphics_pipelines(
-            vk::PipelineCache::null(),
-            &pipeline_info,
-            None,
-            slice::from_mut(&mut pipeline),
-        )
-        .expect("failed to create block overlay pipeline");
-
-    device.destroy_shader_module(vert_module, None);
-    device.destroy_shader_module(frag_module, None);
-
-    pipeline
+        &rhi::RenderPipelineDesc {
+            // No inflation, so this camera-ward offset is what wins the depth
+            // test. Mirror vanilla's constant-heavy crumbling offset (units 10,
+            // slope 1): a large slope pulls edge-on side faces in front of
+            // occluding neighbors.
+            depth: Some(rhi::DepthState {
+                bias: Some(rhi::DepthBias {
+                    constant: -10,
+                    slope: -1.0,
+                }),
+                ..rhi::DepthState::READ_ONLY
+            }),
+            blend: Some(rhi::BlendState {
+                color: rhi::BlendComponent {
+                    src: rhi::BlendFactor::DstColor,
+                    dst: rhi::BlendFactor::SrcColor,
+                },
+                alpha: rhi::BlendComponent::REPLACE,
+            }),
+            ..rhi::RenderPipelineDesc::new(
+                "block overlay",
+                shader::include_shader!("block_overlay.vert"),
+                shader::include_shader!("block_overlay.frag"),
+                &[rhi::vertex_buffer!(OverlayVertex, [Float32x3, Float32x2])],
+            )
+        },
+    )
 }
 
 #[cfg(test)]

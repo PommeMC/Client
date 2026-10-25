@@ -1,12 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
 
 use crate::assets::{AssetId, AssetIndex};
-use crate::renderer::util;
+use crate::renderer::{rhi, util};
 use crate::world::block::model::TextureId;
 use crate::world::block::render_assets::BlockRenderAssets;
 
@@ -115,15 +111,12 @@ pub fn atlas_asset_path(key: &str) -> String {
 }
 
 pub struct TextureAtlas {
-    pub image: vk::Image,
-    pub view: vk::ImageView,
-    pub sampler: vk::Sampler,
+    pub texture: rhi::backend::Texture,
+    pub sampler: rhi::backend::Sampler,
     /// Storage buffer of `uvec4` level-0 sprite rectangles, indexed by
     /// `AtlasRegion::sprite`; the terrain shaders wrap greedy UVs inside it.
-    pub sprite_rects: vk::Buffer,
+    pub sprite_rects: rhi::backend::Buffer,
     pub uv_map: AtlasUVMap,
-    allocation: Option<Allocation>,
-    sprite_rects_allocation: Option<Allocation>,
 }
 
 const MISSING_TILE: u32 = 16;
@@ -513,18 +506,14 @@ pub(crate) struct AtlasCpu {
 }
 
 impl TextureAtlas {
-    #[allow(clippy::too_many_arguments)]
     pub fn build(
-        device: &vk::Device,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
         texture_names: &HashSet<&str>,
         generated_item_textures: &HashSet<&str>,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
-    ) -> Result<Self, vk::Error> {
+    ) -> Result<Self, String> {
         let AtlasCpu {
             uv_map,
             atlas_pixels,
@@ -540,42 +529,47 @@ impl TextureAtlas {
             packs,
         );
 
-        let (sprite_rects, sprite_rects_allocation) = util::create_mapped_buffer(
+        let sprite_rects = rhi::backend::Buffer::try_with_data(
             device,
-            allocator,
-            bytemuck::cast_slice(&uv_map.rects),
-            vk::BufferUsageFlags::StorageBuffer,
             "atlas_sprite_rects",
-        );
+            bytemuck::cast_slice(&uv_map.rects),
+            rhi::BufferUsages::STORAGE,
+        )?;
 
         let staging_pixels =
             build_mip_chain(atlas_pixels, atlas_size, mip_level, &sources, &placements);
 
-        let (image, view, allocation, mip_levels) = util::create_gpu_image_mipmapped(
+        let mip_levels = mip_level + 1;
+        let texture = rhi::backend::Texture::try_new(
             device,
-            allocator,
-            atlas_size,
-            atlas_size,
-            mip_level + 1,
-            "atlas_image",
-        );
-        let (staging_buffer, staging_allocation) =
-            util::create_staging_buffer(device, allocator, &staging_pixels, "atlas_staging");
+            &rhi::TextureDesc {
+                mip_levels,
+                ..util::sampled_texture_desc("atlas_image", atlas_size, atlas_size)
+            },
+        )?;
+        let staging_buffer = rhi::backend::Buffer::try_with_data(
+            device,
+            "atlas_staging",
+            &staging_pixels,
+            rhi::BufferUsages::COPY_SRC,
+        )?;
 
-        util::upload_image_mipmapped(
+        let uploaded = util::upload_image_mipmapped(
             device,
-            queue,
-            command_pool,
-            staging_buffer,
+            staging_buffer.handle(),
             staging_pixels.len() as u64,
-            image,
+            texture.handle(),
             atlas_size,
             atlas_size,
             mip_levels,
         );
-        util::free_staging(device, allocator, staging_buffer, staging_allocation);
+        staging_buffer.destroy(device);
+        uploaded?;
 
-        let sampler = unsafe { util::create_nearest_sampler_mipmapped(device, mip_levels) };
+        let sampler = rhi::backend::try_create_sampler(
+            device,
+            &rhi::SamplerDesc::NEAREST.with_mips(mip_levels),
+        )?;
 
         tracing::info!(
             "Atlas built: {atlas_size}x{atlas_size}, mip level {mip_level}, {} regions",
@@ -583,13 +577,10 @@ impl TextureAtlas {
         );
 
         Ok(Self {
-            image,
-            view,
+            texture,
             sampler,
             sprite_rects,
             uv_map,
-            allocation: Some(allocation),
-            sprite_rects_allocation: Some(sprite_rects_allocation),
         })
     }
 
@@ -702,20 +693,10 @@ impl TextureAtlas {
         (self.uv_map.rects.len() * size_of::<[u32; 4]>()) as u64
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        device.destroy_sampler(self.sampler, None);
-        device.destroy_image_view(self.view, None);
-
-        if let Some(alloc) = self.allocation.take() {
-            allocator.lock().unwrap().free(alloc).ok();
-        }
-
-        device.destroy_image(self.image, None);
-
-        if let Some(alloc) = self.sprite_rects_allocation.take() {
-            allocator.lock().unwrap().free(alloc).ok();
-        }
-        device.destroy_buffer(self.sprite_rects, None);
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        self.sampler.destroy(device);
+        std::mem::take(&mut self.texture).destroy(device);
+        std::mem::take(&mut self.sprite_rects).destroy(device);
     }
 }
 

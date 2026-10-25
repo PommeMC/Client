@@ -440,7 +440,7 @@ pub struct AttackIndicatorState {
 const HOTBAR_W: f32 = 182.0;
 const HOTBAR_H: f32 = 22.0;
 const SELECTION_W: f32 = 24.0;
-const SELECTION_H: f32 = 24.0;
+const SELECTION_H: f32 = 23.0;
 const SLOT_STRIDE: f32 = 20.0;
 
 /// Vanilla `Hud.extractItemHotbar`'s offhand slot, on the offhand arm's side
