@@ -179,16 +179,87 @@ fn push_outline(elements: &mut Vec<MenuElement>, rect: [f32; 4], gs: f32, color:
     });
 }
 
+/// `common.dropdown_background`, nine-sliced 2 units in.
+pub(super) fn push_dropdown_background(elements: &mut Vec<MenuElement>, rect: [f32; 4], gs: f32) {
+    let [x, y, w, h] = rect;
+    elements.push(MenuElement::NineSlice {
+        x,
+        y,
+        w,
+        h,
+        sprite: SpriteId::BedrockDropdown,
+        border: 2.0 * gs,
+        tint: WHITE,
+    });
+}
+
+/// `settings_common.radio_visuals`: a 10-unit radio (or the item's icon) 3
+/// units in, the label 16 further, over `dropDownHoverBG` when hovered.
+pub(super) fn push_dropdown_row(
+    elements: &mut Vec<MenuElement>,
+    rect: [f32; 4],
+    gs: f32,
+    item: &DropItem,
+    hovered: bool,
+) {
+    let [x, y, ..] = rect;
+    if hovered {
+        push_image(elements, rect, SpriteId::BedrockDropdownHover, WHITE);
+    }
+    let left = x + 3.0 * gs;
+    // The visuals are 16 tall at the row's top.
+    let mid = y + 8.0 * gs;
+    match (item.radio, item.icon) {
+        (Some(on), _) => {
+            let sprite = match (on, hovered) {
+                (true, false) => SpriteId::BedrockRadioOn,
+                (true, true) => SpriteId::BedrockRadioOnHover,
+                (false, false) => SpriteId::BedrockRadioOff,
+                (false, true) => SpriteId::BedrockRadioOffHover,
+            };
+            let radio = [left, mid - 5.0 * gs, 10.0 * gs, 10.0 * gs];
+            push_image(elements, radio, sprite, WHITE);
+        }
+        (None, Some((icon, _))) => elements.push(MenuElement::Icon {
+            x: left + 5.0 * gs,
+            y: mid,
+            icon,
+            scale: 10.0 * gs,
+            color: WHITE,
+        }),
+        (None, None) => {}
+    }
+    let label_y = mid + (0.5 - common::FONT_SIZE / 2.0) * gs;
+    push_label(
+        elements,
+        left + 16.0 * gs,
+        label_y,
+        gs,
+        item.label,
+        WHITE,
+        false,
+    );
+}
+
 /// Bedrock's `Black` texture at `alpha`, its backing for labels and tiles.
 fn push_backing(elements: &mut Vec<MenuElement>, rect: [f32; 4], alpha: f32) {
+    push_image(
+        elements,
+        rect,
+        SpriteId::BedrockBlack,
+        [1.0, 1.0, 1.0, alpha],
+    );
+}
+
+fn push_image(elements: &mut Vec<MenuElement>, rect: [f32; 4], sprite: SpriteId, tint: [f32; 4]) {
     let [x, y, w, h] = rect;
     elements.push(MenuElement::Image {
         x,
         y,
         w,
         h,
-        sprite: SpriteId::BedrockBlack,
-        tint: [1.0, 1.0, 1.0, alpha],
+        sprite,
+        tint,
     });
 }
 
@@ -338,14 +409,13 @@ impl MainMenu {
         let (panel, column_top) = title_and_column(uw, uh);
         let [px, py, pw, ph] = panel;
         let logo_h = pw * TITLE_ASPECT;
-        elements.push(MenuElement::Image {
-            x: px * gs,
-            y: (py + (ph - logo_h) / 2.0) * gs,
-            w: pw * gs,
-            h: logo_h * gs,
-            sprite: SpriteId::BedrockTitle,
-            tint: WHITE,
-        });
+        let logo = [
+            px * gs,
+            (py + (ph - logo_h) / 2.0) * gs,
+            pw * gs,
+            logo_h * gs,
+        ];
+        push_image(&mut elements, logo, SpriteId::BedrockTitle, WHITE);
         self.push_splash(
             &mut elements,
             (
@@ -429,14 +499,13 @@ impl MainMenu {
             SpriteId::BedrockSocialHover
         };
         let inset = (ICON_SLOT - SOCIAL_ICON) / 2.0;
-        buttons.elements.push(MenuElement::Image {
-            x: rect[0] + (FIT_LEFT + inset) * gs,
-            y: rect[1] + (FIT_H - SOCIAL_ICON) / 2.0 * gs + look.drop(gs),
-            w: SOCIAL_ICON * gs,
-            h: SOCIAL_ICON * gs,
-            sprite: glyph,
-            tint: WHITE,
-        });
+        let icon = [
+            rect[0] + (FIT_LEFT + inset) * gs,
+            rect[1] + (FIT_H - SOCIAL_ICON) / 2.0 * gs + look.drop(gs),
+            SOCIAL_ICON * gs,
+            SOCIAL_ICON * gs,
+        ];
+        push_image(buttons.elements, icon, glyph, WHITE);
         if fired {
             any_clicked = true;
             if signed_in {
@@ -544,14 +613,12 @@ impl MainMenu {
                 uuid: uuid.clone(),
                 tint: WHITE,
             }),
-            None => buttons.elements.push(MenuElement::Image {
-                x: head[0],
-                y: head[1],
-                w: head[2],
-                h: head[2],
-                sprite: SpriteId::SteveHead,
-                tint: WHITE,
-            }),
+            None => push_image(
+                buttons.elements,
+                [head[0], head[1], head[2], head[2]],
+                SpriteId::SteveHead,
+                WHITE,
+            ),
         }
         if fired {
             any_clicked = true;
@@ -612,9 +679,9 @@ impl MainMenu {
         }
 
         // The pickers' lists hang below them.
-        let drop_style = DropdownStyle::new(gs);
+        let drop_style = DropdownStyle::bedrock(gs);
         // Both lists have three rows.
-        let drop_bottom = (CORNER + PICKER + 2.0) * gs + drop_style.item_h * 3.0;
+        let drop_bottom = (CORNER + PICKER + 2.0) * gs + drop_style.list_h(3);
         self.push_links_dropdown(
             &mut elements,
             &mut any_hovered,

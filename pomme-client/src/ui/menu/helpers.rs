@@ -619,6 +619,11 @@ pub(super) fn push_bottom_text(
 
 pub(super) struct DropdownStyle {
     pub(super) item_h: f32,
+    /// Bedrock's dropdown look in place of Pomme's.
+    bedrock: bool,
+    /// Between the background's edge and the rows.
+    inset: f32,
+    gs: f32,
     radius: f32,
     font: f32,
     icon_scale: f32,
@@ -630,12 +635,30 @@ impl DropdownStyle {
     pub(super) fn new(gs: f32) -> Self {
         Self {
             item_h: 28.0 * gs,
+            bedrock: false,
+            inset: 0.0,
+            gs,
             radius: 5.0 * gs,
             font: 9.0 * gs,
             icon_scale: 11.0 * gs,
             pad: 10.0 * gs,
             bar_h: 2.0 * gs,
         }
+    }
+
+    /// Bedrock's `common.dropdown`: `settings_common.radio_with_label` rows
+    /// 17 tall, 2 inside a `dropdown_background`.
+    pub(super) fn bedrock(gs: f32) -> Self {
+        Self {
+            item_h: 17.0 * gs,
+            bedrock: true,
+            inset: 2.0 * gs,
+            ..Self::new(gs)
+        }
+    }
+
+    pub(super) fn list_h(&self, rows: usize) -> f32 {
+        rows as f32 * self.item_h + 2.0 * self.inset
     }
 
     /// Draws an open list with its bottom edge at `drop_bottom` and returns
@@ -658,36 +681,40 @@ impl DropdownStyle {
         if !*open {
             return None;
         }
-        let total_h = items.len() as f32 * self.item_h;
+        let total_h = self.list_h(items.len());
         let drop_y_top = drop_bottom - total_h;
-        self.draw_background(elements, drop_x, drop_y_top, drop_w, total_h);
+        let list = [drop_x, drop_y_top, drop_w, total_h];
+        self.draw_background(elements, list);
         let mut picked = None;
         for (i, item) in items.iter().enumerate() {
-            let hovered = self.draw_item(
-                elements,
-                any_hovered,
-                cursor,
-                drop_x,
-                drop_y_top,
-                drop_w,
-                i,
-                items.len(),
-                item,
-            );
+            let rect = [
+                drop_x + self.inset,
+                drop_y_top + self.inset + i as f32 * self.item_h,
+                drop_w - 2.0 * self.inset,
+                self.item_h,
+            ];
+            let hovered = common::hit_test(cursor, rect);
+            *any_hovered |= hovered;
+            let ends = i == 0 || i == items.len() - 1;
+            self.draw_item(elements, rect, ends, item, hovered);
             if clicked && hovered {
                 picked = Some(i);
             }
         }
         // A row click closes; so does a click outside the list and its anchor.
-        let outside = !common::hit_test(cursor, [drop_x, drop_y_top, drop_w, total_h])
-            && !common::hit_test(cursor, anchor);
+        let outside = !common::hit_test(cursor, list) && !common::hit_test(cursor, anchor);
         if picked.is_some() || (clicked && outside) {
             *open = false;
         }
         picked
     }
 
-    fn draw_background(&self, elements: &mut Vec<MenuElement>, x: f32, y: f32, w: f32, h: f32) {
+    fn draw_background(&self, elements: &mut Vec<MenuElement>, rect: [f32; 4]) {
+        if self.bedrock {
+            super::bedrock_screen::push_dropdown_background(elements, rect, self.gs);
+            return;
+        }
+        let [x, y, w, h] = rect;
         elements.push(MenuElement::Rect {
             x,
             y,
@@ -698,66 +725,57 @@ impl DropdownStyle {
         });
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// `ends` is the list's first or last row, whose hover rounds its corners.
     fn draw_item(
         &self,
         elements: &mut Vec<MenuElement>,
-        any_hovered: &mut bool,
-        cursor: (f32, f32),
-        drop_x: f32,
-        drop_y: f32,
-        drop_w: f32,
-        index: usize,
-        count: usize,
+        rect: [f32; 4],
+        ends: bool,
         item: &DropItem,
-    ) -> bool {
-        let iy = drop_y + index as f32 * self.item_h;
-        let rect = [drop_x, iy, drop_w, self.item_h];
-        let hovered = common::hit_test(cursor, rect);
-        *any_hovered |= hovered;
+        hovered: bool,
+    ) {
+        let [x, y, w, h] = rect;
+        if self.bedrock {
+            super::bedrock_screen::push_dropdown_row(elements, rect, self.gs, item, hovered);
+        } else {
+            if hovered {
+                elements.push(MenuElement::Rect {
+                    x,
+                    y,
+                    w,
+                    h,
+                    corner_radius: if ends { self.radius } else { 0.0 },
+                    color: [1.0, 1.0, 1.0, 0.08],
+                });
+            }
 
-        if hovered {
-            let r = if index == 0 || index == count - 1 {
-                self.radius
-            } else {
-                0.0
-            };
-            elements.push(MenuElement::Rect {
-                x: drop_x,
-                y: iy,
-                w: drop_w,
-                h: self.item_h,
-                corner_radius: r,
-                color: [1.0, 1.0, 1.0, 0.08],
+            if let Some((icon_char, icon_col)) = item.icon {
+                elements.push(MenuElement::Icon {
+                    x: x + self.pad + self.icon_scale / 2.0,
+                    y: y + h / 2.0,
+                    icon: icon_char,
+                    scale: self.icon_scale,
+                    color: if hovered { DROP_TEXT_BRIGHT } else { icon_col },
+                });
+            }
+
+            elements.push(MenuElement::Text {
+                x: x + self.pad + self.icon_scale + 6.0,
+                y: y + (h - self.font) / 2.0,
+                text: item.label.to_string(),
+                scale: self.font,
+                color: if hovered {
+                    DROP_TEXT_BRIGHT
+                } else {
+                    item.color
+                },
+                centered: false,
             });
         }
-
-        if let Some((icon_char, icon_col)) = item.icon {
-            elements.push(MenuElement::Icon {
-                x: drop_x + self.pad + self.icon_scale / 2.0,
-                y: iy + self.item_h / 2.0,
-                icon: icon_char,
-                scale: self.icon_scale,
-                color: if hovered { DROP_TEXT_BRIGHT } else { icon_col },
-            });
-        }
-
-        elements.push(MenuElement::Text {
-            x: drop_x + self.pad + self.icon_scale + 6.0,
-            y: iy + (self.item_h - self.font) / 2.0,
-            text: item.label.to_string(),
-            scale: self.font,
-            color: if hovered {
-                DROP_TEXT_BRIGHT
-            } else {
-                item.color
-            },
-            centered: false,
-        });
 
         if let Some(progress) = item.progress {
-            let (x, w) = (drop_x + self.pad, drop_w - 2.0 * self.pad);
-            let y = iy + self.item_h - self.bar_h - self.pad / 2.0;
+            let (x, w) = (x + self.pad, w - 2.0 * self.pad);
+            let y = y + h - self.bar_h - self.pad / 2.0;
             for (w, color) in [(w, [1.0, 1.0, 1.0, 0.1]), (w * progress, DROP_ACCENT)] {
                 elements.push(MenuElement::Rect {
                     x,
@@ -769,8 +787,6 @@ impl DropdownStyle {
                 });
             }
         }
-
-        hovered
     }
 }
 
@@ -784,6 +800,9 @@ pub(super) struct DropItem {
     pub(super) label: &'static str,
     pub(super) icon: Option<(char, [f32; 4])>,
     pub(super) color: [f32; 4],
+    /// One of the list's choices, and whether it's the current one: Bedrock
+    /// draws it as a radio button.
+    pub(super) radio: Option<bool>,
     /// Drawn as a bar along the row's bottom.
     pub(super) progress: Option<f32>,
 }
@@ -1120,6 +1139,7 @@ impl MainMenu {
             label,
             icon: Some((icon, DROP_LINK_ICON)),
             color: DROP_TEXT,
+            radio: None,
             progress: None,
         });
         if let Some(i) = style.push_list(
@@ -1171,6 +1191,7 @@ impl MainMenu {
                 label,
                 icon,
                 color: if selected { DROP_ACCENT } else { DROP_TEXT },
+                radio: Some(selected),
                 progress,
             }
         });

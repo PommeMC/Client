@@ -2442,6 +2442,12 @@ pub enum SpriteId {
     BedrockSocial,
     BedrockSocialHover,
     BedrockBlack,
+    BedrockDropdown,
+    BedrockDropdownHover,
+    BedrockRadioOn,
+    BedrockRadioOnHover,
+    BedrockRadioOff,
+    BedrockRadioOffHover,
     IconFriends,
     IconLanguage,
     IconAccessibility,
@@ -2587,7 +2593,7 @@ fn downscale_straight_alpha(src: &image::RgbaImage, w: u32, h: u32) -> image::Rg
 
 /// The Bedrock UI textures the Bedrock title screen draws, by path from
 /// `textures/ui` without the extension.
-const BEDROCK_SPRITES: [(SpriteId, &str); 10] = [
+const BEDROCK_SPRITES: [(SpriteId, &str); 16] = [
     (SpriteId::BedrockButton, "button_borderless_light"),
     (SpriteId::BedrockButtonHover, "button_borderless_lighthover"),
     (
@@ -2613,6 +2619,12 @@ const BEDROCK_SPRITES: [(SpriteId, &str); 10] = [
         "socialbuttonicon/social-hover-icon",
     ),
     (SpriteId::BedrockBlack, "Black"),
+    (SpriteId::BedrockDropdown, "dropdown_background"),
+    (SpriteId::BedrockDropdownHover, "dropDownHoverBG"),
+    (SpriteId::BedrockRadioOn, "radio_on"),
+    (SpriteId::BedrockRadioOnHover, "radio_on_hover"),
+    (SpriteId::BedrockRadioOff, "radio_off"),
+    (SpriteId::BedrockRadioOffHover, "radio_off_hover"),
 ];
 
 /// The `nineslice_size` from the `.json` Bedrock keeps beside a texture, in
