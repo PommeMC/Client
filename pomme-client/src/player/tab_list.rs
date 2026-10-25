@@ -23,7 +23,6 @@ pub struct PlayerInfoEntry {
 
 #[derive(Clone, Debug)]
 pub struct TabListPlayer {
-    #[allow(dead_code)]
     pub uuid: Uuid,
     pub name: String,
     pub textures: Option<String>,
