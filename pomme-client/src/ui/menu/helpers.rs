@@ -1062,7 +1062,7 @@ const DROP_FAILED: [f32; 4] = [1.0, 0.45, 0.45, 0.9];
 /// Dropdown widths in GUI units, wide enough for the longest label at
 /// `DropdownStyle`'s 10-unit pad plus 11-unit icon.
 pub(super) const DROP_LINKS_W: f32 = 74.0;
-pub(super) const DROP_THEME_W: f32 = 66.0;
+pub(super) const DROP_THEME_W: f32 = 82.0;
 
 const LINKS: [(&str, char, &str); 3] = [
     ("Website", ICON_GLOBE, "https://pomme.rs"),
@@ -1074,9 +1074,9 @@ const LINKS: [(&str, char, &str); 3] = [
     ),
 ];
 const THEMES: [(&str, PanoramaTheme); 3] = [
-    ("Pomme", PanoramaTheme::Pomme),
-    ("Default", PanoramaTheme::Default),
+    ("Java", PanoramaTheme::Java),
     ("Bedrock", PanoramaTheme::Bedrock),
+    ("Pomme", PanoramaTheme::Pomme),
 ];
 
 /// The Bedrock theme's textures, downloaded the first time it's picked.

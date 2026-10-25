@@ -1,4 +1,4 @@
-//! Vanilla `TitleScreen`, drawn when the theme switcher is set to Default.
+//! Vanilla `TitleScreen`, drawn when the theme switcher is set to Java.
 //!
 //! Positions come straight from `TitleScreen.init` / `LogoRenderer` /
 //! `SplashRenderer` in GUI units and are multiplied by the GUI scale, so the

@@ -262,6 +262,7 @@ mod tests {
     fn the_person_icon_opens_the_account_screen() {
         let mut key_bindings = KeyBindings::default();
         let mut menu = test_menu("pomme-account-icon-test", &mut key_bindings);
+        menu.theme = PanoramaTheme::Pomme;
         let main = menu.build(W, H, &MenuInput::default(), &mut key_bindings, text_width);
         let icon = main
             .elements
