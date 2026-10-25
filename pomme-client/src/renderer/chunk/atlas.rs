@@ -513,7 +513,7 @@ impl TextureAtlas {
         texture_names: &HashSet<&str>,
         generated_item_textures: &HashSet<&str>,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let AtlasCpu {
             uv_map,
             atlas_pixels,
@@ -529,32 +529,32 @@ impl TextureAtlas {
             packs,
         );
 
-        let sprite_rects = rhi::backend::Buffer::with_data(
+        let sprite_rects = rhi::backend::Buffer::try_with_data(
             device,
             "atlas_sprite_rects",
             bytemuck::cast_slice(&uv_map.rects),
             rhi::BufferUsages::STORAGE,
-        );
+        )?;
 
         let staging_pixels =
             build_mip_chain(atlas_pixels, atlas_size, mip_level, &sources, &placements);
 
         let mip_levels = mip_level + 1;
-        let texture = rhi::backend::Texture::new(
+        let texture = rhi::backend::Texture::try_new(
             device,
             &rhi::TextureDesc {
                 mip_levels,
                 ..util::sampled_texture_desc("atlas_image", atlas_size, atlas_size)
             },
-        );
-        let staging_buffer = rhi::backend::Buffer::with_data(
+        )?;
+        let staging_buffer = rhi::backend::Buffer::try_with_data(
             device,
             "atlas_staging",
             &staging_pixels,
             rhi::BufferUsages::COPY_SRC,
-        );
+        )?;
 
-        util::upload_image_mipmapped(
+        let uploaded = util::upload_image_mipmapped(
             device,
             staging_buffer.handle(),
             staging_pixels.len() as u64,
@@ -564,21 +564,24 @@ impl TextureAtlas {
             mip_levels,
         );
         staging_buffer.destroy(device);
+        uploaded?;
 
-        let sampler =
-            rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST.with_mips(mip_levels));
+        let sampler = rhi::backend::try_create_sampler(
+            device,
+            &rhi::SamplerDesc::NEAREST.with_mips(mip_levels),
+        )?;
 
         tracing::info!(
             "Atlas built: {atlas_size}x{atlas_size}, mip level {mip_level}, {} regions",
             uv_map.regions.len()
         );
 
-        Self {
+        Ok(Self {
             texture,
             sampler,
             sprite_rects,
             uv_map,
-        }
+        })
     }
 
     /// The CPU half of [`Self::build`]: loads and packs every sprite into the

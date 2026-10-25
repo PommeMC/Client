@@ -1864,7 +1864,6 @@ impl EntityRenderer {
             self.texture_sampler,
         );
 
-        // TODO: frames in flight may still read the old skin; free it once they finish.
         if let Some(old) = self.player_skins.insert(
             uuid.to_owned(),
             PlayerSkinTexture {
@@ -2817,6 +2816,8 @@ fn load_entity_texture(
     util::create_sampled_texture(device, "entity_texture", &pixels, width, height)
 }
 
+// TODO: frames in flight may still read a replaced, removed or cleared skin;
+// free it once they finish.
 fn free_player_skin_texture(device: &rhi::backend::Device, skin: PlayerSkinTexture) {
     skin.texture.destroy(device);
     skin.set.destroy(device);

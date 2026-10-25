@@ -162,7 +162,8 @@ pub fn upload_image(
         width,
         height,
         1,
-    );
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
     staging.destroy(device);
 }
 
@@ -280,8 +281,8 @@ pub fn upload_image_mipmapped(
     width: u32,
     height: u32,
     mip_levels: u32,
-) {
-    device.submit(|encoder| {
+) -> Result<(), String> {
+    device.try_submit(|encoder| {
         record_image_upload(
             encoder,
             staging_buffer,
@@ -291,7 +292,7 @@ pub fn upload_image_mipmapped(
             height,
             mip_levels,
         );
-    });
+    })
 }
 
 pub struct PendingImageUpload {

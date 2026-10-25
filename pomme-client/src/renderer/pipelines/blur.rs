@@ -197,7 +197,6 @@ impl BlurPipeline {
     }
 
     fn destroy_images(&mut self, device: &rhi::backend::Device) {
-        device.forget_targets(&[self.texture_a.handle(), self.texture_b.handle()]);
         std::mem::take(&mut self.texture_a).destroy(device);
         std::mem::take(&mut self.texture_b).destroy(device);
     }

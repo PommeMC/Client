@@ -131,8 +131,8 @@ impl Device {
         let _ = self.raw.wait_idle();
     }
 
-    /// Drops the framebuffers holding any of `textures`, which are about to be
-    /// destroyed.
+    /// Drops the framebuffers holding any of `textures`, made outside the RHI
+    /// and about to be destroyed. [`Texture::destroy`] does this itself.
     pub fn forget_targets(&self, textures: &[TextureHandle]) {
         self.targets.forget(self, textures);
     }
@@ -498,7 +498,9 @@ impl Texture {
         }
     }
 
+    /// Frees the texture and any cached framebuffers holding it.
     pub fn destroy(self, device: &Device) {
+        device.targets.forget(device, &[self.handle()]);
         device.raw.destroy_image_view(self.view, None);
         device.raw.destroy_image(self.raw, None);
         device.allocator().free(self.allocation).ok();

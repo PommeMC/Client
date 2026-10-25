@@ -87,6 +87,9 @@ pub enum RendererError {
 
     #[error("failed to initialize Minecraft fonts: {0}")]
     Font(String),
+
+    #[error("failed to build the texture atlas: {0}")]
+    Atlas(String),
 }
 
 /// The loading splash: logo, progress bar and status line.
@@ -336,7 +339,8 @@ impl Renderer {
             &texture_names,
             &generated_item_textures,
             None,
-        );
+        )
+        .map_err(RendererError::Atlas)?;
 
         splash(&mut menu_pipeline, 0.5, "Creating pipelines...");
 
@@ -547,7 +551,8 @@ impl Renderer {
             &swapchain.pass(image_index, rhi::LoadOp::Clear([0.0, 0.0, 0.0, 1.0])),
         );
         let empty_uvs: HashMap<String, [f32; 4]> = HashMap::new();
-        menu.draw(&ctx.device, &mut pass, 0, sw, sh, &elements, &empty_uvs);
+        let frame = frames.index();
+        menu.draw(&ctx.device, &mut pass, frame, sw, sh, &elements, &empty_uvs);
         pass.end();
         swapchain.ready_to_present(&encoder, image_index);
         frames.submit_and_present(encoder, ctx, swapchain, image_index)?;
@@ -1108,7 +1113,8 @@ impl Renderer {
             &texture_names,
             &generated_item_textures,
             Some(packs),
-        );
+        )
+        .expect("failed to rebuild atlas");
 
         self.chunk_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);

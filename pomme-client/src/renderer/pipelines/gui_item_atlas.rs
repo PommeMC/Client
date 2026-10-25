@@ -350,7 +350,6 @@ impl GuiItemAtlas {
     }
 
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
-        device.forget_targets(&[self.color.handle(), self.depth.handle()]);
         self.sampler.destroy(device);
         std::mem::take(&mut self.color).destroy(device);
         std::mem::take(&mut self.depth).destroy(device);

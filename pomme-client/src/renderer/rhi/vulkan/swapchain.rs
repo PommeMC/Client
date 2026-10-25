@@ -287,7 +287,6 @@ impl Swapchain {
 
         self.release_surface(ctx);
 
-        ctx.device.forget_targets(&[self.depth.handle()]);
         std::mem::take(&mut self.depth).destroy(&ctx.device);
     }
 }
