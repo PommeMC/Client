@@ -147,6 +147,8 @@ pub struct GameState {
     pub death_screen_open: bool,
     pub show_death_screen: bool,
     pub hardcore: bool,
+    /// The login packet's `onlineMode`: the tab list shows player heads.
+    pub online_mode: bool,
     pub death_message: String,
     pub death_screen_ticks: u32,
     pub death_confirm: bool,
@@ -448,6 +450,7 @@ impl GameState {
             death_screen_open: false,
             show_death_screen: true,
             hardcore: false,
+            online_mode: false,
             death_message: String::new(),
             death_screen_ticks: 0,
             death_confirm: false,
@@ -2542,11 +2545,9 @@ pub fn update_game(
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
     core.input.menu_capture = game.gui_open() || game.death_screen_open;
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
-    core.sync_game_dynamic_atlas(
-        game,
-        &mut gfx.renderer,
-        core.input.spectator && game.spectator.is_menu_active(),
-    );
+    let faces_shown = (core.input.spectator && game.spectator.is_menu_active())
+        || (game.online_mode && core.input.performing_action(input::Action::ViewPlayerList));
+    core.sync_game_dynamic_atlas(game, &mut gfx.renderer, faces_shown);
 
     // The F3+F4 switcher shows the mouse cursor while open.
     let switcher_open = game.game_mode_switcher.is_some();
@@ -2934,6 +2935,7 @@ pub fn update_game(
             sw,
             &game.tab_list,
             &game.scoreboard,
+            game.online_mode,
             gs,
             &|t, s| r.menu_text_width(t, s),
             &|spans, s| r.menu_spans_width(spans, s),

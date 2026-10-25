@@ -879,8 +879,8 @@ pub struct AppCore {
     /// A packed glyph's pixels changed (a head arrived), so the atlas needs
     /// rebuilding even though its key set is the same.
     inline_atlas_dirty: bool,
-    /// Whether the spectator menu's faces are in the atlas as packed.
-    spectator_faces_packed: bool,
+    /// Whether player faces are in the atlas as packed.
+    player_faces_packed: bool,
     /// The inline-object keys currently packed.
     game_dynamic_atlas_keys: HashSet<String>,
 }
@@ -1033,7 +1033,7 @@ impl AppCore {
             head_tx,
             head_rx,
             inline_atlas_dirty: false,
-            spectator_faces_packed: false,
+            player_faces_packed: false,
             game_dynamic_atlas_keys: HashSet::new(),
         }
     }
@@ -1292,13 +1292,14 @@ impl AppCore {
     }
 
     /// Loads what the text drew last frame into the shared glyph atlas and
-    /// rebuilds it when its contents change. Spectator faces share the same
-    /// texture binding, so they are packed alongside.
+    /// rebuilds it when its contents change. Player faces (spectator menu,
+    /// tab list) share the same texture binding, so they are packed alongside
+    /// while `faces_shown`.
     pub fn sync_game_dynamic_atlas(
         &mut self,
         game: &GameState,
         renderer: &mut Renderer,
-        spectator_active: bool,
+        faces_shown: bool,
     ) {
         let now = Instant::now();
         self.drain_head_results();
@@ -1360,11 +1361,11 @@ impl AppCore {
                 .inline_objects
                 .iter()
                 .any(|(key, entry)| packable(entry) && !self.game_dynamic_atlas_keys.contains(key))
-            || spectator_active != self.spectator_faces_packed
-            || (spectator_active && self.player_faces_dirty);
+            || faces_shown != self.player_faces_packed
+            || (faces_shown && self.player_faces_dirty);
         if rebuild {
             let mut entries = Vec::<(String, Vec<u8>, u32)>::new();
-            if spectator_active {
+            if faces_shown {
                 entries.extend(
                     self.player_faces
                         .iter()
@@ -1410,8 +1411,8 @@ impl AppCore {
                 renderer.update_face_atlas(&entries);
             }
             self.inline_atlas_dirty = false;
-            self.spectator_faces_packed = spectator_active;
-            if spectator_active {
+            self.player_faces_packed = faces_shown;
+            if faces_shown {
                 self.player_faces_dirty = false;
             }
         }
@@ -2826,6 +2827,7 @@ impl AppCore {
                     game.recipe_book.reset_for_login();
                     game.player.entity_id = entity_id;
                     game.hardcore = hardcore;
+                    game.online_mode = online_mode;
                     game.show_death_screen = show_death_screen;
                     // The fresh LocalPlayer starts from supplier defaults.
                     game.player.attributes = AttributeMap::player();

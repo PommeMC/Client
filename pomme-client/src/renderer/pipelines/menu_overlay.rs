@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, packing, rhi, shader, util};
 use crate::ui::font::{FontSources, GLYPH_ATLAS_SIZE, GlyphAtlasPixels, GlyphInfo, GlyphMap};
-use crate::ui::text::{InlineObject, TextSpan};
+use crate::ui::text::{InlineObject, PREFIX_CODE, TextSpan, font_spans};
 
 const FONT_BYTES: &[u8] = include_bytes!("../fonts/Montserrat-Medium.ttf");
 const ICON_FONT_BYTES: &[u8] = include_bytes!("../fonts/fa-solid-900.ttf");
@@ -1001,6 +1001,11 @@ impl MenuGeometry {
         let Some(ref gm) = self.mc_glyph_map else {
             return plain_text_width(&self.atlas, text, scale);
         };
+        if text.contains(PREFIX_CODE) {
+            let mut span = TextSpan::new(text.to_owned(), [1.0; 4]);
+            span.font = font.map(str::to_owned);
+            return self.spans_width(&[span], scale);
+        }
         (run_advance(gm, text, font, false, false) * scale / gm.cell_h as f32).ceil()
     }
 
@@ -1010,7 +1015,7 @@ impl MenuGeometry {
         let Some(ref gm) = self.mc_glyph_map else {
             return 0.0;
         };
-        let raw: f32 = spans
+        let raw: f32 = font_spans(spans)
             .iter()
             .map(|s| {
                 run_advance(
@@ -1449,6 +1454,7 @@ impl MenuGeometry {
         draw: McTextDraw,
         obfuscation_rng: &mut ObfuscationRng,
     ) {
+        let spans = &*font_spans(spans);
         if let Some(gm) = &self.mc_glyph_map {
             let sources = McTextSources {
                 gm,

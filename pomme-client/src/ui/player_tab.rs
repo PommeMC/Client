@@ -18,11 +18,13 @@ const COL_NAME: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// `text_width(text, FONT_SIZE)` must return the width in pixels at 1x GUI
 /// scale.
+#[allow(clippy::too_many_arguments)]
 pub fn build_player_tab_overlay(
     elements: &mut Vec<MenuElement>,
     screen_w: f32,
     tab_list: &TabList,
     scoreboard: &Scoreboard,
+    show_heads: bool,
     gs: f32,
     text_width: &dyn Fn(&str, f32) -> f32,
     spans_width: crate::ui::common::SpansWidthFn<'_>,
@@ -54,8 +56,8 @@ pub fn build_player_tab_overlay(
     }
 
     let cols_i = cols as i32;
-    let slot_width =
-        ((cols_i * (HEAD_COL_W + max_name_w + 13)).min(gw as i32 - 50) / cols_i).max(1);
+    let head_w = if show_heads { HEAD_COL_W } else { 0 };
+    let slot_width = ((cols_i * (head_w + max_name_w + 13)).min(gw as i32 - 50) / cols_i).max(1);
     let grid_w = slot_width * cols_i + (cols_i - 1) * 5;
     let xxo = (gw as i32) / 2 - grid_w / 2;
     let cx = (gw as i32) / 2;
@@ -172,9 +174,18 @@ pub fn build_player_tab_overlay(
             yo + 8,
             BG_ROW,
         );
-        push_image(elements, row_left, yo, 8, 8, SpriteId::SteveHead);
-
         let info = players[i];
+        if show_heads {
+            // TODO: vanilla hides the hat layer per `showHat` and flips the
+            // face for Dinnerbone/Grumm; faces here always carry the hat.
+            elements.push(MenuElement::SkinFace {
+                x: row_left as f32 * gs,
+                y: yo as f32 * gs,
+                size: 8.0 * gs,
+                uuid: info.uuid.to_string(),
+                tint: [1.0; 4],
+            });
+        }
         let mut spans = display_names[i].clone();
         if info.game_mode == SPECTATOR_GAME_MODE {
             // Vanilla `decorateName`: spectators are italicized, nothing else.
@@ -182,7 +193,7 @@ pub fn build_player_tab_overlay(
                 span.italic = true;
             }
         }
-        push_spans(elements, spans, row_left + HEAD_COL_W, yo);
+        push_spans(elements, spans, row_left + head_w, yo);
         push_image(
             elements,
             row_left + slot_width - 11,
