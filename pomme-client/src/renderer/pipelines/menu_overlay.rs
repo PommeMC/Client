@@ -1,14 +1,9 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::slice;
-use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
-
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, packing, shader, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, packing, rhi, shader, util};
 use crate::ui::font::{FontSources, GLYPH_ATLAS_SIZE, GlyphAtlasPixels, GlyphInfo, GlyphMap};
 use crate::ui::text::{InlineObject, TextSpan};
 
@@ -16,6 +11,47 @@ const FONT_BYTES: &[u8] = include_bytes!("../fonts/Montserrat-Medium.ttf");
 const ICON_FONT_BYTES: &[u8] = include_bytes!("../fonts/fa-solid-900.ttf");
 const ATLAS_SIZE: u32 = 512;
 const RASTER_PX: f32 = 48.0;
+
+/// menu_overlay.frag's texture slots: slot `n` binds its texture at `n` and
+/// its sampler at `TEXTURE_SLOTS + n`.
+const TEXTURE_SLOTS: u32 = 9;
+const TEXTURES: &[rhi::BindGroupLayoutEntry] = &{
+    let stage = rhi::ShaderStages::FRAGMENT;
+    let mut entries = [rhi::BindGroupLayoutEntry::texture(stage); 2 * TEXTURE_SLOTS as usize];
+    let mut i = TEXTURE_SLOTS as usize;
+    while i < entries.len() {
+        entries[i] = rhi::BindGroupLayoutEntry::sampler(stage);
+        i += 1;
+    }
+    entries
+};
+
+/// The bindings pointing texture slot `slot` at `texture`, sampled with
+/// `sampler`.
+fn slot_bindings(
+    slot: u32,
+    texture: rhi::backend::TextureHandle,
+    sampler: rhi::backend::Sampler,
+) -> [(u32, rhi::backend::BindingResource); 2] {
+    [
+        (slot, rhi::backend::BindingResource::Texture(texture)),
+        (
+            TEXTURE_SLOTS + slot,
+            rhi::backend::BindingResource::Sampler(sampler),
+        ),
+    ]
+}
+
+/// Each [`TEXTURES`] slot's texture and sampler.
+type TextureSlots = [(rhi::backend::TextureHandle, rhi::backend::Sampler); TEXTURE_SLOTS as usize];
+
+/// The [`TEXTURES`] bindings pointing every slot at its texture.
+fn texture_slot_bindings(slots: &TextureSlots) -> Vec<(u32, rhi::backend::BindingResource)> {
+    (0..)
+        .zip(slots)
+        .flat_map(|(slot, &(texture, sampler))| slot_bindings(slot, texture, sampler))
+        .collect()
+}
 
 pub const ICON_USER: char = '\u{f007}';
 pub const ICON_LINK: char = '\u{f0c1}';
@@ -47,40 +83,34 @@ const VERTEX_SIZE: usize = size_of::<Vertex>();
 /// one may still be read by draws recorded earlier, so it is only freed once
 /// the slot comes round again.
 struct VertexSlot {
-    buffer: vk::Buffer,
-    allocation: Allocation,
+    buffer: rhi::backend::Buffer,
     capacity: usize,
-    retired: Vec<(vk::Buffer, Allocation)>,
+    retired: Vec<rhi::backend::Buffer>,
 }
 
 impl VertexSlot {
-    fn new(device: &vk::Device, allocator: &Arc<Mutex<Allocator>>, capacity: usize) -> Self {
-        let (buffer, allocation) = util::create_host_buffer(
+    fn new(device: &rhi::backend::Device, capacity: usize) -> Self {
+        let buffer = rhi::backend::Buffer::new(
             device,
-            allocator,
-            (capacity * VERTEX_SIZE) as u64,
-            vk::BufferUsageFlags::VertexBuffer,
             "menu_vertices",
+            (capacity * VERTEX_SIZE) as u64,
+            rhi::BufferUsages::VERTEX,
+            rhi::MemoryLocation::Host,
         );
         Self {
             buffer,
-            allocation,
             capacity,
             retired: Vec::new(),
         }
     }
 
-    fn free_retired(&mut self, device: &vk::Device, allocator: &mut Allocator) {
-        for (buffer, allocation) in self.retired.drain(..) {
-            device.destroy_buffer(buffer, None);
-            allocator.free(allocation).ok();
-        }
+    fn free_retired(&mut self, device: &rhi::backend::Device) {
+        util::destroy_buffers(device, &mut self.retired);
     }
 
-    fn destroy(mut self, device: &vk::Device, allocator: &mut Allocator) {
-        self.free_retired(device, allocator);
-        device.destroy_buffer(self.buffer, None);
-        allocator.free(self.allocation).ok();
+    fn destroy(mut self, device: &rhi::backend::Device) {
+        self.free_retired(device);
+        self.buffer.destroy(device);
     }
 }
 
@@ -127,10 +157,9 @@ struct GlyphEntry {
 
 struct FontAtlas {
     glyphs: HashMap<char, GlyphEntry>,
-    pixels: Vec<u8>,
 }
 
-fn build_font_atlas() -> FontAtlas {
+fn build_font_atlas() -> (FontAtlas, AtlasImage) {
     let font = fontdue::Font::from_bytes(FONT_BYTES, fontdue::FontSettings::default())
         .expect("failed to parse Montserrat font");
     let icon_font = fontdue::Font::from_bytes(ICON_FONT_BYTES, fontdue::FontSettings::default())
@@ -210,7 +239,14 @@ fn build_font_atlas() -> FontAtlas {
         cursor_x += metrics.width as u32 + 1;
     }
 
-    FontAtlas { glyphs, pixels }
+    (
+        FontAtlas { glyphs },
+        AtlasImage {
+            pixels,
+            width: ATLAS_SIZE,
+            height: ATLAS_SIZE,
+        },
+    )
 }
 
 /// Extract an 8x8 RGBA player face (front face at (8,8) with the hat layer at
@@ -255,481 +291,119 @@ pub(crate) fn extract_face_8x8_with_hat(
     Some(out)
 }
 
-pub struct MenuOverlayPipeline {
-    pipeline: vk::Pipeline,
-    /// Vanilla `RenderPipelines.CROSSHAIR`: same shaders, INVERT blend.
-    invert_pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    globals_layout: vk::DescriptorSetLayout,
-    tex_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    globals_sets: Vec<vk::DescriptorSet>,
-    tex_set: vk::DescriptorSet,
-    globals_buffers: Vec<vk::Buffer>,
-    globals_allocations: Vec<Allocation>,
-    font_image: vk::Image,
-    font_view: vk::ImageView,
-    font_sampler: vk::Sampler,
-    font_allocation: Option<Allocation>,
-    sprite_image: vk::Image,
-    sprite_view: vk::ImageView,
-    sprite_sampler: vk::Sampler,
-    sprite_allocation: Option<Allocation>,
+/// RGBA8 pixels and their size.
+struct AtlasImage {
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// One Minecraft glyph atlas to upload: its square pages, or a single
+/// transparent texel when the fonts are unavailable.
+struct GlyphPages<'a> {
+    pixels: &'a [u8],
+    size: u32,
+    layers: u32,
+}
+
+/// The gray and color glyph atlases from `pixels`.
+fn glyph_pages(pixels: Option<&GlyphAtlasPixels>) -> [GlyphPages<'_>; 2] {
+    let pages = |pixels, layers| GlyphPages {
+        pixels,
+        size: GLYPH_ATLAS_SIZE,
+        layers,
+    };
+    let stand_in = |pixels| GlyphPages {
+        pixels,
+        size: 1,
+        layers: 1,
+    };
+    [
+        match pixels {
+            Some(p) => pages(&p.gray, p.gray_layers),
+            None => stand_in(&[0]),
+        },
+        match pixels {
+            Some(p) if p.color_layers > 0 => pages(&p.color, p.color_layers),
+            _ => stand_in(&[0; 4]),
+        },
+    ]
+}
+
+/// The pixel data [`MenuGeometry::new`] produces for the GPU side to upload.
+struct MenuAtlases {
+    font: AtlasImage,
+    sprites: AtlasImage,
+    glyphs: Option<GlyphAtlasPixels>,
+    camera_overlay: AtlasImage,
+}
+
+/// One frame's menu vertices and the draw batches over them.
+struct MenuMesh {
+    vertices: Vec<Vertex>,
+    ops: Vec<DrawOp>,
+}
+
+/// The CPU side of the menu overlay: atlas layouts, text and sprite
+/// measurement, and vertex building.
+pub struct MenuGeometry {
+    atlas: FontAtlas,
     sprite_atlas: SpriteAtlas,
-    item_placeholder: Option<TextureResources>,
-    mc_font: TextureResources,
-    mc_font_color: TextureResources,
-    /// Glyph atlas layer cap from the device, reused on reload.
-    font_layer_limit: u32,
     mc_glyph_map: Option<GlyphMap>,
     obfuscation_rng: ObfuscationRng,
-    vertex_slots: Vec<VertexSlot>,
-    atlas: FontAtlas,
-    favicon_image: vk::Image,
-    favicon_view: vk::ImageView,
-    favicon_sampler: vk::Sampler,
-    favicon_allocation: Option<Allocation>,
     favicon_regions: std::collections::HashMap<String, [f32; 4]>,
     /// Inline objects drawn since the app last drained them, so the next
     /// frame's atlas holds what the text actually asked for.
     drawn_inline_objects: std::collections::HashMap<String, InlineObject>,
-    favicon_atlas_size: u32,
-    overlay_image: vk::Image,
-    overlay_view: vk::ImageView,
-    overlay_sampler: vk::Sampler,
-    overlay_allocation: Option<Allocation>,
     overlay_vignette_uv: [f32; 4],
     overlay_pumpkin_uv: [f32; 4],
-    underwater_image: vk::Image,
-    underwater_view: vk::ImageView,
-    underwater_sampler: vk::Sampler,
-    underwater_allocation: Option<Allocation>,
 }
 
-impl MenuOverlayPipeline {
-    pub fn new(
-        device: &vk::Device,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        render_pass: vk::RenderPass,
-        allocator: &Arc<Mutex<Allocator>>,
-        font_sources: FontSources<'_>,
-        font_layer_limit: u32,
-    ) -> Result<Self, String> {
-        let atlas = build_font_atlas();
-
-        let globals_layout = util::create_descriptor_set_layout(
-            device,
-            vk::DescriptorType::UniformBuffer,
-            vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
-        );
-
-        // One combined image sampler per menu_overlay.frag binding.
-        let tex_bindings: [vk::DescriptorSetLayoutBinding; 9] =
-            std::array::from_fn(|binding| vk::DescriptorSetLayoutBinding {
-                binding: binding as u32,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::Fragment,
-                ..Default::default()
-            });
-        let tex_layout_info = vk::DescriptorSetLayoutCreateInfo {
-            binding_count: tex_bindings.len() as u32,
-            bindings: tex_bindings.as_ptr(),
-            ..Default::default()
-        };
-        let tex_layout = device
-            .create_descriptor_set_layout(&tex_layout_info, None)
-            .expect("failed to create texture descriptor set layout");
-
-        let layouts = [globals_layout, tex_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: layouts.len() as u32,
-            set_layouts: layouts.as_ptr(),
-            ..Default::default()
-        };
-        let pipeline_layout = device
-            .create_pipeline_layout(&layout_info, None)
-            .expect("failed to create menu overlay pipeline layout");
-
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout, false);
-        let invert_pipeline = create_pipeline(device, render_pass, pipeline_layout, true);
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: tex_bindings.len() as u32,
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: MAX_FRAMES_IN_FLIGHT as u32 + 1,
-            pool_size_count: pool_sizes.len() as u32,
-            pool_sizes: pool_sizes.as_ptr(),
-            ..Default::default()
-        };
-        let descriptor_pool = device
-            .create_descriptor_pool(&pool_info, None)
-            .expect("failed to create menu overlay descriptor pool");
-
-        let tex_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: 1,
-            set_layouts: &tex_layout,
-            ..Default::default()
-        };
-        let mut tex_set = vk::DescriptorSet::null();
-        device
-            .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut tex_set))
-            .expect("failed to allocate texture descriptor set");
-
-        let (globals_sets, globals_buffers, globals_allocations) = util::create_uniform_sets(
-            device,
-            allocator,
-            descriptor_pool,
-            globals_layout,
-            8,
-            "menu_globals",
-        );
-
-        let (font_image, font_view, font_alloc) = util::create_gpu_image_with_format(
-            device,
-            allocator,
-            ATLAS_SIZE,
-            ATLAS_SIZE,
-            vk::Format::R8G8B8A8Unorm,
-            "menu_font_atlas",
-        );
-
-        upload_and_free_staging(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            &atlas.pixels,
-            font_image,
-            ATLAS_SIZE,
-            ATLAS_SIZE,
-            "menu_font_staging",
-        );
-
-        let font_sampler = unsafe { util::create_linear_sampler(device) };
-
-        let (sprite_atlas_data, sprite_image, sprite_view, sprite_alloc) = build_sprite_atlas(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            font_sources.jar_assets_dir,
-            font_sources.asset_index,
-        );
-
-        let sprite_sampler = unsafe { util::create_nearest_sampler(device) };
-
-        let (item_image, item_view, item_alloc) =
-            util::create_gpu_image(device, allocator, 1, 1, "item_atlas_placeholder");
-        let (item_staging_buffer, item_staging_alloc) = util::create_staging_buffer(
-            device,
-            allocator,
-            &[0u8, 0, 0, 0],
-            "item_atlas_placeholder_staging",
-        );
-        util::upload_image(
-            device,
-            queue,
-            command_pool,
-            item_staging_buffer,
-            item_image,
-            1,
-            1,
-        );
-        let item_sampler = unsafe { util::create_nearest_sampler(device) };
-        let item_placeholder = Some(TextureResources {
-            sampler: item_sampler,
-            image: item_image,
-            view: item_view,
-            image_alloc: Some(item_alloc),
-            staging_buffer: item_staging_buffer,
-            staging_alloc: Some(item_staging_alloc),
-        });
-
-        let (mc_glyph_map, glyph_pixels) = match GlyphMap::load(font_sources, font_layer_limit) {
+impl MenuGeometry {
+    fn new(font_sources: FontSources<'_>, font_layer_limit: u32) -> (Self, MenuAtlases) {
+        let (atlas, font) = build_font_atlas();
+        let (sprite_atlas, sprites) =
+            build_sprite_atlas(font_sources.jar_assets_dir, font_sources.asset_index);
+        let (mc_glyph_map, glyphs) = match GlyphMap::load(font_sources, font_layer_limit) {
             Ok((map, pixels)) => (Some(map), Some(pixels)),
             Err(error) => {
                 tracing::warn!("Minecraft fonts unavailable: {error}");
                 (None, None)
             }
         };
-        crate::lang::load(font_sources.jar_assets_dir);
-        let (mc_font, mc_font_color) = create_font_textures(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            glyph_pixels.as_ref(),
-        )?;
-
-        let font_img_info = vk::DescriptorImageInfo {
-            sampler: font_sampler,
-            image_view: font_view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let sprite_img_info = vk::DescriptorImageInfo {
-            sampler: sprite_sampler,
-            image_view: sprite_view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let item_img_info = vk::DescriptorImageInfo {
-            sampler: item_sampler,
-            image_view: item_view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let mc_font_img_info = mc_font.image_info();
-        let mc_font_color_img_info = mc_font_color.image_info();
-
-        let (favicon_image, favicon_view, favicon_alloc) = util::create_gpu_image_with_format(
-            device,
-            allocator,
-            1,
-            1,
-            vk::Format::R8G8B8A8Srgb,
-            "favicon_placeholder",
-        );
-        let (fav_staging, fav_staging_alloc) = util::create_staging_buffer(
-            device,
-            allocator,
-            &[255u8, 255, 255, 255],
-            "favicon_staging",
-        );
-        util::upload_image(
-            device,
-            queue,
-            command_pool,
-            fav_staging,
-            favicon_image,
-            1,
-            1,
-        );
-        device.destroy_buffer(fav_staging, None);
-        allocator.lock().unwrap().free(fav_staging_alloc).ok();
-        let favicon_sampler = unsafe { util::create_nearest_sampler(device) };
-
-        let favicon_img_info = vk::DescriptorImageInfo {
-            sampler: favicon_sampler,
-            image_view: favicon_view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-
-        let (overlay_image, overlay_view, overlay_alloc, overlay_vignette_uv, overlay_pumpkin_uv) =
-            build_camera_overlay_texture(
-                device,
-                queue,
-                command_pool,
-                allocator,
-                font_sources.jar_assets_dir,
-                font_sources.asset_index,
-            );
-        // Both source textures ship mcmeta `blur: true`.
-        let overlay_sampler = unsafe { util::create_linear_sampler(device) };
-
-        let (underwater_image, underwater_view, underwater_alloc) = load_single_texture(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            font_sources.jar_assets_dir,
-            font_sources.asset_index,
-            "minecraft/textures/misc/underwater.png",
-            "underwater_overlay",
-        );
-        // Repeat wrapping: the overlay tiles 4x and scrolls with the look direction.
-        let underwater_sampler = unsafe { util::create_nearest_repeat_sampler(device) };
-
-        let overlay_img_info = vk::DescriptorImageInfo {
-            sampler: overlay_sampler,
-            image_view: overlay_view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let underwater_img_info = vk::DescriptorImageInfo {
-            sampler: underwater_sampler,
-            image_view: underwater_view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-
-        // In menu_overlay.frag binding order; blur (4) starts as a font-atlas
-        // placeholder until set_blur_texture.
-        let tex_image_infos = [
-            &font_img_info,
-            &sprite_img_info,
-            &item_img_info,
-            &mc_font_img_info,
-            &font_img_info,
-            &favicon_img_info,
-            &overlay_img_info,
-            &underwater_img_info,
-            &mc_font_color_img_info,
-        ];
-        let writes: Vec<_> = tex_image_infos
-            .iter()
-            .enumerate()
-            .map(|(binding, info)| vk::WriteDescriptorSet {
-                dst_set: tex_set,
-                dst_binding: binding as u32,
-                descriptor_count: 1,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: *info,
-                ..Default::default()
-            })
-            .collect();
-        device.update_descriptor_sets(&writes, &[]);
-
-        let vertex_slots = (0..MAX_FRAMES_IN_FLIGHT)
-            .map(|_| VertexSlot::new(device, allocator, INITIAL_VERTICES))
-            .collect();
+        let (camera_overlay, overlay_vignette_uv, overlay_pumpkin_uv) =
+            build_camera_overlay_texture(font_sources.jar_assets_dir, font_sources.asset_index);
 
         let obfuscation_seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
 
-        Ok(Self {
-            pipeline,
-            invert_pipeline,
-            pipeline_layout,
-            globals_layout,
-            tex_layout,
-            descriptor_pool,
-            globals_sets,
-            tex_set,
-            globals_buffers,
-            globals_allocations,
-            font_image,
-            font_view,
-            font_sampler,
-            font_allocation: Some(font_alloc),
-            sprite_image,
-            sprite_view,
-            sprite_sampler,
-            sprite_allocation: Some(sprite_alloc),
-            sprite_atlas: sprite_atlas_data,
-            item_placeholder,
-            mc_font,
-            mc_font_color,
-            font_layer_limit,
+        let geometry = Self {
+            atlas,
+            sprite_atlas,
             mc_glyph_map,
             obfuscation_rng: ObfuscationRng::new(obfuscation_seed),
-            vertex_slots,
-            atlas,
-            favicon_image,
-            favicon_view,
-            favicon_sampler,
-            favicon_allocation: Some(favicon_alloc),
             favicon_regions: std::collections::HashMap::new(),
             drawn_inline_objects: std::collections::HashMap::new(),
-            favicon_atlas_size: 1,
-            overlay_image,
-            overlay_view,
-            overlay_sampler,
-            overlay_allocation: Some(overlay_alloc),
             overlay_vignette_uv,
             overlay_pumpkin_uv,
-            underwater_image,
-            underwater_view,
-            underwater_sampler,
-            underwater_allocation: Some(underwater_alloc),
-        })
+        };
+        let atlases = MenuAtlases {
+            font,
+            sprites,
+            glyphs,
+            camera_overlay,
+        };
+        (geometry, atlases)
     }
 
-    /// Rebuilds the glyph atlases from the current pack stack. Call with the
-    /// device idle: the old textures are destroyed right away.
-    pub fn reload_minecraft_fonts(
+    /// Builds the vertices and draw batches for `elements`.
+    fn build(
         &mut self,
-        device: &vk::Device,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        allocator: &Arc<Mutex<Allocator>>,
-        font_sources: FontSources<'_>,
-    ) -> Result<(), String> {
-        let (glyph_map, pixels) = GlyphMap::load(font_sources, self.font_layer_limit)?;
-        let (gray, color) =
-            create_font_textures(device, queue, command_pool, allocator, Some(&pixels))?;
-        let gray_info = gray.image_info();
-        let color_info = color.image_info();
-        let writes =
-            [(3, &gray_info), (8, &color_info)].map(|(binding, info)| vk::WriteDescriptorSet {
-                dst_set: self.tex_set,
-                dst_binding: binding,
-                descriptor_count: 1,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: info,
-                ..Default::default()
-            });
-        device.update_descriptor_sets(&writes, &[]);
-
-        let mut alloc = util::lock_allocator(allocator);
-        destroy_texture_resources(
-            device,
-            &mut alloc,
-            &mut std::mem::replace(&mut self.mc_font, gray),
-        );
-        destroy_texture_resources(
-            device,
-            &mut alloc,
-            &mut std::mem::replace(&mut self.mc_font_color, color),
-        );
-        self.mc_glyph_map = Some(glyph_map);
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw(
-        &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        cmd: vk::CommandBuffer,
-        frame: usize,
-        screen_w: f32,
-        screen_h: f32,
         elements: &[MenuElement],
         item_atlas_uvs: &HashMap<String, [f32; 4]>,
-    ) {
-        self.draw_from(
-            device,
-            allocator,
-            cmd,
-            frame,
-            screen_w,
-            screen_h,
-            elements,
-            item_atlas_uvs,
-            0,
-        );
-    }
-
-    /// Like [`draw`], but writes vertices starting at `vertex_base` in the
-    /// frame's vertex buffer and returns the next free index, so it can be
-    /// called more than once per frame (e.g. a backdrop before the blur and
-    /// a dialog after).
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw_from(
-        &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        cmd: vk::CommandBuffer,
-        frame: usize,
-        screen_w: f32,
-        screen_h: f32,
-        elements: &[MenuElement],
-        item_atlas_uvs: &HashMap<String, [f32; 4]>,
-        vertex_base: u32,
-    ) -> u32 {
-        let globals: [f32; 2] = [screen_w, screen_h];
-        self.globals_allocations[frame].mapped_slice_mut().unwrap()[..8]
-            .copy_from_slice(bytemuck::cast_slice(&globals));
-
+    ) -> MenuMesh {
         let mut vertices: Vec<Vertex> = Vec::with_capacity(elements.len() * 24);
         // Moved out so the element loop can record into it while `self` is
         // borrowed for the glyph and atlas sources; it keeps its allocation.
@@ -1293,212 +967,10 @@ impl MenuOverlayPipeline {
             cur_invert,
         );
 
-        if draw_ops.is_empty() {
-            return vertex_base;
+        MenuMesh {
+            vertices,
+            ops: draw_ops,
         }
-
-        let slot = &mut self.vertex_slots[frame];
-        // The first draw of a frame runs after the slot's fence, so buffers
-        // replaced last time round are no longer in use.
-        if vertex_base == 0 && !slot.retired.is_empty() {
-            slot.free_retired(device, &mut allocator.lock().unwrap());
-        }
-        let end = vertex_base as usize + vertices.len();
-        if end > slot.capacity {
-            let grown = VertexSlot::new(device, allocator, end.max(slot.capacity * 2));
-            let old = std::mem::replace(slot, grown);
-            slot.retired = old.retired;
-            slot.retired.push((old.buffer, old.allocation));
-        }
-        let byte_off = vertex_base as usize * VERTEX_SIZE;
-        let byte_data: &[u8] = bytemuck::cast_slice(&vertices);
-        slot.allocation.mapped_slice_mut().unwrap()[byte_off..byte_off + byte_data.len()]
-            .copy_from_slice(byte_data);
-        let vertex_buffer = slot.buffer;
-
-        let default_scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: vk::Extent2D {
-                width: screen_w as u32,
-                height: screen_h as u32,
-            },
-        };
-
-        if !draw_ops.is_empty() {
-            // Descriptor sets and vertex buffer stay valid across pipeline
-            // switches (both pipelines share the layout).
-            cmd.bind_descriptor_sets(
-                vk::PipelineBindPoint::Graphics,
-                self.pipeline_layout,
-                0,
-                &[self.globals_sets[frame], self.tex_set],
-                &[],
-            );
-            cmd.bind_vertex_buffers(0, &[vertex_buffer], &[0]);
-        }
-        let mut bound_invert: Option<bool> = None;
-        for op in &draw_ops {
-            if bound_invert != Some(op.invert) {
-                cmd.bind_pipeline(
-                    vk::PipelineBindPoint::Graphics,
-                    if op.invert {
-                        self.invert_pipeline
-                    } else {
-                        self.pipeline
-                    },
-                );
-                bound_invert = Some(op.invert);
-            }
-            let rect = if let Some(s) = op.scissor {
-                vk::Rect2D {
-                    offset: vk::Offset2D {
-                        x: s[0] as i32,
-                        y: s[1] as i32,
-                    },
-                    extent: vk::Extent2D {
-                        width: s[2] as u32,
-                        height: s[3] as u32,
-                    },
-                }
-            } else {
-                default_scissor
-            };
-            cmd.set_scissor(0, &[rect]);
-            cmd.draw(op.count, 1, vertex_base + op.start, 0);
-        }
-        cmd.set_scissor(0, &[default_scissor]);
-        end as u32
-    }
-
-    pub fn set_item_atlas(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
-        let info = vk::DescriptorImageInfo {
-            sampler,
-            image_view: view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let write = vk::WriteDescriptorSet {
-            dst_set: self.tex_set,
-            dst_binding: 2,
-            descriptor_count: 1,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            image_info: &info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[write], &[]);
-    }
-
-    pub fn set_blur_texture(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
-        let info = vk::DescriptorImageInfo {
-            sampler,
-            image_view: view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let write = vk::WriteDescriptorSet {
-            dst_set: self.tex_set,
-            dst_binding: 4,
-            descriptor_count: 1,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            image_info: &info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[write], &[]);
-    }
-
-    pub fn update_favicon_atlas(
-        &mut self,
-        device: &vk::Device,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        allocator: &Arc<Mutex<Allocator>>,
-        favicons: &[(String, Vec<u8>, u32)],
-    ) {
-        if favicons.is_empty() {
-            return;
-        }
-
-        let icon_size = 64u32;
-        let cols = (favicons.len() as f32).sqrt().ceil() as u32;
-        let rows = (favicons.len() as u32).div_ceil(cols);
-        let atlas_w = cols * icon_size;
-        let atlas_h = rows * icon_size;
-        let mut pixels = vec![0u8; (atlas_w * atlas_h * 4) as usize];
-        let mut regions = std::collections::HashMap::new();
-
-        for (i, (addr, rgba, src_size)) in favicons.iter().enumerate() {
-            let col = i as u32 % cols;
-            let row = i as u32 / cols;
-            let dst_x = col * icon_size;
-            let dst_y = row * icon_size;
-
-            for py in 0..icon_size {
-                for px in 0..icon_size {
-                    let sx = (px * src_size / icon_size).min(src_size - 1);
-                    let sy = (py * src_size / icon_size).min(src_size - 1);
-                    let src_off = ((sy * src_size + sx) * 4) as usize;
-                    let dst_off = (((dst_y + py) * atlas_w + dst_x + px) * 4) as usize;
-                    if src_off + 3 < rgba.len() && dst_off + 3 < pixels.len() {
-                        pixels[dst_off..dst_off + 4].copy_from_slice(&rgba[src_off..src_off + 4]);
-                    }
-                }
-            }
-
-            let u0 = dst_x as f32 / atlas_w as f32;
-            let v0 = dst_y as f32 / atlas_h as f32;
-            let u1 = (dst_x + icon_size) as f32 / atlas_w as f32;
-            let v1 = (dst_y + icon_size) as f32 / atlas_h as f32;
-            regions.insert(addr.clone(), [u0, v0, u1, v1]);
-        }
-
-        queue.wait_idle().unwrap();
-
-        if let Some(alloc) = self.favicon_allocation.take() {
-            device.destroy_image_view(self.favicon_view, None);
-            device.destroy_image(self.favicon_image, None);
-            allocator.lock().unwrap().free(alloc).ok();
-        }
-
-        let (image, view, alloc) = util::create_gpu_image_with_format(
-            device,
-            allocator,
-            atlas_w,
-            atlas_h,
-            vk::Format::R8G8B8A8Srgb,
-            "favicon_atlas",
-        );
-        let (staging, staging_alloc) =
-            util::create_staging_buffer(device, allocator, &pixels, "favicon_atlas_staging");
-        util::upload_image(
-            device,
-            queue,
-            command_pool,
-            staging,
-            image,
-            atlas_w,
-            atlas_h,
-        );
-        device.destroy_buffer(staging, None);
-        allocator.lock().unwrap().free(staging_alloc).ok();
-
-        self.favicon_image = image;
-        self.favicon_view = view;
-        self.favicon_allocation = Some(alloc);
-        self.favicon_regions = regions;
-        self.favicon_atlas_size = atlas_w;
-
-        let info = vk::DescriptorImageInfo {
-            sampler: self.favicon_sampler,
-            image_view: view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let write = vk::WriteDescriptorSet {
-            dst_set: self.tex_set,
-            dst_binding: 5,
-            descriptor_count: 1,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            image_info: &info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[write], &[]);
     }
 
     pub fn text_width(&self, text: &str, scale: f32) -> f32 {
@@ -2011,88 +1483,448 @@ impl MenuOverlayPipeline {
             self.favicon_regions.insert(key.to_owned(), region);
         }
     }
+}
 
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline(self.invert_pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout, false);
-        self.invert_pipeline = create_pipeline(device, render_pass, self.pipeline_layout, true);
+pub struct MenuOverlayPipeline {
+    pub geometry: MenuGeometry,
+    pipeline: rhi::backend::RenderPipeline,
+    /// Vanilla `RenderPipelines.CROSSHAIR`: same shaders, INVERT blend.
+    invert_pipeline: rhi::backend::RenderPipeline,
+    pipeline_layout: rhi::backend::PipelineLayout,
+    globals_layout: rhi::backend::BindGroupLayout,
+    tex_layout: rhi::backend::BindGroupLayout,
+    globals_sets: Vec<rhi::backend::BindGroup>,
+    tex_set: rhi::backend::BindGroup,
+    tex_slots: TextureSlots,
+    globals_buffers: Vec<rhi::backend::Buffer>,
+    font: TextureResources,
+    sprite: TextureResources,
+    item_placeholder: TextureResources,
+    mc_font: TextureResources,
+    mc_font_color: TextureResources,
+    /// Glyph atlas layer cap from the device, reused on reload.
+    font_layer_limit: u32,
+    vertex_slots: Vec<VertexSlot>,
+    favicon: TextureResources,
+    favicon_atlas_size: u32,
+    overlay: TextureResources,
+    underwater: TextureResources,
+}
+
+impl MenuOverlayPipeline {
+    pub fn new(
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
+        font_sources: FontSources<'_>,
+        font_layer_limit: u32,
+    ) -> Result<Self, String> {
+        let (geometry, atlases) = MenuGeometry::new(font_sources, font_layer_limit);
+
+        let globals_layout =
+            rhi::backend::create_bind_group_layout(device, util::VERTEX_FRAGMENT_UNIFORM);
+        let tex_layout = rhi::backend::create_bind_group_layout(device, TEXTURES);
+        let pipeline_layout =
+            rhi::backend::create_pipeline_layout(device, &[globals_layout, tex_layout], None);
+
+        let pipeline = create_pipeline(device, targets, pipeline_layout, false);
+        let invert_pipeline = create_pipeline(device, targets, pipeline_layout, true);
+
+        let (globals_sets, globals_buffers) =
+            util::create_uniform_sets(device, globals_layout, 8, "menu_globals");
+
+        let font = rhi::backend::Texture::new(
+            device,
+            &rhi::TextureDesc {
+                format: rhi::TextureFormat::Rgba8Unorm,
+                ..util::sampled_texture_desc(
+                    "menu_font_atlas",
+                    atlases.font.width,
+                    atlases.font.height,
+                )
+            },
+        );
+
+        util::upload_image(
+            device,
+            font.handle(),
+            &atlases.font.pixels,
+            atlases.font.width,
+            atlases.font.height,
+            "menu_font_staging",
+        );
+
+        let font = TextureResources {
+            texture: font,
+            sampler: rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR),
+        };
+
+        let sprite = TextureResources {
+            texture: util::create_sampled_texture(
+                device,
+                "sprite_atlas",
+                &atlases.sprites.pixels,
+                atlases.sprites.width,
+                atlases.sprites.height,
+            ),
+            sampler: rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST),
+        };
+
+        let item_placeholder = TextureResources {
+            texture: util::create_sampled_texture(
+                device,
+                "item_atlas_placeholder",
+                &[0u8, 0, 0, 0],
+                1,
+                1,
+            ),
+            sampler: rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST),
+        };
+
+        crate::lang::load(font_sources.jar_assets_dir);
+        let (mc_font, mc_font_color) = create_font_textures(device, atlases.glyphs.as_ref())?;
+
+        let favicon = TextureResources {
+            texture: util::create_sampled_texture(
+                device,
+                "favicon_placeholder",
+                &[255u8, 255, 255, 255],
+                1,
+                1,
+            ),
+            sampler: rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST),
+        };
+
+        let overlay = TextureResources {
+            texture: util::create_sampled_texture(
+                device,
+                "camera_overlay",
+                &atlases.camera_overlay.pixels,
+                atlases.camera_overlay.width,
+                atlases.camera_overlay.height,
+            ),
+            // Both source textures ship mcmeta `blur: true`.
+            sampler: rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR),
+        };
+
+        let (pixels, w, h) = load_overlay_rgba(
+            font_sources.jar_assets_dir,
+            font_sources.asset_index,
+            "minecraft/textures/misc/underwater.png",
+        );
+        let underwater = TextureResources {
+            texture: util::create_sampled_texture(device, "underwater_overlay", &pixels, w, h),
+            // Repeat wrapping: the overlay tiles 4x and scrolls with the look
+            // direction.
+            sampler: rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST_REPEAT),
+        };
+
+        // In menu_overlay.frag slot order; blur (4) starts as a font-atlas
+        // placeholder until set_blur_texture.
+        let slots = [
+            font.slot(),
+            sprite.slot(),
+            item_placeholder.slot(),
+            mc_font.slot(),
+            font.slot(),
+            favicon.slot(),
+            overlay.slot(),
+            underwater.slot(),
+            mc_font_color.slot(),
+        ];
+        let tex_set = device.create_bind_group(tex_layout, &texture_slot_bindings(&slots));
+
+        let vertex_slots = (0..MAX_FRAMES_IN_FLIGHT)
+            .map(|_| VertexSlot::new(device, INITIAL_VERTICES))
+            .collect();
+
+        Ok(Self {
+            geometry,
+            pipeline,
+            invert_pipeline,
+            pipeline_layout,
+            globals_layout,
+            tex_layout,
+            globals_sets,
+            tex_set,
+            tex_slots: slots,
+            globals_buffers,
+            font,
+            sprite,
+            item_placeholder,
+            mc_font,
+            mc_font_color,
+            font_layer_limit,
+            vertex_slots,
+            favicon,
+            favicon_atlas_size: 1,
+            overlay,
+            underwater,
+        })
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let mut alloc = allocator.lock().unwrap();
+    /// Rebuilds the glyph atlases from the current pack stack. Call with the
+    /// device idle: the old textures are destroyed right away.
+    pub fn reload_minecraft_fonts(
+        &mut self,
+        device: &rhi::backend::Device,
+        font_sources: FontSources<'_>,
+    ) -> Result<(), String> {
+        let (glyph_map, pixels) = GlyphMap::load(font_sources, self.font_layer_limit)?;
+        let (gray, color) = create_font_textures(device, Some(&pixels))?;
+        self.tex_slots[3] = gray.slot();
+        self.tex_slots[8] = color.slot();
+        self.rebind_textures(device);
 
-        util::destroy_buffers(
+        destroy_texture_resources(device, &mut std::mem::replace(&mut self.mc_font, gray));
+        destroy_texture_resources(
             device,
-            &mut alloc,
-            &self.globals_buffers,
-            &mut self.globals_allocations,
+            &mut std::mem::replace(&mut self.mc_font_color, color),
         );
+        self.geometry.mc_glyph_map = Some(glyph_map);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(
+        &mut self,
+        device: &rhi::backend::Device,
+        pass: &mut rhi::backend::RenderPassEncoder,
+        frame: usize,
+        screen_w: f32,
+        screen_h: f32,
+        elements: &[MenuElement],
+        item_atlas_uvs: &HashMap<String, [f32; 4]>,
+    ) {
+        self.draw_from(
+            device,
+            pass,
+            frame,
+            screen_w,
+            screen_h,
+            elements,
+            item_atlas_uvs,
+            0,
+        );
+    }
+
+    /// Like [`draw`], but writes vertices starting at `vertex_base` in the
+    /// frame's vertex buffer and returns the next free index, so it can be
+    /// called more than once per frame (e.g. a backdrop before the blur and
+    /// a dialog after).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_from(
+        &mut self,
+        device: &rhi::backend::Device,
+        pass: &mut rhi::backend::RenderPassEncoder,
+        frame: usize,
+        screen_w: f32,
+        screen_h: f32,
+        elements: &[MenuElement],
+        item_atlas_uvs: &HashMap<String, [f32; 4]>,
+        vertex_base: u32,
+    ) -> u32 {
+        let globals: [f32; 2] = [screen_w, screen_h];
+        self.globals_buffers[frame].write(bytemuck::cast_slice(&globals));
+
+        let MenuMesh {
+            vertices,
+            ops: draw_ops,
+        } = self.geometry.build(elements, item_atlas_uvs);
+
+        if draw_ops.is_empty() {
+            return vertex_base;
+        }
+
+        let slot = &mut self.vertex_slots[frame];
+        // The first draw of a frame runs after the slot's fence, so buffers
+        // replaced last time round are no longer in use.
+        if vertex_base == 0 && !slot.retired.is_empty() {
+            slot.free_retired(device);
+        }
+        let end = vertex_base as usize + vertices.len();
+        if end > slot.capacity {
+            let grown = VertexSlot::new(device, end.max(slot.capacity * 2));
+            let old = std::mem::replace(slot, grown);
+            slot.retired = old.retired;
+            slot.retired.push(old.buffer);
+        }
+        slot.buffer.write_at(
+            vertex_base as usize * VERTEX_SIZE,
+            bytemuck::cast_slice(&vertices),
+        );
+        let vertex_buffer = slot.buffer.handle();
+
+        let default_scissor = rhi::Rect::covering(rhi::Extent {
+            width: screen_w as u32,
+            height: screen_h as u32,
+        });
+
+        let pipeline_for = |invert: bool| {
+            if invert {
+                self.invert_pipeline
+            } else {
+                self.pipeline
+            }
+        };
+        // Bind groups and vertex buffer stay valid across pipeline switches
+        // (both pipelines share the layout).
+        let mut bound_invert = draw_ops[0].invert;
+        pass.set_pipeline(&pipeline_for(bound_invert));
+        pass.set_bind_groups(0, &[self.globals_sets[frame], self.tex_set]);
+        pass.set_vertex_buffer(0, vertex_buffer);
+        for op in &draw_ops {
+            if bound_invert != op.invert {
+                pass.set_pipeline(&pipeline_for(op.invert));
+                bound_invert = op.invert;
+            }
+            let rect = if let Some(s) = op.scissor {
+                rhi::Rect {
+                    x: s[0] as u32,
+                    y: s[1] as u32,
+                    width: s[2] as u32,
+                    height: s[3] as u32,
+                }
+            } else {
+                default_scissor
+            };
+            pass.set_scissor_rect(rect);
+            pass.draw(op.count, 1, vertex_base + op.start, 0);
+        }
+        pass.set_scissor_rect(default_scissor);
+        end as u32
+    }
+
+    pub fn set_item_atlas(
+        &mut self,
+        device: &rhi::backend::Device,
+        texture: rhi::backend::TextureHandle,
+        sampler: rhi::backend::Sampler,
+    ) {
+        self.set_texture(device, 2, texture, sampler);
+    }
+
+    pub fn set_blur_texture(
+        &mut self,
+        device: &rhi::backend::Device,
+        texture: rhi::backend::TextureHandle,
+        sampler: rhi::backend::Sampler,
+    ) {
+        self.set_texture(device, 4, texture, sampler);
+    }
+
+    fn set_texture(
+        &mut self,
+        device: &rhi::backend::Device,
+        slot: usize,
+        texture: rhi::backend::TextureHandle,
+        sampler: rhi::backend::Sampler,
+    ) {
+        self.tex_slots[slot] = (texture, sampler);
+        self.rebind_textures(device);
+    }
+
+    fn rebind_textures(&mut self, device: &rhi::backend::Device) {
+        self.tex_set.replace(
+            device,
+            self.tex_layout,
+            &texture_slot_bindings(&self.tex_slots),
+        );
+    }
+
+    pub fn update_favicon_atlas(
+        &mut self,
+        device: &rhi::backend::Device,
+        favicons: &[(String, Vec<u8>, u32)],
+    ) {
+        if favicons.is_empty() {
+            return;
+        }
+
+        let icon_size = 64u32;
+        let cols = (favicons.len() as f32).sqrt().ceil() as u32;
+        let rows = (favicons.len() as u32).div_ceil(cols);
+        let atlas_w = cols * icon_size;
+        let atlas_h = rows * icon_size;
+        let mut pixels = vec![0u8; (atlas_w * atlas_h * 4) as usize];
+        let mut regions = std::collections::HashMap::new();
+
+        for (i, (addr, rgba, src_size)) in favicons.iter().enumerate() {
+            let col = i as u32 % cols;
+            let row = i as u32 / cols;
+            let dst_x = col * icon_size;
+            let dst_y = row * icon_size;
+
+            for py in 0..icon_size {
+                for px in 0..icon_size {
+                    let sx = (px * src_size / icon_size).min(src_size - 1);
+                    let sy = (py * src_size / icon_size).min(src_size - 1);
+                    let src_off = ((sy * src_size + sx) * 4) as usize;
+                    let dst_off = (((dst_y + py) * atlas_w + dst_x + px) * 4) as usize;
+                    if src_off + 3 < rgba.len() && dst_off + 3 < pixels.len() {
+                        pixels[dst_off..dst_off + 4].copy_from_slice(&rgba[src_off..src_off + 4]);
+                    }
+                }
+            }
+
+            let u0 = dst_x as f32 / atlas_w as f32;
+            let v0 = dst_y as f32 / atlas_h as f32;
+            let u1 = (dst_x + icon_size) as f32 / atlas_w as f32;
+            let v1 = (dst_y + icon_size) as f32 / atlas_h as f32;
+            regions.insert(addr.clone(), [u0, v0, u1, v1]);
+        }
+
+        device.wait_idle();
+
+        std::mem::replace(
+            &mut self.favicon.texture,
+            util::create_sampled_texture(device, "favicon_atlas", &pixels, atlas_w, atlas_h),
+        )
+        .destroy(device);
+        self.geometry.favicon_regions = regions;
+        self.favicon_atlas_size = atlas_w;
+
+        let (texture, sampler) = self.favicon.slot();
+        self.set_texture(device, 5, texture, sampler);
+    }
+
+    pub fn recreate_pipeline(
+        &mut self,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
+    ) {
+        self.pipeline.destroy(device);
+        self.invert_pipeline.destroy(device);
+        self.pipeline = create_pipeline(device, targets, self.pipeline_layout, false);
+        self.invert_pipeline = create_pipeline(device, targets, self.pipeline_layout, true);
+    }
+
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        util::destroy_buffers(device, &mut self.globals_buffers);
 
         for slot in self.vertex_slots.drain(..) {
-            slot.destroy(device, &mut alloc);
+            slot.destroy(device);
         }
 
-        destroy_texture_resources(
-            device,
-            &mut alloc,
-            &mut TextureResources {
-                sampler: self.font_sampler,
-                image: self.font_image,
-                view: self.font_view,
-                image_alloc: self.font_allocation.take(),
-                staging_buffer: vk::Buffer::null(),
-                staging_alloc: None,
-            },
-        );
-        destroy_texture_resources(
-            device,
-            &mut alloc,
-            &mut TextureResources {
-                sampler: self.sprite_sampler,
-                image: self.sprite_image,
-                view: self.sprite_view,
-                image_alloc: self.sprite_allocation.take(),
-                staging_buffer: vk::Buffer::null(),
-                staging_alloc: None,
-            },
-        );
-        if let Some(mut res) = self.item_placeholder.take() {
-            destroy_texture_resources(device, &mut alloc, &mut res);
-        }
-        destroy_texture_resources(device, &mut alloc, &mut self.mc_font);
-        destroy_texture_resources(device, &mut alloc, &mut self.mc_font_color);
-
-        device.destroy_sampler(self.favicon_sampler, None);
-        device.destroy_image_view(self.favicon_view, None);
-        device.destroy_image(self.favicon_image, None);
-
-        if let Some(a) = self.favicon_allocation.take() {
-            alloc.free(a).ok();
+        for res in [
+            &mut self.font,
+            &mut self.sprite,
+            &mut self.item_placeholder,
+            &mut self.favicon,
+            &mut self.overlay,
+            &mut self.underwater,
+            &mut self.mc_font,
+            &mut self.mc_font_color,
+        ] {
+            destroy_texture_resources(device, res);
         }
 
-        device.destroy_sampler(self.overlay_sampler, None);
-        device.destroy_image_view(self.overlay_view, None);
-        device.destroy_image(self.overlay_image, None);
-        if let Some(a) = self.overlay_allocation.take() {
-            alloc.free(a).ok();
-        }
-
-        device.destroy_sampler(self.underwater_sampler, None);
-        device.destroy_image_view(self.underwater_view, None);
-        device.destroy_image(self.underwater_image, None);
-        if let Some(a) = self.underwater_allocation.take() {
-            alloc.free(a).ok();
-        }
-
-        drop(alloc);
-
-        device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline(self.invert_pipeline, None);
-        device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_descriptor_pool(self.descriptor_pool, None);
-        device.destroy_descriptor_set_layout(self.globals_layout, None);
-        device.destroy_descriptor_set_layout(self.tex_layout, None);
+        self.pipeline.destroy(device);
+        self.invert_pipeline.destroy(device);
+        self.pipeline_layout.destroy(device);
+        util::destroy_bind_groups(device, self.globals_sets.drain(..));
+        self.tex_set.destroy(device);
+        self.globals_layout.destroy(device);
+        self.tex_layout.destroy(device);
     }
 }
 
@@ -2712,13 +2544,9 @@ fn downscale_straight_alpha(src: &image::RgbaImage, size: u32) -> image::RgbaIma
 }
 
 fn build_sprite_atlas(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
-) -> (SpriteAtlas, vk::Image, vk::ImageView, Allocation) {
+) -> (SpriteAtlas, AtlasImage) {
     let sprites: &[(SpriteId, &str, f32)] = &[
         (
             SpriteId::Hotbar,
@@ -4075,22 +3903,15 @@ fn build_sprite_atlas(
 
     // `upload_image` copies `atlas_size * atlas_size * 4` bytes regardless of
     // the staging buffer's length, so `pixels` has to stay sized off the packed
-    // `atlas_size` above; feeding these a size of their own would read past it.
-    let (image, view, allocation) =
-        util::create_gpu_image(device, allocator, atlas_size, atlas_size, "sprite_atlas");
-    upload_and_free_staging(
-        device,
-        queue,
-        command_pool,
-        allocator,
-        &pixels,
-        image,
-        atlas_size,
-        atlas_size,
-        "sprite_staging",
-    );
-
-    (SpriteAtlas { regions }, image, view, allocation)
+    // `atlas_size` above; feeding the upload a size of its own would read past it.
+    (
+        SpriteAtlas { regions },
+        AtlasImage {
+            pixels,
+            width: atlas_size,
+            height: atlas_size,
+        },
+    )
 }
 
 fn load_overlay_rgba(
@@ -4112,34 +3933,13 @@ fn load_overlay_rgba(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn upload_and_free_staging(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
-    pixels: &[u8],
-    image: vk::Image,
-    w: u32,
-    h: u32,
-    name: &str,
-) {
-    let (staging, staging_alloc) = util::create_staging_buffer(device, allocator, pixels, name);
-    util::upload_image(device, queue, command_pool, staging, image, w, h);
-    util::free_staging(device, allocator, staging, staging_alloc);
-}
-
 /// Compose the full-screen camera overlay textures (vignette + pumpkin blur)
 /// side by side into one linear-sampled image. Returns the image and each
 /// half's UV rect, inset half a texel so filtering never crosses the seam.
 fn build_camera_overlay_texture(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
-) -> (vk::Image, vk::ImageView, Allocation, [f32; 4], [f32; 4]) {
+) -> (AtlasImage, [f32; 4], [f32; 4]) {
     let (vig, vw, vh) = load_overlay_rgba(
         jar_assets_dir,
         asset_index,
@@ -4157,20 +3957,6 @@ fn build_camera_overlay_texture(
     blit_image(&mut pixels, w, &vig, vw, 0, 0, vw, vh);
     blit_image(&mut pixels, w, &pump, pw, vw, 0, pw, ph);
 
-    let (image, view, allocation) =
-        util::create_gpu_image(device, allocator, w, h, "camera_overlay");
-    upload_and_free_staging(
-        device,
-        queue,
-        command_pool,
-        allocator,
-        &pixels,
-        image,
-        w,
-        h,
-        "camera_overlay_staging",
-    );
-
     let (iw, ih) = (w as f32, h as f32);
     let vignette_uv = [
         0.5 / iw,
@@ -4184,193 +3970,117 @@ fn build_camera_overlay_texture(
         (iw - 0.5) / iw,
         (ph as f32 - 0.5) / ih,
     ];
-    (image, view, allocation, vignette_uv, pumpkin_uv)
+    (
+        AtlasImage {
+            pixels,
+            width: w,
+            height: h,
+        },
+        vignette_uv,
+        pumpkin_uv,
+    )
 }
-
-#[allow(clippy::too_many_arguments)]
-fn load_single_texture(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    asset_key: &str,
-    name: &str,
-) -> (vk::Image, vk::ImageView, Allocation) {
-    let (pixels, w, h) = load_overlay_rgba(jar_assets_dir, asset_index, asset_key);
-    let (image, view, allocation) = util::create_gpu_image(device, allocator, w, h, name);
-    upload_and_free_staging(
-        device,
-        queue,
-        command_pool,
-        allocator,
-        &pixels,
-        image,
-        w,
-        h,
-        name,
-    );
-    (image, view, allocation)
-}
-
-const MC_FONT_COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8Srgb;
 
 struct FontTextureUpload<'a> {
     pixels: &'a [u8],
     extent: util::ImageArrayExtent,
-    format: vk::Format,
+    format: rhi::TextureFormat,
     name: &'static str,
 }
 
 /// Uploads the gray (R8) and colored glyph atlases, with 1x1 placeholders when
 /// there are no fonts or no colored glyphs.
 fn create_font_textures(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
+    device: &rhi::backend::Device,
     pixels: Option<&GlyphAtlasPixels>,
 ) -> Result<(TextureResources, TextureResources), String> {
-    let extent = |layers| util::ImageArrayExtent {
-        width: GLYPH_ATLAS_SIZE,
-        height: GLYPH_ATLAS_SIZE,
-        layers,
-    };
-    let placeholder = util::ImageArrayExtent {
-        width: 1,
-        height: 1,
-        layers: 1,
-    };
-    let gray = match pixels {
-        Some(p) => (p.gray.as_slice(), extent(p.gray_layers)),
-        None => (&[0u8][..], placeholder),
-    };
-    let color = match pixels {
-        Some(p) if p.color_layers > 0 => (p.color.as_slice(), extent(p.color_layers)),
-        _ => (&[0u8; 4][..], placeholder),
-    };
-    let upload = |(pixels, extent), format, name| {
+    let [gray, color] = glyph_pages(pixels);
+    let upload = |pages: GlyphPages, format, name| {
         create_font_texture(
             device,
-            queue,
-            command_pool,
-            allocator,
             FontTextureUpload {
-                pixels,
-                extent,
+                pixels: pages.pixels,
+                extent: util::ImageArrayExtent {
+                    width: pages.size,
+                    height: pages.size,
+                    layers: pages.layers,
+                },
                 format,
                 name,
             },
         )
     };
-    let mut gray = upload(gray, vk::Format::R8Unorm, "mc_font_atlas")?;
-    match upload(color, MC_FONT_COLOR_FORMAT, "mc_font_color_atlas") {
+    let mut gray = upload(gray, rhi::TextureFormat::R8Unorm, "mc_font_atlas")?;
+    match upload(
+        color,
+        rhi::TextureFormat::Rgba8UnormSrgb,
+        "mc_font_color_atlas",
+    ) {
         Ok(color) => Ok((gray, color)),
         Err(error) => {
-            destroy_texture_resources(device, &mut util::lock_allocator(allocator), &mut gray);
+            destroy_texture_resources(device, &mut gray);
             Err(error)
         }
     }
 }
 
 fn create_font_texture(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
+    device: &rhi::backend::Device,
     upload: FontTextureUpload<'_>,
 ) -> Result<TextureResources, String> {
-    let sampler = util::try_create_nearest_sampler(device, 1)?;
-    let (image, view, image_alloc) = match util::create_gpu_image_array_with_format(
-        device,
-        allocator,
-        upload.extent,
-        upload.format,
-        upload.name,
-    ) {
-        Ok(resources) => resources,
+    let sampler = rhi::backend::try_create_sampler(device, &rhi::SamplerDesc::NEAREST)?;
+    let desc = rhi::TextureDesc {
+        layers: upload.extent.layers,
+        format: upload.format,
+        dimension: rhi::TextureViewDimension::D2Array,
+        ..util::sampled_texture_desc(upload.name, upload.extent.width, upload.extent.height)
+    };
+    let mut texture = match rhi::backend::Texture::try_new(device, &desc) {
+        Ok(texture) => TextureResources { sampler, texture },
         Err(error) => {
-            device.destroy_sampler(sampler, None);
+            sampler.destroy(device);
             return Err(error);
         }
     };
-    let mut texture = TextureResources {
-        sampler,
-        image,
-        view,
-        image_alloc: Some(image_alloc),
-        staging_buffer: vk::Buffer::null(),
-        staging_alloc: None,
-    };
-    let bytes_per_pixel = if upload.format == vk::Format::R8Unorm {
-        1
-    } else {
-        4
-    };
-    let uploaded = util::try_create_mapped_buffer(
+    let uploaded = rhi::backend::Buffer::try_with_data(
         device,
-        allocator,
-        upload.pixels,
-        vk::BufferUsageFlags::TransferSrc,
         upload.name,
+        upload.pixels,
+        rhi::BufferUsages::COPY_SRC,
     )
-    .and_then(|(staging, staging_alloc)| {
+    .and_then(|staging| {
         let result = util::upload_image_array(
             device,
-            queue,
-            command_pool,
-            staging,
-            image,
+            staging.handle(),
+            texture.texture.handle(),
             upload.extent,
-            bytes_per_pixel,
+            upload.format.texel_size().into(),
         );
-        device.destroy_buffer(staging, None);
-        let _ = util::lock_allocator(allocator).free(staging_alloc);
+        staging.destroy(device);
         result
     });
     if let Err(error) = uploaded {
-        destroy_texture_resources(device, &mut util::lock_allocator(allocator), &mut texture);
+        destroy_texture_resources(device, &mut texture);
         return Err(error);
     }
     Ok(texture)
 }
 
 struct TextureResources {
-    sampler: vk::Sampler,
-    image: vk::Image,
-    view: vk::ImageView,
-    image_alloc: Option<Allocation>,
-    staging_buffer: vk::Buffer,
-    staging_alloc: Option<Allocation>,
+    sampler: rhi::backend::Sampler,
+    texture: rhi::backend::Texture,
 }
 
 impl TextureResources {
-    fn image_info(&self) -> vk::DescriptorImageInfo {
-        vk::DescriptorImageInfo {
-            sampler: self.sampler,
-            image_view: self.view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        }
+    /// The texture and sampler a menu_overlay.frag slot binds.
+    fn slot(&self) -> (rhi::backend::TextureHandle, rhi::backend::Sampler) {
+        (self.texture.handle(), self.sampler)
     }
 }
 
-fn destroy_texture_resources(
-    device: &vk::Device,
-    alloc: &mut Allocator,
-    res: &mut TextureResources,
-) {
-    device.destroy_sampler(res.sampler, None);
-    device.destroy_image_view(res.view, None);
-
-    if let Some(a) = res.image_alloc.take() {
-        alloc.free(a).ok();
-    }
-    device.destroy_image(res.image, None);
-    if let Some(a) = res.staging_alloc.take() {
-        alloc.free(a).ok();
-    }
-    device.destroy_buffer(res.staging_buffer, None);
+fn destroy_texture_resources(device: &rhi::backend::Device, res: &mut TextureResources) {
+    res.sampler.destroy(device);
+    std::mem::take(&mut res.texture).destroy(device);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5227,186 +4937,34 @@ fn push_mc_glyph(verts: &mut Vec<Vertex>, quad: &GlyphQuad, x: f32, y: f32, colo
     }
 }
 
+const VERTEX_BUFFERS: [rhi::VertexBufferLayout<'static>; 1] = [rhi::vertex_buffer!(
+    Vertex,
+    [Float32x2, Float32x2, Float32x4, Float32, Float32x2, Float32]
+)];
+
+/// The overlay pipeline, with the INVERT blend when `invert`.
 fn create_pipeline(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
     invert: bool,
-) -> vk::Pipeline {
-    let vert_spv = shader::include_spirv!("menu_overlay.vert.spv");
-    let frag_spv = shader::include_spirv!("menu_overlay.frag.spv");
-
-    let vert_module = shader::create_shader_module(device, vert_spv);
-    let frag_module = shader::create_shader_module(device, frag_spv);
-
-    let stages = [
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Vertex,
-            module: vert_module,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Fragment,
-            module: frag_module,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-    ];
-
-    let binding_descs = [vk::VertexInputBindingDescription {
-        binding: 0,
-        stride: VERTEX_SIZE as u32,
-        input_rate: vk::VertexInputRate::Vertex,
-    }];
-
-    let attr_descs = [
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32Sfloat,
-            offset: 0,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R32G32Sfloat,
-            offset: 8,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 2,
-            binding: 0,
-            format: vk::Format::R32G32B32A32Sfloat,
-            offset: 16,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 3,
-            binding: 0,
-            format: vk::Format::R32Sfloat,
-            offset: 32,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 4,
-            binding: 0,
-            format: vk::Format::R32G32Sfloat,
-            offset: 36,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 5,
-            binding: 0,
-            format: vk::Format::R32Sfloat,
-            offset: 44,
-        },
-    ];
-
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo {
-        vertex_binding_description_count: binding_descs.len() as u32,
-        vertex_binding_descriptions: binding_descs.as_ptr(),
-        vertex_attribute_description_count: attr_descs.len() as u32,
-        vertex_attribute_descriptions: attr_descs.as_ptr(),
-        ..Default::default()
-    };
-
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
-        topology: vk::PrimitiveTopology::TriangleList,
-        ..Default::default()
-    };
-
-    let viewport_state = vk::PipelineViewportStateCreateInfo {
-        viewport_count: 1,
-        scissor_count: 1,
-        ..Default::default()
-    };
-
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo {
-        polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeFlags::None,
-        line_width: 1.0,
-        ..Default::default()
-    };
-
-    let multisampling = vk::PipelineMultisampleStateCreateInfo {
-        rasterization_samples: vk::SampleCountFlags::Type1,
-        ..Default::default()
-    };
-
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
-        depth_test_enable: vk::FALSE,
-        depth_write_enable: vk::FALSE,
-        ..Default::default()
-    };
-
-    // Normal path is premultiplied alpha; invert is vanilla `BlendFunction.INVERT`
-    // (transparent texels output rgb 0 / alpha 0, so ONE_MINUS_SRC_COLOR keeps
-    // dst).
-    let (src_color, dst_color, dst_alpha) = if invert {
-        (
-            vk::BlendFactor::OneMinusDstColor,
-            vk::BlendFactor::OneMinusSrcColor,
-            vk::BlendFactor::Zero,
-        )
-    } else {
-        (
-            vk::BlendFactor::One,
-            vk::BlendFactor::OneMinusSrcAlpha,
-            vk::BlendFactor::OneMinusSrcAlpha,
+) -> rhi::backend::RenderPipeline {
+    let desc = rhi::RenderPipelineDesc {
+        // Transparent texels output rgb 0 / alpha 0, so INVERT's
+        // ONE_MINUS_SRC_COLOR keeps dst.
+        blend: Some(if invert {
+            rhi::BlendState::INVERT
+        } else {
+            rhi::BlendState::TRANSLUCENT_PREMULTIPLIED_ALPHA
+        }),
+        ..rhi::RenderPipelineDesc::new(
+            "menu overlay",
+            shader::include_shader!("menu_overlay.vert"),
+            shader::include_shader!("menu_overlay.frag"),
+            &VERTEX_BUFFERS,
         )
     };
-    let blend_attachment = [vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::TRUE,
-        src_color_blend_factor: src_color,
-        dst_color_blend_factor: dst_color,
-        color_blend_op: vk::BlendOp::Add,
-        src_alpha_blend_factor: vk::BlendFactor::One,
-        dst_alpha_blend_factor: dst_alpha,
-        alpha_blend_op: vk::BlendOp::Add,
-        color_write_mask: vk::ColorComponentFlags::RGBA,
-    }];
-
-    let color_blending = vk::PipelineColorBlendStateCreateInfo {
-        attachment_count: blend_attachment.len() as u32,
-        attachments: blend_attachment.as_ptr(),
-        ..Default::default()
-    };
-
-    let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
-    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
-        dynamic_state_count: dynamic_states.len() as u32,
-        dynamic_states: dynamic_states.as_ptr(),
-        ..Default::default()
-    };
-
-    let pipeline_info = [vk::GraphicsPipelineCreateInfo {
-        stage_count: stages.len() as u32,
-        stages: stages.as_ptr(),
-        vertex_input_state: &vertex_input,
-        input_assembly_state: &input_assembly,
-        viewport_state: &viewport_state,
-        rasterization_state: &rasterizer,
-        multisample_state: &multisampling,
-        depth_stencil_state: &depth_stencil,
-        color_blend_state: &color_blending,
-        dynamic_state: &dynamic_state,
-        layout,
-        render_pass,
-        subpass: 0,
-        ..Default::default()
-    }];
-
-    let mut pipeline = vk::Pipeline::null();
-    device
-        .create_graphics_pipelines(
-            vk::PipelineCache::null(),
-            &pipeline_info,
-            None,
-            slice::from_mut(&mut pipeline),
-        )
-        .expect("failed to create menu overlay pipeline");
-
-    device.destroy_shader_module(vert_module, None);
-    device.destroy_shader_module(frag_module, None);
-
-    pipeline
+    rhi::backend::create_render_pipeline(device, targets, layout, &desc)
 }
 
 #[cfg(test)]

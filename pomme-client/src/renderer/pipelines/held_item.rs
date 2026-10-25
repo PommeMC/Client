@@ -1,9 +1,6 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 use glam::{Mat4, Vec3};
-use pomme_gpu_allocator::vulkan::Allocator;
-use pyronyx::vk;
 
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
@@ -12,6 +9,7 @@ use crate::renderer::pipelines::item_display::{DisplayResolver, DisplayTransform
 use crate::renderer::pipelines::item_entity::{
     self, ItemEntityPipeline, ItemPipelineShared, push_model_light,
 };
+use crate::renderer::rhi;
 
 pub struct HeldItemInfo {
     /// The item, whose model JSON gives the display transforms.
@@ -72,7 +70,7 @@ impl HandRenderSelection {
 }
 
 pub struct HeldItemPipeline {
-    pipeline: vk::Pipeline,
+    pipeline: rhi::backend::RenderPipeline,
     shared: ItemPipelineShared,
     right_display: DisplayResolver,
     left_display: DisplayResolver,
@@ -80,14 +78,13 @@ pub struct HeldItemPipeline {
 
 impl HeldItemPipeline {
     pub fn new(
-        device: &vk::Device,
-        render_pass: vk::RenderPass,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
         atlas: &TextureAtlas,
         jar_assets_dir: &Path,
     ) -> Self {
-        let shared = ItemPipelineShared::new(device, allocator, atlas, "held_item");
-        let pipeline = item_entity::create_pipeline(device, render_pass, shared.pipeline_layout);
+        let shared = ItemPipelineShared::new(device, atlas, "held_item");
+        let pipeline = item_entity::create_pipeline(device, targets, shared.pipeline_layout);
         Self {
             pipeline,
             shared,
@@ -99,16 +96,15 @@ impl HeldItemPipeline {
         }
     }
 
-    pub fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
+    pub fn rebind_atlas(&mut self, device: &rhi::backend::Device, atlas: &TextureAtlas) {
         self.shared.rebind_atlas(device, atlas);
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn update_and_draw(
         &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        cmd: vk::CommandBuffer,
+        device: &rhi::backend::Device,
+        pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
         aspect: f32,
         hud_fov: f32,
@@ -120,13 +116,12 @@ impl HeldItemPipeline {
         self.shared.update_camera(frame, &uniform);
 
         let tint_count = hands.iter().map(|hand| hand.item.item_tints.len()).sum();
-        self.shared
-            .begin_tint_frame(device, allocator, frame, tint_count);
+        self.shared.begin_tint_frame(device, frame, tint_count);
         let tint_ranges: Vec<_> = hands
             .iter()
             .map(|hand| self.shared.push_tints(frame, &hand.item.item_tints))
             .collect();
-        self.shared.bind(cmd, frame, self.pipeline);
+        self.shared.bind(pass, frame, self.pipeline);
         for (hand, tint_range) in hands.iter().zip(tint_ranges) {
             let item = hand.item;
             let Some((buffer, vertex_count)) = meshes.mesh_handle(&item.model) else {
@@ -150,27 +145,24 @@ impl HeldItemPipeline {
                     * Mat4::from_rotation_y((invert * 10.0).to_radians());
             }
             let model = arm * display.to_matrix();
-            cmd.bind_vertex_buffers(0, &[buffer], &[0]);
-            push_model_light(
-                cmd,
-                self.shared.pipeline_layout,
-                &model,
-                item.light,
-                tint_range,
-            );
-            cmd.draw(vertex_count, 1, 0, 0);
+            pass.set_vertex_buffer(0, buffer);
+            push_model_light(pass, &model, item.light, tint_range);
+            pass.draw(vertex_count, 1, 0, 0);
         }
     }
 
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
-        self.pipeline =
-            item_entity::create_pipeline(device, render_pass, self.shared.pipeline_layout);
+    pub fn recreate_pipeline(
+        &mut self,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
+    ) {
+        self.pipeline.destroy(device);
+        self.pipeline = item_entity::create_pipeline(device, targets, self.shared.pipeline_layout);
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        device.destroy_pipeline(self.pipeline, None);
-        self.shared.destroy(device, allocator);
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        self.pipeline.destroy(device);
+        self.shared.destroy(device);
     }
 }
 

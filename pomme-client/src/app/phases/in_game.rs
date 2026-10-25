@@ -1880,7 +1880,7 @@ pub fn start_chunk_load(
         core.menu.chunk_detail,
         BenchMode::Windowed {
             gpu: gfx.renderer.gpu_name().to_owned(),
-            vulkan: gfx.renderer.vulkan_version().to_owned(),
+            vulkan: gfx.renderer.api_version().to_owned(),
             resolution: (gfx.renderer.screen_width(), gfx.renderer.screen_height()),
         },
         *game.player.position,
@@ -2645,7 +2645,7 @@ pub fn update_game(
                 (visible, 0, hidden)
             }),
             gpu_name: gfx.renderer.gpu_name(),
-            vulkan_version: gfx.renderer.vulkan_version(),
+            vulkan_version: gfx.renderer.api_version(),
             screen_w: gfx.renderer.screen_width(),
             screen_h: gfx.renderer.screen_height(),
             timings: Some(hud::FrameTimings {

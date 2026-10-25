@@ -1,14 +1,10 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
-
-use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::assets::AssetIndex;
 use crate::renderer::camera::{Camera, CameraUniform};
 use crate::renderer::chunk::mesher::BiomeClimate;
 use crate::renderer::pipelines::sky::SkyState;
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::renderer::{rhi, shader, util};
 
 /// Block radius of the rain/snow grid sampled around the camera (vanilla
 /// `weatherRadius`). Also used for the per-column distance alpha falloff.
@@ -68,209 +64,92 @@ struct WeatherVertex {
 }
 
 pub struct WeatherPipeline {
-    pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    camera_layout: vk::DescriptorSetLayout,
-    tex_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    camera_sets: Vec<vk::DescriptorSet>,
-    rain_set: vk::DescriptorSet,
-    snow_set: vk::DescriptorSet,
-    camera_buffers: Vec<vk::Buffer>,
-    camera_allocations: Vec<Option<Allocation>>,
-    vertex_buffers: Vec<vk::Buffer>,
-    vertex_allocations: Vec<Option<Allocation>>,
-    sampler: vk::Sampler,
-    rain_image: vk::Image,
-    rain_view: vk::ImageView,
-    rain_allocation: Option<Allocation>,
-    snow_image: vk::Image,
-    snow_view: vk::ImageView,
-    snow_allocation: Option<Allocation>,
+    pipeline: rhi::backend::RenderPipeline,
+    pipeline_layout: rhi::backend::PipelineLayout,
+    camera_layout: rhi::backend::BindGroupLayout,
+    tex_layout: rhi::backend::BindGroupLayout,
+    camera_sets: Vec<rhi::backend::BindGroup>,
+    rain_set: rhi::backend::BindGroup,
+    snow_set: rhi::backend::BindGroup,
+    camera_buffers: Vec<rhi::backend::Buffer>,
+    vertex_buffers: Vec<rhi::backend::Buffer>,
+    sampler: rhi::backend::Sampler,
+    rain: rhi::backend::Texture,
+    snow: rhi::backend::Texture,
 }
 
 impl WeatherPipeline {
     pub fn new(
-        device: &vk::Device,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        render_pass: vk::RenderPass,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
     ) -> Self {
-        let camera_layout = util::create_descriptor_set_layout(
+        let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
+        let tex_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
+        let pipeline_layout =
+            rhi::backend::create_pipeline_layout(device, &[camera_layout, tex_layout], None);
+
+        let pipeline = create_pipeline(device, targets, pipeline_layout);
+
+        let (camera_sets, camera_buffers) = util::create_uniform_sets(
             device,
-            vk::DescriptorType::UniformBuffer,
-            vk::ShaderStageFlags::Vertex,
+            camera_layout,
+            std::mem::size_of::<CameraUniform>() as u64,
+            "weather_camera",
         );
-        let tex_layout = util::create_descriptor_set_layout(
+
+        let vertex_buffers = util::create_per_frame_host_buffers(
             device,
-            vk::DescriptorType::CombinedImageSampler,
-            vk::ShaderStageFlags::Fragment,
+            (MAX_WEATHER_VERTS * std::mem::size_of::<WeatherVertex>()) as u64,
+            rhi::BufferUsages::VERTEX,
+            "weather_vertices",
         );
-
-        let layouts = [camera_layout, tex_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: layouts.len() as u32,
-            set_layouts: layouts.as_ptr(),
-            ..Default::default()
-        };
-        let pipeline_layout = device
-            .create_pipeline_layout(&layout_info, None)
-            .expect("failed to create weather pipeline layout");
-
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout);
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 2,
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: (MAX_FRAMES_IN_FLIGHT + 2) as u32,
-            pool_size_count: pool_sizes.len() as u32,
-            pool_sizes: pool_sizes.as_ptr(),
-            ..Default::default()
-        };
-        let descriptor_pool = device
-            .create_descriptor_pool(&pool_info, None)
-            .expect("failed to create weather descriptor pool");
-
-        let camera_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| camera_layout).collect();
-        let camera_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: camera_layouts.len() as u32,
-            set_layouts: camera_layouts.as_ptr(),
-            ..Default::default()
-        };
-        let mut camera_sets = vec![vk::DescriptorSet::null(); camera_layouts.len()];
-        device
-            .allocate_descriptor_sets(&camera_alloc_info, &mut camera_sets)
-            .expect("failed to allocate weather camera sets");
-
-        let tex_layouts = [tex_layout, tex_layout];
-        let tex_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: tex_layouts.len() as u32,
-            set_layouts: tex_layouts.as_ptr(),
-            ..Default::default()
-        };
-        let mut tex_sets = vec![vk::DescriptorSet::null(); 2];
-        device
-            .allocate_descriptor_sets(&tex_alloc_info, &mut tex_sets)
-            .expect("failed to allocate weather texture sets");
-        let rain_set = tex_sets[0];
-        let snow_set = tex_sets[1];
-
-        let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut camera_allocations: Vec<Option<Allocation>> =
-            Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
-                device,
-                allocator,
-                std::mem::size_of::<CameraUniform>() as u64,
-                "weather_camera",
-            );
-            let buffer_info = vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: std::mem::size_of::<CameraUniform>() as u64,
-            };
-            let write = vk::WriteDescriptorSet {
-                dst_set: set,
-                dst_binding: 0,
-                descriptor_type: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
-                buffer_info: &buffer_info,
-                ..Default::default()
-            };
-            device.update_descriptor_sets(&[write], &[]);
-            camera_buffers.push(buf);
-            camera_allocations.push(Some(alloc));
-        }
-
-        let mut vertex_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut vertex_allocations: Vec<Option<Allocation>> =
-            Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let vertex_bytes = (MAX_WEATHER_VERTS * std::mem::size_of::<WeatherVertex>()) as u64;
-        for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let (buf, alloc) = util::create_host_buffer(
-                device,
-                allocator,
-                vertex_bytes,
-                vk::BufferUsageFlags::VertexBuffer,
-                "weather_vertices",
-            );
-            vertex_buffers.push(buf);
-            vertex_allocations.push(Some(alloc));
-        }
 
         // Nearest sampling with REPEAT wrapping so the rain/snow strip tiles
         // vertically as the UV scrolls.
-        let sampler = create_repeat_sampler(device);
+        let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST_REPEAT);
 
-        let (rain_image, rain_view, rain_allocation) = load_weather_texture(
+        let rain = util::load_asset_texture(
             device,
-            queue,
-            command_pool,
-            allocator,
             jar_assets_dir,
             asset_index,
             "minecraft/textures/environment/rain.png",
         );
-        bind_texture_set(device, rain_set, rain_view, sampler);
+        let rain_set = util::create_texture_group(device, tex_layout, rain.handle(), sampler);
 
-        let (snow_image, snow_view, snow_allocation) = load_weather_texture(
+        let snow = util::load_asset_texture(
             device,
-            queue,
-            command_pool,
-            allocator,
             jar_assets_dir,
             asset_index,
             "minecraft/textures/environment/snow.png",
         );
-        bind_texture_set(device, snow_set, snow_view, sampler);
+        let snow_set = util::create_texture_group(device, tex_layout, snow.handle(), sampler);
 
         Self {
             pipeline,
             pipeline_layout,
             camera_layout,
             tex_layout,
-            descriptor_pool,
             camera_sets,
             rain_set,
             snow_set,
             camera_buffers,
-            camera_allocations,
             vertex_buffers,
-            vertex_allocations,
             sampler,
-            rain_image,
-            rain_view,
-            rain_allocation: Some(rain_allocation),
-            snow_image,
-            snow_view,
-            snow_allocation: Some(snow_allocation),
+            rain,
+            snow,
         }
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
         let bytes = bytemuck::bytes_of(uniform);
-        if let Some(alloc) = self.camera_allocations[frame].as_mut() {
-            alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
-        }
+        self.camera_buffers[frame].write(bytes);
     }
 
     pub fn update_and_draw(
         &mut self,
-        cmd: vk::CommandBuffer,
+        pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
         camera: &Camera,
         sky: &SkyState,
@@ -364,71 +243,46 @@ impl WeatherPipeline {
             rain_verts.truncate(MAX_WEATHER_VERTS);
         }
         let bytes = bytemuck::cast_slice::<WeatherVertex, u8>(&rain_verts);
-        if let Some(alloc) = self.vertex_allocations[frame].as_mut() {
-            alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
-        }
+        self.vertex_buffers[frame].write(bytes);
 
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame]], &[0]);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, self.vertex_buffers[frame].handle());
+        pass.set_bind_group(0, self.camera_sets[frame]);
 
         if rain_count > 0 {
-            cmd.bind_descriptor_sets(
-                vk::PipelineBindPoint::Graphics,
-                self.pipeline_layout,
-                0,
-                &[self.camera_sets[frame], self.rain_set],
-                &[],
-            );
-            cmd.draw(rain_count, 1, 0, 0);
+            pass.set_bind_group(1, self.rain_set);
+            pass.draw(rain_count, 1, 0, 0);
         }
         if snow_count > 0 {
-            cmd.bind_descriptor_sets(
-                vk::PipelineBindPoint::Graphics,
-                self.pipeline_layout,
-                0,
-                &[self.camera_sets[frame], self.snow_set],
-                &[],
-            );
-            cmd.draw(snow_count, 1, rain_count, 0);
+            pass.set_bind_group(1, self.snow_set);
+            pass.draw(snow_count, 1, rain_count, 0);
         }
     }
 
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
+    pub fn recreate_pipeline(
+        &mut self,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
+    ) {
+        self.pipeline.destroy(device);
+        self.pipeline = create_pipeline(device, targets, self.pipeline_layout);
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let mut alloc = allocator.lock().unwrap();
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            device.destroy_buffer(self.camera_buffers[i], None);
-            if let Some(a) = self.camera_allocations[i].take() {
-                alloc.free(a).ok();
-            }
-            device.destroy_buffer(self.vertex_buffers[i], None);
-            if let Some(a) = self.vertex_allocations[i].take() {
-                alloc.free(a).ok();
-            }
-        }
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        util::destroy_buffers(device, &mut self.camera_buffers);
+        util::destroy_buffers(device, &mut self.vertex_buffers);
 
-        device.destroy_sampler(self.sampler, None);
-        device.destroy_image_view(self.rain_view, None);
-        device.destroy_image(self.rain_image, None);
-        if let Some(a) = self.rain_allocation.take() {
-            alloc.free(a).ok();
-        }
-        device.destroy_image_view(self.snow_view, None);
-        device.destroy_image(self.snow_image, None);
-        if let Some(a) = self.snow_allocation.take() {
-            alloc.free(a).ok();
-        }
-        drop(alloc);
+        self.sampler.destroy(device);
+        std::mem::take(&mut self.rain).destroy(device);
+        std::mem::take(&mut self.snow).destroy(device);
 
-        device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_descriptor_pool(self.descriptor_pool, None);
-        device.destroy_descriptor_set_layout(self.camera_layout, None);
-        device.destroy_descriptor_set_layout(self.tex_layout, None);
+        self.pipeline.destroy(device);
+        self.pipeline_layout.destroy(device);
+        util::destroy_bind_groups(device, self.camera_sets.drain(..));
+        self.rain_set.destroy(device);
+        self.snow_set.destroy(device);
+        self.camera_layout.destroy(device);
+        self.tex_layout.destroy(device);
     }
 }
 
@@ -525,200 +379,33 @@ fn snow_uv(game_time: u64, partial: f32, x: i32, z: i32) -> (f32, f32) {
     (u, v_base + v_drift)
 }
 
-fn create_repeat_sampler(device: &vk::Device) -> vk::Sampler {
-    let info = vk::SamplerCreateInfo {
-        mag_filter: vk::Filter::Nearest,
-        min_filter: vk::Filter::Nearest,
-        address_mode_u: vk::SamplerAddressMode::Repeat,
-        address_mode_v: vk::SamplerAddressMode::Repeat,
-        address_mode_w: vk::SamplerAddressMode::Repeat,
-        ..Default::default()
-    };
-    device
-        .create_sampler(&info, None)
-        .expect("failed to create weather sampler")
-}
-
-fn load_weather_texture(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    key: &str,
-) -> (vk::Image, vk::ImageView, Allocation) {
-    let path = resolve_asset_path(jar_assets_dir, asset_index, key);
-    let (pixels, w, h) = util::load_png(&path).unwrap_or_else(|| {
-        tracing::warn!("Failed to load {key}, using fallback");
-        (vec![255u8; 16 * 16 * 4], 16, 16)
-    });
-
-    let (image, view, allocation) = util::create_gpu_image(device, allocator, w, h, key);
-    let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, &pixels, &format!("{key}_staging"));
-    util::upload_image(device, queue, command_pool, staging_buf, image, w, h);
-    device.destroy_buffer(staging_buf, None);
-    allocator.lock().unwrap().free(staging_alloc).ok();
-
-    tracing::info!("Weather: loaded {key} ({w}x{h})");
-    (image, view, allocation)
-}
-
-fn bind_texture_set(
-    device: &vk::Device,
-    set: vk::DescriptorSet,
-    view: vk::ImageView,
-    sampler: vk::Sampler,
-) {
-    let image_info = vk::DescriptorImageInfo {
-        sampler,
-        image_view: view,
-        image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-    };
-    let write = vk::WriteDescriptorSet {
-        dst_set: set,
-        dst_binding: 0,
-        descriptor_type: vk::DescriptorType::CombinedImageSampler,
-        descriptor_count: 1,
-        image_info: &image_info,
-        ..Default::default()
-    };
-    device.update_descriptor_sets(&[write], &[]);
-}
-
 fn create_pipeline(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-) -> vk::Pipeline {
-    let vert_spv = shader::include_spirv!("weather.vert.spv");
-    let frag_spv = shader::include_spirv!("weather.frag.spv");
-    let vert_mod = shader::create_shader_module(device, vert_spv);
-    let frag_mod = shader::create_shader_module(device, frag_spv);
-
-    let stages = [
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Vertex,
-            module: vert_mod,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Fragment,
-            module: frag_mod,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-    ];
-
-    let binding_descs = [vk::VertexInputBindingDescription {
-        binding: 0,
-        stride: std::mem::size_of::<WeatherVertex>() as u32,
-        input_rate: vk::VertexInputRate::Vertex,
-    }];
-    let attr_descs = [
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32B32Sfloat,
-            offset: 0,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R32G32Sfloat,
-            offset: 12,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 2,
-            binding: 0,
-            format: vk::Format::R32Sfloat,
-            offset: 20,
-        },
-    ];
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo {
-        vertex_binding_description_count: binding_descs.len() as u32,
-        vertex_binding_descriptions: binding_descs.as_ptr(),
-        vertex_attribute_description_count: attr_descs.len() as u32,
-        vertex_attribute_descriptions: attr_descs.as_ptr(),
-        ..Default::default()
-    };
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
-        topology: vk::PrimitiveTopology::TriangleList,
-        ..Default::default()
-    };
-    let viewport_state = vk::PipelineViewportStateCreateInfo {
-        viewport_count: 1,
-        scissor_count: 1,
-        ..Default::default()
-    };
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo {
-        polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeFlags::None,
-        front_face: vk::FrontFace::CounterClockwise,
-        line_width: 1.0,
-        ..Default::default()
-    };
-    let multisampling = vk::PipelineMultisampleStateCreateInfo {
-        rasterization_samples: vk::SampleCountFlags::Type1,
-        ..Default::default()
-    };
-    // Depth-test against the world (rain is occluded by terrain) but do NOT
-    // write depth, so overlapping translucent columns blend and the later
-    // hand/HUD passes are unaffected.
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
-        depth_test_enable: vk::TRUE,
-        depth_write_enable: vk::FALSE,
-        depth_compare_op: vk::CompareOp::Less,
-        ..Default::default()
-    };
-    let blend_attachment = vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::TRUE,
-        src_color_blend_factor: vk::BlendFactor::SrcAlpha,
-        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
-        color_blend_op: vk::BlendOp::Add,
-        src_alpha_blend_factor: vk::BlendFactor::One,
-        dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
-        alpha_blend_op: vk::BlendOp::Add,
-        color_write_mask: vk::ColorComponentFlags::RGBA,
-    };
-    let color_blending = vk::PipelineColorBlendStateCreateInfo {
-        attachment_count: 1,
-        attachments: &blend_attachment,
-        ..Default::default()
-    };
-    let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
-    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
-        dynamic_state_count: dynamic_states.len() as u32,
-        dynamic_states: dynamic_states.as_ptr(),
-        ..Default::default()
-    };
-
-    let info = [vk::GraphicsPipelineCreateInfo {
-        stage_count: stages.len() as u32,
-        stages: stages.as_ptr(),
-        vertex_input_state: &vertex_input,
-        input_assembly_state: &input_assembly,
-        viewport_state: &viewport_state,
-        rasterization_state: &rasterizer,
-        multisample_state: &multisampling,
-        depth_stencil_state: &depth_stencil,
-        color_blend_state: &color_blending,
-        dynamic_state: &dynamic_state,
+    device: &rhi::backend::Device,
+    targets: rhi::backend::PipelineTargets,
+    layout: rhi::backend::PipelineLayout,
+) -> rhi::backend::RenderPipeline {
+    rhi::backend::create_render_pipeline(
+        device,
+        targets,
         layout,
-        render_pass,
-        subpass: 0,
-        ..Default::default()
-    }];
-
-    let mut pipeline = [vk::Pipeline::null()];
-    device
-        .create_graphics_pipelines(vk::PipelineCache::null(), &info, None, &mut pipeline)
-        .expect("failed to create weather pipeline");
-
-    device.destroy_shader_module(vert_mod, None);
-    device.destroy_shader_module(frag_mod, None);
-
-    pipeline[0]
+        &rhi::RenderPipelineDesc {
+            // Depth-test against the world (rain is occluded by terrain) but do
+            // NOT write depth, so overlapping translucent columns blend and the
+            // later hand/HUD passes are unaffected.
+            depth: Some(rhi::DepthState {
+                compare: rhi::CompareFunction::Less,
+                ..rhi::DepthState::READ_ONLY
+            }),
+            blend: Some(rhi::BlendState::TRANSLUCENT),
+            ..rhi::RenderPipelineDesc::new(
+                "weather",
+                shader::include_shader!("weather.vert"),
+                shader::include_shader!("weather.frag"),
+                &[rhi::vertex_buffer!(
+                    WeatherVertex,
+                    [Float32x3, Float32x2, Float32]
+                )],
+            )
+        },
+    )
 }

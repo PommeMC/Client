@@ -1,11 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::slice;
-use std::sync::{Arc, Mutex};
 
 use azalea_registry::builtin::BlockEntityKind;
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::position::BlockPos;
@@ -15,7 +11,7 @@ use crate::renderer::entity_model::{BakedEntityModel, ModelConvention, PartAnim}
 use crate::renderer::pipelines::entity_renderer::{
     BlendMode, ENTITY_ALPHA_CUTOFF, ModelInput, WHITE_TINT, create_pipeline, fallback_texture,
 };
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, block_entity_model, util};
+use crate::renderer::{block_entity_model, rhi, util};
 
 pub struct BlockEntityRenderInfo {
     pub pos: BlockPos,
@@ -31,18 +27,15 @@ pub struct BlockEntityRenderInfo {
 }
 
 struct TextureSlot {
-    image: vk::Image,
-    view: vk::ImageView,
-    allocation: Allocation,
-    set: vk::DescriptorSet,
+    texture: rhi::backend::Texture,
+    set: rhi::backend::BindGroup,
 }
 
 struct KindEntry {
     /// Model variants sharing one vertex buffer; their `part_ranges` are
     /// rebased to be buffer-absolute at build time.
     models: Vec<BakedEntityModel>,
-    vertex_buffer: vk::Buffer,
-    vertex_allocation: Allocation,
+    vertex_buffer: rhi::backend::Buffer,
     textures: Vec<TextureSlot>,
 }
 
@@ -311,140 +304,59 @@ fn kind_definitions() -> Vec<KindDef> {
 }
 
 pub struct BlockEntityPipeline {
-    pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    camera_layout: vk::DescriptorSetLayout,
-    texture_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    camera_sets: Vec<vk::DescriptorSet>,
-    camera_buffers: Vec<vk::Buffer>,
-    camera_allocations: Vec<Allocation>,
-    texture_sampler: vk::Sampler,
+    pipeline: rhi::backend::RenderPipeline,
+    pipeline_layout: rhi::backend::PipelineLayout,
+    camera_layout: rhi::backend::BindGroupLayout,
+    texture_layout: rhi::backend::BindGroupLayout,
+    camera_sets: Vec<rhi::backend::BindGroup>,
+    camera_buffers: Vec<rhi::backend::Buffer>,
+    texture_sampler: rhi::backend::Sampler,
     entries: HashMap<BlockEntityKind, KindEntry>,
 }
 
 impl BlockEntityPipeline {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        device: &vk::Device,
-        queue: vk::Queue,
-        command_pool: vk::CommandPool,
-        render_pass: vk::RenderPass,
-        allocator: &Arc<Mutex<Allocator>>,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
     ) -> Self {
-        let camera_layout = util::create_descriptor_set_layout(
+        let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
+        let texture_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
+        let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
-            vk::DescriptorType::UniformBuffer,
-            vk::ShaderStageFlags::Vertex,
+            &[camera_layout, texture_layout],
+            Some(rhi::PushConstants {
+                visibility: rhi::ShaderStages::VERTEX,
+                size: 112,
+            }),
         );
-        let texture_layout = util::create_descriptor_set_layout(
-            device,
-            vk::DescriptorType::CombinedImageSampler,
-            vk::ShaderStageFlags::Fragment,
-        );
-
-        let push_constant_range = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::Vertex,
-            offset: 0,
-            size: 112,
-        };
-        let layouts = [camera_layout, texture_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: layouts.len() as u32,
-            set_layouts: layouts.as_ptr(),
-            push_constant_range_count: 1,
-            push_constant_ranges: &push_constant_range,
-            ..Default::default()
-        };
-        let pipeline_layout = device
-            .create_pipeline_layout(&layout_info, None)
-            .expect("failed to create block-entity pipeline layout");
 
         let pipeline = create_pipeline(
             device,
-            render_pass,
+            targets,
             pipeline_layout,
             BlendMode::Opaque,
             ModelInput::PushConstant,
         );
 
         let defs = kind_definitions();
-        let tex_count = defs
-            .iter()
-            .map(|d| d.tex_variants.len() as u32)
-            .sum::<u32>();
 
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: tex_count.max(1),
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: MAX_FRAMES_IN_FLIGHT as u32 + tex_count.max(1),
-            pool_size_count: pool_sizes.len() as u32,
-            pool_sizes: pool_sizes.as_ptr(),
-            ..Default::default()
-        };
-        let descriptor_pool = device
-            .create_descriptor_pool(&pool_info, None)
-            .expect("failed to create block-entity descriptor pool");
+        let (camera_sets, camera_buffers) = util::create_uniform_sets(
+            device,
+            camera_layout,
+            size_of::<CameraUniform>() as u64,
+            "block_entity_camera_uniform",
+        );
 
-        let camera_layouts_vec: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| camera_layout).collect();
-        let camera_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: camera_layouts_vec.len() as u32,
-            set_layouts: camera_layouts_vec.as_ptr(),
-            ..Default::default()
-        };
-        let mut camera_sets = vec![vk::DescriptorSet::null(); camera_layouts_vec.len()];
-        device
-            .allocate_descriptor_sets(&camera_alloc_info, &mut camera_sets)
-            .expect("failed to allocate block-entity camera sets");
-
-        let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut camera_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
-                device,
-                allocator,
-                size_of::<CameraUniform>() as u64,
-                "block_entity_camera_uniform",
-            );
-            let buffer_info = vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: size_of::<CameraUniform>() as u64,
-            };
-            let write = vk::WriteDescriptorSet {
-                dst_set: set,
-                dst_binding: 0,
-                descriptor_type: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
-                buffer_info: &buffer_info,
-                ..Default::default()
-            };
-            device.update_descriptor_sets(&[write], &[]);
-            camera_buffers.push(buf);
-            camera_allocations.push(alloc);
-        }
-
-        let texture_sampler = unsafe { util::create_nearest_sampler(device) };
+        let texture_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
 
         let mut entries = HashMap::new();
         let mut pending_uploads: Vec<util::PendingImageUpload> = Vec::new();
-        let mut staging_to_free: Vec<(vk::Buffer, Allocation)> = Vec::new();
+        let mut staging_to_free: Vec<rhi::backend::Buffer> = Vec::new();
         for def in defs {
             let entry = build_entry(
                 device,
-                allocator,
-                descriptor_pool,
                 texture_layout,
                 texture_sampler,
                 jar_assets_dir,
@@ -458,25 +370,17 @@ impl BlockEntityPipeline {
             entries.insert(def.kind, entry);
         }
 
-        util::upload_images_batched(device, queue, command_pool, &pending_uploads);
+        util::upload_images_batched(device, &pending_uploads);
 
-        {
-            let mut alloc = allocator.lock().unwrap();
-            for (buf, a) in staging_to_free {
-                device.destroy_buffer(buf, None);
-                alloc.free(a).ok();
-            }
-        }
+        util::destroy_buffers(device, &mut staging_to_free);
 
         Self {
             pipeline,
             pipeline_layout,
             camera_layout,
             texture_layout,
-            descriptor_pool,
             camera_sets,
             camera_buffers,
-            camera_allocations,
             texture_sampler,
             entries,
         }
@@ -484,13 +388,12 @@ impl BlockEntityPipeline {
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
         let bytes = bytemuck::bytes_of(uniform);
-        self.camera_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
-            .copy_from_slice(bytes);
+        self.camera_buffers[frame].write(bytes);
     }
 
     pub fn draw(
         &self,
-        cmd: vk::CommandBuffer,
+        pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
         anchor: glam::DVec3,
         items: &[BlockEntityRenderInfo],
@@ -499,10 +402,10 @@ impl BlockEntityPipeline {
             return;
         }
 
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+        pass.set_pipeline(&self.pipeline);
 
         let mut bound_entry: *const KindEntry = std::ptr::null();
-        let mut bound_set: vk::DescriptorSet = vk::DescriptorSet::null();
+        let mut bound_set = rhi::backend::BindGroup::default();
 
         for info in items {
             let Some(entry) = self.entries.get(&info.kind) else {
@@ -513,18 +416,12 @@ impl BlockEntityPipeline {
 
             let entry_ptr: *const KindEntry = entry;
             if bound_entry != entry_ptr {
-                cmd.bind_vertex_buffers(0, &[entry.vertex_buffer], &[0]);
+                pass.set_vertex_buffer(0, entry.vertex_buffer.handle());
                 bound_entry = entry_ptr;
-                bound_set = vk::DescriptorSet::null();
+                bound_set = rhi::backend::BindGroup::default();
             }
             if bound_set != slot.set {
-                cmd.bind_descriptor_sets(
-                    vk::PipelineBindPoint::Graphics,
-                    self.pipeline_layout,
-                    0,
-                    &[self.camera_sets[frame], slot.set],
-                    &[],
-                );
+                pass.set_bind_groups(0, &[self.camera_sets[frame], slot.set]);
                 bound_set = slot.set;
             }
 
@@ -569,80 +466,58 @@ impl BlockEntityPipeline {
                 bytes[64..80].copy_from_slice(bytemuck::cast_slice(&WHITE_TINT));
                 bytes[80..96].copy_from_slice(bytemuck::cast_slice(&no_overlay));
                 bytes[96..112].copy_from_slice(bytemuck::cast_slice(&uv_params));
-                cmd.push_constants(
-                    self.pipeline_layout,
-                    vk::ShaderStageFlags::Vertex,
-                    0,
-                    &bytes,
-                );
-                cmd.draw(*count, 1, *start, 0);
+                pass.set_push_constants(rhi::ShaderStages::VERTEX, 0, &bytes);
+                pass.draw(*count, 1, *start, 0);
             }
         }
     }
 
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
+    pub fn recreate_pipeline(
+        &mut self,
+        device: &rhi::backend::Device,
+        targets: rhi::backend::PipelineTargets,
+    ) {
+        self.pipeline.destroy(device);
         self.pipeline = create_pipeline(
             device,
-            render_pass,
+            targets,
             self.pipeline_layout,
             BlendMode::Opaque,
             ModelInput::PushConstant,
         );
     }
 
-    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let mut alloc = allocator.lock().unwrap();
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            device.destroy_buffer(self.camera_buffers[i], None);
-            alloc
-                .free(std::mem::replace(&mut self.camera_allocations[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
-        }
-        device.destroy_sampler(self.texture_sampler, None);
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        util::destroy_buffers(device, &mut self.camera_buffers);
+        self.texture_sampler.destroy(device);
         for entry in self.entries.values_mut() {
-            device.destroy_buffer(entry.vertex_buffer, None);
-            alloc
-                .free(std::mem::replace(&mut entry.vertex_allocation, unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
+            std::mem::take(&mut entry.vertex_buffer).destroy(device);
             for slot in entry.textures.iter_mut() {
-                device.destroy_image_view(slot.view, None);
-                alloc
-                    .free(std::mem::replace(&mut slot.allocation, unsafe {
-                        std::mem::zeroed()
-                    }))
-                    .ok();
-                device.destroy_image(slot.image, None);
+                std::mem::take(&mut slot.texture).destroy(device);
+                slot.set.destroy(device);
             }
         }
-        drop(alloc);
 
-        device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_descriptor_pool(self.descriptor_pool, None);
-        device.destroy_descriptor_set_layout(self.camera_layout, None);
-        device.destroy_descriptor_set_layout(self.texture_layout, None);
+        self.pipeline.destroy(device);
+        self.pipeline_layout.destroy(device);
+        util::destroy_bind_groups(device, self.camera_sets.drain(..));
+        self.camera_layout.destroy(device);
+        self.texture_layout.destroy(device);
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn build_entry(
-    device: &vk::Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    descriptor_pool: vk::DescriptorPool,
-    texture_layout: vk::DescriptorSetLayout,
-    texture_sampler: vk::Sampler,
+    device: &rhi::backend::Device,
+    texture_layout: rhi::backend::BindGroupLayout,
+    texture_sampler: rhi::backend::Sampler,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     mut models: Vec<BakedEntityModel>,
     tex_variants: &[&[&str]],
     fallback_tex_size: u32,
     pending_uploads: &mut Vec<util::PendingImageUpload>,
-    staging_to_free: &mut Vec<(vk::Buffer, Allocation)>,
+    staging_to_free: &mut Vec<rhi::backend::Buffer>,
 ) -> KindEntry {
     let mut all_vertices: Vec<ChunkVertex> = Vec::new();
     for model in &mut models {
@@ -652,13 +527,11 @@ fn build_entry(
             range.0 += base;
         }
     }
-    let vert_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&all_vertices);
-    let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
+    let vertex_buffer = rhi::backend::Buffer::with_data(
         device,
-        allocator,
-        vert_bytes,
-        vk::BufferUsageFlags::VertexBuffer,
         "block_entity_vertices",
+        bytemuck::cast_slice(&all_vertices),
+        rhi::BufferUsages::VERTEX,
     );
 
     let textures = tex_variants
@@ -666,8 +539,6 @@ fn build_entry(
         .map(|keys| {
             build_texture_slot(
                 device,
-                allocator,
-                descriptor_pool,
                 texture_layout,
                 texture_sampler,
                 jar_assets_dir,
@@ -683,24 +554,21 @@ fn build_entry(
     KindEntry {
         models,
         vertex_buffer,
-        vertex_allocation,
         textures,
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn build_texture_slot(
-    device: &vk::Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    descriptor_pool: vk::DescriptorPool,
-    texture_layout: vk::DescriptorSetLayout,
-    texture_sampler: vk::Sampler,
+    device: &rhi::backend::Device,
+    texture_layout: rhi::backend::BindGroupLayout,
+    texture_sampler: rhi::backend::Sampler,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     keys: &[&str],
     fallback_tex_size: u32,
     pending_uploads: &mut Vec<util::PendingImageUpload>,
-    staging_to_free: &mut Vec<(vk::Buffer, Allocation)>,
+    staging_to_free: &mut Vec<rhi::backend::Buffer>,
 ) -> TextureSlot {
     let (pixels, width, height) = keys
         .iter()
@@ -713,50 +581,27 @@ fn build_texture_slot(
             fallback_texture(fallback_tex_size)
         });
 
-    let (image, view, allocation) =
-        util::create_gpu_image(device, allocator, width, height, "block_entity_texture");
-    let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, &pixels, "block_entity_texture_staging");
+    let texture = rhi::backend::Texture::new(
+        device,
+        &util::sampled_texture_desc("block_entity_texture", width, height),
+    );
+    let staging = rhi::backend::Buffer::with_data(
+        device,
+        "block_entity_texture_staging",
+        &pixels,
+        rhi::BufferUsages::COPY_SRC,
+    );
     pending_uploads.push(util::PendingImageUpload {
-        staging_buffer: staging_buf,
+        staging_buffer: staging.handle(),
         staging_size: pixels.len() as u64,
-        image,
+        image: texture.handle(),
         width,
         height,
         mip_levels: 1,
     });
-    staging_to_free.push((staging_buf, staging_alloc));
+    staging_to_free.push(staging);
 
-    let tex_alloc_info = vk::DescriptorSetAllocateInfo {
-        descriptor_pool,
-        descriptor_set_count: 1,
-        set_layouts: &texture_layout,
-        ..Default::default()
-    };
-    let mut set = vk::DescriptorSet::null();
-    device
-        .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut set))
-        .expect("failed to allocate BE texture descriptor set");
+    let set = util::create_texture_group(device, texture_layout, texture.handle(), texture_sampler);
 
-    let image_info = vk::DescriptorImageInfo {
-        sampler: texture_sampler,
-        image_view: view,
-        image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-    };
-    let tex_write = vk::WriteDescriptorSet {
-        dst_set: set,
-        dst_binding: 0,
-        descriptor_type: vk::DescriptorType::CombinedImageSampler,
-        descriptor_count: 1,
-        image_info: &image_info,
-        ..Default::default()
-    };
-    device.update_descriptor_sets(&[tex_write], &[]);
-
-    TextureSlot {
-        image,
-        view,
-        allocation,
-        set,
-    }
+    TextureSlot { texture, set }
 }
