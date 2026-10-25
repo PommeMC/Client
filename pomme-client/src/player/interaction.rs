@@ -13,7 +13,8 @@ use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerA
 use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
 use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
-use azalea_registry::builtin::ItemKind;
+use azalea_registry::HolderSet;
+use azalea_registry::builtin::{EntityKind, ItemKind};
 use glam::{DVec3, Vec3};
 use pomme_protocol::wire;
 
@@ -84,6 +85,16 @@ pub const HANDS: [InteractionHand; 2] = [InteractionHand::MainHand, InteractionH
 pub struct HandItem<'a> {
     pub stack: Option<&'a ItemStackData>,
     pub place_block: Option<BlockState>,
+    pub worn: Worn<'a>,
+}
+
+/// What a hand's swappable equippable would swap with, vanilla
+/// `Equippable.swapWithEquipmentSlot`'s worn stack.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Worn<'a> {
+    pub stack: Option<&'a ItemStackData>,
+    /// Held by a `prevent_armor_change` enchantment outside creative.
+    pub locked: bool,
 }
 
 /// Vanilla `InteractionResult` as `startUseItem` reads it; `swing` is a
@@ -805,8 +816,8 @@ impl InteractionState {
             let result = match (result, held.stack) {
                 (UseResult::Fail, _) => return false,
                 (UseResult::Pass, Some(stack)) => self.use_item(
-                    sender, audio, chunks, player_pos, eye_pos, look, hand, stack, food, creative,
-                    effects,
+                    sender, audio, chunks, player_pos, eye_pos, look, hand, stack, held.worn, food,
+                    creative, effects,
                 ),
                 (result, _) => result,
             };
@@ -895,6 +906,7 @@ impl InteractionState {
         look: LookDirection,
         hand: InteractionHand,
         stack: &ItemStackData,
+        worn: Worn,
         food: u32,
         creative: bool,
         effects: &mut BreakEffects,
@@ -928,7 +940,7 @@ impl InteractionState {
         }
 
         let Some(consumable) = stack_component::<Consumable>(stack) else {
-            return item_use_result(stack);
+            return item_use_result(stack, worn);
         };
         // Vanilla `Consumable.canConsume` → `Player.canEat`: food needs
         // hunger unless it can always be eaten; creative players (vanilla
@@ -1541,9 +1553,9 @@ fn same_item_same_components(a: Option<&ItemStackData>, b: Option<&ItemStackData
 // TODO: the conditional subclass uses (buckets, bottles, boats, spawn eggs,
 // eyes of ender, gliding fireworks, items on a stick) and the failures of
 // bows, crossbows, tridents and knowledge books.
-fn item_use_result(stack: &ItemStackData) -> UseResult {
-    if stack_component::<Equippable>(stack).is_some_and(|e| e.swappable) {
-        return UseResult::Success { swing: true };
+fn item_use_result(stack: &ItemStackData, worn: Worn) -> UseResult {
+    if let Some(equippable) = stack_component::<Equippable>(stack).filter(|e| e.swappable) {
+        return equip_swap_result(&equippable, stack, worn);
     }
     if stack_component::<BlocksAttacks>(stack).is_some()
         || stack_component::<KineticWeapon>(stack).is_some()
@@ -1561,6 +1573,25 @@ fn item_use_result(stack: &ItemStackData) -> UseResult {
         }
         _ => UseResult::Pass,
     }
+}
+
+/// Vanilla `Equippable.swapWithEquipmentSlot` for a player, whose
+/// `canUseSlot` is always true.
+fn equip_swap_result(equippable: &Equippable, stack: &ItemStackData, worn: Worn) -> UseResult {
+    // TODO: a tag of allowed entities is taken to include the player.
+    if let Some(HolderSet::Direct { contents }) = &equippable.allowed_entities
+        && !contents.contains(&EntityKind::Player)
+    {
+        return UseResult::Pass;
+    }
+    if worn.locked
+        || worn
+            .stack
+            .is_some_and(|w| w.is_same_item_and_components(stack))
+    {
+        return UseResult::Fail;
+    }
+    UseResult::Success { swing: true }
 }
 
 /// Whether right-clicking this block opens a menu we render (so the use
@@ -2177,10 +2208,11 @@ mod tests {
     }
 
     /// Vanilla `Item.use`: a plain item passes so the other hand gets a go;
-    /// throwables swing, shields and bows start a use without one.
+    /// throwables swing, shields and bows start a use without one; armor
+    /// fails when the same piece is worn or the worn one is bound.
     #[test]
     fn item_use_results_follow_item_use() {
-        let result = |kind| item_use_result(&ItemStackData::new(kind, 1));
+        let result = |kind| item_use_result(&ItemStackData::new(kind, 1), Worn::default());
         assert_eq!(result(ItemKind::Stone), UseResult::Pass);
         assert_eq!(
             result(ItemKind::Snowball),
@@ -2193,6 +2225,25 @@ mod tests {
         assert_eq!(result(ItemKind::Bow), UseResult::Success { swing: false });
         assert_eq!(
             result(ItemKind::DiamondHelmet),
+            UseResult::Success { swing: true }
+        );
+
+        let helmet = ItemStackData::new(ItemKind::IronHelmet, 1);
+        let worn = |stack, locked| Worn {
+            stack: Some(stack),
+            locked,
+        };
+        let other = ItemStackData::new(ItemKind::GoldenHelmet, 1);
+        assert_eq!(
+            item_use_result(&helmet, worn(&helmet, false)),
+            UseResult::Fail
+        );
+        assert_eq!(
+            item_use_result(&helmet, worn(&other, true)),
+            UseResult::Fail
+        );
+        assert_eq!(
+            item_use_result(&helmet, worn(&other, false)),
             UseResult::Success { swing: true }
         );
     }

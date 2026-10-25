@@ -4,7 +4,7 @@
 //! reconciles, so a wrong prediction only causes a self-correcting glitch,
 //! never item dup/loss.
 
-use azalea_inventory::components::{BundleContents, EquipmentSlot, Equippable};
+use azalea_inventory::components::{BundleContents, Equippable};
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::operations::{
     ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
@@ -160,12 +160,8 @@ impl ContainerKind {
             (Self::Player | Self::CraftingTable, 0) => false,
             (Self::Furnace | Self::Anvil, 2) => false,
             (Self::Player, 5..=8) => {
-                let want = match s {
-                    5 => EquipmentSlot::Head,
-                    6 => EquipmentSlot::Chest,
-                    7 => EquipmentSlot::Legs,
-                    _ => EquipmentSlot::Feet,
-                };
+                let want = crate::player::inventory::ARMOR_EQUIPMENT
+                    [s - crate::player::inventory::ARMOR_START];
                 item.get_component::<Equippable>().map(|c| c.slot) == Some(want)
             }
             (Self::ShulkerBox, 0..=26) => {

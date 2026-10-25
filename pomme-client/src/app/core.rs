@@ -3391,6 +3391,7 @@ impl AppCore {
             .map(Option::<&_>::cloned);
         let hand_stacks = hand_stacks.each_ref().map(Option::as_ref);
         let held_stack = hand_stacks[0];
+        let creative = crate::player::is_creative(game.player.game_mode);
         let held_item = held_stack
             .as_ref()
             .map(|data| crate::player::inventory::item_resource_name(data.kind));
@@ -3401,7 +3402,7 @@ impl AppCore {
             &game.chunk_store,
             &game.entity_store,
             &game.player.attributes,
-            crate::player::is_creative(game.player.game_mode),
+            creative,
             held_item.as_deref(),
         );
         let legacy_mining = crate::tool::legacy_mining(
@@ -3419,6 +3420,13 @@ impl AppCore {
                 game.block_registry
                     .placeable_block_for_item(&crate::player::inventory::item_resource_name(s.kind))
             }),
+            worn: worn_for(
+                stack,
+                &game.player.inventory,
+                input.selected_slot(),
+                creative,
+                &game.registries,
+            ),
         });
         let player_aabb = game.player.bounding_box();
         let mut effects = crate::player::interaction::BreakEffects {
@@ -3437,7 +3445,7 @@ impl AppCore {
             game.player.eye_pos().into(),
             game.player.look_dir,
             game.player.on_ground,
-            crate::player::is_creative(game.player.game_mode),
+            creative,
             game.player.food,
             input.selected_slot(),
             hands,
@@ -3811,6 +3819,44 @@ pub(crate) fn chunk_lod(
         1
     } else {
         2
+    }
+}
+
+/// The [`Worn`](crate::player::interaction::Worn) for `stack`, if it's a
+/// swappable equippable.
+fn worn_for<'a>(
+    stack: Option<&azalea_inventory::ItemStackData>,
+    inventory: &'a crate::player::inventory::Inventory,
+    selected: u8,
+    creative: bool,
+    registries: &azalea_core::registry_holder::RegistryHolder,
+) -> crate::player::interaction::Worn<'a> {
+    use azalea_core::registry_holder::components::PreventArmorChange;
+    use azalea_inventory::components::{Enchantments, Equippable};
+    use azalea_registry::DataRegistry;
+
+    let Some(equippable) = stack
+        .and_then(|s| s.get_component::<Equippable>())
+        .filter(|e| e.swappable)
+    else {
+        return Default::default();
+    };
+    let worn = inventory.equipped(equippable.slot, selected);
+    let locked = !creative
+        && worn
+            .and_then(|w| w.get_component::<Enchantments>())
+            .is_some_and(|e| {
+                e.levels.keys().any(|enchantment| {
+                    registries
+                        .enchantment
+                        .map
+                        .get_index(enchantment.protocol_id() as usize)
+                        .is_some_and(|(_, data)| data.get::<PreventArmorChange>().is_some())
+                })
+            });
+    crate::player::interaction::Worn {
+        stack: worn,
+        locked,
     }
 }
 

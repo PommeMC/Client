@@ -1,3 +1,4 @@
+use azalea_inventory::components::EquipmentSlot;
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::builtin::ItemKind;
 
@@ -8,6 +9,13 @@ pub const MAIN_START: usize = 9;
 const MAIN_END: usize = 36;
 pub const ARMOR_START: usize = 5;
 const ARMOR_END: usize = 9;
+/// The equipment the armor slots hold, in slot order.
+pub const ARMOR_EQUIPMENT: [EquipmentSlot; 4] = [
+    EquipmentSlot::Head,
+    EquipmentSlot::Chest,
+    EquipmentSlot::Legs,
+    EquipmentSlot::Feet,
+];
 pub const CRAFT_INPUT_START: usize = 1;
 pub const CRAFT_OUTPUT: usize = 0;
 pub const OFFHAND: usize = 45;
@@ -93,6 +101,21 @@ impl Inventory {
     /// The non-empty main-hand then offhand stacks.
     pub fn hand_stacks(&self, selected: u8) -> [Option<&ItemStackData>; 2] {
         [self.held_stack(selected), non_empty(self.offhand())]
+    }
+
+    /// The non-empty stack the player has in `slot`; a player's body and
+    /// saddle slots are always empty.
+    pub fn equipped(&self, slot: EquipmentSlot, selected: u8) -> Option<&ItemStackData> {
+        let [main, off] = self.hand_stacks(selected);
+        match slot {
+            EquipmentSlot::Mainhand => main,
+            EquipmentSlot::Offhand => off,
+            EquipmentSlot::Body | EquipmentSlot::Saddle => None,
+            armor => ARMOR_EQUIPMENT
+                .iter()
+                .position(|&s| s == armor)
+                .and_then(|i| non_empty(&self.armor_slots()[i])),
+        }
     }
 
     /// Remove one item (or the whole stack) from the selected hotbar slot,
