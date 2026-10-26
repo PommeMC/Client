@@ -942,9 +942,16 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                // In GLFW's units, which vanilla reads: lines, with precise
+                // (trackpad) deltas at a tenth of a pixel on macOS and Wayland.
+                // TODO: vanilla then applies `mouseWheelSensitivity` and
+                // `discreteMouseScroll` (MouseHandler.onScroll); pomme has
+                // neither option, so these act as their defaults (1.0, off).
                 let (scroll_x, scroll_y) = match delta {
                     winit::event::MouseScrollDelta::LineDelta(x, y) => (x, y),
-                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => {
+                        (p.x as f32 / 10.0, p.y as f32 / 10.0)
+                    }
                 };
                 let scroll = scroll_y;
                 match self.phase.get_mut() {

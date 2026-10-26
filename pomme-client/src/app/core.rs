@@ -2408,7 +2408,9 @@ impl AppCore {
                         match game_mode {
                             1 => {
                                 game.inventory_open = false;
-                                game.creative_inventory_open = true;
+                                if !game.creative_inventory_open {
+                                    game.open_creative_inventory();
+                                }
                             }
                             3 => {
                                 game.inventory_open = false;

@@ -119,7 +119,18 @@ mouse_down = "left"                           # or mouse_up; left, right, middle
 
 [[step]]
 hover = { slot = 36 }                         # creative item tab: hotbar slot
-                                              # 36-44, or { catalog = 0 }
+                                              # 36-44, or { catalog = 0 };
+                                              # offset = [x, y] GUI px from
+                                              # the cell's centre
+[[step]]
+cursor = [2, 2]                               # cursor to a point, GUI px
+
+[[step]]
+scroll = -2                                   # mouse wheel over the open
+                                              # screen, lines (up is positive)
+[[step]]
+text = "stone"                                # types into the focused field
+
 [[step]]
 press = { action = "key.drop", ctrl = true }  # a key binding's default key, or
                                               # key = "key.keyboard.j" for a
@@ -153,7 +164,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | A chat line | `chat` (text it contains) |
 | A block | `block` (state name, e.g. `air`), `at`, optional `block_entity` (type) |
 | The local player | `player = { ... }` with any of `health`, `food`, `level`, `game_mode`, `effect`, `no_effect`, `max_health`, `raining`, `hand`, `dimension`, `day_time`, `position` (within 0.01), `y_rot` (within 0.01), `spectating` (the kind of entity the camera follows, empty for none) and `post_effect` (the spectator view effect drawn: `creeper`, `spider`, `invert`, or empty) |
-| The open menu | `menu` (a container's menu type, e.g. `generic_9x3`, or `inventory`, `creative`, `pause`, `none`), optional `title` |
+| The open menu | `menu` (a container's menu type, e.g. `generic_9x3`, or `inventory`, `creative`, `pause`, `none`), optional `title`; on the creative screen also `tab` (its vanilla id, e.g. `building_blocks`), `row` (the first catalog row shown) and `search` |
 | The HUD text | `hud = { ... }` with any of `title`, `subtitle` and `sidebar_title` (`""` when none is shown), `boss_bars` (every name, top to bottom), `sidebar` (every row as `"name number"`, top to bottom) and `tab_list` (every listed player as `{ name, game_mode? }`, in tab order) |
 | A played sound | `sound` (event name, e.g. `block.note_block.harp`), among the last 64 played |
 
@@ -179,4 +190,4 @@ echo '{"cmd":"inventory"}' | nc 127.0.0.1 25599
 The commands are `status`, `chat` (`text`), `open_inventory`, `close_menu`,
 `click` (`slot`, `op`), `creative_set_slot` (`slot`, `from`), `inventory`,
 `entities`, `advancements`, `player`, `hud`, `sounds`, `block` (`at`), `look_at` (`at`),
-`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `hover` (`slot` 36-44 or `catalog` cell, in a creative item tab), `chat_log` and `screenshot` (`path`).
+`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `hover` (`slot` 36-44 or `catalog` cell, in a creative item tab; optional `offset`), `cursor` (`at`, GUI px), `scroll` (`y`, wheel lines), `text` (`text`), `chat_log` and `screenshot` (`path`).

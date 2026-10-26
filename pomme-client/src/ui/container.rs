@@ -464,6 +464,9 @@ pub fn resolve_gesture(
 
     if outside {
         // Outside click: drop the cursor stack, else request a close.
+        // TODO: vanilla keeps the screen open and sends a THROW click at
+        // slot -999 even with an empty cursor (`AbstractContainerScreen.
+        // mouseClicked`); changing it needs a Peel capture.
         if carrying {
             ops.push(pickup(&click_kind, None));
             return (ops, false);

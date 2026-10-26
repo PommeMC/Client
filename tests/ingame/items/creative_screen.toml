@@ -1,0 +1,126 @@
+# The creative screen's clicks, wheel and search follow vanilla: an empty
+# click outside keeps it open, the wheel scrolls from anywhere, the gap between
+# slots belongs to a slot, typing scrolls back to the top, and reopening keeps
+# the tab with the search and scroll cleared.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { menu = "creative", tab = "building_blocks", row = 0, search = "" }
+
+# An outside click with nothing carried does nothing.
+[[step]]
+cursor = [2, 2]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+expect = { menu = "creative" }
+
+# The wheel scrolls with the cursor outside the panel, a row per line.
+[[step]]
+scroll = -2
+
+[[step]]
+expect = { menu = "creative", row = 2 }
+
+[[step]]
+scroll = 2
+
+[[step]]
+expect = { menu = "creative", row = 0 }
+
+# Half a GUI pixel into the gap right of the first cell picks that cell.
+[[step]]
+hover = { catalog = 0, offset = [7.5, 0] }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+hover = { slot = 36 }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+expect = { slot = 36, item = "oak_log" }
+
+# Typing into the search scrolls back to the top.
+[[step]]
+press = { action = "key.chat" }
+
+[[step]]
+expect = { menu = "creative", tab = "search" }
+
+[[step]]
+scroll = -3
+
+[[step]]
+expect = { menu = "creative", row = 3 }
+
+[[step]]
+text = "stone"
+
+[[step]]
+expect = { menu = "creative", row = 0, search = "stone" }
+
+# Reopening keeps the tab and clears the search and scroll.
+[[step]]
+scroll = -1
+
+[[step]]
+close_menu = true
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { menu = "creative", tab = "search", row = 0, search = "" }
+
+[[step]]
+close_menu = true
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/gamemode survival"
