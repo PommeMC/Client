@@ -277,8 +277,9 @@
 //! - `player_chat`/`disguised_chat` carry a direct chat-type registry id where
 //!   1.20.5 put a holder (bumped by one on the way through)
 //! - `server_data` ends in an `enforcesSecureChat` bool 1.20.5 dropped; it is
-//!   stripped. TODO: it's this era's only copy of the flag (game `login` lacks
-//!   it and gets false), so these servers read as not enforcing secure chat
+//!   stripped. It's this era's only copy of the flag (game `login` lacks it and
+//!   gets false), so the game loop applies it from there, as 1.20.4's
+//!   `handleServerData` does; the server sends it before any player info
 //!
 //! 1.20.2 -> 26.2 wire changes (all of 1.20.4's plus; the pre-1.20.3 era):
 //! - text components are length-prefixed JSON strings, not NBT
@@ -286,7 +287,7 @@
 //!   consumed component field via `json_to_nbt` (mixed arrays normalize to
 //!   compound lists) and the entity-data component serializers (5/6) transcode
 //!   in the metadata walk — `server_data` and `map_item_data` drop instead
-//!   (pomme never reads them)
+//!   (pomme never reads them), `server_data` once its secure-chat flag is read
 //! - `set_score` carries a method byte (its REMOVE arm becomes the
 //!   `reset_score` packet 1.20.3 added) and no display/numberFormat;
 //!   `set_objective` ends at the render type
@@ -974,6 +975,19 @@ impl Translation {
     /// Whether configuration frames need translation (767 and older).
     pub fn translates_config(&self) -> bool {
         self.config_ids.is_some()
+    }
+
+    /// The `enforcesSecureChat` flag in a wire `server_data` frame from before
+    /// 1.20.5, its only copy then (see [`read_server_data_765`]).
+    pub fn server_data_secure_chat(&self, raw: &[u8]) -> Option<bool> {
+        let ids = self.game_ids.as_ref()?;
+        let v765 = ids.v765.as_ref()?;
+        let mut id_end = 0;
+        let wire_id = wire::read_varint(raw, &mut id_end)?;
+        if ids.inbound.get(wire_id as usize).copied().flatten()? != v765.server_data_id {
+            return None;
+        }
+        read_server_data_765(&raw[id_end..], ids.v764.is_some()).map(|(_, flag)| flag)
     }
 
     /// Whether the wire version has no configuration phase at all, so the join
@@ -2634,21 +2648,30 @@ fn translate_disguised_chat_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 
 /// Rewrites `server_data` for 1.20.4: the motd and optional icon, without
 /// the trailing `enforcesSecureChat` bool.
-/// TODO: carry the bool into the session's secure-chat setting; until then
-/// chat from a player without a chat session shows as unsigned rather than
-/// being rejected. 1.20.1 and 1.20.2 drop the packet, so they lose it too.
 fn translate_server_data_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
-    let mut cur = Cursor::new(payload);
-    skip_nbt(&mut cur)?; // motd
-    skip_optional(&mut cur, skip_utf)?; // icon bytes
-    let end = cur.position() as usize;
-    if !matches!(payload[end..], [0 | 1]) {
-        return None;
-    }
+    let (end, _) = read_server_data_765(payload, false)?;
     let mut out = Vec::with_capacity(end + 5);
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[..end]);
     Some(out)
+}
+
+/// A pre-1.20.5 `server_data` payload: where its trailing `enforcesSecureChat`
+/// bool starts, and the bool. The motd is JSON text before 1.20.3
+/// (`json_motd`), NBT after; the optional icon bytes follow it.
+fn read_server_data_765(payload: &[u8], json_motd: bool) -> Option<(usize, bool)> {
+    let mut cur = Cursor::new(payload);
+    if json_motd {
+        skip_utf(&mut cur)?;
+    } else {
+        skip_nbt(&mut cur)?;
+    }
+    skip_optional(&mut cur, skip_utf)?;
+    let end = cur.position() as usize;
+    match payload[end..] {
+        [flag @ (0 | 1)] => Some((end, flag == 1)),
+        _ => None,
+    }
 }
 
 /// Rewrites `respawn` for 1.20.4: the spawn info's dimension type is a

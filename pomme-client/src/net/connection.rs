@@ -1012,6 +1012,9 @@ async fn game_loop(
             }
         };
         super::capture::record(Phase::Game, &raw);
+        if let Some(flag) = translation.and_then(|t| t.server_data_secure_chat(&raw)) {
+            super::lifecycle_wire::send_secure_chat(flag, event_tx);
+        }
         let raw = match translation {
             Some(t) => match t.translate_game_frame(raw) {
                 Some(raw) => raw,
