@@ -1,0 +1,37 @@
+# An invisible player casts no shadow, in third person too.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/tp @s ~ ~ ~ 0 60"
+
+[[step]]
+press = { action = "key.togglePerspective" }
+
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "visible"
+
+[[step]]
+chat = "/effect give @s minecraft:invisibility infinite 0 true"
+
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "invisible"
+
+[[step]]
+chat = "/effect clear @s"
+
+[[step]]
+press = { action = "key.togglePerspective" }
+
+[[step]]
+press = { action = "key.togglePerspective" }

@@ -4003,7 +4003,8 @@ pub fn update_game(
             partial_tick,
         );
 
-        let (radius, strength) = crate::entity::shadow::of_player(&game.player.attributes);
+        let (radius, strength) =
+            crate::entity::shadow::of_player(&game.player.attributes, game.player.invisible);
         entity_renders.push(EntityRenderInfo {
             position: interp_pos,
             head_y_rot_deg: interp_y_rot_deg,

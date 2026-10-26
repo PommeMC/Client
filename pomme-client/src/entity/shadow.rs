@@ -18,29 +18,35 @@ pub struct ShadowInputs {
     pub puff_state: u8,
 }
 
-/// A tracked mob's or player's shadow; none while it's invisible.
+/// A tracked mob's or player's shadow.
 pub fn of_living(entity: &LivingEntity) -> (f32, f32) {
-    if entity.is_invisible {
-        return (0.0, 0.0);
-    }
     let inputs = ShadowInputs {
         scale: scale(&entity.attributes),
         is_baby: entity.is_baby,
         slime_size: entity.slime_size,
         puff_state: entity.puff_state,
     };
-    shadow(entity.entity_type, &inputs)
+    unless_invisible(entity.is_invisible, entity.entity_type, &inputs)
 }
 
 /// The local player's shadow, from its own attributes.
-pub fn of_player(attributes: &AttributeMap) -> (f32, f32) {
+pub fn of_player(attributes: &AttributeMap, invisible: bool) -> (f32, f32) {
     let inputs = ShadowInputs {
         scale: scale(attributes),
         is_baby: false,
         slime_size: 0,
         puff_state: 0,
     };
-    shadow(EntityKind::Player, &inputs)
+    unless_invisible(invisible, EntityKind::Player, &inputs)
+}
+
+/// Vanilla `extractShadow`: no shadow while the entity is invisible.
+fn unless_invisible(invisible: bool, kind: EntityKind, inputs: &ShadowInputs) -> (f32, f32) {
+    if invisible {
+        (0.0, 0.0)
+    } else {
+        shadow(kind, inputs)
+    }
 }
 
 /// Vanilla `getScale`: the `scale` attribute.
