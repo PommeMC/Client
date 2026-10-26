@@ -68,6 +68,12 @@ impl InboundChat {
         }
     }
 
+    /// The state for wire `protocol`, which checks `globalIndex` only where
+    /// the server sends it.
+    pub fn for_protocol(protocol: i32) -> Self {
+        Self::new(protocol >= 770)
+    }
+
     pub fn reset(&mut self) {
         *self = Self::new(self.validate_global_index);
     }

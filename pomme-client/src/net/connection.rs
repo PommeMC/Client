@@ -951,7 +951,8 @@ async fn game_loop(
     );
 
     let translation = super::translate::active();
-    let mut inbound_chat = super::chat::InboundChat::new(crate::version::session_protocol() >= 770);
+    let mut inbound_chat =
+        super::chat::InboundChat::for_protocol(crate::version::session_protocol());
     let mut chat_tick = tokio::time::interval(std::time::Duration::from_millis(50));
     chat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     if deferred_login.is_some() {

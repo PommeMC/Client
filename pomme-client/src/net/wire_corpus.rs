@@ -176,7 +176,7 @@ impl Session {
             protocol,
             registries: RegistryHolder::default(),
             known_packs: false,
-            inbound_chat: InboundChat::new(protocol >= 770),
+            inbound_chat: InboundChat::for_protocol(protocol),
             config_less_login: true,
             sender: PacketSender::new(out_tx),
             batches: ChunkBatchSizeCalculator::default(),

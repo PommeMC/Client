@@ -168,7 +168,8 @@ fn run(
     for script in &failed {
         println!("  FAILED {script}");
     }
-    Ok(failed.is_empty())
+    // A capture records the server's frames whether or not the script passed.
+    Ok(failed.is_empty() || capture)
 }
 
 /// Runs `scripts` against one version's servers; the failed ones, as

@@ -61,8 +61,7 @@ wire-fixtures +versions: openal
     #!/usr/bin/env bash
     set -euo pipefail
     args=(); for v in {{ versions }}; do args+=(--version "$v"); done
-    # A failing script still leaves its fixture.
-    cargo run -p ingame-test -- --capture "${args[@]}" world/join || true
+    cargo run -p ingame-test -- --capture "${args[@]}" world/join
 
 # Just the local test server, for driving a client over the harness socket.
 ingame-server:
