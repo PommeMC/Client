@@ -533,7 +533,7 @@ impl Server {
         let port = free_port()?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         prepare_server(dir, port)?;
-        let jar = jar.canonicalize().map_err(|e| e.to_string())?;
+        let jar = std::path::absolute(jar).map_err(|e| e.to_string())?;
         let mut child = Command::new(java)
             .args(["-Xmx2G", "-jar"])
             .arg(&jar)
