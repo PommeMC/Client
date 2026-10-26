@@ -142,6 +142,9 @@
 //! 1.21.4 -> 26.2 wire changes (all of 1.21.5's plus):
 //! - chunk heightmaps were a network-NBT compound of named long arrays; 1.21.5
 //!   packed them into a (type id, long array) list
+//! - each chunk section's block and biome `PalettedContainer` prefixed its
+//!   packed longs with a varint length, which 1.21.5 dropped (the bits imply
+//!   it); it is checked and stripped
 //! - `player_chat` gained a leading `globalIndex` varint; zero is synthesized
 //! - serverbound `chat`'s and `chat_command_signed`'s last-seen update gained a
 //!   trailing checksum byte in 1.21.5; it is stripped
@@ -301,6 +304,9 @@
 //!   repeats the yaw, and the data and velocity fields are zero)
 //! - `forget_level_chunk` sent two ints where 1.20.2 packs a `ChunkPos` long,
 //!   whose big-endian halves put z first
+//! - the chunk section buffer was allocated by sizing each long array's length
+//!   varint for its entry count, not its long count, so it ends in zero padding
+//!   (one byte per single-value block container), which is dropped
 //! - serverbound login `hello` wrapped its profile id in an optional, which
 //!   1.20.2 made mandatory
 //! - `update_enabled_features` is a game packet here (1.20.2 moved it into
@@ -3895,22 +3901,19 @@ fn skip_optional(
 /// 26.2 added after each section's `nonEmptyBlockCount` (zero: pomme
 /// doesn't consume it and the client recounts on block changes). The
 /// heightmaps before the section buffer are copied verbatim — or, with
-/// `nbt_heightmaps` (pre-1.21.5), converted from the network-NBT compound
-/// to the packed list. The block entities after it are copied verbatim unless
-/// the wire version names its NBT roots, in which case each tag is rewritten;
-/// the light data that follows is always verbatim.
-fn translate_chunk(
-    id: u32,
-    payload: &[u8],
-    nbt_heightmaps: bool,
-    named_nbt: bool,
-) -> Option<Vec<u8>> {
+/// `v769` (pre-1.21.5), converted from the network-NBT compound to the
+/// packed list, and each section's packed longs lose their length prefix.
+/// When the wire version names its NBT roots (1.20.1), the buffer's end
+/// padding is dropped and each block entity tag after it is rewritten;
+/// otherwise the block entities are copied verbatim. The light data that
+/// follows is always verbatim.
+fn translate_chunk(id: u32, payload: &[u8], v769: bool, named_nbt: bool) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 8)?; // chunk x/z ints
 
     let mut head = Vec::with_capacity(64);
     head.extend_from_slice(&payload[..8]);
-    if nbt_heightmaps {
+    if v769 {
         convert_nbt_heightmaps(&mut cur, &mut head, named_nbt)?;
     } else {
         let maps_at = cur.position() as usize;
@@ -3927,15 +3930,23 @@ fn translate_chunk(
     let mut buffer = Vec::with_capacity(buffer_len + 3 * 26 * 2);
     let mut bcur = Cursor::new(&payload[..buffer_end]);
     bcur.set_position(buffer_at as u64);
-    while (bcur.position() as usize) < buffer_end {
+    // 1.20.1's padding: the bytes its length varints were oversized by.
+    let mut padding = 0;
+    while (bcur.position() as usize) + padding < buffer_end {
         let section_at = bcur.position() as usize;
         advance(&mut bcur, 2)?; // nonEmptyBlockCount
         buffer.extend_from_slice(&payload[section_at..bcur.position() as usize]);
         buffer.extend_from_slice(&[0, 0]); // fluidCount, new in 26.2
-        let rest_at = bcur.position() as usize;
-        skip_paletted_container(&mut bcur, 4096, 8)?;
-        skip_paletted_container(&mut bcur, 64, 3)?;
-        buffer.extend_from_slice(&payload[rest_at..bcur.position() as usize]);
+        for (entries, max_indirect_bits) in [(4096, 8), (64, 3)] {
+            let longs =
+                copy_paletted_container(&mut bcur, &mut buffer, entries, max_indirect_bits, v769)?;
+            if named_nbt {
+                padding += varint_len(entries) - varint_len(longs);
+            }
+        }
+    }
+    if bcur.position() as usize + padding != buffer_end {
+        return None;
     }
 
     let mut out = Vec::with_capacity(head.len() + buffer.len() + payload.len() - buffer_end + 8);
@@ -4103,14 +4114,20 @@ fn convert_nbt_heightmaps(
     Some(())
 }
 
-/// Advances past one `PalettedContainer`: bits-per-entry byte, palette
-/// (single value: one id; indirect while `bits <= max_indirect_bits`:
-/// id list; global: nothing), then the unprefixed packed-long array.
-fn skip_paletted_container(
+/// Copies one `PalettedContainer`: bits-per-entry byte, palette (single
+/// value: one id; indirect while `bits <= max_indirect_bits`: id list;
+/// global: nothing), then the packed-long array. With `length_prefixed`
+/// (pre-1.21.5 `writeLongArray`) the array's varint length is checked
+/// against the one the bits imply and dropped, as 1.21.5's
+/// `writeFixedSizeLongArray` sends none. Returns the array's long count.
+fn copy_paletted_container(
     cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
     entries: usize,
     max_indirect_bits: u8,
-) -> Option<()> {
+    length_prefixed: bool,
+) -> Option<usize> {
+    let at = cur.position() as usize;
     let bits = read_u8(cur)?;
     match bits {
         0 => {
@@ -4124,12 +4141,23 @@ fn skip_paletted_container(
         }
         _ => {}
     }
-    if bits > 0 {
-        let values_per_long = 64 / bits as usize;
-        let longs = entries.div_ceil(values_per_long);
-        advance(cur, longs.checked_mul(8)?)?;
+    out.extend_from_slice(&cur.get_ref()[at..cur.position() as usize]);
+    let longs = match bits {
+        0 => 0,
+        _ => entries.div_ceil(64 / bits as usize),
+    };
+    if length_prefixed && var_u32(cur)? as usize != longs {
+        return None;
     }
-    Some(())
+    let longs_at = cur.position() as usize;
+    advance(cur, longs.checked_mul(8)?)?;
+    out.extend_from_slice(&cur.get_ref()[longs_at..cur.position() as usize]);
+    Some(longs)
+}
+
+/// The bytes `value` takes as a varint.
+fn varint_len(value: usize) -> usize {
+    (usize::BITS - value.max(1).leading_zeros()).div_ceil(7) as usize
 }
 
 /// Rewrites `set_time` from `gameTime, dayTime, tickDayTime` to 26.2's
