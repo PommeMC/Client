@@ -276,6 +276,8 @@
 //!   serializer ids from `particles` (18) up shift
 //! - `player_chat`/`disguised_chat` carry a direct chat-type registry id where
 //!   1.20.5 put a holder (bumped by one on the way through)
+//! - `server_data` ends in an `enforcesSecureChat` bool 1.20.5 dropped; it is
+//!   stripped
 //!
 //! 1.20.2 -> 26.2 wire changes (all of 1.20.4's plus; the pre-1.20.3 era):
 //! - text components are length-prefixed JSON strings, not NBT
@@ -592,6 +594,7 @@ struct Ids765 {
     /// 1.20.5 put a holder (id + 1).
     player_chat_id: u32,
     disguised_chat_id: u32,
+    server_data_id: u32,
     /// The wire version's registry names, for the attribute-key lookup.
     registry: &'static RegistryTable,
     /// Serverbound: native + wire ids for the item-form rewrites.
@@ -614,6 +617,7 @@ impl Ids765 {
             i if i == self.update_mob_effect_id => translate_update_mob_effect_765,
             i if i == self.level_particles_id => translate_level_particles_765,
             i if i == self.respawn_id => translate_respawn_765,
+            i if i == self.server_data_id => translate_server_data_765,
             _ => return None,
         })
     }
@@ -1698,6 +1702,7 @@ impl GameIds {
                 update_advancements_id: id(Clientbound, "update_advancements"),
                 player_chat_id: id(Clientbound, "player_chat"),
                 disguised_chat_id: id(Clientbound, "disguised_chat"),
+                server_data_id: id(Clientbound, "server_data"),
                 registry: RegistryTable::for_protocol(protocol).expect("embedded registry table"),
                 container_click_id: id(Serverbound, "container_click"),
                 container_click_old_id: required_id(
@@ -2624,6 +2629,22 @@ fn translate_disguised_chat_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[..cur.position() as usize]);
     chat_type_holder(&mut cur, &mut out, payload).map(|()| out)
+}
+
+/// Rewrites `server_data` for 1.20.4: the motd and optional icon, without
+/// the trailing `enforcesSecureChat` bool.
+fn translate_server_data_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    skip_nbt(&mut cur)?; // motd
+    skip_optional(&mut cur, skip_utf)?; // icon bytes
+    let end = cur.position() as usize;
+    if !matches!(payload[end..], [0 | 1]) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(end + 5);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..end]);
+    Some(out)
 }
 
 /// Rewrites `respawn` for 1.20.4: the spawn info's dimension type is a

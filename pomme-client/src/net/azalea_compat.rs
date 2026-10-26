@@ -4877,6 +4877,33 @@ fn translate_commands_777() {
     assert_eq!(p.entries.len(), 5);
 }
 
+/// 1.20.4's `server_data` loses its trailing `enforcesSecureChat` bool; a
+/// frame that doesn't end in exactly that bool drops.
+#[test]
+fn translate_server_data_765() {
+    let frame = |id, tail: &[u8]| {
+        let mut out = Vec::new();
+        wire::write_varint(&mut out, id);
+        out.extend_from_slice(&[8, 0, 2, b'h', b'i']); // motd: a string tag
+        out.push(0); // no icon
+        out.extend_from_slice(tail);
+        out
+    };
+    let old_id = old_id(765, Direction::Clientbound, "server_data");
+
+    let translated = translation_for(765)
+        .translate_game_frame(frame(old_id, &[1]).into_boxed_slice())
+        .unwrap();
+    let native = table_id(Phase::Game, Direction::Clientbound, "server_data");
+    assert_eq!(&translated[..], &frame(native, &[])[..]);
+    let ClientboundGamePacket::ServerData(_) = translate_and_decode(765, frame(old_id, &[1]))
+    else {
+        panic!("wrong packet");
+    };
+    let stray = frame(old_id, &[1, 7]).into_boxed_slice();
+    assert!(translation_for(765).translate_game_frame(stray).is_none());
+}
+
 /// 1.20.1's parser ids sit where 26.2 had since inserted parsers, and its
 /// `color` is 26.2's `team_color`; both remap by name, properties intact.
 #[test]

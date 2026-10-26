@@ -28,8 +28,6 @@ use crate::world::block::BlockStateTable;
 /// drops, and open bugs marked `TODO:`. A gap must still fail on every version
 /// it names, so a fix forces its entry out.
 const KNOWN_GAPS: &[Gap] = &[
-    // TODO: 1.20.4's trailing `enforcesSecureChat` bool isn't stripped.
-    gap("1.20.4", "1.20.4", "server_data", "trailing bool"),
     // TODO: one 26.3 registry element doesn't decode; `update_recipes`
     // is dropped (see `translate_update_recipes_777`).
     gap("26.3", "26.3", "registry_data", "an element"),
