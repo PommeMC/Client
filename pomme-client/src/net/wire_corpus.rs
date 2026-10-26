@@ -28,15 +28,6 @@ use crate::world::block::BlockStateTable;
 /// drops, and open bugs marked `TODO:`. A gap must still fail on every version
 /// it names, so a fix forces its entry out.
 const KNOWN_GAPS: &[Gap] = &[
-    // TODO: 1.20.1 pads the section buffer and 1.21.4 and older prefix each
-    // long array with its length (#782); 1.21.5 pads it as if the length were
-    // still written.
-    gap(
-        "1.20.1",
-        "1.21.5",
-        "level_chunk_with_light",
-        "section framing",
-    ),
     // TODO: parser ids pass through unremapped, where 26.2 inserted parsers.
     gap("1.20.1", "1.21.5", "commands", "parser ids"),
     // TODO: 1.20.4's trailing `enforcesSecureChat` bool isn't stripped.
