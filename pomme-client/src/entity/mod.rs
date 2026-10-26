@@ -24,6 +24,15 @@ use crate::renderer::pipelines::entity_renderer::{
 use crate::world::block::{BlockStateTable, FluidKind};
 use crate::world::chunk::ChunkStore;
 
+/// `Entity.FLAG_GLOWING` (bit 6) of the shared entity flags byte (index 0).
+const SHARED_FLAG_GLOWING: u8 = 0x40;
+
+/// Whether a shared entity flags byte is glowing: the server's
+/// `isCurrentlyGlowing`, from the `Glowing` tag or the glowing effect.
+pub fn shared_flags_glowing(flags: u8) -> bool {
+    flags & SHARED_FLAG_GLOWING != 0
+}
+
 /// A scalar synched-entity-data value, forwarded raw from the wire;
 /// [`EntityStore::apply_entity_data`] gives it meaning per (kind, index).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -177,6 +186,7 @@ pub struct LivingEntity {
     pub is_tame: bool,
     pub is_sprinting: bool,
     pub is_invisible: bool,
+    pub is_glowing: bool,
     /// Dye id, wolf/cat collars (vanilla default red).
     pub collar_color: u8,
     pub is_interested: bool,
@@ -400,6 +410,7 @@ impl LivingEntity {
             is_tame: false,
             is_sprinting: false,
             is_invisible: false,
+            is_glowing: false,
             collar_color: 14,
             is_interested: false,
             anger_end_time: -1,
@@ -856,6 +867,7 @@ pub struct ItemEntity {
     pub stack: Option<azalea_inventory::ItemStackData>,
     pub age: u32,
     pub bob_offset: f32,
+    pub is_glowing: bool,
     velocity: DVec3,
     on_ground: bool,
     /// Server-authoritative position, tracked from move/teleport packets.
@@ -921,6 +933,7 @@ impl ItemEntityStore {
                 stack: None,
                 age: 0,
                 bob_offset,
+                is_glowing: false,
                 velocity,
                 on_ground: false,
                 server_pos: position,
@@ -943,6 +956,13 @@ impl ItemEntityStore {
             entity.damage = damage;
             entity.count = count;
             entity.stack = Some(stack);
+        }
+    }
+
+    /// The shared entity flags byte (index 0) of item `id`.
+    pub fn set_shared_flags(&mut self, id: i32, flags: u8) {
+        if let Some(entity) = self.items.get_mut(&id) {
+            entity.is_glowing = shared_flags_glowing(flags);
         }
     }
 
@@ -1234,6 +1254,7 @@ impl EntityStore {
             (_, 0, Byte(f)) => {
                 entity.is_sprinting = f & 0x08 != 0;
                 entity.is_invisible = f & 0x20 != 0;
+                entity.is_glowing = shared_flags_glowing(f);
             }
             (_, 9, Float(h)) => entity.health = h,
             // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
@@ -1893,6 +1914,22 @@ mod tests {
             !within_simulation_distance(Position::new(16.0 * 11.0, 64.0, 0.0), player, 10,),
             "chunk 11 must be outside a simulation distance of 10"
         );
+    }
+
+    #[test]
+    fn shared_flags_carry_glowing_for_mobs_and_items() {
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::Pig, Position::default());
+        store.apply_entity_data(1, 0, MetaValue::Byte(SHARED_FLAG_GLOWING | 0x20));
+        assert!(store.living[&1].is_glowing);
+        assert!(store.living[&1].is_invisible);
+        store.apply_entity_data(1, 0, MetaValue::Byte(0));
+        assert!(!store.living[&1].is_glowing);
+
+        let mut items = ItemEntityStore::new();
+        items.spawn_item(2, Position::default(), DVec3::ZERO);
+        items.set_shared_flags(2, SHARED_FLAG_GLOWING);
+        assert!(items.items[&2].is_glowing);
     }
 
     #[test]

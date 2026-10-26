@@ -2678,13 +2678,16 @@ impl AppCore {
                             game.silent_entities.remove(&id);
                         }
                     }
-                    if id == game.player.entity_id
-                        && let crate::entity::MetaValue::Byte(flags) = value
-                    {
-                        match index {
-                            0 => game.player.sync_shared_flags(flags),
-                            8 => game.interaction.sync_using_item_flag(flags & 1 != 0),
-                            _ => {}
+                    if let crate::entity::MetaValue::Byte(flags) = value {
+                        if id == game.player.entity_id {
+                            match index {
+                                0 => game.player.sync_shared_flags(flags),
+                                8 => game.interaction.sync_using_item_flag(flags & 1 != 0),
+                                _ => {}
+                            }
+                        }
+                        if index == 0 {
+                            game.item_entity_store.set_shared_flags(id, flags);
                         }
                     }
                     game.entity_store.apply_entity_data(id, index, value);

@@ -509,6 +509,14 @@ actions! {
         listed: true,
         defaults: [Mouse(MouseButton::Middle)],
     },
+    SpectatorOutlines => {
+        id: "key.spectatorOutlines",
+        translation_id: Some(StringId::new("key.spectatorOutlines")),
+        fallback: "Highlight Players",
+        category: Spectator,
+        listed: true,
+        defaults: [],
+    },
     SpectatorHotbar => {
         id: "key.spectatorHotbar",
         translation_id: Some(StringId::new("key.spectatorHotbar")),

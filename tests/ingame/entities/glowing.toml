@@ -1,0 +1,26 @@
+# The glowing effect sets the shared glowing flag, and clearing it clears the
+# flag again.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/summon minecraft:pig 30.5 -60 -29.5 {NoAI:1b,Tags:[\"glow\"]}"
+
+[[step]]
+expect = { entity = "pig", at = [30.5, -60, -29.5], glowing = false }
+
+[[step]]
+chat = "/effect give @e[tag=glow] minecraft:glowing infinite 0 true"
+
+[[step]]
+expect = { entity = "pig", at = [30.5, -60, -29.5], glowing = true }
+
+[[step]]
+chat = "/effect clear @e[tag=glow]"
+
+[[step]]
+expect = { entity = "pig", at = [30.5, -60, -29.5], glowing = false }
+
+[[step]]
+chat = "/kill @e[tag=glow]"

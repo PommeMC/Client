@@ -258,6 +258,7 @@ pub struct LivingInfo {
     /// The variant's asset name, for the kinds with a texture pool.
     pub variant_name: Option<&'static str>,
     pub baby: bool,
+    pub glowing: bool,
     pub crouching: bool,
     pub sleeping: bool,
     pub custom_name: Option<String>,
@@ -318,6 +319,7 @@ pub fn entities(game: &GameState) -> EntitiesInfo {
                 variant: entity.variant,
                 variant_name: order.get(entity.variant as usize).copied(),
                 baby: entity.is_baby,
+                glowing: entity.is_glowing,
                 crouching: entity.is_crouching,
                 sleeping: entity.sleeping_pos.is_some(),
                 custom_name: entity.custom_name.clone(),

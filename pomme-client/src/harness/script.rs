@@ -93,6 +93,7 @@ struct EntityExpect {
     variant: Option<String>,
     name: Option<String>,
     baby: Option<bool>,
+    glowing: Option<bool>,
     /// A villager's type, e.g. `desert`.
     villager_type: Option<String>,
     profession: Option<String>,
@@ -473,6 +474,7 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
             variant,
             name,
             baby,
+            glowing,
             villager_type,
             profession,
         }) => {
@@ -495,6 +497,7 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                             .as_deref()
                             .is_none_or(|n| e.custom_name.as_deref() == Some(n))
                         && baby.is_none_or(|b| e.baby == b)
+                        && glowing.is_none_or(|g| e.glowing == g)
                         && villager(e, villager_type, |v| &v.kind)
                         && villager(e, profession, |v| &v.profession)
                 }),
