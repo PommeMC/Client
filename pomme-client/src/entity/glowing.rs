@@ -11,20 +11,18 @@ pub fn appears_glowing(glowing: bool, is_player: bool, spectator_outlines: bool)
     glowing || spectator_outlines && is_player
 }
 
-/// Vanilla `Entity.getTeamColor`: the colour of the team the entity's
-/// scoreboard name belongs to (a player's name, anyone else's UUID string,
-/// `getScoreboardName`), white without one.
-pub fn outline_color(
-    scoreboard: &Scoreboard,
-    tab_list: &TabList,
-    uuid: Uuid,
-    player_uuid: Option<Uuid>,
-) -> u32 {
-    let name = match player_uuid.and_then(|id| tab_list.players.get(&id)) {
+/// Vanilla `getScoreboardName`: a player's name, anyone else's UUID string.
+pub fn scoreboard_name(tab_list: &TabList, uuid: Uuid, player_uuid: Option<Uuid>) -> String {
+    match player_uuid.and_then(|id| tab_list.players.get(&id)) {
         Some(player) => player.name.clone(),
         None => uuid.to_string(),
-    };
-    scoreboard.member_team_color(&name).unwrap_or(0xFFFFFF)
+    }
+}
+
+/// Vanilla `Entity.getTeamColor`: the colour of the team the entity's
+/// scoreboard name belongs to, white without one.
+pub fn outline_color(scoreboard: &Scoreboard, name: &str) -> u32 {
+    scoreboard.member_team_color(name).unwrap_or(0xFFFFFF)
 }
 
 #[cfg(test)]
@@ -41,12 +39,15 @@ mod tests {
 
     #[test]
     fn outline_color_falls_back_to_white() {
-        let color = outline_color(
-            &Scoreboard::default(),
-            &TabList::default(),
-            Uuid::nil(),
-            None,
+        assert_eq!(outline_color(&Scoreboard::default(), "anyone"), 0xFFFFFF);
+    }
+
+    #[test]
+    fn non_players_score_by_uuid() {
+        let uuid = Uuid::from_u128(7);
+        assert_eq!(
+            scoreboard_name(&TabList::default(), uuid, None),
+            uuid.to_string()
         );
-        assert_eq!(color, 0xFFFFFF);
     }
 }

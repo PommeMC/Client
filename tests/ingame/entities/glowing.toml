@@ -1,6 +1,8 @@
 # The glowing effect sets the shared glowing flag and draws vanilla's outline:
-# white without a team, the team's colour with one, through walls, and gone
-# once the effect is cleared.
+# white without a team, the team's colour with one, through walls, around a
+# glowing dropped item, alone for an invisible glowing mob (a sheep keeps its
+# wool's outline), and gone once the effect is cleared. Invisible mobs show
+# nothing else, except to a spectator, who sees them faded.
 
 [[step]]
 wait_ms = 2000
@@ -27,6 +29,23 @@ chat = "/fill 31 -60 -31 34 -58 -31 minecraft:stone"
 [[step]]
 chat = "/summon minecraft:pig 32.5 -60 -32.5 {NoAI:1b,Tags:[\"glow\"]}"
 
+# A glowing dropped item, an invisible glowing pig and sheep, and an
+# invisible pig that shows nothing.
+[[step]]
+chat = "/summon minecraft:item 27.5 -60 -28.0 {Item:{id:\"minecraft:diamond\",count:1},PickupDelay:32767,Age:-32768,Glowing:1b,Tags:[\"glow\"]}"
+
+[[step]]
+chat = "/summon minecraft:pig 33.0 -60 -28.5 {NoAI:1b,Tags:[\"glow\",\"inv\"]}"
+
+[[step]]
+chat = "/summon minecraft:sheep 27.5 -60 -33.5 {NoAI:1b,Tags:[\"glow\",\"inv\"]}"
+
+[[step]]
+chat = "/summon minecraft:pig 31.5 -60 -27.5 {NoAI:1b,Tags:[\"inv\"]}"
+
+[[step]]
+chat = "/effect give @e[tag=inv] minecraft:invisibility infinite 0 true"
+
 [[step]]
 chat = "/team add glowing_red"
 
@@ -52,6 +71,25 @@ wait_ms = 11000
 [[step]]
 screenshot = "outlines"
 
+# A spectator sees invisible mobs faded.
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "spectator"
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+chat = "/gamemode survival"
+
 [[step]]
 chat = "/effect clear @e[tag=glow]"
 
@@ -66,6 +104,9 @@ screenshot = "cleared"
 
 [[step]]
 chat = "/kill @e[tag=glow]"
+
+[[step]]
+chat = "/kill @e[tag=inv]"
 
 [[step]]
 chat = "/team remove glowing_red"

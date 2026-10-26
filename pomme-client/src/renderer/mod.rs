@@ -1798,10 +1798,11 @@ impl Renderer {
                 }
 
                 // Vanilla blits the outline after the hand, before the GUI.
-                if self.entity_renderer.has_outlines() {
+                if self.entity_renderer.has_outlines() || self.item_entity_pipeline.has_outlines() {
                     pass.end();
                     let mut outline = self.entity_outline.begin(&self.ctx.device, &encoder);
                     self.entity_renderer.draw_outlines(&mut outline, frame);
+                    self.item_entity_pipeline.draw_outlines(&mut outline, frame);
                     self.entity_outline
                         .finish(&self.ctx.device, &encoder, outline);
                     pass = self.resume_frame_pass(&encoder, image_index);

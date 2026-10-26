@@ -114,7 +114,9 @@ impl GuiItemPipeline {
             display,
         );
 
-        let instance = self.shared.push_item(frame, &model, 1.0, false, item_tints);
+        let instance = self
+            .shared
+            .push_item(frame, &model, 1.0, false, item_tints, 0);
         pass.set_vertex_buffer(0, buffer);
         pass.draw(vertex_count, 1, 0, instance);
     }

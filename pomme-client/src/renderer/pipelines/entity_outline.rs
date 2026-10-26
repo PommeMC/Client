@@ -115,7 +115,9 @@ impl EntityOutline {
         };
         pass(swap, &self.sobel, self.outline_nearest, &[]);
         pass(outline, &self.blur, self.swap_linear, &[1.0, 0.0]);
-        pass(swap, &self.blur, self.outline_linear, &[0.0, 1.0]);
+        // Vanilla's `(0, 1)` steps up its bottom-up GL rows; these run top
+        // down. The blur's taps aren't symmetric, so the sign matters.
+        pass(swap, &self.blur, self.outline_linear, &[0.0, -1.0]);
         pass(outline, &self.blit, self.swap_nearest, &[1.0; 4]);
     }
 

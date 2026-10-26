@@ -27,11 +27,18 @@ use crate::world::chunk::ChunkStore;
 
 /// `Entity.FLAG_GLOWING` (bit 6) of the shared entity flags byte (index 0).
 const SHARED_FLAG_GLOWING: u8 = 0x40;
+/// `Entity.FLAG_INVISIBLE` (bit 5).
+const SHARED_FLAG_INVISIBLE: u8 = 0x20;
 
 /// Whether a shared entity flags byte is glowing: the server's
 /// `isCurrentlyGlowing`, from the `Glowing` tag or the glowing effect.
 pub fn shared_flags_glowing(flags: u8) -> bool {
     flags & SHARED_FLAG_GLOWING != 0
+}
+
+/// Whether a shared entity flags byte is invisible (vanilla `isInvisible`).
+pub fn shared_flags_invisible(flags: u8) -> bool {
+    flags & SHARED_FLAG_INVISIBLE != 0
 }
 
 /// A scalar synched-entity-data value, forwarded raw from the wire;
@@ -866,6 +873,9 @@ impl LivingEntity {
 }
 
 pub struct ItemEntity {
+    /// As a string, its scoreboard name (vanilla `getScoreboardName`), which
+    /// its team colour is keyed by.
+    pub uuid: uuid::Uuid,
     pub position: Position,
     pub prev_position: Position,
     pub item_name: String,
@@ -928,12 +938,13 @@ impl ItemEntityStore {
         }
     }
 
-    pub fn spawn_item(&mut self, id: i32, position: Position, velocity: DVec3) {
+    pub fn spawn_item(&mut self, id: i32, uuid: uuid::Uuid, position: Position, velocity: DVec3) {
         let bob_offset =
             ((id as u32).wrapping_mul(2654435761)) as f32 / u32::MAX as f32 * std::f32::consts::TAU;
         self.items.insert(
             id,
             ItemEntity {
+                uuid,
                 position,
                 prev_position: position,
                 item_name: String::new(),
@@ -1260,10 +1271,10 @@ impl EntityStore {
         let kind = entity.entity_type;
         let index = normalize_player_index(kind, normalize_ageable_index(kind, index));
         match (kind, index, value) {
-            // Shared entity flags byte: bit 0x08 = sprinting, 0x20 = invisible.
+            // Shared entity flags byte: bit 0x08 = sprinting.
             (_, 0, Byte(f)) => {
                 entity.is_sprinting = f & 0x08 != 0;
-                entity.is_invisible = f & 0x20 != 0;
+                entity.is_invisible = shared_flags_invisible(f);
                 entity.is_glowing = shared_flags_glowing(f);
             }
             (_, 9, Float(h)) => entity.health = h,
@@ -1937,7 +1948,7 @@ mod tests {
         assert!(!store.living[&1].is_glowing);
 
         let mut items = ItemEntityStore::new();
-        items.spawn_item(2, Position::default(), DVec3::ZERO);
+        items.spawn_item(2, uuid::Uuid::nil(), Position::default(), DVec3::ZERO);
         items.set_shared_flags(2, SHARED_FLAG_GLOWING);
         assert!(items.items[&2].is_glowing);
     }

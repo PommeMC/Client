@@ -39,6 +39,8 @@ fn pack_normal(normal: glam::Vec3) -> [i8; 4] {
 
 pub struct ItemRenderInfo {
     pub item_name: Arc<str>,
+    /// `0xRRGGBB` while the item entity glows.
+    pub outline_color: Option<u32>,
     /// Evaluated tint palette, shared by every copy of one dropped stack.
     pub tints: Arc<[u32]>,
     pub model_matrix: Mat4,
@@ -90,6 +92,8 @@ struct ItemInstance {
     /// The copy's slice of the tint palette.
     tint_base: u32,
     tint_count: u32,
+    /// The glowing outline's `0xRRGGBB`, read only by the outline pass.
+    outline_color: u32,
 }
 
 impl ItemInstance {
@@ -109,11 +113,18 @@ impl ItemInstance {
                 rhi::VertexFormat::Float32x2,
                 rhi::VertexFormat::Uint32,
                 rhi::VertexFormat::Uint32,
+                rhi::VertexFormat::Uint32,
             ],
         ),
     };
 
-    fn new(model: &Mat4, light: f32, nether_lighting: bool, tints: (u32, u32)) -> Self {
+    fn new(
+        model: &Mat4,
+        light: f32,
+        nether_lighting: bool,
+        tints: (u32, u32),
+        outline_color: u32,
+    ) -> Self {
         Self {
             model: model.to_cols_array(),
             normal_matrix: glam::Mat3::from_mat4(*model)
@@ -123,8 +134,50 @@ impl ItemInstance {
             light: [light, if nether_lighting { 1.0 } else { 0.0 }],
             tint_base: tints.0,
             tint_count: tints.1,
+            outline_color,
         }
     }
+}
+
+/// One instanced draw: `count` copies of a mesh from instance `first`.
+#[derive(Clone, Copy)]
+struct Run {
+    buffer: rhi::backend::BufferHandle,
+    vertex_count: u32,
+    first: u32,
+    count: u32,
+}
+
+/// Groups the `items` that `keep` picks into runs of adjacent copies sharing
+/// a mesh; instance `i` is item `i`, and nothing is reordered.
+fn runs<'a>(
+    items: &[ItemRenderInfo],
+    meshes: &'a HashMap<String, MeshEntry>,
+    keep: impl Fn(&ItemRenderInfo, &MeshEntry) -> bool,
+) -> Vec<Run> {
+    let mut runs: Vec<(&'a MeshEntry, u32, u32)> = Vec::new();
+    for (index, item) in (0..).zip(items) {
+        let Some(mesh) = meshes.get(&*item.item_name) else {
+            continue;
+        };
+        if !keep(item, mesh) {
+            continue;
+        }
+        match runs.last_mut() {
+            Some((last, first, count)) if std::ptr::eq(*last, mesh) && *first + *count == index => {
+                *count += 1;
+            }
+            _ => runs.push((mesh, index, 1)),
+        }
+    }
+    runs.into_iter()
+        .map(|(mesh, first, count)| Run {
+            buffer: mesh.buffer.handle(),
+            vertex_count: mesh.vertex_count,
+            first,
+            count,
+        })
+        .collect()
 }
 
 /// A host buffer per frame in flight, filled from the start each frame. It
@@ -344,6 +397,7 @@ impl ItemPipelineShared {
         light: f32,
         nether_lighting: bool,
         tints: &[u32],
+        outline_color: u32,
     ) -> u32 {
         let tint_base = self.tints.push(frame, tints);
         let instance = ItemInstance::new(
@@ -351,6 +405,7 @@ impl ItemPipelineShared {
             light,
             nether_lighting,
             (tint_base, tints.len() as u32),
+            outline_color,
         );
         self.instances.push(frame, &[instance])
     }
@@ -376,8 +431,12 @@ pub struct ItemEntityPipeline {
     cutout: rhi::backend::RenderPipeline,
     /// Vanilla `ITEM_TRANSLUCENT`: alpha-tested and blended.
     translucent: rhi::backend::RenderPipeline,
+    /// Vanilla `OUTLINE_CULL`, which both item sheets resubmit as.
+    outline: rhi::backend::RenderPipeline,
     shared: ItemPipelineShared,
     meshes: HashMap<String, MeshEntry>,
+    /// The last `draw`'s glowing copies.
+    outline_runs: Vec<Run>,
 }
 
 impl ItemEntityPipeline {
@@ -392,8 +451,10 @@ impl ItemEntityPipeline {
         Self {
             cutout,
             translucent,
+            outline: create_outline_pipeline(device, shared.pipeline_layout),
             shared,
             meshes: HashMap::new(),
+            outline_runs: Vec::new(),
         }
     }
 
@@ -512,6 +573,7 @@ impl ItemEntityPipeline {
         frame: usize,
         items: &[ItemRenderInfo],
     ) {
+        self.outline_runs.clear();
         if items.is_empty() {
             return;
         }
@@ -525,37 +587,43 @@ impl ItemEntityPipeline {
                 item.light,
                 item.nether_lighting,
                 &item.tints,
+                item.outline_color.unwrap_or(0),
             );
         }
 
         for (pipeline, translucent) in [(self.cutout, false), (self.translucent, true)] {
-            // (mesh, first instance, instance count), for runs of adjacent
-            // items sharing a mesh.
-            let mut runs: Vec<(&MeshEntry, u32, u32)> = Vec::new();
-            for (index, item) in (0..).zip(items) {
-                let Some(mesh) = self.meshes.get(&*item.item_name) else {
-                    continue;
-                };
-                if mesh.translucent != translucent {
-                    continue;
-                }
-                match runs.last_mut() {
-                    Some((last, first, count))
-                        if std::ptr::eq(*last, mesh) && *first + *count == index =>
-                    {
-                        *count += 1;
-                    }
-                    _ => runs.push((mesh, index, 1)),
-                }
-            }
-            if runs.is_empty() {
-                continue;
-            }
-            self.shared.bind(pass, frame, pipeline);
-            for (mesh, first, count) in runs {
-                pass.set_vertex_buffer(0, mesh.buffer.handle());
-                pass.draw(mesh.vertex_count, count, 0, first);
-            }
+            let runs = runs(items, &self.meshes, |_, mesh| {
+                mesh.translucent == translucent
+            });
+            self.draw_runs(pass, frame, pipeline, &runs);
+        }
+        self.outline_runs = runs(items, &self.meshes, |item, _| item.outline_color.is_some());
+    }
+
+    /// Whether the last `draw` left any glowing copy to outline.
+    pub fn has_outlines(&self) -> bool {
+        !self.outline_runs.is_empty()
+    }
+
+    /// The last `draw`'s glowing copies, into the outline target's pass.
+    pub fn draw_outlines(&self, pass: &mut rhi::backend::RenderPassEncoder, frame: usize) {
+        self.draw_runs(pass, frame, self.outline, &self.outline_runs);
+    }
+
+    fn draw_runs(
+        &self,
+        pass: &mut rhi::backend::RenderPassEncoder,
+        frame: usize,
+        pipeline: rhi::backend::RenderPipeline,
+        runs: &[Run],
+    ) {
+        if runs.is_empty() {
+            return;
+        }
+        self.shared.bind(pass, frame, pipeline);
+        for run in runs {
+            pass.set_vertex_buffer(0, run.buffer);
+            pass.draw(run.vertex_count, run.count, 0, run.first);
         }
     }
 
@@ -587,6 +655,7 @@ impl ItemEntityPipeline {
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
         self.clear_meshes(device);
         self.destroy_pipelines(device);
+        self.outline.destroy(device);
         self.shared.destroy(device);
     }
 }
@@ -910,6 +979,29 @@ fn create_world_pipelines(
     (world(false), world(true))
 }
 
+/// Vanilla `OUTLINE_CULL` for item quads: the silhouette in the outline
+/// colour, into the outline target with no depth or blend.
+fn create_outline_pipeline(
+    device: &rhi::backend::Device,
+    layout: rhi::backend::PipelineLayout,
+) -> rhi::backend::RenderPipeline {
+    rhi::backend::create_render_pipeline(
+        device,
+        super::entity_outline::targets(),
+        layout,
+        &rhi::RenderPipelineDesc {
+            cull_mode: rhi::CullMode::Back,
+            front_face: rhi::FrontFace::Ccw,
+            ..rhi::RenderPipelineDesc::new(
+                "item outline",
+                shader::include_shader!("item_outline.vert"),
+                shader::include_shader!("entity_outline.frag"),
+                &[ItemVertex::BUFFER, ItemInstance::BUFFER],
+            )
+        },
+    )
+}
+
 pub(super) fn create_pipeline_with_front_face(
     device: &rhi::backend::Device,
     targets: rhi::backend::PipelineTargets,
@@ -965,7 +1057,7 @@ mod tests {
         let attributes = ItemInstance::BUFFER.attributes;
         let last = attributes.last().unwrap();
         // item_instance.glsl's last location.
-        assert_eq!(last.location, 14);
+        assert_eq!(last.location, 15);
         assert_eq!(
             (last.offset + last.format.size()) as usize,
             size_of::<ItemInstance>()
@@ -979,7 +1071,7 @@ mod tests {
             glam::Quat::from_rotation_y(0.7),
             glam::Vec3::new(1.0, 2.0, 3.0),
         );
-        let instance = ItemInstance::new(&model, 0.8, true, (3, 2));
+        let instance = ItemInstance::new(&model, 0.8, true, (3, 2), 0xFF0000);
         let normal_matrix = glam::Mat3::from_cols_array(&instance.normal_matrix);
         let (normal, tangent) = (glam::Vec3::Y, glam::Vec3::new(1.0, 0.0, 1.0));
         let surface = glam::Mat3::from_mat4(model) * tangent;

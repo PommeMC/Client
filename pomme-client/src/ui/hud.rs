@@ -90,6 +90,7 @@ pub(crate) struct ScoreboardTeam {
     /// menu), like vanilla's `PlayerTeam.getColor()` Optional.
     pub(crate) fill_color: Option<u32>,
     collision_rule: CollisionRule,
+    see_friendly_invisibles: bool,
     pub(crate) members: HashSet<String>,
 }
 
@@ -168,6 +169,7 @@ impl Scoreboard {
         color: [f32; 4],
         fill_color: Option<u32>,
         collision_rule: CollisionRule,
+        see_friendly_invisibles: bool,
         members: Option<Vec<String>>,
     ) {
         // Vanilla ignores a parameter change for a team it doesn't know;
@@ -185,6 +187,7 @@ impl Scoreboard {
             color,
             fill_color: None,
             collision_rule,
+            see_friendly_invisibles,
             members: HashSet::new(),
         });
         team.display_name = display_name;
@@ -193,6 +196,7 @@ impl Scoreboard {
         team.color = color;
         team.fill_color = fill_color;
         team.collision_rule = collision_rule;
+        team.see_friendly_invisibles = see_friendly_invisibles;
         // ADD unions its player list onto an existing team, like vanilla's
         // addPlayerTeam + per-player addPlayerToTeam.
         if let Some(members) = members {
@@ -275,6 +279,13 @@ impl Scoreboard {
 
     /// Vanilla `TeamColor`: a real team chat color if the member belongs to a
     /// team whose formatting carries one, otherwise no owner-derived color.
+    /// `Entity.isInvisibleTo`'s team rule: `viewer` sees an invisible
+    /// `target` on its own team when the team allows it.
+    pub fn sees_friendly_invisible(&self, viewer: &str, target: &str) -> bool {
+        self.team_of(target)
+            .is_some_and(|(_, team)| team.see_friendly_invisibles && team.members.contains(viewer))
+    }
+
     pub fn member_team_color(&self, member: &str) -> Option<u32> {
         self.teams
             .values()
@@ -1809,6 +1820,7 @@ mod tests {
             WHITE,
             None,
             rule,
+            true,
             Some(members.iter().map(|m| (*m).into()).collect()),
         );
     }
@@ -1844,6 +1856,34 @@ mod tests {
         assert!(!scoreboard.pushable_by("pusher", "target"));
     }
 
+    #[test]
+    fn teammates_see_friendly_invisibles_when_the_team_allows() {
+        let mut scoreboard = Scoreboard::default();
+        add_team(
+            &mut scoreboard,
+            "a",
+            CollisionRule::Always,
+            &["viewer", "mate"],
+        );
+        add_team(&mut scoreboard, "b", CollisionRule::Always, &["stranger"]);
+        assert!(scoreboard.sees_friendly_invisible("viewer", "mate"));
+        assert!(!scoreboard.sees_friendly_invisible("viewer", "stranger"));
+        assert!(!scoreboard.sees_friendly_invisible("loner", "mate"));
+
+        scoreboard.set_team(
+            "a".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            WHITE,
+            None,
+            CollisionRule::Always,
+            false,
+            None,
+        );
+        assert!(!scoreboard.sees_friendly_invisible("viewer", "mate"));
+    }
+
     fn add_colored_team(scoreboard: &mut Scoreboard, name: &str, fill: Option<u32>) {
         scoreboard.set_team(
             name.into(),
@@ -1853,6 +1893,7 @@ mod tests {
             WHITE,
             fill,
             CollisionRule::Always,
+            true,
             Some(vec!["Player".into()]),
         );
     }

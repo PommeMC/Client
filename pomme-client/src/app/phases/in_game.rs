@@ -3856,12 +3856,26 @@ pub fn update_game(
         (pos, stage, state)
     });
 
-    let spectator_outlines = crate::player::is_spectator(game.player.game_mode)
-        && core.input.performing_action(Action::SpectatorOutlines);
-    let outline = |glowing: bool, is_player: bool, uuid, player_uuid| {
-        use crate::entity::glowing::{appears_glowing, outline_color};
+    use crate::entity::glowing::{appears_glowing, outline_color, scoreboard_name};
+    use crate::renderer::pipelines::entity_renderer::Visibility;
+    let spectating = crate::player::is_spectator(game.player.game_mode);
+    let spectator_outlines = spectating && core.input.performing_action(Action::SpectatorOutlines);
+    let viewer = scoreboard_name(&game.tab_list, core.user.uuid, Some(core.user.uuid));
+    // Both take the entity's scoreboard name lazily: it's only needed when the
+    // entity glows or is invisible.
+    let outline = |glowing: bool, is_player: bool, name: &dyn Fn() -> String| {
         appears_glowing(glowing, is_player, spectator_outlines)
-            .then(|| outline_color(&game.scoreboard, &game.tab_list, uuid, player_uuid))
+            .then(|| outline_color(&game.scoreboard, &name()))
+    };
+    // Vanilla `Entity.isInvisibleTo`, against the local player.
+    let visibility = |invisible: bool, name: &dyn Fn() -> String| {
+        if !invisible {
+            Visibility::Visible
+        } else if spectating || game.scoreboard.sees_friendly_invisible(&viewer, &name()) {
+            Visibility::Seen
+        } else {
+            Visibility::Hidden
+        }
     };
 
     let mut entity_renders: Vec<EntityRenderInfo> = if benchmark_running {
@@ -3881,14 +3895,15 @@ pub fn update_game(
                 let is_sleeping = e.sleeping_pos.is_some();
                 let (radius, strength) = crate::entity::shadow::of_living(e);
 
+                let name = || scoreboard_name(&game.tab_list, e.uuid, e.player_uuid);
                 EntityRenderInfo {
                     position: interp_pos + extras.render_offset,
                     outline_color: outline(
                         e.is_glowing,
                         e.entity_type == EntityKind::Player,
-                        e.uuid,
-                        e.player_uuid,
+                        &name,
                     ),
+                    visibility: visibility(e.is_invisible, &name),
                     head_y_rot_deg: lerp_angle(
                         e.prev_head_y_rot_deg,
                         e.head_y_rot_deg,
@@ -4005,12 +4020,8 @@ pub fn update_game(
                 .min(1.0),
             entity_kind: EntityKind::Player,
             player_uuid: Some(core.user.uuid),
-            outline_color: outline(
-                game.player.glowing,
-                true,
-                core.user.uuid,
-                Some(core.user.uuid),
-            ),
+            outline_color: outline(game.player.glowing, true, &|| viewer.clone()),
+            visibility: visibility(game.player.invisible, &|| viewer.clone()),
             armor: armor_render_infos(game.player.inventory.armor_slots()),
             has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),
             death_time: render_death_time(game.player.death_time, partial_tick),
@@ -4052,6 +4063,11 @@ pub fn update_game(
             *gfx.renderer.camera_pivot_position(),
             gfx.renderer.camera_anchor(),
             partial_tick,
+            |item| {
+                outline(item.is_glowing, false, &|| {
+                    scoreboard_name(&game.tab_list, item.uuid, None)
+                })
+            },
         )
     };
 
@@ -4552,6 +4568,7 @@ fn emit_item_copies(
     z_size: f32,
     light: f32,
     nether_lighting: bool,
+    outline_color: Option<u32>,
 ) {
     use crate::renderer::pipelines::item_entity::ItemRenderInfo;
     use crate::util::JavaRandom;
@@ -4573,6 +4590,7 @@ fn emit_item_copies(
     let mut push = |copy_offset: glam::Mat4| {
         infos.push(ItemRenderInfo {
             item_name: name.clone(),
+            outline_color,
             tints: tints.clone(),
             model_matrix: base * copy_offset * ground_transform,
             light,
@@ -4683,6 +4701,7 @@ fn shadow_casters(
     entities.chain(items).collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_item_render_infos(
     entity_store: &crate::entity::ItemEntityStore,
     chunk_store: &ChunkStore,
@@ -4691,6 +4710,7 @@ fn build_item_render_infos(
     camera_pos: glam::DVec3,
     anchor: glam::DVec3,
     partial_tick: f32,
+    outline: impl Fn(&crate::entity::ItemEntity) -> Option<u32>,
 ) -> Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo> {
     let mut infos = Vec::new();
     let nether_lighting = cardinal_light == CardinalLightType::Nether;
@@ -4715,6 +4735,7 @@ fn build_item_render_infos(
             z_size,
             light,
             nether_lighting,
+            outline(item),
         );
     }
 
@@ -4740,6 +4761,8 @@ fn build_item_render_infos(
             z_size,
             light,
             nether_lighting,
+            // Vanilla's `ItemPickupParticle` clears its outline.
+            None,
         );
     }
 

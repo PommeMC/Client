@@ -194,6 +194,7 @@ pub struct EntityRenderInfo {
     /// The glowing outline's colour (vanilla `EntityRenderState.outlineColor`),
     /// when the entity draws one.
     pub outline_color: Option<u32>,
+    pub visibility: Visibility,
 }
 
 /// Everything inert: mob-family animation inputs zeroed, no overlays, white
@@ -256,10 +257,26 @@ impl Default for EntityRenderInfo {
             attack_time: 0.0,
             skip_cull: false,
             outline_color: None,
+            visibility: Visibility::Visible,
             shadow: Default::default(),
         }
     }
 }
+
+/// Vanilla `isInvisible` with `isInvisibleToPlayer`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Visibility {
+    #[default]
+    Visible,
+    /// Invisible, but the viewer sees through it: a spectator, or a teammate
+    /// whose team sees friendly invisibles.
+    Seen,
+    /// Invisible to the viewer.
+    Hidden,
+}
+
+/// Vanilla's `0x26` alpha on a `Seen` mob's body.
+const SEEN_ALPHA: f32 = 38.0 / 255.0;
 
 /// How an overlay layer is blended. Base/baby variants are always `Opaque`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -285,6 +302,9 @@ struct MobVariant {
     texture: rhi::backend::Texture,
     texture_set: rhi::backend::BindGroup,
     overlay_kind: OverlayKind,
+    /// A layer that leaves its outline while its mob is invisible and glows
+    /// (vanilla `SheepWoolLayer`, `SlimeOuterLayer`).
+    invisible_outline: bool,
     /// Overlay whose part poses (pivots/rotations/scales) differ from the
     /// base model's, so its part transforms can't be shared with the base
     /// (stray/bogged clothing: humanoid ±1.9 legs over skeleton ±2.0).
@@ -793,6 +813,7 @@ pub struct EntityRenderer {
     pipeline: rhi::backend::RenderPipeline,
     /// Opaque with backface culling — bat wings.
     culled_pipeline: rhi::backend::RenderPipeline,
+    translucent_culled_pipeline: rhi::backend::RenderPipeline,
     /// Translucent, depth-writing — slime shell.
     body_translucent_pipeline: rhi::backend::RenderPipeline,
     /// Translucent, depth-write off — spider eyes.
@@ -832,6 +853,9 @@ pub(super) enum BlendMode {
     /// Same blend as `Translucent` but keeps depth writes (vanilla
     /// `entityTranslucent` vs `EYES`).
     TranslucentDepthWrite,
+    /// `TranslucentDepthWrite` with backface culling (vanilla
+    /// `entityTranslucentCull`): an invisible mob the viewer sees through.
+    TranslucentCulled,
     Additive,
 }
 
@@ -868,6 +892,7 @@ struct VariantDef {
     tex_variants: &'static [&'static [&'static str]],
     tex_size: u32,
     overlay_kind: OverlayKind,
+    invisible_outline: bool,
 }
 
 struct MobDef {
@@ -1086,6 +1111,14 @@ fn mob_definitions() -> Vec<MobDef> {
             tex_variants,
             tex_size,
             overlay_kind: OverlayKind::Opaque,
+            invisible_outline: false,
+        }
+    }
+
+    fn outlined_when_invisible(def: VariantDef) -> VariantDef {
+        VariantDef {
+            invisible_outline: true,
+            ..def
         }
     }
 
@@ -1184,13 +1217,17 @@ fn mob_definitions() -> Vec<MobDef> {
                     SHEEP_WOOL_UNDERCOAT_TEX,
                     64,
                 ),
-                opaque(entity_model::bake_sheep_wool_model(), SHEEP_WOOL_TEX, 64),
+                outlined_when_invisible(opaque(
+                    entity_model::bake_sheep_wool_model(),
+                    SHEEP_WOOL_TEX,
+                    64,
+                )),
             ],
-            baby_overlays: vec![opaque(
+            baby_overlays: vec![outlined_when_invisible(opaque(
                 entity_model::bake_baby_sheep_wool_model(),
                 SHEEP_BABY_WOOL_TEX,
                 64,
-            )],
+            ))],
         },
         MobDef {
             kind: EntityKind::Player,
@@ -1332,6 +1369,7 @@ fn mob_definitions() -> Vec<MobDef> {
                 tex_variants: CREEPER_ARMOR_TEX,
                 tex_size: 64,
                 overlay_kind: OverlayKind::SwirlAdditive,
+                invisible_outline: false,
             }],
             baby_overlays: vec![],
         },
@@ -1372,6 +1410,7 @@ fn mob_definitions() -> Vec<MobDef> {
                 tex_variants: SPIDER_EYES_TEX,
                 tex_size: 64,
                 overlay_kind: OverlayKind::EyesTranslucent,
+                invisible_outline: false,
             }],
             baby_overlays: vec![],
         },
@@ -1389,6 +1428,7 @@ fn mob_definitions() -> Vec<MobDef> {
                 tex_variants: ENDERMAN_EYES_TEX,
                 tex_size: 64,
                 overlay_kind: OverlayKind::EyesTranslucent,
+                invisible_outline: false,
             }],
             baby_overlays: vec![],
         },
@@ -1406,6 +1446,7 @@ fn mob_definitions() -> Vec<MobDef> {
                 tex_variants: SLIME_TEX,
                 tex_size: 64,
                 overlay_kind: OverlayKind::BodyTranslucent,
+                invisible_outline: true,
             }],
             baby_overlays: vec![],
         },
@@ -1502,12 +1543,14 @@ fn mob_definitions() -> Vec<MobDef> {
                 tex_variants: HORSE_MARKINGS_TEX,
                 tex_size: 64,
                 overlay_kind: OverlayKind::BodyTranslucent,
+                invisible_outline: false,
             }],
             baby_overlays: vec![VariantDef {
                 model: entity_model::bake_baby_horse_model(),
                 tex_variants: HORSE_MARKINGS_BABY_TEX,
                 tex_size: 64,
                 overlay_kind: OverlayKind::BodyTranslucent,
+                invisible_outline: false,
             }],
         },
         MobDef {
@@ -1610,6 +1653,7 @@ fn mob_definitions() -> Vec<MobDef> {
                 tex_variants: BAT_TEX,
                 tex_size: 32,
                 overlay_kind: OverlayKind::OpaqueCulled,
+                invisible_outline: false,
             }],
             baby: None,
             adult_overlays: vec![],
@@ -1717,6 +1761,7 @@ impl EntityRenderer {
             rhi::backend::create_pipeline_layout(device, &[camera_layout, texture_layout], None);
 
         let [
+            translucent_culled_pipeline,
             pipeline,
             culled_pipeline,
             body_translucent_pipeline,
@@ -1815,6 +1860,7 @@ impl EntityRenderer {
         Self {
             pipeline,
             culled_pipeline,
+            translucent_culled_pipeline,
             body_translucent_pipeline,
             eyes_pipeline,
             swirl_pipeline,
@@ -2260,7 +2306,7 @@ impl EntityRenderer {
         // part) becomes a single instanced draw. `vis`/`groups` borrow self.mobs
         // and are dropped at the end of this block, before the buffer write below.
         let mut instances = Instances::default();
-        let (opaque, armor, culled, body, eyes, swirl, outline) = {
+        let (opaque, armor, culled, translucent, body, eyes, swirl, outline) = {
             let mut vis: Vec<VisEntity> = Vec::new();
             for info in entities {
                 let Some(entry) = self.mobs.get(&info.entity_kind) else {
@@ -2295,21 +2341,31 @@ impl EntityRenderer {
             // after its upper one.
             let mut opaque = VariantGroups::default();
             let mut culled = VariantGroups::default();
+            let mut translucent = VariantGroups::default();
+            // An invisible glowing mob's parts that only leave their outline.
+            let mut outline_only = VariantGroups::default();
             for (vi, v) in vis.iter().enumerate() {
                 let base = v
                     .entry
                     .base_variant(v.info.is_baby, self.effective_variant_index(v.info));
                 let texture_set = self.player_texture_set(v.info, base.texture_set);
-                let group = if base.overlay_kind == OverlayKind::OpaqueCulled {
-                    &mut culled
-                } else {
-                    &mut opaque
-                };
-                group.add(
-                    base,
-                    texture_set,
-                    (vi, v.info.base_tint, hurt_color(v.info), [0.0, 0.0]),
-                );
+                let member = (vi, v.info.base_tint, hurt_color(v.info), [0.0, 0.0]);
+                match body_route(v.info) {
+                    Route::Draw if base.overlay_kind == OverlayKind::OpaqueCulled => {
+                        culled.add(base, texture_set, member);
+                    }
+                    Route::Draw => opaque.add(base, texture_set, member),
+                    Route::Translucent => {
+                        let [r, g, b, a] = v.info.base_tint;
+                        translucent.add(
+                            base,
+                            texture_set,
+                            (vi, [r, g, b, a * SEEN_ALPHA], member.2, member.3),
+                        );
+                    }
+                    Route::OutlineOnly => outline_only.add(base, texture_set, member),
+                    Route::Skip => {}
+                }
             }
             for slot in 0..MAX_OVERLAYS {
                 for (vi, v) in vis.iter().enumerate() {
@@ -2327,31 +2383,44 @@ impl EntityRenderer {
                         _ => continue,
                     };
                     if let Some(tint) = v.info.overlay_tints[slot] {
-                        group.add(
-                            overlay,
-                            overlay.texture_set,
-                            (vi, tint, hurt_color(v.info), [0.0, 0.0]),
-                        );
+                        let member = (vi, tint, hurt_color(v.info), [0.0, 0.0]);
+                        add_layer(v.info, overlay, member, group, &mut outline_only);
                     }
                 }
             }
 
-            let body = collect_overlays(&vis, OverlayKind::BodyTranslucent);
-            let eyes = collect_overlays(&vis, OverlayKind::EyesTranslucent);
-            let swirl = collect_overlays(&vis, OverlayKind::SwirlAdditive);
+            let body = collect_overlays(&vis, OverlayKind::BodyTranslucent, &mut outline_only);
+            let eyes = collect_overlays(&vis, OverlayKind::EyesTranslucent, &mut outline_only);
+            let swirl = collect_overlays(&vis, OverlayKind::SwirlAdditive, &mut outline_only);
 
             let opaque = opaque.emit(&vis, &mut instances);
             let armor = self.collect_armor_draws(&vis, &mut instances);
             let culled = culled.emit(&vis, &mut instances);
+            let translucent = translucent.emit(&vis, &mut instances);
             let body = body.emit(&vis, &mut instances);
             let eyes = eyes.emit(&vis, &mut instances);
             let swirl = swirl.emit(&vis, &mut instances);
-            // Eyes and the energy swirl don't affect the outline.
+            let outline_only = outline_only.emit(&vis, &mut instances);
+            // Eyes and the energy swirl don't affect the outline; vanilla's
+            // outline-only parts use the unculled `RenderTypes.outline`.
             let outline = [
-                outline_records(&[&opaque, &armor, &body], &vis, &mut instances),
-                outline_records(&[&culled], &vis, &mut instances),
+                outline_records(
+                    &[&opaque, &armor, &body, &outline_only],
+                    &vis,
+                    &mut instances,
+                ),
+                outline_records(&[&culled, &translucent], &vis, &mut instances),
             ];
-            (opaque, armor, culled, body, eyes, swirl, outline)
+            (
+                opaque,
+                armor,
+                culled,
+                translucent,
+                body,
+                eyes,
+                swirl,
+                outline,
+            )
         };
 
         // Write the instance buffer (clamped to capacity; the cap is far above any
@@ -2372,6 +2441,13 @@ impl EntityRenderer {
         self.record_pass(pass, frame, self.pipeline, &opaque, count);
         self.record_pass(pass, frame, self.pipeline, &armor, count);
         self.record_pass(pass, frame, self.culled_pipeline, &culled, count);
+        self.record_pass(
+            pass,
+            frame,
+            self.translucent_culled_pipeline,
+            &translucent,
+            count,
+        );
         self.record_pass(pass, frame, self.body_translucent_pipeline, &body, count);
         self.record_pass(pass, frame, self.eyes_pipeline, &eyes, count);
         self.record_pass(pass, frame, self.swirl_pipeline, &swirl, count);
@@ -2432,18 +2508,28 @@ impl EntityRenderer {
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
     ) {
-        self.pipeline.destroy(device);
-        self.culled_pipeline.destroy(device);
-        self.body_translucent_pipeline.destroy(device);
-        self.eyes_pipeline.destroy(device);
-        self.swirl_pipeline.destroy(device);
+        self.destroy_pipelines(device);
         [
+            self.translucent_culled_pipeline,
             self.pipeline,
             self.culled_pipeline,
             self.body_translucent_pipeline,
             self.eyes_pipeline,
             self.swirl_pipeline,
         ] = create_pipelines(device, targets, self.pipeline_layout);
+    }
+
+    fn destroy_pipelines(&self, device: &rhi::backend::Device) {
+        for pipeline in [
+            self.translucent_culled_pipeline,
+            self.pipeline,
+            self.culled_pipeline,
+            self.body_translucent_pipeline,
+            self.eyes_pipeline,
+            self.swirl_pipeline,
+        ] {
+            pipeline.destroy(device);
+        }
     }
 
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
@@ -2483,11 +2569,7 @@ impl EntityRenderer {
             free_player_skin_texture(device, skin);
         }
 
-        self.pipeline.destroy(device);
-        self.culled_pipeline.destroy(device);
-        self.body_translucent_pipeline.destroy(device);
-        self.eyes_pipeline.destroy(device);
-        self.swirl_pipeline.destroy(device);
+        self.destroy_pipelines(device);
         for pipeline in self.outline_pipelines {
             pipeline.destroy(device);
         }
@@ -2647,7 +2729,66 @@ impl<'a> VariantGroups<'a> {
 }
 
 /// Group the non-opaque overlays of one kind (body / eyes / swirl) by variant.
-fn collect_overlays<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGroups<'a> {
+/// Where vanilla sends a part of an entity's model.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Route {
+    Draw,
+    /// The `entityTranslucentCull` body of an invisible mob the viewer sees.
+    Translucent,
+    /// Only into the outline, for an invisible glowing mob.
+    OutlineOnly,
+    Skip,
+}
+
+/// `LivingEntityRenderer.getRenderType` for the base model.
+fn body_route(info: &EntityRenderInfo) -> Route {
+    match info.visibility {
+        Visibility::Visible => Route::Draw,
+        Visibility::Seen => Route::Translucent,
+        Visibility::Hidden if info.outline_color.is_some() => Route::OutlineOnly,
+        Visibility::Hidden => Route::Skip,
+    }
+}
+
+/// A layer of an invisible mob: most hide (`RenderLayer.
+/// coloredCutoutModelCopyLayerRender`), eyes and the energy swirl ignore it,
+/// and sheep wool and the slime shell leave their outline.
+fn layer_route(info: &EntityRenderInfo, kind: OverlayKind, invisible_outline: bool) -> Route {
+    if info.visibility == Visibility::Visible
+        || matches!(
+            kind,
+            OverlayKind::EyesTranslucent | OverlayKind::SwirlAdditive
+        )
+    {
+        Route::Draw
+    } else if invisible_outline && info.outline_color.is_some() {
+        Route::OutlineOnly
+    } else {
+        Route::Skip
+    }
+}
+
+/// Adds `layer` to `group`, or only to `outline_only`, as `layer_route`
+/// sends it.
+fn add_layer<'a>(
+    info: &EntityRenderInfo,
+    layer: &'a MobVariant,
+    member: Member,
+    group: &mut VariantGroups<'a>,
+    outline_only: &mut VariantGroups<'a>,
+) {
+    match layer_route(info, layer.overlay_kind, layer.invisible_outline) {
+        Route::OutlineOnly => outline_only.add(layer, layer.texture_set, member),
+        Route::Skip => {}
+        _ => group.add(layer, layer.texture_set, member),
+    }
+}
+
+fn collect_overlays<'a>(
+    vis: &[VisEntity<'a>],
+    kind: OverlayKind,
+    outline_only: &mut VariantGroups<'a>,
+) -> VariantGroups<'a> {
     let mut groups = VariantGroups::default();
     for (vi, v) in vis.iter().enumerate() {
         // Energy swirl scrolls its UVs over time (vanilla `EnergySwirlLayer`).
@@ -2672,7 +2813,8 @@ fn collect_overlays<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGrou
                 continue;
             }
             if let Some(tint) = v.info.overlay_tints[slot] {
-                groups.add(overlay, overlay.texture_set, (vi, tint, overlay_color, uv));
+                let member = (vi, tint, overlay_color, uv);
+                add_layer(v.info, overlay, member, &mut groups, outline_only);
             }
         }
     }
@@ -2856,6 +2998,7 @@ fn build_variants(
         tex_variants,
         tex_size,
         overlay_kind,
+        invisible_outline,
     } = variant;
     // The scrolling swirl needs REPEAT wrapping; everything else clamps.
     let sampler = match overlay_kind {
@@ -2886,6 +3029,7 @@ fn build_variants(
                 texture,
                 texture_set,
                 overlay_kind,
+                invisible_outline,
                 own_pivots: false,
             }
         })
@@ -2934,8 +3078,15 @@ fn create_pipelines(
     device: &rhi::backend::Device,
     targets: rhi::backend::PipelineTargets,
     layout: rhi::backend::PipelineLayout,
-) -> [rhi::backend::RenderPipeline; 5] {
+) -> [rhi::backend::RenderPipeline; 6] {
     [
+        create_pipeline(
+            device,
+            targets,
+            layout,
+            BlendMode::TranslucentCulled,
+            ModelInput::Instanced,
+        ),
         create_pipeline(
             device,
             targets,
@@ -3037,7 +3188,10 @@ pub(super) fn create_pipeline(
         targets,
         layout,
         &rhi::RenderPipelineDesc {
-            cull_mode: if blend == BlendMode::OpaqueCulled {
+            cull_mode: if matches!(
+                blend,
+                BlendMode::OpaqueCulled | BlendMode::TranslucentCulled
+            ) {
                 rhi::CullMode::Back
             } else {
                 rhi::CullMode::None
@@ -3053,9 +3207,9 @@ pub(super) fn create_pipeline(
             blend: match blend {
                 BlendMode::Opaque | BlendMode::OpaqueCulled => None,
                 // Glowing eyes, slime shell.
-                BlendMode::Translucent | BlendMode::TranslucentDepthWrite => {
-                    Some(rhi::BlendState::TRANSLUCENT)
-                }
+                BlendMode::Translucent
+                | BlendMode::TranslucentDepthWrite
+                | BlendMode::TranslucentCulled => Some(rhi::BlendState::TRANSLUCENT),
                 // Energy swirl glow.
                 BlendMode::Additive => Some(rhi::BlendState {
                     color: rhi::BlendComponent {
@@ -3085,9 +3239,72 @@ mod tests {
     use azalea_registry::builtin::ItemKind;
 
     use super::{
-        ArmorDye, EquipmentClientInfoJson, armor_layer_defs, armor_render_info,
-        equipment_texture_key,
+        ArmorDye, EquipmentClientInfoJson, OverlayKind, Route, Visibility, armor_layer_defs,
+        armor_render_info, body_route, equipment_texture_key, layer_route,
     };
+
+    fn invisible(visibility: Visibility, glowing: bool) -> EntityRenderInfo {
+        EntityRenderInfo {
+            visibility,
+            outline_color: glowing.then_some(0xFFFFFF),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn invisible_bodies_route_like_get_render_type() {
+        assert_eq!(
+            body_route(&invisible(Visibility::Visible, false)),
+            Route::Draw
+        );
+        assert_eq!(
+            body_route(&invisible(Visibility::Seen, true)),
+            Route::Translucent
+        );
+        assert_eq!(
+            body_route(&invisible(Visibility::Hidden, true)),
+            Route::OutlineOnly
+        );
+        assert_eq!(
+            body_route(&invisible(Visibility::Hidden, false)),
+            Route::Skip
+        );
+    }
+
+    #[test]
+    fn invisible_layers_hide_but_eyes_stay_and_wool_outlines() {
+        let hidden = invisible(Visibility::Hidden, true);
+        let seen = invisible(Visibility::Seen, false);
+        assert_eq!(
+            layer_route(&hidden, OverlayKind::Opaque, false),
+            Route::Skip
+        );
+        assert_eq!(layer_route(&seen, OverlayKind::Opaque, false), Route::Skip);
+        assert_eq!(
+            layer_route(&hidden, OverlayKind::EyesTranslucent, false),
+            Route::Draw
+        );
+        assert_eq!(
+            layer_route(&hidden, OverlayKind::SwirlAdditive, false),
+            Route::Draw
+        );
+        assert_eq!(
+            layer_route(&hidden, OverlayKind::Opaque, true),
+            Route::OutlineOnly
+        );
+        assert_eq!(
+            layer_route(&seen, OverlayKind::BodyTranslucent, true),
+            Route::Skip
+        );
+        assert_eq!(
+            layer_route(
+                &invisible(Visibility::Visible, false),
+                OverlayKind::Opaque,
+                false
+            ),
+            Route::Draw
+        );
+    }
 
     #[test]
     fn armor_render_info_uses_equippable_slot_asset_and_dye() {

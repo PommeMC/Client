@@ -2228,6 +2228,7 @@ impl AppCore {
                     color,
                     fill_color,
                     collision_rule,
+                    see_friendly_invisibles,
                     members,
                 } => {
                     game.scoreboard.set_team(
@@ -2238,6 +2239,7 @@ impl AppCore {
                         color,
                         fill_color,
                         collision_rule,
+                        see_friendly_invisibles,
                         members,
                     );
                 }
@@ -2515,7 +2517,8 @@ impl AppCore {
                         }
                     }
                     if entity_type == azalea_registry::builtin::EntityKind::Item {
-                        game.item_entity_store.spawn_item(id, position, velocity);
+                        game.item_entity_store
+                            .spawn_item(id, uuid, position, velocity);
                     }
                 }
                 NetworkEvent::EntityMoved {

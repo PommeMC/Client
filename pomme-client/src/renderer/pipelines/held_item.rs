@@ -142,7 +142,7 @@ impl HeldItemPipeline {
             let model = arm * display.to_matrix();
             let instance =
                 self.shared
-                    .push_item(frame, &model, item.light, false, &item.item_tints);
+                    .push_item(frame, &model, item.light, false, &item.item_tints, 0);
             pass.set_vertex_buffer(0, buffer);
             pass.draw(vertex_count, 1, 0, instance);
         }

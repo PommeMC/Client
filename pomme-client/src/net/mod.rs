@@ -327,6 +327,7 @@ pub enum NetworkEvent {
         color: [f32; 4],
         fill_color: Option<u32>,
         collision_rule: crate::ui::hud::CollisionRule,
+        see_friendly_invisibles: bool,
         members: Option<Vec<String>>,
     },
     ScoreboardTeamMembers {
