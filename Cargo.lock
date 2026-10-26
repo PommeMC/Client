@@ -3525,6 +3525,7 @@ dependencies = [
 name = "ingame-test"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "md-5 0.11.0",
  "pomme-protocol",
  "reqwest",

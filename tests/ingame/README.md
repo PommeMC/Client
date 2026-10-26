@@ -67,6 +67,19 @@ min_version = "1.20.5"
 that version. Gate only for what the server can't do; a script failing because
 of a client bug stays a failure.
 
+## Wire fixtures
+
+`just wire-fixtures <version>...` runs `world/join` on each version with
+`--capture`: the client records every frame the server sends, before
+translation, and the runner keeps the login and config frames plus the first
+few of each game packet in `pomme-client/src/net/wire-fixtures/<version>/`.
+`net::wire_corpus` replays them through the translation and the client's
+readers in `cargo test`, so each version is checked against what its real
+server sends. Recapture a version when its join traffic changes, such as after
+a protogen or reference update for it. Packets a version is known to misread
+are listed in `KNOWN_GAPS` there; once one reads, the test asks for its entry
+to go.
+
 ## The harness
 
 The client side is the `test-harness` cargo feature: debug tooling that's off

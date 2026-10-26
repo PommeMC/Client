@@ -2,6 +2,7 @@ mod advancement_wire;
 #[cfg(test)]
 mod azalea_compat;
 mod block_wire;
+pub(crate) mod capture;
 pub(crate) mod chat;
 pub(crate) mod chat_security;
 pub mod chunk_batch;
@@ -29,6 +30,8 @@ mod session;
 mod sound_wire;
 pub mod stream;
 pub mod translate;
+#[cfg(test)]
+mod wire_corpus;
 
 use std::sync::Arc;
 

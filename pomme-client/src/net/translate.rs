@@ -6,7 +6,9 @@
 //! wire format changed, and static-registry ids (which shift between versions)
 //! are remapped in both directions so the rest of the client stays
 //! single-version. Layouts were line-checked against the decompiled
-//! references (`reference/<version>/decompiled/.../network/protocol/`).
+//! references (`reference/<version>/decompiled/.../network/protocol/`), and
+//! each tested version's real join traffic is replayed through them by
+//! `net::wire_corpus`.
 //!
 //! 26.3 -> 26.2 wire changes (the first version above native; its frames
 //! translate down):

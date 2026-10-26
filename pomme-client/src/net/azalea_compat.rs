@@ -3878,7 +3878,8 @@ fn select_known_packs_reply_is_byte_exact() {
         version: pomme_protocol::version::NATIVE.name.to_owned(),
     };
     let offered = vec![core_of("minecraft"), core_of("pomme")];
-    let known_packs = crate::net::known_packs::select_packs(&offered);
+    let known_packs =
+        crate::net::known_packs::select_packs(pomme_protocol::version::NATIVE.protocol, &offered);
     assert_eq!(known_packs, offered[..1]);
 
     let mut bytes = Vec::new();

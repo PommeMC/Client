@@ -261,98 +261,163 @@ pub fn handle_raw_game_packet(
     batch_size_calculator: &mut ChunkBatchSizeCalculator,
     event_tx: &Sender<NetworkEvent>,
 ) -> bool {
-    let mut cur = std::io::Cursor::new(raw);
-    let Ok(packet_id) = Reader::on_cursor(&mut cur, Reader::varint) else {
-        return false;
-    };
-
-    if took(
-        super::recipe_wire::handle_raw_recipe_packet(packet_id, &mut cur, event_tx),
-        "recipe",
-    ) {
-        return true;
-    }
-
-    let pos = cur.position() as usize;
-    let payload = &raw[pos..];
-    if took(
-        super::container_wire::handle_raw_container_packet(packet_id, payload, event_tx),
-        "container",
-    ) || took(
-        super::hud_wire::handle_raw_hud_packet(packet_id, payload, event_tx),
-        "hud",
-    ) || took(
-        super::scoreboard_wire::handle_raw_scoreboard_packet(packet_id, payload, event_tx),
-        "scoreboard",
-    ) || took(
-        super::player_info_wire::handle_raw_player_info_packet(packet_id, payload, event_tx),
-        "player_info",
-    ) || took(
-        super::sound_wire::handle_raw_sound_packet(packet_id, payload, event_tx),
-        "sound",
-    ) || took(
-        super::lifecycle_wire::handle_raw_lifecycle_packet(
-            packet_id,
-            payload,
-            registry_holder,
-            sender,
-            event_tx,
-        ),
-        "lifecycle",
-    ) || took(
-        super::entity_data::handle_raw_entity_data(packet_id, payload, registry_holder, event_tx),
-        "set_entity_data",
-    ) || took(
-        super::advancement_wire::handle_raw_advancements(packet_id, payload, event_tx),
-        "update_advancements",
-    ) || took(
-        super::entity_wire::handle_raw_entity_packet(packet_id, payload, event_tx),
-        "entity",
-    ) || took(
-        super::player_wire::handle_raw_player_packet(packet_id, payload, event_tx),
-        "player",
-    ) || took(
-        super::block_wire::handle_raw_block_packet(packet_id, payload, block_state_table, event_tx),
-        "block",
-    ) || took(
-        super::chunk_wire::handle_raw_chunk_packet(
-            packet_id,
-            payload,
-            sender,
-            batch_size_calculator,
-            event_tx,
-        ),
-        "chunk",
-    ) {
-        return true;
-    }
-
-    if packet_id == explode_packet_id() {
-        if let Err(e) = handle_raw_explode(&mut Reader::new(payload), event_tx) {
-            tracing::warn!("Skipping malformed Explode packet prefix: {e}");
-        }
-        return true;
-    }
-
-    if packet_id != level_particles_packet_id() {
-        return false;
-    }
-    match parse_level_particles(&mut Reader::new(payload)) {
-        Ok(Some(event)) => {
-            send_ordered(event_tx, event);
-        }
-        Ok(None) => {}
-        Err(e) => tracing::warn!("Skipping malformed LevelParticles packet: {e}"),
-    }
-    true
-}
-
-/// Whether a raw decoder took the packet, logging it when malformed.
-fn took<E: std::fmt::Display>(result: Option<Result<(), E>>, packet: &str) -> bool {
-    if let Some(Err(e)) = &result {
+    let decoded = decode_raw_game_packet(
+        raw,
+        block_state_table,
+        registry_holder,
+        sender,
+        batch_size_calculator,
+        event_tx,
+    );
+    if let Some((packet, Err(e))) = &decoded {
         tracing::warn!("Skipping malformed {packet} packet: {e}");
     }
-    result.is_some()
+    decoded.is_some()
+}
+
+/// The raw decoder that took `raw`, if any, and how its read went.
+pub(crate) type RawDecode = Option<(&'static str, Result<(), String>)>;
+
+/// Runs `raw` through the first raw decoder that claims it.
+pub(crate) fn decode_raw_game_packet(
+    raw: &[u8],
+    block_state_table: BlockStateTable,
+    registry_holder: &RegistryHolder,
+    sender: &PacketSender,
+    batch_size_calculator: &mut ChunkBatchSizeCalculator,
+    event_tx: &Sender<NetworkEvent>,
+) -> RawDecode {
+    fn claimed<E: std::fmt::Display>(
+        packet: &'static str,
+        result: Option<Result<(), E>>,
+    ) -> RawDecode {
+        result.map(|r| (packet, r.map_err(|e| e.to_string())))
+    }
+
+    let mut cur = std::io::Cursor::new(raw);
+    let packet_id = Reader::on_cursor(&mut cur, Reader::varint).ok()?;
+    if let Some(decoded) = claimed(
+        "recipe",
+        super::recipe_wire::handle_raw_recipe_packet(packet_id, &mut cur, event_tx),
+    ) {
+        return Some(decoded);
+    }
+
+    let payload = &raw[cur.position() as usize..];
+    claimed(
+        "container",
+        super::container_wire::handle_raw_container_packet(packet_id, payload, event_tx),
+    )
+    .or_else(|| {
+        claimed(
+            "hud",
+            super::hud_wire::handle_raw_hud_packet(packet_id, payload, event_tx),
+        )
+    })
+    .or_else(|| {
+        claimed(
+            "scoreboard",
+            super::scoreboard_wire::handle_raw_scoreboard_packet(packet_id, payload, event_tx),
+        )
+    })
+    .or_else(|| {
+        claimed(
+            "player_info",
+            super::player_info_wire::handle_raw_player_info_packet(packet_id, payload, event_tx),
+        )
+    })
+    .or_else(|| {
+        claimed(
+            "sound",
+            super::sound_wire::handle_raw_sound_packet(packet_id, payload, event_tx),
+        )
+    })
+    .or_else(|| {
+        claimed(
+            "lifecycle",
+            super::lifecycle_wire::handle_raw_lifecycle_packet(
+                packet_id,
+                payload,
+                registry_holder,
+                sender,
+                event_tx,
+            ),
+        )
+    })
+    .or_else(|| {
+        claimed(
+            "set_entity_data",
+            super::entity_data::handle_raw_entity_data(
+                packet_id,
+                payload,
+                registry_holder,
+                event_tx,
+            ),
+        )
+    })
+    .or_else(|| {
+        claimed(
+            "update_advancements",
+            super::advancement_wire::handle_raw_advancements(packet_id, payload, event_tx),
+        )
+    })
+    .or_else(|| {
+        claimed(
+            "entity",
+            super::entity_wire::handle_raw_entity_packet(packet_id, payload, event_tx),
+        )
+    })
+    .or_else(|| {
+        claimed(
+            "player",
+            super::player_wire::handle_raw_player_packet(packet_id, payload, event_tx),
+        )
+    })
+    .or_else(|| {
+        claimed(
+            "block",
+            super::block_wire::handle_raw_block_packet(
+                packet_id,
+                payload,
+                block_state_table,
+                event_tx,
+            ),
+        )
+    })
+    .or_else(|| {
+        claimed(
+            "chunk",
+            super::chunk_wire::handle_raw_chunk_packet(
+                packet_id,
+                payload,
+                sender,
+                batch_size_calculator,
+                event_tx,
+            ),
+        )
+    })
+    .or_else(|| {
+        (packet_id == explode_packet_id())
+            .then(|| {
+                claimed(
+                    "explode",
+                    Some(handle_raw_explode(&mut Reader::new(payload), event_tx)),
+                )
+            })
+            .flatten()
+    })
+    .or_else(|| {
+        (packet_id == level_particles_packet_id())
+            .then(|| {
+                let parsed = parse_level_particles(&mut Reader::new(payload)).map(|event| {
+                    if let Some(event) = event {
+                        send_ordered(event_tx, event);
+                    }
+                });
+                claimed("level_particles", Some(parsed))
+            })
+            .flatten()
+    })
 }
 
 /// Runs `raw` through [`handle_raw_game_packet`] with fresh connection
