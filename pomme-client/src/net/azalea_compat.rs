@@ -4877,6 +4877,52 @@ fn translate_commands_777() {
     assert_eq!(p.entries.len(), 5);
 }
 
+/// 1.20.1's parser ids sit where 26.2 had since inserted parsers, and its
+/// `color` is 26.2's `team_color`; both remap by name, properties intact.
+#[test]
+fn translate_commands_763() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let parser = |table, name| registry_id(table, ClientRegistry::CommandArgumentType, name);
+    let old_table = RegistryTable::for_protocol(763).unwrap();
+    let tree = |id, resource: u32, color: u32| {
+        let mut out = Vec::new();
+        wire::write_varint(&mut out, id);
+        out.push(3); // three nodes
+        out.extend_from_slice(&[0, 1, 1]); // root -> e
+        out.extend_from_slice(&[2, 1, 2, 1, b'e']); // e -> c
+        wire::write_varint(&mut out, resource);
+        let registry = b"minecraft:entity_type";
+        out.push(registry.len() as u8);
+        out.extend_from_slice(registry);
+        out.extend_from_slice(&[2 | 0x04, 0, 1, b'c']);
+        wire::write_varint(&mut out, color);
+        out.push(0); // root
+        out
+    };
+
+    let old = tree(
+        old_id(763, Direction::Clientbound, "commands"),
+        parser(old_table, "resource"),
+        parser(old_table, "color"),
+    );
+    let translated = translation_for(763)
+        .translate_game_frame(old.clone().into_boxed_slice())
+        .unwrap();
+    let native = RegistryTable::native();
+    let expected = tree(
+        table_id(Phase::Game, Direction::Clientbound, "commands"),
+        parser(native, "resource"),
+        parser(native, "team_color"),
+    );
+    assert_ne!(parser(old_table, "resource"), parser(native, "resource"));
+    assert_eq!(&translated[..], &expected[..]);
+    let ClientboundGamePacket::Commands(p) = translate_and_decode(763, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.entries.len(), 3);
+}
+
 /// 26.3's `tag` slot display carries a `HolderSet`: a named tag becomes the
 /// tag id 26.2 sent, and a direct item list (every ingredient on 26.3,
 /// `Ingredient.display()`) the `composite` of `item` displays 26.2 sent.

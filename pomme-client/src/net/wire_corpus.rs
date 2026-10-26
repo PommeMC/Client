@@ -28,8 +28,6 @@ use crate::world::block::BlockStateTable;
 /// drops, and open bugs marked `TODO:`. A gap must still fail on every version
 /// it names, so a fix forces its entry out.
 const KNOWN_GAPS: &[Gap] = &[
-    // TODO: parser ids pass through unremapped, where 26.2 inserted parsers.
-    gap("1.20.1", "1.21.5", "commands", "parser ids"),
     // TODO: 1.20.4's trailing `enforcesSecureChat` bool isn't stripped.
     gap("1.20.4", "1.20.4", "server_data", "trailing bool"),
     // TODO: one 26.3 registry element doesn't decode; `update_recipes`

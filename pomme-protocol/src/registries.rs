@@ -164,10 +164,11 @@ pub struct RegistryRemaps {
 
 /// Entry renames name-matching can't bridge, applied both directions
 /// (26.x renamed the chain item to iron_chain, 1.20.3 renamed the grass
-/// block/item to short_grass).
+/// block/item to short_grass, 26.2 the color argument type to team_color).
 const RENAMED: &[(ClientRegistry, &str, &str)] = &[
     (ClientRegistry::Item, "chain", "iron_chain"),
     (ClientRegistry::Item, "grass", "short_grass"),
+    (ClientRegistry::CommandArgumentType, "color", "team_color"),
 ];
 
 impl RegistryRemaps {

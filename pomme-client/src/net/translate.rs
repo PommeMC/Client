@@ -74,6 +74,8 @@
 //!   color from a `ChatFormatting` ordinal into an `Optional<TeamColor>`
 //! - serverbound slot 62 was replaced (`spectate_entity` ->
 //!   `spectator_action`); pomme sends neither
+//! - the `color` argument type was renamed `team_color` at the same id;
+//!   `commands` remaps every parser id by name, so the rename is bridged
 //!
 //! 1.21.11 -> 26.2 wire changes (all of the above — 1.21.11 matches 26.1 on
 //! those three layouts — plus):
@@ -133,6 +135,8 @@
 //!   the shifts and `change_game_mode` (which doesn't exist yet) is suppressed
 //! - serverbound `player_command` still opens its action enum with
 //!   PRESS/RELEASE_SHIFT_KEY, so newer action ordinals sit two higher
+//! - 1.21.6 inserted the `hex_color` and `dialog` argument types (and 1.20.3
+//!   `style`), shifting the `commands` parser ids after them
 //! - `change_difficulty` read an unsigned byte where 1.21.6 reads a varint;
 //!   difficulty ids fit a single byte either way, so the wire bytes are
 //!   identical
@@ -451,6 +455,10 @@ struct GameIds {
     /// registration order shifts between versions).
     serializer_map: fn(u32) -> Option<u32>,
     set_entity_data_id: u32,
+    commands_id: u32,
+    /// Names the wire-space ids the rewrites size by (command parsers,
+    /// particles, slot and recipe displays).
+    wire_registries: &'static RegistryTable,
     /// The rewrites 26.1 introduced, for wire versions below it.
     v774: Option<Ids774>,
     /// Whether the wire version's `entity_effect`/`tinted_leaves` particles
@@ -764,7 +772,6 @@ struct Ids777 {
     level_chunk_id: u32,
     light_update_id: u32,
     player_chat_id: u32,
-    commands_id: u32,
     recipe_book_add_id: u32,
     place_ghost_recipe_id: u32,
     update_recipes_id: u32,
@@ -780,9 +787,6 @@ struct Ids777 {
     /// The teleport id of an `accept_teleportation` held back until the
     /// `move_player_pos_rot` carrying its pose; cleared on `login`.
     pending_accept: Mutex<Option<u32>>,
-    /// Names the wire-space ids the rewrites size by (particles, command
-    /// parsers, slot and recipe displays).
-    wire_registries: &'static RegistryTable,
 }
 
 impl Ids777 {
@@ -1219,8 +1223,13 @@ impl Translation {
                 translate_explode(id, payload, ids, self.to_native)
             } else if v777.is_some_and(|v| id == v.explode_id) {
                 translate_explode_777(id, payload, ids, self.to_native)
-            } else if let Some(v) = v777.filter(|v| id == v.level_particles_id) {
-                match translate_level_particles_777(id, payload, v, self.to_native) {
+            } else if v777.is_some_and(|v| id == v.level_particles_id) {
+                match translate_level_particles_777(
+                    id,
+                    payload,
+                    ids.wire_registries,
+                    self.to_native,
+                ) {
                     Some(out) => Some(out),
                     None => {
                         tracing::debug!("Dropping level_particles with an unsizable payload");
@@ -1229,14 +1238,14 @@ impl Translation {
                 }
             } else if v777.is_some_and(|v| id == v.update_advancements_id) {
                 translate_update_advancements_777(id, payload, self.to_native)
-            } else if let Some(v) = v777.filter(|v| id == v.commands_id) {
-                translate_commands_777(id, payload, v, self.to_native)
-            } else if let Some(v) = v777.filter(|v| id == v.recipe_book_add_id) {
-                translate_recipe_book_add_777(id, payload, v, self.to_native)
-            } else if let Some(v) = v777.filter(|v| id == v.place_ghost_recipe_id) {
-                translate_place_ghost_recipe_777(id, payload, v, self.to_native)
-            } else if let Some(v) = v777.filter(|v| id == v.update_recipes_id) {
-                translate_update_recipes_777(id, payload, v, self.to_native)
+            } else if id == ids.commands_id {
+                translate_commands(id, payload, ids.wire_registries, self.to_native)
+            } else if v777.is_some_and(|v| id == v.recipe_book_add_id) {
+                translate_recipe_book_add_777(id, payload, ids.wire_registries, self.to_native)
+            } else if v777.is_some_and(|v| id == v.place_ghost_recipe_id) {
+                translate_place_ghost_recipe_777(id, payload, ids.wire_registries, self.to_native)
+            } else if v777.is_some_and(|v| id == v.update_recipes_id) {
+                translate_update_recipes_777(id, payload, ids.wire_registries, self.to_native)
             } else if let Some(rewrite) = ids.version_rewrite(id) {
                 rewrite(id, payload)
             } else if let Some(v) = v767.filter(|v| id == v.teleport_entity_id) {
@@ -1563,6 +1572,8 @@ impl GameIds {
                 p => panic!("no serializer map for protocol {p}"),
             },
             set_entity_data_id: id(Clientbound, "set_entity_data"),
+            commands_id: id(Clientbound, "commands"),
+            wire_registries: RegistryTable::for_protocol(protocol).expect("wire registries"),
             v774: (protocol <= 774).then(|| Ids774 {
                 level_chunk_id: id(Clientbound, "level_chunk_with_light"),
                 set_time_id: id(Clientbound, "set_time"),
@@ -1585,7 +1596,6 @@ impl GameIds {
                 level_chunk_id: id(Clientbound, "level_chunk_with_light"),
                 light_update_id: id(Clientbound, "light_update"),
                 player_chat_id: id(Clientbound, "player_chat"),
-                commands_id: id(Clientbound, "commands"),
                 recipe_book_add_id: id(Clientbound, "recipe_book_add"),
                 place_ghost_recipe_id: id(Clientbound, "place_ghost_recipe"),
                 update_recipes_id: id(Clientbound, "update_recipes"),
@@ -1608,7 +1618,6 @@ impl GameIds {
                 ),
                 move_player_pos_rot_id: id(Serverbound, "move_player_pos_rot"),
                 pending_accept: Mutex::new(None),
-                wire_registries: RegistryTable::for_protocol(protocol).expect("wire registries"),
             }),
             v772: (protocol <= 772).then(|| Ids772 {
                 add_entity_id: id(Clientbound, "add_entity"),
@@ -4900,14 +4909,12 @@ fn translate_swing_animation_777(animate_id: u32, payload: &[u8]) -> Option<Box<
 fn translate_level_particles_777(
     id: u32,
     payload: &[u8],
-    v: &Ids777,
+    wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     let particle = var_u32(&mut cur)?;
-    let name = v
-        .wire_registries
-        .name_of(ClientRegistry::ParticleType, particle)?;
+    let name = wire_registries.name_of(ClientRegistry::ParticleType, particle)?;
     if PAYLOAD_PARTICLES.contains(&name) {
         copy_particle_payload(&mut cur, &mut Vec::new(), name, remaps)?;
     }
@@ -5080,15 +5087,16 @@ fn translate_player_chat_777(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Rewrites `commands` from 26.3, whose argument-type registry inserted five
-/// singleton parsers (`ArgumentTypeInfos`): every parser id is remapped by
-/// name, and a 26.3-only parser becomes the one a 26.2 server sent for the
-/// same argument. Node and property layouts are unchanged
-/// (`ClientboundCommandsPacket`), so node indices never move.
-fn translate_commands_777(
+/// Rewrites `commands`, whose argument-type registry (`ArgumentTypeInfos`)
+/// gains and renames parsers between versions: every parser id is remapped
+/// by name, and a parser 26.2 lacks (26.3's five singletons) becomes the one a
+/// 26.2 server sent for the same argument. Node and property layouts are
+/// unchanged from 1.20.1 to 26.3 (`ClientboundCommandsPacket`), so node
+/// indices never move.
+fn translate_commands(
     id: u32,
     payload: &[u8],
-    v: &Ids777,
+    wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
@@ -5109,9 +5117,7 @@ fn translate_commands_777(
         }
         if node_type == 2 {
             let parser = var_u32(&mut cur)?;
-            let name = v
-                .wire_registries
-                .name_of(ClientRegistry::CommandArgumentType, parser)?;
+            let name = wire_registries.name_of(ClientRegistry::CommandArgumentType, parser)?;
             match remaps.remap(ClientRegistry::CommandArgumentType, parser) {
                 Some(native) => {
                     wire::write_varint(&mut out, native);
@@ -5131,7 +5137,7 @@ fn translate_commands_777(
 }
 
 /// Advances past an argument parser's properties (`ArgumentTypeInfos`
-/// serializers; unchanged between 26.2 and 26.3).
+/// serializers; unchanged from 1.20.1 to 26.3).
 fn skip_parser_properties(cur: &mut Cursor<&[u8]>, parser: &str) -> Option<()> {
     let bound = match parser {
         "brigadier:float" | "brigadier:integer" => 4,
@@ -5322,7 +5328,7 @@ fn copy_recipe_display_777(
 fn translate_recipe_book_add_777(
     id: u32,
     payload: &[u8],
-    v: &Ids777,
+    wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
@@ -5330,7 +5336,7 @@ fn translate_recipe_book_add_777(
     wire::write_varint(&mut out, id);
     for _ in 0..copy_varint(&mut cur, &mut out)? {
         copy_varint(&mut cur, &mut out)?; // display id
-        copy_recipe_display_777(&mut cur, &mut out, v.wire_registries, remaps)?;
+        copy_recipe_display_777(&mut cur, &mut out, wire_registries, remaps)?;
         copy_varint(&mut cur, &mut out)?; // group (optional varint)
         copy_varint(&mut cur, &mut out)?; // category
         copy_optional(&mut cur, &mut out, |cur, out| {
@@ -5347,14 +5353,14 @@ fn translate_recipe_book_add_777(
 fn translate_place_ghost_recipe_777(
     id: u32,
     payload: &[u8],
-    v: &Ids777,
+    wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     let mut out = Vec::with_capacity(payload.len() + 32);
     wire::write_varint(&mut out, id);
     copy_varint(&mut cur, &mut out)?;
-    copy_recipe_display_777(&mut cur, &mut out, v.wire_registries, remaps)?;
+    copy_recipe_display_777(&mut cur, &mut out, wire_registries, remaps)?;
     (cur.position() as usize == payload.len()).then_some(out)
 }
 
@@ -5364,7 +5370,7 @@ fn translate_place_ghost_recipe_777(
 fn translate_update_recipes_777(
     id: u32,
     payload: &[u8],
-    v: &Ids777,
+    wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
@@ -5382,7 +5388,7 @@ fn translate_update_recipes_777(
         copy_slot_display_777(
             &mut cur,
             &mut out,
-            v.wire_registries,
+            wire_registries,
             remaps,
             MAX_SLOT_DISPLAY_DEPTH,
         )?;
