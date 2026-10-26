@@ -106,6 +106,17 @@ fn main() {
         ("blur.frag", shaderc::ShaderKind::Fragment),
         ("entity.vert", shaderc::ShaderKind::Vertex),
         ("entity.frag", shaderc::ShaderKind::Fragment),
+        ("entity_outline.frag", shaderc::ShaderKind::Fragment),
+        ("entity_sobel.frag", shaderc::ShaderKind::Fragment),
+        (
+            "entity_outline_box_blur.frag",
+            shaderc::ShaderKind::Fragment,
+        ),
+        ("entity_outline_blit.frag", shaderc::ShaderKind::Fragment),
+        (
+            "entity_outline_composite.frag",
+            shaderc::ShaderKind::Fragment,
+        ),
         ("block_entity.vert", shaderc::ShaderKind::Vertex),
         ("chunk_border.vert", shaderc::ShaderKind::Vertex),
         ("chunk_border.frag", shaderc::ShaderKind::Fragment),

@@ -466,6 +466,9 @@ impl ItemEntityPipeline {
 
     /// Cutout meshes first, then translucent ones, as vanilla's item sheets
     /// are ordered.
+    // TODO: vanilla also outlines glowing item entities (`submitItem` into the
+    // outline target); the item push constants' 128 bytes are full, so the
+    // outline colour needs another way in.
     pub fn draw(
         &mut self,
         device: &rhi::backend::Device,

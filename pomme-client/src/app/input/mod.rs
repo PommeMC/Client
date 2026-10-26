@@ -521,7 +521,8 @@ impl InputState {
             | Action::OpenCommands
             | Action::DropItem
             | Action::SwapOffhand
-            | Action::SpectatorHotbar => self.action_held(action),
+            | Action::SpectatorHotbar
+            | Action::SpectatorOutlines => self.action_held(action),
             // Other actions do not have a held-state query here.
             _ => false,
         }
