@@ -961,31 +961,64 @@ fn component_id_anchors() {
     );
 }
 
-/// The per-section `fluidCount` insertion (see `translate_chunk`).
-#[test]
-fn translate_chunk_774() {
+/// A `level_chunk_with_light` at chunk (3, -2) with no heightmaps, holding
+/// `buffer` as its section data.
+fn chunk_frame(protocol: i32, buffer: &[u8]) -> Vec<u8> {
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
-        old_id(774, Direction::Clientbound, "level_chunk_with_light"),
+        old_id(protocol, Direction::Clientbound, "level_chunk_with_light"),
     );
     old.extend_from_slice(&3i32.to_be_bytes()); // chunk x
     old.extend_from_slice(&(-2i32).to_be_bytes()); // chunk z
     old.push(0); // no heightmaps
-    // One section: block count 1, single-value palettes for states/biomes.
-    let section = [0u8, 1, 0, 5, 0, 0];
-    wire::write_varint(&mut old, section.len() as u32);
-    old.extend_from_slice(&section);
+    wire::write_varint(&mut old, buffer.len() as u32);
+    old.extend_from_slice(buffer);
     old.push(0); // no block entities
     old.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // empty light masks + lists
+    old
+}
 
-    let ChunkPacket::Level { x, z, sections, .. } =
-        translate_and_read(774, old, "level_chunk_with_light", chunk::read)
-    else {
+/// One section: block count 1, single-value palettes for states/biomes.
+const SINGLE_VALUE_SECTION: [u8; 6] = [0, 1, 0, 5, 0, 0];
+
+/// The per-section `fluidCount` insertion (see `translate_chunk`).
+#[test]
+fn translate_chunk_774() {
+    let ChunkPacket::Level { x, z, sections, .. } = translate_and_read(
+        774,
+        chunk_frame(774, &SINGLE_VALUE_SECTION),
+        "level_chunk_with_light",
+        chunk::read,
+    ) else {
         panic!("wrong packet");
     };
     assert_eq!((x, z), (3, -2));
     assert_eq!(sections[..], [0, 1, 0, 0, 0, 5, 0, 0]);
+}
+
+/// 1.21.5's section buffer ends in a zero byte per container, sized for the
+/// length varints it no longer writes; the padding is dropped, and a buffer
+/// without it misframes.
+#[test]
+fn translate_chunk_770() {
+    let padded = [&SINGLE_VALUE_SECTION[..], &[0, 0]].concat();
+    let ChunkPacket::Level { sections, .. } = translate_and_read(
+        770,
+        chunk_frame(770, &padded),
+        "level_chunk_with_light",
+        chunk::read,
+    ) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(sections[..], [0, 1, 0, 0, 0, 5, 0, 0]);
+
+    let unpadded = chunk_frame(770, &SINGLE_VALUE_SECTION).into_boxed_slice();
+    assert!(
+        translation_for(770)
+            .translate_game_frame(unpadded)
+            .is_none()
+    );
 }
 
 /// The world-clock map synthesis (see `translate_set_time`).

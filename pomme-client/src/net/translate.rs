@@ -134,6 +134,10 @@
 //! - `change_difficulty` read an unsigned byte where 1.21.6 reads a varint;
 //!   difficulty ids fit a single byte either way, so the wire bytes are
 //!   identical
+//! - 1.21.5 alone: the chunk section buffer was still sized for the long-array
+//!   length varints `writeFixedSizeLongArray` stopped writing
+//!   (`PalettedContainer.Data.getSerializedSize`), so it ends in zero padding,
+//!   which is dropped
 //! - 1.21.6 gave `HangingEntity` a synched `direction` at index 8, so an item
 //!   frame's item/rotation sit at 8/9 here and a painting's variant at 8 (9/10
 //!   and 9 on 26.2); the walker passes index bytes through unremapped and pomme
@@ -1198,7 +1202,14 @@ impl Translation {
             if id == ids.set_entity_data_id {
                 translate_entity_data(id, payload, ids, self.to_native)
             } else if ids.v774.as_ref().is_some_and(|v| id == v.level_chunk_id) {
-                translate_chunk(id, payload, v769, named_nbt)
+                let padding = if named_nbt {
+                    SectionPadding::EntrySized
+                } else if ids.v770.is_some() && !v769 {
+                    SectionPadding::UnwrittenLength
+                } else {
+                    SectionPadding::None
+                };
+                translate_chunk(id, payload, v769, named_nbt, padding)
             } else if ids.v774.as_ref().is_some_and(|v| id == v.set_time_id) {
                 if v767.is_some() {
                     translate_set_time_767(id, payload)
@@ -3903,11 +3914,17 @@ fn skip_optional(
 /// heightmaps before the section buffer are copied verbatim — or, with
 /// `v769` (pre-1.21.5), converted from the network-NBT compound to the
 /// packed list, and each section's packed longs lose their length prefix.
-/// When the wire version names its NBT roots (1.20.1), the buffer's end
-/// padding is dropped and each block entity tag after it is rewritten;
+/// The buffer's end `padding` is dropped. When the wire version names its
+/// NBT roots (1.20.1), each block entity tag after the buffer is rewritten;
 /// otherwise the block entities are copied verbatim. The light data that
 /// follows is always verbatim.
-fn translate_chunk(id: u32, payload: &[u8], v769: bool, named_nbt: bool) -> Option<Vec<u8>> {
+fn translate_chunk(
+    id: u32,
+    payload: &[u8],
+    v769: bool,
+    named_nbt: bool,
+    padding: SectionPadding,
+) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 8)?; // chunk x/z ints
 
@@ -3930,9 +3947,8 @@ fn translate_chunk(id: u32, payload: &[u8], v769: bool, named_nbt: bool) -> Opti
     let mut buffer = Vec::with_capacity(buffer_len + 3 * 26 * 2);
     let mut bcur = Cursor::new(&payload[..buffer_end]);
     bcur.set_position(buffer_at as u64);
-    // 1.20.1's padding: the bytes its length varints were oversized by.
-    let mut padding = 0;
-    while (bcur.position() as usize) + padding < buffer_end {
+    let mut padded = 0;
+    while (bcur.position() as usize) + padded < buffer_end {
         let section_at = bcur.position() as usize;
         advance(&mut bcur, 2)?; // nonEmptyBlockCount
         buffer.extend_from_slice(&payload[section_at..bcur.position() as usize]);
@@ -3940,12 +3956,10 @@ fn translate_chunk(id: u32, payload: &[u8], v769: bool, named_nbt: bool) -> Opti
         for (entries, max_indirect_bits) in [(4096, 8), (64, 3)] {
             let longs =
                 copy_paletted_container(&mut bcur, &mut buffer, entries, max_indirect_bits, v769)?;
-            if named_nbt {
-                padding += varint_len(entries) - varint_len(longs);
-            }
+            padded += padding.bytes(entries, longs);
         }
     }
-    if bcur.position() as usize + padding != buffer_end {
+    if bcur.position() as usize + padded != buffer_end {
         return None;
     }
 
@@ -4153,6 +4167,28 @@ fn copy_paletted_container(
     advance(cur, longs.checked_mul(8)?)?;
     out.extend_from_slice(&cur.get_ref()[longs_at..cur.position() as usize]);
     Some(longs)
+}
+
+/// The zero bytes a version's chunk section buffer ends in, per container:
+/// `getSerializedSize` sized it for length varints that don't match what
+/// `write` sent.
+#[derive(Clone, Copy)]
+enum SectionPadding {
+    None,
+    /// 1.20.1 sized each length for the entry count, not the long count.
+    EntrySized,
+    /// 1.21.5 sized a length it no longer writes.
+    UnwrittenLength,
+}
+
+impl SectionPadding {
+    fn bytes(self, entries: usize, longs: usize) -> usize {
+        match self {
+            Self::None => 0,
+            Self::EntrySized => varint_len(entries) - varint_len(longs),
+            Self::UnwrittenLength => varint_len(longs),
+        }
+    }
 }
 
 /// The bytes `value` takes as a varint.
