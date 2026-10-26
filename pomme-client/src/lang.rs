@@ -18,7 +18,9 @@ pub fn load(jar_assets_dir: &Path) {
 
 fn read(jar_assets_dir: &Path) -> Option<HashMap<String, String>> {
     let path = jar_assets_dir.join("minecraft/lang/en_us.json");
-    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    serde_json::from_str(&std::fs::read_to_string(&path).ok()?)
+        .inspect_err(|e| tracing::warn!("Couldn't parse {}: {e}", path.display()))
+        .ok()
 }
 
 pub fn translate(key: &str) -> Option<&'static str> {
@@ -57,7 +59,7 @@ mod tests {
     use crate::test_util::test_temp_dir;
 
     #[test]
-    fn reads_nothing_until_the_file_exists() {
+    fn reads_only_a_parsable_file() {
         let dir = test_temp_dir("lang");
         assert_eq!(read(&dir), None);
 
@@ -69,7 +71,10 @@ mod tests {
         )
         .unwrap();
         let map = read(&dir).unwrap();
+        std::fs::write(lang.join("en_us.json"), "{").unwrap();
+        let corrupt = read(&dir);
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(map["chat.type.announcement"], "[%s] %s");
+        assert_eq!(corrupt, None);
     }
 }
