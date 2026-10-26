@@ -961,31 +961,64 @@ fn component_id_anchors() {
     );
 }
 
-/// The per-section `fluidCount` insertion (see `translate_chunk`).
-#[test]
-fn translate_chunk_774() {
+/// A `level_chunk_with_light` at chunk (3, -2) with no heightmaps, holding
+/// `buffer` as its section data.
+fn chunk_frame(protocol: i32, buffer: &[u8]) -> Vec<u8> {
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
-        old_id(774, Direction::Clientbound, "level_chunk_with_light"),
+        old_id(protocol, Direction::Clientbound, "level_chunk_with_light"),
     );
     old.extend_from_slice(&3i32.to_be_bytes()); // chunk x
     old.extend_from_slice(&(-2i32).to_be_bytes()); // chunk z
     old.push(0); // no heightmaps
-    // One section: block count 1, single-value palettes for states/biomes.
-    let section = [0u8, 1, 0, 5, 0, 0];
-    wire::write_varint(&mut old, section.len() as u32);
-    old.extend_from_slice(&section);
+    wire::write_varint(&mut old, buffer.len() as u32);
+    old.extend_from_slice(buffer);
     old.push(0); // no block entities
     old.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // empty light masks + lists
+    old
+}
 
-    let ChunkPacket::Level { x, z, sections, .. } =
-        translate_and_read(774, old, "level_chunk_with_light", chunk::read)
-    else {
+/// One section: block count 1, single-value palettes for states/biomes.
+const SINGLE_VALUE_SECTION: [u8; 6] = [0, 1, 0, 5, 0, 0];
+
+/// The per-section `fluidCount` insertion (see `translate_chunk`).
+#[test]
+fn translate_chunk_774() {
+    let ChunkPacket::Level { x, z, sections, .. } = translate_and_read(
+        774,
+        chunk_frame(774, &SINGLE_VALUE_SECTION),
+        "level_chunk_with_light",
+        chunk::read,
+    ) else {
         panic!("wrong packet");
     };
     assert_eq!((x, z), (3, -2));
     assert_eq!(sections[..], [0, 1, 0, 0, 0, 5, 0, 0]);
+}
+
+/// 1.21.5's section buffer ends in a zero byte per container, sized for the
+/// length varints it no longer writes; the padding is dropped, and a buffer
+/// without it misframes.
+#[test]
+fn translate_chunk_770() {
+    let padded = [&SINGLE_VALUE_SECTION[..], &[0, 0]].concat();
+    let ChunkPacket::Level { sections, .. } = translate_and_read(
+        770,
+        chunk_frame(770, &padded),
+        "level_chunk_with_light",
+        chunk::read,
+    ) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(sections[..], [0, 1, 0, 0, 0, 5, 0, 0]);
+
+    let unpadded = chunk_frame(770, &SINGLE_VALUE_SECTION).into_boxed_slice();
+    assert!(
+        translation_for(770)
+            .translate_game_frame(unpadded)
+            .is_none()
+    );
 }
 
 /// The world-clock map synthesis (see `translate_set_time`).
@@ -1631,10 +1664,9 @@ fn translate_set_player_team_769() {
     assert_eq!(&translated[..], &expected[..]);
 }
 
-/// The pre-1.21.5 NBT heightmap compound becomes the packed list, on top
-/// of the shared per-section `fluidCount` insertion.
-#[test]
-fn translate_chunk_769() {
+/// A 769 `level_chunk_with_light` at chunk (3, -2) holding `section`, its
+/// heightmaps the pre-1.21.5 NBT compound `{ MOTION_BLOCKING: [7L] }`.
+fn chunk_frame_769(section: &[u8]) -> Vec<u8> {
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
@@ -1642,7 +1674,6 @@ fn translate_chunk_769() {
     );
     old.extend_from_slice(&3i32.to_be_bytes()); // chunk x
     old.extend_from_slice(&(-2i32).to_be_bytes()); // chunk z
-    // NBT compound { MOTION_BLOCKING: [long; 1] }.
     old.push(10);
     old.push(12); // long-array tag
     old.extend_from_slice(&15u16.to_be_bytes());
@@ -1650,19 +1681,32 @@ fn translate_chunk_769() {
     old.extend_from_slice(&1i32.to_be_bytes());
     old.extend_from_slice(&7u64.to_be_bytes());
     old.push(0); // compound end
-    let section = [0u8, 1, 0, 5, 0, 0];
     wire::write_varint(&mut old, section.len() as u32);
-    old.extend_from_slice(&section);
+    old.extend_from_slice(section);
     old.push(0); // no block entities
     old.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // empty light masks + lists
+    old
+}
 
+/// The pre-1.21.5 NBT heightmap compound becomes the packed list, and each
+/// single-value container's empty long array loses its `0` length, on top of
+/// the shared per-section `fluidCount` insertion.
+#[test]
+fn translate_chunk_769() {
+    // Block count 1; states and biomes each a single value, then length 0.
+    let section = [0u8, 1, 0, 5, 0, 0, 0, 0];
     let ChunkPacket::Level {
         x,
         z,
         heightmaps,
         sections,
         ..
-    } = translate_and_read(769, old, "level_chunk_with_light", chunk::read)
+    } = translate_and_read(
+        769,
+        chunk_frame_769(&section),
+        "level_chunk_with_light",
+        chunk::read,
+    )
     else {
         panic!("wrong packet");
     };
@@ -1670,6 +1714,36 @@ fn translate_chunk_769() {
     assert_eq!(heightmaps.len(), 1);
     assert_eq!(&*heightmaps[0].1, &[7u64]);
     assert_eq!(sections[..], [0, 1, 0, 0, 0, 5, 0, 0]);
+}
+
+/// An indirect 4-bit block palette's 256 longs keep their bytes and lose the
+/// length before them; a length the bits don't imply drops the packet.
+#[test]
+fn translate_chunk_769_indirect() {
+    let longs: Vec<u8> = (0..256u64).flat_map(|i| i.to_be_bytes()).collect();
+    let section = |length: u32| {
+        let mut section = vec![0u8, 1, 4, 2, 0, 5]; // 4 bits, palette [0, 5]
+        wire::write_varint(&mut section, length);
+        section.extend_from_slice(&longs);
+        section.extend_from_slice(&[0, 0, 0]); // single-value biomes, length 0
+        section
+    };
+
+    let ChunkPacket::Level { sections, .. } = translate_and_read(
+        769,
+        chunk_frame_769(&section(256)),
+        "level_chunk_with_light",
+        chunk::read,
+    ) else {
+        panic!("wrong packet");
+    };
+    let mut expected = vec![0u8, 1, 0, 0, 4, 2, 0, 5];
+    expected.extend_from_slice(&longs);
+    expected.extend_from_slice(&[0, 0]);
+    assert_eq!(sections[..], expected[..]);
+
+    let frame = chunk_frame_769(&section(255)).into_boxed_slice();
+    assert!(translation_for(769).translate_game_frame(frame).is_none());
 }
 
 /// A `player_chat` frame with everything but the chat type fixed: 765 sends a
@@ -3766,7 +3840,8 @@ fn translate_container_set_content_763() {
     );
 }
 
-/// A 763 chunk names both its heightmap root and every block entity's tag.
+/// A 763 chunk names both its heightmap root and every block entity's tag,
+/// and pads its section buffer for the single-value block container.
 #[test]
 fn translate_chunk_763() {
     let mut old = Vec::new();
@@ -3785,7 +3860,7 @@ fn translate_chunk_763() {
     old.extend_from_slice(&1i32.to_be_bytes());
     old.extend_from_slice(&7u64.to_be_bytes());
     old.push(0); // compound end
-    let section = [0u8, 1, 0, 5, 0, 0];
+    let section = [0u8, 1, 0, 5, 0, 0, 0, 0, 0]; // one byte of padding
     wire::write_varint(&mut old, section.len() as u32);
     old.extend_from_slice(&section);
     wire::write_varint(&mut old, 1); // one block entity
@@ -3799,6 +3874,7 @@ fn translate_chunk_763() {
         x,
         z,
         heightmaps,
+        sections,
         block_entities,
         ..
     } = translate_and_read(763, old, "level_chunk_with_light", chunk::read)
@@ -3808,6 +3884,7 @@ fn translate_chunk_763() {
     assert_eq!((x, z), (3, -2));
     assert_eq!(heightmaps.len(), 1);
     assert_eq!(&*heightmaps[0].1, &[7u64]);
+    assert_eq!(sections[..], [0, 1, 0, 0, 0, 5, 0, 0]);
     let [be] = &block_entities[..] else {
         panic!("block entities: {block_entities:?}");
     };
@@ -3926,7 +4003,8 @@ fn select_known_packs_reply_is_byte_exact() {
         version: pomme_protocol::version::NATIVE.name.to_owned(),
     };
     let offered = vec![core_of("minecraft"), core_of("pomme")];
-    let known_packs = crate::net::known_packs::select_packs(&offered);
+    let known_packs =
+        crate::net::known_packs::select_packs(pomme_protocol::version::NATIVE.protocol, &offered);
     assert_eq!(known_packs, offered[..1]);
 
     let mut bytes = Vec::new();
@@ -4846,6 +4924,79 @@ fn translate_commands_777() {
         panic!("wrong packet");
     };
     assert_eq!(p.entries.len(), 5);
+}
+
+/// 1.20.4's `server_data` loses its trailing `enforcesSecureChat` bool; a
+/// frame that doesn't end in exactly that bool drops.
+#[test]
+fn translate_server_data_765() {
+    let frame = |id, tail: &[u8]| {
+        let mut out = Vec::new();
+        wire::write_varint(&mut out, id);
+        out.extend_from_slice(&[8, 0, 2, b'h', b'i']); // motd: a string tag
+        out.push(0); // no icon
+        out.extend_from_slice(tail);
+        out
+    };
+    let old_id = old_id(765, Direction::Clientbound, "server_data");
+
+    let translated = translation_for(765)
+        .translate_game_frame(frame(old_id, &[1]).into_boxed_slice())
+        .unwrap();
+    let native = table_id(Phase::Game, Direction::Clientbound, "server_data");
+    assert_eq!(&translated[..], &frame(native, &[])[..]);
+    let ClientboundGamePacket::ServerData(_) = translate_and_decode(765, frame(old_id, &[1]))
+    else {
+        panic!("wrong packet");
+    };
+    let stray = frame(old_id, &[1, 7]).into_boxed_slice();
+    assert!(translation_for(765).translate_game_frame(stray).is_none());
+}
+
+/// 1.20.1's parser ids sit where 26.2 had since inserted parsers, and its
+/// `color` is 26.2's `team_color`; both remap by name, properties intact.
+#[test]
+fn translate_commands_763() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let parser = |table, name| registry_id(table, ClientRegistry::CommandArgumentType, name);
+    let old_table = RegistryTable::for_protocol(763).unwrap();
+    let tree = |id, resource: u32, color: u32| {
+        let mut out = Vec::new();
+        wire::write_varint(&mut out, id);
+        out.push(3); // three nodes
+        out.extend_from_slice(&[0, 1, 1]); // root -> e
+        out.extend_from_slice(&[2, 1, 2, 1, b'e']); // e -> c
+        wire::write_varint(&mut out, resource);
+        let registry = b"minecraft:entity_type";
+        out.push(registry.len() as u8);
+        out.extend_from_slice(registry);
+        out.extend_from_slice(&[2 | 0x04, 0, 1, b'c']);
+        wire::write_varint(&mut out, color);
+        out.push(0); // root
+        out
+    };
+
+    let old = tree(
+        old_id(763, Direction::Clientbound, "commands"),
+        parser(old_table, "resource"),
+        parser(old_table, "color"),
+    );
+    let translated = translation_for(763)
+        .translate_game_frame(old.clone().into_boxed_slice())
+        .unwrap();
+    let native = RegistryTable::native();
+    let expected = tree(
+        table_id(Phase::Game, Direction::Clientbound, "commands"),
+        parser(native, "resource"),
+        parser(native, "team_color"),
+    );
+    assert_ne!(parser(old_table, "resource"), parser(native, "resource"));
+    assert_eq!(&translated[..], &expected[..]);
+    let ClientboundGamePacket::Commands(p) = translate_and_decode(763, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.entries.len(), 3);
 }
 
 /// 26.3's `tag` slot display carries a `HolderSet`: a named tag becomes the

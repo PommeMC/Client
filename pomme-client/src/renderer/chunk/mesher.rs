@@ -1,5 +1,5 @@
-use std::collections::{BinaryHeap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use azalea_block::BlockState;
@@ -14,7 +14,7 @@ use crate::world::block::model::{
 use crate::world::block::render_assets::{BlockRenderView, OwnedBlockRenderView, Tint};
 use crate::world::block::{BlockStateData, BlockStateTable, FluidKind};
 use crate::world::chunk;
-use crate::world::chunk::{ChunkStore, SectionBlocks};
+use crate::world::chunk::{ChunkRing, ChunkStore, SectionBlocks};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -222,6 +222,9 @@ pub struct MovingBlockMesh {
 
 pub struct ChunkMeshData {
     pub pos: ChunkPos,
+    /// Which load of `pos` this was meshed for (see `MeshColumns`);
+    /// 0 for the synchronous edit path, which uploads directly.
+    pub incarnation: u64,
     /// World Y of section index 0, so the buffer can derive each section's
     /// origin (`min_y + section_index * 16`) for vertex quantization.
     pub min_y: i32,
@@ -232,9 +235,8 @@ pub struct ChunkMeshData {
     /// empty and its slice is freed. `0..section_count` for a whole-column
     /// (re)mesh.
     pub replaced: std::ops::Range<i32>,
-    /// Content generation this mesh was built from (see
-    /// `GameState::content_gen`). Lets the drain drop a stale result whose
-    /// column has since been edited.
+    /// The column generation this mesh was asked for (see `MeshColumns`); its
+    /// dirty sections clear only if no newer generation has been marked since.
     pub content_gen: u64,
     /// Globally monotonic stamp assigned at enqueue. The buffer keeps the
     /// highest epoch uploaded per section and rejects any older upload, so an
@@ -694,6 +696,12 @@ pub struct MeshDispatcher {
     priority_rx: crossbeam_channel::Receiver<ChunkMeshData>,
     priority_tx: crossbeam_channel::Sender<ChunkMeshData>,
     queue: Arc<MeshQueue>,
+    /// The newest generation a worker has taken per column, so a generation
+    /// meshes once even while it sits in successive published batches.
+    claimed: Arc<ChunkRing<AtomicU64>>,
+    /// The last published batch's jobs by column, reused by the next publish
+    /// when it asks for the same work.
+    published: HashMap<ChunkPos, Arc<PendingJob>>,
     workers: Vec<std::thread::JoinHandle<()>>,
     // Monotonic per-enqueue stamp; see `ChunkMeshData::upload_epoch`. Starts at 1
     // so 0 means "never uploaded" on the buffer side.
@@ -779,6 +787,7 @@ impl MeshDispatcher {
         let (priority_tx, priority_rx) = crossbeam_channel::unbounded();
 
         let queue = Arc::new(MeshQueue::new());
+        let claimed = Arc::new(ChunkRing::new(|| AtomicU64::new(0)));
         // Half the cores, capped. Too many saturated workers starve the
         // main/render thread during a load burst (frame spikes); the cap trades
         // some load throughput for that.
@@ -788,12 +797,13 @@ impl MeshDispatcher {
         let mut workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let queue = Arc::clone(&queue);
+            let claimed = Arc::clone(&claimed);
             workers.push(
                 std::thread::Builder::new()
                     .name("chunk-mesher".into())
                     .spawn(move || {
                         lower_current_thread_priority();
-                        queue.run_worker()
+                        queue.run_worker(&claimed)
                     })
                     .expect("spawn chunk-mesher thread"),
             );
@@ -805,6 +815,8 @@ impl MeshDispatcher {
             priority_rx,
             priority_tx,
             queue,
+            claimed,
+            published: HashMap::new(),
             workers,
             next_epoch: AtomicU64::new(1),
             render_view,
@@ -846,40 +858,69 @@ impl MeshDispatcher {
         )
     }
 
-    // Async worker path, vanilla's default `prioritizeChunkUpdates = NONE`.
-    // Player edits use `mesh_section_now` instead.
-    pub fn enqueue(
-        &self,
+    /// Replaces the workers' pending work with `requests`, in vanilla
+    /// `SectionTaskDynamicQueue` order from `camera`. Async worker path,
+    /// vanilla's default `prioritizeChunkUpdates = NONE`; player edits use
+    /// [`Self::mesh_sections_now`] instead.
+    pub fn publish(
+        &mut self,
         chunk_store: &ChunkStore,
-        pos: ChunkPos,
-        lod: u32,
-        priority: bool,
-        content_gen: u64,
-        sections: std::ops::Range<i32>,
+        camera: glam::DVec3,
+        requests: Vec<MeshRequest>,
     ) {
-        let tx = if priority {
-            self.priority_tx.clone()
-        } else {
-            self.result_tx.clone()
-        };
-        let enqueued_at = std::time::Instant::now();
-        let upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
+        let mut previous = std::mem::take(&mut self.published);
+        let mut recompiles = Vec::new();
+        let mut initial = Vec::new();
+        for request in requests {
+            let job = match previous.remove(&request.pos) {
+                Some(job) if job.serves(&request) => job,
+                _ => Arc::new(self.pending_job(chunk_store, request)),
+            };
+            let entry = (column_dist_sq(job.pos, camera), job);
+            if entry.1.is_recompile {
+                recompiles.push(entry);
+            } else {
+                initial.push(entry);
+            }
+        }
+        let jobs = poll_order(recompiles, initial);
+        self.published = jobs.iter().map(|job| (job.pos, Arc::clone(job))).collect();
+        self.queue.publish(jobs);
+    }
 
-        self.queue.push(PendingJob {
-            pos,
-            lod,
-            content_gen,
-            upload_epoch,
-            sections,
-            // An edit re-meshes an already-shown chunk (vanilla's "recompile").
-            is_recompile: priority,
-            enqueued_at,
-            snapshot: self.build_snapshot(chunk_store, pos),
+    fn pending_job(&self, chunk_store: &ChunkStore, request: MeshRequest) -> PendingJob {
+        PendingJob {
+            pos: request.pos,
+            lod: request.lod,
+            incarnation: request.incarnation,
+            content_gen: request.content_gen,
+            upload_epoch: self.next_epoch.fetch_add(1, Ordering::Relaxed),
+            sections: request.sections,
+            is_recompile: request.recompile,
+            enqueued_at: std::time::Instant::now(),
+            snapshot: Mutex::new(Some(self.build_snapshot(chunk_store, request.pos))),
             render_view: self.render_view.clone(),
             uv_map: Arc::clone(&self.uv_map),
-            tx,
+            tx: if request.recompile {
+                self.priority_tx.clone()
+            } else {
+                self.result_tx.clone()
+            },
             pool: Arc::clone(&self.pool),
-        });
+        }
+    }
+
+    /// The newest generation a worker has taken for `pos`.
+    pub fn claimed_generation(&self, pos: ChunkPos) -> u64 {
+        self.claimed.get(pos).load(Ordering::Acquire)
+    }
+
+    /// Retires `pos`'s queued work when it unloads: `generation` is newer
+    /// than anything queued for it, and older than its next load's.
+    pub fn cancel(&self, pos: ChunkPos, generation: u64) {
+        self.claimed
+            .get(pos)
+            .fetch_max(generation, Ordering::AcqRel);
     }
 
     /// Vanilla `compileSync` (`PrioritizeChunkUpdates.PLAYER_AFFECTED`): mesh
@@ -991,11 +1032,6 @@ impl MeshDispatcher {
         }
     }
 
-    /// Latest camera position, used to mesh the nearest pending chunk first.
-    pub fn set_camera_position(&self, pos: glam::DVec3) {
-        self.queue.set_camera(pos);
-    }
-
     pub fn drain_results(&self) -> impl Iterator<Item = ChunkMeshData> + '_ {
         // Edits drain fully and first; bulk chunk loads stay capped per frame.
         self.priority_rx
@@ -1019,18 +1055,31 @@ impl Drop for MeshDispatcher {
 
 const MAX_RECOMPILE_QUOTA: i32 = 2;
 
+/// One column's dirty span, as `MeshColumns::requests` asks for it.
+pub struct MeshRequest {
+    pub pos: ChunkPos,
+    pub lod: u32,
+    pub incarnation: u64,
+    pub content_gen: u64,
+    pub sections: std::ops::Range<i32>,
+    /// Re-meshes sections an edit changed (vanilla's "recompile").
+    pub recompile: bool,
+}
+
 /// A pending chunk-mesh job: a point-in-time snapshot of the neighbourhood plus
 /// everything `mesh_chunk_snapshot` needs. Gathered on the calling thread
-/// (chunk data isn't shareable across threads), then meshed by a worker.
+/// (chunk data isn't shareable across threads), then meshed by the worker
+/// that claims its generation, which takes the snapshot.
 struct PendingJob {
     pos: ChunkPos,
     lod: u32,
+    incarnation: u64,
     content_gen: u64,
     upload_epoch: u64,
     sections: std::ops::Range<i32>,
     is_recompile: bool,
     enqueued_at: std::time::Instant,
-    snapshot: ChunkStoreSnapshot,
+    snapshot: Mutex<Option<ChunkStoreSnapshot>>,
     render_view: OwnedBlockRenderView,
     uv_map: Arc<AtlasUVMap>,
     tx: crossbeam_channel::Sender<ChunkMeshData>,
@@ -1038,22 +1087,27 @@ struct PendingJob {
 }
 
 impl PendingJob {
-    fn key(&self) -> JobKey {
-        (self.pos, self.sections.start, self.sections.end)
+    fn serves(&self, request: &MeshRequest) -> bool {
+        self.incarnation == request.incarnation
+            && self.content_gen == request.content_gen
+            && self.lod == request.lod
+            && self.sections == request.sections
+            && self.is_recompile == request.recompile
     }
 
-    fn run(mut self) {
+    fn run(&self, mut snapshot: ChunkStoreSnapshot) {
         let started_at = std::time::Instant::now();
         let mut mesh = mesh_chunk_snapshot(
-            &mut self.snapshot,
+            &mut snapshot,
             self.pos,
             self.render_view.as_view(),
             &self.uv_map,
             self.lod,
-            self.sections,
+            self.sections.clone(),
             &self.pool,
         );
         let meshed_at = std::time::Instant::now();
+        mesh.incarnation = self.incarnation;
         mesh.content_gen = self.content_gen;
         mesh.upload_epoch = self.upload_epoch;
         mesh.queue_ms = (started_at - self.enqueued_at).as_secs_f32() * 1000.0;
@@ -1077,59 +1131,57 @@ fn column_dist_sq(pos: ChunkPos, cam: glam::DVec3) -> f64 {
     dx * dx + dz * dz
 }
 
-/// Column + section range identifying a queued job. The range is part of the
-/// key so full-column and partial jobs never coalesce.
-type JobKey = (ChunkPos, i32, i32);
-
-/// A load-heap entry keyed by column distance; the job itself lives in
-/// `QueueState::load_jobs`.
-struct LoadEntry {
-    dist: f64,
-    key: JobKey,
+/// Vanilla `SectionTaskDynamicQueue.poll` run over a whole batch: the nearest
+/// task first, with a recompile closer than the nearest initial compile taken
+/// ahead of it at most `MAX_RECOMPILE_QUOTA` times in a row.
+fn poll_order<T>(mut recompiles: Vec<(f64, T)>, mut initial: Vec<(f64, T)>) -> Vec<T> {
+    recompiles.sort_by(|a, b| a.0.total_cmp(&b.0));
+    initial.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut order = Vec::with_capacity(recompiles.len() + initial.len());
+    let mut recompiles = recompiles.into_iter().peekable();
+    let mut initial = initial.into_iter().peekable();
+    let mut quota = MAX_RECOMPILE_QUOTA;
+    loop {
+        let take_recompile = match (recompiles.peek(), initial.peek()) {
+            (None, None) => break,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (Some((rd, _)), Some((id, _))) => quota > 0 && rd < id,
+        };
+        let next = if take_recompile {
+            quota -= 1;
+            recompiles.next()
+        } else {
+            quota = MAX_RECOMPILE_QUOTA;
+            initial.next()
+        };
+        order.extend(next.map(|(_, job)| job));
+    }
+    order
 }
 
-impl PartialEq for LoadEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.dist == other.dist
+/// One published batch, taken front to back by the workers.
+struct Batch {
+    jobs: Box<[Arc<PendingJob>]>,
+    next: AtomicUsize,
+}
+
+impl Batch {
+    fn take(&self) -> Option<&Arc<PendingJob>> {
+        self.jobs.get(self.next.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn exhausted(&self) -> bool {
+        self.next.load(Ordering::Relaxed) >= self.jobs.len()
     }
 }
-impl Eq for LoadEntry {}
-impl PartialOrd for LoadEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for LoadEntry {
-    // Reversed so `BinaryHeap` (a max-heap) pops the nearest (smallest dist).
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.dist.total_cmp(&self.dist)
-    }
-}
 
-struct QueueState {
-    /// Edits, kept small (a handful in flight) so a linear scan + in-place
-    /// replace stays cheap.
-    recompiles: Vec<PendingJob>,
-    /// Bulk loads, a min-by-distance heap so dequeue is `O(log n)` under the
-    /// lock instead of an `O(n)` scan (the old contention point).
-    loads: BinaryHeap<LoadEntry>,
-    /// Queued (not yet started) bulk jobs by key. Invariant: 1:1 with `loads`
-    /// entries — a duplicate push replaces the job here and adds no heap entry.
-    load_jobs: HashMap<JobKey, PendingJob>,
-    // Consecutive edits served ahead of an initial load before one is forced, so
-    // streaming never starves (vanilla SectionTaskDynamicQueue.MAX_RECOMPILE_QUOTA).
-    recompile_quota: i32,
-    camera: glam::DVec3,
-    /// Camera the load heap is keyed against; re-keyed only when the camera
-    /// crosses a bucket, so push/pop stay cheap between rebuilds.
-    sort_cam: glam::DVec3,
-}
-
-/// Re-orderable mesh queue, a port of vanilla `SectionTaskDynamicQueue`. The
-/// best task is chosen at poll time rather than fixed at submission, so a
-/// freshly enqueued edit is taken before the already-queued chunk-load backlog.
+/// The workers' pending work: the latest published batch, which each publish
+/// replaces wholesale. A worker leaves a superseded batch at its next job.
 struct MeshQueue {
-    state: Mutex<QueueState>,
+    batch: Mutex<Arc<Batch>>,
+    /// Bumped by every publish.
+    published: AtomicU64,
     available: Condvar,
     closed: AtomicBool,
 }
@@ -1137,132 +1189,82 @@ struct MeshQueue {
 impl MeshQueue {
     fn new() -> Self {
         Self {
-            state: Mutex::new(QueueState {
-                recompiles: Vec::new(),
-                loads: BinaryHeap::new(),
-                load_jobs: HashMap::new(),
-                recompile_quota: MAX_RECOMPILE_QUOTA,
-                camera: glam::DVec3::ZERO,
-                sort_cam: glam::DVec3::ZERO,
-            }),
+            batch: Mutex::new(Arc::new(Batch {
+                jobs: Box::new([]),
+                next: AtomicUsize::new(0),
+            })),
+            published: AtomicU64::new(0),
             available: Condvar::new(),
             closed: AtomicBool::new(false),
         }
     }
 
-    fn push(&self, job: PendingJob) {
-        let key = job.key();
-        let mut state = self.state.lock().unwrap();
-        // Bound so the replaced job's snapshot drops after the lock is released.
-        let replaced = if job.is_recompile {
-            // A re-edit of a still-queued section replaces the queued job in
-            // place instead of duplicating it.
-            if let Some(existing) = state.recompiles.iter_mut().find(|t| t.key() == key) {
-                Some(std::mem::replace(existing, job))
-            } else {
-                state.recompiles.push(job);
-                None
-            }
-        } else {
-            // Same for bulk loads (neighbor `content_gen` bumps re-enqueue
-            // still-queued columns): replace, never drop — the newer job
-            // carries the newer snapshot/content_gen/upload_epoch.
-            let dist = column_dist_sq(key.0, state.sort_cam);
-            let replaced = state.load_jobs.insert(key, job);
-            if replaced.is_none() {
-                state.loads.push(LoadEntry { dist, key });
-            }
-            replaced
+    fn publish(&self, jobs: Vec<Arc<PendingJob>>) {
+        let batch = Arc::new(Batch {
+            jobs: jobs.into_boxed_slice(),
+            next: AtomicUsize::new(0),
+        });
+        // Bound so the replaced batch drops after the lock is released.
+        let replaced = {
+            let mut current = self.batch.lock().unwrap();
+            self.published.fetch_add(1, Ordering::Release);
+            std::mem::replace(&mut *current, batch)
         };
-        drop(state);
-        self.available.notify_one();
+        self.available.notify_all();
         drop(replaced);
     }
 
-    fn set_camera(&self, camera: glam::DVec3) {
-        const BUCKET: f64 = 8.0;
-        let mut state = self.state.lock().unwrap();
-        state.camera = camera;
-        let crossed = (camera.x / BUCKET).floor() != (state.sort_cam.x / BUCKET).floor()
-            || (camera.z / BUCKET).floor() != (state.sort_cam.z / BUCKET).floor();
-        if !crossed {
-            return;
-        }
-        // Re-key the load heap to the new bucket (pop still gives the nearest).
-        // The O(n) rebuild happens off-lock so workers aren't blocked; sort_cam
-        // is updated first so concurrent pushes key against the new camera, and
-        // workers that find the heap empty meanwhile just condvar-wait.
-        state.sort_cam = camera;
-        let taken = std::mem::take(&mut state.loads);
-        drop(state);
-        let rekeyed: Vec<LoadEntry> = taken
-            .into_iter()
-            .map(|e| LoadEntry {
-                dist: column_dist_sq(e.key.0, camera),
-                key: e.key,
-            })
-            .collect();
-        self.state.lock().unwrap().loads.extend(rekeyed);
-        self.available.notify_all();
-    }
-
     fn close(&self) {
-        self.closed.store(true, Ordering::Relaxed);
+        // Under the lock, so a worker between its check and its wait sees it.
+        let guard = self.batch.lock().unwrap();
+        self.closed.store(true, Ordering::Release);
+        drop(guard);
         self.available.notify_all();
     }
 
-    fn run_worker(&self) {
+    fn run_worker(&self, claimed: &ChunkRing<AtomicU64>) {
+        let mut seen = u64::MAX;
         loop {
-            let mut state = self.state.lock().unwrap();
-            let job = loop {
-                if self.closed.load(Ordering::Relaxed) {
-                    return;
+            let batch = {
+                let mut current = self.batch.lock().unwrap();
+                loop {
+                    if self.closed.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let published = self.published.load(Ordering::Acquire);
+                    if published != seen || !current.exhausted() {
+                        seen = published;
+                        break Arc::clone(&current);
+                    }
+                    current = self.available.wait(current).unwrap();
                 }
-                if let Some(job) = poll(&mut state) {
-                    break job;
-                }
-                state = self.available.wait(state).unwrap();
             };
-            drop(state);
-            // A panicking job must not kill the worker thread; its column stays
-            // unmeshed (its `meshed` bit is set), but meshing continues.
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run())).is_err() {
-                tracing::error!("chunk mesh job panicked; worker continuing");
+            while self.published.load(Ordering::Acquire) == seen
+                && let Some(job) = batch.take()
+            {
+                // Each generation meshes once: the first worker to raise the
+                // column's claim takes the job's snapshot.
+                let generation = job.content_gen;
+                let won = claimed
+                    .get(job.pos)
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |taken| {
+                        (taken < generation).then_some(generation)
+                    })
+                    .is_ok();
+                let Some(snapshot) = won.then(|| job.snapshot.lock().unwrap().take()).flatten()
+                else {
+                    continue;
+                };
+                // A panicking job must not kill the worker thread; its column
+                // stays unmeshed until it is next marked dirty.
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(snapshot)))
+                    .is_err()
+                {
+                    tracing::error!("chunk mesh job panicked; worker continuing");
+                }
             }
         }
     }
-}
-
-/// Pick the next task: nearest to the camera, preferring edits (recompiles)
-/// over initial loads when the edit is closer, bounded by the recompile quota.
-/// Mirrors vanilla `SectionTaskDynamicQueue.poll`.
-fn poll(state: &mut QueueState) -> Option<PendingJob> {
-    let cam = state.sort_cam;
-    // Nearest queued recompile (edits are few, so the linear scan is cheap).
-    let best_recompile = state
-        .recompiles
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (i, column_dist_sq(t.pos, cam)))
-        .min_by(|a, b| a.1.total_cmp(&b.1));
-    let load_dist = state.loads.peek().map(|e| e.dist);
-
-    if let Some((ri, rd)) = best_recompile {
-        let take_recompile = match load_dist {
-            None => true,
-            Some(ld) => state.recompile_quota > 0 && rd < ld,
-        };
-        if take_recompile {
-            state.recompile_quota -= 1;
-            return Some(state.recompiles.swap_remove(ri));
-        }
-    }
-    state.recompile_quota = MAX_RECOMPILE_QUOTA;
-    // `loads` and `load_jobs` are 1:1, so the popped key always has a job.
-    state
-        .loads
-        .pop()
-        .and_then(|e| state.load_jobs.remove(&e.key))
 }
 
 /// Run mesh workers below normal priority so the OS preempts them for the
@@ -1775,6 +1777,7 @@ fn mesh_chunk_snapshot(
         min_y,
         sections,
         replaced: range,
+        incarnation: 0,
         content_gen: 0,
         upload_epoch: 0,
         visibility,
@@ -2764,5 +2767,27 @@ mod tint_tests {
             63
         );
         assert_eq!(tint_sample_y(Tint::Grass, upper, 64, block_state_table), 64);
+    }
+}
+
+#[cfg(test)]
+mod poll_order_tests {
+    use super::poll_order;
+
+    #[test]
+    fn closer_recompiles_go_first_at_most_twice_in_a_row() {
+        let recompiles = vec![(1.0, "r1"), (2.0, "r2"), (3.0, "r3")];
+        let initial = vec![(5.0, "i5"), (9.0, "i9")];
+        assert_eq!(
+            poll_order(recompiles, initial),
+            ["r1", "r2", "i5", "r3", "i9"]
+        );
+    }
+
+    #[test]
+    fn a_farther_recompile_waits_for_closer_initial_compiles() {
+        let recompiles = vec![(5.0, "r5")];
+        let initial = vec![(2.0, "i2"), (1.0, "i1")];
+        assert_eq!(poll_order(recompiles, initial), ["i1", "i2", "r5"]);
     }
 }

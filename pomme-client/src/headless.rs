@@ -240,7 +240,7 @@ fn drive(
         game.last_update_phases.net_decode_ms = ms(t_net);
         // Meshing doesn't wait on visibility, which only orders the drawing.
         let t_rescan = Instant::now();
-        game.rescan_mesh_jobs(game.player_chunk(), chunk_detail);
+        game.rescan_mesh_jobs(chunk_detail);
         game.last_update_phases.rescan_ms = ms(t_rescan);
 
         let batch = game.drain_meshes();
@@ -252,9 +252,6 @@ fn drive(
                 drawn.remove(&mesh.pos);
             }
         }
-        game.mesh_dispatcher
-            .set_camera_position(*game.player.position);
-
         let pass_secs = last_pass.elapsed().as_secs_f32();
         last_pass = Instant::now();
         if ticking {
@@ -265,7 +262,7 @@ fn drive(
                 tick_accumulator -= TICK_RATE;
             }
         }
-        game.update_light(chunk_detail);
+        game.update_light();
 
         if game.chunk_load_bench.is_none() && game.client_loaded {
             game.chunk_load_bench = Some(ChunkLoadBench::new(

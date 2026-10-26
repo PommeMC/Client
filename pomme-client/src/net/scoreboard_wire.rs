@@ -142,7 +142,7 @@ fn styled_color(nbt: &[u8]) -> Option<[f32; 4]> {
 /// out-of-range ids fall back to BLACK (`ByIdMap` ZERO).
 fn team_color(id: u32) -> u32 {
     char::from_digit(id, 16)
-        .and_then(crate::ui::chat::legacy_rgb)
+        .and_then(crate::ui::text::legacy_rgb)
         .unwrap_or(0x000000)
 }
 

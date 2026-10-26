@@ -268,6 +268,7 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
     use azalea_core::registry_holder::RegistryHolder;
 
     let login = conn.reader.read().await?;
+    super::capture::record(Phase::Game, &login);
     let translation = super::translate::active().expect("translation for a config-less version");
     let Some(frames) = translation.split_login_registries(&login) else {
         // A server that turns the join away here does it with a play-phase
@@ -389,6 +390,7 @@ async fn login_sequence(
         // rewritten before the typed decode (26.1's login_finished lacks the
         // trailing session id).
         let raw = conn.reader.read().await?;
+        super::capture::record(Phase::Login, &raw);
         let raw = match super::translate::active() {
             Some(t) => t.translate_login_frame(raw),
             None => raw,
@@ -534,6 +536,7 @@ async fn config_sequence(
                             continue;
                         }
                     };
+                    super::capture::record(Phase::Configuration, &raw);
                     let frames = match super::translate::active() {
                         Some(t) => t.translate_config_frame(raw),
                         None => vec![raw],
@@ -595,8 +598,12 @@ async fn config_sequence(
                 // The server omits the data of every entry the pack we claimed
                 // carries, so fill those in before azalea drops them.
                 let entries = if selected_known_packs {
-                    super::known_packs::fill_known_entries(&p.registry_id, p.entries)
-                        .map_err(ConnectionError::Disconnected)?
+                    super::known_packs::fill_known_entries(
+                        crate::version::session_protocol(),
+                        &p.registry_id,
+                        p.entries,
+                    )
+                    .map_err(ConnectionError::Disconnected)?
                 } else {
                     p.entries
                 };
@@ -612,7 +619,10 @@ async fn config_sequence(
             ClientboundConfigPacket::SelectKnownPacks(p) => {
                 // Vanilla `handleSelectKnownPacks`: claim the offered packs we
                 // have ourselves, so the server can skip their registry data.
-                let known_packs = super::known_packs::select_packs(&p.known_packs);
+                let known_packs = super::known_packs::select_packs(
+                    crate::version::session_protocol(),
+                    &p.known_packs,
+                );
                 selected_known_packs = !known_packs.is_empty();
                 write_config_packet(
                     conn,
@@ -812,7 +822,7 @@ fn nbt_color_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) ->
     })
 }
 
-fn chat_types_from_registry_holder(
+pub(super) fn chat_types_from_registry_holder(
     holder: &azalea_core::registry_holder::RegistryHolder,
 ) -> super::chat::ChatTypeRegistry {
     let key: azalea_registry::identifier::Identifier = "minecraft:chat_type".into();
@@ -941,7 +951,8 @@ async fn game_loop(
     );
 
     let translation = super::translate::active();
-    let mut inbound_chat = super::chat::InboundChat::new(crate::version::session_protocol() >= 770);
+    let mut inbound_chat =
+        super::chat::InboundChat::for_protocol(crate::version::session_protocol());
     let mut chat_tick = tokio::time::interval(std::time::Duration::from_millis(50));
     chat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     if deferred_login.is_some() {
@@ -1000,6 +1011,7 @@ async fn game_loop(
                 continue;
             }
         };
+        super::capture::record(Phase::Game, &raw);
         let raw = match translation {
             Some(t) => match t.translate_game_frame(raw) {
                 Some(raw) => raw,

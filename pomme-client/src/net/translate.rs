@@ -6,7 +6,9 @@
 //! wire format changed, and static-registry ids (which shift between versions)
 //! are remapped in both directions so the rest of the client stays
 //! single-version. Layouts were line-checked against the decompiled
-//! references (`reference/<version>/decompiled/.../network/protocol/`).
+//! references (`reference/<version>/decompiled/.../network/protocol/`), and
+//! each tested version's real join traffic is replayed through them by
+//! `net::wire_corpus`.
 //!
 //! 26.3 -> 26.2 wire changes (the first version above native; its frames
 //! translate down):
@@ -76,6 +78,8 @@
 //!   color from a `ChatFormatting` ordinal into an `Optional<TeamColor>`
 //! - serverbound slot 62 was replaced (`spectate_entity` ->
 //!   `spectator_action`); pomme sends neither
+//! - the `color` argument type was renamed `team_color` at the same id;
+//!   `commands` remaps every parser id by name, so the rename is bridged
 //!
 //! 1.21.11 -> 26.2 wire changes (all of the above — 1.21.11 matches 26.1 on
 //! those three layouts — plus):
@@ -135,9 +139,15 @@
 //!   the shifts and `change_game_mode` (which doesn't exist yet) is suppressed
 //! - serverbound `player_command` still opens its action enum with
 //!   PRESS/RELEASE_SHIFT_KEY, so newer action ordinals sit two higher
+//! - 1.21.6 inserted the `hex_color` and `dialog` argument types (and 1.20.3
+//!   `style`), shifting the `commands` parser ids after them
 //! - `change_difficulty` read an unsigned byte where 1.21.6 reads a varint;
 //!   difficulty ids fit a single byte either way, so the wire bytes are
 //!   identical
+//! - 1.21.5 alone: the chunk section buffer was still sized for the long-array
+//!   length varints `writeFixedSizeLongArray` stopped writing
+//!   (`PalettedContainer.Data.getSerializedSize`), so it ends in zero padding,
+//!   which is dropped
 //! - 1.21.6 gave `HangingEntity` a synched `direction` at index 8, so an item
 //!   frame's item/rotation sit at 8/9 here and a painting's variant at 8 (9/10
 //!   and 9 on 26.2); the walker passes index bytes through unremapped and pomme
@@ -146,6 +156,9 @@
 //! 1.21.4 -> 26.2 wire changes (all of 1.21.5's plus):
 //! - chunk heightmaps were a network-NBT compound of named long arrays; 1.21.5
 //!   packed them into a (type id, long array) list
+//! - each chunk section's block and biome `PalettedContainer` prefixed its
+//!   packed longs with a varint length, which 1.21.5 dropped (the bits imply
+//!   it); it is checked and stripped
 //! - `player_chat` gained a leading `globalIndex` varint; zero is synthesized
 //! - serverbound `chat`'s and `chat_command_signed`'s last-seen update gained a
 //!   trailing checksum byte in 1.21.5; it is stripped
@@ -267,6 +280,9 @@
 //!   serializer ids from `particles` (18) up shift
 //! - `player_chat`/`disguised_chat` carry a direct chat-type registry id where
 //!   1.20.5 put a holder (bumped by one on the way through)
+//! - `server_data` ends in an `enforcesSecureChat` bool 1.20.5 dropped; it is
+//!   stripped. TODO: it's this era's only copy of the flag (game `login` lacks
+//!   it and gets false), so these servers read as not enforcing secure chat
 //!
 //! 1.20.2 -> 26.2 wire changes (all of 1.20.4's plus; the pre-1.20.3 era):
 //! - text components are length-prefixed JSON strings, not NBT
@@ -305,6 +321,9 @@
 //!   repeats the yaw, and the data and velocity fields are zero)
 //! - `forget_level_chunk` sent two ints where 1.20.2 packs a `ChunkPos` long,
 //!   whose big-endian halves put z first
+//! - the chunk section buffer was allocated by sizing each long array's length
+//!   varint for its entry count, not its long count, so it ends in zero padding
+//!   (one byte per single-value block container), which is dropped
 //! - serverbound login `hello` wrapped its profile id in an optional, which
 //!   1.20.2 made mandatory
 //! - `update_enabled_features` is a game packet here (1.20.2 moved it into
@@ -358,7 +377,8 @@ use azalea_registry::builtin::DataComponentKind;
 use glam::DVec3;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::ItemCodec;
-use pomme_protocol::version::NATIVE;
+pub use pomme_protocol::version::joinable;
+use pomme_protocol::version::{NATIVE, TRANSLATED};
 use pomme_protocol::{
     ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, RegistryTable, wire,
 };
@@ -443,6 +463,10 @@ struct GameIds {
     /// registration order shifts between versions).
     serializer_map: fn(u32) -> Option<u32>,
     set_entity_data_id: u32,
+    commands_id: u32,
+    /// Names the wire-space ids the rewrites size by (command parsers,
+    /// particles, slot and recipe displays).
+    wire_registries: &'static RegistryTable,
     /// The rewrites 26.1 introduced, for wire versions below it.
     v774: Option<Ids774>,
     /// Whether the wire version's `entity_effect`/`tinted_leaves` particles
@@ -579,6 +603,7 @@ struct Ids765 {
     /// 1.20.5 put a holder (id + 1).
     player_chat_id: u32,
     disguised_chat_id: u32,
+    server_data_id: u32,
     /// The wire version's registry names, for the attribute-key lookup.
     registry: &'static RegistryTable,
     /// Serverbound: native + wire ids for the item-form rewrites.
@@ -601,6 +626,7 @@ impl Ids765 {
             i if i == self.update_mob_effect_id => translate_update_mob_effect_765,
             i if i == self.level_particles_id => translate_level_particles_765,
             i if i == self.respawn_id => translate_respawn_765,
+            i if i == self.server_data_id => translate_server_data_765,
             _ => return None,
         })
     }
@@ -759,7 +785,6 @@ struct Ids777 {
     level_chunk_id: u32,
     light_update_id: u32,
     player_chat_id: u32,
-    commands_id: u32,
     recipe_book_add_id: u32,
     place_ghost_recipe_id: u32,
     update_recipes_id: u32,
@@ -775,9 +800,6 @@ struct Ids777 {
     /// The teleport id of an `accept_teleportation` held back until the
     /// `move_player_pos_rot` carrying its pose; cleared on `login`.
     pending_accept: Mutex<Option<u32>>,
-    /// Names the wire-space ids the rewrites size by (particles, command
-    /// parsers, slot and recipe displays).
-    wire_registries: &'static RegistryTable,
 }
 
 impl Ids777 {
@@ -824,9 +846,6 @@ impl Ids763 {
         })
     }
 }
-
-use pomme_protocol::version::TRANSLATED;
-pub use pomme_protocol::version::joinable;
 
 /// A wire id in `registry` as the native version numbers it: remapped for a
 /// translated session, unchanged for a native one.
@@ -1193,7 +1212,14 @@ impl Translation {
             {
                 rewrite(id, payload, items.items(self.to_native))
             } else if ids.v774.as_ref().is_some_and(|v| id == v.level_chunk_id) {
-                translate_chunk(id, payload, v769, named_nbt)
+                let padding = if named_nbt {
+                    SectionPadding::EntrySized
+                } else if ids.v770.is_some() && !v769 {
+                    SectionPadding::UnwrittenLength
+                } else {
+                    SectionPadding::None
+                };
+                translate_chunk(id, payload, v769, named_nbt, padding)
             } else if ids.v774.as_ref().is_some_and(|v| id == v.set_time_id) {
                 if v767.is_some() {
                     translate_set_time_767(id, payload)
@@ -1214,8 +1240,13 @@ impl Translation {
                 translate_explode(id, payload, ids, self.to_native)
             } else if v777.is_some_and(|v| id == v.explode_id) {
                 translate_explode_777(id, payload, ids, self.to_native)
-            } else if let Some(v) = v777.filter(|v| id == v.level_particles_id) {
-                match translate_level_particles_777(id, payload, v, self.to_native) {
+            } else if v777.is_some_and(|v| id == v.level_particles_id) {
+                match translate_level_particles_777(
+                    id,
+                    payload,
+                    ids.wire_registries,
+                    self.to_native,
+                ) {
                     Some(out) => Some(out),
                     None => {
                         tracing::debug!("Dropping level_particles with an unsizable payload");
@@ -1224,14 +1255,14 @@ impl Translation {
                 }
             } else if v777.is_some_and(|v| id == v.update_advancements_id) {
                 translate_update_advancements_777(id, payload, self.to_native)
-            } else if let Some(v) = v777.filter(|v| id == v.commands_id) {
-                translate_commands_777(id, payload, v, self.to_native)
-            } else if let Some(v) = v777.filter(|v| id == v.recipe_book_add_id) {
-                translate_recipe_book_add_777(id, payload, v, self.to_native)
-            } else if let Some(v) = v777.filter(|v| id == v.place_ghost_recipe_id) {
-                translate_place_ghost_recipe_777(id, payload, v, self.to_native)
-            } else if let Some(v) = v777.filter(|v| id == v.update_recipes_id) {
-                translate_update_recipes_777(id, payload, v, self.to_native)
+            } else if id == ids.commands_id {
+                translate_commands(id, payload, ids.wire_registries, self.to_native)
+            } else if v777.is_some_and(|v| id == v.recipe_book_add_id) {
+                translate_recipe_book_add_777(id, payload, ids.wire_registries, self.to_native)
+            } else if v777.is_some_and(|v| id == v.place_ghost_recipe_id) {
+                translate_place_ghost_recipe_777(id, payload, ids.wire_registries, self.to_native)
+            } else if v777.is_some_and(|v| id == v.update_recipes_id) {
+                translate_update_recipes_777(id, payload, ids.wire_registries, self.to_native)
             } else if let Some(rewrite) = ids.version_rewrite(id) {
                 rewrite(id, payload)
             } else if let Some(v) = v767.filter(|v| id == v.teleport_entity_id) {
@@ -1573,6 +1604,8 @@ impl GameIds {
                 p => panic!("no serializer map for protocol {p}"),
             },
             set_entity_data_id: id(Clientbound, "set_entity_data"),
+            commands_id: id(Clientbound, "commands"),
+            wire_registries: RegistryTable::for_protocol(protocol).expect("wire registries"),
             v774: (protocol <= 774).then(|| Ids774 {
                 level_chunk_id: id(Clientbound, "level_chunk_with_light"),
                 set_time_id: id(Clientbound, "set_time"),
@@ -1595,7 +1628,6 @@ impl GameIds {
                 level_chunk_id: id(Clientbound, "level_chunk_with_light"),
                 light_update_id: id(Clientbound, "light_update"),
                 player_chat_id: id(Clientbound, "player_chat"),
-                commands_id: id(Clientbound, "commands"),
                 recipe_book_add_id: id(Clientbound, "recipe_book_add"),
                 place_ghost_recipe_id: id(Clientbound, "place_ghost_recipe"),
                 update_recipes_id: id(Clientbound, "update_recipes"),
@@ -1618,7 +1650,6 @@ impl GameIds {
                 ),
                 move_player_pos_rot_id: id(Serverbound, "move_player_pos_rot"),
                 pending_accept: Mutex::new(None),
-                wire_registries: RegistryTable::for_protocol(protocol).expect("wire registries"),
             }),
             items: ItemCodec::for_protocol(protocol).map(|codec| ItemIds {
                 codec,
@@ -1709,6 +1740,7 @@ impl GameIds {
                 update_advancements_id: id(Clientbound, "update_advancements"),
                 player_chat_id: id(Clientbound, "player_chat"),
                 disguised_chat_id: id(Clientbound, "disguised_chat"),
+                server_data_id: id(Clientbound, "server_data"),
                 registry: RegistryTable::for_protocol(protocol).expect("embedded registry table"),
                 container_click_id: id(Serverbound, "container_click"),
                 container_click_old_id: required_id(
@@ -2635,6 +2667,25 @@ fn translate_disguised_chat_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[..cur.position() as usize]);
     chat_type_holder(&mut cur, &mut out, payload).map(|()| out)
+}
+
+/// Rewrites `server_data` for 1.20.4: the motd and optional icon, without
+/// the trailing `enforcesSecureChat` bool.
+/// TODO: carry the bool into the session's secure-chat setting; until then
+/// chat from a player without a chat session shows as unsigned rather than
+/// being rejected. 1.20.1 and 1.20.2 drop the packet, so they lose it too.
+fn translate_server_data_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    skip_nbt(&mut cur)?; // motd
+    skip_optional(&mut cur, skip_utf)?; // icon bytes
+    let end = cur.position() as usize;
+    if !matches!(payload[end..], [0 | 1]) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(end + 5);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..end]);
+    Some(out)
 }
 
 /// Rewrites `respawn` for 1.20.4: the spawn info's dimension type is a
@@ -4122,22 +4173,25 @@ fn skip_optional(
 /// 26.2 added after each section's `nonEmptyBlockCount` (zero: pomme
 /// doesn't consume it and the client recounts on block changes). The
 /// heightmaps before the section buffer are copied verbatim — or, with
-/// `nbt_heightmaps` (pre-1.21.5), converted from the network-NBT compound
-/// to the packed list. The block entities after it are copied verbatim unless
-/// the wire version names its NBT roots, in which case each tag is rewritten;
-/// the light data that follows is always verbatim.
+/// `v769` (pre-1.21.5), converted from the network-NBT compound to the
+/// packed list, and each section's packed longs lose their length prefix.
+/// The buffer's end `padding` is dropped. When the wire version names its
+/// NBT roots (1.20.1), each block entity tag after the buffer is rewritten;
+/// otherwise the block entities are copied verbatim. The light data that
+/// follows is always verbatim.
 fn translate_chunk(
     id: u32,
     payload: &[u8],
-    nbt_heightmaps: bool,
+    v769: bool,
     named_nbt: bool,
+    padding: SectionPadding,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 8)?; // chunk x/z ints
 
     let mut head = Vec::with_capacity(64);
     head.extend_from_slice(&payload[..8]);
-    if nbt_heightmaps {
+    if v769 {
         convert_nbt_heightmaps(&mut cur, &mut head, named_nbt)?;
     } else {
         let maps_at = cur.position() as usize;
@@ -4154,15 +4208,20 @@ fn translate_chunk(
     let mut buffer = Vec::with_capacity(buffer_len + 3 * 26 * 2);
     let mut bcur = Cursor::new(&payload[..buffer_end]);
     bcur.set_position(buffer_at as u64);
-    while (bcur.position() as usize) < buffer_end {
+    let mut padded = 0;
+    while (bcur.position() as usize) + padded < buffer_end {
         let section_at = bcur.position() as usize;
         advance(&mut bcur, 2)?; // nonEmptyBlockCount
         buffer.extend_from_slice(&payload[section_at..bcur.position() as usize]);
         buffer.extend_from_slice(&[0, 0]); // fluidCount, new in 26.2
-        let rest_at = bcur.position() as usize;
-        skip_paletted_container(&mut bcur, 4096, 8)?;
-        skip_paletted_container(&mut bcur, 64, 3)?;
-        buffer.extend_from_slice(&payload[rest_at..bcur.position() as usize]);
+        for (entries, max_indirect_bits) in [(4096, 8), (64, 3)] {
+            let longs =
+                copy_paletted_container(&mut bcur, &mut buffer, entries, max_indirect_bits, v769)?;
+            padded += padding.bytes(entries, longs);
+        }
+    }
+    if bcur.position() as usize + padded != buffer_end {
+        return None;
     }
 
     let mut out = Vec::with_capacity(head.len() + buffer.len() + payload.len() - buffer_end + 8);
@@ -4330,14 +4389,20 @@ fn convert_nbt_heightmaps(
     Some(())
 }
 
-/// Advances past one `PalettedContainer`: bits-per-entry byte, palette
-/// (single value: one id; indirect while `bits <= max_indirect_bits`:
-/// id list; global: nothing), then the unprefixed packed-long array.
-fn skip_paletted_container(
+/// Copies one `PalettedContainer`: bits-per-entry byte, palette (single
+/// value: one id; indirect while `bits <= max_indirect_bits`: id list;
+/// global: nothing), then the packed-long array. With `length_prefixed`
+/// (pre-1.21.5 `writeLongArray`) the array's varint length is checked
+/// against the one the bits imply and dropped, as 1.21.5's
+/// `writeFixedSizeLongArray` sends none. Returns the array's long count.
+fn copy_paletted_container(
     cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
     entries: usize,
     max_indirect_bits: u8,
-) -> Option<()> {
+    length_prefixed: bool,
+) -> Option<usize> {
+    let at = cur.position() as usize;
     let bits = read_u8(cur)?;
     match bits {
         0 => {
@@ -4351,12 +4416,45 @@ fn skip_paletted_container(
         }
         _ => {}
     }
-    if bits > 0 {
-        let values_per_long = 64 / bits as usize;
-        let longs = entries.div_ceil(values_per_long);
-        advance(cur, longs.checked_mul(8)?)?;
+    out.extend_from_slice(&cur.get_ref()[at..cur.position() as usize]);
+    let longs = match bits {
+        0 => 0,
+        _ => entries.div_ceil(64 / bits as usize),
+    };
+    if length_prefixed && var_u32(cur)? as usize != longs {
+        return None;
     }
-    Some(())
+    let longs_at = cur.position() as usize;
+    advance(cur, longs.checked_mul(8)?)?;
+    out.extend_from_slice(&cur.get_ref()[longs_at..cur.position() as usize]);
+    Some(longs)
+}
+
+/// The zero bytes a version's chunk section buffer ends in, per container:
+/// `getSerializedSize` sized it for length varints that don't match what
+/// `write` sent.
+#[derive(Clone, Copy)]
+enum SectionPadding {
+    None,
+    /// 1.20.1 sized each length for the entry count, not the long count.
+    EntrySized,
+    /// 1.21.5 sized a length it no longer writes.
+    UnwrittenLength,
+}
+
+impl SectionPadding {
+    fn bytes(self, entries: usize, longs: usize) -> usize {
+        match self {
+            Self::None => 0,
+            Self::EntrySized => varint_len(entries) - varint_len(longs),
+            Self::UnwrittenLength => varint_len(longs),
+        }
+    }
+}
+
+/// The bytes `value` takes as a varint.
+fn varint_len(value: usize) -> usize {
+    (usize::BITS - value.max(1).leading_zeros()).div_ceil(7) as usize
 }
 
 /// Rewrites `set_time` from `gameTime, dayTime, tickDayTime` to 26.2's
@@ -5074,14 +5172,12 @@ fn translate_swing_animation_777(animate_id: u32, payload: &[u8]) -> Option<Box<
 fn translate_level_particles_777(
     id: u32,
     payload: &[u8],
-    v: &Ids777,
+    wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     let particle = var_u32(&mut cur)?;
-    let name = v
-        .wire_registries
-        .name_of(ClientRegistry::ParticleType, particle)?;
+    let name = wire_registries.name_of(ClientRegistry::ParticleType, particle)?;
     if PAYLOAD_PARTICLES.contains(&name) {
         copy_particle_payload(&mut cur, &mut Vec::new(), name, remaps)?;
     }
@@ -5254,15 +5350,16 @@ fn translate_player_chat_777(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Rewrites `commands` from 26.3, whose argument-type registry inserted five
-/// singleton parsers (`ArgumentTypeInfos`): every parser id is remapped by
-/// name, and a 26.3-only parser becomes the one a 26.2 server sent for the
-/// same argument. Node and property layouts are unchanged
-/// (`ClientboundCommandsPacket`), so node indices never move.
-fn translate_commands_777(
+/// Rewrites `commands`, whose argument-type registry (`ArgumentTypeInfos`)
+/// gains and renames parsers between versions: every parser id is remapped
+/// by name, and a parser 26.2 lacks (26.3's five singletons) becomes the one a
+/// 26.2 server sent for the same argument. Node and property layouts are
+/// unchanged from 1.20.1 to 26.3 (`ClientboundCommandsPacket`), so node
+/// indices never move.
+fn translate_commands(
     id: u32,
     payload: &[u8],
-    v: &Ids777,
+    wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
@@ -5283,9 +5380,7 @@ fn translate_commands_777(
         }
         if node_type == 2 {
             let parser = var_u32(&mut cur)?;
-            let name = v
-                .wire_registries
-                .name_of(ClientRegistry::CommandArgumentType, parser)?;
+            let name = wire_registries.name_of(ClientRegistry::CommandArgumentType, parser)?;
             match remaps.remap(ClientRegistry::CommandArgumentType, parser) {
                 Some(native) => {
                     wire::write_varint(&mut out, native);
@@ -5305,7 +5400,7 @@ fn translate_commands_777(
 }
 
 /// Advances past an argument parser's properties (`ArgumentTypeInfos`
-/// serializers; unchanged between 26.2 and 26.3).
+/// serializers; unchanged from 1.20.1 to 26.3).
 fn skip_parser_properties(cur: &mut Cursor<&[u8]>, parser: &str) -> Option<()> {
     let bound = match parser {
         "brigadier:float" | "brigadier:integer" => 4,
@@ -5496,7 +5591,7 @@ fn copy_recipe_display_777(
 fn translate_recipe_book_add_777(
     id: u32,
     payload: &[u8],
-    v: &Ids777,
+    wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
@@ -5504,7 +5599,7 @@ fn translate_recipe_book_add_777(
     wire::write_varint(&mut out, id);
     for _ in 0..copy_varint(&mut cur, &mut out)? {
         copy_varint(&mut cur, &mut out)?; // display id
-        copy_recipe_display_777(&mut cur, &mut out, v.wire_registries, remaps)?;
+        copy_recipe_display_777(&mut cur, &mut out, wire_registries, remaps)?;
         copy_varint(&mut cur, &mut out)?; // group (optional varint)
         copy_varint(&mut cur, &mut out)?; // category
         copy_optional(&mut cur, &mut out, |cur, out| {
@@ -5521,14 +5616,14 @@ fn translate_recipe_book_add_777(
 fn translate_place_ghost_recipe_777(
     id: u32,
     payload: &[u8],
-    v: &Ids777,
+    wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     let mut out = Vec::with_capacity(payload.len() + 32);
     wire::write_varint(&mut out, id);
     copy_varint(&mut cur, &mut out)?;
-    copy_recipe_display_777(&mut cur, &mut out, v.wire_registries, remaps)?;
+    copy_recipe_display_777(&mut cur, &mut out, wire_registries, remaps)?;
     (cur.position() as usize == payload.len()).then_some(out)
 }
 
@@ -5538,7 +5633,7 @@ fn translate_place_ghost_recipe_777(
 fn translate_update_recipes_777(
     id: u32,
     payload: &[u8],
-    v: &Ids777,
+    wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
@@ -5556,7 +5651,7 @@ fn translate_update_recipes_777(
         copy_slot_display_777(
             &mut cur,
             &mut out,
-            v.wire_registries,
+            wire_registries,
             remaps,
             MAX_SLOT_DISPLAY_DEPTH,
         )?;

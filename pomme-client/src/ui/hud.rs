@@ -4,6 +4,7 @@ use azalea_inventory::ItemStack;
 use glam::DVec3;
 
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
+use crate::entity::wrap_degrees;
 use crate::mob_effect::ActiveMobEffects;
 use crate::position::BlockPos;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -1620,9 +1621,6 @@ pub fn build_debug_overlay(
     let bz = pos.z.floor() as i32;
     let cx = bx.div_euclid(16);
     let cz = bz.div_euclid(16);
-    let facing = facing_name(info.y_rot_deg);
-    let y_rot_deg = info.y_rot_deg;
-    let x_rot_deg = info.x_rot_deg;
 
     let mut left_lines: Vec<String> = vec![
         format!("Pomme ({}fps)", info.fps),
@@ -1636,7 +1634,7 @@ pub fn build_debug_overlay(
             cx,
             cz
         ),
-        format!("Facing: {} ({:.1} / {:.1})", facing, y_rot_deg, x_rot_deg),
+        facing_line(info.y_rot_deg, info.x_rot_deg),
         String::new(),
         format!("Chunks: {} loaded", info.chunk_count),
         format!(
@@ -1724,20 +1722,44 @@ fn push_debug_lines(
     }
 }
 
-fn facing_name(y_rot_deg: f32) -> &'static str {
-    let deg = y_rot_deg.rem_euclid(360.0) as u32;
-    match deg {
-        315..=359 | 0..=44 => "South (+Z)",
-        45..=134 => "West (-X)",
-        135..=224 => "North (-Z)",
-        225..=314 => "East (+X)",
-        _ => "South (+Z)",
+/// Vanilla `DebugEntryPosition`: the direction, which way it points, and
+/// both angles wrapped to [-180, 180).
+fn facing_line(y_rot_deg: f32, x_rot_deg: f32) -> String {
+    let (direction, towards) = facing(y_rot_deg);
+    format!(
+        "Facing: {direction} ({towards}) ({:.1} / {:.1})",
+        wrap_degrees(y_rot_deg),
+        wrap_degrees(x_rot_deg)
+    )
+}
+
+/// Vanilla `Direction.fromYRot`.
+fn facing(y_rot_deg: f32) -> (&'static str, &'static str) {
+    match ((y_rot_deg / 90.0 + 0.5).floor() as i32) & 3 {
+        0 => ("south", "Towards positive Z"),
+        1 => ("west", "Towards negative X"),
+        2 => ("north", "Towards negative Z"),
+        _ => ("east", "Towards positive X"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn facing_angles_wrap_like_vanilla() {
+        assert_eq!(
+            facing_line(400.0, 0.0),
+            "Facing: south (Towards positive Z) (40.0 / 0.0)"
+        );
+        assert_eq!(
+            facing_line(-190.0, 90.0),
+            "Facing: north (Towards negative Z) (170.0 / 90.0)"
+        );
+        assert_eq!(facing(44.9).0, "south");
+        assert_eq!(facing(45.0).0, "west");
+    }
 
     #[test]
     fn offhand_slot_sits_on_the_offhand_arms_side() {

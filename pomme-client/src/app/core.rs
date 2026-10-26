@@ -271,7 +271,7 @@ impl crate::world::piston::PistonLevel for ClientPistonLevel<'_> {
 
 /// Vanilla `PistonMovingBlockEntity.tick` for the client's moving blocks, at
 /// the block-entity point of the game tick; their landings remesh at once.
-pub(crate) fn tick_moving_pistons(core: &AppCore, game: &mut GameState) {
+pub(crate) fn tick_moving_pistons(game: &mut GameState) {
     let mut remesh = Vec::new();
     let mut level = ClientPistonLevel::new(game, &mut remesh);
     let tick = level.game.tick_count;
@@ -296,19 +296,13 @@ pub(crate) fn tick_moving_pistons(core: &AppCore, game: &mut GameState) {
             );
         }
     });
-    enqueue_edits(game, &remesh, core.menu.chunk_detail);
+    enqueue_edits(game, &remesh);
 }
 
-/// Meshes edited sections at once on the priority lane, ungated by
-/// visibility.
-fn enqueue_edits(
-    game: &mut GameState,
-    sections: &[(crate::position::ChunkPos, i32)],
-    chunk_detail: u32,
-) {
-    let player_chunk = game.player_chunk();
+/// Marks edited sections for remeshing as recompiles, ungated by visibility.
+fn enqueue_edits(game: &mut GameState, sections: &[(crate::position::ChunkPos, i32)]) {
     for &(col, si) in sections {
-        game.enqueue_section_edit(col, si, chunk_lod(col, player_chunk, chunk_detail));
+        game.enqueue_section_edit(col, si);
     }
 }
 
@@ -424,7 +418,6 @@ impl GameState {
         // already meshed.
         self.section_vis.clear();
         self.section_vis_epoch.clear();
-        self.meshed.clear();
         self.compiled.clear();
         self.mesh_dispatcher = mesh_source.create_mesh_dispatcher(
             self.block_registry.owned_render_view(),
@@ -432,6 +425,7 @@ impl GameState {
             None,
             cardinal_light,
         );
+        self.reset_mesh_columns();
     }
 
     pub fn load_chunk(
@@ -479,12 +473,10 @@ impl GameState {
             .queue_task(crate::world::light::LightTask::Remove {
                 pos: (pos.x, pos.z),
             });
-        self.content_gen.remove(&pos);
-        self.meshed.remove(&pos);
+        self.forget_mesh_column(pos);
         self.compiled.remove(&pos);
         self.vis_mask.remove(&pos);
         self.vis_tiers.remove(&pos);
-        self.section_gen.retain(|(p, _), _| *p != pos);
         self.section_vis.retain(|(p, _), _| *p != pos);
         self.section_vis_epoch.retain(|(p, _), _| *p != pos);
     }
@@ -879,8 +871,8 @@ pub struct AppCore {
     /// A packed glyph's pixels changed (a head arrived), so the atlas needs
     /// rebuilding even though its key set is the same.
     inline_atlas_dirty: bool,
-    /// Whether the spectator menu's faces are in the atlas as packed.
-    spectator_faces_packed: bool,
+    /// Whether player faces are in the atlas as packed.
+    player_faces_packed: bool,
     /// The inline-object keys currently packed.
     game_dynamic_atlas_keys: HashSet<String>,
 }
@@ -1033,7 +1025,7 @@ impl AppCore {
             head_tx,
             head_rx,
             inline_atlas_dirty: false,
-            spectator_faces_packed: false,
+            player_faces_packed: false,
             game_dynamic_atlas_keys: HashSet::new(),
         }
     }
@@ -1292,13 +1284,14 @@ impl AppCore {
     }
 
     /// Loads what the text drew last frame into the shared glyph atlas and
-    /// rebuilds it when its contents change. Spectator faces share the same
-    /// texture binding, so they are packed alongside.
+    /// rebuilds it when its contents change. Player faces (spectator menu,
+    /// tab list) share the same texture binding, so they are packed alongside
+    /// while `faces_shown`.
     pub fn sync_game_dynamic_atlas(
         &mut self,
         game: &GameState,
         renderer: &mut Renderer,
-        spectator_active: bool,
+        faces_shown: bool,
     ) {
         let now = Instant::now();
         self.drain_head_results();
@@ -1360,11 +1353,11 @@ impl AppCore {
                 .inline_objects
                 .iter()
                 .any(|(key, entry)| packable(entry) && !self.game_dynamic_atlas_keys.contains(key))
-            || spectator_active != self.spectator_faces_packed
-            || (spectator_active && self.player_faces_dirty);
+            || faces_shown != self.player_faces_packed
+            || (faces_shown && self.player_faces_dirty);
         if rebuild {
             let mut entries = Vec::<(String, Vec<u8>, u32)>::new();
-            if spectator_active {
+            if faces_shown {
                 entries.extend(
                     self.player_faces
                         .iter()
@@ -1410,8 +1403,8 @@ impl AppCore {
                 renderer.update_face_atlas(&entries);
             }
             self.inline_atlas_dirty = false;
-            self.spectator_faces_packed = spectator_active;
-            if spectator_active {
+            self.player_faces_packed = faces_shown;
+            if faces_shown {
                 self.player_faces_dirty = false;
             }
         }
@@ -1578,7 +1571,7 @@ impl AppCore {
             dry_foliage,
         );
 
-        game.meshed.clear();
+        game.reset_mesh_columns();
         game.section_vis.clear();
         game.section_vis_epoch.clear();
         game.vis_mask.clear();
@@ -2826,6 +2819,7 @@ impl AppCore {
                     game.recipe_book.reset_for_login();
                     game.player.entity_id = entity_id;
                     game.hardcore = hardcore;
+                    game.online_mode = online_mode;
                     game.show_death_screen = show_death_screen;
                     // The fresh LocalPlayer starts from supplier defaults.
                     game.player.attributes = AttributeMap::player();
@@ -3025,7 +3019,7 @@ impl AppCore {
         }
 
         let player_chunk = game.player_chunk();
-        enqueue_edits(game, &priority_remesh, self.menu.chunk_detail);
+        enqueue_edits(game, &priority_remesh);
 
         // Refresh the frustum tiers (throttled to camera movement / new loads),
         // then enqueue everything that needs meshing — visible-first, with hidden
@@ -3041,7 +3035,7 @@ impl AppCore {
         game.last_update_phases.visibility_ms = ms(t_vis);
 
         let t_rescan = std::time::Instant::now();
-        game.rescan_mesh_jobs(player_chunk, self.menu.chunk_detail);
+        game.rescan_mesh_jobs(self.menu.chunk_detail);
         game.last_update_phases.rescan_ms = ms(t_rescan);
 
         disconnect_reason

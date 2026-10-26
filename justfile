@@ -55,6 +55,14 @@ client-build *args: openal
 ingame-test *scripts: openal
     @cargo run -p ingame-test -- {{ scripts }}
 
+# Records what each named version's server sends during `world/join` into
+# pomme-client/src/net/wire-fixtures/, the corpus `net::wire_corpus` replays.
+wire-fixtures +versions: openal
+    #!/usr/bin/env bash
+    set -euo pipefail
+    args=(); for v in {{ versions }}; do args+=(--version "$v"); done
+    cargo run -p ingame-test -- --capture "${args[@]}" world/join
+
 # Just the local test server, for driving a client over the harness socket.
 ingame-server:
     @cargo run -p ingame-test -- --server-only

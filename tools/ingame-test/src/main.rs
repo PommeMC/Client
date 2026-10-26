@@ -8,7 +8,8 @@
 //! `entities/data`) on N workers per version, each with its own server and
 //! world, against the native version unless `--version` or `--versions all`
 //! picks others; `ingame-test --server-only` starts a server for live socket
-//! sessions.
+//! sessions. `--capture` also records each script's clientbound frames into
+//! its `wire-fixtures/` corpus entry.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -29,6 +30,10 @@ const DEFAULT_JOBS: usize = 6;
 
 const OUT_DIR: &str = "target/ingame";
 const SCRIPT_DIR: &str = "tests/ingame";
+const FIXTURE_DIR: &str = "pomme-client/src/net/wire-fixtures";
+/// Game packets kept per packet id in a fixture, so repeats (chunks above all)
+/// don't bloat it.
+const FIXTURE_FRAMES_PER_PACKET: usize = 3;
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -53,6 +58,7 @@ fn main() -> ExitCode {
         };
     }
     let server_only = take_flag(&mut args, "--server-only");
+    let capture = take_flag(&mut args, "--capture");
     let jobs = match take_value(&mut args, "--jobs").map(|n| n.parse::<usize>()) {
         None => DEFAULT_JOBS,
         Some(Ok(n)) if n > 0 => n,
@@ -61,7 +67,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(&versions, server_only, jobs, &args) {
+    match run(&versions, server_only, jobs, capture, &args) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(e) => {
@@ -115,6 +121,7 @@ fn run(
     versions: &[ProtocolVersion],
     server_only: bool,
     jobs: usize,
+    capture: bool,
     names: &[String],
 ) -> Result<bool, String> {
     let scripts = scripts(Path::new(SCRIPT_DIR), names)?;
@@ -154,14 +161,15 @@ fn run(
         }
         let runnable: Vec<&PathBuf> = runnable.into_iter().map(|(script, _)| script).collect();
         total += runnable.len();
-        failed.extend(run_version(version, &runnable, jobs)?);
+        failed.extend(run_version(version, &runnable, jobs, capture)?);
     }
     failed.sort();
     println!("\n{} of {total} scripts passed", total - failed.len());
     for script in &failed {
         println!("  FAILED {script}");
     }
-    Ok(failed.is_empty())
+    // A capture records the server's frames whether or not the script passed.
+    Ok(failed.is_empty() || capture)
 }
 
 /// Runs `scripts` against one version's servers; the failed ones, as
@@ -170,6 +178,7 @@ fn run_version(
     version: &ProtocolVersion,
     scripts: &[&PathBuf],
     jobs: usize,
+    capture: bool,
 ) -> Result<Vec<String>, String> {
     let Some((first, rest)) = scripts.split_first() else {
         return Ok(Vec::new());
@@ -184,7 +193,7 @@ fn run_version(
     };
     let failed = Mutex::new(Vec::new());
     let run = |script: &Path, server: &mut Server, game_dir: &Path| -> Result<(), String> {
-        if !run_script(script, version, server.port, game_dir)? {
+        if !run_script(script, version, server.port, game_dir, capture)? {
             let name = script_name(Path::new(SCRIPT_DIR), script);
             failed
                 .lock()
@@ -199,16 +208,21 @@ fn run_version(
     let dir = worker_dir(0);
     let mut server = Server::start(&java, &jar.jar, &dir)?;
     run(first, &mut server, &dir.join("client"))?;
-    drop(server);
 
     let queue = Mutex::new(rest.iter());
+    let mut first_server = Some(server);
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..jobs.min(rest.len()))
             .map(|n| {
                 let (queue, run, java, jar) = (&queue, &run, &java, &jar.jar);
+                // Worker 0 keeps the warm-up's server.
+                let server = first_server.take();
                 scope.spawn(move || -> Result<(), String> {
                     let dir = worker_dir(n);
-                    let mut server = Server::start(java, jar, &dir)?;
+                    let mut server = match server {
+                        Some(server) => server,
+                        None => Server::start(java, jar, &dir)?,
+                    };
                     let game_dir = dir.join("client");
                     loop {
                         let next = queue.lock().unwrap().next();
@@ -310,13 +324,17 @@ struct ServerJar {
 
 /// The verified server jar for `version`, downloaded on first use. The
 /// version's metadata (download url, sha1, Java major) is looked up in
-/// Mojang's version manifest once and cached next to the jar.
+/// Mojang's version manifest once and cached next to the jar, and looked up
+/// again if the cache can't be read.
 fn server_jar(version: &ProtocolVersion) -> Result<ServerJar, String> {
     let dir = Path::new(OUT_DIR).join("servers").join(version.name);
     let meta_path = dir.join("version.json");
-    let meta: serde_json::Value = match std::fs::read(&meta_path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
-        Err(_) => {
+    let cached = std::fs::read(&meta_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let meta: serde_json::Value = match cached {
+        Some(meta) => meta,
+        None => {
             let meta = version_meta(version.name)?;
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             std::fs::write(&meta_path, meta.to_string()).map_err(|e| e.to_string())?;
@@ -456,12 +474,14 @@ fn build_client() -> Result<(), String> {
 }
 
 /// Runs one script in a harness client joining `version`, logging to
-/// `client.log` in its output dir; whether it passed.
+/// `client.log` in its output dir; whether it passed. With `capture`, the
+/// frames the server sent become the script's fixture for `version`.
 fn run_script(
     script: &Path,
     version: &ProtocolVersion,
     port: u16,
     game_dir: &Path,
+    capture: bool,
 ) -> Result<bool, String> {
     let name = script_name(Path::new(SCRIPT_DIR), script);
     let out = Path::new(OUT_DIR).join(version.name).join(&name);
@@ -470,15 +490,21 @@ fn run_script(
     let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
     let client =
         Path::new("target/debug").join(format!("pomme-client{}", std::env::consts::EXE_SUFFIX));
+    let frames = out.join("frames.bin");
     let started = Instant::now();
-    let status = Command::new(&client)
+    let mut command = Command::new(&client);
+    command
         .args(join_args(version, port))
         .arg("--game-dir")
         .arg(game_dir)
         .arg("--harness-script")
         .arg(script)
         .arg("--harness-out")
-        .arg(&out)
+        .arg(&out);
+    if capture {
+        command.arg("--capture-frames").arg(&frames);
+    }
+    let status = command
         .stdout(log.try_clone().map_err(|e| e.to_string())?)
         .stderr(log)
         .status()
@@ -491,7 +517,47 @@ fn run_script(
     } else {
         println!("FAIL {v} {name} ({secs:.1}s), see {}", log_path.display());
     }
+    if capture {
+        write_fixture(&frames, version, &name)?;
+    }
     Ok(passed)
+}
+
+/// Trims a script's captured frames to every login and config frame plus
+/// the first few of each game packet, and writes them deflated as its
+/// fixture for `version`.
+fn write_fixture(frames: &Path, version: &ProtocolVersion, script: &str) -> Result<(), String> {
+    use pomme_protocol::{Phase, capture};
+
+    let bytes = std::fs::read(frames).map_err(|e| format!("{}: {e}", frames.display()))?;
+    let records =
+        capture::records(&bytes).ok_or_else(|| format!("{} is cut short", frames.display()))?;
+    let mut kept = Vec::new();
+    let mut seen = std::collections::HashMap::<u32, usize>::new();
+    for (phase, frame) in records {
+        if phase == Phase::Game {
+            let id = pomme_protocol::codec::Reader::new(frame)
+                .varint()
+                .map_err(|e| format!("a frame in {}: {e}", frames.display()))?;
+            let count = seen.entry(id).or_default();
+            *count += 1;
+            if *count > FIXTURE_FRAMES_PER_PACKET {
+                continue;
+            }
+        }
+        capture::write_record(&mut kept, phase, frame);
+    }
+    let path = Path::new(FIXTURE_DIR)
+        .join(version.name)
+        .join(script)
+        .with_extension("bin");
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+    encoder.write_all(&kept).map_err(|e| e.to_string())?;
+    let deflated = encoder.finish().map_err(|e| e.to_string())?;
+    std::fs::write(&path, &deflated).map_err(|e| format!("{}: {e}", path.display()))?;
+    println!("  wrote {} ({} KB)", path.display(), deflated.len() / 1024);
+    Ok(())
 }
 
 /// The client flags that join the test server as the test player.
@@ -524,7 +590,7 @@ impl Server {
         let port = free_port()?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         prepare_server(dir, port)?;
-        let jar = jar.canonicalize().map_err(|e| e.to_string())?;
+        let jar = std::path::absolute(jar).map_err(|e| e.to_string())?;
         let mut child = Command::new(java)
             .args(["-Xmx2G", "-jar"])
             .arg(&jar)

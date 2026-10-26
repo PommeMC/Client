@@ -237,6 +237,12 @@ pub fn run(args: LaunchArgs, platform: Platform) {
     }
     #[cfg(feature = "test-harness")]
     {
+        if let Some(path) = &args.capture_frames
+            && let Err(e) = crate::net::capture::start(path)
+        {
+            tracing::error!("Couldn't record frames into {}: {e}", path.display());
+            std::process::exit(2);
+        }
         let harness = crate::harness::Harness::from_args(
             args.harness_port,
             args.harness_script,

@@ -8,13 +8,19 @@ use crate::player::inventory::item_resource_name;
 
 static LANG: OnceLock<HashMap<String, String>> = OnceLock::new();
 
+/// Loads the translations once they're on disk; before a first-run download
+/// has put them there, a later call fills the table instead.
 pub fn load(jar_assets_dir: &Path) {
+    if let Some(map) = read(jar_assets_dir) {
+        let _ = LANG.set(map);
+    }
+}
+
+fn read(jar_assets_dir: &Path) -> Option<HashMap<String, String>> {
     let path = jar_assets_dir.join("minecraft/lang/en_us.json");
-    let map = std::fs::read_to_string(&path)
+    serde_json::from_str(&std::fs::read_to_string(&path).ok()?)
+        .inspect_err(|e| tracing::warn!("Couldn't parse {}: {e}", path.display()))
         .ok()
-        .and_then(|s| serde_json::from_str::<HashMap<String, String>>(&s).ok())
-        .unwrap_or_default();
-    let _ = LANG.set(map);
 }
 
 pub fn translate(key: &str) -> Option<&'static str> {
@@ -45,4 +51,30 @@ pub(crate) fn title_case_snake(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read;
+    use crate::test_util::test_temp_dir;
+
+    #[test]
+    fn reads_only_a_parsable_file() {
+        let dir = test_temp_dir("lang");
+        assert_eq!(read(&dir), None);
+
+        let lang = dir.join("minecraft/lang");
+        std::fs::create_dir_all(&lang).unwrap();
+        std::fs::write(
+            lang.join("en_us.json"),
+            r#"{"chat.type.announcement": "[%s] %s"}"#,
+        )
+        .unwrap();
+        let map = read(&dir).unwrap();
+        std::fs::write(lang.join("en_us.json"), "{").unwrap();
+        let corrupt = read(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(map["chat.type.announcement"], "[%s] %s");
+        assert_eq!(corrupt, None);
+    }
 }

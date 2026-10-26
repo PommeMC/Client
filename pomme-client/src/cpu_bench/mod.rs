@@ -1,9 +1,10 @@
-//! Headless CPU benchmarks (`just bench [filter]`): the chunk mesher, the
-//! per-frame fade rebuild, cave culling and chunk packet decoding, with no
-//! window or Vulkan device.
+//! Headless CPU benchmarks (`just bench [filter]`): the chunk mesher and its
+//! worker queue, the per-frame fade rebuild, cave culling and chunk packet
+//! decoding, with no window or Vulkan device.
 //! Criterion reports each run's change against the last.
 
 mod chunk_decode;
+mod dispatch;
 mod fade;
 mod fixtures;
 mod mesh;
@@ -35,7 +36,7 @@ pub fn run(version: &str, dirs: &DataDirs, filter: Option<&str>) -> i32 {
     // The mesh and visgraph fixtures load block render assets and the atlas from
     // disk; skip that when the filter leaves neither group to run.
     let needs_assets = filter.is_none_or(|f| {
-        ["mesh", "visgraph"]
+        ["mesh", "dispatch", "visgraph"]
             .iter()
             .any(|group| group.contains(f) || f.contains(group))
     });
@@ -48,6 +49,7 @@ pub fn run(version: &str, dirs: &DataDirs, filter: Option<&str>) -> i32 {
             }
         };
         mesh::bench(&mut c, &assets);
+        dispatch::bench(&mut c, &assets);
         occlusion::bench_sections(&mut c, &assets);
     }
     chunk_decode::bench(&mut c, block_state_table);

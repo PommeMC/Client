@@ -84,6 +84,12 @@ pub struct LaunchArgs {
     #[cfg(feature = "test-harness")]
     #[arg(long, value_name = "DIR")]
     pub harness_out: Option<std::path::PathBuf>,
+
+    /// Records every frame the server sends, before translation, into this
+    /// file (`pomme_protocol::capture`).
+    #[cfg(feature = "test-harness")]
+    #[arg(long, value_name = "FILE")]
+    pub capture_frames: Option<std::path::PathBuf>,
 }
 
 /// The launch arguments' file on a phone, in the app's own storage.

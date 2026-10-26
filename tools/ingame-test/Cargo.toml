@@ -6,6 +6,7 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 
 [dependencies]
+flate2 = "1"
 md-5 = "0.11"
 pomme-protocol = { path = "../../pomme-protocol" }
 reqwest = { workspace = true, features = ["blocking"] }

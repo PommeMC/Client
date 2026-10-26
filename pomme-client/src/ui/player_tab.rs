@@ -4,9 +4,10 @@
 use crate::entity::EntityStore;
 use crate::player::tab_list::{TabList, TabListPlayer};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
+use crate::ui::chat::wrap_spans;
 use crate::ui::common::{FONT_SIZE, LINE_HEIGHT};
 use crate::ui::hud::Scoreboard;
-use crate::ui::text::{TextSpan, span_text};
+use crate::ui::text::{TextSpan, font_spans};
 
 const MAX_ROWS_PER_COL: usize = 20;
 const HEAD_COL_W: i32 = 9;
@@ -14,17 +15,16 @@ const SPECTATOR_GAME_MODE: u8 = 3;
 
 const BG_BACKDROP: [f32; 4] = [0.0, 0.0, 0.0, 0.5]; // Integer.MIN_VALUE (0x80000000)
 const BG_ROW: [f32; 4] = [1.0, 1.0, 1.0, 0x20 as f32 / 255.0]; // 0x20FFFFFF
-const COL_NAME: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
-/// `text_width(text, FONT_SIZE)` must return the width in pixels at 1x GUI
+/// `spans_width(spans, FONT_SIZE)` must return the width in pixels at 1x GUI
 /// scale.
 pub fn build_player_tab_overlay(
     elements: &mut Vec<MenuElement>,
     screen_w: f32,
     tab_list: &TabList,
     scoreboard: &Scoreboard,
+    show_heads: bool,
     gs: f32,
-    text_width: &dyn Fn(&str, f32) -> f32,
     spans_width: crate::ui::common::SpansWidthFn<'_>,
 ) {
     let players = tab_list.sorted_listed(scoreboard);
@@ -33,7 +33,6 @@ pub fn build_player_tab_overlay(
     }
 
     let gw = (screen_w / gs).floor();
-    let font_w = |s: &str| text_width(s, FONT_SIZE);
 
     let display_names: Vec<Vec<TextSpan>> = players
         .iter()
@@ -54,28 +53,21 @@ pub fn build_player_tab_overlay(
     }
 
     let cols_i = cols as i32;
-    let slot_width =
-        ((cols_i * (HEAD_COL_W + max_name_w + 13)).min(gw as i32 - 50) / cols_i).max(1);
+    let head_w = if show_heads { HEAD_COL_W } else { 0 };
+    let slot_width = ((cols_i * (head_w + max_name_w + 13)).min(gw as i32 - 50) / cols_i).max(1);
     let grid_w = slot_width * cols_i + (cols_i - 1) * 5;
     let xxo = (gw as i32) / 2 - grid_w / 2;
     let cx = (gw as i32) / 2;
 
-    let wrap_width_px = (gw - 50.0).max(1.0);
-    // TODO: wrapping flattens the header/footer to plain text, dropping
-    // their formatting; wrap the spans themselves to keep it.
-    let header_lines = tab_list
-        .header
-        .as_ref()
-        .map(|h| wrap_text(&span_text(h), wrap_width_px, &font_w));
-    let footer_lines = tab_list
-        .footer
-        .as_ref()
-        .map(|f| wrap_text(&span_text(f), wrap_width_px, &font_w));
+    let width0 = |spans: &[TextSpan]| spans_width(spans, FONT_SIZE);
+    let wrap = |text: &Vec<TextSpan>| wrap_lines(text, gw - 50.0, &width0);
+    let header_lines = tab_list.header.as_ref().map(wrap);
+    let footer_lines = tab_list.footer.as_ref().map(wrap);
 
     let mut max_line_w = grid_w;
     for lines in [&header_lines, &footer_lines].into_iter().flatten() {
         for l in lines {
-            max_line_w = max_line_w.max(font_w(l).ceil() as i32);
+            max_line_w = max_line_w.max(width0(l).ceil() as i32);
         }
     }
 
@@ -88,17 +80,6 @@ pub fn build_player_tab_overlay(
                 h: (y2 - y1) as f32 * gs,
                 corner_radius: 0.0,
                 color,
-            });
-        };
-    let push_text =
-        |elements: &mut Vec<MenuElement>, s: String, x: i32, y: i32, color: [f32; 4]| {
-            elements.push(MenuElement::Text {
-                x: x as f32 * gs,
-                y: y as f32 * gs,
-                text: s,
-                scale: FONT_SIZE * gs,
-                color,
-                centered: false,
             });
         };
     let push_spans = |elements: &mut Vec<MenuElement>, spans: Vec<TextSpan>, x: i32, y: i32| {
@@ -122,7 +103,7 @@ pub fn build_player_tab_overlay(
             });
         };
 
-    let draw_text_block = |elements: &mut Vec<MenuElement>, lines: &[String], top: i32| {
+    let draw_text_block = |elements: &mut Vec<MenuElement>, lines: &[Vec<TextSpan>], top: i32| {
         push_fill(
             elements,
             cx - max_line_w / 2 - 1,
@@ -132,13 +113,12 @@ pub fn build_player_tab_overlay(
             BG_BACKDROP,
         );
         for (i, line) in lines.iter().enumerate() {
-            let lw = font_w(line).ceil() as i32;
-            push_text(
+            let lw = width0(line).ceil() as i32;
+            push_spans(
                 elements,
                 line.clone(),
                 cx - lw / 2,
                 top + i as i32 * LINE_HEIGHT,
-                COL_NAME,
             );
         }
     };
@@ -172,9 +152,18 @@ pub fn build_player_tab_overlay(
             yo + 8,
             BG_ROW,
         );
-        push_image(elements, row_left, yo, 8, 8, SpriteId::SteveHead);
-
         let info = players[i];
+        if show_heads {
+            // TODO: vanilla hides the hat layer per `showHat` and flips the
+            // face for Dinnerbone/Grumm; faces here always carry the hat.
+            elements.push(MenuElement::SkinFace {
+                x: row_left as f32 * gs,
+                y: yo as f32 * gs,
+                size: 8.0 * gs,
+                uuid: info.uuid.to_string(),
+                tint: [1.0; 4],
+            });
+        }
         let mut spans = display_names[i].clone();
         if info.game_mode == SPECTATOR_GAME_MODE {
             // Vanilla `decorateName`: spectators are italicized, nothing else.
@@ -182,7 +171,7 @@ pub fn build_player_tab_overlay(
                 span.italic = true;
             }
         }
-        push_spans(elements, spans, row_left + HEAD_COL_W, yo);
+        push_spans(elements, spans, row_left + head_w, yo);
         push_image(
             elements,
             row_left + slot_width - 11,
@@ -197,6 +186,16 @@ pub fn build_player_tab_overlay(
         yyo += rows as i32 * 9 + 1;
         draw_text_block(elements, lines, yyo);
     }
+}
+
+/// Vanilla `Font.split` on the header or footer: it splits the decomposed
+/// text, so a legacy code is never parted from its letter.
+fn wrap_lines(
+    text: &[TextSpan],
+    max_w: f32,
+    width0: &dyn Fn(&[TextSpan]) -> f32,
+) -> Vec<Vec<TextSpan>> {
+    wrap_spans(&font_spans(text), max_w, width0)
 }
 
 fn display_name_for(p: &TabListPlayer, scoreboard: &Scoreboard) -> Vec<TextSpan> {
@@ -270,24 +269,26 @@ fn ping_sprite(latency: i32) -> SpriteId {
     }
 }
 
-fn wrap_text(text: &str, max_width: f32, font_w: &dyn Fn(&str) -> f32) -> Vec<String> {
-    let mut lines = Vec::new();
-    for raw_line in text.split('\n') {
-        let mut current = String::new();
-        for word in raw_line.split(' ') {
-            if current.is_empty() {
-                current.push_str(word);
-                continue;
-            }
-            if font_w(&format!("{current} {word}")) <= max_width {
-                current.push(' ');
-                current.push_str(word);
-            } else {
-                lines.push(std::mem::take(&mut current));
-                current.push_str(word);
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_lines_wrap_the_decoded_text() {
+        let width = |spans: &[TextSpan]| {
+            spans
+                .iter()
+                .map(|span| span.text.chars().count())
+                .sum::<usize>() as f32
+                * 6.0
+        };
+        let header = [TextSpan::new("\u{00a7}caaaa bbbb".to_owned(), [1.0; 4])];
+        let lines = wrap_lines(&header, 30.0, &width);
+        let red = crate::ui::common::rgb(0xff5555);
+        assert_eq!(lines.len(), 2);
+        for (line, text) in lines.iter().zip(["aaaa", "bbbb"]) {
+            assert_eq!(crate::ui::text::span_text(line), text);
+            assert!(line.iter().all(|span| span.color == red));
         }
-        lines.push(current);
     }
-    lines
 }

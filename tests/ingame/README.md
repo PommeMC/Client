@@ -26,7 +26,9 @@ just ingame-test --versions all world     # every tested version, one folder
 `--versions all` is one version per joinable protocol, its newest patch
 (`pomme_protocol::version::tested_versions`, 26.3 down to 1.20.1). A full
 sweep takes a while: each version downloads its server jar once, and the client
-installs that version's assets on its first join.
+installs that version's assets on its first join. Not every version passes yet:
+versions below 1.21.5 don't load chunks, and no script is gated by version so
+far, so a sweep shows what's still to fix rather than a green run.
 
 Scripts live in a folder per area (`blocks`, `entities`, `items`, `player`,
 `ui`, `world`); a new one goes in the folder it tests. A script's name is its
@@ -64,6 +66,19 @@ min_version = "1.20.5"
 `max_version` works the same way. Scripts outside the range print `SKIP` for
 that version. Gate only for what the server can't do; a script failing because
 of a client bug stays a failure.
+
+## Wire fixtures
+
+`just wire-fixtures <version>...` runs `world/join` on each version with
+`--capture`: the client records every frame the server sends, before
+translation, and the runner keeps the login and config frames plus the first
+few of each game packet in `pomme-client/src/net/wire-fixtures/<version>/`.
+`net::wire_corpus` replays them through the translation and the client's
+readers in `cargo test`, so each version is checked against what its real
+server sends. Recapture a version when its join traffic changes, such as after
+a protogen or reference update for it. Packets a version is known to misread
+are listed in `KNOWN_GAPS` there; once one reads, the test asks for its entry
+to go.
 
 ## The harness
 

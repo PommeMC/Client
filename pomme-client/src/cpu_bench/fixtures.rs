@@ -38,8 +38,8 @@ impl Assets {
     }
 }
 
-/// A synthetic world of 3×3 columns around (0, 0): the centre column's
-/// meshing neighbourhood.
+/// A synthetic world of columns around (0, 0), by default the 3×3 of the
+/// centre column's meshing neighbourhood.
 #[derive(Clone, Copy)]
 pub enum Scene {
     /// Grass with short grass, flowers and a pond.
@@ -66,16 +66,18 @@ const SURFACE_Y: i32 = 63;
 /// The camera the fade and walk benches view from: just above the surface of
 /// column (0, 0).
 pub const EYE: DVec3 = DVec3::new(8.0, 72.0, 8.0);
-/// Block-space X/Z extent of the 3×3 columns.
-const XZ: std::ops::RangeInclusive<i32> = -16..=31;
+/// Block-space X/Z extent of the columns within `radius` of (0, 0).
+fn xz(radius: i32) -> std::ops::RangeInclusive<i32> {
+    -16 * radius..=16 * (radius + 1) - 1
+}
 
 /// Every column within render distance `rd` of (0, 0).
 pub fn columns_within(rd: i32) -> impl Iterator<Item = ChunkPos> {
     (-rd..=rd).flat_map(move |x| (-rd..=rd).map(move |z| ChunkPos::new(x, z)))
 }
 
-fn columns() -> impl Iterator<Item = (i32, i32)> {
-    XZ.flat_map(|x| XZ.map(move |z| (x, z)))
+fn columns(radius: i32) -> impl Iterator<Item = (i32, i32)> {
+    xz(radius).flat_map(move |x| xz(radius).map(move |z| (x, z)))
 }
 
 struct States {
@@ -121,16 +123,25 @@ impl States {
 
 /// Builds `scene` from a fixed seed, so runs compare like for like.
 pub fn build_world(scene: Scene, block_state_table: BlockStateTable) -> ChunkStore {
+    build_world_within(scene, block_state_table, 1)
+}
+
+/// [`build_world`] over every column within `radius` of (0, 0).
+pub fn build_world_within(
+    scene: Scene,
+    block_state_table: BlockStateTable,
+    radius: i32,
+) -> ChunkStore {
     let s = States::lookup(block_state_table);
     let mut store = ChunkStore::new(8);
-    for pos in columns_within(1) {
+    for pos in columns_within(radius) {
         let sections = store.section_count() as usize;
         store.insert_chunk(pos, Chunk::empty(sections));
     }
     let min_y = store.min_y();
     let mut rng = fastrand::Rng::with_seed(0x0050_4F4D_4D45);
 
-    for (x, z) in columns() {
+    for (x, z) in columns(radius) {
         for y in min_y..SURFACE_Y - 3 {
             store.set_block_state(x, y, z, s.stone, block_state_table);
         }
@@ -142,7 +153,7 @@ pub fn build_world(scene: Scene, block_state_table: BlockStateTable) -> ChunkSto
 
     match scene {
         Scene::Plains => {
-            for (x, z) in columns() {
+            for (x, z) in columns(radius) {
                 let plant = match rng.u32(0..100) {
                     0..15 => s.short_grass,
                     15 => s.poppy,
@@ -161,7 +172,7 @@ pub fn build_world(scene: Scene, block_state_table: BlockStateTable) -> ChunkSto
             }
         }
         Scene::Caves => {
-            for (x, z) in columns() {
+            for (x, z) in columns(radius) {
                 for y in min_y + 1..SURFACE_Y - 3 {
                     match rng.u32(0..200) {
                         0 | 1 => store.set_block_state(x, y, z, s.coal_ore, block_state_table),
@@ -170,21 +181,30 @@ pub fn build_world(scene: Scene, block_state_table: BlockStateTable) -> ChunkSto
                     }
                 }
             }
-            for _ in 0..120 {
-                let (cx, cy, cz) = (rng.i32(XZ), rng.i32(min_y + 4..SURFACE_Y - 8), rng.i32(XZ));
+            // 120 pockets per 3×3 columns.
+            let side = 2 * radius + 1;
+            for _ in 0..120 * side * side / 9 {
+                let (cx, cy, cz) = (
+                    rng.i32(xz(radius)),
+                    rng.i32(min_y + 4..SURFACE_Y - 8),
+                    rng.i32(xz(radius)),
+                );
                 let r = rng.i32(2..=5);
-                for (x, z) in columns() {
-                    for y in cy - r..=cy + r {
-                        if (x - cx).pow(2) + (y - cy).pow(2) + (z - cz).pow(2) <= r * r {
-                            store.set_block_state(x, y, z, s.air, block_state_table);
+                for x in cx - r..=cx + r {
+                    for z in cz - r..=cz + r {
+                        for y in cy - r..=cy + r {
+                            if (x - cx).pow(2) + (y - cy).pow(2) + (z - cz).pow(2) <= r * r {
+                                store.set_block_state(x, y, z, s.air, block_state_table);
+                            }
                         }
                     }
                 }
             }
         }
         Scene::Foliage => {
-            for tx in (XZ.start() + 2..XZ.end() - 1).step_by(4) {
-                for tz in (XZ.start() + 2..XZ.end() - 1).step_by(4) {
+            let (start, end) = xz(radius).into_inner();
+            for tx in (start + 2..end - 1).step_by(4) {
+                for tz in (start + 2..end - 1).step_by(4) {
                     let top = SURFACE_Y + rng.i32(4..=6);
                     for y in top - 2..=top + 1 {
                         let r = if y > top { 1 } else { 2 };
@@ -201,18 +221,18 @@ pub fn build_world(scene: Scene, block_state_table: BlockStateTable) -> ChunkSto
             }
         }
     }
-    add_sky_light(&mut store, block_state_table);
+    add_sky_light(&mut store, block_state_table, radius);
     store
 }
 
 /// Sky light 15 above each column's highest block and 0 below, no block
 /// light: the light reads a real world pays, without running the engine.
 // TODO: run the light engine for propagated light under overhangs and caves.
-fn add_sky_light(store: &mut ChunkStore, block_state_table: BlockStateTable) {
+fn add_sky_light(store: &mut ChunkStore, block_state_table: BlockStateTable, radius: i32) {
     let min_y = store.min_y();
     let top_y = min_y + store.height() as i32;
     let layer_count = store.section_count() as usize + 2;
-    for pos in columns_within(1) {
+    for pos in columns_within(radius) {
         let mut light = ChunkLightData {
             sky_sections: vec![Some(DataLayer::new()); layer_count],
             block_sections: vec![None; layer_count],

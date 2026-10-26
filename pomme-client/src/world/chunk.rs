@@ -410,8 +410,7 @@ impl ChunkGrid {
     }
 
     fn index(&self, pos: ChunkPos) -> usize {
-        let range = self.view_range as i32;
-        (pos.z.rem_euclid(range) * range + pos.x.rem_euclid(range)) as usize
+        ring_index(pos, self.view_range as i32)
     }
 
     fn in_range(&self, pos: ChunkPos) -> bool {
@@ -450,6 +449,37 @@ impl ChunkGrid {
             let index = self.index(pos);
             self.chunks[index] = None;
         }
+    }
+}
+
+/// Per-column values in a fixed square indexed like [`ChunkGrid`] at
+/// [`MAX_VIEW_DISTANCE`], so two columns the store holds at once never share
+/// a slot. Callers compare a stored position to tell a slot's column apart
+/// from an older one it has replaced.
+pub struct ChunkRing<T> {
+    slots: Box<[T]>,
+}
+
+const RING_SIDE: i32 = MAX_VIEW_DISTANCE as i32 * 2 + 1;
+
+/// A column's slot in a `side`×`side` square that wraps around the world.
+fn ring_index(pos: ChunkPos, side: i32) -> usize {
+    (pos.z.rem_euclid(side) * side + pos.x.rem_euclid(side)) as usize
+}
+
+impl<T> ChunkRing<T> {
+    pub fn new(mut init: impl FnMut() -> T) -> Self {
+        Self {
+            slots: (0..RING_SIDE * RING_SIDE).map(|_| init()).collect(),
+        }
+    }
+
+    pub fn get(&self, pos: ChunkPos) -> &T {
+        &self.slots[ring_index(pos, RING_SIDE)]
+    }
+
+    pub fn get_mut(&mut self, pos: ChunkPos) -> &mut T {
+        &mut self.slots[ring_index(pos, RING_SIDE)]
     }
 }
 
@@ -687,6 +717,16 @@ impl ChunkStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ring_slots_repeat_only_past_the_max_view_distance() {
+        let mut ring = ChunkRing::new(|| 0);
+        *ring.get_mut(ChunkPos::new(-1, -1)) = 1;
+        *ring.get_mut(ChunkPos::new(MAX_VIEW_DISTANCE as i32, 0)) = 2;
+        assert_eq!(*ring.get(ChunkPos::new(-1, -1)), 1);
+        assert_eq!(*ring.get(ChunkPos::new(-(MAX_VIEW_DISTANCE as i32), 0)), 0);
+        assert_eq!(*ring.get(ChunkPos::new(RING_SIDE - 1, RING_SIDE - 1)), 1);
+    }
+
     use super::*;
 
     #[test]

@@ -48,12 +48,10 @@ pub fn update_connecting(
     }
 
     if matches!(connect_phase, ConnectionPhase::Loading) {
-        game.mesh_dispatcher
-            .set_camera_position(*game.player.position);
         game.drain_and_upload_meshes(&mut gfx.renderer);
         // Vanilla runs `ClientLevel.update()` every frame, loading screen
         // included; the load gate waits on the light this applies.
-        game.update_light(core.menu.chunk_detail);
+        game.update_light();
 
         // Vanilla keeps ticking behind the loading screen: the tracker advances
         // and every tick is still marked with `client_tick_end`, while
