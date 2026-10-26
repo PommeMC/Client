@@ -277,7 +277,8 @@
 //! - `player_chat`/`disguised_chat` carry a direct chat-type registry id where
 //!   1.20.5 put a holder (bumped by one on the way through)
 //! - `server_data` ends in an `enforcesSecureChat` bool 1.20.5 dropped; it is
-//!   stripped
+//!   stripped. TODO: it's this era's only copy of the flag (game `login` lacks
+//!   it and gets false), so these servers read as not enforcing secure chat
 //!
 //! 1.20.2 -> 26.2 wire changes (all of 1.20.4's plus; the pre-1.20.3 era):
 //! - text components are length-prefixed JSON strings, not NBT
@@ -2633,6 +2634,9 @@ fn translate_disguised_chat_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 
 /// Rewrites `server_data` for 1.20.4: the motd and optional icon, without
 /// the trailing `enforcesSecureChat` bool.
+/// TODO: carry the bool into the session's secure-chat setting; until then
+/// chat from a player without a chat session shows as unsigned rather than
+/// being rejected. 1.20.1 and 1.20.2 drop the packet, so they lose it too.
 fn translate_server_data_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     skip_nbt(&mut cur)?; // motd
