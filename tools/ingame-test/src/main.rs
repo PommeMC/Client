@@ -625,6 +625,11 @@ impl Server {
         // Spawn chunks unload once the player leaves, taking their entities
         // out of the reset's reach; keep the area around spawn loaded.
         server.command("forceload add -48 -48 47 47");
+        // Mobs spawning at night attack and push the test player mid-script.
+        // 26.x renamed the rule; each version rejects the name it lacks.
+        for rule in ["spawn_mobs", "doMobSpawning"] {
+            server.command(&format!("gamerule {rule} false"));
+        }
         Ok(server)
     }
 

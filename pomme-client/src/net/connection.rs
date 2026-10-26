@@ -1147,13 +1147,15 @@ fn outbound_frame(
 ) -> Result<Option<Vec<u8>>, ConnectionError> {
     Ok(match out {
         Outbound::Packet(mut packet) => {
-            match translation {
-                Some(t) => t.remap_outbound(&mut packet),
-                None => {
-                    if let ServerboundGamePacket::SetCreativeModeSlot(p) = &*packet {
-                        return Ok(Some(super::item_codec::creative_slot_frame(p)));
-                    }
-                }
+            // Pomme encodes creative slots itself in vanilla's layout; a wire
+            // version with an item grammar translates that encoding.
+            if let ServerboundGamePacket::SetCreativeModeSlot(p) = &*packet
+                && translation.is_none_or(|t| t.translates_items())
+            {
+                return Ok(Some(super::item_codec::creative_slot_frame(p)));
+            }
+            if let Some(t) = translation {
+                t.remap_outbound(&mut packet);
             }
             Some(serialize_frame(&*packet)?)
         }

@@ -37,11 +37,15 @@
 //!   `DisplayInfo` to a float pair after the entry
 //! - `explode` appended a `playSound` bool
 //! - `EntityDataSerializers` appended `dye_color` (43), used only by the
-//!   cushion, whose entity type (like the poplar boats) has no native id;
-//!   `data_component_type` diverges from 40 (`swing_animation` and `map_color`
-//!   removed, thirteen components added), and `pot_decorations`, inline trim
-//!   materials and instruments, and `teleport_randomly` changed their value
-//!   layout (patches carrying them can't be sized)
+//!   cushion, whose entity type (like the poplar boats) has no native id
+//! - item ids diverge from 72 and `data_component_type` from 40
+//!   (`swing_animation` and `map_color` removed, thirteen components added),
+//!   and `pot_decorations`, inline trim materials and instruments, and
+//!   `teleport_randomly` changed their value layout. Every item-carrying packet
+//!   (containers, cursor, inventory, equipment, merchant offers, entity data,
+//!   creative slots) goes through 26.3's item grammar (`pomme_protocol::item`),
+//!   which remaps the ids, converts the four changed layouts and drops
+//!   components 26.2 lacks
 //! - `ByteBufCodecs.BIT_SET` (a byte array) replaced the long-array bitset in
 //!   the light masks (`level_chunk_with_light`, `light_update`) and the
 //!   `player_chat` partial filter mask
@@ -76,6 +80,10 @@
 //!   `spectator_action`); pomme sends neither
 //! - the `color` argument type was renamed `team_color` at the same id;
 //!   `commands` remaps every parser id by name, so the rename is bridged
+//! - 26.1 alone: item and component layouts are 26.2's, but item ids shift and
+//!   components past `sulfur_cube_content` sit one lower, so its stacks go
+//!   through 26.2's item grammar, which builds its game translation although
+//!   its packet ids match
 //!
 //! 1.21.11 -> 26.2 wire changes (all of the above — 1.21.11 matches 26.1 on
 //! those three layouts — plus):
@@ -356,8 +364,9 @@
 //! versions unless the matching rewrite lands at the same time. Each site
 //! carries a `TODO` pointing here.
 //! - outbound `set_creative_mode_slot` leaves component values undelimited,
-//!   which is 1.21.4's layout rather than 26.2's (native sessions encode it
-//!   with pomme's item grammar instead; see `net::item_codec`)
+//!   which is 1.21.4's layout rather than 26.2's (native sessions and the
+//!   versions with an item grammar encode it with pomme's grammar instead; see
+//!   `net::item_codec`)
 //! - inbound `cooldown` carries an item registry id, where 26.2 names a
 //!   cooldown group
 
@@ -365,14 +374,15 @@ use std::io::Cursor;
 use std::sync::Mutex;
 
 use azalea_buf::AzBuf;
-use azalea_inventory::components::{DataComponentUnion, Profile};
+use azalea_inventory::components::Profile;
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_protocol::packets::game::s_container_click::HashedStack;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
 use azalea_registry::Registry;
 use azalea_registry::builtin::DataComponentKind;
 use glam::DVec3;
-use pomme_protocol::codec::Reader;
+use pomme_protocol::codec::{DecodeResult, Reader};
+use pomme_protocol::item::ItemCodec;
 pub use pomme_protocol::version::joinable;
 use pomme_protocol::version::{NATIVE, TRANSLATED};
 use pomme_protocol::{
@@ -470,6 +480,9 @@ struct GameIds {
     color_particles: bool,
     /// The rewrites 26.3 introduced, for wire versions at or above it.
     v777: Option<Ids777>,
+    /// The item-carrying packets, for wire versions with a ported item
+    /// grammar.
+    items: Option<ItemIds>,
     /// The rewrites 1.21.9 introduced, for wire versions at or below it.
     v772: Option<Ids772>,
     /// The rewrites 1.21.6 introduced, for wire versions below it.
@@ -1213,6 +1226,10 @@ impl Translation {
             let named_nbt = ids.v763.is_some();
             if id == ids.set_entity_data_id {
                 translate_entity_data(id, payload, ids, self.to_native)
+            } else if let Some((items, rewrite)) =
+                ids.items.as_ref().and_then(|v| Some((v, v.rewrite(id)?)))
+            {
+                rewrite(id, payload, items.items(self.to_native))
             } else if ids.v774.as_ref().is_some_and(|v| id == v.level_chunk_id) {
                 let padding = if named_nbt {
                     SectionPadding::EntrySized
@@ -1319,6 +1336,11 @@ impl Translation {
             return Vec::new();
         };
         let old = ids.outbound.get(id as usize).copied().flatten();
+        if let (Some(items), Some(old)) = (&ids.items, old)
+            && id == items.set_creative_mode_slot_id
+        {
+            return translate_creative_slot(old, &frame[pos..], items.codec, self.from_native);
+        }
         if let Some(v777) = &ids.v777 {
             if id == v777.swing_id {
                 return translate_swing_777(v777.punch_old_id, &frame[pos..]);
@@ -1439,6 +1461,15 @@ impl Translation {
         self.to_native.remap(registry, id)
     }
 
+    /// Whether the item-carrying packets arrive already in native ids (the
+    /// wire version's item grammar rewrote them), so their items aren't
+    /// remapped again after decoding.
+    pub fn translates_items(&self) -> bool {
+        self.game_ids
+            .as_ref()
+            .is_some_and(|ids| ids.items.is_some())
+    }
+
     /// Native-version item id for a source-version item id. Used by decoded
     /// configuration/game tag payloads, whose element ids are not covered by
     /// the packet-id translation layer.
@@ -1466,6 +1497,7 @@ impl Translation {
                 }
                 true
             }
+            ClientboundGamePacket::MerchantOffers(_) if self.translates_items() => true,
             ClientboundGamePacket::MerchantOffers(p) => {
                 // An `ItemCost` has no empty form, so an untranslatable base
                 // cost drops the offer rather than the whole trade list.
@@ -1489,8 +1521,9 @@ impl Translation {
     /// Remaps an outbound packet's static-registry ids into the launched
     /// version's id space. Never drops the packet; entries the older version
     /// lacks degrade to empty (the server resyncs the slot).
-    /// TODO: delimit `set_creative_mode_slot` component values for 1.21.5 and
-    /// up once pomme owns the encoder (see the azalea-divergence list).
+    /// TODO: delimit `set_creative_mode_slot` component values for 1.21.5
+    /// through 1.21.11, which have no item grammar yet (see the
+    /// azalea-divergence list).
     pub fn remap_outbound(&self, packet: &mut ServerboundGamePacket) {
         match packet {
             ServerboundGamePacket::ContainerClick(p) => {
@@ -1570,7 +1603,8 @@ impl GameIds {
         use Direction::{Clientbound, Serverbound};
         let inbound = id_map(table, native, Phase::Game, Clientbound);
         let outbound = id_map(native, table, Phase::Game, Serverbound);
-        if identity_maps(&inbound, &outbound) {
+        // An item grammar still has stacks to translate (26.1).
+        if identity_maps(&inbound, &outbound) && ItemCodec::for_protocol(protocol).is_none() {
             return None;
         }
         let id = |dir, name| required_id(native, Phase::Game, dir, name);
@@ -1578,7 +1612,7 @@ impl GameIds {
             inbound,
             outbound,
             serializer_map: match protocol {
-                777 => remap_serializer_777,
+                777 | 775 => remap_serializer_777,
                 774 => remap_serializer_774,
                 773 => remap_serializer_773,
                 // 1.21.5 through 1.21.8 register identical serializer sets,
@@ -1637,6 +1671,16 @@ impl GameIds {
                 ),
                 move_player_pos_rot_id: id(Serverbound, "move_player_pos_rot"),
                 pending_accept: Mutex::new(None),
+            }),
+            items: ItemCodec::for_protocol(protocol).map(|codec| ItemIds {
+                codec,
+                container_set_content_id: id(Clientbound, "container_set_content"),
+                container_set_slot_id: id(Clientbound, "container_set_slot"),
+                set_cursor_item_id: id(Clientbound, "set_cursor_item"),
+                set_player_inventory_id: id(Clientbound, "set_player_inventory"),
+                set_equipment_id: id(Clientbound, "set_equipment"),
+                merchant_offers_id: id(Clientbound, "merchant_offers"),
+                set_creative_mode_slot_id: id(Serverbound, "set_creative_mode_slot"),
             }),
             v772: (protocol <= 772).then(|| Ids772 {
                 add_entity_id: id(Clientbound, "add_entity"),
@@ -3368,9 +3412,9 @@ fn translate_interact(interact_old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
 /// 26.3's appended `dye_color` serializer, which no native entity uses.
 const DYE_COLOR_SERIALIZER: u32 = 43;
 
-/// The native serializer id for a 26.3 `EntityDataSerializers` id: 26.3
-/// appended `dye_color` and shifted nothing (both registration blocks
-/// line-checked).
+/// The native serializer id for a 26.3 or 26.1 `EntityDataSerializers` id:
+/// 26.3 appended `dye_color` and shifted nothing, and 26.1 matches 26.2
+/// (registration blocks line-checked).
 fn remap_serializer_777(old: u32) -> Option<u32> {
     (old < DYE_COLOR_SERIALIZER).then_some(old)
 }
@@ -3514,6 +3558,10 @@ fn translate_entity_data(
             continue;
         }
         if new == 7 {
+            if let Some(items) = &ids.items {
+                items.items(remaps).stack(&mut cur, &mut out)?;
+                continue;
+            }
             let walked = if ids.v765.is_some() {
                 translate_item_765(&mut cur, &mut out, ids.v763.is_some()).map(|()| true)
             } else {
@@ -3862,54 +3910,252 @@ fn copy_particle_payload(
     Some(())
 }
 
-/// Shared components whose 26.3 value layout differs from 26.2's, so
-/// azalea's decoder would mis-size them: `pot_decorations` became four
-/// optional item templates, inline trim materials gained a `paletteId`,
-/// inline instruments a `durabilityDamage`, and `teleport_randomly` consume
-/// effects a `directionalParticles` bool.
-/// TODO: rewrite these values instead of refusing the patch.
-const CHANGED_COMPONENTS_777: &[DataComponentKind] = &[
-    DataComponentKind::PotDecorations,
-    DataComponentKind::Trim,
-    DataComponentKind::ProvidesTrimMaterial,
-    DataComponentKind::Instrument,
-    DataComponentKind::Consumable,
-    DataComponentKind::DeathProtection,
-];
+/// Native-space ids of the packets carrying item stacks, rewritten through
+/// the wire version's item grammar for versions that have one ported.
+struct ItemIds {
+    codec: &'static ItemCodec,
+    container_set_content_id: u32,
+    container_set_slot_id: u32,
+    set_cursor_item_id: u32,
+    set_player_inventory_id: u32,
+    set_equipment_id: u32,
+    merchant_offers_id: u32,
+    set_creative_mode_slot_id: u32,
+}
 
-/// Copies a 26.3 component patch whose type ids are in the wire version's
-/// space, writing native ids and sizing each value with azalea's decoder for
-/// the native component it maps to. `None` for a component the native
-/// version lacks or whose layout changed ([`CHANGED_COMPONENTS_777`]).
+/// Translates item stacks from the wire version's grammar into native ids.
+#[derive(Clone, Copy)]
+struct Items<'a> {
+    codec: &'static ItemCodec,
+    remaps: &'a RegistryRemaps,
+}
+
+type ItemRewrite = fn(u32, &[u8], Items<'_>) -> Option<Vec<u8>>;
+
+impl ItemIds {
+    fn items<'a>(&self, remaps: &'a RegistryRemaps) -> Items<'a> {
+        Items {
+            codec: self.codec,
+            remaps,
+        }
+    }
+
+    fn rewrite(&self, id: u32) -> Option<ItemRewrite> {
+        Some(match id {
+            i if i == self.container_set_content_id => translate_container_set_content,
+            i if i == self.container_set_slot_id => translate_container_set_slot,
+            i if i == self.set_cursor_item_id => translate_set_cursor_item,
+            i if i == self.set_player_inventory_id => translate_set_player_inventory,
+            i if i == self.set_equipment_id => translate_set_equipment,
+            i if i == self.merchant_offers_id => translate_merchant_offers,
+            _ => return None,
+        })
+    }
+}
+
+impl Items<'_> {
+    /// Runs `read` on the rest of `cur`, advancing it past what was read.
+    fn read<T>(
+        cur: &mut Cursor<&[u8]>,
+        read: impl FnOnce(&mut Reader) -> DecodeResult<T>,
+    ) -> Option<T> {
+        Reader::on_cursor(cur, read).ok()
+    }
+
+    /// `ItemStack.OPTIONAL_STREAM_CODEC`.
+    fn stack(self, cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+        Self::read(cur, |r| {
+            self.codec
+                .translate_stack(r, out, ItemCodec::native(), self.remaps)
+        })
+    }
+
+    /// `ItemStack.STREAM_CODEC`, which has no empty form: `Some(false)` when
+    /// the native version lacks the item.
+    fn non_empty_stack(self, cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<bool> {
+        let at = out.len();
+        self.stack(cur, out)?;
+        Some(out[at..] != [0])
+    }
+
+    /// `DataComponentPatch.STREAM_CODEC`.
+    fn patch(self, cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+        Self::read(cur, |r| {
+            self.codec
+                .translate_patch(r, out, ItemCodec::native(), self.remaps)
+        })
+    }
+
+    /// `ItemCost.STREAM_CODEC`: an item, a count and exact-component
+    /// predicates, read in full; `Some(false)` (nothing written) when the
+    /// native version lacks the item.
+    fn cost(self, cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<bool> {
+        let item = var_u32(cur)?;
+        let mut cost = Vec::new();
+        copy_varint(cur, &mut cost)?; // count
+        let predicates = var_u32(cur)?;
+        let mut kept = (0, Vec::new());
+        for _ in 0..predicates {
+            let carried = Self::read(cur, |r| {
+                self.codec.translate_typed_component(
+                    r,
+                    &mut kept.1,
+                    ItemCodec::native(),
+                    self.remaps,
+                )
+            })?;
+            kept.0 += u32::from(carried);
+        }
+        let Some(item) = self.remaps.remap(ClientRegistry::Item, item) else {
+            return Some(false);
+        };
+        wire::write_varint(out, item);
+        out.extend_from_slice(&cost);
+        wire::write_varint(out, kept.0);
+        out.extend_from_slice(&kept.1);
+        Some(true)
+    }
+}
+
+/// Serverbound `set_creative_mode_slot` from pomme's native encoding (a
+/// short slot, then an untrusted stack) into the wire version's ids.
+fn translate_creative_slot(
+    old_id: u32,
+    payload: &[u8],
+    wire_codec: &'static ItemCodec,
+    from_native: &RegistryRemaps,
+) -> Vec<Vec<u8>> {
+    let mut r = Reader::new(payload);
+    let mut out = Vec::with_capacity(payload.len() + 4);
+    wire::write_varint(&mut out, old_id);
+    let translated = r.bytes(2).and_then(|slot| {
+        out.extend_from_slice(slot);
+        ItemCodec::native().translate_untrusted_stack(&mut r, &mut out, wire_codec, from_native)
+    });
+    match translated {
+        Ok(()) => vec![out],
+        Err(e) => {
+            tracing::warn!("Suppressing an untranslatable creative slot: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// The frame id, then `head` (bytes copied verbatim), then `body`.
+fn item_frame(
+    id: u32,
+    payload: &[u8],
+    head: usize,
+    body: impl FnOnce(&mut Cursor<&[u8]>, &mut Vec<u8>) -> Option<()>,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    cur.set_position(head as u64);
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(payload.get(..head)?);
+    body(&mut cur, &mut out)?;
+    out.extend_from_slice(&payload[cur.position() as usize..]);
+    Some(out)
+}
+
+/// The length of a leading run of `varints` varints.
+fn varint_run_len(payload: &[u8], varints: usize) -> Option<usize> {
+    let mut cur = Cursor::new(payload);
+    for _ in 0..varints {
+        varint_span(&mut cur)?;
+    }
+    Some(cur.position() as usize)
+}
+
+/// `container_set_content`: container id, state id, the slots, the carried
+/// stack.
+fn translate_container_set_content(id: u32, payload: &[u8], items: Items<'_>) -> Option<Vec<u8>> {
+    item_frame(id, payload, varint_run_len(payload, 2)?, |cur, out| {
+        let slots = var_u32(cur)?;
+        wire::write_varint(out, slots);
+        for _ in 0..=slots {
+            items.stack(cur, out)?;
+        }
+        Some(())
+    })
+}
+
+/// `container_set_slot`: container id, state id, a short slot, the stack.
+fn translate_container_set_slot(id: u32, payload: &[u8], items: Items<'_>) -> Option<Vec<u8>> {
+    item_frame(id, payload, varint_run_len(payload, 2)? + 2, |cur, out| {
+        items.stack(cur, out)
+    })
+}
+
+fn translate_set_cursor_item(id: u32, payload: &[u8], items: Items<'_>) -> Option<Vec<u8>> {
+    item_frame(id, payload, 0, |cur, out| items.stack(cur, out))
+}
+
+/// `set_player_inventory`: a slot, the stack.
+fn translate_set_player_inventory(id: u32, payload: &[u8], items: Items<'_>) -> Option<Vec<u8>> {
+    item_frame(id, payload, varint_run_len(payload, 1)?, |cur, out| {
+        items.stack(cur, out)
+    })
+}
+
+/// `set_equipment`: the entity, then slot/stack pairs whose slot byte's high
+/// bit continues the list.
+fn translate_set_equipment(id: u32, payload: &[u8], items: Items<'_>) -> Option<Vec<u8>> {
+    item_frame(id, payload, varint_run_len(payload, 1)?, |cur, out| {
+        loop {
+            let slot = read_u8(cur)?;
+            out.push(slot);
+            items.stack(cur, out)?;
+            if slot & 0x80 == 0 {
+                return Some(());
+            }
+        }
+    })
+}
+
+/// `merchant_offers`: per offer a base cost, the result, an optional second
+/// cost and a numeric tail. An offer with an item the native version lacks
+/// is left out, rather than shown cheaper or as a different trade.
+/// TODO: leaving an offer out renumbers the ones after it; map the indices
+/// once pomme sends trade selections (`select_trade`).
+fn translate_merchant_offers(id: u32, payload: &[u8], items: Items<'_>) -> Option<Vec<u8>> {
+    item_frame(id, payload, varint_run_len(payload, 1)?, |cur, out| {
+        let offers = var_u32(cur)?;
+        let (mut kept, mut body) = (0, Vec::new());
+        for _ in 0..offers {
+            let mut offer = Vec::new();
+            let base = items.cost(cur, &mut offer)?;
+            let result = items.non_empty_stack(cur, &mut offer)?;
+            let has_second = read_u8(cur)? != 0;
+            offer.push(u8::from(has_second));
+            let second = !has_second || items.cost(cur, &mut offer)?;
+            let tail_at = cur.position() as usize;
+            advance(cur, 25)?; // outOfStock, 4 ints, multiplier, demand
+            offer.extend_from_slice(&cur.get_ref()[tail_at..cur.position() as usize]);
+            if base && result && second {
+                kept += 1;
+                body.extend_from_slice(&offer);
+            }
+        }
+        wire::write_varint(out, kept);
+        out.extend_from_slice(&body);
+        Some(())
+    })
+}
+
+/// Copies a 26.3 component patch into native ids through 26.3's item
+/// grammar, dropping components the native version lacks or lays out
+/// differently.
 fn copy_component_patch(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
     remaps: &RegistryRemaps,
 ) -> Option<()> {
-    let added = var_u32(cur)?;
-    let removed = var_u32(cur)?;
-    wire::write_varint(out, added);
-    wire::write_varint(out, removed);
-    for _ in 0..added {
-        let component = var_u32(cur)?;
-        let native = remaps.remap(ClientRegistry::DataComponentType, component)?;
-        let kind = DataComponentKind::from_u32(native)?;
-        if CHANGED_COMPONENTS_777.contains(&kind) {
-            return None;
-        }
-        wire::write_varint(out, native);
-        let value_at = cur.position() as usize;
-        DataComponentUnion::azalea_read_as(kind, cur).ok()?;
-        out.extend_from_slice(&cur.get_ref()[value_at..cur.position() as usize]);
-    }
-    for _ in 0..removed {
-        let component = var_u32(cur)?;
-        wire::write_varint(
-            out,
-            remaps.remap(ClientRegistry::DataComponentType, component)?,
-        );
-    }
-    Some(())
+    let items = Items {
+        codec: ItemCodec::for_protocol(777)?,
+        remaps,
+    };
+    items.patch(cur, out)
 }
 
 /// Copies one `Holder<SoundEvent>` (varint id + 1, or 0 followed by the
@@ -5633,9 +5879,8 @@ mod recipe_translation_tests {
     }
 
     #[test]
-    fn recipe_book_add_remaps_26_1_even_without_game_id_translation() {
+    fn recipe_book_add_remaps_26_1() {
         let translation = Translation::for_protocol(775).expect("26.1 translation");
-        assert!(translation.game_ids.is_none());
         let id = required_id(
             PacketTable::native(),
             Phase::Game,

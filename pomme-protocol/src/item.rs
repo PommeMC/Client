@@ -9,8 +9,8 @@
 use std::sync::OnceLock;
 
 use crate::codec::{DecodeResult, MAX_STRING_LENGTH, Reader};
-use crate::entity_data::{SERIALIZERS_26_2, Serializer};
-use crate::registries::{ClientRegistry, RegistryTable};
+use crate::entity_data::{SERIALIZERS_26_2, SERIALIZERS_26_3, Serializer};
+use crate::registries::{ClientRegistry, RegistryRemaps, RegistryTable};
 use crate::version::EMBEDDED;
 use crate::wire::write_varint;
 
@@ -54,6 +54,11 @@ pub enum Shape {
     Ref(&'static Shape),
     /// `ByteBufCodecs.holder`: varint 0 then an inline value, else id + 1.
     Holder(&'static Shape),
+    /// [`Shape::Holder`] over a static registry, whose ids shift between
+    /// versions.
+    RegistryHolder(ClientRegistry, &'static Shape),
+    /// `ByteBufCodecs.registry`: a static registry's id.
+    RegistryId(ClientRegistry),
     /// `ByteBufCodecs.holderSet`: varint 0 then a tag id, else n + 1 ids.
     HolderSet,
     /// An `idMapper` enum dispatch with `OutOfBoundsStrategy.ZERO`.
@@ -80,7 +85,10 @@ const STRING: Shape = Utf(MAX_STRING_LENGTH);
 const TEXT: Shape = Nbt;
 
 /// `SoundEvent.STREAM_CODEC`: a holder over (location, fixed range).
-pub static SOUND: Shape = Holder(&Struct(&[IDENTIFIER, Optional(&Float)]));
+pub static SOUND: Shape = RegistryHolder(
+    ClientRegistry::SoundEvent,
+    &Struct(&[IDENTIFIER, Optional(&Float)]),
+);
 
 /// `MobEffectInstance.Details.STREAM_CODEC`, recursive through its hidden
 /// effect.
@@ -95,24 +103,54 @@ static MOB_EFFECT_DETAILS: Shape = Struct(&[
 /// `MobEffectInstance.STREAM_CODEC`: `MobEffect.STREAM_CODEC`, then details.
 pub static MOB_EFFECT_INSTANCE: Shape = Struct(&[VarInt, Ref(&MOB_EFFECT_DETAILS)]);
 
-/// `ConsumeEffect.STREAM_CODEC` over `consume_effect_type`.
-static CONSUME_EFFECT: Shape = ByRegistry(
-    ClientRegistry::ConsumeEffectType,
-    &[
-        // ApplyStatusEffectsConsumeEffect.java:31
-        (
-            "apply_effects",
-            Struct(&[List(UNBOUNDED, &MOB_EFFECT_INSTANCE), Float]),
-        ),
-        // RemoveStatusEffectsConsumeEffect.java:32
-        ("remove_effects", HolderSet),
-        ("clear_all_effects", Unit),
-        // TeleportRandomlyConsumeEffect.java:37
-        ("teleport_randomly", Float),
-        // PlaySoundConsumeEffect.java:28
-        ("play_sound", Ref(&SOUND)),
-    ],
-);
+/// `ConsumeEffect.STREAM_CODEC` over `consume_effect_type`, given
+/// `teleport_randomly`'s layout, the one arm that differs between versions.
+macro_rules! consume_effect {
+    ($teleport_randomly:expr) => {
+        ByRegistry(
+            ClientRegistry::ConsumeEffectType,
+            &[
+                // ApplyStatusEffectsConsumeEffect.java:31
+                (
+                    "apply_effects",
+                    Struct(&[List(UNBOUNDED, &MOB_EFFECT_INSTANCE), Float]),
+                ),
+                // RemoveStatusEffectsConsumeEffect.java:32
+                ("remove_effects", HolderSet),
+                ("clear_all_effects", Unit),
+                ("teleport_randomly", $teleport_randomly),
+                // PlaySoundConsumeEffect.java:28
+                ("play_sound", Ref(&SOUND)),
+            ],
+        )
+    };
+}
+
+/// TeleportRandomlyConsumeEffect.java:37: a diameter.
+static CONSUME_EFFECT: Shape = consume_effect!(Float);
+/// 26.3 TeleportRandomlyConsumeEffect.java:42 added `directionalParticles`.
+static CONSUME_EFFECT_26_3: Shape = consume_effect!(Struct(&[Float, Bool]));
+
+/// `Consumable.STREAM_CODEC`'s fields before the effects (Consumable.java:49).
+static CONSUMABLE_HEAD: Shape = Struct(&[Float, VarInt, Ref(&SOUND), Bool]);
+
+/// `Consumable.STREAM_CODEC` over a version's effects.
+macro_rules! consumable {
+    ($effect:expr) => {
+        Struct(&[Ref(&CONSUMABLE_HEAD), List(UNBOUNDED, $effect)])
+    };
+}
+
+/// `TrimPattern.STREAM_CODEC` (TrimPattern.java:30).
+static TRIM_PATTERN: Shape = Holder(&Struct(&[IDENTIFIER, TEXT, Bool]));
+
+/// `ArmorTrim.STREAM_CODEC` (ArmorTrim.java:38) over a version's trim
+/// material.
+macro_rules! trim {
+    ($material:expr) => {
+        Struct(&[Ref($material), Ref(&TRIM_PATTERN)])
+    };
+}
 
 /// `StatePropertiesPredicate.PropertyMatcher.STREAM_CODEC`: a name, then an
 /// exact value or a range of optional bounds.
@@ -174,9 +212,15 @@ static TRIM_MATERIAL: Shape = Holder(&Struct(&[
     Struct(&[STRING, Map(&IDENTIFIER, &STRING)]),
     TEXT,
 ]));
+/// 26.3 TrimMaterial.java:28 replaced the asset group with a palette id.
+static TRIM_MATERIAL_26_3: Shape = Holder(&Struct(&[IDENTIFIER, TEXT]));
 
 /// `TypedEntityData.streamCodec`: a registry id, then the compound.
-static TYPED_ENTITY_DATA: Shape = Struct(&[VarInt, Compound]);
+/// `TypedEntityData.streamCodec` over `EntityType.STREAM_CODEC`.
+static ENTITY_DATA: Shape = Struct(&[RegistryId(ClientRegistry::EntityType), Compound]);
+
+/// `TypedEntityData.streamCodec` over the block entity type registry.
+static BLOCK_ENTITY_DATA: Shape = Struct(&[RegistryId(ClientRegistry::BlockEntityType), Compound]);
 
 /// `KineticWeapon.Condition.STREAM_CODEC`.
 static KINETIC_CONDITION: Shape = Struct(&[VarInt, Float, Float]);
@@ -309,17 +353,7 @@ static COMPONENTS_26_2: &[(&str, Shape)] = &[
     ("intangible_projectile", Compound),
     // FoodProperties.java:35
     ("food", Struct(&[VarInt, Float, Bool])),
-    // Consumable.java:49
-    (
-        "consumable",
-        Struct(&[
-            Float,
-            VarInt,
-            Ref(&SOUND),
-            Bool,
-            List(UNBOUNDED, &CONSUME_EFFECT),
-        ]),
-    ),
+    ("consumable", consumable!(&CONSUME_EFFECT)),
     // UseRemainder.java:17
     ("use_remainder", ItemTemplate),
     ("sulfur_cube_content", ItemTemplate),
@@ -447,17 +481,10 @@ static COMPONENTS_26_2: &[(&str, Shape)] = &[
             Bool,
         ]),
     ),
-    // ArmorTrim.java:38; TrimPattern.java:30
-    (
-        "trim",
-        Struct(&[
-            Ref(&TRIM_MATERIAL),
-            Holder(&Struct(&[IDENTIFIER, TEXT, Bool])),
-        ]),
-    ),
+    ("trim", trim!(&TRIM_MATERIAL)),
     ("provides_trim_material", Ref(&TRIM_MATERIAL)),
-    ("entity_data", Ref(&TYPED_ENTITY_DATA)),
-    ("block_entity_data", Ref(&TYPED_ENTITY_DATA)),
+    ("entity_data", Ref(&ENTITY_DATA)),
+    ("block_entity_data", Ref(&BLOCK_ENTITY_DATA)),
     // CustomData.java:26
     ("bucket_entity_data", Compound),
     // InstrumentComponent.java:27; Instrument.java:29
@@ -499,10 +526,7 @@ static COMPONENTS_26_2: &[(&str, Shape)] = &[
     // Bees.java:26; BeehiveBlockEntity.java:310
     (
         "bees",
-        List(
-            UNBOUNDED,
-            &Struct(&[Ref(&TYPED_ENTITY_DATA), VarInt, VarInt]),
-        ),
+        List(UNBOUNDED, &Struct(&[Ref(&ENTITY_DATA), VarInt, VarInt])),
     ),
     ("break_sound", Ref(&SOUND)),
     // Registry-holder variants (`holderRegistry`) and `idMapper` enums.
@@ -547,6 +571,67 @@ static COMPONENTS_26_2: &[(&str, Shape)] = &[
     ),
 ];
 
+/// 26.3's components that differ from 26.2's, layered over
+/// [`COMPONENTS_26_2`]: the four whose layout changed, then the added ones.
+static COMPONENTS_26_3: &[(&str, Shape)] = &[
+    ("consumable", consumable!(&CONSUME_EFFECT_26_3)),
+    ("death_protection", List(UNBOUNDED, &CONSUME_EFFECT_26_3)),
+    ("trim", trim!(&TRIM_MATERIAL_26_3)),
+    ("provides_trim_material", Ref(&TRIM_MATERIAL_26_3)),
+    // Instrument.java:29 added `durabilityDamage`.
+    (
+        "instrument",
+        Holder(&Struct(&[Ref(&SOUND), Float, Float, VarInt, TEXT])),
+    ),
+    // PotDecorations.java:37: back, left, right, front.
+    (
+        "pot_decorations",
+        Struct(&[
+            Optional(&ItemTemplate),
+            Optional(&ItemTemplate),
+            Optional(&ItemTemplate),
+            Optional(&ItemTemplate),
+        ]),
+    ),
+    // SwingAnimation.java:26
+    ("attack_animation", Struct(&[VarInt, VarInt])),
+    ("interact_animation", Struct(&[VarInt, VarInt])),
+    // BlockTransformer.java:66, a registry holder.
+    ("block_transformer", VarInt),
+    // VillagerFood.java:24
+    ("villager_food", VarInt),
+    // Compostable.java:25; ResolvableInt: a constant or a reference.
+    ("compostable", Either(&Int, &IDENTIFIER)),
+    // CookingFuel.java:27, BrewingFuel.java:27: a ResolvableInt, then a
+    // ResolvableFloat.
+    (
+        "cooking_fuel",
+        Struct(&[Either(&Int, &IDENTIFIER), Either(&Float, &IDENTIFIER)]),
+    ),
+    (
+        "brewing_fuel",
+        Struct(&[Either(&Int, &IDENTIFIER), Either(&Float, &IDENTIFIER)]),
+    ),
+    // MobVisibility.java:29
+    ("mob_visibility", Struct(&[HolderSet, Float])),
+    // DecoratedPotPatterns.java:46, a registry holder.
+    ("provides_pottery_pattern", VarInt),
+    ("sign_text_front", Ref(&SIGN_TEXT)),
+    ("sign_text_back", Ref(&SIGN_TEXT)),
+    ("waxed", Unit),
+    // DyeColor.java:172
+    ("cushion/color", VarInt),
+];
+
+/// `SignText.STREAM_CODEC` (SignText.java:43): four lines, optional filtered
+/// lines, a dye color and the glowing flag; fixed-size lists carry no count.
+static SIGN_TEXT: Shape = Struct(&[
+    Struct(&[TEXT, TEXT, TEXT, TEXT]),
+    Optional(&Struct(&[TEXT, TEXT, TEXT, TEXT])),
+    VarInt,
+    Bool,
+]);
+
 /// A stack or template: an item registry id, a count and its patch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ItemStack {
@@ -575,6 +660,9 @@ pub struct ItemCodec {
     registries: &'static RegistryTable,
     components: Vec<&'static Shape>,
     entity_data: &'static [Serializer],
+    /// Rewrites of this version's changed components into the previous
+    /// version's layout, by component name.
+    conversions: &'static [(&'static str, Conversion)],
     air: u32,
 }
 
@@ -593,30 +681,49 @@ impl ItemCodec {
             .position(|e| e.version.protocol == protocol)?;
         CODECS[index]
             .get_or_init(|| {
-                let (shapes, entity_data) = match EMBEDDED[index].version.name {
-                    "26.2" => (COMPONENTS_26_2, SERIALIZERS_26_2),
-                    _ => return None,
-                };
-                Self::new(RegistryTable::for_protocol(protocol)?, shapes, entity_data)
+                let (shapes, entity_data, conversions): (&[_], _, _) =
+                    match EMBEDDED[index].version.name {
+                        // 26.1's layouts are 26.2's; the one component it
+                        // lacks (`sulfur_cube_content`) isn't in its table.
+                        "26.1" | "26.2" => (&[COMPONENTS_26_2], SERIALIZERS_26_2, &[][..]),
+                        "26.3" => (
+                            &[COMPONENTS_26_3, COMPONENTS_26_2],
+                            SERIALIZERS_26_3,
+                            CONVERSIONS_26_3,
+                        ),
+                        _ => return None,
+                    };
+                let mut codec =
+                    Self::new(RegistryTable::for_protocol(protocol)?, shapes, entity_data)?;
+                codec.conversions = conversions;
+                Some(codec)
             })
             .as_ref()
     }
 
+    /// `layers` are shape tables searched in order, so a version can list
+    /// only what changed over an older one.
     fn new(
         registries: &'static RegistryTable,
-        shapes: &'static [(&str, Shape)],
+        layers: &[&'static [(&'static str, Shape)]],
         entity_data: &'static [Serializer],
     ) -> Option<Self> {
         let components = registries
             .names(ClientRegistry::DataComponentType)
             .iter()
-            .map(|name| shapes.iter().find(|(n, _)| n == name).map(|(_, s)| s))
+            .map(|name| {
+                layers
+                    .iter()
+                    .find_map(|shapes| shapes.iter().find(|(n, _)| n == name))
+                    .map(|(_, s)| s)
+            })
             .collect::<Option<_>>()?;
         let air = registries.id_of(ClientRegistry::Item, "air")?;
         Some(Self {
             registries,
             components,
             entity_data,
+            conversions: &[],
             air,
         })
     }
@@ -779,10 +886,13 @@ impl ItemCodec {
                 }
             }
             Ref(inner) => self.walk(r, inner, depth)?,
-            Holder(inline) => {
+            Holder(inline) | RegistryHolder(_, inline) => {
                 if r.varint()? == 0 {
                     self.walk(r, inline, depth)?;
                 }
+            }
+            RegistryId(_) => {
+                r.varint()?;
             }
             HolderSet => match r.varint()? {
                 0 => {
@@ -836,6 +946,531 @@ impl ItemCodec {
             .ok_or_else(|| r.error("unknown dispatch type"))?;
         Ok(arms.iter().find(|(arm, _)| *arm == name).map(|(_, s)| s))
     }
+}
+
+/// Rewrites items read with one version's grammar into another's: the item,
+/// component and dispatch ids are remapped, and a component the target lacks
+/// or lays out differently is dropped (its counts rebuilt). A stack whose
+/// item the target lacks becomes empty, and such a template is left out of
+/// the list or optional holding it.
+// TODO: static-registry ids typed only as `VarInt` or `HolderSet` (block
+// predicates, attributes, effects, ...) pass through unremapped.
+struct Translator<'c> {
+    from: &'c ItemCodec,
+    to: &'c ItemCodec,
+    remaps: &'c RegistryRemaps,
+}
+
+impl ItemCodec {
+    /// `ItemStack.OPTIONAL_STREAM_CODEC` read with this grammar, written in
+    /// `to`'s ids.
+    pub fn translate_stack(
+        &self,
+        r: &mut Reader,
+        out: &mut Vec<u8>,
+        to: &ItemCodec,
+        remaps: &RegistryRemaps,
+    ) -> DecodeResult<()> {
+        self.translator(to, remaps).stack(r, out)
+    }
+
+    /// `ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC` (each component value
+    /// length-prefixed), read with this grammar and written in `to`'s ids.
+    pub fn translate_untrusted_stack(
+        &self,
+        r: &mut Reader,
+        out: &mut Vec<u8>,
+        to: &ItemCodec,
+        remaps: &RegistryRemaps,
+    ) -> DecodeResult<()> {
+        let t = self.translator(to, remaps);
+        t.stack_with(r, out, |r, patch| t.patch_with(r, patch, 0, true))
+    }
+
+    /// `ItemStackTemplate.STREAM_CODEC`; `false` (nothing written) when `to`
+    /// lacks the item.
+    pub fn translate_template(
+        &self,
+        r: &mut Reader,
+        out: &mut Vec<u8>,
+        to: &ItemCodec,
+        remaps: &RegistryRemaps,
+    ) -> DecodeResult<bool> {
+        self.translator(to, remaps).template(r, out, 0)
+    }
+
+    /// `DataComponentPatch.STREAM_CODEC`.
+    pub fn translate_patch(
+        &self,
+        r: &mut Reader,
+        out: &mut Vec<u8>,
+        to: &ItemCodec,
+        remaps: &RegistryRemaps,
+    ) -> DecodeResult<()> {
+        self.translator(to, remaps).patch(r, out, 0)
+    }
+
+    /// `TypedDataComponent.STREAM_CODEC`; `false` (nothing written) when
+    /// `to` can't carry the component.
+    pub fn translate_typed_component(
+        &self,
+        r: &mut Reader,
+        out: &mut Vec<u8>,
+        to: &ItemCodec,
+        remaps: &RegistryRemaps,
+    ) -> DecodeResult<bool> {
+        self.translator(to, remaps).typed_component(r, out, 0)
+    }
+
+    fn translator<'c>(&'c self, to: &'c ItemCodec, remaps: &'c RegistryRemaps) -> Translator<'c> {
+        Translator {
+            from: self,
+            to,
+            remaps,
+        }
+    }
+}
+
+impl Translator<'_> {
+    fn stack(&self, r: &mut Reader, out: &mut Vec<u8>) -> DecodeResult<()> {
+        self.stack_with(r, out, |r, patch| self.patch(r, patch, 0))
+    }
+
+    /// A stack whose patch `patch` translates.
+    fn stack_with(
+        &self,
+        r: &mut Reader,
+        out: &mut Vec<u8>,
+        patch_with: impl FnOnce(&mut Reader, &mut Vec<u8>) -> DecodeResult<()>,
+    ) -> DecodeResult<()> {
+        let count = r.var_i32()?;
+        if count <= 0 {
+            write_varint(out, 0);
+            return Ok(());
+        }
+        let item = self.item(r)?;
+        let mut patch = Vec::new();
+        patch_with(r, &mut patch)?;
+        match item {
+            Some(item) => {
+                write_varint(out, count as u32);
+                write_varint(out, item);
+                out.extend_from_slice(&patch);
+            }
+            None => write_varint(out, 0),
+        }
+        Ok(())
+    }
+
+    fn template(&self, r: &mut Reader, out: &mut Vec<u8>, depth: u32) -> DecodeResult<bool> {
+        let item = self.item(r)?;
+        let count = r.var_i32()?;
+        let mut patch = Vec::new();
+        self.patch(r, &mut patch, depth + 1)?;
+        let Some(item) = item else {
+            return Ok(false);
+        };
+        write_varint(out, item);
+        write_varint(out, count as u32);
+        out.extend_from_slice(&patch);
+        Ok(true)
+    }
+
+    /// The item id in the target's space, `None` when it has no such item.
+    fn item(&self, r: &mut Reader) -> DecodeResult<Option<u32>> {
+        let item = self.from.read_item(r)?;
+        Ok(self.remaps.remap(ClientRegistry::Item, item))
+    }
+
+    fn patch(&self, r: &mut Reader, out: &mut Vec<u8>, depth: u32) -> DecodeResult<()> {
+        self.patch_with(r, out, depth, false)
+    }
+
+    /// `DataComponentPatch.STREAM_CODEC`, or with `delimited` its
+    /// `DELIMITED_STREAM_CODEC`, which length-prefixes each value.
+    fn patch_with(
+        &self,
+        r: &mut Reader,
+        out: &mut Vec<u8>,
+        depth: u32,
+        delimited: bool,
+    ) -> DecodeResult<()> {
+        if depth > MAX_DEPTH {
+            return Err(r.error("item nested too deeply"));
+        }
+        let added_count = r.len(UNBOUNDED)?;
+        let removed_count = r.len(UNBOUNDED)?;
+        let mut added = (0, Vec::new());
+        for _ in 0..added_count {
+            let id = r.varint()?;
+            let translated = if delimited {
+                let len = r.len(UNBOUNDED)?;
+                let mut value = Reader::new(r.bytes(len)?);
+                let translated = self.component(&mut value, id, depth)?;
+                value.ensure_eof()?;
+                translated
+            } else {
+                self.component(r, id, depth)?
+            };
+            if let Some((target, value)) = translated {
+                write_varint(&mut added.1, target);
+                if delimited {
+                    write_varint(&mut added.1, value.len() as u32);
+                }
+                added.1.extend_from_slice(&value);
+                added.0 += 1;
+            }
+        }
+        let mut removed = (0, Vec::new());
+        for _ in 0..removed_count {
+            let id = r.varint()?;
+            self.from.component(r, id)?;
+            if let Some(id) = self.remaps.remap(ClientRegistry::DataComponentType, id) {
+                write_varint(&mut removed.1, id);
+                removed.0 += 1;
+            }
+        }
+        write_varint(out, added.0);
+        write_varint(out, removed.0);
+        out.extend_from_slice(&added.1);
+        out.extend_from_slice(&removed.1);
+        Ok(())
+    }
+
+    fn typed_component(&self, r: &mut Reader, out: &mut Vec<u8>, depth: u32) -> DecodeResult<bool> {
+        let id = r.varint()?;
+        let Some((target, value)) = self.component(r, id, depth)? else {
+            return Ok(false);
+        };
+        write_varint(out, target);
+        out.extend_from_slice(&value);
+        Ok(true)
+    }
+
+    /// Component `id`'s target id and value in the target's layout, or `None`
+    /// when it was dropped. The value is consumed either way.
+    fn component(
+        &self,
+        r: &mut Reader,
+        id: u32,
+        depth: u32,
+    ) -> DecodeResult<Option<(u32, Vec<u8>)>> {
+        let shape = self.from.component(r, id)?;
+        let target = self.remaps.remap(ClientRegistry::DataComponentType, id);
+        let same_layout = target
+            .and_then(|target| self.to.component_shape(target))
+            .is_some_and(|other| std::ptr::eq(shape, other));
+        let conversion = (target.is_some() && !same_layout)
+            .then(|| self.conversion(id))
+            .flatten();
+        let mut value = Vec::new();
+        let carried = match conversion {
+            Some(convert) => convert(self, r, &mut value, depth + 1)?,
+            None => self.value(r, &mut value, shape, depth + 1)? && same_layout,
+        };
+        Ok(target.filter(|_| carried).map(|target| (target, value)))
+    }
+
+    /// The source version's conversion for component `id`, when its layout
+    /// differs from the target's.
+    fn conversion(&self, id: u32) -> Option<Conversion> {
+        let name = self
+            .from
+            .registries
+            .name_of(ClientRegistry::DataComponentType, id)?;
+        self.from
+            .conversions
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, convert)| *convert)
+    }
+
+    /// A static registry's `id` written in the target's ids, plus `offset`
+    /// (1 in a holder); `false` when the target lacks the entry.
+    fn registry_id(
+        &self,
+        out: &mut Vec<u8>,
+        registry: ClientRegistry,
+        id: u32,
+        offset: u32,
+    ) -> bool {
+        let remapped = self.remaps.remap(registry, id);
+        write_varint(out, remapped.map_or(0, |id| id + offset));
+        remapped.is_some()
+    }
+
+    /// One value of `shape`, rewritten into `out`; `false` when the target
+    /// can't represent it (its bytes are then meaningless). The value is
+    /// consumed either way.
+    fn value(
+        &self,
+        r: &mut Reader,
+        out: &mut Vec<u8>,
+        shape: &'static Shape,
+        depth: u32,
+    ) -> DecodeResult<bool> {
+        if depth > MAX_DEPTH {
+            return Err(r.error("component nested too deeply"));
+        }
+        let depth = depth + 1;
+        Ok(match shape {
+            Unit | Bool | Int | Long | Float | Double | VarInt | Utf(_) | Uuid | Nbt | Compound
+            | HolderSet => {
+                let start = r.pos();
+                self.from.walk(r, shape, depth)?;
+                out.extend_from_slice(r.since(start));
+                true
+            }
+            Optional(inner) => {
+                if !r.bool()? {
+                    out.push(0);
+                    return Ok(true);
+                }
+                let mut value = Vec::new();
+                let carried = self.value(r, &mut value, inner, depth)?;
+                if carried {
+                    out.push(1);
+                    out.extend_from_slice(&value);
+                    true
+                } else {
+                    // A template the target lacks is an absent one.
+                    out.push(0);
+                    matches!(inner, ItemTemplate)
+                }
+            }
+            List(max, inner) => {
+                let len = r.len(*max)?;
+                let (mut kept, mut items) = (0, Vec::new());
+                let mut carried = true;
+                for _ in 0..len {
+                    let mut item = Vec::new();
+                    if self.value(r, &mut item, inner, depth)? {
+                        kept += 1;
+                        items.extend_from_slice(&item);
+                    } else if !matches!(inner, ItemTemplate) {
+                        carried = false;
+                    }
+                }
+                write_varint(out, kept);
+                out.extend_from_slice(&items);
+                carried
+            }
+            Map(key, value) => {
+                let len = r.len(UNBOUNDED)?;
+                write_varint(out, len as u32);
+                let mut carried = true;
+                for _ in 0..len {
+                    carried &= self.value(r, out, key, depth)?;
+                    carried &= self.value(r, out, value, depth)?;
+                }
+                carried
+            }
+            Either(left, right) => {
+                let is_left = r.bool()?;
+                out.push(u8::from(is_left));
+                self.value(r, out, if is_left { left } else { right }, depth)?
+            }
+            Struct(fields) => {
+                let mut carried = true;
+                for field in *fields {
+                    carried &= self.value(r, out, field, depth)?;
+                }
+                carried
+            }
+            Ref(inner) => self.value(r, out, inner, depth)?,
+            Holder(inline) => {
+                let id = r.varint()?;
+                write_varint(out, id);
+                id != 0 || self.value(r, out, inline, depth)?
+            }
+            RegistryHolder(registry, inline) => match r.varint()? {
+                0 => {
+                    write_varint(out, 0);
+                    self.value(r, out, inline, depth)?
+                }
+                id => self.registry_id(out, *registry, id - 1, 1),
+            },
+            RegistryId(registry) => {
+                let id = r.varint()?;
+                self.registry_id(out, *registry, id, 0)
+            }
+            ById(arms) => {
+                let id = r.varint()?;
+                write_varint(out, id);
+                // OutOfBoundsStrategy.ZERO
+                self.value(r, out, arms.get(id as usize).unwrap_or(&arms[0]), depth)?
+            }
+            ByRegistry(registry, arms) | ByRegistryOr(registry, arms, _) => {
+                let id = r.varint()?;
+                let name = self
+                    .from
+                    .registries
+                    .name_of(*registry, id)
+                    .ok_or_else(|| r.error("unknown dispatch type"))?;
+                let inner = match (arms.iter().find(|(arm, _)| *arm == name), shape) {
+                    (Some((_, inner)), _) => inner,
+                    (None, ByRegistryOr(_, _, rest)) => rest,
+                    (None, _) => return Err(r.error("unported dispatch type")),
+                };
+                let target = self.remaps.remap(*registry, id);
+                write_varint(out, target.unwrap_or(0));
+                self.value(r, out, inner, depth)? && target.is_some()
+            }
+            ItemTemplate => self.template(r, out, depth)?,
+            TypedComponent => self.typed_component(r, out, depth)?,
+        })
+    }
+}
+
+/// Rewrites one component value from a version's layout into the previous
+/// version's; `false` when it can't be represented there. The value is
+/// consumed either way.
+type Conversion = fn(&Translator, &mut Reader, &mut Vec<u8>, u32) -> DecodeResult<bool>;
+
+/// 26.3's changed components in 26.2's layouts.
+static CONVERSIONS_26_3: &[(&str, Conversion)] = &[
+    ("consumable", consumable_26_2),
+    ("death_protection", consume_effects_26_2),
+    ("trim", trim_26_2),
+    ("provides_trim_material", trim_material_26_2),
+    ("instrument", instrument_26_2),
+    ("pot_decorations", pot_decorations_26_2),
+];
+
+/// `consumable`: only a `teleport_randomly` effect changed.
+fn consumable_26_2(
+    t: &Translator,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+    depth: u32,
+) -> DecodeResult<bool> {
+    let head = t.value(r, out, &CONSUMABLE_HEAD, depth)?;
+    Ok(consume_effects_26_2(t, r, out, depth)? && head)
+}
+
+/// A list of consume effects, dropping 26.3's `directionalParticles` from
+/// `teleport_randomly` (TeleportRandomlyConsumeEffect.java:42).
+fn consume_effects_26_2(
+    t: &Translator,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+    depth: u32,
+) -> DecodeResult<bool> {
+    let ByRegistry(registry, arms) = &CONSUME_EFFECT_26_3 else {
+        unreachable!("consume effects dispatch by type");
+    };
+    let effects = r.len(UNBOUNDED)?;
+    write_varint(out, effects as u32);
+    let mut carried = true;
+    for _ in 0..effects {
+        let id = r.varint()?;
+        let name = t
+            .from
+            .registries
+            .name_of(*registry, id)
+            .ok_or_else(|| r.error("unknown dispatch type"))?;
+        let target = t.remaps.remap(*registry, id);
+        write_varint(out, target.unwrap_or(0));
+        carried &= target.is_some();
+        if name == "teleport_randomly" {
+            out.extend_from_slice(r.bytes(4)?); // diameter
+            r.bool()?;
+            continue;
+        }
+        let arm = arms
+            .iter()
+            .find(|(arm, _)| *arm == name)
+            .map(|(_, shape)| shape)
+            .ok_or_else(|| r.error("unported dispatch type"))?;
+        carried &= t.value(r, out, arm, depth)?;
+    }
+    Ok(carried)
+}
+
+/// `trim`: the material, then the pattern (unchanged).
+fn trim_26_2(t: &Translator, r: &mut Reader, out: &mut Vec<u8>, depth: u32) -> DecodeResult<bool> {
+    let material = trim_material_26_2(t, r, out, depth)?;
+    let pattern = t.value(r, out, &TRIM_PATTERN, depth)?;
+    Ok(material && pattern)
+}
+
+/// The trim materials whose 26.2 asset group swaps in a darker texture on
+/// armour of the same material (MaterialAssetGroup.java:38-44).
+const DARKER_TRIMS: [&str; 5] = ["iron", "netherite", "copper", "gold", "diamond"];
+
+/// A trim material holder; an inline one's palette id (`trim/<name>`,
+/// TrimMaterials.java:75) becomes 26.2's asset group for `<name>`, with the
+/// darker override 26.2 gives that material.
+fn trim_material_26_2(
+    t: &Translator,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+    depth: u32,
+) -> DecodeResult<bool> {
+    let holder = r.varint()?;
+    write_varint(out, holder);
+    if holder != 0 {
+        return Ok(true);
+    }
+    let palette = r.identifier()?;
+    let name = palette.rsplit(['/', ':']).next().unwrap_or(palette);
+    crate::wire::write_utf(out, name);
+    if DARKER_TRIMS.contains(&name) {
+        write_varint(out, 1);
+        crate::wire::write_utf(out, &format!("minecraft:{name}"));
+        crate::wire::write_utf(out, &format!("{name}_darker"));
+    } else {
+        write_varint(out, 0);
+    }
+    t.value(r, out, &TEXT, depth)
+}
+
+/// An instrument holder; an inline one drops 26.3's `durabilityDamage`
+/// (Instrument.java:29).
+fn instrument_26_2(
+    t: &Translator,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+    depth: u32,
+) -> DecodeResult<bool> {
+    let holder = r.varint()?;
+    write_varint(out, holder);
+    if holder != 0 {
+        return Ok(true);
+    }
+    let mut carried = t.value(r, out, &SOUND, depth)?;
+    out.extend_from_slice(r.bytes(8)?); // use duration, range
+    r.varint()?;
+    carried &= t.value(r, out, &TEXT, depth)?;
+    Ok(carried)
+}
+
+/// `pot_decorations`: 26.3's four optional templates (back, left, right,
+/// front) as 26.2's list of four item ids, an absent or unknown side being a
+/// brick as in `PotDecorations.ordered`.
+fn pot_decorations_26_2(
+    t: &Translator,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+    depth: u32,
+) -> DecodeResult<bool> {
+    let brick =
+        t.to.registries
+            .id_of(ClientRegistry::Item, "brick")
+            .ok_or_else(|| r.error("no brick item"))?;
+    write_varint(out, 4);
+    for _ in 0..4 {
+        let mut item = brick;
+        if r.bool()? {
+            if let Some(id) = t.item(r)? {
+                item = id;
+            }
+            r.var_i32()?; // count
+            t.patch(r, &mut Vec::new(), depth)?;
+        }
+        write_varint(out, item);
+    }
+    Ok(true)
 }
 
 /// Writes `ItemStack.OPTIONAL_STREAM_CODEC`; see [`write_patch`].
@@ -1333,5 +1968,333 @@ pub(crate) mod tests {
             .patch("custom_name", Wire::default().bytes(&[0]))
             .0;
         assert!(codec().read_patch(&mut Reader::new(&end_text), 0).is_err());
+    }
+
+    const PROTOCOL_26_3: i32 = 777;
+
+    fn codec_26_3() -> &'static ItemCodec {
+        ItemCodec::for_protocol(PROTOCOL_26_3).expect("26.3 item grammar")
+    }
+
+    fn id_26_3(registry: ClientRegistry, name: &str) -> u32 {
+        codec_26_3()
+            .registries()
+            .id_of(registry, name)
+            .unwrap_or_else(|| panic!("{name} in 26.3"))
+    }
+
+    fn component_26_3(name: &str) -> u32 {
+        id_26_3(ClientRegistry::DataComponentType, name)
+    }
+
+    fn item_26_3(name: &str) -> u32 {
+        id_26_3(ClientRegistry::Item, name)
+    }
+
+    /// Decodes a one-component 26.3 patch and checks it spans exactly `value`.
+    fn assert_component_26_3(name: &str, value: Wire) {
+        let bytes = Wire::default()
+            .var(1)
+            .var(0)
+            .var(component_26_3(name))
+            .bytes(&value.0)
+            .0;
+        let mut r = Reader::new(&bytes);
+        codec_26_3()
+            .read_patch(&mut r, 0)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(r.ensure_eof(), Ok(()), "{name} left bytes");
+    }
+
+    /// The layouts of 26.3's added and changed components, from its
+    /// decompiled codecs.
+    #[test]
+    fn grammar_26_3_reads_its_new_and_changed_components() {
+        let animation = || Wire::default().var(1).var(10);
+        let resolvable_fuel = || {
+            Wire::default()
+                .bool(true)
+                .i32(200)
+                .bool(false)
+                .str("minecraft:x")
+        };
+        let sign = || {
+            Wire::default()
+                .text()
+                .text()
+                .text()
+                .text()
+                .bool(false)
+                .var(3)
+                .bool(true)
+        };
+        assert_component_26_3("attack_animation", animation());
+        assert_component_26_3("interact_animation", animation());
+        assert_component_26_3("block_transformer", Wire::default().var(3));
+        assert_component_26_3("villager_food", Wire::default().var(4));
+        assert_component_26_3("compostable", Wire::default().bool(true).i32(65));
+        assert_component_26_3(
+            "compostable",
+            Wire::default().bool(false).str("minecraft:x"),
+        );
+        assert_component_26_3("cooking_fuel", resolvable_fuel());
+        assert_component_26_3("brewing_fuel", resolvable_fuel());
+        assert_component_26_3("mob_visibility", Wire::default().var(2).var(5).f32(0.5));
+        assert_component_26_3("provides_pottery_pattern", Wire::default().var(1));
+        assert_component_26_3("sign_text_front", sign());
+        assert_component_26_3("sign_text_back", sign());
+        assert_component_26_3("waxed", Wire::default());
+        assert_component_26_3("cushion/color", Wire::default().var(2));
+        // Four optional templates: back only.
+        let pot = Wire::default()
+            .bool(true)
+            .var(item_26_3("brick"))
+            .var(1)
+            .var(0)
+            .var(0)
+            .bool(false)
+            .bool(false)
+            .bool(false);
+        assert_component_26_3("pot_decorations", pot);
+        // An inline instrument: sound (inline location, no range), use
+        // duration, range, durability damage, description.
+        let instrument = Wire::default()
+            .var(0)
+            .var(0)
+            .str("minecraft:goat")
+            .bool(false)
+            .f32(7.0)
+            .f32(256.0)
+            .var(1)
+            .text();
+        assert_component_26_3("instrument", instrument);
+        let teleport = id_26_3(ClientRegistry::ConsumeEffectType, "teleport_randomly");
+        let consumable = Wire::default()
+            .f32(1.6)
+            .var(1)
+            .var(1)
+            .bool(true)
+            .var(1)
+            .var(teleport)
+            .f32(16.0)
+            .bool(true);
+        assert_component_26_3("consumable", consumable);
+        let trim = Wire::default().var(0).str("minecraft:gold").text().var(1);
+        assert_component_26_3("trim", trim);
+    }
+
+    /// A 26.3 bundle comes out in 26.2's ids: its item and component ids
+    /// remapped, a nested item 26.2 lacks left out, a component 26.2 lacks
+    /// (`waxed`) dropped and one it lays out differently (`pot_decorations`)
+    /// converted.
+    #[test]
+    fn translates_a_26_3_stack_into_26_2_ids() {
+        let wire = Wire::default()
+            .var(1)
+            .var(item_26_3("bundle"))
+            .var(4)
+            .var(1)
+            .var(component_26_3("dyed_color"))
+            .i32(0x112233)
+            .var(component_26_3("bundle_contents"))
+            .var(2)
+            .var(item_26_3("diamond"))
+            .var(3)
+            .var(0)
+            .var(0)
+            .var(item_26_3("poplar_planks"))
+            .var(1)
+            .var(0)
+            .var(0)
+            .var(component_26_3("waxed"))
+            .var(component_26_3("pot_decorations"))
+            .bool(false)
+            .bool(false)
+            .bool(false)
+            .bool(false)
+            .var(component_26_3("max_stack_size"))
+            .0;
+        let mut out = Vec::new();
+        let mut r = Reader::new(&wire);
+        let remaps = RegistryRemaps::to_native(PROTOCOL_26_3).unwrap();
+        codec_26_3()
+            .translate_stack(&mut r, &mut out, codec(), remaps)
+            .unwrap();
+        assert_eq!(r.ensure_eof(), Ok(()));
+        let brick = item("brick");
+        let native = Wire::default()
+            .var(1)
+            .var(item("bundle"))
+            .var(3)
+            .var(1)
+            .var(component("dyed_color"))
+            .i32(0x112233)
+            .var(component("bundle_contents"))
+            .var(1)
+            .template("diamond", 3)
+            .var(component("pot_decorations"))
+            .var(4)
+            .var(brick)
+            .var(brick)
+            .var(brick)
+            .var(brick)
+            .var(component("max_stack_size"))
+            .0;
+        assert_eq!(out, native);
+        codec().read_stack(&mut Reader::new(&out)).unwrap();
+    }
+
+    /// A stack of an item 26.2 lacks arrives empty.
+    #[test]
+    fn a_26_3_only_item_translates_to_an_empty_stack() {
+        let wire = Wire::default()
+            .var(5)
+            .var(item_26_3("poplar_planks"))
+            .var(0)
+            .var(0)
+            .0;
+        let mut out = Vec::new();
+        let remaps = RegistryRemaps::to_native(PROTOCOL_26_3).unwrap();
+        codec_26_3()
+            .translate_stack(&mut Reader::new(&wire), &mut out, codec(), remaps)
+            .unwrap();
+        assert_eq!(out, [0]);
+    }
+
+    /// A native patch adding just `name` with `value`.
+    fn one_component(name: &str, value: Wire) -> Vec<u8> {
+        Wire::default().patch(name, value).0
+    }
+
+    /// Translates a one-component 26.3 patch and returns the 26.2 patch.
+    fn translate_component_26_3(name: &str, value: Wire) -> Vec<u8> {
+        let wire = Wire::default()
+            .var(1)
+            .var(0)
+            .var(component_26_3(name))
+            .bytes(&value.0)
+            .0;
+        let mut r = Reader::new(&wire);
+        let mut out = Vec::new();
+        let remaps = RegistryRemaps::to_native(PROTOCOL_26_3).unwrap();
+        codec_26_3()
+            .translate_patch(&mut r, &mut out, codec(), remaps)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(r.ensure_eof(), Ok(()), "{name} left bytes");
+        codec()
+            .read_patch(&mut Reader::new(&out), 0)
+            .unwrap_or_else(|e| panic!("{name} as 26.2: {e}"));
+        out
+    }
+
+    /// Sound and entity type ids remap like item ids; a sound 26.2 lacks
+    /// takes its component with it.
+    #[test]
+    fn remaps_sound_and_entity_type_ids_in_values() {
+        let sound = |id: u32| Wire::default().var(id + 1);
+        assert_eq!(
+            translate_component_26_3(
+                "break_sound",
+                sound(id_26_3(ClientRegistry::SoundEvent, "entity.generic.eat"))
+            ),
+            one_component(
+                "break_sound",
+                sound(id(ClientRegistry::SoundEvent, "entity.generic.eat"))
+            )
+        );
+        let egg = |id: u32| Wire::default().var(id).empty_compound();
+        assert_eq!(
+            translate_component_26_3(
+                "entity_data",
+                egg(id_26_3(ClientRegistry::EntityType, "zombie"))
+            ),
+            one_component("entity_data", egg(id(ClientRegistry::EntityType, "zombie")))
+        );
+        assert_eq!(
+            translate_component_26_3(
+                "break_sound",
+                sound(id_26_3(ClientRegistry::SoundEvent, "entity.cushion.sit"))
+            ),
+            Wire::default().var(0).var(0).0
+        );
+    }
+
+    /// 26.3's changed layouts arrive in 26.2's: `teleport_randomly` without
+    /// its particle flag, an inline trim material as an asset group, an
+    /// inline instrument without its durability damage, and pot sides as
+    /// four item ids.
+    #[test]
+    fn converts_26_3_changed_components_to_26_2_layouts() {
+        let teleport = |codec_id: u32| {
+            Wire::default()
+                .f32(1.6)
+                .var(1)
+                .var(1)
+                .bool(true)
+                .var(1)
+                .var(codec_id)
+                .f32(16.0)
+        };
+        let teleport_26_3 = id_26_3(ClientRegistry::ConsumeEffectType, "teleport_randomly");
+        let teleport_26_2 = id(ClientRegistry::ConsumeEffectType, "teleport_randomly");
+        assert_eq!(
+            translate_component_26_3("consumable", teleport(teleport_26_3).bool(true)),
+            one_component("consumable", teleport(teleport_26_2))
+        );
+
+        let trim = |palette| Wire::default().var(0).str(palette).text().var(1);
+        let gold_26_2 = Wire::default()
+            .var(0)
+            .str("gold")
+            .var(1)
+            .str("minecraft:gold")
+            .str("gold_darker")
+            .text()
+            .var(1);
+        assert_eq!(
+            translate_component_26_3("trim", trim("minecraft:trim/gold")),
+            one_component("trim", gold_26_2)
+        );
+        let quartz_26_2 = Wire::default().var(0).str("quartz").var(0).text().var(1);
+        assert_eq!(
+            translate_component_26_3("trim", trim("minecraft:trim/quartz")),
+            one_component("trim", quartz_26_2)
+        );
+
+        let instrument = |damage: Option<u32>| {
+            let w = Wire::default().var(0).var(1).f32(7.0).f32(256.0);
+            match damage {
+                Some(damage) => w.var(damage),
+                None => w,
+            }
+            .text()
+        };
+        assert_eq!(
+            translate_component_26_3("instrument", instrument(Some(1))),
+            one_component("instrument", instrument(None))
+        );
+
+        let pot = Wire::default()
+            .bool(true)
+            .var(item_26_3("diamond"))
+            .var(1)
+            .var(0)
+            .var(0)
+            .bool(false)
+            .bool(false)
+            .bool(false);
+        let brick = item("brick");
+        assert_eq!(
+            translate_component_26_3("pot_decorations", pot),
+            one_component(
+                "pot_decorations",
+                Wire::default()
+                    .var(4)
+                    .var(item("diamond"))
+                    .var(brick)
+                    .var(brick)
+                    .var(brick)
+            )
+        );
     }
 }

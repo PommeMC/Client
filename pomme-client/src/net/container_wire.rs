@@ -105,11 +105,15 @@ fn event(packet: ContainerPacket) -> Option<NetworkEvent> {
 }
 
 /// A wire stack as the client's: its item remapped from the wire version's
-/// ids, and empty when that item has no native counterpart.
+/// ids (unless translation already did), and empty when that item has no
+/// native counterpart.
 fn stack(stack: Option<item::ItemStack>) -> ItemStack {
+    let translated = super::translate::active().is_some_and(|t| t.translates_items());
     stack
         .and_then(|mut stack| {
-            stack.item = native_id(ClientRegistry::Item, stack.item)?;
+            if !translated {
+                stack.item = native_id(ClientRegistry::Item, stack.item)?;
+            }
             Some(super::item_codec::to_azalea(&stack))
         })
         .unwrap_or(ItemStack::Empty)
