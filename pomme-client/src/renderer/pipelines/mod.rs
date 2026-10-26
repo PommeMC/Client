@@ -17,6 +17,8 @@ pub mod item_entity;
 pub mod menu_overlay;
 pub mod panorama;
 pub mod particle;
+pub mod post;
+pub mod post_effect;
 pub mod skin_preview;
 pub mod sky;
 pub mod weather;

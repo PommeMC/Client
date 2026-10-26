@@ -365,6 +365,8 @@ pub struct PlayerInfo {
     pub rotation: [f32; 2],
     /// The kind of entity the camera follows, empty for the player's own view.
     pub spectating: String,
+    /// The spectator view effect drawn, by its vanilla id, empty for none.
+    pub post_effect: &'static str,
 }
 
 pub fn player(game: &GameState) -> PlayerInfo {
@@ -387,6 +389,9 @@ pub fn player(game: &GameState) -> PlayerInfo {
         spectating: game
             .spectated()
             .map_or_else(String::new, |e| bare(&e.entity_type.to_string())),
+        post_effect: game
+            .drawn_spectator_effect()
+            .map_or("", |effect| effect.id()),
     }
 }
 

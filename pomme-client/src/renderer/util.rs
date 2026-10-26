@@ -214,6 +214,39 @@ pub fn layer_copies(width: u32, height: u32, layers: u32, layer_bytes: u64) -> V
         .collect()
 }
 
+/// Blits `frame`, a colour attachment between passes, into `dst` (scaled to
+/// `dst_size`), leaving `dst` for shaders to read and `frame` for the next
+/// pass.
+pub fn copy_frame(
+    encoder: &rhi::backend::CommandEncoder,
+    frame: rhi::backend::TextureHandle,
+    frame_size: [u32; 2],
+    dst: rhi::backend::TextureHandle,
+    dst_size: [u32; 2],
+) {
+    use rhi::TextureUse;
+    use rhi::backend::TextureTransition;
+    encoder.transition_textures(&[
+        TextureTransition::color(frame, TextureUse::ColorAttachment, TextureUse::CopySrc),
+        TextureTransition::color(dst, TextureUse::Undefined, TextureUse::CopyDst),
+    ]);
+    encoder.blit(
+        frame,
+        dst,
+        &rhi::Blit {
+            src_level: 0,
+            src_size: frame_size,
+            dst_level: 0,
+            dst_size,
+            layers: 1,
+        },
+    );
+    encoder.transition_textures(&[
+        TextureTransition::color(dst, TextureUse::CopyDst, TextureUse::ShaderRead),
+        TextureTransition::color(frame, TextureUse::CopySrc, TextureUse::ColorAttachment),
+    ]);
+}
+
 pub fn transition_image_to_shader_read(
     device: &rhi::backend::Device,
     image: rhi::backend::TextureHandle,

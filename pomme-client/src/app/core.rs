@@ -2697,9 +2697,9 @@ impl AppCore {
                 }
                 NetworkEvent::SetCamera { id } => {
                     if id == game.player.entity_id {
-                        game.camera_entity = None;
+                        game.set_camera(None);
                     } else if game.entity_store.living.contains_key(&id) {
-                        game.camera_entity = Some(id);
+                        game.set_camera(Some(id));
                     }
                 }
                 NetworkEvent::EntitySleepingPos { id, pos } => {
@@ -2828,7 +2828,7 @@ impl AppCore {
                         .reset_for_closed_screen(&mut game.recipe_book);
                     game.recipe_book.reset_for_login();
                     game.player.entity_id = entity_id;
-                    game.camera_entity = None;
+                    game.set_camera(None);
                     game.hardcore = hardcore;
                     game.online_mode = online_mode;
                     game.show_death_screen = show_death_screen;
@@ -2875,7 +2875,7 @@ impl AppCore {
                         game.player.absorption = 0.0;
                     }
                     game.dead = false;
-                    game.camera_entity = None;
+                    game.set_camera(None);
                     // `startWaitingForNewLevel` replaces an open dialog here too.
                     game.server_dialog = None;
                     game.start_level_load();
@@ -3288,10 +3288,17 @@ impl AppCore {
         // same fixed origin.
         let input_live = game.input_live() && game.chunk_load_bench.is_none();
 
-        // Vanilla Minecraft.handleKeybinds: offhand-swap then drop consume the
-        // queued key presses each tick; spectators consume without acting.
+        // Vanilla Minecraft.handleKeybinds: the spectator-effect toggle,
+        // offhand-swap then drop consume the queued key presses each tick;
+        // spectators consume the last two without acting.
         if input_live {
             let spectator = game.player.game_mode == 3;
+            while self
+                .input
+                .consume_click(Action::ToggleSpectatorShaderEffects)
+            {
+                game.spectator_effect_active = !game.spectator_effect_active;
+            }
             while self.input.consume_click(Action::SwapOffhand) {
                 if !spectator {
                     crate::player::interaction::send_swap_offhand(&connection.packet_tx);

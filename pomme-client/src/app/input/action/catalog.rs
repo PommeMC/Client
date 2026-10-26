@@ -264,6 +264,14 @@ actions! {
         listed: true,
         defaults: [Keyboard(KeyCode::F1)],
     },
+    ToggleSpectatorShaderEffects => {
+        id: "key.toggleSpectatorShaderEffects",
+        translation_id: Some(StringId::new("key.toggleSpectatorShaderEffects")),
+        fallback: "Toggle Spectator Shader Effects",
+        category: Miscellaneous,
+        listed: true,
+        defaults: [Keyboard(KeyCode::F4)],
+    },
     ToggleOverlay => {
         id: "key.debug.overlay",
         translation_id: Some(StringId::new("key.debug.overlay")),

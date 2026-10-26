@@ -187,6 +187,7 @@ struct PlayerFields {
     /// Yaw, within 0.01 degrees.
     y_rot: Option<f32>,
     spectating: Option<String>,
+    post_effect: Option<String>,
 }
 
 /// The block state name the client holds at `at`, e.g. `air`.
@@ -553,7 +554,11 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                     && want
                         .spectating
                         .as_ref()
-                        .is_none_or(|s| seen.spectating == *s),
+                        .is_none_or(|s| seen.spectating == *s)
+                    && want
+                        .post_effect
+                        .as_ref()
+                        .is_none_or(|e| seen.post_effect == e),
                 || format!("player is {seen:?}"),
             )
         }

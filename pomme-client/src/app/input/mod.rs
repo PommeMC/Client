@@ -330,7 +330,13 @@ impl InputState {
                 }
                 if self.action_just_pressed(Action::ChangePerspective) {
                     if !game.death_screen_open {
+                        let was_first_person = gfx.renderer.is_first_person();
                         gfx.renderer.cycle_camera_mode();
+                        let first_person = gfx.renderer.is_first_person();
+                        if first_person != was_first_person {
+                            let camera = game.spectated().map(|e| e.entity_type);
+                            game.check_spectator_effect(camera.filter(|_| first_person));
+                        }
                     }
 
                     self.recent_actions.remove(&Action::ChangePerspective);
@@ -655,6 +661,16 @@ impl InputState {
         }
     }
 
+    /// Takes back the clicks `code` just queued: vanilla never clicks a key
+    /// a debug chord used.
+    pub fn unclick(&mut self, code: KeyCode) {
+        for action in self.bound_actions(InputKey::Keyboard(code)) {
+            if let Some(count) = self.click_counts.get_mut(&action) {
+                *count = count.saturating_sub(1);
+            }
+        }
+    }
+
     pub fn clear_click_counts(&mut self) {
         self.click_counts.clear();
         self.spectator_slot_presses.clear();
@@ -737,7 +753,11 @@ impl InputState {
                         Action::ToggleInventory if !self.text_capture => {
                             self.recent_actions.insert(action, true);
                         }
-                        Action::DropItem | Action::SwapOffhand if gameplay => {
+                        Action::DropItem
+                        | Action::SwapOffhand
+                        | Action::ToggleSpectatorShaderEffects
+                            if gameplay =>
+                        {
                             self.click(action);
                         }
                         // Screen cancellation follows Escape's route, including

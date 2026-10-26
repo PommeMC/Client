@@ -42,6 +42,7 @@ use pipelines::hand::HandPipeline;
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline, SpriteId};
 use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
+use pipelines::post_effect::{PostEffect, PostEffects};
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
@@ -252,6 +253,7 @@ pub struct Renderer {
     menu_pipeline: MenuOverlayPipeline,
     blur_pipeline: BlurPipeline,
     entity_outline: EntityOutline,
+    post_effects: PostEffects,
     skin_preview: SkinPreviewPipeline,
     book_preview: BookPreviewPipeline,
     chunk_border_pipeline: ChunkBorderPipeline,
@@ -424,12 +426,9 @@ impl Renderer {
 
         let blur_pipeline =
             BlurPipeline::new(&ctx.device, swapchain_extent.width, swapchain_extent.height);
-        let entity_outline = EntityOutline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            swapchain_extent.width,
-            swapchain_extent.height,
-        );
+        let entity_outline =
+            EntityOutline::new(&ctx.device, swapchain_state.targets(), swapchain_extent);
+        let post_effects = PostEffects::new(&ctx.device, swapchain_state.targets());
         menu_pipeline.set_blur_texture(
             &ctx.device,
             blur_pipeline.blurred_texture(),
@@ -516,6 +515,7 @@ impl Renderer {
             menu_pipeline,
             blur_pipeline,
             entity_outline,
+            post_effects,
             skin_preview,
             book_preview,
             entity_renderer,
@@ -699,6 +699,8 @@ impl Renderer {
                 .recreate_pipeline(&self.ctx.device, targets);
             self.entity_outline
                 .recreate_pipeline(&self.ctx.device, targets);
+            self.post_effects
+                .recreate_pipeline(&self.ctx.device, targets);
             self.entity_shadow_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
             self.block_entity_pipeline
@@ -719,7 +721,7 @@ impl Renderer {
         self.blur_pipeline
             .resize(&self.ctx.device, self.width, self.height);
         self.entity_outline
-            .resize(&self.ctx.device, self.width, self.height);
+            .resize(&self.ctx.device, self.swapchain.extent);
         self.menu_pipeline.set_blur_texture(
             &self.ctx.device,
             self.blur_pipeline.blurred_texture(),
@@ -765,6 +767,11 @@ impl Renderer {
 
     pub fn set_entity_camera_look(&mut self, look_dir: Option<LookDirection>) {
         self.camera.set_entity_look(look_dir);
+    }
+
+    /// The spectator view effect the world frame runs, if any.
+    pub fn set_post_effect(&mut self, effect: Option<PostEffect>) {
+        self.post_effects.set(&self.ctx.device, effect);
     }
 
     pub fn set_view_bob(&mut self, walk_dist: f32, bob: f32, enabled: bool) {
@@ -1795,6 +1802,19 @@ impl Renderer {
                     self.entity_outline.composite(&mut pass);
                 }
 
+                // Vanilla `applyPostEffects`, straight after the outline.
+                if self.post_effects.effect().is_some() {
+                    pass.end();
+                    self.post_effects.apply(
+                        &self.ctx.device,
+                        &encoder,
+                        self.swapchain.image(image_index),
+                        self.swapchain.extent,
+                    );
+                    pass = self.resume_frame_pass(&encoder, image_index);
+                    self.post_effects.finish(&mut pass);
+                }
+
                 self.menu_pipeline.draw(
                     &self.ctx.device,
                     &mut pass,
@@ -2289,6 +2309,7 @@ impl Drop for Renderer {
         self.menu_pipeline.destroy(&self.ctx.device);
         self.blur_pipeline.destroy(&self.ctx.device);
         self.entity_outline.destroy(&self.ctx.device);
+        self.post_effects.destroy(&self.ctx.device);
         self.skin_preview.destroy(&self.ctx.device);
         self.book_preview.destroy(&self.ctx.device);
         self.entity_renderer.destroy(&self.ctx.device);

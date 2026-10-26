@@ -84,35 +84,13 @@ impl BlurPipeline {
     ) {
         let bw = self.width;
         let bh = self.height;
-        encoder.transition_textures(&[
-            TextureTransition::color(src_image, TextureUse::ColorAttachment, TextureUse::CopySrc),
-            TextureTransition::color(
-                self.texture_a.handle(),
-                TextureUse::Undefined,
-                TextureUse::CopyDst,
-            ),
-        ]);
-
-        encoder.blit(
+        util::copy_frame(
+            encoder,
             src_image,
+            [src_width, src_height],
             self.texture_a.handle(),
-            &rhi::Blit {
-                src_level: 0,
-                src_size: [src_width, src_height],
-                dst_level: 0,
-                dst_size: [bw, bh],
-                layers: 1,
-            },
+            [bw, bh],
         );
-
-        encoder.transition_textures(&[
-            TextureTransition::color(
-                self.texture_a.handle(),
-                TextureUse::CopyDst,
-                TextureUse::ShaderRead,
-            ),
-            TextureTransition::color(src_image, TextureUse::CopySrc, TextureUse::ColorAttachment),
-        ]);
 
         let h_dir: [f32; 2] = [1.0 / bw as f32, 0.0];
         let v_dir: [f32; 2] = [0.0, 1.0 / bh as f32];

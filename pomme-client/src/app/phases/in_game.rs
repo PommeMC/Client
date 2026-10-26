@@ -43,6 +43,7 @@ use crate::renderer::pipelines::entity_renderer::{
 };
 use crate::renderer::pipelines::entity_shadow::{ShadowCaster, ShadowScene};
 use crate::renderer::pipelines::menu_overlay::MenuElement;
+use crate::renderer::pipelines::post_effect::PostEffect;
 use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::chat::{ChatState, ChatUiAction};
@@ -254,6 +255,10 @@ pub struct GameState {
     /// The entity a spectator views the world from (vanilla
     /// `Minecraft.cameraEntity`); `None` is the local player.
     pub camera_entity: Option<i32>,
+    /// Vanilla `spectatedEntityPostEffect`: the camera entity's view effect.
+    pub spectator_effect: Option<PostEffect>,
+    /// Vanilla `spectatedEntityEffectActive`, flipped by its toggle key.
+    pub spectator_effect_active: bool,
     /// Current dimension identifier (e.g. "minecraft:overworld"), for F3+C.
     pub dimension: String,
     /// Dimension-type `cardinal_light`, which picks the terrain shade table
@@ -346,6 +351,31 @@ impl GameState {
     /// The mob a spectator views the world from, if it's one the client knows.
     pub fn spectated(&self) -> Option<&crate::entity::LivingEntity> {
         self.entity_store.living.get(&self.camera_entity?)
+    }
+
+    /// Vanilla `Minecraft.setCameraEntity`; `None` is the local player.
+    pub fn set_camera(&mut self, id: Option<i32>) {
+        self.camera_entity = id;
+        self.check_spectator_effect(self.spectated().map(|e| e.entity_type));
+    }
+
+    /// Vanilla `GameRenderer.checkEntityPostEffect`: the effect of viewing
+    /// the world as `camera`, `None` for no entity.
+    pub fn check_spectator_effect(&mut self, camera: Option<EntityKind>) {
+        self.spectator_effect = match camera {
+            Some(EntityKind::Creeper) => Some(PostEffect::Creeper),
+            Some(EntityKind::Spider | EntityKind::CaveSpider) => Some(PostEffect::Spider),
+            Some(EntityKind::Enderman) => Some(PostEffect::Invert),
+            _ => None,
+        };
+        self.spectator_effect_active = self.spectator_effect.is_some();
+    }
+
+    /// The spectator effect the frame draws: vanilla requests it only while
+    /// it's toggled on.
+    pub fn drawn_spectator_effect(&self) -> Option<PostEffect> {
+        self.spectator_effect
+            .filter(|_| self.spectator_effect_active)
     }
 
     /// This dimension's `skyDarken` right now.
@@ -499,6 +529,8 @@ impl GameState {
             pending_chunk_reload: false,
             previous_game_mode: None,
             camera_entity: None,
+            spectator_effect: None,
+            spectator_effect_active: false,
             dimension: String::new(),
             cardinal_light: Default::default(),
             ambient_light: 0.0,
@@ -2379,8 +2411,7 @@ pub fn update_game(
     }
     // TODO: remaining vanilla keybinds with no backing feature yet:
     // L advancements, P social interactions, O friends overlay (in-game),
-    // G quick actions, F4 spectator shader effects, C/X creative saved
-    // hotbars, spectator hotbar select.
+    // G quick actions, C/X creative saved hotbars, spectator hotbar select.
 
     // Finished F2 captures announce in chat (vanilla screenshot.success: bare
     // filename, underlined).
@@ -2546,6 +2577,7 @@ pub fn update_game(
     let bob_amount = game.player.prev_bob.lerp(game.player.bob, partial_tick);
     gfx.renderer
         .set_view_bob(bob_walk, bob_amount, core.menu.view_bobbing);
+    gfx.renderer.set_post_effect(game.drawn_spectator_effect());
     gfx.renderer.update_third_person_distance(
         game.block_registry.render_view(),
         camera_pivot,

@@ -3,22 +3,12 @@
 //! blurs soften the band, and the result blends over the frame after the
 //! hand, before the HUD.
 
-use crate::renderer::rhi::TextureUse;
-use crate::renderer::rhi::backend::TextureTransition;
-use crate::renderer::{rhi, shader, util};
-
-/// Vanilla's `entity_outline` and `swap` targets are plain RGBA8, so the post
-/// chain works on the same gamma-space values vanilla's does.
-const FORMAT: rhi::TextureFormat = rhi::TextureFormat::Rgba8Unorm;
-
 /// The target the outline geometry draws into: colour only, so outlines show
 /// through the world.
-pub fn targets() -> rhi::backend::PipelineTargets {
-    rhi::backend::PipelineTargets {
-        color: rhi::backend::texture_format(FORMAT),
-        depth: false,
-    }
-}
+pub use post::targets;
+
+use super::post;
+use crate::renderer::{rhi, shader, util};
 
 pub struct EntityOutline {
     outline: rhi::backend::Texture,
@@ -35,45 +25,48 @@ pub struct EntityOutline {
     outline_linear: rhi::backend::BindGroup,
     swap_nearest: rhi::backend::BindGroup,
     swap_linear: rhi::backend::BindGroup,
-    width: u32,
-    height: u32,
+    extent: rhi::Extent,
 }
 
 impl EntityOutline {
     pub fn new(
         device: &rhi::backend::Device,
         frame_targets: rhi::backend::PipelineTargets,
-        width: u32,
-        height: u32,
+        extent: rhi::Extent,
     ) -> Self {
-        let outline = create_target(device, width, height, "entity_outline");
-        let swap = create_target(device, width, height, "entity_outline_swap");
+        let outline = post::create_target(device, extent, "entity_outline");
+        let swap = post::create_target(device, extent, "entity_outline_swap");
         let nearest = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
         let linear = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR);
         let texture_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
         let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
             &[texture_layout],
-            Some(rhi::PushConstants {
-                visibility: rhi::ShaderStages::FRAGMENT,
-                size: 8,
-            }),
+            Some(post::PUSH_CONSTANTS),
         );
-        let post = |label, fragment| {
-            create_post_pipeline(device, targets(), pipeline_layout, label, fragment, None)
+        let pipeline = |label, fragment| {
+            post::create_pipeline(
+                device,
+                targets(),
+                pipeline_layout,
+                label,
+                None,
+                fragment,
+                None,
+            )
         };
         let group = |texture: &rhi::backend::Texture, sampler| {
             util::create_texture_group(device, texture_layout, texture.handle(), sampler)
         };
         Self {
-            sobel: post("entity sobel", shader::include_shader!("entity_sobel.frag")),
-            blur: post(
+            sobel: pipeline("entity sobel", shader::include_shader!("entity_sobel.frag")),
+            blur: pipeline(
                 "entity outline blur",
                 shader::include_shader!("entity_outline_box_blur.frag"),
             ),
-            blit: post(
+            blit: pipeline(
                 "entity outline blit",
-                shader::include_shader!("entity_outline_blit.frag"),
+                shader::include_shader!("post_blit.frag"),
             ),
             composite: create_composite_pipeline(device, frame_targets, pipeline_layout),
             outline_nearest: group(&outline, nearest),
@@ -86,8 +79,7 @@ impl EntityOutline {
             linear,
             texture_layout,
             pipeline_layout,
-            width,
-            height,
+            extent,
         }
     }
 
@@ -97,7 +89,7 @@ impl EntityOutline {
         device: &rhi::backend::Device,
         encoder: &rhi::backend::CommandEncoder,
     ) -> rhi::backend::RenderPassEncoder {
-        self.open_pass(device, encoder, self.outline.handle())
+        post::open_pass(device, encoder, self.outline.handle(), self.extent)
     }
 
     /// Closes the geometry pass and runs vanilla's chain: sobel into `swap`,
@@ -108,123 +100,38 @@ impl EntityOutline {
         encoder: &rhi::backend::CommandEncoder,
         geometry: rhi::backend::RenderPassEncoder,
     ) {
-        self.close_pass(encoder, geometry, self.outline.handle());
         let (outline, swap) = (self.outline.handle(), self.swap.handle());
-        self.post_pass(
-            device,
-            encoder,
-            swap,
-            self.sobel,
-            self.outline_nearest,
-            [0.0; 2],
-        );
-        self.post_pass(
-            device,
-            encoder,
-            outline,
-            self.blur,
-            self.swap_linear,
-            [1.0, 0.0],
-        );
-        self.post_pass(
-            device,
-            encoder,
-            swap,
-            self.blur,
-            self.outline_linear,
-            [0.0, 1.0],
-        );
-        self.post_pass(
-            device,
-            encoder,
-            outline,
-            self.blit,
-            self.swap_nearest,
-            [0.0; 2],
-        );
+        post::close_pass(encoder, geometry, outline);
+        let pass = |target, pipeline, inputs, uniforms: &[f32]| {
+            post::run(
+                device,
+                encoder,
+                target,
+                self.extent,
+                pipeline,
+                inputs,
+                uniforms,
+            );
+        };
+        pass(swap, &self.sobel, self.outline_nearest, &[]);
+        pass(outline, &self.blur, self.swap_linear, &[1.0, 0.0]);
+        pass(swap, &self.blur, self.outline_linear, &[0.0, 1.0]);
+        pass(outline, &self.blit, self.swap_nearest, &[1.0; 4]);
     }
 
     /// Vanilla `blitEntityOutline`: the outlines over the frame.
     pub fn composite(&self, pass: &mut rhi::backend::RenderPassEncoder) {
-        pass.set_pipeline(&self.composite);
-        pass.set_bind_group(0, self.outline_nearest);
-        pass.draw(3, 1, 0, 0);
+        post::draw(pass, &self.composite, self.outline_nearest, &[]);
     }
 
-    /// One full-screen pass of `pipeline` reading `input` into `target`.
-    fn post_pass(
-        &self,
-        device: &rhi::backend::Device,
-        encoder: &rhi::backend::CommandEncoder,
-        target: rhi::backend::TextureHandle,
-        pipeline: rhi::backend::RenderPipeline,
-        input: rhi::backend::BindGroup,
-        blur_dir: [f32; 2],
-    ) {
-        let mut pass = self.open_pass(device, encoder, target);
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, input);
-        pass.set_push_constants(
-            rhi::ShaderStages::FRAGMENT,
-            0,
-            bytemuck::cast_slice(&blur_dir),
-        );
-        pass.draw(3, 1, 0, 0);
-        self.close_pass(encoder, pass, target);
-    }
-
-    fn open_pass(
-        &self,
-        device: &rhi::backend::Device,
-        encoder: &rhi::backend::CommandEncoder,
-        target: rhi::backend::TextureHandle,
-    ) -> rhi::backend::RenderPassEncoder {
-        encoder.transition_textures(&[TextureTransition::color(
-            target,
-            TextureUse::ShaderRead,
-            TextureUse::ColorAttachment,
-        )]);
-        encoder.begin_render_pass(
-            device,
-            &rhi::backend::RenderPassDesc {
-                color: rhi::backend::ColorAttachment {
-                    texture: target,
-                    format: rhi::backend::texture_format(FORMAT),
-                    load: rhi::LoadOp::Clear([0.0; 4]),
-                    store: rhi::StoreOp::Store,
-                },
-                depth: None,
-                extent: rhi::Extent {
-                    width: self.width,
-                    height: self.height,
-                },
-            },
-        )
-    }
-
-    /// Ends `pass`, leaving `target` for the next pass to read.
-    fn close_pass(
-        &self,
-        encoder: &rhi::backend::CommandEncoder,
-        pass: rhi::backend::RenderPassEncoder,
-        target: rhi::backend::TextureHandle,
-    ) {
-        pass.end();
-        encoder.transition_textures(&[TextureTransition::color(
-            target,
-            TextureUse::ColorAttachment,
-            TextureUse::ShaderRead,
-        )]);
-    }
-
-    pub fn resize(&mut self, device: &rhi::backend::Device, width: u32, height: u32) {
-        if (width, height) == (self.width, self.height) {
+    pub fn resize(&mut self, device: &rhi::backend::Device, extent: rhi::Extent) {
+        if extent == self.extent {
             return;
         }
         device.wait_idle();
         self.destroy_targets(device);
-        self.outline = create_target(device, width, height, "entity_outline");
-        self.swap = create_target(device, width, height, "entity_outline_swap");
+        self.outline = post::create_target(device, extent, "entity_outline");
+        self.swap = post::create_target(device, extent, "entity_outline_swap");
         for (group, texture, sampler) in [
             (&mut self.outline_nearest, &self.outline, self.nearest),
             (&mut self.outline_linear, &self.outline, self.linear),
@@ -237,8 +144,7 @@ impl EntityOutline {
                 &util::texture_binding(texture.handle(), sampler),
             );
         }
-        self.width = width;
-        self.height = height;
+        self.extent = extent;
     }
 
     /// Rebuilds the composite against a new frame format.
@@ -276,51 +182,6 @@ impl EntityOutline {
     }
 }
 
-/// A screen-size target, ready to be sampled.
-fn create_target(
-    device: &rhi::backend::Device,
-    width: u32,
-    height: u32,
-    name: &str,
-) -> rhi::backend::Texture {
-    let texture = rhi::backend::Texture::new(
-        device,
-        &rhi::TextureDesc::new(
-            name,
-            width.max(1),
-            height.max(1),
-            FORMAT,
-            rhi::TextureUsages::RENDER_ATTACHMENT | rhi::TextureUsages::TEXTURE_BINDING,
-        ),
-    );
-    util::transition_image_to_shader_read(device, texture.handle());
-    texture
-}
-
-fn create_post_pipeline(
-    device: &rhi::backend::Device,
-    targets: rhi::backend::PipelineTargets,
-    layout: rhi::backend::PipelineLayout,
-    label: &str,
-    fragment: rhi::Shader,
-    blend: Option<rhi::BlendState>,
-) -> rhi::backend::RenderPipeline {
-    rhi::backend::create_render_pipeline(
-        device,
-        targets,
-        layout,
-        &rhi::RenderPipelineDesc {
-            blend,
-            ..rhi::RenderPipelineDesc::new(
-                label,
-                shader::include_shader!("blur.vert"),
-                fragment,
-                &[],
-            )
-        },
-    )
-}
-
 /// Vanilla `ENTITY_OUTLINE_BLIT`: alpha-blended colour over the frame, its
 /// alpha kept (`BlendFunction.ENTITY_OUTLINE_BLIT`), with no depth test.
 fn create_composite_pipeline(
@@ -328,11 +189,12 @@ fn create_composite_pipeline(
     frame_targets: rhi::backend::PipelineTargets,
     layout: rhi::backend::PipelineLayout,
 ) -> rhi::backend::RenderPipeline {
-    create_post_pipeline(
+    post::create_pipeline(
         device,
         frame_targets,
         layout,
         "entity outline composite",
+        None,
         shader::include_shader!("entity_outline_composite.frag"),
         Some(rhi::BlendState {
             color: rhi::BlendComponent {

@@ -1,0 +1,148 @@
+# Spectating a creeper, spider or enderman draws its view effect; the toggle
+# key flips it, and leaving first person clears it until first person comes
+# back.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+chat = "/tp @s -30.5 -60 30.5 0 0"
+
+[[step]]
+chat = "/setblock -31 -60 37 minecraft:gold_block"
+
+# Hidden GUI keeps command feedback out of the screenshots.
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+chat = "/summon minecraft:creeper -30.5 -60 33.5 {NoAI:1b,Rotation:[0f,0f],Tags:[\"spectated\"]}"
+
+[[step]]
+expect = { entity = "creeper", at = [-30.5, -60, 33.5] }
+
+[[step]]
+chat = "/spectate @e[tag=spectated,limit=1] @s"
+
+[[step]]
+expect = { player = { spectating = "creeper", post_effect = "creeper" } }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "creeper"
+
+[[step]]
+press = { action = "key.toggleSpectatorShaderEffects" }
+
+[[step]]
+expect = { player = { spectating = "creeper", post_effect = "" } }
+
+[[step]]
+press = { action = "key.toggleSpectatorShaderEffects" }
+
+[[step]]
+expect = { player = { post_effect = "creeper" } }
+
+[[step]]
+chat = "/spectate"
+
+[[step]]
+expect = { player = { spectating = "", post_effect = "" } }
+
+[[step]]
+chat = "/kill @e[tag=spectated]"
+
+[[step]]
+chat = "/summon minecraft:spider -30.5 -60 33.5 {NoAI:1b,Rotation:[0f,0f],Tags:[\"spectated\"]}"
+
+[[step]]
+expect = { entity = "spider", at = [-30.5, -60, 33.5] }
+
+[[step]]
+chat = "/spectate @e[tag=spectated,limit=1] @s"
+
+[[step]]
+expect = { player = { spectating = "spider", post_effect = "spider" } }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "spider"
+
+[[step]]
+chat = "/spectate"
+
+[[step]]
+expect = { player = { spectating = "" } }
+
+[[step]]
+chat = "/kill @e[tag=spectated]"
+
+[[step]]
+chat = "/summon minecraft:enderman -30.5 -60 33.5 {NoAI:1b,Rotation:[0f,0f],Tags:[\"spectated\"]}"
+
+[[step]]
+expect = { entity = "enderman", at = [-30.5, -60, 33.5] }
+
+[[step]]
+chat = "/spectate @e[tag=spectated,limit=1] @s"
+
+[[step]]
+expect = { player = { spectating = "enderman", post_effect = "invert" } }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "enderman"
+
+# First person to third person clears the effect; the next press (third
+# person to the front view) keeps it off, and the third returns first
+# person, which checks the camera entity again.
+[[step]]
+press = { action = "key.togglePerspective" }
+
+[[step]]
+expect = { player = { spectating = "enderman", post_effect = "" } }
+
+[[step]]
+press = { action = "key.togglePerspective" }
+
+[[step]]
+wait_ms = 200
+
+[[step]]
+expect = { player = { post_effect = "" } }
+
+[[step]]
+press = { action = "key.togglePerspective" }
+
+[[step]]
+expect = { player = { post_effect = "invert" } }
+
+[[step]]
+chat = "/spectate"
+
+[[step]]
+expect = { player = { spectating = "", post_effect = "" } }
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+chat = "/kill @e[tag=spectated]"
+
+[[step]]
+chat = "/setblock -31 -60 37 minecraft:air"
+
+[[step]]
+chat = "/gamemode survival"

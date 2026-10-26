@@ -884,12 +884,14 @@ impl ApplicationHandler for App {
                                         _ => {
                                             let f3_held =
                                                 self.core.input.action_held(Action::DebugModifier);
-                                            game.handle_debug_key(
+                                            if game.handle_debug_key(
                                                 code,
                                                 f3_held,
                                                 &self.core.input.key_bindings,
                                                 &connection,
-                                            );
+                                            ) {
+                                                self.core.input.unclick(code);
+                                            }
                                         }
                                     }
                                 }
