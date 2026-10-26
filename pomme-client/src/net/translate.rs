@@ -80,6 +80,10 @@
 //!   `spectator_action`); pomme sends neither
 //! - the `color` argument type was renamed `team_color` at the same id;
 //!   `commands` remaps every parser id by name, so the rename is bridged
+//! - 26.1 alone: item and component layouts are 26.2's, but item ids shift and
+//!   components past `sulfur_cube_content` sit one lower, so its stacks go
+//!   through 26.2's item grammar, which builds its game translation although
+//!   its packet ids match
 //!
 //! 1.21.11 -> 26.2 wire changes (all of the above — 1.21.11 matches 26.1 on
 //! those three layouts — plus):
@@ -359,8 +363,9 @@
 //! versions unless the matching rewrite lands at the same time. Each site
 //! carries a `TODO` pointing here.
 //! - outbound `set_creative_mode_slot` leaves component values undelimited,
-//!   which is 1.21.4's layout rather than 26.2's (native sessions encode it
-//!   with pomme's item grammar instead; see `net::item_codec`)
+//!   which is 1.21.4's layout rather than 26.2's (native sessions and the
+//!   versions with an item grammar encode it with pomme's grammar instead; see
+//!   `net::item_codec`)
 //! - inbound `cooldown` carries an item registry id, where 26.2 names a
 //!   cooldown group
 
@@ -1502,8 +1507,9 @@ impl Translation {
     /// Remaps an outbound packet's static-registry ids into the launched
     /// version's id space. Never drops the packet; entries the older version
     /// lacks degrade to empty (the server resyncs the slot).
-    /// TODO: delimit `set_creative_mode_slot` component values for 1.21.5 and
-    /// up once pomme owns the encoder (see the azalea-divergence list).
+    /// TODO: delimit `set_creative_mode_slot` component values for 1.21.5
+    /// through 1.21.11, which have no item grammar yet (see the
+    /// azalea-divergence list).
     pub fn remap_outbound(&self, packet: &mut ServerboundGamePacket) {
         match packet {
             ServerboundGamePacket::ContainerClick(p) => {
@@ -1583,7 +1589,8 @@ impl GameIds {
         use Direction::{Clientbound, Serverbound};
         let inbound = id_map(table, native, Phase::Game, Clientbound);
         let outbound = id_map(native, table, Phase::Game, Serverbound);
-        if identity_maps(&inbound, &outbound) {
+        // An item grammar still has stacks to translate (26.1).
+        if identity_maps(&inbound, &outbound) && ItemCodec::for_protocol(protocol).is_none() {
             return None;
         }
         let id = |dir, name| required_id(native, Phase::Game, dir, name);
@@ -1591,7 +1598,7 @@ impl GameIds {
             inbound,
             outbound,
             serializer_map: match protocol {
-                777 => remap_serializer_777,
+                777 | 775 => remap_serializer_777,
                 774 => remap_serializer_774,
                 773 => remap_serializer_773,
                 // 1.21.5 through 1.21.8 register identical serializer sets,
@@ -3382,9 +3389,9 @@ fn translate_interact(interact_old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
 /// 26.3's appended `dye_color` serializer, which no native entity uses.
 const DYE_COLOR_SERIALIZER: u32 = 43;
 
-/// The native serializer id for a 26.3 `EntityDataSerializers` id: 26.3
-/// appended `dye_color` and shifted nothing (both registration blocks
-/// line-checked).
+/// The native serializer id for a 26.3 or 26.1 `EntityDataSerializers` id:
+/// 26.3 appended `dye_color` and shifted nothing, and 26.1 matches 26.2
+/// (registration blocks line-checked).
 fn remap_serializer_777(old: u32) -> Option<u32> {
     (old < DYE_COLOR_SERIALIZER).then_some(old)
 }
@@ -5848,9 +5855,8 @@ mod recipe_translation_tests {
     }
 
     #[test]
-    fn recipe_book_add_remaps_26_1_even_without_game_id_translation() {
+    fn recipe_book_add_remaps_26_1() {
         let translation = Translation::for_protocol(775).expect("26.1 translation");
-        assert!(translation.game_ids.is_none());
         let id = required_id(
             PacketTable::native(),
             Phase::Game,

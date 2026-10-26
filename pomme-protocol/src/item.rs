@@ -674,7 +674,9 @@ impl ItemCodec {
             .get_or_init(|| {
                 let (shapes, entity_data, conversions): (&[_], _, _) =
                     match EMBEDDED[index].version.name {
-                        "26.2" => (&[COMPONENTS_26_2], SERIALIZERS_26_2, &[][..]),
+                        // 26.1's layouts are 26.2's; the one component it
+                        // lacks (`sulfur_cube_content`) isn't in its table.
+                        "26.1" | "26.2" => (&[COMPONENTS_26_2], SERIALIZERS_26_2, &[][..]),
                         "26.3" => (
                             &[COMPONENTS_26_3, COMPONENTS_26_2],
                             SERIALIZERS_26_3,

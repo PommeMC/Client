@@ -766,12 +766,11 @@ fn remap_add_entity_26_1() {
     );
 }
 
-/// azalea's typed encoder always writes 26.2 component-type ids, so a
-/// creative stack whose patch touches a shifted id (78+, where 26.2 inserted
-/// `sulfur_cube_content`) is cleared wholesale outbound; unshifted
-/// components survive.
+/// azalea's typed encoder always writes 26.2 component-type ids, so on a
+/// version without an item grammar a creative stack whose patch touches a
+/// shifted id is cleared wholesale outbound; unshifted components survive.
 #[test]
-fn strip_creative_components_26_1() {
+fn strip_creative_components_774() {
     use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
     use azalea_protocol::packets::game::ServerboundGamePacket;
     use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
@@ -791,7 +790,7 @@ fn strip_creative_components_26_1() {
                     component_patch: patch,
                 }),
             });
-        translation_for(775).remap_outbound(&mut packet);
+        translation_for(774).remap_outbound(&mut packet);
         let ServerboundGamePacket::SetCreativeModeSlot(p) = packet else {
             unreachable!()
         };
@@ -801,17 +800,18 @@ fn strip_creative_components_26_1() {
         data.component_patch
     };
 
-    // max_stack_size (id 1) is numbered the same in 26.1: kept.
+    // max_stack_size (id 1) is numbered the same in 1.21.11: kept.
     assert_eq!(remap(DataComponentKind::MaxStackSize).iter().count(), 1);
-    // lock (79 in 26.2, 78 in 26.1) is shifted: the patch is cleared.
+    // lock (79 in 26.2, 76 in 1.21.11) is shifted: the patch is cleared.
     assert_eq!(remap(DataComponentKind::Lock).iter().count(), 0);
 }
 
-/// 26.1's game ids match 26.2, so its frames pass through without the id
-/// remap or the outbound reroute; 1.21.11's diverge, so they don't.
+/// 26.1's game ids match 26.2's, but its item grammar still routes its
+/// frames through the translation; 1.21.11's ids diverge.
 #[test]
 fn outbound_translation_gating() {
-    assert!(!translation_for(775).translates_outbound());
+    assert!(translation_for(775).translates_items());
+    assert!(translation_for(775).translates_outbound());
     assert!(translation_for(774).translates_outbound());
 }
 
@@ -2694,6 +2694,90 @@ fn translate_container_set_slot_765() {
             state_id: 2,
             slot: 1,
             item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+        }
+    );
+}
+
+/// A `dripstone_block` carrying `salmon/size`: both ids sit lower in 26.1
+/// than in 26.2 (items past 26.2's inserts, components past
+/// `sulfur_cube_content`), with the value in its length-prefixed form.
+fn dripstone_with_size(table: &pomme_protocol::RegistryTable) -> (u32, u32, Vec<u8>) {
+    use pomme_protocol::ClientRegistry;
+
+    let item = registry_id(table, ClientRegistry::Item, "dripstone_block");
+    let size = registry_id(table, ClientRegistry::DataComponentType, "salmon/size");
+    let mut stack = vec![1]; // count
+    wire::write_varint(&mut stack, item);
+    stack.extend_from_slice(&[1, 0]); // one added, none removed
+    wire::write_varint(&mut stack, size);
+    (item, size, stack)
+}
+
+/// [`dripstone_with_size`]'s stack in native ids, its size `medium`.
+fn native_dripstone_with_size() -> pomme_protocol::item::ItemStack {
+    let (item, size, _) = dripstone_with_size(pomme_protocol::RegistryTable::native());
+    let mut stack = pomme_protocol::item::ItemStack {
+        item,
+        count: 1,
+        patch: Default::default(),
+    };
+    stack.patch.added.push((size, [1].into()));
+    stack
+}
+
+/// A native creative stack goes out in 26.1's item and component ids, each
+/// component value still length-prefixed (`OPTIONAL_UNTRUSTED_STREAM_CODEC`).
+#[test]
+fn translate_creative_slot_775() {
+    use pomme_protocol::RegistryTable;
+
+    let (native_item, native_size, _) = dripstone_with_size(RegistryTable::native());
+    let frame = pomme_protocol::wire::encode_set_creative_mode_slot(
+        36,
+        Some(&native_dripstone_with_size()),
+    );
+
+    let (wire_item, wire_size, wire_stack) =
+        dripstone_with_size(RegistryTable::for_protocol(775).unwrap());
+    assert_ne!((wire_item, wire_size), (native_item, native_size));
+    let mut expected = Vec::new();
+    wire::write_varint(
+        &mut expected,
+        old_id(775, Direction::Serverbound, "set_creative_mode_slot"),
+    );
+    expected.extend_from_slice(&36i16.to_be_bytes());
+    expected.extend_from_slice(&wire_stack);
+    expected.extend_from_slice(&[1, 1]); // value length, medium
+    assert_eq!(
+        translation_for(775).translate_outbound_game_frame(frame),
+        vec![expected]
+    );
+}
+
+/// The same stack inbound lands in native ids, decoded by pomme's own
+/// container reader.
+#[test]
+fn translate_container_set_slot_775() {
+    use pomme_protocol::RegistryTable;
+
+    let (_, _, wire_stack) = dripstone_with_size(RegistryTable::for_protocol(775).unwrap());
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(775, Direction::Clientbound, "container_set_slot"),
+    );
+    old.extend_from_slice(&[0, 4]); // container, state id
+    old.extend_from_slice(&36i16.to_be_bytes());
+    old.extend_from_slice(&wire_stack);
+    old.push(1); // medium
+
+    assert_eq!(
+        translate_and_read(775, old, "container_set_slot", container::read),
+        ContainerPacket::Slot {
+            container_id: 0,
+            state_id: 4,
+            slot: 36,
+            item: Some(native_dripstone_with_size())
         }
     );
 }
