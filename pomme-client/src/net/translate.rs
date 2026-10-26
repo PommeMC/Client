@@ -4029,7 +4029,7 @@ fn item_frame(
 }
 
 /// The length of a leading run of `varints` varints.
-fn varints_len(payload: &[u8], varints: usize) -> Option<usize> {
+fn varint_run_len(payload: &[u8], varints: usize) -> Option<usize> {
     let mut cur = Cursor::new(payload);
     for _ in 0..varints {
         varint_span(&mut cur)?;
@@ -4040,7 +4040,7 @@ fn varints_len(payload: &[u8], varints: usize) -> Option<usize> {
 /// `container_set_content`: container id, state id, the slots, the carried
 /// stack.
 fn translate_container_set_content(id: u32, payload: &[u8], items: Items<'_>) -> Option<Vec<u8>> {
-    item_frame(id, payload, varints_len(payload, 2)?, |cur, out| {
+    item_frame(id, payload, varint_run_len(payload, 2)?, |cur, out| {
         let slots = var_u32(cur)?;
         wire::write_varint(out, slots);
         for _ in 0..=slots {
@@ -4052,7 +4052,7 @@ fn translate_container_set_content(id: u32, payload: &[u8], items: Items<'_>) ->
 
 /// `container_set_slot`: container id, state id, a short slot, the stack.
 fn translate_container_set_slot(id: u32, payload: &[u8], items: Items<'_>) -> Option<Vec<u8>> {
-    item_frame(id, payload, varints_len(payload, 2)? + 2, |cur, out| {
+    item_frame(id, payload, varint_run_len(payload, 2)? + 2, |cur, out| {
         items.stack(cur, out)
     })
 }
@@ -4063,7 +4063,7 @@ fn translate_set_cursor_item(id: u32, payload: &[u8], items: Items<'_>) -> Optio
 
 /// `set_player_inventory`: a slot, the stack.
 fn translate_set_player_inventory(id: u32, payload: &[u8], items: Items<'_>) -> Option<Vec<u8>> {
-    item_frame(id, payload, varints_len(payload, 1)?, |cur, out| {
+    item_frame(id, payload, varint_run_len(payload, 1)?, |cur, out| {
         items.stack(cur, out)
     })
 }
@@ -4071,7 +4071,7 @@ fn translate_set_player_inventory(id: u32, payload: &[u8], items: Items<'_>) -> 
 /// `set_equipment`: the entity, then slot/stack pairs whose slot byte's high
 /// bit continues the list.
 fn translate_set_equipment(id: u32, payload: &[u8], items: Items<'_>) -> Option<Vec<u8>> {
-    item_frame(id, payload, varints_len(payload, 1)?, |cur, out| {
+    item_frame(id, payload, varint_run_len(payload, 1)?, |cur, out| {
         loop {
             let slot = read_u8(cur)?;
             out.push(slot);
@@ -4087,7 +4087,7 @@ fn translate_set_equipment(id: u32, payload: &[u8], items: Items<'_>) -> Option<
 /// cost and a numeric tail. An offer whose base cost or result the native
 /// version lacks is left out.
 fn translate_merchant_offers(id: u32, payload: &[u8], items: Items<'_>) -> Option<Vec<u8>> {
-    item_frame(id, payload, varints_len(payload, 1)?, |cur, out| {
+    item_frame(id, payload, varint_run_len(payload, 1)?, |cur, out| {
         let offers = var_u32(cur)?;
         let (mut kept, mut body) = (0, Vec::new());
         for _ in 0..offers {
