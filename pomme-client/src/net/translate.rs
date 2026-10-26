@@ -4084,8 +4084,10 @@ fn translate_set_equipment(id: u32, payload: &[u8], items: Items<'_>) -> Option<
 }
 
 /// `merchant_offers`: per offer a base cost, the result, an optional second
-/// cost and a numeric tail. An offer whose base cost or result the native
-/// version lacks is left out.
+/// cost and a numeric tail. An offer with an item the native version lacks
+/// is left out, rather than shown cheaper or as a different trade.
+/// TODO: leaving an offer out renumbers the ones after it; map the indices
+/// once pomme sends trade selections (`select_trade`).
 fn translate_merchant_offers(id: u32, payload: &[u8], items: Items<'_>) -> Option<Vec<u8>> {
     item_frame(id, payload, varint_run_len(payload, 1)?, |cur, out| {
         let offers = var_u32(cur)?;
@@ -4094,14 +4096,13 @@ fn translate_merchant_offers(id: u32, payload: &[u8], items: Items<'_>) -> Optio
             let mut offer = Vec::new();
             let base = items.cost(cur, &mut offer)?;
             let result = items.non_empty_stack(cur, &mut offer)?;
-            let mut second = Vec::new();
-            let has_second = read_u8(cur)? != 0 && items.cost(cur, &mut second)?;
+            let has_second = read_u8(cur)? != 0;
             offer.push(u8::from(has_second));
-            offer.extend_from_slice(&second);
+            let second = !has_second || items.cost(cur, &mut offer)?;
             let tail_at = cur.position() as usize;
             advance(cur, 25)?; // outOfStock, 4 ints, multiplier, demand
             offer.extend_from_slice(&cur.get_ref()[tail_at..cur.position() as usize]);
-            if base && result {
+            if base && result && second {
                 kept += 1;
                 body.extend_from_slice(&offer);
             }
