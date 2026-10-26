@@ -1716,6 +1716,8 @@ pub(crate) fn build_server_screens(
         if scroll != 0.0 && !modal_open {
             dialog.handle_scroll(scroll);
         }
+        // Vanilla's `DialogScreen` keeps `Screen`'s blurred background.
+        elements.push(MenuElement::BlurBackground);
         let action = dialog.build(
             elements,
             sw,
@@ -2255,6 +2257,8 @@ pub fn update_game(
     core.audio.set_subtitles_enabled(core.menu.show_subtitles);
 
     gfx.renderer.set_vsync(core.menu.vsync);
+    gfx.renderer
+        .set_menu_blur_radius(core.menu.menu_background_blurriness);
     game.chat.set_options(core.menu.chat_options);
 
     // Vanilla pauseIfInactive: losing OS focus for more than half a second
@@ -3213,6 +3217,9 @@ pub fn update_game(
     } else if game.paused && !matches!(game.pause_screen, PauseScreen::Hidden) && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
+        // Vanilla `PauseScreen.extractBackground`: blurred while the menu
+        // shows; F3+Esc's hidden pause draws nothing.
+        elements.push(MenuElement::BlurBackground);
         pause_action = pause::build_pause_menu(
             &mut elements,
             sw,

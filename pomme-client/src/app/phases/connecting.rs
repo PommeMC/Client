@@ -3,6 +3,7 @@ use crate::app::core::AppCore;
 use crate::app::phases::in_game::{GameState, build_server_screens};
 use crate::app::phases::{ConnectionPhase, Gfx, Panorama, draw_status};
 use crate::net::connection::ConnectionHandle;
+use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::singleplayer::World;
 
 pub enum ConnectingUpdateResult {
@@ -110,7 +111,7 @@ fn draw_server_dialog(
     // the same atlas the in-game text uses.
     core.sync_game_dynamic_atlas(game, &mut gfx.renderer, false);
 
-    let mut elements = Vec::new();
+    let mut elements = vec![MenuElement::BlurBackground];
     let text_events = core.input.drain_text_events();
     // The connecting screen runs no client ticks, so the dialog's own
     // timers fall back to wall time.
@@ -128,9 +129,9 @@ fn draw_server_dialog(
     );
 
     let cursor = core.input.cursor_pos();
-    if let Err(e) =
-        gfx.renderer
-            .render_menu(&gfx.window, panorama.scroll(), 2.0, elements, cursor, None)
+    if let Err(e) = gfx
+        .renderer
+        .render_menu(&gfx.window, panorama.scroll(), elements, cursor, None)
     {
         tracing::error!("Render error: {e}");
     }

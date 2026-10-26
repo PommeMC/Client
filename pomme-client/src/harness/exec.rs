@@ -203,6 +203,9 @@ fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Valu
         core.menu
             .set_main_hand_right(hand == protocol::Hand::Right, &core.input.key_bindings);
     }
+    if let Some(radius) = options.menu_background_blur {
+        core.menu.set_menu_background_blurriness(radius);
+    }
     core.menu.save_options(&core.input.key_bindings);
     Ok(Value::Null)
 }

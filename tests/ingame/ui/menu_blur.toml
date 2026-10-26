@@ -1,0 +1,89 @@
+# The pause menu blurs the world and HUD behind it by the Menu Background
+# Blur option: the default 5, nothing at 0, more at 10.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+look_at = [8.0, -61.0, 8.0]
+
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "unpaused"
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "blur_5"
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+option = { menu_background_blur = 0 }
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "blur_0"
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+option = { menu_background_blur = 10 }
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "blur_10"
+
+# Options opened from the pause menu blurs too, at the default again. The
+# script ends here: back from Options, the pause menu ignores input (a
+# separate bug), and the client closes with the script.
+[[step]]
+option = { menu_background_blur = 5 }
+
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "options"

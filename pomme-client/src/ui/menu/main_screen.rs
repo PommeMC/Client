@@ -39,7 +39,7 @@ impl MainMenu {
         let cursor = input.cursor;
         let clicked = input.clicked;
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackdrop];
         let mut action = MenuAction::None;
         let mut any_hovered = false;
         let mut any_clicked = false;
@@ -478,7 +478,6 @@ impl MainMenu {
             elements,
             action,
             cursor_pointer: any_hovered,
-            blur: 1.0,
             clicked_button: any_clicked,
         }
     }

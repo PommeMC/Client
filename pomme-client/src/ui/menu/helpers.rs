@@ -1,12 +1,12 @@
 use super::*;
 use crate::ui::text::TextSpan;
 
-pub(super) fn empty_result(blur: f32) -> MainMenuResult {
+/// A screen with nothing on it yet: its blurred background only.
+pub(super) fn empty_result() -> MainMenuResult {
     MainMenuResult {
-        elements: Vec::new(),
+        elements: vec![MenuElement::BlurBackground],
         action: MenuAction::None,
         cursor_pointer: false,
-        blur,
         clicked_button: false,
     }
 }
@@ -1433,7 +1433,7 @@ impl MainMenu {
         yes: &str,
     ) -> (MainMenuResult, Option<bool>) {
         if input.escape {
-            return (empty_result(2.0), Some(false));
+            return (empty_result(), Some(false));
         }
 
         let gs = self.gui_scale(screen_w, screen_h);
@@ -1450,7 +1450,7 @@ impl MainMenu {
         let column_h = (fs + spacing) * 2.0 + row_pad + btn_h;
         let mut y = (screen_h - column_h) / 2.0;
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
         for text in [question, warning] {
             elements.push(MenuElement::Text {
@@ -1504,7 +1504,6 @@ impl MainMenu {
                 elements,
                 action: MenuAction::None,
                 cursor_pointer: any_hovered,
-                blur: 2.0,
                 clicked_button: (clicked && any_hovered) || ctx.fired,
             },
             choice,

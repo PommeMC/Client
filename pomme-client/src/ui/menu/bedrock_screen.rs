@@ -734,7 +734,6 @@ impl MainMenu {
             elements,
             action,
             cursor_pointer: any_hovered,
-            blur: 0.0,
             clicked_button: any_clicked,
         }
     }

@@ -92,7 +92,7 @@ impl MainMenu {
         let leave = if gated { "Quit" } else { "Back" };
         if input.escape && !gated {
             self.close_account(key_bindings);
-            return empty_result(2.0);
+            return empty_result();
         }
         if matches!(*self.sign_in.read(), SignIn::Done(_)) {
             let SignIn::Done(account) = std::mem::take(&mut *self.sign_in.write()) else {
@@ -100,7 +100,7 @@ impl MainMenu {
             };
             self.sign_in_task = None;
             self.set_screen(Screen::Main, key_bindings);
-            let mut result = empty_result(2.0);
+            let mut result = empty_result();
             result.action = MenuAction::Account(Some(account));
             return result;
         }
@@ -156,7 +156,7 @@ impl MainMenu {
         let column_h = (fs + spacing) * lines.len() as f32 + code_h + 2.0 * spacing + btn_h;
         let mut y = (screen_h - column_h) / 2.0;
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
         for line in lines {
             elements.push(MenuElement::Text {
@@ -229,7 +229,6 @@ impl MainMenu {
             elements,
             action,
             cursor_pointer: any_hovered,
-            blur: 2.0,
             clicked_button: (input.clicked && any_hovered) || ctx.fired,
         }
     }

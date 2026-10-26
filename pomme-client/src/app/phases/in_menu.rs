@@ -132,7 +132,6 @@ pub fn update_menu(
     if let Err(e) = gfx.renderer.render_menu(
         &gfx.window,
         panorama.scroll(),
-        result.blur,
         result.elements,
         core.input.cursor_pos(),
         core.menu.skin_preview(),
@@ -145,6 +144,8 @@ pub fn update_menu(
     core.sync_display_mode(&gfx.window);
 
     gfx.renderer.set_vsync(core.menu.vsync);
+    gfx.renderer
+        .set_menu_blur_radius(core.menu.menu_background_blurriness);
 
     if core.menu.rescan_packs {
         core.menu.rescan_packs = false;

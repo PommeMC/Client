@@ -732,7 +732,8 @@ mod tests {
         assert_eq!(
             steps[19],
             Step::Run(Command::Option(OptionSet {
-                main_hand: Some(Hand::Left)
+                main_hand: Some(Hand::Left),
+                menu_background_blur: None,
             }))
         );
         assert_eq!(

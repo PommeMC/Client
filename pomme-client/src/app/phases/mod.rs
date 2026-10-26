@@ -188,7 +188,7 @@ pub fn draw_status(
     let cy = sh / 2.0;
 
     let cursor = core.input.cursor_pos();
-    let mut elements = Vec::new();
+    let mut elements = vec![MenuElement::BlurBackground];
 
     elements.push(MenuElement::Text {
         x: cx,
@@ -217,9 +217,9 @@ pub fn draw_status(
 
     core.input.clear_just_pressed_actions();
 
-    if let Err(e) =
-        gfx.renderer
-            .render_menu(&gfx.window, panorama.scroll(), 2.0, elements, cursor, None)
+    if let Err(e) = gfx
+        .renderer
+        .render_menu(&gfx.window, panorama.scroll(), elements, cursor, None)
     {
         tracing::error!("Render error: {e}");
     }

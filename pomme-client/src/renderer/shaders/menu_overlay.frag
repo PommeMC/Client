@@ -87,8 +87,12 @@ void main() {
         float d = sdf_rounded_rect(local, half_s, v_corner_radius);
         float alpha = 1.0 - smoothstep(-1.0, 1.0, d);
 
+        // The blur lives in vanilla's `main`: bottom-up rows of gamma-space
+        // colours.
         vec2 screen_uv = gl_FragCoord.xy / vec2(screen_w, screen_h);
-        vec4 blurred = texture(sampler2D(blur_tex, blur_tex_sampler), screen_uv);
+        vec2 main_uv = vec2(screen_uv.x, 1.0 - screen_uv.y);
+        vec4 blurred = texture(sampler2D(blur_tex, blur_tex_sampler), main_uv);
+        blurred.rgb = pow(blurred.rgb, vec3(2.2));
 
         vec3 tinted = blurred.rgb * v_color.rgb;
         float a = v_color.a * alpha;

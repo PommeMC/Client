@@ -27,7 +27,7 @@ impl MainMenu {
         let list_bottom = screen_h - footer_h;
         let list_h = list_bottom - list_top;
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
         let mut action = MenuAction::None;
         let mut any_hovered = false;
 
@@ -37,10 +37,9 @@ impl MainMenu {
         if input.escape {
             self.set_screen(Screen::Main, key_bindings);
             return MainMenuResult {
-                elements: Vec::new(),
+                elements: vec![MenuElement::BlurBackground],
                 action: MenuAction::None,
                 cursor_pointer: false,
-                blur: 1.0,
                 clicked_button: false,
             };
         }
@@ -504,7 +503,6 @@ impl MainMenu {
             elements,
             action,
             cursor_pointer: any_hovered,
-            blur: 2.0,
             clicked_button: (input.clicked && any_hovered) || ctx.fired,
         }
     }
@@ -518,7 +516,7 @@ impl MainMenu {
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let Screen::ConfirmDelete(idx) = self.screen else {
-            return empty_result(2.0);
+            return empty_result();
         };
         let warning = self
             .server_list
@@ -564,12 +562,12 @@ impl MainMenu {
 
         if input.escape {
             self.set_screen(Screen::ServerList, key_bindings);
-            return empty_result(2.0);
+            return empty_result();
         }
 
         self.cycle_fields(input, 1);
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
         let mut action = MenuAction::None;
         let mut any_hovered = false;
 
@@ -672,7 +670,6 @@ impl MainMenu {
             elements,
             action,
             cursor_pointer: any_hovered,
-            blur: 2.0,
             clicked_button: input.clicked && any_hovered,
         }
     }
@@ -696,12 +693,12 @@ impl MainMenu {
 
         if input.escape {
             self.set_screen(Screen::ServerList, key_bindings);
-            return empty_result(2.0);
+            return empty_result();
         }
 
         self.cycle_fields(input, 2);
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
 
         let cx = screen_w / 2.0;
@@ -839,7 +836,6 @@ impl MainMenu {
             elements,
             action: MenuAction::None,
             cursor_pointer: any_hovered,
-            blur: 2.0,
             clicked_button: input.clicked && any_hovered,
         }
     }
@@ -1050,7 +1046,7 @@ impl MainMenu {
     ) -> MainMenuResult {
         let reason = match &self.screen {
             Screen::Disconnected(r) => r.clone(),
-            _ => return empty_result(2.0),
+            _ => return empty_result(),
         };
 
         let gs = self.gui_scale(screen_w, screen_h);
@@ -1070,7 +1066,7 @@ impl MainMenu {
         let top = ((screen_h - total_h) / 2.0 / gs).floor() * gs;
         let cx = screen_w / 2.0;
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
         let mut text = |text: String, y: f32| {
             elements.push(MenuElement::Text {
@@ -1114,7 +1110,6 @@ impl MainMenu {
             elements,
             action: MenuAction::None,
             cursor_pointer: any_hovered,
-            blur: 2.0,
             clicked_button: (input.clicked && any_hovered) || ctx.fired,
         }
     }

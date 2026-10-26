@@ -106,6 +106,8 @@ pub struct Click {
 #[serde(deny_unknown_fields)]
 pub struct OptionSet {
     pub main_hand: Option<Hand>,
+    /// Menu Background Blur, 0 (off) to 10.
+    pub menu_background_blur: Option<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]

@@ -1,6 +1,5 @@
 pub mod block_entity;
 pub mod block_overlay;
-pub mod blur;
 pub mod book_preview;
 pub mod chunk;
 pub mod chunk_borders;

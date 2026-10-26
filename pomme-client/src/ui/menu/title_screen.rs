@@ -335,7 +335,6 @@ impl MainMenu {
             action,
             cursor_pointer: any_hovered,
             // `TitleScreen.extractBackground` is empty: just the panorama.
-            blur: 0.0,
             clicked_button: any_clicked,
         }
     }

@@ -2184,6 +2184,9 @@ pub enum MenuElement {
     /// scene so the blur pass captures them; elements after are drawn sharp on
     /// top. Used to render the title screen blurred behind the Friends dialog.
     BlurBackdrop,
+    /// Vanilla `blurBeforeThisStratum`: elements before it are blurred in
+    /// place by the Menu Background Blur, and the rest drawn sharp on top.
+    BlurBackground,
     /// Full-screen vignette, multiplying the framebuffer down by `brightness`.
     Vignette {
         w: f32,

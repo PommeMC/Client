@@ -103,7 +103,6 @@ fn main() {
         ("sky.frag", shaderc::ShaderKind::Fragment),
         ("cull.comp", shaderc::ShaderKind::Compute),
         ("blur.vert", shaderc::ShaderKind::Vertex),
-        ("blur.frag", shaderc::ShaderKind::Fragment),
         ("entity.vert", shaderc::ShaderKind::Vertex),
         ("entity.frag", shaderc::ShaderKind::Fragment),
         ("entity_outline.frag", shaderc::ShaderKind::Fragment),

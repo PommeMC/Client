@@ -1,8 +1,9 @@
-//! Vanilla's spectator view effects (`post_effect/creeper.json`,
-//! `spider.json`, `invert.json`), run over the frame after the glowing
-//! outline, before the HUD. The frame is copied out of the sRGB swapchain into
-//! `main` as vanilla's gamma-space colours, in GL's bottom-up rows, so the
-//! ported shaders and their uv maths run unchanged, then written back.
+//! Vanilla's post chains over the whole frame: the spectator view effects
+//! (`post_effect/creeper.json`, `spider.json`, `invert.json`), run after the
+//! glowing outline before the HUD, and the menu background blur
+//! (`post_effect/blur.json`). The frame is copied out of the sRGB swapchain
+//! into `main` as vanilla's gamma-space colours, in GL's bottom-up rows, so
+//! the ported shaders and their uv maths run unchanged, then written back.
 
 use super::post;
 use crate::renderer::{rhi, shader, util};
@@ -37,13 +38,10 @@ enum Target {
     SmallBlur,
 }
 
-const TARGET_NAMES: [&str; 5] = [
-    "post_main",
-    "post_swap",
-    "post_temp",
-    "post_large_blur",
-    "post_small_blur",
-];
+/// `minecraft:main` and every chain's `swap`, kept at the frame's size.
+const FRAME_TARGETS: [&str; 2] = ["post_main", "post_swap"];
+/// `spider.json`'s own targets, after [`FRAME_TARGETS`] in [`Target`]'s order.
+const SPIDER_TARGETS: [&str; 3] = ["post_temp", "post_large_blur", "post_small_blur"];
 
 /// The (`In`, `Blur`) pairs spiderclip reads.
 const CLIP_INPUTS: [(Target, Target); 3] = [
@@ -117,21 +115,95 @@ const fn clip(
     ]
 }
 
-/// The targets, made while an effect is on.
-struct Targets {
+/// A screen-size target per name, with its nearest and bilinear groups.
+struct TargetSet {
+    textures: Vec<rhi::backend::Texture>,
+    nearest: Vec<rhi::backend::BindGroup>,
+    linear: Vec<rhi::backend::BindGroup>,
+}
+
+impl TargetSet {
+    fn new(
+        device: &rhi::backend::Device,
+        samplers: &Samplers,
+        extent: rhi::Extent,
+        names: &[&str],
+    ) -> Self {
+        let textures: Vec<_> = names
+            .iter()
+            .map(|name| post::create_target(device, extent, name))
+            .collect();
+        let groups = |sampler| {
+            textures
+                .iter()
+                .map(|texture| samplers.group(device, texture.handle(), sampler))
+                .collect()
+        };
+        Self {
+            nearest: groups(samplers.nearest),
+            linear: groups(samplers.linear),
+            textures,
+        }
+    }
+
+    fn destroy(&mut self, device: &rhi::backend::Device) {
+        for texture in &mut self.textures {
+            std::mem::take(texture).destroy(device);
+        }
+        for group in self.nearest.drain(..).chain(self.linear.drain(..)) {
+            group.destroy(device);
+        }
+    }
+}
+
+/// The set `target` lives in, and its index there: [`FRAME_TARGETS`] first,
+/// then [`SPIDER_TARGETS`].
+fn locate<'a>(
+    frame: &'a TargetSet,
+    spider: Option<&'a TargetSet>,
+    target: Target,
+) -> (&'a TargetSet, usize) {
+    let i = target as usize;
+    let frame_count = FRAME_TARGETS.len();
+    if i < frame_count {
+        (frame, i)
+    } else {
+        (
+            spider.expect("made with the spider effect"),
+            i - frame_count,
+        )
+    }
+}
+
+/// The texture layout and samplers every target's groups use.
+struct Samplers {
+    layout: rhi::backend::BindGroupLayout,
+    nearest: rhi::backend::Sampler,
+    linear: rhi::backend::Sampler,
+}
+
+impl Samplers {
+    fn group(
+        &self,
+        device: &rhi::backend::Device,
+        texture: rhi::backend::TextureHandle,
+        sampler: rhi::backend::Sampler,
+    ) -> rhi::backend::BindGroup {
+        util::create_texture_group(device, self.layout, texture, sampler)
+    }
+}
+
+/// The frame's copy and [`FRAME_TARGETS`], at the frame's size.
+struct FrameTargets {
     extent: rhi::Extent,
     /// The swapchain's copy, sRGB so sampling decodes it.
     frame: rhi::backend::Texture,
-    textures: [rhi::backend::Texture; 5],
     frame_group: rhi::backend::BindGroup,
-    nearest: [rhi::backend::BindGroup; 5],
-    linear: [rhi::backend::BindGroup; 5],
-    /// By [`CLIP_INPUTS`].
-    clip: [rhi::backend::BindGroup; 3],
+    targets: TargetSet,
 }
 
-impl Targets {
-    fn new(device: &rhi::backend::Device, effects: &PostEffects, extent: rhi::Extent) -> Self {
+impl FrameTargets {
+    fn new(device: &rhi::backend::Device, samplers: &Samplers, extent: rhi::Extent) -> Self {
         let frame = rhi::backend::Texture::new(
             device,
             &rhi::TextureDesc::new(
@@ -142,46 +214,33 @@ impl Targets {
                 rhi::TextureUsages::COPY_DST | rhi::TextureUsages::TEXTURE_BINDING,
             ),
         );
-        let textures = TARGET_NAMES.map(|name| post::create_target(device, extent, name));
-        let group = |texture: &rhi::backend::Texture, sampler| {
-            util::create_texture_group(device, effects.texture_layout, texture.handle(), sampler)
-        };
-        let clip = CLIP_INPUTS.map(|(input, blur)| {
-            let [texture, sampler] =
-                util::texture_binding(textures[input as usize].handle(), effects.nearest);
-            let [blur_texture, blur_sampler] =
-                util::texture_binding(textures[blur as usize].handle(), effects.nearest);
-            device.create_bind_group(
-                effects.clip_layout,
-                &[texture, sampler, (2, blur_texture.1), (3, blur_sampler.1)],
-            )
-        });
         Self {
             extent,
-            frame_group: group(&frame, effects.nearest),
-            nearest: std::array::from_fn(|i| group(&textures[i], effects.nearest)),
-            linear: std::array::from_fn(|i| group(&textures[i], effects.linear)),
-            clip,
+            frame_group: samplers.group(device, frame.handle(), samplers.nearest),
             frame,
-            textures,
+            targets: TargetSet::new(device, samplers, extent, &FRAME_TARGETS),
         }
     }
 
-    fn handle(&self, target: Target) -> rhi::backend::TextureHandle {
-        self.textures[target as usize].handle()
+    fn destroy(&mut self, device: &rhi::backend::Device) {
+        std::mem::take(&mut self.frame).destroy(device);
+        self.frame_group.destroy(device);
+        self.targets.destroy(device);
     }
+}
 
-    fn destroy(self, device: &rhi::backend::Device) {
-        self.frame.destroy(device);
-        for texture in self.textures {
-            texture.destroy(device);
-        }
-        for group in [self.frame_group]
-            .into_iter()
-            .chain(self.nearest)
-            .chain(self.linear)
-            .chain(self.clip)
-        {
+/// [`SPIDER_TARGETS`] and spiderclip's (`In`, `Blur`) groups, made while the
+/// spider effect runs.
+struct SpiderTargets {
+    targets: TargetSet,
+    /// By [`CLIP_INPUTS`].
+    clip: [rhi::backend::BindGroup; 3],
+}
+
+impl SpiderTargets {
+    fn destroy(&mut self, device: &rhi::backend::Device) {
+        self.targets.destroy(device);
+        for group in self.clip {
             group.destroy(device);
         }
     }
@@ -189,10 +248,9 @@ impl Targets {
 
 pub struct PostEffects {
     effect: Option<PostEffect>,
-    targets: Option<Targets>,
-    nearest: rhi::backend::Sampler,
-    linear: rhi::backend::Sampler,
-    texture_layout: rhi::backend::BindGroupLayout,
+    samplers: Samplers,
+    frame: FrameTargets,
+    spider: Option<SpiderTargets>,
     clip_layout: rhi::backend::BindGroupLayout,
     pipeline_layout: rhi::backend::PipelineLayout,
     clip_pipeline_layout: rhi::backend::PipelineLayout,
@@ -210,15 +268,20 @@ impl PostEffects {
     pub fn new(
         device: &rhi::backend::Device,
         frame_targets: rhi::backend::PipelineTargets,
+        extent: rhi::Extent,
     ) -> Self {
-        let texture_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
+        let samplers = Samplers {
+            layout: rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE),
+            nearest: rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST),
+            linear: rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR),
+        };
         let clip_layout = rhi::backend::create_bind_group_layout(
             device,
             &[util::FRAGMENT_TEXTURE, util::FRAGMENT_TEXTURE].concat(),
         );
         let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
-            &[texture_layout],
+            &[samplers.layout],
             Some(post::PUSH_CONSTANTS),
         );
         let clip_pipeline_layout = rhi::backend::create_pipeline_layout(
@@ -239,9 +302,9 @@ impl PostEffects {
         };
         Self {
             effect: None,
-            targets: None,
-            nearest: rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST),
-            linear: rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR),
+            frame: FrameTargets::new(device, &samplers, extent),
+            spider: None,
+            samplers,
             decode: pipeline("post decode", shader::include_shader!("post_gamma.frag")),
             encode: create_encode_pipeline(device, frame_targets, pipeline_layout),
             invert: pipeline("post invert", shader::include_shader!("post_invert.frag")),
@@ -264,7 +327,6 @@ impl PostEffects {
                 shader::include_shader!("post_spiderclip.frag"),
                 None,
             ),
-            texture_layout,
             clip_layout,
             pipeline_layout,
             clip_pipeline_layout,
@@ -275,55 +337,143 @@ impl PostEffects {
         self.effect
     }
 
-    /// Sets the effect to run, freeing the targets once none is.
+    /// Sets the effect to run, freeing the spider's targets once it stops.
     pub fn set(&mut self, device: &rhi::backend::Device, effect: Option<PostEffect>) {
         self.effect = effect;
-        if effect.is_none()
-            && let Some(targets) = self.targets.take()
+        if effect != Some(PostEffect::Spider)
+            && let Some(mut spider) = self.spider.take()
         {
             device.wait_idle();
-            targets.destroy(device);
+            spider.destroy(device);
         }
     }
 
-    /// Copies `frame` (the swapchain image, between passes) into `main` and
-    /// runs the effect's chain over it; [`Self::finish`] writes it back.
+    /// Remakes the targets for a new frame size.
+    pub fn resize(&mut self, device: &rhi::backend::Device, extent: rhi::Extent) {
+        if extent == self.frame.extent {
+            return;
+        }
+        device.wait_idle();
+        if let Some(mut spider) = self.spider.take() {
+            spider.destroy(device);
+        }
+        let mut stale = std::mem::replace(
+            &mut self.frame,
+            FrameTargets::new(device, &self.samplers, extent),
+        );
+        stale.destroy(device);
+    }
+
+    /// `main`, gamma-space in bottom-up rows, as the last blur left it.
+    pub fn blurred_texture(&self) -> rhi::backend::TextureHandle {
+        self.handle(Target::Main)
+    }
+
+    pub fn blurred_sampler(&self) -> rhi::backend::Sampler {
+        self.samplers.linear
+    }
+
+    fn locate(&self, target: Target) -> (&TargetSet, usize) {
+        locate(
+            &self.frame.targets,
+            self.spider.as_ref().map(|spider| &spider.targets),
+            target,
+        )
+    }
+
+    fn handle(&self, target: Target) -> rhi::backend::TextureHandle {
+        let (set, i) = self.locate(target);
+        set.textures[i].handle()
+    }
+
+    /// `target`'s group with the nearest or bilinear sampler.
+    fn group(&self, target: Target, linear: bool) -> rhi::backend::BindGroup {
+        let (set, i) = self.locate(target);
+        if linear {
+            set.linear[i]
+        } else {
+            set.nearest[i]
+        }
+    }
+
+    fn make_spider_targets(&self, device: &rhi::backend::Device) -> SpiderTargets {
+        let targets = TargetSet::new(device, &self.samplers, self.frame.extent, &SPIDER_TARGETS);
+        let handle = |target| {
+            let (set, i) = locate(&self.frame.targets, Some(&targets), target);
+            set.textures[i].handle()
+        };
+        let clip = CLIP_INPUTS.map(|(input, blur)| {
+            let [texture, sampler] = util::texture_binding(handle(input), self.samplers.nearest);
+            let [blur_texture, blur_sampler] =
+                util::texture_binding(handle(blur), self.samplers.nearest);
+            device.create_bind_group(
+                self.clip_layout,
+                &[texture, sampler, (2, blur_texture.1), (3, blur_sampler.1)],
+            )
+        });
+        SpiderTargets { targets, clip }
+    }
+
+    /// One full-screen pass of `pipeline` reading `inputs` into `target`.
+    fn pass(
+        &self,
+        device: &rhi::backend::Device,
+        encoder: &rhi::backend::CommandEncoder,
+        target: Target,
+        pipeline: &rhi::backend::RenderPipeline,
+        inputs: rhi::backend::BindGroup,
+        uniforms: &[f32],
+    ) {
+        post::run(
+            device,
+            encoder,
+            self.handle(target),
+            self.frame.extent,
+            pipeline,
+            inputs,
+            uniforms,
+        );
+    }
+
+    /// Copies `frame` (the swapchain image, between passes) into `main` as
+    /// gamma-space colours.
+    fn capture(
+        &self,
+        device: &rhi::backend::Device,
+        encoder: &rhi::backend::CommandEncoder,
+        frame: rhi::backend::TextureHandle,
+    ) {
+        let size = [self.frame.extent.width, self.frame.extent.height];
+        util::copy_frame(encoder, frame, size, self.frame.frame.handle(), size);
+        self.pass(
+            device,
+            encoder,
+            Target::Main,
+            &self.decode,
+            self.frame.frame_group,
+            &[1.0 / 2.2],
+        );
+    }
+
+    /// Runs the effect's chain over `frame`; [`Self::finish`] writes it back.
     pub fn apply(
         &mut self,
         device: &rhi::backend::Device,
         encoder: &rhi::backend::CommandEncoder,
         frame: rhi::backend::TextureHandle,
-        extent: rhi::Extent,
     ) {
         let Some(effect) = self.effect else {
             return;
         };
-        if self.targets.as_ref().is_none_or(|t| t.extent != extent) {
-            if let Some(stale) = self.targets.take() {
-                device.wait_idle();
-                stale.destroy(device);
-            }
-            self.targets = Some(Targets::new(device, self, extent));
+        if effect == PostEffect::Spider && self.spider.is_none() {
+            self.spider = Some(self.make_spider_targets(device));
         }
-        let t = self.targets.as_ref().expect("made above");
+        self.capture(device, encoder, frame);
 
-        let size = [extent.width, extent.height];
-        util::copy_frame(encoder, frame, size, t.frame.handle(), size);
-
-        let pass = |target: Target, pipeline, inputs, uniforms: &[f32]| {
-            post::run(
-                device,
-                encoder,
-                t.handle(target),
-                extent,
-                pipeline,
-                inputs,
-                uniforms,
-            );
+        let pass = |target, pipeline, inputs, uniforms: &[f32]| {
+            self.pass(device, encoder, target, pipeline, inputs, uniforms);
         };
-        let nearest = |target: Target| t.nearest[target as usize];
-        let linear = |target: Target| t.linear[target as usize];
-        pass(Target::Main, &self.decode, t.frame_group, &[1.0 / 2.2]);
+        let nearest = |target| self.group(target, false);
         match effect {
             PostEffect::Invert => {
                 pass(Target::Swap, &self.invert, nearest(Target::Main), &[0.8]);
@@ -351,21 +501,11 @@ impl PostEffects {
             }
             PostEffect::Spider => {
                 for (radius, blurred) in [(15.0, Target::LargeBlur), (7.0, Target::SmallBlur)] {
-                    pass(
-                        Target::Temp,
-                        &self.box_blur,
-                        linear(Target::Main),
-                        &[1.0, 0.0, radius],
-                    );
-                    pass(
-                        blurred,
-                        &self.box_blur,
-                        linear(Target::Temp),
-                        &[0.0, 1.0, radius],
-                    );
+                    self.box_blur(device, encoder, Target::Main, Target::Temp, blurred, radius);
                 }
+                let clip = &self.spider.as_ref().expect("made above").clip;
                 for (inputs, output, uniforms) in SPIDER_CLIPS {
-                    pass(output, &self.spiderclip, t.clip[inputs], &uniforms);
+                    pass(output, &self.spiderclip, clip[inputs], &uniforms);
                 }
                 pass(
                     Target::Main,
@@ -377,11 +517,58 @@ impl PostEffects {
         }
     }
 
+    /// Vanilla `processBlurEffect` (`post_effect/blur.json`): three rounds of
+    /// box blur at `radius` over `frame`, left in `main`. A radius of 0 only
+    /// captures the frame.
+    pub fn blur(
+        &self,
+        device: &rhi::backend::Device,
+        encoder: &rhi::backend::CommandEncoder,
+        frame: rhi::backend::TextureHandle,
+        radius: u8,
+    ) {
+        self.capture(device, encoder, frame);
+        if radius == 0 {
+            return;
+        }
+        for _ in 0..3 {
+            self.box_blur(
+                device,
+                encoder,
+                Target::Main,
+                Target::Swap,
+                Target::Main,
+                f32::from(radius),
+            );
+        }
+    }
+
+    /// A bilinear `box_blur` of `radius` from `from`, horizontally into
+    /// `through` and then vertically into `to`.
+    fn box_blur(
+        &self,
+        device: &rhi::backend::Device,
+        encoder: &rhi::backend::CommandEncoder,
+        from: Target,
+        through: Target,
+        to: Target,
+        radius: f32,
+    ) {
+        for (input, output, direction) in [(from, through, [1.0, 0.0]), (through, to, [0.0, 1.0])] {
+            self.pass(
+                device,
+                encoder,
+                output,
+                &self.box_blur,
+                self.group(input, true),
+                &[direction[0], direction[1], radius],
+            );
+        }
+    }
+
     /// Writes `main` back over the frame, in the reopened frame pass.
     pub fn finish(&self, pass: &mut rhi::backend::RenderPassEncoder) {
-        if let Some(t) = &self.targets {
-            post::draw(pass, &self.encode, t.nearest[Target::Main as usize], &[2.2]);
-        }
+        post::draw(pass, &self.encode, self.group(Target::Main, false), &[2.2]);
     }
 
     /// Rebuilds the write-back against a new frame format.
@@ -395,9 +582,10 @@ impl PostEffects {
     }
 
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
-        if let Some(targets) = self.targets.take() {
-            targets.destroy(device);
+        if let Some(mut spider) = self.spider.take() {
+            spider.destroy(device);
         }
+        self.frame.destroy(device);
         for pipeline in [
             self.decode,
             self.encode,
@@ -412,10 +600,10 @@ impl PostEffects {
         }
         self.pipeline_layout.destroy(device);
         self.clip_pipeline_layout.destroy(device);
-        self.texture_layout.destroy(device);
+        self.samplers.layout.destroy(device);
         self.clip_layout.destroy(device);
-        self.nearest.destroy(device);
-        self.linear.destroy(device);
+        self.samplers.nearest.destroy(device);
+        self.samplers.linear.destroy(device);
     }
 }
 

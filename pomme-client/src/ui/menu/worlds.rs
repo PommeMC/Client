@@ -70,14 +70,14 @@ impl MainMenu {
         }
         if input.escape {
             self.set_screen(Screen::Main, key_bindings);
-            return empty_result(2.0);
+            return empty_result();
         }
 
         let list_top = header_h;
         let list_bottom = screen_h - footer_h;
         let list_h = list_bottom - list_top;
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
         let mut action = MenuAction::None;
         let playable = crate::singleplayer::AVAILABLE;
@@ -397,7 +397,6 @@ impl MainMenu {
             elements,
             action,
             cursor_pointer: any_hovered,
-            blur: 2.0,
             clicked_button: (clicked && any_hovered) || ctx.fired,
         }
     }
@@ -617,14 +616,14 @@ impl MainMenu {
 
         if input.escape {
             self.leave_create_world(key_bindings);
-            return empty_result(2.0);
+            return empty_result();
         }
 
         if self.create.field_target().is_some() {
             self.cycle_fields(input, 1);
         }
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
         let inert = |elements: &mut Vec<MenuElement>,
                      any_hovered: &mut bool,
@@ -920,7 +919,6 @@ impl MainMenu {
             elements,
             action: MenuAction::None,
             cursor_pointer: any_hovered,
-            blur: 2.0,
             clicked_button: clicked && any_hovered,
         }
     }
@@ -1042,7 +1040,7 @@ impl MainMenu {
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let Some(folder) = self.screen_folder() else {
-            return empty_result(2.0);
+            return empty_result();
         };
 
         let gs = self.gui_scale(screen_w, screen_h);
@@ -1057,12 +1055,12 @@ impl MainMenu {
 
         if input.escape {
             self.set_screen(Screen::WorldList, key_bindings);
-            return empty_result(2.0);
+            return empty_result();
         }
 
         self.cycle_fields(input, 1);
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
 
         let cx = screen_w / 2.0;
@@ -1202,7 +1200,6 @@ impl MainMenu {
             elements,
             action: MenuAction::None,
             cursor_pointer: any_hovered,
-            blur: 2.0,
             clicked_button: clicked && any_hovered,
         }
     }
@@ -1216,7 +1213,7 @@ impl MainMenu {
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let Some(folder) = self.screen_folder() else {
-            return empty_result(2.0);
+            return empty_result();
         };
         let warning = format!(
             "'{}' will be lost forever! (A long time!)",

@@ -61,11 +61,11 @@ impl MainMenu {
         // Esc: close the popup, else blur a field, else leave the screen.
         if input.escape {
             if self.pending_remove.take().is_some() {
-                return empty_result(2.0);
+                return empty_result();
             }
             if self.focused_field.take().is_none() {
                 self.set_screen(Screen::Main, key_bindings);
-                return empty_result(2.0);
+                return empty_result();
             }
         }
         // Click outside the panel closes (unless a popup is capturing input).
@@ -77,7 +77,7 @@ impl MainMenu {
             )
         {
             self.set_screen(Screen::Main, key_bindings);
-            return empty_result(2.0);
+            return empty_result();
         }
         if input.f5 {
             self.refresh_friends_now();
@@ -294,7 +294,6 @@ impl MainMenu {
             elements,
             action: MenuAction::None,
             cursor_pointer: false,
-            blur: 1.0,
             clicked_button: false,
         }
     }

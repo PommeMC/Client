@@ -53,6 +53,8 @@ struct Settings {
     invert_mouse_y: bool,
     #[serde(default = "default_true")]
     view_bobbing: bool,
+    #[serde(default = "default_menu_background_blurriness")]
+    menu_background_blurriness: u8,
     #[serde(default)]
     show_subtitles: bool,
     #[serde(default = "default_true")]
@@ -143,6 +145,14 @@ fn default_damage_tilt_strength() -> f32 {
     1.0
 }
 
+/// Vanilla `menuBackgroundBlurriness`: 0 (off) to 10, default 5.
+const MAX_MENU_BACKGROUND_BLURRINESS: u8 = 10;
+pub const DEFAULT_MENU_BACKGROUND_BLURRINESS: u8 = 5;
+
+fn default_menu_background_blurriness() -> u8 {
+    DEFAULT_MENU_BACKGROUND_BLURRINESS
+}
+
 /// Vanilla's `OptionInstance.UnitDouble` range, for sliders an out-of-range
 /// options.json would otherwise feed straight into a render or input curve.
 fn unit_range(value: f32) -> f32 {
@@ -201,6 +211,7 @@ impl Default for Settings {
             invert_mouse_x: false,
             invert_mouse_y: false,
             view_bobbing: true,
+            menu_background_blurriness: default_menu_background_blurriness(),
             show_subtitles: false,
             show_autosave_indicator: true,
             vignette: true,
@@ -352,7 +363,6 @@ pub struct MainMenuResult {
     // TODO: vanilla `AbstractWidget.handleCursor` wants NOT_ALLOWED over a
     // hovered inactive widget; one bool only says pointer or arrow.
     pub cursor_pointer: bool,
-    pub blur: f32,
     pub clicked_button: bool,
 }
 
@@ -698,6 +708,8 @@ pub struct MainMenu {
     pub invert_mouse_x: bool,
     pub invert_mouse_y: bool,
     pub view_bobbing: bool,
+    /// The Menu Background Blur radius (vanilla `MenuBlurRadius`), 0 for off.
+    pub menu_background_blurriness: u8,
     pub show_subtitles: bool,
     pub show_autosave_indicator: bool,
     pub vignette: bool,
@@ -853,6 +865,9 @@ impl MainMenu {
             invert_mouse_x: settings.invert_mouse_x,
             invert_mouse_y: settings.invert_mouse_y,
             view_bobbing: settings.view_bobbing,
+            menu_background_blurriness: settings
+                .menu_background_blurriness
+                .min(MAX_MENU_BACKGROUND_BLURRINESS),
             show_subtitles: settings.show_subtitles,
             show_autosave_indicator: settings.show_autosave_indicator,
             vignette: settings.vignette,
@@ -1096,6 +1111,7 @@ impl MainMenu {
                 invert_mouse_x: self.invert_mouse_x,
                 invert_mouse_y: self.invert_mouse_y,
                 view_bobbing: self.view_bobbing,
+                menu_background_blurriness: self.menu_background_blurriness,
                 show_subtitles: self.show_subtitles,
                 show_autosave_indicator: self.show_autosave_indicator,
                 vignette: self.vignette,
@@ -1155,6 +1171,11 @@ impl MainMenu {
             hat: self.skin_hat,
             main_hand_right: self.skin_main_hand_right,
         }
+    }
+
+    pub fn set_menu_background_blurriness(&mut self, radius: u8) {
+        self.menu_background_blurriness = radius.min(MAX_MENU_BACKGROUND_BLURRINESS);
+        self.settings_dirty = true;
     }
 
     pub fn set_main_hand_right(&mut self, right: bool, key_bindings: &KeyBindings) {
@@ -1634,6 +1655,25 @@ mod tests {
         assert_eq!(saved, 12);
         assert_eq!(menu.render_distance, 2);
         assert_eq!(chunk_detail, 4);
+    }
+
+    #[test]
+    fn menu_background_blur_defaults_to_five_and_clamps_to_ten() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("menu_background_blurriness");
+        let legacy: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.menu_background_blurriness, 5);
+
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("menu-blur-clamp", &mut key_bindings);
+        menu.set_menu_background_blurriness(42);
+        assert_eq!(
+            menu.menu_background_blurriness,
+            MAX_MENU_BACKGROUND_BLURRINESS
+        );
     }
 
     #[test]

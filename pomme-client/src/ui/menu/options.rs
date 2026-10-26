@@ -49,6 +49,16 @@ const TEXT_BACKGROUND_OPACITY: &str = "Text Background Opacity:";
 const CHAT_SCALE: &str = "Chat Text Size:";
 const CHAT_LINE_SPACING: &str = "Line Spacing:";
 const CHAT_DELAY: &str = "Chat Delay:";
+const MENU_BACKGROUND_BLUR: &str = "Menu Background Blur:";
+
+/// Vanilla `genericValueOrOffLabel`.
+fn menu_background_blur_label(radius: u8) -> String {
+    if radius == 0 {
+        format!("{MENU_BACKGROUND_BLUR} OFF")
+    } else {
+        format!("{MENU_BACKGROUND_BLUR} {radius}")
+    }
+}
 const CHAT_WIDTH: &str = "Width:";
 const CHAT_HEIGHT_FOCUSED: &str = "Focused Height:";
 const CHAT_HEIGHT_UNFOCUSED: &str = "Unfocused Height:";
@@ -182,6 +192,15 @@ impl MainMenu {
         }
     }
 
+    /// The Menu Background Blur slider's label and position.
+    fn menu_background_blur_slider(&self) -> (String, f32) {
+        let radius = self.menu_background_blurriness;
+        (
+            menu_background_blur_label(radius),
+            f32::from(radius) / f32::from(MAX_MENU_BACKGROUND_BLURRINESS),
+        )
+    }
+
     fn show_subtitles_label(&self) -> &'static str {
         if self.show_subtitles {
             "Show Subtitles: ON"
@@ -201,6 +220,7 @@ impl MainMenu {
             "Max Framerate:" => 25.0,
             "FOV:" => 80.0,
             CHAT_DELAY => CHAT_DELAY_MAX_TENTHS as f32,
+            MENU_BACKGROUND_BLUR => f32::from(MAX_MENU_BACKGROUND_BLURRINESS),
             _ => return None,
         })
     }
@@ -272,6 +292,7 @@ impl MainMenu {
         } else {
             "Entity Shadows: OFF"
         };
+        let (blur_label, blur_frac) = self.menu_background_blur_slider();
         let rows: Vec<OptRow> = vec![
             OptRow::Header("Display"),
             OptRow::Big("Fullscreen Resolution: Current"),
@@ -288,7 +309,7 @@ impl MainMenu {
             OptRow::PairLeft(&cd),
             OptRow::Pair("Particles: All", "Mipmap Levels: 4"),
             OptRow::Pair(entity_shadows_label, "Entity Distance: 100%"),
-            OptRow::Pair("Menu Background Blur: 50%", "Cloud Range: 128"),
+            OptRow::Pair(&blur_label, "Cloud Range: 128"),
             OptRow::Pair("Cutout Leaves: Fancy", "Improved Transparency: OFF"),
             OptRow::Pair("Texture Filtering: None", "Max Anisotropy: 1"),
             OptRow::PairLeft("Weather Radius: 10"),
@@ -305,6 +326,7 @@ impl MainMenu {
             ("Chunk Detail:", cd_frac),
             ("Simulation Distance:", sd_frac),
             ("Max Framerate:", mf_frac),
+            (MENU_BACKGROUND_BLUR, blur_frac),
         ];
         let disabled = &[
             "Fullscreen Resolution:",
@@ -320,7 +342,6 @@ impl MainMenu {
             "Particles:",
             "Mipmap Levels:",
             "Entity Distance:",
-            "Menu Background Blur:",
             "Cloud Range:",
             "Cutout Leaves:",
             "Improved Transparency:",
@@ -472,7 +493,7 @@ impl MainMenu {
 
         if input.escape {
             self.set_screen(Screen::OptionsControls, key_bindings);
-            return empty_result(1.0);
+            return empty_result();
         }
 
         let gs = self.gui_scale(sw, sh);
@@ -480,7 +501,7 @@ impl MainMenu {
         let btn_h = BTN_H * gs;
         let mut any_hovered = false;
         let mut any_clicked = false;
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
 
         self.focus_advance(input);
         let ctx = &mut self.make_focus_ctx(input);
@@ -711,7 +732,7 @@ impl MainMenu {
             true,
         ) {
             self.set_screen(Screen::OptionsControls, key_bindings);
-            let mut result = empty_result(1.0);
+            let mut result = empty_result();
             result.clicked_button = true;
             return result;
         }
@@ -720,7 +741,6 @@ impl MainMenu {
             elements,
             action: MenuAction::None,
             cursor_pointer: any_hovered,
-            blur: 2.0,
             clicked_button: any_clicked,
         }
     }
@@ -867,9 +887,10 @@ impl MainMenu {
         let chat_opacity = chat_opacity_label(o.opacity);
         let spacing = percent_label(CHAT_LINE_SPACING, o.line_spacing.into());
         let delay = chat_delay_label(o.delay_secs);
+        let (blur_label, blur_frac) = self.menu_background_blur_slider();
         let rows: Vec<OptRow> = vec![
             OptRow::Pair("Narrator: OFF", self.show_subtitles_label()),
-            OptRow::Pair("High Contrast: OFF", "Menu Background Blur: 50%"),
+            OptRow::Pair("High Contrast: OFF", &blur_label),
             OptRow::Pair(&bg_opacity, "Background for Chat Only: OFF"),
             OptRow::Pair(&chat_opacity, &spacing),
             OptRow::Pair(&delay, "Notification Time: 10.0s"),
@@ -889,11 +910,11 @@ impl MainMenu {
             (CHAT_DELAY, chat_delay_slider(o.delay_secs)),
             ("FOV Effects:", self.fov_effect_scale),
             ("Damage Tilt:", self.damage_tilt_strength),
+            (MENU_BACKGROUND_BLUR, blur_frac),
         ];
         let disabled = &[
             "Narrator:",
             "High Contrast:",
-            "Menu Background Blur:",
             "Background for Chat Only:",
             "Notification Time:",
             "Distortion Effects:",
@@ -1159,7 +1180,7 @@ impl MainMenu {
     ) -> MainMenuResult {
         if input.escape {
             self.set_screen(back.clone_screen(), key_bindings);
-            return empty_result(2.0);
+            return empty_result();
         }
 
         let gs = self.gui_scale(sw, sh);
@@ -1176,7 +1197,7 @@ impl MainMenu {
         let cursor = input.cursor;
         let clicked = input.clicked;
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
         let mut any_clicked = false;
 
@@ -1525,6 +1546,9 @@ impl MainMenu {
                 }
                 "Max Framerate:" => self.max_framerate = 10 + 10 * (v * span).round() as u32,
                 "FOV:" => self.fov = (30.0 + v * span).round() as u32,
+                MENU_BACKGROUND_BLUR => {
+                    self.set_menu_background_blurriness((v * span).round() as u8)
+                }
                 "FOV Effects:" => self.fov_effect_scale = v,
                 "Damage Tilt:" => self.damage_tilt_strength = v,
                 "Sensitivity:" => self.sensitivity = v,
@@ -1619,7 +1643,6 @@ impl MainMenu {
             elements,
             action: MenuAction::None,
             cursor_pointer: any_hovered,
-            blur: 2.0,
             clicked_button: any_clicked,
         }
     }
@@ -1637,7 +1660,7 @@ impl MainMenu {
         if input.escape {
             self.pack_search.clear();
             self.set_screen(Screen::Options, key_bindings);
-            return empty_result(2.0);
+            return empty_result();
         }
 
         self.cycle_fields(input, 1);
@@ -1650,7 +1673,7 @@ impl MainMenu {
         let cursor = input.cursor;
         let clicked = input.clicked;
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
 
         common::push_overlay(&mut elements, sw, sh, 0.4);
@@ -1918,7 +1941,6 @@ impl MainMenu {
             elements,
             action: MenuAction::None,
             cursor_pointer: any_hovered,
-            blur: 2.0,
             clicked_button: false,
         }
     }
@@ -1936,13 +1958,13 @@ impl MainMenu {
     ) -> MainMenuResult {
         if input.escape {
             self.set_screen(back.clone_screen(), key_bindings);
-            return empty_result(2.0);
+            return empty_result();
         }
 
         let gs = self.gui_scale(sw, sh);
         let cx = sw / 2.0;
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
 
         let chrome = push_screen_chrome(&mut elements, sw, sh, gs, title);
@@ -2001,7 +2023,6 @@ impl MainMenu {
             elements,
             action: MenuAction::None,
             cursor_pointer: any_hovered,
-            blur: 2.0,
             clicked_button: ctx.fired,
         }
     }
@@ -2020,6 +2041,13 @@ mod tests {
         assert!(!option_enabled("Graphics: Fancy", disabled));
         assert!(option_enabled("Render Distance: 12 chunks", disabled));
         assert!(option_enabled("Graphics Backend: Default", disabled));
+    }
+
+    #[test]
+    fn menu_background_blur_label_is_generic_value_or_off() {
+        assert_eq!(menu_background_blur_label(0), "Menu Background Blur: OFF");
+        assert_eq!(menu_background_blur_label(5), "Menu Background Blur: 5");
+        assert_eq!(menu_background_blur_label(10), "Menu Background Blur: 10");
     }
 
     #[test]

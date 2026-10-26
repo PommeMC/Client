@@ -163,14 +163,14 @@ impl MainMenu {
         let back = self.settings_back.clone_screen();
         if input.escape {
             self.set_screen(back, key_bindings);
-            return empty_result(2.0);
+            return empty_result();
         }
 
         let gs = self.gui_scale(sw, sh);
         let btn_h = common::BTN_H * gs;
         let cx = sw / 2.0;
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
 
         let chrome = push_screen_chrome(&mut elements, sw, sh, gs, "Credits and Attribution");
@@ -232,7 +232,6 @@ impl MainMenu {
             elements,
             action: MenuAction::None,
             cursor_pointer: any_hovered,
-            blur: 2.0,
             clicked_button: ctx.fired,
         }
     }
@@ -259,7 +258,7 @@ impl MainMenu {
         let lines = credits();
         if input.escape || lines.is_empty() {
             self.set_screen(Screen::OptionsCredits, key_bindings);
-            return empty_result(2.0);
+            return empty_result();
         }
 
         let gs = self.gui_scale(sw, sh);
@@ -284,10 +283,10 @@ impl MainMenu {
         let total_scroll_length = lines.len() as f32 * LINE_H;
         if self.credits_scroll > total_scroll_length + 2.0 * sh_units + 24.0 {
             self.set_screen(Screen::OptionsCredits, key_bindings);
-            return empty_result(2.0);
+            return empty_result();
         }
 
-        let mut elements = Vec::new();
+        let mut elements = vec![MenuElement::BlurBackground];
 
         // `WinScreen.extractMenuBackground` scrolls the tiling at half speed.
         // `TiledImage` has no UV offset, so shift the quad by one tile instead.
@@ -362,7 +361,6 @@ impl MainMenu {
             elements,
             action: MenuAction::None,
             cursor_pointer: false,
-            blur: 2.0,
             clicked_button: false,
         }
     }

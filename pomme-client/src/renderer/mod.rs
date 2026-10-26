@@ -31,7 +31,6 @@ use glam::dvec3;
 use pipelines::block_entity::BlockEntityPipeline;
 pub use pipelines::block_entity::BlockEntityRenderInfo;
 use pipelines::block_overlay::BlockOverlayPipeline;
-use pipelines::blur::BlurPipeline;
 use pipelines::book_preview::BookPreviewPipeline;
 use pipelines::chunk::ChunkPipeline;
 use pipelines::clouds::CloudPipeline;
@@ -210,7 +209,6 @@ enum RenderMode<'a> {
     },
     MainMenu {
         scroll: f32,
-        blur: f32,
         elements: Vec<MenuElement>,
         cursor: (f32, f32),
         skin: Option<MenuSkin>,
@@ -251,7 +249,8 @@ pub struct Renderer {
     sky_pipeline: SkyPipeline,
     panorama_pipeline: PanoramaPipeline,
     menu_pipeline: MenuOverlayPipeline,
-    blur_pipeline: BlurPipeline,
+    /// The Menu Background Blur option: vanilla's `MenuBlurRadius`.
+    menu_blur_radius: u8,
     entity_outline: EntityOutline,
     post_effects: PostEffects,
     skin_preview: SkinPreviewPipeline,
@@ -424,15 +423,14 @@ impl Renderer {
             asset_index,
         );
 
-        let blur_pipeline =
-            BlurPipeline::new(&ctx.device, swapchain_extent.width, swapchain_extent.height);
         let entity_outline =
             EntityOutline::new(&ctx.device, swapchain_state.targets(), swapchain_extent);
-        let post_effects = PostEffects::new(&ctx.device, swapchain_state.targets());
+        let post_effects =
+            PostEffects::new(&ctx.device, swapchain_state.targets(), swapchain_extent);
         menu_pipeline.set_blur_texture(
             &ctx.device,
-            blur_pipeline.blurred_texture(),
-            blur_pipeline.blurred_sampler(),
+            post_effects.blurred_texture(),
+            post_effects.blurred_sampler(),
         );
 
         let entity_renderer = EntityRenderer::new(
@@ -513,7 +511,7 @@ impl Renderer {
             sky_pipeline,
             panorama_pipeline,
             menu_pipeline,
-            blur_pipeline,
+            menu_blur_radius: crate::ui::menu::DEFAULT_MENU_BACKGROUND_BLURRINESS,
             entity_outline,
             post_effects,
             skin_preview,
@@ -644,6 +642,59 @@ impl Renderer {
 
     /// Reopens the frame's pass after an offscreen detour, keeping what it
     /// drew.
+    pub fn set_menu_blur_radius(&mut self, radius: u8) {
+        self.menu_blur_radius = radius;
+    }
+
+    /// Vanilla `GuiRenderer.draw`: draws `elements` up to the first blur
+    /// marker, then blurs the frame there (`processBlurEffect`). The blur is
+    /// written back over the frame for `BlurBackground`, and only kept as the
+    /// frosted panels' texture for `BlurBackdrop`. Returns the reopened pass,
+    /// the next vertex base and the elements still to draw.
+    fn draw_until_blur<'e>(
+        &mut self,
+        encoder: &rhi::backend::CommandEncoder,
+        image_index: u32,
+        frame: usize,
+        mut pass: rhi::backend::RenderPassEncoder,
+        elements: &'e [MenuElement],
+        item_atlas_uvs: &HashMap<String, [f32; 4]>,
+    ) -> (rhi::backend::RenderPassEncoder, u32, &'e [MenuElement]) {
+        let Some(split) = elements
+            .iter()
+            .position(|e| matches!(e, MenuElement::BlurBackground | MenuElement::BlurBackdrop))
+        else {
+            return (pass, 0, elements);
+        };
+        let extent = self.swapchain.extent;
+        let vbase = self.menu_pipeline.draw_from(
+            &self.ctx.device,
+            &mut pass,
+            frame,
+            extent.width as f32,
+            extent.height as f32,
+            &elements[..split],
+            item_atlas_uvs,
+            0,
+        );
+        let in_place = matches!(elements[split], MenuElement::BlurBackground);
+        // Vanilla `extractBlurredBackground` skips a radius under 1.
+        if !in_place || self.menu_blur_radius > 0 {
+            pass.end();
+            self.post_effects.blur(
+                &self.ctx.device,
+                encoder,
+                self.swapchain.image(image_index),
+                self.menu_blur_radius,
+            );
+            pass = self.resume_frame_pass(encoder, image_index);
+            if in_place {
+                self.post_effects.finish(&mut pass);
+            }
+        }
+        (pass, vbase, &elements[split + 1..])
+    }
+
     fn resume_frame_pass(
         &self,
         encoder: &rhi::backend::CommandEncoder,
@@ -718,14 +769,14 @@ impl Renderer {
             self.chunk_border_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
         }
-        self.blur_pipeline
-            .resize(&self.ctx.device, self.width, self.height);
         self.entity_outline
+            .resize(&self.ctx.device, self.swapchain.extent);
+        self.post_effects
             .resize(&self.ctx.device, self.swapchain.extent);
         self.menu_pipeline.set_blur_texture(
             &self.ctx.device,
-            self.blur_pipeline.blurred_texture(),
-            self.blur_pipeline.blurred_sampler(),
+            self.post_effects.blurred_texture(),
+            self.post_effects.blurred_sampler(),
         );
 
         self.swapchain_dirty = false;
@@ -1120,7 +1171,6 @@ impl Renderer {
         &mut self,
         window: &Window,
         scroll: f32,
-        blur: f32,
         elements: Vec<MenuElement>,
         cursor: (f32, f32),
         skin: Option<MenuSkin>,
@@ -1131,7 +1181,6 @@ impl Renderer {
             [0.0, 0.0, 0.0, 1.0],
             RenderMode::MainMenu {
                 scroll,
-                blur,
                 elements,
                 cursor,
                 skin,
@@ -1815,13 +1864,21 @@ impl Renderer {
                         &self.ctx.device,
                         &encoder,
                         self.swapchain.image(image_index),
-                        self.swapchain.extent,
                     );
                     pass = self.resume_frame_pass(&encoder, image_index);
                     self.post_effects.finish(&mut pass);
                 }
 
-                self.menu_pipeline.draw(
+                let (blurred_pass, vbase, overlay) = self.draw_until_blur(
+                    &encoder,
+                    image_index,
+                    frame,
+                    pass,
+                    overlay,
+                    &item_atlas_uvs,
+                );
+                pass = blurred_pass;
+                self.menu_pipeline.draw_from(
                     &self.ctx.device,
                     &mut pass,
                     frame,
@@ -1829,6 +1886,7 @@ impl Renderer {
                     sh,
                     overlay,
                     &item_atlas_uvs,
+                    vbase,
                 );
 
                 // Each preview box gets its depth cleared and its own scissor
@@ -1863,7 +1921,6 @@ impl Renderer {
             }
             RenderMode::MainMenu {
                 scroll,
-                blur,
                 elements,
                 cursor,
                 skin,
@@ -1872,42 +1929,15 @@ impl Renderer {
                 self.panorama_pipeline
                     .draw(&mut pass, frame, *scroll, aspect, 0.0);
 
-                // A BlurBackdrop marker splits the elements: those before it are
-                // drawn into the scene so the blur pass captures them (the title
-                // screen behind the Friends dialog); the rest are drawn sharp.
-                let split = elements
-                    .iter()
-                    .position(|e| matches!(e, MenuElement::BlurBackdrop));
-                let mut vbase = 0u32;
-                if let Some(i) = split {
-                    vbase = self.menu_pipeline.draw_from(
-                        &self.ctx.device,
-                        &mut pass,
-                        frame,
-                        sw,
-                        sh,
-                        &elements[..i],
-                        &item_atlas_uvs,
-                        0,
-                    );
-                }
-
-                if *blur > 0.01 {
-                    pass.end();
-
-                    let swapchain_image = self.swapchain.image(image_index);
-                    let iterations = ((*blur * 3.0).ceil() as u32).clamp(1, 4);
-                    self.blur_pipeline.execute(
-                        &self.ctx.device,
-                        &encoder,
-                        swapchain_image,
-                        self.swapchain.extent.width,
-                        self.swapchain.extent.height,
-                        iterations,
-                    );
-
-                    pass = self.resume_frame_pass(&encoder, image_index);
-                }
+                let (blurred_pass, vbase, fg) = self.draw_until_blur(
+                    &encoder,
+                    image_index,
+                    frame,
+                    pass,
+                    elements,
+                    &item_atlas_uvs,
+                );
+                pass = blurred_pass;
 
                 if let Some(skin) = *skin {
                     self.skin_preview.draw(
@@ -1916,10 +1946,6 @@ impl Renderer {
                     );
                 }
 
-                let fg = match split {
-                    Some(i) => &elements[i + 1..],
-                    None => &elements[..],
-                };
                 self.menu_pipeline.draw_from(
                     &self.ctx.device,
                     &mut pass,
@@ -2313,7 +2339,7 @@ impl Drop for Renderer {
         self.sky_pipeline.destroy(&self.ctx.device);
         self.panorama_pipeline.destroy(&self.ctx.device);
         self.menu_pipeline.destroy(&self.ctx.device);
-        self.blur_pipeline.destroy(&self.ctx.device);
+
         self.entity_outline.destroy(&self.ctx.device);
         self.post_effects.destroy(&self.ctx.device);
         self.skin_preview.destroy(&self.ctx.device);
