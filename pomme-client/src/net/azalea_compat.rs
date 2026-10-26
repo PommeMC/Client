@@ -2454,6 +2454,74 @@ fn translate_merchant_offers_765() {
     assert!(p.can_restock);
 }
 
+/// An offer whose second cost 26.2 lacks is left out, not shown cheaper;
+/// the offers around it remap and keep their order.
+#[test]
+fn translate_merchant_offers_777() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let wire_item = |name| {
+        registry_id(
+            RegistryTable::for_protocol(777).unwrap(),
+            ClientRegistry::Item,
+            name,
+        )
+    };
+    let offer = |old: &mut Vec<u8>, base: u32, second: Option<u32>| {
+        wire::write_varint(old, base);
+        old.extend_from_slice(&[2, 0]); // count, no component predicates
+        old.push(1); // result: one
+        wire::write_varint(old, wire_item("emerald"));
+        old.extend_from_slice(&[0, 0]); // no components
+        old.push(u8::from(second.is_some()));
+        if let Some(second) = second {
+            wire::write_varint(old, second);
+            old.extend_from_slice(&[1, 0]);
+        }
+        old.push(0); // out of stock
+        for n in [0i32, 12, 2, 0] {
+            old.extend_from_slice(&n.to_be_bytes()); // uses, maxUses, xp, special
+        }
+        old.extend_from_slice(&0.05f32.to_be_bytes()); // price multiplier
+        old.extend_from_slice(&0i32.to_be_bytes()); // demand
+    };
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(777, Direction::Clientbound, "merchant_offers"),
+    );
+    wire::write_varint(&mut old, 1); // container id
+    wire::write_varint(&mut old, 3); // offers
+    offer(&mut old, wire_item("diamond"), None);
+    offer(
+        &mut old,
+        wire_item("diamond"),
+        Some(wire_item("poplar_planks")),
+    );
+    offer(&mut old, wire_item("bread"), Some(wire_item("diamond")));
+    wire::write_varint(&mut old, 2); // villager level
+    wire::write_varint(&mut old, 30); // villager xp
+    old.extend_from_slice(&[1, 1]); // show progress, can restock
+
+    let ClientboundGamePacket::MerchantOffers(p) = translate_and_decode(777, old) else {
+        panic!("wrong packet");
+    };
+    use azalea_registry::builtin::ItemKind;
+    let kept: Vec<_> = p
+        .offers
+        .iter()
+        .map(|o| (o.base_cost_a.item, o.cost_b.as_ref().map(|c| c.item)))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            (ItemKind::Diamond, None),
+            (ItemKind::Bread, Some(ItemKind::Diamond))
+        ]
+    );
+    assert_eq!(p.villager_level, 2);
+}
+
 /// 1.20.5 widened `update_mob_effect`'s amplifier from a byte to a varint
 /// and dropped the trailing factor-data NBT.
 #[test]
@@ -5010,18 +5078,24 @@ fn translate_commands_777() {
     assert_eq!(p.entries.len(), 5);
 }
 
+/// A pre-1.20.5 `server_data` frame: `motd`, no icon, then `tail`.
+fn server_data_frame(id: u32, motd: &[u8], tail: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(motd);
+    out.push(0); // no icon
+    out.extend_from_slice(tail);
+    out
+}
+
+/// A motd as 1.20.3+ sends it: a string NBT tag.
+const NBT_MOTD: &[u8] = &[8, 0, 2, b'h', b'i'];
+
 /// 1.20.4's `server_data` loses its trailing `enforcesSecureChat` bool; a
 /// frame that doesn't end in exactly that bool drops.
 #[test]
 fn translate_server_data_765() {
-    let frame = |id, tail: &[u8]| {
-        let mut out = Vec::new();
-        wire::write_varint(&mut out, id);
-        out.extend_from_slice(&[8, 0, 2, b'h', b'i']); // motd: a string tag
-        out.push(0); // no icon
-        out.extend_from_slice(tail);
-        out
-    };
+    let frame = |id, tail: &[u8]| server_data_frame(id, NBT_MOTD, tail);
     let old_id = old_id(765, Direction::Clientbound, "server_data");
 
     let translated = translation_for(765)
@@ -5035,6 +5109,39 @@ fn translate_server_data_765() {
     };
     let stray = frame(old_id, &[1, 7]).into_boxed_slice();
     assert!(translation_for(765).translate_game_frame(stray).is_none());
+}
+
+/// The secure-chat flag reads out of `server_data` in both pre-1.20.5 motd
+/// forms, and out of nothing else.
+#[test]
+fn server_data_secure_chat_765() {
+    let nbt = server_data_frame(
+        old_id(765, Direction::Clientbound, "server_data"),
+        NBT_MOTD,
+        &[1],
+    );
+    assert_eq!(
+        translation_for(765).server_data_secure_chat(&nbt),
+        Some(true)
+    );
+
+    let json = server_data_frame(
+        old_id(764, Direction::Clientbound, "server_data"),
+        &[4, b'"', b'h', b'i', b'"'],
+        &[0],
+    );
+    assert_eq!(
+        translation_for(764).server_data_secure_chat(&json),
+        Some(false)
+    );
+
+    let mut other = Vec::new();
+    wire::write_varint(
+        &mut other,
+        old_id(765, Direction::Clientbound, "keep_alive"),
+    );
+    other.extend_from_slice(&[0; 8]);
+    assert_eq!(translation_for(765).server_data_secure_chat(&other), None);
 }
 
 /// 1.20.1's parser ids sit where 26.2 had since inserted parsers, and its
@@ -5398,7 +5505,7 @@ fn sample_component(
         }
         Struct(fields) => fields.iter().for_each(|f| deeper(f, out)),
         Ref(inner) => deeper(inner, out),
-        Holder(direct) => {
+        Holder(direct) | RegistryHolder(_, direct) => {
             if inline {
                 out.push(0);
                 deeper(direct, out);
@@ -5406,6 +5513,7 @@ fn sample_component(
                 out.push(2);
             }
         }
+        RegistryId(_) => out.push(1),
         HolderSet => out.extend([2, 1]),
         ById(arms) => {
             out.push(arms.len() as u8 - 1);

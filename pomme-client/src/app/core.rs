@@ -2837,6 +2837,10 @@ impl AppCore {
                     self.apply_cursor_grab(window, Some(game));
                 }
                 NetworkEvent::SecureChatEnforced { enforced } => {
+                    // TODO: the `UNSECURE_SERVER_WARNING` toast, once per
+                    // connection when this is false (`handleLogin`; 1.20.x
+                    // `handleServerData`). 1.20.x sends a placeholder false
+                    // from `login` first, so wait for its `server_data`.
                     game.server_enforces_secure_chat = enforced;
                 }
                 NetworkEvent::PlayerScore { entity_id, score } => {

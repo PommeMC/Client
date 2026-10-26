@@ -139,6 +139,10 @@ fn replay(version: &ProtocolVersion) -> Vec<(String, String)> {
             failures.push((packet, error));
         }
     }
+    let pre_1_20_5 = protocol <= ProtocolVersion::from_name("1.20.4").unwrap().protocol;
+    if pre_1_20_5 && session.secure_chat.is_none() {
+        failures.push(("server_data's secure-chat flag".into(), "not read".into()));
+    }
     failures
 }
 
@@ -160,6 +164,8 @@ struct Session {
     events_rx: crossbeam_channel::Receiver<super::NetworkEvent>,
     /// The login dimension's section count, which every chunk must carry.
     sections: Option<u32>,
+    /// The secure-chat flag a pre-1.20.5 `server_data` carried.
+    secure_chat: Option<bool>,
     // Kept so the readers' sends succeed.
     _outbound: tokio::sync::mpsc::UnboundedReceiver<super::sender::Outbound>,
 }
@@ -179,6 +185,7 @@ impl Session {
             events,
             events_rx,
             sections: None,
+            secure_chat: None,
             _outbound: outbound,
         }
     }
@@ -240,6 +247,9 @@ impl Session {
             for frame in frames {
                 self.configure(&frame)?;
             }
+        }
+        if let Some(flag) = translation.and_then(|t| t.server_data_secure_chat(frame)) {
+            self.secure_chat = Some(flag);
         }
         let raw = match translation {
             Some(t) => t

@@ -100,10 +100,16 @@ pub(super) fn login_events(
             online_mode: login.online_mode,
         },
     );
+    send_secure_chat(login.enforces_secure_chat, event_tx);
+}
+
+/// Vanilla `ClientPacketListener.enforcesSecureChat`: the server's flag
+/// counts only while profile keys can be validated.
+pub(super) fn send_secure_chat(server_enforces: bool, event_tx: &Sender<NetworkEvent>) {
     send_ordered(
         event_tx,
         NetworkEvent::SecureChatEnforced {
-            enforced: ProfileKeyServices::get().is_some() && login.enforces_secure_chat,
+            enforced: ProfileKeyServices::get().is_some() && server_enforces,
         },
     );
 }
