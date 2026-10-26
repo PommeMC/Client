@@ -3747,6 +3747,8 @@ pub fn update_game(
 
     // F1 hides the closed-chat overlay; an open chat is a screen and renders
     // regardless (vanilla Hud.extractChat vs ChatScreen).
+    // TODO: the closed chat (and titles) build after screens, so they draw
+    // sharp over the menu blur; vanilla's HUD extracts them before the screen.
     if !game.hide_gui || game.chat.is_focused() {
         let command_tree = game.command_tree.clone();
         // Vanilla `ChatScreen.mouseClicked` offers the click to the chat's own
@@ -4277,6 +4279,8 @@ pub fn update_game(
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
         PauseAction::Options => {
+            // TODO: back from these options, the pause menu ignores Escape and
+            // clicks (tests/ingame/ui/menu_blur.toml stops before it).
             core.menu.open_options(&core.input.key_bindings);
             game.options_from_game = true;
             core.apply_cursor_grab(&gfx.window, Some(game));
