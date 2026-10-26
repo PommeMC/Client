@@ -1243,7 +1243,11 @@ fn buffer_image_copies(copies: &[TexelCopy]) -> Vec<vk::BufferImageCopy> {
                 base_array_layer: copy.layer,
                 layer_count: 1,
             },
-            image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+            image_offset: vk::Offset3D {
+                x: copy.origin[0] as i32,
+                y: copy.origin[1] as i32,
+                z: 0,
+            },
             image_extent: vk::Extent3D {
                 width: copy.width,
                 height: copy.height,

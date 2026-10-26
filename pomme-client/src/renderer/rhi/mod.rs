@@ -127,6 +127,8 @@ pub struct TexelCopy {
     pub buffer_offset: u64,
     pub mip_level: u32,
     pub layer: u32,
+    /// The top-left texel written in the level.
+    pub origin: [u32; 2],
     pub width: u32,
     pub height: u32,
 }

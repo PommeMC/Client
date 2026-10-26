@@ -208,6 +208,7 @@ pub fn layer_copies(width: u32, height: u32, layers: u32, layer_bytes: u64) -> V
             buffer_offset: layer_bytes * u64::from(layer),
             mip_level: 0,
             layer,
+            origin: [0, 0],
             width,
             height,
         })
@@ -378,6 +379,7 @@ fn record_image_upload(
                 buffer_offset,
                 mip_level: level,
                 layer: 0,
+                origin: [0, 0],
                 width: w,
                 height: h,
             };

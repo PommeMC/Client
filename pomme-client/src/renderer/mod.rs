@@ -765,6 +765,10 @@ impl Renderer {
         self.camera.set_sleeping_look(yaw_deg);
     }
 
+    pub fn tick_texture_animations(&mut self) {
+        self.atlas.tick_animations();
+    }
+
     pub fn set_entity_camera_look(&mut self, look_dir: Option<LookDirection>) {
         self.camera.set_entity_look(look_dir);
     }
@@ -1433,6 +1437,7 @@ impl Renderer {
         }
 
         let encoder = self.frames.begin(&self.ctx.device)?;
+        self.atlas.record_animation_upload(&encoder, frame);
 
         let scissor = rhi::Rect::covering(self.swapchain.extent);
 

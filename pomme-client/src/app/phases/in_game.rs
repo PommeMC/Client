@@ -2302,6 +2302,13 @@ pub fn update_game(
 
     // Menus never pause the simulation; tick_physics substitutes neutral input.
     core.tick_accumulator += dt;
+    // Vanilla `Minecraft.runTick` ticks textures once per frame that runs any
+    // ticks, before them.
+    // TODO: vanilla also skips this while singleplayer is paused and under
+    // `/tick freeze` (`isLevelRunningNormally`); pomme tracks neither yet.
+    if core.tick_accumulator >= TICK_RATE {
+        gfx.renderer.tick_texture_animations();
+    }
     while core.tick_accumulator >= TICK_RATE {
         game.tick_count = game.tick_count.wrapping_add(1);
         // Vanilla `Minecraft.tick` order: `gameMode.tick` drives the connection

@@ -117,6 +117,13 @@ pub struct TextureAtlas {
     /// `AtlasRegion::sprite`; the terrain shaders wrap greedy UVs inside it.
     pub sprite_rects: rhi::backend::Buffer,
     pub uv_map: AtlasUVMap,
+    mip_levels: u32,
+    animated: Vec<AnimatedSprite>,
+    /// A tick ran since the last upload; vanilla only draws after a tick.
+    animation_ticked: bool,
+    /// Per frame in flight, room for every animated sprite's levels at once;
+    /// empty when nothing animates.
+    animation_staging: Vec<rhi::backend::Buffer>,
 }
 
 const MISSING_TILE: u32 = 16;
@@ -135,6 +142,7 @@ struct Source {
     translucent: bool,
     alpha_mask: Option<SpriteAlphaMask>,
     mip_source: Option<MipSource>,
+    animation: Option<SpriteAnimation>,
 }
 
 impl Source {
@@ -149,8 +157,112 @@ impl Source {
             translucent: false,
             alpha_mask: None,
             mip_source: None,
+            animation: None,
         }
     }
+}
+
+/// Vanilla `SpriteContents.AnimatedTexture`: the frames a sprite plays and
+/// each unique frame's pixels.
+struct SpriteAnimation {
+    /// `(slot in pixels, ticks shown)` in play order.
+    frames: Vec<(usize, u32)>,
+    interpolate: bool,
+    /// Each unique frame's levels, level 0 first. Level 0 only until
+    /// `build_mip_chain` cuts a mipped sprite's levels from its strip mips.
+    pixels: Vec<Vec<Vec<u8>>>,
+}
+
+impl SpriteAnimation {
+    /// `None` unless `layout` plays more than one frame.
+    fn new(strip: &[u8], strip_width: u32, layout: &AnimationLayout) -> Option<Self> {
+        if layout.frames.len() <= 1 {
+            return None;
+        }
+        let slot = |index| {
+            layout
+                .unique_frames
+                .iter()
+                .position(|&frame| frame == index)
+                .expect("unique_frames holds every played frame")
+        };
+        Some(Self {
+            frames: layout
+                .frames
+                .iter()
+                .map(|frame| (slot(frame.index), frame.time))
+                .collect(),
+            interpolate: layout.interpolate,
+            pixels: layout
+                .unique_frames
+                .iter()
+                .map(|&frame| vec![extract_frame_rgba(strip, strip_width, layout, frame)])
+                .collect(),
+        })
+    }
+}
+
+/// Vanilla `SpriteContents.AnimationState`: a placed animated sprite and where
+/// it is in its frames.
+struct AnimatedSprite {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    animation: SpriteAnimation,
+    frame: usize,
+    sub_frame: u32,
+    /// The shown frame changed since the last upload. Vanilla's flag only
+    /// covers the last tick; several ticks can pass between two frames here.
+    dirty: bool,
+}
+
+impl AnimatedSprite {
+    /// Vanilla `AnimationState.tick`.
+    fn tick(&mut self) {
+        self.sub_frame += 1;
+        let (slot, time) = self.animation.frames[self.frame];
+        if self.sub_frame >= time {
+            self.frame = (self.frame + 1) % self.animation.frames.len();
+            self.sub_frame = 0;
+            self.dirty |= self.animation.frames[self.frame].0 != slot;
+        }
+    }
+
+    /// Vanilla `AnimationState.needsToDraw`.
+    fn needs_upload(&self) -> bool {
+        self.animation.interpolate || self.dirty
+    }
+
+    fn levels(&self) -> u32 {
+        self.animation.pixels[0].len() as u32
+    }
+
+    /// Level `level` as vanilla's `drawToAtlas` writes it: the shown frame, or
+    /// mixed toward the next one by the frame's progress.
+    fn level_pixels<'a>(&'a self, level: usize, scratch: &'a mut Vec<u8>) -> &'a [u8] {
+        let frames = &self.animation.frames;
+        let (slot, time) = frames[self.frame];
+        let current = &self.animation.pixels[slot][level];
+        if !self.animation.interpolate {
+            return current;
+        }
+        let next = &self.animation.pixels[frames[(self.frame + 1) % frames.len()].0][level];
+        // Vanilla packs the progress into the vertex index as an int of
+        // thousandths.
+        let progress = ((self.sub_frame as f32 / time as f32) * 1000.0) as i32 as f32 / 1000.0;
+        mix_rgba8(current, next, progress, scratch);
+        scratch
+    }
+}
+
+/// `animate_sprite_interpolate.fsh`: `mix` on the atlas's RGBA8 values.
+fn mix_rgba8(current: &[u8], next: &[u8], progress: f32, out: &mut Vec<u8>) {
+    out.clear();
+    out.extend(current.iter().zip(next).map(|(&a, &b)| {
+        let mixed = f32::from(a) / 255.0 * (1.0 - progress) + f32::from(b) / 255.0 * progress;
+        (mixed * 255.0).round() as u8
+    }));
 }
 
 struct MipSource {
@@ -193,8 +305,7 @@ struct AnimationMetadata {
     height: Option<u32>,
     frames: Option<Vec<AnimationFrameSpec>>,
     frametime: Option<u32>,
-    #[serde(rename = "interpolate")]
-    _interpolate: Option<bool>,
+    interpolate: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -214,6 +325,20 @@ impl AnimationFrameSpec {
     fn has_valid_time(&self) -> bool {
         !matches!(self, Self::Timed { time: Some(0), .. })
     }
+
+    fn time(&self) -> Option<u32> {
+        match self {
+            Self::Index(_) => None,
+            Self::Timed { time, .. } => *time,
+        }
+    }
+}
+
+/// Vanilla `SpriteContents.FrameInfo`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AnimationFrame {
+    index: u32,
+    time: u32,
 }
 
 #[derive(Clone)]
@@ -223,6 +348,9 @@ struct AnimationLayout {
     frames_per_row: u32,
     unique_frames: Vec<u32>,
     initial_display_frame: u32,
+    /// The frames played, empty for a still sprite.
+    frames: Vec<AnimationFrame>,
+    interpolate: bool,
 }
 
 fn static_animation_layout(width: u32, height: u32) -> AnimationLayout {
@@ -232,6 +360,8 @@ fn static_animation_layout(width: u32, height: u32) -> AnimationLayout {
         frames_per_row: 1,
         unique_frames: vec![0],
         initial_display_frame: 0,
+        frames: Vec::new(),
+        interpolate: false,
     }
 }
 
@@ -283,34 +413,42 @@ fn animation_layout_from_metadata(
 
     let frames_per_row = width / frame_width;
     let total_frames = frames_per_row * (height / frame_height);
-    let listed_frames: Vec<u32> = metadata
-        .frames
-        .as_ref()
-        .map(|frames| frames.iter().map(AnimationFrameSpec::index).collect())
-        .unwrap_or_else(|| (0..total_frames).collect());
-    let valid_frames: Vec<u32> = listed_frames
-        .into_iter()
-        .filter(|frame| *frame < total_frames)
-        .collect();
+    let frame_time = metadata.frametime.unwrap_or(1);
+    let frames: Vec<AnimationFrame> = match &metadata.frames {
+        Some(frames) => frames
+            .iter()
+            .map(|frame| AnimationFrame {
+                index: frame.index(),
+                time: frame.time().unwrap_or(frame_time),
+            })
+            .filter(|frame| frame.index < total_frames)
+            .collect(),
+        None => (0..total_frames)
+            .map(|index| AnimationFrame {
+                index,
+                time: frame_time,
+            })
+            .collect(),
+    };
 
     // SpriteContents drops the AnimatedTexture wrapper when zero or one valid
     // frame remains. In that case frame lookups ignore the metadata index and
     // sample the top-left logical frame from the original image.
-    if valid_frames.len() <= 1 {
+    if frames.len() <= 1 {
         return Some(AnimationLayout {
             frame_width,
             frame_height,
             frames_per_row,
-            unique_frames: vec![0],
-            initial_display_frame: 0,
+            ..static_animation_layout(width, height)
         });
     }
 
-    let initial_display_frame = valid_frames[0];
+    let initial_display_frame = frames[0].index;
     let mut seen = HashSet::new();
-    let unique_frames: Vec<u32> = valid_frames
-        .into_iter()
-        .filter(|frame| seen.insert(*frame))
+    let unique_frames: Vec<u32> = frames
+        .iter()
+        .map(|frame| frame.index)
+        .filter(|&index| seen.insert(index))
         .collect();
 
     Some(AnimationLayout {
@@ -319,6 +457,8 @@ fn animation_layout_from_metadata(
         frames_per_row,
         unique_frames,
         initial_display_frame,
+        frames,
+        interpolate: metadata.interpolate.unwrap_or(false),
     })
 }
 
@@ -454,6 +594,7 @@ fn load_source(
             let (opaque, translucent) = sprite_transparency(&data);
             let display =
                 extract_frame_rgba(&data, width, &animation, animation.initial_display_frame);
+            let sprite_animation = SpriteAnimation::new(&data, width, &animation);
             let texture = metadata.texture.as_ref();
             let mip_source = uses_block_atlas_mip_chain(name).then(|| MipSource {
                 full_data: data,
@@ -472,6 +613,7 @@ fn load_source(
                 translucent,
                 alpha_mask,
                 mip_source,
+                animation: sprite_animation,
             }
         }
         None => {
@@ -519,7 +661,7 @@ impl TextureAtlas {
             atlas_pixels,
             atlas_size,
             mip_level,
-            sources,
+            mut sources,
             placements,
         } = Self::build_cpu(
             jar_assets_dir,
@@ -536,8 +678,13 @@ impl TextureAtlas {
             rhi::BufferUsages::STORAGE,
         )?;
 
-        let staging_pixels =
-            build_mip_chain(atlas_pixels, atlas_size, mip_level, &sources, &placements);
+        let staging_pixels = build_mip_chain(
+            atlas_pixels,
+            atlas_size,
+            mip_level,
+            &mut sources,
+            &placements,
+        );
 
         let mip_levels = mip_level + 1;
         let texture = rhi::backend::Texture::try_new(
@@ -571,9 +718,42 @@ impl TextureAtlas {
             &rhi::SamplerDesc::NEAREST.with_mips(mip_levels),
         )?;
 
+        let animated: Vec<AnimatedSprite> = sources
+            .into_iter()
+            .filter_map(|source| {
+                let (x, y) = (*placements.get(source.name.as_str())?)?;
+                Some(AnimatedSprite {
+                    x,
+                    y,
+                    width: source.w,
+                    height: source.h,
+                    animation: source.animation?,
+                    frame: 0,
+                    sub_frame: 0,
+                    dirty: false,
+                })
+            })
+            .collect();
+        let staging_bytes: usize = animated
+            .iter()
+            .flat_map(|sprite| &sprite.animation.pixels[0])
+            .map(Vec::len)
+            .sum();
+        let animation_staging = if animated.is_empty() {
+            Vec::new()
+        } else {
+            util::create_per_frame_host_buffers(
+                device,
+                staging_bytes as u64,
+                rhi::BufferUsages::COPY_SRC,
+                "atlas_animation",
+            )
+        };
+
         tracing::info!(
-            "Atlas built: {atlas_size}x{atlas_size}, mip level {mip_level}, {} regions",
-            uv_map.regions.len()
+            "Atlas built: {atlas_size}x{atlas_size}, mip level {mip_level}, {} regions, {} animated",
+            uv_map.regions.len(),
+            animated.len()
         );
 
         Ok(Self {
@@ -581,7 +761,79 @@ impl TextureAtlas {
             sampler,
             sprite_rects,
             uv_map,
+            mip_levels,
+            animated,
+            animation_ticked: false,
+            animation_staging,
         })
+    }
+
+    /// Vanilla `TextureAtlas.cycleAnimationFrames`' tick half; the upload
+    /// waits for [`Self::record_animation_upload`].
+    pub fn tick_animations(&mut self) {
+        for sprite in &mut self.animated {
+            sprite.tick();
+        }
+        self.animation_ticked = true;
+    }
+
+    /// Vanilla `uploadAnimationFrames`: writes every sprite that needs it
+    /// into its rectangle at each of its levels.
+    pub fn record_animation_upload(
+        &mut self,
+        encoder: &rhi::backend::CommandEncoder,
+        frame: usize,
+    ) {
+        if !std::mem::take(&mut self.animation_ticked) {
+            return;
+        }
+        let Some(staging) = self.animation_staging.get_mut(frame) else {
+            return;
+        };
+        let mut copies = Vec::new();
+        let mut offset = 0;
+        let mut scratch = Vec::new();
+        for sprite in self
+            .animated
+            .iter_mut()
+            .filter(|sprite| sprite.needs_upload())
+        {
+            sprite.dirty = false;
+            for level in 0..sprite.levels() {
+                let pixels = sprite.level_pixels(level as usize, &mut scratch);
+                staging.write_at(offset, pixels);
+                copies.push(rhi::TexelCopy {
+                    buffer_offset: offset as u64,
+                    mip_level: level,
+                    layer: 0,
+                    origin: [sprite.x >> level, sprite.y >> level],
+                    width: sprite.width >> level,
+                    height: sprite.height >> level,
+                });
+                offset += pixels.len();
+            }
+        }
+        if copies.is_empty() {
+            return;
+        }
+        let transition = |from, to| rhi::backend::TextureTransition {
+            texture: self.texture.handle(),
+            range: rhi::TextureRange {
+                mips: self.mip_levels,
+                ..rhi::TextureRange::BASE
+            },
+            from,
+            to,
+        };
+        encoder.transition_textures(&[transition(
+            rhi::TextureUse::ShaderRead,
+            rhi::TextureUse::CopyDst,
+        )]);
+        encoder.copy_buffer_to_texture(staging.handle(), self.texture.handle(), &copies);
+        encoder.transition_textures(&[transition(
+            rhi::TextureUse::CopyDst,
+            rhi::TextureUse::ShaderRead,
+        )]);
     }
 
     /// The CPU half of [`Self::build`]: loads and packs every sprite into the
@@ -694,6 +946,7 @@ impl TextureAtlas {
     }
 
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        util::destroy_buffers(device, &mut self.animation_staging);
         self.sampler.destroy(device);
         std::mem::take(&mut self.texture).destroy(device);
         std::mem::take(&mut self.sprite_rects).destroy(device);
@@ -713,7 +966,7 @@ fn build_mip_chain(
     atlas_pixels: Vec<u8>,
     atlas_size: u32,
     mip_level: u32,
-    sources: &[Source],
+    sources: &mut [Source],
     placements: &HashMap<String, Option<(u32, u32)>>,
 ) -> Vec<u8> {
     let mut levels = Vec::with_capacity((mip_level + 1) as usize);
@@ -751,6 +1004,7 @@ fn build_mip_chain(
         let Some(mip_source) = &source.mip_source else {
             continue;
         };
+        let layout = &mip_source.animation;
         let full_mips = generate_rgba_mips(
             mip_source.full_data.clone(),
             mip_source.full_width,
@@ -759,14 +1013,31 @@ fn build_mip_chain(
             mip_source.strategy,
             mip_source.alpha_cutoff_bias,
         );
-        for level in 0..=mip_level {
-            let frame = extract_frame_rgba_at_mip(
-                &full_mips[level as usize],
-                mip_source.full_width >> level,
-                &mip_source.animation,
-                mip_source.animation.initial_display_frame,
-                level,
-            );
+        let frame_levels = |frame| -> Vec<Vec<u8>> {
+            (0..=mip_level)
+                .map(|level| {
+                    extract_frame_rgba_at_mip(
+                        &full_mips[level as usize],
+                        mip_source.full_width >> level,
+                        layout,
+                        frame,
+                        level,
+                    )
+                })
+                .collect()
+        };
+        if let Some(animation) = &mut source.animation {
+            animation.pixels = layout
+                .unique_frames
+                .iter()
+                .map(|&frame| frame_levels(frame))
+                .collect();
+        }
+        for (level, frame) in frame_levels(layout.initial_display_frame)
+            .into_iter()
+            .enumerate()
+        {
+            let level = level as u32;
             copy_rect_rgba(
                 &frame,
                 source.w >> level,
@@ -1258,13 +1529,14 @@ mod tests {
                 strategy: MipmapStrategy::Mean,
                 alpha_cutoff_bias: 0.0,
             }),
+            animation: None,
         }
     }
 
     #[test]
     fn mips_stay_within_sprite_regions() {
         const SIZE: u32 = 64;
-        let sources = [
+        let mut sources = [
             solid_source("red", 16, 16, [255, 0, 0, 255]),
             solid_source("blue", 16, 16, [0, 0, 255, 255]),
         ];
@@ -1273,7 +1545,7 @@ mod tests {
             ("blue".to_string(), Some((32, 0))),
         ]);
         let pixels = vec![0u8; (SIZE * SIZE * 4) as usize];
-        let chain = build_mip_chain(pixels, SIZE, MAX_MIP_LEVEL, &sources, &placements);
+        let chain = build_mip_chain(pixels, SIZE, MAX_MIP_LEVEL, &mut sources, &placements);
 
         let mut offset = (SIZE * SIZE * 4) as usize;
         for level in 1..=MAX_MIP_LEVEL {
@@ -1399,7 +1671,7 @@ mod tests {
     #[test]
     fn odd_sized_block_sprite_populates_only_supported_mip_levels() {
         const SIZE: u32 = 64;
-        let source = solid_source("odd", 18, 18, [17, 34, 51, 255]);
+        let mut source = solid_source("odd", 18, 18, [17, 34, 51, 255]);
         let mip_level = effective_mip_level(std::slice::from_ref(&source));
         assert_eq!(mip_level, 1);
         let placements = HashMap::from([("odd".to_string(), Some((16, 0)))]);
@@ -1407,7 +1679,7 @@ mod tests {
             vec![0; (SIZE * SIZE * 4) as usize],
             SIZE,
             mip_level,
-            std::slice::from_ref(&source),
+            std::slice::from_mut(&mut source),
             &placements,
         );
         let level_one = &chain[(SIZE * SIZE * 4) as usize..];
@@ -1442,6 +1714,174 @@ mod tests {
         );
     }
 
+    /// A `width`-wide strip of one-pixel-tall frames, frame `n` filled with
+    /// `[n, n, n, 255]`.
+    fn numbered_strip(width: u32, frames: u32) -> Vec<u8> {
+        (0..frames)
+            .flat_map(|frame| {
+                (0..width).flat_map(move |_| [frame as u8, frame as u8, frame as u8, 255])
+            })
+            .collect()
+    }
+
+    fn animated_sprite(frames: Vec<(usize, u32)>, interpolate: bool) -> AnimatedSprite {
+        AnimatedSprite {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            animation: SpriteAnimation {
+                frames,
+                interpolate,
+                pixels: vec![vec![vec![0, 0, 0, 255]], vec![vec![255, 255, 255, 255]]],
+            },
+            frame: 0,
+            sub_frame: 0,
+            dirty: false,
+        }
+    }
+
+    #[test]
+    fn animation_frames_take_their_time_or_the_default() {
+        let metadata = AnimationMetadata {
+            width: Some(1),
+            height: Some(1),
+            frames: Some(vec![
+                AnimationFrameSpec::Index(1),
+                AnimationFrameSpec::Timed {
+                    index: 0,
+                    time: Some(5),
+                },
+                AnimationFrameSpec::Timed {
+                    index: 9,
+                    time: None,
+                },
+            ]),
+            frametime: Some(3),
+            interpolate: Some(true),
+        };
+        let layout = animation_layout_from_metadata(Some(&metadata), 1, 2).unwrap();
+        assert_eq!(
+            layout.frames,
+            [
+                AnimationFrame { index: 1, time: 3 },
+                AnimationFrame { index: 0, time: 5 },
+            ]
+        );
+        assert!(layout.interpolate);
+
+        let unlisted = AnimationMetadata {
+            frames: None,
+            frametime: None,
+            interpolate: None,
+            ..metadata
+        };
+        let layout = animation_layout_from_metadata(Some(&unlisted), 1, 2).unwrap();
+        assert_eq!(
+            layout.frames,
+            [
+                AnimationFrame { index: 0, time: 1 },
+                AnimationFrame { index: 1, time: 1 },
+            ]
+        );
+        assert!(!layout.interpolate);
+    }
+
+    #[test]
+    fn sprite_animation_stores_each_unique_frame_once() {
+        let metadata = AnimationMetadata {
+            width: Some(1),
+            height: Some(1),
+            frames: Some(vec![
+                AnimationFrameSpec::Index(2),
+                AnimationFrameSpec::Index(0),
+                AnimationFrameSpec::Index(2),
+            ]),
+            frametime: Some(4),
+            interpolate: None,
+        };
+        let layout = animation_layout_from_metadata(Some(&metadata), 1, 3).unwrap();
+        let animation = SpriteAnimation::new(&numbered_strip(1, 3), 1, &layout).unwrap();
+        assert_eq!(animation.frames, [(0, 4), (1, 4), (0, 4)]);
+        assert_eq!(
+            animation.pixels,
+            [vec![vec![2, 2, 2, 255]], vec![vec![0, 0, 0, 255]]]
+        );
+
+        let still = static_animation_layout(1, 1);
+        assert!(SpriteAnimation::new(&numbered_strip(1, 1), 1, &still).is_none());
+    }
+
+    #[test]
+    fn animation_tick_matches_vanilla_animation_state() {
+        // Frames 0 (2 ticks), 1, 1, 0: a repeated frame index isn't a change.
+        let mut sprite = animated_sprite(vec![(0, 2), (1, 1), (1, 1), (0, 1)], false);
+        sprite.tick();
+        assert_eq!(
+            (sprite.frame, sprite.sub_frame, sprite.dirty),
+            (0, 1, false)
+        );
+        sprite.tick();
+        assert_eq!((sprite.frame, sprite.sub_frame, sprite.dirty), (1, 0, true));
+        sprite.dirty = false;
+        sprite.tick();
+        assert_eq!((sprite.frame, sprite.dirty), (2, false));
+        sprite.tick();
+        assert_eq!((sprite.frame, sprite.dirty), (3, true));
+        sprite.dirty = false;
+        sprite.tick();
+        assert_eq!((sprite.frame, sprite.dirty), (0, false));
+        assert!(!sprite.needs_upload());
+    }
+
+    #[test]
+    fn interpolated_frames_mix_by_thousandths_of_progress() {
+        let mut sprite = animated_sprite(vec![(0, 3), (1, 3)], true);
+        assert!(sprite.needs_upload());
+        let mut scratch = Vec::new();
+        assert_eq!(sprite.level_pixels(0, &mut scratch), [0, 0, 0, 255]);
+        // 1/3 packs as 333 thousandths: 0.333 * 255 = 84.9.
+        sprite.tick();
+        assert_eq!(sprite.level_pixels(0, &mut scratch), [85, 85, 85, 255]);
+        sprite.tick();
+        assert_eq!(sprite.level_pixels(0, &mut scratch), [170, 170, 170, 255]);
+        // The last frame mixes back toward the first.
+        sprite.tick();
+        sprite.tick();
+        assert_eq!(sprite.level_pixels(0, &mut scratch), [170, 170, 170, 255]);
+    }
+
+    #[test]
+    fn mipped_animation_levels_come_from_the_strip_mips() {
+        let metadata = AnimationMetadata {
+            width: Some(4),
+            height: Some(4),
+            frames: None,
+            frametime: None,
+            interpolate: None,
+        };
+        let layout = animation_layout_from_metadata(Some(&metadata), 4, 8).unwrap();
+        // Frame 0 red, frame 1 blue.
+        let strip: Vec<u8> = [[255, 0, 0, 255], [0, 0, 255, 255]]
+            .into_iter()
+            .flat_map(|color| std::iter::repeat_n(color, 16).flatten())
+            .collect();
+        let mut source = solid_source("anim", 4, 4, [255, 0, 0, 255]);
+        let mip_source = source.mip_source.as_mut().unwrap();
+        mip_source.full_data = strip.clone();
+        mip_source.full_height = 8;
+        mip_source.animation = layout.clone();
+        source.animation = SpriteAnimation::new(&strip, 4, &layout);
+        let mut sources = [source];
+        let placements = HashMap::from([("anim".to_string(), Some((0, 0)))]);
+        build_mip_chain(vec![0; 16 * 16 * 4], 16, 2, &mut sources, &placements);
+
+        let pixels = &sources[0].animation.as_ref().unwrap().pixels;
+        assert_eq!(pixels[1].len(), 3);
+        assert_eq!(pixels[1][1], [0, 0, 255, 255].repeat(4));
+        assert_eq!(pixels[1][2], [0, 0, 255, 255]);
+    }
+
     #[test]
     fn explicit_animation_initial_display_uses_first_listed_frame() {
         let metadata = AnimationMetadata {
@@ -1452,7 +1892,7 @@ mod tests {
                 AnimationFrameSpec::Index(0),
             ]),
             frametime: None,
-            _interpolate: None,
+            interpolate: None,
         };
         let layout = animation_layout_from_metadata(Some(&metadata), 4, 2).unwrap();
         assert_eq!(layout.initial_display_frame, 2);
@@ -1480,7 +1920,7 @@ mod tests {
                 AnimationFrameSpec::Index(2),
             ]),
             frametime: None,
-            _interpolate: None,
+            interpolate: None,
         };
         let layout = animation_layout_from_metadata(Some(&metadata), 2, 6).unwrap();
         assert_eq!(layout.frame_width, 2);
@@ -1523,7 +1963,7 @@ mod tests {
             height: None,
             frames: Some(vec![AnimationFrameSpec::Index(2)]),
             frametime: None,
-            _interpolate: None,
+            interpolate: None,
         };
         let layout = animation_layout_from_metadata(Some(&metadata), 2, 6).unwrap();
 
@@ -1542,7 +1982,7 @@ mod tests {
             height: None,
             frames: Some(Vec::new()),
             frametime: None,
-            _interpolate: None,
+            interpolate: None,
         };
         let layout = animation_layout_from_metadata(Some(&metadata), 2, 6).unwrap();
 

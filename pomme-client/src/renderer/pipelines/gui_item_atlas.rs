@@ -10,6 +10,9 @@ const TARGET_SLOT_CAPACITY: u32 = 256;
 const MIN_ATLAS_PX: u32 = 512;
 const MAX_ATLAS_PX: u32 = 4096;
 
+// TODO: vanilla marks an item animated when any of its quads samples an
+// animated sprite (`CuboidItemModelWrapper`, material flag 2) and re-renders
+// it every frame, so a magma block icon animates; pomme bakes those once.
 pub fn is_animated_item(item_name: &str) -> bool {
     matches!(item_name, "compass" | "recovery_compass" | "clock")
 }
