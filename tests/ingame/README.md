@@ -26,7 +26,9 @@ just ingame-test --versions all world     # every tested version, one folder
 `--versions all` is one version per joinable protocol, its newest patch
 (`pomme_protocol::version::tested_versions`, 26.3 down to 1.20.1). A full
 sweep takes a while: each version downloads its server jar once, and the client
-installs that version's assets on its first join.
+installs that version's assets on its first join. Not every version passes yet:
+versions below 1.21.5 don't load chunks, and no script is gated by version so
+far, so a sweep shows what's still to fix rather than a green run.
 
 Scripts live in a folder per area (`blocks`, `entities`, `items`, `player`,
 `ui`, `world`); a new one goes in the folder it tests. A script's name is its

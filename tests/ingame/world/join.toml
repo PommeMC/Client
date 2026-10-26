@@ -1,7 +1,7 @@
 # Joining works end to end: chunks arrive (the floor exists and holds the
 # player up) and a chat command round-trips, in a corner no other script
-# builds in. Valid on every version, so the
-# multi-version sweep catches a translation that breaks the join itself.
+# builds in. Valid on every version, so the multi-version sweep catches a
+# translation that breaks the join itself.
 
 [[step]]
 wait_ms = 2000

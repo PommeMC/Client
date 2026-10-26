@@ -353,7 +353,8 @@ use azalea_registry::Registry;
 use azalea_registry::builtin::DataComponentKind;
 use glam::DVec3;
 use pomme_protocol::codec::Reader;
-use pomme_protocol::version::NATIVE;
+pub use pomme_protocol::version::joinable;
+use pomme_protocol::version::{NATIVE, TRANSLATED};
 use pomme_protocol::{
     ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, RegistryTable, wire,
 };
@@ -816,9 +817,6 @@ impl Ids763 {
         })
     }
 }
-
-use pomme_protocol::version::TRANSLATED;
-pub use pomme_protocol::version::joinable;
 
 /// A wire id in `registry` as the native version numbers it: remapped for a
 /// translated session, unchanged for a native one.

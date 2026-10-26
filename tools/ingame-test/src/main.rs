@@ -199,16 +199,21 @@ fn run_version(
     let dir = worker_dir(0);
     let mut server = Server::start(&java, &jar.jar, &dir)?;
     run(first, &mut server, &dir.join("client"))?;
-    drop(server);
 
     let queue = Mutex::new(rest.iter());
+    let mut first_server = Some(server);
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..jobs.min(rest.len()))
             .map(|n| {
                 let (queue, run, java, jar) = (&queue, &run, &java, &jar.jar);
+                // Worker 0 keeps the warm-up's server.
+                let server = first_server.take();
                 scope.spawn(move || -> Result<(), String> {
                     let dir = worker_dir(n);
-                    let mut server = Server::start(java, jar, &dir)?;
+                    let mut server = match server {
+                        Some(server) => server,
+                        None => Server::start(java, jar, &dir)?,
+                    };
                     let game_dir = dir.join("client");
                     loop {
                         let next = queue.lock().unwrap().next();
@@ -310,13 +315,17 @@ struct ServerJar {
 
 /// The verified server jar for `version`, downloaded on first use. The
 /// version's metadata (download url, sha1, Java major) is looked up in
-/// Mojang's version manifest once and cached next to the jar.
+/// Mojang's version manifest once and cached next to the jar, and looked up
+/// again if the cache can't be read.
 fn server_jar(version: &ProtocolVersion) -> Result<ServerJar, String> {
     let dir = Path::new(OUT_DIR).join("servers").join(version.name);
     let meta_path = dir.join("version.json");
-    let meta: serde_json::Value = match std::fs::read(&meta_path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
-        Err(_) => {
+    let cached = std::fs::read(&meta_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let meta: serde_json::Value = match cached {
+        Some(meta) => meta,
+        None => {
             let meta = version_meta(version.name)?;
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             std::fs::write(&meta_path, meta.to_string()).map_err(|e| e.to_string())?;
