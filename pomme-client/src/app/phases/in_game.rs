@@ -4569,9 +4569,10 @@ fn emit_item_copies(
     let tints: std::sync::Arc<[u32]> = render_assets
         .item_tint_palette(item_name, item_stack, None)
         .into();
+    let name: std::sync::Arc<str> = item_name.into();
     let mut push = |copy_offset: glam::Mat4| {
         infos.push(ItemRenderInfo {
-            item_name: item_name.to_string(),
+            item_name: name.clone(),
             tints: tints.clone(),
             model_matrix: base * copy_offset * ground_transform,
             light,

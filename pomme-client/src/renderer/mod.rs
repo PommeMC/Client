@@ -1581,6 +1581,7 @@ impl Renderer {
                 &self.ctx.device,
                 &mut bake,
                 frame,
+                bake_list.len(),
                 required_tint_colors,
             );
             for job in &bake_list {
