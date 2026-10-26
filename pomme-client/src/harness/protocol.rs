@@ -277,7 +277,7 @@ pub fn inventory(game: &GameState) -> InventoryInfo {
         creative: game.creative_inventory_open.then(|| {
             let state = &game.creative_state;
             CreativeInfo {
-                tab: state.tab_id(),
+                tab: state.tab.id(),
                 row: crate::ui::creative_inventory::scroll_row(state),
                 search: state.search.value().to_owned(),
             }

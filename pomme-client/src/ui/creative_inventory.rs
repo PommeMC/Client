@@ -98,8 +98,6 @@ enum ItemSource {
 }
 
 struct TabMeta {
-    /// The vanilla `creative_mode_tab` registry id.
-    id: &'static str,
     row: Row,
     col: u8,
     icon: &'static str,
@@ -111,7 +109,6 @@ impl CreativeTab {
     fn meta(self) -> TabMeta {
         match self {
             CreativeTab::BuildingBlocks => TabMeta {
-                id: "building_blocks",
                 row: Row::Top,
                 col: 1,
                 icon: "bricks",
@@ -119,7 +116,6 @@ impl CreativeTab {
                 items: ItemSource::Static(BUILDING_BLOCKS_ITEMS),
             },
             CreativeTab::ColoredBlocks => TabMeta {
-                id: "colored_blocks",
                 row: Row::Top,
                 col: 2,
                 icon: "cyan_wool",
@@ -127,7 +123,6 @@ impl CreativeTab {
                 items: ItemSource::Static(COLORED_BLOCKS_ITEMS),
             },
             CreativeTab::NaturalBlocks => TabMeta {
-                id: "natural_blocks",
                 row: Row::Top,
                 col: 3,
                 icon: "grass_block",
@@ -135,7 +130,6 @@ impl CreativeTab {
                 items: ItemSource::Static(NATURAL_BLOCKS_ITEMS),
             },
             CreativeTab::FunctionalBlocks => TabMeta {
-                id: "functional_blocks",
                 row: Row::Top,
                 col: 4,
                 icon: "oak_sign",
@@ -143,7 +137,6 @@ impl CreativeTab {
                 items: ItemSource::Static(FUNCTIONAL_BLOCKS_ITEMS),
             },
             CreativeTab::RedstoneBlocks => TabMeta {
-                id: "redstone_blocks",
                 row: Row::Top,
                 col: 5,
                 icon: "redstone",
@@ -151,7 +144,6 @@ impl CreativeTab {
                 items: ItemSource::Static(REDSTONE_BLOCKS_ITEMS),
             },
             CreativeTab::Hotbar => TabMeta {
-                id: "hotbar",
                 row: Row::Top,
                 col: 6,
                 icon: "bookshelf",
@@ -159,7 +151,6 @@ impl CreativeTab {
                 items: ItemSource::Empty,
             },
             CreativeTab::Search => TabMeta {
-                id: "search",
                 row: Row::Top,
                 col: 7,
                 icon: "compass",
@@ -167,7 +158,6 @@ impl CreativeTab {
                 items: ItemSource::Search,
             },
             CreativeTab::ToolsAndUtilities => TabMeta {
-                id: "tools_and_utilities",
                 row: Row::Bottom,
                 col: 1,
                 icon: "diamond_pickaxe",
@@ -175,7 +165,6 @@ impl CreativeTab {
                 items: ItemSource::Static(TOOLS_AND_UTILITIES_ITEMS),
             },
             CreativeTab::Combat => TabMeta {
-                id: "combat",
                 row: Row::Bottom,
                 col: 2,
                 icon: "netherite_sword",
@@ -183,7 +172,6 @@ impl CreativeTab {
                 items: ItemSource::Static(COMBAT_ITEMS),
             },
             CreativeTab::FoodAndDrinks => TabMeta {
-                id: "food_and_drinks",
                 row: Row::Bottom,
                 col: 3,
                 icon: "golden_apple",
@@ -191,7 +179,6 @@ impl CreativeTab {
                 items: ItemSource::Static(FOOD_AND_DRINKS_ITEMS),
             },
             CreativeTab::Ingredients => TabMeta {
-                id: "ingredients",
                 row: Row::Bottom,
                 col: 4,
                 icon: "iron_ingot",
@@ -199,7 +186,6 @@ impl CreativeTab {
                 items: ItemSource::Static(INGREDIENTS_ITEMS),
             },
             CreativeTab::SpawnEggs => TabMeta {
-                id: "spawn_eggs",
                 row: Row::Bottom,
                 col: 5,
                 icon: "creeper_spawn_egg",
@@ -207,7 +193,6 @@ impl CreativeTab {
                 items: ItemSource::Static(SPAWN_EGGS_ITEMS),
             },
             CreativeTab::OpBlocks => TabMeta {
-                id: "op_blocks",
                 row: Row::Bottom,
                 col: 6,
                 icon: "command_block",
@@ -215,13 +200,33 @@ impl CreativeTab {
                 items: ItemSource::Static(OP_BLOCKS_ITEMS),
             },
             CreativeTab::SurvivalInventory => TabMeta {
-                id: "inventory",
                 row: Row::Bottom,
                 col: 7,
                 icon: "chest",
                 title: "Survival Inventory",
                 items: ItemSource::Empty,
             },
+        }
+    }
+
+    /// The vanilla `creative_mode_tab` registry id.
+    #[cfg(feature = "test-harness")]
+    pub fn id(self) -> &'static str {
+        match self {
+            CreativeTab::BuildingBlocks => "building_blocks",
+            CreativeTab::ColoredBlocks => "colored_blocks",
+            CreativeTab::NaturalBlocks => "natural_blocks",
+            CreativeTab::FunctionalBlocks => "functional_blocks",
+            CreativeTab::RedstoneBlocks => "redstone_blocks",
+            CreativeTab::Hotbar => "hotbar",
+            CreativeTab::Search => "search",
+            CreativeTab::ToolsAndUtilities => "tools_and_utilities",
+            CreativeTab::Combat => "combat",
+            CreativeTab::FoodAndDrinks => "food_and_drinks",
+            CreativeTab::Ingredients => "ingredients",
+            CreativeTab::SpawnEggs => "spawn_eggs",
+            CreativeTab::OpBlocks => "op_blocks",
+            CreativeTab::SurvivalInventory => "inventory",
         }
     }
 
@@ -322,11 +327,6 @@ impl CreativeState {
         self.select_tab(self.tab);
     }
 
-    /// The selected tab's vanilla registry id, e.g. `building_blocks`.
-    pub fn tab_id(&self) -> &'static str {
-        self.tab.meta().id
-    }
-
     /// Discards the carried stack and any pending drag/double-click state.
     /// Must run whenever the screen closes, or a stale drag would re-commit on
     /// reopen.
@@ -425,6 +425,7 @@ fn scrollable_rows(state: &CreativeState, items: usize) -> usize {
 }
 
 /// The first catalog row the screen shows.
+#[cfg(feature = "test-harness")]
 pub fn scroll_row(state: &CreativeState) -> usize {
     first_row(
         state.scroll,
