@@ -3795,6 +3795,14 @@ pub fn update_game(
         (pos, stage, state)
     });
 
+    let spectator_outlines = crate::player::is_spectator(game.player.game_mode)
+        && core.input.performing_action(Action::SpectatorOutlines);
+    let outline = |glowing: bool, is_player: bool, uuid, player_uuid| {
+        use crate::entity::glowing::{appears_glowing, outline_color};
+        appears_glowing(glowing, is_player, spectator_outlines)
+            .then(|| outline_color(&game.scoreboard, &game.tab_list, uuid, player_uuid))
+    };
+
     let mut entity_renders: Vec<EntityRenderInfo> = if benchmark_running {
         Vec::new()
     } else {
@@ -3810,6 +3818,12 @@ pub fn update_game(
 
                 EntityRenderInfo {
                     position: interp_pos + extras.render_offset,
+                    outline_color: outline(
+                        e.is_glowing,
+                        e.entity_type == EntityKind::Player,
+                        e.uuid,
+                        e.player_uuid,
+                    ),
                     head_y_rot_deg: lerp_angle(
                         e.prev_head_y_rot_deg,
                         e.head_y_rot_deg,
@@ -3923,6 +3937,12 @@ pub fn update_game(
                 .min(1.0),
             entity_kind: EntityKind::Player,
             player_uuid: Some(core.user.uuid),
+            outline_color: outline(
+                game.player.glowing,
+                true,
+                core.user.uuid,
+                Some(core.user.uuid),
+            ),
             armor: armor_render_infos(game.player.inventory.armor_slots()),
             has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),
             death_time: render_death_time(game.player.death_time, partial_tick),

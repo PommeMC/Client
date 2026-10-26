@@ -190,6 +190,9 @@ pub struct EntityRenderInfo {
     /// the camera and must never blink out).
     pub skip_cull: bool,
     pub shadow: super::entity_shadow::ShadowCaster,
+    /// The glowing outline's colour (vanilla `EntityRenderState.outlineColor`),
+    /// when the entity draws one.
+    pub outline_color: Option<u32>,
 }
 
 /// Everything inert: mob-family animation inputs zeroed, no overlays, white
@@ -251,6 +254,7 @@ impl Default for EntityRenderInfo {
             age_in_ticks: 0.0,
             attack_time: 0.0,
             skip_cull: false,
+            outline_color: None,
             shadow: Default::default(),
         }
     }
@@ -358,15 +362,19 @@ fn armor_layer_tint(layer: &ArmorTextureLayer, armor: &ArmorRenderInfo) -> Optio
     match layer.dye {
         ArmorDye::None => Some([1.0, 1.0, 1.0, 1.0]),
         ArmorDye::Dyeable { color_when_undyed } => {
-            let rgb = armor.dyed_color.or(color_when_undyed)?;
-            Some([
-                ((rgb >> 16) & 0xff) as f32 / 255.0,
-                ((rgb >> 8) & 0xff) as f32 / 255.0,
-                (rgb & 0xff) as f32 / 255.0,
-                1.0,
-            ])
+            Some(rgb_tint(armor.dyed_color.or(color_when_undyed)?))
         }
     }
+}
+
+/// An opaque `0xRRGGBB` as an instance tint.
+fn rgb_tint(rgb: u32) -> [f32; 4] {
+    [
+        ((rgb >> 16) & 0xff) as f32 / 255.0,
+        ((rgb >> 8) & 0xff) as f32 / 255.0,
+        (rgb & 0xff) as f32 / 255.0,
+        1.0,
+    ]
 }
 
 #[derive(Default)]
@@ -790,6 +798,12 @@ pub struct EntityRenderer {
     eyes_pipeline: rhi::backend::RenderPipeline,
     /// Additive, depth-writing — charged-creeper energy swirl.
     swirl_pipeline: rhi::backend::RenderPipeline,
+    /// Glowing outlines into the outline target, unculled then culled.
+    outline_pipelines: [rhi::backend::RenderPipeline; 2],
+    /// This frame's outline draws, paired with `outline_pipelines`.
+    outline_records: [Vec<DrawRecord>; 2],
+    /// The instances this frame's buffer holds.
+    instance_count: usize,
     pipeline_layout: rhi::backend::PipelineLayout,
     camera_layout: rhi::backend::BindGroupLayout,
     texture_layout: rhi::backend::BindGroupLayout,
@@ -1708,6 +1722,8 @@ impl EntityRenderer {
             eyes_pipeline,
             swirl_pipeline,
         ] = create_pipelines(device, targets, pipeline_layout);
+        let outline_pipelines = [rhi::CullMode::None, rhi::CullMode::Back]
+            .map(|cull_mode| create_outline_pipeline(device, pipeline_layout, cull_mode));
 
         let defs = mob_definitions();
 
@@ -1801,6 +1817,9 @@ impl EntityRenderer {
             body_translucent_pipeline,
             eyes_pipeline,
             swirl_pipeline,
+            outline_pipelines,
+            outline_records: Default::default(),
+            instance_count: 0,
             pipeline_layout,
             camera_layout,
             texture_layout,
@@ -1932,10 +1951,10 @@ impl EntityRenderer {
     fn collect_armor_draws(
         &self,
         vis: &[VisEntity<'_>],
-        instances: &mut Vec<EntityInstance>,
+        instances: &mut Instances,
     ) -> Vec<DrawRecord> {
         let mut records = Vec::new();
-        for v in vis {
+        for (vi, v) in vis.iter().enumerate() {
             // TODO: baby armor (vanilla `HUMANOID_BABY` layer type +
             // `HumanoidModel.createBabyArmorMeshSet`) needs anisotropic
             // `CubeDeformation`, which pomme's model format lacks.
@@ -1965,13 +1984,16 @@ impl EntityRenderer {
                         }
                         let first_instance = instances.len() as u32;
                         let model = v.entity_mat * part_transforms[part];
-                        instances.push(EntityInstance {
-                            model: model.to_cols_array_2d(),
-                            tint,
-                            // Vanilla armor is `NO_OVERLAY`: no hurt/death red.
-                            overlay_color: NO_OVERLAY,
-                            uv_params: [0.0, 0.0, ARMOR_ALPHA_CUTOFF, 0.0],
-                        });
+                        instances.push(
+                            vi,
+                            EntityInstance {
+                                model: model.to_cols_array_2d(),
+                                tint,
+                                // Vanilla armor is `NO_OVERLAY`: no hurt/death red.
+                                overlay_color: NO_OVERLAY,
+                                uv_params: [0.0, 0.0, ARMOR_ALPHA_CUTOFF, 0.0],
+                            },
+                        );
                         records.push(DrawRecord {
                             texture_set,
                             vertex_buffer: mesh.vertex_buffer.handle(),
@@ -2227,6 +2249,7 @@ impl EntityRenderer {
         eye: glam::DVec3,
         cull_dist: f32,
     ) {
+        self.outline_records = Default::default();
         if entities.is_empty() {
             return;
         }
@@ -2235,8 +2258,8 @@ impl EntityRenderer {
         // (immutable reads of self.mobs), grouped by variant so each (variant,
         // part) becomes a single instanced draw. `vis`/`groups` borrow self.mobs
         // and are dropped at the end of this block, before the buffer write below.
-        let mut instances: Vec<EntityInstance> = Vec::new();
-        let (opaque, armor, culled, body, eyes, swirl) = {
+        let mut instances = Instances::default();
+        let (opaque, armor, culled, body, eyes, swirl, outline) = {
             let mut vis: Vec<VisEntity> = Vec::new();
             for info in entities {
                 let Some(entry) = self.mobs.get(&info.entity_kind) else {
@@ -2318,14 +2341,16 @@ impl EntityRenderer {
 
             let opaque = opaque.emit(&vis, &mut instances);
             let armor = self.collect_armor_draws(&vis, &mut instances);
-            (
-                opaque,
-                armor,
-                culled.emit(&vis, &mut instances),
-                body.emit(&vis, &mut instances),
-                eyes.emit(&vis, &mut instances),
-                swirl.emit(&vis, &mut instances),
-            )
+            let culled = culled.emit(&vis, &mut instances);
+            let body = body.emit(&vis, &mut instances);
+            let eyes = eyes.emit(&vis, &mut instances);
+            let swirl = swirl.emit(&vis, &mut instances);
+            // Eyes and the energy swirl don't affect the outline.
+            let outline = [
+                outline_records(&[&opaque, &armor, &body], &vis, &mut instances),
+                outline_records(&[&culled], &vis, &mut instances),
+            ];
+            (opaque, armor, culled, body, eyes, swirl, outline)
         };
 
         // Write the instance buffer (clamped to capacity; the cap is far above any
@@ -2338,8 +2363,10 @@ impl EntityRenderer {
                 MAX_INSTANCES
             );
         }
-        let bytes = bytemuck::cast_slice(&instances[..count]);
+        let bytes = bytemuck::cast_slice(&instances.data[..count]);
         self.instance_buffers[frame].write(bytes);
+        self.instance_count = count;
+        self.outline_records = outline;
 
         self.record_pass(pass, frame, self.pipeline, &opaque, count);
         self.record_pass(pass, frame, self.pipeline, &armor, count);
@@ -2347,6 +2374,20 @@ impl EntityRenderer {
         self.record_pass(pass, frame, self.body_translucent_pipeline, &body, count);
         self.record_pass(pass, frame, self.eyes_pipeline, &eyes, count);
         self.record_pass(pass, frame, self.swirl_pipeline, &swirl, count);
+    }
+
+    /// Whether the last `draw` left any glowing outline to draw.
+    pub fn has_outlines(&self) -> bool {
+        self.outline_records
+            .iter()
+            .any(|records| !records.is_empty())
+    }
+
+    /// The last `draw`'s glowing outlines, into the outline target's pass.
+    pub fn draw_outlines(&self, pass: &mut rhi::backend::RenderPassEncoder, frame: usize) {
+        for (pipeline, records) in self.outline_pipelines.iter().zip(&self.outline_records) {
+            self.record_pass(pass, frame, *pipeline, records, self.instance_count);
+        }
     }
 
     fn record_pass(
@@ -2446,6 +2487,9 @@ impl EntityRenderer {
         self.body_translucent_pipeline.destroy(device);
         self.eyes_pipeline.destroy(device);
         self.swirl_pipeline.destroy(device);
+        for pipeline in self.outline_pipelines {
+            pipeline.destroy(device);
+        }
         self.pipeline_layout.destroy(device);
         util::destroy_bind_groups(device, self.camera_sets.drain(..));
         self.camera_layout.destroy(device);
@@ -2465,6 +2509,7 @@ struct VisEntity<'a> {
 
 /// One instanced (variant, part) draw: a run of `instance_count` instances from
 /// `first_instance` in the per-frame instance buffer.
+#[derive(Clone, Copy)]
 struct DrawRecord {
     texture_set: rhi::backend::BindGroup,
     vertex_buffer: rhi::backend::BufferHandle,
@@ -2472,6 +2517,57 @@ struct DrawRecord {
     part_count: u32,
     first_instance: u32,
     instance_count: u32,
+}
+
+/// The frame's instances, each with the visible entity it belongs to.
+#[derive(Default)]
+struct Instances {
+    data: Vec<EntityInstance>,
+    owners: Vec<usize>,
+}
+
+impl Instances {
+    fn push(&mut self, owner: usize, instance: EntityInstance) {
+        self.data.push(instance);
+        self.owners.push(owner);
+    }
+
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+}
+
+/// Copies of `records`' instances whose entity glows, recoloured to its
+/// outline colour: vanilla resubmits every outline-affecting render type as
+/// its `outline()` type.
+fn outline_records(
+    records: &[&[DrawRecord]],
+    vis: &[VisEntity],
+    instances: &mut Instances,
+) -> Vec<DrawRecord> {
+    let mut outline = Vec::new();
+    for record in records.iter().copied().flatten() {
+        let first_instance = instances.len() as u32;
+        for i in record.first_instance..record.first_instance + record.instance_count {
+            let owner = instances.owners[i as usize];
+            if let Some(color) = vis[owner].info.outline_color {
+                let instance = EntityInstance {
+                    tint: rgb_tint(color),
+                    ..instances.data[i as usize]
+                };
+                instances.push(owner, instance);
+            }
+        }
+        let instance_count = instances.len() as u32 - first_instance;
+        if instance_count > 0 {
+            outline.push(DrawRecord {
+                first_instance,
+                instance_count,
+                ..*record
+            });
+        }
+    }
+    outline
 }
 
 /// (visible-entity index, tint, overlay color, uv scroll) for one instance.
@@ -2505,7 +2601,7 @@ impl<'a> VariantGroups<'a> {
         self.groups[gi].2.push(member);
     }
 
-    fn emit(&self, vis: &[VisEntity], instances: &mut Vec<EntityInstance>) -> Vec<DrawRecord> {
+    fn emit(&self, vis: &[VisEntity], instances: &mut Instances) -> Vec<DrawRecord> {
         let mut records = Vec::new();
         for (variant, texture_set, members) in &self.groups {
             let own: Option<Vec<Vec<glam::Mat4>>> = variant.own_pivots.then(|| {
@@ -2525,12 +2621,15 @@ impl<'a> VariantGroups<'a> {
                         None => vis[*vi].part_transforms[p],
                     };
                     let model = vis[*vi].entity_mat * part;
-                    instances.push(EntityInstance {
-                        model: model.to_cols_array_2d(),
-                        tint: *tint,
-                        overlay_color: *overlay,
-                        uv_params: [uv[0], uv[1], ENTITY_ALPHA_CUTOFF, 0.0],
-                    });
+                    instances.push(
+                        *vi,
+                        EntityInstance {
+                            model: model.to_cols_array_2d(),
+                            tint: *tint,
+                            overlay_color: *overlay,
+                            uv_params: [uv[0], uv[1], ENTITY_ALPHA_CUTOFF, 0.0],
+                        },
+                    );
                 }
                 records.push(DrawRecord {
                     texture_set: *texture_set,
@@ -2874,6 +2973,41 @@ fn create_pipelines(
     ]
 }
 
+/// Binding 0: per-vertex mesh data. Instanced pipelines add binding 1 with
+/// per-instance data (model columns + tint + overlay + uv), one EntityInstance
+/// per (entity, part); push-constant ones bind only the mesh.
+const INSTANCED_BUFFERS: [rhi::VertexBufferLayout<'static>; 2] = [
+    ChunkVertex::BUFFER,
+    rhi::VertexBufferLayout {
+        stride: size_of::<EntityInstance>() as u32,
+        step_mode: rhi::VertexStepMode::Instance,
+        attributes: &rhi::packed_attributes(3, [VertexFormat::Float32x4; 7]),
+    },
+];
+
+/// Vanilla's `OUTLINE_NO_CULL` / `OUTLINE_CULL`: the instanced model drawn flat
+/// in its outline colour into the outline target, with no depth or blend.
+fn create_outline_pipeline(
+    device: &rhi::backend::Device,
+    layout: rhi::backend::PipelineLayout,
+    cull_mode: rhi::CullMode,
+) -> rhi::backend::RenderPipeline {
+    rhi::backend::create_render_pipeline(
+        device,
+        super::entity_outline::targets(),
+        layout,
+        &rhi::RenderPipelineDesc {
+            cull_mode,
+            ..rhi::RenderPipelineDesc::new(
+                "entity outline",
+                shader::include_shader!("entity.vert"),
+                shader::include_shader!("entity_outline.frag"),
+                &INSTANCED_BUFFERS,
+            )
+        },
+    )
+}
+
 /// Source of a draw's model matrix: mobs are GPU-instanced (binding 1, a perf
 /// divergence from vanilla); block entities keep vanilla's per-draw
 /// push-constant transform (binding 0 only).
@@ -2893,20 +3027,9 @@ pub(super) fn create_pipeline(
         ModelInput::Instanced => shader::include_shader!("entity.vert"),
         ModelInput::PushConstant => shader::include_shader!("block_entity.vert"),
     };
-    // Binding 0: per-vertex mesh data. Instanced pipelines add binding 1 with
-    // per-instance data (model columns + tint + overlay + uv), one EntityInstance
-    // per (entity, part); push-constant ones bind only the mesh.
-    let vertex_buffers = [
-        ChunkVertex::BUFFER,
-        rhi::VertexBufferLayout {
-            stride: size_of::<EntityInstance>() as u32,
-            step_mode: rhi::VertexStepMode::Instance,
-            attributes: &rhi::packed_attributes(3, [VertexFormat::Float32x4; 7]),
-        },
-    ];
     let vertex_buffers = match model_input {
-        ModelInput::Instanced => &vertex_buffers[..],
-        ModelInput::PushConstant => &vertex_buffers[..1],
+        ModelInput::Instanced => &INSTANCED_BUFFERS[..],
+        ModelInput::PushConstant => &INSTANCED_BUFFERS[..1],
     };
     rhi::backend::create_render_pipeline(
         device,

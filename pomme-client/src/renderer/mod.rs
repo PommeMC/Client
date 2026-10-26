@@ -35,6 +35,7 @@ use pipelines::blur::BlurPipeline;
 use pipelines::book_preview::BookPreviewPipeline;
 use pipelines::chunk::ChunkPipeline;
 use pipelines::clouds::CloudPipeline;
+use pipelines::entity_outline::EntityOutline;
 use pipelines::entity_renderer::{ArmorRenderInfo, EntityRenderInfo, EntityRenderer};
 use pipelines::entity_shadow::{EntityShadowPipeline, ShadowScene};
 use pipelines::hand::HandPipeline;
@@ -250,6 +251,7 @@ pub struct Renderer {
     panorama_pipeline: PanoramaPipeline,
     menu_pipeline: MenuOverlayPipeline,
     blur_pipeline: BlurPipeline,
+    entity_outline: EntityOutline,
     skin_preview: SkinPreviewPipeline,
     book_preview: BookPreviewPipeline,
     chunk_border_pipeline: ChunkBorderPipeline,
@@ -422,6 +424,12 @@ impl Renderer {
 
         let blur_pipeline =
             BlurPipeline::new(&ctx.device, swapchain_extent.width, swapchain_extent.height);
+        let entity_outline = EntityOutline::new(
+            &ctx.device,
+            swapchain_state.targets(),
+            swapchain_extent.width,
+            swapchain_extent.height,
+        );
         menu_pipeline.set_blur_texture(
             &ctx.device,
             blur_pipeline.blurred_texture(),
@@ -507,6 +515,7 @@ impl Renderer {
             panorama_pipeline,
             menu_pipeline,
             blur_pipeline,
+            entity_outline,
             skin_preview,
             book_preview,
             entity_renderer,
@@ -633,6 +642,19 @@ impl Renderer {
         self.last_timings.pace_ms = t_pace.elapsed().as_secs_f32() * 1000.0;
     }
 
+    /// Reopens the frame's pass after an offscreen detour, keeping what it
+    /// drew.
+    fn resume_frame_pass(
+        &self,
+        encoder: &rhi::backend::CommandEncoder,
+        image_index: u32,
+    ) -> rhi::backend::RenderPassEncoder {
+        encoder.begin_render_pass(
+            &self.ctx.device,
+            &self.swapchain.pass(image_index, rhi::LoadOp::Load),
+        )
+    }
+
     fn recreate_swapchain(&mut self) -> Result<(), RendererError> {
         self.ctx.device.wait_idle();
 
@@ -675,6 +697,8 @@ impl Renderer {
                 .recreate_pipeline(&self.ctx.device, targets);
             self.entity_renderer
                 .recreate_pipeline(&self.ctx.device, targets);
+            self.entity_outline
+                .recreate_pipeline(&self.ctx.device, targets);
             self.entity_shadow_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
             self.block_entity_pipeline
@@ -693,6 +717,8 @@ impl Renderer {
                 .recreate_pipeline(&self.ctx.device, targets);
         }
         self.blur_pipeline
+            .resize(&self.ctx.device, self.width, self.height);
+        self.entity_outline
             .resize(&self.ctx.device, self.width, self.height);
         self.menu_pipeline.set_blur_texture(
             &self.ctx.device,
@@ -1754,6 +1780,17 @@ impl Renderer {
                     }
                 }
 
+                // Vanilla blits the outline after the hand, before the GUI.
+                if self.entity_renderer.has_outlines() {
+                    pass.end();
+                    let mut outline = self.entity_outline.begin(&self.ctx.device, &encoder);
+                    self.entity_renderer.draw_outlines(&mut outline, frame);
+                    self.entity_outline
+                        .finish(&self.ctx.device, &encoder, outline);
+                    pass = self.resume_frame_pass(&encoder, image_index);
+                    self.entity_outline.composite(&mut pass);
+                }
+
                 self.menu_pipeline.draw(
                     &self.ctx.device,
                     &mut pass,
@@ -1839,10 +1876,7 @@ impl Renderer {
                         iterations,
                     );
 
-                    pass = encoder.begin_render_pass(
-                        &self.ctx.device,
-                        &self.swapchain.pass(image_index, rhi::LoadOp::Load),
-                    );
+                    pass = self.resume_frame_pass(&encoder, image_index);
                 }
 
                 if let Some(skin) = *skin {
@@ -2250,6 +2284,7 @@ impl Drop for Renderer {
         self.panorama_pipeline.destroy(&self.ctx.device);
         self.menu_pipeline.destroy(&self.ctx.device);
         self.blur_pipeline.destroy(&self.ctx.device);
+        self.entity_outline.destroy(&self.ctx.device);
         self.skin_preview.destroy(&self.ctx.device);
         self.book_preview.destroy(&self.ctx.device);
         self.entity_renderer.destroy(&self.ctx.device);

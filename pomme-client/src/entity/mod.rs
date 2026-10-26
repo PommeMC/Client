@@ -1,5 +1,6 @@
 pub mod components;
 pub mod dimensions;
+pub mod glowing;
 pub mod shadow;
 pub mod villager;
 
