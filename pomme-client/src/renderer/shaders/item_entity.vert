@@ -1,6 +1,6 @@
 #version 450
 
-#include "item_push.glsl"
+#include "item_instance.glsl"
 #include "fog.glsl"
 
 #include "camera_ubo.glsl"
@@ -17,6 +17,7 @@ layout(location = 1) out float v_light;
 layout(location = 2) out vec4 v_tint;
 layout(location = 3) out float v_fog;
 layout(location = 4) out vec3 v_fog_color;
+layout(location = 5) flat out float v_world_light;
 
 void main() {
     vec4 world_pos = model * vec4(position, 1.0);
@@ -27,4 +28,5 @@ void main() {
     v_tint = resolve_item_tint(tint_index, item_tint_base, item_tint_count);
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;
+    v_world_light = instance_light.x;
 }

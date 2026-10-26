@@ -3,9 +3,7 @@ use glam::{Mat4, Vec3};
 
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
-use crate::renderer::pipelines::item_entity::{
-    self, ItemEntityPipeline, ItemPipelineShared, push_model_light,
-};
+use crate::renderer::pipelines::item_entity::{self, ItemEntityPipeline, ItemPipelineShared};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi};
 use crate::world::block::model::DisplayTransform;
 
@@ -76,14 +74,16 @@ impl GuiItemPipeline {
         self.shared.rebind_atlas(device, atlas);
     }
 
+    /// Binds for `items` bakes with `colors` tints between them.
     pub fn bind_for_bake_pass(
         &mut self,
         device: &rhi::backend::Device,
         pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
-        required_colors: usize,
+        items: usize,
+        colors: usize,
     ) {
-        self.shared.begin_tint_frame(device, frame, required_colors);
+        self.shared.begin_frame(device, frame, items, colors);
         self.write_atlas_ortho(frame);
         self.shared.bind(pass, frame, self.pipeline);
     }
@@ -114,10 +114,9 @@ impl GuiItemPipeline {
             display,
         );
 
-        let tint_range = self.shared.push_tints(frame, item_tints);
+        let instance = self.shared.push_item(frame, &model, 1.0, false, item_tints);
         pass.set_vertex_buffer(0, buffer);
-        push_model_light(pass, &model, 1.0, tint_range);
-        pass.draw(vertex_count, 1, 0, 0);
+        pass.draw(vertex_count, 1, 0, instance);
     }
 
     pub fn destroy(&mut self, device: &rhi::backend::Device) {

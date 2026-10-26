@@ -38,7 +38,7 @@ fn pack_normal(normal: glam::Vec3) -> [i8; 4] {
 }
 
 pub struct ItemRenderInfo {
-    pub item_name: String,
+    pub item_name: Arc<str>,
     /// Evaluated tint palette, shared by every copy of one dropped stack.
     pub tints: Arc<[u32]>,
     pub model_matrix: Mat4,
@@ -68,7 +68,7 @@ struct MeshEntry {
     bounds_max: glam::Vec3,
 }
 
-/// The per-frame tint palette a [`TintPaletteArena`] binds.
+/// The per-frame tint palette, `ItemPipelineShared::tints`.
 const ITEM_TINTS: &[rhi::BindGroupLayoutEntry] = &[rhi::BindGroupLayoutEntry::storage(
     rhi::ShaderStages::VERTEX,
 )];
@@ -76,112 +76,141 @@ const ITEM_TINTS: &[rhi::BindGroupLayoutEntry] = &[rhi::BindGroupLayoutEntry::st
 /// The item pipelines' bind groups: camera, atlas, tint palette.
 const ITEM_BIND_GROUPS: [&[rhi::BindGroupLayoutEntry]; 3] =
     [util::VERTEX_UNIFORM, util::FRAGMENT_TEXTURE, ITEM_TINTS];
-/// item_push.glsl's block. Vulkan guarantees at least 128 push bytes.
-const ITEM_PUSH_CONSTANTS: rhi::PushConstants = rhi::PushConstants {
-    visibility: rhi::ShaderStages::VERTEX_FRAGMENT,
-    size: 128,
-};
 
-#[derive(Clone, Copy, Default)]
-pub(super) struct ItemTintRange {
-    pub base: u32,
-    pub count: u32,
+/// One drawn copy of an item mesh, read per instance (binding 1) by
+/// item_instance.glsl.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ItemInstance {
+    model: [f32; 16],
+    /// The inverse transpose of the model's 3x3, for the baked normals.
+    normal_matrix: [f32; 9],
+    /// The world light, then the nether-lighting flag (0 or 1).
+    light: [f32; 2],
+    /// The copy's slice of the tint palette.
+    tint_base: u32,
+    tint_count: u32,
 }
 
-struct TintPaletteArena {
-    layout: rhi::backend::BindGroupLayout,
-    sets: Vec<rhi::backend::BindGroup>,
+impl ItemInstance {
+    const BUFFER: rhi::VertexBufferLayout<'static> = rhi::VertexBufferLayout {
+        stride: size_of::<Self>() as u32,
+        step_mode: rhi::VertexStepMode::Instance,
+        attributes: &rhi::packed_attributes(
+            5,
+            [
+                rhi::VertexFormat::Float32x4,
+                rhi::VertexFormat::Float32x4,
+                rhi::VertexFormat::Float32x4,
+                rhi::VertexFormat::Float32x4,
+                rhi::VertexFormat::Float32x3,
+                rhi::VertexFormat::Float32x3,
+                rhi::VertexFormat::Float32x3,
+                rhi::VertexFormat::Float32x2,
+                rhi::VertexFormat::Uint32,
+                rhi::VertexFormat::Uint32,
+            ],
+        ),
+    };
+
+    fn new(model: &Mat4, light: f32, nether_lighting: bool, tints: (u32, u32)) -> Self {
+        Self {
+            model: model.to_cols_array(),
+            normal_matrix: glam::Mat3::from_mat4(*model)
+                .inverse()
+                .transpose()
+                .to_cols_array(),
+            light: [light, if nether_lighting { 1.0 } else { 0.0 }],
+            tint_base: tints.0,
+            tint_count: tints.1,
+        }
+    }
+}
+
+/// A host buffer per frame in flight, filled from the start each frame. It
+/// only grows in `begin_frame`, before any draw reading it is recorded.
+struct FrameArena<T> {
     buffers: Vec<Option<rhi::backend::Buffer>>,
     capacities: Vec<usize>,
     cursors: Vec<usize>,
+    usage: rhi::BufferUsages,
     label: String,
+    _element: std::marker::PhantomData<T>,
 }
 
-impl TintPaletteArena {
-    fn new(
-        device: &rhi::backend::Device,
-        layout: rhi::backend::BindGroupLayout,
-        label: &str,
-    ) -> Self {
+impl<T: bytemuck::Pod> FrameArena<T> {
+    fn new(device: &rhi::backend::Device, usage: rhi::BufferUsages, label: String) -> Self {
         let mut arena = Self {
-            layout,
-            sets: vec![rhi::backend::BindGroup::default(); MAX_FRAMES_IN_FLIGHT],
             buffers: (0..MAX_FRAMES_IN_FLIGHT).map(|_| None).collect(),
             capacities: vec![0; MAX_FRAMES_IN_FLIGHT],
             cursors: vec![0; MAX_FRAMES_IN_FLIGHT],
-            label: label.to_string(),
+            usage,
+            label,
+            _element: std::marker::PhantomData,
         };
         for frame in 0..MAX_FRAMES_IN_FLIGHT {
-            arena.ensure_capacity(device, frame, 1);
+            arena.begin_frame(device, frame, 1);
         }
         arena
     }
 
-    fn ensure_capacity(&mut self, device: &rhi::backend::Device, frame: usize, required: usize) {
+    /// Restarts `frame`'s buffer, growing it to hold `required` elements;
+    /// true if it was replaced.
+    fn begin_frame(
+        &mut self,
+        device: &rhi::backend::Device,
+        frame: usize,
+        required: usize,
+    ) -> bool {
+        self.cursors[frame] = 0;
         if self.capacities[frame] >= required.max(1) {
-            return;
+            return false;
         }
-        let capacity = required.max(1).next_power_of_two();
         if let Some(buffer) = self.buffers[frame].take() {
             buffer.destroy(device);
         }
-        let buffer = rhi::backend::Buffer::new(
+        self.capacities[frame] = required.max(1).next_power_of_two();
+        self.buffers[frame] = Some(rhi::backend::Buffer::new(
             device,
-            &format!("{}_tints_{frame}", self.label),
-            (capacity * size_of::<u32>()) as u64,
-            rhi::BufferUsages::STORAGE,
+            &format!("{}_{frame}", self.label),
+            self.byte_capacity(frame),
+            self.usage,
             rhi::MemoryLocation::Host,
-        );
-        self.sets[frame].replace(
-            device,
-            self.layout,
-            &[(
-                0,
-                rhi::backend::BindingResource::storage(
-                    &buffer,
-                    (capacity * size_of::<u32>()) as u64,
-                ),
-            )],
-        );
-        self.buffers[frame] = Some(buffer);
-        self.capacities[frame] = capacity;
+        ));
+        true
     }
 
-    fn begin_frame(&mut self, device: &rhi::backend::Device, frame: usize, required_colors: usize) {
-        self.ensure_capacity(device, frame, required_colors.max(1));
-        self.cursors[frame] = 0;
-    }
-
-    fn push(&mut self, frame: usize, colors: &[u32]) -> ItemTintRange {
-        if colors.is_empty() {
-            return ItemTintRange::default();
-        }
+    /// Appends `elements`, returning the index of the first.
+    fn push(&mut self, frame: usize, elements: &[T]) -> u32 {
         let base = self.cursors[frame];
-        let end = base + colors.len();
+        let end = base + elements.len();
         debug_assert!(end <= self.capacities[frame]);
-        let buffer = self.buffers[frame].as_mut().expect("tint buffer allocated");
-        buffer.write_at(base * size_of::<u32>(), bytemuck::cast_slice(colors));
+        self.buffers[frame]
+            .as_mut()
+            .expect("allocated in new")
+            .write_at(base * size_of::<T>(), bytemuck::cast_slice(elements));
         self.cursors[frame] = end;
-        ItemTintRange {
-            base: base as u32,
-            count: colors.len() as u32,
-        }
+        base as u32
     }
 
-    fn set(&self, frame: usize) -> rhi::backend::BindGroup {
-        self.sets[frame]
+    fn buffer(&self, frame: usize) -> &rhi::backend::Buffer {
+        self.buffers[frame].as_ref().expect("allocated in new")
+    }
+
+    fn byte_capacity(&self, frame: usize) -> u64 {
+        (self.capacities[frame] * size_of::<T>()) as u64
     }
 
     fn destroy(&mut self, device: &rhi::backend::Device) {
         for buffer in self.buffers.iter_mut().filter_map(Option::take) {
             buffer.destroy(device);
         }
-        util::destroy_bind_groups(device, self.sets.drain(..));
     }
 }
 
-/// Bind group layouts, per-frame camera UBOs, the atlas group and tint palette
-/// storage shared by pipelines that draw item meshes with the item shaders.
+/// Bind group layouts, per-frame camera UBOs, the atlas group, and the tint
+/// palette and instance buffers shared by pipelines that draw item meshes
+/// with the item shaders.
 pub(super) struct ItemPipelineShared {
     pub pipeline_layout: rhi::backend::PipelineLayout,
     camera_layout: rhi::backend::BindGroupLayout,
@@ -191,7 +220,10 @@ pub(super) struct ItemPipelineShared {
     atlas_set: rhi::backend::BindGroup,
     atlas_sampler: rhi::backend::Sampler,
     camera_buffers: Vec<rhi::backend::Buffer>,
-    tint_arena: TintPaletteArena,
+    tints: FrameArena<u32>,
+    /// Each frame's tint palette group, re-pointed when `tints` grows.
+    tint_sets: Vec<rhi::backend::BindGroup>,
+    instances: FrameArena<ItemInstance>,
 }
 
 impl ItemPipelineShared {
@@ -202,7 +234,7 @@ impl ItemPipelineShared {
         let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
             &[camera_layout, atlas_layout, tint_layout],
-            Some(ITEM_PUSH_CONSTANTS),
+            None,
         );
 
         let (camera_sets, camera_buffers) = util::create_uniform_sets(
@@ -216,7 +248,12 @@ impl ItemPipelineShared {
         // in vanilla; pomme samples those at level 0 too.
         let atlas_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
 
-        let tint_arena = TintPaletteArena::new(device, tint_layout, label);
+        let tints = FrameArena::new(device, rhi::BufferUsages::STORAGE, format!("{label}_tints"));
+        let instances = FrameArena::new(
+            device,
+            rhi::BufferUsages::VERTEX,
+            format!("{label}_instances"),
+        );
         let mut this = Self {
             pipeline_layout,
             camera_layout,
@@ -226,10 +263,29 @@ impl ItemPipelineShared {
             atlas_set: rhi::backend::BindGroup::default(),
             atlas_sampler,
             camera_buffers,
-            tint_arena,
+            tints,
+            tint_sets: vec![rhi::backend::BindGroup::default(); MAX_FRAMES_IN_FLIGHT],
+            instances,
         };
+        for frame in 0..MAX_FRAMES_IN_FLIGHT {
+            this.rebind_tints(device, frame);
+        }
         this.rebind_atlas(device, atlas);
         this
+    }
+
+    fn rebind_tints(&mut self, device: &rhi::backend::Device, frame: usize) {
+        self.tint_sets[frame].replace(
+            device,
+            self.tint_layout,
+            &[(
+                0,
+                rhi::backend::BindingResource::storage(
+                    self.tints.buffer(frame),
+                    self.tints.byte_capacity(frame),
+                ),
+            )],
+        );
     }
 
     pub(super) fn rebind_atlas(&mut self, device: &rhi::backend::Device, atlas: &TextureAtlas) {
@@ -245,6 +301,8 @@ impl ItemPipelineShared {
         self.camera_buffers[frame].write(bytes);
     }
 
+    /// Binds `pipeline` with the frame's groups and instance buffer; call
+    /// after `begin_frame`.
     pub(super) fn bind(
         &self,
         pass: &mut rhi::backend::RenderPassEncoder,
@@ -257,28 +315,52 @@ impl ItemPipelineShared {
             &[
                 self.camera_sets[frame],
                 self.atlas_set,
-                self.tint_arena.set(frame),
+                self.tint_sets[frame],
             ],
         );
+        pass.set_vertex_buffer(1, self.instances.buffer(frame).handle());
     }
 
-    pub(super) fn begin_tint_frame(
+    /// Restarts the frame's tint and instance buffers, sized for `items`
+    /// copies with `colors` tints between them.
+    pub(super) fn begin_frame(
         &mut self,
         device: &rhi::backend::Device,
         frame: usize,
-        required_colors: usize,
+        items: usize,
+        colors: usize,
     ) {
-        self.tint_arena.begin_frame(device, frame, required_colors);
+        if self.tints.begin_frame(device, frame, colors) {
+            self.rebind_tints(device, frame);
+        }
+        self.instances.begin_frame(device, frame, items);
     }
 
-    pub(super) fn push_tints(&mut self, frame: usize, colors: &[u32]) -> ItemTintRange {
-        self.tint_arena.push(frame, colors)
+    /// Queues one copy of a mesh, returning its instance index.
+    pub(super) fn push_item(
+        &mut self,
+        frame: usize,
+        model: &Mat4,
+        light: f32,
+        nether_lighting: bool,
+        tints: &[u32],
+    ) -> u32 {
+        let tint_base = self.tints.push(frame, tints);
+        let instance = ItemInstance::new(
+            model,
+            light,
+            nether_lighting,
+            (tint_base, tints.len() as u32),
+        );
+        self.instances.push(frame, &[instance])
     }
 
     pub(super) fn destroy(&mut self, device: &rhi::backend::Device) {
         util::destroy_buffers(device, &mut self.camera_buffers);
 
-        self.tint_arena.destroy(device);
+        self.tints.destroy(device);
+        self.instances.destroy(device);
+        util::destroy_bind_groups(device, self.tint_sets.drain(..));
         self.atlas_sampler.destroy(device);
         self.pipeline_layout.destroy(device);
         util::destroy_bind_groups(device, self.camera_sets.drain(..));
@@ -287,52 +369,6 @@ impl ItemPipelineShared {
         self.atlas_layout.destroy(device);
         self.tint_layout.destroy(device);
     }
-}
-
-pub(super) fn push_model_light(
-    pass: &rhi::backend::RenderPassEncoder,
-    model: &Mat4,
-    light: f32,
-    item_tints: ItemTintRange,
-) {
-    let mvp_data = model.to_cols_array();
-    pass.set_push_constants(
-        rhi::ShaderStages::VERTEX_FRAGMENT,
-        0,
-        bytemuck::bytes_of(&mvp_data),
-    );
-    pass.set_push_constants(
-        rhi::ShaderStages::VERTEX_FRAGMENT,
-        64,
-        bytemuck::bytes_of(&light),
-    );
-    let tint_range = [item_tints.base, item_tints.count];
-    pass.set_push_constants(
-        rhi::ShaderStages::VERTEX_FRAGMENT,
-        72,
-        bytemuck::bytes_of(&tint_range),
-    );
-}
-
-fn push_world_lighting(pass: &rhi::backend::RenderPassEncoder, model: &Mat4, nether: bool) {
-    let nether = if nether { 1.0_f32 } else { 0.0_f32 };
-    pass.set_push_constants(
-        rhi::ShaderStages::VERTEX_FRAGMENT,
-        68,
-        bytemuck::bytes_of(&nether),
-    );
-
-    let normal = glam::Mat3::from_mat4(*model).inverse().transpose();
-    let cols = normal.to_cols_array();
-    let padded_cols = [
-        cols[0], cols[1], cols[2], 0.0, cols[3], cols[4], cols[5], 0.0, cols[6], cols[7], cols[8],
-        0.0,
-    ];
-    pass.set_push_constants(
-        rhi::ShaderStages::VERTEX_FRAGMENT,
-        80,
-        bytemuck::bytes_of(&padded_cols),
-    );
 }
 
 pub struct ItemEntityPipeline {
@@ -465,10 +501,10 @@ impl ItemEntityPipeline {
     }
 
     /// Cutout meshes first, then translucent ones, as vanilla's item sheets
-    /// are ordered.
+    /// are ordered. Each item's copies, being consecutive, draw as one
+    /// instanced call; nothing is reordered.
     // TODO: vanilla also outlines glowing item entities (`submitItem` into the
-    // outline target); the item push constants' 128 bytes are full, so the
-    // outline colour needs another way in.
+    // outline target); the colour can ride in `ItemInstance`.
     pub fn draw(
         &mut self,
         device: &rhi::backend::Device,
@@ -480,30 +516,45 @@ impl ItemEntityPipeline {
             return;
         }
 
-        let required_colors = items.iter().map(|item| item.tints.len()).sum();
-        self.shared.begin_tint_frame(device, frame, required_colors);
-        let tint_ranges: Vec<_> = items
-            .iter()
-            .map(|item| self.shared.push_tints(frame, &item.tints))
-            .collect();
+        let colors = items.iter().map(|item| item.tints.len()).sum();
+        self.shared.begin_frame(device, frame, items.len(), colors);
+        for item in items {
+            self.shared.push_item(
+                frame,
+                &item.model_matrix,
+                item.light,
+                item.nether_lighting,
+                &item.tints,
+            );
+        }
 
         for (pipeline, translucent) in [(self.cutout, false), (self.translucent, true)] {
-            let mut bound = false;
-            for (item, tint_range) in items.iter().zip(tint_ranges.iter().copied()) {
-                let Some(mesh) = self.meshes.get(&item.item_name) else {
+            // (mesh, first instance, instance count), for runs of adjacent
+            // items sharing a mesh.
+            let mut runs: Vec<(&MeshEntry, u32, u32)> = Vec::new();
+            for (index, item) in (0..).zip(items) {
+                let Some(mesh) = self.meshes.get(&*item.item_name) else {
                     continue;
                 };
                 if mesh.translucent != translucent {
                     continue;
                 }
-                if !bound {
-                    self.shared.bind(pass, frame, pipeline);
-                    bound = true;
+                match runs.last_mut() {
+                    Some((last, first, count))
+                        if std::ptr::eq(*last, mesh) && *first + *count == index =>
+                    {
+                        *count += 1;
+                    }
+                    _ => runs.push((mesh, index, 1)),
                 }
+            }
+            if runs.is_empty() {
+                continue;
+            }
+            self.shared.bind(pass, frame, pipeline);
+            for (mesh, first, count) in runs {
                 pass.set_vertex_buffer(0, mesh.buffer.handle());
-                push_model_light(pass, &item.model_matrix, item.light, tint_range);
-                push_world_lighting(pass, &item.model_matrix, item.nether_lighting);
-                pass.draw(mesh.vertex_count, 1, 0, 0);
+                pass.draw(mesh.vertex_count, count, 0, first);
             }
         }
     }
@@ -899,7 +950,7 @@ fn create_pipeline_impl(
                 "item entity",
                 vertex_shader,
                 shader::include_shader!("item_entity.frag"),
-                &[ItemVertex::BUFFER],
+                &[ItemVertex::BUFFER, ItemInstance::BUFFER],
             )
         },
     )
@@ -908,6 +959,34 @@ fn create_pipeline_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_instance_attributes_cover_the_struct() {
+        let attributes = ItemInstance::BUFFER.attributes;
+        let last = attributes.last().unwrap();
+        // item_instance.glsl's last location.
+        assert_eq!(last.location, 14);
+        assert_eq!(
+            (last.offset + last.format.size()) as usize,
+            size_of::<ItemInstance>()
+        );
+    }
+
+    #[test]
+    fn item_instance_normals_stay_perpendicular_under_scale() {
+        let model = Mat4::from_scale_rotation_translation(
+            glam::Vec3::new(2.0, -1.0, 0.5),
+            glam::Quat::from_rotation_y(0.7),
+            glam::Vec3::new(1.0, 2.0, 3.0),
+        );
+        let instance = ItemInstance::new(&model, 0.8, true, (3, 2));
+        let normal_matrix = glam::Mat3::from_cols_array(&instance.normal_matrix);
+        let (normal, tangent) = (glam::Vec3::Y, glam::Vec3::new(1.0, 0.0, 1.0));
+        let surface = glam::Mat3::from_mat4(model) * tangent;
+        assert!((normal_matrix * normal).dot(surface).abs() < 1e-5);
+        assert_eq!(instance.light, [0.8, 1.0]);
+        assert_eq!((instance.tint_base, instance.tint_count), (3, 2));
+    }
 
     fn unit_region() -> AtlasRegion {
         AtlasRegion {

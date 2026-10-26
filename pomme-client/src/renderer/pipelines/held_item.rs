@@ -6,9 +6,7 @@ use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::pipelines::hand;
 use crate::renderer::pipelines::item_display::{DisplayResolver, DisplayTransform};
-use crate::renderer::pipelines::item_entity::{
-    self, ItemEntityPipeline, ItemPipelineShared, push_model_light,
-};
+use crate::renderer::pipelines::item_entity::{self, ItemEntityPipeline, ItemPipelineShared};
 use crate::renderer::rhi;
 
 pub struct HeldItemInfo {
@@ -116,13 +114,10 @@ impl HeldItemPipeline {
         self.shared.update_camera(frame, &uniform);
 
         let tint_count = hands.iter().map(|hand| hand.item.item_tints.len()).sum();
-        self.shared.begin_tint_frame(device, frame, tint_count);
-        let tint_ranges: Vec<_> = hands
-            .iter()
-            .map(|hand| self.shared.push_tints(frame, &hand.item.item_tints))
-            .collect();
+        self.shared
+            .begin_frame(device, frame, hands.len(), tint_count);
         self.shared.bind(pass, frame, self.pipeline);
-        for (hand, tint_range) in hands.iter().zip(tint_ranges) {
+        for hand in hands {
             let item = hand.item;
             let Some((buffer, vertex_count)) = meshes.mesh_handle(&item.model) else {
                 continue;
@@ -145,9 +140,11 @@ impl HeldItemPipeline {
                     * Mat4::from_rotation_y((invert * 10.0).to_radians());
             }
             let model = arm * display.to_matrix();
+            let instance =
+                self.shared
+                    .push_item(frame, &model, item.light, false, &item.item_tints);
             pass.set_vertex_buffer(0, buffer);
-            push_model_light(pass, &model, item.light, tint_range);
-            pass.draw(vertex_count, 1, 0, 0);
+            pass.draw(vertex_count, 1, 0, instance);
         }
     }
 

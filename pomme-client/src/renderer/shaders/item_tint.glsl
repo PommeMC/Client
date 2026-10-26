@@ -1,6 +1,6 @@
 // The per-frame item tint palette (set 2, binding 0) shared by the item
-// vertex shaders. Each item pushes the base/count of its slice; a vertex's
-// raw model `tintindex` past that count is untinted.
+// vertex shaders. Each instance carries the base/count of its slice; a
+// vertex's raw model `tintindex` past that count is untinted.
 layout(set = 2, binding = 0, std430) readonly buffer ItemTintPalette {
     uint item_tints[];
 };
