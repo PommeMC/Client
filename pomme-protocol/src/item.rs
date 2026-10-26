@@ -2159,12 +2159,12 @@ pub(crate) mod tests {
         assert_eq!(out, [0]);
     }
 
-    /// Translates a one-component 26.3 patch and returns the 26.2 patch.
     /// A native patch adding just `name` with `value`.
     fn one_component(name: &str, value: Wire) -> Vec<u8> {
         Wire::default().patch(name, value).0
     }
 
+    /// Translates a one-component 26.3 patch and returns the 26.2 patch.
     fn translate_component_26_3(name: &str, value: Wire) -> Vec<u8> {
         let wire = Wire::default()
             .var(1)
@@ -2185,10 +2185,8 @@ pub(crate) mod tests {
         out
     }
 
-    /// 26.3's changed layouts arrive in 26.2's: `teleport_randomly` without
-    /// its particle flag, an inline trim material as an asset group, an
-    /// inline instrument without its durability damage, and pot sides as
-    /// four item ids.
+    /// Sound and entity type ids remap like item ids; a sound 26.2 lacks
+    /// takes its component with it.
     #[test]
     fn remaps_sound_and_entity_type_ids_in_values() {
         let sound = |id: u32| Wire::default().var(id + 1);
@@ -2210,7 +2208,6 @@ pub(crate) mod tests {
             ),
             one_component("entity_data", egg(id(ClientRegistry::EntityType, "zombie")))
         );
-        // A sound 26.2 lacks takes its component with it.
         assert_eq!(
             translate_component_26_3(
                 "break_sound",
@@ -2220,6 +2217,10 @@ pub(crate) mod tests {
         );
     }
 
+    /// 26.3's changed layouts arrive in 26.2's: `teleport_randomly` without
+    /// its particle flag, an inline trim material as an asset group, an
+    /// inline instrument without its durability damage, and pot sides as
+    /// four item ids.
     #[test]
     fn converts_26_3_changed_components_to_26_2_layouts() {
         let teleport = |codec_id: u32| {
