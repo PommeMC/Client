@@ -50,6 +50,9 @@ pub struct InputState {
     /// A harness `press` waiting for the next frame.
     #[cfg(feature = "test-harness")]
     harness_press: Option<(KeyCode, bool)>,
+    /// Harness `text` waiting for the next frame.
+    #[cfg(feature = "test-harness")]
+    harness_text: Option<String>,
     mouse_delta: (f64, f64),
     cursor_captured: bool,
     touch: TouchControls,
@@ -176,6 +179,8 @@ impl InputState {
             harness_ctrl: false,
             #[cfg(feature = "test-harness")]
             harness_press: None,
+            #[cfg(feature = "test-harness")]
+            harness_text: None,
             mouse_delta: (0.0, 0.0),
             cursor_captured: true,
             touch: TouchControls::default(),
@@ -701,6 +706,10 @@ impl InputState {
         self.page_up_pressed = false;
         self.page_down_pressed = false;
         self.text_events.clear();
+        #[cfg(feature = "test-harness")]
+        if let Some(text) = self.harness_text.take() {
+            self.on_menu_key_press(None, Some(&text));
+        }
     }
 
     pub fn weak_rumble_for_instant(&self) -> Result<(), gilrs::ff::Error> {
@@ -728,6 +737,13 @@ impl InputState {
     #[cfg(feature = "test-harness")]
     pub fn press_key(&mut self, code: KeyCode, ctrl: bool) {
         self.harness_press = Some((code, ctrl));
+    }
+
+    /// Types `text` into the focused field on the next frame, as the
+    /// keyboard's text input would.
+    #[cfg(feature = "test-harness")]
+    pub fn type_text(&mut self, text: String) {
+        self.harness_text = Some(text);
     }
 
     fn on_key(&mut self, code: KeyCode, state: ElementState, repeat: bool) {

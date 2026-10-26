@@ -478,7 +478,12 @@ pub(crate) fn push_slot_with_owner(
     empty_sprite: Option<SpriteId>,
     use_player_team: bool,
 ) -> bool {
-    let hovered = hit_test(cursor, [x, y, size, size]);
+    // Vanilla `isHovering` reaches a pixel past each edge, so slots 18 apart
+    // leave no gap.
+    let hovered = hit_test(
+        cursor,
+        [x - scale, y - scale, size + 2.0 * scale, size + 2.0 * scale],
+    );
     let highlight = |sprite| MenuElement::Image {
         x: x - 4.0 * scale,
         y: y - 4.0 * scale,
@@ -1148,6 +1153,29 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn slot_hover_reaches_one_gui_pixel_past_each_edge() {
+        let item = ItemStack::from(ItemKind::Stone);
+        // A 16-unit slot at GUI scale 2, as vanilla's `isHovering` sees it.
+        let hovered = |cursor| {
+            push_slot_with_owner(
+                &mut Vec::new(),
+                20.0,
+                20.0,
+                32.0,
+                2.0,
+                cursor,
+                &item,
+                None,
+                true,
+            )
+        };
+        assert!(hovered((18.0, 30.0)));
+        assert!(hovered((53.9, 53.9)));
+        assert!(!hovered((17.9, 30.0)));
+        assert!(!hovered((54.0, 30.0)));
     }
 
     /// A vanilla `argb` fill over a gamma-space `bg`: pomme's linear blend of

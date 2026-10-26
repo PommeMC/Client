@@ -689,10 +689,15 @@ impl GameState {
     /// Opens the player's inventory, the creative one in creative mode.
     pub fn open_inventory(&mut self) {
         if crate::player::is_creative(self.player.game_mode) {
-            self.creative_inventory_open = true;
+            self.open_creative_inventory();
         } else {
             self.inventory_open = true;
         }
+    }
+
+    pub fn open_creative_inventory(&mut self) {
+        self.creative_inventory_open = true;
+        self.creative_state.reopen();
     }
 
     /// Closes whichever inventory or container menu is open.
@@ -3700,9 +3705,6 @@ pub fn update_game(
             gs,
         );
         match action {
-            crate::ui::creative_inventory::CreativeAction::Close => {
-                close_inventory = true;
-            }
             crate::ui::creative_inventory::CreativeAction::SetSlot(slot_num, item) => {
                 set_creative_slot(game, connection, slot_num, item);
             }

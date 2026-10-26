@@ -79,6 +79,23 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         Command::Bind(bind) => bind_keys(core, bind),
         Command::Option(options) => set_options(core, options),
         Command::Hover(target) => hover(core, gfx, game, target),
+        Command::Cursor { at } => {
+            let gs = gui_scale(core, gfx);
+            core.input.on_cursor_moved(at[0] * gs, at[1] * gs);
+            Ok(Value::Null)
+        }
+        Command::Text { text } => {
+            core.input.type_text(text.clone());
+            Ok(Value::Null)
+        }
+        Command::Scroll { y } => {
+            if game.gui_open() {
+                core.input.on_menu_scroll_xy(0.0, *y);
+                Ok(Value::Null)
+            } else {
+                Err("scroll needs a screen open".into())
+            }
+        }
         Command::LookAt { at } => {
             let eye = game.player.eye_pos();
             let (y_rot, x_rot) = protocol::look_angles(eye.into(), glam::DVec3::from_array(*at));
@@ -202,7 +219,7 @@ fn hover(
     if !game.creative_inventory_open {
         return Err("hover needs the creative inventory open".into());
     }
-    let target = match (target.slot, target.catalog) {
+    let cell = match (target.slot, target.catalog) {
         (Some(slot), None) => HoverTarget::Hotbar(slot),
         (None, Some(cell)) => HoverTarget::Catalog(cell),
         _ => return Err("hover takes one of slot or catalog".into()),
@@ -211,11 +228,18 @@ fn hover(
     let h = gfx.renderer.screen_height() as f32;
     let (x, y) = slot_center(
         &game.creative_state,
-        target,
+        cell,
+        target.offset,
         w,
         h,
-        core.menu.gui_scale(w, h),
+        gui_scale(core, gfx),
     )?;
     core.input.on_cursor_moved(x, y);
     Ok(Value::Null)
+}
+
+fn gui_scale(core: &AppCore, gfx: &crate::app::phases::Gfx) -> f32 {
+    let w = gfx.renderer.screen_width() as f32;
+    let h = gfx.renderer.screen_height() as f32;
+    core.menu.gui_scale(w, h)
 }

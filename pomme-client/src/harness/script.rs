@@ -45,6 +45,9 @@ struct StepFile {
     bind: Option<protocol::Bind>,
     option: Option<protocol::OptionSet>,
     hover: Option<protocol::Hover>,
+    cursor: Option<[f32; 2]>,
+    scroll: Option<f32>,
+    text: Option<String>,
     wait_ms: Option<u64>,
     screenshot: Option<String>,
     expect: Option<Expect>,
@@ -207,6 +210,10 @@ struct BlockExpect {
 struct MenuExpect {
     menu: String,
     title: Option<String>,
+    /// The creative screen's selected tab, first catalog row and search.
+    tab: Option<String>,
+    row: Option<usize>,
+    search: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -268,6 +275,15 @@ impl StepFile {
         }
         if let Some(hover) = self.hover {
             steps.push(Step::Run(Command::Hover(hover)));
+        }
+        if let Some(at) = self.cursor {
+            steps.push(Step::Run(Command::Cursor { at }));
+        }
+        if let Some(y) = self.scroll {
+            steps.push(Step::Run(Command::Scroll { y }));
+        }
+        if let Some(text) = self.text {
+            steps.push(Step::Run(Command::Text { text }));
         }
         if let Some(ms) = self.wait_ms {
             steps.push(Step::Wait(Duration::from_millis(ms)));
@@ -606,15 +622,34 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                 || format!("{at:?} holds {seen} with block entity {entity:?}"),
             )
         }
-        Expect::Menu(MenuExpect { menu, title }) => {
+        Expect::Menu(MenuExpect {
+            menu,
+            title,
+            tab,
+            row,
+            search,
+        }) => {
             let seen = protocol::inventory(game);
             let open = seen.menu_type.unwrap_or(&seen.menu);
+            let creative = seen.creative.as_ref();
             ensure(
                 open == menu
                     && title
                         .as_ref()
-                        .is_none_or(|t| seen.title.as_ref() == Some(t)),
-                || format!("menu is {open} titled {:?}", seen.title),
+                        .is_none_or(|t| seen.title.as_ref() == Some(t))
+                    && tab
+                        .as_ref()
+                        .is_none_or(|t| creative.is_some_and(|c| c.tab == t))
+                    && row.is_none_or(|r| creative.is_some_and(|c| c.row == r))
+                    && search
+                        .as_ref()
+                        .is_none_or(|s| creative.is_some_and(|c| c.search == *s)),
+                || {
+                    format!(
+                        "menu is {open} titled {:?}, creative {creative:?}",
+                        seen.title
+                    )
+                },
             )
         }
         Expect::Advancement(AdvancementExpect { advancement }) => ensure(

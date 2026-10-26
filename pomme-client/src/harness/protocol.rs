@@ -54,6 +54,19 @@ pub enum Command {
     Option(OptionSet),
     /// Moves the cursor over a creative-inventory cell.
     Hover(Hover),
+    /// Moves the cursor to `at`, in GUI pixels from the window's top left.
+    Cursor {
+        at: [f32; 2],
+    },
+    /// Turns the mouse wheel `y` lines (positive scrolls up) over the open
+    /// screen.
+    Scroll {
+        y: f32,
+    },
+    /// Types `text` into the focused text field.
+    Text {
+        text: String,
+    },
     MouseUp {
         button: Mouse,
     },
@@ -123,12 +136,15 @@ pub struct Bind {
     pub keys: Option<Vec<String>>,
 }
 
-/// A creative item-tab cell: one of `slot` (hotbar, 36-44) or `catalog`.
+/// A creative item-tab cell: one of `slot` (hotbar, 36-44) or `catalog`,
+/// optionally `offset` GUI pixels from its centre.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hover {
     pub slot: Option<u16>,
     pub catalog: Option<usize>,
+    #[serde(default)]
+    pub offset: [f32; 2],
 }
 
 /// Sets inventory slot `slot` to a copy of slot `from`'s stack, as the
@@ -212,6 +228,16 @@ pub struct InventoryInfo {
     pub title: Option<String>,
     pub slots: Vec<SlotInfo>,
     pub cursor: Option<StackInfo>,
+    pub creative: Option<CreativeInfo>,
+}
+
+/// The creative screen's selected tab, first shown catalog row and search
+/// text.
+#[derive(Debug, Serialize)]
+pub struct CreativeInfo {
+    pub tab: &'static str,
+    pub row: usize,
+    pub search: String,
 }
 
 pub fn inventory(game: &GameState) -> InventoryInfo {
@@ -243,7 +269,19 @@ pub fn inventory(game: &GameState) -> InventoryInfo {
                 })
             })
             .collect(),
-        cursor: StackInfo::of(&game.cursor_item),
+        cursor: StackInfo::of(if game.creative_inventory_open {
+            &game.creative_state.cursor_item
+        } else {
+            &game.cursor_item
+        }),
+        creative: game.creative_inventory_open.then(|| {
+            let state = &game.creative_state;
+            CreativeInfo {
+                tab: state.tab.id(),
+                row: crate::ui::creative_inventory::scroll_row(state),
+                search: state.search.value().to_owned(),
+            }
+        }),
     }
 }
 

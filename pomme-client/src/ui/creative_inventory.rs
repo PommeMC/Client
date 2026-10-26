@@ -209,6 +209,27 @@ impl CreativeTab {
         }
     }
 
+    /// The vanilla `creative_mode_tab` registry id.
+    #[cfg(feature = "test-harness")]
+    pub fn id(self) -> &'static str {
+        match self {
+            CreativeTab::BuildingBlocks => "building_blocks",
+            CreativeTab::ColoredBlocks => "colored_blocks",
+            CreativeTab::NaturalBlocks => "natural_blocks",
+            CreativeTab::FunctionalBlocks => "functional_blocks",
+            CreativeTab::RedstoneBlocks => "redstone_blocks",
+            CreativeTab::Hotbar => "hotbar",
+            CreativeTab::Search => "search",
+            CreativeTab::ToolsAndUtilities => "tools_and_utilities",
+            CreativeTab::Combat => "combat",
+            CreativeTab::FoodAndDrinks => "food_and_drinks",
+            CreativeTab::Ingredients => "ingredients",
+            CreativeTab::SpawnEggs => "spawn_eggs",
+            CreativeTab::OpBlocks => "op_blocks",
+            CreativeTab::SurvivalInventory => "inventory",
+        }
+    }
+
     fn scrollable(self) -> bool {
         matches!(
             self.meta().items,
@@ -300,6 +321,12 @@ impl CreativeState {
         self.sync_search_focus();
     }
 
+    /// Vanilla `init` re-selects the remembered tab, so the screen reopens on
+    /// it with the search and scroll cleared.
+    pub fn reopen(&mut self) {
+        self.select_tab(self.tab);
+    }
+
     /// Discards the carried stack and any pending drag/double-click state.
     /// Must run whenever the screen closes, or a stale drag would re-commit on
     /// reopen.
@@ -318,7 +345,6 @@ impl Default for CreativeState {
 
 pub enum CreativeAction {
     None,
-    Close,
     /// Set a real player-inventory slot to the given stack (creative set-slot).
     SetSlot(u16, ItemStack),
     /// Set several slots at once (drag distribution).
@@ -371,6 +397,40 @@ pub fn player_preview(
         cursor,
         armor: armor_render_infos(inventory.armor_slots()),
     })
+}
+
+/// Vanilla `ItemPickerMenu.subtractInputFromScroll`: one unit of wheel input
+/// moves one row.
+fn subtract_input_from_scroll(scroll: f32, input: f32, rows: usize) -> f32 {
+    (scroll - input / rows as f32).clamp(0.0, 1.0)
+}
+
+/// Vanilla `ItemPickerMenu.calculateRowCount`: the rows past the visible five.
+fn hidden_rows(items: usize) -> usize {
+    items.div_ceil(GRID_COLS).saturating_sub(GRID_ROWS)
+}
+
+/// Vanilla `getRowIndexForScroll`: the first row shown.
+fn first_row(scroll: f32, rows: usize) -> usize {
+    (scroll * rows as f32).round() as usize
+}
+
+/// The rows `items` can scroll through on the selected tab.
+fn scrollable_rows(state: &CreativeState, items: usize) -> usize {
+    if state.tab.scrollable() {
+        hidden_rows(items)
+    } else {
+        0
+    }
+}
+
+/// The first catalog row the screen shows.
+#[cfg(feature = "test-harness")]
+pub fn scroll_row(state: &CreativeState) -> usize {
+    first_row(
+        state.scroll,
+        scrollable_rows(state, visible_items(state).len()),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -487,19 +547,12 @@ pub fn build_creative_inventory(
     } else {
         let items = visible_items(state);
         let scrollable = state.tab.scrollable();
-        let max_scroll_rows = if scrollable {
-            items.len().div_ceil(GRID_COLS).saturating_sub(GRID_ROWS)
-        } else {
-            0
-        };
+        let max_scroll_rows = scrollable_rows(state, items.len());
 
         let mut grid_clicked = clicked;
         if scrollable && max_scroll_rows > 0 {
-            let inside = hit_test(cursor, [ox, oy, inv_w, inv_h]);
-            if inside && scroll_delta != 0.0 {
-                let step = 1.0 / max_scroll_rows as f32;
-                state.scroll = (state.scroll - scroll_delta.signum() * step).clamp(0.0, 1.0);
-            }
+            // Vanilla `mouseScrolled` takes the wheel anywhere on the screen.
+            state.scroll = subtract_input_from_scroll(state.scroll, scroll_delta, max_scroll_rows);
             if update_scroll_drag(state, ox, oy, scale, cursor, clicked, left_held) {
                 grid_clicked = false;
             }
@@ -508,7 +561,7 @@ pub fn build_creative_inventory(
             state.scroll_dragging = false;
         }
 
-        let scroll_row_offset = (state.scroll * max_scroll_rows as f32).round() as usize;
+        let scroll_row_offset = first_row(state.scroll, max_scroll_rows);
         let item_offset = scroll_row_offset * GRID_COLS;
 
         if matches!(state.tab, CreativeTab::Search) {
@@ -712,6 +765,7 @@ pub fn build_creative_inventory(
         let inner_w = SEARCH_BOX_W * scale;
         let fs = FONT_SIZE * scale;
         let wf = |t: &str| text_width_fn(t, fs);
+        let before = state.search.value().to_owned();
         for ev in events {
             if let crate::ui::text_edit::TextInputEvent::Char(c) = ev
                 && Some(*c) == skip_digit
@@ -719,6 +773,10 @@ pub fn build_creative_inventory(
                 continue;
             }
             state.search.handle(ev, &mut clipboard, inner_w, &wf);
+        }
+        // Vanilla `refreshSearchResults` scrolls back to the top.
+        if state.search.value() != before {
+            state.scroll = 0.0;
         }
     }
 
@@ -729,20 +787,16 @@ pub fn build_creative_inventory(
         && outside
         && tab_hit.is_none()
         && matches!(action, CreativeAction::None)
+        && can_drop
+        && let ItemStack::Present(carried) = &state.cursor_item
     {
-        if let ItemStack::Present(carried) = &state.cursor_item {
-            if can_drop {
-                // The survival-inventory tab throws the whole carried stack for
-                // either button; the item tabs split one off on a right click
-                // (`slotClicked`'s INVENTORY branch vs its outside-click tail).
-                let whole_stack = clicked || matches!(state.tab, CreativeTab::SurvivalInventory);
-                let (dropped, remaining) = split_for_drop(carried, whole_stack);
-                state.cursor_item = remaining;
-                action = CreativeAction::DropItem(dropped);
-            }
-        } else if clicked {
-            action = CreativeAction::Close;
-        }
+        // The survival-inventory tab throws the whole carried stack for
+        // either button; the item tabs split one off on a right click
+        // (`slotClicked`'s INVENTORY branch vs its outside-click tail).
+        let whole_stack = clicked || matches!(state.tab, CreativeTab::SurvivalInventory);
+        let (dropped, remaining) = split_for_drop(carried, whole_stack);
+        state.cursor_item = remaining;
+        action = CreativeAction::DropItem(dropped);
     }
 
     // Draw the carried item on the cursor; while dragging, show the remainder.
@@ -790,6 +844,7 @@ pub enum HoverTarget {
 pub fn slot_center(
     state: &CreativeState,
     target: HoverTarget,
+    offset: [f32; 2],
     screen_w: f32,
     screen_h: f32,
     gs: f32,
@@ -813,8 +868,8 @@ pub fn slot_center(
         ox,
         oy,
         scale,
-        x + 0.5 * SLOT_STRIDE,
-        y + 0.5 * SLOT_STRIDE,
+        x + 0.5 * SLOT_STRIDE + offset[0],
+        y + 0.5 * SLOT_STRIDE + offset[1],
     ))
 }
 
@@ -1641,6 +1696,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wheel_moves_a_row_per_line_and_clamps() {
+        let rows = 4;
+        let one_down = subtract_input_from_scroll(0.0, -1.0, rows);
+        assert_eq!(first_row(one_down, rows), 1);
+        // A fractional (trackpad) input moves part of a row.
+        let half = subtract_input_from_scroll(one_down, -0.5, rows);
+        assert_eq!(half, 0.375);
+        assert_eq!(subtract_input_from_scroll(0.0, 3.0, rows), 0.0);
+        assert_eq!(subtract_input_from_scroll(1.0, -10.0, rows), 1.0);
+    }
+
+    #[test]
+    fn hidden_rows_count_past_the_visible_five() {
+        assert_eq!(hidden_rows(45), 0);
+        assert_eq!(hidden_rows(46), 1);
+        assert_eq!(hidden_rows(90), 5);
+    }
+
+    #[test]
     fn survival_inventory_tab_requests_vanilla_player_preview() {
         let mut state = CreativeState::new();
         state.tab = CreativeTab::SurvivalInventory;
@@ -1707,7 +1781,15 @@ mod tests {
     }
 
     fn centre(target: HoverTarget) -> (f32, f32) {
-        slot_center(&CreativeState::new(), target, SCREEN.0, SCREEN.1, 2.0).unwrap()
+        slot_center(
+            &CreativeState::new(),
+            target,
+            [0.0; 2],
+            SCREEN.0,
+            SCREEN.1,
+            2.0,
+        )
+        .unwrap()
     }
 
     fn dropped_count(action: CreativeAction) -> i32 {
