@@ -514,6 +514,11 @@ pub enum NetworkEvent {
         id: i32,
         is_crouching: bool,
     },
+    /// Vanilla `handleSetCamera`: view the world from entity `id`, which is
+    /// the local player's own id when spectating ends.
+    SetCamera {
+        id: i32,
+    },
     /// LivingEntity metadata index 14 (SLEEPING_POS): Some while in a bed.
     /// Vanilla `isSleeping()` is `getSleepingPos().isPresent()`.
     EntitySleepingPos {

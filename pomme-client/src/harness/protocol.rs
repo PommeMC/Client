@@ -363,6 +363,8 @@ pub struct PlayerInfo {
     pub position: [f64; 3],
     /// Yaw and pitch, in degrees.
     pub rotation: [f32; 2],
+    /// The kind of entity the camera follows, empty for the player's own view.
+    pub spectating: String,
 }
 
 pub fn player(game: &GameState) -> PlayerInfo {
@@ -382,6 +384,9 @@ pub fn player(game: &GameState) -> PlayerInfo {
         day_time: game.sky_state.day_time,
         position: [player.position.x, player.position.y, player.position.z],
         rotation: [player.look_dir.y_rot_deg(), player.look_dir.x_rot_deg()],
+        spectating: game
+            .spectated()
+            .map_or_else(String::new, |e| bare(&e.entity_type.to_string())),
     }
 }
 

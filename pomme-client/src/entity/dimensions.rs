@@ -23,6 +23,17 @@ impl EntityDimensions {
         Self { width, height }
     }
 
+    /// The type's standing eye height: its builder's `eyeHeight`, else
+    /// `EntityType.Builder`'s default of 0.85 of its height.
+    pub fn eye_height(kind: EntityKind) -> f32 {
+        EYE_HEIGHTS
+            .binary_search_by(|(id, _)| id.cmp(&kind.to_str()))
+            .map_or_else(
+                |_| Self::of(kind).height * DEFAULT_EYE_HEIGHT_RATIO,
+                |i| EYE_HEIGHTS[i].1,
+            )
+    }
+
     /// Vanilla `EntityDimensions.makeBoundingBox`: centred on `pos` in x and
     /// z, rising `height` from it.
     pub fn make_bounding_box(&self, pos: DVec3) -> Aabb {
@@ -201,6 +212,120 @@ const SIZES: &[(&str, f32, f32)] = &[
     ("minecraft:zombified_piglin", 0.6, 1.95),
 ];
 
+/// `EntityType.Builder`'s eye height, as a fraction of the height, when it
+/// sets none.
+pub const DEFAULT_EYE_HEIGHT_RATIO: f32 = 0.85;
+
+/// `(registry id, eye height)` for every type whose builder sets `eyeHeight`,
+/// sorted by id.
+#[rustfmt::skip]
+const EYE_HEIGHTS: &[(&str, f32)] = &[
+    ("minecraft:acacia_boat", 0.5625),
+    ("minecraft:acacia_chest_boat", 0.5625),
+    ("minecraft:allay", 0.36),
+    ("minecraft:armadillo", 0.26),
+    ("minecraft:armor_stand", 1.7775),
+    ("minecraft:arrow", 0.13),
+    ("minecraft:axolotl", 0.2751),
+    ("minecraft:bamboo_chest_raft", 0.5625),
+    ("minecraft:bamboo_raft", 0.5625),
+    ("minecraft:bat", 0.45),
+    ("minecraft:bee", 0.3),
+    ("minecraft:birch_boat", 0.5625),
+    ("minecraft:birch_chest_boat", 0.5625),
+    ("minecraft:bogged", 1.74),
+    ("minecraft:breeze", 1.3452),
+    ("minecraft:breeze_wind_charge", 0.0),
+    ("minecraft:camel", 2.275),
+    ("minecraft:camel_husk", 2.275),
+    ("minecraft:cat", 0.35),
+    ("minecraft:cave_spider", 0.45),
+    ("minecraft:cherry_boat", 0.5625),
+    ("minecraft:cherry_chest_boat", 0.5625),
+    ("minecraft:chicken", 0.644),
+    ("minecraft:cod", 0.195),
+    ("minecraft:copper_golem", 0.8125),
+    ("minecraft:cow", 1.3),
+    ("minecraft:creaking", 2.3),
+    ("minecraft:dark_oak_boat", 0.5625),
+    ("minecraft:dark_oak_chest_boat", 0.5625),
+    ("minecraft:dolphin", 0.3),
+    ("minecraft:donkey", 1.425),
+    ("minecraft:drowned", 1.74),
+    ("minecraft:elder_guardian", 0.99875),
+    ("minecraft:enderman", 2.55),
+    ("minecraft:endermite", 0.13),
+    ("minecraft:fox", 0.4),
+    ("minecraft:ghast", 2.6),
+    ("minecraft:giant", 10.44),
+    ("minecraft:glow_item_frame", 0.0),
+    ("minecraft:glow_squid", 0.4),
+    ("minecraft:guardian", 0.425),
+    ("minecraft:happy_ghast", 2.6),
+    ("minecraft:horse", 1.52),
+    ("minecraft:husk", 1.74),
+    ("minecraft:item", 0.2125),
+    ("minecraft:item_frame", 0.0),
+    ("minecraft:jungle_boat", 0.5625),
+    ("minecraft:jungle_chest_boat", 0.5625),
+    ("minecraft:leash_knot", 0.0625),
+    ("minecraft:llama", 1.7765),
+    ("minecraft:magma_cube", 0.325),
+    ("minecraft:mangrove_boat", 0.5625),
+    ("minecraft:mangrove_chest_boat", 0.5625),
+    ("minecraft:mannequin", 1.62),
+    ("minecraft:mooshroom", 1.3),
+    ("minecraft:mule", 1.52),
+    ("minecraft:nautilus", 0.2751),
+    ("minecraft:oak_boat", 0.5625),
+    ("minecraft:oak_chest_boat", 0.5625),
+    ("minecraft:pale_oak_boat", 0.5625),
+    ("minecraft:pale_oak_chest_boat", 0.5625),
+    ("minecraft:parched", 1.74),
+    ("minecraft:parrot", 0.54),
+    ("minecraft:phantom", 0.175),
+    ("minecraft:piglin", 1.79),
+    ("minecraft:piglin_brute", 1.79),
+    ("minecraft:player", 1.62),
+    ("minecraft:poplar_boat", 0.5625),
+    ("minecraft:poplar_chest_boat", 0.5625),
+    ("minecraft:pufferfish", 0.455),
+    ("minecraft:rabbit", 0.59),
+    ("minecraft:salmon", 0.26),
+    ("minecraft:sheep", 1.235),
+    ("minecraft:shulker", 0.5),
+    ("minecraft:silverfish", 0.13),
+    ("minecraft:skeleton", 1.74),
+    ("minecraft:skeleton_horse", 1.52),
+    ("minecraft:slime", 0.325),
+    ("minecraft:sniffer", 1.05),
+    ("minecraft:snow_golem", 1.7),
+    ("minecraft:spectral_arrow", 0.13),
+    ("minecraft:spider", 0.65),
+    ("minecraft:spruce_boat", 0.5625),
+    ("minecraft:spruce_chest_boat", 0.5625),
+    ("minecraft:squid", 0.4),
+    ("minecraft:stray", 1.74),
+    ("minecraft:sulfur_cube", 0.175),
+    ("minecraft:tadpole", 0.19500001),
+    ("minecraft:tnt", 0.15),
+    ("minecraft:trader_llama", 1.7765),
+    ("minecraft:trident", 0.13),
+    ("minecraft:tropical_fish", 0.26),
+    ("minecraft:vex", 0.51875),
+    ("minecraft:villager", 1.62),
+    ("minecraft:wandering_trader", 1.62),
+    ("minecraft:wind_charge", 0.0),
+    ("minecraft:witch", 1.62),
+    ("minecraft:wither_skeleton", 2.1),
+    ("minecraft:wolf", 0.68),
+    ("minecraft:zombie", 1.74),
+    ("minecraft:zombie_horse", 1.52),
+    ("minecraft:zombie_nautilus", 0.2751),
+    ("minecraft:zombie_villager", 1.74),
+    ("minecraft:zombified_piglin", 1.79),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +333,17 @@ mod tests {
     #[test]
     fn sizes_are_sorted_for_lookup() {
         assert!(SIZES.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(EYE_HEIGHTS.windows(2).all(|w| w[0].0 < w[1].0));
+    }
+
+    #[test]
+    fn eye_heights_take_the_override_or_the_default() {
+        assert_eq!(EntityDimensions::eye_height(EntityKind::Spider), 0.65);
+        assert_eq!(EntityDimensions::eye_height(EntityKind::Enderman), 2.55);
+        assert_eq!(
+            EntityDimensions::eye_height(EntityKind::Creeper),
+            1.7 * 0.85
+        );
     }
 
     #[test]

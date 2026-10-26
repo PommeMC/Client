@@ -737,6 +737,10 @@ impl Renderer {
         self.camera.set_sleeping_look(yaw_deg);
     }
 
+    pub fn set_entity_camera_look(&mut self, look_dir: Option<LookDirection>) {
+        self.camera.set_entity_look(look_dir);
+    }
+
     pub fn set_view_bob(&mut self, walk_dist: f32, bob: f32, enabled: bool) {
         self.camera.set_view_bob(walk_dist, bob, enabled);
     }
@@ -772,7 +776,7 @@ impl Renderer {
         // visual shapes with no minimum; this marches 0.2 steps against full
         // cubes with a 0.4 pad and a 0.5 floor, so a distance of 0 sits 0.5 back.
         let max = max_distance as f64;
-        let fwd = self.camera.look_dir.as_vec().as_dvec3();
+        let fwd = self.camera.render_look_dir().as_vec().as_dvec3();
         let dir = if self.camera.mode == camera::CameraMode::ThirdPersonFront {
             fwd
         } else {

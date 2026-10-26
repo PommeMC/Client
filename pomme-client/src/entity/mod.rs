@@ -508,6 +508,15 @@ impl LivingEntity {
         self.equipment.get(&slot)
     }
 
+    /// Vanilla `getViewYRot` / `getViewXRot`: the rotation between ticks.
+    pub fn view_look(&self, partial_tick: f32) -> LookDirection {
+        let (prev, now) = (self.prev_look_dir, self.look_dir);
+        LookDirection::new(
+            lerp_angle(prev.y_rot_deg(), now.y_rot_deg(), partial_tick),
+            prev.x_rot_deg() + (now.x_rot_deg() - prev.x_rot_deg()) * partial_tick,
+        )
+    }
+
     fn interpolate_to_pos(&mut self, pos: Position) {
         self.interp_target = pos;
         self.interp_steps = INTERPOLATION_STEPS;

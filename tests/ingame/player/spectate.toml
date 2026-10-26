@@ -1,0 +1,53 @@
+# Spectating a mob views the world from its eye, along its rotation:
+# `/spectate` sends `set_camera`, and `/spectate` with no target sends the
+# player's own id back.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+chat = "/tp @s -30.5 -60 30.5 0 0"
+
+# A NoAI creeper facing south (yaw 0), toward a gold block.
+[[step]]
+chat = "/summon minecraft:creeper -30.5 -60 33.5 {NoAI:1b,Rotation:[0f,0f],Tags:[\"spectated\"]}"
+
+[[step]]
+chat = "/setblock -31 -60 37 minecraft:gold_block"
+
+[[step]]
+expect = { entity = "creeper", at = [-30.5, -60, 33.5] }
+
+[[step]]
+chat = "/spectate @e[tag=spectated,limit=1] @s"
+
+[[step]]
+expect = { player = { spectating = "creeper" } }
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "creeper_view"
+
+[[step]]
+chat = "/spectate"
+
+[[step]]
+expect = { player = { spectating = "" } }
+
+[[step]]
+chat = "/kill @e[tag=spectated]"
+
+[[step]]
+chat = "/setblock -31 -60 37 minecraft:air"
+
+[[step]]
+chat = "/gamemode survival"

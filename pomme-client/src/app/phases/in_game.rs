@@ -251,6 +251,9 @@ pub struct GameState {
     /// Game mode before the last change (vanilla `previousLocalPlayerMode`),
     /// the F3+N return target.
     pub previous_game_mode: Option<u8>,
+    /// The entity a spectator views the world from (vanilla
+    /// `Minecraft.cameraEntity`); `None` is the local player.
+    pub camera_entity: Option<i32>,
     /// Current dimension identifier (e.g. "minecraft:overworld"), for F3+C.
     pub dimension: String,
     /// Dimension-type `cardinal_light`, which picks the terrain shade table
@@ -340,6 +343,11 @@ pub struct GameState {
 }
 
 impl GameState {
+    /// The mob a spectator views the world from, if it's one the client knows.
+    pub fn spectated(&self) -> Option<&crate::entity::LivingEntity> {
+        self.entity_store.living.get(&self.camera_entity?)
+    }
+
     /// This dimension's `skyDarken` right now.
     pub fn sky_darken(&self) -> u8 {
         self.sky_state.sky_darken(self.overworld_day)
@@ -490,6 +498,7 @@ impl GameState {
             debug_overlay_pending: false,
             pending_chunk_reload: false,
             previous_game_mode: None,
+            camera_entity: None,
             dimension: String::new(),
             cardinal_light: Default::default(),
             ambient_light: 0.0,
@@ -2492,12 +2501,25 @@ pub fn update_game(
     } else {
         0.0
     };
-    let camera_pivot = game
-        .player
-        .prev_eye_pos()
-        .lerp(game.player.eye_pos(), partial_tick as f64)
-        + glam::dvec3(0.0, first_person_lift, 0.0);
+    // Vanilla `Camera.setup` follows the camera entity: a spectated mob's
+    // eye and view rotation, else the local player's.
+    let spectated = game.spectated();
+    let camera_pivot = match spectated {
+        Some(e) => {
+            let eye = standing_eye_height(e.entity_type, e.is_baby);
+            e.prev_position.lerp(e.position, partial_tick as f64)
+                + glam::dvec3(0.0, f64::from(eye), 0.0)
+        }
+        None => {
+            game.player
+                .prev_eye_pos()
+                .lerp(game.player.eye_pos(), partial_tick as f64)
+                + glam::dvec3(0.0, first_person_lift, 0.0)
+        }
+    };
     gfx.renderer.sync_camera_pos(camera_pivot);
+    gfx.renderer
+        .set_entity_camera_look(spectated.map(|e| e.view_look(partial_tick)));
     gfx.renderer.set_sleeping_camera_look(is_sleeping.then(|| {
         sleeping_direction
             .map(BedDirection::camera_yaw_deg)
@@ -3798,9 +3820,13 @@ pub fn update_game(
     let mut entity_renders: Vec<EntityRenderInfo> = if benchmark_running {
         Vec::new()
     } else {
+        // Vanilla `LevelExtractor` skips the camera entity unless the camera
+        // is detached.
+        let first_person = gfx.renderer.is_first_person();
         game.entity_store
             .living
             .iter()
+            .filter(|&(&id, _)| !(first_person && game.camera_entity == Some(id)))
             .map(|(&entity_id, e)| {
                 let interp_pos = e.prev_position.lerp(e.position, partial_tick as f64);
                 let extras =
@@ -3887,12 +3913,15 @@ pub fn update_game(
             .collect()
     };
 
-    if should_render_local_player(
-        benchmark_running,
-        gfx.renderer.is_first_person(),
-        game.player.is_sleeping(),
-        game.player.death_animation_finished(),
-    ) {
+    // Vanilla only extracts the local player while it's the camera entity.
+    if game.camera_entity.is_none()
+        && should_render_local_player(
+            benchmark_running,
+            gfx.renderer.is_first_person(),
+            game.player.is_sleeping(),
+            game.player.death_animation_finished(),
+        )
+    {
         let interp_pos = game
             .player
             .prev_position

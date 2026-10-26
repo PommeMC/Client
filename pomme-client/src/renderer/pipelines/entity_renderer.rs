@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 use crate::assets::{AssetIndex, resolve_asset_path, resolve_asset_path_with_packs};
 use crate::entity::components::Position;
+use crate::entity::dimensions;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::BakedEntityModel;
@@ -2591,13 +2592,13 @@ const ANIM_MARGIN: f32 = 0.5;
 /// Vanilla `AvatarRenderer.scale`: players render at 15/16 model scale.
 const PLAYER_MODEL_SCALE: f32 = 0.9375;
 
-/// Standing eye height, which positions a sleeper on its bed.
+/// Standing eye height, which positions a sleeper on its bed and a
+/// spectator's camera on the entity it spectates.
 pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
     match kind {
-        EntityKind::Player => crate::player::STANDING_EYE_HEIGHT,
         EntityKind::Villager if is_baby => 0.63,
-        EntityKind::Villager => 1.62,
-        _ => entity_bounds(kind, is_baby).1 * 0.85,
+        _ if is_baby => entity_bounds(kind, is_baby).1 * dimensions::DEFAULT_EYE_HEIGHT_RATIO,
+        _ => dimensions::EntityDimensions::eye_height(kind),
     }
 }
 

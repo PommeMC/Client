@@ -114,6 +114,9 @@ pub struct Camera {
     pub look_dir: LookDirection,
     /// The first-person view along the bed while asleep; render-only.
     sleeping_look_dir: Option<LookDirection>,
+    /// A spectated entity's view rotation, which the view takes in every mode
+    /// (vanilla `Camera.setup` reads the camera entity's); render-only.
+    entity_look_dir: Option<LookDirection>,
     pub mode: CameraMode,
     pub third_person_dist: f32,
     /// When set, render straight down from this many blocks above the pivot,
@@ -145,6 +148,7 @@ impl Camera {
             position: Position::default(),
             look_dir: LookDirection::default(),
             sleeping_look_dir: None,
+            entity_look_dir: None,
             mode: CameraMode::FirstPerson,
             third_person_dist: THIRD_PERSON_DISTANCE,
             top_down: None,
@@ -298,7 +302,14 @@ impl Camera {
         });
     }
 
-    fn render_look_dir(&self) -> LookDirection {
+    pub fn set_entity_look(&mut self, look_dir: Option<LookDirection>) {
+        self.entity_look_dir = look_dir;
+    }
+
+    pub fn render_look_dir(&self) -> LookDirection {
+        if let Some(look_dir) = self.entity_look_dir {
+            return look_dir;
+        }
         if self.mode == CameraMode::FirstPerson {
             self.sleeping_look_dir.unwrap_or(self.look_dir)
         } else {

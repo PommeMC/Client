@@ -2695,6 +2695,13 @@ impl AppCore {
                 NetworkEvent::EntityPose { id, is_crouching } => {
                     game.entity_store.set_crouching(id, is_crouching);
                 }
+                NetworkEvent::SetCamera { id } => {
+                    if id == game.player.entity_id {
+                        game.camera_entity = None;
+                    } else if game.entity_store.living.contains_key(&id) {
+                        game.camera_entity = Some(id);
+                    }
+                }
                 NetworkEvent::EntitySleepingPos { id, pos } => {
                     game.entity_store.set_sleeping_pos(id, pos);
                     if id == game.player.entity_id {
@@ -2821,6 +2828,7 @@ impl AppCore {
                         .reset_for_closed_screen(&mut game.recipe_book);
                     game.recipe_book.reset_for_login();
                     game.player.entity_id = entity_id;
+                    game.camera_entity = None;
                     game.hardcore = hardcore;
                     game.online_mode = online_mode;
                     game.show_death_screen = show_death_screen;
@@ -2867,6 +2875,7 @@ impl AppCore {
                         game.player.absorption = 0.0;
                     }
                     game.dead = false;
+                    game.camera_entity = None;
                     // `startWaitingForNewLevel` replaces an open dialog here too.
                     game.server_dialog = None;
                     game.start_level_load();

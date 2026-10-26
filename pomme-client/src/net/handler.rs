@@ -171,6 +171,9 @@ pub fn handle_game_packet(
         ClientboundGamePacket::ClearDialog(_) => {
             send_ordered(event_tx, NetworkEvent::ClearDialog);
         }
+        ClientboundGamePacket::SetCamera(p) => {
+            send_ordered(event_tx, NetworkEvent::SetCamera { id: p.camera_id.0 });
+        }
         ClientboundGamePacket::CustomChatCompletions(p) => {
             tracing::debug!(
                 "Custom chat completions: {:?} ({} entries)",
