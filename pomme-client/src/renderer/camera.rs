@@ -448,13 +448,13 @@ impl Camera {
         }
     }
 
-    /// Forward and up vectors for the view matrix, accounting for the top-down
-    /// override and front-facing third person.
     /// The way the camera looks (vanilla `Camera.forwardVector`).
     pub fn forward(&self) -> Vec3 {
         self.view_basis().0
     }
 
+    /// Forward and up vectors for the view matrix, accounting for the top-down
+    /// override and front-facing third person.
     fn view_basis(&self) -> (Vec3, Vec3) {
         if self.top_down.is_some() {
             // Looking straight down Y; Y can't be the up hint, so use -Z (north up).
