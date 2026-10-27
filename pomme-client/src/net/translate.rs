@@ -152,6 +152,9 @@
 //!   length varints `writeFixedSizeLongArray` stopped writing
 //!   (`PalettedContainer.Data.getSerializedSize`), so it ends in zero padding,
 //!   which is dropped
+//! - `chunks_biomes` carries the same biome containers, length-prefixed before
+//!   1.21.5 and padded on it; the packet is dropped (TODO), so a `/fillbiome`
+//!   shows only once its chunks are sent again
 //! - 1.21.6 gave `HangingEntity` a synched `direction` at index 8, so an item
 //!   frame's item/rotation sit at 8/9 here and a painting's variant at 8 (9/10
 //!   and 9 on 26.2); the walker passes index bytes through unremapped and pomme
@@ -741,10 +744,11 @@ impl Ids769 {
 }
 
 /// Dispatch ids for the one outbound rewrite protocol 770 needs (see
-/// [`translate_player_command`]).
+/// [`translate_player_command`]), and the `chunks_biomes` it drops.
 struct Ids770 {
     player_command_id: u32,
     player_command_old_id: u32,
+    chunks_biomes_id: u32,
 }
 
 /// Native-space dispatch ids for the frame rewrites only protocols at or
@@ -1155,6 +1159,13 @@ impl Translation {
         }
         if v765.is_some_and(|v| id == v.update_advancements_id) {
             tracing::debug!("Dropping update_advancements with old-form icons");
+            return None;
+        }
+        let v770 = self.game_ids.as_ref().and_then(|g| g.v770.as_ref());
+        if v770.is_some_and(|v| id == v.chunks_biomes_id) {
+            // TODO: translate `chunks_biomes`: copy each biome container like
+            // [`translate_chunk`], dropping its length prefix and padding.
+            tracing::debug!("Dropping chunks_biomes with pre-1.21.6 biome containers");
             return None;
         }
         let v764 = self.game_ids.as_ref().and_then(|g| g.v764.as_ref());
@@ -1690,6 +1701,7 @@ impl GameIds {
                 explode_id: id(Clientbound, "explode"),
             }),
             v770: (protocol <= 770).then(|| Ids770 {
+                chunks_biomes_id: id(Clientbound, "chunks_biomes"),
                 player_command_id: id(Serverbound, "player_command"),
                 player_command_old_id: required_id(
                     table,

@@ -463,6 +463,25 @@ impl GameState {
         queue_light_apply(self, pos, light, true);
     }
 
+    /// Vanilla `handleChunksBiomes`: the columns' new biomes, then every
+    /// loaded column around them remeshes, since biome tints blend across
+    /// column edges.
+    pub fn replace_biomes(&mut self, chunks: &[(crate::position::ChunkPos, Box<[u8]>)]) {
+        let biomes = crate::net::connection::biome_count(&self.registries);
+        for (pos, data) in chunks {
+            if let Err(e) = self.chunk_store.replace_biomes(*pos, data, biomes) {
+                tracing::error!("Failed to replace biomes in [{}, {}]: {e}", pos.x, pos.z);
+            }
+        }
+        for (pos, _) in chunks {
+            for column in crate::world::chunk::column_neighborhood(*pos) {
+                if self.chunk_store.get_chunk(&column).is_some() {
+                    self.mark_column_dirty(column);
+                }
+            }
+        }
+    }
+
     pub fn apply_light_update(
         &mut self,
         pos: crate::position::ChunkPos,
@@ -1703,6 +1722,7 @@ impl AppCore {
                     light,
                 } => game.load_chunk(pos, &data, &heightmaps, &light),
                 NetworkEvent::LightUpdate { pos, light } => game.apply_light_update(pos, &light),
+                NetworkEvent::ChunkBiomes { chunks } => game.replace_biomes(&chunks),
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.unload_chunk(pos);
                     renderer.remove_chunk_mesh(&pos);

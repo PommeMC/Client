@@ -152,8 +152,26 @@ chat = "/fill 58 -60 54 64 -56 60 minecraft:air"
 [[step]]
 chat = "/fill 58 -61 54 64 -61 60 minecraft:grass_block"
 
+# The nether is generated from a random seed, so the shot looks over what
+# every seed shares: the bedrock roof's top layer, always solid at y 127,
+# under a biome set by hand. Forceloading lets the biome be filled first, so
+# the chunks arrive with it.
 [[step]]
-chat = "/execute in minecraft:the_nether run tp @s 0 100 0 0 20"
+chat = "/execute in minecraft:the_nether run forceload add -16 -16 15 15"
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/execute in minecraft:the_nether run fillbiome -15 112 -15 15 142 15 minecraft:nether_wastes"
+
+# "N biome entries set", or "No biome entries were changed" on a rerun in the
+# same world; not the not-loaded error.
+[[step]]
+expect = { chat = "biome entr" }
+
+[[step]]
+chat = "/execute in minecraft:the_nether run tp @s 0.5 128 0.5 0 20"
 
 [[step]]
 expect = { player = { dimension = "the_nether" } }
@@ -167,6 +185,9 @@ screenshot = "nether"
 
 [[step]]
 chat = "/execute in minecraft:overworld run tp @s 0.5 -60 0.5"
+
+[[step]]
+chat = "/execute in minecraft:the_nether run forceload remove -16 -16 15 15"
 
 [[step]]
 expect = { player = { dimension = "overworld" } }

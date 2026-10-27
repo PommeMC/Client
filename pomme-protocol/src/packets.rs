@@ -303,6 +303,7 @@ mod tests {
             (Direction::Clientbound, "level_chunk_with_light", 45),
             (Direction::Clientbound, "light_update", 48),
             (Direction::Clientbound, "forget_level_chunk", 37),
+            (Direction::Clientbound, "chunks_biomes", 13),
             (Direction::Clientbound, "chunk_batch_start", 12),
             (Direction::Clientbound, "chunk_batch_finished", 11),
             (Direction::Clientbound, "set_chunk_cache_center", 94),
