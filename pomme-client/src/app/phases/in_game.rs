@@ -4129,7 +4129,16 @@ pub fn update_game(
             min_y,
             game.flat,
         ),
-        dark_disc: game.player.eye_pos().y < horizon && !game.player.eyes_in_water,
+        // `Entity.getEyePosition(partialTicks)`: the position between ticks,
+        // the eye height as of now.
+        dark_disc: game
+            .player
+            .prev_position
+            .y
+            .lerp(game.player.position.y, f64::from(partial_tick))
+            + f64::from(game.player.eye_height)
+            < horizon
+            && !game.player.eyes_in_water,
         ..game.sky_state.clone()
     };
     if game.show_chunk_borders {
