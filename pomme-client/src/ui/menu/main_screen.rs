@@ -51,14 +51,17 @@ impl MainMenu {
             .as_secs_f32();
         let panel_t = ease_out_cubic((anim_t / 2.0).min(1.0));
 
-        let accent: [f32; 4] = [0.29, 0.87, 0.5, 1.0];
-        let glass: [f32; 4] = [0.07, 0.08, 0.16, 0.55];
-        let glass_hover: [f32; 4] = [0.12, 0.14, 0.25, 0.65];
-        let text_col: [f32; 4] = [0.89, 0.90, 0.96, 0.85];
+        let accent: [f32; 4] = [0.57, 0.94, 0.73, 1.0];
+        let glass: [f32; 4] = [0.3, 0.32, 0.43, 0.76];
+        let glass_hover: [f32; 4] = [0.38, 0.41, 0.53, 0.82];
+        let text_col: [f32; 4] = [0.89, 0.90, 0.96, 0.93];
         let text_bright: [f32; 4] = [0.94, 0.95, 0.98, 1.0];
-        let text_dim: [f32; 4] = [0.53, 0.56, 0.69, 0.6];
-        let text_disabled: [f32; 4] = [0.45, 0.47, 0.58, 0.35];
-        let border: [f32; 4] = [1.0, 1.0, 1.0, 0.05];
+        let text_dim: [f32; 4] = [0.53, 0.56, 0.69, 0.79];
+        let text_disabled: [f32; 4] = [0.45, 0.47, 0.58, 0.62];
+        let icon_bright: [f32; 4] = [0.97, 0.98, 0.99, 1.0];
+        let icon_dim: [f32; 4] = [0.75, 0.77, 0.84, 0.6];
+        let icon_disabled: [f32; 4] = [0.7, 0.71, 0.78, 0.35];
+        let border: [f32; 4] = [1.0, 1.0, 1.0, 0.26];
 
         struct BtnDef {
             label: &'static str,
@@ -138,7 +141,7 @@ impl MainMenu {
             w: 50.0 * s,
             h: accent_bar_h,
             corner_radius: accent_bar_h * 0.5,
-            color: [accent[0], accent[1], accent[2], 0.7],
+            color: [accent[0], accent[1], accent[2], 0.85],
         });
         cy += accent_bar_h + 14.0 * s;
 
@@ -186,7 +189,7 @@ impl MainMenu {
                 w: bw,
                 h: badge_h,
                 corner_radius: badge_r,
-                color: [accent[0], accent[1], accent[2], 0.9 * badge_scale],
+                color: [accent[0], accent[1], accent[2], 0.95 * badge_scale],
             });
             if badge_t >= 0.5 {
                 let text_a = ((badge_t - 0.5) / 0.5).min(1.0);
@@ -256,11 +259,11 @@ impl MainMenu {
                     accent[1],
                     accent[2],
                     if !def.enabled {
-                        0.04
+                        0.23
                     } else if active {
-                        0.9
+                        0.95
                     } else {
-                        0.12
+                        0.38
                     },
                 ],
             });
@@ -329,11 +332,11 @@ impl MainMenu {
                     icon,
                     scale: icon_scale,
                     color: if !enabled {
-                        text_disabled
+                        icon_disabled
                     } else if hovered {
-                        text_bright
+                        icon_bright
                     } else {
-                        text_dim
+                        icon_dim
                     },
                 });
                 hovered
@@ -452,7 +455,7 @@ impl MainMenu {
         let footer_size = 8.0 * s;
         let footer_pad = 8.0 * s;
         let footer_y = screen_h - footer_pad - footer_size;
-        let footer_col = [0.4, 0.45, 0.6, 0.2];
+        let footer_col = [0.4, 0.45, 0.6, 0.48];
         elements.push(MenuElement::Text {
             x: footer_pad,
             y: footer_y,

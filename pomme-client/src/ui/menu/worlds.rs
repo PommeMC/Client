@@ -205,7 +205,7 @@ impl MainMenu {
                     w: icon[2],
                     h: icon[3],
                     corner_radius: 0.0,
-                    color: [0.274, 0.274, 0.274, 0.63],
+                    color: crate::ui::text::argb32(ICON_HOVER_FILL),
                 });
                 push_icon(
                     &mut elements,

@@ -21,8 +21,8 @@ fn push_gradient(elements: &mut Vec<MenuElement>, screen_w: f32, screen_h: f32) 
         elements,
         screen_w,
         screen_h,
-        [0.080, 0.0, 0.0, 0.376],
-        [0.216, 0.029, 0.029, 0.627],
+        crate::ui::text::argb32(0x6050_0000),
+        crate::ui::text::argb32(0xA080_3030),
     );
 }
 

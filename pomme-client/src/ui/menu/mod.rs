@@ -480,6 +480,9 @@ impl MenuInput {
 /// Vanilla `HeaderAndFooterLayout.DEFAULT_HEADER_AND_FOOTER_HEIGHT`.
 const HEADER_FOOTER_H: f32 = 33.0;
 const ENTRY_H: f32 = 36.0;
+/// `ServerSelectionList` and `WorldSelectionList`'s fill behind a hovered
+/// entry's icon.
+const ICON_HOVER_FILL: u32 = 0xA090_9090;
 /// Inset (GUI units) keeping server-list entry content off the raw row edges.
 const SERVER_ENTRY_PAD: f32 = 2.0;
 const ROW_W: f32 = 305.0;
