@@ -1145,15 +1145,15 @@ impl Renderer {
         // terrain shows the clear color, so it must match the sky/terrain or it
         // reads as a horizon band (visible at night). Underwater, clear to the
         // water fog color so background gaps read as water rather than sky.
-        let clear_col = if eyes_in_water {
+        let [r, g, b] = util::srgb_to_linear(if eyes_in_water {
             camera::WATER_FOG_COLOR
         } else {
-            sky.sky_color()
-        };
+            sky.attributes.sky_color.to_array()
+        });
         self.render_frame(
             window,
             hide_cursor,
-            [clear_col[0], clear_col[1], clear_col[2], 1.0],
+            [r, g, b, 1.0],
             RenderMode::World {
                 block_render,
                 overlay,
@@ -1481,7 +1481,7 @@ impl Renderer {
         {
             let uniform = CameraUniform::new(
                 &self.camera,
-                sky.sky_color(),
+                sky.attributes.sky_color.to_array(),
                 render_distance,
                 eyes_in_water,
             );

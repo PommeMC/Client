@@ -4,6 +4,19 @@ use super::{MAX_FRAMES_IN_FLIGHT, rhi};
 use crate::assets::{AssetIndex, resolve_asset_path};
 
 /// An sRGB texture holding `pixels`, ready for shaders to read.
+/// The exact sRGB decode (`fog.glsl`'s `srgb_to_linear`): vanilla's colours
+/// are sRGB values its framebuffer holds as they are, while pomme's swapchain
+/// encodes what it's given.
+pub fn srgb_to_linear(rgb: [f32; 3]) -> [f32; 3] {
+    rgb.map(|c| {
+        if c < 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    })
+}
+
 pub fn create_sampled_texture(
     device: &rhi::backend::Device,
     label: &str,

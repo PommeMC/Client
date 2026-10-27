@@ -1,91 +1,21 @@
-use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::f32::consts::TAU;
 use std::path::Path;
 
-use glam::{FloatExt, Vec3};
+use glam::Vec3;
 
 use crate::assets::AssetIndex;
 use crate::renderer::camera::Camera;
 use crate::renderer::{rhi, shader, util};
+use crate::world::environment::{EnvAttributes, Environment};
 
 const STAR_COUNT: u32 = 1500;
 const SUN_SIZE: f32 = 30.0;
 const MOON_SIZE: f32 = 20.0;
 const CELESTIAL_DIST: f32 = 100.0;
 const SKY_DISC_RADIUS: f32 = 512.0;
-const TICKS_PER_DAY: f32 = 24000.0;
 const SUNRISE_STEPS: u32 = 16;
 
 const MOON_BRIGHTNESS_PER_PHASE: [f32; 8] = [1.0, 0.75, 0.5, 0.25, 0.0, 0.25, 0.5, 0.75];
-
-const STAR_BRIGHTNESS_KEYFRAMES: &[(f32, f32)] = &[
-    (92.0, 0.037),
-    (627.0, 0.0),
-    (11373.0, 0.0),
-    (11732.0, 0.016),
-    (11959.0, 0.044),
-    (12399.0, 0.143),
-    (12729.0, 0.258),
-    (13228.0, 0.5),
-    (22772.0, 0.5),
-    (23032.0, 0.364),
-    (23356.0, 0.225),
-    (23758.0, 0.101),
-];
-
-const SKY_COLOR_KEYFRAMES: &[(f32, [f32; 3])] = &[
-    (133.0, [1.0, 1.0, 1.0]),
-    (11867.0, [1.0, 1.0, 1.0]),
-    (13670.0, [0.0, 0.0, 0.0]),
-    (22330.0, [0.0, 0.0, 0.0]),
-];
-
-/// The overworld timeline's `SKY_LIGHT_LEVEL` multiplier.
-const SKY_LIGHT_LEVEL_KEYFRAMES: &[(f32, f32)] = &[
-    (133.0, 1.0),
-    (11867.0, 1.0),
-    (13670.0, 0.266_666_68),
-    (22330.0, 0.266_666_68),
-];
-
-const SUNRISE_COLOR_KEYFRAMES: &[(f32, i32)] = &[
-    (71.0, 1609540403),
-    (310.0, 703969843),
-    (565.0, 117167155),
-    (730.0, 16770355),
-    (11270.0, 16770355),
-    (11397.0, 83679283),
-    (11522.0, 268028723),
-    (11690.0, 703969843),
-    (11929.0, 1609540403),
-    (12243.0, -1310226637),
-    (12358.0, -857440717),
-    (12512.0, -371166669),
-    (12613.0, -153261261),
-    (12732.0, -19242189),
-    (12841.0, -19440589),
-    (13035.0, -321760973),
-    (13252.0, -1043577037),
-    (13775.0, 918435635),
-    (13888.0, 532362547),
-    (14039.0, 163001139),
-    (14192.0, 11744051),
-    (21807.0, 11678515),
-    (21961.0, 163001139),
-    (22112.0, 532362547),
-    (22225.0, 918435635),
-    (22748.0, -1043577037),
-    (22965.0, -321760973),
-    (23159.0, -19440589),
-    (23272.0, -19242189),
-    (23488.0, -371166669),
-    (23642.0, -857440717),
-    (23757.0, -1310226637),
-];
-
-const BASE_SKY_COLOR: [f32; 3] = [0.478, 0.659, 1.0];
-
-// EasingType.symmetricCubicBezier(0.362, 0.241)
-const SKY_ANGLE_BEZIER: (f32, f32, f32, f32) = (0.362, 0.241, 0.638, 0.759);
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -113,39 +43,24 @@ struct SkyUniform {
 #[derive(Clone)]
 pub struct SkyState {
     pub day_time: u64,
-    /// The day time as of the last tick, which frames blend from.
-    pub prev_day_time: u64,
     pub game_time: u64,
     pub rain_level: f32,
     pub thunder_level: f32,
     pub partial_tick: f32,
+    /// The environment attributes, blended for this frame.
+    pub attributes: EnvAttributes,
 }
 
 impl SkyState {
     pub fn default_day() -> Self {
         Self {
             day_time: 6000,
-            prev_day_time: 6000,
             game_time: 6000,
             rain_level: 0.0,
             thunder_level: 0.0,
             partial_tick: 0.0,
+            attributes: Environment::default().resolve(6000, 0.0, 0.0),
         }
-    }
-
-    /// The day's tick for this frame. Vanilla samples the sky's attributes at
-    /// whole ticks (`AttributeTrackSampler`), then blends the last tick's into
-    /// this one's by the partial tick (`EnvironmentAttributeProbe`), its angles
-    /// snapping on a jump of 90 degrees or more (`LerpFunction.ofDegrees`).
-    pub fn day_tick(&self) -> f32 {
-        let (from, to) = (tick_of_day(self.prev_day_time), tick_of_day(self.day_time));
-        let half_day = TICKS_PER_DAY / 2.0;
-        let delta = (to - from + half_day).rem_euclid(TICKS_PER_DAY) - half_day;
-        let turn = (sun_angle(to) - sun_angle(from) + PI).rem_euclid(TAU) - PI;
-        if turn.abs() >= FRAC_PI_2 {
-            return to;
-        }
-        (from + self.partial_tick * delta).rem_euclid(TICKS_PER_DAY)
     }
 
     /// Clamped rain level (server-driven). Vanilla `setRainLevel` stores prev
@@ -158,96 +73,6 @@ impl SkyState {
     /// by the rain level so there is no thunder without rain).
     pub fn thunder(&self) -> f32 {
         self.thunder_level.clamp(0.0, 1.0) * self.rain()
-    }
-
-    pub fn sky_color(&self) -> [f32; 3] {
-        let base = self.day_color(SKY_COLOR_KEYFRAMES);
-        self.apply_weather(
-            base,
-            |c| blend_to_gray(c, 0.6, 0.75),
-            |c| blend_to_gray(c, 0.24, 0.94),
-        )
-    }
-
-    /// Cloud tint (rgba): vanilla base is white at 0.8 alpha, darkened toward
-    /// night and blended to grey under rain/thunder. The day/night curve reuses
-    /// the sky-colour keyframes (1.0 by day, 0.0 at midnight) with a floor so
-    /// clouds stay faintly lit at night.
-    pub fn cloud_color(&self) -> [f32; 4] {
-        let day = sample_rgb_keyframes(self.day_tick(), SKY_COLOR_KEYFRAMES, TICKS_PER_DAY)[0];
-        // Vanilla's night cloud multiplier is (0.1, 0.1, 0.15) — faintly blue.
-        let base = [0.1 + 0.9 * day, 0.1 + 0.9 * day, 0.15 + 0.85 * day];
-        let rgb = self.apply_weather(
-            base,
-            |c| blend_to_gray(c, 0.24, 0.5),
-            |c| blend_to_gray(c, 0.095, 0.94),
-        );
-        [rgb[0], rgb[1], rgb[2], 0.8]
-    }
-
-    fn day_color(&self, keyframes: &[(f32, [f32; 3])]) -> [f32; 3] {
-        let mult = sample_rgb_keyframes(self.day_tick(), keyframes, TICKS_PER_DAY);
-        [
-            BASE_SKY_COLOR[0] * mult[0],
-            BASE_SKY_COLOR[1] * mult[1],
-            BASE_SKY_COLOR[2] * mult[2],
-        ]
-    }
-
-    /// Layers the rain then thunder color modifiers over the base color, each
-    /// scaled by its level (thunder is gated by rain), matching vanilla
-    /// `WeatherAttributes`: the sky blends to grey, the fog multiplies its RGB.
-    fn apply_weather(
-        &self,
-        rgb: [f32; 3],
-        rain_mod: impl Fn([f32; 3]) -> [f32; 3],
-        thunder_mod: impl Fn([f32; 3]) -> [f32; 3],
-    ) -> [f32; 3] {
-        self.weather_layers(rgb, rain_mod, thunder_mod, lerp_rgb)
-    }
-
-    /// Vanilla `WeatherAttributes.addLayer`: the rain-only share of the rain
-    /// level, then the thunder level, each blending toward its modified value.
-    fn weather_layers<T: Copy>(
-        &self,
-        mut value: T,
-        rain_mod: impl Fn(T) -> T,
-        thunder_mod: impl Fn(T) -> T,
-        lerp: impl Fn(T, T, f32) -> T,
-    ) -> T {
-        let thunder = self.thunder();
-        let rain_only = (self.rain() - thunder).max(0.0);
-        if rain_only > 0.0 {
-            value = lerp(value, rain_mod(value), rain_only);
-        }
-        if thunder > 0.0 {
-            value = lerp(value, thunder_mod(value), thunder);
-        }
-        value
-    }
-
-    /// Vanilla `Level.skyDarken`: 15 less `SKY_LIGHT_LEVEL`, which the
-    /// overworld day timeline takes from 15 by day to 4 at night, and rain
-    /// and thunder pull toward 4. Sampled per whole tick, as vanilla caches
-    /// it. The end has no day timeline; the nether has no sky light to dim.
-    pub fn sky_darken(&self, overworld_day: bool) -> u8 {
-        let toward_night = |alpha: f32| move |level: f32| level.lerp(4.0, alpha);
-        let day = if overworld_day {
-            sample_float_keyframes(
-                tick_of_day(self.day_time),
-                SKY_LIGHT_LEVEL_KEYFRAMES,
-                TICKS_PER_DAY,
-            )
-        } else {
-            1.0
-        };
-        let level = self.weather_layers(
-            15.0 * day,
-            toward_night(0.3125),
-            toward_night(0.527_343_75),
-            FloatExt::lerp,
-        );
-        (15.0 - level) as u8
     }
 }
 
@@ -383,23 +208,10 @@ impl SkyPipeline {
         camera: &Camera,
         sky: &SkyState,
     ) {
-        let day_tick = sky.day_tick();
-
-        let sun_angle = sun_angle(day_tick);
-        let moon_angle = sun_angle + PI;
-        let star_angle = sun_angle;
-
-        // Stars fade out as rain ramps up (vanilla forces star brightness to 0).
-        let star_brightness =
-            sample_float_keyframes(day_tick, STAR_BRIGHTNESS_KEYFRAMES, TICKS_PER_DAY)
-                * (1.0 - sky.rain());
-
-        let dome = sky.sky_color();
-        let sky_color = [dome[0], dome[1], dome[2], 1.0];
-
-        let sunrise_argb = sample_argb_keyframes(day_tick, SUNRISE_COLOR_KEYFRAMES, TICKS_PER_DAY);
-
-        let moon_phase_idx = ((sky.game_time / TICKS_PER_DAY as u64) % 8) as usize;
+        let attributes = &sky.attributes;
+        let sky_color = attributes.sky_color.extend(1.0).to_array();
+        let sunrise_argb = attributes.sunrise_sunset_color.to_array();
+        let moon_phase_idx = usize::from(attributes.moon_phase % 8);
         let moon_brightness = MOON_BRIGHTNESS_PER_PHASE[moon_phase_idx];
 
         let celestial_alpha = 1.0 - sky.rain();
@@ -410,10 +222,10 @@ impl SkyPipeline {
             view_proj: view_proj.to_cols_array_2d(),
             sky_color,
             sunrise_color: sunrise_argb,
-            sun_angle,
-            moon_angle,
-            star_angle,
-            star_brightness,
+            sun_angle: attributes.sun_angle.to_radians(),
+            moon_angle: attributes.moon_angle.to_radians(),
+            star_angle: attributes.star_angle.to_radians(),
+            star_brightness: attributes.star_brightness,
             celestial_alpha,
             moon_brightness,
             moon_phase: moon_phase_idx as f32,
@@ -460,7 +272,7 @@ impl SkyPipeline {
         push_mode(pass, 3);
         pass.draw(6, 1, self.moon_offset, 0);
 
-        if star_brightness > 0.01 {
+        if attributes.star_brightness > 0.01 {
             push_mode(pass, 1);
             pass.draw(self.star_count, 1, self.star_offset, 0);
         }
@@ -525,119 +337,6 @@ impl JavaRandom {
         let lo = self.next(27) as i64;
         ((hi << 27) + lo) as f64 / (1i64 << 53) as f64
     }
-}
-
-fn tick_of_day(day_time: u64) -> f32 {
-    (day_time % TICKS_PER_DAY as u64) as f32
-}
-
-/// The sun's angle at a day tick, in radians.
-fn sun_angle(day_tick: f32) -> f32 {
-    let t = (day_tick - 6000.0).rem_euclid(TICKS_PER_DAY) / TICKS_PER_DAY;
-    let (x1, y1, x2, y2) = SKY_ANGLE_BEZIER;
-    cubic_bezier_ease(t, x1, y1, x2, y2) * TAU
-}
-
-/// CSS-style cubic Bezier easing with P0=(0,0), P3=(1,1). Solves Bx(s)=x via 4
-/// Newton-Raphson iterations (matches vanilla EasingType.CubicBezier) and
-/// returns By(s).
-fn cubic_bezier_ease(x: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
-    let x = x.clamp(0.0, 1.0);
-    let cx = 3.0 * x1;
-    let bx = 3.0 * (x2 - x1) - cx;
-    let ax = 1.0 - cx - bx;
-    let cy = 3.0 * y1;
-    let by = 3.0 * (y2 - y1) - cy;
-    let ay = 1.0 - cy - by;
-
-    let mut s = x;
-    for _ in 0..4 {
-        let d = (3.0 * ax * s + 2.0 * bx) * s + cx;
-        if d.abs() < 1e-6 {
-            break;
-        }
-        s -= (((ax * s + bx) * s + cx) * s - x) / d;
-    }
-    let s = s.clamp(0.0, 1.0);
-    ((ay * s + by) * s + cy) * s
-}
-
-fn keyframe_segment(
-    t: f32,
-    count: usize,
-    tick_at: impl Fn(usize) -> f32,
-    period: f32,
-) -> (usize, usize, f32) {
-    let mut i = 0;
-    while i < count && tick_at(i) <= t {
-        i += 1;
-    }
-
-    if i == 0 {
-        let span = tick_at(0) + period - tick_at(count - 1);
-        (count - 1, 0, (t + period - tick_at(count - 1)) / span)
-    } else if i == count {
-        let span = tick_at(0) + period - tick_at(count - 1);
-        (count - 1, 0, (t - tick_at(count - 1)) / span)
-    } else {
-        (
-            i - 1,
-            i,
-            (t - tick_at(i - 1)) / (tick_at(i) - tick_at(i - 1)),
-        )
-    }
-}
-
-fn sample_float_keyframes(tick: f32, keyframes: &[(f32, f32)], period: f32) -> f32 {
-    let (a, b, frac) = keyframe_segment(tick % period, keyframes.len(), |i| keyframes[i].0, period);
-    keyframes[a].1 + (keyframes[b].1 - keyframes[a].1) * frac
-}
-
-fn sample_rgb_keyframes(tick: f32, keyframes: &[(f32, [f32; 3])], period: f32) -> [f32; 3] {
-    let (a, b, frac) = keyframe_segment(tick % period, keyframes.len(), |i| keyframes[i].0, period);
-    let (v0, v1) = (keyframes[a].1, keyframes[b].1);
-    [
-        v0[0] + (v1[0] - v0[0]) * frac,
-        v0[1] + (v1[1] - v0[1]) * frac,
-        v0[2] + (v1[2] - v0[2]) * frac,
-    ]
-}
-
-fn lerp_rgb(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    [
-        a[0] + (b[0] - a[0]) * t,
-        a[1] + (b[1] - a[1]) * t,
-        a[2] + (b[2] - a[2]) * t,
-    ]
-}
-
-/// Vanilla `ColorModifier.BlendToGray`: greyscale the color, scale it by
-/// `brightness`, then lerp the original toward that darkened grey by `factor`.
-fn blend_to_gray(rgb: [f32; 3], brightness: f32, factor: f32) -> [f32; 3] {
-    let luma = rgb[0] * 0.3 + rgb[1] * 0.59 + rgb[2] * 0.11;
-    let grey = [luma * brightness, luma * brightness, luma * brightness];
-    lerp_rgb(rgb, grey, factor)
-}
-
-fn argb_to_rgba(argb: i32) -> [f32; 4] {
-    let u = argb as u32;
-    [
-        ((u >> 16) & 0xFF) as f32 / 255.0,
-        ((u >> 8) & 0xFF) as f32 / 255.0,
-        (u & 0xFF) as f32 / 255.0,
-        ((u >> 24) & 0xFF) as f32 / 255.0,
-    ]
-}
-
-fn sample_argb_keyframes(tick: f32, keyframes: &[(f32, i32)], period: f32) -> [f32; 4] {
-    let (a, b, frac) = keyframe_segment(tick % period, keyframes.len(), |i| keyframes[i].0, period);
-    let (c0, c1) = (argb_to_rgba(keyframes[a].1), argb_to_rgba(keyframes[b].1));
-    [
-        c0[0] + (c1[0] - c0[0]) * frac,
-        c0[1] + (c1[1] - c0[1]) * frac,
-        c0[2] + (c1[2] - c0[2]) * frac,
-        c0[3] + (c1[3] - c0[3]) * frac,
-    ]
 }
 
 struct Geometry {
@@ -856,58 +555,4 @@ fn create_pipelines(
         create("sky", rhi::BlendState::TRANSLUCENT),
         create("sky overlay", rhi::BlendState::OVERLAY),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::SkyState;
-
-    fn at(day_time: u64, rain_level: f32, thunder_level: f32) -> SkyState {
-        SkyState {
-            day_time,
-            prev_day_time: day_time,
-            game_time: day_time,
-            rain_level,
-            thunder_level,
-            partial_tick: 0.0,
-        }
-    }
-
-    fn blended(prev_day_time: u64, day_time: u64, partial_tick: f32) -> f32 {
-        SkyState {
-            prev_day_time,
-            partial_tick,
-            ..at(day_time, 0.0, 0.0)
-        }
-        .day_tick()
-    }
-
-    #[test]
-    fn frames_blend_from_the_last_ticks_day_time() {
-        assert_eq!(blended(6000, 6001, 0.25), 6000.25);
-        assert_eq!(blended(6000, 6000, 0.75), 6000.0);
-        // Across midnight, the short way round.
-        assert_eq!(blended(23999, 24000, 0.5), 23999.5);
-        // Sped up, still blended.
-        assert_eq!(blended(6000, 6100, 0.5), 6050.0);
-    }
-
-    #[test]
-    fn a_jump_of_a_quarter_turn_or_more_snaps() {
-        assert_eq!(blended(6000, 13000, 0.5), 13000.0);
-        assert_eq!(blended(6000, 18000, 0.5), 18000.0);
-    }
-
-    #[test]
-    fn sky_darkens_at_night_and_in_weather() {
-        assert_eq!(at(6000, 0.0, 0.0).sky_darken(true), 0);
-        // 15 x 0.26666668 rounds to 4 in f32, as in vanilla.
-        assert_eq!(at(18000, 0.0, 0.0).sky_darken(true), 11);
-        assert_eq!(at(6000, 1.0, 0.0).sky_darken(true), 3);
-        assert_eq!(at(6000, 1.0, 1.0).sky_darken(true), 5);
-        // Halfway through dusk: 15 x 0.633.
-        assert_eq!(at(12768, 0.0, 0.0).sky_darken(true), 5);
-        // The end keeps its sky light through the night.
-        assert_eq!(at(18000, 0.0, 0.0).sky_darken(false), 0);
-    }
 }

@@ -6,8 +6,6 @@ use crate::renderer::pipelines::sky::SkyState;
 use crate::renderer::rhi::{self, VertexFormat};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
-/// World-space Y of the cloud layer bottom (vanilla overworld `cloud_height`).
-const CLOUD_HEIGHT: f32 = 192.33;
 /// Vertical thickness of the cloud layer in blocks.
 const CLOUD_THICKNESS: f32 = 4.0;
 /// Horizontal size of one cloud cell in blocks (one clouds.png texel).
@@ -220,7 +218,7 @@ impl CloudPipeline {
         let cell_z = (cloud_z / CELL_SIZE as f64).floor() as i32;
         let x_in_cell = (cloud_x - cell_x as f64 * CELL_SIZE as f64) as f32;
         let z_in_cell = (cloud_z - cell_z as f64 * CELL_SIZE as f64) as f32;
-        let relative_bottom_y = (CLOUD_HEIGHT as f64 - eye.y) as f32;
+        let relative_bottom_y = (f64::from(sky.attributes.cloud_height) - eye.y) as f32;
         let relative_top_y = relative_bottom_y + CLOUD_THICKNESS;
         let rel = if relative_top_y < 0.0 {
             RelativePos::Above
@@ -258,7 +256,7 @@ impl CloudPipeline {
             self.dirty[frame] = false;
         }
 
-        let tint = sky.cloud_color();
+        let tint = sky.attributes.cloud_color.to_array();
         // offset.w carries the fog-fade end (blocks): the fragment shader fades
         // cloud alpha to zero by this distance so the field melts into the sky
         // instead of ending at a hard circle.

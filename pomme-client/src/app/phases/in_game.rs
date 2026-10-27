@@ -268,13 +268,13 @@ pub struct GameState {
     /// Dimension-type `ambient_light`: 0 in the overworld, 0.1 in the
     /// nether, 0.25 in the end.
     pub ambient_light: f32,
-    /// The dimension follows the overworld's day (see `SkyState::sky_darken`).
-    pub overworld_day: bool,
     /// The current dimension's `default_clock`, whose ticks are its day time.
     pub default_clock: Option<String>,
     pub clocks: crate::world::clock::ClientClocks,
-    /// The current dimension's lightmap attribute layers.
-    pub light_environment: crate::world::environment::LightEnvironment,
+    /// The current dimension's environment attribute layers, and the
+    /// attributes they resolve to each tick.
+    pub environment: crate::world::environment::Environment,
+    pub environment_probe: crate::world::environment::EnvironmentProbe,
     /// Vanilla `LightmapRenderStateExtractor.blockLightFlicker`.
     pub block_light_flicker: f32,
     /// Set by the test harness's `deterministic` step.
@@ -391,9 +391,16 @@ impl GameState {
             .filter(|_| self.spectator_effect_active)
     }
 
-    /// This dimension's `skyDarken` right now.
+    /// This dimension's `skyDarken` as of the latest tick.
     pub fn sky_darken(&self) -> u8 {
-        self.sky_state.sky_darken(self.overworld_day)
+        self.environment_probe.current().sky_darken()
+    }
+
+    /// The environment attributes at the current clock and weather.
+    pub fn resolve_environment(&self) -> crate::world::environment::EnvAttributes {
+        let sky = &self.sky_state;
+        self.environment
+            .resolve(sky.day_time as i64, sky.rain(), sky.thunder())
     }
 
     /// Notes a played sound for the harness, keeping the last 64.
@@ -547,10 +554,10 @@ impl GameState {
             dimension: String::new(),
             cardinal_light: Default::default(),
             ambient_light: 0.0,
-            overworld_day: true,
             default_clock: None,
             clocks: Default::default(),
-            light_environment: Default::default(),
+            environment: Default::default(),
+            environment_probe: Default::default(),
             block_light_flicker: 0.0,
             deterministic: false,
             game_mode_switcher: None,
@@ -2311,9 +2318,9 @@ pub fn update_game(
     core.time_tick_accumulator = (core.time_tick_accumulator + dt).min(1.0);
     while core.time_tick_accumulator >= TICK_RATE {
         game.sky_state.game_time = game.sky_state.game_time.wrapping_add(1);
-        game.sky_state.prev_day_time = game.sky_state.day_time;
         game.clocks.tick(game.sky_state.game_time);
         game.sync_day_time();
+        game.environment_probe.tick(game.resolve_environment());
         core.time_tick_accumulator -= TICK_RATE;
     }
 
@@ -2433,8 +2440,11 @@ pub fn update_game(
         core.tick_accumulator -= TICK_RATE;
     }
     if ticked {
-        gfx.renderer
-            .tick_lightmap(lightmap_info(game, core.menu.brightness));
+        gfx.renderer.tick_lightmap(lightmap_info(
+            game,
+            core.menu.brightness,
+            sky_partial_tick(core),
+        ));
     }
 
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
@@ -4084,9 +4094,10 @@ pub fn update_game(
         });
     }
 
-    let sky_partial_tick = (core.time_tick_accumulator / TICK_RATE).clamp(0.0, 1.0);
+    let partial_tick = sky_partial_tick(core);
     let sky = crate::renderer::SkyState {
-        partial_tick: sky_partial_tick,
+        partial_tick,
+        attributes: game.environment_probe.at(partial_tick),
         ..game.sky_state.clone()
     };
     if game.show_chunk_borders {
@@ -5314,13 +5325,16 @@ fn tick_block_light_flicker(flicker: f32) -> f32 {
     (flicker + (r() - r()) * r() * r() * 0.1) * 0.9
 }
 
-/// Vanilla `LightmapRenderStateExtractor.extract`.
+/// How far the clock is between its last tick and the next.
+fn sky_partial_tick(core: &AppCore) -> f32 {
+    (core.time_tick_accumulator / TICK_RATE).clamp(0.0, 1.0)
+}
+
+/// Vanilla `LightmapRenderStateExtractor.extract`, which samples the
+/// attribute probe at the frame's partial tick.
 /// TODO: night vision, darkness, boss fog and the lightning and end flashes.
-fn lightmap_info(game: &GameState, brightness: f32) -> LightmapInfo {
-    let sky = &game.sky_state;
-    let attributes = game
-        .light_environment
-        .resolve(sky.day_time as i64, sky.rain(), sky.thunder());
+fn lightmap_info(game: &GameState, brightness: f32, partial_tick: f32) -> LightmapInfo {
+    let attributes = game.environment_probe.at(partial_tick);
     let with = |rgb: glam::Vec3, w: f32| rgb.extend(w).to_array();
     LightmapInfo {
         block_light_tint: with(attributes.block_light_tint, game.block_light_flicker + 1.4),

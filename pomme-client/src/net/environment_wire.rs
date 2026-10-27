@@ -1,4 +1,4 @@
-//! Reads a dimension type's lighting attributes and its timelines' lighting
+//! Reads a dimension type's environment attributes and its timelines'
 //! tracks out of the synced registries, in the shapes of vanilla's
 //! `EnvironmentAttributeMap` and `Timeline` network codecs.
 
@@ -6,29 +6,35 @@ use std::collections::HashMap;
 
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_registry::identifier::Identifier;
-use glam::Vec3;
+use glam::{Vec3, Vec4};
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 
 use crate::world::environment::{
-    Argument, AttributeLayers, AttributeValue, LightAttribute, LightEnvironment, Modifier,
+    Argument, AttributeLayers, AttributeValue, Ease, EnvAttribute, Environment, Modifier,
     ModifierOp, Track,
 };
 
 pub(super) const TIMELINE_REGISTRY: &str = "minecraft:timeline";
 
-/// A lighting attribute's value type and its codecs.
+/// An attribute's value type and its codecs.
 trait WireValue: AttributeValue {
     const FLOAT: bool;
     fn read(tag: &NbtTag) -> Option<Self>;
     /// `alpha_blend`'s argument: a `FloatWithAlpha`, or an ARGB colour.
     fn read_with_alpha(tag: &NbtTag) -> Option<Argument<Self>>;
+    /// `add` and `subtract`'s argument, which is RGB for every colour.
+    fn read_rgb(tag: &NbtTag) -> Option<Self> {
+        Self::read(tag)
+    }
 }
 
 impl WireValue for f32 {
     const FLOAT: bool = true;
 
+    /// A number, or a `MoonPhase` by name as its index; no other float
+    /// attribute takes a string.
     fn read(tag: &NbtTag) -> Option<Self> {
-        number(tag)
+        number(tag).or_else(|| moon_phase(tag))
     }
 
     fn read_with_alpha(tag: &NbtTag) -> Option<Argument<Self>> {
@@ -60,6 +66,48 @@ impl WireValue for Vec3 {
             alpha,
         })
     }
+}
+
+impl WireValue for Vec4 {
+    const FLOAT: bool = false;
+
+    /// `STRING_ARGB_VEC4_COLOR`.
+    fn read(tag: &NbtTag) -> Option<Self> {
+        let [a, r, g, b] = argb(tag, 8)?;
+        Some(Vec4::new(r, g, b, a))
+    }
+
+    fn read_with_alpha(tag: &NbtTag) -> Option<Argument<Self>> {
+        let value = Self::read(tag)?;
+        Some(Argument {
+            value,
+            alpha: value.w,
+        })
+    }
+
+    fn read_rgb(tag: &NbtTag) -> Option<Self> {
+        Some(Vec3::read(tag)?.extend(1.0))
+    }
+}
+
+/// `MoonPhase`'s serialized names, in order.
+const MOON_PHASES: [&str; 8] = [
+    "full_moon",
+    "waning_gibbous",
+    "third_quarter",
+    "waning_crescent",
+    "new_moon",
+    "waxing_crescent",
+    "first_quarter",
+    "waxing_gibbous",
+];
+
+fn moon_phase(tag: &NbtTag) -> Option<f32> {
+    let name = tag.string()?.to_str();
+    MOON_PHASES
+        .iter()
+        .position(|phase| *phase == name)
+        .map(|i| i as f32)
 }
 
 fn number(tag: &NbtTag) -> Option<f32> {
@@ -111,13 +159,14 @@ fn floats(list: &NbtList) -> Option<Vec<f32>> {
 fn argument<T: WireValue>(op: ModifierOp, tag: &NbtTag) -> Option<Argument<T>> {
     match op {
         ModifierOp::AlphaBlend => T::read_with_alpha(tag),
+        ModifierOp::Add | ModifierOp::Subtract => T::read_rgb(tag).map(Argument::opaque),
         _ => T::read(tag).map(Argument::opaque),
     }
 }
 
 /// An entry's `modifier` (override when absent), warning about ones pomme
 /// doesn't port.
-fn op<T: WireValue>(attribute: LightAttribute, entry: &NbtCompound) -> Option<ModifierOp> {
+fn op<T: WireValue>(attribute: EnvAttribute, entry: &NbtCompound) -> Option<ModifierOp> {
     let Some(name) = entry.string("modifier") else {
         return Some(ModifierOp::Override);
     };
@@ -134,10 +183,7 @@ fn op<T: WireValue>(attribute: LightAttribute, entry: &NbtCompound) -> Option<Mo
 
 /// An `EnvironmentAttributeMap` entry: a bare value (override) or
 /// `{modifier, argument}`.
-fn dimension_modifier<T: WireValue>(
-    attribute: LightAttribute,
-    tag: &NbtTag,
-) -> Option<Modifier<T>> {
+fn dimension_modifier<T: WireValue>(attribute: EnvAttribute, tag: &NbtTag) -> Option<Modifier<T>> {
     let (op, argument_tag) = match tag.compound().filter(|entry| entry.contains("modifier")) {
         Some(entry) => (op::<T>(attribute, entry)?, entry.get("argument")?),
         None => (ModifierOp::Override, tag),
@@ -148,17 +194,34 @@ fn dimension_modifier<T: WireValue>(
     })
 }
 
-/// An `AttributeTrack`: `{modifier?, keyframes: [{ticks, value}], ease?}`.
-fn track<T: WireValue>(attribute: LightAttribute, entry: &NbtCompound) -> Option<Track<T>> {
-    let op = op::<T>(attribute, entry)?;
-    if let Some(ease) = entry.get("ease").and_then(|e| e.string())
-        && ease.to_str() != "linear"
+/// `EasingType.CODEC`: a simple easing's name, or `{cubic_bezier: [x1, y1,
+/// x2, y2]}`; linear when absent.
+fn ease(attribute: EnvAttribute, tag: Option<&NbtTag>) -> Ease {
+    let Some(tag) = tag else {
+        return Ease::Linear;
+    };
+    if let Some(bezier) = tag.compound().and_then(|c| c.list("cubic_bezier"))
+        && let Ok(controls) = <[f32; 4]>::try_from(floats(bezier).unwrap_or_default())
     {
-        tracing::warn!(
-            "{}: ease {ease} is not ported, sampling linearly",
-            attribute.id()
-        );
+        return Ease::CubicBezier(controls);
     }
+    match tag.string().map(|name| name.to_str()) {
+        Some(name) if name == "linear" => Ease::Linear,
+        Some(name) if name == "constant" => Ease::Constant,
+        name => {
+            tracing::warn!(
+                "{}: ease {name:?} is not ported, sampling linearly",
+                attribute.id()
+            );
+            Ease::Linear
+        }
+    }
+}
+
+/// An `AttributeTrack`: `{modifier?, keyframes: [{ticks, value}], ease?}`.
+fn track<T: WireValue>(attribute: EnvAttribute, entry: &NbtCompound) -> Option<Track<T>> {
+    let op = op::<T>(attribute, entry)?;
+    let ease = ease(attribute, entry.get("ease"));
     let keyframes: Vec<_> = entry
         .list("keyframes")?
         .compounds()?
@@ -168,12 +231,16 @@ fn track<T: WireValue>(attribute: LightAttribute, entry: &NbtCompound) -> Option
             Some((ticks, argument(op, frame.get("value")?)?))
         })
         .collect::<Option<_>>()?;
-    (!keyframes.is_empty()).then_some(Track { op, keyframes })
+    (!keyframes.is_empty()).then_some(Track {
+        op,
+        ease,
+        keyframes,
+    })
 }
 
 /// One attribute's dimension modifier and timeline tracks.
 fn layers<T: WireValue>(
-    attribute: LightAttribute,
+    attribute: EnvAttribute,
     attributes: Option<&NbtCompound>,
     timelines: &[&NbtCompound],
 ) -> AttributeLayers<T> {
@@ -194,13 +261,13 @@ fn layers<T: WireValue>(
     AttributeLayers { dimension, tracks }
 }
 
-/// The dimension type's lighting layers. `timelines` must already be a list
+/// The dimension type's attribute layers. `timelines` must already be a list
 /// of ids (see [`resolve_timeline_tags`]).
-pub(super) fn light_environment(
+pub(super) fn environment(
     extra: &HashMap<String, NbtTag>,
     registries: &RegistryHolder,
     has_weather: bool,
-) -> LightEnvironment {
+) -> Environment {
     let attributes = extra.get("attributes").and_then(NbtTag::compound);
     let timeline_registry = registries.extra.get(&TIMELINE_REGISTRY.into());
     let timelines: Vec<&NbtCompound> = timeline_ids(extra.get("timelines"))
@@ -208,12 +275,30 @@ pub(super) fn light_environment(
         .filter_map(|id| timeline_registry?.map.get(&Identifier::new(id)))
         .collect();
     let rgb = |attribute| layers::<Vec3>(attribute, attributes, &timelines);
-    LightEnvironment {
-        block_light_tint: rgb(LightAttribute::BlockLightTint),
-        sky_light_color: rgb(LightAttribute::SkyLightColor),
-        sky_light_factor: layers(LightAttribute::SkyLightFactor, attributes, &timelines),
-        night_vision_color: rgb(LightAttribute::NightVisionColor),
-        ambient_light_color: rgb(LightAttribute::AmbientLightColor),
+    let argb = |attribute| layers::<Vec4>(attribute, attributes, &timelines);
+    let float = |attribute| layers::<f32>(attribute, attributes, &timelines);
+    let mut moon_phase = float(EnvAttribute::MoonPhase);
+    // An enum's keyframes step (`AttributeType.ofNotInterpolated`).
+    for (track, _) in &mut moon_phase.tracks {
+        track.ease = Ease::Constant;
+    }
+    Environment {
+        block_light_tint: rgb(EnvAttribute::BlockLightTint),
+        sky_light_color: rgb(EnvAttribute::SkyLightColor),
+        sky_light_factor: float(EnvAttribute::SkyLightFactor),
+        night_vision_color: rgb(EnvAttribute::NightVisionColor),
+        ambient_light_color: rgb(EnvAttribute::AmbientLightColor),
+        sky_color: rgb(EnvAttribute::SkyColor),
+        fog_color: rgb(EnvAttribute::FogColor),
+        cloud_color: argb(EnvAttribute::CloudColor),
+        cloud_height: float(EnvAttribute::CloudHeight),
+        sunrise_sunset_color: argb(EnvAttribute::SunriseSunsetColor),
+        star_brightness: float(EnvAttribute::StarBrightness),
+        sun_angle: float(EnvAttribute::SunAngle),
+        moon_angle: float(EnvAttribute::MoonAngle),
+        star_angle: float(EnvAttribute::StarAngle),
+        moon_phase,
+        sky_light_level: float(EnvAttribute::SkyLightLevel),
         has_weather,
     }
 }
@@ -311,7 +396,7 @@ mod tests {
 
     #[test]
     fn dimension_entries_are_overrides_or_modifiers() {
-        let attribute = LightAttribute::SkyLightFactor;
+        let attribute = EnvAttribute::SkyLightFactor;
         assert_eq!(
             dimension_modifier::<f32>(attribute, &NbtTag::Float(0.0)),
             Some(Modifier {
@@ -346,9 +431,40 @@ mod tests {
             "keyframes",
             NbtTag::List(NbtList::Compound(vec![frame(730, 1.0), frame(13140, 0.24)])),
         )]);
-        let track = track::<f32>(LightAttribute::SkyLightFactor, &entry).unwrap();
+        let track = track::<f32>(EnvAttribute::SkyLightFactor, &entry).unwrap();
         assert_eq!(track.op, ModifierOp::Override);
+        assert_eq!(track.ease, Ease::Linear);
         assert_eq!(track.keyframes[1], (13140, Argument::opaque(0.24)));
+    }
+
+    #[test]
+    fn eases_read_names_and_bezier_controls() {
+        let attribute = EnvAttribute::SunAngle;
+        let bezier = NbtTag::Compound(compound(vec![(
+            "cubic_bezier",
+            NbtTag::List(NbtList::Float(vec![0.362, 0.241, 0.638, 0.759])),
+        )]));
+        assert_eq!(
+            ease(attribute, Some(&bezier)),
+            Ease::CubicBezier([0.362, 0.241, 0.638, 0.759])
+        );
+        let constant = NbtTag::String("constant".into());
+        assert_eq!(ease(attribute, Some(&constant)), Ease::Constant);
+        assert_eq!(ease(attribute, None), Ease::Linear);
+    }
+
+    #[test]
+    fn argb_colours_and_moon_phases_read() {
+        assert_eq!(
+            Vec4::read(&NbtTag::String("#ccffffff".into())),
+            Some(Vec4::new(1.0, 1.0, 1.0, 0xCC as f32 / 255.0))
+        );
+        assert_eq!(
+            Vec4::read_rgb(&NbtTag::String("#7f7f99".into())),
+            Some(Vec4::new(127.0 / 255.0, 127.0 / 255.0, 153.0 / 255.0, 1.0))
+        );
+        assert_eq!(f32::read(&NbtTag::String("new_moon".into())), Some(4.0));
+        assert_eq!(f32::read(&NbtTag::String("blue_moon".into())), None);
     }
 
     #[test]

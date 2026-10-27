@@ -25,9 +25,11 @@ layout(location = 0) in vec2 v_uv;
 
 layout(location = 0) out vec4 out_color;
 
+#include "fog.glsl"
+
 void main() {
     if (mode == 0) {
-        out_color = vec4(sky_color.rgb, 1.0);
+        out_color = vec4(srgb_to_linear(sky_color.rgb), 1.0);
     } else if (mode == 1) {
         float b = star_brightness;
         if (b < 0.01) discard;
@@ -49,6 +51,6 @@ void main() {
     } else if (mode == 5) {
         float alpha = v_uv.x * sunrise_color.a;
         if (alpha < 0.001) discard;
-        out_color = vec4(sunrise_color.rgb, alpha);
+        out_color = vec4(srgb_to_linear(sunrise_color.rgb), alpha);
     }
 }
