@@ -130,8 +130,9 @@ impl SkyState {
         }
     }
 
+    /// The day's tick, whole as vanilla's `AttributeTrackSampler` samples it.
     pub fn day_tick(&self) -> f32 {
-        (self.day_time % TICKS_PER_DAY as u64) as f32 + self.partial_tick
+        (self.day_time % TICKS_PER_DAY as u64) as f32
     }
 
     /// Clamped rain level (server-driven). Vanilla `setRainLevel` stores prev

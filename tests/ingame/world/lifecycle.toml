@@ -16,6 +16,14 @@ chat = "/time set 6000"
 [[step]]
 expect = { player = { day_time = 6000 } }
 
+# And stays there: a paused clock isn't advanced locally.
+[[step]]
+wait_ms = 2000
+
+[[step]]
+expect = { player = { day_time = 6000 } }
+timeout_ms = 100
+
 [[step]]
 chat = "/tp @s 10 -60 10"
 

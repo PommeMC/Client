@@ -186,7 +186,7 @@ fn handle(
                 .into_iter()
                 .filter_map(|(id, state)| {
                     let (name, _) = names?.map.get_index(id as usize)?;
-                    Some((name.to_string(), state.total_ticks as u64))
+                    Some((name.to_string(), state))
                 })
                 .collect();
             send_ordered(
@@ -344,8 +344,8 @@ mod tests {
         assert_eq!(
             clocks,
             [
-                ("minecraft:the_end".to_owned(), 300),
-                ("minecraft:overworld".to_owned(), 6000),
+                ("minecraft:the_end".to_owned(), state(300)),
+                ("minecraft:overworld".to_owned(), state(6000)),
             ]
         );
     }

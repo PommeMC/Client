@@ -680,16 +680,6 @@ fn player_input_state(
 }
 
 /// `base + value` for a relative field, `value` for an absolute one.
-/// The ticks of the dimension's `default_clock`, which drives its day time;
-/// `None` for a dimension without one, which keeps the time it has.
-fn dimension_clock(clocks: &[(String, u64)], default_clock: Option<&str>) -> Option<u64> {
-    let clock = default_clock?;
-    clocks
-        .iter()
-        .find(|(name, _)| name == clock)
-        .map(|(_, ticks)| *ticks)
-}
-
 fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
     if is_relative { base + value } else { value }
 }
@@ -2473,9 +2463,8 @@ impl AppCore {
                 }
                 NetworkEvent::TimeUpdate { game_time, clocks } => {
                     game.sky_state.game_time = game_time;
-                    if let Some(ticks) = dimension_clock(&clocks, game.default_clock.as_deref()) {
-                        game.sky_state.day_time = ticks;
-                    }
+                    game.clocks.handle_updates(game_time, clocks);
+                    game.sync_day_time();
                 }
                 NetworkEvent::WeatherUpdate(weather) => {
                     // Mirrors vanilla ClientPacketListener.handleGameEvent: the
@@ -3904,7 +3893,7 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 mod tests {
     use super::{
         CursorOp, DeathRoute, HeadProfile, MENU_REPEAT_DELAY, MENU_REPEAT_INTERVAL, RepeatStepper,
-        accepted_player_chat_tag, cursor_step, death_route, dimension_clock, player_input_state,
+        accepted_player_chat_tag, cursor_step, death_route, player_input_state,
         resolve_corrected_look, resolve_head_profile, resolve_player_position_correction,
         server_view_distance_update, serverbound_player_input, sync_living_attribute_mirrors,
         sync_player_attribute_mirrors, sync_respawn_attributes,
@@ -4203,23 +4192,6 @@ mod tests {
         let relative = resolve_corrected_look(current, 400.0, 50.0, true, true);
         assert_eq!(relative.y_rot_deg(), 430.0);
         assert_eq!(relative.x_rot_deg(), 90.0);
-    }
-
-    #[test]
-    fn day_time_follows_the_dimension_clock() {
-        let clocks = [
-            ("minecraft:the_end".to_owned(), 300),
-            ("minecraft:overworld".to_owned(), 6000),
-        ];
-        assert_eq!(
-            dimension_clock(&clocks, Some("minecraft:overworld")),
-            Some(6000)
-        );
-        assert_eq!(
-            dimension_clock(&clocks, Some("minecraft:the_end")),
-            Some(300)
-        );
-        assert_eq!(dimension_clock(&clocks, None), None);
     }
 
     #[test]

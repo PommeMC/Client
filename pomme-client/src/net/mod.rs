@@ -394,8 +394,8 @@ pub enum NetworkEvent {
     },
     TimeUpdate {
         game_time: u64,
-        /// Every world clock by name, with its total ticks.
-        clocks: Vec<(String, u64)>,
+        /// Every world clock by name.
+        clocks: Vec<(String, pomme_protocol::lifecycle::ClockState)>,
     },
     WeatherUpdate(Weather),
     GameModeChanged {
