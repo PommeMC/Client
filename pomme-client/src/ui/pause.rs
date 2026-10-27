@@ -111,7 +111,7 @@ fn build_main(
     let mut action = PauseAction::None;
     let fs = common::FONT_SIZE * gs;
 
-    common::push_inworld_menu_background(elements, screen_w, screen_h);
+    common::push_menu_background(elements, screen_w, screen_h);
 
     let full_w = FULL_W * gs;
     let half_w = HALF_W * gs;
@@ -282,7 +282,7 @@ fn build_submenu(
     let mut action = PauseAction::None;
     let fs = common::FONT_SIZE * gs;
 
-    common::push_inworld_menu_background(elements, screen_w, screen_h);
+    common::push_menu_background(elements, screen_w, screen_h);
 
     let full_w = FULL_W * gs;
     let btn_h = common::BTN_H * gs;

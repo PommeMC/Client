@@ -131,9 +131,9 @@ pub fn push_overlay(elements: &mut Vec<MenuElement>, screen_w: f32, screen_h: f3
     });
 }
 
-/// `inworld_menu_background.png`, which in-world screens draw over the world:
-/// black at 64/255 throughout.
-pub fn push_inworld_menu_background(elements: &mut Vec<MenuElement>, screen_w: f32, screen_h: f32) {
+/// Vanilla `Screen.extractMenuBackground`: `menu_background.png`, or
+/// `inworld_menu_background.png` over a world, both black at 64/255.
+pub fn push_menu_background(elements: &mut Vec<MenuElement>, screen_w: f32, screen_h: f32) {
     push_overlay(elements, screen_w, screen_h, 64.0 / 255.0);
 }
 

@@ -2404,9 +2404,8 @@ impl ConfirmScreen {
         width0: &dyn Fn(&[TextSpan]) -> f32,
     ) -> Vec<[f32; 4]> {
         // TODO: vanilla also blurs the world behind in-world screens
-        // (`Screen.extractBlurredBackground`); this is only the flat
-        // inworld_menu_background.png tint (black at 64/255).
-        common::push_inworld_menu_background(elements, screen_w, screen_h);
+        // (`Screen.extractBlurredBackground`).
+        common::push_menu_background(elements, screen_w, screen_h);
         let layout = self.layout(
             (screen_w / gs).ceil() as i32,
             (screen_h / gs).ceil() as i32,

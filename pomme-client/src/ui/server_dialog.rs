@@ -745,7 +745,7 @@ impl ServerDialogState {
         let h = screen_h / gs;
         let cursor = (input.cursor.0 / gs, input.cursor.1 / gs);
         let mut draw = Draw { gs, elements };
-        common::push_overlay(draw.elements, screen_w, screen_h, 0.5);
+        common::push_menu_background(draw.elements, screen_w, screen_h);
 
         if let DialogMode::Waiting {
             ticks,

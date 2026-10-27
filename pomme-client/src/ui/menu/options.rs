@@ -1228,7 +1228,7 @@ impl MainMenu {
             done_y = sh - btn_h - done_pad;
             content_bottom = done_y;
 
-            common::push_overlay(&mut elements, sw, sh, 0.4);
+            common::push_menu_background(&mut elements, sw, sh);
 
             elements.push(MenuElement::Text {
                 x: cx,
@@ -1690,7 +1690,7 @@ impl MainMenu {
         let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
 
-        common::push_overlay(&mut elements, sw, sh, 0.4);
+        common::push_menu_background(&mut elements, sw, sh);
 
         let pad = 4.0 * gs;
         let entry_h = 36.0 * gs;
