@@ -786,6 +786,16 @@ impl TextureAtlas {
         self.animation_ticked = true;
     }
 
+    /// Holds every animated sprite on its first frame.
+    pub fn hold_animations(&mut self) {
+        for sprite in &mut self.animated {
+            sprite.dirty |= sprite.frame != 0;
+            sprite.frame = 0;
+            sprite.sub_frame = 0;
+        }
+        self.animation_ticked = true;
+    }
+
     /// Vanilla `uploadAnimationFrames`: writes every sprite that needs it
     /// into its rectangle at each of its levels.
     pub fn record_animation_upload(

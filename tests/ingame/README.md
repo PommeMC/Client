@@ -142,6 +142,11 @@ bind = { action = "key.drop", keys = ["key.keyboard.j"] }  # this session only;
 [[step]]
 option = { main_hand = "left" }               # sets client options, as the
                                               # options screen does
+[[step]]
+deterministic = true                          # holds flicker, particles,
+                                              # animated textures, clouds and
+                                              # view bobbing still for the rest
+                                              # of the script
 
 [[step]]
 wait_ms = 1000

@@ -826,6 +826,10 @@ impl Renderer {
         self.atlas.tick_animations();
     }
 
+    pub fn hold_texture_animations(&mut self) {
+        self.atlas.hold_animations();
+    }
+
     /// Redraws the lightmap with `info` on the next frame, as vanilla does
     /// once per tick.
     pub fn tick_lightmap(&mut self, info: LightmapInfo) {

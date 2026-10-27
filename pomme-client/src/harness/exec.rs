@@ -78,6 +78,10 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         Command::Press(press) => press_key(core, press),
         Command::Bind(bind) => bind_keys(core, bind),
         Command::Option(options) => set_options(core, options),
+        Command::Deterministic => {
+            game.deterministic = true;
+            Ok(Value::Null)
+        }
         Command::Hover(target) => hover(core, gfx, game, target),
         Command::Cursor { at } => {
             let gs = gui_scale(core, gfx);

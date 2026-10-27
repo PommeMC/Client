@@ -25,6 +25,9 @@ expect = { player = { position = [60.5, -60.0, 50.5] } }
 press = { action = "key.toggleGui" }
 
 [[step]]
+deterministic = true
+
+[[step]]
 wait_ms = 3000
 
 [[step]]

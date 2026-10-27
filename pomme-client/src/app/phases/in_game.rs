@@ -276,6 +276,8 @@ pub struct GameState {
     pub light_environment: crate::world::environment::LightEnvironment,
     /// Vanilla `LightmapRenderStateExtractor.blockLightFlicker`.
     pub block_light_flicker: f32,
+    /// Set by the test harness's `deterministic` step.
+    pub deterministic: bool,
     /// F3+F4 game-mode switcher overlay, while open.
     pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
     /// Spectator hotbar menu (vanilla `SpectatorGui`). Not a GUI screen: the
@@ -543,6 +545,7 @@ impl GameState {
             default_clock: None,
             light_environment: Default::default(),
             block_light_flicker: 0.0,
+            deterministic: false,
             game_mode_switcher: None,
             spectator: Default::default(),
             switcher_was_open: false,
@@ -2324,11 +2327,17 @@ pub fn update_game(
     // `/tick freeze` (`isLevelRunningNormally`); pomme tracks neither yet.
     let ticked = core.tick_accumulator >= TICK_RATE;
     if ticked {
-        gfx.renderer.tick_texture_animations();
+        if game.deterministic {
+            gfx.renderer.hold_texture_animations();
+        } else {
+            gfx.renderer.tick_texture_animations();
+        }
     }
     while core.tick_accumulator >= TICK_RATE {
         game.tick_count = game.tick_count.wrapping_add(1);
-        game.block_light_flicker = tick_block_light_flicker(game.block_light_flicker);
+        if !game.deterministic {
+            game.block_light_flicker = tick_block_light_flicker(game.block_light_flicker);
+        }
         // Vanilla `Minecraft.tick` order: `gameMode.tick` drives the connection
         // tick (and so the level load tracker) before the level's entities,
         // i.e. before the local player moves or sends anything.
@@ -2361,11 +2370,13 @@ pub fn update_game(
         }
         game.item_entity_store
             .tick(&game.chunk_store, game.block_registry.block_state_table());
-        game.level_runtime.animate_tick(
-            &game.block_registry,
-            &game.chunk_store,
-            *game.player.position,
-        );
+        if !game.deterministic {
+            game.level_runtime.animate_tick(
+                &game.block_registry,
+                &game.chunk_store,
+                *game.player.position,
+            );
+        }
         game.particle_store
             .tick(&game.chunk_store, game.block_registry.block_state_table());
         game.block_entity_anim.tick();
@@ -2604,8 +2615,11 @@ pub fn update_game(
         .prev_walk_dist
         .lerp(game.player.walk_dist, partial_tick);
     let bob_amount = game.player.prev_bob.lerp(game.player.bob, partial_tick);
-    gfx.renderer
-        .set_view_bob(bob_walk, bob_amount, core.menu.view_bobbing);
+    gfx.renderer.set_view_bob(
+        bob_walk,
+        bob_amount,
+        core.menu.view_bobbing && !game.deterministic,
+    );
     gfx.renderer.set_post_effect(game.drawn_spectator_effect());
     gfx.renderer.update_third_person_distance(
         game.block_registry.render_view(),
@@ -4170,7 +4184,12 @@ pub fn update_game(
         )
     };
 
-    let particle_quads = if benchmark_running {
+    if game.deterministic {
+        game.particle_store.clear();
+    }
+    // Benchmarks and deterministic tests draw neither particles nor clouds.
+    let no_ambience = benchmark_running || game.deterministic;
+    let particle_quads = if no_ambience {
         Vec::new()
     } else {
         game.particle_store
@@ -4245,7 +4264,7 @@ pub fn update_game(
         &block_entity_renders,
         &particle_quads,
         &weather_columns,
-        if benchmark_running {
+        if no_ambience {
             crate::renderer::CloudMode::Off
         } else {
             core.menu.cloud_mode

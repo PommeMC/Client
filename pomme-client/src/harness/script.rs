@@ -44,6 +44,7 @@ struct StepFile {
     press: Option<protocol::Press>,
     bind: Option<protocol::Bind>,
     option: Option<protocol::OptionSet>,
+    deterministic: Option<bool>,
     hover: Option<protocol::Hover>,
     cursor: Option<[f32; 2]>,
     scroll: Option<f32>,
@@ -272,6 +273,9 @@ impl StepFile {
         }
         if let Some(options) = self.option {
             steps.push(Step::Run(Command::Option(options)));
+        }
+        if self.deterministic == Some(true) {
+            steps.push(Step::Run(Command::Deterministic));
         }
         if let Some(hover) = self.hover {
             steps.push(Step::Run(Command::Hover(hover)));
@@ -725,10 +729,13 @@ mod tests {
             press = { key = "key.keyboard.j" }
             [[step]]
             option = { main_hand = "left" }
+            [[step]]
+            deterministic = true
             "#,
         )
         .unwrap();
-        assert_eq!(steps.len(), 20);
+        assert_eq!(steps.len(), 21);
+        assert_eq!(steps[20], Step::Run(Command::Deterministic));
         assert_eq!(
             steps[19],
             Step::Run(Command::Option(OptionSet {

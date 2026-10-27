@@ -559,6 +559,11 @@ impl ParticleStore {
         self.pending.push(particle);
     }
 
+    pub fn clear(&mut self) {
+        self.particles.clear();
+        self.pending.clear();
+    }
+
     pub fn tick(&mut self, chunks: &ChunkStore, block_state_table: BlockStateTable) {
         let frames = self.end_rod_frames;
         self.particles

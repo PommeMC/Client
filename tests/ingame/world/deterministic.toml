@@ -1,0 +1,73 @@
+# The deterministic step holds a scene's frame-to-frame noise still: a torch's
+# flicker and smoke, lava's pops, animated textures, server particles and the
+# clouds all stay put, so two shots a second apart match.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/gamemode creative"
+
+# Sunk into the grass layer, so it can't flow.
+[[step]]
+chat = "/fill 79 -61 84 81 -61 85 minecraft:lava"
+
+[[step]]
+chat = "/setblock 82 -60 84 minecraft:torch"
+
+[[step]]
+chat = "/setblock 78 -60 84 minecraft:magma_block"
+
+[[step]]
+chat = "/tp @s 80.5 -60 81.5 0 30"
+
+[[step]]
+expect = { player = { position = [80.5, -60.0, 81.5] } }
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+deterministic = true
+
+[[step]]
+chat = "/particle minecraft:flame 80 -59.5 84 0.5 0.3 0.5 0 50 force"
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "first"
+
+[[step]]
+chat = "/particle minecraft:flame 80 -59.5 84 0.5 0.3 0.5 0 50 force"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "second"
+
+[[step]]
+chat = "/tp @s 80.5 -60 81.5 0 -60"
+
+[[step]]
+expect = { player = { y_rot = 0.0 } }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "sky"
+
+[[step]]
+chat = "/fill 79 -61 84 81 -61 85 minecraft:grass_block"
+
+[[step]]
+chat = "/fill 78 -60 84 82 -60 84 minecraft:air"
