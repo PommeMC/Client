@@ -6410,7 +6410,7 @@ fn chunk_packets_match_azalea() {
     use azalea_protocol::packets::game::*;
     use azalea_registry::Registry;
     use azalea_registry::builtin::BlockEntityKind;
-    use pomme_protocol::chunk::{BlockEntityInfo, LightData};
+    use pomme_protocol::chunk::{BlockEntityInfo, ChunkBiomes, LightData};
 
     let decode = |name, packet| decode_azalea(name, packet, chunk::read);
     let light_data = || c_light_update::ClientboundLightUpdatePacketData {
@@ -6490,6 +6490,21 @@ fn chunk_packets_match_azalea() {
                 },
             ),
             ChunkPacket::Forget { x: 3, z: -7 },
+        ),
+        (
+            "chunks_biomes",
+            ClientboundGamePacket::ChunksBiomes(c_chunks_biomes::ClientboundChunksBiomes {
+                // A positive x, as for `forget_level_chunk` above.
+                chunk_biome_data: vec![c_chunks_biomes::ChunkBiomeData {
+                    pos: ChunkPos::new(3, -7),
+                    buffer: vec![1, 2, 3],
+                }],
+            }),
+            ChunkPacket::Biomes(vec![ChunkBiomes {
+                x: 3,
+                z: -7,
+                data: vec![1, 2, 3].into(),
+            }]),
         ),
         (
             "chunk_batch_start",
