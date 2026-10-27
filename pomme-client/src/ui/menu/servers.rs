@@ -158,7 +158,7 @@ impl MainMenu {
                     w: icon_size,
                     h: icon_size,
                     corner_radius: 0.0,
-                    color: [0.274, 0.274, 0.274, 0.63],
+                    color: crate::ui::text::argb32(ICON_HOVER_FILL),
                 });
 
                 if on_icon {
