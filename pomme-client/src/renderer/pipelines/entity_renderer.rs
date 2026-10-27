@@ -13,8 +13,7 @@ use crate::entity::components::Position;
 use crate::entity::dimensions;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::block_lighter::LightLevels;
-use crate::renderer::chunk::mesher::ChunkVertex;
-use crate::renderer::entity_model::BakedEntityModel;
+use crate::renderer::entity_model::{BakedEntityModel, EntityVertex};
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::rhi::{self, VertexFormat};
 use crate::renderer::{entity_model, shader, util};
@@ -3033,7 +3032,7 @@ fn build_variants(
         OverlayKind::SwirlAdditive => texture_sampler_repeat,
         _ => texture_sampler,
     };
-    let vert_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&model.vertices);
+    let vert_bytes = bytemuck::cast_slice::<EntityVertex, u8>(&model.vertices);
 
     tex_variants
         .iter()
@@ -3157,7 +3156,7 @@ fn create_pipelines(
 /// per-instance data (model columns + tint + overlay + uv), one EntityInstance
 /// per (entity, part); push-constant ones bind only the mesh.
 const INSTANCED_BUFFERS: [rhi::VertexBufferLayout<'static>; 2] = [
-    ChunkVertex::BUFFER,
+    EntityVertex::BUFFER,
     rhi::VertexBufferLayout {
         stride: size_of::<EntityInstance>() as u32,
         step_mode: rhi::VertexStepMode::Instance,

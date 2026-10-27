@@ -1,6 +1,32 @@
 use glam::{Mat4, Vec3};
 
-use super::chunk::mesher::ChunkVertex;
+use crate::renderer::chunk::mesher::pack_uv;
+use crate::renderer::rhi;
+
+/// An entity or block-entity model vertex: its position, UV and face normal.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct EntityVertex {
+    pub position: [f32; 3],
+    pub tex_coords: [u16; 2],
+    pub normal: [i8; 4],
+}
+
+impl EntityVertex {
+    pub const BUFFER: rhi::VertexBufferLayout<'static> =
+        rhi::vertex_buffer!(Self, [Float32x3, Unorm16x2, Snorm8x4]);
+}
+
+/// A unit normal as `Snorm8x4`, w unused.
+pub(crate) fn pack_normal(normal: Vec3) -> [i8; 4] {
+    let normal = normal.normalize_or_zero();
+    [
+        (normal.x.clamp(-1.0, 1.0) * 127.0).round() as i8,
+        (normal.y.clamp(-1.0, 1.0) * 127.0).round() as i8,
+        (normal.z.clamp(-1.0, 1.0) * 127.0).round() as i8,
+        0,
+    ]
+}
 
 /// Vanilla `EntityModel.MODEL_Y_OFFSET` (-1.501) in model pixels: re-bases the
 /// y-down ground plane (y=24) onto the y-up origin, with a 0.001-block lift so
@@ -87,7 +113,7 @@ pub enum ModelConvention {
 #[derive(Clone)]
 pub struct BakedEntityModel {
     pub parts: Vec<EntityPart>,
-    pub vertices: Vec<ChunkVertex>,
+    pub vertices: Vec<EntityVertex>,
     pub part_ranges: Vec<(u32, u32)>,
     pub convention: ModelConvention,
     /// Per-part scale (parallel to `parts`), applied about each part's pivot at
@@ -107,7 +133,7 @@ impl BakedEntityModel {
     /// Assemble baked parts, defaulting every part's scale to 1.0.
     pub(crate) fn new(
         parts: Vec<EntityPart>,
-        vertices: Vec<ChunkVertex>,
+        vertices: Vec<EntityVertex>,
         part_ranges: Vec<(u32, u32)>,
     ) -> Self {
         let part_scales = vec![1.0; parts.len()];
@@ -5357,14 +5383,29 @@ pub(crate) fn cube_face_uvs(cube: &ModelCube) -> [[f32; 4]; 6] {
 /// maxY face a V-reversed rect on purpose). The visible half of vanilla's
 /// mirror is the minX/maxX swap in `cube_face_positions`; `mirror` here only
 /// reverses the quad to restore vanilla's winding parity.
+/// The outward normal of [`cube_face_positions`]' face `slot`: its
+/// `ModelPart.Polygon` direction, with y negated for `y_down` and x for a
+/// mirrored cube, as the positions are.
+fn cube_face_normal(slot: usize, y_down: bool, mirror: bool) -> [i8; 4] {
+    let x = if mirror { -1.0 } else { 1.0 };
+    let y = if y_down { -1.0 } else { 1.0 };
+    pack_normal(match slot {
+        0 => Vec3::NEG_Z,
+        1 => Vec3::Z,
+        2 => Vec3::new(0.0, -y, 0.0),
+        3 => Vec3::new(0.0, y, 0.0),
+        4 => Vec3::new(-x, 0.0, 0.0),
+        _ => Vec3::new(x, 0.0, 0.0),
+    })
+}
+
+/// A quad from `positions` and its `[u0, v0, u1, v1]` UV rect.
 fn push_face(
     positions: &[[f32; 3]; 4],
-    u0: f32,
-    v0: f32,
-    u1: f32,
-    v1: f32,
+    [u0, v0, u1, v1]: [f32; 4],
     mirror: bool,
-    vertices: &mut Vec<ChunkVertex>,
+    normal: [i8; 4],
+    vertices: &mut Vec<EntityVertex>,
 ) {
     let mut corners = [
         (positions[0], [u1, v0]),
@@ -5377,13 +5418,10 @@ fn push_face(
     }
     for &i in &[0usize, 1, 2, 0, 2, 3] {
         let (position, uv) = corners[i];
-        vertices.push(ChunkVertex {
+        vertices.push(EntityVertex {
             position,
-            tex_coords: crate::renderer::chunk::mesher::pack_uv(uv[0], uv[1]),
-            light_tint: crate::renderer::chunk::mesher::pack_light_tint(
-                1.0,
-                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
-            ),
+            tex_coords: pack_uv(uv[0], uv[1]),
+            normal,
         });
     }
 }
@@ -5403,7 +5441,7 @@ pub(crate) fn generate_cube_vertices(
     tex_h: u32,
     faces: u8,
     y_down: bool,
-    vertices: &mut Vec<ChunkVertex>,
+    vertices: &mut Vec<EntityVertex>,
 ) {
     let tw = tex_w as f32;
     let th = tex_h as f32;
@@ -5427,6 +5465,7 @@ pub(crate) fn generate_cube_vertices(
         if faces & (1 << slot) == 0 {
             continue;
         }
+        let normal = cube_face_normal(slot, y_down, cube.mirror);
         let (su, eu) = wrap(uv[0], uv[2], tw);
         // The maxY face's V rect runs reversed; wrap on ordered bounds and
         // restore the orientation.
@@ -5446,14 +5485,18 @@ pub(crate) fn generate_cube_vertices(
             let m23 = mix3(pos[2], pos[3], t);
             let quad_a = [m10, pos[1], pos[2], m23];
             let quad_b = [pos[0], m10, m23, pos[3]];
-            push_face(&quad_a, su / tw, sv / th, 1.0, ev / th, false, vertices);
+            push_face(
+                &quad_a,
+                [su / tw, sv / th, 1.0, ev / th],
+                false,
+                normal,
+                vertices,
+            );
             push_face(
                 &quad_b,
-                0.0,
-                sv / th,
-                (eu - tw) / tw,
-                ev / th,
+                [0.0, sv / th, (eu - tw) / tw, ev / th],
                 false,
+                normal,
                 vertices,
             );
         } else {
@@ -5466,11 +5509,9 @@ pub(crate) fn generate_cube_vertices(
             );
             push_face(
                 pos,
-                su / tw,
-                sv / th,
-                eu / tw,
-                ev / th,
+                [su / tw, sv / th, eu / tw, ev / th],
                 cube.mirror,
+                normal,
                 vertices,
             );
         }
@@ -5496,20 +5537,57 @@ pub(crate) fn generate_cube_vertices_faces(
     face_uvs: &[[f32; 4]; 6],
     tex_w: u32,
     tex_h: u32,
-    vertices: &mut Vec<ChunkVertex>,
+    vertices: &mut Vec<EntityVertex>,
 ) {
     let tw = tex_w as f32;
     let th = tex_h as f32;
     let positions = cube_face_positions(cube, true);
-    for (pos, uv) in positions.iter().zip(face_uvs) {
+    for (slot, (pos, uv)) in positions.iter().zip(face_uvs).enumerate() {
         push_face(
             pos,
-            uv[0] / tw,
-            uv[1] / th,
-            uv[2] / tw,
-            uv[3] / th,
+            [uv[0] / tw, uv[1] / th, uv[2] / tw, uv[3] / th],
             false,
+            cube_face_normal(slot, true, cube.mirror),
             vertices,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every face's normal points from the cube's centre to the face's, in
+    /// both y conventions and mirrored.
+    #[test]
+    fn cube_normals_point_outward() {
+        for y_down in [false, true] {
+            for mirror in [false, true] {
+                let cube = ModelCube {
+                    origin: Vec3::new(-2.0, -3.0, -4.0),
+                    size: Vec3::new(4.0, 5.0, 6.0),
+                    tex_offset: (0, 0),
+                    deformation: 0.0,
+                    mirror,
+                };
+                let mut vertices = Vec::new();
+                generate_cube_vertices(&cube, 64, 64, FACE_ALL, y_down, &mut vertices);
+                let centre = vertices
+                    .iter()
+                    .map(|v| Vec3::from(v.position))
+                    .sum::<Vec3>()
+                    / vertices.len() as f32;
+                for face in vertices.chunks(6) {
+                    let face_centre =
+                        face.iter().map(|v| Vec3::from(v.position)).sum::<Vec3>() / 6.0;
+                    let [x, y, z, _] = face[0].normal;
+                    let normal = Vec3::new(x.into(), y.into(), z.into()) / 127.0;
+                    assert!(
+                        normal.dot(face_centre - centre) > 0.0,
+                        "y_down {y_down}, mirror {mirror}: {normal} at {face_centre}"
+                    );
+                }
+            }
+        }
     }
 }

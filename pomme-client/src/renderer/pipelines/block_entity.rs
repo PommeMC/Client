@@ -7,8 +7,7 @@ use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::position::BlockPos;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::block_lighter::LightLevels;
-use crate::renderer::chunk::mesher::ChunkVertex;
-use crate::renderer::entity_model::{BakedEntityModel, ModelConvention, PartAnim};
+use crate::renderer::entity_model::{BakedEntityModel, EntityVertex, ModelConvention, PartAnim};
 use crate::renderer::pipelines::entity_renderer::{
     BlendMode, ENTITY_ALPHA_CUTOFF, ModelInput, WHITE_TINT, create_pipeline, fallback_texture,
 };
@@ -527,7 +526,7 @@ fn build_entry(
     pending_uploads: &mut Vec<util::PendingImageUpload>,
     staging_to_free: &mut Vec<rhi::backend::Buffer>,
 ) -> KindEntry {
-    let mut all_vertices: Vec<ChunkVertex> = Vec::new();
+    let mut all_vertices: Vec<EntityVertex> = Vec::new();
     for model in &mut models {
         let base = all_vertices.len() as u32;
         all_vertices.append(&mut model.vertices);

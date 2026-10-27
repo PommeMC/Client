@@ -6,6 +6,7 @@ use glam::Vec3;
 use crate::assets::AssetIndex;
 use crate::renderer::camera::Camera;
 use crate::renderer::{rhi, shader, util};
+use crate::world::block::model::CardinalLightType;
 use crate::world::environment::{EnvAttributes, Skybox};
 
 const STAR_COUNT: u32 = 1500;
@@ -60,6 +61,8 @@ pub struct SkyState {
     /// The frame's fog colour (sRGB), which the renderer computes from the
     /// rest ([`crate::renderer::fog::fog_color`]).
     pub fog_color: Vec3,
+    /// The dimension's directional light, vanilla `Lighting.updateLevel`.
+    pub cardinal_light: CardinalLightType,
 }
 
 impl SkyState {
@@ -75,6 +78,7 @@ impl SkyState {
             void_darkness: 0.0,
             dark_disc: false,
             fog_color: Vec3::ZERO,
+            cardinal_light: CardinalLightType::Default,
         }
     }
 

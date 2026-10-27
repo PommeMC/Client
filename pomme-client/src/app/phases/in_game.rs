@@ -4160,6 +4160,7 @@ pub fn update_game(
             + f64::from(game.player.eye_height)
             < horizon
             && !game.player.eyes_in_water,
+        cardinal_light: game.cardinal_light,
         ..game.sky_state.clone()
     };
     if game.show_chunk_borders {

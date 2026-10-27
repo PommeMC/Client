@@ -5,6 +5,7 @@ use glam::Mat4;
 
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, SpriteAlphaMask, TextureAtlas};
+use crate::renderer::entity_model::pack_normal;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
 use crate::world::block::model::{BakedModel, Direction, direction_from_positions};
 
@@ -25,16 +26,6 @@ struct ItemVertex {
 impl ItemVertex {
     const BUFFER: rhi::VertexBufferLayout<'static> =
         rhi::vertex_buffer!(Self, [Float32x3, Float32x2, Unorm8x4, Snorm8x4, Uint32]);
-}
-
-fn pack_normal(normal: glam::Vec3) -> [i8; 4] {
-    let normal = normal.normalize_or_zero();
-    [
-        (normal.x.clamp(-1.0, 1.0) * 127.0).round() as i8,
-        (normal.y.clamp(-1.0, 1.0) * 127.0).round() as i8,
-        (normal.z.clamp(-1.0, 1.0) * 127.0).round() as i8,
-        0,
-    ]
 }
 
 pub struct ItemRenderInfo {

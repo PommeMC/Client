@@ -563,7 +563,8 @@ pub struct CameraUniform {
     camera_pos: [f32; 4],
     fog_color: [f32; 4],
     /// xyz: the anchor as integers (vanilla `CameraBlockPos`); chunk.vert
-    /// subtracts it from the absolute integer section origins.
+    /// subtracts it from the absolute integer section origins. w: 1 under
+    /// the nether's directional light (`light.glsl`).
     camera_block: [i32; 4],
     /// xy: the environmental fog band (vanilla `environmentalStart/End`,
     /// spherical), layered by max() over the render-distance band in the .w
@@ -629,7 +630,12 @@ impl CameraUniform {
             view_proj: camera.view_projection().to_cols_array_2d(),
             camera_pos: [pos.x, pos.y, pos.z, fog_start],
             fog_color: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_end],
-            camera_block: anchor.as_ivec3().extend(0).to_array(),
+            camera_block: anchor
+                .as_ivec3()
+                .extend(i32::from(
+                    sky.cardinal_light == crate::world::block::model::CardinalLightType::Nether,
+                ))
+                .to_array(),
             fog_env: [env_start, env_end, 0.0, 0.0],
         }
     }

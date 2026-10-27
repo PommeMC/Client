@@ -82,6 +82,8 @@ fn main() {
         "atlas_sprite.glsl",
         "item_tint.glsl",
         "item_instance.glsl",
+        "lightmap.glsl",
+        "light.glsl",
     ] {
         println!(
             "cargo:rerun-if-changed={}",

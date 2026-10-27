@@ -8,20 +8,11 @@ use super::block_lighter::{self, LightLevels, LightSource, VertexLight};
 use super::occlusion_graph::{VisibilitySet, compute_visibility};
 use crate::position::ChunkPos;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
-use crate::renderer::rhi;
 use crate::world::block::model::{CardinalLighting, Direction, face_positions, face_uvs};
 use crate::world::block::render_assets::{BlockRenderView, OwnedBlockRenderView, Tint};
 use crate::world::block::{BlockStateData, BlockStateTable, FluidKind};
 use crate::world::chunk;
 use crate::world::chunk::{ChunkRing, ChunkStore, SectionBlocks};
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ChunkVertex {
-    pub position: [f32; 3],
-    pub tex_coords: [u16; 2],
-    pub light_tint: u32,
-}
 
 #[derive(Copy, Clone)]
 struct TerrainVertex {
@@ -33,11 +24,6 @@ struct TerrainVertex {
     light: VertexLight,
     /// The quad's tint, as [`pack_tint_shifted`] packs it.
     tint: u32,
-}
-
-impl ChunkVertex {
-    pub const BUFFER: rhi::VertexBufferLayout<'static> =
-        rhi::vertex_buffer!(Self, [Float32x3, Unorm16x2, Unorm8x4]);
 }
 
 include!("packing_consts.rs");
