@@ -165,6 +165,11 @@ wait_ms = 2000
 [[step]]
 chat = "/execute in minecraft:the_nether run fillbiome -15 112 -15 15 142 15 minecraft:nether_wastes"
 
+# "N biome entries set", or "No biome entries were changed" on a rerun in the
+# same world; not the not-loaded error.
+[[step]]
+expect = { chat = "biome entr" }
+
 [[step]]
 chat = "/execute in minecraft:the_nether run tp @s 0.5 128 0.5 0 20"
 
