@@ -626,10 +626,7 @@ impl Server {
         // out of the reset's reach; keep the area around spawn loaded.
         server.command("forceload add -48 -48 47 47");
         // Mobs spawning at night attack and push the test player mid-script.
-        // 26.x renamed the rule; each version rejects the name it lacks.
-        for rule in ["spawn_mobs", "doMobSpawning"] {
-            server.command(&format!("gamerule {rule} false"));
-        }
+        server.gamerule(["spawn_mobs", "doMobSpawning"], false);
         Ok(server)
     }
 
@@ -656,6 +653,14 @@ impl Server {
         let _ = writeln!(self.stdin, "{command}");
     }
 
+    /// Sets a game rule by its 26.x and older names; each version rejects
+    /// the name it lacks.
+    fn gamerule(&mut self, names: [&str; 2], value: bool) {
+        for name in names {
+            self.command(&format!("gamerule {name} {value}"));
+        }
+    }
+
     /// Clears what a script left behind. Once the player has left and the
     /// world is saved, their data is deleted so the next join starts fresh.
     fn reset_player(&mut self) -> Result<(), String> {
@@ -678,6 +683,11 @@ impl Server {
         for _ in 0..2 {
             self.command("kill @e[type=!player]");
         }
+        // Noon, clear and ticking, so a script that doesn't set the time or
+        // weather sees the same sky whichever scripts ran before it.
+        self.gamerule(["advance_time", "doDaylightCycle"], true);
+        self.command("time set 6000");
+        self.command("weather clear");
         Ok(())
     }
 
