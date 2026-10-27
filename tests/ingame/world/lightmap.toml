@@ -98,8 +98,9 @@ wait_ms = 1500
 [[step]]
 screenshot = "torch"
 
-# Multipart full cubes, an emissive block, light-giving blocks and partial
-# faces, which vanilla's lighter treats each its own way.
+# Multipart full cubes, an emissive block, light-giving blocks, partial faces
+# and rotated models (whose corners are rewound after the blockstate turn),
+# which vanilla's lighter treats each its own way.
 [[step]]
 chat = "/setblock 59 -60 59 minecraft:red_mushroom_block"
 
@@ -124,7 +125,6 @@ chat = "/setblock 60 -60 57 minecraft:stone_slab"
 [[step]]
 chat = "/setblock 62 -60 57 minecraft:stone_stairs"
 
-# Rotated models, whose corners vanilla rewinds after the blockstate turn.
 [[step]]
 chat = "/setblock 59 -60 57 minecraft:oak_log[axis=x]"
 

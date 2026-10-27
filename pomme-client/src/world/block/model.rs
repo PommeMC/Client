@@ -2576,10 +2576,6 @@ mod tests {
         assert!((rotated[0][2] - 0.25).abs() < 1.0e-6);
     }
 
-    /// Every face must show the full-tile texture upright at rotation 0 and
-    /// spin it clockwise per 90 degrees, vanilla's `FaceInfo` +
-    /// `CuboidFace.UVs` + `Quadrant` behavior (the piston's side faces use
-    /// 90/270 and read 180 degrees off when the direction is inverted).
     #[test]
     fn rotated_faces_wind_back_to_their_facings_vertex_order() {
         // A full cube's top turned on its side, as a sideways log's is.
@@ -2597,6 +2593,10 @@ mod tests {
         }
     }
 
+    /// Every face must show the full-tile texture upright at rotation 0 and
+    /// spin it clockwise per 90 degrees, vanilla's `FaceInfo` +
+    /// `CuboidFace.UVs` + `Quadrant` behavior (the piston's side faces use
+    /// 90/270 and read 180 degrees off when the direction is inverted).
     #[test]
     fn face_uvs_show_upright_clockwise_rotated_texture() {
         // Image corners in clockwise order; screen corner `s` under a
