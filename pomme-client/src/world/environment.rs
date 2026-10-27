@@ -1,13 +1,14 @@
 //! The environment attributes behind the lightmap and the sky (vanilla
 //! `EnvironmentAttributes`' `visual/*` entries and `gameplay/sky_light_level`),
 //! resolved like `EnvironmentAttributeSystem`: the attribute's default, then
-//! the dimension's layer, its timelines' tracks, and the weather.
-//! TODO: the biome layer, and the client's lightning layer (`ClientLevel`'s
-//! sky flash, which lifts the sky colour and the sky light factor).
+//! the dimension's layer, the biomes around the camera, its timelines' tracks,
+//! and the weather.
+//! TODO: the client's lightning layer (`ClientLevel`'s sky flash, which lifts
+//! the sky colour and the sky light factor).
 
 use std::ops::{Add, Mul, Sub};
 
-use glam::{Vec3, Vec4};
+use glam::{DVec3, Vec3, Vec4};
 
 /// The attributes pomme resolves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -337,10 +338,13 @@ impl<T: AttributeValue> Track<T> {
     }
 }
 
-/// One attribute's layers from the dimension and its timelines.
+/// One attribute's layers from the dimension, the biomes and the timelines.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AttributeLayers<T> {
     pub dimension: Option<Modifier<T>>,
+    /// Each biome's modifier by registry id; empty when no biome sets the
+    /// attribute, which leaves vanilla without the layer.
+    pub biomes: Vec<Option<Modifier<T>>>,
     /// Each timeline's track for this attribute, with that timeline's period.
     /// TODO: each timeline's own `clock`; every track reads the dimension's
     /// default clock, which every vanilla timeline uses.
@@ -351,21 +355,96 @@ impl<T> Default for AttributeLayers<T> {
     fn default() -> Self {
         Self {
             dimension: None,
+            biomes: Vec::new(),
             tracks: Vec::new(),
         }
     }
 }
 
 impl<T: AttributeValue> AttributeLayers<T> {
-    fn resolve(&self, default: T, ticks: i64) -> T {
+    fn resolve(&self, default: T, ticks: i64, biomes: &BiomeWeights) -> T {
         let mut value = default;
         if let Some(modifier) = self.dimension {
             value = Modifier::apply(modifier.op, value, modifier.argument);
         }
+        value = self.blend_biomes(value, biomes);
         for (track, period) in &self.tracks {
             value = Modifier::apply(track.op, value, track.sample(ticks, *period));
         }
         value
+    }
+
+    /// `SpatialAttributeInterpolator.applyAttributeLayer`: each biome's
+    /// modifier on `base` (a biome without one keeps it), blended by weight
+    /// in the order the biomes were met.
+    fn blend_biomes(&self, base: T, biomes: &BiomeWeights) -> T {
+        if self.biomes.is_empty() {
+            return base;
+        }
+        let in_biome = |id: u32| match self.biomes.get(id as usize).copied().flatten() {
+            Some(modifier) => Modifier::apply(modifier.op, base, modifier.argument),
+            None => base,
+        };
+        let mut blended: Option<T> = None;
+        let mut total = 0.0;
+        for &(id, weight) in &biomes.0 {
+            let value = in_biome(id);
+            total += weight;
+            blended = Some(match blended {
+                None => value,
+                Some(so_far) => so_far.lerp(value, (weight / total) as f32),
+            });
+        }
+        blended.unwrap_or(base)
+    }
+}
+
+/// `GaussianSampler`'s kernel: the weight of a cell by its offset from the
+/// sampled position's cell.
+const GAUSSIAN_KERNEL: [f64; 7] = [0.0, 1.0, 4.0, 6.0, 4.0, 1.0, 0.0];
+
+/// The biomes around a position and their Gaussian weights, merged by biome
+/// in the order they were met (vanilla `SpatialAttributeInterpolator`).
+/// TODO: attributes vanilla doesn't interpolate spatially (the moon phase,
+/// the sky light level) take the blend too; no vanilla biome sets them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BiomeWeights(Vec<(u32, f64)>);
+
+impl BiomeWeights {
+    /// `GaussianSampler.sample` around `position`, in quart (4-block) cells,
+    /// `biome_at` naming each cell's biome.
+    pub fn sample(position: DVec3, biome_at: impl Fn(i32, i32, i32) -> u32) -> Self {
+        let position = position - 0.5;
+        let cell = position.floor();
+        let relative = position - cell;
+        let weight = |offset: usize, relative: f64| {
+            glam::FloatExt::lerp(
+                GAUSSIAN_KERNEL[offset + 1],
+                GAUSSIAN_KERNEL[offset],
+                relative,
+            )
+        };
+        let [cx, cy, cz] = cell.as_ivec3().to_array();
+        let mut weights = Self::default();
+        for z in 0..6 {
+            let wz = weight(z, relative.z);
+            for x in 0..6 {
+                let wx = weight(x, relative.x);
+                for y in 0..6 {
+                    let wy = weight(y, relative.y);
+                    let id = biome_at(cx - 2 + x as i32, cy - 2 + y as i32, cz - 2 + z as i32);
+                    weights.accumulate(id, wx * wy * wz);
+                }
+            }
+        }
+        weights
+    }
+
+    fn accumulate(&mut self, id: u32, weight: f64) {
+        match self.0.iter_mut().find(|(seen, _)| *seen == id) {
+            Some((_, total)) => *total += weight,
+            None => self.0.push((id, weight)),
+        }
     }
 }
 
@@ -404,6 +483,9 @@ pub struct Environment {
     /// Vanilla `Level.canHaveWeather`, which gates the weather layer.
     pub has_weather: bool,
     pub skybox: Skybox,
+    /// The `minecraft:plains` biome's id, which a cell in an unloaded chunk
+    /// reads as (`ClientLevel.getUncachedNoiseBiome`).
+    pub plains: u32,
 }
 
 /// The resolved attributes.
@@ -429,6 +511,13 @@ pub struct EnvAttributes {
     pub fog_start_distance: f32,
     pub fog_end_distance: f32,
     pub sky_fog_end_distance: f32,
+}
+
+/// Every attribute's default, as a dimension without layers has them.
+impl Default for EnvAttributes {
+    fn default() -> Self {
+        Environment::default().resolve(0, &BiomeWeights::default(), 0.0, 0.0)
+    }
 }
 
 impl EnvAttributes {
@@ -524,30 +613,40 @@ fn blend_to_gray(rgb: Vec3, (brightness, factor): (f32, f32)) -> Vec3 {
 }
 
 impl Environment {
-    /// The attributes at whole clock `ticks`, then `WeatherAttributes`' rain
-    /// and thunder layers. `rain` and `thunder` are the level's rain and
-    /// thunder levels, thunder already scaled by rain.
-    pub fn resolve(&self, ticks: i64, rain: f32, thunder: f32) -> EnvAttributes {
+    /// The attributes at whole clock `ticks` among `biomes`, then
+    /// `WeatherAttributes`' rain and thunder layers. `rain` and `thunder` are
+    /// the level's rain and thunder levels, thunder already scaled by rain.
+    pub fn resolve(
+        &self,
+        ticks: i64,
+        biomes: &BiomeWeights,
+        rain: f32,
+        thunder: f32,
+    ) -> EnvAttributes {
         let mut a = EnvAttributes {
-            block_light_tint: self.block_light_tint.resolve(rgb_hex(0xFFD88C), ticks),
-            sky_light_color: self.sky_light_color.resolve(Vec3::ONE, ticks),
-            sky_light_factor: self.sky_light_factor.resolve(1.0, ticks),
-            night_vision_color: self.night_vision_color.resolve(rgb_hex(0x999999), ticks),
-            ambient_light_color: self.ambient_light_color.resolve(Vec3::ZERO, ticks),
-            sky_color: self.sky_color.resolve(Vec3::ZERO, ticks),
-            fog_color: self.fog_color.resolve(Vec3::ZERO, ticks),
-            cloud_color: self.cloud_color.resolve(Vec4::ZERO, ticks),
-            cloud_height: self.cloud_height.resolve(192.33, ticks),
-            sunrise_sunset_color: self.sunrise_sunset_color.resolve(Vec4::ZERO, ticks),
-            star_brightness: self.star_brightness.resolve(0.0, ticks),
-            sun_angle: self.sun_angle.resolve(0.0, ticks),
-            moon_angle: self.moon_angle.resolve(0.0, ticks),
-            star_angle: self.star_angle.resolve(0.0, ticks),
-            moon_phase: self.moon_phase.resolve(0.0, ticks) as u8,
-            sky_light_level: self.sky_light_level.resolve(15.0, ticks),
-            fog_start_distance: self.fog_start_distance.resolve(0.0, ticks),
-            fog_end_distance: self.fog_end_distance.resolve(1024.0, ticks),
-            sky_fog_end_distance: self.sky_fog_end_distance.resolve(512.0, ticks),
+            block_light_tint: self
+                .block_light_tint
+                .resolve(rgb_hex(0xFFD88C), ticks, biomes),
+            sky_light_color: self.sky_light_color.resolve(Vec3::ONE, ticks, biomes),
+            sky_light_factor: self.sky_light_factor.resolve(1.0, ticks, biomes),
+            night_vision_color: self
+                .night_vision_color
+                .resolve(rgb_hex(0x999999), ticks, biomes),
+            ambient_light_color: self.ambient_light_color.resolve(Vec3::ZERO, ticks, biomes),
+            sky_color: self.sky_color.resolve(Vec3::ZERO, ticks, biomes),
+            fog_color: self.fog_color.resolve(Vec3::ZERO, ticks, biomes),
+            cloud_color: self.cloud_color.resolve(Vec4::ZERO, ticks, biomes),
+            cloud_height: self.cloud_height.resolve(192.33, ticks, biomes),
+            sunrise_sunset_color: self.sunrise_sunset_color.resolve(Vec4::ZERO, ticks, biomes),
+            star_brightness: self.star_brightness.resolve(0.0, ticks, biomes),
+            sun_angle: self.sun_angle.resolve(0.0, ticks, biomes),
+            moon_angle: self.moon_angle.resolve(0.0, ticks, biomes),
+            star_angle: self.star_angle.resolve(0.0, ticks, biomes),
+            moon_phase: self.moon_phase.resolve(0.0, ticks, biomes) as u8,
+            sky_light_level: self.sky_light_level.resolve(15.0, ticks, biomes),
+            fog_start_distance: self.fog_start_distance.resolve(0.0, ticks, biomes),
+            fog_end_distance: self.fog_end_distance.resolve(1024.0, ticks, biomes),
+            sky_fog_end_distance: self.sky_fog_end_distance.resolve(512.0, ticks, biomes),
         };
         if self.has_weather {
             let layers = [rain - thunder, thunder].into_iter().zip(
@@ -624,7 +723,7 @@ impl EnvironmentProbe {
 
 impl Default for EnvironmentProbe {
     fn default() -> Self {
-        Self::new(Environment::default().resolve(0, 0.0, 0.0))
+        Self::new(EnvAttributes::default())
     }
 }
 
@@ -650,8 +749,8 @@ mod tests {
 
     fn timeline<T>(track: Track<T>) -> AttributeLayers<T> {
         AttributeLayers {
-            dimension: None,
             tracks: vec![(track, Some(24000))],
+            ..Default::default()
         }
     }
 
@@ -661,8 +760,13 @@ mod tests {
                 op: ModifierOp::Override,
                 argument: Argument::opaque(value),
             }),
-            tracks: Vec::new(),
+            ..Default::default()
         }
+    }
+
+    /// `env`'s attributes away from any biome.
+    fn resolve(env: &Environment, ticks: i64, rain: f32, thunder: f32) -> EnvAttributes {
+        env.resolve(ticks, &BiomeWeights::default(), rain, thunder)
     }
 
     const SUN_EASE: Ease = Ease::CubicBezier([0.362, 0.241, 0.638, 0.759]);
@@ -716,7 +820,6 @@ mod tests {
                 &[(6000, 360.0), (6000, 0.0)],
             )),
             moon_phase: AttributeLayers {
-                dimension: None,
                 tracks: vec![(
                     track(
                         ModifierOp::Override,
@@ -725,6 +828,7 @@ mod tests {
                     ),
                     Some(192000),
                 )],
+                ..Default::default()
             },
             sky_light_level: timeline(track(multiply, linear, &day_night(1.0, 0.266_666_68))),
             has_weather: true,
@@ -735,17 +839,17 @@ mod tests {
     #[test]
     fn the_overworld_day_dims_the_sky_light_at_night() {
         let env = overworld();
-        let noon = env.resolve(6000, 0.0, 0.0);
+        let noon = resolve(&env, 6000, 0.0, 0.0);
         assert_eq!(noon.sky_light_factor, 1.0);
         assert_eq!(noon.sky_light_color, Vec3::ONE);
         assert_eq!(noon.ambient_light_color, rgb_hex(0x0A0A0A));
         assert_eq!(noon.block_light_tint, rgb_hex(0xFFD88C));
 
-        let midnight = env.resolve(18000, 0.0, 0.0);
+        let midnight = resolve(&env, 18000, 0.0, 0.0);
         assert_eq!(midnight.sky_light_factor, 0.24);
         assert_eq!(midnight.sky_light_color, night_sky_light_color());
 
-        let dusk = env.resolve(12205, 0.0, 0.0);
+        let dusk = resolve(&env, 12205, 0.0, 0.0);
         assert!((dusk.sky_light_factor - 0.62).abs() < 1e-6);
     }
 
@@ -753,19 +857,19 @@ mod tests {
     fn keyframes_wrap_around_the_period() {
         let env = overworld();
         // Halfway from 22860 (0.24) to 730 of the next day (1.0).
-        let dawn = env.resolve(24000 + 23795, 0.0, 0.0);
+        let dawn = resolve(&env, 24000 + 23795, 0.0, 0.0);
         assert!((dawn.sky_light_factor - 0.62).abs() < 1e-6);
-        assert_eq!(env.resolve(-18000, 0.0, 0.0).sky_light_factor, 1.0);
+        assert_eq!(resolve(&env, -18000, 0.0, 0.0).sky_light_factor, 1.0);
     }
 
     #[test]
     fn the_sky_and_fog_darken_at_night() {
         let env = overworld();
-        let noon = env.resolve(6000, 0.0, 0.0);
+        let noon = resolve(&env, 6000, 0.0, 0.0);
         assert_eq!(noon.sky_color, rgb_hex(0x78A7FF));
         assert_eq!(noon.fog_color, rgb_hex(0xC0D8FF));
         assert_eq!(noon.cloud_color, argb_hex(0xCCFFFFFF));
-        let midnight = env.resolve(18000, 0.0, 0.0);
+        let midnight = resolve(&env, 18000, 0.0, 0.0);
         assert_eq!(midnight.sky_color, Vec3::ZERO);
         assert_eq!(midnight.fog_color, rgb_hex(0xC0D8FF) * rgb_hex(0x0F0F16));
         assert_eq!(
@@ -777,7 +881,7 @@ mod tests {
     #[test]
     fn the_sun_sweeps_a_full_turn_from_noon() {
         let env = overworld();
-        let angle = |t| env.resolve(t, 0.0, 0.0).sun_angle;
+        let angle = |t| resolve(&env, t, 0.0, 0.0).sun_angle;
         assert_eq!(angle(6000), 0.0);
         assert!((angle(18000) - 180.0).abs() < 1e-3);
         let mut last = angle(6000);
@@ -791,19 +895,19 @@ mod tests {
     #[test]
     fn the_moon_steps_through_its_phases() {
         let env = overworld();
-        assert_eq!(env.resolve(0, 0.0, 0.0).moon_phase, 0);
-        assert_eq!(env.resolve(23999, 0.0, 0.0).moon_phase, 0);
-        assert_eq!(env.resolve(24000, 0.0, 0.0).moon_phase, 1);
-        assert_eq!(env.resolve(7 * 24000 + 100, 0.0, 0.0).moon_phase, 7);
-        assert_eq!(env.resolve(8 * 24000, 0.0, 0.0).moon_phase, 0);
+        assert_eq!(resolve(&env, 0, 0.0, 0.0).moon_phase, 0);
+        assert_eq!(resolve(&env, 23999, 0.0, 0.0).moon_phase, 0);
+        assert_eq!(resolve(&env, 24000, 0.0, 0.0).moon_phase, 1);
+        assert_eq!(resolve(&env, 7 * 24000 + 100, 0.0, 0.0).moon_phase, 7);
+        assert_eq!(resolve(&env, 8 * 24000, 0.0, 0.0).moon_phase, 0);
     }
 
     #[test]
     fn rain_and_thunder_blend_toward_night() {
         let env = overworld();
-        let rain = env.resolve(6000, 1.0, 0.0);
+        let rain = resolve(&env, 6000, 1.0, 0.0);
         assert!((rain.sky_light_factor - 1.0.lerp(0.24, 0.3125)).abs() < 1e-6);
-        let storm = env.resolve(6000, 1.0, 1.0);
+        let storm = resolve(&env, 6000, 1.0, 1.0);
         assert!((storm.sky_light_factor - 1.0.lerp(0.24, 0.527_343_75)).abs() < 1e-6);
         assert_eq!(storm.star_brightness, 0.0);
         assert_eq!(storm.fog_color, rgb_hex(0xC0D8FF) * rgb_hex(0x3F3F4C));
@@ -813,27 +917,27 @@ mod tests {
             has_weather: false,
             ..overworld()
         };
-        assert_eq!(dry.resolve(6000, 1.0, 1.0).sky_light_factor, 1.0);
+        assert_eq!(resolve(&dry, 6000, 1.0, 1.0).sky_light_factor, 1.0);
     }
 
     #[test]
     fn the_sky_darkens_at_night_and_in_weather() {
         let env = overworld();
-        let darken = |t, rain, thunder| env.resolve(t, rain, thunder).sky_darken();
+        let darken = |t, rain, thunder| resolve(&env, t, rain, thunder).sky_darken();
         assert_eq!(darken(6000, 0.0, 0.0), 0);
         // 15 x 0.26666668 rounds to 4 in f32, as in vanilla.
         assert_eq!(darken(18000, 0.0, 0.0), 11);
         assert_eq!(darken(6000, 1.0, 0.0), 3);
         assert_eq!(darken(6000, 1.0, 1.0), 5);
         assert_eq!(
-            Environment::default().resolve(18000, 0.0, 0.0).sky_darken(),
+            resolve(&Environment::default(), 18000, 0.0, 0.0).sky_darken(),
             0
         );
     }
 
     #[test]
     fn a_dimension_without_layers_keeps_the_defaults() {
-        let attributes = Environment::default().resolve(18000, 0.0, 0.0);
+        let attributes = resolve(&Environment::default(), 18000, 0.0, 0.0);
         assert_eq!(attributes.sky_light_factor, 1.0);
         assert_eq!(attributes.sky_light_color, Vec3::ONE);
         assert_eq!(attributes.night_vision_color, rgb_hex(0x999999));
@@ -870,14 +974,59 @@ mod tests {
     }
 
     #[test]
+    fn the_gaussian_kernel_weighs_the_cells_around_a_position() {
+        // Each axis's six weights sum to the kernel's 16, wherever the
+        // position sits in its cell.
+        for position in [DVec3::ZERO, DVec3::new(0.3, -7.6, 12.25)] {
+            let weights = BiomeWeights::sample(position, |_, _, _| 7);
+            let [(id, total)] = weights.0[..] else {
+                panic!("one biome expected, got {weights:?}");
+            };
+            assert_eq!(id, 7);
+            assert!((total - 16.0 * 16.0 * 16.0).abs() < 1e-9);
+        }
+        // A position at a cell's centre gives the cells 3 away nothing, but
+        // their biomes are still met, as vanilla's are.
+        let weights = BiomeWeights::sample(DVec3::splat(0.5), |x, _, _| u32::from(x > 2));
+        assert_eq!(weights.0, [(0, 16.0 * 16.0 * 16.0), (1, 0.0)]);
+    }
+
+    #[test]
+    fn biomes_blend_their_modifiers_by_weight() {
+        let override_with = |rgb| {
+            Some(Modifier {
+                op: ModifierOp::Override,
+                argument: Argument::opaque(rgb_hex(rgb)),
+            })
+        };
+        let fog = AttributeLayers {
+            dimension: None,
+            biomes: vec![override_with(0x330303), None],
+            tracks: Vec::new(),
+        };
+        let one = BiomeWeights(vec![(0, 2.0)]);
+        assert_eq!(fog.resolve(Vec3::ZERO, 0, &one), rgb_hex(0x330303));
+        // Biome 1 sets no fog colour, so its share keeps the base.
+        let half = BiomeWeights(vec![(0, 2.0), (1, 2.0)]);
+        assert_eq!(
+            fog.resolve(Vec3::ONE, 0, &half),
+            rgb_hex(0x330303).lerp(Vec3::ONE, 0.5)
+        );
+        assert_eq!(
+            fog.resolve(Vec3::ONE, 0, &BiomeWeights::default()),
+            Vec3::ONE
+        );
+    }
+
+    #[test]
     fn frames_blend_like_the_attribute_probe() {
         let env = overworld();
-        let mut probe = EnvironmentProbe::new(env.resolve(6000, 0.0, 0.0));
-        probe.tick(env.resolve(6001, 0.0, 0.0));
+        let mut probe = EnvironmentProbe::new(resolve(&env, 6000, 0.0, 0.0));
+        probe.tick(resolve(&env, 6001, 0.0, 0.0));
         let half = probe.at(0.5).sun_angle;
         assert!(half > 0.0 && half < probe.current().sun_angle);
         // A jump of a quarter turn or more snaps.
-        probe.tick(env.resolve(13000, 0.0, 0.0));
+        probe.tick(resolve(&env, 13000, 0.0, 0.0));
         assert_eq!(probe.at(0.5).sun_angle, probe.current().sun_angle);
         assert_eq!(probe.at(0.5).moon_phase, probe.current().moon_phase);
     }

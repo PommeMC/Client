@@ -403,6 +403,9 @@ impl GameState {
         self.default_clock = default_clock;
         self.flat = flat;
         self.environment = *environment;
+        // Vanilla `EnvironmentAttributeProbe.reset`: no biomes until the
+        // next tick samples the new level's.
+        self.biome_weights = Default::default();
         self.environment_probe = EnvironmentProbe::new(self.resolve_environment());
         self.chunk_store = ChunkStore::new_with_dimension(render_distance, height, min_y);
         self.light_engine = crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);

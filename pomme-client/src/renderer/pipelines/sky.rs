@@ -6,7 +6,7 @@ use glam::Vec3;
 use crate::assets::AssetIndex;
 use crate::renderer::camera::Camera;
 use crate::renderer::{rhi, shader, util};
-use crate::world::environment::{EnvAttributes, Environment, Skybox};
+use crate::world::environment::{EnvAttributes, Skybox};
 
 const STAR_COUNT: u32 = 1500;
 const SUN_SIZE: f32 = 30.0;
@@ -70,7 +70,7 @@ impl SkyState {
             rain_level: 0.0,
             thunder_level: 0.0,
             partial_tick: 0.0,
-            attributes: Environment::default().resolve(6000, 0.0, 0.0),
+            attributes: EnvAttributes::default(),
             skybox: Skybox::Overworld,
             void_darkness: 0.0,
             dark_disc: false,
