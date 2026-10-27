@@ -3,6 +3,7 @@ pub mod boot;
 pub mod camera;
 pub mod chunk;
 pub mod entity_model;
+pub(crate) mod fog;
 pub(crate) mod packing;
 pub mod pipelines;
 pub(crate) mod rhi;
@@ -1108,7 +1109,7 @@ impl Renderer {
         render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
-        sky: SkyState,
+        mut sky: SkyState,
         shadows: ShadowScene<'_>,
         moving_blocks: &[MovingBlockRender],
         entities: &[EntityRenderInfo],
@@ -1141,14 +1142,13 @@ impl Renderer {
                 }
             })
         });
-        // Clear to the sky color: the strip between the sky disc's edge and the
-        // terrain shows the clear color, so it must match the sky/terrain or it
-        // reads as a horizon band (visible at night). Underwater, clear to the
-        // water fog color so background gaps read as water rather than sky.
+        sky.fog_color = fog::fog_color(&sky, self.camera.forward(), render_distance);
+        // Vanilla clears to the fog colour, which shows below the sky disc's
+        // rim; underwater, the water fog colour.
         let [r, g, b] = util::srgb_to_linear(if eyes_in_water {
             camera::WATER_FOG_COLOR
         } else {
-            sky.attributes.sky_color.to_array()
+            sky.fog_color.to_array()
         });
         self.render_frame(
             window,
@@ -1479,12 +1479,7 @@ impl Renderer {
             ..
         } = mode
         {
-            let uniform = CameraUniform::new(
-                &self.camera,
-                sky.attributes.sky_color.to_array(),
-                render_distance,
-                eyes_in_water,
-            );
+            let uniform = CameraUniform::new(&self.camera, sky, render_distance, eyes_in_water);
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
@@ -1714,8 +1709,13 @@ impl Renderer {
                 // is cleared to the water fog color, so skipping them tints the view
                 // when looking up out of geometry.
                 if !*eyes_in_water {
-                    self.sky_pipeline
-                        .update_and_draw(&mut pass, frame, &self.camera, sky);
+                    self.sky_pipeline.update_and_draw(
+                        &mut pass,
+                        frame,
+                        &self.camera,
+                        sky,
+                        *render_distance,
+                    );
                 }
 
                 let t_cull = std::time::Instant::now();

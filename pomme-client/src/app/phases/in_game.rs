@@ -270,6 +270,8 @@ pub struct GameState {
     pub ambient_light: f32,
     /// The current dimension's `default_clock`, whose ticks are its day time.
     pub default_clock: Option<String>,
+    /// The level is superflat (`ClientLevelData.isFlat`).
+    pub flat: bool,
     pub clocks: crate::world::clock::ClientClocks,
     /// The current dimension's environment attribute layers, and the
     /// attributes they resolve to each tick.
@@ -555,6 +557,7 @@ impl GameState {
             cardinal_light: Default::default(),
             ambient_light: 0.0,
             default_clock: None,
+            flat: false,
             clocks: Default::default(),
             environment: Default::default(),
             environment_probe: Default::default(),
@@ -4095,9 +4098,19 @@ pub fn update_game(
     }
 
     let partial_tick = sky_partial_tick(core);
+    let min_y = game.chunk_store.min_y();
+    // `ClientLevelData.getHorizonHeight`.
+    let horizon = if game.flat { f64::from(min_y) } else { 63.0 };
     let sky = crate::renderer::SkyState {
         partial_tick,
         attributes: game.environment_probe.at(partial_tick),
+        skybox: game.environment.skybox,
+        void_darkness: crate::renderer::fog::void_darkness(
+            gfx.renderer.camera_render_position().y,
+            min_y,
+            game.flat,
+        ),
+        dark_disc: game.player.eye_pos().y < horizon && !game.player.eyes_in_water,
         ..game.sky_state.clone()
     };
     if game.show_chunk_borders {

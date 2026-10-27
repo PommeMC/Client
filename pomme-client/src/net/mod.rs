@@ -115,6 +115,9 @@ pub struct DimensionInfo {
     pub ambient_light: f32,
     /// The `world_clock` driving this dimension's day time.
     pub default_clock: Option<String>,
+    /// The level is superflat (`ClientLevelData.isFlat`), which drops its
+    /// horizon and void darkness to the world's floor.
+    pub flat: bool,
     /// The lightmap's and the sky's attribute layers.
     pub environment: Box<crate::world::environment::Environment>,
 }

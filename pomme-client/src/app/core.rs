@@ -392,6 +392,7 @@ impl GameState {
             cardinal_light,
             ambient_light,
             default_clock,
+            flat,
             environment,
         } = dim;
         tracing::info!(
@@ -400,6 +401,7 @@ impl GameState {
         self.cardinal_light = cardinal_light;
         self.ambient_light = ambient_light;
         self.default_clock = default_clock;
+        self.flat = flat;
         self.environment = *environment;
         self.environment_probe = EnvironmentProbe::new(self.resolve_environment());
         self.chunk_store = ChunkStore::new_with_dimension(render_distance, height, min_y);
