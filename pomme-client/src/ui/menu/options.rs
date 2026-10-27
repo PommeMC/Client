@@ -78,6 +78,18 @@ fn on_off(value: bool) -> &'static str {
     if value { "ON" } else { "OFF" }
 }
 
+const BRIGHTNESS: &str = "Brightness:";
+
+/// Vanilla `gamma`'s label: named at 0, 50 and 100, a number otherwise.
+fn brightness_label(brightness: f32) -> String {
+    match (brightness * 100.0) as i32 {
+        0 => format!("{BRIGHTNESS} Moody"),
+        50 => format!("{BRIGHTNESS} Default"),
+        100 => format!("{BRIGHTNESS} Bright"),
+        value => format!("{BRIGHTNESS} {value}"),
+    }
+}
+
 /// Vanilla `Options.percentValueLabel`, which truncates.
 fn percent_label(prefix: &str, value: f64) -> String {
     format!("{prefix} {}%", (value * 100.0) as i32)
@@ -293,13 +305,14 @@ impl MainMenu {
             "Entity Shadows: OFF"
         };
         let (blur_label, blur_frac) = self.menu_background_blur_slider();
+        let brightness = brightness_label(self.brightness);
         let rows: Vec<OptRow> = vec![
             OptRow::Header("Display"),
             OptRow::Big("Fullscreen Resolution: Current"),
             OptRow::Pair(&mf, vsync_label),
             OptRow::Pair("Inactivity FPS Limit: 1 minute", &gui_label),
             OptRow::Pair(fullscreen_label, "Exclusive Fullscreen: OFF"),
-            OptRow::Pair("Brightness: 50%", "Graphics Backend: Default"),
+            OptRow::Pair(&brightness, "Graphics Backend: Default"),
             OptRow::Header("Quality"),
             OptRow::Big("Graphics: Fancy"),
             OptRow::Pair("Biome Blend: 5x5", &rd),
@@ -326,13 +339,13 @@ impl MainMenu {
             ("Chunk Detail:", cd_frac),
             ("Simulation Distance:", sd_frac),
             ("Max Framerate:", mf_frac),
+            (BRIGHTNESS, self.brightness),
             (MENU_BACKGROUND_BLUR, blur_frac),
         ];
         let disabled = &[
             "Fullscreen Resolution:",
             "Inactivity FPS Limit:",
             "Exclusive Fullscreen:",
-            "Brightness:",
             "Graphics Backend:",
             "Graphics:",
             "Biome Blend:",
@@ -1551,6 +1564,7 @@ impl MainMenu {
                 }
                 "FOV Effects:" => self.fov_effect_scale = v,
                 "Damage Tilt:" => self.damage_tilt_strength = v,
+                BRIGHTNESS => self.brightness = v,
                 "Sensitivity:" => self.sensitivity = v,
                 "Master Volume:" => self.master_volume = v,
                 "Music:" => self.music_volume = v,
@@ -2041,6 +2055,14 @@ mod tests {
         assert!(!option_enabled("Graphics: Fancy", disabled));
         assert!(option_enabled("Render Distance: 12 chunks", disabled));
         assert!(option_enabled("Graphics Backend: Default", disabled));
+    }
+
+    #[test]
+    fn brightness_label_names_its_ends_and_default() {
+        assert_eq!(brightness_label(0.0), "Brightness: Moody");
+        assert_eq!(brightness_label(0.5), "Brightness: Default");
+        assert_eq!(brightness_label(1.0), "Brightness: Bright");
+        assert_eq!(brightness_label(0.379), "Brightness: 37");
     }
 
     #[test]

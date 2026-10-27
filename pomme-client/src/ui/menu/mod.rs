@@ -45,6 +45,8 @@ struct Settings {
     fov_effect_scale: f32,
     #[serde(default = "default_damage_tilt_strength")]
     damage_tilt_strength: f32,
+    #[serde(default = "default_brightness")]
+    brightness: f32,
     #[serde(default = "default_sensitivity")]
     sensitivity: f32,
     #[serde(default)]
@@ -145,6 +147,11 @@ fn default_damage_tilt_strength() -> f32 {
     1.0
 }
 
+/// Vanilla `gamma`.
+fn default_brightness() -> f32 {
+    0.5
+}
+
 /// Vanilla `menuBackgroundBlurriness`: 0 (off) to 10, default 5.
 const MAX_MENU_BACKGROUND_BLURRINESS: u8 = 10;
 pub const DEFAULT_MENU_BACKGROUND_BLURRINESS: u8 = 5;
@@ -207,6 +214,7 @@ impl Default for Settings {
             fov: 70,
             fov_effect_scale: 1.0,
             damage_tilt_strength: 1.0,
+            brightness: default_brightness(),
             sensitivity: 0.5,
             invert_mouse_x: false,
             invert_mouse_y: false,
@@ -704,6 +712,8 @@ pub struct MainMenu {
     /// FOV Effects slider fraction (0..1); squared by `fov_effect()`.
     pub fov_effect_scale: f32,
     pub damage_tilt_strength: f32,
+    /// The Brightness option (vanilla `gamma`), 0..1.
+    pub brightness: f32,
     pub sensitivity: f32,
     pub invert_mouse_x: bool,
     pub invert_mouse_y: bool,
@@ -859,6 +869,7 @@ impl MainMenu {
             fov: settings.fov,
             fov_effect_scale: settings.fov_effect_scale,
             damage_tilt_strength: unit_range(settings.damage_tilt_strength),
+            brightness: unit_range(settings.brightness),
             // Cubed by the look curve, so an out-of-range value reaches
             // infinity and leaves the look direction NaN for good.
             sensitivity: unit_range(settings.sensitivity),
@@ -1107,6 +1118,7 @@ impl MainMenu {
                 fov: self.fov,
                 fov_effect_scale: self.fov_effect_scale,
                 damage_tilt_strength: self.damage_tilt_strength,
+                brightness: self.brightness,
                 sensitivity: self.sensitivity,
                 invert_mouse_x: self.invert_mouse_x,
                 invert_mouse_y: self.invert_mouse_y,

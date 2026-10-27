@@ -42,6 +42,7 @@ use crate::renderer::pipelines::entity_renderer::{
     standing_eye_height, wool_color_tint,
 };
 use crate::renderer::pipelines::entity_shadow::{ShadowCaster, ShadowScene};
+use crate::renderer::pipelines::lightmap::LightmapInfo;
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::pipelines::post_effect::PostEffect;
 use crate::renderer::{Renderer, SkyState};
@@ -271,6 +272,10 @@ pub struct GameState {
     pub overworld_day: bool,
     /// The current dimension's `default_clock`, whose ticks are its day time.
     pub default_clock: Option<String>,
+    /// The current dimension's lightmap attribute layers.
+    pub light_environment: crate::world::environment::LightEnvironment,
+    /// Vanilla `LightmapRenderStateExtractor.blockLightFlicker`.
+    pub block_light_flicker: f32,
     /// F3+F4 game-mode switcher overlay, while open.
     pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
     /// Spectator hotbar menu (vanilla `SpectatorGui`). Not a GUI screen: the
@@ -536,6 +541,8 @@ impl GameState {
             ambient_light: 0.0,
             overworld_day: true,
             default_clock: None,
+            light_environment: Default::default(),
+            block_light_flicker: 0.0,
             game_mode_switcher: None,
             spectator: Default::default(),
             switcher_was_open: false,
@@ -2315,11 +2322,13 @@ pub fn update_game(
     // ticks, before them.
     // TODO: vanilla also skips this while singleplayer is paused and under
     // `/tick freeze` (`isLevelRunningNormally`); pomme tracks neither yet.
-    if core.tick_accumulator >= TICK_RATE {
+    let ticked = core.tick_accumulator >= TICK_RATE;
+    if ticked {
         gfx.renderer.tick_texture_animations();
     }
     while core.tick_accumulator >= TICK_RATE {
         game.tick_count = game.tick_count.wrapping_add(1);
+        game.block_light_flicker = tick_block_light_flicker(game.block_light_flicker);
         // Vanilla `Minecraft.tick` order: `gameMode.tick` drives the connection
         // tick (and so the level load tracker) before the level's entities,
         // i.e. before the local player moves or sends anything.
@@ -2403,6 +2412,10 @@ pub fn update_game(
         }
         AppCore::send_client_tick_end(connection);
         core.tick_accumulator -= TICK_RATE;
+    }
+    if ticked {
+        gfx.renderer
+            .tick_lightmap(lightmap_info(game, core.menu.brightness));
     }
 
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
@@ -5270,9 +5283,46 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
     (pos_scale, angle_scale)
 }
 
+/// Vanilla `LightmapRenderStateExtractor.tick`: the block light's random
+/// walk.
+fn tick_block_light_flicker(flicker: f32) -> f32 {
+    let r = fastrand::f32;
+    (flicker + (r() - r()) * r() * r() * 0.1) * 0.9
+}
+
+/// Vanilla `LightmapRenderStateExtractor.extract`.
+/// TODO: night vision, darkness, boss fog and the lightning and end flashes.
+fn lightmap_info(game: &GameState, brightness: f32) -> LightmapInfo {
+    let sky = &game.sky_state;
+    let attributes = game
+        .light_environment
+        .resolve(sky.day_time as i64, sky.rain(), sky.thunder());
+    let with = |rgb: glam::Vec3, w: f32| rgb.extend(w).to_array();
+    LightmapInfo {
+        block_light_tint: with(attributes.block_light_tint, game.block_light_flicker + 1.4),
+        sky_light_color: with(attributes.sky_light_color, attributes.sky_light_factor),
+        ambient_color: with(attributes.ambient_light_color, brightness),
+        night_vision_color: with(attributes.night_vision_color, 0.0),
+        ..bytemuck::Zeroable::zeroed()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{detached_distance, has_red_overlay, scroll_wheel, section_bit, section_bits};
+    use super::{
+        detached_distance, has_red_overlay, scroll_wheel, section_bit, section_bits,
+        tick_block_light_flicker,
+    };
+
+    #[test]
+    fn block_light_flicker_stays_within_its_steady_bound() {
+        // Each step adds under 0.1 before the 0.9 decay, so it never passes 0.9.
+        let mut flicker = 0.0;
+        for _ in 0..100_000 {
+            flicker = tick_block_light_flicker(flicker);
+            assert!(flicker.abs() < 0.9, "{flicker}");
+        }
+    }
 
     #[test]
     fn third_person_distance_takes_the_further_of_player_and_mount() {

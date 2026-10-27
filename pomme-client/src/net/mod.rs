@@ -14,6 +14,7 @@ mod container_wire;
 mod dialog;
 mod entity_data;
 mod entity_wire;
+mod environment_wire;
 pub mod handler;
 pub(crate) mod http;
 mod hud_wire;
@@ -117,6 +118,8 @@ pub struct DimensionInfo {
     pub overworld_day: bool,
     /// The `world_clock` driving this dimension's day time.
     pub default_clock: Option<String>,
+    /// The lightmap's attribute layers.
+    pub light_environment: crate::world::environment::LightEnvironment,
 }
 
 pub enum NetworkEvent {

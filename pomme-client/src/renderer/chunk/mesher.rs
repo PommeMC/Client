@@ -31,7 +31,58 @@ struct TerrainVertex {
     sprite_uv: [f32; 2],
     /// `AtlasRegion::sprite`, resolved to a rectangle in the fragment shader.
     sprite: u16,
-    light_tint: u32,
+    light: VertexLight,
+    /// The quad's tint, as [`pack_tint_shifted`] packs it.
+    tint: u32,
+}
+
+/// A terrain vertex's light, as vanilla's BLOCK vertex carries it: the colour
+/// factor (ambient occlusion × face shade) and the block and sky light
+/// coordinates, each 0..240 (`LightCoordsUtil.smoothPack`'s channels).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct VertexLight {
+    shade: f32,
+    block: u8,
+    sky: u8,
+}
+
+impl VertexLight {
+    /// A flat-lit vertex: `levels` at face shade `shade`.
+    fn flat(shade: f32, levels: LightLevels) -> Self {
+        Self {
+            shade,
+            block: levels.block() * 16,
+            sky: levels.sky() * 16,
+        }
+    }
+
+    /// What the quad's diagonal balances.
+    fn brightness(self) -> f32 {
+        self.shade * f32::from(self.block.max(self.sky))
+    }
+}
+
+/// A block's sky and block light levels, packed `sky << 4 | block`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LightLevels(u8);
+
+impl LightLevels {
+    fn new(sky: u8, block: u8) -> Self {
+        Self(sky << 4 | block)
+    }
+
+    fn block(self) -> u8 {
+        self.0 & 0xF
+    }
+
+    fn sky(self) -> u8 {
+        self.0 >> 4
+    }
+
+    /// Vanilla `LightCoordsUtil.max`: each channel's brighter level.
+    fn max(self, other: Self) -> Self {
+        Self::new(self.sky().max(other.sky()), self.block().max(other.block()))
+    }
 }
 
 impl ChunkVertex {
@@ -42,9 +93,10 @@ impl ChunkVertex {
 include!("packing_consts.rs");
 
 /// Compact terrain GPU vertex (16 bytes). `uv` packs the sprite-local UV as
-/// two [`TERRAIN_UV_BITS`]-bit fixed-point axes, u low and v above it; its top
-/// byte is reserved and zero. `sprite` indexes the atlas's rectangle buffer,
-/// which the shader resolves the UV inside, avoiding atlas-boundary rounding.
+/// two [`TERRAIN_UV_BITS`]-bit fixed-point axes, u low and v above it, and sky
+/// light in its top byte. `sprite` indexes the atlas's rectangle buffer, which
+/// the shader resolves the UV inside, avoiding atlas-boundary rounding.
+/// `light_tint` is block light, then the RGB colour (tint × AO × face shade).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PackedVertex {
@@ -93,8 +145,14 @@ fn pack_vertex(v: &TerrainVertex) -> PackedVertex {
             quantize_coord(v.position[2]),
         ],
         sprite: v.sprite,
-        uv: pack_sprite_uv(v.sprite_uv[0]) | pack_sprite_uv(v.sprite_uv[1]) << TERRAIN_UV_BITS,
-        light_tint: v.light_tint.to_le_bytes(),
+        uv: pack_sprite_uv(v.sprite_uv[0])
+            | pack_sprite_uv(v.sprite_uv[1]) << TERRAIN_UV_BITS
+            | u32::from(v.light.sky) << 24,
+        light_tint: {
+            let [_, r, g, b] = v.tint.to_le_bytes();
+            let shaded = |c: u8| (f32::from(c) * v.light.shade + 0.5) as u8;
+            [v.light.block, shaded(r), shaded(g), shaded(b)]
+        },
     }
 }
 
@@ -1575,23 +1633,29 @@ impl ChunkStoreSnapshot {
         blend_color(x, z, |bx, bz| self.water_color_at(bx, y, bz))
     }
 
-    fn get_light(&self, x: i32, y: i32, z: i32) -> f32 {
-        let level = || {
+    /// The block's light levels; a column without light data reads as open
+    /// sky.
+    fn get_light(&self, x: i32, y: i32, z: i32) -> LightLevels {
+        let levels = || {
             let lx = x.rem_euclid(16);
             let lz = z.rem_euclid(16);
             match self.light.get(&(x.div_euclid(16), z.div_euclid(16))) {
-                Some(light) => light
-                    .get_sky_light(lx, y, lz)
-                    .max(light.get_block_light(lx, y, lz)),
-                None => 15,
+                Some(light) => {
+                    LightLevels::new(
+                        light.get_sky_light(lx, y, lz),
+                        light.get_block_light(lx, y, lz),
+                    )
+                    .0
+                }
+                None => LightLevels::new(15, 0).0,
             }
         };
-        let level = self
-            .light_levels
-            .as_ref()
-            .and_then(|levels| levels.get_or_insert_with([x, y, z], level))
-            .unwrap_or_else(level);
-        LIGHT_TABLE[level as usize]
+        LightLevels(
+            self.light_levels
+                .as_ref()
+                .and_then(|cache| cache.get_or_insert_with([x, y, z], levels))
+                .unwrap_or_else(levels),
+        )
     }
 }
 
@@ -1849,7 +1913,7 @@ fn emit_baked_model(
         let lights = if let Some(dir) = quad.cullface {
             compute_face_ao(snapshot, registry, bx, by, bz, dir, quad.shade_face)
         } else {
-            [snapshot.shade(quad.shade_face); 4]
+            unculled_quad_light(snapshot, quad, bx, by, bz)
         };
         emit_face(
             sink,
@@ -2138,6 +2202,10 @@ fn emit_fluid(
 ) {
     let (region, tint) =
         block_face_tex_tint(state, Direction::Up, uv_map, snapshot, registry, bx, by, bz);
+    // TODO: vanilla `FluidRenderer`'s per-face light positions.
+    let fluid_light = snapshot
+        .get_light(bx, by, bz)
+        .max(snapshot.get_light(bx, by + 1, bz));
 
     // Water is translucent (separate blended pass); lava is opaque.
     let MeshSink {
@@ -2193,7 +2261,7 @@ fn emit_fluid(
         }
 
         let (mut positions, uvs) = cube_face_geometry(*dir);
-        let light = snapshot.cardinal_lighting.by_face(*dir);
+        let light = [VertexLight::flat(snapshot.cardinal_lighting.by_face(*dir), fluid_light); 4];
         match dir {
             Direction::Up => {
                 if !render_up {
@@ -2205,7 +2273,7 @@ fn emit_fluid(
                 positions[3][1] = north_east;
 
                 emit_face_into(
-                    vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
+                    vertices, indices, block_pos, &positions, &uvs, light, region, tint,
                 );
 
                 // TODO: gate on `FluidState.shouldRenderBackwardUpFace`.
@@ -2217,7 +2285,7 @@ fn emit_fluid(
                     block_pos,
                     &rev_positions,
                     &rev_uvs,
-                    [light; 4],
+                    light,
                     region,
                     tint,
                 );
@@ -2259,7 +2327,7 @@ fn emit_fluid(
         }
 
         emit_face_into(
-            vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
+            vertices, indices, block_pos, &positions, &uvs, light, region, tint,
         );
     }
 }
@@ -2293,7 +2361,7 @@ fn emit_multipart(
             block_pos,
             &quad.positions,
             &quad.uvs,
-            [snapshot.shade(quad.shade_face); 4],
+            unculled_quad_light(snapshot, quad, bx, by, bz),
             region,
             tint,
         );
@@ -2354,7 +2422,10 @@ fn emit_lod_cube(
             block_face_tex_tint(state, *dir, uv_map, snapshot, registry, bx, by, bz);
 
         let (positions, uvs) = cube_face_geometry(*dir);
-        let light = snapshot.cardinal_lighting.by_face(*dir);
+        let light = VertexLight::flat(
+            snapshot.cardinal_lighting.by_face(*dir),
+            snapshot.get_light(nx, ny, nz),
+        );
         let s = step as f32;
         let sy = if is_fluid { fluid_top } else { s };
         let base = sink.vertices.len() as u32;
@@ -2367,7 +2438,8 @@ fn emit_lod_cube(
                 ],
                 sprite_uv: uvs[i],
                 sprite: region.sprite,
-                light_tint: pack_light_tint(light, tint),
+                light,
+                tint,
             });
         }
         sink.indices_for(region.opaque).extend_from_slice(&[
@@ -2403,7 +2475,10 @@ fn emit_missing_cube(
         }
 
         let (positions, uvs) = cube_face_geometry(*dir);
-        let light = snapshot.cardinal_lighting.by_face(*dir);
+        let light = VertexLight::flat(
+            snapshot.cardinal_lighting.by_face(*dir),
+            snapshot.get_light(bx + offset[0], by + offset[1], bz + offset[2]),
+        );
         let base = sink.vertices.len() as u32;
         for (pos, uv) in positions.iter().zip(uvs) {
             sink.vertices.push(TerrainVertex {
@@ -2414,7 +2489,8 @@ fn emit_missing_cube(
                 ],
                 sprite_uv: uv,
                 sprite: missing.sprite,
-                light_tint: pack_light_tint(light, MISSING_TINT),
+                light,
+                tint: MISSING_TINT,
             });
         }
         // The missing tile is a solid checker, so the cube goes in the solid pass.
@@ -2440,7 +2516,7 @@ fn emit_face(
     block_pos: [f32; 3],
     positions: &[[f32; 3]; 4],
     uvs: &[[f32; 2]; 4],
-    lights: [f32; 4],
+    lights: [VertexLight; 4],
     region: AtlasRegion,
     tint: u32,
 ) {
@@ -2464,7 +2540,7 @@ fn emit_face_into(
     block_pos: [f32; 3],
     positions: &[[f32; 3]; 4],
     uvs: &[[f32; 2]; 4],
-    lights: [f32; 4],
+    lights: [VertexLight; 4],
     region: AtlasRegion,
     tint: u32,
 ) {
@@ -2478,11 +2554,13 @@ fn emit_face_into(
             ],
             sprite_uv: uvs[i],
             sprite: region.sprite,
-            light_tint: pack_light_tint(lights[i], tint),
+            light: lights[i],
+            tint,
         });
     }
 
-    if lights[0] + lights[2] > lights[1] + lights[3] {
+    let brightness = lights.map(VertexLight::brightness);
+    if brightness[0] + brightness[2] > brightness[1] + brightness[3] {
         indices.extend_from_slice(&[base + 1, base + 2, base + 3, base + 3, base, base + 1]);
     } else {
         indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
@@ -2518,9 +2596,26 @@ fn corners0_offset(dir: Direction) -> [i32; 3] {
     }
 }
 
-/// Per-vertex brightness of `dir`'s face: ambient occlusion, sampled light and
-/// the face's cardinal shade, where `shade_face` is `None` for a model element
-/// with `shade: false`.
+/// A quad without a cullface, lit flat by the block's own light.
+/// TODO: vanilla's flat and partial-face rules (`BlockModelLighter`).
+fn unculled_quad_light(
+    snapshot: &ChunkStoreSnapshot,
+    quad: &crate::world::block::model::BakedQuad,
+    bx: i32,
+    by: i32,
+    bz: i32,
+) -> [VertexLight; 4] {
+    [VertexLight::flat(
+        snapshot.shade(quad.shade_face),
+        snapshot.get_light(bx, by, bz),
+    ); 4]
+}
+
+/// Per-vertex light of `dir`'s face: ambient occlusion times the face's
+/// cardinal shade, where `shade_face` is `None` for a model element with
+/// `shade: false`, and each light channel averaged over the vertex's four
+/// samples.
+/// TODO: vanilla's `smoothBlend` (dark samples take the centre's light).
 #[allow(clippy::too_many_arguments)]
 fn compute_face_ao(
     snapshot: &ChunkStoreSnapshot,
@@ -2530,7 +2625,7 @@ fn compute_face_ao(
     bz: i32,
     dir: Direction,
     shade_face: Option<Direction>,
-) -> [f32; 4] {
+) -> [VertexLight; 4] {
     // Every sample lies in the face's 3×3 neighbour plane (`n` plus in-plane
     // offsets), so read each of its cells once.
     let n = dir.offset();
@@ -2557,7 +2652,7 @@ fn compute_face_ao(
             shade_brightness(snapshot.get_block_state(x, y, z), registry)
         }
     });
-    let lights: [f32; 9] = std::array::from_fn(|i| {
+    let lights: [LightLevels; 9] = std::array::from_fn(|i| {
         let [x, y, z] = at(offset(i));
         snapshot.get_light(x, y, z)
     });
@@ -2610,13 +2705,15 @@ fn compute_face_ao(
     let dir_shade = snapshot.shade(shade_face);
     rows.map(|[side1, side2, corner]| {
         let ao = super::block_ao::vertex_brightness(s(side1), s(side2), s(corner), shade0);
-        let light = avg4(l(n), l(side1), l(side2), l(corner));
-        ao * light * dir_shade
+        let samples = [l(n), l(side1), l(side2), l(corner)];
+        // Four 0..15 levels, each ×16 and averaged.
+        let smooth = |level: fn(LightLevels) -> u8| samples.into_iter().map(level).sum::<u8>() * 4;
+        VertexLight {
+            shade: ao * dir_shade,
+            block: smooth(LightLevels::block),
+            sky: smooth(LightLevels::sky),
+        }
     })
-}
-
-fn avg4(a: f32, b: f32, c: f32, d: f32) -> f32 {
-    (a + b + c + d) * 0.25
 }
 
 pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4]) {
@@ -2708,14 +2805,17 @@ mod fluid_height_tests {
 
 #[cfg(test)]
 mod terrain_uv_tests {
-    use super::{PackedVertex, TERRAIN_UV_FIXED_SCALE, TerrainVertex, pack_vertex};
+    use super::{
+        LightLevels, PackedVertex, TERRAIN_UV_FIXED_SCALE, TerrainVertex, VertexLight, pack_vertex,
+    };
 
     fn packed(sprite_uv: [f32; 2]) -> PackedVertex {
         pack_vertex(&TerrainVertex {
             position: [0.0; 3],
             sprite_uv,
             sprite: 0,
-            light_tint: 0,
+            light: VertexLight::flat(1.0, LightLevels::new(0, 0)),
+            tint: 0,
         })
     }
 
@@ -2749,11 +2849,24 @@ mod terrain_uv_tests {
     }
 
     #[test]
-    fn u_packs_low_v_above_and_the_top_byte_stays_free() {
+    fn u_packs_low_v_above_and_sky_light_on_top() {
         assert_eq!(size_of::<PackedVertex>(), 16);
         assert_eq!(packed([1.0, 0.0]).uv, 0x0000_0FFF);
         assert_eq!(packed([0.0, 1.0]).uv, 0x00FF_F000);
         assert_eq!(packed([1.0, 1.0]).uv >> 24, 0);
+    }
+
+    #[test]
+    fn light_packs_block_and_sky_with_the_shaded_tint() {
+        let vertex = pack_vertex(&TerrainVertex {
+            position: [0.0; 3],
+            sprite_uv: [0.0; 2],
+            sprite: 0,
+            light: VertexLight::flat(0.5, LightLevels::new(15, 7)),
+            tint: super::pack_tint_shifted([1.0, 0.5, 0.0]),
+        });
+        assert_eq!(vertex.uv >> 24, 240);
+        assert_eq!(vertex.light_tint, [112, 128, 64, 0]);
     }
 }
 
