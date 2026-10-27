@@ -108,6 +108,8 @@ pub struct OptionSet {
     pub main_hand: Option<Hand>,
     /// Menu Background Blur, 0 (off) to 10.
     pub menu_background_blur: Option<u8>,
+    /// Brightness, 0 (Moody) to 1 (Bright).
+    pub brightness: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]

@@ -206,6 +206,9 @@ fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Valu
     if let Some(radius) = options.menu_background_blur {
         core.menu.set_menu_background_blurriness(radius);
     }
+    if let Some(brightness) = options.brightness {
+        core.menu.brightness = brightness.clamp(0.0, 1.0);
+    }
     core.menu.save_options(&core.input.key_bindings);
     Ok(Value::Null)
 }

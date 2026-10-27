@@ -218,7 +218,10 @@ fn spawn_events(
         .get_index(spawn.dimension_type as usize)
     {
         Some((_, dim)) => {
-            send_ordered(event_tx, dimension_info(dim));
+            send_ordered(
+                event_tx,
+                dimension_info(dim, &spawn.dimension, registry_holder),
+            );
         }
         None => tracing::error!("Unknown dimension_type {}", spawn.dimension_type),
     }
@@ -244,22 +247,31 @@ fn spawn_events(
 /// Dimension info from a login/respawn registry entry. Fields that azalea does
 /// not model directly live in its flattened extras. Missing `has_skylight`
 /// defaults to true; missing `cardinal_light` defaults to vanilla's `default`.
-fn dimension_info(dim: &DimensionKindElement) -> NetworkEvent {
+fn dimension_info(
+    dim: &DimensionKindElement,
+    dimension: &str,
+    registries: &RegistryHolder,
+) -> NetworkEvent {
     let string = |key: &str| {
         dim._extra
             .get(key)
             .and_then(|tag| tag.string())
             .map(|value| value.to_str().into_owned())
     };
+    let flag = |key: &str| {
+        dim._extra
+            .get(key)
+            .and_then(|tag| tag.byte())
+            .map(|b| b != 0)
+    };
+    let has_skylight = flag("has_skylight").unwrap_or(true);
+    // Vanilla `Level.canHaveWeather`, which names the end.
+    let has_weather =
+        has_skylight && !flag("has_ceiling").unwrap_or(false) && dimension != "minecraft:the_end";
     NetworkEvent::DimensionInfo(DimensionInfo {
         height: dim.height,
         min_y: dim.min_y,
-        has_skylight: dim
-            ._extra
-            .get("has_skylight")
-            .and_then(|tag| tag.byte())
-            .map(|b| b != 0)
-            .unwrap_or(true),
+        has_skylight,
         cardinal_light: match string("cardinal_light").as_deref() {
             Some("nether") => CardinalLightType::Nether,
             _ => CardinalLightType::Default,
@@ -271,6 +283,11 @@ fn dimension_info(dim: &DimensionKindElement) -> NetworkEvent {
             .unwrap_or(0.0),
         overworld_day: dim._extra.get("timelines").is_some_and(names_overworld_day),
         default_clock: string("default_clock"),
+        light_environment: super::environment_wire::light_environment(
+            &dim._extra,
+            registries,
+            has_weather,
+        ),
     })
 }
 
@@ -360,19 +377,24 @@ mod tests {
             ambient_light,
             overworld_day,
             default_clock,
-        }) = dimension_info(&dimension(&[
-            ("has_skylight", NbtTag::Byte(1)),
-            ("cardinal_light", NbtTag::String("nether".into())),
-            ("ambient_light", NbtTag::Float(0.1)),
-            (
-                "timelines",
-                NbtTag::String("#minecraft:in_overworld".into()),
-            ),
-            (
-                "default_clock",
-                NbtTag::String("minecraft:overworld".into()),
-            ),
-        ]))
+            ..
+        }) = dimension_info(
+            &dimension(&[
+                ("has_skylight", NbtTag::Byte(1)),
+                ("cardinal_light", NbtTag::String("nether".into())),
+                ("ambient_light", NbtTag::Float(0.1)),
+                (
+                    "timelines",
+                    NbtTag::String("#minecraft:in_overworld".into()),
+                ),
+                (
+                    "default_clock",
+                    NbtTag::String("minecraft:overworld".into()),
+                ),
+            ]),
+            "minecraft:overworld",
+            &RegistryHolder::default(),
+        )
         else {
             panic!("dimension_info returned the wrong event variant");
         };
@@ -392,7 +414,11 @@ mod tests {
             overworld_day,
             default_clock,
             ..
-        }) = dimension_info(&dimension(&[]))
+        }) = dimension_info(
+            &dimension(&[]),
+            "minecraft:overworld",
+            &RegistryHolder::default(),
+        )
         else {
             panic!("dimension_info returned the wrong event variant");
         };

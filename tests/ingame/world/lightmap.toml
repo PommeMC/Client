@@ -1,0 +1,178 @@
+# Terrain lit through the lightmap: sky light dims at night and in a storm, a
+# torch lights a sealed room warm, the nether has its own colours, and the
+# Brightness option lifts the dark.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/tp @s 60.5 -60 50.5 0 15"
+
+[[step]]
+expect = { player = { position = [60.5, -60.0, 50.5] } }
+
+# F1 hides the chat and HUD, so the screenshots show terrain only.
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "noon"
+
+[[step]]
+chat = "/time set 18000"
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "midnight"
+
+[[step]]
+option = { brightness = 0.0 }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "moody"
+
+[[step]]
+option = { brightness = 1.0 }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "bright"
+
+[[step]]
+option = { brightness = 0.5 }
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/weather thunder"
+
+[[step]]
+expect = { player = { raining = true } }
+
+# Past the rain and thunder levels' ramp.
+[[step]]
+wait_ms = 6000
+
+[[step]]
+screenshot = "thunder"
+
+[[step]]
+chat = "/weather clear"
+
+# A sealed stone room lit by one torch.
+[[step]]
+chat = "/fill 58 -61 54 64 -56 60 minecraft:stone hollow"
+
+[[step]]
+chat = "/setblock 61 -60 58 minecraft:torch"
+
+[[step]]
+chat = "/tp @s 61.5 -60 55.5 0 15"
+
+[[step]]
+expect = { player = { position = [61.5, -60.0, 55.5] } }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+screenshot = "torch"
+
+# Multipart full cubes, an emissive block, light-giving blocks, partial faces
+# and rotated models (whose corners are rewound after the blockstate turn),
+# which vanilla's lighter treats each its own way.
+[[step]]
+chat = "/setblock 59 -60 59 minecraft:red_mushroom_block"
+
+[[step]]
+chat = "/setblock 60 -60 59 minecraft:mushroom_stem"
+
+[[step]]
+chat = "/setblock 62 -60 59 minecraft:chiseled_bookshelf"
+
+[[step]]
+chat = "/setblock 63 -60 59 minecraft:magma_block"
+
+[[step]]
+chat = "/setblock 59 -59 59 minecraft:glowstone"
+
+[[step]]
+chat = "/setblock 63 -59 59 minecraft:sea_lantern"
+
+[[step]]
+chat = "/setblock 60 -60 57 minecraft:stone_slab"
+
+[[step]]
+chat = "/setblock 62 -60 57 minecraft:stone_stairs"
+
+[[step]]
+chat = "/setblock 59 -60 57 minecraft:oak_log[axis=x]"
+
+[[step]]
+chat = "/setblock 63 -60 57 minecraft:hay_block[axis=z]"
+
+[[step]]
+chat = "/setblock 63 -60 58 minecraft:furnace[facing=east]"
+
+[[step]]
+expect = { block = "stone_stairs", at = [62, -60, 57] }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+screenshot = "lit_blocks"
+
+[[step]]
+chat = "/fill 58 -60 54 64 -56 60 minecraft:air"
+
+[[step]]
+chat = "/fill 58 -61 54 64 -61 60 minecraft:grass_block"
+
+[[step]]
+chat = "/execute in minecraft:the_nether run tp @s 0 100 0 0 20"
+
+[[step]]
+expect = { player = { dimension = "the_nether" } }
+
+# Past the respawn's chunk loading.
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "nether"
+
+[[step]]
+chat = "/execute in minecraft:overworld run tp @s 0.5 -60 0.5"
+
+[[step]]
+expect = { player = { dimension = "overworld" } }
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/gamerule advance_time true"

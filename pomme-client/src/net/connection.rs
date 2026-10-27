@@ -491,6 +491,7 @@ async fn config_sequence(
     let mut received_registry_data = false;
     let mut selected_known_packs = false;
     let mut received_dialog_tags = None;
+    let mut received_timeline_tags = None;
 
     // Vanilla sends brand and client information once, from the login
     // listener; a reconfiguration sends neither.
@@ -611,8 +612,13 @@ async fn config_sequence(
             }
             ClientboundConfigPacket::UpdateTags(p) => {
                 // A later packet replaces an earlier one's tags per registry.
-                if let Some(tags) = dialog_tags(&p.tags) {
+                if let Some(tags) = registry_tags(&p.tags, &dialog_registry_key()) {
                     received_dialog_tags = Some(tags);
+                }
+                if let Some(tags) =
+                    registry_tags(&p.tags, &super::environment_wire::TIMELINE_REGISTRY.into())
+                {
+                    received_timeline_tags = Some(tags);
                 }
                 forward_tags(event_tx, &p.tags);
             }
@@ -664,13 +670,21 @@ async fn config_sequence(
                             None => previous.dialogs.clone(),
                         },
                     },
-                    _ => Configured {
-                        dialogs: std::sync::Arc::new(dialog_registry(
-                            &registry_holder,
-                            received_dialog_tags.unwrap_or_default(),
-                        )),
-                        registries: std::sync::Arc::new(registry_holder),
-                    },
+                    // TODO: timeline tags resent without registry data
+                    // keep the previous resolution.
+                    _ => {
+                        super::environment_wire::resolve_timeline_tags(
+                            &mut registry_holder,
+                            &received_timeline_tags.unwrap_or_default(),
+                        );
+                        Configured {
+                            dialogs: std::sync::Arc::new(dialog_registry(
+                                &registry_holder,
+                                received_dialog_tags.unwrap_or_default(),
+                            )),
+                            registries: std::sync::Arc::new(registry_holder),
+                        }
+                    }
                 });
             }
             ClientboundConfigPacket::Disconnect(p) => {
@@ -857,11 +871,12 @@ fn dialog_registry(
     DialogRegistry::new(entries, tags)
 }
 
-/// The `minecraft:dialog` tags of an `update_tags` packet, if it has any.
-fn dialog_tags(
+/// One registry's tags from an `update_tags` packet, if it has any.
+fn registry_tags(
     tags: &azalea_protocol::common::tags::TagMap,
+    registry: &azalea_registry::identifier::Identifier,
 ) -> Option<std::collections::HashMap<String, Vec<usize>>> {
-    let tags = tags.0.get(&dialog_registry_key())?;
+    let tags = tags.0.get(registry)?;
     Some(
         tags.iter()
             .map(|tag| {
@@ -1115,7 +1130,7 @@ async fn game_loop(
                     continue;
                 }
                 if let ClientboundGamePacket::UpdateTags(p) = &packet {
-                    if let Some(tags) = dialog_tags(&p.tags) {
+                    if let Some(tags) = registry_tags(&p.tags, &dialog_registry_key()) {
                         configured.dialogs =
                             std::sync::Arc::new(configured.dialogs.with_tags(tags));
                         send_ordered(

@@ -734,6 +734,7 @@ mod tests {
             Step::Run(Command::Option(OptionSet {
                 main_hand: Some(Hand::Left),
                 menu_background_blur: None,
+                brightness: None,
             }))
         );
         assert_eq!(

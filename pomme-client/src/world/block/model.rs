@@ -75,6 +75,7 @@ struct ModelFile {
     #[serde(default)]
     display: HashMap<String, serde_json::Value>,
     gui_light: Option<GuiLight>,
+    ambientocclusion: Option<bool>,
 }
 
 #[derive(Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,6 +188,8 @@ struct ElementDef {
     faces: HashMap<String, FaceDef>,
     #[serde(default = "default_true")]
     shade: bool,
+    #[serde(default)]
+    light_emission: u8,
 }
 
 fn default_true() -> bool {
@@ -492,6 +495,10 @@ pub struct BakedQuad {
     pub shade_light: f32,
     /// The face terrain shades this quad as, `None` for `shade: false`.
     pub shade_face: Option<Direction>,
+    /// The element's `light_emission`, 0..15.
+    pub emission: u8,
+    /// The model's `ambientocclusion`, which smooth lighting needs.
+    pub ambient_occlusion: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1228,6 +1235,8 @@ fn add_chest_cube(
             tint_index: None,
             shade_light: spec.shade,
             shade_face: None,
+            emission: 0,
+            ambient_occlusion: true,
         });
     }
 }
@@ -1669,6 +1678,9 @@ fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<ModelRef> {
 struct ResolvedModel {
     textures: HashMap<String, String>,
     elements: Vec<ElementDef>,
+    /// Vanilla `BlockModel.getAmbientOcclusion`: the nearest model in the
+    /// parent chain that sets it, else true.
+    ambient_occlusion: bool,
     gui_transform: DisplayTransform,
     gui_light: GuiLight,
     ground_transform: Mat4,
@@ -1686,6 +1698,7 @@ fn resolve_model(
     let mut gui_transform: Option<DisplayTransform> = None;
     let mut gui_light: Option<GuiLight> = None;
     let mut ground_transform: Option<Mat4> = None;
+    let mut ambient_occlusion: Option<bool> = None;
     let mut current_id = model_id.to_string();
 
     for _ in 0..20 {
@@ -1710,6 +1723,9 @@ fn resolve_model(
         if gui_light.is_none() {
             gui_light = model.gui_light;
         }
+        if ambient_occlusion.is_none() {
+            ambient_occlusion = model.ambientocclusion;
+        }
         if ground_transform.is_none()
             && let Some(transform) = model
                 .display
@@ -1733,6 +1749,7 @@ fn resolve_model(
     ResolvedModel {
         textures: resolved_textures,
         elements: elements.unwrap_or_default(),
+        ambient_occlusion: ambient_occlusion.unwrap_or(true),
         gui_transform: gui_transform.unwrap_or(DisplayTransform::IDENTITY),
         gui_light: gui_light.unwrap_or_default(),
         ground_transform: ground_transform.unwrap_or(Mat4::IDENTITY),
@@ -1869,7 +1886,7 @@ fn bake_resolved_model(
             };
 
             let positions = face_positions(dir, from, to);
-            let uvs = face_uvs(dir, from, to, face_def.uv.as_ref(), face_def.rotation);
+            let mut uvs = face_uvs(dir, from, to, face_def.uv.as_ref(), face_def.rotation);
 
             let mut positions = apply_element_rotation(positions, &element.rotation);
 
@@ -1883,6 +1900,11 @@ fn bake_resolved_model(
             if rot_x != 0 || rot_y != 0 {
                 positions = rotate_positions(positions, rot_x, rot_y);
                 cullface = cullface.map(|d| d.rotate_x(rot_x).rotate_y(rot_y));
+            }
+            if element.rotation.is_none()
+                && let Some(facing) = direction_from_positions(&positions)
+            {
+                recalculate_winding(&mut positions, &mut uvs, facing);
             }
 
             // Vanilla `FaceBakery.bakeQuad`: the shade direction is the
@@ -1902,6 +1924,8 @@ fn bake_resolved_model(
                     .and_then(|index| u32::try_from(index).ok()),
                 shade_light: shade_face.map_or(1.0, |face| face.shade_light()),
                 shade_face,
+                emission: element.light_emission,
+                ambient_occlusion: resolved.ambient_occlusion,
             });
         }
     }
@@ -2077,33 +2101,47 @@ pub(crate) fn direction_from_positions(positions: &[[f32; 3]; 4]) -> Option<Dire
     nearest_cardinal_direction(quad_normal(positions)?)
 }
 
+/// A quad's smallest and largest corner coordinates, per axis.
+pub(crate) fn quad_bounds(positions: &[[f32; 3]; 4]) -> ([f32; 3], [f32; 3]) {
+    let mut min = [f32::MAX; 3];
+    let mut max = [f32::MIN; 3];
+    for p in positions {
+        for i in 0..3 {
+            min[i] = min[i].min(p[i]);
+            max[i] = max[i].max(p[i]);
+        }
+    }
+    (min, max)
+}
+
+/// Vanilla `FaceBakery.recalculateWinding`: a rotated face's corners (and
+/// their uvs) back in `facing`'s vertex order, which per-vertex lighting
+/// relies on.
+fn recalculate_winding(positions: &mut [[f32; 3]; 4], uvs: &mut [[f32; 2]; 4], facing: Direction) {
+    let (min, max) = quad_bounds(positions);
+    let target = face_positions(facing, min, max);
+    for (vertex, &corner) in target.iter().enumerate() {
+        let Some(found) = (vertex..4).find(|&i| positions[i] == corner) else {
+            return;
+        };
+        positions.swap(vertex, found);
+        uvs.swap(vertex, found);
+    }
+}
+
+/// A blockstate's `x` then `y` rotation, in exact quarter turns about the
+/// block centre (vanilla's are only ever multiples of 90), so corners on the
+/// block's edge stay exactly on it.
 fn rotate_positions(mut positions: [[f32; 3]; 4], rot_x: i32, rot_y: i32) -> [[f32; 3]; 4] {
-    let center = 0.5f32;
-
-    if rot_x != 0 {
-        let angle = (rot_x as f32).to_radians();
-        let cos = angle.cos();
-        let sin = angle.sin();
-        for pos in &mut positions {
-            let dy = pos[1] - center;
-            let dz = pos[2] - center;
-            pos[1] = center + cos * dy + sin * dz;
-            pos[2] = center - sin * dy + cos * dz;
+    let quarter_turns = |degrees: i32| degrees.rem_euclid(360) / 90;
+    for pos in &mut positions {
+        for _ in 0..quarter_turns(rot_x) {
+            *pos = [pos[0], pos[2], 1.0 - pos[1]];
+        }
+        for _ in 0..quarter_turns(rot_y) {
+            *pos = [1.0 - pos[2], pos[1], pos[0]];
         }
     }
-
-    if rot_y != 0 {
-        let angle = (rot_y as f32).to_radians();
-        let cos = angle.cos();
-        let sin = angle.sin();
-        for pos in &mut positions {
-            let dx = pos[0] - center;
-            let dz = pos[2] - center;
-            pos[0] = center + cos * dx - sin * dz;
-            pos[2] = center + sin * dx + cos * dz;
-        }
-    }
-
     positions
 }
 
@@ -2368,6 +2406,8 @@ mod tests {
             tint_index: None,
             shade_light: 0.25,
             shade_face: Some(Direction::Up),
+            emission: 0,
+            ambient_occlusion: true,
         };
         apply_gui_lambert(
             std::slice::from_mut(&mut quad),
@@ -2447,7 +2487,9 @@ mod tests {
                 rotation: None,
                 faces: HashMap::from([("west".to_string(), face)]),
                 shade: true,
+                light_emission: 0,
             }],
+            ambient_occlusion: true,
             gui_transform: DisplayTransform::IDENTITY,
             gui_light: GuiLight::Side,
             ground_transform: Mat4::IDENTITY,
@@ -2475,7 +2517,9 @@ mod tests {
                 rotation: None,
                 faces: HashMap::from([("south".to_string(), face)]),
                 shade: true,
+                light_emission: 0,
             }],
+            ambient_occlusion: true,
             gui_transform: DisplayTransform::IDENTITY,
             gui_light: GuiLight::default(),
             ground_transform: Mat4::IDENTITY,
@@ -2530,6 +2574,23 @@ mod tests {
         assert!((rotated[0][0] - expected_x).abs() < 1.0e-6);
         assert!((rotated[0][1] - 0.5).abs() < 1.0e-6);
         assert!((rotated[0][2] - 0.25).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn rotated_faces_wind_back_to_their_facings_vertex_order() {
+        // A full cube's top turned on its side, as a sideways log's is.
+        let mut positions =
+            rotate_positions(face_positions(Direction::Up, [0.0; 3], [1.0; 3]), 90, 0);
+        let mut uvs = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+        let facing = direction_from_positions(&positions).unwrap();
+        let before: Vec<([f32; 3], [f32; 2])> = positions.into_iter().zip(uvs).collect();
+        recalculate_winding(&mut positions, &mut uvs, facing);
+        let target = face_positions(facing, [0.0; 3], [1.0; 3]);
+        assert_eq!(positions, target);
+        // Each corner keeps its own uv.
+        for (p, uv) in positions.iter().zip(uvs) {
+            assert!(before.contains(&(*p, uv)));
+        }
     }
 
     /// Every face must show the full-tile texture upright at rotation 0 and
@@ -2678,6 +2739,8 @@ mod tests {
                     tint_index: Some(0),
                     shade_light: 1.0,
                     shade_face: None,
+                    emission: 0,
+                    ambient_occlusion: true,
                 },
                 BakedQuad {
                     positions: [[0.0; 3]; 4],
@@ -2688,6 +2751,8 @@ mod tests {
                     tint_index: None,
                     shade_light: 1.0,
                     shade_face: None,
+                    emission: 0,
+                    ambient_occlusion: true,
                 },
             ],
             is_full_cube: false,

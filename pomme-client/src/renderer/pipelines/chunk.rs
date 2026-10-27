@@ -1,6 +1,7 @@
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::chunk::buffer::CHUNK_VERTEX_BUFFERS;
+use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{rhi, shader, util};
 
 /// Set 1: the atlas, its sampler and the sprite-rectangle buffer the fragment
@@ -24,6 +25,8 @@ pub struct ChunkPipeline {
     pub atlas_layout: rhi::backend::BindGroupLayout,
     pub camera_sets: Vec<rhi::backend::BindGroup>,
     pub atlas_set: rhi::backend::BindGroup,
+    /// Set 2, which [`Lightmap`] owns.
+    lightmap_set: rhi::backend::BindGroup,
     camera_buffers: Vec<rhi::backend::Buffer>,
 }
 
@@ -32,6 +35,7 @@ impl ChunkPipeline {
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
         atlas: &TextureAtlas,
+        lightmap: &Lightmap,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
         let atlas_layout = rhi::backend::create_bind_group_layout(device, ATLAS_LAYOUT);
@@ -39,7 +43,7 @@ impl ChunkPipeline {
         // indirect passes read them per-instance and ignore the range.
         let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
-            &[camera_layout, atlas_layout],
+            &[camera_layout, atlas_layout, lightmap.layout],
             Some(rhi::PushConstants {
                 visibility: rhi::ShaderStages::VERTEX,
                 size: 16,
@@ -65,6 +69,7 @@ impl ChunkPipeline {
             atlas_layout,
             camera_sets,
             atlas_set: rhi::backend::BindGroup::default(),
+            lightmap_set: lightmap.group,
             camera_buffers,
         };
         pipeline.rebind_atlas(device, atlas);
@@ -116,7 +121,10 @@ impl ChunkPipeline {
         frame: usize,
     ) {
         pass.set_pipeline(&pipeline);
-        pass.set_bind_groups(0, &[self.camera_sets[frame], self.atlas_set]);
+        pass.set_bind_groups(
+            0,
+            &[self.camera_sets[frame], self.atlas_set, self.lightmap_set],
+        );
     }
 
     pub fn destroy(&mut self, device: &rhi::backend::Device) {

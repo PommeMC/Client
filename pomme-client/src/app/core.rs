@@ -392,6 +392,7 @@ impl GameState {
             ambient_light,
             overworld_day,
             default_clock,
+            light_environment,
         } = dim;
         tracing::info!(
             "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}, cardinal_light={cardinal_light:?}"
@@ -400,6 +401,7 @@ impl GameState {
         self.ambient_light = ambient_light;
         self.overworld_day = overworld_day;
         self.default_clock = default_clock;
+        self.light_environment = light_environment;
         self.chunk_store = ChunkStore::new_with_dimension(render_distance, height, min_y);
         self.light_engine = crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
         // The old level's block entities, moving blocks among them.

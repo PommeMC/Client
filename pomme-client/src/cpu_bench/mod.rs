@@ -48,18 +48,16 @@ pub fn run(version: &str, dirs: &DataDirs, filter: Option<&str>) -> i32 {
     0
 }
 
-/// Prints [`mesh_hash::scene_hash`] for every bench scene; returns the
+/// Prints [`mesh_hash::scene_hashes`] for every bench scene; returns the
 /// process exit code.
 pub fn mesh_hash(version: &str, dirs: &DataDirs) -> i32 {
     let Some(assets) = load_assets(version, dirs, block_state_table(version)) else {
         return 1;
     };
+    println!("scene    geometry         all bytes");
     for scene in fixtures::Scene::ALL {
-        println!(
-            "{:<8} {:016x}",
-            scene.name(),
-            mesh_hash::scene_hash(&assets, scene)
-        );
+        let [geometry, all] = mesh_hash::scene_hashes(&assets, scene);
+        println!("{:<8} {geometry:016x} {all:016x}", scene.name());
     }
     0
 }

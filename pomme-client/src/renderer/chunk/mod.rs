@@ -1,5 +1,5 @@
 pub mod atlas;
-pub mod block_ao;
+mod block_lighter;
 pub mod buffer;
 pub mod mesh_columns;
 pub mod mesh_source;

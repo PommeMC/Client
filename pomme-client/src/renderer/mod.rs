@@ -38,6 +38,7 @@ use pipelines::entity_outline::EntityOutline;
 use pipelines::entity_renderer::{ArmorRenderInfo, EntityRenderInfo, EntityRenderer};
 use pipelines::entity_shadow::{EntityShadowPipeline, ShadowScene};
 use pipelines::hand::HandPipeline;
+use pipelines::lightmap::{Lightmap, LightmapInfo};
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline, SpriteId};
 use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
@@ -244,6 +245,7 @@ pub struct Renderer {
     asset_index: Option<AssetIndex>,
 
     chunk_pipeline: ChunkPipeline,
+    lightmap: Lightmap,
     hand_pipeline: HandPipeline,
     block_overlay_pipeline: BlockOverlayPipeline,
     sky_pipeline: SkyPipeline,
@@ -357,7 +359,9 @@ impl Renderer {
 
         splash(&mut menu_pipeline, 0.5, "Creating pipelines...");
 
-        let chunk_pipeline = ChunkPipeline::new(&ctx.device, swapchain_state.targets(), &atlas);
+        let lightmap = Lightmap::new(&ctx.device);
+        let chunk_pipeline =
+            ChunkPipeline::new(&ctx.device, swapchain_state.targets(), &atlas, &lightmap);
 
         let hand_pipeline = HandPipeline::new(
             &ctx.device,
@@ -506,6 +510,7 @@ impl Renderer {
             asset_index: asset_index.clone(),
             atlas,
             chunk_pipeline,
+            lightmap,
             hand_pipeline,
             block_overlay_pipeline,
             sky_pipeline,
@@ -730,7 +735,8 @@ impl Renderer {
         let targets = self.swapchain.targets();
         if targets != old_targets {
             self.chunk_pipeline.destroy(&self.ctx.device);
-            self.chunk_pipeline = ChunkPipeline::new(&self.ctx.device, targets, &self.atlas);
+            self.chunk_pipeline =
+                ChunkPipeline::new(&self.ctx.device, targets, &self.atlas, &self.lightmap);
 
             self.hand_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
@@ -818,6 +824,12 @@ impl Renderer {
 
     pub fn tick_texture_animations(&mut self) {
         self.atlas.tick_animations();
+    }
+
+    /// Redraws the lightmap with `info` on the next frame, as vanilla does
+    /// once per tick.
+    pub fn tick_lightmap(&mut self, info: LightmapInfo) {
+        self.lightmap.tick(info);
     }
 
     pub fn set_entity_camera_look(&mut self, look_dir: Option<LookDirection>) {
@@ -1487,6 +1499,7 @@ impl Renderer {
 
         let encoder = self.frames.begin(&self.ctx.device)?;
         self.atlas.record_animation_upload(&encoder, frame);
+        self.lightmap.record(&self.ctx.device, &encoder);
 
         let scissor = rhi::Rect::covering(self.swapchain.extent);
 
@@ -2335,6 +2348,7 @@ impl Drop for Renderer {
         self.screenshot.destroy(&self.ctx.device);
         self.chunk_buffers.destroy(&self.ctx.device);
         self.chunk_pipeline.destroy(&self.ctx.device);
+        self.lightmap.destroy(&self.ctx.device);
         self.hand_pipeline.destroy(&self.ctx.device);
         self.block_overlay_pipeline.destroy(&self.ctx.device);
         self.sky_pipeline.destroy(&self.ctx.device);
