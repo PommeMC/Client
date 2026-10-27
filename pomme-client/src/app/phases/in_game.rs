@@ -4097,13 +4097,13 @@ pub fn update_game(
         });
     }
 
-    let partial_tick = sky_partial_tick(core);
+    let clock_partial_tick = sky_partial_tick(core);
     let min_y = game.chunk_store.min_y();
     // `ClientLevelData.getHorizonHeight`.
     let horizon = if game.flat { f64::from(min_y) } else { 63.0 };
     let sky = crate::renderer::SkyState {
-        partial_tick,
-        attributes: game.environment_probe.at(partial_tick),
+        partial_tick: clock_partial_tick,
+        attributes: game.environment_probe.at(clock_partial_tick),
         skybox: game.environment.skybox,
         void_darkness: crate::renderer::fog::void_darkness(
             gfx.renderer.camera_render_position().y,
