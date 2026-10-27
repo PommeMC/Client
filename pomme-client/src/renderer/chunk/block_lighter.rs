@@ -4,7 +4,7 @@
 
 use crate::physics::block_shape::is_collision_shape_full_block;
 use crate::world::block::BlockStateData;
-use crate::world::block::model::Direction;
+use crate::world::block::model::{Direction, quad_bounds};
 
 /// What the lighter reads from the world around the block it lights.
 pub(super) trait LightSource {
@@ -185,16 +185,7 @@ struct Shape {
 
 impl Shape {
     fn new(quad: &Quad, data: &BlockStateData) -> Self {
-        let mut min = [32.0f32; 3];
-        let mut max = [-32.0f32; 3];
-        for p in quad.positions {
-            for i in 0..3 {
-                min[i] = min[i].min(p[i]);
-                max[i] = max[i].max(p[i]);
-            }
-        }
-        let [min_x, min_y, min_z] = min;
-        let [max_x, max_y, max_z] = max;
+        let ([min_x, min_y, min_z], [max_x, max_y, max_z]) = quad_bounds(quad.positions);
         const MIN: f32 = 1.0e-4;
         const MAX: f32 = 0.9999;
         let partial = match quad.direction {
