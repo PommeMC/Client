@@ -79,6 +79,13 @@ pub(super) fn handle_raw_chunk_packet(
                     },
                 );
             }
+            ChunkPacket::Biomes(chunks) => {
+                let chunks = chunks
+                    .into_iter()
+                    .map(|chunk| (ChunkPos::new(chunk.x, chunk.z), chunk.data))
+                    .collect();
+                send_ordered(event_tx, NetworkEvent::ChunkBiomes { chunks });
+            }
             ChunkPacket::BatchStart => batch_size_calculator.on_batch_start(),
             ChunkPacket::BatchFinished { size } => {
                 // Answered on the network thread: vanilla's

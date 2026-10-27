@@ -26,11 +26,13 @@ import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.data.registries.VanillaRegistries;
+import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.common.ClientboundDisconnectPacket;
 import net.minecraft.network.protocol.common.ClientboundKeepAlivePacket;
 import net.minecraft.network.protocol.common.ClientboundPingPacket;
+import net.minecraft.network.protocol.game.ClientboundChunksBiomesPacket;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket;
@@ -48,6 +50,7 @@ import net.minecraft.world.clock.WorldClocks;
 import net.minecraft.world.entity.PositionMoveRotation;
 import net.minecraft.world.entity.Relative;
 import net.minecraft.world.item.equipment.trim.TrimPattern;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
@@ -157,6 +160,27 @@ public final class CodecOracle {
         section(factory, "chunk_section/linear", 3, 3);
         section(factory, "chunk_section/hashmap", 20, 1);
         section(factory, "chunk_section/global", 300, 20);
+        chunkBiomes(factory);
+    }
+
+    /**
+     * Two columns as {@code ChunkBiomeData} frames them: one with an all-plains
+     * section then one whose cell {@code i} holds biome {@code i % 3}, and an
+     * empty one.
+     */
+    private static void chunkBiomes(PalettedContainerFactory factory) {
+        Registry<Biome> biomeRegistry = registries.lookupOrThrow(Registries.BIOME);
+        PalettedContainer<Holder<Biome>> mixed = factory.createForBiomes();
+        for (int i = 0; i < 64; ++i) {
+            mixed.set(i & 3, i >> 4, i >> 2 & 3, biomeRegistry.get(i % 3).orElseThrow());
+        }
+        FriendlyByteBuf column = new FriendlyByteBuf(Unpooled.buffer());
+        factory.createForBiomes().write(column);
+        mixed.write(column);
+        encode("chunks_biomes/two_columns", ClientboundChunksBiomesPacket.STREAM_CODEC::encode,
+                new ClientboundChunksBiomesPacket(List.of(
+                        new ClientboundChunksBiomesPacket.ChunkBiomeData(new ChunkPos(3, -7), ByteBufUtil.getBytes(column)),
+                        new ClientboundChunksBiomesPacket.ChunkBiomeData(new ChunkPos(-1, 0), new byte[0]))));
     }
 
     private static void section(PalettedContainerFactory factory, String name, int blockStates, int biomes) {

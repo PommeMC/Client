@@ -1746,6 +1746,33 @@ fn translate_chunk_769_indirect() {
     assert!(translation_for(769).translate_game_frame(frame).is_none());
 }
 
+/// `chunks_biomes` carries biome containers in their pre-1.21.6 layout up to
+/// 1.21.5, so it drops there; from 1.21.6 it passes through.
+#[test]
+fn chunks_biomes_drop_before_1_21_6() {
+    let empty = |protocol| {
+        let mut frame = Vec::new();
+        wire::write_varint(
+            &mut frame,
+            old_id(protocol, Direction::Clientbound, "chunks_biomes"),
+        );
+        wire::write_varint(&mut frame, 0);
+        frame.into_boxed_slice()
+    };
+    for protocol in [769, 770] {
+        assert!(
+            translation_for(protocol)
+                .translate_game_frame(empty(protocol))
+                .is_none()
+        );
+    }
+    assert!(
+        translation_for(772)
+            .translate_game_frame(empty(772))
+            .is_some()
+    );
+}
+
 /// A `player_chat` frame with everything but the chat type fixed: 765 sends a
 /// direct registry id where 769 already sends a holder.
 fn player_chat_frame(protocol: i32, chat_type: u32) -> Vec<u8> {
