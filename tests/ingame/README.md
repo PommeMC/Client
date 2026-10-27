@@ -43,7 +43,8 @@ The runner (`tools/ingame-test`):
    (17 for 1.20.x, 21 for 1.21.x, 25 for 26.x): `JAVA_HOME_<major>` if set,
    else `JAVA_HOME`, else `java` on `PATH`. A newer Java runs older servers.
 3. Runs a debug client per script, joining as that version, then resets the
-   player for the next one.
+   player for the next one, and the world to noon in clear weather with time
+   ticking.
 
 With `--jobs N`, N workers per version each start their own server and world
 under `target/ingame/workers/<version>/<n>/` and take scripts from a shared
