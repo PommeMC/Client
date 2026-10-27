@@ -21,8 +21,9 @@ chat = "/fill 79 -61 84 81 -61 85 minecraft:lava"
 [[step]]
 chat = "/setblock 82 -60 84 minecraft:torch"
 
+# Sunk too: grass under it would turn to dirt between the shots.
 [[step]]
-chat = "/setblock 78 -60 84 minecraft:magma_block"
+chat = "/setblock 78 -61 84 minecraft:magma_block"
 
 [[step]]
 chat = "/tp @s 80.5 -60 81.5 0 30"
@@ -70,7 +71,7 @@ wait_ms = 1000
 screenshot = "sky"
 
 [[step]]
-chat = "/fill 79 -61 84 81 -61 85 minecraft:grass_block"
+chat = "/fill 78 -61 84 81 -61 85 minecraft:grass_block"
 
 [[step]]
 chat = "/fill 78 -60 84 82 -60 84 minecraft:air"
