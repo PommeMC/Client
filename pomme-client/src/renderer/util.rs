@@ -3,7 +3,6 @@ use std::path::Path;
 use super::{MAX_FRAMES_IN_FLIGHT, rhi};
 use crate::assets::{AssetIndex, resolve_asset_path};
 
-/// An sRGB texture holding `pixels`, ready for shaders to read.
 /// The exact sRGB decode (`fog.glsl`'s `srgb_to_linear`): vanilla's colours
 /// are sRGB values its framebuffer holds as they are, while pomme's swapchain
 /// encodes what it's given.
@@ -17,6 +16,7 @@ pub fn srgb_to_linear(rgb: [f32; 3]) -> [f32; 3] {
     })
 }
 
+/// An sRGB texture holding `pixels`, ready for shaders to read.
 pub fn create_sampled_texture(
     device: &rhi::backend::Device,
     label: &str,

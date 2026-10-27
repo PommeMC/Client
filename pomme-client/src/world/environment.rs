@@ -346,6 +346,8 @@ pub struct AttributeLayers<T> {
     /// attribute, which leaves vanilla without the layer.
     pub biomes: Vec<Option<Modifier<T>>>,
     /// Each timeline's track for this attribute, with that timeline's period.
+    /// TODO: each timeline's own `clock`; every track reads the dimension's
+    /// default clock, which every vanilla timeline uses.
     pub tracks: Vec<(Track<T>, Option<i64>)>,
 }
 
