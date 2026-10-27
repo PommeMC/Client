@@ -2301,6 +2301,7 @@ pub fn update_game(
     core.time_tick_accumulator = (core.time_tick_accumulator + dt).min(1.0);
     while core.time_tick_accumulator >= TICK_RATE {
         game.sky_state.game_time = game.sky_state.game_time.wrapping_add(1);
+        game.sky_state.prev_day_time = game.sky_state.day_time;
         game.clocks.tick(game.sky_state.game_time);
         game.sync_day_time();
         core.time_tick_accumulator -= TICK_RATE;
@@ -4058,11 +4059,8 @@ pub fn update_game(
 
     let sky_partial_tick = (core.time_tick_accumulator / TICK_RATE).clamp(0.0, 1.0);
     let sky = crate::renderer::SkyState {
-        day_time: game.sky_state.day_time,
-        game_time: game.sky_state.game_time,
-        rain_level: game.sky_state.rain_level,
-        thunder_level: game.sky_state.thunder_level,
         partial_tick: sky_partial_tick,
+        ..game.sky_state.clone()
     };
     if game.show_chunk_borders {
         gfx.renderer.update_chunk_borders(

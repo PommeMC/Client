@@ -1,4 +1,4 @@
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::path::Path;
 
 use glam::{FloatExt, Vec3};
@@ -113,6 +113,8 @@ struct SkyUniform {
 #[derive(Clone)]
 pub struct SkyState {
     pub day_time: u64,
+    /// The day time as of the last tick, which frames blend from.
+    pub prev_day_time: u64,
     pub game_time: u64,
     pub rain_level: f32,
     pub thunder_level: f32,
@@ -123,6 +125,7 @@ impl SkyState {
     pub fn default_day() -> Self {
         Self {
             day_time: 6000,
+            prev_day_time: 6000,
             game_time: 6000,
             rain_level: 0.0,
             thunder_level: 0.0,
@@ -130,9 +133,19 @@ impl SkyState {
         }
     }
 
-    /// The day's tick, whole as vanilla's `AttributeTrackSampler` samples it.
+    /// The day's tick for this frame. Vanilla samples the sky's attributes at
+    /// whole ticks (`AttributeTrackSampler`), then blends the last tick's into
+    /// this one's by the partial tick (`EnvironmentAttributeProbe`), its angles
+    /// snapping on a jump of 90 degrees or more (`LerpFunction.ofDegrees`).
     pub fn day_tick(&self) -> f32 {
-        (self.day_time % TICKS_PER_DAY as u64) as f32
+        let (from, to) = (tick_of_day(self.prev_day_time), tick_of_day(self.day_time));
+        let half_day = TICKS_PER_DAY / 2.0;
+        let delta = (to - from + half_day).rem_euclid(TICKS_PER_DAY) - half_day;
+        let turn = (sun_angle(to) - sun_angle(from) + PI).rem_euclid(TAU) - PI;
+        if turn.abs() >= FRAC_PI_2 {
+            return to;
+        }
+        (from + self.partial_tick * delta).rem_euclid(TICKS_PER_DAY)
     }
 
     /// Clamped rain level (server-driven). Vanilla `setRainLevel` stores prev
@@ -221,7 +234,7 @@ impl SkyState {
         let toward_night = |alpha: f32| move |level: f32| level.lerp(4.0, alpha);
         let day = if overworld_day {
             sample_float_keyframes(
-                (self.day_time % TICKS_PER_DAY as u64) as f32,
+                tick_of_day(self.day_time),
                 SKY_LIGHT_LEVEL_KEYFRAMES,
                 TICKS_PER_DAY,
             )
@@ -372,9 +385,7 @@ impl SkyPipeline {
     ) {
         let day_tick = sky.day_tick();
 
-        let t = (day_tick - 6000.0).rem_euclid(TICKS_PER_DAY) / TICKS_PER_DAY;
-        let (x1, y1, x2, y2) = SKY_ANGLE_BEZIER;
-        let sun_angle = cubic_bezier_ease(t, x1, y1, x2, y2) * TAU;
+        let sun_angle = sun_angle(day_tick);
         let moon_angle = sun_angle + PI;
         let star_angle = sun_angle;
 
@@ -514,6 +525,17 @@ impl JavaRandom {
         let lo = self.next(27) as i64;
         ((hi << 27) + lo) as f64 / (1i64 << 53) as f64
     }
+}
+
+fn tick_of_day(day_time: u64) -> f32 {
+    (day_time % TICKS_PER_DAY as u64) as f32
+}
+
+/// The sun's angle at a day tick, in radians.
+fn sun_angle(day_tick: f32) -> f32 {
+    let t = (day_tick - 6000.0).rem_euclid(TICKS_PER_DAY) / TICKS_PER_DAY;
+    let (x1, y1, x2, y2) = SKY_ANGLE_BEZIER;
+    cubic_bezier_ease(t, x1, y1, x2, y2) * TAU
 }
 
 /// CSS-style cubic Bezier easing with P0=(0,0), P3=(1,1). Solves Bx(s)=x via 4
@@ -843,11 +865,37 @@ mod tests {
     fn at(day_time: u64, rain_level: f32, thunder_level: f32) -> SkyState {
         SkyState {
             day_time,
+            prev_day_time: day_time,
             game_time: day_time,
             rain_level,
             thunder_level,
             partial_tick: 0.0,
         }
+    }
+
+    fn blended(prev_day_time: u64, day_time: u64, partial_tick: f32) -> f32 {
+        SkyState {
+            prev_day_time,
+            partial_tick,
+            ..at(day_time, 0.0, 0.0)
+        }
+        .day_tick()
+    }
+
+    #[test]
+    fn frames_blend_from_the_last_ticks_day_time() {
+        assert_eq!(blended(6000, 6001, 0.25), 6000.25);
+        assert_eq!(blended(6000, 6000, 0.75), 6000.0);
+        // Across midnight, the short way round.
+        assert_eq!(blended(23999, 24000, 0.5), 23999.5);
+        // Sped up, still blended.
+        assert_eq!(blended(6000, 6100, 0.5), 6050.0);
+    }
+
+    #[test]
+    fn a_jump_of_a_quarter_turn_or_more_snaps() {
+        assert_eq!(blended(6000, 13000, 0.5), 13000.0);
+        assert_eq!(blended(6000, 18000, 0.5), 18000.0);
     }
 
     #[test]
