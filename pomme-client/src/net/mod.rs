@@ -156,6 +156,10 @@ pub enum NetworkEvent {
     ChunkUnloaded {
         pos: ChunkPos,
     },
+    /// Each column's new biome containers, one per section.
+    ChunkBiomes {
+        chunks: Vec<(ChunkPos, Box<[u8]>)>,
+    },
     ChunkCacheCenter {
         x: i32,
         z: i32,

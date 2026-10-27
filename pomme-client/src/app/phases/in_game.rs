@@ -1155,7 +1155,7 @@ impl GameState {
     }
 
     /// Marks a whole column for remeshing as new content.
-    fn mark_column_dirty(&mut self, pos: ChunkPos) {
+    pub(crate) fn mark_column_dirty(&mut self, pos: ChunkPos) {
         let full = section_mask(self.chunk_store.section_count());
         self.mesh_columns.mark(pos, full, false);
     }

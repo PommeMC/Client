@@ -4,7 +4,8 @@
 
 use crate::codec::{DecodeResult, Reader};
 
-/// `ClientboundLevelChunkPacketData`'s cap on the section buffer.
+/// `ClientboundLevelChunkPacketData`'s cap on the section buffer, which
+/// `ClientboundChunksBiomesPacket.ChunkBiomeData` shares for its biomes.
 const MAX_SECTION_BYTES: usize = 0x200000;
 /// `ClientboundLightUpdatePacketData.DATA_LAYER_STREAM_CODEC`'s layer size.
 const LIGHT_LAYER_BYTES: usize = 2048;
@@ -19,6 +20,15 @@ pub struct BlockEntityInfo {
     pub kind: u32,
     /// The update tag as network NBT, `None` for an end tag.
     pub tag: Option<Box<[u8]>>,
+}
+
+/// `ClientboundChunksBiomesPacket.ChunkBiomeData`: a column's biome
+/// containers, one per section, opaque here like a chunk's section buffer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChunkBiomes {
+    pub x: i32,
+    pub z: i32,
+    pub data: Box<[u8]>,
 }
 
 /// `ClientboundLightUpdatePacketData`: the masks are BitSets as longs, and
@@ -53,6 +63,7 @@ pub enum ChunkPacket {
         x: i32,
         z: i32,
     },
+    Biomes(Vec<ChunkBiomes>),
     BatchStart,
     BatchFinished {
         size: u32,
@@ -100,14 +111,26 @@ pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<ChunkPacket>> {
                 light: light_data(r)?,
             })
         },
-        // ClientboundForgetLevelChunkPacket.java:18-19: `ChunkPos.unpack`,
-        // x in the low half.
+        // ClientboundForgetLevelChunkPacket.java:18-19
         "forget_level_chunk" => |r| {
-            let packed = r.i64()?;
-            Ok(ChunkPacket::Forget {
-                x: packed as i32,
-                z: (packed >> 32) as i32,
-            })
+            let (x, z) = chunk_pos(r)?;
+            Ok(ChunkPacket::Forget { x, z })
+        },
+        // ClientboundChunksBiomesPacket.java:21 and `ChunkBiomeData`'s codec
+        "chunks_biomes" => |r| {
+            let chunks = r.list(usize::MAX, |r| {
+                let (x, z) = chunk_pos(r)?;
+                let size = r.varint()? as usize;
+                if size > MAX_SECTION_BYTES {
+                    return Err(r.error("chunk biomes over their maximum"));
+                }
+                Ok(ChunkBiomes {
+                    x,
+                    z,
+                    data: r.bytes(size)?.into(),
+                })
+            })?;
+            Ok(ChunkPacket::Biomes(chunks))
         },
         // ClientboundChunkBatchStartPacket.java:19
         "chunk_batch_start" => |_| Ok(ChunkPacket::BatchStart),
@@ -129,6 +152,12 @@ pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<ChunkPacket>> {
         _ => return None,
     };
     Some(read(r))
+}
+
+/// `ChunkPos.STREAM_CODEC`: `ChunkPos.pack`'s long, x in the low half.
+fn chunk_pos(r: &mut Reader) -> DecodeResult<(i32, i32)> {
+    let packed = r.i64()?;
+    Ok((packed as i32, (packed >> 32) as i32))
 }
 
 /// ClientboundLevelChunkPacketData.java:132-137
@@ -295,5 +324,33 @@ mod tests {
                 light: LightData::default()
             }
         );
+    }
+
+    #[test]
+    fn chunks_biomes_match_vanilla_encoder() {
+        use crate::section::{PalettedContainer, Strategy};
+        use crate::vanilla_fixtures::{case, registry_size};
+
+        let ChunkPacket::Biomes(chunks) =
+            decode("chunks_biomes", &case("chunks_biomes/two_columns"))
+        else {
+            panic!("chunks_biomes decodes to biomes");
+        };
+        let [full, empty] = &chunks[..] else {
+            panic!("two columns, got {}", chunks.len());
+        };
+        assert_eq!((full.x, full.z, empty.x, empty.z), (3, -7, -1, 0));
+        assert!(empty.data.is_empty());
+        // The oracle writes an all-plains section, then one whose cell `i`
+        // holds biome `i % 3`.
+        let biomes = registry_size("worldgen/biome");
+        let mut r = Reader::new(&full.data);
+        let plains = PalettedContainer::read(Strategy::Biomes, &mut r, biomes).unwrap();
+        let mixed = PalettedContainer::read(Strategy::Biomes, &mut r, biomes).unwrap();
+        r.ensure_eof().unwrap();
+        assert!(plains.single_value().is_some());
+        assert_eq!(mixed.get(1, 0, 0), 1);
+        assert_eq!(mixed.get(2, 0, 0), 2);
+        assert_eq!(mixed.get(3, 0, 0), 0);
     }
 }

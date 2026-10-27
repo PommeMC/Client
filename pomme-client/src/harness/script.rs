@@ -72,6 +72,7 @@ enum Expect {
     Hud(HudExpect),
     Sound(SoundExpect),
     Block(BlockExpect),
+    Biome(BiomeExpect),
     Menu(MenuExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
@@ -206,6 +207,14 @@ struct BlockExpect {
     at: [i32; 3],
     /// The stored block entity's type, e.g. `sign`.
     block_entity: Option<String>,
+}
+
+/// The biome the client holds at `at`, e.g. `swamp`.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BiomeExpect {
+    biome: String,
+    at: [i32; 3],
 }
 
 /// The open menu: a container's menu type (`generic_9x3`), `inventory`,
@@ -668,6 +677,10 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                         .is_none_or(|kind| entity.as_ref() == Some(kind)),
                 || format!("{at:?} holds {seen} with block entity {entity:?}"),
             )
+        }
+        Expect::Biome(BiomeExpect { biome, at }) => {
+            let seen = protocol::biome(game, *at);
+            ensure(seen == *biome, || format!("{at:?} is in {seen}"))
         }
         Expect::Menu(MenuExpect {
             menu,

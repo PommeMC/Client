@@ -1,0 +1,47 @@
+# A `/fillbiome` reaches the client without the chunks being resent: the
+# biome changes where the player stands, and the grass takes its tint.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/tp @s 100.5 -60 100.5 0 60"
+
+[[step]]
+expect = { player = { position = [100.5, -60.0, 100.5] } }
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+deterministic = true
+
+[[step]]
+expect = { biome = "plains", at = [100, -61, 100] }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "plains"
+
+[[step]]
+chat = "/fillbiome 92 -64 92 108 -56 108 minecraft:swamp"
+
+[[step]]
+expect = { biome = "swamp", at = [100, -61, 100] }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "swamp"
+
+[[step]]
+chat = "/fillbiome 92 -64 92 108 -56 108 minecraft:plains"
+
+[[step]]
+expect = { biome = "plains", at = [100, -61, 100] }

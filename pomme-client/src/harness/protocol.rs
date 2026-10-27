@@ -523,6 +523,14 @@ pub fn block(game: &GameState, [x, y, z]: [i32; 3]) -> String {
     )
 }
 
+/// The biome the client stores at `at`, e.g. `swamp`.
+pub fn biome(game: &GameState, [x, y, z]: [i32; 3]) -> String {
+    let id = game.chunk_store.biome_id(x, y, z) as usize;
+    crate::net::connection::biome_registry(&game.registries)
+        .and_then(|registry| registry.map.get_index(id))
+        .map_or_else(|| format!("#{id}"), |(name, _)| bare(&name.to_string()))
+}
+
 /// The type of the block entity the client stores at `at`, e.g. `sign`.
 pub fn block_entity(game: &GameState, [x, y, z]: [i32; 3]) -> Option<String> {
     let stored = game

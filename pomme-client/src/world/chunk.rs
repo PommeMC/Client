@@ -3,7 +3,7 @@ use std::sync::Arc;
 use azalea_block::BlockState;
 use parking_lot::RwLock;
 use pomme_protocol::codec::{DecodeResult, Reader};
-use pomme_protocol::section::{BitStorage, Section, ceil_log2};
+use pomme_protocol::section::{BitStorage, PalettedContainer, Section, Strategy, ceil_log2};
 use thiserror::Error;
 
 use super::block_entity::StoredBlockEntity;
@@ -330,6 +330,21 @@ impl Chunk {
         })
     }
 
+    /// Vanilla `LevelChunk.replaceBiomes`: each section's biome container,
+    /// in order. On a malformed buffer no section changes.
+    fn replace_biomes(&mut self, data: &[u8], biomes: usize) -> DecodeResult<()> {
+        let mut r = Reader::new(data);
+        let containers = self
+            .sections
+            .iter()
+            .map(|_| PalettedContainer::read(Strategy::Biomes, &mut r, biomes))
+            .collect::<DecodeResult<Vec<_>>>()?;
+        for (section, container) in self.sections.iter_mut().zip(containers) {
+            section.biomes = container;
+        }
+        Ok(())
+    }
+
     /// The section holding world `y`, or `None` outside the column's height.
     pub fn section(&self, y: i32, min_y: i32) -> Option<&Section> {
         self.sections.get(section_index(y, min_y)?)
@@ -539,6 +554,23 @@ impl ChunkStore {
         .map_err(|e| ChunkError::Parse(e.to_string()))?;
         self.grid.replace(pos, chunk);
         Ok(())
+    }
+
+    /// Replaces a loaded column's biomes (vanilla
+    /// `ClientChunkCache.replaceBiomes`); an unloaded column is skipped.
+    pub fn replace_biomes(
+        &mut self,
+        pos: ChunkPos,
+        data: &[u8],
+        biomes: usize,
+    ) -> Result<(), ChunkError> {
+        let Some(chunk) = self.get_chunk(&pos) else {
+            return Ok(());
+        };
+        chunk
+            .write()
+            .replace_biomes(data, biomes)
+            .map_err(|e| ChunkError::Parse(e.to_string()))
     }
 
     /// Stores an already-built column, as a chunk packet would.
