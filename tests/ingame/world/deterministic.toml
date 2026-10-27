@@ -55,6 +55,9 @@ wait_ms = 1000
 screenshot = "second"
 
 [[step]]
+match_screenshots = ["first", "second"]
+
+[[step]]
 chat = "/tp @s 80.5 -60 81.5 0 -60"
 
 [[step]]

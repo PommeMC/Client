@@ -155,6 +155,10 @@ wait_ms = 1000
 screenshot = "equipped"                       # target/ingame/<script>/equipped.png
 
 [[step]]
+match_screenshots = ["first", "second"]       # fails unless two shots match
+                                              # pixel for pixel
+
+[[step]]
 expect = { slot = 6, item = "iron_chestplate" }
 timeout_ms = 5000                             # how long to retry (default 5 s)
 ```

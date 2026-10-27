@@ -51,6 +51,7 @@ struct StepFile {
     text: Option<String>,
     wait_ms: Option<u64>,
     screenshot: Option<String>,
+    match_screenshots: Option<[String; 2]>,
     expect: Option<Expect>,
     timeout_ms: Option<u64>,
 }
@@ -234,6 +235,8 @@ enum Step {
     Run(Command),
     Wait(Duration),
     Screenshot(String),
+    /// Two of the script's screenshots, which must be pixel for pixel equal.
+    MatchScreenshots([String; 2]),
     Expect(Expect, Duration),
 }
 
@@ -294,6 +297,9 @@ impl StepFile {
         }
         if let Some(name) = self.screenshot {
             steps.push(Step::Screenshot(name));
+        }
+        if let Some(names) = self.match_screenshots {
+            steps.push(Step::MatchScreenshots(names));
         }
         if let Some(expect) = self.expect {
             steps.push(Step::Expect(expect, timeout.unwrap_or(DEFAULT_TIMEOUT)));
@@ -389,7 +395,7 @@ impl Script {
                 let path = match &self.pending_shot {
                     Some(path) => path.clone(),
                     None => {
-                        let path = self.out_dir.join(format!("{name}.png"));
+                        let path = self.shot_path(name);
                         exec::run(&Command::Screenshot { path: path.clone() }, core, phase);
                         self.pending_shot = Some(path.clone());
                         path
@@ -397,6 +403,7 @@ impl Script {
                 };
                 exec::screenshot_progress(phase, &path, started)
             }
+            Step::MatchScreenshots(names) => Some(self.match_screenshots(names)),
             Step::Expect(expect, timeout) => match check(expect, phase) {
                 Ok(()) => Some(Ok(())),
                 Err(e) if started.elapsed() > *timeout => Some(Err(e)),
@@ -418,6 +425,30 @@ impl Script {
             Ok(()) => None,
             Err(_) => Some(self.finish(false)),
         }
+    }
+
+    fn shot_path(&self, name: &str) -> PathBuf {
+        self.out_dir.join(format!("{name}.png"))
+    }
+
+    fn match_screenshots(&self, [a, b]: &[String; 2]) -> Result<(), String> {
+        let load = |name: &String| {
+            image::open(self.shot_path(name))
+                .map(|image| image.into_rgba8())
+                .map_err(|e| format!("{name}: {e}"))
+        };
+        let (first, second) = (load(a)?, load(b)?);
+        if first.dimensions() != second.dimensions() {
+            return Err(format!("{a} and {b} differ in size"));
+        }
+        let differing = first
+            .pixels()
+            .zip(second.pixels())
+            .filter(|(p, q)| p != q)
+            .count();
+        ensure(differing == 0, || {
+            format!("{a} and {b} differ in {differing} pixels")
+        })
     }
 
     fn fail(&mut self, error: String) -> i32 {
@@ -731,11 +762,17 @@ mod tests {
             option = { main_hand = "left" }
             [[step]]
             deterministic = true
+            [[step]]
+            match_screenshots = ["first", "second"]
             "#,
         )
         .unwrap();
-        assert_eq!(steps.len(), 21);
+        assert_eq!(steps.len(), 22);
         assert_eq!(steps[20], Step::Run(Command::Deterministic));
+        assert_eq!(
+            steps[21],
+            Step::MatchScreenshots(["first".into(), "second".into()])
+        );
         assert_eq!(
             steps[19],
             Step::Run(Command::Option(OptionSet {

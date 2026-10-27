@@ -80,6 +80,7 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         Command::Option(options) => set_options(core, options),
         Command::Deterministic => {
             game.deterministic = true;
+            game.block_light_flicker = 0.0;
             Ok(Value::Null)
         }
         Command::Hover(target) => hover(core, gfx, game, target),
