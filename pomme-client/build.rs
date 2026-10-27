@@ -124,7 +124,7 @@ fn main() {
         ),
         ("post_blit.frag", shaderc::ShaderKind::Fragment),
         ("lightmap.frag", shaderc::ShaderKind::Fragment),
-        ("post_gamma.frag", shaderc::ShaderKind::Fragment),
+        ("post_flip.frag", shaderc::ShaderKind::Fragment),
         ("post_invert.frag", shaderc::ShaderKind::Fragment),
         ("post_color_convolve.frag", shaderc::ShaderKind::Fragment),
         ("post_bits.frag", shaderc::ShaderKind::Fragment),

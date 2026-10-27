@@ -1145,11 +1145,11 @@ impl Renderer {
         sky.fog_color = fog::fog_color(&sky, self.camera.forward(), render_distance);
         // Vanilla clears to the fog colour, which shows below the sky disc's
         // rim; underwater, the water fog colour.
-        let [r, g, b] = util::srgb_to_linear(if eyes_in_water {
+        let [r, g, b] = if eyes_in_water {
             camera::WATER_FOG_COLOR
         } else {
             sky.fog_color.to_array()
-        });
+        };
         self.render_frame(
             window,
             hide_cursor,

@@ -27,15 +27,14 @@ layout(location = 0) out vec4 out_color;
 
 #include "fog.glsl"
 
-// Vanilla `sky.fsh`: faded to the fog colour out to `FogSkyEnd`, mixed in the
-// gamma space vanilla's framebuffer holds.
+// Vanilla `sky.fsh`: faded to the fog colour out to `FogSkyEnd`.
 vec3 fogged(vec3 color) {
     float end = fog_color.w;
     float fog = max(
         linear_fog_value(v_spherical, 0.0, end),
         linear_fog_value(v_cylindrical, end, end)
     );
-    return srgb_to_linear(mix(color, fog_color.rgb, fog));
+    return mix(color, fog_color.rgb, fog);
 }
 
 void main() {
@@ -44,7 +43,7 @@ void main() {
     } else if (mode == 1) {
         // Additive, alpha-weighted (b, b, b, b): b squared.
         float b = star_brightness;
-        out_color = vec4(srgb_to_linear(vec3(b * b)), 1.0);
+        out_color = vec4(vec3(b * b), 1.0);
     } else if (mode == 2) {
         vec4 color = texture(sampler2D(celestial_tex, celestial_tex_sampler), v_uv);
         if (color.a < 0.1) discard;
@@ -59,10 +58,10 @@ void main() {
     } else if (mode == 5) {
         float alpha = v_uv.x * sunrise_color.a;
         if (alpha < 0.001) discard;
-        out_color = vec4(srgb_to_linear(sunrise_color.rgb), alpha);
+        out_color = vec4(sunrise_color.rgb, alpha);
     } else if (mode == 6) {
         // Vanilla's end sky: the texture times grey 0x28.
         vec4 color = texture(sampler2D(celestial_tex, celestial_tex_sampler), v_uv);
-        out_color = vec4(srgb_to_linear(linear_to_srgb(color.rgb) * (40.0 / 255.0)), color.a);
+        out_color = vec4(color.rgb * (40.0 / 255.0), color.a);
     }
 }

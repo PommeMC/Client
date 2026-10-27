@@ -514,7 +514,6 @@ pub fn texture_format(format: TextureFormat) -> vk::Format {
     match format {
         TextureFormat::R8Unorm => vk::Format::R8Unorm,
         TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8Unorm,
-        TextureFormat::Rgba8UnormSrgb => vk::Format::R8G8B8A8Srgb,
         TextureFormat::Depth32Float => vk::Format::D32Sfloat,
     }
 }

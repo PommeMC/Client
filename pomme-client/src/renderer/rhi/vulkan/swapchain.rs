@@ -5,10 +5,12 @@ use pyronyx::vk;
 use super::{Context, ContextError};
 use crate::renderer::rhi;
 
-/// An 8-bit sRGB format: BGRA (desktop drivers) or RGBA (Android), else the
+/// An 8-bit UNORM format, BGRA (desktop drivers) or RGBA (Android), so the
+/// display gets the gamma-space bytes as vanilla's present blit does; else the
 /// first one offered.
+/// TODO: a surface offering only sRGB formats would encode the frame again.
 fn choose_format(formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
-    [vk::Format::B8G8R8A8Srgb, vk::Format::R8G8B8A8Srgb]
+    [vk::Format::B8G8R8A8Unorm, vk::Format::R8G8B8A8Unorm]
         .into_iter()
         .find_map(|want| {
             formats
@@ -305,17 +307,17 @@ mod tests {
     }
 
     #[test]
-    fn prefers_an_srgb_format_in_either_channel_order() {
+    fn prefers_a_unorm_format_in_either_channel_order() {
         let desktop = [
-            format(vk::Format::B8G8R8A8Unorm),
             format(vk::Format::B8G8R8A8Srgb),
+            format(vk::Format::B8G8R8A8Unorm),
         ];
-        assert_eq!(choose_format(&desktop).format, vk::Format::B8G8R8A8Srgb);
+        assert_eq!(choose_format(&desktop).format, vk::Format::B8G8R8A8Unorm);
         let android = [
-            format(vk::Format::R8G8B8A8Unorm),
             format(vk::Format::R8G8B8A8Srgb),
+            format(vk::Format::R8G8B8A8Unorm),
         ];
-        assert_eq!(choose_format(&android).format, vk::Format::R8G8B8A8Srgb);
+        assert_eq!(choose_format(&android).format, vk::Format::R8G8B8A8Unorm);
         let neither = [format(vk::Format::R5G6B5UnormPack16)];
         assert_eq!(
             choose_format(&neither).format,

@@ -848,22 +848,10 @@ impl MenuGeometry {
                     );
                 }
                 MenuElement::SleepOverlay { w, h, amount } => {
-                    // Vanilla fills 0x101020 at (int)(220 * amount) alpha,
-                    // blended in the gamma-space GL framebuffer. Our blend is
-                    // premultiplied One / OneMinusSrcAlpha in linear on an sRGB
-                    // target, so (as with the vignette) the gamma-space dst
-                    // factor 1 - a becomes 1 - (1 - a)^2.2 and the premultiplied
-                    // src term c * a is linearized as (c * a)^2.2.
+                    // Vanilla fills 0x101020 at (int)(220 * amount) alpha.
                     let a = (220.0 * amount).floor() / 255.0;
-                    let [r, g, b] = [16.0f32, 16.0, 32.0].map(|c| (c / 255.0 * a).powf(2.2));
-                    push_fullscreen_quad(
-                        &mut vertices,
-                        *w,
-                        *h,
-                        [0.0; 4],
-                        [r, g, b, 1.0 - (1.0 - a).powf(2.2)],
-                        10.0,
-                    );
+                    let [r, g, b] = [16.0f32, 16.0, 32.0].map(|c| c / 255.0 * a);
+                    push_fullscreen_quad(&mut vertices, *w, *h, [0.0; 4], [r, g, b, a], 10.0);
                 }
                 _ => {}
             }
@@ -4147,11 +4135,7 @@ fn create_font_textures(
         )
     };
     let mut gray = upload(gray, rhi::TextureFormat::R8Unorm, "mc_font_atlas")?;
-    match upload(
-        color,
-        rhi::TextureFormat::Rgba8UnormSrgb,
-        "mc_font_color_atlas",
-    ) {
+    match upload(color, rhi::TextureFormat::Rgba8Unorm, "mc_font_color_atlas") {
         Ok(color) => Ok((gray, color)),
         Err(error) => {
             destroy_texture_resources(device, &mut gray);
@@ -5021,10 +5005,8 @@ fn push_mc_effect(verts: &mut Vec<Vertex>, effect: &McEffect, shadow_offset: f32
     push_mc_fill(verts, x0, y0, w, h, effect.color);
 }
 
-/// A hard-edged effect quad, gamma-linearized first as the shader does for
-/// glyphs. Otherwise the same fill `push_rect` emits at radius 0.
+/// A hard-edged effect quad: the same fill `push_rect` emits at radius 0.
 fn push_mc_fill(verts: &mut Vec<Vertex>, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
-    let [r, g, b, a] = color;
     push_quad(
         verts,
         x,
@@ -5035,7 +5017,7 @@ fn push_mc_fill(verts: &mut Vec<Vertex>, x: f32, y: f32, w: f32, h: f32, color: 
         0.0,
         1.0,
         1.0,
-        premultiplied([r.powf(2.2), g.powf(2.2), b.powf(2.2), a]),
+        premultiplied(color),
         10.0,
         [0.0, 0.0],
         0.0,

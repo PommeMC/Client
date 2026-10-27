@@ -12,7 +12,7 @@ use azalea_inventory::operations::{
 
 use super::common::{
     FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_gradient_overlay,
-    push_item_icon, vanilla_fill,
+    push_item_icon,
 };
 use crate::player::menu_click::{self, ContainerKind};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -111,8 +111,8 @@ pub fn push_transparent_background(elements: &mut Vec<MenuElement>, screen_w: f3
         elements,
         screen_w,
         screen_h,
-        vanilla_fill(0xC010_1010),
-        vanilla_fill(0xD010_1010),
+        crate::ui::text::argb32(0xC010_1010),
+        crate::ui::text::argb32(0xD010_1010),
     );
 }
 

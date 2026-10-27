@@ -25,16 +25,6 @@ vec3 apply_fog(vec3 color, float fog, vec3 fog_color) {
     return mix(color, fog_color, clamp(fog, 0.0, 1.0));
 }
 
-// The sRGB transfer functions, exact rather than a 2.2 power, which crushes
-// dark values against the swapchain's own encode.
-vec3 srgb_to_linear(vec3 c) {
-    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
-}
-
-vec3 linear_to_srgb(vec3 c) {
-    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
-}
-
 // Shared chunk surface shading (opaque terrain and translucent water): the
 // texture times the lit vertex colour in gamma space, as vanilla's
 // framebuffer holds it, fade to fog while a section is still appearing, then
@@ -46,7 +36,7 @@ vec3 shade_chunk_surface(
     vec3 fog_color,
     float fog
 ) {
-    vec3 tinted = srgb_to_linear(linear_to_srgb(tex_rgb) * color);
+    vec3 tinted = tex_rgb * color;
     if (visibility < 1.0) {
         tinted = mix(fog_color, tinted, visibility);
     }

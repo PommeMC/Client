@@ -10,7 +10,6 @@ layout(location = 1) in float v_dist;
 
 layout(location = 0) out vec4 out_color;
 
-#include "fog.glsl"
 
 void main() {
     // pc.offset.w = fog-fade end; fade cloud alpha linearly to zero by it, so the
@@ -18,5 +17,5 @@ void main() {
     float fog = clamp(v_dist / pc.offset.w, 0.0, 1.0);
     float a = pc.tint.a * (1.0 - fog);
     if (a < 0.01) discard;
-    out_color = vec4(srgb_to_linear(v_color.rgb * pc.tint.rgb), a);
+    out_color = vec4(v_color.rgb * pc.tint.rgb, a);
 }

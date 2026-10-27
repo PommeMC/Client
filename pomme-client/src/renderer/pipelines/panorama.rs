@@ -257,7 +257,7 @@ fn create_cubemap(device: &rhi::backend::Device, width: u32, height: u32) -> rhi
                 "panorama_cubemap",
                 width,
                 height,
-                rhi::TextureFormat::Rgba8UnormSrgb,
+                rhi::TextureFormat::Rgba8Unorm,
                 rhi::TextureUsages::COPY_DST
                     | rhi::TextureUsages::COPY_SRC
                     | rhi::TextureUsages::TEXTURE_BINDING,

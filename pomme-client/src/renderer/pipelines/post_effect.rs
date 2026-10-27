@@ -1,9 +1,9 @@
 //! Vanilla's post chains over the whole frame: the spectator view effects
 //! (`post_effect/creeper.json`, `spider.json`, `invert.json`), run after the
 //! glowing outline before the HUD, and the menu background blur
-//! (`post_effect/blur.json`). The frame is copied out of the sRGB swapchain
-//! into `main` as vanilla's gamma-space colours, in GL's bottom-up rows, so
-//! the ported shaders and their uv maths run unchanged, then written back.
+//! (`post_effect/blur.json`). The frame is copied out of the swapchain into
+//! `main` in GL's bottom-up rows, so the ported shaders and their uv maths run
+//! unchanged, then written back.
 
 use super::post;
 use crate::renderer::{rhi, shader, util};
@@ -196,7 +196,7 @@ impl Samplers {
 /// The frame's copy and [`FRAME_TARGETS`], at the frame's size.
 struct FrameTargets {
     extent: rhi::Extent,
-    /// The swapchain's copy, sRGB so sampling decodes it.
+    /// The swapchain's copy.
     frame: rhi::backend::Texture,
     frame_group: rhi::backend::BindGroup,
     targets: TargetSet,
@@ -210,7 +210,7 @@ impl FrameTargets {
                 "post_frame",
                 extent.width.max(1),
                 extent.height.max(1),
-                rhi::TextureFormat::Rgba8UnormSrgb,
+                rhi::TextureFormat::Rgba8Unorm,
                 rhi::TextureUsages::COPY_DST | rhi::TextureUsages::TEXTURE_BINDING,
             ),
         );
@@ -305,7 +305,7 @@ impl PostEffects {
             frame: FrameTargets::new(device, &samplers, extent),
             spider: None,
             samplers,
-            decode: pipeline("post decode", shader::include_shader!("post_gamma.frag")),
+            decode: pipeline("post decode", shader::include_shader!("post_flip.frag")),
             encode: create_encode_pipeline(device, frame_targets, pipeline_layout),
             invert: pipeline("post invert", shader::include_shader!("post_invert.frag")),
             color_convolve: pipeline(
@@ -435,8 +435,7 @@ impl PostEffects {
         );
     }
 
-    /// Copies `frame` (the swapchain image, between passes) into `main` as
-    /// gamma-space colours.
+    /// Copies `frame` (the swapchain image, between passes) into `main`.
     fn capture(
         &self,
         device: &rhi::backend::Device,
@@ -451,7 +450,7 @@ impl PostEffects {
             Target::Main,
             &self.decode,
             self.frame.frame_group,
-            &[1.0 / 2.2],
+            &[],
         );
     }
 
@@ -568,7 +567,7 @@ impl PostEffects {
 
     /// Writes `main` back over the frame, in the reopened frame pass.
     pub fn finish(&self, pass: &mut rhi::backend::RenderPassEncoder) {
-        post::draw(pass, &self.encode, self.group(Target::Main, false), &[2.2]);
+        post::draw(pass, &self.encode, self.group(Target::Main, false), &[]);
     }
 
     /// Rebuilds the write-back against a new frame format.
@@ -618,7 +617,7 @@ fn create_encode_pipeline(
         layout,
         "post encode",
         None,
-        shader::include_shader!("post_gamma.frag"),
+        shader::include_shader!("post_flip.frag"),
         None,
     )
 }

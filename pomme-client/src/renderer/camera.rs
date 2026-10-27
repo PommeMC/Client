@@ -628,10 +628,7 @@ impl CameraUniform {
         Self {
             view_proj: camera.view_projection().to_cols_array_2d(),
             camera_pos: [pos.x, pos.y, pos.z, fog_start],
-            fog_color: {
-                let [r, g, b] = super::util::srgb_to_linear(fog_rgb);
-                [r, g, b, fog_end]
-            },
+            fog_color: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_end],
             camera_block: anchor.as_ivec3().extend(0).to_array(),
             fog_env: [env_start, env_end, 0.0, 0.0],
         }

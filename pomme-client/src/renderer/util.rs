@@ -3,20 +3,7 @@ use std::path::Path;
 use super::{MAX_FRAMES_IN_FLIGHT, rhi};
 use crate::assets::{AssetIndex, resolve_asset_path};
 
-/// The exact sRGB decode (`fog.glsl`'s `srgb_to_linear`): vanilla's colours
-/// are sRGB values its framebuffer holds as they are, while pomme's swapchain
-/// encodes what it's given.
-pub fn srgb_to_linear(rgb: [f32; 3]) -> [f32; 3] {
-    rgb.map(|c| {
-        if c < 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    })
-}
-
-/// An sRGB texture holding `pixels`, ready for shaders to read.
+/// A texture holding `pixels`, ready for shaders to read.
 pub fn create_sampled_texture(
     device: &rhi::backend::Device,
     label: &str,
@@ -53,13 +40,14 @@ pub fn load_asset_texture(
     texture
 }
 
-/// An sRGB texture filled by copies and read by shaders.
+/// A texture filled by copies and read by shaders: plain RGBA8 like
+/// vanilla's, which samples the gamma-space texels as they are.
 pub fn sampled_texture_desc(label: &str, width: u32, height: u32) -> rhi::TextureDesc<'_> {
     rhi::TextureDesc::new(
         label,
         width,
         height,
-        rhi::TextureFormat::Rgba8UnormSrgb,
+        rhi::TextureFormat::Rgba8Unorm,
         rhi::TextureUsages::COPY_DST | rhi::TextureUsages::TEXTURE_BINDING,
     )
 }

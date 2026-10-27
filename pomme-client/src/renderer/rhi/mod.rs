@@ -240,7 +240,6 @@ flags! {
 pub enum TextureFormat {
     R8Unorm,
     Rgba8Unorm,
-    Rgba8UnormSrgb,
     Depth32Float,
 }
 
@@ -249,7 +248,7 @@ impl TextureFormat {
     pub fn texel_size(self) -> u32 {
         match self {
             Self::R8Unorm => 1,
-            Self::Rgba8Unorm | Self::Rgba8UnormSrgb | Self::Depth32Float => 4,
+            Self::Rgba8Unorm | Self::Depth32Float => 4,
         }
     }
 }

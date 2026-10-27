@@ -171,13 +171,6 @@ impl Look {
     }
 }
 
-/// Bedrock's colours are sRGB; sprite tints and icon colours are linear,
-/// while text colours are linearised by the shader.
-fn linear(color: [f32; 4]) -> [f32; 4] {
-    let [r, g, b, a] = color;
-    [r.powf(2.2), g.powf(2.2), b.powf(2.2), a]
-}
-
 /// `focus_border_white`, a 1-unit ring tinted `color`.
 fn push_outline(elements: &mut Vec<MenuElement>, rect: [f32; 4], gs: f32, color: [f32; 4]) {
     let [x, y, w, h] = rect;
@@ -188,7 +181,7 @@ fn push_outline(elements: &mut Vec<MenuElement>, rect: [f32; 4], gs: f32, color:
         h,
         sprite: SpriteId::BedrockOutline,
         border: gs,
-        tint: linear(color),
+        tint: color,
     });
 }
 
@@ -546,7 +539,7 @@ impl MainMenu {
                 y: rect[1] + rect[3] / 2.0 + look.drop(gs),
                 icon: glyph,
                 scale: PICKER_ICON * gs,
-                color: linear(color),
+                color,
             });
             if fired {
                 any_clicked = true;

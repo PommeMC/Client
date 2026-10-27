@@ -47,8 +47,9 @@ const SUGGEST_ROW_H: f32 = 12.0;
 const MAX_SUGGESTION_ROWS: usize = 10;
 const SUGGEST_BG_ALPHA: f32 = 208.0 / 255.0;
 
-fn vanilla_black_fill(alpha: f32) -> [f32; 4] {
-    common::vanilla_fill_rgba([0.0, 0.0, 0.0, alpha])
+/// Black at `alpha`, as vanilla's chat and suggestion backgrounds fill.
+fn black(alpha: f32) -> [f32; 4] {
+    [0.0, 0.0, 0.0, alpha]
 }
 
 fn push_fill(elements: &mut Vec<MenuElement>, [x, y, w, h]: [f32; 4], color: [f32; 4]) {
@@ -1788,11 +1789,7 @@ impl ChatState {
             let entry_top = entry_bottom - lh;
             let bg_a = alpha * self.options.text_background_opacity.clamp(0.0, 1.0);
             if bg_a > 1e-5 {
-                push_fill(
-                    elements,
-                    [0.0, entry_top, bg_w, lh],
-                    vanilla_black_fill(bg_a),
-                );
+                push_fill(elements, [0.0, entry_top, bg_w, lh], black(bg_a));
             }
             let text_a = alpha * text_opacity;
             let text_top = entry_bottom - text_baseline_offset * unit;
@@ -1871,7 +1868,7 @@ impl ChatState {
             push_fill(
                 elements,
                 [2.0 * unit, restricted_y, (render_width + 10.0) * unit, lh],
-                vanilla_black_fill(self.options.text_background_opacity),
+                black(self.options.text_background_opacity),
             );
             let mut restricted = colored(
                 Component::translate("chat_screen.restricted", Vec::new()),
@@ -1923,7 +1920,7 @@ impl ChatState {
                     (render_width + 6.0) * unit,
                     9.0 * unit,
                 ],
-                vanilla_black_fill(self.options.text_background_opacity),
+                black(self.options.text_background_opacity),
             );
             let queue_component = Component::translate(
                 "chat.queue",
@@ -2003,7 +2000,7 @@ impl ChatState {
             push_fill(
                 elements,
                 [2.0 * gs, bar_y, screen_w - 4.0 * gs, input_h],
-                vanilla_black_fill(INPUT_BG_ALPHA),
+                black(INPUT_BG_ALPHA),
             );
 
             // ChatScreen's EditBox is independent of ChatComponent scale:
@@ -2123,7 +2120,7 @@ impl ChatState {
         let fill = |elements: &mut Vec<MenuElement>, rect: [f32; 4], color| {
             push_fill(elements, rect.map(|v| v * gs), color);
         };
-        let bg = vanilla_black_fill(SUGGEST_BG_ALPHA);
+        let bg = black(SUGGEST_BG_ALPHA);
         let mouse = ((cursor.0 / gs).floor(), (cursor.1 / gs).floor());
         let mouse_moved = self.last_suggestion_cursor != Some(mouse);
         self.last_suggestion_cursor = Some(mouse);
@@ -2204,7 +2201,7 @@ impl ChatState {
             push_fill(
                 elements,
                 [x - 1.0, y, width + 2.0, SUGGEST_ROW_H].map(|v| v * gs),
-                vanilla_black_fill(SUGGEST_BG_ALPHA),
+                black(SUGGEST_BG_ALPHA),
             );
             elements.push(MenuElement::McText {
                 x: x * gs,
@@ -2409,12 +2406,7 @@ impl ConfirmScreen {
         // TODO: vanilla also blurs the world behind in-world screens
         // (`Screen.extractBlurredBackground`); this is only the flat
         // inworld_menu_background.png tint (black at 64/255).
-        common::push_overlay(
-            elements,
-            screen_w,
-            screen_h,
-            vanilla_black_fill(64.0 / 255.0)[3],
-        );
+        common::push_inworld_menu_background(elements, screen_w, screen_h);
         let layout = self.layout(
             (screen_w / gs).ceil() as i32,
             (screen_h / gs).ceil() as i32,
