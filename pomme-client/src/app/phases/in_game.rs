@@ -4237,7 +4237,7 @@ pub fn update_game(
     };
     // Last element pushed: vanilla draws the saving indicator on its own
     // stratum above screens, with the GUI hidden (F1) included.
-    if !benchmark_running && core.menu.show_autosave_indicator {
+    if !benchmark_running && !game.deterministic && core.menu.show_autosave_indicator {
         let alpha = game
             .last_saving_indicator_value
             .lerp(game.saving_indicator_value, partial_tick)

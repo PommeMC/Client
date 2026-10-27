@@ -76,8 +76,9 @@ pub enum Command {
         path: PathBuf,
     },
     /// Holds what varies frame to frame still for the rest of the session:
-    /// block light flicker, particles, animated textures, clouds and view
-    /// bobbing, so two runs of a script draw the same frames.
+    /// block light flicker, particles, animated textures, clouds, view
+    /// bobbing and the autosave indicator, so two runs of a script draw the
+    /// same frames.
     Deterministic,
 }
 

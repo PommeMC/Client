@@ -144,9 +144,10 @@ option = { main_hand = "left" }               # sets client options, as the
                                               # options screen does
 [[step]]
 deterministic = true                          # holds flicker, particles,
-                                              # animated textures, clouds and
-                                              # view bobbing still for the rest
-                                              # of the script
+                                              # animated textures, clouds, view
+                                              # bobbing and the autosave
+                                              # indicator still for the rest of
+                                              # the script
 
 [[step]]
 wait_ms = 1000

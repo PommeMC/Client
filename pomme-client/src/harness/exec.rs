@@ -124,6 +124,8 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
+            // A shot from an earlier run would read as this one written.
+            let _ = std::fs::remove_file(path);
             gfx.renderer.request_screenshot_to(path.clone());
             return Outcome::Screenshot(path.clone());
         }
