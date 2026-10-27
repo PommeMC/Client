@@ -6,11 +6,13 @@ use azalea_registry::builtin::BlockEntityKind;
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::position::BlockPos;
 use crate::renderer::camera::CameraUniform;
+use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::{BakedEntityModel, ModelConvention, PartAnim};
 use crate::renderer::pipelines::entity_renderer::{
     BlendMode, ENTITY_ALPHA_CUTOFF, ModelInput, WHITE_TINT, create_pipeline, fallback_texture,
 };
+use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{block_entity_model, rhi, util};
 
 pub struct BlockEntityRenderInfo {
@@ -24,6 +26,8 @@ pub struct BlockEntityRenderInfo {
     /// Lid openness for chest/shulker, 0.0=closed to 1.0=open. Raw (un-eased);
     /// the pipeline applies a cubic ease at draw time.
     pub lid_open: f32,
+    /// Vanilla `BlockEntityRenderState.lightCoords`.
+    pub light: LightLevels,
 }
 
 struct TextureSlot {
@@ -310,6 +314,8 @@ pub struct BlockEntityPipeline {
     texture_layout: rhi::backend::BindGroupLayout,
     camera_sets: Vec<rhi::backend::BindGroup>,
     camera_buffers: Vec<rhi::backend::Buffer>,
+    /// The shared [`Lightmap`]'s group, set 2.
+    lightmap_set: rhi::backend::BindGroup,
     texture_sampler: rhi::backend::Sampler,
     entries: HashMap<BlockEntityKind, KindEntry>,
 }
@@ -320,12 +326,13 @@ impl BlockEntityPipeline {
         targets: rhi::backend::PipelineTargets,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
+        lightmap: &Lightmap,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
         let texture_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
         let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
-            &[camera_layout, texture_layout],
+            &[camera_layout, texture_layout, lightmap.layout],
             Some(rhi::PushConstants {
                 visibility: rhi::ShaderStages::VERTEX,
                 size: 112,
@@ -381,6 +388,7 @@ impl BlockEntityPipeline {
             texture_layout,
             camera_sets,
             camera_buffers,
+            lightmap_set: lightmap.group,
             texture_sampler,
             entries,
         }
@@ -421,7 +429,7 @@ impl BlockEntityPipeline {
                 bound_set = rhi::backend::BindGroup::default();
             }
             if bound_set != slot.set {
-                pass.set_bind_groups(0, &[self.camera_sets[frame], slot.set]);
+                pass.set_bind_groups(0, &[self.camera_sets[frame], slot.set, self.lightmap_set]);
                 bound_set = slot.set;
             }
 
@@ -460,7 +468,7 @@ impl BlockEntityPipeline {
                 // Shared entity shader push block: mat, tint, overlay_color, uv_params.
                 // Block entities are opaque with no hurt flash or UV scroll.
                 let no_overlay = [0.0f32, 0.0, 0.0, 1.0];
-                let uv_params = [0.0f32, 0.0, ENTITY_ALPHA_CUTOFF, 0.0];
+                let uv_params = [0.0f32, 0.0, ENTITY_ALPHA_CUTOFF, info.light.lane()];
                 let mut bytes = [0u8; 112];
                 bytes[..64].copy_from_slice(bytemuck::cast_slice(&cols));
                 bytes[64..80].copy_from_slice(bytemuck::cast_slice(&WHITE_TINT));

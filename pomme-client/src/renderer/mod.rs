@@ -55,6 +55,7 @@ use crate::app::input::InputState;
 use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::position::{BlockPos, ChunkPos};
+use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::held_item::{HandRenderSelection, HeldHand};
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
@@ -190,6 +191,9 @@ enum RenderMode<'a> {
         /// The main hand's then the offhand's item.
         held_items: [Option<pipelines::held_item::HeldItemInfo>; 2],
         main_hand_right: bool,
+        /// The local player's light, for the first-person arm (vanilla
+        /// `renderHandsWithItems`).
+        hand_light: LightLevels,
         shown_hands: HandRenderSelection,
         player_team_color: Option<u32>,
         render_first_person_hand: bool,
@@ -369,6 +373,7 @@ impl Renderer {
             swapchain_state.targets(),
             jar_assets_dir,
             asset_index,
+            &lightmap,
         );
 
         let block_overlay_pipeline = BlockOverlayPipeline::new(
@@ -444,6 +449,7 @@ impl Renderer {
             jar_assets_dir,
             asset_index,
             packs,
+            &lightmap,
         );
 
         let moving_block_buffers = MovingBlockBuffers::new(&ctx.device);
@@ -460,6 +466,7 @@ impl Renderer {
             swapchain_state.targets(),
             jar_assets_dir,
             asset_index,
+            &lightmap,
         );
 
         let chunk_border_pipeline = pipelines::chunk_borders::ChunkBorderPipeline::new(
@@ -1104,6 +1111,7 @@ impl Renderer {
         use_anim: [Option<pipelines::held_item::UseAnim>; 2],
         held_items: [Option<(String, f32, azalea_inventory::ItemStackData)>; 2],
         main_hand_right: bool,
+        hand_light: LightLevels,
         shown_hands: HandRenderSelection,
         player_team_color: Option<u32>,
         render_first_person_hand: bool,
@@ -1161,6 +1169,7 @@ impl Renderer {
                 use_anim,
                 held_items,
                 main_hand_right,
+                hand_light,
                 shown_hands,
                 player_team_color,
                 render_first_person_hand,
@@ -1686,6 +1695,7 @@ impl Renderer {
                 use_anim,
                 held_items,
                 main_hand_right,
+                hand_light,
                 shown_hands,
                 player_team_color: _,
                 render_first_person_hand,
@@ -1834,6 +1844,7 @@ impl Renderer {
                             swing_progress[0],
                             *main_hand_right,
                             view_effect,
+                            *hand_light,
                         );
                     }
                     let shown = [shown_hands.main, shown_hands.off];

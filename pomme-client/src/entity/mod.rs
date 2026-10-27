@@ -1,6 +1,7 @@
 pub mod components;
 pub mod dimensions;
 pub mod glowing;
+pub mod light;
 pub mod shadow;
 pub mod villager;
 
@@ -25,10 +26,18 @@ use crate::renderer::pipelines::entity_renderer::{
 use crate::world::block::{BlockStateTable, FluidKind};
 use crate::world::chunk::ChunkStore;
 
-/// `Entity.FLAG_GLOWING` (bit 6) of the shared entity flags byte (index 0).
+/// `Entity.FLAG_ONFIRE` (bit 0) of the shared entity flags byte (index 0).
+const SHARED_FLAG_ON_FIRE: u8 = 0x01;
+/// `Entity.FLAG_GLOWING` (bit 6).
 const SHARED_FLAG_GLOWING: u8 = 0x40;
 /// `Entity.FLAG_INVISIBLE` (bit 5).
 const SHARED_FLAG_INVISIBLE: u8 = 0x20;
+
+/// Whether a shared entity flags byte is on fire, as the client's
+/// `Entity.isOnFire` reads it before fire immunity.
+pub fn shared_flags_on_fire(flags: u8) -> bool {
+    flags & SHARED_FLAG_ON_FIRE != 0
+}
 
 /// Whether a shared entity flags byte is glowing: the server's
 /// `isCurrentlyGlowing`, from the `Glowing` tag or the glowing effect.
@@ -195,6 +204,7 @@ pub struct LivingEntity {
     pub is_sprinting: bool,
     pub is_invisible: bool,
     pub is_glowing: bool,
+    pub is_on_fire: bool,
     /// Dye id, wolf/cat collars (vanilla default red).
     pub collar_color: u8,
     pub is_interested: bool,
@@ -419,6 +429,7 @@ impl LivingEntity {
             is_sprinting: false,
             is_invisible: false,
             is_glowing: false,
+            is_on_fire: false,
             collar_color: 14,
             is_interested: false,
             anger_end_time: -1,
@@ -572,6 +583,16 @@ impl LivingEntity {
     pub fn swing_progress(&self, partial: f32) -> f32 {
         ((SWING_DURATION as f32 - self.swing_time as f32 + partial) / SWING_DURATION as f32)
             .clamp(0.0, 1.0)
+    }
+
+    /// Vanilla `getEyePosition(partialTick)`, at the standing eye height.
+    pub fn eye_position(&self, partial: f32) -> Position {
+        let eye = crate::renderer::pipelines::entity_renderer::standing_eye_height(
+            self.entity_type,
+            self.is_baby,
+        );
+        self.prev_position.lerp(self.position, f64::from(partial))
+            + DVec3::new(0.0, f64::from(eye), 0.0)
     }
 
     /// Vanilla `WalkAnimationState.position(partialTick)` (babies run the
@@ -1273,6 +1294,7 @@ impl EntityStore {
         match (kind, index, value) {
             // Shared entity flags byte: bit 0x08 = sprinting.
             (_, 0, Byte(f)) => {
+                entity.is_on_fire = shared_flags_on_fire(f);
                 entity.is_sprinting = f & 0x08 != 0;
                 entity.is_invisible = shared_flags_invisible(f);
                 entity.is_glowing = shared_flags_glowing(f);

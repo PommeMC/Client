@@ -21,6 +21,7 @@ use crate::benchmark::{
     UploadHandle, UploadStatus, upload_result,
 };
 use crate::entity::components::{LookDirection, Position};
+use crate::entity::light::entity_light;
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
 use crate::player::LocalPlayer;
@@ -30,6 +31,7 @@ use crate::player::interaction::{
 use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
 use crate::position::{BlockPos, ChunkPos};
+use crate::renderer::chunk::block_lighter::{self, WorldLight};
 use crate::renderer::chunk::buffer::column_is_near;
 use crate::renderer::chunk::mesh_columns::MeshColumns;
 use crate::renderer::chunk::mesh_source::MeshSource;
@@ -2616,11 +2618,7 @@ pub fn update_game(
     // eye and view rotation, else the local player's.
     let spectated = game.spectated();
     let camera_pivot = match spectated {
-        Some(e) => {
-            let eye = standing_eye_height(e.entity_type, e.is_baby);
-            e.prev_position.lerp(e.position, partial_tick as f64)
-                + glam::dvec3(0.0, f64::from(eye), 0.0)
-        }
+        Some(e) => e.eye_position(partial_tick),
         None => {
             game.player
                 .prev_eye_pos()
@@ -3956,6 +3954,21 @@ pub fn update_game(
         }
     };
 
+    let world_light = WorldLight {
+        chunks: &game.chunk_store,
+        table: game.block_registry.block_state_table(),
+    };
+    let player_light = entity_light(
+        &world_light,
+        EntityKind::Player,
+        game.player
+            .prev_position
+            .lerp(game.player.position, partial_tick as f64)
+            + glam::dvec3(0.0, f64::from(game.player.target_eye_height()), 0.0),
+        game.player.on_fire,
+        0,
+    );
+
     let mut entity_renders: Vec<EntityRenderInfo> = if benchmark_running {
         Vec::new()
     } else {
@@ -3982,6 +3995,13 @@ pub fn update_game(
                         &name,
                     ),
                     visibility: visibility(e.is_invisible, &name),
+                    light: entity_light(
+                        &world_light,
+                        e.entity_type,
+                        e.eye_position(partial_tick),
+                        e.is_on_fire,
+                        e.dark_ticks,
+                    ),
                     head_y_rot_deg: lerp_angle(
                         e.prev_head_y_rot_deg,
                         e.head_y_rot_deg,
@@ -4101,6 +4121,7 @@ pub fn update_game(
             player_uuid: Some(core.user.uuid),
             outline_color: outline(game.player.glowing, true, &|| viewer.clone()),
             visibility: visibility(game.player.invisible, &|| viewer.clone()),
+            light: player_light,
             armor: armor_render_infos(game.player.inventory.armor_slots()),
             has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),
             death_time: render_death_time(game.player.death_time, partial_tick),
@@ -4205,10 +4226,14 @@ pub fn update_game(
                         .map(|a| a.openness(partial_tick))
                         .unwrap_or(0.0)
                 };
+                let light_at =
+                    |p: &BlockPos| block_lighter::light_coords(&world_light, [p.x, p.y, p.z]);
                 let mut lid_open = openness_at(pos);
+                let mut light = light_at(pos);
                 // A double chest's lids follow the max openness of both halves
-                // (vanilla opennessCombiner); the open block event only arrives
-                // at the interacted half's position.
+                // (vanilla opennessCombiner), and its light the max of both
+                // (`BrightnessCombiner`); the open block event only arrives at
+                // the interacted half's position.
                 if matches!(
                     be.kind,
                     BlockEntityKind::Chest | BlockEntityKind::TrappedChest
@@ -4218,6 +4243,7 @@ pub fn update_game(
                 ) {
                     let partner = BlockPos::new(pos.x + dx, pos.y, pos.z + dz);
                     lid_open = lid_open.max(openness_at(&partner));
+                    light = light.max(light_at(&partner));
                 }
                 Some(crate::renderer::BlockEntityRenderInfo {
                     pos: *pos,
@@ -4225,6 +4251,7 @@ pub fn update_game(
                     yaw,
                     variant,
                     lid_open,
+                    light,
                 })
             })
             .collect()
@@ -4302,6 +4329,7 @@ pub fn update_game(
         use_anim,
         held_items,
         core.menu.main_hand_right(),
+        player_light,
         shown_hands,
         game.scoreboard.member_team_color(&core.user.username),
         renders_first_person_hand(game),
@@ -5079,13 +5107,6 @@ fn squid_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
     // z_body_rot grows without bound; wrap only here, after the lerp.
     let z_rot = (e.prev_z_body_rot + (e.z_body_rot - e.prev_z_body_rot) * alpha).rem_euclid(360.0);
     let (up, down) = if e.is_baby { (0.25, -0.6) } else { (0.5, -1.2) };
-    // Approximation: vanilla drops the glow light level while dark and lets
-    // ambient light take over; pomme's entity pipeline is unlit, so darken
-    // the tint instead.
-    let base_tint = (e.entity_type == EntityKind::GlowSquid).then(|| {
-        let k = (1.0 - e.dark_ticks as f32 / 10.0).clamp(0.0, 1.0);
-        [k, k, k, 1.0]
-    });
     EntityExtras {
         tentacle_angle: e.prev_tentacle_angle + (e.tentacle_angle - e.prev_tentacle_angle) * alpha,
         // The axial spin is applied about Y, after the pitch (vanilla).
@@ -5095,7 +5116,6 @@ fn squid_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
                 * glam::Mat4::from_rotation_y(z_rot.to_radians())
                 * glam::Mat4::from_translation(glam::Vec3::new(0.0, down, 0.0)),
         ),
-        base_tint,
         ..Default::default()
     }
 }

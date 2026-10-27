@@ -3,11 +3,12 @@
 //! (`prepareQuadFlat`), with `LightCoordsUtil`'s blending.
 
 use crate::physics::block_shape::is_collision_shape_full_block;
-use crate::world::block::BlockStateData;
 use crate::world::block::model::{Direction, quad_bounds};
+use crate::world::block::{BlockStateData, BlockStateTable};
+use crate::world::chunk::ChunkStore;
 
 /// What the lighter reads from the world around the block it lights.
-pub(super) trait LightSource {
+pub(crate) trait LightSource {
     fn state_data(&self, at: [i32; 3]) -> &BlockStateData;
     /// The light engine's sky and block levels at a position.
     fn levels(&self, at: [i32; 3]) -> LightLevels;
@@ -18,9 +19,29 @@ pub(super) fn offset(at: [i32; 3], by: [i32; 3]) -> [i32; 3] {
     [at[0] + by[0], at[1] + by[1], at[2] + by[2]]
 }
 
+/// The live world, for light read outside the mesher's snapshot.
+pub(crate) struct WorldLight<'a> {
+    pub chunks: &'a ChunkStore,
+    pub table: BlockStateTable,
+}
+
+impl LightSource for WorldLight<'_> {
+    fn state_data(&self, [x, y, z]: [i32; 3]) -> &BlockStateData {
+        self.table
+            .block_state_data(self.chunks.get_block_state(x, y, z))
+    }
+
+    fn levels(&self, [x, y, z]: [i32; 3]) -> LightLevels {
+        LightLevels::new(
+            self.chunks.get_sky_light(x, y, z),
+            self.chunks.get_block_light(x, y, z),
+        )
+    }
+}
+
 /// A block's sky and block light levels, packed `sky << 4 | block`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct LightLevels(pub u8);
+pub(crate) struct LightLevels(pub u8);
 
 impl LightLevels {
     pub const FULL_BRIGHT: Self = Self::new(15, 15);
@@ -49,6 +70,12 @@ impl LightLevels {
             return self;
         }
         Self::new(self.sky().max(emission), self.block().max(emission))
+    }
+
+    /// The shaders' light lane (`light_lane_color`): vanilla's UV2, block
+    /// and sky light coordinates in 0..240, as `block + sky * 256`.
+    pub fn lane(self) -> f32 {
+        f32::from(self.block()) * 16.0 + f32::from(self.sky()) * 16.0 * 256.0
     }
 }
 
@@ -90,7 +117,7 @@ pub(super) struct Quad<'a> {
 }
 
 /// The light at a position, by the state there.
-pub(super) fn light_coords(world: &impl LightSource, at: [i32; 3]) -> LightLevels {
+pub(crate) fn light_coords(world: &impl LightSource, at: [i32; 3]) -> LightLevels {
     light_coords_of(world.state_data(at), world, at)
 }
 

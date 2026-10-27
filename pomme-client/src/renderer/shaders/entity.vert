@@ -4,12 +4,15 @@
 
 #include "camera_ubo.glsl"
 
+#include "lightmap.glsl"
+
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec2 tex_coords;
 layout(location = 2) in vec4 light_tint;
 
 // Per-instance data (binding 1, vertexInputRate = instance): the 4 model-matrix
-// columns, then tint, overlay color, and uv scroll offset (xy).
+// columns, then tint, overlay color, and uv scroll offset (xy), alpha cutoff
+// (z) and light lane (w).
 layout(location = 3) in vec4 i_model_0;
 layout(location = 4) in vec4 i_model_1;
 layout(location = 5) in vec4 i_model_2;
@@ -24,6 +27,7 @@ layout(location = 2) out float v_fog;
 layout(location = 3) out vec3 v_fog_color;
 layout(location = 4) out vec4 v_overlay;
 layout(location = 5) out float v_alpha_cutoff;
+layout(location = 6) out vec4 v_light;
 
 void main() {
     mat4 model = mat4(i_model_0, i_model_1, i_model_2, i_model_3);
@@ -34,6 +38,7 @@ void main() {
     v_tint = i_tint;
     v_overlay = i_overlay;
     v_alpha_cutoff = i_uv.z;
+    v_light = light_lane_color(i_uv.w);
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;
 }

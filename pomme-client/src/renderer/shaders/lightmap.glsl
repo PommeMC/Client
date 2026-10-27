@@ -11,6 +11,13 @@ vec4 sample_lightmap(vec2 uv) {
     );
 }
 
+// A light lane (`LightLevels::lane`): block + sky * 256, each 0..240. A
+// negative lane is one of vanilla's EMISSIVE layers, which skip the lightmap.
+vec4 light_lane_color(float lane) {
+    if (lane < 0.0) return vec4(1.0);
+    return sample_lightmap(vec2(mod(lane, 256.0), floor(lane / 256.0)));
+}
+
 // Vanilla `terrain.vsh`'s `Color * sample_lightmap(Sampler2, UV2)` for a
 // packed terrain vertex: block light in `light_tint.r`, sky light in the top
 // byte of `uv`.

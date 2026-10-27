@@ -12,8 +12,10 @@ use crate::assets::{AssetIndex, resolve_asset_path, resolve_asset_path_with_pack
 use crate::entity::components::Position;
 use crate::entity::dimensions;
 use crate::renderer::camera::CameraUniform;
+use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::BakedEntityModel;
+use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::rhi::{self, VertexFormat};
 use crate::renderer::{entity_model, shader, util};
 use crate::resource_pack::ResourcePackManager;
@@ -44,7 +46,8 @@ const MAX_INSTANCES: usize = 16384;
 const MAX_PLAYER_SKINS: usize = 128;
 
 /// Per-instance data for one (entity, part) draw, fed as instance-rate vertex
-/// attributes (binding 1) — the four model-matrix columns, tint, overlay, uv.
+/// attributes (binding 1) — the four model-matrix columns, tint, overlay, and
+/// uv scroll, alpha cutoff and light lane.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct EntityInstance {
@@ -195,6 +198,8 @@ pub struct EntityRenderInfo {
     /// when the entity draws one.
     pub outline_color: Option<u32>,
     pub visibility: Visibility,
+    /// Vanilla `EntityRenderState.lightCoords`.
+    pub light: LightLevels,
 }
 
 /// Everything inert: mob-family animation inputs zeroed, no overlays, white
@@ -259,6 +264,7 @@ impl Default for EntityRenderInfo {
             outline_color: None,
             visibility: Visibility::Visible,
             shadow: Default::default(),
+            light: LightLevels::FULL_BRIGHT,
         }
     }
 }
@@ -485,6 +491,8 @@ const HURT_OVERLAY: [f32; 4] = [1.0, 0.0, 0.0, 178.0 / 255.0];
 const NO_OVERLAY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 pub(super) const ENTITY_ALPHA_CUTOFF: f32 = 0.5;
 pub(crate) const ARMOR_ALPHA_CUTOFF: f32 = 0.1;
+/// The light lane `light_lane_color` leaves unlit.
+const EMISSIVE_LANE: f32 = -1.0;
 
 pub const WOOL_COLOR_RGBA: [[f32; 4]; 16] = [
     rgb(0xF0F0F0), // 0 white
@@ -831,6 +839,8 @@ pub struct EntityRenderer {
     texture_layout: rhi::backend::BindGroupLayout,
     camera_sets: Vec<rhi::backend::BindGroup>,
     camera_buffers: Vec<rhi::backend::Buffer>,
+    /// The shared [`Lightmap`]'s group, set 2.
+    lightmap_set: rhi::backend::BindGroup,
     /// Per-instance vertex buffer (bound at binding 1), one per frame in
     /// flight.
     instance_buffers: Vec<rhi::backend::Buffer>,
@@ -1754,11 +1764,15 @@ impl EntityRenderer {
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
         packs: &ResourcePackManager,
+        lightmap: &Lightmap,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
         let texture_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
-        let pipeline_layout =
-            rhi::backend::create_pipeline_layout(device, &[camera_layout, texture_layout], None);
+        let pipeline_layout = rhi::backend::create_pipeline_layout(
+            device,
+            &[camera_layout, texture_layout, lightmap.layout],
+            None,
+        );
 
         let [
             translucent_culled_pipeline,
@@ -1872,6 +1886,7 @@ impl EntityRenderer {
             texture_layout,
             camera_sets,
             camera_buffers,
+            lightmap_set: lightmap.group,
             instance_buffers,
             texture_sampler,
             texture_sampler_repeat,
@@ -2038,7 +2053,7 @@ impl EntityRenderer {
                                 tint,
                                 // Vanilla armor is `NO_OVERLAY`: no hurt/death red.
                                 overlay_color: NO_OVERLAY,
-                                uv_params: [0.0, 0.0, ARMOR_ALPHA_CUTOFF, 0.0],
+                                uv_params: [0.0, 0.0, ARMOR_ALPHA_CUTOFF, v.info.light.lane()],
                             },
                         );
                         records.push(DrawRecord {
@@ -2489,7 +2504,10 @@ impl EntityRenderer {
                 continue; // dropped by the capacity clamp above
             }
             if r.vertex_buffer != last_vb || r.texture_set != last_texture_set {
-                pass.set_bind_groups(0, &[self.camera_sets[frame], r.texture_set]);
+                pass.set_bind_groups(
+                    0,
+                    &[self.camera_sets[frame], r.texture_set, self.lightmap_set],
+                );
                 pass.set_vertex_buffer(0, r.vertex_buffer);
                 last_vb = r.vertex_buffer;
                 last_texture_set = r.texture_set;
@@ -2687,6 +2705,11 @@ impl<'a> VariantGroups<'a> {
     fn emit(&self, vis: &[VisEntity], instances: &mut Instances) -> Vec<DrawRecord> {
         let mut records = Vec::new();
         for (variant, texture_set, members) in &self.groups {
+            // Vanilla's EMISSIVE eyes and swirl layers skip the lightmap.
+            let emissive = matches!(
+                variant.overlay_kind,
+                OverlayKind::EyesTranslucent | OverlayKind::SwirlAdditive
+            );
             let own: Option<Vec<Vec<glam::Mat4>>> = variant.own_pivots.then(|| {
                 members
                     .iter()
@@ -2704,13 +2727,18 @@ impl<'a> VariantGroups<'a> {
                         None => vis[*vi].part_transforms[p],
                     };
                     let model = vis[*vi].entity_mat * part;
+                    let light = if emissive {
+                        EMISSIVE_LANE
+                    } else {
+                        vis[*vi].info.light.lane()
+                    };
                     instances.push(
                         *vi,
                         EntityInstance {
                             model: model.to_cols_array_2d(),
                             tint: *tint,
                             overlay_color: *overlay,
-                            uv_params: [uv[0], uv[1], ENTITY_ALPHA_CUTOFF, 0.0],
+                            uv_params: [uv[0], uv[1], ENTITY_ALPHA_CUTOFF, light],
                         },
                     );
                 }

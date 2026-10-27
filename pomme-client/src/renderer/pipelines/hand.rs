@@ -4,6 +4,8 @@ use glam::camera::rh::proj;
 use glam::{Mat4, Vec3};
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::renderer::chunk::block_lighter::LightLevels;
+use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{SkinData, rhi, shader, util};
 const NEAR: f32 = 0.05;
 const FAR: f32 = 10.0;
@@ -19,6 +21,8 @@ struct HandVertex {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct HandUniform {
     mvp: [[f32; 4]; 4],
+    /// x = the player's light lane.
+    light: [f32; 4],
 }
 
 pub struct HandPipeline {
@@ -29,6 +33,8 @@ pub struct HandPipeline {
     mvp_sets: Vec<rhi::backend::BindGroup>,
     skin_set: rhi::backend::BindGroup,
     mvp_buffers: Vec<rhi::backend::Buffer>,
+    /// The shared [`Lightmap`]'s group, set 2.
+    lightmap_set: rhi::backend::BindGroup,
     vertex_buffer: rhi::backend::Buffer,
     /// Per arm: the buffer holds the right arm, then the left.
     vertex_count: u32,
@@ -42,11 +48,15 @@ impl HandPipeline {
         targets: rhi::backend::PipelineTargets,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
+        lightmap: &Lightmap,
     ) -> Self {
         let mvp_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
         let skin_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
-        let pipeline_layout =
-            rhi::backend::create_pipeline_layout(device, &[mvp_layout, skin_layout], None);
+        let pipeline_layout = rhi::backend::create_pipeline_layout(
+            device,
+            &[mvp_layout, skin_layout, lightmap.layout],
+            None,
+        );
 
         let pipeline = create_pipeline(device, targets, pipeline_layout);
 
@@ -78,6 +88,7 @@ impl HandPipeline {
             mvp_sets,
             skin_set,
             mvp_buffers,
+            lightmap_set: lightmap.group,
             vertex_buffer,
             vertex_count,
             skin,
@@ -95,6 +106,7 @@ impl HandPipeline {
         swing_progress: f32,
         right_arm: bool,
         bob: Mat4,
+        light: LightLevels,
     ) {
         let proj = projection(aspect, hud_fov);
         let model = arm_matrix(swing_progress, arm_invert(right_arm));
@@ -102,12 +114,13 @@ impl HandPipeline {
         let mvp = proj * bob * model;
         let uniform = HandUniform {
             mvp: mvp.to_cols_array_2d(),
+            light: [light.lane(), 0.0, 0.0, 0.0],
         };
         let bytes = bytemuck::bytes_of(&uniform);
         self.mvp_buffers[frame].write(bytes);
 
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_groups(0, &[self.mvp_sets[frame], self.skin_set]);
+        pass.set_bind_groups(0, &[self.mvp_sets[frame], self.skin_set, self.lightmap_set]);
         pass.set_vertex_buffer(0, self.vertex_buffer.handle());
         let first_vertex = if right_arm { 0 } else { self.vertex_count };
         pass.draw(self.vertex_count, 1, first_vertex, 0);

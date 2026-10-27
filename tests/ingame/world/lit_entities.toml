@@ -1,0 +1,125 @@
+# Entities and block entities lit through the lightmap: a cow and a chest dim
+# with the sky at night and take a torch's warmth, while a glow squid stays
+# full bright.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/tp @s 60.5 -60 50.5 0 15"
+
+[[step]]
+expect = { player = { position = [60.5, -60.0, 50.5] } }
+
+[[step]]
+chat = "/summon minecraft:cow 59.5 -60 54.5 {NoAI:1b,Rotation:[90f,0f],Tags:[\"lit\"]}"
+
+[[step]]
+chat = "/setblock 63 -60 54 minecraft:chest[facing=north]"
+
+# Out of water, a squid only starts to dry out after 15 seconds.
+[[step]]
+chat = "/summon minecraft:glow_squid 61.5 -60 54.5 {NoAI:1b,Rotation:[180f,0f],Tags:[\"lit\"]}"
+
+[[step]]
+expect = { entity = "glow_squid" }
+
+# F1 hides the chat and HUD, so the screenshots show the scene only.
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+deterministic = true
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "noon"
+
+[[step]]
+chat = "/time set 18000"
+
+[[step]]
+wait_ms = 500
+
+# Monsters that spawned in the dark.
+[[step]]
+chat = "/kill @e[type=!player,tag=!lit]"
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "midnight"
+
+# A sealed stone room lit by one torch.
+[[step]]
+chat = "/kill @e[tag=lit]"
+
+[[step]]
+chat = "/setblock 63 -60 54 minecraft:air"
+
+# And their drops.
+[[step]]
+chat = "/kill @e[type=item]"
+
+[[step]]
+chat = "/fill 58 -61 54 64 -56 60 minecraft:stone hollow"
+
+[[step]]
+chat = "/setblock 61 -60 59 minecraft:torch"
+
+[[step]]
+chat = "/setblock 62 -60 58 minecraft:chest[facing=north]"
+
+[[step]]
+chat = "/summon minecraft:cow 59.5 -60 58.5 {NoAI:1b,Rotation:[90f,0f],Tags:[\"lit\"]}"
+
+[[step]]
+chat = "/tp @s 61.5 -60 55.5 0 15"
+
+[[step]]
+expect = { player = { position = [61.5, -60.0, 55.5] } }
+
+[[step]]
+expect = { entity = "cow" }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+screenshot = "torch"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/fill 58 -60 54 64 -56 60 minecraft:air"
+
+[[step]]
+chat = "/fill 58 -61 54 64 -61 60 minecraft:grass_block"
+
+[[step]]
+chat = "/tp @s 0.5 -60 0.5"
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/gamerule advance_time true"

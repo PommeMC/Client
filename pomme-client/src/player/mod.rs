@@ -227,6 +227,8 @@ pub struct LocalPlayer {
     pub swimming: bool,
     /// The shared glowing flag.
     pub glowing: bool,
+    /// The shared fire flag.
+    pub on_fire: bool,
     /// The shared invisible flag.
     pub invisible: bool,
     /// The physical SWIMMING pose, chosen by `Player.updatePlayerPose`.
@@ -331,6 +333,7 @@ impl LocalPlayer {
             under_water: false,
             swimming: false,
             glowing: false,
+            on_fire: false,
             invisible: false,
             swimming_pose: false,
             air_supply: MAX_AIR_SUPPLY,
@@ -441,11 +444,13 @@ impl LocalPlayer {
         }
     }
 
-    /// The shared entity flags (bit 3 sprinting, bit 4 swimming, bit 5
-    /// invisible, bit 6 glowing) the server sets on the local player.
+    /// The shared entity flags (bit 0 on fire, bit 3 sprinting, bit 4
+    /// swimming, bit 5 invisible, bit 6 glowing) the server sets on the local
+    /// player.
     // TODO: vanilla's sprint speed modifier only follows a local
     // `setSprinting`; this server flag also drives pomme's movement speed.
     pub fn sync_shared_flags(&mut self, flags: u8) {
+        self.on_fire = crate::entity::shared_flags_on_fire(flags);
         self.sprinting = flags & 0x08 != 0;
         self.swimming = flags & 0x10 != 0;
         self.glowing = crate::entity::shared_flags_glowing(flags);

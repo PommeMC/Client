@@ -472,7 +472,7 @@ fn create_pipeline_with_state(
             blend: state.blend,
             ..rhi::RenderPipelineDesc::new(
                 "preview",
-                shader::include_shader!("hand.vert"),
+                shader::include_shader!("preview.vert"),
                 shader::include_shader!("preview.frag"),
                 &[rhi::vertex_buffer!(Vertex, [Float32x3, Float32x2])],
             )

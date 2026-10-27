@@ -4,13 +4,15 @@
 
 #include "camera_ubo.glsl"
 
+#include "lightmap.glsl"
+
 // Per-draw model matrix via push constants (vanilla's PoseStack), not the
 // instance attributes the mob pipeline uses.
 layout(push_constant) uniform PushConstants {
     mat4 model;
     vec4 tint;
     vec4 overlay_color;
-    // xy = texture-coordinate scroll offset; zw unused.
+    // xy = texture-coordinate scroll offset, z = alpha cutoff, w = light lane.
     vec4 uv_params;
 };
 
@@ -24,6 +26,7 @@ layout(location = 2) out float v_fog;
 layout(location = 3) out vec3 v_fog_color;
 layout(location = 4) out vec4 v_overlay;
 layout(location = 5) out float v_alpha_cutoff;
+layout(location = 6) out vec4 v_light;
 
 void main() {
     vec4 world_pos = model * vec4(position, 1.0);
@@ -33,6 +36,7 @@ void main() {
     v_tint = tint;
     v_overlay = overlay_color;
     v_alpha_cutoff = uv_params.z;
+    v_light = light_lane_color(uv_params.w);
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;
 }

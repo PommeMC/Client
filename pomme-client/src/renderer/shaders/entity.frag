@@ -11,6 +11,7 @@ layout(location = 2) in float v_fog;
 layout(location = 3) in vec3 v_fog_color;
 layout(location = 4) in vec4 v_overlay;
 layout(location = 5) in float v_alpha_cutoff;
+layout(location = 6) in vec4 v_light;
 
 layout(location = 0) out vec4 out_color;
 
@@ -19,5 +20,6 @@ void main() {
     if (color.a < v_alpha_cutoff) discard;
     vec4 lit = color * v_tint;
     lit.rgb = mix(v_overlay.rgb, lit.rgb, v_overlay.a);
+    lit *= v_light;
     out_color = vec4(apply_fog(lit.rgb, v_fog, v_fog_color), lit.a);
 }
