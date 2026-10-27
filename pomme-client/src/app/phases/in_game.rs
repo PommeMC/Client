@@ -4094,10 +4094,10 @@ pub fn update_game(
         });
     }
 
-    let partial_tick = sky_partial_tick(core);
+    let clock_partial_tick = sky_partial_tick(core);
     let sky = crate::renderer::SkyState {
-        partial_tick,
-        attributes: game.environment_probe.at(partial_tick),
+        partial_tick: clock_partial_tick,
+        attributes: game.environment_probe.at(clock_partial_tick),
         ..game.sky_state.clone()
     };
     if game.show_chunk_borders {
