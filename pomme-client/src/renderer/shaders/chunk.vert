@@ -7,7 +7,7 @@
 // Binding 0: packed section-local terrain vertex.
 layout(location = 0) in vec2 in_pos_xy;
 layout(location = 1) in float in_pos_z;
-layout(location = 2) in uvec2 in_sprite_uv;
+layout(location = 2) in uint in_uv;
 layout(location = 3) in uint in_sprite;
 layout(location = 4) in vec4 in_light_tint;
 // Binding 1: per-section instance meta for the indirect terrain passes.
@@ -26,7 +26,7 @@ void main() {
     vec3 local = vec3(in_pos_xy, in_pos_z) * POS_RANGE - POS_BIAS;
     vec3 rel = vec3(in_origin - camera_block.xyz) - camera_pos.xyz + local;
     gl_Position = view_proj * vec4(rel, 1.0);
-    v_sprite_uv = vec2(in_sprite_uv) / TERRAIN_UV_FIXED_SCALE;
+    v_sprite_uv = unpack_sprite_uv(in_uv);
     v_light = in_light_tint.r;
     v_tint = in_light_tint.gba;
     v_visibility = in_visibility;

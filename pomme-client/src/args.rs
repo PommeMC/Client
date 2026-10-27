@@ -70,6 +70,12 @@ pub struct LaunchArgs {
     #[arg(long, value_name = "FILTER")]
     pub cpu_bench: Option<Option<String>>,
 
+    /// Prints an order-independent hash of the mesher's output for each bench
+    /// scene, and exits.
+    #[cfg(feature = "cpu-bench")]
+    #[arg(long)]
+    pub mesh_hash: bool,
+
     /// Serves the test harness on this localhost port.
     #[cfg(feature = "test-harness")]
     #[arg(long, value_name = "PORT")]

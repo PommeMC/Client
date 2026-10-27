@@ -1497,7 +1497,6 @@ fn vertex_format(format: VertexFormat) -> vk::Format {
         VertexFormat::Uint32 => vk::Format::R32Uint,
         VertexFormat::Sint16x2 => vk::Format::R16G16Sint,
         VertexFormat::Uint16 => vk::Format::R16Uint,
-        VertexFormat::Uint16x2 => vk::Format::R16G16Uint,
         VertexFormat::Unorm16 => vk::Format::R16Unorm,
         VertexFormat::Unorm16x2 => vk::Format::R16G16Unorm,
         VertexFormat::Uint8x2 => vk::Format::R8G8Uint,

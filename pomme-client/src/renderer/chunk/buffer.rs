@@ -176,7 +176,7 @@ pub const CHUNK_VERTEX_BUFFERS: [rhi::VertexBufferLayout<'static>; 2] = {
                 },
                 rhi::VertexAttribute {
                     location: 2,
-                    format: rhi::VertexFormat::Uint16x2,
+                    format: rhi::VertexFormat::Uint32,
                     offset: offset_of!(PackedVertex, uv) as u32,
                 },
                 rhi::VertexAttribute {

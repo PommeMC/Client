@@ -9,8 +9,6 @@
 pub const POS_RANGE: f32 = 24.0;
 pub const POS_BIAS: f32 = 4.0;
 
-/// Fixed-point scale for sprite-local terrain UVs. 4095 units per sprite
-/// keeps every integer repeat boundary through 16 blocks exactly representable
-/// in u16 (16 * 4095 = 65520).
+/// Sprite-local terrain UVs: one sprite spans 0..=4095, in 12 bits per axis.
 pub const TERRAIN_UV_FIXED_SCALE: f32 = 4095.0;
-pub const TERRAIN_UV_MAX_REPEAT: f32 = 16.0;
+pub const TERRAIN_UV_BITS: u32 = 12;

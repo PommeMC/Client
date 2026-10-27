@@ -86,6 +86,15 @@ impl AtlasUVMap {
     pub(crate) fn sprite_alpha_mask(&self, name: &str) -> Option<&SpriteAlphaMask> {
         self.sprite_alpha_masks.get(name)
     }
+
+    /// Each sprite's texture name, by sprite index.
+    #[cfg(feature = "cpu-bench")]
+    pub fn sprite_names(&self) -> HashMap<u16, &str> {
+        self.regions
+            .iter()
+            .map(|(name, region)| (region.sprite, name.as_str()))
+            .collect()
+    }
 }
 
 /// Vanilla 26.2 `atlases/blocks.json`, the only atlas built with mipmaps.
@@ -114,7 +123,7 @@ pub struct TextureAtlas {
     pub texture: rhi::backend::Texture,
     pub sampler: rhi::backend::Sampler,
     /// Storage buffer of `uvec4` level-0 sprite rectangles, indexed by
-    /// `AtlasRegion::sprite`; the terrain shaders wrap greedy UVs inside it.
+    /// `AtlasRegion::sprite`; the terrain shaders resolve sprite UVs inside it.
     pub sprite_rects: rhi::backend::Buffer,
     pub uv_map: AtlasUVMap,
     mip_levels: u32,

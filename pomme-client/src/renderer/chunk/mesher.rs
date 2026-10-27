@@ -27,9 +27,7 @@ pub struct ChunkVertex {
 #[derive(Copy, Clone)]
 struct TerrainVertex {
     position: [f32; 3],
-    /// Sprite-local UV where 1.0 spans one full sprite. Greedy quads may exceed
-    /// 1.0 so the chunk shader can repeat the sprite without sampling adjacent
-    /// atlas entries.
+    /// Sprite-local UV where 1.0 spans one full sprite.
     sprite_uv: [f32; 2],
     /// `AtlasRegion::sprite`, resolved to a rectangle in the fragment shader.
     sprite: u16,
@@ -43,19 +41,29 @@ impl ChunkVertex {
 
 include!("packing_consts.rs");
 
-/// Compact terrain GPU vertex (16 bytes). Positions stay quantized as before.
-/// `uv` stores sprite-local coordinates as u16 fixed point over the section's
-/// 0..16 repeat range, and `sprite` indexes the atlas's rectangle buffer. The
-/// shader wraps the UV inside that integer rectangle, which avoids
-/// atlas-boundary rounding and lets a greedy quad repeat one sprite instead of
-/// walking into its neighbour.
+/// Compact terrain GPU vertex (16 bytes). `uv` packs the sprite-local UV as
+/// two [`TERRAIN_UV_BITS`]-bit fixed-point axes, u low and v above it; its top
+/// byte is reserved and zero. `sprite` indexes the atlas's rectangle buffer,
+/// which the shader resolves the UV inside, avoiding atlas-boundary rounding.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PackedVertex {
     pub pos: [u16; 3],
-    pub uv: [u16; 2],
     pub sprite: u16,
+    pub uv: u32,
     pub light_tint: [u8; 4],
+}
+
+impl PackedVertex {
+    /// The sprite-local UV in `TERRAIN_UV_FIXED_SCALE` units.
+    #[cfg(any(test, feature = "cpu-bench"))]
+    pub fn sprite_uv_fixed(&self) -> [u16; 2] {
+        const MASK: u32 = (1 << TERRAIN_UV_BITS) - 1;
+        [
+            (self.uv & MASK) as u16,
+            (self.uv >> TERRAIN_UV_BITS & MASK) as u16,
+        ]
+    }
 }
 
 #[repr(C)]
@@ -73,8 +81,8 @@ fn quantize_coord(local: f32) -> u16 {
     unorm_to_u16((local + POS_BIAS) / POS_RANGE)
 }
 
-fn pack_sprite_uv(x: f32) -> u16 {
-    (x.clamp(0.0, TERRAIN_UV_MAX_REPEAT) * TERRAIN_UV_FIXED_SCALE + 0.5) as u16
+fn pack_sprite_uv(x: f32) -> u32 {
+    (x.clamp(0.0, 1.0) * TERRAIN_UV_FIXED_SCALE + 0.5) as u32
 }
 
 fn pack_vertex(v: &TerrainVertex) -> PackedVertex {
@@ -84,18 +92,10 @@ fn pack_vertex(v: &TerrainVertex) -> PackedVertex {
             quantize_coord(v.position[1]),
             quantize_coord(v.position[2]),
         ],
-        uv: [
-            pack_sprite_uv(v.sprite_uv[0]),
-            pack_sprite_uv(v.sprite_uv[1]),
-        ],
         sprite: v.sprite,
+        uv: pack_sprite_uv(v.sprite_uv[0]) | pack_sprite_uv(v.sprite_uv[1]) << TERRAIN_UV_BITS,
         light_tint: v.light_tint.to_le_bytes(),
     }
-}
-
-#[cfg(test)]
-fn unpack_sprite_uv(x: u16) -> f32 {
-    x as f32 / TERRAIN_UV_FIXED_SCALE
 }
 
 fn section_aabb(verts: &[TerrainVertex]) -> ChunkAABB {
@@ -2708,33 +2708,52 @@ mod fluid_height_tests {
 
 #[cfg(test)]
 mod terrain_uv_tests {
-    use super::{pack_sprite_uv, unpack_sprite_uv};
+    use super::{PackedVertex, TERRAIN_UV_FIXED_SCALE, TerrainVertex, pack_vertex};
 
-    fn wrapped(x: f32) -> f32 {
-        x - x.floor()
+    fn packed(sprite_uv: [f32; 2]) -> PackedVertex {
+        pack_vertex(&TerrainVertex {
+            position: [0.0; 3],
+            sprite_uv,
+            sprite: 0,
+            light_tint: 0,
+        })
+    }
+
+    /// The shader's `unpack_sprite_uv`.
+    fn decoded(sprite_uv: [f32; 2]) -> [f32; 2] {
+        packed(sprite_uv)
+            .sprite_uv_fixed()
+            .map(|x| f32::from(x) / TERRAIN_UV_FIXED_SCALE)
     }
 
     #[test]
-    fn packed_greedy_uv_preserves_integer_repeat_boundaries_exactly() {
-        for uv in 0..=16 {
-            let decoded = unpack_sprite_uv(pack_sprite_uv(uv as f32));
-            assert_eq!(decoded, uv as f32);
+    fn sprite_edges_round_trip_exactly() {
+        for uv in [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]] {
+            assert_eq!(decoded(uv), uv);
         }
     }
 
     #[test]
-    fn packed_greedy_uv_keeps_fractional_precision() {
-        for uv in [0.25_f32, 1.25, 8.5, 15.75] {
-            let decoded = unpack_sprite_uv(pack_sprite_uv(uv));
-            assert!((decoded - uv).abs() <= 0.5 / 4095.0, "uv {uv} -> {decoded}");
+    fn fractions_keep_their_precision() {
+        const HALF_STEP: f32 = 0.5 / TERRAIN_UV_FIXED_SCALE + f32::EPSILON;
+        for uv in [[0.25_f32, 0.75], [0.5, 0.0625], [0.3, 0.9]] {
+            let [u, v] = decoded(uv);
+            assert!((u - uv[0]).abs() <= HALF_STEP, "{uv:?} -> {u}");
+            assert!((v - uv[1]).abs() <= HALF_STEP, "{uv:?} -> {v}");
         }
     }
 
     #[test]
-    fn adjacent_blocks_wrap_to_the_same_sprite_position() {
-        let a = unpack_sprite_uv(pack_sprite_uv(0.25));
-        let b = unpack_sprite_uv(pack_sprite_uv(1.25));
-        assert!((wrapped(a) - wrapped(b)).abs() <= 1.0 / 4095.0);
+    fn uvs_outside_one_sprite_clamp() {
+        assert_eq!(decoded([-0.5, 1.5]), [0.0, 1.0]);
+    }
+
+    #[test]
+    fn u_packs_low_v_above_and_the_top_byte_stays_free() {
+        assert_eq!(size_of::<PackedVertex>(), 16);
+        assert_eq!(packed([1.0, 0.0]).uv, 0x0000_0FFF);
+        assert_eq!(packed([0.0, 1.0]).uv, 0x00FF_F000);
+        assert_eq!(packed([1.0, 1.0]).uv >> 24, 0);
     }
 }
 

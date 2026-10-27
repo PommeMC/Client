@@ -5,6 +5,13 @@ use std::path::Path;
 // shaders via the generated packing.glsl.
 include!("src/renderer/chunk/packing_consts.rs");
 
+/// `PackedVertex::uv` back to a sprite-local UV, for `packing.glsl`.
+const UNPACK_SPRITE_UV: &str = "vec2 unpack_sprite_uv(uint uv) {
+    uint mask = (1u << TERRAIN_UV_BITS) - 1u;
+    return vec2(uv & mask, (uv >> TERRAIN_UV_BITS) & mask) / TERRAIN_UV_FIXED_SCALE;
+}
+";
+
 fn main() {
     // `mobile` covers what Android and iOS share: touch, the soft keyboard,
     // no launcher.
@@ -40,7 +47,7 @@ fn main() {
     fs::write(
         Path::new(&out_dir).join("packing.glsl"),
         format!(
-            "const float POS_RANGE = {POS_RANGE:?};\nconst float POS_BIAS = {POS_BIAS:?};\nconst float TERRAIN_UV_FIXED_SCALE = {TERRAIN_UV_FIXED_SCALE:?};\n"
+            "const float POS_RANGE = {POS_RANGE:?};\nconst float POS_BIAS = {POS_BIAS:?};\nconst float TERRAIN_UV_FIXED_SCALE = {TERRAIN_UV_FIXED_SCALE:?};\nconst uint TERRAIN_UV_BITS = {TERRAIN_UV_BITS}u;\n{UNPACK_SPRITE_UV}"
         ),
     )
     .expect("failed to write packing.glsl");

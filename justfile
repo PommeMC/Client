@@ -34,6 +34,11 @@ client-release *args: openal
 bench *args:
     @cargo run --release -p pomme-client --features cpu-bench -- --cpu-bench {{ args }}
 
+# An order-independent hash of the mesher's output per bench scene, to prove
+# a mesher or vertex-format refactor leaves it unchanged.
+mesh-hash *args:
+    @cargo run --release -p pomme-client --features cpu-bench -- --mesh-hash {{ args }}
+
 # The chunk-load benchmark, headless: render distance `rd` (16 by default) in a
 # fixed-seed bench world, or in a quick-play world or server passed after the
 # distance, e.g. `just chunk-bench 16 --quick-access-multiplayer dev.pomme.rs`.

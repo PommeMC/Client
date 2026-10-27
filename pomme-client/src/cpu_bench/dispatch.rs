@@ -1,17 +1,11 @@
 //! Meshing a load's worth of columns through the worker queue, from publish
 //! to the last result, per scene.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use criterion::Criterion;
 
 use super::fixtures::{Assets, EYE, Scene, build_world_within, columns_within};
 use crate::position::ChunkPos;
-use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::mesher::MeshRequest;
-use crate::world::block::model::CardinalLightType;
-use crate::world::block::render_assets::OwnedBlockRenderView;
 
 /// Columns meshed per iteration: every one within this radius, each with its
 /// full neighbourhood loaded.
@@ -22,12 +16,7 @@ pub fn bench(c: &mut Criterion, assets: &Assets) {
     group.sample_size(10);
     for scene in Scene::ALL {
         let store = build_world_within(scene, assets.block_state_table, RADIUS + 1);
-        let mut dispatcher = assets.mesh.create_mesh_dispatcher(
-            OwnedBlockRenderView::new(assets.mesh.render_assets.clone(), assets.block_state_table),
-            Arc::new(HashMap::new()),
-            None,
-            CardinalLightType::Default,
-        );
+        let mut dispatcher = assets.mesh_dispatcher();
         let columns: Vec<ChunkPos> = columns_within(RADIUS).collect();
         let sections = 0..store.section_count();
         // Generations only rise, so every iteration's jobs are fresh.

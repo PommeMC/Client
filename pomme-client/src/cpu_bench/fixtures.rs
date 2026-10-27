@@ -1,14 +1,20 @@
 //! Bench inputs: block render assets and atlas UV map loaded from the version's
 //! assets on disk (CPU-only), and deterministic synthetic worlds.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use azalea_block::BlockState;
 use glam::DVec3;
 
 use crate::assets::AssetIndex;
 use crate::dirs::DataDirs;
 use crate::position::ChunkPos;
-use crate::renderer::chunk::mesh_source::CpuMeshAssets;
+use crate::renderer::chunk::mesh_source::{CpuMeshAssets, MeshSource};
+use crate::renderer::chunk::mesher::MeshDispatcher;
 use crate::world::block::BlockStateTable;
+use crate::world::block::model::CardinalLightType;
+use crate::world::block::render_assets::OwnedBlockRenderView;
 use crate::world::chunk::{Chunk, ChunkLightData, ChunkStore};
 use crate::world::light::DataLayer;
 
@@ -35,6 +41,16 @@ impl Assets {
             mesh: CpuMeshAssets::load(&dirs.jar_assets_dir, asset_index),
             block_state_table,
         })
+    }
+
+    /// An overworld dispatcher with no biome climates or resource packs.
+    pub fn mesh_dispatcher(&self) -> MeshDispatcher {
+        self.mesh.create_mesh_dispatcher(
+            OwnedBlockRenderView::new(self.mesh.render_assets.clone(), self.block_state_table),
+            Arc::new(HashMap::new()),
+            None,
+            CardinalLightType::Default,
+        )
     }
 }
 

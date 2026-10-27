@@ -109,10 +109,13 @@ pub fn run(args: LaunchArgs, platform: Platform) {
 
     // Ahead of the launch-token guard, which bench builds have no launcher for.
     #[cfg(feature = "cpu-bench")]
-    if let Some(filter) = &args.cpu_bench {
+    if args.cpu_bench.is_some() || args.mesh_hash {
         let version = args.version.as_deref().unwrap_or(NATIVE.name);
         let data_dirs = args.data_dirs(version);
-        std::process::exit(cpu_bench::run(version, &data_dirs, filter.as_deref()));
+        std::process::exit(match &args.cpu_bench {
+            Some(filter) => cpu_bench::run(version, &data_dirs, filter.as_deref()),
+            None => cpu_bench::mesh_hash(version, &data_dirs),
+        });
     }
 
     update::clean_up();

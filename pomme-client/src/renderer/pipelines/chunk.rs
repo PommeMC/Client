@@ -4,7 +4,7 @@ use crate::renderer::chunk::buffer::CHUNK_VERTEX_BUFFERS;
 use crate::renderer::{rhi, shader, util};
 
 /// Set 1: the atlas, its sampler and the sprite-rectangle buffer the fragment
-/// shaders wrap greedy UVs with.
+/// shaders resolve sprite UVs with.
 const ATLAS_LAYOUT: &[rhi::BindGroupLayoutEntry] = &[
     util::FRAGMENT_TEXTURE[0],
     util::FRAGMENT_TEXTURE[1],

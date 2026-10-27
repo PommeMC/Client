@@ -503,7 +503,6 @@ pub enum VertexFormat {
     Uint32,
     Sint16x2,
     Uint16,
-    Uint16x2,
     Unorm16,
     Unorm16x2,
     Uint8x2,
@@ -518,7 +517,6 @@ impl VertexFormat {
             Self::Float32
             | Self::Uint32
             | Self::Sint16x2
-            | Self::Uint16x2
             | Self::Unorm16x2
             | Self::Unorm8x4
             | Self::Snorm8x4 => 4,
