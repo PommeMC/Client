@@ -98,6 +98,41 @@ wait_ms = 1500
 [[step]]
 screenshot = "torch"
 
+# Along the back wall: multipart full cubes, an emissive block, light-giving
+# blocks and partial faces, which vanilla's lighter treats each its own way.
+[[step]]
+chat = "/setblock 59 -60 59 minecraft:red_mushroom_block"
+
+[[step]]
+chat = "/setblock 60 -60 59 minecraft:mushroom_stem"
+
+[[step]]
+chat = "/setblock 62 -60 59 minecraft:chiseled_bookshelf"
+
+[[step]]
+chat = "/setblock 63 -60 59 minecraft:magma_block"
+
+[[step]]
+chat = "/setblock 59 -59 59 minecraft:glowstone"
+
+[[step]]
+chat = "/setblock 63 -59 59 minecraft:sea_lantern"
+
+[[step]]
+chat = "/setblock 60 -60 57 minecraft:stone_slab"
+
+[[step]]
+chat = "/setblock 62 -60 57 minecraft:stone_stairs"
+
+[[step]]
+expect = { block = "stone_stairs", at = [62, -60, 57] }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+screenshot = "lit_blocks"
+
 [[step]]
 chat = "/fill 58 -60 54 64 -56 60 minecraft:air"
 

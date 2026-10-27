@@ -218,7 +218,10 @@ fn spawn_events(
         .get_index(spawn.dimension_type as usize)
     {
         Some((_, dim)) => {
-            send_ordered(event_tx, dimension_info(dim, registry_holder));
+            send_ordered(
+                event_tx,
+                dimension_info(dim, &spawn.dimension, registry_holder),
+            );
         }
         None => tracing::error!("Unknown dimension_type {}", spawn.dimension_type),
     }
@@ -244,7 +247,11 @@ fn spawn_events(
 /// Dimension info from a login/respawn registry entry. Fields that azalea does
 /// not model directly live in its flattened extras. Missing `has_skylight`
 /// defaults to true; missing `cardinal_light` defaults to vanilla's `default`.
-fn dimension_info(dim: &DimensionKindElement, registries: &RegistryHolder) -> NetworkEvent {
+fn dimension_info(
+    dim: &DimensionKindElement,
+    dimension: &str,
+    registries: &RegistryHolder,
+) -> NetworkEvent {
     let string = |key: &str| {
         dim._extra
             .get(key)
@@ -258,8 +265,9 @@ fn dimension_info(dim: &DimensionKindElement, registries: &RegistryHolder) -> Ne
             .map(|b| b != 0)
     };
     let has_skylight = flag("has_skylight").unwrap_or(true);
-    // Vanilla `Level.canHaveWeather`; the end has no sky light.
-    let has_weather = has_skylight && !flag("has_ceiling").unwrap_or(false);
+    // Vanilla `Level.canHaveWeather`, which names the end.
+    let has_weather =
+        has_skylight && !flag("has_ceiling").unwrap_or(false) && dimension != "minecraft:the_end";
     NetworkEvent::DimensionInfo(DimensionInfo {
         height: dim.height,
         min_y: dim.min_y,
@@ -384,6 +392,7 @@ mod tests {
                     NbtTag::String("minecraft:overworld".into()),
                 ),
             ]),
+            "minecraft:overworld",
             &RegistryHolder::default(),
         )
         else {
@@ -405,7 +414,11 @@ mod tests {
             overworld_day,
             default_clock,
             ..
-        }) = dimension_info(&dimension(&[]), &RegistryHolder::default())
+        }) = dimension_info(
+            &dimension(&[]),
+            "minecraft:overworld",
+            &RegistryHolder::default(),
+        )
         else {
             panic!("dimension_info returned the wrong event variant");
         };

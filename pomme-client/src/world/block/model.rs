@@ -75,6 +75,7 @@ struct ModelFile {
     #[serde(default)]
     display: HashMap<String, serde_json::Value>,
     gui_light: Option<GuiLight>,
+    ambientocclusion: Option<bool>,
 }
 
 #[derive(Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,6 +188,8 @@ struct ElementDef {
     faces: HashMap<String, FaceDef>,
     #[serde(default = "default_true")]
     shade: bool,
+    #[serde(default)]
+    light_emission: u8,
 }
 
 fn default_true() -> bool {
@@ -492,6 +495,10 @@ pub struct BakedQuad {
     pub shade_light: f32,
     /// The face terrain shades this quad as, `None` for `shade: false`.
     pub shade_face: Option<Direction>,
+    /// The element's `light_emission`, 0..15.
+    pub emission: u8,
+    /// The model's `ambientocclusion`, which smooth lighting needs.
+    pub ambient_occlusion: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1228,6 +1235,8 @@ fn add_chest_cube(
             tint_index: None,
             shade_light: spec.shade,
             shade_face: None,
+            emission: 0,
+            ambient_occlusion: true,
         });
     }
 }
@@ -1669,6 +1678,9 @@ fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<ModelRef> {
 struct ResolvedModel {
     textures: HashMap<String, String>,
     elements: Vec<ElementDef>,
+    /// Vanilla `BlockModel.getAmbientOcclusion`: the nearest model in the
+    /// parent chain that sets it, else true.
+    ambient_occlusion: bool,
     gui_transform: DisplayTransform,
     gui_light: GuiLight,
     ground_transform: Mat4,
@@ -1686,6 +1698,7 @@ fn resolve_model(
     let mut gui_transform: Option<DisplayTransform> = None;
     let mut gui_light: Option<GuiLight> = None;
     let mut ground_transform: Option<Mat4> = None;
+    let mut ambient_occlusion: Option<bool> = None;
     let mut current_id = model_id.to_string();
 
     for _ in 0..20 {
@@ -1710,6 +1723,9 @@ fn resolve_model(
         if gui_light.is_none() {
             gui_light = model.gui_light;
         }
+        if ambient_occlusion.is_none() {
+            ambient_occlusion = model.ambientocclusion;
+        }
         if ground_transform.is_none()
             && let Some(transform) = model
                 .display
@@ -1733,6 +1749,7 @@ fn resolve_model(
     ResolvedModel {
         textures: resolved_textures,
         elements: elements.unwrap_or_default(),
+        ambient_occlusion: ambient_occlusion.unwrap_or(true),
         gui_transform: gui_transform.unwrap_or(DisplayTransform::IDENTITY),
         gui_light: gui_light.unwrap_or_default(),
         ground_transform: ground_transform.unwrap_or(Mat4::IDENTITY),
@@ -1902,6 +1919,8 @@ fn bake_resolved_model(
                     .and_then(|index| u32::try_from(index).ok()),
                 shade_light: shade_face.map_or(1.0, |face| face.shade_light()),
                 shade_face,
+                emission: element.light_emission,
+                ambient_occlusion: resolved.ambient_occlusion,
             });
         }
     }
@@ -2368,6 +2387,8 @@ mod tests {
             tint_index: None,
             shade_light: 0.25,
             shade_face: Some(Direction::Up),
+            emission: 0,
+            ambient_occlusion: true,
         };
         apply_gui_lambert(
             std::slice::from_mut(&mut quad),
@@ -2447,7 +2468,9 @@ mod tests {
                 rotation: None,
                 faces: HashMap::from([("west".to_string(), face)]),
                 shade: true,
+                light_emission: 0,
             }],
+            ambient_occlusion: true,
             gui_transform: DisplayTransform::IDENTITY,
             gui_light: GuiLight::Side,
             ground_transform: Mat4::IDENTITY,
@@ -2475,7 +2498,9 @@ mod tests {
                 rotation: None,
                 faces: HashMap::from([("south".to_string(), face)]),
                 shade: true,
+                light_emission: 0,
             }],
+            ambient_occlusion: true,
             gui_transform: DisplayTransform::IDENTITY,
             gui_light: GuiLight::default(),
             ground_transform: Mat4::IDENTITY,
@@ -2678,6 +2703,8 @@ mod tests {
                     tint_index: Some(0),
                     shade_light: 1.0,
                     shade_face: None,
+                    emission: 0,
+                    ambient_occlusion: true,
                 },
                 BakedQuad {
                     positions: [[0.0; 3]; 4],
@@ -2688,6 +2715,8 @@ mod tests {
                     tint_index: None,
                     shade_light: 1.0,
                     shade_face: None,
+                    emission: 0,
+                    ambient_occlusion: true,
                 },
             ],
             is_full_cube: false,

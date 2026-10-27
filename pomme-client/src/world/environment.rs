@@ -233,11 +233,17 @@ pub struct LightAttributes {
     pub ambient_light_color: Vec3,
 }
 
-/// `DimensionDefaults.NIGHT_SKY_LIGHT_COLOR`, which rain and thunder blend
-/// the sky light colour toward.
-const NIGHT_SKY_LIGHT_COLOR: Vec3 = Vec3::new(0.48, 0.48, 1.0);
-/// `DimensionDefaults.NIGHT_SKY_LIGHT_FACTOR`.
+/// `Timelines.NIGHT_SKY_LIGHT_FACTOR`, which rain and thunder blend the sky
+/// light factor toward.
 const NIGHT_SKY_LIGHT_FACTOR: f32 = 0.24;
+/// `WeatherAttributes`' rain and thunder layers: the sky light factor's blend
+/// alpha, then the colour's, which vanilla packs into an 8-bit ARGB alpha.
+const WEATHER_ALPHAS: [(f32, f32); 2] = [(0.3125, 79.0 / 255.0), (0.527_343_75, 134.0 / 255.0)];
+
+/// `Timelines.NIGHT_SKY_LIGHT_COLOR` (0.48, 0.48, 1.0), as its packed RGB.
+fn night_sky_light_color() -> Vec3 {
+    rgb_hex(0x7A7AFF)
+}
 
 /// A `0xRRGGBB` colour as 0..1 floats.
 pub fn rgb_hex(rgb: u32) -> Vec3 {
@@ -257,11 +263,13 @@ impl LightEnvironment {
         let mut sky_light_color = self.sky_light_color.resolve(Vec3::ONE, ticks);
         if self.has_weather {
             let rain_only = rain - thunder;
-            for (level, alpha) in [(rain_only, 0.3125), (thunder, 0.527_343_75)] {
+            for (level, (factor_alpha, color_alpha)) in
+                [rain_only, thunder].into_iter().zip(WEATHER_ALPHAS)
+            {
                 if level > 0.0 {
-                    let factor = sky_light_factor.lerp(NIGHT_SKY_LIGHT_FACTOR, alpha);
+                    let factor = sky_light_factor.lerp(NIGHT_SKY_LIGHT_FACTOR, factor_alpha);
                     sky_light_factor = sky_light_factor.lerp(factor, level);
-                    let color = sky_light_color.lerp(NIGHT_SKY_LIGHT_COLOR, alpha);
+                    let color = sky_light_color.lerp(night_sky_light_color(), color_alpha);
                     sky_light_color = sky_light_color.lerp(color, level);
                 }
             }
@@ -291,8 +299,8 @@ mod tests {
             keyframes: [(730, Vec3::ONE), (11270, Vec3::ONE)]
                 .into_iter()
                 .chain([
-                    (13140, NIGHT_SKY_LIGHT_COLOR),
-                    (22860, NIGHT_SKY_LIGHT_COLOR),
+                    (13140, night_sky_light_color()),
+                    (22860, night_sky_light_color()),
                 ])
                 .map(|(t, v)| (t, Argument::opaque(v)))
                 .collect(),
@@ -335,7 +343,7 @@ mod tests {
 
         let midnight = env.resolve(18000, 0.0, 0.0);
         assert_eq!(midnight.sky_light_factor, 0.24);
-        assert_eq!(midnight.sky_light_color, NIGHT_SKY_LIGHT_COLOR);
+        assert_eq!(midnight.sky_light_color, night_sky_light_color());
 
         let dusk = env.resolve(12205, 0.0, 0.0);
         assert!((dusk.sky_light_factor - 0.62).abs() < 1e-6);

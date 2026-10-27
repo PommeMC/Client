@@ -4,13 +4,12 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use azalea_block::BlockState;
 
+use super::block_lighter::{self, LightLevels, LightSource, VertexLight};
 use super::occlusion_graph::{VisibilitySet, compute_visibility};
 use crate::position::ChunkPos;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::renderer::rhi;
-use crate::world::block::model::{
-    BakedModel, CardinalLighting, Direction, face_positions, face_uvs,
-};
+use crate::world::block::model::{CardinalLighting, Direction, face_positions, face_uvs};
 use crate::world::block::render_assets::{BlockRenderView, OwnedBlockRenderView, Tint};
 use crate::world::block::{BlockStateData, BlockStateTable, FluidKind};
 use crate::world::chunk;
@@ -34,55 +33,6 @@ struct TerrainVertex {
     light: VertexLight,
     /// The quad's tint, as [`pack_tint_shifted`] packs it.
     tint: u32,
-}
-
-/// A terrain vertex's light, as vanilla's BLOCK vertex carries it: the colour
-/// factor (ambient occlusion × face shade) and the block and sky light
-/// coordinates, each 0..240 (`LightCoordsUtil.smoothPack`'s channels).
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct VertexLight {
-    shade: f32,
-    block: u8,
-    sky: u8,
-}
-
-impl VertexLight {
-    /// A flat-lit vertex: `levels` at face shade `shade`.
-    fn flat(shade: f32, levels: LightLevels) -> Self {
-        Self {
-            shade,
-            block: levels.block() * 16,
-            sky: levels.sky() * 16,
-        }
-    }
-
-    /// What the quad's diagonal balances.
-    fn brightness(self) -> f32 {
-        self.shade * f32::from(self.block.max(self.sky))
-    }
-}
-
-/// A block's sky and block light levels, packed `sky << 4 | block`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct LightLevels(u8);
-
-impl LightLevels {
-    fn new(sky: u8, block: u8) -> Self {
-        Self(sky << 4 | block)
-    }
-
-    fn block(self) -> u8 {
-        self.0 & 0xF
-    }
-
-    fn sky(self) -> u8 {
-        self.0 >> 4
-    }
-
-    /// Vanilla `LightCoordsUtil.max`: each channel's brighter level.
-    fn max(self, other: Self) -> Self {
-        Self::new(self.sky().max(other.sky()), self.block().max(other.block()))
-    }
 }
 
 impl ChunkVertex {
@@ -1505,6 +1455,17 @@ impl BlockSlice {
     }
 }
 
+impl LightSource for ChunkStoreSnapshot {
+    fn state_data(&self, [x, y, z]: [i32; 3]) -> &BlockStateData {
+        self.block_state_table
+            .block_state_data(self.get_block_state(x, y, z))
+    }
+
+    fn levels(&self, [x, y, z]: [i32; 3]) -> LightLevels {
+        self.get_light(x, y, z)
+    }
+}
+
 impl ChunkStoreSnapshot {
     /// Vanilla `BlockModelLighter`: an unshaded face takes the table's up
     /// value, which is the brightest in both tables.
@@ -1868,12 +1829,30 @@ fn emit_block_model(
     bz: i32,
 ) -> bool {
     if let Some(baked) = registry.get_baked_model(state) {
-        emit_baked_model(
-            sink, model_pos, state, baked, snapshot, registry, uv_map, bx, by, bz,
+        emit_quads(
+            sink,
+            model_pos,
+            state,
+            baked.quads.iter(),
+            snapshot,
+            registry,
+            uv_map,
+            bx,
+            by,
+            bz,
         );
     } else if let Some(quads) = registry.get_multipart_quads(state) {
-        emit_multipart(
-            sink, model_pos, state, &quads, snapshot, registry, uv_map, bx, by, bz,
+        emit_quads(
+            sink,
+            model_pos,
+            state,
+            quads.iter().copied(),
+            snapshot,
+            registry,
+            uv_map,
+            bx,
+            by,
+            bz,
         );
     } else if let Some(textures) = registry.get_textures(state) {
         emit_cube_faces(
@@ -1886,12 +1865,63 @@ fn emit_block_model(
     true
 }
 
+/// Vanilla `ModelBlockRenderer.tesselateBlock`'s choice: smooth lighting
+/// unless the block gives off light or its model (the first part, for a
+/// multipart) opts out of ambient occlusion.
+fn smooth_lighting(
+    snapshot: &ChunkStoreSnapshot,
+    state: BlockState,
+    ambient_occlusion: bool,
+) -> bool {
+    ambient_occlusion
+        && snapshot
+            .block_state_table
+            .block_state_data(state)
+            .light_props()
+            .emission
+            == 0
+}
+
+/// One quad's vertex light, through [`block_lighter`]: smooth, or flat from
+/// its culled neighbour ([`neighbour_light`]).
+fn quad_light(
+    snapshot: &ChunkStoreSnapshot,
+    smooth: bool,
+    [bx, by, bz]: [i32; 3],
+    positions: &[[f32; 3]; 4],
+    shade_face: Option<Direction>,
+    cullface: Option<Direction>,
+    emission: u8,
+) -> [VertexLight; 4] {
+    let quad = block_lighter::Quad {
+        positions,
+        direction: crate::world::block::model::direction_from_positions(positions)
+            .unwrap_or(Direction::Up),
+        shade_face,
+        emission,
+    };
+    let shade = |face| snapshot.shade(face);
+    if smooth {
+        return block_lighter::ambient_occlusion(snapshot, shade, [bx, by, bz], &quad);
+    }
+    let culled = cullface.map(|dir| neighbour_light(snapshot, [bx, by, bz], dir));
+    block_lighter::flat(snapshot, shade, [bx, by, bz], &quad, culled)
+}
+
+/// The light a flat face toward `dir` takes: its neighbour's levels, read
+/// with the block's own state, as vanilla's `tesselateFlat` does.
+fn neighbour_light(snapshot: &ChunkStoreSnapshot, pos: [i32; 3], dir: Direction) -> LightLevels {
+    let at = block_lighter::offset(pos, dir.offset());
+    block_lighter::light_coords_of(snapshot.state_data(pos), snapshot, at)
+}
+
+/// A baked model's or multipart's quads, culled against their neighbours.
 #[allow(clippy::too_many_arguments)]
-fn emit_baked_model(
+fn emit_quads<'q>(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
     state: azalea_block::BlockState,
-    model: &BakedModel,
+    quads: impl Iterator<Item = &'q crate::world::block::model::BakedQuad> + Clone,
     snapshot: &ChunkStoreSnapshot,
     registry: BlockRenderView<'_>,
     uv_map: &AtlasUVMap,
@@ -1899,7 +1929,12 @@ fn emit_baked_model(
     by: i32,
     bz: i32,
 ) {
-    for quad in &model.quads {
+    let first_ao = quads
+        .clone()
+        .next()
+        .is_some_and(|quad| quad.ambient_occlusion);
+    let smooth = smooth_lighting(snapshot, state, first_ao);
+    for quad in quads {
         if let Some(cullface) = quad.cullface {
             let offset = cullface.offset();
             let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
@@ -1910,11 +1945,15 @@ fn emit_baked_model(
 
         let region = uv_map.region(quad.texture);
         let tint = tint_color(quad.tint, snapshot, state, bx, by, bz);
-        let lights = if let Some(dir) = quad.cullface {
-            compute_face_ao(snapshot, registry, bx, by, bz, dir, quad.shade_face)
-        } else {
-            unculled_quad_light(snapshot, quad, bx, by, bz)
-        };
+        let lights = quad_light(
+            snapshot,
+            smooth,
+            [bx, by, bz],
+            &quad.positions,
+            quad.shade_face,
+            quad.cullface,
+            quad.emission,
+        );
         emit_face(
             sink,
             block_pos,
@@ -1941,6 +1980,7 @@ fn emit_cube_faces(
     bz: i32,
 ) {
     let tint = tint_color(textures.tint, snapshot, state, bx, by, bz);
+    let smooth = smooth_lighting(snapshot, state, true);
 
     for (i, dir) in CUBE_FACE_DIRS.iter().enumerate() {
         let offset = dir.offset();
@@ -1959,7 +1999,15 @@ fn emit_cube_faces(
         };
         let region = uv_map.get_region(face_tex);
         let (positions, uvs) = cube_face_geometry(*dir);
-        let lights = compute_face_ao(snapshot, registry, bx, by, bz, *dir, Some(*dir));
+        let lights = quad_light(
+            snapshot,
+            smooth,
+            [bx, by, bz],
+            &positions,
+            Some(*dir),
+            Some(*dir),
+            0,
+        );
 
         let is_side = i >= 2;
         if let Some(overlay) = textures.side_overlay.as_deref().filter(|_| is_side) {
@@ -2203,9 +2251,8 @@ fn emit_fluid(
     let (region, tint) =
         block_face_tex_tint(state, Direction::Up, uv_map, snapshot, registry, bx, by, bz);
     // TODO: vanilla `FluidRenderer`'s per-face light positions.
-    let fluid_light = snapshot
-        .get_light(bx, by, bz)
-        .max(snapshot.get_light(bx, by + 1, bz));
+    let fluid_light = block_lighter::light_coords(snapshot, [bx, by, bz])
+        .max(block_lighter::light_coords(snapshot, [bx, by + 1, bz]));
 
     // Water is translucent (separate blended pass); lava is opaque.
     let MeshSink {
@@ -2333,42 +2380,6 @@ fn emit_fluid(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn emit_multipart(
-    sink: &mut MeshSink,
-    block_pos: [f32; 3],
-    state: azalea_block::BlockState,
-    quads: &[&crate::world::block::model::BakedQuad],
-    snapshot: &ChunkStoreSnapshot,
-    registry: BlockRenderView<'_>,
-    uv_map: &AtlasUVMap,
-    bx: i32,
-    by: i32,
-    bz: i32,
-) {
-    for quad in quads {
-        if let Some(cullface) = quad.cullface {
-            let offset = cullface.offset();
-            let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
-            if registry.occludes_neighbor(neighbor) {
-                continue;
-            }
-        }
-
-        let region = uv_map.region(quad.texture);
-        let tint = tint_color(quad.tint, snapshot, state, bx, by, bz);
-        emit_face(
-            sink,
-            block_pos,
-            &quad.positions,
-            &quad.uvs,
-            unculled_quad_light(snapshot, quad, bx, by, bz),
-            region,
-            tint,
-        );
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 fn emit_lod_cube(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
@@ -2424,7 +2435,11 @@ fn emit_lod_cube(
         let (positions, uvs) = cube_face_geometry(*dir);
         let light = VertexLight::flat(
             snapshot.cardinal_lighting.by_face(*dir),
-            snapshot.get_light(nx, ny, nz),
+            block_lighter::light_coords_of(
+                snapshot.state_data([bx, by, bz]),
+                snapshot,
+                [nx, ny, nz],
+            ),
         );
         let s = step as f32;
         let sy = if is_fluid { fluid_top } else { s };
@@ -2477,7 +2492,7 @@ fn emit_missing_cube(
         let (positions, uvs) = cube_face_geometry(*dir);
         let light = VertexLight::flat(
             snapshot.cardinal_lighting.by_face(*dir),
-            snapshot.get_light(bx + offset[0], by + offset[1], bz + offset[2]),
+            neighbour_light(snapshot, [bx, by, bz], *dir),
         );
         let base = sink.vertices.len() as u32;
         for (pos, uv) in positions.iter().zip(uvs) {
@@ -2565,155 +2580,6 @@ fn emit_face_into(
     } else {
         indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
     }
-}
-
-fn shade_brightness(state: azalea_block::BlockState, registry: BlockRenderView<'_>) -> f32 {
-    // TODO: non-occluding full cubes (leaves, glass, ice) still darken adjacent
-    // faces here. Vanilla's are `isViewBlocking=never` and don't contribute AO.
-    if registry.is_opaque_full_cube(state) {
-        0.2
-    } else {
-        1.0
-    }
-}
-
-/// Centre-relative offset of vanilla's `AdjacencyInfo.corners[0]` neighbour
-/// (`centre + dir + corners[0]`), the `shade0` occlusion fallback.
-fn corners0_offset(dir: Direction) -> [i32; 3] {
-    match dir {
-        // corners[0] = EAST(+x)
-        Direction::Up => [1, 1, 0],
-        // corners[0] = WEST(-x)
-        Direction::Down => [-1, -1, 0],
-        // corners[0] = UP(+y)
-        Direction::North => [0, 1, -1],
-        // corners[0] = WEST(-x)
-        Direction::South => [-1, 0, 1],
-        // corners[0] = UP(+y)
-        Direction::West => [-1, 1, 0],
-        // corners[0] = DOWN(-y)
-        Direction::East => [1, -1, 0],
-    }
-}
-
-/// A quad without a cullface, lit flat by the block's own light.
-/// TODO: vanilla's flat and partial-face rules (`BlockModelLighter`).
-fn unculled_quad_light(
-    snapshot: &ChunkStoreSnapshot,
-    quad: &crate::world::block::model::BakedQuad,
-    bx: i32,
-    by: i32,
-    bz: i32,
-) -> [VertexLight; 4] {
-    [VertexLight::flat(
-        snapshot.shade(quad.shade_face),
-        snapshot.get_light(bx, by, bz),
-    ); 4]
-}
-
-/// Per-vertex light of `dir`'s face: ambient occlusion times the face's
-/// cardinal shade, where `shade_face` is `None` for a model element with
-/// `shade: false`, and each light channel averaged over the vertex's four
-/// samples.
-/// TODO: vanilla's `smoothBlend` (dark samples take the centre's light).
-#[allow(clippy::too_many_arguments)]
-fn compute_face_ao(
-    snapshot: &ChunkStoreSnapshot,
-    registry: BlockRenderView<'_>,
-    bx: i32,
-    by: i32,
-    bz: i32,
-    dir: Direction,
-    shade_face: Option<Direction>,
-) -> [VertexLight; 4] {
-    // Every sample lies in the face's 3×3 neighbour plane (`n` plus in-plane
-    // offsets), so read each of its cells once.
-    let n = dir.offset();
-    let normal_axis = n.iter().position(|&c| c != 0).expect("unit offset");
-    let [a, b] = match normal_axis {
-        0 => [1, 2],
-        1 => [0, 2],
-        _ => [0, 1],
-    };
-    let cell = |o: [i32; 3]| ((o[a] + 1) * 3 + o[b] + 1) as usize;
-    let offset = |i: usize| {
-        let mut o = n;
-        o[a] = i as i32 / 3 - 1;
-        o[b] = i as i32 % 3 - 1;
-        o
-    };
-    let at = |[dx, dy, dz]: [i32; 3]| [bx + dx, by + dy, bz + dz];
-    let shades: [f32; 9] = std::array::from_fn(|i| {
-        let [x, y, z] = at(offset(i));
-        // The centre (`n` itself) never feeds AO.
-        if i == 4 {
-            1.0
-        } else {
-            shade_brightness(snapshot.get_block_state(x, y, z), registry)
-        }
-    });
-    let lights: [LightLevels; 9] = std::array::from_fn(|i| {
-        let [x, y, z] = at(offset(i));
-        snapshot.get_light(x, y, z)
-    });
-    let s = |o: [i32; 3]| shades[cell(o)];
-    let l = |o: [i32; 3]| lights[cell(o)];
-
-    let shade0 = s(corners0_offset(dir));
-
-    // Each vertex's (side1, side2, corner) neighbour offsets, in
-    // `face_positions`' vertex order.
-    let rows: [[[i32; 3]; 3]; 4] = match dir {
-        Direction::Up => [
-            [[0, 1, -1], [-1, 1, 0], [-1, 1, -1]],
-            [[0, 1, 1], [-1, 1, 0], [-1, 1, 1]],
-            [[0, 1, 1], [1, 1, 0], [1, 1, 1]],
-            [[0, 1, -1], [1, 1, 0], [1, 1, -1]],
-        ],
-        Direction::Down => [
-            [[0, -1, 1], [-1, -1, 0], [-1, -1, 1]],
-            [[0, -1, -1], [-1, -1, 0], [-1, -1, -1]],
-            [[0, -1, -1], [1, -1, 0], [1, -1, -1]],
-            [[0, -1, 1], [1, -1, 0], [1, -1, 1]],
-        ],
-        Direction::North => [
-            [[1, 0, -1], [0, 1, -1], [1, 1, -1]],
-            [[1, 0, -1], [0, -1, -1], [1, -1, -1]],
-            [[-1, 0, -1], [0, -1, -1], [-1, -1, -1]],
-            [[-1, 0, -1], [0, 1, -1], [-1, 1, -1]],
-        ],
-        Direction::South => [
-            [[-1, 0, 1], [0, 1, 1], [-1, 1, 1]],
-            [[-1, 0, 1], [0, -1, 1], [-1, -1, 1]],
-            [[1, 0, 1], [0, -1, 1], [1, -1, 1]],
-            [[1, 0, 1], [0, 1, 1], [1, 1, 1]],
-        ],
-        Direction::West => [
-            [[-1, 0, -1], [-1, 1, 0], [-1, 1, -1]],
-            [[-1, 0, -1], [-1, -1, 0], [-1, -1, -1]],
-            [[-1, 0, 1], [-1, -1, 0], [-1, -1, 1]],
-            [[-1, 0, 1], [-1, 1, 0], [-1, 1, 1]],
-        ],
-        Direction::East => [
-            [[1, 0, 1], [1, 1, 0], [1, 1, 1]],
-            [[1, 0, 1], [1, -1, 0], [1, -1, 1]],
-            [[1, 0, -1], [1, -1, 0], [1, -1, -1]],
-            [[1, 0, -1], [1, 1, 0], [1, 1, -1]],
-        ],
-    };
-
-    let dir_shade = snapshot.shade(shade_face);
-    rows.map(|[side1, side2, corner]| {
-        let ao = super::block_ao::vertex_brightness(s(side1), s(side2), s(corner), shade0);
-        let samples = [l(n), l(side1), l(side2), l(corner)];
-        // Four 0..15 levels, each ×16 and averaged.
-        let smooth = |level: fn(LightLevels) -> u8| samples.into_iter().map(level).sum::<u8>() * 4;
-        VertexLight {
-            shade: ao * dir_shade,
-            block: smooth(LightLevels::block),
-            sky: smooth(LightLevels::sky),
-        }
-    })
 }
 
 pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4]) {
