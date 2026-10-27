@@ -740,7 +740,7 @@ async fn config_sequence(
 }
 
 /// The synced biome registry, in protocol-id order.
-fn biome_registry(
+pub(super) fn biome_registry(
     holder: &azalea_core::registry_holder::RegistryHolder,
 ) -> Option<&azalea_core::registry_holder::RegistryType<simdnbt::owned::NbtCompound>> {
     holder

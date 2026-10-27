@@ -238,15 +238,29 @@ fn track<T: WireValue>(attribute: EnvAttribute, entry: &NbtCompound) -> Option<T
     })
 }
 
-/// One attribute's dimension modifier and timeline tracks.
+/// An `EnvironmentAttributeMap`'s modifier for `attribute`.
+fn map_modifier<T: WireValue>(
+    attribute: EnvAttribute,
+    map: Option<&NbtCompound>,
+) -> Option<Modifier<T>> {
+    dimension_modifier(attribute, map?.get(attribute.id())?)
+}
+
+/// One attribute's dimension modifier, biome modifiers and timeline tracks.
 fn layers<T: WireValue>(
     attribute: EnvAttribute,
     attributes: Option<&NbtCompound>,
+    biomes: &[Option<&NbtCompound>],
     timelines: &[&NbtCompound],
 ) -> AttributeLayers<T> {
-    let dimension = attributes
-        .and_then(|map| map.get(attribute.id()))
-        .and_then(|tag| dimension_modifier(attribute, tag));
+    let dimension = map_modifier(attribute, attributes);
+    let mut biome_modifiers: Vec<_> = biomes
+        .iter()
+        .map(|&map| map_modifier(attribute, map))
+        .collect();
+    if biome_modifiers.iter().all(Option::is_none) {
+        biome_modifiers.clear();
+    }
     let tracks = timelines
         .iter()
         .filter_map(|timeline| {
@@ -258,7 +272,11 @@ fn layers<T: WireValue>(
             Some((track(attribute, entry)?, period))
         })
         .collect();
-    AttributeLayers { dimension, tracks }
+    AttributeLayers {
+        dimension,
+        biomes: biome_modifiers,
+        tracks,
+    }
 }
 
 /// The dimension type's attribute layers. `timelines` must already be a list
@@ -274,9 +292,19 @@ pub(super) fn environment(
         .iter()
         .filter_map(|id| timeline_registry?.map.get(&Identifier::new(id)))
         .collect();
-    let rgb = |attribute| layers::<Vec3>(attribute, attributes, &timelines);
-    let argb = |attribute| layers::<Vec4>(attribute, attributes, &timelines);
-    let float = |attribute| layers::<f32>(attribute, attributes, &timelines);
+    let biome_registry = super::connection::biome_registry(registries);
+    let biomes: Vec<Option<&NbtCompound>> = biome_registry
+        .map(|registry| {
+            registry
+                .map
+                .values()
+                .map(|biome| biome.compound("attributes"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let rgb = |attribute| layers::<Vec3>(attribute, attributes, &biomes, &timelines);
+    let argb = |attribute| layers::<Vec4>(attribute, attributes, &biomes, &timelines);
+    let float = |attribute| layers::<f32>(attribute, attributes, &biomes, &timelines);
     let mut moon_phase = float(EnvAttribute::MoonPhase);
     // An enum's keyframes step (`AttributeType.ofNotInterpolated`).
     for (track, _) in &mut moon_phase.tracks {
@@ -313,6 +341,13 @@ pub(super) fn environment(
             Some("end") => Skybox::End,
             _ => Skybox::Overworld,
         },
+        plains: biome_registry
+            .and_then(|registry| {
+                registry
+                    .map
+                    .get_index_of(&Identifier::new("minecraft:plains"))
+            })
+            .unwrap_or_default() as u32,
     }
 }
 

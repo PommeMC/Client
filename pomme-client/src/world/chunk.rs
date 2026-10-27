@@ -692,6 +692,16 @@ impl ChunkStore {
             .unwrap_or(self.min_y())
     }
 
+    /// The biome at a quart (4-block) cell, vanilla `getNoiseBiomeAtQuart`:
+    /// its height clamped into the column, `None` while its chunk isn't
+    /// loaded.
+    pub fn noise_biome(&self, qx: i32, qy: i32, qz: i32) -> Option<u32> {
+        let (x, z) = (qx * 4, qz * 4);
+        let y = (qy * 4).clamp(self.min_y, self.min_y + self.height() as i32 - 1);
+        let chunk = self.get_chunk(&ChunkPos::new(x.div_euclid(16), z.div_euclid(16)))?;
+        chunk.read().biome(x, y, z, self.min_y)
+    }
+
     /// Registry id of the biome at a block position (matches the mesher's biome
     /// lookup). Returns 0 when the chunk is missing.
     pub fn biome_id(&self, x: i32, y: i32, z: i32) -> u32 {

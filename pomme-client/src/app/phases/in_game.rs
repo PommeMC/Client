@@ -277,6 +277,8 @@ pub struct GameState {
     /// attributes they resolve to each tick.
     pub environment: crate::world::environment::Environment,
     pub environment_probe: crate::world::environment::EnvironmentProbe,
+    /// The biomes around the camera, as of the latest tick.
+    pub biome_weights: crate::world::environment::BiomeWeights,
     /// Vanilla `LightmapRenderStateExtractor.blockLightFlicker`.
     pub block_light_flicker: f32,
     /// Set by the test harness's `deterministic` step.
@@ -398,11 +400,26 @@ impl GameState {
         self.environment_probe.current().sky_darken()
     }
 
-    /// The environment attributes at the current clock and weather.
+    /// The environment attributes at the current clock, biomes and weather.
     pub fn resolve_environment(&self) -> crate::world::environment::EnvAttributes {
         let sky = &self.sky_state;
-        self.environment
-            .resolve(sky.day_time as i64, sky.rain(), sky.thunder())
+        self.environment.resolve(
+            sky.day_time as i64,
+            &self.biome_weights,
+            sky.rain(),
+            sky.thunder(),
+        )
+    }
+
+    /// Vanilla `EnvironmentAttributeProbe.tick`'s biome sampling around the
+    /// camera, in quart cells.
+    fn sample_biomes(&mut self, camera: glam::DVec3) {
+        let plains = self.environment.plains;
+        let chunks = &self.chunk_store;
+        self.biome_weights =
+            crate::world::environment::BiomeWeights::sample(camera * 0.25, |x, y, z| {
+                chunks.noise_biome(x, y, z).unwrap_or(plains)
+            });
     }
 
     /// Notes a played sound for the harness, keeping the last 64.
@@ -561,6 +578,7 @@ impl GameState {
             clocks: Default::default(),
             environment: Default::default(),
             environment_probe: Default::default(),
+            biome_weights: Default::default(),
             block_light_flicker: 0.0,
             deterministic: false,
             game_mode_switcher: None,
@@ -2323,6 +2341,7 @@ pub fn update_game(
         game.sky_state.game_time = game.sky_state.game_time.wrapping_add(1);
         game.clocks.tick(game.sky_state.game_time);
         game.sync_day_time();
+        game.sample_biomes(gfx.renderer.camera_render_position());
         game.environment_probe.tick(game.resolve_environment());
         core.time_tick_accumulator -= TICK_RATE;
     }
