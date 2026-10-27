@@ -11,7 +11,7 @@ use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 
 use crate::world::environment::{
     Argument, AttributeLayers, AttributeValue, Ease, EnvAttribute, Environment, Modifier,
-    ModifierOp, Track,
+    ModifierOp, Skybox, Track,
 };
 
 pub(super) const TIMELINE_REGISTRY: &str = "minecraft:timeline";
@@ -303,7 +303,20 @@ pub(super) fn environment(
         star_angle: float(EnvAttribute::StarAngle),
         moon_phase,
         sky_light_level: float(EnvAttribute::SkyLightLevel),
+        fog_start_distance: float(EnvAttribute::FogStartDistance),
+        fog_end_distance: float(EnvAttribute::FogEndDistance),
+        sky_fog_end_distance: float(EnvAttribute::SkyFogEndDistance),
         has_weather,
+        skybox: match extra
+            .get("skybox")
+            .and_then(NbtTag::string)
+            .map(|name| name.to_str())
+            .as_deref()
+        {
+            Some("none") => Skybox::None,
+            Some("end") => Skybox::End,
+            _ => Skybox::Overworld,
+        },
     }
 }
 

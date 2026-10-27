@@ -219,7 +219,7 @@ fn spawn_events(
         Some((_, dim)) => {
             send_ordered(
                 event_tx,
-                dimension_info(dim, &spawn.dimension, registry_holder),
+                dimension_info(dim, &spawn.dimension, spawn.is_flat, registry_holder),
             );
         }
         None => tracing::error!("Unknown dimension_type {}", spawn.dimension_type),
@@ -249,6 +249,7 @@ fn spawn_events(
 fn dimension_info(
     dim: &DimensionKindElement,
     dimension: &str,
+    flat: bool,
     registries: &RegistryHolder,
 ) -> NetworkEvent {
     let string = |key: &str| {
@@ -281,6 +282,7 @@ fn dimension_info(
             .and_then(|tag| tag.float())
             .unwrap_or(0.0),
         default_clock: string("default_clock"),
+        flat,
         environment: Box::new(super::environment_wire::environment(
             &dim._extra,
             registries,
@@ -377,6 +379,7 @@ mod tests {
                 ),
             ]),
             "minecraft:overworld",
+            false,
             &RegistryHolder::default(),
         )
         else {
@@ -399,6 +402,7 @@ mod tests {
         }) = dimension_info(
             &dimension(&[]),
             "minecraft:overworld",
+            false,
             &RegistryHolder::default(),
         )
         else {

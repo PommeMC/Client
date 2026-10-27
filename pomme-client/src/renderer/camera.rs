@@ -4,6 +4,7 @@ use glam::{DVec3, FloatExt, Mat4, Vec2, Vec3};
 use crate::app::input::InputState;
 use crate::entity::HURT_DURATION;
 use crate::entity::components::{LookDirection, Position};
+use crate::renderer::pipelines::sky::SkyState;
 
 pub const DEFAULT_FOV_DEGREES: f32 = 70.0;
 #[allow(dead_code)]
@@ -447,6 +448,11 @@ impl Camera {
         }
     }
 
+    /// The way the camera looks (vanilla `Camera.forwardVector`).
+    pub fn forward(&self) -> Vec3 {
+        self.view_basis().0
+    }
+
     /// Forward and up vectors for the view matrix, accounting for the top-down
     /// override and front-facing third person.
     fn view_basis(&self) -> (Vec3, Vec3) {
@@ -574,20 +580,17 @@ pub const WATER_FOG_COLOR: [f32; 3] = [5.0 / 255.0, 5.0 / 255.0, 51.0 / 255.0];
 const WATER_FOG_START: f32 = -8.0;
 const WATER_FOG_END: f32 = 96.0;
 
-// Vanilla `EnvironmentAttributes` FOG_START/END_DISTANCE defaults, the
-// render-distance-independent ambient haze (overworld and End run these;
-// TODO: dimension attribute overrides - the nether is 10/96 - and the rain
-// offsets AtmosphericFogEnvironment applies to them).
-const ENV_FOG_START: f32 = 0.0;
-const ENV_FOG_END: f32 = 1024.0;
-
 impl CameraUniform {
+    /// The camera with its fog: `sky`'s fog colour, and the environmental band
+    /// from its fog distances.
+    /// TODO: the rain offsets `AtmosphericFogEnvironment` applies to them.
     pub fn new(
         camera: &Camera,
-        sky_color: [f32; 3],
+        sky: &SkyState,
         render_distance_chunks: u32,
         eyes_in_water: bool,
     ) -> Self {
+        let fog_color = sky.fog_color.to_array();
         let anchor = camera.anchor();
         let offset = camera.third_person_offset();
         let pos = (*camera.position - anchor).as_vec3() + offset;
@@ -600,7 +603,7 @@ impl CameraUniform {
         let span = (blocks / 10.0).clamp(4.0, 64.0);
         let (fog_start, fog_end, env_start, env_end, fog_rgb) = if camera.top_down().is_some() {
             let far = camera.depth_far;
-            (far, far, far, far, sky_color)
+            (far, far, far, far, fog_color)
         } else if eyes_in_water {
             // Vanilla's water fog is the environmental pair; the
             // render-distance band still applies on top (FogRenderer always
@@ -613,9 +616,14 @@ impl CameraUniform {
                 WATER_FOG_COLOR,
             )
         } else {
-            // Fade distant terrain to the sky color so it melts into the flat sky disc
-            // with no horizon edge (at night both go dark).
-            (blocks - span, blocks, ENV_FOG_START, ENV_FOG_END, sky_color)
+            let attributes = &sky.attributes;
+            (
+                blocks - span,
+                blocks,
+                attributes.fog_start_distance,
+                attributes.fog_end_distance,
+                fog_color,
+            )
         };
         Self {
             view_proj: camera.view_projection().to_cols_array_2d(),

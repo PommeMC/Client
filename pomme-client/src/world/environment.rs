@@ -28,6 +28,9 @@ pub enum EnvAttribute {
     StarAngle,
     MoonPhase,
     SkyLightLevel,
+    FogStartDistance,
+    FogEndDistance,
+    SkyFogEndDistance,
 }
 
 impl EnvAttribute {
@@ -50,6 +53,9 @@ impl EnvAttribute {
             Self::StarAngle => "minecraft:visual/star_angle",
             Self::MoonPhase => "minecraft:visual/moon_phase",
             Self::SkyLightLevel => "minecraft:gameplay/sky_light_level",
+            Self::FogStartDistance => "minecraft:visual/fog_start_distance",
+            Self::FogEndDistance => "minecraft:visual/fog_end_distance",
+            Self::SkyFogEndDistance => "minecraft:visual/sky_fog_end_distance",
         }
     }
 }
@@ -363,6 +369,15 @@ impl<T: AttributeValue> AttributeLayers<T> {
     }
 }
 
+/// Vanilla `DimensionType.Skybox`: what the sky pass draws.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Skybox {
+    None,
+    #[default]
+    Overworld,
+    End,
+}
+
 /// A dimension's attribute layers, from its dimension type and timelines.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Environment {
@@ -383,8 +398,12 @@ pub struct Environment {
     /// The `MoonPhase` index, from full moon (0) to waxing gibbous (7).
     pub moon_phase: AttributeLayers<f32>,
     pub sky_light_level: AttributeLayers<f32>,
+    pub fog_start_distance: AttributeLayers<f32>,
+    pub fog_end_distance: AttributeLayers<f32>,
+    pub sky_fog_end_distance: AttributeLayers<f32>,
     /// Vanilla `Level.canHaveWeather`, which gates the weather layer.
     pub has_weather: bool,
+    pub skybox: Skybox,
 }
 
 /// The resolved attributes.
@@ -407,6 +426,9 @@ pub struct EnvAttributes {
     pub star_angle: f32,
     pub moon_phase: u8,
     pub sky_light_level: f32,
+    pub fog_start_distance: f32,
+    pub fog_end_distance: f32,
+    pub sky_fog_end_distance: f32,
 }
 
 impl EnvAttributes {
@@ -445,6 +467,9 @@ impl EnvAttributes {
             star_angle: degrees(self.star_angle, to.star_angle),
             moon_phase: to.moon_phase,
             sky_light_level: self.sky_light_level.lerp(to.sky_light_level, t),
+            fog_start_distance: self.fog_start_distance.lerp(to.fog_start_distance, t),
+            fog_end_distance: self.fog_end_distance.lerp(to.fog_end_distance, t),
+            sky_fog_end_distance: self.sky_fog_end_distance.lerp(to.sky_fog_end_distance, t),
         }
     }
 }
@@ -520,6 +545,9 @@ impl Environment {
             star_angle: self.star_angle.resolve(0.0, ticks),
             moon_phase: self.moon_phase.resolve(0.0, ticks) as u8,
             sky_light_level: self.sky_light_level.resolve(15.0, ticks),
+            fog_start_distance: self.fog_start_distance.resolve(0.0, ticks),
+            fog_end_distance: self.fog_end_distance.resolve(1024.0, ticks),
+            sky_fog_end_distance: self.sky_fog_end_distance.resolve(512.0, ticks),
         };
         if self.has_weather {
             let layers = [rain - thunder, thunder].into_iter().zip(
@@ -555,6 +583,8 @@ impl Environment {
         a.sky_light_factor = a.sky_light_factor.clamp(0.0, 1.0);
         a.star_brightness = a.star_brightness.clamp(0.0, 1.0);
         a.sky_light_level = a.sky_light_level.clamp(0.0, 15.0);
+        a.fog_end_distance = a.fog_end_distance.max(0.0);
+        a.sky_fog_end_distance = a.sky_fog_end_distance.max(0.0);
         a
     }
 }

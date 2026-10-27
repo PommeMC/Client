@@ -6,7 +6,7 @@ use glam::Vec3;
 use crate::assets::AssetIndex;
 use crate::renderer::camera::Camera;
 use crate::renderer::{rhi, shader, util};
-use crate::world::environment::{EnvAttributes, Environment};
+use crate::world::environment::{EnvAttributes, Environment, Skybox};
 
 const STAR_COUNT: u32 = 1500;
 const SUN_SIZE: f32 = 30.0;
@@ -14,8 +14,9 @@ const MOON_SIZE: f32 = 20.0;
 const CELESTIAL_DIST: f32 = 100.0;
 const SKY_DISC_RADIUS: f32 = 512.0;
 const SUNRISE_STEPS: u32 = 16;
-
-const MOON_BRIGHTNESS_PER_PHASE: [f32; 8] = [1.0, 0.75, 0.5, 0.25, 0.0, 0.25, 0.5, 0.75];
+const END_SKY_SIZE: f32 = 100.0;
+/// The end sky's texture repeats this many times across a face.
+const END_SKY_REPEATS: f32 = 16.0;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -30,14 +31,14 @@ struct SkyUniform {
     view_proj: [[f32; 4]; 4],
     sky_color: [f32; 4],
     sunrise_color: [f32; 4],
+    /// rgb: the fog colour (sRGB), w: vanilla's `FogSkyEnd`.
+    fog_color: [f32; 4],
     sun_angle: f32,
     moon_angle: f32,
     star_angle: f32,
     star_brightness: f32,
     celestial_alpha: f32,
-    moon_brightness: f32,
-    moon_phase: f32,
-    _pad: f32,
+    _pad: [f32; 3],
 }
 
 #[derive(Clone)]
@@ -49,6 +50,16 @@ pub struct SkyState {
     pub partial_tick: f32,
     /// The environment attributes, blended for this frame.
     pub attributes: EnvAttributes,
+    pub skybox: Skybox,
+    /// `FogRenderer`'s void darkness at the camera
+    /// ([`crate::renderer::fog::void_darkness`]).
+    pub void_darkness: f32,
+    /// Vanilla `SkyRenderer.shouldRenderDarkDisc`: the eyes are below the
+    /// horizon and out of water.
+    pub dark_disc: bool,
+    /// The frame's fog colour (sRGB), which the renderer computes from the
+    /// rest ([`crate::renderer::fog::fog_color`]).
+    pub fog_color: Vec3,
 }
 
 impl SkyState {
@@ -60,6 +71,10 @@ impl SkyState {
             thunder_level: 0.0,
             partial_tick: 0.0,
             attributes: Environment::default().resolve(6000, 0.0, 0.0),
+            skybox: Skybox::Overworld,
+            void_darkness: 0.0,
+            dark_disc: false,
+            fog_color: Vec3::ZERO,
         }
     }
 
@@ -85,6 +100,7 @@ pub struct SkyPipeline {
     ubo_sets: Vec<rhi::backend::BindGroup>,
     sun_set: rhi::backend::BindGroup,
     moon_sets: [rhi::backend::BindGroup; 8],
+    end_sky_set: rhi::backend::BindGroup,
     ubo_buffers: Vec<rhi::backend::Buffer>,
     vertex_buffer: rhi::backend::Buffer,
     top_disc_offset: u32,
@@ -95,11 +111,15 @@ pub struct SkyPipeline {
     moon_offset: u32,
     sunrise_offset: u32,
     sunrise_count: u32,
-    _dark_disc_offset: u32,
-    _dark_disc_count: u32,
+    dark_disc_offset: u32,
+    dark_disc_count: u32,
+    end_sky_offset: u32,
+    end_sky_count: u32,
     sun: rhi::backend::Texture,
     sampler: rhi::backend::Sampler,
     moons: Vec<rhi::backend::Texture>,
+    end_sky: rhi::backend::Texture,
+    end_sky_sampler: rhi::backend::Sampler,
 }
 
 impl SkyPipeline {
@@ -157,6 +177,17 @@ impl SkyPipeline {
             moons.push(moon);
         }
 
+        let end_sky = util::load_asset_texture(
+            device,
+            jar_assets_dir,
+            asset_index,
+            "minecraft/textures/environment/end_sky.png",
+        );
+        let end_sky_sampler =
+            rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST_REPEAT);
+        let end_sky_set =
+            util::create_texture_group(device, tex_layout, end_sky.handle(), end_sky_sampler);
+
         let geom = build_all_geometry();
         let vertex_bytes = bytemuck::cast_slice::<SkyVertex, u8>(&geom.vertices);
         let vertex_buffer = rhi::backend::Buffer::with_data(
@@ -183,6 +214,7 @@ impl SkyPipeline {
             ubo_sets,
             sun_set,
             moon_sets,
+            end_sky_set,
             ubo_buffers,
             vertex_buffer,
             top_disc_offset: geom.top_disc_offset,
@@ -193,11 +225,15 @@ impl SkyPipeline {
             moon_offset: geom.moon_offset,
             sunrise_offset: geom.sunrise_offset,
             sunrise_count: geom.sunrise_count,
-            _dark_disc_offset: geom.dark_disc_offset,
-            _dark_disc_count: geom.dark_disc_count,
+            dark_disc_offset: geom.dark_disc_offset,
+            dark_disc_count: geom.dark_disc_count,
+            end_sky_offset: geom.end_sky_offset,
+            end_sky_count: geom.end_sky_count,
             sun,
             sampler,
             moons,
+            end_sky,
+            end_sky_sampler,
         }
     }
 
@@ -207,12 +243,17 @@ impl SkyPipeline {
         frame: usize,
         camera: &Camera,
         sky: &SkyState,
+        render_distance: u32,
     ) {
+        if sky.skybox == Skybox::None {
+            return;
+        }
         let attributes = &sky.attributes;
         let sky_color = attributes.sky_color.extend(1.0).to_array();
         let sunrise_argb = attributes.sunrise_sunset_color.to_array();
         let moon_phase_idx = usize::from(attributes.moon_phase % 8);
-        let moon_brightness = MOON_BRIGHTNESS_PER_PHASE[moon_phase_idx];
+        // `AtmosphericFogEnvironment.setupFog`'s sky end.
+        let sky_fog_end = ((render_distance * 16) as f32).min(attributes.sky_fog_end_distance);
 
         let celestial_alpha = 1.0 - sky.rain();
 
@@ -222,14 +263,13 @@ impl SkyPipeline {
             view_proj: view_proj.to_cols_array_2d(),
             sky_color,
             sunrise_color: sunrise_argb,
+            fog_color: sky.fog_color.extend(sky_fog_end).to_array(),
             sun_angle: attributes.sun_angle.to_radians(),
             moon_angle: attributes.moon_angle.to_radians(),
             star_angle: attributes.star_angle.to_radians(),
             star_brightness: attributes.star_brightness,
             celestial_alpha,
-            moon_brightness,
-            moon_phase: moon_phase_idx as f32,
-            _pad: 0.0,
+            _pad: [0.0; 3],
         };
 
         let bytes = bytemuck::bytes_of(&uniform);
@@ -250,6 +290,14 @@ impl SkyPipeline {
         };
 
         bind(pass, self.pipeline);
+        // Vanilla `SkyRenderer.renderEndSky`.
+        // TODO: the end flash.
+        if sky.skybox == Skybox::End {
+            pass.set_bind_group(1, self.end_sky_set);
+            push_mode(pass, 6);
+            pass.draw(self.end_sky_count, 1, self.end_sky_offset, 0);
+            return;
+        }
         push_mode(pass, 0);
         pass.draw(self.top_disc_count, 1, self.top_disc_offset, 0);
 
@@ -272,9 +320,15 @@ impl SkyPipeline {
         push_mode(pass, 3);
         pass.draw(6, 1, self.moon_offset, 0);
 
-        if attributes.star_brightness > 0.01 {
+        if attributes.star_brightness > 0.0 {
             push_mode(pass, 1);
             pass.draw(self.star_count, 1, self.star_offset, 0);
+        }
+
+        if sky.dark_disc {
+            bind(pass, self.pipeline);
+            push_mode(pass, 4);
+            pass.draw(self.dark_disc_count, 1, self.dark_disc_offset, 0);
         }
     }
 
@@ -295,7 +349,9 @@ impl SkyPipeline {
         std::mem::take(&mut self.vertex_buffer).destroy(device);
 
         self.sampler.destroy(device);
+        self.end_sky_sampler.destroy(device);
         std::mem::take(&mut self.sun).destroy(device);
+        std::mem::take(&mut self.end_sky).destroy(device);
 
         for moon in self.moons.drain(..) {
             moon.destroy(device);
@@ -307,6 +363,7 @@ impl SkyPipeline {
         util::destroy_bind_groups(device, self.ubo_sets.drain(..));
         self.sun_set.destroy(device);
         util::destroy_bind_groups(device, self.moon_sets);
+        self.end_sky_set.destroy(device);
         self.ubo_layout.destroy(device);
         self.tex_layout.destroy(device);
     }
@@ -351,6 +408,8 @@ struct Geometry {
     sunrise_count: u32,
     dark_disc_offset: u32,
     dark_disc_count: u32,
+    end_sky_offset: u32,
+    end_sky_count: u32,
 }
 
 fn build_all_geometry() -> Geometry {
@@ -374,9 +433,14 @@ fn build_all_geometry() -> Geometry {
     build_sunrise_fan(&mut verts);
     let sunrise_count = verts.len() as u32 - sunrise_offset;
 
+    // Built at -16 and drawn 12 higher, so its fog distances are vanilla's.
     let dark_disc_offset = verts.len() as u32;
-    build_sky_disc(&mut verts, -4.0);
+    build_sky_disc(&mut verts, -16.0);
     let dark_disc_count = verts.len() as u32 - dark_disc_offset;
+
+    let end_sky_offset = verts.len() as u32;
+    build_end_sky(&mut verts);
+    let end_sky_count = verts.len() as u32 - end_sky_offset;
 
     Geometry {
         vertices: verts,
@@ -390,6 +454,39 @@ fn build_all_geometry() -> Geometry {
         sunrise_count,
         dark_disc_offset,
         dark_disc_count,
+        end_sky_offset,
+        end_sky_count,
+    }
+}
+
+/// Vanilla `SkyRenderer.buildEndSky`: the inside of a cube, one face turned
+/// into each side.
+fn build_end_sky(verts: &mut Vec<SkyVertex>) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+
+    let faces = [
+        glam::Mat3::IDENTITY,
+        glam::Mat3::from_rotation_x(FRAC_PI_2),
+        glam::Mat3::from_rotation_x(-FRAC_PI_2),
+        glam::Mat3::from_rotation_x(PI),
+        glam::Mat3::from_rotation_z(FRAC_PI_2),
+        glam::Mat3::from_rotation_z(-FRAC_PI_2),
+    ];
+    let (s, r) = (END_SKY_SIZE, END_SKY_REPEATS);
+    let corners = [
+        ([-s, -s, -s], [0.0, 0.0]),
+        ([-s, -s, s], [0.0, r]),
+        ([s, -s, s], [r, r]),
+        ([s, -s, -s], [r, 0.0]),
+    ];
+    for face in faces {
+        for i in [0, 1, 2, 0, 2, 3] {
+            let (position, uv) = corners[i];
+            verts.push(SkyVertex {
+                position: (face * Vec3::from_array(position)).to_array(),
+                uv,
+            });
+        }
     }
 }
 
