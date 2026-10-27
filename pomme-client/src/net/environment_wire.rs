@@ -277,8 +277,12 @@ pub(super) fn environment(
     let rgb = |attribute| layers::<Vec3>(attribute, attributes, &timelines);
     let argb = |attribute| layers::<Vec4>(attribute, attributes, &timelines);
     let float = |attribute| layers::<f32>(attribute, attributes, &timelines);
+    // An enum takes only `override`, and its keyframes step
+    // (`AttributeType.ofNotInterpolated`).
     let mut moon_phase = float(EnvAttribute::MoonPhase);
-    // An enum's keyframes step (`AttributeType.ofNotInterpolated`).
+    let overrides = |op| op == ModifierOp::Override;
+    moon_phase.dimension = moon_phase.dimension.filter(|m| overrides(m.op));
+    moon_phase.tracks.retain(|(track, _)| overrides(track.op));
     for (track, _) in &mut moon_phase.tracks {
         track.ease = Ease::Constant;
     }
