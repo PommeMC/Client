@@ -627,6 +627,7 @@ impl Server {
         server.command("forceload add -48 -48 47 47");
         // Mobs spawning at night attack and push the test player mid-script.
         server.gamerule(["spawn_mobs", "doMobSpawning"], false);
+        server.reset_world();
         Ok(server)
     }
 
@@ -683,12 +684,16 @@ impl Server {
         for _ in 0..2 {
             self.command("kill @e[type=!player]");
         }
-        // Noon, clear and ticking, so a script that doesn't set the time or
-        // weather sees the same sky whichever scripts ran before it.
+        self.reset_world();
+        Ok(())
+    }
+
+    /// Noon, clear and ticking, so a script that doesn't set the time or
+    /// weather sees the same sky whether it runs first or after others.
+    fn reset_world(&mut self) {
         self.gamerule(["advance_time", "doDaylightCycle"], true);
         self.command("time set 6000");
         self.command("weather clear");
-        Ok(())
     }
 
     /// Blocks until the server exits (Ctrl+C or `stop`).
