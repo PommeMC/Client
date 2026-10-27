@@ -32,6 +32,21 @@ pub struct AtlasRegion {
     pub translucent: bool,
 }
 
+#[cfg(test)]
+impl AtlasRegion {
+    /// A one-texel, fully opaque sprite spanning the whole atlas.
+    pub(crate) const UNIT: Self = Self {
+        u_min: 0.0,
+        v_min: 0.0,
+        u_max: 1.0,
+        v_max: 1.0,
+        pixel_rect: [0, 0, 1, 1],
+        sprite: 0,
+        opaque: true,
+        translucent: false,
+    };
+}
+
 #[derive(Clone)]
 pub struct AtlasUVMap {
     regions: HashMap<String, AtlasRegion>,

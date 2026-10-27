@@ -10,7 +10,7 @@ layout(location = 1) in float v_light;
 layout(location = 2) in vec4 v_tint;
 layout(location = 3) in float v_fog;
 layout(location = 4) in vec3 v_fog_color;
-layout(location = 5) flat in float v_world_light;
+layout(location = 5) flat in vec4 v_world_light;
 
 layout(location = 0) out vec4 out_color;
 
@@ -22,7 +22,8 @@ void main() {
     // vertex color directly. Decoding the tint a second time makes grayscale
     // tint-mask textures such as bush substantially too dark.
     vec4 tinted = color * v_tint;
-    tinted.rgb *= v_world_light * v_light;
+    tinted.rgb *= v_light;
+    tinted *= v_world_light;
     tinted.rgb = apply_fog(tinted.rgb, v_fog, v_fog_color);
     out_color = tinted;
 }

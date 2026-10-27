@@ -1,7 +1,11 @@
 // Vanilla `include/sample_lightmap.glsl`: `uv` is (block, sky) light in
 // 0..240, between texel centres so the bilinear sampler blends smooth light.
-layout(set = 2, binding = 0) uniform texture2D lightmap_texture;
-layout(set = 2, binding = 1) uniform sampler lightmap_sampler;
+// Set 2 unless the includer picks another.
+#ifndef LIGHTMAP_SET
+#define LIGHTMAP_SET 2
+#endif
+layout(set = LIGHTMAP_SET, binding = 0) uniform texture2D lightmap_texture;
+layout(set = LIGHTMAP_SET, binding = 1) uniform sampler lightmap_sampler;
 
 vec4 sample_lightmap(vec2 uv) {
     return textureLod(

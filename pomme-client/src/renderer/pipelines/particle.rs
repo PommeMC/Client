@@ -2,6 +2,7 @@ use glam::Vec3;
 
 use crate::renderer::camera::{Camera, CameraUniform};
 use crate::renderer::chunk::atlas::TextureAtlas;
+use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{rhi, shader, util};
 
 /// Vanilla `ParticleGroup.MAX_PARTICLES`: the particle store's hard cap,
@@ -20,8 +21,10 @@ pub struct ParticleQuad {
     pub u1: f32,
     pub v0: f32,
     pub v1: f32,
-    /// Packed RGBA8; rgb already multiplied by tint and world light.
+    /// Packed RGBA8, the particle's own colour.
     pub color: u32,
+    /// The light lane (`LightLevels::lane`).
+    pub light: f32,
     /// Vanilla `SingleQuadParticle.Layer`: false = opaque/cutout terrain
     /// layer, true = alpha-blended translucent layer.
     pub translucent: bool,
@@ -33,6 +36,7 @@ struct ParticleVertex {
     position: [f32; 3],
     uv: [f32; 2],
     color: u32,
+    light: f32,
 }
 
 pub struct ParticlePipeline {
@@ -45,6 +49,8 @@ pub struct ParticlePipeline {
     atlas_set: rhi::backend::BindGroup,
     atlas_sampler: rhi::backend::Sampler,
     camera_buffers: Vec<rhi::backend::Buffer>,
+    /// The shared [`Lightmap`]'s group, set 2.
+    lightmap_set: rhi::backend::BindGroup,
     vertex_buffers: Vec<rhi::backend::Buffer>,
 }
 
@@ -53,11 +59,15 @@ impl ParticlePipeline {
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
         atlas: &TextureAtlas,
+        lightmap: &Lightmap,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
         let atlas_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
-        let pipeline_layout =
-            rhi::backend::create_pipeline_layout(device, &[camera_layout, atlas_layout], None);
+        let pipeline_layout = rhi::backend::create_pipeline_layout(
+            device,
+            &[camera_layout, atlas_layout, lightmap.layout],
+            None,
+        );
 
         let pipeline = create_pipeline(device, targets, pipeline_layout, false);
         let translucent_pipeline = create_pipeline(device, targets, pipeline_layout, true);
@@ -89,6 +99,7 @@ impl ParticlePipeline {
             atlas_set: rhi::backend::BindGroup::default(),
             atlas_sampler,
             camera_buffers,
+            lightmap_set: lightmap.group,
             vertex_buffers,
         };
         this.rebind_atlas(device, atlas);
@@ -134,6 +145,7 @@ impl ParticlePipeline {
                     position: (center + (right * nx + up * ny) * quad.size).into(),
                     uv: [u, v],
                     color: quad.color,
+                    light: quad.light,
                 };
                 // Vanilla QuadParticleRenderState corner order and UV mapping.
                 let corners = [
@@ -163,7 +175,10 @@ impl ParticlePipeline {
                 continue;
             }
             pass.set_pipeline(&pipeline);
-            pass.set_bind_groups(0, &[self.camera_sets[frame], self.atlas_set]);
+            pass.set_bind_groups(
+                0,
+                &[self.camera_sets[frame], self.atlas_set, self.lightmap_set],
+            );
             pass.draw(range.len() as u32, 1, range.start as u32, 0);
         }
     }
@@ -222,7 +237,7 @@ fn create_pipeline(
                 shader::include_shader!("particle.frag"),
                 &[rhi::vertex_buffer!(
                     ParticleVertex,
-                    [Float32x3, Float32x2, Unorm8x4]
+                    [Float32x3, Float32x2, Unorm8x4, Float32]
                 )],
             )
         },

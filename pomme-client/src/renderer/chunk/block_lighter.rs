@@ -39,6 +39,10 @@ impl LightSource for WorldLight<'_> {
     }
 }
 
+/// The light lane `light_lane_color` leaves unlit: vanilla's EMISSIVE layers
+/// and the GUI.
+pub(crate) const UNLIT_LANE: f32 = -1.0;
+
 /// A block's sky and block light levels, packed `sky << 4 | block`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LightLevels(pub u8);

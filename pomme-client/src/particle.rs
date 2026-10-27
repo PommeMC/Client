@@ -11,12 +11,13 @@ use glam::{DVec3, dvec3};
 use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::{self, CollisionContext, LocalBox};
 use crate::physics::collision::resolve_collision;
-use crate::position::BlockPos;
+use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::ParticleQuad;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
+use crate::renderer::chunk::block_lighter::{self, LightLevels, WorldLight};
 use crate::renderer::chunk::mesher::{
     BiomeClimate, Colormap, blend_color, dry_foliage_color, foliage_color, grass_color,
-    tint_sample_y, world_brightness,
+    tint_sample_y,
 };
 use crate::renderer::pipelines::particle::MAX_PARTICLE_QUADS as MAX_PARTICLES;
 use crate::world::block::BlockStateTable;
@@ -69,20 +70,13 @@ pub struct Particle {
     v1: f32,
     color: [f32; 3],
     alpha: f32,
-    light: f32,
 }
 
 impl Particle {
     /// Vanilla `TerrainParticle` constructor chain: velocity jitter +
     /// normalization from `Particle(level, x, y, z, xa, ya, za)`, then the
     /// terrain quad size and random quarter sub-tile.
-    fn terrain(
-        pos: DVec3,
-        velocity_arg: DVec3,
-        region: AtlasRegion,
-        color: [f32; 3],
-        light: f32,
-    ) -> Self {
+    fn terrain(pos: DVec3, velocity_arg: DVec3, region: AtlasRegion, color: [f32; 3]) -> Self {
         let jitter = || (fastrand::f64() * 2.0 - 1.0) * 0.4;
         let dir = velocity_arg + DVec3::new(jitter(), jitter(), jitter());
         let speed = (fastrand::f64() + fastrand::f64() + 1.0) * 0.15;
@@ -118,7 +112,6 @@ impl Particle {
             v1: sprite_v((vo + 1.0) / 4.0),
             color,
             alpha: 1.0,
-            light,
         }
     }
 
@@ -146,11 +139,30 @@ impl Particle {
             v1: 0.0,
             color: [1.0; 3],
             alpha: 1.0,
-            // SimpleAnimatedParticle.getLightCoords is always full-bright.
-            light: 1.0,
         };
         p.set_sprite(&frames[0]);
         p
+    }
+
+    /// Vanilla `getLightCoords`, read each frame at the current position.
+    fn light(&self, world: &WorldLight) -> LightLevels {
+        match self.kind {
+            // `Particle.getLightCoords`: sky light alone outside loaded chunks.
+            Kind::Terrain => {
+                let at = self.pos.floor().as_ivec3();
+                let loaded = world
+                    .chunks
+                    .get_chunk(&ChunkPos::new(at.x.div_euclid(16), at.z.div_euclid(16)))
+                    .is_some();
+                if loaded {
+                    block_lighter::light_coords(world, at.to_array())
+                } else {
+                    LightLevels::new(15, 0)
+                }
+            }
+            // `SimpleAnimatedParticle`.
+            Kind::EndRod => LightLevels::FULL_BRIGHT,
+        }
     }
 
     /// Vanilla `SingleQuadParticle.setSprite`.
@@ -164,8 +176,8 @@ impl Particle {
     /// Vanilla `BreakingItemParticle`: the base-constructor velocity (zero
     /// argument, jitter only) scaled to 10%, plus the spawn velocity. Shares
     /// the halved quad size and quarter sub-tile sampling with terrain.
-    fn breaking_item(pos: DVec3, velocity: DVec3, region: AtlasRegion, light: f32) -> Self {
-        let mut p = Self::terrain(pos, DVec3::ZERO, region, [1.0; 3], light);
+    fn breaking_item(pos: DVec3, velocity: DVec3, region: AtlasRegion) -> Self {
+        let mut p = Self::terrain(pos, DVec3::ZERO, region, [1.0; 3]);
         p.vel = p.vel * 0.1 + velocity;
         p
     }
@@ -194,14 +206,7 @@ impl Particle {
             self.vel.z *= 0.7;
         }
         match self.kind {
-            Kind::Terrain => {
-                self.light = world_brightness(
-                    chunks,
-                    self.pos.x.floor() as i32,
-                    self.pos.y.floor() as i32,
-                    self.pos.z.floor() as i32,
-                );
-            }
+            Kind::Terrain => {}
             // SimpleAnimatedParticle.tick: advance the sprite frame, then
             // after half-life fade alpha out and lerp toward the fade color.
             Kind::EndRod => {
@@ -378,8 +383,6 @@ impl ParticleStore {
             // No face textures at all: the missing-texture region.
             None => self.uv_map.get_region(""),
         };
-        let light = world_brightness(chunks, pos.x, pos.y, pos.z);
-
         // Vanilla `ParticleEngine.destroy` scatters over the outline shape's
         // boxes, so a block with an empty outline emits nothing.
         let boxes: &[LocalBox] = block_shape::outline_shape(block_state_data);
@@ -408,7 +411,6 @@ impl ParticleStore {
                             DVec3::new(rel_x - 0.5, rel_y - 0.5, rel_z - 0.5),
                             region,
                             color,
-                            light,
                         ));
                     }
                 }
@@ -425,7 +427,6 @@ impl ParticleStore {
         eye_pos: DVec3,
         x_rot_deg: f32,
         y_rot_deg: f32,
-        chunks: &ChunkStore,
     ) {
         if !self.uv_map.has_region(texture) {
             return;
@@ -433,12 +434,6 @@ impl ParticleStore {
         let region = self.uv_map.get_region(texture);
         let x_rot = -(x_rot_deg as f64).to_radians();
         let y_rot = -(y_rot_deg as f64).to_radians();
-        let light = world_brightness(
-            chunks,
-            eye_pos.x.floor() as i32,
-            eye_pos.y.floor() as i32,
-            eye_pos.z.floor() as i32,
-        );
         for _ in 0..count {
             let d = dvec3(
                 (fastrand::f64() - 0.5) * 0.1,
@@ -456,7 +451,6 @@ impl ParticleStore {
                 p,
                 dvec3(d.x, d.y + 0.05, d.z),
                 region,
-                light,
             ));
         }
     }
@@ -573,12 +567,17 @@ impl ParticleStore {
 
     /// Quad positions are anchor-relative, subtracted in f64 (see
     /// `Camera::anchor`).
-    pub fn extract(&self, partial_tick: f32, anchor: DVec3) -> Vec<ParticleQuad> {
+    pub fn extract(
+        &self,
+        partial_tick: f32,
+        anchor: DVec3,
+        world: &WorldLight,
+    ) -> Vec<ParticleQuad> {
         self.particles
             .iter()
             .map(|p| {
                 let pos = (p.prev_pos.lerp(p.pos, partial_tick as f64) - anchor).as_vec3();
-                let channel = |c: f32| (c * p.light * 255.0).round() as u8;
+                let channel = |c: f32| (c * 255.0).round() as u8;
                 ParticleQuad {
                     pos: pos.into(),
                     size: p.size,
@@ -592,6 +591,7 @@ impl ParticleStore {
                         channel(p.color[2]),
                         (p.alpha * 255.0).round() as u8,
                     ]),
+                    light: p.light(world).lane(),
                     translucent: p.kind.translucent(),
                 }
             })
@@ -622,4 +622,24 @@ fn rot_x(v: DVec3, angle: f64) -> DVec3 {
 fn rot_y(v: DVec3, angle: f64) -> DVec3 {
     let (sin, cos) = angle.sin_cos();
     dvec3(v.x * cos + v.z * sin, v.y, -v.x * sin + v.z * cos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn particles_take_vanilla_light_coords() {
+        let chunks = ChunkStore::new(8);
+        let world = WorldLight {
+            chunks: &chunks,
+            table: BlockStateTable::native(),
+        };
+        let region = AtlasRegion::UNIT;
+        let terrain = Particle::terrain(DVec3::new(0.5, 64.0, 0.5), DVec3::ZERO, region, [1.0; 3]);
+        // No chunk loaded: `Particle.getLightCoords`' sky-only fallback.
+        assert_eq!(terrain.light(&world), LightLevels::new(15, 0));
+        let end_rod = Particle::end_rod(DVec3::ZERO, DVec3::ZERO, &[region; 8]);
+        assert_eq!(end_rod.light(&world), LightLevels::FULL_BRIGHT);
+    }
 }

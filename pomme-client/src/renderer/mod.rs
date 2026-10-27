@@ -397,10 +397,11 @@ impl Renderer {
             swapchain_state.targets(),
             jar_assets_dir,
             asset_index,
+            &lightmap,
         );
 
         let particle_pipeline =
-            ParticlePipeline::new(&ctx.device, swapchain_state.targets(), &atlas);
+            ParticlePipeline::new(&ctx.device, swapchain_state.targets(), &atlas, &lightmap);
 
         let cloud_pipeline = CloudPipeline::new(
             &ctx.device,
@@ -480,6 +481,7 @@ impl Renderer {
             &ctx.device,
             swapchain_state.targets(),
             &atlas,
+            &lightmap,
         );
 
         let held_item_pipeline = pipelines::held_item::HeldItemPipeline::new(
@@ -487,6 +489,7 @@ impl Renderer {
             swapchain_state.targets(),
             &atlas,
             jar_assets_dir,
+            &lightmap,
         );
 
         splash(&mut menu_pipeline, 0.95, "Caching item meshes...");
@@ -500,6 +503,7 @@ impl Renderer {
             gui_item_atlas.targets(),
             gui_item_atlas.atlas_px(),
             &atlas,
+            &lightmap,
         );
 
         warm_item_meshes(
@@ -1109,7 +1113,7 @@ impl Renderer {
         overlay: Vec<MenuElement>,
         swing_progress: [f32; 2],
         use_anim: [Option<pipelines::held_item::UseAnim>; 2],
-        held_items: [Option<(String, f32, azalea_inventory::ItemStackData)>; 2],
+        held_items: [Option<(String, azalea_inventory::ItemStackData)>; 2],
         main_hand_right: bool,
         hand_light: LightLevels,
         shown_hands: HandRenderSelection,
@@ -1134,7 +1138,7 @@ impl Renderer {
         // Refresh the far plane before this frame's view/projection and fog.
         self.camera.set_render_distance(render_distance);
         let held_items = held_items.map(|held| {
-            held.map(|(name, light, stack)| {
+            held.map(|(name, stack)| {
                 let model = self.render_assets.stack_model_key(&name, &stack);
                 let item_tints =
                     self.render_assets
@@ -1143,7 +1147,6 @@ impl Renderer {
                 pipelines::held_item::HeldItemInfo {
                     name,
                     model,
-                    light,
                     item_tints,
                     has_3d_model,
                     charged_crossbow: crate::player::interaction::is_charged_crossbow(&stack),
@@ -1828,6 +1831,7 @@ impl Renderer {
                     // Vanilla applies bobHurt (death + hurt) and bobView to the
                     // first-person arm/item pose stack as well as the world.
                     let view_effect = self.camera.view_effect_matrix();
+                    let hand_pose = self.camera.hand_pose();
                     // Vanilla submitArmWithItem draws the bare arm only for an
                     // empty main hand; held items render alone, and an empty
                     // offhand draws nothing. The main arm is the options' one,
@@ -1844,7 +1848,9 @@ impl Renderer {
                             swing_progress[0],
                             *main_hand_right,
                             view_effect,
+                            hand_pose,
                             *hand_light,
+                            sky.cardinal_light,
                         );
                     }
                     let shown = [shown_hands.main, shown_hands.off];
@@ -1870,6 +1876,9 @@ impl Renderer {
                             &hands,
                             &self.item_entity_pipeline,
                             view_effect,
+                            hand_pose,
+                            *hand_light,
+                            sky.cardinal_light,
                         );
                     }
                 }

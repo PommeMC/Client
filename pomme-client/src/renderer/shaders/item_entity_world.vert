@@ -7,6 +7,10 @@
 
 #include "item_tint.glsl"
 
+// Sets 0-2 are the camera, atlas and tint palette.
+#define LIGHTMAP_SET 3
+#include "lightmap.glsl"
+
 #include "light.glsl"
 
 layout(location = 0) in vec3 position;
@@ -20,7 +24,7 @@ layout(location = 1) out float v_light;
 layout(location = 2) out vec4 v_tint;
 layout(location = 3) out float v_fog;
 layout(location = 4) out vec3 v_fog_color;
-layout(location = 5) flat out float v_world_light;
+layout(location = 5) flat out vec4 v_world_light;
 
 void main() {
     vec4 world_pos = model * vec4(position, 1.0);
@@ -32,9 +36,9 @@ void main() {
     vec3 world_normal = normalize(normal_matrix * normal_packed.xyz);
 
     v_tex_coords = tex_coords;
-    v_light = mix_light(level_light(world_normal, instance_light.y > 0.5));
+    v_light = mix_light(level_light(world_normal, camera_block.w != 0));
     v_tint = resolve_item_tint(tint_index, item_tint_base, item_tint_count);
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;
-    v_world_light = instance_light.x;
+    v_world_light = light_lane_color(instance_light);
 }

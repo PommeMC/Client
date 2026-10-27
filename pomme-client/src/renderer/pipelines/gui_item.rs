@@ -1,9 +1,11 @@
 use glam::camera::rh::proj;
-use glam::{Mat4, Vec3};
+use glam::{Mat3, Mat4, Vec3};
 
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
+use crate::renderer::chunk::block_lighter::UNLIT_LANE;
 use crate::renderer::pipelines::item_entity::{self, ItemEntityPipeline, ItemPipelineShared};
+use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi};
 use crate::world::block::model::DisplayTransform;
 
@@ -21,8 +23,9 @@ impl GuiItemPipeline {
         atlas_targets: rhi::backend::PipelineTargets,
         atlas_px: u32,
         atlas: &TextureAtlas,
+        lightmap: &Lightmap,
     ) -> Self {
-        let shared = ItemPipelineShared::new(device, atlas, "gui_item");
+        let shared = ItemPipelineShared::new(device, atlas, lightmap, "gui_item");
         let pipeline = item_entity::create_pipeline_with_front_face(
             device,
             atlas_targets,
@@ -114,9 +117,9 @@ impl GuiItemPipeline {
             display,
         );
 
-        let instance = self
-            .shared
-            .push_item(frame, &model, 1.0, false, item_tints, 0);
+        let instance =
+            self.shared
+                .push_item(frame, &model, Mat3::IDENTITY, UNLIT_LANE, item_tints, 0);
         pass.set_vertex_buffer(0, buffer);
         pass.draw(vertex_count, 1, 0, instance);
     }

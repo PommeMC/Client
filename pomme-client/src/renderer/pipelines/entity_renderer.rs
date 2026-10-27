@@ -12,7 +12,7 @@ use crate::assets::{AssetIndex, resolve_asset_path, resolve_asset_path_with_pack
 use crate::entity::components::Position;
 use crate::entity::dimensions;
 use crate::renderer::camera::CameraUniform;
-use crate::renderer::chunk::block_lighter::LightLevels;
+use crate::renderer::chunk::block_lighter::{LightLevels, UNLIT_LANE};
 use crate::renderer::entity_model::{BakedEntityModel, EntityVertex};
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::rhi::{self, VertexFormat};
@@ -490,8 +490,6 @@ const HURT_OVERLAY: [f32; 4] = [1.0, 0.0, 0.0, 178.0 / 255.0];
 const NO_OVERLAY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 pub(super) const ENTITY_ALPHA_CUTOFF: f32 = 0.5;
 pub(crate) const ARMOR_ALPHA_CUTOFF: f32 = 0.1;
-/// The light lane `light_lane_color` leaves unlit.
-const EMISSIVE_LANE: f32 = -1.0;
 
 pub const WOOL_COLOR_RGBA: [[f32; 4]; 16] = [
     rgb(0xF0F0F0), // 0 white
@@ -2727,7 +2725,7 @@ impl<'a> VariantGroups<'a> {
                     };
                     let model = vis[*vi].entity_mat * part;
                     let light = if emissive {
-                        EMISSIVE_LANE
+                        UNLIT_LANE
                     } else {
                         vis[*vi].info.light.lane()
                     };

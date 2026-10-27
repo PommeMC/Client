@@ -816,7 +816,7 @@ impl InteractionState {
             let result = match (result, held.stack) {
                 (UseResult::Fail, _) => return false,
                 (UseResult::Pass, Some(stack)) => self.use_item(
-                    sender, audio, chunks, player_pos, eye_pos, look, hand, stack, held.worn, food,
+                    sender, audio, player_pos, eye_pos, look, hand, stack, held.worn, food,
                     creative, effects,
                 ),
                 (result, _) => result,
@@ -900,7 +900,6 @@ impl InteractionState {
         &mut self,
         sender: &PacketSender,
         audio: &AudioEngine,
-        chunks: &ChunkStore,
         player_pos: DVec3,
         eye_pos: DVec3,
         look: LookDirection,
@@ -974,7 +973,6 @@ impl InteractionState {
                 16,
                 audio,
                 effects.particles,
-                chunks,
                 player_pos,
                 eye_pos,
                 look,
@@ -1018,7 +1016,6 @@ impl InteractionState {
         hand_stacks: [Option<&ItemStackData>; 2],
         sender: &PacketSender,
         audio: &AudioEngine,
-        chunks: &ChunkStore,
         player_pos: DVec3,
         eye_pos: DVec3,
         look: LookDirection,
@@ -1028,7 +1025,6 @@ impl InteractionState {
             hand_stacks,
             sender,
             audio,
-            chunks,
             player_pos,
             eye_pos,
             look,
@@ -1063,7 +1059,6 @@ impl InteractionState {
         hand_stacks: [Option<&ItemStackData>; 2],
         sender: &PacketSender,
         audio: &AudioEngine,
-        chunks: &ChunkStore,
         player_pos: DVec3,
         eye_pos: DVec3,
         look: LookDirection,
@@ -1116,7 +1111,6 @@ impl InteractionState {
                 5,
                 audio,
                 effects.particles,
-                chunks,
                 player_pos,
                 eye_pos,
                 look,
@@ -1148,7 +1142,6 @@ impl InteractionState {
         &mut self,
         audio: &AudioEngine,
         particles: &mut ParticleStore,
-        chunks: &ChunkStore,
         player_pos: DVec3,
         eye_pos: DVec3,
         look: LookDirection,
@@ -1160,9 +1153,7 @@ impl InteractionState {
         if active.bundle.is_some() {
             return;
         }
-        emit_consume_effects(
-            &active, 16, audio, particles, chunks, player_pos, eye_pos, look,
-        );
+        emit_consume_effects(&active, 16, audio, particles, player_pos, eye_pos, look);
     }
 
     /// Vanilla `LocalPlayer.itemUseSpeedMultiplier`: the in-use item's
@@ -1802,13 +1793,11 @@ fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Op
 /// burst of item crumbs plus the consume sound. The sound plays locally here
 /// and again from the server's broadcast, doubling up for the eater exactly
 /// like vanilla (MC-98310).
-#[allow(clippy::too_many_arguments)]
 fn emit_consume_effects(
     active: &ActiveUse,
     particle_count: u32,
     audio: &AudioEngine,
     particles: &mut ParticleStore,
-    chunks: &ChunkStore,
     player_pos: DVec3,
     eye_pos: DVec3,
     look: LookDirection,
@@ -1820,7 +1809,6 @@ fn emit_consume_effects(
             eye_pos,
             look.x_rot_deg(),
             look.y_rot_deg(),
-            chunks,
         );
     }
     let (volume, pitch) = if matches!(active.anim, ItemUseAnimation::Drink) {

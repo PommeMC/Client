@@ -1606,20 +1606,6 @@ impl ChunkStoreSnapshot {
     }
 }
 
-pub const LIGHT_TABLE: [f32; 16] = [
-    0.05, 0.067, 0.085, 0.106, 0.129, 0.156, 0.188, 0.227, 0.272, 0.328, 0.393, 0.472, 0.566,
-    0.679, 0.815, 1.0,
-];
-
-/// Brightness at a block position from the chunk store's light data:
-/// `LIGHT_TABLE[max(sky, block)]`.
-pub fn world_brightness(chunks: &ChunkStore, x: i32, y: i32, z: i32) -> f32 {
-    let level = chunks
-        .get_sky_light(x, y, z)
-        .max(chunks.get_block_light(x, y, z));
-    LIGHT_TABLE[level as usize]
-}
-
 /// Whether a section provably emits nothing: every block is hidden once
 /// enclosed, and every block touching it from outside occludes. `at` reads
 /// section-relative coordinates.

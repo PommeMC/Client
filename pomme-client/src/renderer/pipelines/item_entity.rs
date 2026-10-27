@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use glam::Mat4;
+use glam::{Mat3, Mat4};
 
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, SpriteAlphaMask, TextureAtlas};
+use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::entity_model::pack_normal;
+use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
 use crate::world::block::model::{BakedModel, Direction, direction_from_positions};
 
@@ -35,8 +37,7 @@ pub struct ItemRenderInfo {
     /// Evaluated tint palette, shared by every copy of one dropped stack.
     pub tints: Arc<[u32]>,
     pub model_matrix: Mat4,
-    pub light: f32,
-    pub nether_lighting: bool,
+    pub light: LightLevels,
 }
 
 /// What the item-entity renderer needs to place a mesh: whether it baked from a
@@ -78,8 +79,8 @@ struct ItemInstance {
     model: [f32; 16],
     /// The inverse transpose of the model's 3x3, for the baked normals.
     normal_matrix: [f32; 9],
-    /// The world light, then the nether-lighting flag (0 or 1).
-    light: [f32; 2],
+    /// The light lane (`LightLevels::lane`).
+    light: f32,
     /// The copy's slice of the tint palette.
     tint_base: u32,
     tint_count: u32,
@@ -101,7 +102,7 @@ impl ItemInstance {
                 rhi::VertexFormat::Float32x3,
                 rhi::VertexFormat::Float32x3,
                 rhi::VertexFormat::Float32x3,
-                rhi::VertexFormat::Float32x2,
+                rhi::VertexFormat::Float32,
                 rhi::VertexFormat::Uint32,
                 rhi::VertexFormat::Uint32,
                 rhi::VertexFormat::Uint32,
@@ -109,20 +110,19 @@ impl ItemInstance {
         ),
     };
 
+    /// `normal_basis` carries the model's normals on into world space.
     fn new(
         model: &Mat4,
+        normal_basis: Mat3,
         light: f32,
-        nether_lighting: bool,
         tints: (u32, u32),
         outline_color: u32,
     ) -> Self {
         Self {
             model: model.to_cols_array(),
-            normal_matrix: glam::Mat3::from_mat4(*model)
-                .inverse()
-                .transpose()
+            normal_matrix: (normal_basis * Mat3::from_mat4(*model).inverse().transpose())
                 .to_cols_array(),
-            light: [light, if nether_lighting { 1.0 } else { 0.0 }],
+            light,
             tint_base: tints.0,
             tint_count: tints.1,
             outline_color,
@@ -261,6 +261,8 @@ pub(super) struct ItemPipelineShared {
     atlas_layout: rhi::backend::BindGroupLayout,
     tint_layout: rhi::backend::BindGroupLayout,
     camera_sets: Vec<rhi::backend::BindGroup>,
+    /// The shared [`Lightmap`]'s group, set 3.
+    lightmap_set: rhi::backend::BindGroup,
     atlas_set: rhi::backend::BindGroup,
     atlas_sampler: rhi::backend::Sampler,
     camera_buffers: Vec<rhi::backend::Buffer>,
@@ -271,13 +273,18 @@ pub(super) struct ItemPipelineShared {
 }
 
 impl ItemPipelineShared {
-    pub(super) fn new(device: &rhi::backend::Device, atlas: &TextureAtlas, label: &str) -> Self {
+    pub(super) fn new(
+        device: &rhi::backend::Device,
+        atlas: &TextureAtlas,
+        lightmap: &Lightmap,
+        label: &str,
+    ) -> Self {
         let [camera_layout, atlas_layout, tint_layout] =
             ITEM_BIND_GROUPS.map(|entries| rhi::backend::create_bind_group_layout(device, entries));
 
         let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
-            &[camera_layout, atlas_layout, tint_layout],
+            &[camera_layout, atlas_layout, tint_layout, lightmap.layout],
             None,
         );
 
@@ -304,6 +311,7 @@ impl ItemPipelineShared {
             atlas_layout,
             tint_layout,
             camera_sets,
+            lightmap_set: lightmap.group,
             atlas_set: rhi::backend::BindGroup::default(),
             atlas_sampler,
             camera_buffers,
@@ -360,6 +368,7 @@ impl ItemPipelineShared {
                 self.camera_sets[frame],
                 self.atlas_set,
                 self.tint_sets[frame],
+                self.lightmap_set,
             ],
         );
         pass.set_vertex_buffer(1, self.instances.buffer(frame).handle());
@@ -385,16 +394,16 @@ impl ItemPipelineShared {
         &mut self,
         frame: usize,
         model: &Mat4,
+        normal_basis: Mat3,
         light: f32,
-        nether_lighting: bool,
         tints: &[u32],
         outline_color: u32,
     ) -> u32 {
         let tint_base = self.tints.push(frame, tints);
         let instance = ItemInstance::new(
             model,
+            normal_basis,
             light,
-            nether_lighting,
             (tint_base, tints.len() as u32),
             outline_color,
         );
@@ -435,8 +444,9 @@ impl ItemEntityPipeline {
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
         atlas: &TextureAtlas,
+        lightmap: &Lightmap,
     ) -> Self {
-        let shared = ItemPipelineShared::new(device, atlas, "item_entity");
+        let shared = ItemPipelineShared::new(device, atlas, lightmap, "item_entity");
         let (cutout, translucent) = create_world_pipelines(device, targets, shared.pipeline_layout);
 
         Self {
@@ -575,8 +585,8 @@ impl ItemEntityPipeline {
             self.shared.push_item(
                 frame,
                 &item.model_matrix,
-                item.light,
-                item.nether_lighting,
+                Mat3::IDENTITY,
+                item.light.lane(),
                 &item.tints,
                 item.outline_color.unwrap_or(0),
             );
@@ -951,12 +961,13 @@ fn build_flat_quad(region: AtlasRegion, tint_index: Option<u32>) -> Vec<ItemVert
         .collect()
 }
 
+/// The held-item pipeline: lit by `Lighting.Entry.LEVEL`, like dropped items.
 pub(super) fn create_pipeline(
     device: &rhi::backend::Device,
     targets: rhi::backend::PipelineTargets,
     layout: rhi::backend::PipelineLayout,
 ) -> rhi::backend::RenderPipeline {
-    create_pipeline_impl(device, targets, layout, rhi::FrontFace::Ccw, false, true)
+    create_pipeline_impl(device, targets, layout, rhi::FrontFace::Ccw, true, true)
 }
 
 /// The dropped-item pipelines: `(cutout, translucent)`.
@@ -1062,26 +1073,13 @@ mod tests {
             glam::Quat::from_rotation_y(0.7),
             glam::Vec3::new(1.0, 2.0, 3.0),
         );
-        let instance = ItemInstance::new(&model, 0.8, true, (3, 2), 0xFF0000);
+        let instance = ItemInstance::new(&model, Mat3::IDENTITY, 0.8, (3, 2), 0xFF0000);
         let normal_matrix = glam::Mat3::from_cols_array(&instance.normal_matrix);
         let (normal, tangent) = (glam::Vec3::Y, glam::Vec3::new(1.0, 0.0, 1.0));
         let surface = glam::Mat3::from_mat4(model) * tangent;
         assert!((normal_matrix * normal).dot(surface).abs() < 1e-5);
-        assert_eq!(instance.light, [0.8, 1.0]);
+        assert_eq!(instance.light, 0.8);
         assert_eq!((instance.tint_base, instance.tint_count), (3, 2));
-    }
-
-    fn unit_region() -> AtlasRegion {
-        AtlasRegion {
-            u_min: 0.0,
-            v_min: 0.0,
-            u_max: 1.0,
-            v_max: 1.0,
-            pixel_rect: [0, 0, 1, 1],
-            sprite: 0,
-            opaque: true,
-            translucent: false,
-        }
     }
 
     fn unpack_uv(vertex: &ItemVertex) -> [f32; 2] {
@@ -1111,7 +1109,7 @@ mod tests {
     #[test]
     fn extruded_item_side_faces_wind_outward() {
         let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
-        let vertices = build_extruded_item(&image, unit_region());
+        let vertices = build_extruded_item(&image, AtlasRegion::UNIT);
         let expected_normals = [
             glam::Vec3::Y,
             glam::Vec3::NEG_Y,
@@ -1140,7 +1138,7 @@ mod tests {
     #[test]
     fn extruded_item_carries_vanilla_cardinal_normals() {
         let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
-        let vertices = build_extruded_item(&image, unit_region());
+        let vertices = build_extruded_item(&image, AtlasRegion::UNIT);
         let expected = [
             glam::Vec3::Z,
             glam::Vec3::NEG_Z,
@@ -1187,7 +1185,7 @@ mod tests {
             height: 1,
             frames: vec![vec![true]],
         };
-        let vertices = build_extruded_item_mask(&mask, unit_region(), Some(37));
+        let vertices = build_extruded_item_mask(&mask, AtlasRegion::UNIT, Some(37));
         assert!(!vertices.is_empty());
         assert!(vertices.iter().all(|vertex| vertex.tint_index == 37));
         assert!(
@@ -1204,7 +1202,7 @@ mod tests {
             height: 1,
             frames: vec![vec![true]],
         };
-        let vertices = build_extruded_item_mask(&mask, unit_region(), None);
+        let vertices = build_extruded_item_mask(&mask, AtlasRegion::UNIT, None);
         assert!(
             vertices
                 .iter()
@@ -1219,7 +1217,7 @@ mod tests {
             height: 1,
             frames: vec![vec![true, false], vec![false, true]],
         };
-        let vertices = build_extruded_item_mask(&mask, unit_region(), None);
+        let vertices = build_extruded_item_mask(&mask, AtlasRegion::UNIT, None);
 
         // Each frame exposes the shared edge from one side, so vanilla emits
         // eight side quads total. Collapsing the frames into one opacity bitmap
@@ -1230,7 +1228,7 @@ mod tests {
     #[test]
     fn extruded_item_back_face_preserves_sprite_orientation() {
         let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
-        let vertices = build_extruded_item(&image, unit_region());
+        let vertices = build_extruded_item(&image, AtlasRegion::UNIT);
 
         assert_uvs_near(
             &vertices[6..12],
@@ -1282,7 +1280,7 @@ mod tests {
     #[test]
     fn extruded_item_side_faces_match_vanilla_pixel_inset_uvs() {
         let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
-        let vertices = build_extruded_item(&image, unit_region());
+        let vertices = build_extruded_item(&image, AtlasRegion::UNIT);
         let expected = [
             // UP
             [0.1, 0.1],

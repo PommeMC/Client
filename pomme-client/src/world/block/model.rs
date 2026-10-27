@@ -1127,10 +1127,8 @@ fn vanilla_gui_face_shades(display: DisplayTransform, gui_light: GuiLight) -> [f
     shades
 }
 
-/// TODO: `held_item.rs` draws this same mesh through `item_entity.vert`, so
-/// the first-person hand picks up the GUI pose's lambert too. Vanilla lights
-/// the hand with `Lighting.Entry.LEVEL` (it draws inside `renderLevel`, before
-/// `GameRenderer` switches to `ITEMS_3D` for the GUI).
+/// The GUI's lambert, baked for `item_entity.vert`; held and dropped items
+/// light by their normals instead (`item_entity_world.vert`).
 fn apply_gui_lambert(quads: &mut [BakedQuad], display: DisplayTransform, gui_light: GuiLight) {
     let (l0, l1) = gui_lights(gui_light);
     for quad in quads {

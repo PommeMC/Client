@@ -31,7 +31,7 @@ use crate::player::interaction::{
 use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
 use crate::position::{BlockPos, ChunkPos};
-use crate::renderer::chunk::block_lighter::{self, WorldLight};
+use crate::renderer::chunk::block_lighter::{self, LightLevels, WorldLight};
 use crate::renderer::chunk::buffer::column_is_near;
 use crate::renderer::chunk::mesh_columns::MeshColumns;
 use crate::renderer::chunk::mesh_source::MeshSource;
@@ -4175,9 +4175,8 @@ pub fn update_game(
     } else {
         build_item_render_infos(
             &game.item_entity_store,
-            &game.chunk_store,
+            &world_light,
             &gfx.renderer,
-            game.cardinal_light,
             *gfx.renderer.camera_pivot_position(),
             gfx.renderer.camera_anchor(),
             partial_tick,
@@ -4262,7 +4261,7 @@ pub fn update_game(
         Vec::new()
     } else {
         build_weather_columns(
-            &game.chunk_store,
+            &world_light,
             &game.biome_climate,
             gfx.renderer.camera_render_position(),
             sky.rain(),
@@ -4278,7 +4277,7 @@ pub fn update_game(
         Vec::new()
     } else {
         game.particle_store
-            .extract(partial_tick, gfx.renderer.camera_anchor())
+            .extract(partial_tick, gfx.renderer.camera_anchor(), &world_light)
     };
 
     let effective_rd = if game.server_render_distance > 0 {
@@ -4294,11 +4293,10 @@ pub fn update_game(
     let held_items = if benchmark_running {
         [None, None]
     } else {
-        let light = get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
         let held = |stack: &azalea_inventory::ItemStack| match stack {
             azalea_inventory::ItemStack::Present(data) => {
                 let name = crate::player::inventory::item_resource_name(data.kind);
-                (name != "air").then(|| (name, light, data.clone()))
+                (name != "air").then(|| (name, data.clone()))
             }
             _ => None,
         };
@@ -4501,20 +4499,11 @@ fn stack_render_count(count: i32) -> usize {
     }
 }
 
-fn get_entity_light(chunk_store: &ChunkStore, pos: Position) -> f32 {
-    crate::renderer::chunk::mesher::world_brightness(
-        chunk_store,
-        pos.x.floor() as i32,
-        pos.y.floor() as i32,
-        pos.z.floor() as i32,
-    )
-}
-
 /// Builds the rain/snow columns in a square around the camera (vanilla
 /// WeatherEffectRenderer.extractRenderState). Returns empty when it is not
 /// raining or when no precipitation biomes are nearby.
 fn build_weather_columns(
-    chunk_store: &ChunkStore,
+    world_light: &WorldLight,
     biome_climate: &HashMap<u32, BiomeClimate>,
     cam: glam::DVec3,
     rain: f32,
@@ -4526,6 +4515,7 @@ fn build_weather_columns(
         return Vec::new();
     }
 
+    let chunk_store = world_light.chunks;
     let cam_x = cam.x.floor() as i32;
     let cam_y = cam.y.floor() as i32;
     let cam_z = cam.z.floor() as i32;
@@ -4549,11 +4539,7 @@ fn build_weather_columns(
             if precip == Precip::None {
                 continue;
             }
-            let light_y = cam_y.max(terrain);
-            let light = get_entity_light(
-                chunk_store,
-                Position::new(wx as f64, light_y as f64, wz as f64),
-            );
+            let light = block_lighter::light_coords(world_light, [wx, cam_y.max(terrain), wz]);
             columns.push(WeatherColumn {
                 x: wx,
                 z: wz,
@@ -4698,8 +4684,7 @@ fn emit_item_copies(
     ground_transform: glam::Mat4,
     min_y: f32,
     z_size: f32,
-    light: f32,
-    nether_lighting: bool,
+    light: LightLevels,
     outline_color: Option<u32>,
 ) {
     use crate::renderer::pipelines::item_entity::ItemRenderInfo;
@@ -4726,7 +4711,6 @@ fn emit_item_copies(
             tints: tints.clone(),
             model_matrix: base * copy_offset * ground_transform,
             light,
-            nether_lighting,
         });
     };
 
@@ -4836,20 +4820,23 @@ fn shadow_casters(
 #[allow(clippy::too_many_arguments)]
 fn build_item_render_infos(
     entity_store: &crate::entity::ItemEntityStore,
-    chunk_store: &ChunkStore,
+    world_light: &WorldLight,
     renderer: &Renderer,
-    cardinal_light: CardinalLightType,
     camera_pos: glam::DVec3,
     anchor: glam::DVec3,
     partial_tick: f32,
     outline: impl Fn(&crate::entity::ItemEntity) -> Option<u32>,
 ) -> Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo> {
+    // TODO: an item's fire flag, and its fire immunity.
+    let light = |pos: Position| {
+        let eye_height = crate::entity::dimensions::EntityDimensions::eye_height(EntityKind::Item);
+        let eye = pos + glam::dvec3(0.0, f64::from(eye_height), 0.0);
+        entity_light(world_light, EntityKind::Item, eye, false, 0)
+    };
     let mut infos = Vec::new();
-    let nether_lighting = cardinal_light == CardinalLightType::Nether;
     for item in entity_store.visible_items(camera_pos, 64.0) {
         let age_f = item.age as f32 + partial_tick;
         let lerped = item.prev_position.lerp(item.position, partial_tick as f64);
-        let light = get_entity_light(chunk_store, lerped);
         let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &item.item_name);
         emit_item_copies(
             &mut infos,
@@ -4865,8 +4852,7 @@ fn build_item_render_infos(
             ground_transform,
             min_y,
             z_size,
-            light,
-            nether_lighting,
+            light(lerped),
             outline(item),
         );
     }
@@ -4875,7 +4861,6 @@ fn build_item_render_infos(
     // pickup.
     for pickup in entity_store.active_pickups(partial_tick) {
         let age_f = pickup.age as f32 + partial_tick;
-        let light = get_entity_light(chunk_store, pickup.position);
         let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &pickup.item_name);
         emit_item_copies(
             &mut infos,
@@ -4891,8 +4876,9 @@ fn build_item_render_infos(
             ground_transform,
             min_y,
             z_size,
-            light,
-            nether_lighting,
+            // TODO: vanilla's `ItemPickupParticle` keeps the item's light from
+            // the pickup.
+            light(pickup.position),
             // Vanilla's `ItemPickupParticle` clears its outline.
             None,
         );

@@ -2,7 +2,9 @@ use std::path::Path;
 
 use crate::assets::AssetIndex;
 use crate::renderer::camera::{Camera, CameraUniform};
+use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::chunk::mesher::BiomeClimate;
+use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::pipelines::sky::SkyState;
 use crate::renderer::{rhi, shader, util};
 
@@ -51,8 +53,15 @@ pub struct WeatherColumn {
     pub bottom_y: f32,
     pub top_y: f32,
     pub precip: Precip,
-    /// Skylight/blocklight brightness factor (0..1) at the column.
-    pub light: f32,
+    /// Vanilla `LightCoordsUtil.getLightCoords` at the column's light sample.
+    pub light: LightLevels,
+}
+
+/// Vanilla `WeatherEffectRenderer`'s snow light: each level brightened a
+/// quarter of the way to 15.
+fn snow_light(light: LightLevels) -> LightLevels {
+    let brighten = |level: u8| (level * 3 + 15) / 4;
+    LightLevels::new(brighten(light.sky()), brighten(light.block()))
 }
 
 #[repr(C)]
@@ -60,7 +69,8 @@ pub struct WeatherColumn {
 struct WeatherVertex {
     position: [f32; 3],
     uv: [f32; 2],
-    brightness: f32,
+    alpha: f32,
+    light: f32,
 }
 
 pub struct WeatherPipeline {
@@ -72,6 +82,8 @@ pub struct WeatherPipeline {
     rain_set: rhi::backend::BindGroup,
     snow_set: rhi::backend::BindGroup,
     camera_buffers: Vec<rhi::backend::Buffer>,
+    /// The shared [`Lightmap`]'s group, set 2.
+    lightmap_set: rhi::backend::BindGroup,
     vertex_buffers: Vec<rhi::backend::Buffer>,
     sampler: rhi::backend::Sampler,
     rain: rhi::backend::Texture,
@@ -84,11 +96,15 @@ impl WeatherPipeline {
         targets: rhi::backend::PipelineTargets,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
+        lightmap: &Lightmap,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
         let tex_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
-        let pipeline_layout =
-            rhi::backend::create_pipeline_layout(device, &[camera_layout, tex_layout], None);
+        let pipeline_layout = rhi::backend::create_pipeline_layout(
+            device,
+            &[camera_layout, tex_layout, lightmap.layout],
+            None,
+        );
 
         let pipeline = create_pipeline(device, targets, pipeline_layout);
 
@@ -135,6 +151,7 @@ impl WeatherPipeline {
             rain_set,
             snow_set,
             camera_buffers,
+            lightmap_set: lightmap.group,
             vertex_buffers,
             sampler,
             rain,
@@ -195,9 +212,15 @@ impl WeatherPipeline {
             };
 
             // Distance falloff (vanilla lerp(min(distSq/radiusSq,1), maxAlpha, 0.5))
-            // folded with rain intensity and the column light.
+            // folded with rain intensity.
             let falloff = max_alpha + (0.5 - max_alpha) * (dist_sq / radius_sq).min(1.0);
-            let brightness = falloff * intensity * col.light;
+            let alpha = falloff * intensity;
+            let light = if is_snow {
+                snow_light(col.light)
+            } else {
+                col.light
+            }
+            .lane();
 
             let x0 = wx - hx;
             let x1 = wx + hx;
@@ -227,7 +250,8 @@ impl WeatherPipeline {
                 target.push(WeatherVertex {
                     position: corners[i].0,
                     uv: corners[i].1,
-                    brightness,
+                    alpha,
+                    light,
                 });
             }
         }
@@ -248,6 +272,7 @@ impl WeatherPipeline {
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertex_buffers[frame].handle());
         pass.set_bind_group(0, self.camera_sets[frame]);
+        pass.set_bind_group(2, self.lightmap_set);
 
         if rain_count > 0 {
             pass.set_bind_group(1, self.rain_set);
@@ -403,9 +428,21 @@ fn create_pipeline(
                 shader::include_shader!("weather.frag"),
                 &[rhi::vertex_buffer!(
                     WeatherVertex,
-                    [Float32x3, Float32x2, Float32]
+                    [Float32x3, Float32x2, Float32, Float32]
                 )],
             )
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snow_brightens_each_level_a_quarter_toward_15() {
+        assert_eq!(snow_light(LightLevels::new(0, 0)), LightLevels::new(3, 3));
+        assert_eq!(snow_light(LightLevels::new(15, 4)), LightLevels::new(15, 6));
+        assert_eq!(snow_light(LightLevels::new(7, 14)), LightLevels::new(9, 14));
+    }
 }

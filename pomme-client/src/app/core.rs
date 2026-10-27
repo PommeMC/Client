@@ -2748,7 +2748,6 @@ impl AppCore {
                         game.interaction.complete_using(
                             &self.audio,
                             &mut game.particle_store,
-                            &game.chunk_store,
                             game.player.position.into(),
                             game.player.eye_pos().into(),
                             game.player.look_dir,
@@ -3255,7 +3254,6 @@ impl AppCore {
                 hand_stacks.each_ref().map(Option::as_ref),
                 &connection.packet_tx,
                 &self.audio,
-                &game.chunk_store,
                 game.player.position.into(),
                 game.player.eye_pos().into(),
                 game.player.look_dir,
@@ -3498,7 +3496,6 @@ impl AppCore {
             hand_stacks,
             &connection.packet_tx,
             &self.audio,
-            &game.chunk_store,
             game.player.position.into(),
             game.player.eye_pos().into(),
             game.player.look_dir,

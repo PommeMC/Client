@@ -1,12 +1,14 @@
 use std::path::Path;
 
 use glam::camera::rh::proj;
-use glam::{Mat4, Vec3};
+use glam::{Mat3, Mat4, Vec3};
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::chunk::block_lighter::LightLevels;
+use crate::renderer::entity_model::pack_normal;
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{SkinData, rhi, shader, util};
+use crate::world::block::model::CardinalLightType;
 const NEAR: f32 = 0.05;
 const FAR: f32 = 10.0;
 
@@ -15,13 +17,17 @@ const FAR: f32 = 10.0;
 struct HandVertex {
     position: [f32; 3],
     uv: [f32; 2],
+    normal: [i8; 4],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct HandUniform {
     mvp: [[f32; 4]; 4],
-    /// x = the player's light lane.
+    /// The model's normals into world space, as a `mat4` for std140.
+    normal_matrix: [[f32; 4]; 4],
+    /// x = the player's light lane, y = 1 under the nether's directional
+    /// light.
     light: [f32; 4],
 }
 
@@ -106,15 +112,20 @@ impl HandPipeline {
         swing_progress: f32,
         right_arm: bool,
         bob: Mat4,
+        hand_pose: Mat4,
         light: LightLevels,
+        cardinal_light: CardinalLightType,
     ) {
         let proj = projection(aspect, hud_fov);
         let model = arm_matrix(swing_progress, arm_invert(right_arm));
 
         let mvp = proj * bob * model;
+        let normal_matrix = Mat3::from_mat4(hand_pose * model).inverse().transpose();
+        let nether = f32::from(u8::from(cardinal_light == CardinalLightType::Nether));
         let uniform = HandUniform {
             mvp: mvp.to_cols_array_2d(),
-            light: [light.lane(), 0.0, 0.0, 0.0],
+            normal_matrix: Mat4::from_mat3(normal_matrix).to_cols_array_2d(),
+            light: [light.lane(), nether, 0.0, 0.0],
         };
         let bytes = bytemuck::bytes_of(&uniform);
         self.mvp_buffers[frame].write(bytes);
@@ -291,7 +302,8 @@ fn build_arm_vertices(skin_w: u32, skin_h: u32, slim: bool, right: bool) -> Vec<
     let mut verts = Vec::with_capacity(36);
 
     // UV corner order matches vanilla ModelPart.Polygon
-    let mut quad = |positions: [[f32; 3]; 4], uv_px: [f32; 4]| {
+    let mut quad = |positions: [[f32; 3]; 4], uv_px: [f32; 4], normal: Vec3| {
+        let normal = pack_normal(normal);
         let ua = uv_px[0] / sw;
         let va = uv_px[1] / sh;
         let ub = uv_px[2] / sw;
@@ -301,16 +313,17 @@ fn build_arm_vertices(skin_w: u32, skin_h: u32, slim: bool, right: bool) -> Vec<
             verts.push(HandVertex {
                 position: positions[i],
                 uv: uvs[i],
+                normal,
             });
         }
     };
 
-    quad([l1, l0, t0, t1], [u1, v0, u2, v1]); // down (shoulder cap)
-    quad([t2, t3, l3, l2], [u2, v1, u2 + w, v0]); // up (hand cap, V reversed as vanilla)
-    quad([t0, l0, l3, t3], [u0, v1, u1, v2]); // west (outer)
-    quad([t1, t0, t3, t2], [u1, v1, u2, v2]); // north (front)
-    quad([l1, t1, t2, l2], [u2, v1, u3, v2]); // east (inner)
-    quad([l0, l1, l2, l3], [u3, v1, u4, v2]); // south (back)
+    quad([l1, l0, t0, t1], [u1, v0, u2, v1], Vec3::NEG_Y); // down (shoulder cap)
+    quad([t2, t3, l3, l2], [u2, v1, u2 + w, v0], Vec3::Y); // up (hand cap, V reversed as vanilla)
+    quad([t0, l0, l3, t3], [u0, v1, u1, v2], Vec3::NEG_X); // west (outer)
+    quad([t1, t0, t3, t2], [u1, v1, u2, v2], Vec3::NEG_Z); // north (front)
+    quad([l1, t1, t2, l2], [u2, v1, u3, v2], Vec3::X); // east (inner)
+    quad([l0, l1, l2, l3], [u3, v1, u4, v2], Vec3::Z); // south (back)
 
     verts
 }
@@ -369,7 +382,10 @@ fn create_pipeline(
                 "hand",
                 shader::include_shader!("hand.vert"),
                 shader::include_shader!("hand.frag"),
-                &[rhi::vertex_buffer!(HandVertex, [Float32x3, Float32x2])],
+                &[rhi::vertex_buffer!(
+                    HandVertex,
+                    [Float32x3, Float32x2, Snorm8x4]
+                )],
             )
         },
     )
