@@ -85,11 +85,11 @@ pub struct PackFrame {
 /// The player's surroundings as Iris reports them, from the game state.
 #[derive(Clone, Default)]
 pub struct PackWorld {
-    /// The biome's registry id at the eye.
+    /// The biome's registry id at the feet.
     pub biome: i32,
     /// Every biome's name, by registry id, for the `BIOME_*` constants.
     pub biome_names: Arc<[String]>,
-    /// `PPT_NONE`, `PPT_RAIN` or `PPT_SNOW` at the eye.
+    /// `PPT_NONE`, `PPT_RAIN` or `PPT_SNOW` at the feet.
     pub precipitation: i32,
     pub temperature: f32,
     pub rainfall: f32,

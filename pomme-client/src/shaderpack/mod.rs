@@ -24,7 +24,7 @@ use prelude::{Geometry, Preludes};
 use preprocess::Overrides;
 use programs::Gbuffers;
 use source::{PackSource, SourceError};
-use uniforms::{CustomUniforms, UniformError};
+use uniforms::CustomUniforms;
 
 pub struct ShaderPack {
     pub name: String,
@@ -41,8 +41,6 @@ pub struct ShaderPack {
 pub enum PackError {
     #[error("{0}")]
     Source(#[from] SourceError),
-    #[error("shaders.properties: {0}")]
-    Uniforms(#[from] UniformError),
     #[error("{program}: {error}")]
     Include {
         program: String,
@@ -103,7 +101,7 @@ impl ShaderPack {
                 .unwrap_or_default()
         };
         let ordered = read_properties("shaders.properties");
-        let custom_uniforms = CustomUniforms::parse(&ordered)?;
+        let custom_uniforms = CustomUniforms::parse(&ordered);
         let dimensions = read_properties("dimension.properties")
             .into_iter()
             .collect();
