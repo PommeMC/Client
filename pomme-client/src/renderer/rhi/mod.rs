@@ -382,7 +382,8 @@ pub const MAX_COLOR_TARGETS: usize = 8;
 /// formats rather than a pass.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PipelineTargets<Format> {
-    pub color: Format,
+    /// The color target at location 0; `None` draws depth alone.
+    pub color: Option<Format>,
     /// Further color targets, at locations 1, 2, ...
     pub extra_colors: [Option<Format>; MAX_COLOR_TARGETS - 1],
     /// Whether there's a `Depth32Float` target.
@@ -393,15 +394,25 @@ impl<Format: Copy> PipelineTargets<Format> {
     /// One color target, and a depth target if `depth`.
     pub const fn new(color: Format, depth: bool) -> Self {
         Self {
-            color,
+            color: Some(color),
             extra_colors: [None; MAX_COLOR_TARGETS - 1],
             depth,
+        }
+    }
+
+    /// A depth target alone.
+    pub const fn depth_only() -> Self {
+        Self {
+            color: None,
+            extra_colors: [None; MAX_COLOR_TARGETS - 1],
+            depth: true,
         }
     }
 }
 
 pub struct RenderPassDesc<Texture, Format> {
-    pub color: ColorAttachment<Texture, Format>,
+    /// The color target at location 0; `None` draws depth alone.
+    pub color: Option<ColorAttachment<Texture, Format>>,
     /// Further color targets, matching the pipelines' `extra_colors`.
     pub extra_colors: Vec<ColorAttachment<Texture, Format>>,
     pub depth: Option<DepthAttachment<Texture>>,
@@ -419,12 +430,12 @@ impl<Texture, Format> RenderPassDesc<Texture, Format> {
         extent: Extent,
     ) -> Self {
         Self {
-            color: ColorAttachment {
+            color: Some(ColorAttachment {
                 texture: image,
                 format,
                 load,
                 store: StoreOp::Store,
-            },
+            }),
             extra_colors: Vec::new(),
             depth: Some(DepthAttachment::cleared(depth)),
             extent,

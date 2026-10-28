@@ -273,7 +273,7 @@ impl SkyPipeline {
         self.ubo_buffers[frame].write(bytemuck::bytes_of(&uniform));
 
         let mut overlay = None;
-        for draw in self.draws(camera, sky) {
+        for draw in self.draws(camera, sky, 0.0) {
             let blend = draw.stage.overlay();
             if overlay != Some(blend) {
                 overlay = Some(blend);
@@ -288,9 +288,10 @@ impl SkyPipeline {
         }
     }
 
-    /// [`elements`] with their textures and vertices.
-    pub fn draws(&self, camera: &Camera, sky: &SkyState) -> Vec<SkyDraw> {
-        elements(sky, camera.top_down().is_some())
+    /// [`elements`] with their textures and vertices; `tilt` is a shader
+    /// pack's `sunPathRotation`.
+    pub fn draws(&self, camera: &Camera, sky: &SkyState, tilt: f32) -> Vec<SkyDraw> {
+        elements(sky, camera.top_down().is_some(), tilt)
             .into_iter()
             .map(|(stage, pose, color)| {
                 let (texture, vertices) = match stage {
@@ -370,11 +371,19 @@ impl SkyPipeline {
     }
 }
 
+/// Vanilla's `rotateDegrees(YP, -90)` then `rotate(XP, angle)` for the sun,
+/// moon and stars, with Iris's `sunPathRotation` `tilt` about Z between.
+pub fn celestial_pose(degrees: f32, tilt: f32) -> Mat4 {
+    Mat4::from_rotation_y(-90f32.to_radians())
+        * Mat4::from_rotation_z(tilt.to_radians())
+        * Mat4::from_rotation_x(degrees.to_radians())
+}
+
 /// Vanilla `SkyRenderer.render`'s elements in order, each with its pose and
 /// colour modulator. The chunk-load benchmark's `top_down` view keeps the
 /// sky backdrop but drops the sun, moon, stars and sunrise glow so only
 /// terrain reads.
-fn elements(sky: &SkyState, top_down: bool) -> Vec<(SkyStage, Mat4, Vec4)> {
+fn elements(sky: &SkyState, top_down: bool, tilt: f32) -> Vec<(SkyStage, Mat4, Vec4)> {
     let attributes = &sky.attributes;
     match sky.skybox {
         Skybox::None => return Vec::new(),
@@ -408,9 +417,7 @@ fn elements(sky: &SkyState, top_down: bool) -> Vec<(SkyStage, Mat4, Vec4)> {
         elements.push((SkyStage::Sunset, pose, sunrise));
     }
 
-    let celestial = |degrees: f32| {
-        Mat4::from_rotation_y(-90f32.to_radians()) * Mat4::from_rotation_x(degrees.to_radians())
-    };
+    let celestial = |degrees| celestial_pose(degrees, tilt);
     let rain_brightness = Vec4::new(1.0, 1.0, 1.0, 1.0 - sky.rain());
     elements.push((
         SkyStage::Sun,
@@ -701,7 +708,7 @@ mod tests {
     use super::*;
 
     fn stages(sky: &SkyState, top_down: bool) -> Vec<SkyStage> {
-        elements(sky, top_down)
+        elements(sky, top_down, 0.0)
             .into_iter()
             .map(|(s, _, _)| s)
             .collect()
@@ -740,6 +747,16 @@ mod tests {
     }
 
     #[test]
+    fn sun_path_rotation_tilts_the_sun() {
+        let sun = celestial_pose(0.0, 30.0).transform_point3(Vec3::new(0.0, 100.0, 0.0));
+        let (s, c) = 30f32.to_radians().sin_cos();
+        assert!(
+            sun.abs_diff_eq(Vec3::new(0.0, 100.0 * c, -100.0 * s), 1e-3),
+            "{sun}"
+        );
+    }
+
+    #[test]
     fn stages_are_iris_render_stages() {
         use crate::shaderpack::preprocess::render_stage;
         for (stage, name) in [
@@ -760,7 +777,7 @@ mod tests {
         let mut sky = SkyState::default_day();
         sky.attributes.sun_angle = 30.0;
         sky.attributes.sunrise_sunset_color = Vec4::new(1.0, 0.5, 0.2, 0.5);
-        let elements = elements(&sky, false);
+        let elements = elements(&sky, false, 0.0);
         let pose = |stage| elements.iter().find(|e| e.0 == stage).unwrap().1;
         let close = |a: Vec3, b: Vec3| assert!(a.abs_diff_eq(b, 1e-3), "{a} != {b}");
 

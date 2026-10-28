@@ -396,7 +396,7 @@ impl Camera {
         proj * view
     }
 
-    fn planes_from_view_projection(m: Mat4) -> [[f32; 4]; 6] {
+    pub fn planes_from_view_projection(m: Mat4) -> [[f32; 4]; 6] {
         let mt = m.transpose();
         let r0 = mt.x_axis;
         let r1 = mt.y_axis;

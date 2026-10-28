@@ -296,12 +296,12 @@ impl GuiItemAtlas {
             rhi::TextureUse::ColorAttachment,
         );
         let desc = rhi::backend::RenderPassDesc {
-            color: rhi::backend::ColorAttachment {
+            color: Some(rhi::backend::ColorAttachment {
                 texture: self.color.handle(),
                 format: rhi::backend::texture_format(COLOR_FORMAT),
                 load: rhi::LoadOp::Load,
                 store: rhi::StoreOp::Store,
-            },
+            }),
             extra_colors: Vec::new(),
             depth: Some(rhi::backend::DepthAttachment::cleared(self.depth.handle())),
             extent: rhi::Extent {

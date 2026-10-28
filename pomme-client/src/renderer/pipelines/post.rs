@@ -82,12 +82,12 @@ pub fn open_pass(
     encoder.begin_render_pass(
         device,
         &rhi::backend::RenderPassDesc {
-            color: rhi::backend::ColorAttachment {
+            color: Some(rhi::backend::ColorAttachment {
                 texture: target,
                 format: rhi::backend::texture_format(FORMAT),
                 load: rhi::LoadOp::Clear([0.0; 4]),
                 store: rhi::StoreOp::Store,
-            },
+            }),
             extra_colors: Vec::new(),
             depth: None,
             extent,

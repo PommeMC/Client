@@ -59,6 +59,7 @@ pub enum PackError {
 }
 
 /// A program's stages, ready to translate.
+#[derive(Clone)]
 pub struct ProgramText {
     /// The program's path below `shaders/`, without extension, e.g.
     /// `world0/gbuffers_terrain`.
@@ -290,6 +291,10 @@ mod corpus {
         if let Ok(Some(text)) = pack.program(dimension, "final") {
             out.push((text, Geometry::Final));
         }
+        if let Ok(Some(text)) = pack.program(dimension, "shadow") {
+            out.push((text.clone(), Geometry::Terrain));
+            out.push((text, Geometry::Water));
+        }
         out
     }
 
@@ -422,7 +427,7 @@ void main",
         let compiled = compile(&program, Geometry::Final).unwrap();
         let mut settings = directives::TargetSettings::default();
         settings.read(&compiled.text);
-        assert_eq!(settings.formats[&0], "RGBA16F");
+        assert_eq!(settings.colortex.formats[&0], "RGBA16F");
     }
 
     #[test]

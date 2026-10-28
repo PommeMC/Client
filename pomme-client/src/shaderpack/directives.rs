@@ -46,15 +46,53 @@ pub fn draw_buffers(source: &str) -> Option<Vec<u8>> {
 }
 
 /// Render target settings from `const` declarations across a pack's
-/// programs, keyed by colortex index.
+/// programs.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TargetSettings {
-    /// `colortexNFormat`, the GL internal-format name (e.g. `RGBA16F`).
+    pub colortex: BufferSettings,
+    pub shadowcolor: BufferSettings,
+    pub shadow: ShadowSettings,
+}
+
+/// One family of buffers' settings, keyed by index.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BufferSettings {
+    /// `<buffer>Format`, the GL internal-format name (e.g. `RGBA16F`).
     pub formats: BTreeMap<u8, String>,
-    /// `colortexNClear = false` buffers keep last frame's contents.
+    /// `<buffer>Clear = false` buffers keep last frame's contents.
     pub no_clear: Vec<u8>,
-    /// `colortexNClearColor`.
+    /// `<buffer>ClearColor`.
     pub clear_colors: BTreeMap<u8, [f32; 4]>,
+}
+
+/// Iris's `PackShadowDirectives`, with its defaults.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShadowSettings {
+    /// `shadowMapResolution`: the shadow maps' width and height.
+    pub resolution: u32,
+    /// `shadowDistance`: the orthographic projection's half width.
+    pub distance: f32,
+    /// `shadowIntervalSize`: the grid the shadow view snaps to.
+    pub interval: f32,
+    /// `sunPathRotation`: the sun and moon's tilt, in degrees.
+    pub sun_path_rotation: f32,
+    /// `shadowtexNNearest`.
+    pub depth_nearest: [bool; 2],
+    /// `shadowcolorNNearest`.
+    pub color_nearest: [bool; 2],
+}
+
+impl Default for ShadowSettings {
+    fn default() -> Self {
+        Self {
+            resolution: 1024,
+            distance: 160.0,
+            interval: 2.0,
+            sun_path_rotation: 0.0,
+            depth_nearest: [false; 2],
+            color_nearest: [false; 2],
+        }
+    }
 }
 
 /// The legacy names of colortex0-7.
@@ -72,7 +110,24 @@ pub fn buffer_index(name: &str) -> Option<u8> {
     })
 }
 
+/// `shadowcolor0`-`7`, `shadowcolor` naming the first.
+pub fn shadow_buffer_index(name: &str) -> Option<u8> {
+    match name.strip_prefix("shadowcolor")? {
+        "" => Some(0),
+        n => n.parse().ok().filter(|&i| i < 8),
+    }
+}
+
 impl TargetSettings {
+    /// The settings of the buffer `name`, and its index.
+    fn buffer(&mut self, name: &str) -> Option<(&mut BufferSettings, u8)> {
+        if let Some(i) = buffer_index(name) {
+            Some((&mut self.colortex, i))
+        } else {
+            shadow_buffer_index(name).map(|i| (&mut self.shadowcolor, i))
+        }
+    }
+
     pub fn read(&mut self, source: &str) {
         static FORMAT: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"const\s+int\s+(\w+)Format\s*=\s*(\w+)\s*;").expect("static regex")
@@ -84,20 +139,27 @@ impl TargetSettings {
             Regex::new(r"const\s+vec4\s+(\w+)ClearColor\s*=\s*vec4\s*\(([^)]*)\)\s*;")
                 .expect("static regex")
         });
+        static SCALAR: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"const\s+(?:int|float|bool)\s+(\w+)\s*=\s*([\w.+-]+)\s*;")
+                .expect("static regex")
+        });
         for caps in FORMAT.captures_iter(source) {
-            if let Some(i) = buffer_index(&caps[1]) {
-                self.formats.insert(i, caps[2].to_owned());
+            if let Some((buffers, i)) = self.buffer(&caps[1]) {
+                buffers.formats.insert(i, caps[2].to_owned());
             }
         }
         for caps in CLEAR.captures_iter(source) {
-            if let Some(i) = buffer_index(&caps[1])
-                && !self.no_clear.contains(&i)
+            if let Some((buffers, i)) = self.buffer(&caps[1])
+                && !buffers.no_clear.contains(&i)
             {
-                self.no_clear.push(i);
+                buffers.no_clear.push(i);
             }
         }
+        for caps in SCALAR.captures_iter(source) {
+            self.shadow.read(&caps[1], &caps[2]);
+        }
         for caps in CLEAR_COLOR.captures_iter(source) {
-            let Some(i) = buffer_index(&caps[1]) else {
+            let Some((buffers, i)) = self.buffer(&caps[1]) else {
                 continue;
             };
             let parts: Vec<f32> = caps[2]
@@ -109,7 +171,46 @@ impl TargetSettings {
                 [r, g, b, a] => [r, g, b, a],
                 _ => continue,
             };
-            self.clear_colors.insert(i, color);
+            buffers.clear_colors.insert(i, color);
+        }
+    }
+}
+
+impl ShadowSettings {
+    /// Takes `const <type> name = value;` if it's a shadow setting.
+    fn read(&mut self, name: &str, value: &str) {
+        let float = || value.trim_end_matches('f').parse::<f32>().ok();
+        let nearest = match name {
+            "shadowMapResolution" => {
+                self.resolution = float().map_or(self.resolution, |v| v as u32);
+                return;
+            }
+            "shadowDistance" => {
+                self.distance = float().unwrap_or(self.distance);
+                return;
+            }
+            "shadowIntervalSize" => {
+                self.interval = float().unwrap_or(self.interval);
+                return;
+            }
+            "sunPathRotation" => {
+                self.sun_path_rotation = float().unwrap_or(0.0);
+                return;
+            }
+            "shadowtexNearest" | "shadowtex0Nearest" | "shadow0MinMagNearest" => {
+                &mut self.depth_nearest[0]
+            }
+            "shadowtex1Nearest" | "shadow1MinMagNearest" => &mut self.depth_nearest[1],
+            "shadowcolor0Nearest" | "shadowColor0Nearest" | "shadowColor0MinMagNearest" => {
+                &mut self.color_nearest[0]
+            }
+            "shadowcolor1Nearest" | "shadowColor1Nearest" | "shadowColor1MinMagNearest" => {
+                &mut self.color_nearest[1]
+            }
+            _ => return,
+        };
+        if let Ok(value) = value.parse() {
+            *nearest = value;
         }
     }
 }
@@ -149,16 +250,41 @@ mod tests {
              const int gaux1Format = R11F_G11F_B10F;\nconst bool colortex3Clear = false;\n\
              const vec4 colortex2ClearColor = vec4(1.0, 0.0, 0.0, 1.0);\n*/",
         );
+        let colortex = &settings.colortex;
         assert_eq!(
-            settings.formats.get(&0).map(String::as_str),
+            colortex.formats.get(&0).map(String::as_str),
             Some("RGBA16F")
         );
         assert_eq!(
-            settings.formats.get(&4).map(String::as_str),
+            colortex.formats.get(&4).map(String::as_str),
             Some("R11F_G11F_B10F")
         );
-        assert!(!settings.formats.contains_key(&2));
-        assert_eq!(settings.no_clear, [3]);
-        assert_eq!(settings.clear_colors.get(&2), Some(&[1.0, 0.0, 0.0, 1.0]));
+        assert!(!colortex.formats.contains_key(&2));
+        assert_eq!(colortex.no_clear, [3]);
+        assert_eq!(colortex.clear_colors.get(&2), Some(&[1.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn shadow_settings() {
+        let mut settings = TargetSettings::default();
+        assert_eq!(settings.shadow.resolution, 1024);
+        settings.read(
+            "const int shadowMapResolution = 2048;\nconst float shadowDistance = 192.0f;\n\
+             const float sunPathRotation = -40.0;\nconst bool shadowHardwareFiltering = true;\n\
+             const bool shadowtex1Nearest = true;\n\
+             /*\nconst int shadowcolor0Format = RGBA16;\nconst bool shadowcolor1Clear = false;\n*/",
+        );
+        let shadow = &settings.shadow;
+        assert_eq!(shadow.resolution, 2048);
+        assert_eq!(shadow.distance, 192.0);
+        assert_eq!(shadow.interval, 2.0);
+        assert_eq!(shadow.sun_path_rotation, -40.0);
+        assert_eq!(shadow.depth_nearest, [false, true]);
+        assert_eq!(
+            settings.shadowcolor.formats.get(&0).map(String::as_str),
+            Some("RGBA16")
+        );
+        assert_eq!(settings.shadowcolor.no_clear, [1]);
+        assert!(settings.colortex.formats.is_empty());
     }
 }
