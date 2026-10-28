@@ -559,6 +559,10 @@ pub enum NetworkEvent {
     RabbitJump {
         id: i32,
     },
+    /// Entity event 63: a sniffer starts digging.
+    SnifferDigging {
+        id: i32,
+    },
     SquidTentacleReset {
         id: i32,
     },

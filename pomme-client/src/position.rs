@@ -15,6 +15,15 @@ impl BlockPos {
         Self { x, y, z }
     }
 
+    /// Vanilla `BlockPos.containing`.
+    pub fn containing(pos: glam::DVec3) -> Self {
+        Self::new(
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        )
+    }
+
     /// Vanilla `BlockPos.relative`: the neighbour one step towards
     /// `direction`.
     pub fn relative(self, direction: Direction) -> Self {

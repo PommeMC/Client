@@ -256,6 +256,23 @@ impl BlockStateData {
         self.is_air
     }
 
+    /// `getRenderShape() == RenderShape.INVISIBLE`: the blocks overriding it.
+    pub(crate) fn is_invisible(&self) -> bool {
+        self.is_air
+            || matches!(
+                self.id(),
+                "barrier"
+                    | "bubble_column"
+                    | "end_gateway"
+                    | "end_portal"
+                    | "light"
+                    | "water"
+                    | "lava"
+                    | "moving_piston"
+                    | "structure_void"
+            )
+    }
+
     /// `None` is a full cube; an empty slice is not targetable.
     pub(crate) fn outline_boxes(&self) -> Option<&'static [LocalBox]> {
         self.outline.or(self.shape)

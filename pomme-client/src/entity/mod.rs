@@ -92,6 +92,11 @@ impl SnifferState {
     fn animated(self) -> bool {
         !matches!(self, Self::Idling | Self::Searching)
     }
+
+    /// `Sniffer.canPlayDiggingSound`.
+    pub(crate) fn can_play_digging_sound(self) -> bool {
+        matches!(self, Self::Digging | Self::Searching)
+    }
 }
 
 /// `AgeableMob` descendants on every supported version (Slime joined only
@@ -301,6 +306,8 @@ pub struct LivingEntity {
     /// The tick the current state's animation started at.
     pub sniffer_state: SnifferState,
     pub sniffer_anim_start: Option<u32>,
+    /// Playing `SnifferSoundInstance`s, stopped once digging ends.
+    pub sniffer_dig_sounds: Vec<u64>,
     pub puff_state: u8,
     /// Glow squid post-hurt dim timer, synced then decremented client-side.
     pub dark_ticks: i32,
@@ -517,6 +524,7 @@ impl LivingEntity {
             bat_anim_start: None,
             sniffer_state: SnifferState::Idling,
             sniffer_anim_start: None,
+            sniffer_dig_sounds: Vec::new(),
             puff_state: 0,
             dark_ticks: 0,
             golem_attack_ticks: 0,

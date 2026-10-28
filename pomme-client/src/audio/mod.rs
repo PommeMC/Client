@@ -55,6 +55,9 @@ pub const CATEGORY_BLOCKS: u8 = SoundCategory::Blocks as u8;
 /// pickup).
 pub const CATEGORY_PLAYERS: u8 = SoundCategory::Players as u8;
 
+/// `SoundSource::NEUTRAL` index, for client-side mob sounds.
+pub const CATEGORY_NEUTRAL: u8 = SoundCategory::Neutral as u8;
+
 /// `SoundSource::AMBIENT` index, for local ambience (e.g. the portal trigger).
 pub const CATEGORY_AMBIENT: u8 = SoundCategory::Ambient as u8;
 
@@ -425,6 +428,7 @@ impl AudioEngine {
         self.play_positioned_sound(sound_ref, category, pos, volume, pitch, seed, None);
     }
 
+    /// Returns the playing instance's id, for [`Self::stop`].
     pub fn play_entity_sound(
         &mut self,
         sound_ref: &SoundRef,
@@ -433,9 +437,9 @@ impl AudioEngine {
         volume: f32,
         pitch: f32,
         seed: u64,
-    ) {
+    ) -> Option<u64> {
         // Only a dispatched sound gets an end report to balance the count.
-        if self.play_positioned_sound(
+        let id = self.play_positioned_sound(
             sound_ref,
             category,
             target.pos,
@@ -443,12 +447,12 @@ impl AudioEngine {
             pitch,
             seed,
             Some(target.id),
-        ) {
-            *self.entity_sound_targets.entry(target.id).or_default() += 1;
-        }
+        )?;
+        *self.entity_sound_targets.entry(target.id).or_default() += 1;
+        Some(id)
     }
 
-    /// Returns whether the sound resolved and was handed to the worker.
+    /// The instance id if the sound resolved and was handed to the worker.
     #[allow(clippy::too_many_arguments)]
     fn play_positioned_sound(
         &self,
@@ -459,10 +463,8 @@ impl AudioEngine {
         pitch: f32,
         seed: u64,
         entity_id: Option<i32>,
-    ) -> bool {
-        let Some(sound) = self.resolve_sound(sound_ref, Some(seed)) else {
-            return false;
-        };
+    ) -> Option<u64> {
+        let sound = self.resolve_sound(sound_ref, Some(seed))?;
         let instance_volume = volume * sound.entry_volume;
 
         // Vanilla notifies subtitle listeners before category-volume/distance
@@ -494,7 +496,12 @@ impl AudioEngine {
             entity_id,
             report_completion: false,
         }));
-        self.command_tx.is_some()
+        self.command_tx.is_some().then_some(id)
+    }
+
+    /// Stops one playing instance; a finished one is ignored.
+    pub fn stop(&self, id: u64) {
+        self.send(AudioCommand::Stop(id));
     }
 
     /// Every entity move packet reaches this, so entities with no sound of
