@@ -892,8 +892,18 @@ fn sampler_param(param: &ast::FunctionParameterDeclaration) -> Option<(String, S
     let ast::FunctionParameterDeclarationData::Named(_, declarator) = &param.content else {
         return None;
     };
-    let kind = SamplerKind::of(&declarator.ty.ty.content)?;
-    Some((declarator.ident.ident.as_str().to_owned(), kind))
+    Some((
+        declarator.ident.ident.as_str().to_owned(),
+        sampler_kind(param)?,
+    ))
+}
+
+fn sampler_kind(param: &ast::FunctionParameterDeclaration) -> Option<SamplerKind> {
+    let ty = match &param.content {
+        ast::FunctionParameterDeclarationData::Named(_, declarator) => &declarator.ty,
+        ast::FunctionParameterDeclarationData::Unnamed(_, ty) => ty,
+    };
+    SamplerKind::of(&ty.ty.content)
 }
 
 /// Functions with sampler parameters, which naga can't take: they get a
@@ -913,7 +923,7 @@ fn sampler_parameter_positions(tu: &ast::TranslationUnit) -> BTreeMap<String, Ve
             .parameters
             .iter()
             .enumerate()
-            .filter(|(_, p)| sampler_param(p).is_some())
+            .filter(|(_, p)| sampler_kind(p).is_some())
             .map(|(i, _)| i)
             .collect();
         if !positions.is_empty() {
@@ -925,12 +935,19 @@ fn sampler_parameter_positions(tu: &ast::TranslationUnit) -> BTreeMap<String, Ve
 
 /// A parameter of the type named `ty` (e.g. `texture2D`).
 fn typed_param(ty: &str, name: &str) -> ast::FunctionParameterDeclaration {
-    let ty: ast::TypeSpecifier = ast::TypeSpecifierData::from(
-        ast::TypeSpecifierNonArrayData::TypeName(ast::TypeNameData::from(ty).into()),
-    )
-    .into();
+    let ty = ast::TypeSpecifierData::from(ast::TypeSpecifierNonArrayData::TypeName(
+        ast::TypeNameData::from(ty).into(),
+    ));
+    named_param(None, ty.into(), name)
+}
+
+fn named_param(
+    qualifier: Option<ast::TypeQualifier>,
+    ty: ast::TypeSpecifier,
+    name: &str,
+) -> ast::FunctionParameterDeclaration {
     ast::FunctionParameterDeclarationData::Named(
-        None,
+        qualifier,
         ast::FunctionParameterDeclaratorData {
             ty,
             ident: ast::ArrayedIdentifierData {
@@ -945,11 +962,18 @@ fn typed_param(ty: &str, name: &str) -> ast::FunctionParameterDeclaration {
 }
 
 /// Splits `prototype`'s sampler parameters into a texture and a sampler
-/// each, returning them by name.
+/// each, returning them by name. Unnamed parameters, which a forward
+/// declaration may have and naga can't take, are named by position.
 fn split_sampler_params(prototype: &mut ast::FunctionPrototype) -> BTreeMap<String, SamplerKind> {
     let mut split = BTreeMap::new();
     let mut params = Vec::with_capacity(prototype.parameters.len());
-    for param in std::mem::take(&mut prototype.parameters) {
+    for (i, mut param) in std::mem::take(&mut prototype.parameters)
+        .into_iter()
+        .enumerate()
+    {
+        if let ast::FunctionParameterDeclarationData::Unnamed(qualifier, ty) = &param.content {
+            param = named_param(qualifier.clone(), ty.clone(), &format!("pomme_param{i}"));
+        }
         match sampler_param(&param) {
             Some((name, kind)) => {
                 let (texture, sampler, _) = kind.glsl();
@@ -1264,8 +1288,10 @@ void main() {
             "#version 120\nvoid main() { gl_Position = ftransform(); }\n",
             "#version 120\nuniform sampler2D colortex0;\n\
              vec4 sample_at(sampler2D s, vec2 uv);\n\
-             void main() { gl_FragColor = sample_at(colortex0, vec2(0.5)); }\n\
-             vec4 sample_at(sampler2D s, vec2 uv) { return texture2D(s, uv); }\n",
+             vec4 unnamed(sampler2D, vec2);\n\
+             void main() { gl_FragColor = unnamed(colortex0, vec2(0.5)); }\n\
+             vec4 sample_at(sampler2D s, vec2 uv) { return texture2D(s, uv); }\n\
+             vec4 unnamed(sampler2D s, vec2 uv) { return sample_at(s, uv); }\n",
         );
     }
 
