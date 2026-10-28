@@ -4062,6 +4062,7 @@ pub fn update_game(
                     tentacle_angle: extras.tentacle_angle,
                     bat_resting: e.bat_resting,
                     bat_elapsed_secs: extras.bat_elapsed_secs,
+                    sniffer: extras.sniffer,
                     golem_attack_ticks: extras.golem_attack_ticks,
                     golem_offer_flower_ticks: extras.golem_offer_flower_ticks,
                     body_transform: extras.body_transform,
@@ -4916,6 +4917,7 @@ struct EntityExtras {
     animate_tail: bool,
     tentacle_angle: f32,
     bat_elapsed_secs: Option<f32>,
+    sniffer: crate::renderer::entity_model::SnifferAnims,
     golem_attack_ticks: f32,
     golem_offer_flower_ticks: u32,
 }
@@ -5019,6 +5021,10 @@ fn entity_extras(
         | EntityKind::TropicalFish
         | EntityKind::Pufferfish => fish_extras(e, alpha),
         EntityKind::IronGolem => golem_extras(e, alpha),
+        EntityKind::Sniffer => EntityExtras {
+            sniffer: sniffer_anims(e, alpha),
+            ..Default::default()
+        },
         EntityKind::Rabbit => EntityExtras {
             // "Toast" overrides the variant texture (slot 7).
             variant_index: if e.custom_name.as_deref() == Some("Toast") {
@@ -5036,6 +5042,28 @@ fn entity_extras(
         },
         _ => EntityExtras::default(),
     }
+}
+
+/// Vanilla `SnifferRenderer.extractRenderState`.
+fn sniffer_anims(
+    e: &crate::entity::LivingEntity,
+    alpha: f32,
+) -> crate::renderer::entity_model::SnifferAnims {
+    use crate::entity::SnifferState as S;
+    let clock = e.sniffer_anim_start.map(|s| anim_clock_secs(e, s, alpha));
+    let mut anims = crate::renderer::entity_model::SnifferAnims {
+        searching: e.sniffer_state == S::Searching,
+        ..Default::default()
+    };
+    match e.sniffer_state {
+        S::Digging => anims.digging = clock,
+        S::Sniffing => anims.sniffing = clock,
+        S::Rising => anims.rising = clock,
+        S::FeelingHappy => anims.feeling_happy = clock,
+        S::Scenting => anims.scenting = clock,
+        S::Idling | S::Searching => {}
+    }
+    anims
 }
 
 /// Seconds on a vanilla `AnimationState` clock started at tick `start`

@@ -177,6 +177,8 @@ pub struct EntityRenderInfo {
     /// Bat pose flag + its fly/rest animation clock.
     pub bat_resting: bool,
     pub bat_elapsed_secs: Option<f32>,
+    /// Sniffer search flag + its five animation clocks.
+    pub sniffer: entity_model::SnifferAnims,
     /// Iron golem countdowns; the punch one is partial-tick adjusted.
     pub golem_attack_ticks: f32,
     pub golem_offer_flower_ticks: u32,
@@ -253,6 +255,7 @@ impl Default for EntityRenderInfo {
             tentacle_angle: 0.0,
             bat_resting: false,
             bat_elapsed_secs: None,
+            sniffer: entity_model::SnifferAnims::default(),
             golem_attack_ticks: 0.0,
             golem_offer_flower_ticks: 0,
             base_tint: WHITE_TINT,
@@ -885,6 +888,7 @@ enum AnimationType {
     Equine,
     Squid,
     Bat,
+    Sniffer,
     /// Cod, salmon, tropical fish, pufferfish.
     Fish,
     Golem,
@@ -1068,6 +1072,8 @@ fn mob_definitions() -> Vec<MobDef> {
     const GLOW_SQUID_TEX: &[&[&str]] = tex_table!("squid" => "glow_squid");
     const GLOW_SQUID_BABY_TEX: &[&[&str]] = tex_table!("squid" => "glow_squid_baby");
     const BAT_TEX: &[&[&str]] = tex_table!("bat" => "bat");
+    const SNIFFER_TEX: &[&[&str]] = tex_table!("sniffer" => "sniffer");
+    const SNIFFLET_TEX: &[&[&str]] = tex_table!("sniffer" => "snifflet");
     const COD_TEX: &[&[&str]] = tex_table!("fish" => "cod");
     const SALMON_TEX: &[&[&str]] = tex_table!("fish" => "salmon");
     const PUFFERFISH_TEX: &[&[&str]] = tex_table!("fish" => "pufferfish");
@@ -1667,6 +1673,18 @@ fn mob_definitions() -> Vec<MobDef> {
             baby_overlays: vec![],
         },
         MobDef {
+            kind: EntityKind::Sniffer,
+            anim: AnimationType::Sniffer,
+            adult: vec![opaque(entity_model::bake_sniffer_model(), SNIFFER_TEX, 192)],
+            baby: Some(opaque(
+                entity_model::bake_snifflet_model(),
+                SNIFFLET_TEX,
+                128,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
             kind: EntityKind::Cod,
             anim: AnimationType::Fish,
             adult: vec![opaque(entity_model::bake_cod_model(), COD_TEX, 32)],
@@ -2223,6 +2241,14 @@ impl EntityRenderer {
                 local_head_y,
                 info.bat_elapsed_secs,
                 info.bat_resting,
+            ),
+            AnimationType::Sniffer => entity_model::compute_sniffer_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                &info.sniffer,
             ),
             AnimationType::Fish => entity_model::compute_fish_anim(
                 model,
@@ -2863,6 +2889,8 @@ const PLAYER_MODEL_SCALE: f32 = 0.9375;
 pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
     match kind {
         EntityKind::Villager if is_baby => 0.63,
+        // An explicit `eyeHeight(1.05)`, which the 0.85 ratio would miss.
+        EntityKind::Sniffer if is_baby => dimensions::EntityDimensions::eye_height(kind) * 0.5,
         _ if is_baby => entity_bounds(kind, is_baby).1 * dimensions::DEFAULT_EYE_HEIGHT_RATIO,
         _ => dimensions::EntityDimensions::eye_height(kind),
     }
@@ -2921,6 +2949,7 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
         EntityKind::Squid | EntityKind::GlowSquid if is_baby => return (0.5, 0.5),
         EntityKind::Squid | EntityKind::GlowSquid => (0.8, 0.8),
         EntityKind::Bat => (0.5, 0.9),
+        EntityKind::Sniffer => (1.9, 1.75),
         EntityKind::Cod => (0.5, 0.3),
         // Salmon/pufferfish scale with their variant; use the largest.
         EntityKind::Salmon => (1.05, 0.6),
@@ -2944,6 +2973,14 @@ fn entity_visible(
     cull_dist: f32,
 ) -> bool {
     let (w, h) = entity_bounds(info.entity_kind, info.is_baby);
+    // Renderer `getBoundingBoxForCulling().inflate(..)` overrides grow the
+    // box on every side around the same center (the sniffer's head reaches
+    // well past its hitbox).
+    let inflate = match info.entity_kind {
+        EntityKind::Sniffer => 0.6,
+        _ => 0.0,
+    };
+    let (cw, ch) = (w + 2.0 * inflate, h + 2.0 * inflate);
     // A body transform (slime size/squish) can grow the entity well past its
     // base bounds: scale the sphere and its center by the largest axis scale,
     // and pad the radius by the translation (pure-rotation transforms still
@@ -2958,7 +2995,7 @@ fn entity_visible(
             .max(1.0);
         (s, m.w_axis.truncate().length())
     });
-    let radius = (0.5 * (2.0 * w * w + h * h).sqrt() + ANIM_MARGIN) * scale + shift;
+    let radius = (0.5 * (2.0 * cw * cw + ch * ch).sqrt() + ANIM_MARGIN) * scale + shift;
     let mut q = (*info.position - eye).as_vec3();
     q.y += h * 0.5 * scale;
     // Distance-cull with the radius as margin so an oversized entity stays

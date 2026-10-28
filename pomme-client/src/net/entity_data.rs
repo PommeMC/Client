@@ -239,6 +239,7 @@ pub(super) fn from_azalea(value: &EntityDataValue) -> Option<Value> {
         EntityDataValue::CowVariant(v) => Value::Variant(Variant::Cow, v.protocol_id()),
         EntityDataValue::WolfVariant(v) => Value::Variant(Variant::Wolf, v.protocol_id()),
         EntityDataValue::ChickenVariant(v) => Value::Variant(Variant::Chicken, v.protocol_id()),
+        EntityDataValue::SnifferState(state) => Value::Int(*state as i32),
         _ => return None,
     })
 }

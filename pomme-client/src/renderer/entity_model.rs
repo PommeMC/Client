@@ -3,6 +3,8 @@ use glam::{Mat4, Vec3};
 use crate::renderer::chunk::mesher::pack_uv;
 use crate::renderer::rhi;
 
+mod sniffer_anim;
+
 /// An entity or block-entity model vertex: its position, UV and face normal.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -127,6 +129,9 @@ pub struct BakedEntityModel {
 pub struct PartAnim {
     pub rotation: Vec<(usize, Vec3)>,
     pub translation: Vec<(usize, Vec3)>,
+    /// Per-axis part scale (vanilla `ModelPart.xScale`..), composed with the
+    /// static `part_scales`; inherited by children like vanilla's.
+    pub scale: Vec<(usize, Vec3)>,
 }
 
 impl BakedEntityModel {
@@ -223,10 +228,12 @@ impl BakedEntityModel {
                         * Mat4::from_rotation_x(rot.x)
                 }
             };
-            let scale = self.part_scales.get(i).copied().unwrap_or(1.0);
+            let mut scale = Vec3::splat(self.part_scales.get(i).copied().unwrap_or(1.0));
+            if let Some(&(_, s)) = anim.scale.iter().find(|&&(idx, _)| idx == i) {
+                scale *= s;
+            }
 
-            let local =
-                Mat4::from_translation(offset) * rot_mat * Mat4::from_scale(Vec3::splat(scale));
+            let local = Mat4::from_translation(offset) * rot_mat * Mat4::from_scale(scale);
 
             let transform = if let Some(parent_idx) = part.parent {
                 transforms[parent_idx] * local
@@ -1470,6 +1477,164 @@ fn baby_rabbit_parts() -> Vec<EntityPart> {
 
 pub fn bake_baby_rabbit_model() -> BakedEntityModel {
     bake_model(baby_rabbit_parts(), 32, 32)
+}
+
+/// The sniffer's six legs, children of `bone` (part 0), right side then left,
+/// each front to hind, at `(-+x, y, -z/0/+z)`.
+fn sniffer_legs(
+    x: f32,
+    y: f32,
+    z: f32,
+    origin: (f32, f32, f32),
+    size: (f32, f32, f32),
+    tex: [(i32, i32); 6],
+) -> impl Iterator<Item = EntityPart> {
+    const NAMES: [&str; 6] = [
+        "right_front_leg",
+        "right_mid_leg",
+        "right_hind_leg",
+        "left_front_leg",
+        "left_mid_leg",
+        "left_hind_leg",
+    ];
+    NAMES
+        .into_iter()
+        .zip(tex)
+        .enumerate()
+        .map(move |(i, (name, tex))| {
+            let side = if i < 3 { -x } else { x };
+            let offset = Vec3::new(side, y, z * (i % 3) as f32 - z);
+            vpart(name, Some(0), offset, vec![vbox(tex, origin, size)])
+        })
+}
+
+/// Vanilla `SnifferModel.createBodyLayer`, 192x192. The legs hang off `bone`,
+/// not `body`.
+pub fn bake_sniffer_model() -> BakedEntityModel {
+    let mut parts = vec![
+        vpart("bone", None, Vec3::new(0.0, 5.0, 0.0), vec![]),
+        vpart(
+            "body",
+            Some(0),
+            Vec3::ZERO,
+            vec![
+                vbox((62, 68), (-12.5, -14.0, -20.0), (25.0, 29.0, 40.0)),
+                ModelCube {
+                    deformation: 0.5,
+                    ..vbox((62, 0), (-12.5, -14.0, -20.0), (25.0, 24.0, 40.0))
+                },
+                vbox((87, 68), (-12.5, 12.0, -20.0), (25.0, 0.0, 40.0)),
+            ],
+        ),
+    ];
+    parts.extend(sniffer_legs(
+        7.5,
+        10.0,
+        15.0,
+        (-3.5, -1.0, -4.0),
+        (7.0, 10.0, 8.0),
+        [(32, 87), (32, 105), (32, 123), (0, 87), (0, 105), (0, 123)],
+    ));
+    parts.extend([
+        vpart(
+            "head",
+            Some(1),
+            Vec3::new(0.0, 6.5, -19.48),
+            vec![
+                vbox((8, 15), (-6.5, -7.5, -11.5), (13.0, 18.0, 11.0)),
+                vbox((8, 4), (-6.5, 7.5, -11.5), (13.0, 0.0, 11.0)),
+            ],
+        ),
+        vpart(
+            "left_ear",
+            Some(8),
+            Vec3::new(6.51, -7.5, -4.51),
+            vec![vbox((2, 0), (0.0, 0.0, -3.0), (1.0, 19.0, 7.0))],
+        ),
+        vpart(
+            "right_ear",
+            Some(8),
+            Vec3::new(-6.51, -7.5, -4.51),
+            vec![vbox((48, 0), (-1.0, 0.0, -3.0), (1.0, 19.0, 7.0))],
+        ),
+        vpart(
+            "nose",
+            Some(8),
+            Vec3::new(0.0, -4.5, -11.5),
+            vec![vbox((10, 45), (-6.5, -2.0, -9.0), (13.0, 2.0, 9.0))],
+        ),
+        vpart(
+            "lower_beak",
+            Some(8),
+            Vec3::new(0.0, 2.5, -12.5),
+            vec![vbox((10, 57), (-6.5, -7.0, -8.0), (13.0, 12.0, 9.0))],
+        ),
+    ]);
+    bake_model(parts, 192, 192)
+}
+
+/// Vanilla `SniffletModel.createBodyLayer`, 128x128. Only the mesh is
+/// vanilla's: `SnifferRenderer` wraps it in a plain `SnifferModel`, so
+/// `SniffletModel.setupAnim`'s `BABY_TRANSFORM` never runs.
+pub fn bake_snifflet_model() -> BakedEntityModel {
+    let mut parts = vec![
+        vpart("bone", None, Vec3::new(0.0, 24.0, 0.0), vec![]),
+        vpart(
+            "body",
+            Some(0),
+            Vec3::new(6.0, -3.0, -9.5),
+            vec![
+                ModelCube {
+                    deformation: 0.25,
+                    ..vbox((0, 35), (-13.0, -14.0, -0.5), (14.0, 14.0, 20.0))
+                },
+                vbox((0, 0), (-13.0, -14.0, -0.5), (14.0, 15.0, 20.0)),
+                vbox((68, 0), (-13.0, 0.0, -0.5), (14.0, 0.0, 20.0)),
+            ],
+        ),
+        vpart(
+            "head",
+            Some(1),
+            Vec3::new(-6.0, -4.75, 0.0),
+            vec![
+                vbox((68, 20), (-5.0, -4.25, -7.5), (10.0, 9.0, 9.0)),
+                vbox((88, 20), (-5.0, 3.75, -7.5), (10.0, 0.0, 9.0)),
+            ],
+        ),
+        vpart(
+            "left_ear",
+            Some(2),
+            Vec3::new(5.0, -4.25, -1.5),
+            vec![vbox((104, 38), (0.0, 0.0, -2.0), (1.0, 11.0, 3.0))],
+        ),
+        vpart(
+            "right_ear",
+            Some(2),
+            Vec3::new(-5.0, -4.25, -1.5),
+            vec![vbox((96, 38), (-1.0, 0.0, -2.0), (1.0, 11.0, 3.0))],
+        ),
+        vpart(
+            "nose",
+            Some(2),
+            Vec3::new(0.0, -1.25, -9.5),
+            vec![vbox((68, 47), (-5.0, -3.0, -2.0), (10.0, 3.0, 4.0))],
+        ),
+        vpart(
+            "lower_beak",
+            Some(2),
+            Vec3::new(0.0, 1.25, -9.5),
+            vec![vbox((68, 38), (-5.0, -2.5, -2.0), (10.0, 5.0, 4.0))],
+        ),
+    ];
+    parts.extend(sniffer_legs(
+        4.0,
+        -4.0,
+        7.0,
+        (-2.0, -1.0, -2.0),
+        (4.0, 5.0, 4.0),
+        [(0, 69), (0, 78), (0, 87), (16, 69), (16, 78), (16, 87)],
+    ));
+    bake_model(parts, 128, 128)
 }
 
 /// Vanilla `AbstractEquineModel.createBodyMesh(NONE)`, 64x64 (shared by
@@ -4391,9 +4556,18 @@ struct Kf {
     i: Kfi,
 }
 
+/// Vanilla `AnimationChannel.Targets`.
+#[derive(Clone, Copy)]
+enum KfTarget {
+    Rot,
+    Pos,
+    /// Raw `scaleVec` values (already `v - 1`), added onto the unit scale.
+    Scale,
+}
+
 struct KfChannel {
     part: &'static str,
-    rotation: bool,
+    target: KfTarget,
     frames: &'static [Kf],
 }
 
@@ -4437,16 +4611,61 @@ fn kf_sample(frames: &[Kf], t: f32) -> Vec3 {
     }
 }
 
-/// Applies a keyframe animation additively into vanilla-space euler/pivot
-/// deltas (vanilla `offsetRotation`/`offsetPos`; the position Y-negation of
-/// `KeyframeAnimations.posVec` is applied here).
-fn apply_kf_anim(
+/// Per-part keyframe offsets accumulated across animations, in vanilla space.
+struct KfDeltas {
+    rot: Vec<Vec3>,
+    pos: Vec<Vec3>,
+    scale: Vec<Vec3>,
+    touched_rot: Vec<bool>,
+}
+
+impl KfDeltas {
+    fn new(model: &BakedEntityModel) -> Self {
+        let n = model.parts.len();
+        Self {
+            rot: vec![Vec3::ZERO; n],
+            pos: vec![Vec3::ZERO; n],
+            scale: vec![Vec3::ZERO; n],
+            touched_rot: vec![false; n],
+        }
+    }
+
+    /// A vanilla absolute `xRot`/`yRot` assignment (head look): replaces the
+    /// part's rest rotation, with keyframes still adding on top.
+    fn set_rot(&mut self, model: &BakedEntityModel, idx: usize, rot: Vec3) {
+        self.rot[idx] += rot - model.parts[idx].default_rotation;
+        self.touched_rot[idx] = true;
+    }
+
+    /// Emit the accumulated offsets on top of each part's rest pose.
+    fn emit(&self, model: &BakedEntityModel) -> PartAnim {
+        let mut anim = PartAnim::default();
+        for (i, part) in model.parts.iter().enumerate() {
+            if self.touched_rot[i] {
+                let e = part.default_rotation + self.rot[i];
+                anim.rotation.push((i, vanilla_rot(e.x, e.y, e.z)));
+            }
+            if self.pos[i] != Vec3::ZERO {
+                anim.translation.push((i, self.pos[i]));
+            }
+            if self.scale[i] != Vec3::ZERO {
+                anim.scale.push((i, Vec3::ONE + self.scale[i]));
+            }
+        }
+        anim
+    }
+}
+
+/// Vanilla `KeyframeAnimation.apply(millisSinceStart, targetScale)`, adding
+/// into the deltas (vanilla `offsetRotation`/`offsetPos`/`offsetScale`; the
+/// position Y-negation of `KeyframeAnimations.posVec` is applied here).
+/// Every sampled value is multiplied by `target_scale`.
+fn apply_kf_scaled(
     anim: &KfAnim,
     model: &BakedEntityModel,
     elapsed_secs: f32,
-    rot_delta: &mut [Vec3],
-    pos_delta: &mut [Vec3],
-    touched_rot: &mut [bool],
+    target_scale: f32,
+    d: &mut KfDeltas,
 ) {
     use std::f32::consts::PI;
     let t = if anim.looping {
@@ -4458,14 +4677,45 @@ fn apply_kf_anim(
         let Some(idx) = model.parts.iter().position(|p| p.name == ch.part) else {
             continue;
         };
-        let v = kf_sample(ch.frames, t);
-        if ch.rotation {
-            rot_delta[idx] += v * (PI / 180.0);
-            touched_rot[idx] = true;
-        } else {
-            pos_delta[idx] += Vec3::new(v.x, -v.y, v.z);
+        let v = kf_sample(ch.frames, t) * target_scale;
+        match ch.target {
+            KfTarget::Rot => {
+                d.rot[idx] += v * (PI / 180.0);
+                d.touched_rot[idx] = true;
+            }
+            KfTarget::Pos => d.pos[idx] += Vec3::new(v.x, -v.y, v.z),
+            KfTarget::Scale => d.scale[idx] += v,
         }
     }
+}
+
+/// Vanilla `KeyframeAnimation.apply(AnimationState, ageInTicks)`; a stopped
+/// state (`None`) applies nothing.
+fn apply_kf_anim(
+    anim: &KfAnim,
+    model: &BakedEntityModel,
+    elapsed_secs: Option<f32>,
+    d: &mut KfDeltas,
+) {
+    if let Some(elapsed) = elapsed_secs {
+        apply_kf_scaled(anim, model, elapsed, 1.0, d);
+    }
+}
+
+/// Vanilla `KeyframeAnimation.applyWalk`: the walk position drives the clock
+/// (truncated to whole milliseconds) and the walk speed fades it in.
+fn apply_kf_walk(
+    anim: &KfAnim,
+    model: &BakedEntityModel,
+    walk_pos: f32,
+    walk_speed: f32,
+    speed_factor: f32,
+    scale_factor: f32,
+    d: &mut KfDeltas,
+) {
+    let millis = (walk_pos * 50.0 * speed_factor) as i64;
+    let scale = (walk_speed * scale_factor).min(1.0);
+    apply_kf_scaled(anim, model, millis as f32 / 1000.0, scale, d);
 }
 
 /// `RabbitAnimation.HOP` (0.75s, looping) — transcribed from the decompiled
@@ -4479,7 +4729,7 @@ static RABBIT_HOP: KfAnim = {
         channels: &[
             KfChannel {
                 part: "body",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 0.0, 0.0, Lin),
@@ -4492,7 +4742,7 @@ static RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "head",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 0.0, 0.0, Lin),
@@ -4505,7 +4755,7 @@ static RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "backlegs",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 0.0, 0.0, Lin),
@@ -4520,7 +4770,7 @@ static RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "frontlegs",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, -0.17, 0.0, 0.0, Lin),
                     kf(0.125, -0.17, 0.0, 0.0, Lin),
@@ -4534,7 +4784,7 @@ static RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "frontlegs",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 0.0, 0.0, Lin),
@@ -4545,7 +4795,7 @@ static RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "right_front_leg",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Cat),
                     kf(0.125, 0.0, 0.0, 0.0, Cat),
@@ -4558,7 +4808,7 @@ static RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "left_front_leg",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Cat),
                     kf(0.125, 0.0, 0.0, 0.0, Cat),
@@ -4571,7 +4821,7 @@ static RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "left_ear",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Cat),
                     kf(0.125, 2.5, 0.0, 0.0, Cat),
@@ -4582,7 +4832,7 @@ static RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "left_ear",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[
                     kf(0.0, -0.025, 0.0, 0.0, Cat),
                     kf(0.2083, -0.025, -0.2, 0.0, Cat),
@@ -4592,7 +4842,7 @@ static RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "right_ear",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Cat),
                     kf(0.125, 7.5, 0.0, 0.0, Cat),
@@ -4603,7 +4853,7 @@ static RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "right_ear",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[
                     kf(0.0, 0.025, 0.0, 0.0, Cat),
                     kf(0.2083, 0.025, -0.3, 0.0, Cat),
@@ -4613,7 +4863,7 @@ static RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "right_hind_leg",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, -2.5, 0.0, Lin),
                     kf(0.1667, 0.0, -2.5, 0.0, Lin),
@@ -4625,7 +4875,7 @@ static RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "left_hind_leg",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.1667, 0.0, 0.0, 0.0, Lin),
@@ -4637,7 +4887,7 @@ static RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "tail",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, -25.0, 0.0, 0.0, Lin),
@@ -4658,7 +4908,7 @@ static BABY_RABBIT_HOP: KfAnim = {
         channels: &[
             KfChannel {
                 part: "body",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.01, Lin),
                     kf(0.125, 0.0, 0.0, 0.01, Lin),
@@ -4671,7 +4921,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "head",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 0.0, 0.0, Lin),
@@ -4684,7 +4934,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "backlegs",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 0.0, 0.0, Lin),
@@ -4698,7 +4948,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "frontlegs",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, -0.17, 0.0, 0.0, Lin),
                     kf(0.125, -0.17, 0.0, 0.0, Lin),
@@ -4713,7 +4963,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "frontlegs",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 0.0, 0.0, Lin),
@@ -4724,7 +4974,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "right_front_leg",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 0.0, 0.0, Lin),
@@ -4736,7 +4986,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "right_front_leg",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 0.0, 0.0, Lin),
@@ -4746,7 +4996,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "left_front_leg",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 0.0, 0.0, Lin),
@@ -4758,7 +5008,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "left_front_leg",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 0.0, 0.0, Lin),
@@ -4768,7 +5018,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "left_ear",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.1667, 0.0, 0.0, 0.0, Lin),
@@ -4779,7 +5029,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "left_ear",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[
                     kf(0.0, -0.02, 0.0, 0.0, Lin),
                     kf(0.1667, -0.02, 0.0, 0.0, Lin),
@@ -4790,7 +5040,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "right_ear",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.1667, 0.0, 0.0, 0.0, Lin),
@@ -4800,7 +5050,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "right_ear",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[
                     kf(0.0, 0.05, 0.0, 0.0, Lin),
                     kf(0.1667, 0.05, 0.0, 0.0, Lin),
@@ -4811,7 +5061,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "right_hind_leg",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, -2.5, 0.0, Lin),
                     kf(0.0833, 0.0, -2.5, 0.0, Lin),
@@ -4823,7 +5073,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "left_hind_leg",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.0833, 0.0, 0.0, 0.0, Lin),
@@ -4835,7 +5085,7 @@ static BABY_RABBIT_HOP: KfAnim = {
             },
             KfChannel {
                 part: "tail",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 0.0, 0.0, Lin),
@@ -4860,46 +5110,19 @@ pub fn compute_rabbit_anim(
     hop_elapsed_secs: Option<f32>,
     is_baby: bool,
 ) -> PartAnim {
-    let mut anim = PartAnim::default();
-    let mut rot_delta = vec![Vec3::ZERO; model.parts.len()];
-    let mut pos_delta = vec![Vec3::ZERO; model.parts.len()];
-    let mut touched_rot = vec![false; model.parts.len()];
-
-    if let Some(elapsed) = hop_elapsed_secs {
-        let table = if is_baby {
-            &BABY_RABBIT_HOP
-        } else {
-            &RABBIT_HOP
-        };
-        apply_kf_anim(
-            table,
-            model,
-            elapsed,
-            &mut rot_delta,
-            &mut pos_delta,
-            &mut touched_rot,
-        );
-    }
-
-    for (i, part) in model.parts.iter().enumerate() {
-        if part.name == "head" {
-            // The look replaces the default pose (vanilla assigns absolutely);
-            // keyframe offsets add on top.
-            let e = Vec3::new(
-                head_x_rot_deg.to_radians(),
-                local_head_y_rot_deg.to_radians(),
-                0.0,
-            ) + rot_delta[i];
-            anim.rotation.push((i, vanilla_rot(e.x, e.y, e.z)));
-        } else if touched_rot[i] {
-            let e = part.default_rotation + rot_delta[i];
-            anim.rotation.push((i, vanilla_rot(e.x, e.y, e.z)));
-        }
-        if pos_delta[i] != Vec3::ZERO {
-            anim.translation.push((i, pos_delta[i]));
-        }
-    }
-    anim
+    let mut d = KfDeltas::new(model);
+    d.set_rot(
+        model,
+        part_index(&model.parts, "head"),
+        head_rotation(head_x_rot_deg, local_head_y_rot_deg),
+    );
+    let table = if is_baby {
+        &BABY_RABBIT_HOP
+    } else {
+        &RABBIT_HOP
+    };
+    apply_kf_anim(table, model, hop_elapsed_secs, &mut d);
+    d.emit(model)
 }
 
 /// Which equine `setupAnim` hook set applies (`AbstractEquineModel` defaults
@@ -5089,52 +5312,52 @@ static BAT_RESTING: KfAnim = {
         channels: &[
             KfChannel {
                 part: "head",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[kf(0.0, 180.0, 0.0, 0.0, Lin)],
             },
             KfChannel {
                 part: "head",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[kf(0.0, 0.0, 0.5, 0.0, Lin)],
             },
             KfChannel {
                 part: "body",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[kf(0.0, 180.0, 0.0, 0.0, Lin)],
             },
             KfChannel {
                 part: "body",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[kf(0.0, 0.0, 0.5, 0.0, Lin)],
             },
             KfChannel {
                 part: "right_wing",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[kf(0.0, 0.0, -10.0, 0.0, Lin)],
             },
             KfChannel {
                 part: "right_wing",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[kf(0.0, 0.0, 0.0, 1.0, Lin)],
             },
             KfChannel {
                 part: "right_wing_tip",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[kf(0.0, 0.0, -120.0, 0.0, Lin)],
             },
             KfChannel {
                 part: "left_wing",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[kf(0.0, 0.0, 10.0, 0.0, Lin)],
             },
             KfChannel {
                 part: "left_wing",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[kf(0.0, 0.0, 0.0, 1.0, Lin)],
             },
             KfChannel {
                 part: "left_wing_tip",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[kf(0.0, 0.0, 120.0, 0.0, Lin)],
             },
         ],
@@ -5150,7 +5373,7 @@ static BAT_FLYING: KfAnim = {
         channels: &[
             KfChannel {
                 part: "head",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 20.0, 0.0, 0.0, Lin),
@@ -5159,7 +5382,7 @@ static BAT_FLYING: KfAnim = {
             },
             KfChannel {
                 part: "head",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 2.0, 0.0, Lin),
@@ -5171,7 +5394,7 @@ static BAT_FLYING: KfAnim = {
             },
             KfChannel {
                 part: "body",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 40.0, 0.0, 0.0, Lin),
                     kf(0.25, 52.5, 0.0, 0.0, Lin),
@@ -5180,7 +5403,7 @@ static BAT_FLYING: KfAnim = {
             },
             KfChannel {
                 part: "body",
-                rotation: false,
+                target: KfTarget::Pos,
                 frames: &[
                     kf(0.0, 0.0, 0.0, 0.0, Lin),
                     kf(0.125, 0.0, 2.0, 0.0, Lin),
@@ -5192,7 +5415,7 @@ static BAT_FLYING: KfAnim = {
             },
             KfChannel {
                 part: "feet",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 10.0, 0.0, 0.0, Lin),
                     kf(0.125, -21.25, 0.0, 0.0, Lin),
@@ -5202,7 +5425,7 @@ static BAT_FLYING: KfAnim = {
             },
             KfChannel {
                 part: "right_wing",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 85.0, 0.0, Lin),
                     kf(0.125, 0.0, -55.0, 0.0, Lin),
@@ -5213,7 +5436,7 @@ static BAT_FLYING: KfAnim = {
             },
             KfChannel {
                 part: "left_wing",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, -85.0, 0.0, Lin),
                     kf(0.125, 0.0, 55.0, 0.0, Lin),
@@ -5224,7 +5447,7 @@ static BAT_FLYING: KfAnim = {
             },
             KfChannel {
                 part: "right_wing_tip",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, 10.5, 0.0, Lin),
                     kf(0.0417, 0.0, 65.5, 0.0, Lin),
@@ -5234,7 +5457,7 @@ static BAT_FLYING: KfAnim = {
             },
             KfChannel {
                 part: "left_wing_tip",
-                rotation: true,
+                target: KfTarget::Rot,
                 frames: &[
                     kf(0.0, 0.0, -10.5, 0.0, Lin),
                     kf(0.0417, 0.0, -65.5, 0.0, Lin),
@@ -5254,37 +5477,58 @@ pub fn compute_bat_anim(
     elapsed_secs: Option<f32>,
     resting: bool,
 ) -> PartAnim {
-    let mut anim = PartAnim::default();
-    let mut rot_delta = vec![Vec3::ZERO; model.parts.len()];
-    let mut pos_delta = vec![Vec3::ZERO; model.parts.len()];
-    let mut touched_rot = vec![false; model.parts.len()];
-
-    if let Some(elapsed) = elapsed_secs {
-        let table = if resting { &BAT_RESTING } else { &BAT_FLYING };
-        apply_kf_anim(
-            table,
+    let mut d = KfDeltas::new(model);
+    if resting {
+        d.set_rot(
             model,
-            elapsed,
-            &mut rot_delta,
-            &mut pos_delta,
-            &mut touched_rot,
+            part_index(&model.parts, "head"),
+            head_rotation(0.0, local_head_y_rot_deg),
         );
     }
+    let table = if resting { &BAT_RESTING } else { &BAT_FLYING };
+    apply_kf_anim(table, model, elapsed_secs, &mut d);
+    d.emit(model)
+}
 
-    for (i, part) in model.parts.iter().enumerate() {
-        let head_look = resting && part.name == "head";
-        if touched_rot[i] || head_look {
-            let mut e = part.default_rotation + rot_delta[i];
-            if head_look {
-                e.y += local_head_y_rot_deg.to_radians();
-            }
-            anim.rotation.push((i, vanilla_rot(e.x, e.y, e.z)));
-        }
-        if pos_delta[i] != Vec3::ZERO {
-            anim.translation.push((i, pos_delta[i]));
-        }
-    }
-    anim
+/// Sniffer `AnimationState` clocks (seconds since start; `None` = stopped).
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct SnifferAnims {
+    pub searching: bool,
+    pub digging: Option<f32>,
+    pub sniffing: Option<f32>,
+    pub rising: Option<f32>,
+    pub feeling_happy: Option<f32>,
+    pub scenting: Option<f32>,
+}
+
+/// Vanilla `SnifferModel.setupAnim`, shared by the adult and snifflet meshes.
+pub fn compute_sniffer_anim(
+    model: &BakedEntityModel,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+    s: &SnifferAnims,
+) -> PartAnim {
+    use sniffer_anim::*;
+    let mut d = KfDeltas::new(model);
+    d.set_rot(
+        model,
+        part_index(&model.parts, "head"),
+        head_rotation(head_x_rot_deg, local_head_y_rot_deg),
+    );
+    let walk = if s.searching {
+        &SNIFFER_SNIFF_SEARCH
+    } else {
+        &SNIFFER_WALK
+    };
+    apply_kf_walk(walk, model, walk_pos, walk_speed, 9.0, 100.0, &mut d);
+    apply_kf_anim(&SNIFFER_DIG, model, s.digging, &mut d);
+    apply_kf_anim(&SNIFFER_LONGSNIFF, model, s.sniffing, &mut d);
+    apply_kf_anim(&SNIFFER_STAND_UP, model, s.rising, &mut d);
+    apply_kf_anim(&SNIFFER_HAPPY, model, s.feeling_happy, &mut d);
+    apply_kf_anim(&SNIFFER_SNIFFSNIFF, model, s.scenting, &mut d);
+    d.emit(model)
 }
 
 /// The four fish (`CodModel`/`SalmonModel`/`TropicalFish*Model`/

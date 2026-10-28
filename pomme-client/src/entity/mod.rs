@@ -61,6 +61,39 @@ pub enum MetaValue {
     Long(i64),
 }
 
+/// Vanilla `Sniffer.State`, in id order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnifferState {
+    Idling,
+    FeelingHappy,
+    Scenting,
+    Sniffing,
+    Searching,
+    Digging,
+    Rising,
+}
+
+impl SnifferState {
+    /// `ByIdMap.continuous` with `OutOfBoundsStrategy.ZERO`.
+    fn from_id(id: i32) -> Self {
+        match id {
+            1 => Self::FeelingHappy,
+            2 => Self::Scenting,
+            3 => Self::Sniffing,
+            4 => Self::Searching,
+            5 => Self::Digging,
+            6 => Self::Rising,
+            _ => Self::Idling,
+        }
+    }
+
+    /// Whether the state has an `AnimationState`; idling and searching
+    /// start none.
+    fn animated(self) -> bool {
+        !matches!(self, Self::Idling | Self::Searching)
+    }
+}
+
 /// `AgeableMob` descendants on every supported version (Slime joined only
 /// in 26.2, so it's excluded here and special-cased where it matters).
 fn is_ageable_mob(kind: EntityKind) -> bool {
@@ -77,6 +110,7 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::Rabbit
             | EntityKind::Squid
             | EntityKind::GlowSquid
+            | EntityKind::Sniffer
     ) || is_equine(&kind)
 }
 
@@ -264,6 +298,9 @@ pub struct LivingEntity {
     pub bat_resting: bool,
     /// Tick the bat's current fly/rest animation started at.
     pub bat_anim_start: Option<u32>,
+    /// The tick the current state's animation started at.
+    pub sniffer_state: SnifferState,
+    pub sniffer_anim_start: Option<u32>,
     pub puff_state: u8,
     /// Glow squid post-hurt dim timer, synced then decremented client-side.
     pub dark_ticks: i32,
@@ -311,6 +348,10 @@ pub struct LivingEntity {
 
 pub(crate) fn living_entity_dimensions(entity: &LivingEntity) -> EntityDimensions {
     let mut dims = EntityDimensions::of(entity.entity_type);
+    // `Sniffer.DIGGING_DIMENSIONS`, then the same age scale.
+    if entity.entity_type == EntityKind::Sniffer && entity.sniffer_state == SnifferState::Digging {
+        dims.height -= 0.4;
+    }
     if entity.is_baby {
         // `Squid.BABY_DIMENSIONS` is an explicit 0.5x0.5, not the generic
         // half scale.
@@ -474,6 +515,8 @@ impl LivingEntity {
             prev_tentacle_angle: 0.0,
             bat_resting: false,
             bat_anim_start: None,
+            sniffer_state: SnifferState::Idling,
+            sniffer_anim_start: None,
             puff_state: 0,
             dark_ticks: 0,
             golem_attack_ticks: 0,
@@ -1374,6 +1417,13 @@ impl EntityStore {
             }
             // Salmon size ids clamp to SMALL..LARGE; a pufferfish puff state
             // outside 0/1 renders big (vanilla `switch` default).
+            // `Sniffer.onSyncedDataUpdated`: every update stops all five
+            // animation states, then starts the new state's one.
+            (EntityKind::Sniffer, 18, Int(id)) => {
+                let state = SnifferState::from_id(id);
+                entity.sniffer_state = state;
+                entity.sniffer_anim_start = state.animated().then_some(entity.age_in_ticks + 1);
+            }
             (EntityKind::Salmon, 17, Int(v)) => entity.variant = v.clamp(0, 2) as u32,
             (EntityKind::TropicalFish, 17, Int(v)) => entity.variant = v as u32,
             (EntityKind::Pufferfish, 17, Int(s)) => {
@@ -1705,6 +1755,7 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::TropicalFish
                 | EntityKind::Pufferfish
                 | EntityKind::IronGolem
+                | EntityKind::Sniffer
         )
 }
 
@@ -1740,6 +1791,36 @@ mod tests {
         let mut store = EntityStore::new();
         spawn(&mut store, 1, EntityKind::Cat, Position::default());
         assert_eq!(store.living[&1].variant, CAT_DEFAULT_VARIANT);
+    }
+
+    /// `Sniffer.onSyncedDataUpdated`: each state update restarts the one
+    /// animation clock; idling, searching and out-of-range ids stop it.
+    #[test]
+    fn sniffer_state_drives_one_animation_clock() {
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::Sniffer, Position::default());
+        store.living.get_mut(&1).unwrap().age_in_ticks = 40;
+        let state = |store: &EntityStore| {
+            let e = &store.living[&1];
+            (e.sniffer_state, e.sniffer_anim_start)
+        };
+
+        store.apply_entity_data(1, 18, MetaValue::Int(5));
+        assert_eq!(state(&store), (SnifferState::Digging, Some(41)));
+        assert_eq!(
+            living_entity_dimensions(&store.living[&1]).height,
+            1.75 - 0.4
+        );
+
+        store.living.get_mut(&1).unwrap().age_in_ticks = 100;
+        store.apply_entity_data(1, 18, MetaValue::Int(6));
+        assert_eq!(state(&store), (SnifferState::Rising, Some(101)));
+        assert_eq!(living_entity_dimensions(&store.living[&1]).height, 1.75);
+
+        store.apply_entity_data(1, 18, MetaValue::Int(4));
+        assert_eq!(state(&store), (SnifferState::Searching, None));
+        store.apply_entity_data(1, 18, MetaValue::Int(9));
+        assert_eq!(state(&store), (SnifferState::Idling, None));
     }
 
     fn tick(store: &mut EntityStore) {

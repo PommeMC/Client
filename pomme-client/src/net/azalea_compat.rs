@@ -2658,6 +2658,10 @@ fn translate_entity_data_765() {
         p.packed_items.0[0].value,
         azalea_entity::EntityDataValue::SnifferState(_)
     ));
+    assert_eq!(
+        super::entity_data::from_azalea(&p.packed_items.0[0].value),
+        Some(pomme_protocol::entity_data::Value::Int(2))
+    );
 }
 
 /// Translates a `set_entity_data` frame for entity 9 carrying `values` (the

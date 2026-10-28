@@ -140,8 +140,8 @@ macro_rules! serializers_26_2 {
         Optional(&TEXT),
         Optional(&TEXT),
     ]))),
-    // SNIFFER_STATE
-    S::Skip(ENUM),
+    // SNIFFER_STATE: an idMapper VarInt, read like INT.
+    S::Int,
     // ARMADILLO_STATE
     S::Skip(ENUM),
     // COPPER_GOLEM_STATE
@@ -292,6 +292,23 @@ mod tests {
                 Value::Variant(Variant::Cow, 7),
                 Value::Item(None),
             ]
+        );
+    }
+
+    /// `Sniffer.DATA_STATE` (index 18) set to DIGGING by vanilla's encoder.
+    #[test]
+    fn sniffer_state_matches_vanilla_encoder() {
+        let payload = crate::vanilla_fixtures::case("set_entity_data/sniffer_state");
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().unwrap(), 7);
+        let values = codec().read_entity_data(&mut r).expect("valid entity data");
+        r.ensure_eof().unwrap();
+        assert_eq!(
+            values,
+            [DataValue {
+                index: 18,
+                value: Value::Int(5),
+            }]
         );
     }
 
