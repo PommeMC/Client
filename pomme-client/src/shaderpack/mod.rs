@@ -219,10 +219,7 @@ pub fn compile(program: &ProgramText, geometry: Geometry) -> Result<CompiledProg
 
 /// Iris's standard macros, by name.
 fn standard_macros() -> BTreeMap<String, String> {
-    preprocess::standard_macros()
-        .into_iter()
-        .map(|(name, value)| (name.to_owned(), value.to_owned()))
-        .collect()
+    preprocess::standard_macros().into_iter().collect()
 }
 
 /// What Iris runs as `final` when a pack has none: `colortex0` as it is.
@@ -254,6 +251,7 @@ pub fn gbuffers_geometry(program: Gbuffers) -> Geometry {
         Gbuffers::Entities => Geometry::Entity,
         Gbuffers::Block => Geometry::BlockEntity,
         Gbuffers::Water => Geometry::Water,
+        Gbuffers::SkyBasic | Gbuffers::SkyTextured => Geometry::Sky,
         _ => Geometry::Terrain,
     }
 }
@@ -271,6 +269,8 @@ mod corpus {
     fn milestone_programs(pack: &ShaderPack, dimension: &str) -> Vec<(ProgramText, Geometry)> {
         let mut out = Vec::new();
         for program in [
+            Gbuffers::SkyBasic,
+            Gbuffers::SkyTextured,
             Gbuffers::Terrain,
             Gbuffers::Water,
             Gbuffers::Entities,
@@ -377,6 +377,31 @@ void main() {}
             macros: BTreeMap::new(),
             custom_uniforms: CustomUniforms::default(),
         }
+    }
+
+    #[test]
+    fn sky_programs_read_the_render_stage() {
+        let program = ProgramText {
+            path: "gbuffers_skybasic".to_owned(),
+            vertex: "#version 120
+void main() { gl_Position = ftransform(); }
+"
+            .to_owned(),
+            fragment: "#version 120
+uniform int renderStage;
+void main() { gl_FragData[0] = vec4(renderStage == 4 ? 1.0 : 0.0); }
+"
+            .to_owned(),
+        };
+        let compiled = compile(&program, Geometry::Sky).unwrap();
+        assert!(
+            compiled
+                .interface
+                .uniforms
+                .iter()
+                .all(|u| u.name != "renderStage")
+        );
+        assert_eq!(standard_macros()["MC_RENDER_STAGE_SUN"], "4");
     }
 
     #[test]

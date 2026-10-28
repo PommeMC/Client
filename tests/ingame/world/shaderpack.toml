@@ -1,7 +1,9 @@
-# A shader pack (fixtures/shaderpacks/pomme_test) draws the world: terrain,
-# a cow and a chest through its one `gbuffers_textured_lit` program, normal
-# shading from its composite pass, and a blue-shifted sky from a custom
-# uniform in its `shaders.properties`. Then packs off again.
+# A shader pack (fixtures/shaderpacks/pomme_test) draws the world: the sky
+# through its `gbuffers_skybasic` (the disc tinted red by `renderStage`) and
+# `gbuffers_skytextured` programs, terrain, a cow and a chest through its
+# `gbuffers_textured_lit`, normal shading from its composite pass, and the
+# sky blended toward a custom uniform from its `shaders.properties`. Then
+# packs off again, with the same sky shots to compare.
 
 [[step]]
 wait_ms = 2000
@@ -48,6 +50,47 @@ wait_ms = 3000
 [[step]]
 screenshot = "pack"
 
+# The sun overhead at noon, the moon and stars at midnight, then the sunset
+# glow to the west at dusk.
+[[step]]
+chat = "/tp @s 60.5 -60 50.5 0 -90"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "pack_sun"
+
+[[step]]
+chat = "/time set 18000"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "pack_night"
+
+[[step]]
+chat = "/time set 12600"
+
+[[step]]
+chat = "/tp @s 60.5 -60 50.5 90 -10"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "pack_dusk"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/tp @s 60.5 -60 50.5 0 15"
+
+[[step]]
+wait_ms = 1000
+
 # A pack with no composite or final: its gbuffers output reaches the screen
 # as it is, the sky the fog colour colortex0 clears to.
 [[step]]
@@ -67,6 +110,47 @@ wait_ms = 1500
 
 [[step]]
 screenshot = "off"
+
+# The sun overhead at noon, the moon and stars at midnight, then the sunset
+# glow to the west at dusk.
+[[step]]
+chat = "/tp @s 60.5 -60 50.5 0 -90"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "off_sun"
+
+[[step]]
+chat = "/time set 18000"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "off_night"
+
+[[step]]
+chat = "/time set 12600"
+
+[[step]]
+chat = "/tp @s 60.5 -60 50.5 90 -10"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "off_dusk"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/tp @s 60.5 -60 50.5 0 15"
+
+[[step]]
+wait_ms = 1000
 
 [[step]]
 chat = "/kill @e[tag=pack]"

@@ -2,18 +2,13 @@
 
 layout(set = 0, binding = 0) uniform SkyUBO {
     mat4 view_proj;
-    vec4 sky_color;
-    vec4 sunrise_color;
     vec4 fog_color;
-    float sun_angle;
-    float moon_angle;
-    float star_angle;
-    float star_brightness;
-    float celestial_alpha;
 };
 
-layout(push_constant) uniform PushConstants {
-    uint mode;
+layout(push_constant) uniform SkyDraw {
+    mat4 pose;
+    vec4 color;
+    uint stage;
 };
 
 layout(location = 0) in vec3 in_position;
@@ -23,33 +18,8 @@ layout(location = 0) out vec2 v_uv;
 layout(location = 1) out float v_spherical;
 layout(location = 2) out float v_cylindrical;
 
-vec3 celestial_rotate(vec3 p, float angle) {
-    float ca = cos(angle);
-    float sa = sin(angle);
-    return vec3(-(p.y * sa + p.z * ca), p.y * ca - p.z * sa, p.x);
-}
-
 void main() {
-    vec3 pos = in_position;
-
-    if (mode == 1) {
-        pos = celestial_rotate(pos, star_angle);
-    } else if (mode == 2) {
-        pos = celestial_rotate(pos, sun_angle);
-    } else if (mode == 3) {
-        pos = celestial_rotate(pos, moon_angle);
-    } else if (mode == 4) {
-        pos.y += 12.0;
-    } else if (mode == 5) {
-        float s = sin(sun_angle) < 0.0 ? -1.0 : 1.0;
-        pos = vec3(
-            -in_position.y * s,
-            -in_position.z,
-            in_position.x * s * sunrise_color.a
-        );
-    }
-
-    gl_Position = view_proj * vec4(pos, 1.0);
+    gl_Position = view_proj * pose * vec4(in_position, 1.0);
     v_uv = in_uv;
     // Vanilla `sky.vsh`'s fog distances, from the untranslated position.
     v_spherical = length(in_position);

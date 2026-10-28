@@ -2,7 +2,7 @@
 //! `gbuffers_*` ones.
 
 /// A geometry program milestone 1 draws with, or one of their fallbacks.
-// TODO: the sky, clouds, hand, weather, particle and glint programs.
+// TODO: the clouds, hand, weather, particle and glint programs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Gbuffers {
     Basic,
@@ -12,6 +12,8 @@ pub enum Gbuffers {
     Block,
     Entities,
     Water,
+    SkyBasic,
+    SkyTextured,
 }
 
 impl Gbuffers {
@@ -24,6 +26,8 @@ impl Gbuffers {
             Self::Block => "gbuffers_block",
             Self::Entities => "gbuffers_entities",
             Self::Water => "gbuffers_water",
+            Self::SkyBasic => "gbuffers_skybasic",
+            Self::SkyTextured => "gbuffers_skytextured",
         }
     }
 
@@ -32,8 +36,8 @@ impl Gbuffers {
     pub fn fallback(self) -> Option<Self> {
         Some(match self {
             Self::Basic => return None,
-            Self::Textured => Self::Basic,
-            Self::TexturedLit => Self::Textured,
+            Self::Textured | Self::SkyBasic => Self::Basic,
+            Self::TexturedLit | Self::SkyTextured => Self::Textured,
             Self::Terrain | Self::Entities => Self::TexturedLit,
             Self::Block | Self::Water => Self::Terrain,
         })
@@ -57,6 +61,8 @@ mod tests {
             Gbuffers::Block,
             Gbuffers::Entities,
             Gbuffers::Water,
+            Gbuffers::SkyBasic,
+            Gbuffers::SkyTextured,
         ] {
             let mut at = program;
             while let Some(next) = at.fallback() {
@@ -66,5 +72,6 @@ mod tests {
         }
         assert_eq!(Gbuffers::Water.fallback(), Some(Gbuffers::Terrain));
         assert_eq!(Gbuffers::Terrain.fallback(), Some(Gbuffers::TexturedLit));
+        assert_eq!(Gbuffers::SkyTextured.fallback(), Some(Gbuffers::Textured));
     }
 }

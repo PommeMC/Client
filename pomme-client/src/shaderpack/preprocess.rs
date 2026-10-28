@@ -16,8 +16,44 @@ pub enum OptionValue {
 
 pub type Overrides = BTreeMap<String, OptionValue>;
 
+/// Iris's `WorldRenderingPhase`s, in order: `renderStage`'s values.
+pub const RENDER_STAGES: [&str; 24] = [
+    "NONE",
+    "SKY",
+    "SUNSET",
+    "CUSTOM_SKY",
+    "SUN",
+    "MOON",
+    "STARS",
+    "VOID",
+    "TERRAIN_SOLID",
+    "TERRAIN_CUTOUT_MIPPED",
+    "TERRAIN_CUTOUT",
+    "ENTITIES",
+    "BLOCK_ENTITIES",
+    "DESTROY",
+    "OUTLINE",
+    "DEBUG",
+    "HAND_SOLID",
+    "TERRAIN_TRANSLUCENT",
+    "TRIPWIRE",
+    "PARTICLES",
+    "CLOUDS",
+    "RAIN_SNOW",
+    "WORLD_BORDER",
+    "HAND_TRANSLUCENT",
+];
+
+/// `stage`'s index in [`RENDER_STAGES`].
+pub fn render_stage(stage: &str) -> usize {
+    RENDER_STAGES
+        .iter()
+        .position(|s| *s == stage)
+        .expect("a render stage")
+}
+
 /// Iris's `StandardMacros`, as a client on the Vulkan path reports them.
-pub fn standard_macros() -> Vec<(&'static str, &'static str)> {
+pub fn standard_macros() -> Vec<(String, String)> {
     let os = if cfg!(windows) {
         "MC_OS_WINDOWS"
     } else if cfg!(target_os = "macos") {
@@ -27,7 +63,7 @@ pub fn standard_macros() -> Vec<(&'static str, &'static str)> {
     } else {
         "MC_OS_UNKNOWN"
     };
-    vec![
+    let fixed = [
         ("MC_VERSION", "260300"),
         ("MC_GL_VERSION", "460"),
         ("MC_GLSL_VERSION", "460"),
@@ -39,6 +75,12 @@ pub fn standard_macros() -> Vec<(&'static str, &'static str)> {
         ("MC_HAND_DEPTH", "0.125"),
         ("IS_IRIS", ""),
     ]
+    .map(|(name, value)| (name.to_owned(), value.to_owned()));
+    let stages = RENDER_STAGES
+        .iter()
+        .enumerate()
+        .map(|(i, stage)| (format!("MC_RENDER_STAGE_{stage}"), i.to_string()));
+    fixed.into_iter().chain(stages).collect()
 }
 
 /// The program's text with the standard macros after its `#version` line and

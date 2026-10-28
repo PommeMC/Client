@@ -8,6 +8,7 @@
 //! the pack expects. Only `final` flips onto the upright swapchain.
 
 use super::glsl::translate::Prelude;
+use super::preprocess::render_stage;
 use crate::renderer::chunk::mesher::{
     POS_BIAS, POS_RANGE, SPRITE_BITS, TERRAIN_UV_BITS, TERRAIN_UV_FIXED_SCALE,
 };
@@ -23,6 +24,8 @@ pub enum Geometry {
     Entity,
     /// `EntityVertex` with the block-entity push constants.
     BlockEntity,
+    /// `SkyVertex` with the sky push block (`SkyPipeline::draws`).
+    Sky,
     /// A full-screen triangle (`deferred`, `composite`).
     FullScreen,
     /// `final`, flipped onto the upright swapchain.
@@ -43,8 +46,9 @@ layout(std140, set = 0, binding = 1) uniform PommeFrame {
 };
 ";
 
-/// The built-in matrices, both stages.
+/// The built-in matrices and `renderStage`, both stages.
 const MATRICES: &str = "
+int pomme_render_stage;
 mat4 pomme_ModelViewMatrix;
 mat4 pomme_ModelViewMatrixInverse;
 mat4 pomme_ProjectionMatrix;
@@ -144,9 +148,32 @@ impl Preludes {
                 ENTITY_SETUP,
                 ENTITY_MODEL_VIEW,
             ),
+            Geometry::Sky => (
+                format!("{SKY_DRAW}{SKY_INPUTS}"),
+                SKY_SETUP,
+                "pomme_view * pomme_sky_pose",
+            ),
             Geometry::FullScreen | Geometry::Final => {
                 (String::new(), FULL_SCREEN_SETUP, "mat4(1.0)")
             }
+        };
+        let stage = match geometry {
+            Geometry::Sky => "int(pomme_sky_stage)".to_owned(),
+            other => render_stage(match other {
+                // TODO: cutout terrain reads TERRAIN_CUTOUT.
+                Geometry::Terrain => "TERRAIN_SOLID",
+                Geometry::Water => "TERRAIN_TRANSLUCENT",
+                Geometry::Entity => "ENTITIES",
+                Geometry::BlockEntity => "BLOCK_ENTITIES",
+                _ => "NONE",
+            })
+            .to_string(),
+        };
+        let stage = format!("    pomme_render_stage = {stage};\n");
+        let fragment_inputs = if geometry == Geometry::Sky {
+            SKY_DRAW
+        } else {
+            ""
         };
         let (fragment_view, projection) = if geometry.is_geometry() {
             ("pomme_view", "pomme_projection")
@@ -164,11 +191,11 @@ impl Preludes {
             ),
             // Iris reads the lightmap coordinate as TexCoord2 too.
             vertex_main: format!(
-                "\nvoid main() {{\n{setup}    pomme_MultiTexCoord2 = pomme_MultiTexCoord1;\n    pomme_matrices({model_view}, {projection});\n    pack_main();\n{GL_DEPTH}{flip}}}\n"
+                "\nvoid main() {{\n{stage}{setup}    pomme_MultiTexCoord2 = pomme_MultiTexCoord1;\n    pomme_matrices({model_view}, {projection});\n    pack_main();\n{GL_DEPTH}{flip}}}\n"
             ),
-            fragment_decls: format!("{FRAME}{MATRICES}{POLYFILLS}"),
+            fragment_decls: format!("{FRAME}{MATRICES}{POLYFILLS}{fragment_inputs}"),
             fragment_main: format!(
-                "\nvoid main() {{\n    pomme_matrices({fragment_view}, {projection});\n    pack_main();\n}}\n"
+                "\nvoid main() {{\n{stage}    pomme_matrices({fragment_view}, {projection});\n    pack_main();\n}}\n"
             ),
         }
     }
@@ -312,6 +339,34 @@ const ENTITY_SETUP: &str = "
     pomme_Color = pomme_in_tint;
     pomme_MultiTexCoord0 = vec4(pomme_in_tex_coords + pomme_in_uv.xy, 0.0, 1.0);
     pomme_MultiTexCoord1 = pomme_light_coords(max(pomme_in_uv.w, 0.0));
+";
+
+/// The sky push block, both stages: `SkyPush` on the Rust side.
+const SKY_DRAW: &str = "
+layout(push_constant) uniform PommeSky {
+    mat4 pomme_sky_pose;
+    vec4 pomme_sky_color;
+    uint pomme_sky_stage;
+};
+";
+
+const SKY_INPUTS: &str = "
+layout(location = 0) in vec3 pomme_in_position;
+layout(location = 1) in vec2 pomme_in_tex_coords;
+";
+
+// Vanilla's sky formats carry no normal or light; the sunset fan's
+// vertex alpha ramps from its centre (`build_sunrise_fan`'s uv.x).
+const SKY_SETUP: &str = "
+    pomme_Vertex = vec4(pomme_in_position, 1.0);
+    pomme_Normal = vec3(0.0, 0.0, 1.0);
+    pomme_Color = pomme_sky_color;
+    // MC_RENDER_STAGE_SUNSET
+    if (pomme_sky_stage == 2u) {
+        pomme_Color.a *= pomme_in_tex_coords.x;
+    }
+    pomme_MultiTexCoord0 = vec4(pomme_in_tex_coords, 0.0, 1.0);
+    pomme_MultiTexCoord1 = vec4(240.0, 240.0, 0.0, 1.0);
 ";
 
 const FULL_SCREEN_SETUP: &str = "

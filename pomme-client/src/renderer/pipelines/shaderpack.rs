@@ -1,7 +1,7 @@
 //! A loaded shader pack's render path, Iris's pipeline in milestone 1: the
-//! `gbuffers_*` programs draw terrain, entities and block entities into the
-//! pack's `colortex` targets, `deferred*` and `composite*` passes run over
-//! them, and `final` writes the swapchain. No shadow pass yet.
+//! `gbuffers_*` programs draw the sky, terrain, entities and block entities
+//! into the pack's `colortex` targets, `deferred*` and `composite*` passes run
+//! over them, and `final` writes the swapchain. No shadow pass yet.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -12,6 +12,7 @@ use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::chunk::buffer::CHUNK_VERTEX_BUFFERS;
 use crate::renderer::entity_model::EntityVertex;
 use crate::renderer::pipelines::lightmap::Lightmap;
+use crate::renderer::pipelines::sky::{SKY_PUSH_SIZE, SkyDraw, SkyPipeline, SkyVertex};
 use crate::renderer::rhi::{self, TextureTransition, TextureUse};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, util};
 use crate::shaderpack::directives::{TargetSettings, buffer_index};
@@ -28,6 +29,8 @@ const BUFFERS: usize = 32;
 /// What the geometry passes draw, in order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PackGeometry {
+    SkyBasic,
+    SkyTextured,
     Terrain,
     Entities,
     BlockEntities,
@@ -37,6 +40,8 @@ pub enum PackGeometry {
 impl PackGeometry {
     fn program(self) -> Gbuffers {
         match self {
+            Self::SkyBasic => Gbuffers::SkyBasic,
+            Self::SkyTextured => Gbuffers::SkyTextured,
             Self::Terrain => Gbuffers::Terrain,
             Self::Entities => Gbuffers::Entities,
             Self::BlockEntities => Gbuffers::Block,
@@ -112,6 +117,8 @@ struct FrameUniform {
 /// One compiled program on the GPU.
 struct Program {
     pipeline: rhi::backend::RenderPipeline,
+    /// The sky programs' additive variant, for the sun, moon and stars.
+    overlay: Option<rhi::backend::RenderPipeline>,
     layout: rhi::backend::PipelineLayout,
     uniform_layout: rhi::backend::BindGroupLayout,
     sampler_layout: rhi::backend::BindGroupLayout,
@@ -226,6 +233,8 @@ impl PackRenderer {
         lightmap: &Lightmap,
     ) -> Result<Self, String> {
         let gbuffers: Vec<(PackGeometry, CompiledProgram)> = [
+            PackGeometry::SkyBasic,
+            PackGeometry::SkyTextured,
             PackGeometry::Terrain,
             PackGeometry::Entities,
             PackGeometry::BlockEntities,
@@ -481,6 +490,10 @@ impl PackRenderer {
                 visibility: rhi::ShaderStages::VERTEX,
                 size: 112,
             }),
+            Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured) => Some(rhi::PushConstants {
+                visibility: rhi::ShaderStages::VERTEX_FRAGMENT,
+                size: SKY_PUSH_SIZE,
+            }),
             _ => None,
         };
         let layout = rhi::backend::create_pipeline_layout(
@@ -497,7 +510,13 @@ impl PackRenderer {
         let fragment = bytemuck::cast_slice(&compiled.fragment);
         let entity_buffers = crate::renderer::pipelines::entity_renderer::INSTANCED_BUFFERS;
         let block_entity_buffers = [EntityVertex::BUFFER];
+        let sky_buffers = [SkyVertex::BUFFER];
+        let sky = matches!(
+            geometry,
+            Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured)
+        );
         let vertex_buffers: &[rhi::VertexBufferLayout] = match geometry {
+            Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured) => &sky_buffers,
             Some(PackGeometry::Terrain) => &CHUNK_VERTEX_BUFFERS,
             Some(PackGeometry::Water) => &CHUNK_VERTEX_BUFFERS[..1],
             Some(PackGeometry::Entities) => &entity_buffers,
@@ -512,23 +531,41 @@ impl PackRenderer {
                 _ => rhi::CullMode::None,
             },
             front_face: rhi::FrontFace::Cw,
-            depth: geometry.map(|_| rhi::DepthState {
-                compare: rhi::CompareFunction::LessEqual,
-                ..rhi::DepthState::WRITE
+            // Vanilla's sky writes no depth.
+            depth: geometry.map(|_| {
+                if sky {
+                    rhi::DepthState::READ_ONLY
+                } else {
+                    rhi::DepthState::WRITE
+                }
             }),
-            blend: (geometry == Some(PackGeometry::Water)).then_some(rhi::BlendState::TRANSLUCENT),
+            blend: (sky || geometry == Some(PackGeometry::Water))
+                .then_some(rhi::BlendState::TRANSLUCENT),
             ..rhi::RenderPipelineDesc::new(&compiled.path, vertex, fragment, vertex_buffers)
         };
-        let pipeline =
-            match rhi::backend::try_create_render_pipeline(device, targets, layout, &desc) {
-                Ok(pipeline) => pipeline,
-                Err(e) => {
-                    layout.destroy(device);
-                    uniform_layout.destroy(device);
-                    sampler_layout.destroy(device);
-                    return Err(format!("{}: {e}", compiled.path));
-                }
-            };
+        let overlay = rhi::RenderPipelineDesc {
+            blend: Some(rhi::BlendState::OVERLAY),
+            ..desc
+        };
+        let pipelines = rhi::backend::try_create_render_pipeline(device, targets, layout, &desc)
+            .and_then(|pipeline| {
+                let overlay = sky
+                    .then(|| {
+                        rhi::backend::try_create_render_pipeline(device, targets, layout, &overlay)
+                    })
+                    .transpose()
+                    .inspect_err(|_| pipeline.destroy(device))?;
+                Ok((pipeline, overlay))
+            });
+        let (pipeline, overlay) = match pipelines {
+            Ok(pipelines) => pipelines,
+            Err(e) => {
+                layout.destroy(device);
+                uniform_layout.destroy(device);
+                sampler_layout.destroy(device);
+                return Err(format!("{}: {e}", compiled.path));
+            }
+        };
         let uniform_size = u64::from(compiled.interface.uniform_size);
         let uniform_buffers = util::create_per_frame_host_buffers(
             device,
@@ -566,6 +603,7 @@ impl PackRenderer {
             .collect();
         Ok(Program {
             pipeline,
+            overlay,
             layout,
             uniform_layout,
             sampler_layout,
@@ -892,6 +930,36 @@ impl PackRenderer {
         }
     }
 
+    /// Draws `draws` through `gbuffers_skybasic` and `gbuffers_skytextured`,
+    /// a pass for each run of draws one program takes.
+    pub fn draw_sky(
+        &mut self,
+        device: &rhi::backend::Device,
+        encoder: &rhi::backend::CommandEncoder,
+        frame: usize,
+        sky: &SkyPipeline,
+        draws: &[SkyDraw],
+    ) {
+        for run in draws.chunk_by(|a, b| a.stage.textured() == b.stage.textured()) {
+            let geometry = if run[0].stage.textured() {
+                PackGeometry::SkyTextured
+            } else {
+                PackGeometry::SkyBasic
+            };
+            let Some((mut pass, binding)) = self.begin_geometry(device, encoder, frame, geometry)
+            else {
+                continue;
+            };
+            let overlay = self.geometry[&geometry].overlay;
+            for draw in run {
+                let pipeline = overlay.filter(|_| draw.stage.overlay());
+                pass.set_pipeline(&pipeline.unwrap_or(binding.pipeline));
+                sky.record(&pass, draw, 3);
+            }
+            self.end_geometry(encoder, pass, geometry);
+        }
+    }
+
     /// Runs the `deferred*` passes, or the `composite*` ones.
     pub fn run_full_screen(
         &mut self,
@@ -994,6 +1062,9 @@ impl PackRenderer {
             .collect();
         for mut program in programs {
             program.pipeline.destroy(device);
+            if let Some(overlay) = program.overlay {
+                overlay.destroy(device);
+            }
             program.layout.destroy(device);
             util::destroy_buffers(device, &mut program.uniform_buffers);
             util::destroy_bind_groups(device, program.uniform_sets.drain(..));
@@ -1294,7 +1365,6 @@ impl UniformValues {
         set("screenBrightness", Value::Float(data.screen_brightness));
         set("heldBlockLightValue", Value::Int(0));
         set("heldBlockLightValue2", Value::Int(0));
-        set("renderStage", Value::Int(0));
         set(
             "atlasSize",
             Value::IVec2(IVec2::splat(data.atlas_size as i32)),

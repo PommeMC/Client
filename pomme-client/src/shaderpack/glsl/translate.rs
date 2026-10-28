@@ -230,6 +230,7 @@ fn builtin(name: &str) -> Option<&'static str> {
         "gl_TexCoord" => "pomme_TexCoord",
         "gl_Fog" => "pomme_Fog",
         "gl_FragColor" => "pomme_FragData0",
+        "renderStage" => "pomme_render_stage",
         "ftransform" => "pomme_ftransform",
         // naga's GLSL frontend lacks `modf`; the preludes polyfill it.
         "modf" => "pomme_modf",
@@ -681,7 +682,8 @@ fn lift_list(
                     globals.samplers.push((n, kind));
                 }
             } else if UniformType::of(&ty.ty.content).is_some() {
-                for (n, a) in names {
+                // The prelude sets `renderStage` per draw.
+                for (n, a) in names.into_iter().filter(|(n, _)| n != "renderStage") {
                     globals.uniforms.push(decl(n, a));
                 }
             } else {
