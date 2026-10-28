@@ -479,6 +479,10 @@ impl PackRenderer {
             Some(PackGeometry::Terrain | PackGeometry::Water) => self.sprite_layout,
             _ => self.empty_layout,
         };
+        let sky = matches!(
+            geometry,
+            Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured)
+        );
         let push_constants = match geometry {
             // `draw_water`'s section origin and fade.
             Some(PackGeometry::Water) => Some(rhi::PushConstants {
@@ -490,7 +494,7 @@ impl PackRenderer {
                 visibility: rhi::ShaderStages::VERTEX,
                 size: 112,
             }),
-            Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured) => Some(rhi::PushConstants {
+            _ if sky => Some(rhi::PushConstants {
                 visibility: rhi::ShaderStages::VERTEX_FRAGMENT,
                 size: SKY_PUSH_SIZE,
             }),
@@ -511,10 +515,6 @@ impl PackRenderer {
         let entity_buffers = crate::renderer::pipelines::entity_renderer::INSTANCED_BUFFERS;
         let block_entity_buffers = [EntityVertex::BUFFER];
         let sky_buffers = [SkyVertex::BUFFER];
-        let sky = matches!(
-            geometry,
-            Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured)
-        );
         let vertex_buffers: &[rhi::VertexBufferLayout] = match geometry {
             Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured) => &sky_buffers,
             Some(PackGeometry::Terrain) => &CHUNK_VERTEX_BUFFERS,

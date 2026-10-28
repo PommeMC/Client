@@ -698,8 +698,6 @@ fn create_pipelines(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
 
     fn stages(sky: &SkyState, top_down: bool) -> Vec<SkyStage> {
@@ -762,15 +760,13 @@ mod tests {
         let mut sky = SkyState::default_day();
         sky.attributes.sun_angle = 30.0;
         sky.attributes.sunrise_sunset_color = Vec4::new(1.0, 0.5, 0.2, 0.5);
-        let poses: BTreeMap<_, _> = elements(&sky, false)
-            .into_iter()
-            .map(|(stage, pose, _)| (stage as u32, pose))
-            .collect();
+        let elements = elements(&sky, false);
+        let pose = |stage| elements.iter().find(|e| e.0 == stage).unwrap().1;
         let close = |a: Vec3, b: Vec3| assert!(a.abs_diff_eq(b, 1e-3), "{a} != {b}");
 
         // `rotateDegrees(YP, -90)` then `rotate(XP, angle)`: the sun, overhead
         // at angle 0, swings toward -x as the angle grows.
-        let sun = poses[&(SkyStage::Sun as u32)];
+        let sun = pose(SkyStage::Sun);
         let (s, c) = 30f32.to_radians().sin_cos();
         close(
             sun.transform_point3(Vec3::new(0.0, 100.0, 0.0)),
@@ -779,7 +775,7 @@ mod tests {
 
         // `rotateDegrees(XP, 90)`, `rotateDegrees(ZP, 90)`, `scale(1, 1, a)`:
         // the fan's centre lies on the horizon, its depth squashed by alpha.
-        let sunset = poses[&(SkyStage::Sunset as u32)];
+        let sunset = pose(SkyStage::Sunset);
         close(
             sunset.transform_point3(Vec3::new(0.0, 100.0, 0.0)),
             Vec3::new(-100.0, 0.0, 0.0),
