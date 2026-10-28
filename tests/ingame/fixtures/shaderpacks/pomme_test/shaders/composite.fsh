@@ -21,7 +21,9 @@ void main() {
     vec3 color = texture2D(colortex0, texcoord).rgb;
     float depth = texture2D(depthtex0, texcoord).r;
     if (depth >= 1.0) {
+#ifdef SKY_TINT
         color = mix(color, pommeSky, 0.5);
+#endif
     } else {
         vec3 normal = texture2D(colortex2, texcoord).rgb * 2.0 - 1.0;
         float up = dot(normal, normalize(upPosition));
