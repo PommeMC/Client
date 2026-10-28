@@ -128,6 +128,8 @@ mod tests {
         assert!(inside("world0/composite.fsh").is_some());
         assert!(inside("../outside.glsl").is_none());
         assert!(inside("/etc/passwd").is_none());
+        // Only a drive on Windows; elsewhere `C:` is a plain folder name.
+        #[cfg(windows)]
         assert!(inside("C:/Windows/win.ini").is_none());
     }
 }
