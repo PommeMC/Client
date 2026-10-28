@@ -32,6 +32,8 @@ pub struct ShaderPack {
     properties: BTreeMap<String, String>,
     dimensions: BTreeMap<String, String>,
     overrides: Overrides,
+    /// The option and standard macros `shaders.properties` is read with.
+    macros: BTreeMap<String, String>,
     pub custom_uniforms: CustomUniforms,
 }
 
@@ -93,9 +95,7 @@ impl ShaderPack {
             .map(|text| preprocess::parse_overrides(&text))
             .unwrap_or_default();
         let mut macros = options::macros(&options::discover(&source), &overrides);
-        for (name, value) in preprocess::standard_macros() {
-            macros.insert(name.to_owned(), value.to_owned());
-        }
+        macros.extend(standard_macros());
         let read_properties = |file| {
             source
                 .read(file)
@@ -113,6 +113,7 @@ impl ShaderPack {
             properties: ordered.into_iter().collect(),
             dimensions,
             overrides,
+            macros,
             custom_uniforms,
         })
     }
@@ -162,13 +163,14 @@ impl ShaderPack {
         Ok(None)
     }
 
-    /// `program.<path>.enabled=false` in `shaders.properties`.
+    /// `program.<path>.enabled` in `shaders.properties` reading false: a
+    /// boolean expression over the pack's options, such as `!SSAO`.
     fn disabled(&self, path: &str) -> bool {
         let name = path.rsplit('/').next().unwrap_or(path);
         [path, name].iter().any(|p| {
             self.properties
                 .get(&format!("program.{p}.enabled"))
-                .is_some_and(|v| v == "false")
+                .is_some_and(|v| !properties::condition(v, &self.macros))
         })
     }
 }
@@ -206,8 +208,21 @@ pub fn compile(program: &ProgramText, geometry: Geometry) -> Result<CompiledProg
         fragment: compile_stage(ShaderStage::Fragment, &interface.fragment)?,
         draw_buffers: directives::draw_buffers(&interface.fragment),
         interface,
-        text: format!("{}\n{}", program.vertex, program.fragment),
+        text: {
+            let macros = standard_macros();
+            [&program.vertex, &program.fragment]
+                .map(|stage| properties::preprocess(stage, &macros))
+                .join("\n")
+        },
     })
+}
+
+/// Iris's standard macros, by name.
+fn standard_macros() -> BTreeMap<String, String> {
+    preprocess::standard_macros()
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect()
 }
 
 /// What Iris runs as `final` when a pack has none: `colortex0` as it is.
@@ -359,8 +374,32 @@ void main() {}
             properties: BTreeMap::new(),
             dimensions: BTreeMap::new(),
             overrides: Overrides::new(),
+            macros: BTreeMap::new(),
             custom_uniforms: CustomUniforms::default(),
         }
+    }
+
+    #[test]
+    fn target_settings_follow_the_active_branch() {
+        let mut program = copy_program();
+        program.fragment = program.fragment.replace(
+            "void main",
+            "#define HQ
+#ifdef HQ
+/*
+const int colortex0Format = RGBA16F;
+*/
+             #else
+/*
+const int colortex0Format = RGBA8;
+*/
+#endif
+void main",
+        );
+        let compiled = compile(&program, Geometry::Final).unwrap();
+        let mut settings = directives::TargetSettings::default();
+        settings.read(&compiled.text);
+        assert_eq!(settings.formats[&0], "RGBA16F");
     }
 
     #[test]

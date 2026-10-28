@@ -52,7 +52,13 @@ pub fn preprocess(text: &str, macros: &BTreeMap<String, String>) -> String {
     for line in text.lines() {
         let active = branches.last().is_none_or(|b| b.active);
         if let Some(directive) = line.trim_start().strip_prefix('#') {
-            let directive = directive.trim_start();
+            // A directive's trailing comment isn't part of its value.
+            let directive = ["//", "/*"]
+                .iter()
+                .filter_map(|c| directive.find(c))
+                .min()
+                .map_or(directive, |end| &directive[..end])
+                .trim();
             let (word, arg) = directive
                 .split_once(char::is_whitespace)
                 .map_or((directive, ""), |(w, a)| (w, a.trim()));
@@ -115,6 +121,8 @@ pub fn preprocess(text: &str, macros: &BTreeMap<String, String>) -> String {
 }
 
 /// `text` with each macro name replaced by its value, until none are left.
+/// A macro with no value, a switched-on toggle, stays as its name so
+/// `program.X.enabled = TOGGLE` still reads it.
 fn expand(text: &str, macros: &BTreeMap<String, String>) -> String {
     static IDENT: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\b[A-Za-z_]\w*\b").expect("static regex"));
@@ -124,6 +132,7 @@ fn expand(text: &str, macros: &BTreeMap<String, String>) -> String {
         let expanded = IDENT.replace_all(&text, |caps: &regex::Captures| {
             macros
                 .get(&caps[0])
+                .filter(|value| !value.is_empty())
                 .cloned()
                 .unwrap_or_else(|| caps[0].to_owned())
         });
@@ -135,9 +144,9 @@ fn expand(text: &str, macros: &BTreeMap<String, String>) -> String {
     text
 }
 
-/// An `#if` condition: `defined` resolved, macros expanded, and any name
-/// left reading 0, as in C.
-fn condition(text: &str, macros: &BTreeMap<String, String>) -> bool {
+/// An `#if` condition or a `program.X.enabled` value: `defined` resolved,
+/// macros expanded, and a name left reading 1 if it's defined, else 0.
+pub fn condition(text: &str, macros: &BTreeMap<String, String>) -> bool {
     static DEFINED: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"defined\s*(?:\(\s*(\w+)\s*\)|(\w+))").expect("static regex"));
     let text = DEFINED.replace_all(text, |caps: &regex::Captures| {
@@ -146,11 +155,11 @@ fn condition(text: &str, macros: &BTreeMap<String, String>) -> bool {
     });
     let text = expand(&text, macros);
     let Ok(expr) = Expr::parse(&text, &mut 0) else {
-        tracing::warn!("Shader pack properties: can't read `#if {text}`");
+        tracing::warn!("Shader pack: can't read the condition `{text}`");
         return false;
     };
     expr.eval(&mut Context {
-        lookup: &|_| Some(Value::Int(0)),
+        lookup: &|name| Some(Value::Int(i32::from(macros.contains_key(name)))),
         frame_time: 0.0,
         smooth: &mut [],
         missing: Vec::new(),
@@ -226,8 +235,11 @@ mod tests {
              #if defined(FOG) || UNKNOWN > 0
   c = 1
 #endif
-             #define LOCAL 4
+             #define LOCAL 4 // [2 4 8]
 d = LOCAL
+#if LOCAL == 4 // comment
+e = 1
+#endif
 ",
             &macros,
         );
@@ -236,6 +248,10 @@ d = LOCAL
         assert_eq!(props["b"], "0.5 0.5");
         assert!(!props.contains_key("c"));
         assert_eq!(props["d"], "4");
+        assert_eq!(props["e"], "1");
+        assert!(condition("BLOOM && !FOG", &macros));
+        assert!(!condition("FOG || SHADOW_QUALITY > 0", &macros));
+        assert!(condition("true", &macros));
     }
 
     #[test]
