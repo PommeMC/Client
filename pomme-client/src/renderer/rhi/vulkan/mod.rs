@@ -521,6 +521,7 @@ pub fn texture_format(format: TextureFormat) -> vk::Format {
         TextureFormat::Rg16Float => vk::Format::R16G16Sfloat,
         TextureFormat::Rgba16Float => vk::Format::R16G16B16A16Sfloat,
         TextureFormat::R32Float => vk::Format::R32Sfloat,
+        TextureFormat::Rg32Float => vk::Format::R32G32Sfloat,
         TextureFormat::Rgba32Float => vk::Format::R32G32B32A32Sfloat,
         TextureFormat::Rg11b10Float => vk::Format::B10G11R11UfloatPack32,
         TextureFormat::Depth32Float => vk::Format::D32Sfloat,
@@ -971,8 +972,8 @@ impl TextureUse {
     fn layout(self) -> vk::ImageLayout {
         match self {
             Self::Undefined => vk::ImageLayout::Undefined,
-            Self::CopySrc => vk::ImageLayout::TransferSrcOptimal,
-            Self::CopyDst => vk::ImageLayout::TransferDstOptimal,
+            Self::CopySrc | Self::DepthCopySrc => vk::ImageLayout::TransferSrcOptimal,
+            Self::CopyDst | Self::DepthCopyDst => vk::ImageLayout::TransferDstOptimal,
             Self::ShaderRead => vk::ImageLayout::ShaderReadOnlyOptimal,
             Self::ColorAttachment => vk::ImageLayout::ColorAttachmentOptimal,
             Self::Present => vk::ImageLayout::PresentSrcKHR,
@@ -982,7 +983,10 @@ impl TextureUse {
     }
 
     fn is_depth(self) -> bool {
-        matches!(self, Self::DepthAttachment | Self::DepthRead)
+        matches!(
+            self,
+            Self::DepthAttachment | Self::DepthRead | Self::DepthCopySrc | Self::DepthCopyDst
+        )
     }
 
     /// The access and stage that must finish before leaving this use.
@@ -1002,17 +1006,17 @@ impl TextureUse {
     fn dst(self) -> (vk::AccessFlags, vk::PipelineStageFlags) {
         match self {
             Self::Undefined => unreachable!("textures can't move to Undefined"),
-            Self::CopySrc => (
+            Self::CopySrc | Self::DepthCopySrc => (
                 vk::AccessFlags::TransferRead,
                 vk::PipelineStageFlags::Transfer,
             ),
-            Self::CopyDst => (
+            Self::CopyDst | Self::DepthCopyDst => (
                 vk::AccessFlags::TransferWrite,
                 vk::PipelineStageFlags::Transfer,
             ),
             Self::ShaderRead | Self::DepthRead => (
                 vk::AccessFlags::ShaderRead,
-                vk::PipelineStageFlags::FragmentShader,
+                vk::PipelineStageFlags::VertexShader | vk::PipelineStageFlags::FragmentShader,
             ),
             Self::DepthAttachment => (
                 vk::AccessFlags::DepthStencilAttachmentRead
@@ -1209,6 +1213,44 @@ impl CommandEncoder {
             TextureUse::CopyDst.layout(),
             &vk::ClearColorValue { float32: color },
             &[vk_range(range)],
+        );
+    }
+
+    /// Clears a depth `image` ([`TextureUse::DepthCopyDst`]) to `depth`.
+    pub fn clear_depth(&self, image: TextureHandle, depth: f32) {
+        self.cmd.clear_depth_stencil_image(
+            image.image,
+            TextureUse::DepthCopyDst.layout(),
+            &vk::ClearDepthStencilValue { depth, stencil: 0 },
+            &[DEPTH_SUBRESOURCE_RANGE],
+        );
+    }
+
+    /// Copies `extent` of a depth texture `src` ([`TextureUse::DepthCopySrc`])
+    /// into `dst` ([`TextureUse::DepthCopyDst`]).
+    pub fn copy_depth(&self, src: TextureHandle, dst: TextureHandle, extent: Extent) {
+        let layers = vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::Depth,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        self.cmd.copy_image(
+            src.image,
+            TextureUse::DepthCopySrc.layout(),
+            dst.image,
+            TextureUse::DepthCopyDst.layout(),
+            &[vk::ImageCopy {
+                src_subresource: layers,
+                src_offset: vk::Offset3D::default(),
+                dst_subresource: layers,
+                dst_offset: vk::Offset3D::default(),
+                extent: vk::Extent3D {
+                    width: extent.width,
+                    height: extent.height,
+                    depth: 1,
+                },
+            }],
         );
     }
 

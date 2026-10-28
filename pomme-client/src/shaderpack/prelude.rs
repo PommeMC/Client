@@ -52,7 +52,6 @@ mat4 pomme_ProjectionMatrixInverse;
 mat4 pomme_ModelViewProjectionMatrix;
 mat3 pomme_NormalMatrix;
 mat4 pomme_TextureMatrix[2];
-float pomme_FogFragCoord;
 
 // The fixed-function fog `gl_Fog` reported.
 struct pomme_FogParameters {
@@ -163,8 +162,9 @@ impl Preludes {
             vertex_decls: format!(
                 "{FRAME}{MATRICES}{POLYFILLS}{VERTEX_INPUTS}{EYE_OFFSET}{inputs}"
             ),
+            // Iris reads the lightmap coordinate as TexCoord2 too.
             vertex_main: format!(
-                "\nvoid main() {{\n{setup}    pomme_matrices({model_view}, {projection});\n    pack_main();\n{GL_DEPTH}{flip}}}\n"
+                "\nvoid main() {{\n{setup}    pomme_MultiTexCoord2 = pomme_MultiTexCoord1;\n    pomme_matrices({model_view}, {projection});\n    pack_main();\n{GL_DEPTH}{flip}}}\n"
             ),
             fragment_decls: format!("{FRAME}{MATRICES}{POLYFILLS}"),
             fragment_main: format!(
@@ -264,7 +264,6 @@ const TERRAIN_SETUP: &str = "
     vec2 atlas_uv = (vec2(rect.xy) + sprite_uv * vec2(rect.zw)) / pomme_atlas_size.xy;
     pomme_MultiTexCoord0 = vec4(atlas_uv, 0.0, 1.0);
     pomme_MultiTexCoord1 = vec4(round(pomme_in_light_tint.r * 255.0), float(pomme_in_uv >> 24), 0.0, 1.0);
-    pomme_MultiTexCoord2 = vec4(0.0);
     // TODO: vanilla's face shade is baked in here; Iris drops it for packs.
     pomme_Color = vec4(pomme_in_light_tint.gba, 1.0);
 ";
@@ -313,7 +312,6 @@ const ENTITY_SETUP: &str = "
     pomme_Color = pomme_in_tint;
     pomme_MultiTexCoord0 = vec4(pomme_in_tex_coords + pomme_in_uv.xy, 0.0, 1.0);
     pomme_MultiTexCoord1 = pomme_light_coords(max(pomme_in_uv.w, 0.0));
-    pomme_MultiTexCoord2 = vec4(0.0);
 ";
 
 const FULL_SCREEN_SETUP: &str = "
@@ -323,5 +321,4 @@ const FULL_SCREEN_SETUP: &str = "
     pomme_Color = vec4(1.0);
     pomme_MultiTexCoord0 = vec4(uv, 0.0, 1.0);
     pomme_MultiTexCoord1 = vec4(240.0, 240.0, 0.0, 1.0);
-    pomme_MultiTexCoord2 = vec4(0.0);
 ";

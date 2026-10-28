@@ -47,6 +47,17 @@ wait_ms = 3000
 [[step]]
 screenshot = "pack"
 
+# A pack with no composite or final: its gbuffers output reaches the screen
+# as it is, the sky the fog colour colortex0 clears to.
+[[step]]
+option = { shader_pack = "pomme_nofinal" }
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "no_final"
+
 [[step]]
 option = { shader_pack = "" }
 

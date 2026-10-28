@@ -226,6 +226,8 @@ fn builtin(name: &str) -> Option<&'static str> {
         "gl_NormalMatrix" => "pomme_NormalMatrix",
         "gl_TextureMatrix" => "pomme_TextureMatrix",
         "gl_FogFragCoord" => "pomme_FogFragCoord",
+        "gl_FrontColor" => "pomme_FrontColor",
+        "gl_TexCoord" => "pomme_TexCoord",
         "gl_Fog" => "pomme_Fog",
         "gl_FragColor" => "pomme_FragData0",
         "ftransform" => "pomme_ftransform",
@@ -284,8 +286,12 @@ pub fn translate(
 ) -> Result<Translated, TranslateError> {
     let mut vertex = parse(ShaderStage::Vertex, source.vertex)?;
     let mut fragment = parse(ShaderStage::Fragment, source.fragment)?;
-    let vertex_globals = lift_globals(ShaderStage::Vertex, &mut vertex)?;
-    let fragment_globals = lift_globals(ShaderStage::Fragment, &mut fragment)?;
+    let mut vertex_globals = lift_globals(ShaderStage::Vertex, &mut vertex)?;
+    let mut fragment_globals = lift_globals(ShaderStage::Fragment, &mut fragment)?;
+    for varying in builtin_varyings(source) {
+        vertex_globals.varyings.push(varying.clone());
+        fragment_globals.varyings.push(varying);
+    }
     hoist_global_initializers(&mut vertex);
     hoist_global_initializers(&mut fragment);
 
@@ -309,8 +315,8 @@ pub fn translate(
         .map(|u| u.name.clone())
         .collect();
 
-    let vertex_outputs = rewrite(&mut vertex, &sampler_names, &bools);
-    let fragment_outputs = rewrite(&mut fragment, &sampler_names, &bools);
+    let vertex_outputs = rewrite(ShaderStage::Vertex, &mut vertex, &sampler_names, &bools);
+    let fragment_outputs = rewrite(ShaderStage::Fragment, &mut fragment, &sampler_names, &bools);
     debug_assert!(vertex_outputs.is_empty());
 
     let locations = varying_locations(&vertex_globals.varyings);
@@ -785,14 +791,56 @@ fn array_len(spec: &ast::ArraySpecifier) -> Option<u32> {
     }
 }
 
+/// The built-in varyings OpenGL passes between the stages that `source`
+/// uses: the vertex `gl_FrontColor` the fragment reads as `gl_Color`,
+/// `gl_TexCoord[]` and `gl_FogFragCoord`.
+fn builtin_varyings(source: ProgramSource) -> Vec<Decl> {
+    static TEX_COORD: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\bgl_TexCoord\s*\[\s*(\d+)\s*\]").expect("static regex")
+    });
+    let varying = |name: &str, ty: &str, count: u32| Decl {
+        name: name.to_owned(),
+        ty: ty.to_owned(),
+        array: if count > 1 {
+            format!("[{count}]")
+        } else {
+            String::new()
+        },
+        flat: false,
+        is_int: false,
+        uniform: None,
+        count,
+    };
+    let mut varyings = Vec::new();
+    if source.vertex.contains("gl_FrontColor") || source.fragment.contains("gl_Color") {
+        varyings.push(varying("pomme_FrontColor", "vec4", 1));
+    }
+    let tex_coords = [source.vertex, source.fragment]
+        .iter()
+        .flat_map(|s| TEX_COORD.captures_iter(s))
+        .filter_map(|c| c[1].parse::<u32>().ok())
+        .max();
+    if let Some(last) = tex_coords {
+        // One past the highest index used, and at least two so it stays an
+        // array.
+        varyings.push(varying("pomme_TexCoord", "vec4", (last + 1).max(2)));
+    }
+    if source.vertex.contains("gl_FogFragCoord") || source.fragment.contains("gl_FogFragCoord") {
+        varyings.push(varying("pomme_FogFragCoord", "float", 1));
+    }
+    varyings
+}
+
 /// Rewrites built-ins, texture calls, sampler and bool-uniform uses and
 /// `main`, returning the `gl_FragData` indices written.
 fn rewrite(
+    stage: ShaderStage,
     tu: &mut ast::TranslationUnit,
     samplers: &BTreeMap<String, (String, SamplerKind)>,
     bools: &BTreeSet<String>,
 ) -> BTreeSet<u32> {
     let mut rewriter = Rewriter {
+        stage,
         samplers,
         bools,
         frag_data: BTreeSet::new(),
@@ -805,6 +853,7 @@ fn rewrite(
 }
 
 struct Rewriter<'a> {
+    stage: ShaderStage,
     /// Each sampler name's binding name and kind.
     samplers: &'a BTreeMap<String, (String, SamplerKind)>,
     bools: &'a BTreeSet<String>,
@@ -1011,6 +1060,10 @@ impl VisitorMut for Rewriter<'_> {
                         )
                         .into(),
                     )
+                } else if name == "gl_Color" && self.stage == ShaderStage::Fragment {
+                    // The fragment stage's `gl_Color` is the interpolated
+                    // `gl_FrontColor`.
+                    Some(variable("pomme_FrontColor"))
                 } else if name == "gl_FragColor" {
                     self.frag_data.insert(0);
                     Some(variable("pomme_FragData0"))
@@ -1047,7 +1100,7 @@ mod tests {
     const VS_PRELUDE: Prelude = Prelude {
         decls: "vec4 pomme_Vertex; vec4 pomme_Color; vec4 pomme_MultiTexCoord0; vec3 pomme_Normal;\n\
                 mat4 pomme_ModelViewMatrix; mat4 pomme_ProjectionMatrix; mat4 pomme_TextureMatrix[2];\n\
-                mat3 pomme_NormalMatrix; float pomme_FogFragCoord;\n\
+                mat3 pomme_NormalMatrix;\n\
                 vec4 pomme_ftransform() { return pomme_ProjectionMatrix * pomme_ModelViewMatrix * pomme_Vertex; }\n",
         main: "void main() { pack_main(); }\n",
     };
@@ -1152,6 +1205,40 @@ mod tests {
             "#version 120\nvarying float sample;\nvoid main() { gl_Position = ftransform(); sample = 1.0; }\n",
             "#version 120\nvarying float sample;\nuniform sampler2DShadow shadowtex0;\n\
              void main() { float s = shadow2D(shadowtex0, vec3(0.5, 0.5, sample)).r; gl_FragColor = vec4(s); }\n",
+        );
+    }
+
+    #[test]
+    fn builtin_varyings_pass_between_stages() {
+        let t = translated(
+            "#version 120
+void main() {
+               gl_Position = ftransform();
+               gl_FrontColor = gl_Color;
+               gl_TexCoord[0] = gl_MultiTexCoord0;
+               gl_FogFragCoord = length(gl_Position.xyz);
+             }
+",
+            "#version 120
+void main() {
+               gl_FragColor = gl_Color * gl_TexCoord[0] * gl_FogFragCoord;
+             }
+",
+        );
+        assert!(
+            t.vertex.contains("out vec4 pomme_FrontColor;"),
+            "{}",
+            t.vertex
+        );
+        assert!(
+            t.fragment.contains("in vec4 pomme_TexCoord[2];"),
+            "{}",
+            t.fragment
+        );
+        assert!(
+            t.fragment.contains("in float pomme_FogFragCoord;"),
+            "{}",
+            t.fragment
         );
     }
 
