@@ -113,8 +113,9 @@ chat = "/item replace entity @s weapon.offhand with minecraft:torch"
 [[step]]
 press = { action = "key.toggleGui" }
 
+# Unfocused chat fades after 10 seconds.
 [[step]]
-wait_ms = 1000
+wait_ms = 10500
 
 [[step]]
 screenshot = "torch_hand"
