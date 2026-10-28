@@ -147,9 +147,9 @@ pub struct PackRenderer {
     extent: rhi::Extent,
     swapchain_targets: rhi::backend::PipelineTargets,
     buffers: BTreeMap<u8, Buffer>,
-    /// `depthtex0`, everything drawn; `depthtex1`, copied before
-    /// translucents.
+    /// `depthtex0`: everything drawn.
     depth: rhi::backend::Texture,
+    /// `depthtex1`: `depthtex0` copied before translucents.
     depth_opaque: rhi::backend::Texture,
     noise: rhi::backend::Texture,
     /// 1×1 stand-ins: white color, and depth at the far plane for shadow maps.

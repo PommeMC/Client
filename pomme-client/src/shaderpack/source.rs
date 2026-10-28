@@ -55,7 +55,8 @@ impl PackSource {
             if file.is_dir() || rel.is_empty() {
                 continue;
             }
-            let mut bytes = Vec::with_capacity(file.size() as usize);
+            // The entry's declared size isn't trusted for the allocation.
+            let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)?;
             files.insert(rel, bytes);
         }
