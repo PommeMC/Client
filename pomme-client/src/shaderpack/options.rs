@@ -1,12 +1,14 @@
-//! A pack's options, found the way Iris finds them: `#define` lines in its
-//! shader files, a toggle being `#define NAME` or `//#define NAME` and a
-//! value option `#define NAME value // [a b c]`.
+//! A pack's options, found the way Iris's `OptionAnnotatedSource` finds them:
+//! `#define` lines in each shader file with its includes expanded, a toggle
+//! being `#define NAME` or `//#define NAME` that the same file tests with
+//! `#ifdef`/`#ifndef`, and a value option `#define NAME value // [a b c]`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
 use regex::Regex;
 
+use super::include;
 use super::preprocess::{OptionValue, Overrides};
 use super::source::PackSource;
 
@@ -19,13 +21,17 @@ pub fn discover(source: &PackSource) -> BTreeMap<String, OptionValue> {
         if !SHADER_EXTENSIONS.iter().any(|ext| path.ends_with(ext)) {
             continue;
         }
-        let Some(text) = source.read(&path) else {
+        let Ok(text) = include::expand(source, &path) else {
             continue;
         };
+        let tested = tested(&text);
         for line in text.lines() {
             let Some((name, rank, value)) = option(line) else {
                 continue;
             };
+            if matches!(value, OptionValue::Toggle(_)) && !tested.contains(&name) {
+                continue;
+            }
             // A define that reads like a setting (commented out, or with a
             // comment) wins over a bare one, which is often an include guard.
             if found.get(&name).is_none_or(|(best, _)| rank > *best) {
@@ -39,13 +45,24 @@ pub fn discover(source: &PackSource) -> BTreeMap<String, OptionValue> {
         .collect()
 }
 
+/// The names `text` tests with `#ifdef` or `#ifndef`; `#if defined(...)`
+/// doesn't count, as in OptiFine.
+fn tested(text: &str) -> BTreeSet<String> {
+    static IFDEF: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?m)^\s*#\s*ifn?def\s+(\w+)").expect("static regex"));
+    IFDEF
+        .captures_iter(text)
+        .map(|caps| caps[1].to_owned())
+        .collect()
+}
+
 /// An option `line` declares, ranked by how sure it is to be a setting.
 fn option(line: &str) -> Option<(String, u8, OptionValue)> {
     static TOGGLE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^\s*(//)?\s*#define\s+(\w+)\s*(//.*)?$").expect("static regex")
     });
     static VALUE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^\s*#define\s+(\w+)\s+([^\s/]+)\s*//(.*)$").expect("static regex")
+        Regex::new(r"^\s*#define\s+(\w+)\s+([^\s/]+)\s*//.*\[.*\]").expect("static regex")
     });
     if let Some(caps) = TOGGLE.captures(line) {
         let commented = caps.get(1).is_some();
@@ -53,15 +70,10 @@ fn option(line: &str) -> Option<(String, u8, OptionValue)> {
         return Some((caps[2].to_owned(), rank, OptionValue::Toggle(!commented)));
     }
     let caps = VALUE.captures(line)?;
-    let value = &caps[2];
-    let listed = caps[3].trim_start().starts_with('[');
-    if !listed && value.trim_end_matches('f').parse::<f64>().is_err() {
-        return None;
-    }
     Some((
         caps[1].to_owned(),
-        if listed { 2 } else { 1 },
-        OptionValue::Value(value.to_owned()),
+        2,
+        OptionValue::Value(caps[2].to_owned()),
     ))
 }
 
@@ -96,12 +108,19 @@ mod tests {
             (
                 "lib/settings.glsl".to_owned(),
                 b"#define BLOOM // bloom\n//#define FOG\n#define QUALITY 2 // [1 2 3]\n\
-                  #define STRENGTH 1.5 // how strong\n#define PI 3.14159\n#define NAME_ONLY\n"
+                  #define STRENGTH 1.5 // how strong\n#define PI 3.14159\n#define NAME_ONLY\n\
+                  #define UNTESTED // never tested\n"
+                    .to_vec(),
+            ),
+            (
+                "composite.fsh".to_owned(),
+                b"#include \"/lib/settings.glsl\"\n#ifdef BLOOM\n#endif\n#ifndef FOG\n#endif\n\
+                  #if defined(UNTESTED)\n#endif\n#ifdef NAME_ONLY\n#endif\n"
                     .to_vec(),
             ),
             (
                 "lib/guard.glsl".to_owned(),
-                b"//#define NAME_ONLY // off by default\n".to_vec(),
+                b"//#define NAME_ONLY // off by default\n#ifdef NAME_ONLY\n#endif\n".to_vec(),
             ),
             (
                 "shaders.properties".to_owned(),
@@ -112,8 +131,9 @@ mod tests {
         assert_eq!(options["BLOOM"], OptionValue::Toggle(true));
         assert_eq!(options["FOG"], OptionValue::Toggle(false));
         assert_eq!(options["QUALITY"], OptionValue::Value("2".into()));
-        assert_eq!(options["STRENGTH"], OptionValue::Value("1.5".into()));
         assert_eq!(options["NAME_ONLY"], OptionValue::Toggle(false));
+        assert!(!options.contains_key("STRENGTH"));
+        assert!(!options.contains_key("UNTESTED"));
         assert!(!options.contains_key("PI"));
         assert!(!options.contains_key("NOT_GLSL"));
 
