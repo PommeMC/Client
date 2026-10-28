@@ -2,10 +2,12 @@
 
 // Sky where nothing drew; geometry lit from above by its normal.
 
+#define SKY_TINT // the sky from shaders.properties' custom uniform
+
 uniform sampler2D colortex0;
 uniform sampler2D colortex2;
 uniform sampler2D depthtex0;
-uniform vec3 skyColor;
+uniform vec3 pommeSky;
 uniform vec3 upPosition;
 
 /*
@@ -18,7 +20,7 @@ void main() {
     vec3 color = texture2D(colortex0, texcoord).rgb;
     float depth = texture2D(depthtex0, texcoord).r;
     if (depth >= 1.0) {
-        color = skyColor;
+        color = pommeSky;
     } else {
         vec3 normal = texture2D(colortex2, texcoord).rgb * 2.0 - 1.0;
         float up = dot(normal, normalize(upPosition));

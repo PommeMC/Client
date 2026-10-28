@@ -47,6 +47,7 @@ use crate::renderer::pipelines::entity_shadow::{ShadowCaster, ShadowScene};
 use crate::renderer::pipelines::lightmap::LightmapInfo;
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::pipelines::post_effect::PostEffect;
+use crate::renderer::pipelines::shaderpack::PackWorld;
 use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::chat::{ChatState, ChatUiAction};
@@ -141,6 +142,8 @@ pub struct GameState {
     /// Bubble index the pop sound last played for, so each pop fires once.
     pub last_bubble_pop_sound_played: i32,
     pub biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+    /// The biome registry's names by id, built when a shader pack needs them.
+    pack_biome_names: Arc<[String]>,
     pub player_walk_pos: f32,
     pub player_walk_speed: f32,
     pub player_prev_walk_speed: f32,
@@ -496,6 +499,7 @@ impl GameState {
             player: LocalPlayer::new(),
             last_bubble_pop_sound_played: 0,
             biome_climate: Arc::new(HashMap::new()),
+            pack_biome_names: Arc::default(),
             player_walk_pos: 0.0,
             player_walk_speed: 0.0,
             player_prev_walk_speed: 0.0,
@@ -2176,6 +2180,44 @@ fn sleeping_head_pitch_deg(is_sleeping: bool, head_x_rot_deg: f32) -> f32 {
 
 /// Vanilla `GameRenderer.renderItemInHand`: not while asleep, with the HUD
 /// hidden (F1), or in spectator.
+/// What a shader pack reads about the player's surroundings (Iris's
+/// `BiomeUniforms` and `blindness`).
+fn pack_world(game: &mut GameState) -> PackWorld {
+    use crate::renderer::pipelines::weather::{Precip, precipitation_for};
+    let registry = crate::net::connection::biome_registry(&game.registries);
+    if registry.is_some_and(|r| r.map.len() != game.pack_biome_names.len()) {
+        game.pack_biome_names = registry
+            .into_iter()
+            .flat_map(|r| r.map.keys())
+            .map(ToString::to_string)
+            .collect();
+    }
+    let eye = game.player.eye_pos();
+    let [x, y, z] = [eye.x, eye.y, eye.z].map(|c| c.floor() as i32);
+    let biome = game.chunk_store.biome_id(x, y, z);
+    let climate = game.biome_climate.get(&biome).copied().unwrap_or_default();
+    // Iris: a second of fade-out at the end, full while infinite.
+    let blindness = game.player.effects.duration("blindness").map_or(0.0, |d| {
+        if d < 0 {
+            1.0
+        } else {
+            (d as f32 / 20.0).clamp(0.0, 1.0)
+        }
+    });
+    PackWorld {
+        biome: biome as i32,
+        biome_names: Arc::clone(&game.pack_biome_names),
+        precipitation: match precipitation_for(&climate, y) {
+            Precip::None => 0,
+            Precip::Rain => 1,
+            Precip::Snow => 2,
+        },
+        temperature: climate.temperature,
+        rainfall: climate.downfall,
+        blindness,
+    }
+}
+
 pub(crate) fn renders_first_person_hand(game: &GameState) -> bool {
     hand_visible(
         game.player.is_sleeping(),
@@ -4324,6 +4366,9 @@ pub fn update_game(
         .shader_pack
         .as_ref()
         .map(|name| core.menu.shader_packs_dir.join(name));
+    if shader_pack.is_some() {
+        gfx.renderer.set_pack_world(pack_world(game));
+    }
     if let Err(e) = gfx.renderer.set_shader_pack(shader_pack.as_deref()) {
         tracing::error!(
             "Shader pack {}: {e}",

@@ -68,6 +68,30 @@ impl PackSource {
         Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
+    /// Every file's path, relative to `shaders/`, sorted.
+    pub fn files(&self) -> Vec<String> {
+        let mut files = match self {
+            Self::Dir(root) => {
+                let mut files = Vec::new();
+                let mut dirs = vec![root.clone()];
+                while let Some(dir) = dirs.pop() {
+                    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            dirs.push(path);
+                        } else if let Ok(rel) = path.strip_prefix(root) {
+                            files.push(rel.to_string_lossy().replace('\\', "/"));
+                        }
+                    }
+                }
+                files
+            }
+            Self::Zip(files) => files.keys().cloned().collect(),
+        };
+        files.sort_unstable();
+        files
+    }
+
     pub fn exists(&self, path: &str) -> bool {
         match self {
             Self::Dir(root) => root.join(path).is_file(),

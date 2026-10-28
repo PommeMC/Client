@@ -3,13 +3,16 @@
 //! is the spec.
 
 pub mod directives;
+pub mod expr;
 pub mod glsl;
 pub mod include;
+pub mod options;
 pub mod prelude;
 pub mod preprocess;
 pub mod programs;
 pub mod properties;
 pub mod source;
+pub mod uniforms;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -21,6 +24,7 @@ use prelude::{Geometry, Preludes};
 use preprocess::Overrides;
 use programs::Gbuffers;
 use source::{PackSource, SourceError};
+use uniforms::{CustomUniforms, UniformError};
 
 pub struct ShaderPack {
     pub name: String,
@@ -28,12 +32,15 @@ pub struct ShaderPack {
     properties: BTreeMap<String, String>,
     dimensions: BTreeMap<String, String>,
     overrides: Overrides,
+    pub custom_uniforms: CustomUniforms,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum PackError {
     #[error("{0}")]
     Source(#[from] SourceError),
+    #[error("shaders.properties: {0}")]
+    Uniforms(#[from] UniformError),
     #[error("{program}: {error}")]
     Include {
         program: String,
@@ -82,23 +89,31 @@ impl ShaderPack {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let read_properties = |file| {
-            source
-                .read(file)
-                .map(|text| properties::parse(&text))
-                .unwrap_or_default()
-        };
-        let properties = read_properties("shaders.properties");
-        let dimensions = read_properties("dimension.properties");
         let overrides = std::fs::read_to_string(path.with_file_name(format!("{name}.txt")))
             .map(|text| preprocess::parse_overrides(&text))
             .unwrap_or_default();
+        let mut macros = options::macros(&options::discover(&source), &overrides);
+        for (name, value) in preprocess::standard_macros() {
+            macros.insert(name.to_owned(), value.to_owned());
+        }
+        let read_properties = |file| {
+            source
+                .read(file)
+                .map(|text| properties::parse_ordered(&properties::preprocess(&text, &macros)))
+                .unwrap_or_default()
+        };
+        let ordered = read_properties("shaders.properties");
+        let custom_uniforms = CustomUniforms::parse(&ordered)?;
+        let dimensions = read_properties("dimension.properties")
+            .into_iter()
+            .collect();
         Ok(Self {
             name,
             source,
-            properties,
+            properties: ordered.into_iter().collect(),
             dimensions,
             overrides,
+            custom_uniforms,
         })
     }
 

@@ -17,7 +17,7 @@ pub enum OptionValue {
 pub type Overrides = BTreeMap<String, OptionValue>;
 
 /// Iris's `StandardMacros`, as a client on the Vulkan path reports them.
-fn standard_macros() -> Vec<(&'static str, &'static str)> {
+pub fn standard_macros() -> Vec<(&'static str, &'static str)> {
     let os = if cfg!(windows) {
         "MC_OS_WINDOWS"
     } else if cfg!(target_os = "macos") {

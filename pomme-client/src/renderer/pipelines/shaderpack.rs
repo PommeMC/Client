@@ -4,8 +4,9 @@
 //! them, and `final` writes the swapchain. No shadow pass yet.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use glam::{DVec3, IVec3, Mat4, Vec3, Vec4};
+use glam::{DVec3, IVec2, IVec3, Mat4, Vec3, Vec4};
 
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::chunk::buffer::CHUNK_VERTEX_BUFFERS;
@@ -14,9 +15,11 @@ use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::rhi::{self, TextureTransition, TextureUse};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, util};
 use crate::shaderpack::directives::{TargetSettings, buffer_index};
+use crate::shaderpack::expr::Value;
 use crate::shaderpack::glsl::translate::{SamplerKind, UniformType};
 use crate::shaderpack::prelude::Geometry;
 use crate::shaderpack::programs::{Gbuffers, full_screen_names};
+use crate::shaderpack::uniforms::CustomUniforms;
 use crate::shaderpack::{self, CompiledProgram, ShaderPack};
 
 /// Buffers a pack can name, `colortex0` to `colortex31`.
@@ -74,6 +77,21 @@ pub struct PackFrame {
     pub eye_light: [f32; 2],
     pub eye_in_water: bool,
     pub screen_brightness: f32,
+    pub world: PackWorld,
+}
+
+/// The player's surroundings as Iris reports them, from the game state.
+#[derive(Clone, Default)]
+pub struct PackWorld {
+    /// The biome's registry id at the eye.
+    pub biome: i32,
+    /// Every biome's name, by registry id, for the `BIOME_*` constants.
+    pub biome_names: Arc<[String]>,
+    /// `PPT_NONE`, `PPT_RAIN` or `PPT_SNOW` at the eye.
+    pub precipitation: i32,
+    pub temperature: f32,
+    pub rainfall: f32,
+    pub blindness: f32,
 }
 
 /// `PommeFrame` in the preludes.
@@ -142,6 +160,8 @@ pub struct PackRenderer {
     previous: Option<Previous>,
     frame_counter: u32,
     started: std::time::Instant,
+    last_prepare: Option<std::time::Instant>,
+    custom: CustomUniforms,
 }
 
 /// Which program [`PackRenderer::bind_samplers`] works on.
@@ -306,6 +326,8 @@ impl PackRenderer {
             previous: None,
             frame_counter: 0,
             started: std::time::Instant::now(),
+            last_prepare: None,
+            custom: pack.custom_uniforms.clone(),
         };
 
         for index in used.into_iter().filter(|&i| (i as usize) < BUFFERS) {
@@ -573,13 +595,20 @@ impl PackRenderer {
         };
         self.frame_buffers[frame].write(bytemuck::bytes_of(&frame_uniform));
 
+        let now = std::time::Instant::now();
+        let frame_time = self
+            .last_prepare
+            .map_or(1.0 / 60.0, |last| (now - last).as_secs_f32());
+        self.last_prepare = Some(now);
         let values = UniformValues::new(
             data,
             self.previous.unwrap_or(current),
             self.extent,
             self.frame_counter,
             self.started.elapsed().as_secs_f32() % 3600.0,
+            frame_time,
         );
+        self.custom.evaluate(&|name| values.get(name), frame_time);
         for program in self
             .geometry
             .values_mut()
@@ -587,7 +616,7 @@ impl PackRenderer {
             .chain(&mut self.composite)
             .chain(&mut self.final_pass)
         {
-            let bytes = values.block(&program.compiled);
+            let bytes = values.block(&program.compiled, &self.custom);
             program.uniform_buffers[frame].write(&bytes);
         }
         self.previous = Some(current);
@@ -1079,16 +1108,36 @@ struct Previous {
 }
 
 /// A frame's values for Iris's uniforms, by name.
-struct UniformValues(BTreeMap<&'static str, Value>);
-
-#[derive(Clone, Copy)]
-enum Value {
-    Float(f32),
-    Int(i32),
-    Vec3([f32; 3]),
-    IVec2([i32; 2]),
-    Mat4(Mat4),
+struct UniformValues {
+    values: BTreeMap<&'static str, Value>,
+    biome_names: Arc<[String]>,
 }
+
+/// Iris's precipitation and biome-category constants.
+const CONSTANTS: &[(&str, i32)] = &[
+    ("PPT_NONE", 0),
+    ("PPT_RAIN", 1),
+    ("PPT_SNOW", 2),
+    ("CAT_NONE", 0),
+    ("CAT_TAIGA", 1),
+    ("CAT_EXTREME_HILLS", 2),
+    ("CAT_JUNGLE", 3),
+    ("CAT_MESA", 4),
+    ("CAT_PLAINS", 5),
+    ("CAT_SAVANNA", 6),
+    ("CAT_ICY", 7),
+    ("CAT_THE_END", 8),
+    ("CAT_BEACH", 9),
+    ("CAT_FOREST", 10),
+    ("CAT_OCEAN", 11),
+    ("CAT_DESERT", 12),
+    ("CAT_RIVER", 13),
+    ("CAT_SWAMP", 14),
+    ("CAT_MUSHROOM", 15),
+    ("CAT_NETHER", 16),
+    ("CAT_MOUNTAIN", 17),
+    ("CAT_UNDERGROUND", 18),
+];
 
 impl UniformValues {
     fn new(
@@ -1096,6 +1145,7 @@ impl UniformValues {
         previous: Previous,
         extent: rhi::Extent,
         frame_counter: u32,
+        time_counter: f32,
         frame_time: f32,
     ) -> Self {
         let sky_angle = data.sun_angle_degrees / 360.0;
@@ -1127,27 +1177,21 @@ impl UniformValues {
             "gbufferPreviousProjection",
             Value::Mat4(previous.projection),
         );
-        set("cameraPosition", Value::Vec3(camera.as_vec3().to_array()));
-        set("cameraPositionFract", Value::Vec3(camera_fract.to_array()));
-        set(
-            "cameraPositionInt",
-            Value::Vec3(camera.floor().as_vec3().to_array()),
-        );
+        set("cameraPosition", Value::Vec3(camera.as_vec3()));
+        set("cameraPositionFract", Value::Vec3(camera_fract));
+        set("cameraPositionInt", Value::Vec3(camera.floor().as_vec3()));
         set(
             "previousCameraPosition",
-            Value::Vec3(previous.camera.as_vec3().to_array()),
+            Value::Vec3(previous.camera.as_vec3()),
         );
-        set(
-            "previousCameraPositionFract",
-            Value::Vec3(previous_fract.to_array()),
-        );
-        set("sunPosition", Value::Vec3(sun.to_array()));
-        set("moonPosition", Value::Vec3(moon.to_array()));
+        set("previousCameraPositionFract", Value::Vec3(previous_fract));
+        set("sunPosition", Value::Vec3(sun));
+        set("moonPosition", Value::Vec3(moon));
         set(
             "shadowLightPosition",
-            Value::Vec3(if day { sun } else { moon }.to_array()),
+            Value::Vec3(if day { sun } else { moon }),
         );
-        set("upPosition", Value::Vec3(up.to_array()));
+        set("upPosition", Value::Vec3(up));
         set("sunAngle", Value::Float((sky_angle + 0.25).fract()));
         set(
             "shadowAngle",
@@ -1164,8 +1208,8 @@ impl UniformValues {
         set("worldDay", Value::Int((data.day_time / 24000) as i32));
         set("moonPhase", Value::Int(i32::from(data.moon_phase)));
         set("frameCounter", Value::Int((frame_counter % 720_720) as i32));
-        set("frameTimeCounter", Value::Float(frame_time));
-        set("frameTime", Value::Float(1.0 / 60.0));
+        set("frameTimeCounter", Value::Float(time_counter));
+        set("frameTime", Value::Float(frame_time));
         set("rainStrength", Value::Float(data.rain));
         set("wetness", Value::Float(data.rain));
         set("viewWidth", Value::Float(w));
@@ -1173,62 +1217,104 @@ impl UniformValues {
         set("aspectRatio", Value::Float(w / h.max(1.0)));
         set("near", Value::Float(data.near));
         set("far", Value::Float(data.far));
-        set("fogColor", Value::Vec3(data.fog_color.to_array()));
-        set("skyColor", Value::Vec3(data.sky_color.to_array()));
+        set("fogColor", Value::Vec3(data.fog_color));
+        set("skyColor", Value::Vec3(data.sky_color));
         set("fogStart", Value::Float(data.fog[0]));
         set("fogEnd", Value::Float(data.fog[1]));
-        let eye_brightness = Value::IVec2(data.eye_light.map(|l| l as i32));
+        let eye_brightness = Value::IVec2(IVec2::from_array(data.eye_light.map(|l| l as i32)));
         set("eyeBrightness", eye_brightness);
         set("eyeBrightnessSmooth", eye_brightness);
         set("isEyeInWater", Value::Int(i32::from(data.eye_in_water)));
-        set("blindness", Value::Float(0.0));
+        set("blindness", Value::Float(data.world.blindness));
+        set("eyeAltitude", Value::Float(camera.y as f32));
+        set("biome", Value::Int(data.world.biome));
+        // TODO: Iris's biome categories, from the biome tags.
+        set("biome_category", Value::Int(0));
+        set("biome_precipitation", Value::Int(data.world.precipitation));
+        set("temperature", Value::Float(data.world.temperature));
+        set("rainfall", Value::Float(data.world.rainfall));
         set("darknessFactor", Value::Float(0.0));
         set("nightVision", Value::Float(0.0));
         set("screenBrightness", Value::Float(data.screen_brightness));
         set("heldBlockLightValue", Value::Int(0));
         set("heldBlockLightValue2", Value::Int(0));
         set("renderStage", Value::Int(0));
-        set("atlasSize", Value::IVec2([0, 0]));
+        set("atlasSize", Value::IVec2(IVec2::ZERO));
         set("gtexture", Value::Int(0));
         // TODO: the shadow pass's matrices, entity colour, held item ids,
-        // biome and player-mood uniforms read zero until they're fed.
+        // player-mood and end-flash uniforms read zero until they're fed.
         set("shadowModelView", Value::Mat4(Mat4::IDENTITY));
         set("shadowModelViewInverse", Value::Mat4(Mat4::IDENTITY));
         set("shadowProjection", Value::Mat4(Mat4::IDENTITY));
         set("shadowProjectionInverse", Value::Mat4(Mat4::IDENTITY));
-        Self(values)
+        Self {
+            values,
+            biome_names: Arc::clone(&data.world.biome_names),
+        }
     }
 
-    /// `compiled`'s uniforms block, std140, from the values it declares.
-    fn block(&self, compiled: &CompiledProgram) -> Vec<u8> {
+    /// A built-in uniform or constant, by name.
+    fn get(&self, name: &str) -> Option<Value> {
+        if let Some(value) = self.values.get(name) {
+            return Some(*value);
+        }
+        if let Some(biome) = name.strip_prefix("BIOME_") {
+            let id = self.biome_names.iter().position(|n| {
+                n.rsplit(':')
+                    .next()
+                    .is_some_and(|path| path.eq_ignore_ascii_case(biome))
+            })?;
+            return Some(Value::Int(id as i32));
+        }
+        CONSTANTS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| Value::Int(*v))
+    }
+
+    /// `compiled`'s uniforms block, std140, from the values it declares:
+    /// the pack's custom uniforms first, then the built-in ones.
+    fn block(&self, compiled: &CompiledProgram, custom: &CustomUniforms) -> Vec<u8> {
         let mut bytes = vec![0u8; compiled.interface.uniform_size as usize];
         for uniform in &compiled.interface.uniforms {
-            let Some(value) = self.0.get(uniform.name.as_str()) else {
+            let name = uniform.name.as_str();
+            let Some(value) = custom.get(name).or_else(|| self.get(name)) else {
+                continue;
+            };
+            let floats = |n: usize| {
+                value
+                    .components()
+                    .map(|(c, _)| bytemuck::cast_slice::<f32, u8>(&c.to_array()[..n]).to_vec())
+            };
+            let ints = |n: usize| {
+                value.components().map(|(c, _)| {
+                    let ints = c.to_array().map(|v| v as i32);
+                    bytemuck::cast_slice::<i32, u8>(&ints[..n]).to_vec()
+                })
+            };
+            let data = match (uniform.ty, value) {
+                (UniformType::Mat4, Value::Mat4(m)) => {
+                    Some(bytemuck::cast_slice(&m.to_cols_array()).to_vec())
+                }
+                (UniformType::Float, _) => Some(value.as_f32().to_le_bytes().to_vec()),
+                (UniformType::Int | UniformType::Bool, _) => {
+                    Some(value.as_i32().to_le_bytes().to_vec())
+                }
+                (UniformType::UInt, _) => Some((value.as_i32() as u32).to_le_bytes().to_vec()),
+                (UniformType::Vec2, _) => floats(2),
+                (UniformType::Vec3, _) => floats(3),
+                (UniformType::Vec4, _) => floats(4),
+                (UniformType::IVec2, _) => ints(2),
+                (UniformType::IVec3, _) => ints(3),
+                (UniformType::IVec4, _) => ints(4),
+                _ => None,
+            };
+            let Some(data) = data else {
                 continue;
             };
             let at = uniform.offset as usize;
-            let mut put = |data: &[u8]| {
-                let end = (at + data.len()).min(bytes.len());
-                bytes[at..end].copy_from_slice(&data[..end - at]);
-            };
-            match (uniform.ty, value) {
-                (UniformType::Float, Value::Float(v)) => put(&v.to_le_bytes()),
-                (UniformType::Float, Value::Int(v)) => put(&(*v as f32).to_le_bytes()),
-                (UniformType::Int | UniformType::Bool, Value::Int(v)) => put(&v.to_le_bytes()),
-                (UniformType::Int, Value::Float(v)) => put(&(*v as i32).to_le_bytes()),
-                (UniformType::Vec2, Value::IVec2(v)) => {
-                    put(bytemuck::cast_slice(&v.map(|c| c as f32)));
-                }
-                (UniformType::IVec2, Value::IVec2(v)) => put(bytemuck::cast_slice(v)),
-                (UniformType::Vec3, Value::Vec3(v)) => put(bytemuck::cast_slice(v)),
-                (UniformType::IVec3, Value::Vec3(v)) => {
-                    put(bytemuck::cast_slice(&v.map(|c| c as i32)));
-                }
-                (UniformType::Mat4, Value::Mat4(m)) => {
-                    put(bytemuck::cast_slice(&m.to_cols_array()))
-                }
-                _ => {}
-            }
+            let end = (at + data.len()).min(bytes.len());
+            bytes[at..end].copy_from_slice(&data[..end - at]);
         }
         bytes
     }

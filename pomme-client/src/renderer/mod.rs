@@ -287,6 +287,8 @@ pub struct Renderer {
     /// The pack last asked for, loaded or not, so a broken one isn't retried
     /// every frame.
     shader_pack_selected: Option<std::path::PathBuf>,
+    /// What the selected pack reads about the player's surroundings.
+    pack_world: pipelines::shaderpack::PackWorld,
     chunk_buffers: ChunkBufferStore,
     frames: rhi::backend::Frames,
     screenshot: screenshot::ScreenshotCapture,
@@ -547,6 +549,7 @@ impl Renderer {
             block_entity_pipeline,
             shader_pack: None,
             shader_pack_selected: None,
+            pack_world: Default::default(),
             chunk_border_pipeline,
             item_entity_pipeline,
             held_item_pipeline,
@@ -752,6 +755,11 @@ impl Renderer {
         Ok(())
     }
 
+    /// Sets what the shader pack reads about the player's surroundings.
+    pub fn set_pack_world(&mut self, world: pipelines::shaderpack::PackWorld) {
+        self.pack_world = world;
+    }
+
     /// Draws a world frame's geometry and full-screen passes through the
     /// selected shader pack, before the swapchain pass draws its `final`;
     /// `false` when no pack draws this frame.
@@ -843,6 +851,7 @@ impl Renderer {
                 eye_in_water: *eyes_in_water,
                 // TODO: the Brightness option.
                 screen_brightness: 0.5,
+                world: self.pack_world.clone(),
             },
             self.atlas.size,
         );

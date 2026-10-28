@@ -154,6 +154,14 @@ impl ActiveMobEffects {
             .any(|e| info(e.effect_id).is_some_and(|i| i.name == name))
     }
 
+    /// The remaining ticks of the effect named `name`, `-1` if infinite.
+    pub fn duration(&self, name: &str) -> Option<i32> {
+        self.0
+            .iter()
+            .find(|e| info(e.effect_id).is_some_and(|i| i.name == name))
+            .map(|e| e.duration)
+    }
+
     pub fn amplifier(&self, effect_id: u32) -> Option<i32> {
         self.0
             .iter()

@@ -2,10 +2,16 @@
 //! `dimension.properties`.
 
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 
-/// `key=value` pairs, with `#` comments and `\` line continuations.
-pub fn parse(text: &str) -> BTreeMap<String, String> {
-    let mut entries = BTreeMap::new();
+use regex::Regex;
+
+use super::expr::{Context, Expr, Value};
+
+/// `key=value` pairs in file order, with `#` comments and `\` line
+/// continuations.
+pub fn parse_ordered(text: &str) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
     let mut pending = String::new();
     for line in text.lines() {
         let line = line.trim();
@@ -22,10 +28,134 @@ pub fn parse(text: &str) -> BTreeMap<String, String> {
         }
         let entry = std::mem::take(&mut pending);
         if let Some((key, value)) = entry.split_once(['=', ':']) {
-            entries.insert(key.trim().to_owned(), value.trim().to_owned());
+            entries.push((key.trim().to_owned(), value.trim().to_owned()));
         }
     }
     entries
+}
+
+/// Iris runs a properties file through the C preprocessor with the pack's
+/// option macros first: `#if`/`#ifdef`/`#else` pick lines, `#define`s add
+/// macros, and macros expand in the lines kept. Other `#` lines are comments.
+pub fn preprocess(text: &str, macros: &BTreeMap<String, String>) -> String {
+    struct Branch {
+        /// Lines in it are kept.
+        active: bool,
+        /// One of its `#if`/`#elif` arms has been taken.
+        taken: bool,
+        /// The enclosing branch is active.
+        parent: bool,
+    }
+    let mut macros = macros.clone();
+    let mut branches: Vec<Branch> = Vec::new();
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let active = branches.last().is_none_or(|b| b.active);
+        if let Some(directive) = line.trim_start().strip_prefix('#') {
+            let directive = directive.trim_start();
+            let (word, arg) = directive
+                .split_once(char::is_whitespace)
+                .map_or((directive, ""), |(w, a)| (w, a.trim()));
+            let name = arg.split_whitespace().next().unwrap_or("");
+            let condition = match word {
+                "ifdef" => Some(macros.contains_key(name)),
+                "ifndef" => Some(!macros.contains_key(name)),
+                "if" | "elif" => Some(condition(arg, &macros)),
+                _ => None,
+            };
+            match (word, condition) {
+                ("if" | "ifdef" | "ifndef", Some(holds)) => {
+                    branches.push(Branch {
+                        active: active && holds,
+                        taken: holds,
+                        parent: active,
+                    });
+                    continue;
+                }
+                ("elif", Some(holds)) => {
+                    if let Some(b) = branches.last_mut() {
+                        b.active = b.parent && !b.taken && holds;
+                        b.taken |= holds;
+                    }
+                    continue;
+                }
+                ("else", _) => {
+                    if let Some(b) = branches.last_mut() {
+                        b.active = b.parent && !b.taken;
+                        b.taken = true;
+                    }
+                    continue;
+                }
+                ("endif", _) => {
+                    branches.pop();
+                    continue;
+                }
+                ("define", _) => {
+                    if active {
+                        let value = arg[name.len()..].trim();
+                        macros.insert(name.to_owned(), value.to_owned());
+                    }
+                    continue;
+                }
+                ("undef", _) => {
+                    if active {
+                        macros.remove(name);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if active {
+            out.push_str(&expand(line, &macros));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// `text` with each macro name replaced by its value, until none are left.
+fn expand(text: &str, macros: &BTreeMap<String, String>) -> String {
+    static IDENT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\b[A-Za-z_]\w*\b").expect("static regex"));
+    let mut text = text.to_owned();
+    // Deep enough for macros defined in terms of others, and stops cycles.
+    for _ in 0..8 {
+        let expanded = IDENT.replace_all(&text, |caps: &regex::Captures| {
+            macros
+                .get(&caps[0])
+                .cloned()
+                .unwrap_or_else(|| caps[0].to_owned())
+        });
+        if expanded == text {
+            break;
+        }
+        text = expanded.into_owned();
+    }
+    text
+}
+
+/// An `#if` condition: `defined` resolved, macros expanded, and any name
+/// left reading 0, as in C.
+fn condition(text: &str, macros: &BTreeMap<String, String>) -> bool {
+    static DEFINED: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"defined\s*(?:\(\s*(\w+)\s*\)|(\w+))").expect("static regex"));
+    let text = DEFINED.replace_all(text, |caps: &regex::Captures| {
+        let name = caps.get(1).or(caps.get(2)).map_or("", |m| m.as_str());
+        if macros.contains_key(name) { "1" } else { "0" }
+    });
+    let text = expand(&text, macros);
+    let Ok(expr) = Expr::parse(&text, &mut 0) else {
+        tracing::warn!("Shader pack properties: can't read `#if {text}`");
+        return false;
+    };
+    expr.eval(&mut Context {
+        lookup: &|_| Some(Value::Int(0)),
+        frame_time: 0.0,
+        smooth: &mut [],
+        missing: Vec::new(),
+    })
+    .as_bool()
 }
 
 /// The folder (`world0`, `world-1`, ...) a pack's `dimension.properties`
@@ -59,12 +189,53 @@ pub fn dimension_folder(dimensions: &BTreeMap<String, String>, dimension: &str) 
 mod tests {
     use super::*;
 
+    fn parse(text: &str) -> BTreeMap<String, String> {
+        parse_ordered(text).into_iter().collect()
+    }
+
     #[test]
     fn continuations_and_comments() {
         let props =
             parse("# comment\nprogram.world0/composite2.enabled = false\nscreen = A B \\\n  C\n");
         assert_eq!(props["program.world0/composite2.enabled"], "false");
         assert_eq!(props["screen"], "A B  C");
+    }
+
+    #[test]
+    fn preprocessing() {
+        let macros = BTreeMap::from([
+            ("SHADOW_QUALITY".to_owned(), "-1".to_owned()),
+            ("BLOOM".to_owned(), String::new()),
+            ("RES".to_owned(), "SIZE".to_owned()),
+            ("SIZE".to_owned(), "0.5".to_owned()),
+        ]);
+        let out = preprocess(
+            "# a comment
+             #if SHADOW_QUALITY == -1
+  a = 1
+#elif defined BLOOM
+  a = 2
+#else
+  a = 3
+#endif
+             #ifdef BLOOM
+  #ifndef FOG
+    b = RES RES
+  #endif
+#endif
+             #if defined(FOG) || UNKNOWN > 0
+  c = 1
+#endif
+             #define LOCAL 4
+d = LOCAL
+",
+            &macros,
+        );
+        let props = parse(&out);
+        assert_eq!(props["a"], "1");
+        assert_eq!(props["b"], "0.5 0.5");
+        assert!(!props.contains_key("c"));
+        assert_eq!(props["d"], "4");
     }
 
     #[test]
