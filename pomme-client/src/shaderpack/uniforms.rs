@@ -4,7 +4,7 @@
 
 use glam::{Vec2, Vec4};
 
-use super::expr::{Context, Expr, ExprError, Value};
+use super::expr::{Context, Expr, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Type {
@@ -60,16 +60,10 @@ pub struct CustomUniforms {
     warned: bool,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("{key}: {error}")]
-pub struct UniformError {
-    key: String,
-    error: ExprError,
-}
-
 impl CustomUniforms {
-    /// The custom uniforms and variables among `properties`, in file order.
-    pub fn parse(properties: &[(String, String)]) -> Result<Self, UniformError> {
+    /// The custom uniforms and variables among `properties`, in file order;
+    /// a line that doesn't parse is skipped.
+    pub fn parse(properties: &[(String, String)]) -> Self {
         let mut entries = Vec::new();
         let mut smooth_slots = 0;
         for (key, text) in properties {
@@ -82,10 +76,13 @@ impl CustomUniforms {
             let (Some(ty), Some(name)) = (parts.next().and_then(Type::of), parts.next()) else {
                 continue;
             };
-            let expr = Expr::parse(text, &mut smooth_slots).map_err(|error| UniformError {
-                key: key.clone(),
-                error,
-            })?;
+            let expr = match Expr::parse(text, &mut smooth_slots) {
+                Ok(expr) => expr,
+                Err(error) => {
+                    tracing::warn!("Shader pack: skipped {key}: {error}");
+                    continue;
+                }
+            };
             entries.push(Entry {
                 name: name.to_owned(),
                 ty,
@@ -93,12 +90,12 @@ impl CustomUniforms {
                 expr,
             });
         }
-        Ok(Self {
+        Self {
             values: vec![Value::Float(0.0); entries.len()],
             entries,
             smooth: vec![None; smooth_slots],
             warned: false,
-        })
+        }
     }
 
     /// Evaluates every line in order: each reads the lines before it, then
@@ -165,7 +162,7 @@ mod tests {
              uniform.bool.even = framemod2 == 0\n\
              screen = A B\n",
         );
-        let mut uniforms = CustomUniforms::parse(&properties).unwrap();
+        let mut uniforms = CustomUniforms::parse(&properties);
         let builtin = |name: &str| match name {
             "frameCounter" => Some(Value::Int(5)),
             "cameraPosition" => Some(Value::Vec3(Vec3::new(0.5, 0.0, 0.0))),
@@ -184,9 +181,17 @@ mod tests {
     }
 
     #[test]
-    fn bad_lines_name_their_key() {
-        let properties = parse_ordered("uniform.float.broken = 1 +\n");
-        let error = CustomUniforms::parse(&properties).err().unwrap();
-        assert!(error.to_string().starts_with("uniform.float.broken"));
+    fn bad_lines_are_skipped() {
+        let properties = parse_ordered(
+            "uniform.float.broken = 1 +\n\
+             uniform.bool.same = equals(1, 1)\n\
+             uniform.float.noise = random(2, 3)\n",
+        );
+        let mut uniforms = CustomUniforms::parse(&properties);
+        uniforms.evaluate(&|_| None, 0.0);
+        assert_eq!(uniforms.get("broken"), None);
+        assert_eq!(uniforms.get("same"), Some(Value::Bool(true)));
+        let noise = uniforms.get("noise").unwrap().as_f32();
+        assert!((2.0..3.0).contains(&noise));
     }
 }

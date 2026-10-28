@@ -2192,8 +2192,9 @@ fn pack_world(game: &mut GameState) -> PackWorld {
             .map(ToString::to_string)
             .collect();
     }
-    let eye = game.player.eye_pos();
-    let [x, y, z] = [eye.x, eye.y, eye.z].map(|c| c.floor() as i32);
+    // Iris reads them at `blockPosition()`, the feet.
+    let feet = game.player.position;
+    let [x, y, z] = [feet.x, feet.y, feet.z].map(|c| c.floor() as i32);
     let biome = game.chunk_store.biome_id(x, y, z);
     let climate = game.biome_climate.get(&biome).copied().unwrap_or_default();
     // Iris: a second of fade-out at the end, full while infinite.

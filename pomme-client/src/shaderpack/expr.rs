@@ -230,7 +230,7 @@ fn call(name: &str, args: &[Expr], slot: usize, cx: &mut Context) -> Value {
         "floor" => map(values[0], f32::floor),
         "ceil" => map(values[0], f32::ceil),
         "round" => map(values[0], f32::round),
-        "frac" | "fract" => map(values[0], f32::fract),
+        "frac" | "fract" => map(values[0], |x| x - x.floor()),
         "exp" => map(values[0], f32::exp),
         "exp2" => map(values[0], f32::exp2),
         "log" => map(values[0], f32::ln),
@@ -265,8 +265,10 @@ fn call(name: &str, args: &[Expr], slot: usize, cx: &mut Context) -> Value {
             Value::Float(t * t * (3.0 - 2.0 * t))
         }
         "between" => Value::Bool(f(0) >= f(1) && f(0) <= f(2)),
-        "equals" => Value::Bool((f(0) - f(1)).abs() <= f(2)),
+        // Without an epsilon, an exact match.
+        "equals" => Value::Bool((f(0) - f(1)).abs() <= values.get(2).map_or(0.0, |v| v.as_f32())),
         "in" => Value::Bool(values[1..].iter().any(|v| v.as_f32() == f(0))),
+        "random" if values.len() == 2 => Value::Float(f(0) + fastrand::f32() * (f(1) - f(0))),
         "random" => Value::Float(fastrand::f32()),
         "vec2" | "vec3" | "vec4" => {
             let len = usize::from(name.as_bytes()[3] - b'0');
@@ -285,8 +287,8 @@ fn call(name: &str, args: &[Expr], slot: usize, cx: &mut Context) -> Value {
 }
 
 /// `smooth([id,] value, [fadeUp, [fadeDown]])`: eases toward `value`,
-/// covering 99% of a change in the fade time, in seconds. Iris ignores the
-/// id and keeps a state per call.
+/// halving the gap every tenth of the fade time, in seconds, as Iris's
+/// `SmoothFloat` does. Iris ignores the id and keeps a state per call.
 fn smooth(values: &[Value], slot: usize, cx: &mut Context) -> f32 {
     let args: Vec<f32> = values.iter().map(|v| v.as_f32()).collect();
     let (target, up, down) = match args[..] {
@@ -304,7 +306,7 @@ fn smooth(values: &[Value], slot: usize, cx: &mut Context) -> f32 {
     let next = if fade <= 0.0 {
         target
     } else {
-        target + (current - target) * (-cx.frame_time * 100f32.ln() / fade).exp()
+        target + (current - target) * (-cx.frame_time * 2f32.ln() / (0.1 * fade)).exp()
     };
     *state = Some(next);
     next
@@ -518,10 +520,11 @@ fn check_arity(name: &str, count: usize) -> Result<(), ExprError> {
         | "sign" => count == 1,
         "atan" => count == 1 || count == 2,
         "atan2" | "pow" | "fmod" => count == 2,
-        "clamp" | "smoothstep" | "between" | "equals" => count == 3,
+        "clamp" | "smoothstep" | "between" => count == 3,
+        "equals" => count == 2 || count == 3,
         "min" | "max" | "in" => count >= 2,
         "if" => count >= 3 && count % 2 == 1,
-        "random" => count == 0,
+        "random" => count == 0 || count == 2,
         "smooth" => (1..=4).contains(&count),
         "vec2" | "vec3" | "vec4" => count >= 1,
         _ => return Err(ExprError(format!("unknown function `{name}`"))),
@@ -570,6 +573,8 @@ mod tests {
         assert_eq!(eval("if(1 > 2, 10, 0 > 1, 20, 30)"), Value::Int(30));
         assert_eq!(eval("if(true, 1.5, 2)"), Value::Float(1.5));
         assert_eq!(eval("in(3, 1, 2, 3)"), Value::Bool(true));
+        assert_eq!(eval("frac(-0.25)"), Value::Float(0.75));
+        assert_eq!(eval("equals(0.5, 0.5)"), Value::Bool(true));
         assert_eq!(eval("between(5, 1, 4)"), Value::Bool(false));
         assert_eq!(eval("equals(1.0, 1.05, 0.1)"), Value::Bool(true));
         assert_eq!(eval("clamp(5.0, 0.0, 1.0)"), Value::Float(1.0));
@@ -613,10 +618,10 @@ mod tests {
             })
             .as_f32()
         };
-        // The first frame takes the value, then 99% of a change takes the
-        // fade time.
+        // The first frame takes the value, then the gap halves every tenth
+        // of the fade time.
         assert_eq!(run(0.0, 0.0), 0.0);
-        assert!((run(1.0, 1.0) - 0.99).abs() < 1e-4);
+        assert!((run(1.0, 0.1) - 0.5).abs() < 1e-4);
     }
 
     #[test]
