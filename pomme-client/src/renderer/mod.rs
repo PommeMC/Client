@@ -772,6 +772,7 @@ impl Renderer {
         use pipelines::shaderpack::{PackFrame, PackGeometry, PackRenderer};
         let RenderMode::World {
             sky,
+            moving_blocks,
             entities,
             block_entities,
             render_distance,
@@ -849,21 +850,24 @@ impl Renderer {
                     f32::from(hand_light.sky()) * 16.0,
                 ],
                 eye_in_water: *eyes_in_water,
-                // TODO: the Brightness option.
-                screen_brightness: 0.5,
+                screen_brightness: self.lightmap.brightness(),
+                atlas_size: self.atlas.size,
                 world: self.pack_world.clone(),
             },
-            self.atlas.size,
         );
-        pack.clear(device, encoder);
+        pack.clear(encoder, sky.fog_color);
+        self.moving_block_buffers
+            .upload(device, frame, moving_blocks);
 
         let frustum = self.camera.frustum_planes();
         let cull_distance = entity_cull_distance(*render_distance);
         if let Some((pass, _)) = pack.begin_geometry(device, encoder, frame, PackGeometry::Terrain)
         {
             pass.set_bind_group(3, pack.atlas_group);
-            self.chunk_buffers.draw_indirect(&pass, frame, false);
-            self.chunk_buffers.draw_indirect(&pass, frame, true);
+            for cutout in [false, true] {
+                self.chunk_buffers.draw_indirect(&pass, frame, cutout);
+                self.moving_block_buffers.draw(&pass, frame, cutout);
+            }
             pack.end_geometry(encoder, pass, PackGeometry::Terrain);
         }
         if let Some((mut pass, binding)) =
@@ -891,6 +895,7 @@ impl Renderer {
             self.block_entity_pipeline.pack_binding = None;
             pack.end_geometry(encoder, pass, PackGeometry::BlockEntities);
         }
+        pack.copy_opaque_depth(encoder);
         pack.run_full_screen(device, encoder, frame, true);
         if let Some((pass, _)) = pack.begin_geometry(device, encoder, frame, PackGeometry::Water) {
             pass.set_bind_group(3, pack.atlas_group);
@@ -899,7 +904,8 @@ impl Renderer {
         }
         pack.run_full_screen(device, encoder, frame, false);
         // TODO: particles, weather, clouds, dropped items, the block-break
-        // overlay and entity shadows through their `gbuffers_*` programs.
+        // overlay and entity shadows through their `gbuffers_*` programs; the
+        // block outline and chunk borders over the pack's depth.
         if let Some((_, slot)) = &mut self.shader_pack {
             *slot = Some(pack);
         }

@@ -97,6 +97,11 @@ impl Lightmap {
 
     /// Vanilla `LightmapRenderStateExtractor.extract` after a tick: the next
     /// frame redraws with `info`.
+    /// The Brightness option, as the last tick passed it.
+    pub fn brightness(&self) -> f32 {
+        self.info.ambient_color[3]
+    }
+
     pub fn tick(&mut self, info: LightmapInfo) {
         self.info = info;
         self.needs_update = true;

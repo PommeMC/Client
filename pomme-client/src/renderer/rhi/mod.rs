@@ -157,8 +157,11 @@ pub enum TextureUse {
     Present,
     /// A depth texture as a pass's depth target.
     DepthAttachment,
-    /// A depth texture sampled by a fragment shader.
+    /// A depth texture sampled by a shader.
     DepthRead,
+    /// A depth texture as a copy's source or destination, or being cleared.
+    DepthCopySrc,
+    DepthCopyDst,
 }
 
 /// `range` of `texture` moving from one use to the next.
@@ -251,6 +254,7 @@ pub enum TextureFormat {
     Rg16Float,
     Rgba16Float,
     R32Float,
+    Rg32Float,
     Rgba32Float,
     Rg11b10Float,
     Depth32Float,
@@ -268,7 +272,7 @@ impl TextureFormat {
             | Self::R32Float
             | Self::Rg11b10Float
             | Self::Depth32Float => 4,
-            Self::Rgba16Unorm | Self::Rgba16Float => 8,
+            Self::Rgba16Unorm | Self::Rgba16Float | Self::Rg32Float => 8,
             Self::Rgba32Float => 16,
         }
     }

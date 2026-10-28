@@ -77,6 +77,8 @@ pub struct PackFrame {
     pub eye_light: [f32; 2],
     pub eye_in_water: bool,
     pub screen_brightness: f32,
+    /// The block atlas's width and height, in texels.
+    pub atlas_size: u32,
     pub world: PackWorld,
 }
 
@@ -128,7 +130,16 @@ struct Buffer {
     format: rhi::TextureFormat,
     /// Which of `textures` holds the latest contents.
     current: usize,
-    clear: Option<[f32; 4]>,
+    clear: Clear,
+}
+
+/// What a buffer clears to each frame.
+#[derive(Clone, Copy)]
+enum Clear {
+    Keep,
+    /// Iris's default for `colortex0`.
+    FogColor,
+    Color([f32; 4]),
 }
 
 pub struct PackRenderer {
@@ -136,7 +147,10 @@ pub struct PackRenderer {
     extent: rhi::Extent,
     swapchain_targets: rhi::backend::PipelineTargets,
     buffers: BTreeMap<u8, Buffer>,
+    /// `depthtex0`, everything drawn; `depthtex1`, copied before
+    /// translucents.
     depth: rhi::backend::Texture,
+    depth_opaque: rhi::backend::Texture,
     noise: rhi::backend::Texture,
     /// 1×1 stand-ins: white color, and depth at the far plane for shadow maps.
     white: rhi::backend::Texture,
@@ -162,6 +176,8 @@ pub struct PackRenderer {
     started: std::time::Instant,
     last_prepare: Option<std::time::Instant>,
     custom: CustomUniforms,
+    /// `eyeBrightnessSmooth`, eased toward `eyeBrightness`.
+    eye_brightness_smooth: Option<[f32; 2]>,
 }
 
 /// Which program [`PackRenderer::bind_samplers`] works on.
@@ -176,16 +192,22 @@ enum ProgramRef {
 /// Iris's `colortexNFormat` names onto the RHI's formats.
 fn buffer_format(name: Option<&str>) -> rhi::TextureFormat {
     use rhi::TextureFormat as F;
+    // Signed-normalised formats aren't always renderable in Vulkan; a float
+    // format of the same channels keeps their sign.
+    // TODO: integer formats, which also need integer samplers.
     match name.unwrap_or("RGBA8") {
-        "R8" | "R8_SNORM" => F::R8Unorm,
-        "RG8" | "RG8_SNORM" => F::Rg8Unorm,
-        "RGBA16" | "RGB16" | "RGBA12" | "RGB12" => F::Rgba16Unorm,
+        "R8" => F::R8Unorm,
+        "RG8" => F::Rg8Unorm,
+        "RGBA16" | "RGB16" | "RGBA12" | "RGB12" | "RG16" | "R16" => F::Rgba16Unorm,
         "RGB10_A2" => F::Rgb10a2Unorm,
-        "R16F" => F::R16Float,
-        "RG16F" | "RG16" | "R16" => F::Rg16Float,
-        "RGBA16F" | "RGB16F" => F::Rgba16Float,
+        "R16F" | "R8_SNORM" | "R16_SNORM" => F::R16Float,
+        "RG16F" | "RG8_SNORM" | "RG16_SNORM" => F::Rg16Float,
+        "RGBA16F" | "RGB16F" | "RGBA8_SNORM" | "RGB8_SNORM" | "RGBA16_SNORM" | "RGB16_SNORM" => {
+            F::Rgba16Float
+        }
         "R32F" => F::R32Float,
-        "RGBA32F" | "RGB32F" | "RG32F" => F::Rgba32Float,
+        "RG32F" => F::Rg32Float,
+        "RGBA32F" | "RGB32F" => F::Rgba32Float,
         "R11F_G11F_B10F" => F::Rg11b10Float,
         _ => F::Rgba8Unorm,
     }
@@ -229,10 +251,8 @@ impl PackRenderer {
         let composite = screen("composite", Geometry::FullScreen)?;
         let final_pass = pack
             .program(dimension, "final")
-            .and_then(|t| {
-                t.map(|t| shaderpack::compile(&t, Geometry::Final))
-                    .transpose()
-            })
+            .map(|t| t.unwrap_or_else(shaderpack::copy_program))
+            .and_then(|t| shaderpack::compile(&t, Geometry::Final))
             .map_err(|e| e.to_string())?;
 
         // Targets: every buffer a program writes or reads, set up by the
@@ -244,7 +264,7 @@ impl PackRenderer {
             .map(|(_, c)| c)
             .chain(&deferred)
             .chain(&composite)
-            .chain(&final_pass)
+            .chain([&final_pass])
         {
             settings.read(&c.text);
             used.extend(draw_buffers(c));
@@ -305,6 +325,7 @@ impl PackRenderer {
             swapchain_targets,
             buffers: BTreeMap::new(),
             depth: create_depth(device, extent),
+            depth_opaque: create_depth(device, extent),
             noise: create_noise(device),
             white: create_white(device),
             far_depth: create_far_depth(device),
@@ -328,17 +349,17 @@ impl PackRenderer {
             started: std::time::Instant::now(),
             last_prepare: None,
             custom: pack.custom_uniforms.clone(),
+            eye_brightness_smooth: None,
         };
 
         for index in used.into_iter().filter(|&i| (i as usize) < BUFFERS) {
             let format = buffer_format(settings.formats.get(&index).map(String::as_str));
-            let clear = (!settings.no_clear.contains(&index)).then(|| {
-                settings
-                    .clear_colors
-                    .get(&index)
-                    .copied()
-                    .unwrap_or([if index == 1 { 1.0 } else { 0.0 }; 4])
-            });
+            let clear = match settings.clear_colors.get(&index) {
+                _ if settings.no_clear.contains(&index) => Clear::Keep,
+                Some(color) => Clear::Color(*color),
+                None if index == 0 => Clear::FogColor,
+                None => Clear::Color([if index == 1 { 1.0 } else { 0.0 }; 4]),
+            };
             this.buffers.insert(
                 index,
                 Buffer {
@@ -350,22 +371,38 @@ impl PackRenderer {
             );
         }
 
-        for (geometry, compiled) in gbuffers {
-            let program = this.program(device, compiled, Some(geometry))?;
-            this.geometry.insert(geometry, program);
+        match this.build_programs(device, gbuffers, deferred, composite, final_pass) {
+            Ok(()) => Ok(this),
+            Err(e) => {
+                this.destroy(device);
+                Err(e)
+            }
         }
-        this.deferred = deferred
-            .into_iter()
-            .map(|c| this.program(device, c, None))
-            .collect::<Result<_, _>>()?;
-        this.composite = composite
-            .into_iter()
-            .map(|c| this.program(device, c, None))
-            .collect::<Result<_, _>>()?;
-        this.final_pass = final_pass
-            .map(|c| this.build(device, c, this.swapchain_targets, None, vec![0]))
-            .transpose()?;
-        Ok(this)
+    }
+
+    fn build_programs(
+        &mut self,
+        device: &rhi::backend::Device,
+        gbuffers: Vec<(PackGeometry, CompiledProgram)>,
+        deferred: Vec<CompiledProgram>,
+        composite: Vec<CompiledProgram>,
+        final_pass: CompiledProgram,
+    ) -> Result<(), String> {
+        for (geometry, compiled) in gbuffers {
+            let program = self.program(device, compiled, Some(geometry))?;
+            self.geometry.insert(geometry, program);
+        }
+        for compiled in deferred {
+            let program = self.program(device, compiled, None)?;
+            self.deferred.push(program);
+        }
+        for compiled in composite {
+            let program = self.program(device, compiled, None)?;
+            self.composite.push(program);
+        }
+        self.final_pass =
+            Some(self.build(device, final_pass, self.swapchain_targets, None, vec![0])?);
+        Ok(())
     }
 
     pub fn dimension(&self) -> &str {
@@ -475,19 +512,23 @@ impl PackRenderer {
                 _ => rhi::CullMode::None,
             },
             front_face: rhi::FrontFace::Cw,
-            depth: geometry.map(|g| rhi::DepthState {
+            depth: geometry.map(|_| rhi::DepthState {
                 compare: rhi::CompareFunction::LessEqual,
-                ..if g == PackGeometry::Water {
-                    rhi::DepthState::READ_ONLY
-                } else {
-                    rhi::DepthState::WRITE
-                }
+                ..rhi::DepthState::WRITE
             }),
             blend: (geometry == Some(PackGeometry::Water)).then_some(rhi::BlendState::TRANSLUCENT),
             ..rhi::RenderPipelineDesc::new(&compiled.path, vertex, fragment, vertex_buffers)
         };
-        let pipeline = rhi::backend::try_create_render_pipeline(device, targets, layout, &desc)
-            .map_err(|e| format!("{}: {e}", compiled.path))?;
+        let pipeline =
+            match rhi::backend::try_create_render_pipeline(device, targets, layout, &desc) {
+                Ok(pipeline) => pipeline,
+                Err(e) => {
+                    layout.destroy(device);
+                    uniform_layout.destroy(device);
+                    sampler_layout.destroy(device);
+                    return Err(format!("{}: {e}", compiled.path));
+                }
+            };
         let uniform_size = u64::from(compiled.interface.uniform_size);
         let uniform_buffers = util::create_per_frame_host_buffers(
             device,
@@ -548,24 +589,28 @@ impl PackRenderer {
             let name = s.name.as_str();
             let colortex = buffer_index(name)
                 .or((full_screen && matches!(name, "tex" | "texture")).then_some(0));
-            let (texture, sampler) =
-                if let Some(buffer) = colortex.and_then(|i| self.buffers.get(&i)) {
-                    (buffer.textures[buffer.current].handle(), self.nearest)
-                } else {
-                    match name {
-                        "depthtex0" | "depthtex1" | "depthtex2" | "gdepthtex" => {
-                            (self.depth.handle(), self.nearest)
-                        }
-                        "lightmap" => self.lightmap,
-                        "noisetex" => (self.noise.handle(), self.linear),
-                        _ if s.kind == SamplerKind::Tex2DShadow => {
-                            (self.far_depth.handle(), self.shadow)
-                        }
-                        // TODO: shadow maps, normals/specular atlases and custom
-                        // textures; they read white until then.
-                        _ => (self.white.handle(), self.nearest),
+            let (texture, sampler) = if let Some(buffer) =
+                colortex.and_then(|i| self.buffers.get(&i))
+            {
+                (buffer.textures[buffer.current].handle(), self.linear)
+            } else {
+                match name {
+                    // Geometry passes draw into `depthtex0`, so they read
+                    // the copy.
+                    "depthtex0" | "gdepthtex" if full_screen => (self.depth.handle(), self.nearest),
+                    "depthtex0" | "gdepthtex" | "depthtex1" | "depthtex2" => {
+                        (self.depth_opaque.handle(), self.nearest)
                     }
-                };
+                    "lightmap" => self.lightmap,
+                    "noisetex" => (self.noise.handle(), self.linear),
+                    _ if s.kind == SamplerKind::Tex2DShadow => {
+                        (self.far_depth.handle(), self.shadow)
+                    }
+                    // TODO: shadow maps, normals/specular atlases and custom
+                    // textures; they read white until then.
+                    _ => (self.white.handle(), self.nearest),
+                }
+            };
             let sampler = if s.kind == SamplerKind::Tex2DShadow {
                 self.shadow
             } else {
@@ -578,7 +623,7 @@ impl PackRenderer {
     }
 
     /// Fills the frame's uniforms for every program.
-    pub fn prepare(&mut self, frame: usize, data: &PackFrame, atlas_size: u32) {
+    pub fn prepare(&mut self, frame: usize, data: &PackFrame) {
         let current = Previous {
             view: data.view,
             projection: data.projection,
@@ -589,7 +634,7 @@ impl PackRenderer {
             projection: data.projection.to_cols_array(),
             eye: data.eye.extend(0.0).to_array(),
             anchor: data.anchor.extend(0).to_array(),
-            atlas_size: [atlas_size as f32, atlas_size as f32, 0.0, 0.0],
+            atlas_size: [data.atlas_size as f32, data.atlas_size as f32, 0.0, 0.0],
             fog: [data.fog[0], data.fog[1], 0.0, 0.0],
             fog_color: data.fog_color.extend(1.0).to_array(),
         };
@@ -600,13 +645,25 @@ impl PackRenderer {
             .last_prepare
             .map_or(1.0 / 60.0, |last| (now - last).as_secs_f32());
         self.last_prepare = Some(now);
+        // Iris's default `eyeBrightnessHalfLife`: a second each way.
+        let eased = 0.5f32.powf(frame_time);
+        let eye_brightness_smooth = match self.eye_brightness_smooth {
+            Some(smooth) => {
+                std::array::from_fn(|i| data.eye_light[i] + (smooth[i] - data.eye_light[i]) * eased)
+            }
+            None => data.eye_light,
+        };
+        self.eye_brightness_smooth = Some(eye_brightness_smooth);
         let values = UniformValues::new(
             data,
             self.previous.unwrap_or(current),
             self.extent,
-            self.frame_counter,
-            self.started.elapsed().as_secs_f32() % 3600.0,
-            frame_time,
+            Timing {
+                frame_counter: self.frame_counter,
+                time_counter: self.started.elapsed().as_secs_f32() % 3600.0,
+                frame_time,
+            },
+            eye_brightness_smooth,
         );
         self.custom.evaluate(&|name| values.get(name), frame_time);
         for program in self
@@ -656,65 +713,59 @@ impl PackRenderer {
         }
     }
 
-    /// Clears the buffers that clear each frame, and the depth target.
-    pub fn clear(&mut self, device: &rhi::backend::Device, encoder: &rhi::backend::CommandEncoder) {
-        let cleared: Vec<(rhi::backend::TextureHandle, rhi::TextureFormat, [f32; 4])> = self
+    /// Clears both textures of the buffers that clear each frame, and the
+    /// depth targets.
+    pub fn clear(&mut self, encoder: &rhi::backend::CommandEncoder, fog_color: Vec3) {
+        let cleared: Vec<(rhi::backend::TextureHandle, [f32; 4])> = self
             .buffers
             .values()
-            .filter_map(|b| Some((b.textures[b.current].handle(), b.format, b.clear?)))
+            .flat_map(|b| {
+                let color = match b.clear {
+                    Clear::Keep => None,
+                    Clear::FogColor => Some(fog_color.extend(1.0).to_array()),
+                    Clear::Color(color) => Some(color),
+                };
+                b.textures
+                    .iter()
+                    .filter_map(move |t| Some((t.handle(), color?)))
+            })
             .collect();
+        let depths = [self.depth.handle(), self.depth_opaque.handle()];
         let transitions: Vec<_> = cleared
             .iter()
-            .map(|(t, ..)| {
-                TextureTransition::color(*t, TextureUse::ShaderRead, TextureUse::ColorAttachment)
-            })
-            .chain(std::iter::once(TextureTransition::color(
-                self.depth.handle(),
-                TextureUse::DepthRead,
-                TextureUse::DepthAttachment,
-            )))
+            .map(|(t, _)| TextureTransition::color(*t, TextureUse::ShaderRead, TextureUse::CopyDst))
+            .chain(depths.map(|d| {
+                TextureTransition::color(d, TextureUse::DepthRead, TextureUse::DepthCopyDst)
+            }))
             .collect();
         encoder.transition_textures(&transitions);
-        // One pass per eight buffers; the depth target clears with the first.
-        let mut first = true;
-        for chunk in cleared.chunks(rhi::MAX_COLOR_TARGETS) {
-            let attachment = |(texture, format, color): &(
-                rhi::backend::TextureHandle,
-                rhi::TextureFormat,
-                [f32; 4],
-            )| {
-                rhi::backend::ColorAttachment {
-                    texture: *texture,
-                    format: rhi::backend::texture_format(*format),
-                    load: rhi::LoadOp::Clear(*color),
-                    store: rhi::StoreOp::Store,
-                }
-            };
-            let pass = encoder.begin_render_pass(
-                device,
-                &rhi::backend::RenderPassDesc {
-                    color: attachment(&chunk[0]),
-                    extra_colors: chunk[1..].iter().map(attachment).collect(),
-                    depth: first.then(|| rhi::backend::DepthAttachment {
-                        texture: self.depth.handle(),
-                        load: rhi::LoadOp::Clear(1.0),
-                        store: rhi::StoreOp::Store,
-                    }),
-                    extent: self.extent,
-                },
-            );
-            pass.end();
-            first = false;
+        for (texture, color) in &cleared {
+            encoder.clear_texture(*texture, rhi::TextureRange::BASE, *color);
         }
-        let back: Vec<_> = transitions
-            .iter()
-            .map(|t| TextureTransition {
-                from: t.to,
-                to: t.from,
-                ..*t
-            })
-            .collect();
-        encoder.transition_textures(&back);
+        for depth in depths {
+            encoder.clear_depth(depth, 1.0);
+        }
+        encoder.transition_textures(&reversed(&transitions));
+    }
+
+    /// Copies `depthtex0` into `depthtex1`, as Iris does before the
+    /// translucent geometry.
+    pub fn copy_opaque_depth(&self, encoder: &rhi::backend::CommandEncoder) {
+        let transitions = [
+            TextureTransition::color(
+                self.depth.handle(),
+                TextureUse::DepthRead,
+                TextureUse::DepthCopySrc,
+            ),
+            TextureTransition::color(
+                self.depth_opaque.handle(),
+                TextureUse::DepthRead,
+                TextureUse::DepthCopyDst,
+            ),
+        ];
+        encoder.transition_textures(&transitions);
+        encoder.copy_depth(self.depth.handle(), self.depth_opaque.handle(), self.extent);
+        encoder.transition_textures(&reversed(&transitions));
     }
 
     /// The color attachments for `buffers`: their current texture, or the
@@ -921,7 +972,9 @@ impl PackRenderer {
             return;
         }
         self.extent = extent;
-        std::mem::replace(&mut self.depth, create_depth(device, extent)).destroy(device);
+        for depth in [&mut self.depth, &mut self.depth_opaque] {
+            std::mem::replace(depth, create_depth(device, extent)).destroy(device);
+        }
         for buffer in self.buffers.values_mut() {
             for texture in &mut buffer.textures {
                 std::mem::replace(texture, create_color(device, extent, buffer.format))
@@ -955,6 +1008,7 @@ impl PackRenderer {
         }
         for texture in [
             &mut self.depth,
+            &mut self.depth_opaque,
             &mut self.noise,
             &mut self.white,
             &mut self.far_depth,
@@ -997,7 +1051,10 @@ fn create_target(
             extent.width,
             extent.height,
             format,
-            rhi::TextureUsages::RENDER_ATTACHMENT | rhi::TextureUsages::TEXTURE_BINDING,
+            rhi::TextureUsages::RENDER_ATTACHMENT
+                | rhi::TextureUsages::TEXTURE_BINDING
+                | rhi::TextureUsages::COPY_SRC
+                | rhi::TextureUsages::COPY_DST,
         ),
     );
     device.submit(|encoder| {
@@ -1008,6 +1065,20 @@ fn create_target(
         )]);
     });
     texture
+}
+
+/// `transitions` undone, in the same order.
+fn reversed(
+    transitions: &[rhi::backend::TextureTransition],
+) -> Vec<rhi::backend::TextureTransition> {
+    transitions
+        .iter()
+        .map(|t| TextureTransition {
+            from: t.to,
+            to: t.from,
+            ..*t
+        })
+        .collect()
 }
 
 fn create_color(
@@ -1046,43 +1117,16 @@ fn create_far_depth(device: &rhi::backend::Device) -> rhi::backend::Texture {
         "pack_far_depth",
         one,
         rhi::TextureFormat::Depth32Float,
-        TextureUse::DepthAttachment,
-    );
-    // The RHI's passes always have a color target: a throwaway one.
-    let scratch = create_target(
-        device,
-        "pack_scratch",
-        one,
-        rhi::TextureFormat::Rgba8Unorm,
-        TextureUse::ColorAttachment,
+        TextureUse::DepthCopyDst,
     );
     device.submit(|encoder| {
-        let pass = encoder.begin_render_pass(
-            device,
-            &rhi::backend::RenderPassDesc {
-                color: rhi::backend::ColorAttachment {
-                    texture: scratch.handle(),
-                    format: rhi::backend::texture_format(rhi::TextureFormat::Rgba8Unorm),
-                    load: rhi::LoadOp::Clear([0.0; 4]),
-                    store: rhi::StoreOp::Discard,
-                },
-                extra_colors: Vec::new(),
-                depth: Some(rhi::backend::DepthAttachment {
-                    texture: texture.handle(),
-                    load: rhi::LoadOp::Clear(1.0),
-                    store: rhi::StoreOp::Store,
-                }),
-                extent: one,
-            },
-        );
-        pass.end();
+        encoder.clear_depth(texture.handle(), 1.0);
         encoder.transition_textures(&[TextureTransition::color(
             texture.handle(),
-            TextureUse::DepthAttachment,
+            TextureUse::DepthCopyDst,
             TextureUse::DepthRead,
         )]);
     });
-    scratch.destroy(device);
     texture
 }
 
@@ -1097,6 +1141,15 @@ fn create_noise(device: &rhi::backend::Device) -> rhi::backend::Texture {
         .map(|i| if i % 4 == 3 { 255 } else { rng.u8(..) })
         .collect();
     util::create_sampled_texture(device, "pack_noise", &pixels, 256, 256)
+}
+
+/// The frame counters the time uniforms read.
+struct Timing {
+    frame_counter: u32,
+    /// `frameTimeCounter`: seconds since the pack loaded, wrapping hourly.
+    time_counter: f32,
+    /// Seconds since the last frame.
+    frame_time: f32,
 }
 
 /// Last frame's camera, for the `previous*` uniforms.
@@ -1144,9 +1197,8 @@ impl UniformValues {
         data: &PackFrame,
         previous: Previous,
         extent: rhi::Extent,
-        frame_counter: u32,
-        time_counter: f32,
-        frame_time: f32,
+        timing: Timing,
+        eye_brightness_smooth: [f32; 2],
     ) -> Self {
         let sky_angle = data.sun_angle_degrees / 360.0;
         // Iris's `CelestialUniforms`: the sun 100 blocks up the celestial
@@ -1156,7 +1208,8 @@ impl UniformValues {
         let sun = (data.view * celestial * Vec4::new(0.0, 100.0, 0.0, 0.0)).truncate();
         let moon = (data.view * celestial * Vec4::new(0.0, -100.0, 0.0, 0.0)).truncate();
         let up = (data.view * Vec4::new(0.0, 100.0, 0.0, 0.0)).truncate();
-        let day = sky_angle < 0.5;
+        let sun_angle = (sky_angle + 0.25).fract();
+        let day = sun_angle <= 0.5;
         let camera = data.camera;
         let camera_fract = (camera - camera.floor()).as_vec3();
         let previous_fract = (previous.camera - previous.camera.floor()).as_vec3();
@@ -1192,24 +1245,20 @@ impl UniformValues {
             Value::Vec3(if day { sun } else { moon }),
         );
         set("upPosition", Value::Vec3(up));
-        set("sunAngle", Value::Float((sky_angle + 0.25).fract()));
+        set("sunAngle", Value::Float(sun_angle));
         set(
             "shadowAngle",
-            Value::Float(
-                if day {
-                    sky_angle + 0.25
-                } else {
-                    sky_angle - 0.25
-                }
-                .rem_euclid(0.5),
-            ),
+            Value::Float(if day { sun_angle } else { sun_angle - 0.5 }),
         );
         set("worldTime", Value::Int((data.day_time % 24000) as i32));
         set("worldDay", Value::Int((data.day_time / 24000) as i32));
         set("moonPhase", Value::Int(i32::from(data.moon_phase)));
-        set("frameCounter", Value::Int((frame_counter % 720_720) as i32));
-        set("frameTimeCounter", Value::Float(time_counter));
-        set("frameTime", Value::Float(frame_time));
+        set(
+            "frameCounter",
+            Value::Int((timing.frame_counter % 720_720) as i32),
+        );
+        set("frameTimeCounter", Value::Float(timing.time_counter));
+        set("frameTime", Value::Float(timing.frame_time));
         set("rainStrength", Value::Float(data.rain));
         set("wetness", Value::Float(data.rain));
         set("viewWidth", Value::Float(w));
@@ -1221,9 +1270,16 @@ impl UniformValues {
         set("skyColor", Value::Vec3(data.sky_color));
         set("fogStart", Value::Float(data.fog[0]));
         set("fogEnd", Value::Float(data.fog[1]));
-        let eye_brightness = Value::IVec2(IVec2::from_array(data.eye_light.map(|l| l as i32)));
-        set("eyeBrightness", eye_brightness);
-        set("eyeBrightnessSmooth", eye_brightness);
+        set(
+            "eyeBrightness",
+            Value::IVec2(IVec2::from_array(data.eye_light.map(|l| l as i32))),
+        );
+        set(
+            "eyeBrightnessSmooth",
+            Value::IVec2(IVec2::from_array(
+                eye_brightness_smooth.map(|l| l.round() as i32),
+            )),
+        );
         set("isEyeInWater", Value::Int(i32::from(data.eye_in_water)));
         set("blindness", Value::Float(data.world.blindness));
         set("eyeAltitude", Value::Float(camera.y as f32));
@@ -1239,7 +1295,10 @@ impl UniformValues {
         set("heldBlockLightValue", Value::Int(0));
         set("heldBlockLightValue2", Value::Int(0));
         set("renderStage", Value::Int(0));
-        set("atlasSize", Value::IVec2(IVec2::ZERO));
+        set(
+            "atlasSize",
+            Value::IVec2(IVec2::splat(data.atlas_size as i32)),
+        );
         set("gtexture", Value::Int(0));
         // TODO: the shadow pass's matrices, entity colour, held item ids,
         // player-mood and end-flash uniforms read zero until they're fed.

@@ -117,20 +117,18 @@ impl ShaderPack {
         })
     }
 
-    /// `name`'s program for `dimension` (e.g. `minecraft:overworld`): the
-    /// dimension folder's, else the pack root's; `None` if the pack lacks it
-    /// or disables it.
+    /// `name`'s program for `dimension` (e.g. `minecraft:overworld`): from
+    /// the dimension's folder if the pack has one, as Iris uses it alone,
+    /// else from the pack root; `None` if the pack lacks it or disables it.
     pub fn program(&self, dimension: &str, name: &str) -> Result<Option<ProgramText>, PackError> {
         let folder = properties::dimension_folder(&self.dimensions, dimension);
-        let path = [format!("{folder}/{name}"), name.to_owned()]
-            .into_iter()
-            .find(|p| {
-                self.source.exists(&format!("{p}.vsh")) && self.source.exists(&format!("{p}.fsh"))
-            });
-        let Some(path) = path else {
-            return Ok(None);
+        let path = if self.source.has_folder(&folder) {
+            format!("{folder}/{name}")
+        } else {
+            name.to_owned()
         };
-        if self.disabled(&path) {
+        let exists = |ext| self.source.exists(&format!("{path}.{ext}"));
+        if !exists("vsh") || !exists("fsh") || self.disabled(&path) {
             return Ok(None);
         }
         let expand = |file: String| {
@@ -210,6 +208,29 @@ pub fn compile(program: &ProgramText, geometry: Geometry) -> Result<CompiledProg
         interface,
         text: format!("{}\n{}", program.vertex, program.fragment),
     })
+}
+
+/// What Iris runs as `final` when a pack has none: `colortex0` as it is.
+pub fn copy_program() -> ProgramText {
+    ProgramText {
+        path: "final (built in)".to_owned(),
+        vertex: "#version 120
+varying vec2 texcoord;
+void main() {
+    gl_Position = ftransform();
+    texcoord = gl_MultiTexCoord0.xy;
+}
+"
+        .to_owned(),
+        fragment: "#version 120
+uniform sampler2D colortex0;
+varying vec2 texcoord;
+void main() {
+    gl_FragColor = texture2D(colortex0, texcoord);
+}
+"
+        .to_owned(),
+    }
 }
 
 /// The geometry a `gbuffers_*` program draws in milestone 1.
@@ -309,5 +330,59 @@ mod corpus {
             }
         }
         println!("{} of {total} programs compiled", total - failed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn pack(files: &[&str]) -> ShaderPack {
+        ShaderPack {
+            name: "test".into(),
+            source: PackSource::Zip(
+                files
+                    .iter()
+                    .map(|f| {
+                        (
+                            (*f).to_owned(),
+                            b"#version 120
+void main() {}
+"
+                            .to_vec(),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>(),
+            ),
+            properties: BTreeMap::new(),
+            dimensions: BTreeMap::new(),
+            overrides: Overrides::new(),
+            custom_uniforms: CustomUniforms::default(),
+        }
+    }
+
+    #[test]
+    fn a_dimension_folder_replaces_the_root() {
+        let pack = pack(&[
+            "composite.vsh",
+            "composite.fsh",
+            "final.vsh",
+            "final.fsh",
+            "world-1/final.vsh",
+            "world-1/final.fsh",
+        ]);
+        let path = |dimension, name| pack.program(dimension, name).unwrap().map(|p| p.path);
+        assert_eq!(
+            path("minecraft:the_nether", "final").as_deref(),
+            Some("world-1/final")
+        );
+        // The Nether's folder has no composite, and Iris doesn't fall back.
+        assert_eq!(path("minecraft:the_nether", "composite"), None);
+        assert_eq!(
+            path("minecraft:overworld", "composite").as_deref(),
+            Some("composite")
+        );
     }
 }

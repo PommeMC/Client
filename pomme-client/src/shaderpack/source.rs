@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub enum PackSource {
     /// The pack folder's `shaders/` directory.
@@ -36,9 +36,12 @@ impl PackSource {
         let prefix = (0..archive.len())
             .filter_map(|i| {
                 let name = archive.name_for_index(i)?.ok()?;
-                let at = name.find("shaders/")?;
-                (at == 0 || name[..at].ends_with('/'))
-                    .then(|| name[..at + "shaders/".len()].to_owned())
+                // A whole `shaders` segment, not the end of `sildurs_shaders/`.
+                let at = name
+                    .match_indices("shaders/")
+                    .map(|(at, _)| at)
+                    .find(|&at| at == 0 || name[..at].ends_with('/'))?;
+                Some(name[..at + "shaders/".len()].to_owned())
             })
             .min_by_key(|p| p.len())
             .ok_or(SourceError::NoShaders)?;
@@ -62,7 +65,7 @@ impl PackSource {
     /// The file at `path`, relative to `shaders/` with `/` separators.
     pub fn read(&self, path: &str) -> Option<String> {
         let bytes = match self {
-            Self::Dir(root) => std::fs::read(root.join(path)).ok()?,
+            Self::Dir(root) => std::fs::read(root.join(inside(path)?)).ok()?,
             Self::Zip(files) => files.get(path)?.clone(),
         };
         Some(String::from_utf8_lossy(&bytes).into_owned())
@@ -94,8 +97,60 @@ impl PackSource {
 
     pub fn exists(&self, path: &str) -> bool {
         match self {
-            Self::Dir(root) => root.join(path).is_file(),
+            Self::Dir(root) => inside(path).is_some_and(|p| root.join(p).is_file()),
             Self::Zip(files) => files.contains_key(path),
         }
+    }
+
+    pub fn has_folder(&self, path: &str) -> bool {
+        match self {
+            Self::Dir(root) => inside(path).is_some_and(|p| root.join(p).is_dir()),
+            Self::Zip(files) => {
+                let prefix = format!("{path}/");
+                files.keys().any(|f| f.starts_with(&prefix))
+            }
+        }
+    }
+}
+
+/// `path` if it stays inside the pack: plain names only, so no `..`, root
+/// or drive (`C:`) can take a join outside it.
+fn inside(path: &str) -> Option<&Path> {
+    let path = Path::new(path);
+    path.components()
+        .all(|c| matches!(c, Component::Normal(_)))
+        .then_some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    #[test]
+    fn nested_zip_shaders_folder() {
+        let path = std::env::temp_dir().join(format!("pomme_pack_{}.zip", std::process::id()));
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        for name in [
+            "sildurs_shaders/readme.txt",
+            "sildurs_shaders/shaders/final.fsh",
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"x").unwrap();
+        }
+        zip.finish().unwrap();
+        let source = PackSource::open(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(source.unwrap().exists("final.fsh"));
+    }
+
+    #[test]
+    fn paths_stay_inside_the_pack() {
+        assert!(inside("world0/composite.fsh").is_some());
+        assert!(inside("../outside.glsl").is_none());
+        assert!(inside("/etc/passwd").is_none());
+        assert!(inside("C:/Windows/win.ini").is_none());
     }
 }
