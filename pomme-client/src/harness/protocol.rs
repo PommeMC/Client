@@ -107,7 +107,7 @@ pub struct Click {
 }
 
 /// Client options to change; fields left out keep their value.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OptionSet {
     pub main_hand: Option<Hand>,
@@ -115,6 +115,8 @@ pub struct OptionSet {
     pub menu_background_blur: Option<u8>,
     /// Brightness, 0 (Moody) to 1 (Bright).
     pub brightness: Option<f32>,
+    /// A shader pack's name in `shaderpacks/`, or `""` for none.
+    pub shader_pack: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]

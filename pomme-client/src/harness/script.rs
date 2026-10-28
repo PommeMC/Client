@@ -804,6 +804,7 @@ mod tests {
                 main_hand: Some(Hand::Left),
                 menu_background_blur: None,
                 brightness: None,
+                shader_pack: None,
             }))
         );
         assert_eq!(

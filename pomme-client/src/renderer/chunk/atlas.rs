@@ -141,6 +141,8 @@ pub struct TextureAtlas {
     /// `AtlasRegion::sprite`; the terrain shaders resolve sprite UVs inside it.
     pub sprite_rects: rhi::backend::Buffer,
     pub uv_map: AtlasUVMap,
+    /// Width and height, in texels.
+    pub size: u32,
     mip_levels: u32,
     animated: Vec<AnimatedSprite>,
     /// A tick ran since the last upload; vanilla only draws after a tick.
@@ -785,6 +787,7 @@ impl TextureAtlas {
             sampler,
             sprite_rects,
             uv_map,
+            size: atlas_size,
             mip_levels,
             animated,
             animation_ticked: false,
@@ -939,8 +942,12 @@ impl TextureAtlas {
             match placements.get(src.name.as_str()) {
                 Some(Some((cx, cy))) => {
                     let mut region = pixel_region(*cx, *cy, src.w, src.h, atlas_size);
+                    // TODO: an atlas past 8192 sprites needs a wider vertex
+                    // sprite field (`SPRITE_BITS`).
                     region.sprite = u16::try_from(rects.len())
-                        .expect("an 8192² atlas holds fewer than 65536 sprites");
+                        .ok()
+                        .filter(|&id| id < 1 << crate::renderer::chunk::mesher::SPRITE_BITS)
+                        .expect("the atlas holds fewer than 8192 sprites");
                     region.opaque = src.opaque;
                     region.translucent = src.translucent;
                     rects.push(region.pixel_rect.map(u32::from));

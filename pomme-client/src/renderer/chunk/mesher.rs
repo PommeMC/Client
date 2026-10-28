@@ -21,6 +21,8 @@ struct TerrainVertex {
     sprite_uv: [f32; 2],
     /// `AtlasRegion::sprite`, resolved to a rectangle in the fragment shader.
     sprite: u16,
+    /// The quad's face, as [`face_code`] packs it.
+    face: u16,
     light: VertexLight,
     /// The quad's tint, as [`pack_tint_shifted`] packs it.
     tint: u32,
@@ -80,7 +82,7 @@ fn pack_vertex(v: &TerrainVertex) -> PackedVertex {
             quantize_coord(v.position[1]),
             quantize_coord(v.position[2]),
         ],
-        sprite: v.sprite,
+        sprite: v.sprite | v.face << SPRITE_BITS,
         uv: pack_sprite_uv(v.sprite_uv[0])
             | pack_sprite_uv(v.sprite_uv[1]) << TERRAIN_UV_BITS
             | u32::from(v.light.sky) << 24,
@@ -90,6 +92,12 @@ fn pack_vertex(v: &TerrainVertex) -> PackedVertex {
             [v.light.block, shaded(r), shaded(g), shaded(b)]
         },
     }
+}
+
+/// A quad's face for [`PackedVertex::sprite`]'s top bits: `Direction` + 1,
+/// or 0 for none.
+fn face_code(face: Option<Direction>) -> u16 {
+    face.map_or(0, |dir| dir as u16 + 1)
 }
 
 fn section_aabb(verts: &[TerrainVertex]) -> ChunkAABB {
@@ -2425,6 +2433,7 @@ fn emit_lod_cube(
                 ],
                 sprite_uv: uvs[i],
                 sprite: region.sprite,
+                face: face_code(Some(*dir)),
                 light,
                 tint,
             });
@@ -2476,6 +2485,7 @@ fn emit_missing_cube(
                 ],
                 sprite_uv: uv,
                 sprite: missing.sprite,
+                face: face_code(Some(*dir)),
                 light,
                 tint: MISSING_TINT,
             });
@@ -2532,6 +2542,9 @@ fn emit_face_into(
     tint: u32,
 ) {
     let base = vertices.len() as u32;
+    let face = face_code(crate::world::block::model::direction_from_positions(
+        positions,
+    ));
     for i in 0..4 {
         vertices.push(TerrainVertex {
             position: [
@@ -2541,6 +2554,7 @@ fn emit_face_into(
             ],
             sprite_uv: uvs[i],
             sprite: region.sprite,
+            face,
             light: lights[i],
             tint,
         });
@@ -2652,6 +2666,7 @@ mod terrain_uv_tests {
             position: [0.0; 3],
             sprite_uv,
             sprite: 0,
+            face: 0,
             light: VertexLight::flat(1.0, LightLevels::new(0, 0)),
             tint: 0,
         })
@@ -2700,6 +2715,7 @@ mod terrain_uv_tests {
             position: [0.0; 3],
             sprite_uv: [0.0; 2],
             sprite: 0,
+            face: 0,
             light: VertexLight::flat(0.5, LightLevels::new(15, 7)),
             tint: super::pack_tint_shifted([1.0, 0.5, 0.0]),
         });

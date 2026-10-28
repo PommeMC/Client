@@ -17,10 +17,7 @@ pub const PUSH_CONSTANTS: rhi::PushConstants = rhi::PushConstants {
 
 /// What a post pass draws into.
 pub fn targets() -> rhi::backend::PipelineTargets {
-    rhi::backend::PipelineTargets {
-        color: rhi::backend::texture_format(FORMAT),
-        depth: false,
-    }
+    rhi::backend::PipelineTargets::new(rhi::backend::texture_format(FORMAT), false)
 }
 
 /// A screen-size target, ready to be sampled.
@@ -91,6 +88,7 @@ pub fn open_pass(
                 load: rhi::LoadOp::Clear([0.0; 4]),
                 store: rhi::StoreOp::Store,
             },
+            extra_colors: Vec::new(),
             depth: None,
             extent,
         },

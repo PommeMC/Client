@@ -46,6 +46,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 tracing-appender = "0.2"
+# Shader packs: GLSL parsed and rewritten in Rust, then compiled to SPIR-V.
+# naga 30's `glsl-in` doesn't build without `wgsl-in`.
+glsl-lang = { version = "0.8.1", features = ["lexer-full"] }
+naga = { version = "30.0.1", features = ["glsl-in", "wgsl-in", "spv-out"] }
 # Per-thread-heap allocator: the chunk-mesh worker pool churns vertex/index Vecs
 # across threads, and the default system heap's global lock serializes that and
 # stalls the main thread. Mirrors vanilla (JVM TLABs + LWJGL's jemalloc).

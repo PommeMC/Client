@@ -30,6 +30,8 @@ const DEFAULT_JOBS: usize = 6;
 
 const OUT_DIR: &str = "target/ingame";
 const SCRIPT_DIR: &str = "tests/ingame";
+/// Shader packs the scripts select, copied into each client's game dir.
+const SHADER_PACKS: &str = "fixtures/shaderpacks";
 const FIXTURE_DIR: &str = "pomme-client/src/net/wire-fixtures";
 /// Game packets kept per packet id in a fixture, so repeats (chunks above all)
 /// don't bloat it.
@@ -486,6 +488,10 @@ fn run_script(
     let name = script_name(Path::new(SCRIPT_DIR), script);
     let out = Path::new(OUT_DIR).join(version.name).join(&name);
     std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    copy_dir(
+        &Path::new(SCRIPT_DIR).join(SHADER_PACKS),
+        &game_dir.join("shaderpacks"),
+    )?;
     let log_path = out.join("client.log");
     let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
     let client =
@@ -715,6 +721,25 @@ impl Drop for Server {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Copies `from`'s files into `to`, keeping what's already there; a missing
+/// `from` copies nothing.
+fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
+    let Ok(entries) = std::fs::read_dir(from) else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    for entry in entries.flatten() {
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)
+                .map_err(|e| format!("{}: {e}", target.display()))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

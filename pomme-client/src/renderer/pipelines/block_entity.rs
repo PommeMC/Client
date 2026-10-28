@@ -315,6 +315,9 @@ pub struct BlockEntityPipeline {
     camera_buffers: Vec<rhi::backend::Buffer>,
     /// The shared [`Lightmap`]'s group, set 2.
     lightmap_set: rhi::backend::BindGroup,
+    /// A shader pack's `gbuffers_block`, drawn with while set; the texture
+    /// binds at set 3.
+    pub pack_binding: Option<super::shaderpack::PackBinding>,
     texture_sampler: rhi::backend::Sampler,
     entries: HashMap<BlockEntityKind, KindEntry>,
 }
@@ -388,6 +391,7 @@ impl BlockEntityPipeline {
             camera_sets,
             camera_buffers,
             lightmap_set: lightmap.group,
+            pack_binding: None,
             texture_sampler,
             entries,
         }
@@ -409,7 +413,10 @@ impl BlockEntityPipeline {
             return;
         }
 
-        pass.set_pipeline(&self.pipeline);
+        let pipeline = self
+            .pack_binding
+            .map_or(self.pipeline, |pack| pack.pipeline);
+        pass.set_pipeline(&pipeline);
 
         let mut bound_entry: *const KindEntry = std::ptr::null();
         let mut bound_set = rhi::backend::BindGroup::default();
@@ -428,7 +435,16 @@ impl BlockEntityPipeline {
                 bound_set = rhi::backend::BindGroup::default();
             }
             if bound_set != slot.set {
-                pass.set_bind_groups(0, &[self.camera_sets[frame], slot.set, self.lightmap_set]);
+                match &self.pack_binding {
+                    Some(pack) => {
+                        pass.set_bind_groups(0, &pack.sets);
+                        pass.set_bind_group(3, slot.set);
+                    }
+                    None => pass.set_bind_groups(
+                        0,
+                        &[self.camera_sets[frame], slot.set, self.lightmap_set],
+                    ),
+                }
                 bound_set = slot.set;
             }
 

@@ -141,7 +141,11 @@ bind = { action = "key.drop", keys = ["key.keyboard.j"] }  # this session only;
                                               # no keys resets the defaults
 [[step]]
 option = { main_hand = "left" }               # sets client options, as the
-                                              # options screen does
+                                              # options screen does; also
+                                              # menu_background_blur,
+                                              # brightness, and shader_pack
+                                              # (a name in fixtures/shaderpacks,
+                                              # "" for none)
 [[step]]
 deterministic = true                          # holds flicker, particles,
                                               # animated textures, clouds, view

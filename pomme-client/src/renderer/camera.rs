@@ -519,6 +519,30 @@ impl Camera {
         view::look_to_mat4(Vec3::ZERO, forward, up).inverse() * self.view_effect_matrix()
     }
 
+    /// What a shader pack sees as `gbufferModelView` and `gbufferProjection`:
+    /// the eye-relative view with its bob, and an OpenGL projection.
+    pub fn pack_matrices(&self) -> (Mat4, Mat4) {
+        let (forward, up) = self.view_basis();
+        let view = self.view_effect_matrix() * view::look_to_mat4(Vec3::ZERO, forward, up);
+        let projection = proj::opengl::perspective(
+            self.fov_radians(self.render_partial_tick),
+            self.aspect_ratio,
+            NEAR,
+            self.depth_far,
+        );
+        (view, projection)
+    }
+
+    /// The near and far planes, in blocks.
+    pub fn planes(&self) -> (f32, f32) {
+        (NEAR, self.depth_far)
+    }
+
+    /// The eye relative to [`Self::anchor`], as the world shaders place it.
+    pub fn eye_from_anchor(&self) -> Vec3 {
+        (*self.position - self.anchor()).as_vec3() + self.third_person_offset()
+    }
+
     /// Vanilla `Camera.getViewRotationProjectionMatrix`: rotation-only view
     /// times the GL-convention projection — no view bob, no third-person
     /// translation, no Vulkan Y flip. Used by the locator bar's waypoint

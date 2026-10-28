@@ -4319,6 +4319,17 @@ pub fn update_game(
     // Recompute after this frame's state changes (a finished benchmark releases
     // the cursor mid-frame), so the renderer doesn't re-hide it from a stale value.
     let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();
+    let shader_pack = core
+        .menu
+        .shader_pack
+        .as_ref()
+        .map(|name| core.menu.shader_packs_dir.join(name));
+    if let Err(e) = gfx.renderer.set_shader_pack(shader_pack.as_deref()) {
+        tracing::error!(
+            "Shader pack {}: {e}",
+            shader_pack.unwrap_or_default().display()
+        );
+    }
     if let Err(e) = gfx.renderer.render_world(
         game.block_registry.render_view(),
         &gfx.window,

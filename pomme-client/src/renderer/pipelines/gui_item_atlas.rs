@@ -230,10 +230,7 @@ impl GuiItemAtlas {
     }
 
     pub fn targets(&self) -> rhi::backend::PipelineTargets {
-        rhi::backend::PipelineTargets {
-            color: rhi::backend::texture_format(COLOR_FORMAT),
-            depth: true,
-        }
+        rhi::backend::PipelineTargets::new(rhi::backend::texture_format(COLOR_FORMAT), true)
     }
 
     pub fn get_or_allocate(
@@ -305,6 +302,7 @@ impl GuiItemAtlas {
                 load: rhi::LoadOp::Load,
                 store: rhi::StoreOp::Store,
             },
+            extra_colors: Vec::new(),
             depth: Some(rhi::backend::DepthAttachment::cleared(self.depth.handle())),
             extent: rhi::Extent {
                 width: self.atlas_px,

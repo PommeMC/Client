@@ -288,6 +288,10 @@ impl MainMenu {
             "VSync: OFF"
         };
         let clouds_label = format!("Clouds: {}", self.cloud_mode.label());
+        let shader_label = format!(
+            "Shader Pack: {}",
+            self.shader_pack.as_deref().unwrap_or("OFF")
+        );
         let attack_label = format!("Attack Indicator: {}", self.attack_indicator.label());
         let vignette_label = if self.vignette {
             "Vignette: ON"
@@ -325,7 +329,7 @@ impl MainMenu {
             OptRow::Pair(&blur_label, "Cloud Range: 128"),
             OptRow::Pair("Cutout Leaves: Fancy", "Improved Transparency: OFF"),
             OptRow::Pair("Texture Filtering: None", "Max Anisotropy: 1"),
-            OptRow::PairLeft("Weather Radius: 10"),
+            OptRow::Pair("Weather Radius: 10", &shader_label),
             OptRow::Header("Preferences"),
             OptRow::Pair(autosave_label, vignette_label),
             OptRow::Pair(&attack_label, "Chunk Fade-in: 1.0s"),
@@ -1430,6 +1434,11 @@ impl MainMenu {
                         self.cloud_mode = self.cloud_mode.cycle();
                         self.save_settings(key_bindings);
                     }
+                    if label.starts_with("Shader Pack:") {
+                        self.shader_pack =
+                            next_shader_pack(&self.shader_packs_dir, self.shader_pack.as_deref());
+                        self.save_settings(key_bindings);
+                    }
                     if label.starts_with("Attack Indicator:") {
                         self.attack_indicator = self.attack_indicator.cycle();
                         self.save_settings(key_bindings);
@@ -2039,6 +2048,30 @@ impl MainMenu {
             cursor_pointer: any_hovered,
             clicked_button: ctx.fired,
         }
+    }
+}
+
+/// The pack after `current` in `dir` (folders and zips, by name), wrapping
+/// through off.
+fn next_shader_pack(dir: &std::path::Path, current: Option<&str>) -> Option<String> {
+    let mut packs: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            let path = entry.path();
+            path.is_dir()
+                || path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+        })
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    packs.sort();
+    match current.and_then(|c| packs.iter().position(|p| p == c)) {
+        Some(i) => packs.get(i + 1).cloned(),
+        None if current.is_some() => None,
+        None => packs.into_iter().next(),
     }
 }
 

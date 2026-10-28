@@ -1,0 +1,75 @@
+# A shader pack (fixtures/shaderpacks/pomme_test) draws the world: terrain,
+# a cow and a chest through its one `gbuffers_textured_lit` program, the sky
+# and normal shading from its composite pass. Then packs off again.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/tp @s 60.5 -60 50.5 0 15"
+
+[[step]]
+expect = { player = { position = [60.5, -60.0, 50.5] } }
+
+[[step]]
+chat = "/summon minecraft:cow 59.5 -60 54.5 {NoAI:1b,Rotation:[90f,0f],Tags:[\"pack\"]}"
+
+[[step]]
+chat = "/setblock 62 -60 54 minecraft:chest[facing=north]"
+
+[[step]]
+chat = "/fill 63 -60 55 64 -59 56 minecraft:oak_planks"
+
+[[step]]
+expect = { entity = "cow" }
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+deterministic = true
+
+[[step]]
+option = { shader_pack = "pomme_test" }
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "pack"
+
+[[step]]
+option = { shader_pack = "" }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+screenshot = "off"
+
+[[step]]
+chat = "/kill @e[tag=pack]"
+
+[[step]]
+chat = "/kill @e[type=item]"
+
+[[step]]
+chat = "/fill 62 -60 54 64 -59 56 minecraft:air"
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/gamerule advance_time true"
