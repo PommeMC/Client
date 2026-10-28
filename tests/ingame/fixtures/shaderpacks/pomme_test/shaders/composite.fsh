@@ -20,6 +20,7 @@ uniform mat4 shadowProjection;
 const int colortex0Format = RGBA16F;
 */
 const float sunPathRotation = 30.0;
+const bool shadowHardwareFiltering = true;
 
 varying vec2 texcoord;
 
