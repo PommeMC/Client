@@ -5377,12 +5377,6 @@ pub(crate) fn cube_face_uvs(cube: &ModelCube) -> [[f32; 4]; 6] {
     ]
 }
 
-/// Emit one quad as two triangles with vanilla `ModelPart.Polygon` UV
-/// corners: vertex 0 gets `(u1, v0)`, then `(u0, v0)`, `(u0, v1)`,
-/// `(u1, v1)` — the rect params are used as passed (the box unwrap hands the
-/// maxY face a V-reversed rect on purpose). The visible half of vanilla's
-/// mirror is the minX/maxX swap in `cube_face_positions`; `mirror` here only
-/// reverses the quad to restore vanilla's winding parity.
 /// The outward normal of [`cube_face_positions`]' face `slot`: its
 /// `ModelPart.Polygon` direction, with y negated for `y_down` and x for a
 /// mirrored cube, as the positions are.
@@ -5399,7 +5393,12 @@ fn cube_face_normal(slot: usize, y_down: bool, mirror: bool) -> [i8; 4] {
     })
 }
 
-/// A quad from `positions` and its `[u0, v0, u1, v1]` UV rect.
+/// Emit one quad as two triangles with vanilla `ModelPart.Polygon` UV
+/// corners: vertex 0 gets `(u1, v0)`, then `(u0, v0)`, `(u0, v1)`,
+/// `(u1, v1)` — the `[u0, v0, u1, v1]` rect is used as passed (the box unwrap
+/// hands the maxY face a V-reversed rect on purpose). The visible half of
+/// vanilla's mirror is the minX/maxX swap in `cube_face_positions`; `mirror`
+/// here only reverses the quad to restore vanilla's winding parity.
 fn push_face(
     positions: &[[f32; 3]; 4],
     [u0, v0, u1, v1]: [f32; 4],
