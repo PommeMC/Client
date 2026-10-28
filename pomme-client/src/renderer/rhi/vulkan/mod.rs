@@ -919,7 +919,18 @@ pub fn try_create_render_pipeline(
     };
 
     let color_count = 1 + targets.extra_colors.iter().flatten().count();
-    let blend_attachments = vec![color_blend_attachment(desc.blend); color_count];
+    // Vulkan doesn't guarantee blending 32-bit float targets: they're
+    // written unblended.
+    let blend_attachments: Vec<_> = std::iter::once(targets.color)
+        .chain(targets.extra_colors.iter().flatten().copied())
+        .map(|format| {
+            let blendable = !matches!(
+                format,
+                vk::Format::R32Sfloat | vk::Format::R32G32Sfloat | vk::Format::R32G32B32A32Sfloat
+            );
+            color_blend_attachment(desc.blend.filter(|_| blendable))
+        })
+        .collect();
     let color_blending = vk::PipelineColorBlendStateCreateInfo {
         attachment_count: color_count as u32,
         attachments: blend_attachments.as_ptr(),

@@ -319,7 +319,8 @@ pub fn translate(
     let fragment_outputs = rewrite(ShaderStage::Fragment, &mut fragment, &sampler_names, &bools);
     debug_assert!(vertex_outputs.is_empty());
 
-    let locations = varying_locations(&vertex_globals.varyings);
+    // Fragment-only varyings go after every slot the vertex ones take.
+    let (locations, mut next) = varying_locations(&vertex_globals.varyings);
     let shared = shared_decls(&uniforms, uniform_size, &samplers, albedo);
 
     let mut vs = header(vertex_prelude.decls, &shared);
@@ -339,7 +340,6 @@ pub fn translate(
     vs.push_str(vertex_prelude.main);
 
     let mut fs = header(fragment_prelude.decls, &shared);
-    let mut next = locations.values().copied().max().map_or(0, |l| l + 4);
     for v in &fragment_globals.varyings {
         let location = locations.get(&v.name).copied().unwrap_or_else(|| {
             let l = next;
@@ -417,19 +417,21 @@ fn slots(v: &Decl) -> u32 {
     per * v.count
 }
 
-/// The vertex outputs' locations, by name, so the fragment inputs match.
-fn varying_locations(varyings: &[Decl]) -> BTreeMap<String, u32> {
+/// The vertex outputs' locations, by name, so the fragment inputs match,
+/// and the first location after them.
+fn varying_locations(varyings: &[Decl]) -> (BTreeMap<String, u32>, u32) {
     let mut sorted: Vec<&Decl> = varyings.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     let mut next = 0;
-    sorted
+    let locations = sorted
         .into_iter()
         .map(|v| {
             let location = next;
             next += slots(v);
             (v.name.clone(), location)
         })
-        .collect()
+        .collect();
+    (locations, next)
 }
 
 /// Both stages' loose uniforms, by name, laid out std140.
@@ -942,6 +944,26 @@ fn typed_param(ty: &str, name: &str) -> ast::FunctionParameterDeclaration {
     .into()
 }
 
+/// Splits `prototype`'s sampler parameters into a texture and a sampler
+/// each, returning them by name.
+fn split_sampler_params(prototype: &mut ast::FunctionPrototype) -> BTreeMap<String, SamplerKind> {
+    let mut split = BTreeMap::new();
+    let mut params = Vec::with_capacity(prototype.parameters.len());
+    for param in std::mem::take(&mut prototype.parameters) {
+        match sampler_param(&param) {
+            Some((name, kind)) => {
+                let (texture, sampler, _) = kind.glsl();
+                params.push(typed_param(texture, &format!("pt_{name}")));
+                params.push(typed_param(sampler, &format!("ps_{name}")));
+                split.insert(name, kind);
+            }
+            None => params.push(param),
+        }
+    }
+    prototype.parameters = params;
+    split
+}
+
 /// Every name a function declares: its parameters and its locals.
 struct Declared(BTreeSet<String>);
 
@@ -973,27 +995,21 @@ impl VisitorMut for Rewriter<'_> {
         let mut declared = Declared(BTreeSet::new());
         f.visit(&mut declared);
         self.shadowed = declared.0;
-        self.params.clear();
         let prototype = &mut f.prototype;
         if prototype.name.as_str() == "main" {
             prototype.name = ast::IdentifierData::from("pack_main").into();
         }
-        let mut params = Vec::with_capacity(prototype.parameters.len());
-        for param in std::mem::take(&mut prototype.parameters) {
-            match sampler_param(&param) {
-                Some((name, kind)) => {
-                    let (texture, sampler, _) = kind.glsl();
-                    params.push(typed_param(texture, &format!("pt_{name}")));
-                    params.push(typed_param(sampler, &format!("ps_{name}")));
-                    self.params.insert(name, kind);
-                }
-                None => params.push(param),
-            }
-        }
-        prototype.parameters = params;
+        self.params = split_sampler_params(prototype);
         f.statement.visit_mut(self);
         self.shadowed.clear();
         self.params.clear();
+        Visit::Parent
+    }
+
+    /// A forward declaration, whose sampler parameters split as its
+    /// definition's do.
+    fn visit_function_prototype(&mut self, prototype: &mut ast::FunctionPrototype) -> Visit {
+        split_sampler_params(prototype);
         Visit::Parent
     }
 
@@ -1237,6 +1253,32 @@ void main() {
         );
         assert!(
             t.fragment.contains("in float pomme_FogFragCoord;"),
+            "{}",
+            t.fragment
+        );
+    }
+
+    #[test]
+    fn forward_declared_sampler_functions() {
+        translated(
+            "#version 120\nvoid main() { gl_Position = ftransform(); }\n",
+            "#version 120\nuniform sampler2D colortex0;\n\
+             vec4 sample_at(sampler2D s, vec2 uv);\n\
+             void main() { gl_FragColor = sample_at(colortex0, vec2(0.5)); }\n\
+             vec4 sample_at(sampler2D s, vec2 uv) { return texture2D(s, uv); }\n",
+        );
+    }
+
+    #[test]
+    fn fragment_only_varyings_clear_array_slots() {
+        let t = translated(
+            "#version 120\nvarying vec4 a[6];\nvoid main() { gl_Position = ftransform(); a[5] = vec4(1); }\n",
+            "#version 120\nvarying vec4 a[6];\nvarying float only_here;\n\
+             void main() { gl_FragColor = a[5] * only_here; }\n",
+        );
+        assert!(
+            t.fragment
+                .contains("layout(location = 6) in float only_here;"),
             "{}",
             t.fragment
         );

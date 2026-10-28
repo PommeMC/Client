@@ -159,8 +159,9 @@ pub enum TextureUse {
     DepthAttachment,
     /// A depth texture sampled by a shader.
     DepthRead,
-    /// A depth texture as a copy's source or destination, or being cleared.
+    /// A depth texture as a copy's source.
     DepthCopySrc,
+    /// A depth texture as a copy's destination, or being cleared.
     DepthCopyDst,
 }
 
