@@ -29,37 +29,37 @@ chat = "/tp @s 0.5 -57 0.5 0 40"
 expect = { player = { position = [0.5, -57.0, 0.5] } }
 
 [[step]]
-chat = "/summon minecraft:axolotl -2.5 -60 6.5 {NoAI:1b,Variant:0,Rotation:[160f,0f]}"
+chat = "/summon minecraft:axolotl -2.5 -60 6.5 {NoAI:1b,OnGround:1b,Variant:0,Rotation:[160f,0f]}"
 
 [[step]]
-chat = "/summon minecraft:axolotl -1 -60 6.5 {NoAI:1b,Variant:1,Rotation:[160f,0f]}"
+chat = "/summon minecraft:axolotl -1 -60 6.5 {NoAI:1b,OnGround:1b,Variant:1,Rotation:[160f,0f]}"
 
 [[step]]
-chat = "/summon minecraft:axolotl 0.5 -60 6.5 {NoAI:1b,Variant:2,Rotation:[160f,0f]}"
+chat = "/summon minecraft:axolotl 0.5 -60 6.5 {NoAI:1b,OnGround:1b,Variant:2,Rotation:[160f,0f]}"
 
 [[step]]
-chat = "/summon minecraft:axolotl 2 -60 6.5 {NoAI:1b,Variant:3,Rotation:[160f,0f]}"
+chat = "/summon minecraft:axolotl 2 -60 6.5 {NoAI:1b,OnGround:1b,Variant:3,Rotation:[160f,0f]}"
 
 [[step]]
-chat = "/summon minecraft:axolotl 3.5 -60 6.5 {NoAI:1b,Variant:4,Rotation:[160f,0f]}"
+chat = "/summon minecraft:axolotl 3.5 -60 6.5 {NoAI:1b,OnGround:1b,Variant:4,Rotation:[160f,0f]}"
 
 [[step]]
 expect = { entity = "axolotl", baby = false }
 
 [[step]]
-chat = "/summon minecraft:axolotl -2.5 -60 4 {NoAI:1b,Variant:0,Age:-24000,Rotation:[200f,0f]}"
+chat = "/summon minecraft:axolotl -2.5 -60 4 {NoAI:1b,OnGround:1b,Variant:0,Age:-24000,Rotation:[200f,0f]}"
 
 [[step]]
-chat = "/summon minecraft:axolotl -1 -60 4 {NoAI:1b,Variant:1,Age:-24000,Rotation:[200f,0f]}"
+chat = "/summon minecraft:axolotl -1 -60 4 {NoAI:1b,OnGround:1b,Variant:1,Age:-24000,Rotation:[200f,0f]}"
 
 [[step]]
-chat = "/summon minecraft:axolotl 0.5 -60 4 {NoAI:1b,Variant:2,Age:-24000,Rotation:[200f,0f]}"
+chat = "/summon minecraft:axolotl 0.5 -60 4 {NoAI:1b,OnGround:1b,Variant:2,Age:-24000,Rotation:[200f,0f]}"
 
 [[step]]
-chat = "/summon minecraft:axolotl 2 -60 4 {NoAI:1b,Variant:3,Age:-24000,Rotation:[200f,0f]}"
+chat = "/summon minecraft:axolotl 2 -60 4 {NoAI:1b,OnGround:1b,Variant:3,Age:-24000,Rotation:[200f,0f]}"
 
 [[step]]
-chat = "/summon minecraft:axolotl 3.5 -60 4 {NoAI:1b,Variant:4,Age:-24000,Rotation:[200f,0f]}"
+chat = "/summon minecraft:axolotl 3.5 -60 4 {NoAI:1b,OnGround:1b,Variant:4,Age:-24000,Rotation:[200f,0f]}"
 
 [[step]]
 expect = { entity = "axolotl", baby = true }

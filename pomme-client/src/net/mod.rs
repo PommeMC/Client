@@ -562,6 +562,10 @@ pub enum NetworkEvent {
     SnifferDigging {
         id: i32,
     },
+    /// Entity event 45: a fox eats the food in its mouth.
+    FoxEat {
+        id: i32,
+    },
     /// Entity event 64: an armadillo peeks out of its shell.
     ArmadilloPeek {
         id: i32,

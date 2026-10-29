@@ -941,11 +941,12 @@ fn living_entity_aabb(entity: &LivingEntity) -> Aabb {
 
 /// Per-kind `pushEntities` / `doPush` overrides. Team rules, spectators and
 /// shared vehicles are the caller's `pusher_allowed` filter.
-// TODO: once these kinds are modeled: Parrot.doPush skips players, ArmorStand
-// no-ops doPush/pushEntities, Vex ticks with noPhysics (no push), and Warden /
-// Creaking gate the reciprocal impulse in isPushable.
+// TODO: once these kinds are modeled: ArmorStand no-ops doPush/pushEntities,
+// Vex ticks with noPhysics (no push), and Warden / Creaking gate the
+// reciprocal impulse in isPushable.
 fn pushes_local_player(entity: &LivingEntity) -> bool {
-    entity.entity_type != EntityKind::Bat
+    // `Parrot.doPush` skips players.
+    !matches!(entity.entity_type, EntityKind::Bat | EntityKind::Parrot)
 }
 
 /// The pusher's `isPushable`, which gates only the reciprocal impulse.
@@ -2377,6 +2378,11 @@ impl EntityStore {
             }
             let dx = entity.position.x - entity.prev_position.x;
             let dz = entity.position.z - entity.prev_position.z;
+            let dy = if omnidirectional_air_mover(entity.entity_type) {
+                entity.position.y - entity.prev_position.y
+            } else {
+                0.0
+            };
             if entity.health <= 0.0 {
                 stop_walk_animation(
                     &mut entity.walk_anim_pos,
@@ -2386,6 +2392,7 @@ impl EntityStore {
             } else {
                 update_walk_animation(
                     dx,
+                    dy,
                     dz,
                     &mut entity.walk_anim_pos,
                     &mut entity.walk_anim_speed,
@@ -2456,14 +2463,17 @@ pub fn stop_walk_animation(walk_pos: &mut f32, walk_speed: &mut f32, prev_walk_s
     *walk_pos = 0.0;
 }
 
+/// Vanilla `calculateEntityAnimation`: `dy` counts only for an
+/// `omnidirectionalAirMover`.
 pub fn update_walk_animation(
     dx: f64,
+    dy: f64,
     dz: f64,
     walk_pos: &mut f32,
     walk_speed: &mut f32,
     prev_walk_speed: &mut f32,
 ) {
-    let distance = ((dx * dx + dz * dz) as f32).sqrt();
+    let distance = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
     let target_speed = (distance * 4.0).min(1.0);
     *prev_walk_speed = *walk_speed;
     *walk_speed += (target_speed - *walk_speed) * 0.4;
@@ -2556,6 +2566,15 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::Axolotl
                 | EntityKind::PolarBear
         )
+}
+
+/// Vanilla `omnidirectionalAirMover`: flyers whose walk animation counts
+/// vertical movement too.
+fn omnidirectional_air_mover(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::Bee | EntityKind::Parrot | EntityKind::SulfurCube
+    )
 }
 
 /// Kinds whose `wasTouchingWater` matters for rendering (fish flop pose,
@@ -3041,6 +3060,7 @@ mod tests {
             (3, EntityKind::Bat),
             (4, EntityKind::Zombie),
             (5, EntityKind::Zombie),
+            (6, EntityKind::Parrot),
         ] {
             spawn(&mut store, id, kind, Position::new(0.25, 64.0, 0.0));
         }
@@ -3060,11 +3080,12 @@ mod tests {
         let expected = f64::from(0.05_f32) * 0.5;
 
         // A normal mob, a remote player, and a dying mob all push the local
-        // player. Bat overrides the vanilla push path and does not.
+        // player. Bat and Parrot override the vanilla push path and don't.
         assert_eq!(impulse, DVec3::new(-expected * 3.0, 0.0, 0.0));
         assert_eq!(store.living[&1].velocity, DVec3::new(expected, 0.0, 0.0));
         assert_eq!(store.living[&2].velocity, DVec3::new(expected, 0.0, 0.0));
         assert_eq!(store.living[&3].velocity, DVec3::ZERO);
+        assert_eq!(store.living[&6].velocity, DVec3::ZERO);
         // Dead LivingEntity::isPushable is false, so it does not receive the
         // reciprocal impulse even though its tick still pushes the local player.
         assert_eq!(store.living[&4].velocity, DVec3::ZERO);
