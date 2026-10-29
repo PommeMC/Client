@@ -1172,9 +1172,30 @@ impl GameState {
         }
     }
 
+    /// [`MeshColumns::first_unmeshed`] over the loaded columns.
+    #[cfg(feature = "test-harness")]
+    pub fn first_unmeshed_column(&self) -> Option<ChunkPos> {
+        self.mesh_columns
+            .first_unmeshed(self.chunk_store.loaded_positions())
+    }
+
     /// Forgets every column's scheduling state, for a new level or dispatcher.
     pub fn reset_mesh_columns(&mut self) {
         self.mesh_columns.reset();
+    }
+
+    /// Meshes every loaded column again from scratch, after the renderer
+    /// dropped its meshes.
+    pub fn rebuild_meshes(&mut self) {
+        self.reset_mesh_columns();
+        self.remesh_all_columns();
+        self.section_vis.clear();
+        self.section_vis_epoch.clear();
+        self.vis_mask.clear();
+        self.vis_tiers.clear();
+        self.vis_task = None;
+        self.vis_valid = false;
+        self.pending_load_rescan = true;
     }
 
     /// Marks every loaded column for remeshing (F3+A).
@@ -4402,6 +4423,21 @@ pub fn update_game(
             "Shader pack {}: {e}",
             shader_pack.unwrap_or_default().display()
         );
+    }
+    let block_ids = gfx.renderer.pack_block_ids();
+    if !game.mesh_dispatcher.meshes_for(block_ids.as_ref()) {
+        // TODO: rebuild after a datapack reload replaces the block tags.
+        let pack = block_ids.map(|ids| {
+            Arc::new(crate::shaderpack::block_ids::PackBlockIds::new(
+                ids,
+                game.block_registry.block_state_table(),
+                game.block_registry.tags(),
+            ))
+        });
+        game.mesh_dispatcher = game.mesh_dispatcher.with_pack(pack);
+        gfx.renderer
+            .set_terrain_format(game.mesh_dispatcher.format());
+        game.rebuild_meshes();
     }
     if let Err(e) = gfx.renderer.render_world(
         game.block_registry.render_view(),
