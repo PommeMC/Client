@@ -107,12 +107,12 @@ impl MainMenu {
             return result;
         }
 
-        let (lines, code, buttons): (Vec<String>, Option<String>, [&str; 2]) =
+        let (lines, code, buttons): (Vec<String>, Option<String>, Vec<&str>) =
             match (&self.access_token, &*self.sign_in.read()) {
                 (Some(_), _) => (
                     vec![format!("Signed in as {}", self.username)],
                     None,
-                    ["Sign Out", "Back"],
+                    vec!["Sign Out", "Back"],
                 ),
                 (None, SignIn::Idle) if gated => (
                     vec![
@@ -120,15 +120,15 @@ impl MainMenu {
                         "Sign in with the Microsoft account that owns Minecraft.".into(),
                     ],
                     None,
-                    ["Sign In", leave],
+                    vec!["Sign In", leave],
                 ),
                 (None, SignIn::Idle) => (
                     vec!["Sign in with a Microsoft account to join online servers.".into()],
                     None,
-                    ["Sign In", leave],
+                    vec!["Sign In", leave],
                 ),
                 (None, SignIn::Requesting) => {
-                    (vec!["Contacting Microsoft...".into()], None, ["", "Cancel"])
+                    (vec!["Contacting Microsoft...".into()], None, vec!["Cancel"])
                 }
                 (None, SignIn::Code(code)) => (
                     vec![format!(
@@ -136,12 +136,12 @@ impl MainMenu {
                         code.verification_uri
                     )],
                     Some(code.user_code.clone()),
-                    ["Open Link", "Cancel"],
+                    vec!["Open Link", "Cancel"],
                 ),
                 (None, SignIn::Failed(reason)) => (
                     vec!["Sign-in failed:".into(), reason.clone()],
                     None,
-                    ["Try Again", leave],
+                    vec!["Try Again", leave],
                 ),
                 (None, SignIn::Done(_)) => unreachable!("handled above"),
             };
@@ -187,10 +187,10 @@ impl MainMenu {
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
         let mut pressed = None;
-        for (label, x) in [
-            (buttons[0], cx - btn_w - gap / 2.0),
-            (buttons[1], cx + gap / 2.0),
-        ] {
+        let n = buttons.len() as f32;
+        let row_x = cx - (n * btn_w + (n - 1.0) * gap) / 2.0;
+        for (i, label) in buttons.into_iter().enumerate() {
+            let x = row_x + (i as f32) * (btn_w + gap);
             if !label.is_empty()
                 && push_button_f(
                     &mut elements,
