@@ -56,8 +56,9 @@ chat = "/setblock -46 -60 6 minecraft:jukebox"
 [[step]]
 chat = "/summon minecraft:parrot -47.5 -60 5.5 {NoAI:1b,Variant:0,Rotation:[180f,0f]}"
 
+# The jukebox's level event only reaches parrots the client already has.
 [[step]]
-expect = { entity = "parrot" }
+expect = { entity = "parrot", at = [-47.5, -60.0, 5.5] }
 
 [[step]]
 chat = "/item replace block -46 -60 6 container.0 with minecraft:music_disc_cat"

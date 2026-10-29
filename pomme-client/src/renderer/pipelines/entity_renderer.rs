@@ -1336,6 +1336,10 @@ fn mob_definitions() -> Vec<MobDef> {
             baby_overlays: vec![],
         },
         // TODO: `BeeStingerLayer` (stingers stuck in players, `BeeStingerModel`).
+        // TODO: `BeeFlyingSoundInstance` / `BeeAggressiveSoundInstance`, the
+        // looping buzz `postAddEntitySoundInstance` starts per bee; its volume
+        // and pitch follow the bee's speed each tick, which the audio engine
+        // can't change on a playing sound yet.
         MobDef {
             kind: EntityKind::Bee,
             anim: AnimationType::Bee,

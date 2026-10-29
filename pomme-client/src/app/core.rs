@@ -3552,6 +3552,7 @@ impl AppCore {
         let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(
             dx,
+            0.0,
             dz,
             &mut game.player_walk_pos,
             &mut game.player_walk_speed,
