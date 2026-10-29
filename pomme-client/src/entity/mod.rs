@@ -174,6 +174,100 @@ impl CopperGolemAnim {
     }
 }
 
+/// Vanilla `BinaryAnimator(10, EasingType.IN_OUT_SINE)`: a tick ramp
+/// toward 10 while active, back to 0 while not, eased on read.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BinaryAnimator {
+    ticks: u8,
+    ticks_old: u8,
+}
+
+impl BinaryAnimator {
+    const LENGTH: u8 = 10;
+
+    fn tick(&mut self, active: bool) {
+        self.ticks_old = self.ticks;
+        if active {
+            self.ticks = (self.ticks + 1).min(Self::LENGTH);
+        } else {
+            self.ticks = self.ticks.saturating_sub(1);
+        }
+    }
+
+    /// `getFactor(partialTicks)`, `Ease.inOutSine` applied.
+    pub fn factor(&self, partial: f32) -> f32 {
+        let old = f32::from(self.ticks_old);
+        let x = (old + partial * (f32::from(self.ticks) - old)) / f32::from(Self::LENGTH);
+        -((std::f32::consts::PI * x).cos() - 1.0) / 2.0
+    }
+}
+
+/// The baby axolotl's `AnimationState`s (vanilla `Axolotl.ALL_ANIMATIONS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BabyAxolotlAnim {
+    Swim,
+    Walk,
+    WalkUnderWater,
+    IdleUnderWater,
+    IdleUnderWaterOnGround,
+    IdleOnGround,
+    PlayDead,
+}
+
+/// Client-side axolotl animation state (vanilla `Axolotl.baseTick`'s
+/// `tickAdultAnimations` / `tickBabyAnimations`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AxolotlSim {
+    pub playing_dead: bool,
+    pub playing_dead_animator: BinaryAnimator,
+    pub in_water_animator: BinaryAnimator,
+    pub on_ground_animator: BinaryAnimator,
+    pub moving_animator: BinaryAnimator,
+    /// The baby's one running animation (`soloAnimation`) and its start tick.
+    pub baby_anim: Option<(BabyAxolotlAnim, u32)>,
+}
+
+impl AxolotlSim {
+    /// `is_moving` is `walkAnimation.isMoving() || xRot != xRotO || yRot !=
+    /// yRotO`; `tick` is the post-increment `tickCount`.
+    fn tick(&mut self, is_baby: bool, in_water: bool, on_ground: bool, is_moving: bool, tick: u32) {
+        if is_baby {
+            self.moving_animator.tick(is_moving);
+            use BabyAxolotlAnim as A;
+            let anim = if self.playing_dead {
+                A::PlayDead
+            } else if is_moving {
+                if in_water && !on_ground {
+                    A::Swim
+                } else if !in_water && on_ground {
+                    A::Walk
+                } else {
+                    A::WalkUnderWater
+                }
+            } else if in_water && !on_ground {
+                A::IdleUnderWater
+            } else if in_water && on_ground {
+                A::IdleUnderWaterOnGround
+            } else {
+                A::IdleOnGround
+            };
+            // `startIfStopped`: a running animation keeps its clock.
+            if self.baby_anim.is_none_or(|(running, _)| running != anim) {
+                self.baby_anim = Some((anim, tick));
+            }
+        } else {
+            // `AxolotlAnimationState`: playing dead, then in water, then on
+            // the ground, else in the air.
+            let dead = self.playing_dead;
+            self.playing_dead_animator.tick(dead);
+            self.in_water_animator.tick(!dead && in_water);
+            self.on_ground_animator
+                .tick(!dead && !in_water && on_ground);
+            self.moving_animator.tick(is_moving);
+        }
+    }
+}
+
 /// Vanilla `Fox` client state: the synced flags byte and the crouch spring
 /// (`Fox.tick`). The interested head tilt reuses the wolf's spring.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -397,6 +491,8 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::Parrot
             | EntityKind::Dolphin
             | EntityKind::Turtle
+            | EntityKind::Axolotl
+            | EntityKind::PolarBear
     ) || is_equine(&kind)
         || is_llama(kind)
 }
@@ -567,12 +663,15 @@ pub struct LivingEntity {
     pub prev_relax_state_one_amount: f32,
     /// Tick the rabbit hop keyframe clock started at, while hopping.
     pub hop_anim_start: Option<u32>,
-    /// Equine flag-byte state (grass eating, rearing, open mouth).
+    /// Equine flag-byte state (grass eating, rearing, open mouth);
+    /// `is_standing` is also the polar bear's `DATA_STANDING_ID`.
     pub is_eating: bool,
     pub is_standing: bool,
     pub is_open_mouth: bool,
     pub eat_anim: f32,
     pub prev_eat_anim: f32,
+    /// Equine rear spring (0..1); the polar bear's
+    /// `clientSideStandAnimation` (0..6).
     pub stand_anim: f32,
     pub prev_stand_anim: f32,
     pub mouth_anim: f32,
@@ -613,6 +712,7 @@ pub struct LivingEntity {
     pub sulfur_fuse: i32,
     pub fox: FoxSim,
     pub panda: PandaSim,
+    pub axolotl: AxolotlSim,
     /// `Turtle.HAS_EGG` / `LAYING_EGG`.
     pub has_egg: bool,
     pub laying_egg: bool,
@@ -686,6 +786,7 @@ pub(crate) fn living_entity_dimensions(entity: &LivingEntity) -> EntityDimension
     if entity.is_baby {
         (dims.width, dims.height) = baby_dimensions(entity.entity_type, dims.width, dims.height);
     }
+    dims.height *= entity.stand_height_scale();
     dims
 }
 
@@ -847,6 +948,7 @@ impl LivingEntity {
             sulfur_fuse: -1,
             fox: FoxSim::default(),
             panda: PandaSim::default(),
+            axolotl: AxolotlSim::default(),
             has_egg: false,
             laying_egg: false,
             puff_state: 0,
@@ -986,7 +1088,7 @@ impl LivingEntity {
             self.is_baby,
         );
         self.prev_position.lerp(self.position, f64::from(partial))
-            + DVec3::new(0.0, f64::from(eye), 0.0)
+            + DVec3::new(0.0, f64::from(eye * self.stand_height_scale()), 0.0)
     }
 
     /// The wolf / fox interested tilt between ticks, before its
@@ -997,6 +1099,17 @@ impl LivingEntity {
             self.prev_interested_angle,
             self.interested_angle,
         )
+    }
+
+    /// `PolarBear.getDefaultDimensions`' height stretch while standing. Its
+    /// `tick` refreshes the dimensions before stepping the stand counter, so
+    /// they hold the previous value.
+    fn stand_height_scale(&self) -> f32 {
+        if self.entity_type == EntityKind::PolarBear {
+            1.0 + self.prev_stand_anim / 6.0
+        } else {
+            1.0
+        }
     }
 
     /// Vanilla `WalkAnimationState.position(partialTick)` (babies run the
@@ -1272,6 +1385,22 @@ impl LivingEntity {
             // particle type yet).
             EntityKind::Bee => self.bee.tick(),
             EntityKind::Fox => self.fox.tick(),
+            // `Axolotl.baseTick` runs before the interpolation step, where a
+            // remote entity's rotation still equals the `setOldPosAndRot`
+            // copy, so only the walk speed (its pre-update value) can move it.
+            EntityKind::Axolotl => self.axolotl.tick(
+                self.is_baby,
+                self.is_in_water,
+                self.on_ground,
+                self.prev_walk_anim_speed > 1.0e-5,
+                self.age_in_ticks + 1,
+            ),
+            // `PolarBear.tick`: `clientSideStandAnimation`, 0..6.
+            EntityKind::PolarBear => {
+                self.prev_stand_anim = self.stand_anim;
+                let step = if self.is_standing { 1.0 } else { -1.0 };
+                self.stand_anim = (self.stand_anim + step).clamp(0.0, 6.0);
+            }
             EntityKind::Slime => self.tick_squish(),
             EntityKind::SulfurCube => {
                 if self.sulfur_fuse > 0 {
@@ -1856,6 +1985,12 @@ impl EntityStore {
             }
             (EntityKind::Turtle, 18, Bool(b)) => entity.has_egg = b,
             (EntityKind::Turtle, 19, Bool(b)) => entity.laying_egg = b,
+            // `Axolotl.Variant.byId`: out-of-range ids fall back to LUCY.
+            (EntityKind::Axolotl, 18, Int(v)) => {
+                entity.variant = if (0..=4).contains(&v) { v as u32 } else { 0 }
+            }
+            (EntityKind::Axolotl, 19, Bool(b)) => entity.axolotl.playing_dead = b,
+            (EntityKind::PolarBear, 18, Bool(b)) => entity.is_standing = b,
             // Salmon size ids clamp to SMALL..LARGE; a pufferfish puff state
             // outside 0/1 renders big (vanilla `switch` default).
             // `Sniffer.onSyncedDataUpdated`: every update stops all five
@@ -2096,6 +2231,9 @@ impl EntityStore {
                     &mut entity.prev_walk_anim_speed,
                 );
             }
+            // TODO: vanilla's `baseTick` reads the water state before the
+            // interpolation step; this probes after it, so in-water mobs
+            // (axolotl, fish) can lag a tick at a water edge.
             if probes_water(&entity.entity_type) {
                 entity.is_in_water = entity.probe_water(chunks, block_state_table);
             }
@@ -2255,6 +2393,8 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::Mooshroom
                 | EntityKind::Dolphin
                 | EntityKind::Turtle
+                | EntityKind::Axolotl
+                | EntityKind::PolarBear
         )
 }
 
@@ -2280,6 +2420,7 @@ fn probes_water(kind: &EntityKind) -> bool {
             | EntityKind::Pufferfish
             | EntityKind::Panda
             | EntityKind::Turtle
+            | EntityKind::Axolotl
     )
 }
 
@@ -2534,6 +2675,77 @@ mod tests {
         assert_eq!(store.living[&2].variant, 1);
         store.apply_entity_data(2, 16, MetaValue::Bool(true));
         assert!(store.living[&2].is_baby);
+    }
+
+    /// `Axolotl.DATA_VARIANT` (18) and `DATA_PLAYING_DEAD` (19): the adult
+    /// ramps its eased playing-dead animator, the baby solos one
+    /// `AnimationState` that keeps its clock while it stays selected.
+    #[test]
+    fn axolotl_synced_data_drives_its_animations() {
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::Axolotl, Position::default());
+        store.apply_entity_data(1, 18, MetaValue::Int(4));
+        assert_eq!(store.living[&1].variant, 4);
+        store.apply_entity_data(1, 18, MetaValue::Int(5));
+        assert_eq!(store.living[&1].variant, 0);
+
+        store.apply_entity_data(1, 19, MetaValue::Bool(true));
+        for _ in 0..5 {
+            tick(&mut store);
+        }
+        let sim = store.living[&1].axolotl;
+        assert_eq!(sim.playing_dead_animator.factor(1.0), 0.5);
+        assert_eq!(sim.in_water_animator.factor(1.0), 0.0);
+        assert_eq!(sim.baby_anim, None);
+        for _ in 0..10 {
+            tick(&mut store);
+        }
+        assert_eq!(
+            store.living[&1].axolotl.playing_dead_animator.factor(0.0),
+            1.0
+        );
+
+        store.apply_entity_data(1, 16, MetaValue::Bool(true));
+        let start = store.living[&1].age_in_ticks + 1;
+        tick(&mut store);
+        tick(&mut store);
+        assert_eq!(
+            store.living[&1].axolotl.baby_anim,
+            Some((BabyAxolotlAnim::PlayDead, start))
+        );
+        store.apply_entity_data(1, 19, MetaValue::Bool(false));
+        let start = store.living[&1].age_in_ticks + 1;
+        tick(&mut store);
+        assert_eq!(
+            store.living[&1].axolotl.baby_anim,
+            Some((BabyAxolotlAnim::IdleOnGround, start))
+        );
+    }
+
+    /// `PolarBear.DATA_STANDING_ID` (18) steps the 0..6 stand counter; the
+    /// hitbox height trails it by a tick.
+    #[test]
+    fn polar_bear_standing_stretches_its_height() {
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::PolarBear, Position::default());
+        store.apply_entity_data(1, 18, MetaValue::Bool(true));
+        for _ in 0..3 {
+            tick(&mut store);
+        }
+        let e = &store.living[&1];
+        assert_eq!((e.prev_stand_anim, e.stand_anim), (2.0, 3.0));
+        assert_eq!(living_entity_dimensions(e).height, 1.4 * (1.0 + 2.0 / 6.0));
+        for _ in 0..10 {
+            tick(&mut store);
+        }
+        assert_eq!(store.living[&1].stand_anim, 6.0);
+        store.apply_entity_data(1, 18, MetaValue::Bool(false));
+        tick(&mut store);
+        assert_eq!(store.living[&1].stand_anim, 5.0);
+        assert_eq!(
+            living_entity_dimensions(&store.living[&1]).height,
+            1.4 * 2.0
+        );
     }
 
     fn tick(store: &mut EntityStore) {

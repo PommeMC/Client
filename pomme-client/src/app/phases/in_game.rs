@@ -4143,6 +4143,7 @@ pub fn update_game(
                     llama_decor: extras.llama_decor,
                     bee: extras.bee,
                     fox: extras.fox,
+                    axolotl: extras.axolotl,
                     panda: extras.panda,
                     parrot: extras.parrot,
                     dolphin_moving: extras.dolphin_moving,
@@ -5048,6 +5049,7 @@ struct EntityExtras {
     llama_decor: Option<crate::renderer::pipelines::entity_renderer::LlamaDecor>,
     bee: crate::renderer::entity_model::BeeAnims,
     fox: crate::renderer::entity_model::FoxAnims,
+    axolotl: crate::renderer::entity_model::AxolotlAnims,
     panda: crate::renderer::entity_model::PandaAnims,
     parrot: crate::renderer::entity_model::ParrotAnims,
     dolphin_moving: bool,
@@ -5207,6 +5209,16 @@ fn entity_extras(
         },
         EntityKind::Bee => bee_extras(e, alpha, game_time),
         EntityKind::Fox => fox_extras(e, alpha),
+        EntityKind::Axolotl => EntityExtras {
+            variant_index: e.variant,
+            axolotl: axolotl_anims(e, alpha),
+            ..Default::default()
+        },
+        // `PolarBear.getStandingAnimationScale`.
+        EntityKind::PolarBear => EntityExtras {
+            stand_anim: lerp(alpha, e.prev_stand_anim, e.stand_anim) / 6.0,
+            ..Default::default()
+        },
         EntityKind::Panda => panda_extras(e, alpha),
         EntityKind::Parrot => parrot_extras(e, alpha),
         EntityKind::Sniffer => EntityExtras {
@@ -5373,6 +5385,36 @@ fn parrot_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
         },
         ..Default::default()
     }
+}
+
+/// Vanilla `AxolotlRenderer.extractRenderState`.
+fn axolotl_anims(
+    e: &crate::entity::LivingEntity,
+    alpha: f32,
+) -> crate::renderer::entity_model::AxolotlAnims {
+    use crate::entity::BabyAxolotlAnim as A;
+    let sim = &e.axolotl;
+    let mut anims = crate::renderer::entity_model::AxolotlAnims {
+        playing_dead_factor: sim.playing_dead_animator.factor(alpha),
+        in_water_factor: sim.in_water_animator.factor(alpha),
+        on_ground_factor: sim.on_ground_animator.factor(alpha),
+        moving_factor: sim.moving_animator.factor(alpha),
+        ..Default::default()
+    };
+    if let Some((anim, start)) = sim.baby_anim {
+        let clock = Some(anim_clock_secs(e, start, alpha));
+        match anim {
+            A::Swim => anims.swim = clock,
+            A::Walk => anims.walk = clock,
+            A::IdleUnderWater => anims.idle_under_water = clock,
+            A::IdleUnderWaterOnGround => anims.idle_under_water_on_ground = clock,
+            A::IdleOnGround => anims.idle_on_ground = clock,
+            A::PlayDead => anims.play_dead = clock,
+            // `BabyAxolotlModel` never reads this state.
+            A::WalkUnderWater => {}
+        }
+    }
+    anims
 }
 
 /// Vanilla `SnifferRenderer.extractRenderState`.

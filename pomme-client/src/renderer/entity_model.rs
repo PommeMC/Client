@@ -3,6 +3,7 @@ use glam::{Mat4, Vec3};
 use crate::renderer::chunk::mesher::pack_uv;
 use crate::renderer::rhi;
 
+mod axolotl;
 mod bee;
 mod copper_golem_anim;
 mod dolphin;
@@ -10,14 +11,17 @@ mod fox;
 mod llama;
 mod panda;
 mod parrot;
+mod polar_bear;
 mod sniffer_anim;
 mod turtle;
+pub use axolotl::*;
 pub use bee::*;
 pub use dolphin::*;
 pub use fox::*;
 pub use llama::*;
 pub use panda::*;
 pub use parrot::*;
+pub use polar_bear::*;
 pub use turtle::*;
 
 /// An entity or block-entity model vertex: its position, UV and face normal.

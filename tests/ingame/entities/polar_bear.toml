@@ -1,0 +1,63 @@
+# Polar bear and cub at rest, three-quarter view from above. The adult mesh
+# is scaled 1.2 from its root; the cub is its own 64x64 mesh, not a scaled
+# adult.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+deterministic = true
+
+# A pillar to look down from.
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 0.5 -57 0.5 0 40"
+
+[[step]]
+expect = { player = { position = [0.5, -57.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:polar_bear -1.5 -60 6.5 {NoAI:1b,Rotation:[150f,0f]}"
+
+[[step]]
+expect = { entity = "polar_bear", baby = false }
+
+[[step]]
+chat = "/summon minecraft:polar_bear 2.5 -60 5 {NoAI:1b,Age:-24000,Rotation:[210f,0f]}"
+
+[[step]]
+expect = { entity = "polar_bear", baby = true }
+
+[[step]]
+look_at = [0.5, -59.5, 6.0]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "polar_bears"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+# The adult drops fish.
+[[step]]
+chat = "/kill @e[type=item]"
+
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"
