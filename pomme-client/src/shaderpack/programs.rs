@@ -11,6 +11,8 @@ pub enum Gbuffers {
     Terrain,
     Block,
     Entities,
+    EntitiesTrans,
+    SpiderEyes,
     Water,
     SkyBasic,
     SkyTextured,
@@ -25,6 +27,8 @@ impl Gbuffers {
             Self::Terrain => "gbuffers_terrain",
             Self::Block => "gbuffers_block",
             Self::Entities => "gbuffers_entities",
+            Self::EntitiesTrans => "gbuffers_entities_translucent",
+            Self::SpiderEyes => "gbuffers_spidereyes",
             Self::Water => "gbuffers_water",
             Self::SkyBasic => "gbuffers_skybasic",
             Self::SkyTextured => "gbuffers_skytextured",
@@ -37,8 +41,9 @@ impl Gbuffers {
         Some(match self {
             Self::Basic => return None,
             Self::Textured | Self::SkyBasic => Self::Basic,
-            Self::TexturedLit | Self::SkyTextured => Self::Textured,
+            Self::TexturedLit | Self::SkyTextured | Self::SpiderEyes => Self::Textured,
             Self::Terrain | Self::Entities => Self::TexturedLit,
+            Self::EntitiesTrans => Self::Entities,
             Self::Block | Self::Water => Self::Terrain,
         })
     }
@@ -60,6 +65,8 @@ mod tests {
             Gbuffers::Terrain,
             Gbuffers::Block,
             Gbuffers::Entities,
+            Gbuffers::EntitiesTrans,
+            Gbuffers::SpiderEyes,
             Gbuffers::Water,
             Gbuffers::SkyBasic,
             Gbuffers::SkyTextured,
@@ -73,5 +80,7 @@ mod tests {
         assert_eq!(Gbuffers::Water.fallback(), Some(Gbuffers::Terrain));
         assert_eq!(Gbuffers::Terrain.fallback(), Some(Gbuffers::TexturedLit));
         assert_eq!(Gbuffers::SkyTextured.fallback(), Some(Gbuffers::Textured));
+        assert_eq!(Gbuffers::EntitiesTrans.fallback(), Some(Gbuffers::Entities));
+        assert_eq!(Gbuffers::SpiderEyes.fallback(), Some(Gbuffers::Textured));
     }
 }

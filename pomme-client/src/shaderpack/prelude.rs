@@ -338,7 +338,10 @@ const ENTITY_SETUP: &str = "
     pomme_Normal = pomme_in_normal.xyz;
     pomme_Color = pomme_in_tint;
     pomme_MultiTexCoord0 = vec4(pomme_in_tex_coords + pomme_in_uv.xy, 0.0, 1.0);
-    pomme_MultiTexCoord1 = pomme_light_coords(max(pomme_in_uv.w, 0.0));
+    // Emissive layers come unlit; Iris draws them full bright.
+    pomme_MultiTexCoord1 = pomme_in_uv.w < 0.0
+        ? vec4(240.0, 240.0, 0.0, 1.0)
+        : pomme_light_coords(pomme_in_uv.w);
 ";
 
 /// The sky push block, both stages: `SkyPush` on the Rust side.

@@ -769,6 +769,7 @@ impl Renderer {
         frame: usize,
         mode: &RenderMode,
     ) -> bool {
+        use pipelines::entity_renderer::PackLayer;
         use pipelines::shaderpack::{PackFrame, PackGeometry, PackRenderer};
         let RenderMode::World {
             sky,
@@ -940,6 +941,19 @@ impl Renderer {
         terrain(&mut pack, PackGeometry::Terrain, View::Camera);
         draw_entities(&mut pack, PackGeometry::Entities, &frustum, None);
         draw_block_entities(&mut pack, PackGeometry::BlockEntities);
+        for layer in PackLayer::ALL {
+            if !entity_renderer.has_pack_layer(layer) {
+                continue;
+            }
+            let geometry = layer.geometry();
+            if let Some((mut pass, binding)) = pack.begin_geometry(device, encoder, frame, geometry)
+            {
+                entity_renderer.pack_binding = Some(binding);
+                entity_renderer.draw_pack_layer(&mut pass, frame, layer);
+                entity_renderer.pack_binding = None;
+                pack.end_geometry(encoder, pass, geometry);
+            }
+        }
         pack.copy_opaque_depth(encoder, false);
         pack.run_full_screen(device, encoder, frame, true);
         water(&mut pack, PackGeometry::Water, &frustum);

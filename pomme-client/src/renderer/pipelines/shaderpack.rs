@@ -12,7 +12,7 @@ use glam::{DVec3, IVec2, IVec3, Mat4, Vec3, Vec4};
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::chunk::buffer::CHUNK_VERTEX_BUFFERS;
 use crate::renderer::entity_model::EntityVertex;
-use crate::renderer::pipelines::entity_renderer::PackShadow;
+use crate::renderer::pipelines::entity_renderer::{PackShadow, SWIRL_BLEND};
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::pipelines::sky::{
     SKY_PUSH_SIZE, SkyDraw, SkyPipeline, SkyVertex, celestial_pose,
@@ -47,6 +47,10 @@ pub enum PackGeometry {
     SkyTextured,
     Terrain,
     Entities,
+    /// Translucent entity layers: slime shells, seen-invisible mobs.
+    EntitiesTranslucent,
+    /// Emissive eye layers.
+    EntityEyes,
     BlockEntities,
     Water,
 }
@@ -89,6 +93,8 @@ impl PackGeometry {
             Self::SkyTextured => Gbuffers::SkyTextured,
             Self::Terrain => Gbuffers::Terrain,
             Self::Entities => Gbuffers::Entities,
+            Self::EntitiesTranslucent => Gbuffers::EntitiesTrans,
+            Self::EntityEyes => Gbuffers::SpiderEyes,
             Self::BlockEntities => Gbuffers::Block,
             Self::Water => Gbuffers::Water,
         })
@@ -116,6 +122,19 @@ impl PackGeometry {
         shaderpack::gbuffers_geometry(program.expect("drawn geometry has a gbuffers program"))
     }
 }
+
+/// `ProgramId.SpiderEyes`'s default blend override: the eyes add their
+/// color and keep the target's alpha.
+const SPIDER_EYES_BLEND: rhi::BlendState = rhi::BlendState {
+    color: rhi::BlendComponent {
+        src: rhi::BlendFactor::SrcAlpha,
+        dst: rhi::BlendFactor::One,
+    },
+    alpha: rhi::BlendComponent {
+        src: rhi::BlendFactor::Zero,
+        dst: rhi::BlendFactor::One,
+    },
+};
 
 /// Which entities a pack's shadow pass draws: `shaders.properties`'s
 /// `shadowEntities`, `shadowPlayer` and `shadowBlockEntities`, with Iris's
@@ -162,6 +181,8 @@ impl ShadowCasters {
 #[derive(Clone, Copy)]
 pub struct PackBinding {
     pub pipeline: rhi::backend::RenderPipeline,
+    /// The program's additive variant, if it has one.
+    pub overlay: Option<rhi::backend::RenderPipeline>,
     pub sets: [rhi::backend::BindGroup; 3],
 }
 
@@ -224,7 +245,8 @@ struct FrameUniform {
 /// One compiled program on the GPU.
 struct Program {
     pipeline: rhi::backend::RenderPipeline,
-    /// The sky programs' additive variant, for the sun, moon and stars.
+    /// The additive variant: the sky's for the sun, moon and stars,
+    /// `gbuffers_entities`'s for the energy swirl.
     overlay: Option<rhi::backend::RenderPipeline>,
     layout: rhi::backend::PipelineLayout,
     uniform_layout: rhi::backend::BindGroupLayout,
@@ -376,6 +398,8 @@ impl PackRenderer {
             PackGeometry::SkyTextured,
             PackGeometry::Terrain,
             PackGeometry::Entities,
+            PackGeometry::EntitiesTranslucent,
+            PackGeometry::EntityEyes,
             PackGeometry::BlockEntities,
             PackGeometry::Water,
         ]
@@ -709,7 +733,11 @@ impl PackRenderer {
             Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured) => &sky_buffers,
             Some(PackGeometry::Terrain) => &CHUNK_VERTEX_BUFFERS,
             Some(PackGeometry::Water) => &CHUNK_VERTEX_BUFFERS[..1],
-            Some(PackGeometry::Entities) => &entity_buffers,
+            Some(
+                PackGeometry::Entities
+                | PackGeometry::EntitiesTranslucent
+                | PackGeometry::EntityEyes,
+            ) => &entity_buffers,
             Some(PackGeometry::BlockEntities) => &block_entity_buffers,
             Some(_) => unreachable!("drawn geometries aren't shadow ones"),
             None => &[],
@@ -723,28 +751,38 @@ impl PackRenderer {
                 _ => rhi::CullMode::None,
             },
             front_face: rhi::FrontFace::Cw,
-            // Vanilla's sky writes no depth.
-            depth: geometry.map(|_| {
-                if sky {
+            // Vanilla's sky and `EYES` write no depth.
+            depth: geometry.map(|g| {
+                if sky || g == PackGeometry::EntityEyes {
                     rhi::DepthState::READ_ONLY
                 } else {
                     rhi::DepthState::WRITE
                 }
             }),
-            blend: (sky || geometry.is_some_and(PackGeometry::water))
-                .then_some(rhi::BlendState::TRANSLUCENT),
+            blend: match geometry {
+                Some(PackGeometry::EntityEyes) => Some(SPIDER_EYES_BLEND),
+                Some(g) if sky || g.water() || g == PackGeometry::EntitiesTranslucent => {
+                    Some(rhi::BlendState::TRANSLUCENT)
+                }
+                _ => None,
+            },
             // As the normal sky does, so the disc has no cracks.
             depth_clamp: sky,
             ..rhi::RenderPipelineDesc::new(&compiled.path, vertex, fragment, vertex_buffers)
         };
-        let overlay = rhi::RenderPipelineDesc {
-            blend: Some(rhi::BlendState::OVERLAY),
-            ..desc
+        let overlay_blend = match geometry {
+            _ if sky => Some(rhi::BlendState::OVERLAY),
+            Some(PackGeometry::Entities) => Some(SWIRL_BLEND),
+            _ => None,
         };
         let pipelines = rhi::backend::try_create_render_pipeline(device, targets, layout, &desc)
             .and_then(|pipeline| {
-                let overlay = sky
-                    .then(|| {
+                let overlay = overlay_blend
+                    .map(|blend| {
+                        let overlay = rhi::RenderPipelineDesc {
+                            blend: Some(blend),
+                            ..desc
+                        };
                         rhi::backend::try_create_render_pipeline(device, targets, layout, &overlay)
                     })
                     .transpose()
@@ -1214,6 +1252,7 @@ impl PackRenderer {
         };
         let binding = PackBinding {
             pipeline: program.pipeline,
+            overlay: program.overlay,
             sets: [program.uniform_sets[frame], sampler_set, resources],
         };
         let (attachments, depth, extent) = self.geometry_targets(program, geometry.shadow());
@@ -1258,9 +1297,8 @@ impl PackRenderer {
             else {
                 continue;
             };
-            let overlay = self.geometry[&geometry].overlay;
             for draw in run {
-                let pipeline = overlay.filter(|_| draw.stage.overlay());
+                let pipeline = binding.overlay.filter(|_| draw.stage.overlay());
                 pass.set_pipeline(&pipeline.unwrap_or(binding.pipeline));
                 sky.record(&pass, draw, 3);
             }
