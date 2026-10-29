@@ -174,6 +174,40 @@ impl CopperGolemAnim {
     }
 }
 
+/// Vanilla `Fox` client state: the synced flags byte and the crouch spring
+/// (`Fox.tick`). The interested head tilt reuses the wolf's spring.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FoxSim {
+    pub flags: u8,
+    pub crouch_amount: f32,
+    pub crouch_amount_o: f32,
+}
+
+impl FoxSim {
+    pub fn is_crouching(&self) -> bool {
+        self.flags & 4 != 0
+    }
+    pub fn is_pouncing(&self) -> bool {
+        self.flags & 16 != 0
+    }
+    pub fn is_sleeping(&self) -> bool {
+        self.flags & 32 != 0
+    }
+    pub fn is_faceplanted(&self) -> bool {
+        self.flags & 64 != 0
+    }
+
+    /// The crouch half of `Fox.tick`.
+    fn tick(&mut self) {
+        self.crouch_amount_o = self.crouch_amount;
+        if self.is_crouching() {
+            self.crouch_amount = (self.crouch_amount + 0.2).min(5.0);
+        } else {
+            self.crouch_amount = 0.0;
+        }
+    }
+}
+
 /// Vanilla `Bee` client state: the synced flags byte and its roll spring.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BeeSim {
@@ -197,6 +231,133 @@ impl BeeSim {
     fn tick(&mut self) {
         self.prev_roll_amount = self.roll_amount;
         self.roll_amount = spring(self.roll_amount, self.is_rolling(), 0.2, 0.24);
+    }
+}
+
+/// Vanilla `Panda` client state: the synced counters, genes and flags, which
+/// `Panda.tick` also advances client-side, plus its sit / on-back / roll
+/// springs and roll counter.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PandaSim {
+    pub sneeze_counter: i32,
+    pub eat_counter: i32,
+    pub main_gene: u8,
+    pub hidden_gene: u8,
+    pub flags: u8,
+    pub roll_counter: i32,
+    pub sit_amount: f32,
+    pub sit_amount_o: f32,
+    pub on_back_amount: f32,
+    pub on_back_amount_o: f32,
+    pub roll_amount: f32,
+    pub roll_amount_o: f32,
+    /// `isScared()` as of the last tick (worried and thundering).
+    pub is_scared: bool,
+    /// The last tick's `addEatingParticles` fired (eating, counter % 5).
+    pub eat_particles: bool,
+}
+
+impl PandaSim {
+    pub const WORRIED: u32 = 2;
+
+    /// `Gene.byId` (signed byte, out of range = NORMAL).
+    fn gene(id: u8) -> u32 {
+        match id as i8 {
+            g @ 0..=6 => g as u32,
+            _ => 0,
+        }
+    }
+
+    /// `Gene.getVariantFromGenes`: a recessive main gene (brown, weak) only
+    /// shows when the hidden gene matches.
+    pub fn variant(&self) -> u32 {
+        let (main, hidden) = (Self::gene(self.main_gene), Self::gene(self.hidden_gene));
+        if matches!(main, 4 | 5) && main != hidden {
+            0
+        } else {
+            main
+        }
+    }
+
+    pub fn is_sneezing(&self) -> bool {
+        self.flags & 2 != 0
+    }
+    pub fn is_rolling(&self) -> bool {
+        self.flags & 4 != 0
+    }
+    pub fn is_sitting(&self) -> bool {
+        self.flags & 8 != 0
+    }
+    pub fn is_on_back(&self) -> bool {
+        self.flags & 16 != 0
+    }
+    pub fn is_eating(&self) -> bool {
+        self.eat_counter > 0
+    }
+
+    fn set_flag(&mut self, flag: u8, value: bool) {
+        if value {
+            self.flags |= flag;
+        } else {
+            self.flags &= !flag;
+        }
+    }
+
+    /// The client-side half of `Panda.tick` after `super.tick()` (the
+    /// unhappy countdown is the shared one in `tick_living`); returns whether
+    /// it zeroes the pitch (`isSitting` -> `setXRot(0)`).
+    // TODO: the `afterSneeze` SNEEZE particle; pomme has no sneeze particle
+    // type yet. Its sounds are server broadcasts (a client `playSound` with
+    // no player is a no-op), and its jumps and gift drop are server-side.
+    fn tick(&mut self, thundering: bool, in_water: bool, holding_item: bool) -> bool {
+        let worried = self.variant() == Self::WORRIED;
+        if worried {
+            if thundering && !in_water {
+                self.set_flag(8, true);
+                self.eat_counter = 0;
+            } else if !self.is_eating() {
+                self.set_flag(8, false);
+            }
+        }
+        if self.is_sneezing() {
+            self.sneeze_counter += 1;
+            if self.sneeze_counter > 20 {
+                self.set_flag(2, false);
+                self.sneeze_counter = 0;
+            }
+        }
+        if self.is_rolling() {
+            self.roll_counter += 1;
+            if self.roll_counter > 32 {
+                self.set_flag(4, false);
+            }
+        } else {
+            self.roll_counter = 0;
+        }
+        let zero_pitch = self.is_sitting();
+        self.sit_amount_o = self.sit_amount;
+        self.sit_amount = spring(self.sit_amount, self.is_sitting(), 0.15, 0.19);
+        // `handleEating`; stopping after a meal is server-only.
+        self.is_scared = worried && thundering;
+        if !self.is_eating()
+            && self.is_sitting()
+            && !self.is_scared
+            && holding_item
+            && fastrand::u32(0..80) == 1
+        {
+            self.eat_counter = 1;
+        } else if !holding_item || !self.is_sitting() {
+            self.eat_counter = 0;
+        }
+        self.eat_particles = self.is_eating() && self.eat_counter % 5 == 0;
+        if self.is_eating() {
+            self.eat_counter += 1;
+        }
+        self.on_back_amount_o = self.on_back_amount;
+        self.on_back_amount = spring(self.on_back_amount, self.is_on_back(), 0.15, 0.19);
+        self.roll_amount_o = self.roll_amount;
+        self.roll_amount = spring(self.roll_amount, self.is_rolling(), 0.15, 0.19);
+        zero_pitch
     }
 }
 
@@ -230,6 +391,8 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::WanderingTrader
             | EntityKind::SulfurCube
             | EntityKind::Mooshroom
+            | EntityKind::Fox
+            | EntityKind::Panda
             | EntityKind::Bee
             | EntityKind::Parrot
             | EntityKind::Dolphin
@@ -448,6 +611,8 @@ pub struct LivingEntity {
     pub copper_golem: CopperGolemAnim,
     /// Sulfur cube fuse ticks left, -1 while unprimed (`SulfurCube.fuse`).
     pub sulfur_fuse: i32,
+    pub fox: FoxSim,
+    pub panda: PandaSim,
     /// `Turtle.HAS_EGG` / `LAYING_EGG`.
     pub has_egg: bool,
     pub laying_egg: bool,
@@ -503,6 +668,7 @@ pub struct LivingEntity {
 pub(crate) fn baby_dimensions(kind: EntityKind, width: f32, height: f32) -> (f32, f32) {
     let scale = match kind {
         EntityKind::Squid | EntityKind::GlowSquid => return (0.5, 0.5),
+        EntityKind::Fox => 0.6,
         // Their `getAgeScale`.
         EntityKind::Dolphin => 0.65,
         EntityKind::Turtle => 0.3,
@@ -678,6 +844,8 @@ impl LivingEntity {
             allay: AllayAnim::default(),
             copper_golem: CopperGolemAnim::default(),
             sulfur_fuse: -1,
+            fox: FoxSim::default(),
+            panda: PandaSim::default(),
             has_egg: false,
             laying_egg: false,
             puff_state: 0,
@@ -818,6 +986,16 @@ impl LivingEntity {
         );
         self.prev_position.lerp(self.position, f64::from(partial))
             + DVec3::new(0.0, f64::from(eye), 0.0)
+    }
+
+    /// The wolf / fox interested tilt between ticks, before its
+    /// `getHeadRollAngle` scale.
+    pub fn interested_angle(&self, partial: f32) -> f32 {
+        crate::renderer::entity_model::lerp(
+            partial,
+            self.prev_interested_angle,
+            self.interested_angle,
+        )
     }
 
     /// Vanilla `WalkAnimationState.position(partialTick)` (babies run the
@@ -1092,6 +1270,7 @@ impl LivingEntity {
             // TODO: `Bee.tick`'s falling-nectar drip particles (no drip
             // particle type yet).
             EntityKind::Bee => self.bee.tick(),
+            EntityKind::Fox => self.fox.tick(),
             EntityKind::Slime => self.tick_squish(),
             EntityKind::SulfurCube => {
                 if self.sulfur_fuse > 0 {
@@ -1479,12 +1658,15 @@ fn apply_item_fluid_movement(entity: &mut ItemEntity, multiplier: f64) {
 
 pub struct EntityStore {
     pub living: HashMap<i32, LivingEntity>,
+    /// Vanilla `Level.isThundering`, set by the caller before each tick.
+    pub thundering: bool,
 }
 
 impl EntityStore {
     pub fn new() -> Self {
         Self {
             living: HashMap::new(),
+            thundering: false,
         }
     }
 
@@ -1594,9 +1776,23 @@ impl EntityStore {
             // Zombie-family underwater conversion / zombie villager curing.
             (EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned, 18, Bool(b))
             | (EntityKind::ZombieVillager, 19, Bool(b)) => entity.is_converting = b,
-            (EntityKind::Villager | EntityKind::WanderingTrader, 18, Int(c)) => {
-                entity.unhappy_counter = c
+            (
+                EntityKind::Villager | EntityKind::WanderingTrader | EntityKind::Panda,
+                18,
+                Int(c),
+            ) => entity.unhappy_counter = c,
+            // `Fox.Variant` id map (ZERO out of range): 0 red, 1 snow.
+            (EntityKind::Fox, 18, Int(v)) => entity.variant = u32::from(v == 1),
+            (EntityKind::Fox, 19, Byte(f)) => {
+                entity.fox.flags = f;
+                entity.is_sitting = f & 0x01 != 0;
+                entity.is_interested = f & 0x08 != 0;
             }
+            (EntityKind::Panda, 19, Int(c)) => entity.panda.sneeze_counter = c,
+            (EntityKind::Panda, 20, Int(c)) => entity.panda.eat_counter = c,
+            (EntityKind::Panda, 21, Byte(g)) => entity.panda.main_gene = g,
+            (EntityKind::Panda, 22, Byte(g)) => entity.panda.hidden_gene = g,
+            (EntityKind::Panda, 23, Byte(f)) => entity.panda.flags = f,
             // Vanilla sparse rabbit id map: 99 = evil, unknown ids fall back
             // to brown.
             (EntityKind::Rabbit, 18, Int(v)) => {
@@ -1872,6 +2068,7 @@ impl EntityStore {
         simulation_distance: u32,
     ) -> DVec3 {
         let mut local_push = DVec3::ZERO;
+        let thundering = self.thundering;
         for (&id, entity) in &mut self.living {
             entity.tick_interpolation();
             entity.tick_body_rotation();
@@ -1899,6 +2096,12 @@ impl EntityStore {
                 entity.tick_party(chunks, block_state_table);
             }
             entity.tick_kind_anims();
+            if entity.entity_type == EntityKind::Panda {
+                let holding = entity.equipment(EquipmentSlot::Mainhand).is_some();
+                if entity.panda.tick(thundering, entity.is_in_water, holding) {
+                    entity.look_dir = LookDirection::new(entity.look_dir.y_rot_deg(), 0.0);
+                }
+            }
             entity.tick_tamable_anims();
             entity.prev_eat_anim_tick = entity.eat_anim_tick;
             if entity.eat_anim_tick > 0 {
@@ -1915,8 +2118,11 @@ impl EntityStore {
             if entity.swing_time > 0 {
                 entity.swing_time -= 1;
             }
-            // Only `Villager.tick` counts it down, not the wandering trader.
-            if entity.entity_type == EntityKind::Villager && entity.unhappy_counter > 0 {
+            // `Villager.tick` and `Panda.tick` count it down, not the
+            // wandering trader.
+            if matches!(entity.entity_type, EntityKind::Villager | EntityKind::Panda)
+                && entity.unhappy_counter > 0
+            {
                 entity.unhappy_counter -= 1;
             }
             entity.age_in_ticks = entity.age_in_ticks.wrapping_add(1);
@@ -2034,6 +2240,8 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::CopperGolem
                 | EntityKind::WanderingTrader
                 | EntityKind::SulfurCube
+                | EntityKind::Fox
+                | EntityKind::Panda
                 | EntityKind::Mooshroom
                 | EntityKind::Dolphin
                 | EntityKind::Turtle
@@ -2051,6 +2259,7 @@ fn probes_water(kind: &EntityKind) -> bool {
             | EntityKind::Salmon
             | EntityKind::TropicalFish
             | EntityKind::Pufferfish
+            | EntityKind::Panda
             | EntityKind::Turtle
     )
 }
@@ -2088,6 +2297,69 @@ mod tests {
         let mut store = EntityStore::new();
         spawn(&mut store, 1, EntityKind::Cat, Position::default());
         assert_eq!(store.living[&1].variant, CAT_DEFAULT_VARIANT);
+    }
+
+    /// Fox type (19 = flags byte, 18 = variant with ZERO fallback) and the
+    /// client crouch spring capped at 5.
+    #[test]
+    fn fox_flags_and_crouch_spring() {
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::Fox, Position::default());
+        store.apply_entity_data(1, 18, MetaValue::Int(1));
+        assert_eq!(store.living[&1].variant, 1);
+        store.apply_entity_data(1, 18, MetaValue::Int(7));
+        assert_eq!(store.living[&1].variant, 0);
+
+        store.apply_entity_data(1, 19, MetaValue::Byte(0x01 | 0x04 | 0x08 | 0x20));
+        let fox = &store.living[&1];
+        assert!(fox.is_sitting && fox.is_interested);
+        assert!(fox.fox.is_crouching() && fox.fox.is_sleeping());
+        assert!(!fox.fox.is_pouncing() && !fox.fox.is_faceplanted());
+        for _ in 0..30 {
+            tick(&mut store);
+        }
+        assert_eq!(store.living[&1].fox.crouch_amount, 5.0);
+        store.apply_entity_data(1, 19, MetaValue::Byte(0));
+        tick(&mut store);
+        assert_eq!(store.living[&1].fox.crouch_amount, 0.0);
+    }
+
+    /// Panda genes resolve like `Gene.getVariantFromGenes`, and the sneeze
+    /// counter runs client-side until the flag clears itself after 20 ticks.
+    #[test]
+    fn panda_genes_and_client_sneeze() {
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::Panda, Position::default());
+        let variant = |store: &mut EntityStore, main: u8, hidden: u8| {
+            store.apply_entity_data(1, 21, MetaValue::Byte(main));
+            store.apply_entity_data(1, 22, MetaValue::Byte(hidden));
+            store.living[&1].panda.variant()
+        };
+        assert_eq!(variant(&mut store, 1, 0), 1);
+        assert_eq!(variant(&mut store, 4, 0), 0);
+        assert_eq!(variant(&mut store, 4, 4), 4);
+        assert_eq!(variant(&mut store, 5, 5), 5);
+        assert_eq!(variant(&mut store, 0xFF, 0), 0);
+
+        store.apply_entity_data(1, 23, MetaValue::Byte(0x02));
+        store.apply_entity_data(1, 19, MetaValue::Int(0));
+        for _ in 0..20 {
+            tick(&mut store);
+        }
+        assert!(store.living[&1].panda.is_sneezing());
+        assert_eq!(store.living[&1].panda.sneeze_counter, 20);
+        tick(&mut store);
+        assert!(!store.living[&1].panda.is_sneezing());
+        assert_eq!(store.living[&1].panda.sneeze_counter, 0);
+
+        store.apply_entity_data(1, 23, MetaValue::Byte(0x08));
+        tick(&mut store);
+        assert!((store.living[&1].panda.sit_amount - 0.15).abs() < 1e-6);
+
+        // `Panda.tick` counts the unhappy counter down, like the villager's.
+        store.apply_entity_data(1, 18, MetaValue::Int(2));
+        tick(&mut store);
+        assert_eq!(store.living[&1].unhappy_counter, 1);
     }
 
     /// Bee flags and anger drive the render state; the roll eases in by 0.2

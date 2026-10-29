@@ -307,6 +307,34 @@ fn enqueue_edits(game: &mut GameState, sections: &[(crate::position::ChunkPos, i
     }
 }
 
+/// The client half of `Panda.addEatingParticles`, flagged by the entity tick
+/// (the sound is the server's broadcast).
+fn panda_eating_particles(game: &mut GameState, camera_pos: glam::DVec3) {
+    for e in game.entity_store.living.values() {
+        if e.entity_type != azalea_registry::builtin::EntityKind::Panda || !e.panda.eat_particles {
+            continue;
+        }
+        let Some(azalea_inventory::ItemStack::Present(held)) =
+            e.equipment(azalea_inventory::components::EquipmentSlot::Mainhand)
+        else {
+            continue;
+        };
+        let texture = format!(
+            "item/{}",
+            crate::player::inventory::item_resource_name(held.kind)
+        );
+        game.particle_store.add_panda_eating_particles(
+            &texture,
+            e.position.into(),
+            glam::DVec3::from(e.eye_position(1.0)).y,
+            e.look_dir.x_rot_deg(),
+            e.look_dir.y_rot_deg(),
+            e.body_y_rot_deg,
+            camera_pos,
+        );
+    }
+}
+
 /// A sound following an entity, skipped while it's silent (vanilla
 /// `EntityBoundSoundInstance.canPlaySound`); the playing instance's id.
 #[allow(clippy::too_many_arguments)]
@@ -3194,6 +3222,7 @@ impl AppCore {
         self.tick_remote_entities(game);
         super::sniffer::tick(&mut self.audio, game, renderer.camera_render_position());
         super::copper_golem::tick(&self.audio, game);
+        panda_eating_particles(game, renderer.camera_render_position());
     }
 
     /// `LivingEntity.pushEntities` from every remote living entity's tick,
@@ -3222,6 +3251,9 @@ impl AppCore {
             };
             scoreboard.pushable_by(&pusher_name, local_name)
         };
+        // Vanilla `Level.isThundering`.
+        game.entity_store.thundering =
+            game.environment.has_weather && f64::from(game.sky_state.thunder()) > 0.9;
         *game.player.velocity += game.entity_store.tick_living(
             &game.chunk_store,
             game.block_registry.block_state_table(),

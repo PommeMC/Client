@@ -198,6 +198,8 @@ pub struct EntityRenderInfo {
     /// Llama carpet or trader decor.
     pub llama_decor: Option<LlamaDecor>,
     pub bee: entity_model::BeeAnims,
+    pub fox: entity_model::FoxAnims,
+    pub panda: entity_model::PandaAnims,
     pub parrot: entity_model::ParrotAnims,
     /// `DolphinRenderState.isMoving`.
     pub dolphin_moving: bool,
@@ -284,6 +286,8 @@ impl Default for EntityRenderInfo {
             copper_golem: entity_model::CopperGolemAnims::default(),
             llama_decor: None,
             bee: entity_model::BeeAnims::default(),
+            fox: entity_model::FoxAnims::default(),
+            panda: entity_model::PandaAnims::default(),
             parrot: entity_model::ParrotAnims::default(),
             dolphin_moving: false,
             turtle: entity_model::TurtleAnims::default(),
@@ -964,6 +968,8 @@ enum AnimationType {
     Allay,
     SnowGolem,
     CopperGolem,
+    Fox,
+    Panda,
     Bee,
     Parrot,
     Dolphin,
@@ -1169,6 +1175,18 @@ fn mob_definitions() -> Vec<MobDef> {
     const SULFUR_CUBE_INNER_SMALL_TEX: &[&[&str]] =
         tex_table!("sulfur_cube" => "sulfur_cube_inner_small");
     const DOLPHIN_TEX: &[&[&str]] = tex_table!("dolphin" => "dolphin");
+    // Indexed by `variant * 2 + sleeping`.
+    const FOX_TEX: &[&[&str]] =
+        tex_table!("fox" => "fox", "fox_sleep", "fox_snow", "fox_snow_sleep");
+    const FOX_BABY_TEX: &[&[&str]] = tex_table!("fox" =>
+        "fox_baby", "fox_sleep_baby", "fox_snow_baby", "fox_snow_sleep_baby");
+    // Indexed by `Panda.Gene` id.
+    const PANDA_TEX: &[&[&str]] = tex_table!("panda" =>
+        "panda", "panda_lazy", "panda_worried", "panda_playful", "panda_brown",
+        "panda_weak", "panda_aggressive");
+    const PANDA_BABY_TEX: &[&[&str]] = tex_table!("panda" =>
+        "panda_baby", "lazy_panda_baby", "worried_panda_baby", "playful_panda_baby",
+        "brown_panda_baby", "weak_panda_baby", "aggressive_panda_baby");
     // Indexed by `angry * 2 + nectar`.
     const BEE_TEX: &[&[&str]] =
         tex_table!("bee" => "bee", "bee_nectar", "bee_angry", "bee_angry_nectar");
@@ -1326,6 +1344,30 @@ fn mob_definitions() -> Vec<MobDef> {
             baby: Some(opaque(
                 entity_model::bake_baby_cow_model(),
                 MOOSHROOM_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Fox,
+            anim: AnimationType::Fox,
+            adult: vec![opaque(entity_model::bake_fox_model(), FOX_TEX, 48)],
+            baby: Some(opaque(
+                entity_model::bake_baby_fox_model(),
+                FOX_BABY_TEX,
+                32,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Panda,
+            anim: AnimationType::Panda,
+            adult: vec![opaque(entity_model::bake_panda_model(), PANDA_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_panda_model(),
+                PANDA_BABY_TEX,
                 64,
             )),
             adult_overlays: vec![],
@@ -2586,6 +2628,26 @@ impl EntityRenderer {
                 info.bat_elapsed_secs,
                 info.bat_resting,
             ),
+            AnimationType::Fox => entity_model::compute_fox_anim(
+                model,
+                info.is_baby,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.age_in_ticks,
+                &info.fox,
+            ),
+            AnimationType::Panda => entity_model::compute_panda_anim(
+                model,
+                info.is_baby,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.age_in_ticks,
+                &info.panda,
+            ),
             AnimationType::Bee => {
                 entity_model::compute_bee_anim(model, info.age_in_ticks, &info.bee)
             }
@@ -3314,6 +3376,8 @@ pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
     match kind {
         EntityKind::Villager if is_baby => 0.63,
         // Explicit `BABY_DIMENSIONS` eye heights.
+        EntityKind::Fox if is_baby => 0.34375,
+        EntityKind::Panda if is_baby => 0.28125,
         EntityKind::Dolphin if is_baby => 0.09375,
         EntityKind::Mooshroom if is_baby => 0.69,
         // Explicit `eyeHeight`s, halved; the 0.85 ratio would miss them.
