@@ -197,6 +197,8 @@ pub struct EntityRenderInfo {
     pub copper_golem: entity_model::CopperGolemAnims,
     /// Llama carpet or trader decor.
     pub llama_decor: Option<LlamaDecor>,
+    pub bee: entity_model::BeeAnims,
+    pub parrot: entity_model::ParrotAnims,
     /// `DolphinRenderState.isMoving`.
     pub dolphin_moving: bool,
     pub turtle: entity_model::TurtleAnims,
@@ -281,6 +283,8 @@ impl Default for EntityRenderInfo {
             allay: entity_model::AllayAnims::default(),
             copper_golem: entity_model::CopperGolemAnims::default(),
             llama_decor: None,
+            bee: entity_model::BeeAnims::default(),
+            parrot: entity_model::ParrotAnims::default(),
             dolphin_moving: false,
             turtle: entity_model::TurtleAnims::default(),
             golem_attack_ticks: 0.0,
@@ -960,6 +964,8 @@ enum AnimationType {
     Allay,
     SnowGolem,
     CopperGolem,
+    Bee,
+    Parrot,
     Dolphin,
     Turtle,
     /// Cod, salmon, tropical fish, pufferfish.
@@ -1163,6 +1169,14 @@ fn mob_definitions() -> Vec<MobDef> {
     const SULFUR_CUBE_INNER_SMALL_TEX: &[&[&str]] =
         tex_table!("sulfur_cube" => "sulfur_cube_inner_small");
     const DOLPHIN_TEX: &[&[&str]] = tex_table!("dolphin" => "dolphin");
+    // Indexed by `angry * 2 + nectar`.
+    const BEE_TEX: &[&[&str]] =
+        tex_table!("bee" => "bee", "bee_nectar", "bee_angry", "bee_angry_nectar");
+    const BEE_BABY_TEX: &[&[&str]] = tex_table!("bee" =>
+        "bee_baby", "bee_nectar_baby", "bee_angry_baby", "bee_angry_nectar_baby");
+    // Indexed by `Parrot.Variant` id.
+    const PARROT_TEX: &[&[&str]] = tex_table!("parrot" =>
+        "parrot_red_blue", "parrot_blue", "parrot_green", "parrot_yellow_blue", "parrot_grey");
     const DOLPHIN_BABY_TEX: &[&[&str]] = tex_table!("dolphin" => "dolphin_baby");
     const TURTLE_TEX: &[&[&str]] = tex_table!("turtle" => "turtle");
     const TURTLE_BABY_TEX: &[&[&str]] = tex_table!("turtle" => "turtle_baby");
@@ -1314,6 +1328,30 @@ fn mob_definitions() -> Vec<MobDef> {
                 MOOSHROOM_BABY_TEX,
                 64,
             )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // TODO: `BeeStingerLayer` (stingers stuck in players, `BeeStingerModel`).
+        MobDef {
+            kind: EntityKind::Bee,
+            anim: AnimationType::Bee,
+            adult: vec![opaque(entity_model::bake_bee_model(), BEE_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_bee_model(),
+                BEE_BABY_TEX,
+                32,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // A `MobRenderer`, not an `AgeableMobRenderer`: babies draw the adult
+        // mesh. TODO: `ParrotOnShoulderLayer` (needs the player's
+        // `DATA_SHOULDER_PARROT_LEFT`/`RIGHT`).
+        MobDef {
+            kind: EntityKind::Parrot,
+            anim: AnimationType::Parrot,
+            adult: vec![opaque(entity_model::bake_parrot_model(), PARROT_TEX, 32)],
+            baby: None,
             adult_overlays: vec![],
             baby_overlays: vec![],
         },
@@ -2548,6 +2586,18 @@ impl EntityRenderer {
                 info.bat_elapsed_secs,
                 info.bat_resting,
             ),
+            AnimationType::Bee => {
+                entity_model::compute_bee_anim(model, info.age_in_ticks, &info.bee)
+            }
+            AnimationType::Parrot => entity_model::compute_parrot_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.age_in_ticks,
+                &info.parrot,
+            ),
             AnimationType::Dolphin => entity_model::compute_dolphin_anim(
                 model,
                 info.head_x_rot_deg,
@@ -3267,7 +3317,13 @@ pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
         EntityKind::Dolphin if is_baby => 0.09375,
         EntityKind::Mooshroom if is_baby => 0.69,
         // Explicit `eyeHeight`s, halved; the 0.85 ratio would miss them.
-        EntityKind::Sniffer | EntityKind::Llama | EntityKind::TraderLlama if is_baby => {
+        EntityKind::Sniffer
+        | EntityKind::Bee
+        | EntityKind::Parrot
+        | EntityKind::Llama
+        | EntityKind::TraderLlama
+            if is_baby =>
+        {
             dimensions::EntityDimensions::eye_height(kind) * 0.5
         }
         _ if is_baby => entity_bounds(kind, is_baby).1 * dimensions::DEFAULT_EYE_HEIGHT_RATIO,

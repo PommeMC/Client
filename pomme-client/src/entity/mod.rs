@@ -174,6 +174,42 @@ impl CopperGolemAnim {
     }
 }
 
+/// Vanilla `Bee` client state: the synced flags byte and its roll spring.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BeeSim {
+    pub flags: u8,
+    pub roll_amount: f32,
+    pub prev_roll_amount: f32,
+}
+
+impl BeeSim {
+    pub fn is_rolling(&self) -> bool {
+        self.flags & 0x02 != 0
+    }
+    pub fn has_stung(&self) -> bool {
+        self.flags & 0x04 != 0
+    }
+    pub fn has_nectar(&self) -> bool {
+        self.flags & 0x08 != 0
+    }
+
+    /// `Bee.updateRollAmount`.
+    fn tick(&mut self) {
+        self.prev_roll_amount = self.roll_amount;
+        self.roll_amount = spring(self.roll_amount, self.is_rolling(), 0.2, 0.24);
+    }
+}
+
+/// A 0..1 pose amount stepping `up` toward 1 while `on`, else `down`
+/// toward 0.
+fn spring(cur: f32, on: bool, up: f32, down: f32) -> f32 {
+    if on {
+        (cur + up).min(1.0)
+    } else {
+        (cur - down).max(0.0)
+    }
+}
+
 /// `AgeableMob` descendants on every supported version (Slime joined only
 /// in 26.2, so it's excluded here and special-cased where it matters).
 fn is_ageable_mob(kind: EntityKind) -> bool {
@@ -194,6 +230,8 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::WanderingTrader
             | EntityKind::SulfurCube
             | EntityKind::Mooshroom
+            | EntityKind::Bee
+            | EntityKind::Parrot
             | EntityKind::Dolphin
             | EntityKind::Turtle
     ) || is_equine(&kind)
@@ -399,6 +437,11 @@ pub struct LivingEntity {
     /// The tick the current state's animation started at.
     pub sniffer_state: SnifferState,
     pub sniffer_anim_start: Option<u32>,
+    pub bee: BeeSim,
+    /// `Parrot.partyParrot` and its `jukebox`, set by the jukebox level
+    /// events and cleared in `aiStep`.
+    pub party_parrot: bool,
+    pub jukebox: Option<BlockPos>,
     /// Playing `SnifferSoundInstance`s, stopped once digging ends.
     pub sniffer_dig_sounds: Vec<u64>,
     pub allay: AllayAnim,
@@ -628,6 +671,9 @@ impl LivingEntity {
             bat_anim_start: None,
             sniffer_state: SnifferState::Idling,
             sniffer_anim_start: None,
+            bee: BeeSim::default(),
+            party_parrot: false,
+            jukebox: None,
             sniffer_dig_sounds: Vec::new(),
             allay: AllayAnim::default(),
             copper_golem: CopperGolemAnim::default(),
@@ -787,6 +833,27 @@ impl LivingEntity {
             .min(1.0)
     }
 
+    /// The head of vanilla `Parrot.aiStep`: the party ends once the jukebox
+    /// is out of reach or gone.
+    fn tick_party(&mut self, chunks: &ChunkStore, block_state_table: BlockStateTable) {
+        let in_reach = self.jukebox.is_some_and(|pos| {
+            let center = DVec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            );
+            DVec3::from(self.position).distance_squared(center) < 3.46 * 3.46
+                && block_state_table
+                    .block_state_data(chunks.get_block_state(pos.x, pos.y, pos.z))
+                    .id()
+                    == "jukebox"
+        });
+        if !in_reach {
+            self.party_parrot = false;
+            self.jukebox = None;
+        }
+    }
+
     /// Vanilla `Chicken.aiStep` wing flap; the update order matters.
     fn tick_flap(&mut self) {
         self.prev_flap = self.flap;
@@ -804,13 +871,6 @@ impl LivingEntity {
     /// and relax, and the rabbit hop clock (vanilla ticks these on both
     /// sides; only the driving flags are synced). Inert for other mobs.
     fn tick_tamable_anims(&mut self) {
-        let spring = |cur: f32, on: bool, up: f32, down: f32| {
-            if on {
-                (cur + up).min(1.0)
-            } else {
-                (cur - down).max(0.0)
-            }
-        };
         self.prev_interested_angle = self.interested_angle;
         self.interested_angle +=
             (if self.is_interested { 1.0 } else { 0.0 } - self.interested_angle) * 0.4;
@@ -1025,7 +1085,13 @@ impl LivingEntity {
     /// `aiStep`); arms accrue as mobs land.
     fn tick_kind_anims(&mut self) {
         match self.entity_type {
-            EntityKind::Chicken => self.tick_flap(),
+            // `Parrot.calculateFlapping` is the chicken's flap, but it also
+            // folds while a passenger. TODO: passengers (no client-side
+            // vehicle tracking for other entities yet).
+            EntityKind::Chicken | EntityKind::Parrot => self.tick_flap(),
+            // TODO: `Bee.tick`'s falling-nectar drip particles (no drip
+            // particle type yet).
+            EntityKind::Bee => self.bee.tick(),
             EntityKind::Slime => self.tick_squish(),
             EntityKind::SulfurCube => {
                 if self.sulfur_fuse > 0 {
@@ -1560,7 +1626,7 @@ impl EntityStore {
                 entity.variant = ((v & 0xFF) % 7) | ((((v >> 8) & 0xFF) % 5) << 8);
             }
             // Tamable flags byte: bit 0x01 = sitting, 0x04 = tame.
-            (EntityKind::Wolf | EntityKind::Cat, 18, Byte(f)) => {
+            (EntityKind::Wolf | EntityKind::Cat | EntityKind::Parrot, 18, Byte(f)) => {
                 entity.is_sitting = f & 0x01 != 0;
                 entity.is_tame = f & 0x04 != 0;
             }
@@ -1572,11 +1638,16 @@ impl EntityStore {
             // Persistent anger: a game-time end tick since 1.21.11; on
             // 1.21.9-1.21.10 a remaining-tick countdown the server re-syncs
             // as it decrements, so any positive value means angry.
-            (EntityKind::Wolf, 22, Long(t)) => entity.anger_end_time = t,
-            (EntityKind::Wolf, 22, Int(t)) => {
+            (EntityKind::Wolf, 22, Long(t)) | (EntityKind::Bee, 19, Long(t)) => {
+                entity.anger_end_time = t
+            }
+            (EntityKind::Wolf, 22, Int(t)) | (EntityKind::Bee, 19, Int(t)) => {
                 entity.anger_end_time = if t > 0 { i64::MAX } else { -1 }
             }
             (EntityKind::Cat, 22, Bool(b)) => entity.relax_state_one = b,
+            (EntityKind::Bee, 18, Byte(f)) => entity.bee.flags = f,
+            // `Parrot.Variant.BY_ID` clamps out-of-range ids.
+            (EntityKind::Parrot, 20, Int(v)) => entity.variant = v.clamp(0, 4) as u32,
             // Bat flags byte: bit 0x01 = resting (hanging); a flip restarts
             // the fly/rest animation clock.
             (EntityKind::Bat, 16, Byte(f)) => {
@@ -1695,6 +1766,22 @@ impl EntityStore {
         }
     }
 
+    /// Vanilla `LevelEventHandler.notifyNearbyEntities`: every living
+    /// entity touching the jukebox's box grown by 3 hears it start or stop
+    /// (only parrots react, `Parrot.setRecordPlayingNearby`).
+    pub fn set_record_playing_nearby(&mut self, pos: BlockPos, is_playing: bool) {
+        let b = Aabb::block(pos.x, pos.y, pos.z);
+        let area = Aabb::new(b.min - DVec3::splat(3.0), b.max + DVec3::splat(3.0));
+        for entity in self.living.values_mut() {
+            if entity.entity_type == EntityKind::Parrot
+                && living_entity_aabb(entity).intersects(&area)
+            {
+                entity.jukebox = Some(pos);
+                entity.party_parrot = is_playing;
+            }
+        }
+    }
+
     pub fn set_living_motion(&mut self, id: i32, velocity: DVec3) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.velocity = velocity;
@@ -1808,6 +1895,9 @@ impl EntityStore {
             if probes_water(&entity.entity_type) {
                 entity.is_in_water = entity.probe_water(chunks, block_state_table);
             }
+            if entity.entity_type == EntityKind::Parrot {
+                entity.tick_party(chunks, block_state_table);
+            }
             entity.tick_kind_anims();
             entity.tick_tamable_anims();
             entity.prev_eat_anim_tick = entity.eat_anim_tick;
@@ -1907,6 +1997,8 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
         || matches!(
             kind,
             EntityKind::Player
+                | EntityKind::Bee
+                | EntityKind::Parrot
                 | EntityKind::Pig
                 | EntityKind::Cow
                 | EntityKind::Sheep
@@ -1996,6 +2088,53 @@ mod tests {
         let mut store = EntityStore::new();
         spawn(&mut store, 1, EntityKind::Cat, Position::default());
         assert_eq!(store.living[&1].variant, CAT_DEFAULT_VARIANT);
+    }
+
+    /// Bee flags and anger drive the render state; the roll eases in by 0.2
+    /// and out by 0.24 per tick.
+    #[test]
+    fn bee_flags_and_roll() {
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::Bee, Position::default());
+        store.apply_entity_data(1, 18, MetaValue::Byte(0x02 | 0x08));
+        store.apply_entity_data(1, 19, MetaValue::Long(500));
+        let e = &store.living[&1];
+        assert!(e.bee.is_rolling() && e.bee.has_nectar() && !e.bee.has_stung());
+        assert_eq!(e.anger_end_time, 500);
+        let tick_kind =
+            |store: &mut EntityStore| store.living.get_mut(&1).unwrap().tick_kind_anims();
+        for _ in 0..6 {
+            tick_kind(&mut store);
+        }
+        assert_eq!(store.living[&1].bee.roll_amount, 1.0);
+        store.apply_entity_data(1, 18, MetaValue::Byte(0));
+        tick_kind(&mut store);
+        let bee = &store.living[&1].bee;
+        assert_eq!((bee.prev_roll_amount, bee.roll_amount), (1.0, 0.76));
+    }
+
+    /// Parrot variants clamp; the tamable flags byte carries the sit pose;
+    /// a jukebox event within 3 blocks starts the party.
+    #[test]
+    fn parrot_variant_sitting_and_party() {
+        let mut store = EntityStore::new();
+        spawn(
+            &mut store,
+            1,
+            EntityKind::Parrot,
+            Position::new(0.5, 64.0, 0.5),
+        );
+        store.apply_entity_data(1, 20, MetaValue::Int(9));
+        store.apply_entity_data(1, 18, MetaValue::Byte(0x01));
+        assert_eq!(store.living[&1].variant, 4);
+        assert!(store.living[&1].is_sitting);
+        store.set_record_playing_nearby(BlockPos::new(3, 64, 0), true);
+        assert!(store.living[&1].party_parrot);
+        store.set_record_playing_nearby(BlockPos::new(10, 64, 0), true);
+        assert_eq!(store.living[&1].jukebox, Some(BlockPos::new(3, 64, 0)));
+        // No jukebox block in an empty world: the next tick ends it.
+        tick(&mut store);
+        assert!(!store.living[&1].party_parrot);
     }
 
     /// `Turtle.HAS_EGG`/`LAYING_EGG` land at 18/19 on every wire: 26.1 added

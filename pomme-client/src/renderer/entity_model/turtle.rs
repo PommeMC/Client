@@ -6,8 +6,8 @@ use std::f32::consts::FRAC_PI_2;
 use glam::Vec3;
 
 use super::{
-    BakedEntityModel, EntityPart, PartAnim, bake_model, compute_quadruped_anim, part_index,
-    rotated, vbox, vpart,
+    BakedEntityModel, EntityPart, PartAnim, bake_model, compute_quadruped_anim, find_part,
+    part_index, rotated, vbox, vpart,
 };
 
 /// `TurtleRenderState` flags the model reads.
@@ -166,7 +166,7 @@ pub fn compute_turtle_anim(
         anim.rotation_mut(model, rf).z = -swing;
         anim.rotation_mut(model, lf).z = swing;
     }
-    if let Some(egg_belly) = model.parts.iter().position(|p| p.name == "egg_belly") {
+    if let Some(egg_belly) = find_part(&model.parts, "egg_belly") {
         if t.has_egg {
             // `root.y -= 1`: every part hangs off the root.
             for (i, part) in model.parts.iter().enumerate() {
