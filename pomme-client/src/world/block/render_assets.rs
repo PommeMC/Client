@@ -300,7 +300,7 @@ impl BlockRenderAssets {
                             .cloned();
                         let opaque_full_cube = !block_state_data.is_air
                             && model.as_ref().is_some_and(|m| m.is_full_cube);
-                        let occludes = opaque_full_cube && block_state_data.light.can_occlude;
+                        let occludes = block_state_data.occludes_neighbor_faces();
                         let all_quads_cull = model
                             .as_ref()
                             .is_some_and(|m| m.quads.iter().all(|q| q.cullface.is_some()));
