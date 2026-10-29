@@ -198,6 +198,9 @@ pub struct EntityRenderInfo {
     pub copper_golem: entity_model::CopperGolemAnims,
     /// Llama carpet or trader decor.
     pub llama_decor: Option<LlamaDecor>,
+    /// `DolphinRenderState.isMoving`.
+    pub dolphin_moving: bool,
+    pub turtle: entity_model::TurtleAnims,
     /// Iron golem countdowns; the punch one is partial-tick adjusted.
     pub golem_attack_ticks: f32,
     pub golem_offer_flower_ticks: u32,
@@ -279,6 +282,8 @@ impl Default for EntityRenderInfo {
             allay: entity_model::AllayAnims::default(),
             copper_golem: entity_model::CopperGolemAnims::default(),
             llama_decor: None,
+            dolphin_moving: false,
+            turtle: entity_model::TurtleAnims::default(),
             golem_attack_ticks: 0.0,
             golem_offer_flower_ticks: 0,
             base_tint: WHITE_TINT,
@@ -959,6 +964,8 @@ enum AnimationType {
     Allay,
     SnowGolem,
     CopperGolem,
+    Dolphin,
+    Turtle,
     /// Cod, salmon, tropical fish, pufferfish.
     Fish,
     Golem,
@@ -1159,6 +1166,10 @@ fn mob_definitions() -> Vec<MobDef> {
     const SULFUR_CUBE_INNER_TEX: &[&[&str]] = tex_table!("sulfur_cube" => "sulfur_cube_inner");
     const SULFUR_CUBE_INNER_SMALL_TEX: &[&[&str]] =
         tex_table!("sulfur_cube" => "sulfur_cube_inner_small");
+    const DOLPHIN_TEX: &[&[&str]] = tex_table!("dolphin" => "dolphin");
+    const DOLPHIN_BABY_TEX: &[&[&str]] = tex_table!("dolphin" => "dolphin_baby");
+    const TURTLE_TEX: &[&[&str]] = tex_table!("turtle" => "turtle");
+    const TURTLE_BABY_TEX: &[&[&str]] = tex_table!("turtle" => "turtle_baby");
     // Indexed by `Llama.Variant` id.
     const LLAMA_TEX: &[&[&str]] =
         tex_table!("llama" => "llama_creamy", "llama_white", "llama_brown", "llama_gray");
@@ -1307,6 +1318,39 @@ fn mob_definitions() -> Vec<MobDef> {
                 MOOSHROOM_BABY_TEX,
                 64,
             )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // TODO: `DolphinCarryingItemLayer` (the item held in its mouth).
+        // TODO: `Dolphin.tick`'s client bubble trail (DOLPHIN particles while
+        // fast in water, which needs it in `probes_water`), entity event 38's
+        // happy-villager particles when fed, and a stranded dolphin's client
+        // hops and turns.
+        MobDef {
+            kind: EntityKind::Dolphin,
+            anim: AnimationType::Dolphin,
+            adult: vec![opaque(entity_model::bake_dolphin_model(), DOLPHIN_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_dolphin_model(),
+                DOLPHIN_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Turtle,
+            anim: AnimationType::Turtle,
+            adult: vec![opaque(entity_model::bake_turtle_model(), TURTLE_TEX, 128)],
+            // `BabyTurtleModel` draws `entityCutoutCull`: its legs are
+            // zero-height planes.
+            baby: Some(VariantDef {
+                model: entity_model::bake_baby_turtle_model(),
+                tex_variants: TURTLE_BABY_TEX,
+                tex_size: 16,
+                overlay_kind: OverlayKind::OpaqueCulled,
+                invisible_outline: false,
+            }),
             adult_overlays: vec![],
             baby_overlays: vec![],
         },
@@ -2513,6 +2557,21 @@ impl EntityRenderer {
                 info.bat_elapsed_secs,
                 info.bat_resting,
             ),
+            AnimationType::Dolphin => entity_model::compute_dolphin_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.age_in_ticks,
+                info.dolphin_moving,
+            ),
+            AnimationType::Turtle => entity_model::compute_turtle_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                &info.turtle,
+            ),
             AnimationType::Sniffer => entity_model::compute_sniffer_anim(
                 model,
                 info.head_x_rot_deg,
@@ -3285,6 +3344,7 @@ pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
     match kind {
         EntityKind::Villager if is_baby => 0.63,
         // Explicit `BABY_DIMENSIONS` eye heights.
+        EntityKind::Dolphin if is_baby => 0.09375,
         EntityKind::Mooshroom if is_baby => 0.69,
         // Explicit `eyeHeight`s, halved; the 0.85 ratio would miss them.
         EntityKind::Sniffer | EntityKind::Llama | EntityKind::TraderLlama if is_baby => {
@@ -3361,8 +3421,11 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
             (d.width, d.height)
         }
     };
-    let s = if is_baby { 0.5 } else { 1.0 };
-    (w * s, h * s)
+    if is_baby {
+        crate::entity::baby_dimensions(kind, w, h)
+    } else {
+        (w, h)
+    }
 }
 
 /// Bounding-sphere frustum + distance cull. The frustum planes operate on

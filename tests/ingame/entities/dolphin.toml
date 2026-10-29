@@ -1,0 +1,81 @@
+# Dolphins in and out of water, three-quarter view from above: a pitched
+# adult and a baby at rest in a pool, an adult and a baby on the grass
+# beside it. The baby is its own mesh and texture, not a scaled adult.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+deterministic = true
+
+# A pillar to look down from.
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:stone"
+
+# A two-deep pool cut into the dirt and grass.
+[[step]]
+chat = "/fill -4 -62 3 3 -61 10 minecraft:water"
+
+[[step]]
+expect = { block = "water", at = [-4, -62, 3] }
+
+[[step]]
+chat = "/tp @s 0.5 -57 0.5 0 40"
+
+[[step]]
+expect = { player = { position = [0.5, -57.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:dolphin -1.5 -61.7 7 {NoAI:1b,Rotation:[150f,-25f]}"
+
+[[step]]
+expect = { entity = "dolphin", baby = false }
+
+[[step]]
+chat = "/summon minecraft:dolphin 1.5 -61.6 4.5 {NoAI:1b,Age:-24000,Rotation:[230f,0f]}"
+
+[[step]]
+expect = { entity = "dolphin", baby = true }
+
+[[step]]
+chat = "/summon minecraft:dolphin 6 -60 7 {NoAI:1b,Rotation:[200f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:dolphin 5.5 -60 3.5 {NoAI:1b,Age:-24000,Rotation:[120f,0f]}"
+
+[[step]]
+look_at = [2.0, -60.5, 6.0]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "dolphins"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/fill -4 -62 3 3 -62 10 minecraft:dirt"
+
+[[step]]
+chat = "/fill -4 -61 3 3 -61 10 minecraft:grass_block"
+
+[[step]]
+expect = { block = "grass_block", at = [-4, -61, 3] }
+
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"

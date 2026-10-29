@@ -4,9 +4,13 @@ use crate::renderer::chunk::mesher::pack_uv;
 use crate::renderer::rhi;
 
 mod copper_golem_anim;
+mod dolphin;
 mod llama;
 mod sniffer_anim;
+mod turtle;
+pub use dolphin::*;
 pub use llama::*;
+pub use turtle::*;
 
 /// An entity or block-entity model vertex: its position, UV and face normal.
 #[repr(C)]
@@ -135,6 +139,33 @@ pub struct PartAnim {
     /// Per-axis part scale (vanilla `ModelPart.xScale`..), composed with the
     /// static `part_scales`; inherited by children like vanilla's.
     pub scale: Vec<(usize, Vec3)>,
+}
+
+impl PartAnim {
+    /// Part `idx`'s emitted rotation, starting from its rest rotation if it
+    /// has none yet.
+    fn rotation_mut(&mut self, model: &BakedEntityModel, idx: usize) -> &mut Vec3 {
+        let slot = match self.rotation.iter().position(|&(i, _)| i == idx) {
+            Some(slot) => slot,
+            None => {
+                self.rotation.push((idx, model.parts[idx].default_rotation));
+                self.rotation.len() - 1
+            }
+        };
+        &mut self.rotation[slot].1
+    }
+}
+
+#[cfg(test)]
+impl PartAnim {
+    /// The named part's rendered rotation: its emitted one, else its rest.
+    fn rotation_of(&self, model: &BakedEntityModel, name: &str) -> Vec3 {
+        let i = part_index(&model.parts, name);
+        self.rotation
+            .iter()
+            .find(|&&(j, _)| j == i)
+            .map_or(model.parts[i].default_rotation, |r| r.1)
+    }
 }
 
 impl BakedEntityModel {
@@ -3536,6 +3567,14 @@ fn rotated(part: EntityPart, rotation: Vec3) -> EntityPart {
     EntityPart {
         default_rotation: rotation,
         ..part
+    }
+}
+
+/// `.mirror()` before `addBox`.
+fn mirrored(cube: ModelCube) -> ModelCube {
+    ModelCube {
+        mirror: true,
+        ..cube
     }
 }
 
