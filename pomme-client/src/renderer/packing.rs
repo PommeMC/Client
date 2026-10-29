@@ -5,9 +5,9 @@
 //! its contents: [`fit_atlas_size`] seeds from the padded area and doubles
 //! until everything fits, the way vanilla's `Stitcher.expand` does.
 //
-// TODO: `chunk::atlas::pack` and the font atlas in `pipelines::menu_overlay`
-// are two more hand-rolled shelf packers that predate this module; the font one
-// still drops glyphs on overflow. Both should move over here.
+// TODO: the font atlas in `pipelines::menu_overlay` is another hand-rolled
+// shelf packer that predates this module and still drops glyphs on overflow;
+// it should move over here.
 
 use std::cmp::Reverse;
 

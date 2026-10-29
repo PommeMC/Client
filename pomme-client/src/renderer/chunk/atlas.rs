@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::assets::{AssetId, AssetIndex};
-use crate::renderer::{rhi, util};
+use crate::renderer::{packing, rhi, util};
 use crate::world::block::model::TextureId;
 use crate::world::block::render_assets::BlockRenderAssets;
 
@@ -186,6 +186,10 @@ impl Source {
             animation: None,
         }
     }
+
+    fn padding(&self, mip_level: u32) -> u32 {
+        sprite_padding(mip_level, self.mip_source.is_some())
+    }
 }
 
 /// Vanilla `SpriteContents.AnimatedTexture`: the frames a sprite plays and
@@ -231,6 +235,7 @@ impl SpriteAnimation {
 /// Vanilla `SpriteContents.AnimationState`: a placed animated sprite and where
 /// it is in its frames.
 struct AnimatedSprite {
+    /// The level-0 cell, padding included.
     x: u32,
     y: u32,
     width: u32,
@@ -671,6 +676,8 @@ pub(crate) struct AtlasCpu {
     mip_level: u32,
     sources: Vec<Source>,
     placements: HashMap<String, Option<(u32, u32)>>,
+    /// The missing tile's level-0 origin.
+    missing: (u32, u32),
 }
 
 impl TextureAtlas {
@@ -689,6 +696,7 @@ impl TextureAtlas {
             mip_level,
             mut sources,
             placements,
+            missing,
         } = Self::build_cpu(
             jar_assets_dir,
             asset_index,
@@ -710,6 +718,7 @@ impl TextureAtlas {
             mip_level,
             &mut sources,
             &placements,
+            missing,
         );
 
         let mip_levels = mip_level + 1;
@@ -748,12 +757,21 @@ impl TextureAtlas {
             .into_iter()
             .filter_map(|source| {
                 let (x, y) = (*placements.get(source.name.as_str())?)?;
+                let pad = source.padding(mip_level);
+                let mut animation = source.animation?;
+                // Vanilla redraws the padded cell (`animate_sprite.vsh`).
+                for levels in &mut animation.pixels {
+                    for (level, pixels) in levels.iter_mut().enumerate() {
+                        *pixels =
+                            padded_rgba(pixels, source.w >> level, source.h >> level, pad >> level);
+                    }
+                }
                 Some(AnimatedSprite {
-                    x,
-                    y,
-                    width: source.w,
-                    height: source.h,
-                    animation: source.animation?,
+                    x: x - pad,
+                    y: y - pad,
+                    width: source.w + 2 * pad,
+                    height: source.h + 2 * pad,
+                    animation,
                     frame: 0,
                     sub_frame: 0,
                     dirty: false,
@@ -895,45 +913,56 @@ impl TextureAtlas {
 
         let mip_level = effective_mip_level(&sources);
         let mip_align = 1 << mip_level;
-        let mut total_area: u64 = (MISSING_TILE * MISSING_TILE) as u64;
-        for source in &sources {
-            if !source.data.is_empty() {
-                total_area += u64::from(source.w.next_multiple_of(mip_align))
-                    * u64::from(source.h.next_multiple_of(mip_align));
-            }
-        }
-        sources.sort_by_key(|s| std::cmp::Reverse(s.h.max(MISSING_TILE)));
+        let block_pad = sprite_padding(mip_level, true);
+        // Vanilla `Stitcher.HOLDER_COMPARATOR`'s last key; the packer sorts by
+        // size stably.
+        sources.sort_by(|a, b| a.name.cmp(&b.name));
+        let packed_sources: Vec<(&Source, u32)> = sources
+            .iter()
+            .filter(|s| !s.data.is_empty())
+            .map(|s| (s, s.padding(mip_level)))
+            .collect();
+        // Vanilla `Stitcher.smallestFittingMinTexel`. One atlas holds every
+        // sheet here, so all cells keep the block sheet's mip alignment.
+        let cell = |w: u32, h: u32, pad: u32| {
+            (
+                (w + 2 * pad).next_multiple_of(mip_align),
+                (h + 2 * pad).next_multiple_of(mip_align),
+            )
+        };
+        let sizes: Vec<(u32, u32)> = std::iter::once(cell(MISSING_TILE, MISSING_TILE, block_pad))
+            .chain(packed_sources.iter().map(|&(s, pad)| cell(s.w, s.h, pad)))
+            .collect();
 
         const MAX_ATLAS_SIZE: u32 = 8192;
-        let mut atlas_size = (((total_area as f64) * 1.4).sqrt().ceil() as u32).next_power_of_two();
-
-        let (placements, missing_region) = loop {
-            let (result, all_fit) = pack(&sources, atlas_size, mip_align);
-            if all_fit || atlas_size >= MAX_ATLAS_SIZE {
-                if !all_fit {
-                    tracing::warn!(
-                        "Atlas at {MAX_ATLAS_SIZE} cap; oversize sources fall back to missing tile"
-                    );
-                }
-                break result;
-            }
-            atlas_size *= 2;
-        };
+        let (atlas_size, packed, all_fit) = packing::fit_atlas_size(&sizes, 0, MAX_ATLAS_SIZE);
+        if !all_fit {
+            tracing::warn!(
+                "Atlas at {MAX_ATLAS_SIZE} cap; oversize sources fall back to missing tile"
+            );
+        }
+        let inset = |cell: Option<(u32, u32)>, pad| cell.map(|(x, y)| (x + pad, y + pad));
+        // Only an atlas already past its cap loses the missing tile; it then
+        // overlaps whatever owns the first cell rather than vanishing.
+        let missing = inset(packed[0], block_pad).unwrap_or((block_pad, block_pad));
+        let missing_region =
+            pixel_region(missing.0, missing.1, MISSING_TILE, MISSING_TILE, atlas_size);
+        let placements: HashMap<String, Option<(u32, u32)>> = packed_sources
+            .iter()
+            .zip(&packed[1..])
+            .map(|(&(s, pad), &placement)| (s.name.clone(), inset(placement, pad)))
+            .collect();
 
         let mut atlas_pixels = vec![0u8; (atlas_size * atlas_size * 4) as usize];
-        // Vanilla `MissingTextureAtlasSprite.generateMissingImage`.
-        for py in 0..MISSING_TILE {
-            for px in 0..MISSING_TILE {
-                let pink = (py < MISSING_TILE / 2) ^ (px < MISSING_TILE / 2);
-                let color: [u8; 4] = if pink {
-                    [248, 0, 248, 255]
-                } else {
-                    [0, 0, 0, 255]
-                };
-                let idx = ((py * atlas_size + px) * 4) as usize;
-                atlas_pixels[idx..idx + 4].copy_from_slice(&color);
-            }
-        }
+        copy_rect_rgba(
+            &missing_tile_rgba(),
+            MISSING_TILE,
+            MISSING_TILE,
+            &mut atlas_pixels,
+            atlas_size,
+            missing,
+            block_pad,
+        );
 
         let mut regions = HashMap::new();
         let mut sprite_alpha_masks = HashMap::new();
@@ -951,13 +980,15 @@ impl TextureAtlas {
                     region.opaque = src.opaque;
                     region.translucent = src.translucent;
                     rects.push(region.pixel_rect.map(u32::from));
-                    for py in 0..src.h {
-                        for px in 0..src.w {
-                            let s = ((py * src.w + px) * 4) as usize;
-                            let d = (((cy + py) * atlas_size + cx + px) * 4) as usize;
-                            atlas_pixels[d..d + 4].copy_from_slice(&src.data[s..s + 4]);
-                        }
-                    }
+                    copy_rect_rgba(
+                        &src.data,
+                        src.w,
+                        src.h,
+                        &mut atlas_pixels,
+                        atlas_size,
+                        (*cx, *cy),
+                        src.padding(mip_level),
+                    );
                     if let Some(mask) = &src.alpha_mask {
                         sprite_alpha_masks.insert(src.name.clone(), mask.clone());
                     }
@@ -978,6 +1009,7 @@ impl TextureAtlas {
             mip_level,
             sources,
             placements,
+            missing,
         }
     }
 
@@ -1009,7 +1041,9 @@ fn build_mip_chain(
     mip_level: u32,
     sources: &mut [Source],
     placements: &HashMap<String, Option<(u32, u32)>>,
+    missing: (u32, u32),
 ) -> Vec<u8> {
+    let pad = sprite_padding(mip_level, true);
     let mut levels = Vec::with_capacity((mip_level + 1) as usize);
     levels.push(atlas_pixels);
     for level in 1..=mip_level {
@@ -1017,9 +1051,8 @@ fn build_mip_chain(
         levels.push(vec![0; (size * size * 4) as usize]);
     }
 
-    let missing = extract_rect_rgba(&levels[0], atlas_size, 0, 0, MISSING_TILE, MISSING_TILE);
     let missing_mips = generate_rgba_mips(
-        missing,
+        missing_tile_rgba(),
         MISSING_TILE,
         MISSING_TILE,
         mip_level,
@@ -1033,8 +1066,8 @@ fn build_mip_chain(
             MISSING_TILE >> level,
             &mut levels[level as usize],
             atlas_size >> level,
-            0,
-            0,
+            (missing.0 >> level, missing.1 >> level),
+            pad >> level,
         );
     }
 
@@ -1085,8 +1118,8 @@ fn build_mip_chain(
                 source.h >> level,
                 &mut levels[level as usize],
                 atlas_size >> level,
-                x >> level,
-                y >> level,
+                (x >> level, y >> level),
+                pad >> level,
             );
         }
     }
@@ -1133,21 +1166,71 @@ fn extract_rect_rgba(
     output
 }
 
+/// Writes a `width` x `height` image at `(x, y)` with a `pad` texel border
+/// that repeats its edge texels, as vanilla's clamp-to-edge sprite blit fills
+/// the padding (`animate_sprite.vsh`).
 fn copy_rect_rgba(
     source: &[u8],
     width: u32,
     height: u32,
     destination: &mut [u8],
     destination_width: u32,
-    x: u32,
-    y: u32,
+    (x, y): (u32, u32),
+    pad: u32,
 ) {
     let row_bytes = width as usize * 4;
-    for row in 0..height {
-        let src = row as usize * row_bytes;
-        let dst = (((y + row) * destination_width + x) * 4) as usize;
-        destination[dst..dst + row_bytes].copy_from_slice(&source[src..src + row_bytes]);
+    let pad_bytes = pad as usize * 4;
+    for row in 0..height + 2 * pad {
+        let src_row = row.saturating_sub(pad).min(height - 1) as usize;
+        let src = &source[src_row * row_bytes..][..row_bytes];
+        let dst = (((y + row - pad) * destination_width + x - pad) * 4) as usize;
+        let (left, rest) = destination[dst..][..row_bytes + 2 * pad_bytes].split_at_mut(pad_bytes);
+        let (middle, right) = rest.split_at_mut(row_bytes);
+        middle.copy_from_slice(src);
+        for texel in left.as_chunks_mut::<4>().0 {
+            texel.copy_from_slice(&src[..4]);
+        }
+        for texel in right.as_chunks_mut::<4>().0 {
+            texel.copy_from_slice(&src[row_bytes - 4..]);
+        }
     }
+}
+
+/// `source` with a `pad` texel edge-repeating border, as its own image.
+fn padded_rgba(source: &[u8], width: u32, height: u32, pad: u32) -> Vec<u8> {
+    let padded_width = width + 2 * pad;
+    let mut out = vec![0; (padded_width * (height + 2 * pad) * 4) as usize];
+    copy_rect_rgba(
+        source,
+        width,
+        height,
+        &mut out,
+        padded_width,
+        (pad, pad),
+        pad,
+    );
+    out
+}
+
+/// Vanilla `Stitcher`'s padding with anisotropic filtering off, which Pomme
+/// doesn't offer yet. Only the block sheet is mipped; the others stitch at
+/// mip level 0.
+fn sprite_padding(mip_level: u32, mipped: bool) -> u32 {
+    if mipped { 1 << mip_level } else { 1 }
+}
+
+/// Vanilla `MissingTextureAtlasSprite.generateMissingImage`.
+fn missing_tile_rgba() -> Vec<u8> {
+    (0..MISSING_TILE * MISSING_TILE)
+        .flat_map(|i| {
+            let (px, py) = (i % MISSING_TILE, i / MISSING_TILE);
+            if (py < MISSING_TILE / 2) ^ (px < MISSING_TILE / 2) {
+                [248, 0, 248, 255]
+            } else {
+                [0, 0, 0, 255]
+            }
+        })
+        .collect()
 }
 
 fn generate_rgba_mips(
@@ -1479,37 +1562,6 @@ fn sprite_transparency(data: &[u8]) -> (bool, bool) {
         })
 }
 
-type PackResult = (HashMap<String, Option<(u32, u32)>>, AtlasRegion);
-
-fn pack(sources: &[Source], atlas_size: u32, mip_align: u32) -> (PackResult, bool) {
-    let mut placements: HashMap<String, Option<(u32, u32)>> = HashMap::new();
-    let missing_region = pixel_region(0, 0, MISSING_TILE, MISSING_TILE, atlas_size);
-    let mut cursor_x = MISSING_TILE;
-    let mut cursor_y = 0;
-    let mut shelf_h = MISSING_TILE;
-    let mut all_fit = true;
-    for src in sources {
-        if src.data.is_empty() {
-            placements.insert(src.name.clone(), None);
-            continue;
-        }
-        if cursor_x + src.w > atlas_size {
-            cursor_y = (cursor_y + shelf_h).next_multiple_of(mip_align);
-            cursor_x = 0;
-            shelf_h = 0;
-        }
-        if cursor_y + src.h > atlas_size {
-            all_fit = false;
-            placements.insert(src.name.clone(), None);
-            continue;
-        }
-        placements.insert(src.name.clone(), Some((cursor_x, cursor_y)));
-        cursor_x = (cursor_x + src.w).next_multiple_of(mip_align);
-        shelf_h = shelf_h.max(src.h);
-    }
-    ((placements, missing_region), all_fit)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1574,39 +1626,62 @@ mod tests {
         }
     }
 
+    /// Each sprite fills its padded cell at every level, so a sample just
+    /// past its edge never reaches a neighbour.
     #[test]
-    fn mips_stay_within_sprite_regions() {
-        const SIZE: u32 = 64;
+    fn mips_and_padding_stay_within_sprite_cells() {
+        const SIZE: u32 = 256;
+        let pad = sprite_padding(MAX_MIP_LEVEL, true);
         let mut sources = [
             solid_source("red", 16, 16, [255, 0, 0, 255]),
             solid_source("blue", 16, 16, [0, 0, 255, 255]),
         ];
         let placements = HashMap::from([
-            ("red".to_string(), Some((16, 0))),
-            ("blue".to_string(), Some((32, 0))),
+            ("red".to_string(), Some((64, 16))),
+            ("blue".to_string(), Some((112, 16))),
         ]);
         let pixels = vec![0u8; (SIZE * SIZE * 4) as usize];
-        let chain = build_mip_chain(pixels, SIZE, MAX_MIP_LEVEL, &mut sources, &placements);
+        let chain = build_mip_chain(
+            pixels,
+            SIZE,
+            MAX_MIP_LEVEL,
+            &mut sources,
+            &placements,
+            (16, 16),
+        );
 
-        let mut offset = (SIZE * SIZE * 4) as usize;
-        for level in 1..=MAX_MIP_LEVEL {
+        let mut offset = 0;
+        for level in 0..=MAX_MIP_LEVEL {
             let size = SIZE >> level;
+            let level_pad = pad >> level;
             for (source, color) in sources.iter().zip([[255u8, 0, 0, 255], [0, 0, 255, 255]]) {
                 let (x, y) = placements[&source.name].unwrap();
-                let dx = x >> level;
-                let dy = y >> level;
-                let width = source.w >> level;
-                let height = source.h >> level;
+                let (dx, dy) = ((x >> level) - level_pad, (y >> level) - level_pad);
+                let (width, height) = (
+                    (source.w >> level) + 2 * level_pad,
+                    (source.h >> level) + 2 * level_pad,
+                );
                 for py in dy..dy + height {
                     for px in dx..dx + width {
                         let i = offset + ((py * size + px) * 4) as usize;
-                        assert_eq!(&chain[i..i + 4], &color);
+                        assert_eq!(&chain[i..i + 4], &color, "level {level} at ({px}, {py})");
                     }
                 }
             }
             offset += (size * size * 4) as usize;
         }
         assert_eq!(offset, chain.len());
+    }
+
+    #[test]
+    fn padding_repeats_the_nearest_edge_texel() {
+        let (a, b, c, d) = ([1, 1, 1, 1], [2, 2, 2, 2], [3, 3, 3, 3], [4, 4, 4, 4]);
+        let padded = padded_rgba(&[a, b, c, d].concat(), 2, 2, 1);
+        let rows: Vec<&[u8]> = padded.chunks(16).collect();
+        assert_eq!(rows[0], [a, a, b, b].concat());
+        assert_eq!(rows[1], [a, a, b, b].concat());
+        assert_eq!(rows[2], [c, c, d, d].concat());
+        assert_eq!(rows[3], [c, c, d, d].concat());
     }
 
     #[test]
@@ -1715,18 +1790,19 @@ mod tests {
         let mut source = solid_source("odd", 18, 18, [17, 34, 51, 255]);
         let mip_level = effective_mip_level(std::slice::from_ref(&source));
         assert_eq!(mip_level, 1);
-        let placements = HashMap::from([("odd".to_string(), Some((16, 0)))]);
+        let placements = HashMap::from([("odd".to_string(), Some((16, 16)))]);
         let chain = build_mip_chain(
             vec![0; (SIZE * SIZE * 4) as usize],
             SIZE,
             mip_level,
             std::slice::from_mut(&mut source),
             &placements,
+            (40, 40),
         );
         let level_one = &chain[(SIZE * SIZE * 4) as usize..];
         let level_one_size = SIZE >> 1;
         let expected = mean_linear([[17, 34, 51, 255]; 4]);
-        for y in 0..9 {
+        for y in 8..17 {
             for x in 8..17 {
                 let index = ((y * level_one_size + x) * 4) as usize;
                 assert_eq!(&level_one[index..index + 4], &expected);
@@ -1914,8 +1990,15 @@ mod tests {
         mip_source.animation = layout.clone();
         source.animation = SpriteAnimation::new(&strip, 4, &layout);
         let mut sources = [source];
-        let placements = HashMap::from([("anim".to_string(), Some((0, 0)))]);
-        build_mip_chain(vec![0; 16 * 16 * 4], 16, 2, &mut sources, &placements);
+        let placements = HashMap::from([("anim".to_string(), Some((4, 4)))]);
+        build_mip_chain(
+            vec![0; 64 * 64 * 4],
+            64,
+            2,
+            &mut sources,
+            &placements,
+            (20, 4),
+        );
 
         let pixels = &sources[0].animation.as_ref().unwrap().pixels;
         assert_eq!(pixels[1].len(), 3);
