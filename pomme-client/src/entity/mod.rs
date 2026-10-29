@@ -1430,7 +1430,7 @@ impl EntityStore {
             (EntityKind::Sniffer, 18, Int(id)) => {
                 let state = SnifferState::from_id(id);
                 entity.sniffer_state = state;
-                entity.sniffer_anim_start = state.animated().then_some(entity.age_in_ticks + 1);
+                entity.sniffer_anim_start = state.animated().then_some(entity.age_in_ticks);
             }
             (EntityKind::Salmon, 17, Int(v)) => entity.variant = v.clamp(0, 2) as u32,
             (EntityKind::TropicalFish, 17, Int(v)) => entity.variant = v as u32,
@@ -1814,7 +1814,7 @@ mod tests {
         };
 
         store.apply_entity_data(1, 18, MetaValue::Int(5));
-        assert_eq!(state(&store), (SnifferState::Digging, Some(41)));
+        assert_eq!(state(&store), (SnifferState::Digging, Some(40)));
         assert_eq!(
             living_entity_dimensions(&store.living[&1]).height,
             1.75 - 0.4
@@ -1822,7 +1822,7 @@ mod tests {
 
         store.living.get_mut(&1).unwrap().age_in_ticks = 100;
         store.apply_entity_data(1, 18, MetaValue::Int(6));
-        assert_eq!(state(&store), (SnifferState::Rising, Some(101)));
+        assert_eq!(state(&store), (SnifferState::Rising, Some(100)));
         assert_eq!(living_entity_dimensions(&store.living[&1]).height, 1.75);
 
         store.apply_entity_data(1, 18, MetaValue::Int(4));
