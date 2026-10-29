@@ -973,14 +973,15 @@ fn living_push_impulses(local: Position, remote: Position) -> Option<(DVec3, DVe
 }
 
 impl LivingEntity {
+    /// Vanilla `LivingEntity.recreateFromPacket`: the head and body both
+    /// start at the packet's head yaw, which `look_dir` carries.
     pub fn new(
         entity_type: EntityKind,
         position: Position,
         look_dir: LookDirection,
-        head_y_rot_deg: f32,
-        body_y_rot_deg: f32,
         uuid: uuid::Uuid,
     ) -> Self {
+        let y_rot_deg = look_dir.y_rot_deg();
         let default_health = if entity_type == EntityKind::IronGolem {
             100.0
         } else {
@@ -991,10 +992,10 @@ impl LivingEntity {
             prev_position: position,
             look_dir,
             prev_look_dir: look_dir,
-            head_y_rot_deg,
-            prev_head_y_rot_deg: head_y_rot_deg,
-            body_y_rot_deg,
-            prev_body_y_rot_deg: body_y_rot_deg,
+            head_y_rot_deg: y_rot_deg,
+            prev_head_y_rot_deg: y_rot_deg,
+            body_y_rot_deg: y_rot_deg,
+            prev_body_y_rot_deg: y_rot_deg,
             entity_type,
             uuid,
             player_uuid: (entity_type == EntityKind::Player).then_some(uuid),
@@ -1126,7 +1127,7 @@ impl LivingEntity {
             interp_target: position,
             interp_look_dir: look_dir,
             interp_steps: 0,
-            interp_head_y_rot_deg: head_y_rot_deg,
+            interp_head_y_rot_deg: y_rot_deg,
             interp_head_y_rot_steps: 0,
         }
     }
@@ -1956,20 +1957,10 @@ impl EntityStore {
         entity_type: EntityKind,
         position: Position,
         look_dir: LookDirection,
-        body_y_rot_deg: f32,
         uuid: uuid::Uuid,
     ) {
-        self.living.insert(
-            id,
-            LivingEntity::new(
-                entity_type,
-                position,
-                look_dir,
-                look_dir.y_rot_deg(),
-                body_y_rot_deg,
-                uuid,
-            ),
-        );
+        self.living
+            .insert(id, LivingEntity::new(entity_type, position, look_dir, uuid));
     }
 
     pub fn move_living_delta(&mut self, id: i32, dx: f64, dy: f64, dz: f64, on_ground: bool) {
@@ -2607,7 +2598,7 @@ mod tests {
 
     fn spawn(store: &mut EntityStore, id: i32, kind: EntityKind, position: Position) {
         let uuid = uuid::Uuid::from_u128(id as u128);
-        store.spawn_living(id, kind, position, LookDirection::default(), 0.0, uuid);
+        store.spawn_living(id, kind, position, LookDirection::default(), uuid);
     }
 
     #[test]
@@ -2998,8 +2989,6 @@ mod tests {
             EntityKind::Player,
             Position::default(),
             LookDirection::default(),
-            0.0,
-            0.0,
             uuid::Uuid::nil(),
         );
         let helmet = ItemStack::new(ItemKind::DiamondHelmet, 1);

@@ -433,7 +433,6 @@ pub enum NetworkEvent {
         entity_type: EntityKind,
         position: Position,
         velocity: DVec3,
-        y_rot_deg: f32,
         x_rot_deg: f32,
         head_y_rot_deg: f32,
     },

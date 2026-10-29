@@ -2560,7 +2560,6 @@ impl AppCore {
                     entity_type,
                     position,
                     velocity,
-                    y_rot_deg,
                     x_rot_deg,
                     head_y_rot_deg,
                 } => {
@@ -2572,7 +2571,6 @@ impl AppCore {
                             entity_type,
                             position,
                             LookDirection::new(head_y_rot_deg, x_rot_deg),
-                            y_rot_deg,
                             uuid,
                         );
                         if entity_type == azalea_registry::builtin::EntityKind::Player {

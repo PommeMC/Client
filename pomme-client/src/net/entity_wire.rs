@@ -41,7 +41,7 @@ fn event(packet: EntityPacket) -> Option<NetworkEvent> {
             position,
             movement,
             x_rot,
-            y_rot,
+            y_rot: _,
             y_head_rot,
             data: _,
         } => {
@@ -55,7 +55,6 @@ fn event(packet: EntityPacket) -> Option<NetworkEvent> {
                 entity_type,
                 position: position.into(),
                 velocity: movement,
-                y_rot_deg: y_rot,
                 x_rot_deg: x_rot,
                 head_y_rot_deg: y_head_rot,
             }
