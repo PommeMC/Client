@@ -681,6 +681,9 @@ fn create_pipelines(
             layout,
             &rhi::RenderPipelineDesc {
                 blend: Some(blend),
+                // Clipping the disc where it passes behind the eye can open a
+                // pixel-wide crack along the edges its triangles share.
+                depth_clamp: true,
                 ..rhi::RenderPipelineDesc::new(
                     label,
                     shader::include_shader!("sky.vert"),

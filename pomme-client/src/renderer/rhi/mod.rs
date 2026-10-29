@@ -774,6 +774,9 @@ pub struct RenderPipelineDesc<'a> {
     pub depth: Option<DepthState>,
     /// `None` writes the color unblended.
     pub blend: Option<BlendState>,
+    /// Clamps depth instead of clipping at the near and far planes, where the
+    /// device can.
+    pub depth_clamp: bool,
 }
 
 impl<'a> RenderPipelineDesc<'a> {
@@ -795,6 +798,7 @@ impl<'a> RenderPipelineDesc<'a> {
             front_face: FrontFace::Ccw,
             depth: None,
             blend: None,
+            depth_clamp: false,
         }
     }
 }
