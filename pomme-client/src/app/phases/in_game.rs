@@ -5009,6 +5009,22 @@ const SLOT0_TINTS: [Option<[f32; 4]>; MAX_OVERLAYS] = {
     tints
 };
 
+/// An `AbstractSkullBlock` item, which `LivingEntityRenderer` wears as a head.
+fn is_skull(item: &azalea_inventory::ItemStack) -> bool {
+    item.as_present().is_some_and(|d| {
+        matches!(
+            crate::player::inventory::item_resource_name(d.kind).as_str(),
+            "skeleton_skull"
+                | "wither_skeleton_skull"
+                | "zombie_head"
+                | "player_head"
+                | "creeper_head"
+                | "dragon_head"
+                | "piglin_head"
+        )
+    })
+}
+
 /// Slot-0 overlay picked by a 1-based id (0 draws nothing), as
 /// (`overlay_tints`, `overlay_variants`).
 fn slot0_overlay(id: u32) -> ([Option<[f32; 4]>; MAX_OVERLAYS], [u32; MAX_OVERLAYS]) {
@@ -5185,7 +5201,9 @@ fn copper_golem_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExt
         overlay_tints,
         overlay_variants,
         copper_golem: crate::renderer::entity_model::CopperGolemAnims {
-            holding_item: e.has_item_in_hand(),
+            holding_item: [EquipmentSlot::Mainhand, EquipmentSlot::Offhand]
+                .into_iter()
+                .any(|slot| e.equipment(slot).is_some()),
             idle: g.idle_anim_start.and_then(clock),
             get_item: interaction(1),
             get_no_item: interaction(2),
@@ -5197,9 +5215,14 @@ fn copper_golem_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExt
 }
 
 /// Vanilla `SulfurCubeRenderer.scale`: a carried block stops the squish and
-/// hides the inner cube, and a lit fuse swells it like primed TNT.
+/// hides the inner cube, and a lit fuse swells it like primed TNT. A skull in
+/// the body or head slot is worn instead, which only hides the inner cube.
 fn sulfur_cube_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
-    let carries_block = e.equipment(EquipmentSlot::Body).is_some();
+    let body = e.equipment(EquipmentSlot::Body);
+    // TODO: a non-block body item resolves to air in vanilla, which still
+    // squishes and draws the inner cube.
+    let carries_block = body.is_some_and(|item| !is_skull(item));
+    let hides_inner = body.is_some() || e.equipment(EquipmentSlot::Head).is_some_and(is_skull);
     let fuse = if e.sulfur_fuse >= 0 {
         e.sulfur_fuse as f32 - alpha + 1.0
     } else {
@@ -5214,7 +5237,7 @@ fn sulfur_cube_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtr
     let (extra_downscale, v_offset) = if e.is_baby { (1.0, 1.24) } else { (0.5, 0.98) };
     let one_pixel_up = if e.is_invisible { 0.0 } else { 1.0 / 16.0 };
     EntityExtras {
-        overlay_tints: if carries_block {
+        overlay_tints: if hides_inner {
             [None; MAX_OVERLAYS]
         } else {
             SLOT0_TINTS

@@ -145,6 +145,8 @@ pub struct CopperGolemAnim {
     pub idle_anim_start: Option<u32>,
     /// The interaction state playing, and the tick it started at.
     pub interaction: Option<(i32, u32)>,
+    /// The idle head spin reached its sound this tick (`playHeadSpinSound`).
+    pub head_spun: bool,
 }
 
 impl CopperGolemAnim {
@@ -157,10 +159,12 @@ impl CopperGolemAnim {
             } else if self.idle_start_tick == 0 {
                 self.idle_start_tick = tick + fastrand::u32(200..240);
             }
-            if tick == self.idle_start_tick + 10 {
+            self.head_spun = tick == self.idle_start_tick + 10;
+            if self.head_spun {
                 self.idle_start_tick = 0;
             }
         } else {
+            self.head_spun = false;
             self.idle_anim_start = None;
             self.idle_start_tick = 0;
             if self.interaction.map(|(state, _)| state) != Some(self.state) {
@@ -661,13 +665,6 @@ impl LivingEntity {
         self.equipment.get(&slot)
     }
 
-    /// Vanilla `LivingEntity.hasItemInHand`.
-    pub fn has_item_in_hand(&self) -> bool {
-        [EquipmentSlot::Mainhand, EquipmentSlot::Offhand]
-            .into_iter()
-            .any(|slot| self.equipment(slot).is_some())
-    }
-
     /// Vanilla `getViewYRot` / `getViewXRot`: the rotation between ticks.
     pub fn view_look(&self, partial_tick: f32) -> LookDirection {
         let (prev, now) = (self.prev_look_dir, self.look_dir);
@@ -995,8 +992,9 @@ impl LivingEntity {
                 }
                 self.tick_squish();
             }
+            // `Allay.hasItemInHand` checks only the main hand.
             EntityKind::Allay => {
-                let in_hand = self.has_item_in_hand();
+                let in_hand = self.equipment(EquipmentSlot::Mainhand).is_some();
                 self.allay.tick(in_hand);
             }
             // Vanilla's `tickCount` here is one past the age.
@@ -1778,7 +1776,8 @@ impl EntityStore {
             if entity.swing_time > 0 {
                 entity.swing_time -= 1;
             }
-            if entity.unhappy_counter > 0 {
+            // Only `Villager.tick` counts it down, not the wandering trader.
+            if entity.entity_type == EntityKind::Villager && entity.unhappy_counter > 0 {
                 entity.unhappy_counter -= 1;
             }
             entity.age_in_ticks = entity.age_in_ticks.wrapping_add(1);
@@ -1909,6 +1908,21 @@ mod tests {
     use azalea_registry::builtin::ItemKind;
 
     use super::*;
+
+    #[test]
+    fn copper_golem_spins_its_head_once_per_idle_cycle() {
+        let mut golem = CopperGolemAnim {
+            idle_start_tick: 300,
+            ..Default::default()
+        };
+        let spun: Vec<u32> = (290..320)
+            .filter(|&tick| {
+                golem.tick(tick);
+                golem.head_spun
+            })
+            .collect();
+        assert_eq!(spun, [310]);
+    }
 
     fn spawn(store: &mut EntityStore, id: i32, kind: EntityKind, position: Position) {
         let uuid = uuid::Uuid::from_u128(id as u128);

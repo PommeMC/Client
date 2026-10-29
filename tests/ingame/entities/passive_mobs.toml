@@ -73,6 +73,15 @@ wait_ms = 11000
 [[step]]
 screenshot = "passive_mobs"
 
+# An idle copper golem spins its head every 210 to 249 ticks, with its
+# weathering's sound.
+[[step]]
+chat = '/summon minecraft:copper_golem 6 -60 2 {weather_state:"weathered"}'
+
+[[step]]
+expect = { sound = "entity.copper_golem_weathered.spin" }
+timeout_ms = 15000
+
 [[step]]
 chat = "/kill @e[type=!player]"
 

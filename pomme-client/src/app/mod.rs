@@ -1,3 +1,4 @@
+mod copper_golem;
 pub mod core;
 pub mod input;
 mod install;

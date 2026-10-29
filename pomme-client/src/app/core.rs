@@ -3186,6 +3186,7 @@ impl AppCore {
         self.tick_local_player(renderer, connection, game);
         self.tick_remote_entities(game);
         super::sniffer::tick(&mut self.audio, game, renderer.camera_render_position());
+        super::copper_golem::tick(&self.audio, game);
     }
 
     /// `LivingEntity.pushEntities` from every remote living entity's tick,
