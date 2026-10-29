@@ -941,6 +941,8 @@ impl Renderer {
         terrain(&mut pack, PackGeometry::Terrain, View::Camera);
         draw_entities(&mut pack, PackGeometry::Entities, &frustum, None);
         draw_block_entities(&mut pack, PackGeometry::BlockEntities);
+        // TODO: `separateEntityDraws`, which draws these after translucent
+        // terrain instead.
         for layer in PackLayer::ALL {
             if !entity_renderer.has_pack_layer(layer) {
                 continue;

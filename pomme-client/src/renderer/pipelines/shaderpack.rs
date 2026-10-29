@@ -181,8 +181,8 @@ impl ShadowCasters {
 #[derive(Clone, Copy)]
 pub struct PackBinding {
     pub pipeline: rhi::backend::RenderPipeline,
-    /// The program's additive variant, if it has one.
-    pub overlay: Option<rhi::backend::RenderPipeline>,
+    /// The program's second pipeline state, if it has one.
+    pub variant: Option<rhi::backend::RenderPipeline>,
     pub sets: [rhi::backend::BindGroup; 3],
 }
 
@@ -245,9 +245,11 @@ struct FrameUniform {
 /// One compiled program on the GPU.
 struct Program {
     pipeline: rhi::backend::RenderPipeline,
-    /// The additive variant: the sky's for the sun, moon and stars,
-    /// `gbuffers_entities`'s for the energy swirl.
-    overlay: Option<rhi::backend::RenderPipeline>,
+    /// A second pipeline state: the sky's additive one for the sun, moon and
+    /// stars, `gbuffers_entities`'s additive one for the energy swirl, or
+    /// `gbuffers_entities_translucent`'s back-face culled one for
+    /// `entityTranslucentCull`.
+    variant: Option<rhi::backend::RenderPipeline>,
     layout: rhi::backend::PipelineLayout,
     uniform_layout: rhi::backend::BindGroupLayout,
     sampler_layout: rhi::backend::BindGroupLayout,
@@ -770,26 +772,32 @@ impl PackRenderer {
             depth_clamp: sky,
             ..rhi::RenderPipelineDesc::new(&compiled.path, vertex, fragment, vertex_buffers)
         };
-        let overlay_blend = match geometry {
-            _ if sky => Some(rhi::BlendState::OVERLAY),
-            Some(PackGeometry::Entities) => Some(SWIRL_BLEND),
+        let variant = match geometry {
+            _ if sky => Some(rhi::RenderPipelineDesc {
+                blend: Some(rhi::BlendState::OVERLAY),
+                ..desc
+            }),
+            Some(PackGeometry::Entities) => Some(rhi::RenderPipelineDesc {
+                blend: Some(SWIRL_BLEND),
+                ..desc
+            }),
+            Some(PackGeometry::EntitiesTranslucent) => Some(rhi::RenderPipelineDesc {
+                cull_mode: rhi::CullMode::Back,
+                ..desc
+            }),
             _ => None,
         };
         let pipelines = rhi::backend::try_create_render_pipeline(device, targets, layout, &desc)
             .and_then(|pipeline| {
-                let overlay = overlay_blend
-                    .map(|blend| {
-                        let overlay = rhi::RenderPipelineDesc {
-                            blend: Some(blend),
-                            ..desc
-                        };
-                        rhi::backend::try_create_render_pipeline(device, targets, layout, &overlay)
+                let variant = variant
+                    .map(|desc| {
+                        rhi::backend::try_create_render_pipeline(device, targets, layout, &desc)
                     })
                     .transpose()
                     .inspect_err(|_| pipeline.destroy(device))?;
-                Ok((pipeline, overlay))
+                Ok((pipeline, variant))
             });
-        let (pipeline, overlay) = match pipelines {
+        let (pipeline, variant) = match pipelines {
             Ok(pipelines) => pipelines,
             Err(e) => {
                 layout.destroy(device);
@@ -839,7 +847,7 @@ impl PackRenderer {
             .collect();
         Ok(Program {
             pipeline,
-            overlay,
+            variant,
             layout,
             uniform_layout,
             sampler_layout,
@@ -1252,7 +1260,7 @@ impl PackRenderer {
         };
         let binding = PackBinding {
             pipeline: program.pipeline,
-            overlay: program.overlay,
+            variant: program.variant,
             sets: [program.uniform_sets[frame], sampler_set, resources],
         };
         let (attachments, depth, extent) = self.geometry_targets(program, geometry.shadow());
@@ -1298,7 +1306,7 @@ impl PackRenderer {
                 continue;
             };
             for draw in run {
-                let pipeline = binding.overlay.filter(|_| draw.stage.overlay());
+                let pipeline = binding.variant.filter(|_| draw.stage.overlay());
                 pass.set_pipeline(&pipeline.unwrap_or(binding.pipeline));
                 sky.record(&pass, draw, 3);
             }
@@ -1408,8 +1416,8 @@ impl PackRenderer {
             .collect();
         for mut program in programs {
             program.pipeline.destroy(device);
-            if let Some(overlay) = program.overlay {
-                overlay.destroy(device);
+            if let Some(variant) = program.variant {
+                variant.destroy(device);
             }
             program.layout.destroy(device);
             util::destroy_buffers(device, &mut program.uniform_buffers);

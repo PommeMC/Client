@@ -852,7 +852,7 @@ pub struct EntityRenderer {
     /// This frame's outline draws, paired with `outline_pipelines`.
     outline_records: [Vec<DrawRecord>; 2],
     /// This frame's [`PackLayer`] draws, kept for their own pack passes.
-    pack_layers: [Vec<DrawRecord>; 3],
+    pack_layers: [Vec<DrawRecord>; PackLayer::ALL.len()],
     /// The instances this frame's buffer holds.
     instance_count: usize,
     pipeline_layout: rhi::backend::PipelineLayout,
@@ -2534,7 +2534,7 @@ impl EntityRenderer {
             (None, self.pipeline, armor),
             (None, self.culled_pipeline, culled),
             (
-                Some(PackLayer::Translucent),
+                Some(PackLayer::TranslucentCulled),
                 self.translucent_culled_pipeline,
                 translucent,
             ),
@@ -2563,9 +2563,10 @@ impl EntityRenderer {
         !self.pack_layers[layer as usize].is_empty()
     }
 
-    /// Draws the last `draw`'s `layer` through the bound pack program.
+    /// Draws, and drops, the last `draw`'s `layer` through the bound pack
+    /// program.
     pub fn draw_pack_layer(
-        &self,
+        &mut self,
         pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
         layer: PackLayer,
@@ -2574,12 +2575,14 @@ impl EntityRenderer {
             return;
         };
         let pipeline = match layer {
-            PackLayer::Swirl => pack.overlay.unwrap_or(pack.pipeline),
+            PackLayer::TranslucentCulled | PackLayer::Swirl => {
+                pack.variant.unwrap_or(pack.pipeline)
+            }
             PackLayer::Translucent | PackLayer::Eyes => pack.pipeline,
         };
         let buffer = self.instance_buffers[frame].handle();
-        let records = &self.pack_layers[layer as usize];
-        self.record_pass(pass, frame, buffer, pipeline, records, self.instance_count);
+        let records = std::mem::take(&mut self.pack_layers[layer as usize]);
+        self.record_pass(pass, frame, buffer, pipeline, &records, self.instance_count);
     }
 
     /// Whether the last `draw` left any glowing outline to draw.
@@ -2725,18 +2728,25 @@ impl EntityRenderer {
 /// own pass through its program (Iris's `IrisPipelines`), in draw order.
 #[derive(Clone, Copy)]
 pub enum PackLayer {
-    /// `entityTranslucentCull` and `entityTranslucent`.
+    /// `entityTranslucentCull`: an invisible mob the viewer sees.
+    TranslucentCulled,
+    /// `entityTranslucent`.
     Translucent,
     Eyes,
     Swirl,
 }
 
 impl PackLayer {
-    pub const ALL: [Self; 3] = [Self::Translucent, Self::Eyes, Self::Swirl];
+    pub const ALL: [Self; 4] = [
+        Self::TranslucentCulled,
+        Self::Translucent,
+        Self::Eyes,
+        Self::Swirl,
+    ];
 
     pub fn geometry(self) -> PackGeometry {
         match self {
-            Self::Translucent => PackGeometry::EntitiesTranslucent,
+            Self::TranslucentCulled | Self::Translucent => PackGeometry::EntitiesTranslucent,
             Self::Eyes => PackGeometry::EntityEyes,
             Self::Swirl => PackGeometry::Entities,
         }
