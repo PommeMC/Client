@@ -563,6 +563,10 @@ pub enum NetworkEvent {
     SnifferDigging {
         id: i32,
     },
+    /// Entity event 45: a fox eats the food in its mouth.
+    FoxEat {
+        id: i32,
+    },
     SquidTentacleReset {
         id: i32,
     },

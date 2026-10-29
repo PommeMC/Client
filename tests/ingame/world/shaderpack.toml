@@ -4,8 +4,9 @@
 # `gbuffers_textured_lit`, normal shading and the shadows of a pillar, the
 # planks, the cow, the chest and the player (its `shadow` program, the sun
 # tilted by `sunPathRotation`) from its composite pass, and the sky blended
-# toward a custom uniform from its `shaders.properties`. Then packs off again,
-# with the same sky shots to compare.
+# toward a custom uniform from its `shaders.properties`. The stone pillar is
+# tinted red, its `block.properties` id read through `mc_Entity`. Then packs
+# off again, with the same sky shots to compare.
 
 [[step]]
 wait_ms = 2000
@@ -51,6 +52,9 @@ option = { shader_pack = "pomme_test" }
 
 [[step]]
 wait_ms = 3000
+
+[[step]]
+expect = { terrain = "settled" }
 
 [[step]]
 screenshot = "pack"
@@ -115,6 +119,9 @@ chat = "/tp @s 60.5 -60 50.5 90 -10"
 wait_ms = 1000
 
 [[step]]
+expect = { terrain = "settled" }
+
+[[step]]
 screenshot = "pack_dusk"
 
 [[step]]
@@ -135,6 +142,9 @@ option = { shader_pack = "pomme_nofinal" }
 wait_ms = 3000
 
 [[step]]
+expect = { terrain = "settled" }
+
+[[step]]
 screenshot = "no_final"
 
 [[step]]
@@ -142,6 +152,9 @@ option = { shader_pack = "" }
 
 [[step]]
 wait_ms = 1500
+
+[[step]]
+expect = { terrain = "settled" }
 
 [[step]]
 screenshot = "off"
@@ -184,6 +197,9 @@ chat = "/tp @s 60.5 -60 50.5 90 -10"
 
 [[step]]
 wait_ms = 1000
+
+[[step]]
+expect = { terrain = "settled" }
 
 [[step]]
 screenshot = "off_dusk"

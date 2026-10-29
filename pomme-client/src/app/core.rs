@@ -307,6 +307,19 @@ fn enqueue_edits(game: &mut GameState, sections: &[(crate::position::ChunkPos, i
     }
 }
 
+/// The texture of what `e` holds in its main hand, for its eating crumbs.
+fn mouth_item_texture(e: &crate::entity::LivingEntity) -> Option<String> {
+    let azalea_inventory::ItemStack::Present(held) =
+        e.equipment(azalea_inventory::components::EquipmentSlot::Mainhand)?
+    else {
+        return None;
+    };
+    Some(format!(
+        "item/{}",
+        crate::player::inventory::item_resource_name(held.kind)
+    ))
+}
+
 /// The client half of `Panda.addEatingParticles`, flagged by the entity tick
 /// (the sound is the server's broadcast).
 fn panda_eating_particles(game: &mut GameState, camera_pos: glam::DVec3) {
@@ -314,15 +327,9 @@ fn panda_eating_particles(game: &mut GameState, camera_pos: glam::DVec3) {
         if e.entity_type != azalea_registry::builtin::EntityKind::Panda || !e.panda.eat_particles {
             continue;
         }
-        let Some(azalea_inventory::ItemStack::Present(held)) =
-            e.equipment(azalea_inventory::components::EquipmentSlot::Mainhand)
-        else {
+        let Some(texture) = mouth_item_texture(e) else {
             continue;
         };
-        let texture = format!(
-            "item/{}",
-            crate::player::inventory::item_resource_name(held.kind)
-        );
         game.particle_store.add_panda_eating_particles(
             &texture,
             e.position.into(),
@@ -1646,14 +1653,7 @@ impl AppCore {
             dry_foliage,
         );
 
-        game.reset_mesh_columns();
-        game.section_vis.clear();
-        game.section_vis_epoch.clear();
-        game.vis_mask.clear();
-        game.vis_tiers.clear();
-        game.vis_task = None;
-        game.vis_valid = false;
-        game.pending_load_rescan = true;
+        game.rebuild_meshes();
     }
 
     fn clear_server_ui(&mut self, game: &mut GameState, renderer: &mut Renderer) {
@@ -2823,6 +2823,18 @@ impl AppCore {
                 NetworkEvent::SnifferDigging { id } => {
                     super::sniffer::start_digging_sound(&mut self.audio, game, id);
                 }
+                NetworkEvent::FoxEat { id } => {
+                    if let Some(fox) = game.entity_store.living.get(&id)
+                        && let Some(texture) = mouth_item_texture(fox)
+                    {
+                        game.particle_store.add_fox_eating_particles(
+                            &texture,
+                            fox.position.into(),
+                            fox.look_dir,
+                            renderer.camera_render_position(),
+                        );
+                    }
+                }
                 NetworkEvent::SquidTentacleReset { id } => {
                     game.entity_store.squid_tentacle_reset(id);
                 }
@@ -3591,6 +3603,7 @@ impl AppCore {
         let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(
             dx,
+            0.0,
             dz,
             &mut game.player_walk_pos,
             &mut game.player_walk_speed,
