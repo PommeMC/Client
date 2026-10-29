@@ -199,6 +199,8 @@ pub struct EntityRenderInfo {
     pub llama_decor: Option<LlamaDecor>,
     pub bee: entity_model::BeeAnims,
     pub fox: entity_model::FoxAnims,
+    /// Axolotl animator factors and baby animation clocks.
+    pub axolotl: entity_model::AxolotlAnims,
     pub panda: entity_model::PandaAnims,
     pub parrot: entity_model::ParrotAnims,
     /// `DolphinRenderState.isMoving`.
@@ -287,6 +289,7 @@ impl Default for EntityRenderInfo {
             llama_decor: None,
             bee: entity_model::BeeAnims::default(),
             fox: entity_model::FoxAnims::default(),
+            axolotl: entity_model::AxolotlAnims::default(),
             panda: entity_model::PandaAnims::default(),
             parrot: entity_model::ParrotAnims::default(),
             dolphin_moving: false,
@@ -968,6 +971,8 @@ enum AnimationType {
     Allay,
     SnowGolem,
     CopperGolem,
+    Axolotl,
+    PolarBear,
     Fox,
     Panda,
     Bee,
@@ -1175,6 +1180,14 @@ fn mob_definitions() -> Vec<MobDef> {
     const SULFUR_CUBE_INNER_SMALL_TEX: &[&[&str]] =
         tex_table!("sulfur_cube" => "sulfur_cube_inner_small");
     const DOLPHIN_TEX: &[&[&str]] = tex_table!("dolphin" => "dolphin");
+    // Indexed by `Axolotl.Variant` id.
+    const AXOLOTL_TEX: &[&[&str]] = tex_table!("axolotl" =>
+        "axolotl_lucy", "axolotl_wild", "axolotl_gold", "axolotl_cyan", "axolotl_blue");
+    const AXOLOTL_BABY_TEX: &[&[&str]] = tex_table!("axolotl" =>
+        "axolotl_lucy_baby", "axolotl_wild_baby", "axolotl_gold_baby", "axolotl_cyan_baby",
+        "axolotl_blue_baby");
+    const POLAR_BEAR_TEX: &[&[&str]] = tex_table!("bear" => "polarbear");
+    const POLAR_BEAR_BABY_TEX: &[&[&str]] = tex_table!("bear" => "polarbear_baby");
     // Indexed by `variant * 2 + sleeping`.
     const FOX_TEX: &[&[&str]] =
         tex_table!("fox" => "fox", "fox_sleep", "fox_snow", "fox_snow_sleep");
@@ -1344,6 +1357,34 @@ fn mob_definitions() -> Vec<MobDef> {
             baby: Some(opaque(
                 entity_model::bake_baby_cow_model(),
                 MOOSHROOM_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Axolotl,
+            anim: AnimationType::Axolotl,
+            adult: vec![opaque(entity_model::bake_axolotl_model(), AXOLOTL_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_axolotl_model(),
+                AXOLOTL_BABY_TEX,
+                32,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::PolarBear,
+            anim: AnimationType::PolarBear,
+            adult: vec![opaque(
+                entity_model::bake_polar_bear_model(),
+                POLAR_BEAR_TEX,
+                128,
+            )],
+            baby: Some(opaque(
+                entity_model::bake_baby_polar_bear_model(),
+                POLAR_BEAR_BABY_TEX,
                 64,
             )),
             adult_overlays: vec![],
@@ -2628,6 +2669,25 @@ impl EntityRenderer {
                 info.bat_elapsed_secs,
                 info.bat_resting,
             ),
+            AnimationType::Axolotl => entity_model::compute_axolotl_anim(
+                model,
+                info.is_baby,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.age_in_ticks,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                &info.axolotl,
+            ),
+            AnimationType::PolarBear => entity_model::compute_polar_bear_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.stand_anim,
+                if info.is_baby { 0.5 } else { 1.0 },
+            ),
             AnimationType::Fox => entity_model::compute_fox_anim(
                 model,
                 info.is_baby,
@@ -3376,9 +3436,9 @@ pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
     match kind {
         EntityKind::Villager if is_baby => 0.63,
         // Explicit `BABY_DIMENSIONS` eye heights.
-        EntityKind::Fox if is_baby => 0.34375,
+        EntityKind::Fox | EntityKind::PolarBear if is_baby => 0.34375,
         EntityKind::Panda if is_baby => 0.28125,
-        EntityKind::Dolphin if is_baby => 0.09375,
+        EntityKind::Axolotl | EntityKind::Dolphin if is_baby => 0.09375,
         EntityKind::Mooshroom if is_baby => 0.69,
         // Explicit `eyeHeight`s, halved; the 0.85 ratio would miss them.
         EntityKind::Sniffer
@@ -3477,7 +3537,11 @@ fn entity_visible(
     eye: glam::DVec3,
     cull_dist: f32,
 ) -> bool {
-    let (w, h) = entity_bounds(info.entity_kind, info.is_baby);
+    let (w, mut h) = entity_bounds(info.entity_kind, info.is_baby);
+    // A standing polar bear's hitbox stretches up to double height.
+    if info.entity_kind == EntityKind::PolarBear {
+        h *= 1.0 + info.stand_anim;
+    }
     // Renderer `getBoundingBoxForCulling().inflate(..)` overrides grow the
     // box on every side around the same center (the sniffer's head reaches
     // well past its hitbox).
