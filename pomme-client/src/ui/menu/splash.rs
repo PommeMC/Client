@@ -1,8 +1,9 @@
 //! Vanilla `SplashManager`: the yellow line that hangs off the title logo.
 
-use std::path::Path;
+use crate::resources::{ResourceManager, resource_id};
 
-use crate::assets::{AssetIndex, resolve_asset_path};
+/// Bound pack-provided text before decoding it or building the splash pool.
+const MAX_SPLASH_BYTES: usize = 1024 * 1024;
 
 /// The one line `SplashManager.prepare` drops from the pool, by hash.
 const FILTERED_HASH: i32 = 125_780_783;
@@ -27,8 +28,7 @@ fn dated_splash(month: u32, day: u32) -> Option<&'static str> {
 /// `SplashManager.getSplash`. `None` when the file is missing or empty, which
 /// vanilla renders as no splash at all.
 pub(super) fn pick(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    resources: &ResourceManager,
     username: &str,
     month: u32,
     day: u32,
@@ -37,9 +37,19 @@ pub(super) fn pick(
         return Some(fixed.to_string());
     }
 
-    let path = resolve_asset_path(jar_assets_dir, asset_index, "minecraft/texts/splashes.txt");
-    let text = std::fs::read_to_string(&path)
+    let resource = resources
+        .get_resource(&resource_id!("minecraft:texts/splashes.txt"))
+        .inspect_err(|e| tracing::warn!("Failed to locate splashes.txt: {e}"))
+        .ok()??;
+    let content = resource.content();
+    let bytes = content
+        .read_bytes(MAX_SPLASH_BYTES)
         .inspect_err(|e| tracing::warn!("Failed to load splashes.txt: {e}"))
+        .ok()?;
+    let text = String::from_utf8(bytes)
+        .inspect_err(|e| {
+            tracing::warn!(origin = ?content.origin(), "Invalid UTF-8 in splashes.txt: {e}");
+        })
         .ok()?;
     let splashes: Vec<&str> = text
         .lines()

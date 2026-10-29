@@ -8,6 +8,7 @@ use super::block_lighter::{self, LightLevels, LightSource, VertexLight};
 use super::occlusion_graph::{VisibilitySet, compute_visibility};
 use crate::position::ChunkPos;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
+use crate::world::block::colormap::Colormap;
 use crate::world::block::model::{CardinalLighting, Direction, face_positions, face_uvs};
 use crate::world::block::render_assets::{BlockRenderView, OwnedBlockRenderView, Tint};
 use crate::world::block::{BlockStateData, BlockStateTable, FluidKind};
@@ -350,65 +351,6 @@ const MAX_MESH_UPLOADS_PER_FRAME: usize = 32;
 /// into an unbounded queue, which would starve the buffer pool.
 const MAX_PENDING_RESULTS: usize = 256;
 
-pub struct Colormap {
-    pixels: Vec<[u8; 3]>,
-}
-
-impl Colormap {
-    pub fn load(
-        jar_assets_dir: &std::path::Path,
-        asset_index: &Option<crate::assets::AssetIndex>,
-        colormap_path: &str,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
-    ) -> Self {
-        let path = crate::assets::resolve_asset_path_with_packs(
-            jar_assets_dir,
-            asset_index,
-            colormap_path,
-            packs,
-        );
-        let pixels = crate::renderer::util::load_png(&path)
-            .map(|(data, _w, _h)| {
-                data.chunks(4)
-                    .take(256 * 256)
-                    .map(|c| [c[0], c[1], c[2]])
-                    .collect()
-            })
-            .unwrap_or_else(|| Self::fallback().pixels);
-        Self { pixels }
-    }
-
-    /// A map filled with vanilla's default grass color, used when the PNG
-    /// can't be loaded.
-    pub(crate) fn fallback() -> Self {
-        Self::from_pixels(vec![[145, 189, 89]; 256 * 256])
-    }
-
-    pub(crate) fn from_pixels(pixels: Vec<[u8; 3]>) -> Self {
-        Self { pixels }
-    }
-
-    fn pixel(&self, temperature: f32, downfall: f32) -> [u8; 3] {
-        let t = temperature.clamp(0.0, 1.0);
-        let d = (downfall.clamp(0.0, 1.0)) * t;
-        let x = ((1.0 - t) * 255.0) as usize;
-        let y = ((1.0 - d) * 255.0) as usize;
-        let idx = (y * 256 + x).min(256 * 256 - 1);
-        self.pixels[idx]
-    }
-
-    fn lookup(&self, temperature: f32, downfall: f32) -> [f32; 3] {
-        self.pixel(temperature, downfall)
-            .map(|channel| channel as f32 / 255.0)
-    }
-
-    /// Vanilla `GrassColor.get` as packed `0xRRGGBB`.
-    pub(crate) fn rgb(&self, temperature: f32, downfall: f32) -> u32 {
-        let [r, g, b] = self.pixel(temperature, downfall);
-        u32::from_be_bytes([0, r, g, b])
-    }
-}
-
 pub fn grass_color(climate: &BiomeClimate, colormap: &Colormap, x: i32, z: i32) -> [f32; 3] {
     let base = climate
         .grass_color_override
@@ -670,7 +612,15 @@ impl BufferPool {
             if buf.capacity() > 4 * hint {
                 buf.shrink_to(hint);
             }
-            let _ = tx.try_send(buf);
+            match tx.try_send(buf) {
+                Ok(()) => {}
+                Err(crossbeam_channel::TrySendError::Full(_)) => {
+                    tracing::trace!("Mesher scratch pool at capacity; releasing recycled buffer");
+                }
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                    tracing::trace!("Mesher scratch pool disconnected; releasing recycled buffer");
+                }
+            }
         }
     }
 
@@ -721,53 +671,22 @@ pub struct MeshDispatcher {
 }
 
 impl MeshDispatcher {
-    /// [`Self::new`] with the grass, foliage and dry-foliage colormaps loaded
-    /// from the assets (and resource packs).
-    #[allow(clippy::too_many_arguments)]
-    pub fn load(
-        render_view: OwnedBlockRenderView,
-        uv_map: AtlasUVMap,
-        jar_assets_dir: &std::path::Path,
-        asset_index: &Option<crate::assets::AssetIndex>,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
-        biome_climate: Arc<HashMap<u32, BiomeClimate>>,
-        cardinal_lighting: CardinalLighting,
-    ) -> Self {
-        let colormap = |name| {
-            Colormap::load(
-                jar_assets_dir,
-                asset_index,
-                &format!("minecraft/textures/colormap/{name}.png"),
-                packs,
-            )
-        };
-        Self::new(
-            render_view,
-            uv_map,
-            colormap("grass"),
-            colormap("foliage"),
-            colormap("dry_foliage"),
-            biome_climate,
-            cardinal_lighting,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         render_view: OwnedBlockRenderView,
         uv_map: AtlasUVMap,
-        grass_colormap: Colormap,
-        foliage_colormap: Colormap,
-        dry_foliage_colormap: Colormap,
+        grass_colormap: Arc<Colormap>,
+        foliage_colormap: Arc<Colormap>,
+        dry_foliage_colormap: Arc<Colormap>,
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
         cardinal_lighting: CardinalLighting,
     ) -> Self {
         Self::with_colormaps(
             render_view,
             Arc::new(uv_map),
-            Arc::new(grass_colormap),
-            Arc::new(foliage_colormap),
-            Arc::new(dry_foliage_colormap),
+            grass_colormap,
+            foliage_colormap,
+            dry_foliage_colormap,
             biome_climate,
             cardinal_lighting,
         )
@@ -1050,7 +969,9 @@ impl Drop for MeshDispatcher {
         let (_tx, rx) = crossbeam_channel::bounded(0);
         drop(std::mem::replace(&mut self.result_rx, rx));
         for handle in self.workers.drain(..) {
-            let _ = handle.join();
+            if handle.join().is_err() {
+                tracing::warn!("Chunk mesher worker panicked during shutdown");
+            }
         }
     }
 }
@@ -1121,7 +1042,9 @@ impl PendingJob {
                 meshed_at,
             });
         }
-        let _ = self.tx.send(mesh);
+        if self.tx.send(mesh).is_err() {
+            tracing::debug!(chunk = ?self.pos, "Chunk mesh result receiver disconnected");
+        }
     }
 }
 

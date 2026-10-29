@@ -1,12 +1,14 @@
 //! Installs a Minecraft version's assets the way the client reads them: the
-//! asset index and objects under `assets/`, and the client jar's `assets/`
-//! extracted under `versions/<version>/extracted/`.
+//! asset index and objects under `assets/`, the client jar at
+//! `versions/<version>/<version>.jar`, and its `assets/` extracted under
+//! `versions/<version>/extracted/` for legacy consumers.
 //!
 //! Every download is checked against the sha1 Mojang publishes, retried, and
 //! written beside its final path then renamed, so an interrupted install
 //! leaves nothing half-written under a real name.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -69,6 +71,7 @@ struct Downloads {
 struct Download {
     url: String,
     sha1: String,
+    size: u64,
 }
 
 #[derive(Deserialize)]
@@ -90,6 +93,35 @@ fn extracted_dir(versions_dir: &Path, version: &str) -> PathBuf {
     versions_dir.join(version).join("extracted")
 }
 
+fn client_jar_path(versions_dir: &Path, version: &str) -> PathBuf {
+    versions_dir.join(version).join(format!("{version}.jar"))
+}
+
+/// Read only the ZIP directory and root version metadata, not the asset
+/// payloads. This is a structural readiness check, not the installer's full
+/// size/SHA1 check; corruption in other entries is not detected here.
+fn client_jar_version(path: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    struct JarVersion {
+        id: String,
+    }
+
+    // Root version metadata is small; bound startup reads of a damaged local jar.
+    const MAX_VERSION_JSON_SIZE: u64 = 1024 * 1024;
+    if !path.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let entry = archive.by_name("version.json").ok()?;
+    if entry.size() > MAX_VERSION_JSON_SIZE {
+        return None;
+    }
+    let metadata: JarVersion =
+        serde_json::from_reader(entry.take(MAX_VERSION_JSON_SIZE + 1)).ok()?;
+    Some(metadata.id)
+}
+
 /// Written into a version's extraction once it's complete.
 const EXTRACTED_MARKER: &str = ".extracted";
 
@@ -97,12 +129,16 @@ fn extracted_marker(versions_dir: &Path, version: &str) -> PathBuf {
     extracted_dir(versions_dir, version).join(EXTRACTED_MARKER)
 }
 
-/// The version's index and its jar's extraction are in place. Each is
+/// The version's index, client jar, and jar extraction are in place. Each is
 /// written only once it's complete, the extraction with its `.extracted`
 /// marker; older launchers extracted in place and wrote the marker last, so
-/// one without it may be half done.
+/// one without it may be half done. The jar must open and identify this
+/// version.
 pub fn is_installed(assets_dir: &Path, versions_dir: &Path, version: &str) -> bool {
-    index_path(assets_dir, version).exists() && extracted_marker(versions_dir, version).exists()
+    index_path(assets_dir, version).exists()
+        && extracted_marker(versions_dir, version).exists()
+        && client_jar_version(&client_jar_path(versions_dir, version))
+            .is_some_and(|id| id == version)
 }
 
 /// Downloads whatever of `version` is missing or damaged, reporting through
@@ -125,13 +161,19 @@ pub async fn install(
         .ok_or_else(|| format!("Version {version} not found"))?;
     let version_json: VersionJson = get_json(http, &entry.url).await?;
 
-    let index_bytes = fetch_verified(
-        http,
-        &version_json.asset_index.url,
-        &version_json.asset_index.sha1,
-        Hash::Sha1,
-    )
-    .await?;
+    let index_path = index_path(assets_dir, version);
+    let index_bytes = match read_verified(&index_path, &version_json.asset_index).await {
+        Some(bytes) => bytes,
+        None => {
+            fetch_verified(
+                http,
+                &version_json.asset_index.url,
+                &version_json.asset_index.sha1,
+                Hash::Sha1,
+            )
+            .await?
+        }
+    };
     let index: AssetIndexJson =
         serde_json::from_slice(&index_bytes).map_err(|e| format!("Asset index: {e}"))?;
     let objects_dir = assets_dir.join("objects");
@@ -148,13 +190,26 @@ pub async fn install(
         .collect();
     download_all(http, objects, &report).await?;
     // After the objects, so an index on disk means they're all there.
-    write_atomic(&index_path(assets_dir, version), &index_bytes).await?;
+    write_atomic(&index_path, &index_bytes).await?;
+
+    let client = &version_json.downloads.client;
+    let jar_path = client_jar_path(versions_dir, version);
+    report(0, 1, "Checking the client jar...");
+    let jar = match read_verified(&jar_path, client).await {
+        Some(bytes) => bytes,
+        None => {
+            report(0, 1, "Downloading the client jar...");
+            let bytes = fetch_verified(http, &client.url, &client.sha1, Hash::Sha1).await?;
+            if bytes.len() as u64 != client.size {
+                return Err("Client jar: the download didn't match its size".into());
+            }
+            write_atomic(&jar_path, &bytes).await?;
+            bytes
+        }
+    };
 
     let out = extracted_dir(versions_dir, version);
     if !extracted_marker(versions_dir, version).exists() {
-        report(0, 1, "Downloading the client jar...");
-        let client = &version_json.downloads.client;
-        let jar = fetch_verified(http, &client.url, &client.sha1, Hash::Sha1).await?;
         let mut part = out.as_os_str().to_owned();
         part.push(".part");
         let part = PathBuf::from(part);
@@ -166,16 +221,27 @@ pub async fn install(
             )
         };
         tokio::task::block_in_place(|| {
-            let _ = std::fs::remove_dir_all(&part);
+            remove_extraction_dir(&part)?;
             extract_assets(&jar, &part, &extract_report)?;
             // Inside the `.part`, so it lands with the files in one rename.
             std::fs::write(part.join(EXTRACTED_MARKER), version)
                 .map_err(|e| format!("{}: {e}", part.display()))?;
-            let _ = std::fs::remove_dir_all(&out);
+            remove_extraction_dir(&out)?;
             std::fs::rename(&part, &out).map_err(|e| format!("{}: {e}", out.display()))
         })?;
     }
     Ok(())
+}
+
+fn remove_extraction_dir(path: &Path) -> Result<(), String> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Failed to remove extraction directory {}: {error}",
+            path.display()
+        )),
+    }
 }
 
 /// How a download's hash is taken: Mojang publishes plain sha1s, while git
@@ -329,6 +395,20 @@ where
     Err(format!("{url}: {last_error}"))
 }
 
+fn sha1_hex(bytes: &[u8]) -> String {
+    sha1_smol::Sha1::from(bytes).digest().to_string()
+}
+
+/// Reuse only bytes matching this version manifest, not merely its filename.
+async fn read_verified(path: &Path, download: &Download) -> Option<Vec<u8>> {
+    let metadata = tokio::fs::metadata(path).await.ok()?;
+    if !metadata.is_file() || metadata.len() != download.size {
+        return None;
+    }
+    let bytes = tokio::fs::read(path).await.ok()?;
+    (bytes.len() as u64 == download.size && sha1_hex(&bytes) == download.sha1).then_some(bytes)
+}
+
 /// Writes `bytes` beside `path`, then renames it into place.
 pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
@@ -455,6 +535,12 @@ mod tests {
         std::fs::create_dir_all(versions.join("26.2/extracted/assets")).unwrap();
         assert!(!is_installed(&assets, &versions, "26.2"));
         std::fs::write(versions.join("26.2/extracted/.extracted"), "26.2").unwrap();
+        write_atomic(
+            &versions.join("26.2/26.2.jar"),
+            &jar(&[("version.json", r#"{"id":"26.2"}"#)]),
+        )
+        .await
+        .unwrap();
         assert!(is_installed(&assets, &versions, "26.2"));
         assert!(!assets.join("indexes/26.2.json.part").exists());
         std::fs::remove_dir_all(dir).unwrap();

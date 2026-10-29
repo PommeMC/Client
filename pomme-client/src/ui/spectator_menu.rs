@@ -334,7 +334,7 @@ impl SpectatorGuiState {
 }
 
 fn key_spans(key: &str) -> Vec<TextSpan> {
-    let text = crate::lang::translate(key).unwrap_or(key).to_string();
+    let text = crate::lang::translate(key).unwrap_or_else(|| key.to_owned());
     vec![TextSpan::new(text, WHITE)]
 }
 

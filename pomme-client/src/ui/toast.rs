@@ -33,7 +33,7 @@ pub enum AdvancementFrame {
 
 impl AdvancementFrame {
     /// Vanilla `AdvancementType.getDisplayName()`.
-    fn header(self) -> &'static str {
+    fn header(self) -> String {
         translate(match self {
             Self::Task => "advancements.toast.task",
             Self::Challenge => "advancements.toast.challenge",
@@ -593,8 +593,8 @@ fn find_free_slots_index(occupied: &[bool; SLOT_COUNT], required: usize) -> Opti
     None
 }
 
-fn translate(key: &'static str) -> &'static str {
-    crate::lang::translate(key).unwrap_or(key)
+fn translate(key: &str) -> String {
+    crate::lang::translate(key).unwrap_or_else(|| key.to_owned())
 }
 
 fn with_alpha(spans: &[TextSpan], alpha: f32) -> Vec<TextSpan> {
@@ -705,7 +705,7 @@ fn build_advancement(
             elements,
             x,
             oy + 7.0 * gs,
-            toast.frame.header(),
+            &toast.frame.header(),
             toast.frame.header_color(),
             gs,
         );
@@ -719,7 +719,7 @@ fn build_advancement(
                 elements,
                 x,
                 oy + 11.0 * gs,
-                toast.frame.header(),
+                &toast.frame.header(),
                 [c[0], c[1], c[2], alpha / 255.0],
                 gs,
             );
@@ -758,7 +758,7 @@ fn build_recipe(toast: &RecipeToast, elements: &mut Vec<MenuElement>, ox: f32, o
         elements,
         x,
         oy + 7.0 * gs,
-        translate("recipe.toast.title"),
+        &translate("recipe.toast.title"),
         PURPLE_TEXT,
         gs,
     );
@@ -766,7 +766,7 @@ fn build_recipe(toast: &RecipeToast, elements: &mut Vec<MenuElement>, ox: f32, o
         elements,
         x,
         oy + 18.0 * gs,
-        translate("recipe.toast.description"),
+        &translate("recipe.toast.description"),
         BLACK_TEXT,
         gs,
     );

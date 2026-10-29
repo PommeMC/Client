@@ -29,6 +29,7 @@ use crate::app::phases::{AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx
 use crate::app::state_slot::StateSlot;
 use crate::dirs::DataDirs;
 use crate::net::connection::{ConnectArgs, ConnectionHandle, spawn_connection};
+use crate::renderer::util::MAX_RESOURCE_IMAGE_BYTES;
 use crate::renderer::{self, Renderer};
 use crate::singleplayer::World;
 use crate::user::UserData;
@@ -197,7 +198,6 @@ fn start_connecting(
     let connection = spawn_connection(&core.tokio_rt, connect_args);
     let game = GameState::new(
         &*gfx.renderer,
-        Some(&core.resource_packs),
         core.menu.render_distance,
         world.is_some(),
         core.menu.chat_options,
@@ -437,11 +437,25 @@ fn create_window(
     core: &AppCore,
 ) -> Result<Arc<Window>, winit::error::OsError> {
     let window_icon = {
-        let img =
-            image::load_from_memory(crate::assets::POMME_ICON_PNG).expect("failed to decode icon");
-        let rgba = img.to_rgba8();
-        let (w, h) = (rgba.width(), rgba.height());
-        winit::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
+        crate::renderer::util::load_resource_image(
+            &core.resources,
+            &crate::resources::packs::POMME_ICON,
+            MAX_RESOURCE_IMAGE_BYTES,
+        )
+        .map(|rgba| {
+            let (w, h) = (rgba.width(), rgba.height());
+            match winit::window::Icon::from_rgba(rgba.into_raw(), w, h) {
+                Ok(icon) => Some(icon),
+                Err(error) => {
+                    tracing::warn!(%error, "Failed to create window icon");
+                    None
+                }
+            }
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "Failed to load window icon");
+            None
+        })
     };
     let monitor = event_loop
         .primary_monitor()
@@ -518,8 +532,6 @@ impl ApplicationHandler for App {
                     &self.core.data_dirs.game_dir,
                     &self.core.data_dirs.cache_dir,
                     self.core.menu.vsync,
-                    &self.core.menu.theme().panorama_dir(&self.core.data_dirs),
-                    &self.core.data_dirs.bedrock_ui_dir(),
                 ) {
                     Ok(r) => r,
                     Err(e) => {
@@ -579,13 +591,12 @@ impl ApplicationHandler for App {
         if let Some(install) = &mut self.install {
             match event {
                 WindowEvent::RedrawRequested => {
-                    let step = install.frame(&self.core);
+                    let step = install.frame(&mut self.core);
                     if matches!(step, install::Step::Relaunched) {
                         event_loop.exit();
                     }
                     if let install::Step::Done(window) = step {
                         self.install = None;
-                        self.core.reload_installed_assets();
                         self.installed_window = Some(window);
                         // In the background there's no surface to build the
                         // renderer on; the real `resumed` builds it.

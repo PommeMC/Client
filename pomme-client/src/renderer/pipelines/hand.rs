@@ -1,16 +1,15 @@
-use std::path::Path;
-
 use glam::camera::rh::proj;
 use glam::{Mat3, Mat4, Vec3};
 
-use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::entity_model::pack_normal;
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{SkinData, rhi, shader, util};
+use crate::resources::{ResourceError, ResourceId, ResourceManager, resource_id};
 use crate::world::block::model::CardinalLightType;
 const NEAR: f32 = 0.05;
 const FAR: f32 = 10.0;
+const MAX_DEFAULT_SKIN_BYTES: usize = 32 * 1024 * 1024;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -46,14 +45,14 @@ pub struct HandPipeline {
     vertex_count: u32,
     skin: rhi::backend::Texture,
     skin_sampler: rhi::backend::Sampler,
+    using_default_skin: bool,
 }
 
 impl HandPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &ResourceManager,
         lightmap: &Lightmap,
     ) -> Self {
         let mvp_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
@@ -73,7 +72,7 @@ impl HandPipeline {
             "hand_uniform",
         );
 
-        let (skin, skin_w, skin_h) = load_skin_texture(device, jar_assets_dir, asset_index);
+        let (skin, skin_w, skin_h) = load_skin_texture(device, resources);
 
         let skin_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
 
@@ -99,6 +98,7 @@ impl HandPipeline {
             vertex_count,
             skin,
             skin_sampler,
+            using_default_skin: true,
         }
     }
 
@@ -145,15 +145,51 @@ impl HandPipeline {
         self.skin_sampler
     }
 
-    pub fn reload_skin(&mut self, device: &rhi::backend::Device, skin: &SkinData) {
-        let texture = upload_skin_to_gpu(device, &skin.pixels, skin.width, skin.height);
+    /// Return the retired texture so the caller can rebind the preview first.
+    pub fn reload_skin(
+        &mut self,
+        device: &rhi::backend::Device,
+        skin: &SkinData,
+    ) -> rhi::backend::Texture {
+        let old_skin = self.replace_skin(device, skin);
+        self.using_default_skin = false;
+        old_skin
+    }
 
-        std::mem::replace(&mut self.skin, texture).destroy(device);
+    /// Called while idle. Rebind the preview before destroying the returned
+    /// skin.
+    pub fn reload_default_skin(
+        &mut self,
+        device: &rhi::backend::Device,
+        resources: &ResourceManager,
+    ) -> Option<rhi::backend::Texture> {
+        if !self.using_default_skin {
+            return None;
+        }
+        let (pixels, width, height) = load_default_skin(resources);
+        Some(self.replace_skin(
+            device,
+            &SkinData {
+                pixels,
+                width,
+                height,
+                slim: false,
+            },
+        ))
+    }
+
+    fn replace_skin(
+        &mut self,
+        device: &rhi::backend::Device,
+        skin: &SkinData,
+    ) -> rhi::backend::Texture {
+        let texture = upload_skin_to_gpu(device, &skin.pixels, skin.width, skin.height);
         self.skin_set.replace(
             device,
             self.skin_layout,
-            &util::texture_binding(self.skin.handle(), self.skin_sampler),
+            &util::texture_binding(texture.handle(), self.skin_sampler),
         );
+        let old_skin = std::mem::replace(&mut self.skin, texture);
 
         let (vertex_buffer, vertex_count) =
             create_arm_vertex_buffer(device, skin.width, skin.height, skin.slim);
@@ -166,6 +202,7 @@ impl HandPipeline {
             skin.height,
             skin.slim
         );
+        old_skin
     }
 
     pub fn recreate_pipeline(
@@ -330,22 +367,34 @@ fn build_arm_vertices(skin_w: u32, skin_h: u32, slim: bool, right: bool) -> Vec<
 
 fn load_skin_texture(
     device: &rhi::backend::Device,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    resources: &ResourceManager,
 ) -> (rhi::backend::Texture, u32, u32) {
-    let skin_key = "minecraft/textures/entity/player/wide/steve.png";
-    let skin_path = resolve_asset_path(jar_assets_dir, asset_index, skin_key);
-
-    let (pixels, width, height) = util::load_png(&skin_path).unwrap_or_else(|| {
-        tracing::warn!(
-            "Failed to load skin from {}, using fallback",
-            skin_path.display()
-        );
-        fallback_skin()
-    });
+    let (pixels, width, height) = load_default_skin(resources);
 
     let texture = upload_skin_to_gpu(device, &pixels, width, height);
     (texture, width, height)
+}
+
+fn load_default_skin(resources: &ResourceManager) -> (Vec<u8>, u32, u32) {
+    const DEFAULT_SKIN: ResourceId =
+        resource_id!("minecraft:textures/entity/player/wide/steve.png");
+    resources
+        .get_resource(&DEFAULT_SKIN)
+        .and_then(|resource| {
+            resource
+                .ok_or(ResourceError::Missing(DEFAULT_SKIN))?
+                .content()
+                .read_bytes(MAX_DEFAULT_SKIN_BYTES)
+        })
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            util::load_png_reader(bytes.as_slice(), MAX_DEFAULT_SKIN_BYTES)
+                .map_err(|error| error.to_string())
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!("Failed to load default skin {DEFAULT_SKIN}: {error}; using fallback");
+            fallback_skin()
+        })
 }
 
 fn upload_skin_to_gpu(

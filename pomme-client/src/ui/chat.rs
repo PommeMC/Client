@@ -911,8 +911,7 @@ impl ChatState {
         }
         let mut marker = TextSpan::new(
             crate::lang::translate("chat.deleted_marker")
-                .unwrap_or("<message deleted>")
-                .to_owned(),
+                .unwrap_or_else(|| "<message deleted>".to_owned()),
             common::rgb(0xaaaaaa),
         );
         marker.italic = true;
@@ -2428,8 +2427,8 @@ impl ConfirmScreen {
             .zip(&self.buttons)
             .map(|(rect, (key, _))| {
                 let [x, y, w, h] = rect.map(|v| v as f32 * gs);
-                let label = crate::lang::translate(key).unwrap_or(key);
-                common::push_button(elements, cursor, x, y, w, h, gs, fs, label, true);
+                let label = crate::lang::translate(key).unwrap_or_else(|| (*key).to_owned());
+                common::push_button(elements, cursor, x, y, w, h, gs, fs, &label, true);
                 [x, y, w, h]
             })
             .collect()
@@ -2649,7 +2648,6 @@ fn item_tooltip_lines_with_bindings(
     let block_key = format!("block.minecraft.{path}");
     let default_name = crate::lang::translate(&item_key)
         .or_else(|| crate::lang::translate(&block_key))
-        .map(str::to_owned)
         .unwrap_or_else(|| crate::lang::title_case_snake(path));
 
     let custom_name = item_component(components, raw_components, "custom_name");
@@ -2716,9 +2714,7 @@ fn item_tooltip_lines_with_bindings(
         && component_value(components, "unbreakable").is_some()
     {
         lines.push(TooltipLine::new(
-            crate::lang::translate("item.unbreakable")
-                .unwrap_or("Unbreakable")
-                .to_owned(),
+            crate::lang::translate("item.unbreakable").unwrap_or_else(|| "Unbreakable".to_owned()),
             common::rgb(0x5555ff),
         ));
     }
@@ -2868,9 +2864,7 @@ fn enchantment_level_fallback(level: i32) -> String {
 fn enchantment_tooltip_line(id: &str, level: i32) -> TooltipLine {
     let path = id.split(':').next_back().unwrap_or(id);
     let key = format!("enchantment.minecraft.{path}");
-    let name = crate::lang::translate(&key)
-        .map(str::to_owned)
-        .unwrap_or_else(|| crate::lang::title_case_snake(path));
+    let name = crate::lang::translate(&key).unwrap_or_else(|| crate::lang::title_case_snake(path));
     let curse = matches!(path, "binding_curse" | "vanishing_curse");
     let single_level = matches!(
         path,
@@ -2888,9 +2882,8 @@ fn enchantment_tooltip_line(id: &str, level: i32) -> TooltipLine {
         name
     } else {
         let level_key = format!("enchantment.level.{level}");
-        let level_text = crate::lang::translate(&level_key)
-            .map(str::to_owned)
-            .unwrap_or_else(|| enchantment_level_fallback(level));
+        let level_text =
+            crate::lang::translate(&level_key).unwrap_or_else(|| enchantment_level_fallback(level));
         format!("{name} {level_text}")
     };
     TooltipLine::new(

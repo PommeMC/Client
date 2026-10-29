@@ -46,7 +46,7 @@ impl<'a> DisplayText<'a> {
         if let Some(id) = self.translation_id
             && let Some(text) = crate::lang::translate(id.as_str())
         {
-            return Cow::Borrowed(text);
+            return Cow::Owned(text);
         }
         self.fallback
     }

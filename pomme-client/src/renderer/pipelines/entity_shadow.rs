@@ -2,14 +2,12 @@
 //! `ShadowFeatureRenderer` (26.2), one quad per lit, full block under an
 //! entity.
 
-use std::path::Path;
-
 use glam::{DVec3, Vec3};
 
-use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::physics::block_shape::{LocalBox, is_collision_shape_full_block, outline_shape};
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::{rhi, shader, util};
+use crate::resources::{ResourceId, ResourceManager, resource_id};
 use crate::world::block::{BlockStateData, BlockStateTable};
 use crate::world::block_entity::is_invisible_block;
 use crate::world::chunk::ChunkStore;
@@ -53,6 +51,7 @@ const MAX_SHADOW_QUADS: usize = 2730;
 const MAX_SHADOW_VERTS: usize = MAX_SHADOW_QUADS * VERTS_PER_QUAD;
 /// Vanilla `EntityRenderer.MAX_SHADOW_RADIUS`.
 const MAX_SHADOW_RADIUS: f32 = 32.0;
+const SHADOW_TEXTURE: ResourceId = resource_id!("minecraft:textures/misc/shadow.png");
 
 pub struct EntityShadowPipeline {
     pipeline: rhi::backend::RenderPipeline,
@@ -73,8 +72,7 @@ impl EntityShadowPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &ResourceManager,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
         let texture_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
@@ -90,7 +88,7 @@ impl EntityShadowPipeline {
             "entity_shadow_camera",
         );
 
-        let texture = load_shadow_texture(device, jar_assets_dir, asset_index);
+        let texture = load_shadow_texture(device, resources);
 
         let texture_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR);
 
@@ -117,6 +115,17 @@ impl EntityShadowPipeline {
             texture_sampler,
             verts: Vec::with_capacity(MAX_SHADOW_VERTS),
         }
+    }
+
+    /// The caller must idle the device before replacing the shared texture set.
+    pub fn reload_texture(&mut self, device: &rhi::backend::Device, resources: &ResourceManager) {
+        let texture = load_shadow_texture(device, resources);
+        self.texture_set.replace(
+            device,
+            self.texture_layout,
+            &util::texture_binding(texture.handle(), self.texture_sampler),
+        );
+        std::mem::replace(&mut self.texture, texture).destroy(device);
     }
 
     pub fn recreate_pipeline(
@@ -298,30 +307,32 @@ fn bounds(boxes: &[LocalBox]) -> Option<LocalBox> {
 
 fn load_shadow_texture(
     device: &rhi::backend::Device,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    resources: &ResourceManager,
 ) -> rhi::backend::Texture {
-    let key = "minecraft/textures/misc/shadow.png";
-    let path = resolve_asset_path(jar_assets_dir, asset_index, key);
-    let (pixels, w, h) = if let Some((p, width, height)) = util::load_png(&path) {
-        (p, width, height)
-    } else {
-        tracing::warn!(
-            "Failed to load shadow texture from {}, using fallback",
-            path.display()
-        );
-        // 64x64 fallback circular gradient
-        let mut p = Vec::with_capacity(64 * 64 * 4);
-        for y in 0..64 {
-            for x in 0..64 {
-                let dx = (x as f32 - 31.5) / 32.0;
-                let dy = (y as f32 - 31.5) / 32.0;
-                let dist = (dx * dx + dy * dy).sqrt();
-                let a = ((1.0 - dist).clamp(0.0, 1.0) * 255.0) as u8;
-                p.extend_from_slice(&[0, 0, 0, a]);
-            }
+    let image =
+        util::load_resource_image(resources, &SHADOW_TEXTURE, util::MAX_RESOURCE_IMAGE_BYTES);
+    let (pixels, w, h) = match image {
+        Ok(image) => {
+            let (w, h) = image.dimensions();
+            (image.into_raw(), w, h)
         }
-        (p, 64, 64)
+        Err(error) => {
+            tracing::warn!(
+                "Failed to load {SHADOW_TEXTURE}, using circular-gradient fallback: {error}"
+            );
+            // 64x64 fallback circular gradient
+            let mut p = Vec::with_capacity(64 * 64 * 4);
+            for y in 0..64 {
+                for x in 0..64 {
+                    let dx = (x as f32 - 31.5) / 32.0;
+                    let dy = (y as f32 - 31.5) / 32.0;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    let a = ((1.0 - dist).clamp(0.0, 1.0) * 255.0) as u8;
+                    p.extend_from_slice(&[0, 0, 0, a]);
+                }
+            }
+            (p, 64, 64)
+        }
     };
 
     util::create_sampled_texture(device, "entity_shadow_texture", &pixels, w, h)

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use azalea_block::BlockState;
@@ -11,12 +10,10 @@ use azalea_registry::Registry as AzaleaRegistry;
 use azalea_registry::builtin::{ItemKind, MobEffect, Potion};
 use serde::{Deserialize, Serialize};
 
-const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
-
 use super::block_state_table::BlockStateTable;
+use super::colormap::Colormaps;
 use super::model;
 use super::model::BakedModel;
-use crate::assets::AssetIndex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Tint {
@@ -92,6 +89,9 @@ struct StateRender {
 
 #[derive(Default)]
 pub struct BlockRenderAssets {
+    colormaps: Colormaps,
+    model_sources: model::ModelSources,
+    item_definition_sources: model::ItemDefinitionSources,
     textures: HashMap<String, FaceTextures>,
     baked: HashMap<String, HashMap<String, Arc<BakedModel>>>,
     /// Per block-state table slot, every state's resolved model lookups,
@@ -125,6 +125,10 @@ pub(crate) struct OwnedBlockRenderView {
 }
 
 impl OwnedBlockRenderView {
+    pub(crate) fn colormaps(&self) -> &Colormaps {
+        &self.assets.colormaps
+    }
+
     pub(crate) fn block_state_table(&self) -> BlockStateTable {
         self.block_state_table
     }
@@ -142,45 +146,26 @@ impl OwnedBlockRenderView {
 }
 
 impl BlockRenderAssets {
-    pub fn load(
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
-        cache_dir: Option<&Path>,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
+    pub(crate) fn load(
+        colormaps: Colormaps,
+        blockstates: model::BlockstateSources,
+        models: model::ModelSources,
+        items: model::ItemDefinitionSources,
     ) -> Self {
-        // Only vanilla textures are cached, so a cache shared between
-        // profiles never carries one profile's resource packs into another.
-        let cache_path = cache_dir
-            .filter(|_| packs.is_none())
-            .map(|dir| dir.join(BLOCK_CACHE_FILE));
+        let blockstates = blockstates.parse();
+        // The old vanilla-only disk cache had no resource-source identity and
+        // could disagree with the selected blockstates used for geometry.
+        let mut textures = model::load_all_block_textures(&models, &blockstates);
+        textures
+            .entry("water".into())
+            .or_insert_with(|| FaceTextures::uniform("water_still", Tint::None));
+        textures
+            .entry("lava".into())
+            .or_insert_with(|| FaceTextures::uniform("lava_still", Tint::None));
+        tracing::info!("Block render assets: {} blocks (built)", textures.len());
 
-        let textures = cache_path.as_deref().and_then(load_cache);
-        if let Some(cached) = &textures {
-            tracing::info!(
-                "Block render assets: {} blocks (cached textures)",
-                cached.len()
-            );
-        }
-
-        let textures = textures.unwrap_or_else(|| {
-            let mut textures = model::load_all_block_textures(jar_assets_dir, asset_index, packs);
-
-            textures
-                .entry("water".into())
-                .or_insert_with(|| FaceTextures::uniform("water_still", Tint::None));
-            textures
-                .entry("lava".into())
-                .or_insert_with(|| FaceTextures::uniform("lava_still", Tint::None));
-
-            if let Some(path) = &cache_path {
-                save_cache(path, &textures);
-            }
-            tracing::info!("Block render assets: {} blocks (built)", textures.len());
-            textures
-        });
-
-        let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index, packs);
-        let baked_items = model::bake_item_models(jar_assets_dir, asset_index, packs);
+        let (baked, multipart) = model::bake_all_models(&models, &blockstates);
+        let baked_items = model::bake_item_models(&items, colormaps.grass(), &models);
         let item_models = baked_items.models;
         let flat_item_textures = baked_items.generated_textures;
         let flat_item_texture_keys = baked_items.flat_texture_keys;
@@ -189,6 +174,9 @@ impl BlockRenderAssets {
         let item_tint_sources = baked_items.tint_sources;
 
         Self {
+            colormaps,
+            model_sources: models,
+            item_definition_sources: items,
             textures,
             baked,
             state_render: [const { OnceLock::new() }; super::TABLE_SLOTS],
@@ -200,6 +188,14 @@ impl BlockRenderAssets {
             item_ground_transforms,
             item_tint_sources,
         }
+    }
+
+    pub(crate) fn model_sources(&self) -> &model::ModelSources {
+        &self.model_sources
+    }
+
+    pub(crate) fn item_definition_sources(&self) -> &model::ItemDefinitionSources {
+        &self.item_definition_sources
     }
 
     pub(crate) fn for_version(&self, block_state_table: BlockStateTable) -> BlockRenderView<'_> {
@@ -578,23 +574,6 @@ fn constraints_match<'a>(
             .get(k)
             .is_some_and(|pv| v.split('|').any(|opt| opt == pv))
     })
-}
-
-fn load_cache(path: &Path) -> Option<HashMap<String, FaceTextures>> {
-    let data = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
-}
-
-/// Atomic, since every client of a version shares the one cache.
-fn save_cache(path: &Path, textures: &HashMap<String, FaceTextures>) {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(json) = serde_json::to_string(textures)
-        && let Err(e) = crate::util::write_atomic(path, json.as_bytes())
-    {
-        tracing::warn!("Failed to write block cache: {e}");
-    }
 }
 
 #[cfg(test)]

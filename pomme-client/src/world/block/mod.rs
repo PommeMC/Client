@@ -12,6 +12,7 @@
 
 pub(crate) mod block_registry;
 mod block_state_table;
+pub(crate) mod colormap;
 pub mod model;
 pub mod render_assets;
 pub mod sound;

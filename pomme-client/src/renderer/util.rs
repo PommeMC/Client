@@ -1,7 +1,28 @@
-use std::path::Path;
-
 use super::{MAX_FRAMES_IN_FLIGHT, rhi};
-use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::resources::{ResourceError, ResourceId, ResourceManager};
+
+/// Maximum encoded size for ordinary resource-backed images.
+pub(crate) const MAX_RESOURCE_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Loads a bounded resource image and auto-detects its format.
+pub(crate) fn load_resource_image(
+    resources: &ResourceManager,
+    id: &ResourceId,
+    max_bytes: usize,
+) -> Result<image::RgbaImage, String> {
+    let bytes = resources
+        .get_resource(id)
+        .and_then(|resource| {
+            resource
+                .ok_or_else(|| ResourceError::Missing(id.clone()))?
+                .content()
+                .read_bytes(max_bytes)
+        })
+        .map_err(|error| error.to_string())?;
+    image::load_from_memory(&bytes)
+        .map(|image| image.into_rgba8())
+        .map_err(|error| format!("could not decode {id}: {error}"))
+}
 
 /// A texture holding `pixels`, ready for shaders to read.
 pub fn create_sampled_texture(
@@ -20,23 +41,6 @@ pub fn create_sampled_texture(
         height,
         &format!("{label}_staging"),
     );
-    texture
-}
-
-/// The texture at `key`, or a 16x16 white one if it won't load.
-pub fn load_asset_texture(
-    device: &rhi::backend::Device,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    key: &str,
-) -> rhi::backend::Texture {
-    let path = resolve_asset_path(jar_assets_dir, asset_index, key);
-    let (pixels, w, h) = load_png(&path).unwrap_or_else(|| {
-        tracing::warn!("Failed to load {key}, using fallback");
-        (vec![255u8; 16 * 16 * 4], 16, 16)
-    });
-    let texture = create_sampled_texture(device, key, &pixels, w, h);
-    tracing::info!("Loaded {key} ({w}x{h})");
     texture
 }
 
@@ -262,13 +266,26 @@ pub fn transition_image_to_shader_read(
     });
 }
 
-pub fn load_png(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut decoder = png::Decoder::new(file);
+/// The legacy PNG transforms and RGBA conversion for managed content callers.
+/// The limit bounds both the output buffer and RGBA pixels;
+/// the decoder retains png's default internal allocation limit (64 MiB).
+pub(crate) fn load_png_reader(
+    input: impl std::io::Read,
+    max_decoded_bytes: usize,
+) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error>> {
+    let mut decoder = png::Decoder::new(input);
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info().ok()?;
+    let mut reader = decoder.read_info()?;
+    let header = reader.info();
+    let rgba_bytes = (header.width as usize)
+        .checked_mul(header.height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or("PNG dimensions overflow RGBA buffer size")?;
+    if rgba_bytes > max_decoded_bytes || reader.output_buffer_size() > max_decoded_bytes {
+        return Err("PNG exceeds decoded byte limit".into());
+    }
     let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).ok()?;
+    let info = reader.next_frame(&mut buf)?;
 
     let data = match info.color_type {
         png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
@@ -298,12 +315,11 @@ pub fn load_png(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
             rgba
         }
         other => {
-            tracing::warn!("Unsupported PNG color type {other:?}: {}", path.display());
-            return None;
+            return Err(format!("unsupported PNG color type {other:?}").into());
         }
     };
 
-    Some((data, info.width, info.height))
+    Ok((data, info.width, info.height))
 }
 
 /// Uploads an image whose mip levels are all present in the staging buffer,

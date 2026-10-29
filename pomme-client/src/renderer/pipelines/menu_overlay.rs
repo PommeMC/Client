@@ -1,16 +1,15 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, packing, rhi, shader, util};
+use crate::resources::packs::{POMME_ICON, POMME_ICONS_FONT, POMME_UI_FONT};
+use crate::resources::{ResourceError, ResourceId, ResourceManager, resource_id};
 use crate::ui::font::{FontSources, GLYPH_ATLAS_SIZE, GlyphAtlasPixels, GlyphInfo, GlyphMap};
 use crate::ui::text::{InlineObject, PREFIX_CODE, TextSpan, font_spans};
 
-const FONT_BYTES: &[u8] = include_bytes!("../fonts/Montserrat-Medium.ttf");
-const ICON_FONT_BYTES: &[u8] = include_bytes!("../fonts/fa-solid-900.ttf");
 const ATLAS_SIZE: u32 = 512;
 const RASTER_PX: f32 = 48.0;
+const POMME_LOGO_SIZE: u32 = 256;
 
 /// menu_overlay.frag's texture slots: slot `n` binds its texture at `n` and
 /// its sampler at `TEXTURE_SLOTS + n`.
@@ -161,11 +160,36 @@ struct FontAtlas {
     glyphs: HashMap<char, GlyphEntry>,
 }
 
-fn build_font_atlas() -> (FontAtlas, AtlasImage) {
-    let font = fontdue::Font::from_bytes(FONT_BYTES, fontdue::FontSettings::default())
-        .expect("failed to parse Montserrat font");
-    let icon_font = fontdue::Font::from_bytes(ICON_FONT_BYTES, fontdue::FontSettings::default())
-        .expect("failed to parse Font Awesome font");
+const MAX_RESOURCE_FONT_BYTES: usize = 32 * 1024 * 1024;
+
+fn pomme_bytes(resources: &ResourceManager, id: ResourceId) -> Result<Vec<u8>, String> {
+    resources
+        .get_resource(&id)
+        .and_then(|resource| {
+            resource
+                .ok_or(ResourceError::Missing(id))?
+                .content()
+                .read_bytes(MAX_RESOURCE_FONT_BYTES)
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn load_pomme_logo(resources: &ResourceManager) -> Result<Vec<u8>, String> {
+    let img = util::load_resource_image(resources, &POMME_ICON, util::MAX_RESOURCE_IMAGE_BYTES)?;
+    Ok(downscale_straight_alpha(&img, POMME_LOGO_SIZE, POMME_LOGO_SIZE).into_raw())
+}
+
+fn build_font_atlas(resources: &ResourceManager) -> Result<(FontAtlas, AtlasImage), String> {
+    let font = fontdue::Font::from_bytes(
+        pomme_bytes(resources, POMME_UI_FONT)?,
+        fontdue::FontSettings::default(),
+    )
+    .map_err(|error| format!("failed to parse UI font: {error}"))?;
+    let icon_font = fontdue::Font::from_bytes(
+        pomme_bytes(resources, POMME_ICONS_FONT)?,
+        fontdue::FontSettings::default(),
+    )
+    .map_err(|error| format!("failed to parse icon font: {error}"))?;
 
     let mut glyphs = HashMap::new();
     let mut pixels = vec![0u8; (ATLAS_SIZE * ATLAS_SIZE * 4) as usize];
@@ -243,14 +267,14 @@ fn build_font_atlas() -> (FontAtlas, AtlasImage) {
         cursor_x += metrics.width as u32 + 1;
     }
 
-    (
+    Ok((
         FontAtlas { glyphs },
         AtlasImage {
             pixels,
             width: ATLAS_SIZE,
             height: ATLAS_SIZE,
         },
-    )
+    ))
 }
 
 /// Extract an 8x8 RGBA player face (front face at (8,8) with the hat layer at
@@ -366,15 +390,11 @@ pub struct MenuGeometry {
 impl MenuGeometry {
     fn new(
         font_sources: FontSources<'_>,
-        bedrock_ui_dir: Option<&Path>,
         font_layer_limit: u32,
-    ) -> (Self, MenuAtlases) {
-        let (atlas, font) = build_font_atlas();
-        let (sprite_atlas, sprites) = build_sprite_atlas(
-            font_sources.jar_assets_dir,
-            font_sources.asset_index,
-            bedrock_ui_dir,
-        );
+    ) -> Result<(Self, MenuAtlases), String> {
+        let (atlas, font) = build_font_atlas(font_sources.resources)?;
+        let pomme_logo = load_pomme_logo(font_sources.resources)?;
+        let (sprite_atlas, sprites) = build_sprite_atlas(font_sources, &pomme_logo);
         let (mc_glyph_map, glyphs) = match GlyphMap::load(font_sources, font_layer_limit) {
             Ok((map, pixels)) => (Some(map), Some(pixels)),
             Err(error) => {
@@ -383,7 +403,7 @@ impl MenuGeometry {
             }
         };
         let (camera_overlay, overlay_vignette_uv, overlay_pumpkin_uv) =
-            build_camera_overlay_texture(font_sources.jar_assets_dir, font_sources.asset_index);
+            build_camera_overlay_texture(font_sources.resources);
 
         let obfuscation_seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -406,7 +426,7 @@ impl MenuGeometry {
             glyphs,
             camera_overlay,
         };
-        (geometry, atlases)
+        Ok((geometry, atlases))
     }
 
     /// Builds the vertices and draw batches for `elements`.
@@ -1154,8 +1174,8 @@ impl MenuGeometry {
         let rows = items.len().min(12).div_ceil(4) as i32;
         let empty_lines = if items.is_empty() {
             let description = crate::lang::translate("item.minecraft.bundle.empty.description")
-                .unwrap_or("Can hold a mixed stack of items");
-            self.wrap_tooltip_text(description, scale, 96.0 * px)
+                .unwrap_or_else(|| "Can hold a mixed stack of items".to_owned());
+            self.wrap_tooltip_text(&description, scale, 96.0 * px)
         } else {
             Vec::new()
         };
@@ -1346,8 +1366,8 @@ impl MenuGeometry {
             None
         };
         if let Some(label) = label {
-            let label_x = centered(label, left + 48.0 * px);
-            let spans = [TextSpan::new(label.to_owned(), white)];
+            let label_x = centered(&label, left + 48.0 * px);
+            let spans = [TextSpan::new(label, white)];
             text(
                 vertices,
                 drawn_objects,
@@ -1521,10 +1541,9 @@ impl MenuOverlayPipeline {
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
         font_sources: FontSources<'_>,
-        bedrock_ui_dir: Option<&Path>,
         font_layer_limit: u32,
     ) -> Result<Self, String> {
-        let (geometry, atlases) = MenuGeometry::new(font_sources, bedrock_ui_dir, font_layer_limit);
+        let (geometry, atlases) = MenuGeometry::new(font_sources, font_layer_limit)?;
 
         let globals_layout =
             rhi::backend::create_bind_group_layout(device, util::VERTEX_FRAGMENT_UNIFORM);
@@ -1584,7 +1603,6 @@ impl MenuOverlayPipeline {
             sampler: rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST),
         };
 
-        crate::lang::load(font_sources.jar_assets_dir);
         let (mc_font, mc_font_color) = create_font_textures(device, atlases.glyphs.as_ref())?;
 
         let favicon = TextureResources {
@@ -1610,13 +1628,13 @@ impl MenuOverlayPipeline {
             sampler: rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR),
         };
 
-        let (pixels, w, h) = load_overlay_rgba(
-            font_sources.jar_assets_dir,
-            font_sources.asset_index,
-            "minecraft/textures/misc/underwater.png",
-        );
         let underwater = TextureResources {
-            texture: util::create_sampled_texture(device, "underwater_overlay", &pixels, w, h),
+            texture: load_single_texture(
+                device,
+                font_sources.resources,
+                &UNDERWATER,
+                "underwater_overlay",
+            ),
             // Repeat wrapping: the overlay tiles 4x and scrolls with the look
             // direction.
             sampler: rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST_REPEAT),
@@ -1664,6 +1682,74 @@ impl MenuOverlayPipeline {
             overlay,
             underwater,
         })
+    }
+
+    /// Rebuild GUI/HUD layouts and textures together from the active resources.
+    pub fn reload_gui_assets(
+        &mut self,
+        device: &rhi::backend::Device,
+        font_sources: FontSources<'_>,
+    ) -> Result<(), String> {
+        let (atlas, font_pixels) = build_font_atlas(font_sources.resources)?;
+        let pomme_logo = load_pomme_logo(font_sources.resources)?;
+        let (sprite_atlas, sprites) = build_sprite_atlas(font_sources, &pomme_logo);
+
+        device.wait_idle();
+        let font = create_ui_texture(
+            device,
+            &font_pixels,
+            rhi::TextureFormat::Rgba8Unorm,
+            "pomme_font_reload",
+        )?;
+        let sprite = match create_ui_texture(
+            device,
+            &sprites,
+            rhi::TextureFormat::Rgba8Unorm,
+            "sprite_reload",
+        ) {
+            Ok(sprite) => sprite,
+            Err(error) => {
+                font.destroy(device);
+                return Err(error);
+            }
+        };
+        let old_font = self.font.texture.handle();
+        self.tex_slots[0] = (font.handle(), self.font.sampler);
+        self.tex_slots[1] = (sprite.handle(), self.sprite.sampler);
+        if self.tex_slots[4].0 == old_font {
+            self.tex_slots[4].0 = font.handle();
+        }
+        self.rebind_textures(device);
+        std::mem::replace(&mut self.font.texture, font).destroy(device);
+        std::mem::replace(&mut self.sprite.texture, sprite).destroy(device);
+        self.geometry.atlas = atlas;
+        self.geometry.sprite_atlas = sprite_atlas;
+        Ok(())
+    }
+
+    /// Replace camera textures and their CPU UVs together, retaining samplers.
+    pub fn reload_camera_overlays(
+        &mut self,
+        device: &rhi::backend::Device,
+        resources: &ResourceManager,
+    ) {
+        let (pixels, vignette_uv, pumpkin_uv) = build_camera_overlay_texture(resources);
+        device.wait_idle();
+        let overlay = util::create_sampled_texture(
+            device,
+            "camera_overlay",
+            &pixels.pixels,
+            pixels.width,
+            pixels.height,
+        );
+        let underwater = load_single_texture(device, resources, &UNDERWATER, "underwater_overlay");
+        self.tex_slots[6] = (overlay.handle(), self.overlay.sampler);
+        self.tex_slots[7] = (underwater.handle(), self.underwater.sampler);
+        self.rebind_textures(device);
+        std::mem::replace(&mut self.overlay.texture, overlay).destroy(device);
+        std::mem::replace(&mut self.underwater.texture, underwater).destroy(device);
+        self.geometry.overlay_vignette_uv = vignette_uv;
+        self.geometry.overlay_pumpkin_uv = pumpkin_uv;
     }
 
     /// Rebuilds the glyph atlases from the current pack stack. Call with the
@@ -1835,28 +1921,6 @@ impl MenuOverlayPipeline {
         );
     }
 
-    pub fn has_sprite(&self, id: SpriteId) -> bool {
-        self.geometry.sprite_atlas.regions.contains_key(&id)
-    }
-
-    /// Rebuilds the sprite atlas, for sprites whose files arrived after it was
-    /// built.
-    pub fn reload_sprite_atlas(
-        &mut self,
-        device: &rhi::backend::Device,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
-        bedrock_ui_dir: Option<&Path>,
-    ) {
-        let (atlas, sprites) = build_sprite_atlas(jar_assets_dir, asset_index, bedrock_ui_dir);
-        device.wait_idle();
-        std::mem::replace(&mut self.sprite.texture, sprite_texture(device, &sprites))
-            .destroy(device);
-        self.geometry.sprite_atlas = atlas;
-        let (texture, sampler) = self.sprite.slot();
-        self.set_texture(device, 1, texture, sampler);
-    }
-
     pub fn update_favicon_atlas(
         &mut self,
         device: &rhi::backend::Device,
@@ -1983,11 +2047,9 @@ impl TooltipLine {
 }
 
 pub fn item_icon_atlas_key(item_name: &str, item_tints: &[u32]) -> String {
-    use std::fmt::Write as _;
-
     let mut key = format!("{item_name}#");
     for color in item_tints {
-        let _ = write!(key, "{color:06x}-");
+        key.push_str(&format!("{color:06x}-"));
     }
     key
 }
@@ -2589,965 +2651,1054 @@ fn downscale_straight_alpha(src: &image::RgbaImage, w: u32, h: u32) -> image::Rg
     out
 }
 
-/// The Bedrock UI textures the Bedrock title screen draws, by path from
-/// `textures/ui` without the extension.
-const BEDROCK_SPRITES: [(SpriteId, &str); 17] = [
-    (SpriteId::BedrockButton, "button_borderless_light"),
-    (SpriteId::BedrockButtonHover, "button_borderless_lighthover"),
-    (
+macro_rules! bedrock_sprite {
+    ($sprite:expr, $stem:literal) => {
+        (
+            $sprite,
+            resource_id!(concat!("minecraft:textures/ui/", $stem, ".png")),
+            Some(resource_id!(concat!(
+                "minecraft:textures/ui/",
+                $stem,
+                ".json"
+            ))),
+        )
+    };
+}
+
+const BEDROCK_SPRITES: [(SpriteId, ResourceId, Option<ResourceId>); 17] = [
+    bedrock_sprite!(SpriteId::BedrockButton, "button_borderless_light"),
+    bedrock_sprite!(SpriteId::BedrockButtonHover, "button_borderless_lighthover"),
+    bedrock_sprite!(
         SpriteId::BedrockButtonPressed,
-        "button_borderless_lightpressed",
+        "button_borderless_lightpressed"
     ),
-    (SpriteId::BedrockOutline, "focus_border_white"),
-    (SpriteId::BedrockRealms, "realms_button_borderless_default"),
-    (
+    bedrock_sprite!(SpriteId::BedrockOutline, "focus_border_white"),
+    bedrock_sprite!(SpriteId::BedrockRealms, "realms_button_borderless_default"),
+    bedrock_sprite!(
         SpriteId::BedrockRealmsHover,
-        "realms_button_borderless_hover",
+        "realms_button_borderless_hover"
     ),
-    (
+    bedrock_sprite!(
         SpriteId::BedrockRealmsPressed,
-        "realms_button_borderless_hover_pressed",
+        "realms_button_borderless_hover_pressed"
     ),
-    (
+    bedrock_sprite!(
         SpriteId::BedrockSocial,
-        "socialbuttonicon/social-default-icon",
+        "socialbuttonicon/social-default-icon"
     ),
-    (
+    bedrock_sprite!(
         SpriteId::BedrockSocialHover,
-        "socialbuttonicon/social-hover-icon",
+        "socialbuttonicon/social-hover-icon"
     ),
-    (SpriteId::BedrockBlack, "Black"),
-    (SpriteId::BedrockDropdown, "dropdown_background"),
-    (SpriteId::BedrockDropdownHover, "dropDownHoverBG"),
-    (SpriteId::BedrockDropdownSelect, "dropDownSelectBG"),
-    (SpriteId::BedrockRadioOn, "radio_on"),
-    (SpriteId::BedrockRadioOnHover, "radio_on_hover"),
-    (SpriteId::BedrockRadioOff, "radio_off"),
-    (SpriteId::BedrockRadioOffHover, "radio_off_hover"),
+    bedrock_sprite!(SpriteId::BedrockBlack, "Black"),
+    bedrock_sprite!(SpriteId::BedrockDropdown, "dropdown_background"),
+    bedrock_sprite!(SpriteId::BedrockDropdownHover, "dropDownHoverBG"),
+    bedrock_sprite!(SpriteId::BedrockDropdownSelect, "dropDownSelectBG"),
+    bedrock_sprite!(SpriteId::BedrockRadioOn, "radio_on"),
+    bedrock_sprite!(SpriteId::BedrockRadioOnHover, "radio_on_hover"),
+    bedrock_sprite!(SpriteId::BedrockRadioOff, "radio_off"),
+    bedrock_sprite!(SpriteId::BedrockRadioOffHover, "radio_off_hover"),
 ];
 
 /// The `nineslice_size` from the `.json` Bedrock keeps beside a texture, in
-/// texels. Only the single-number form is read; anything else is unsliced.
-fn bedrock_nine_slice(dir: &Path, stem: &str) -> f32 {
-    std::fs::read(dir.join(format!("{stem}.json")))
+/// texels. Only the single-number form is read; anything else uses the default.
+fn bedrock_nine_slice(json: &[u8]) -> f32 {
+    serde_json::from_slice::<serde_json::Value>(json)
         .ok()
-        .and_then(|json| serde_json::from_slice::<serde_json::Value>(&json).ok())
         .and_then(|meta| meta.get("nineslice_size")?.as_f64())
         .map_or(0.0, |size| size as f32)
 }
 
+fn load_bedrock_nine_slice(resources: &ResourceManager, id: &ResourceId) -> f32 {
+    const MAX_SIDECAR_BYTES: usize = 64 * 1024 * 1024;
+    let load = || -> Result<f32, ResourceError> {
+        let Some(resource) = resources.get_resource(id)? else {
+            return Ok(0.0);
+        };
+        Ok(bedrock_nine_slice(
+            &resource.content().read_bytes(MAX_SIDECAR_BYTES)?,
+        ))
+    };
+    load().unwrap_or_else(|error| {
+        tracing::debug!(%error, "Bedrock nine-slice unavailable; using default");
+        0.0
+    })
+}
+
+const MAX_SPRITE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Missing, filtered, unreadable and corrupt images all use the caller's sprite
+/// fallback, never an extracted-asset lookup that could bypass the pack stack.
+fn load_gui_sprite(
+    resources: &ResourceManager,
+    id: &ResourceId,
+) -> Result<image::RgbaImage, String> {
+    util::load_resource_image(resources, id, MAX_SPRITE_BYTES)
+}
+
 fn build_sprite_atlas(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    bedrock_ui_dir: Option<&Path>,
+    font_sources: FontSources<'_>,
+    pomme_logo: &[u8],
 ) -> (SpriteAtlas, AtlasImage) {
-    let sprites: &[(SpriteId, &str, f32)] = &[
+    let sprites: &[(SpriteId, ResourceId, f32)] = &[
         (
             SpriteId::Hotbar,
-            "minecraft/textures/gui/sprites/hud/hotbar.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/hotbar.png"),
             0.0,
         ),
         (
             SpriteId::GameModeSwitcherBackground,
-            "minecraft/textures/gui/container/gamemode_switcher.png",
+            resource_id!("minecraft:textures/gui/container/gamemode_switcher.png"),
             0.0,
         ),
         (
             SpriteId::GameModeSwitcherSlot,
-            "minecraft/textures/gui/sprites/gamemode_switcher/slot.png",
+            resource_id!("minecraft:textures/gui/sprites/gamemode_switcher/slot.png"),
             0.0,
         ),
         (
             SpriteId::GameModeSwitcherSelection,
-            "minecraft/textures/gui/sprites/gamemode_switcher/selection.png",
+            resource_id!("minecraft:textures/gui/sprites/gamemode_switcher/selection.png"),
             0.0,
         ),
         (
             SpriteId::HotbarSelection,
-            "minecraft/textures/gui/sprites/hud/hotbar_selection.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/hotbar_selection.png"),
             0.0,
         ),
         (
             SpriteId::HotbarOffhandLeft,
-            "minecraft/textures/gui/sprites/hud/hotbar_offhand_left.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/hotbar_offhand_left.png"),
             0.0,
         ),
         (
             SpriteId::HotbarOffhandRight,
-            "minecraft/textures/gui/sprites/hud/hotbar_offhand_right.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/hotbar_offhand_right.png"),
             0.0,
         ),
         (
             SpriteId::EffectBackground,
-            "minecraft/textures/gui/sprites/hud/effect_background.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/effect_background.png"),
             0.0,
         ),
         (
             SpriteId::EffectBackgroundAmbient,
-            "minecraft/textures/gui/sprites/hud/effect_background_ambient.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/effect_background_ambient.png"),
             0.0,
         ),
         (
             SpriteId::SpectatorClose,
-            "minecraft/textures/gui/sprites/spectator/close.png",
+            resource_id!("minecraft:textures/gui/sprites/spectator/close.png"),
             0.0,
         ),
         (
             SpriteId::SpectatorScrollLeft,
-            "minecraft/textures/gui/sprites/spectator/scroll_left.png",
+            resource_id!("minecraft:textures/gui/sprites/spectator/scroll_left.png"),
             0.0,
         ),
         (
             SpriteId::SpectatorScrollRight,
-            "minecraft/textures/gui/sprites/spectator/scroll_right.png",
+            resource_id!("minecraft:textures/gui/sprites/spectator/scroll_right.png"),
             0.0,
         ),
         (
             SpriteId::SpectatorTeleportToPlayer,
-            "minecraft/textures/gui/sprites/spectator/teleport_to_player.png",
+            resource_id!("minecraft:textures/gui/sprites/spectator/teleport_to_player.png"),
             0.0,
         ),
         (
             SpriteId::SpectatorTeleportToTeam,
-            "minecraft/textures/gui/sprites/spectator/teleport_to_team.png",
+            resource_id!("minecraft:textures/gui/sprites/spectator/teleport_to_team.png"),
             0.0,
         ),
         (
             SpriteId::HeartContainer,
-            "minecraft/textures/gui/sprites/hud/heart/container.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/heart/container.png"),
             0.0,
         ),
         (
             SpriteId::HeartFull,
-            "minecraft/textures/gui/sprites/hud/heart/full.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/heart/full.png"),
             0.0,
         ),
         (
             SpriteId::HeartHalf,
-            "minecraft/textures/gui/sprites/hud/heart/half.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/heart/half.png"),
             0.0,
         ),
         (
             SpriteId::HeartAbsorbingFull,
-            "minecraft/textures/gui/sprites/hud/heart/absorbing_full.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/heart/absorbing_full.png"),
             0.0,
         ),
         (
             SpriteId::HeartAbsorbingHalf,
-            "minecraft/textures/gui/sprites/hud/heart/absorbing_half.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/heart/absorbing_half.png"),
             0.0,
         ),
         (
             SpriteId::HeartVehicleContainer,
-            "minecraft/textures/gui/sprites/hud/heart/vehicle_container.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/heart/vehicle_container.png"),
             0.0,
         ),
         (
             SpriteId::HeartVehicleFull,
-            "minecraft/textures/gui/sprites/hud/heart/vehicle_full.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/heart/vehicle_full.png"),
             0.0,
         ),
         (
             SpriteId::HeartVehicleHalf,
-            "minecraft/textures/gui/sprites/hud/heart/vehicle_half.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/heart/vehicle_half.png"),
             0.0,
         ),
         (
             SpriteId::FoodEmpty,
-            "minecraft/textures/gui/sprites/hud/food_empty.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/food_empty.png"),
             0.0,
         ),
         (
             SpriteId::FoodFull,
-            "minecraft/textures/gui/sprites/hud/food_full.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/food_full.png"),
             0.0,
         ),
         (
             SpriteId::FoodHalf,
-            "minecraft/textures/gui/sprites/hud/food_half.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/food_half.png"),
             0.0,
         ),
         (
             SpriteId::AirFull,
-            "minecraft/textures/gui/sprites/hud/air.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/air.png"),
             0.0,
         ),
         (
             SpriteId::AirBursting,
-            "minecraft/textures/gui/sprites/hud/air_bursting.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/air_bursting.png"),
             0.0,
         ),
         (
             SpriteId::AirEmpty,
-            "minecraft/textures/gui/sprites/hud/air_empty.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/air_empty.png"),
             0.0,
         ),
         (
             SpriteId::ArmorEmpty,
-            "minecraft/textures/gui/sprites/hud/armor_empty.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/armor_empty.png"),
             0.0,
         ),
         (
             SpriteId::ArmorHalf,
-            "minecraft/textures/gui/sprites/hud/armor_half.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/armor_half.png"),
             0.0,
         ),
         (
             SpriteId::ArmorFull,
-            "minecraft/textures/gui/sprites/hud/armor_full.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/armor_full.png"),
             0.0,
         ),
         (
             SpriteId::ExperienceBarBackground,
-            "minecraft/textures/gui/sprites/hud/experience_bar_background.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/experience_bar_background.png"),
             0.0,
         ),
         (
             SpriteId::ExperienceBarProgress,
-            "minecraft/textures/gui/sprites/hud/experience_bar_progress.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/experience_bar_progress.png"),
             0.0,
         ),
         (
             SpriteId::Crosshair,
-            "minecraft/textures/gui/sprites/hud/crosshair.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/crosshair.png"),
             0.0,
         ),
         (
             SpriteId::CrosshairAttackIndicatorFull,
-            "minecraft/textures/gui/sprites/hud/crosshair_attack_indicator_full.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/crosshair_attack_indicator_full.png"),
             0.0,
         ),
         (
             SpriteId::CrosshairAttackIndicatorBackground,
-            "minecraft/textures/gui/sprites/hud/crosshair_attack_indicator_background.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/hud/crosshair_attack_indicator_background.png"
+            ),
             0.0,
         ),
         (
             SpriteId::CrosshairAttackIndicatorProgress,
-            "minecraft/textures/gui/sprites/hud/crosshair_attack_indicator_progress.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/hud/crosshair_attack_indicator_progress.png"
+            ),
             0.0,
         ),
         (
             SpriteId::HotbarAttackIndicatorBackground,
-            "minecraft/textures/gui/sprites/hud/hotbar_attack_indicator_background.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/hud/hotbar_attack_indicator_background.png"
+            ),
             0.0,
         ),
         (
             SpriteId::HotbarAttackIndicatorProgress,
-            "minecraft/textures/gui/sprites/hud/hotbar_attack_indicator_progress.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/hotbar_attack_indicator_progress.png"),
             0.0,
         ),
         (
             SpriteId::JumpBarBackground,
-            "minecraft/textures/gui/sprites/hud/jump_bar_background.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/jump_bar_background.png"),
             0.0,
         ),
         (
             SpriteId::JumpBarProgress,
-            "minecraft/textures/gui/sprites/hud/jump_bar_progress.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/jump_bar_progress.png"),
             0.0,
         ),
         (
             SpriteId::LocatorDotDefault0,
-            "minecraft/textures/gui/sprites/hud/locator_bar_dot/default_0.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/locator_bar_dot/default_0.png"),
             0.0,
         ),
         (
             SpriteId::LocatorDotDefault1,
-            "minecraft/textures/gui/sprites/hud/locator_bar_dot/default_1.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/locator_bar_dot/default_1.png"),
             0.0,
         ),
         (
             SpriteId::LocatorDotDefault2,
-            "minecraft/textures/gui/sprites/hud/locator_bar_dot/default_2.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/locator_bar_dot/default_2.png"),
             0.0,
         ),
         (
             SpriteId::LocatorDotDefault3,
-            "minecraft/textures/gui/sprites/hud/locator_bar_dot/default_3.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/locator_bar_dot/default_3.png"),
             0.0,
         ),
         (
             SpriteId::LocatorDotBowtie,
-            "minecraft/textures/gui/sprites/hud/locator_bar_dot/bowtie.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/locator_bar_dot/bowtie.png"),
             0.0,
         ),
         (
             SpriteId::EmptyHelmet,
-            "minecraft/textures/gui/sprites/container/slot/helmet.png",
+            resource_id!("minecraft:textures/gui/sprites/container/slot/helmet.png"),
             0.0,
         ),
         (
             SpriteId::EmptyChestplate,
-            "minecraft/textures/gui/sprites/container/slot/chestplate.png",
+            resource_id!("minecraft:textures/gui/sprites/container/slot/chestplate.png"),
             0.0,
         ),
         (
             SpriteId::EmptyLeggings,
-            "minecraft/textures/gui/sprites/container/slot/leggings.png",
+            resource_id!("minecraft:textures/gui/sprites/container/slot/leggings.png"),
             0.0,
         ),
         (
             SpriteId::EmptyBoots,
-            "minecraft/textures/gui/sprites/container/slot/boots.png",
+            resource_id!("minecraft:textures/gui/sprites/container/slot/boots.png"),
             0.0,
         ),
         (
             SpriteId::EmptyShield,
-            "minecraft/textures/gui/sprites/container/slot/shield.png",
+            resource_id!("minecraft:textures/gui/sprites/container/slot/shield.png"),
             0.0,
         ),
         (
             SpriteId::SlotHighlightBack,
-            "minecraft/textures/gui/sprites/container/slot_highlight_back.png",
+            resource_id!("minecraft:textures/gui/sprites/container/slot_highlight_back.png"),
             0.0,
         ),
         (
             SpriteId::SlotHighlightFront,
-            "minecraft/textures/gui/sprites/container/slot_highlight_front.png",
+            resource_id!("minecraft:textures/gui/sprites/container/slot_highlight_front.png"),
             0.0,
         ),
         (
             SpriteId::AnvilTextField,
-            "minecraft/textures/gui/sprites/container/anvil/text_field.png",
+            resource_id!("minecraft:textures/gui/sprites/container/anvil/text_field.png"),
             0.0,
         ),
         (
             SpriteId::AnvilTextFieldDisabled,
-            "minecraft/textures/gui/sprites/container/anvil/text_field_disabled.png",
+            resource_id!("minecraft:textures/gui/sprites/container/anvil/text_field_disabled.png"),
             0.0,
         ),
         (
             SpriteId::AnvilError,
-            "minecraft/textures/gui/sprites/container/anvil/error.png",
+            resource_id!("minecraft:textures/gui/sprites/container/anvil/error.png"),
             0.0,
         ),
         (
             SpriteId::EnchantmentSlot,
-            "minecraft/textures/gui/sprites/container/enchanting_table/enchantment_slot.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/container/enchanting_table/enchantment_slot.png"
+            ),
             0.0,
         ),
         (
             SpriteId::EnchantmentSlotDisabled,
-            "minecraft/textures/gui/sprites/container/enchanting_table/enchantment_slot_disabled.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/container/enchanting_table/enchantment_slot_disabled.png"
+            ),
             0.0,
         ),
         (
             SpriteId::EnchantmentSlotHighlighted,
-            "minecraft/textures/gui/sprites/container/enchanting_table/enchantment_slot_highlighted.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/container/enchanting_table/enchantment_slot_highlighted.png"
+            ),
             0.0,
         ),
         (
             SpriteId::EnchantmentLevel1,
-            "minecraft/textures/gui/sprites/container/enchanting_table/level_1.png",
+            resource_id!("minecraft:textures/gui/sprites/container/enchanting_table/level_1.png"),
             0.0,
         ),
         (
             SpriteId::EnchantmentLevel2,
-            "minecraft/textures/gui/sprites/container/enchanting_table/level_2.png",
+            resource_id!("minecraft:textures/gui/sprites/container/enchanting_table/level_2.png"),
             0.0,
         ),
         (
             SpriteId::EnchantmentLevel3,
-            "minecraft/textures/gui/sprites/container/enchanting_table/level_3.png",
+            resource_id!("minecraft:textures/gui/sprites/container/enchanting_table/level_3.png"),
             0.0,
         ),
         (
             SpriteId::EnchantmentLevel1Disabled,
-            "minecraft/textures/gui/sprites/container/enchanting_table/level_1_disabled.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/container/enchanting_table/level_1_disabled.png"
+            ),
             0.0,
         ),
         (
             SpriteId::EnchantmentLevel2Disabled,
-            "minecraft/textures/gui/sprites/container/enchanting_table/level_2_disabled.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/container/enchanting_table/level_2_disabled.png"
+            ),
             0.0,
         ),
         (
             SpriteId::EnchantmentLevel3Disabled,
-            "minecraft/textures/gui/sprites/container/enchanting_table/level_3_disabled.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/container/enchanting_table/level_3_disabled.png"
+            ),
             0.0,
         ),
         (
             SpriteId::EmptyLapisLazuli,
-            "minecraft/textures/gui/sprites/container/slot/lapis_lazuli.png",
+            resource_id!("minecraft:textures/gui/sprites/container/slot/lapis_lazuli.png"),
             0.0,
         ),
         (
             SpriteId::FurnaceLitProgress,
-            "minecraft/textures/gui/sprites/container/furnace/lit_progress.png",
+            resource_id!("minecraft:textures/gui/sprites/container/furnace/lit_progress.png"),
             0.0,
         ),
         (
             SpriteId::FurnaceBurnProgress,
-            "minecraft/textures/gui/sprites/container/furnace/burn_progress.png",
+            resource_id!("minecraft:textures/gui/sprites/container/furnace/burn_progress.png"),
             0.0,
         ),
         (
             SpriteId::BlastFurnaceLitProgress,
-            "minecraft/textures/gui/sprites/container/blast_furnace/lit_progress.png",
+            resource_id!("minecraft:textures/gui/sprites/container/blast_furnace/lit_progress.png"),
             0.0,
         ),
         (
             SpriteId::BlastFurnaceBurnProgress,
-            "minecraft/textures/gui/sprites/container/blast_furnace/burn_progress.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/container/blast_furnace/burn_progress.png"
+            ),
             0.0,
         ),
         (
             SpriteId::SmokerLitProgress,
-            "minecraft/textures/gui/sprites/container/smoker/lit_progress.png",
+            resource_id!("minecraft:textures/gui/sprites/container/smoker/lit_progress.png"),
             0.0,
         ),
         (
             SpriteId::SmokerBurnProgress,
-            "minecraft/textures/gui/sprites/container/smoker/burn_progress.png",
+            resource_id!("minecraft:textures/gui/sprites/container/smoker/burn_progress.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookButton,
-            "minecraft/textures/gui/sprites/recipe_book/button.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/button.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookButtonHighlighted,
-            "minecraft/textures/gui/sprites/recipe_book/button_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/button_highlighted.png"),
             0.0,
         ),
         (
             SpriteId::WidgetTextField,
-            "minecraft/textures/gui/sprites/widget/text_field.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/text_field.png"),
             1.0,
         ),
         (
             SpriteId::WidgetTextFieldHighlighted,
-            "minecraft/textures/gui/sprites/widget/text_field_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/text_field_highlighted.png"),
             1.0,
         ),
         (
             SpriteId::RecipeBookTab,
-            "minecraft/textures/gui/sprites/recipe_book/tab.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/tab.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookTabSelected,
-            "minecraft/textures/gui/sprites/recipe_book/tab_selected.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/tab_selected.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookFilterEnabled,
-            "minecraft/textures/gui/sprites/recipe_book/filter_enabled.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/filter_enabled.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookFilterDisabled,
-            "minecraft/textures/gui/sprites/recipe_book/filter_disabled.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/filter_disabled.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookFilterEnabledHighlighted,
-            "minecraft/textures/gui/sprites/recipe_book/filter_enabled_highlighted.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/recipe_book/filter_enabled_highlighted.png"
+            ),
             0.0,
         ),
         (
             SpriteId::RecipeBookFilterDisabledHighlighted,
-            "minecraft/textures/gui/sprites/recipe_book/filter_disabled_highlighted.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/recipe_book/filter_disabled_highlighted.png"
+            ),
             0.0,
         ),
         (
             SpriteId::RecipeBookFurnaceFilterEnabled,
-            "minecraft/textures/gui/sprites/recipe_book/furnace_filter_enabled.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/furnace_filter_enabled.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookFurnaceFilterDisabled,
-            "minecraft/textures/gui/sprites/recipe_book/furnace_filter_disabled.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/furnace_filter_disabled.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookFurnaceFilterEnabledHighlighted,
-            "minecraft/textures/gui/sprites/recipe_book/furnace_filter_enabled_highlighted.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/recipe_book/furnace_filter_enabled_highlighted.png"
+            ),
             0.0,
         ),
         (
             SpriteId::RecipeBookFurnaceFilterDisabledHighlighted,
-            "minecraft/textures/gui/sprites/recipe_book/furnace_filter_disabled_highlighted.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/recipe_book/furnace_filter_disabled_highlighted.png"
+            ),
             0.0,
         ),
         (
             SpriteId::RecipeBookSlotCraftable,
-            "minecraft/textures/gui/sprites/recipe_book/slot_craftable.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/slot_craftable.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookSlotUncraftable,
-            "minecraft/textures/gui/sprites/recipe_book/slot_uncraftable.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/slot_uncraftable.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookSlotManyCraftable,
-            "minecraft/textures/gui/sprites/recipe_book/slot_many_craftable.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/slot_many_craftable.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookSlotManyUncraftable,
-            "minecraft/textures/gui/sprites/recipe_book/slot_many_uncraftable.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/slot_many_uncraftable.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookPageForward,
-            "minecraft/textures/gui/sprites/recipe_book/page_forward.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/page_forward.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookPageForwardHighlighted,
-            "minecraft/textures/gui/sprites/recipe_book/page_forward_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/page_forward_highlighted.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookPageBackward,
-            "minecraft/textures/gui/sprites/recipe_book/page_backward.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/page_backward.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookPageBackwardHighlighted,
-            "minecraft/textures/gui/sprites/recipe_book/page_backward_highlighted.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/recipe_book/page_backward_highlighted.png"
+            ),
             0.0,
         ),
         (
             SpriteId::RecipeBookOverlay,
-            "minecraft/textures/gui/sprites/recipe_book/overlay_recipe.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/overlay_recipe.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookCraftingOverlay,
-            "minecraft/textures/gui/sprites/recipe_book/crafting_overlay.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/crafting_overlay.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookCraftingOverlayHighlighted,
-            "minecraft/textures/gui/sprites/recipe_book/crafting_overlay_highlighted.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/recipe_book/crafting_overlay_highlighted.png"
+            ),
             0.0,
         ),
         (
             SpriteId::RecipeBookCraftingOverlayDisabled,
-            "minecraft/textures/gui/sprites/recipe_book/crafting_overlay_disabled.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/recipe_book/crafting_overlay_disabled.png"
+            ),
             0.0,
         ),
         (
             SpriteId::RecipeBookCraftingOverlayDisabledHighlighted,
-            "minecraft/textures/gui/sprites/recipe_book/crafting_overlay_disabled_highlighted.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/recipe_book/crafting_overlay_disabled_highlighted.png"
+            ),
             0.0,
         ),
         (
             SpriteId::RecipeBookFurnaceOverlay,
-            "minecraft/textures/gui/sprites/recipe_book/furnace_overlay.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/furnace_overlay.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookFurnaceOverlayHighlighted,
-            "minecraft/textures/gui/sprites/recipe_book/furnace_overlay_highlighted.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/recipe_book/furnace_overlay_highlighted.png"
+            ),
             0.0,
         ),
         (
             SpriteId::RecipeBookFurnaceOverlayDisabled,
-            "minecraft/textures/gui/sprites/recipe_book/furnace_overlay_disabled.png",
+            resource_id!("minecraft:textures/gui/sprites/recipe_book/furnace_overlay_disabled.png"),
             0.0,
         ),
         (
             SpriteId::RecipeBookFurnaceOverlayDisabledHighlighted,
-            "minecraft/textures/gui/sprites/recipe_book/furnace_overlay_disabled_highlighted.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/recipe_book/furnace_overlay_disabled_highlighted.png"
+            ),
             0.0,
         ),
         (
             SpriteId::ButtonNormal,
-            "minecraft/textures/gui/sprites/widget/button.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/button.png"),
             3.0,
         ),
         (
             SpriteId::ButtonHover,
-            "minecraft/textures/gui/sprites/widget/button_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/button_highlighted.png"),
             3.0,
         ),
         (
             SpriteId::ButtonDisabled,
-            "minecraft/textures/gui/sprites/widget/button_disabled.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/button_disabled.png"),
             1.0,
         ),
         (
             SpriteId::SliderTrack,
-            "minecraft/textures/gui/sprites/widget/slider.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/slider.png"),
             1.0,
         ),
         (
             SpriteId::SliderTrackHover,
-            "minecraft/textures/gui/sprites/widget/slider_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/slider_highlighted.png"),
             1.0,
         ),
         (
             SpriteId::SliderHandle,
-            "minecraft/textures/gui/sprites/widget/slider_handle.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/slider_handle.png"),
             0.0,
         ),
         (
             SpriteId::SliderHandleHover,
-            "minecraft/textures/gui/sprites/widget/slider_handle_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/slider_handle_highlighted.png"),
             0.0,
         ),
         (
             SpriteId::HeaderSeparator,
-            "minecraft/textures/gui/inworld_header_separator.png",
+            resource_id!("minecraft:textures/gui/inworld_header_separator.png"),
             0.0,
         ),
         (
             SpriteId::FooterSeparator,
-            "minecraft/textures/gui/inworld_footer_separator.png",
+            resource_id!("minecraft:textures/gui/inworld_footer_separator.png"),
             0.0,
         ),
         (
             SpriteId::MenuBackground,
-            "minecraft/textures/gui/inworld_menu_background.png",
+            resource_id!("minecraft:textures/gui/inworld_menu_background.png"),
             0.0,
         ),
         (
             SpriteId::BundleProgressBorder,
-            "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_border.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/container/bundle/bundle_progressbar_border.png"
+            ),
             2.0,
         ),
         (
             SpriteId::BundleProgressFill,
-            "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_fill.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/container/bundle/bundle_progressbar_fill.png"
+            ),
             2.0,
         ),
         (
             SpriteId::BundleProgressFull,
-            "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_full.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/container/bundle/bundle_progressbar_full.png"
+            ),
             2.0,
         ),
         (
             SpriteId::BundleSlotBackground,
-            "minecraft/textures/gui/sprites/container/bundle/slot_background.png",
+            resource_id!("minecraft:textures/gui/sprites/container/bundle/slot_background.png"),
             0.0,
         ),
         (
             SpriteId::BundleSlotHighlightBack,
-            "minecraft/textures/gui/sprites/container/bundle/slot_highlight_back.png",
+            resource_id!("minecraft:textures/gui/sprites/container/bundle/slot_highlight_back.png"),
             0.0,
         ),
         (
             SpriteId::BundleSlotHighlightFront,
-            "minecraft/textures/gui/sprites/container/bundle/slot_highlight_front.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/container/bundle/slot_highlight_front.png"
+            ),
             0.0,
         ),
         (
             SpriteId::TooltipBackground,
-            "minecraft/textures/gui/sprites/tooltip/background.png",
+            resource_id!("minecraft:textures/gui/sprites/tooltip/background.png"),
             9.0,
         ),
         (
             SpriteId::TooltipFrame,
-            "minecraft/textures/gui/sprites/tooltip/frame.png",
+            resource_id!("minecraft:textures/gui/sprites/tooltip/frame.png"),
             10.0,
         ),
         (
             SpriteId::Scroller,
-            "minecraft/textures/gui/sprites/widget/scroller.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/scroller.png"),
             1.0,
         ),
         (
             SpriteId::ScrollerBackground,
-            "minecraft/textures/gui/sprites/widget/scroller_background.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/scroller_background.png"),
             1.0,
         ),
         // `DialogScreen.WARNING_BUTTON_SPRITES` and `Checkbox`, all plain
         // 20x20 blits.
         (
             SpriteId::WarningButton,
-            "minecraft/textures/gui/sprites/dialog/warning_button.png",
+            resource_id!("minecraft:textures/gui/sprites/dialog/warning_button.png"),
             0.0,
         ),
         (
             SpriteId::WarningButtonHighlighted,
-            "minecraft/textures/gui/sprites/dialog/warning_button_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/dialog/warning_button_highlighted.png"),
             0.0,
         ),
         (
             SpriteId::Checkbox,
-            "minecraft/textures/gui/sprites/widget/checkbox.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/checkbox.png"),
             0.0,
         ),
         (
             SpriteId::CheckboxHighlighted,
-            "minecraft/textures/gui/sprites/widget/checkbox_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/checkbox_highlighted.png"),
             0.0,
         ),
         (
             SpriteId::CheckboxSelected,
-            "minecraft/textures/gui/sprites/widget/checkbox_selected.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/checkbox_selected.png"),
             0.0,
         ),
         (
             SpriteId::CheckboxSelectedHighlighted,
-            "minecraft/textures/gui/sprites/widget/checkbox_selected_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/checkbox_selected_highlighted.png"),
             0.0,
         ),
         (
             SpriteId::FriendsBackground,
-            "minecraft/textures/gui/sprites/friends/background.png",
+            resource_id!("minecraft:textures/gui/sprites/friends/background.png"),
             8.0,
         ),
         // `CommonButtons` icons for the title screen's bottom row.
         (
             SpriteId::IconFriends,
-            "minecraft/textures/gui/sprites/friends/friends.png",
+            resource_id!("minecraft:textures/gui/sprites/friends/friends.png"),
             0.0,
         ),
         (
             SpriteId::IconLanguage,
-            "minecraft/textures/gui/sprites/icon/language.png",
+            resource_id!("minecraft:textures/gui/sprites/icon/language.png"),
             0.0,
         ),
         (
             SpriteId::IconAccessibility,
-            "minecraft/textures/gui/sprites/icon/accessibility.png",
+            resource_id!("minecraft:textures/gui/sprites/icon/accessibility.png"),
             0.0,
         ),
         (
             SpriteId::FriendsTab,
-            "minecraft/textures/gui/sprites/friends/button.png",
+            resource_id!("minecraft:textures/gui/sprites/friends/button.png"),
             3.0,
         ),
         (
             SpriteId::FriendsTabDisabled,
-            "minecraft/textures/gui/sprites/friends/button_disabled.png",
+            resource_id!("minecraft:textures/gui/sprites/friends/button_disabled.png"),
             1.0,
         ),
         (
             SpriteId::FriendsTabHighlighted,
-            "minecraft/textures/gui/sprites/friends/button_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/friends/button_highlighted.png"),
             3.0,
         ),
         (
             SpriteId::FriendsIllustration,
-            "minecraft/textures/gui/sprites/friends/illustrations_00.png",
+            resource_id!("minecraft:textures/gui/sprites/friends/illustrations_00.png"),
             0.0,
         ),
         (
             SpriteId::FriendsSend,
-            "minecraft/textures/gui/sprites/friends/send_request.png",
+            resource_id!("minecraft:textures/gui/sprites/friends/send_request.png"),
             0.0,
         ),
         (
             SpriteId::FriendsRemove,
-            "minecraft/textures/gui/sprites/friends/remove.png",
+            resource_id!("minecraft:textures/gui/sprites/friends/remove.png"),
             0.0,
         ),
         (
             SpriteId::FriendsAccept,
-            "minecraft/textures/gui/sprites/friends/accept.png",
+            resource_id!("minecraft:textures/gui/sprites/friends/accept.png"),
             0.0,
         ),
         (
             SpriteId::FriendsReject,
-            "minecraft/textures/gui/sprites/friends/reject.png",
+            resource_id!("minecraft:textures/gui/sprites/friends/reject.png"),
             0.0,
         ),
         (
             SpriteId::FriendsCancel,
-            "minecraft/textures/gui/sprites/friends/cancel.png",
+            resource_id!("minecraft:textures/gui/sprites/friends/cancel.png"),
             0.0,
         ),
         (
             SpriteId::Ping1,
-            "minecraft/textures/gui/sprites/icon/ping_1.png",
+            resource_id!("minecraft:textures/gui/sprites/icon/ping_1.png"),
             0.0,
         ),
         (
             SpriteId::Ping2,
-            "minecraft/textures/gui/sprites/icon/ping_2.png",
+            resource_id!("minecraft:textures/gui/sprites/icon/ping_2.png"),
             0.0,
         ),
         (
             SpriteId::Ping3,
-            "minecraft/textures/gui/sprites/icon/ping_3.png",
+            resource_id!("minecraft:textures/gui/sprites/icon/ping_3.png"),
             0.0,
         ),
         (
             SpriteId::Ping4,
-            "minecraft/textures/gui/sprites/icon/ping_4.png",
+            resource_id!("minecraft:textures/gui/sprites/icon/ping_4.png"),
             0.0,
         ),
         (
             SpriteId::Ping5,
-            "minecraft/textures/gui/sprites/icon/ping_5.png",
+            resource_id!("minecraft:textures/gui/sprites/icon/ping_5.png"),
             0.0,
         ),
         (
             SpriteId::PingUnknown,
-            "minecraft/textures/gui/sprites/icon/ping_unknown.png",
+            resource_id!("minecraft:textures/gui/sprites/icon/ping_unknown.png"),
             0.0,
         ),
         (
             SpriteId::ServerJoin,
-            "minecraft/textures/gui/sprites/server_list/join.png",
+            resource_id!("minecraft:textures/gui/sprites/server_list/join.png"),
             0.0,
         ),
         (
             SpriteId::Tab,
-            "minecraft/textures/gui/sprites/widget/tab.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/tab.png"),
             2.0,
         ),
         (
             SpriteId::TabHighlighted,
-            "minecraft/textures/gui/sprites/widget/tab_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/tab_highlighted.png"),
             2.0,
         ),
         (
             SpriteId::TabSelected,
-            "minecraft/textures/gui/sprites/widget/tab_selected.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/tab_selected.png"),
             2.0,
         ),
         (
             SpriteId::TabSelectedHighlighted,
-            "minecraft/textures/gui/sprites/widget/tab_selected_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/widget/tab_selected_highlighted.png"),
             2.0,
         ),
         (
             SpriteId::WorldJoin,
-            "minecraft/textures/gui/sprites/world_list/join.png",
+            resource_id!("minecraft:textures/gui/sprites/world_list/join.png"),
             0.0,
         ),
         (
             SpriteId::WorldJoinHighlighted,
-            "minecraft/textures/gui/sprites/world_list/join_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/world_list/join_highlighted.png"),
             0.0,
         ),
         (
             SpriteId::ServerJoinHighlighted,
-            "minecraft/textures/gui/sprites/server_list/join_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/server_list/join_highlighted.png"),
             0.0,
         ),
         (
             SpriteId::ServerMoveUp,
-            "minecraft/textures/gui/sprites/server_list/move_up.png",
+            resource_id!("minecraft:textures/gui/sprites/server_list/move_up.png"),
             0.0,
         ),
         (
             SpriteId::ServerMoveUpHighlighted,
-            "minecraft/textures/gui/sprites/server_list/move_up_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/server_list/move_up_highlighted.png"),
             0.0,
         ),
         (
             SpriteId::ServerMoveDown,
-            "minecraft/textures/gui/sprites/server_list/move_down.png",
+            resource_id!("minecraft:textures/gui/sprites/server_list/move_down.png"),
             0.0,
         ),
         (
             SpriteId::ServerMoveDownHighlighted,
-            "minecraft/textures/gui/sprites/server_list/move_down_highlighted.png",
+            resource_id!("minecraft:textures/gui/sprites/server_list/move_down_highlighted.png"),
             0.0,
         ),
         (
             SpriteId::UnknownServer,
-            "minecraft/textures/misc/unknown_server.png",
+            resource_id!("minecraft:textures/misc/unknown_server.png"),
             0.0,
         ),
         (
             SpriteId::Pinging1,
-            "minecraft/textures/gui/sprites/server_list/pinging_1.png",
+            resource_id!("minecraft:textures/gui/sprites/server_list/pinging_1.png"),
             0.0,
         ),
         (
             SpriteId::Pinging2,
-            "minecraft/textures/gui/sprites/server_list/pinging_2.png",
+            resource_id!("minecraft:textures/gui/sprites/server_list/pinging_2.png"),
             0.0,
         ),
         (
             SpriteId::Pinging3,
-            "minecraft/textures/gui/sprites/server_list/pinging_3.png",
+            resource_id!("minecraft:textures/gui/sprites/server_list/pinging_3.png"),
             0.0,
         ),
         (
             SpriteId::Pinging4,
-            "minecraft/textures/gui/sprites/server_list/pinging_4.png",
+            resource_id!("minecraft:textures/gui/sprites/server_list/pinging_4.png"),
             0.0,
         ),
         (
             SpriteId::Pinging5,
-            "minecraft/textures/gui/sprites/server_list/pinging_5.png",
+            resource_id!("minecraft:textures/gui/sprites/server_list/pinging_5.png"),
             0.0,
         ),
         (
             SpriteId::Incompatible,
-            "minecraft/textures/gui/sprites/server_list/incompatible.png",
+            resource_id!("minecraft:textures/gui/sprites/server_list/incompatible.png"),
             0.0,
         ),
         (
             SpriteId::Unreachable,
-            "minecraft/textures/gui/sprites/server_list/unreachable.png",
+            resource_id!("minecraft:textures/gui/sprites/server_list/unreachable.png"),
             0.0,
         ),
         (
             SpriteId::CreativeScroller,
-            "minecraft/textures/gui/sprites/container/creative_inventory/scroller.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/container/creative_inventory/scroller.png"
+            ),
             0.0,
         ),
         (
             SpriteId::CreativeScrollerDisabled,
-            "minecraft/textures/gui/sprites/container/creative_inventory/scroller_disabled.png",
+            resource_id!(
+                "minecraft:textures/gui/sprites/container/creative_inventory/scroller_disabled.png"
+            ),
             0.0,
         ),
         (
             SpriteId::ChatModified,
-            "minecraft/textures/gui/sprites/icon/chat_modified.png",
+            resource_id!("minecraft:textures/gui/sprites/icon/chat_modified.png"),
             0.0,
         ),
         (
             SpriteId::ToastAdvancement,
-            "minecraft/textures/gui/sprites/toast/advancement.png",
+            resource_id!("minecraft:textures/gui/sprites/toast/advancement.png"),
             0.0,
         ),
         (
             SpriteId::ToastRecipe,
-            "minecraft/textures/gui/sprites/toast/recipe.png",
+            resource_id!("minecraft:textures/gui/sprites/toast/recipe.png"),
             0.0,
         ),
         (
             SpriteId::ToastTutorial,
-            "minecraft/textures/gui/sprites/toast/tutorial.png",
+            resource_id!("minecraft:textures/gui/sprites/toast/tutorial.png"),
             3.0,
         ),
         (
             SpriteId::ToastMovementKeys,
-            "minecraft/textures/gui/sprites/toast/movement_keys.png",
+            resource_id!("minecraft:textures/gui/sprites/toast/movement_keys.png"),
             0.0,
         ),
         (
             SpriteId::ToastMouse,
-            "minecraft/textures/gui/sprites/toast/mouse.png",
+            resource_id!("minecraft:textures/gui/sprites/toast/mouse.png"),
             0.0,
         ),
         (
             SpriteId::ToastTree,
-            "minecraft/textures/gui/sprites/toast/tree.png",
+            resource_id!("minecraft:textures/gui/sprites/toast/tree.png"),
             0.0,
         ),
         (
             SpriteId::ToastRecipeBook,
-            "minecraft/textures/gui/sprites/toast/recipe_book.png",
+            resource_id!("minecraft:textures/gui/sprites/toast/recipe_book.png"),
             0.0,
         ),
         (
             SpriteId::ToastWoodenPlanks,
-            "minecraft/textures/gui/sprites/toast/wooden_planks.png",
+            resource_id!("minecraft:textures/gui/sprites/toast/wooden_planks.png"),
             0.0,
         ),
         (
             SpriteId::ToastSocialInteractions,
-            "minecraft/textures/gui/sprites/toast/social_interactions.png",
+            resource_id!("minecraft:textures/gui/sprites/toast/social_interactions.png"),
             0.0,
         ),
         (
             SpriteId::ToastRightClick,
-            "minecraft/textures/gui/sprites/toast/right_click.png",
+            resource_id!("minecraft:textures/gui/sprites/toast/right_click.png"),
             0.0,
         ),
     ];
@@ -3558,15 +3709,17 @@ fn build_sprite_atlas(
         .map(|(i, info)| {
             (
                 SpriteId::MobEffect(i as u8),
-                format!("minecraft/textures/mob_effect/{}.png", info.name),
+                ResourceId::new(&format!("minecraft:textures/mob_effect/{}.png", info.name)),
                 0.0,
             )
         });
-    let mut boss_bar_sprites: Vec<(SpriteId, String, f32)> = Vec::new();
+    let mut boss_bar_sprites = Vec::new();
     let mut boss_bar_sprite = |id: SpriteId, name: &str, kind: &str| {
         boss_bar_sprites.push((
             id,
-            format!("minecraft/textures/gui/sprites/boss_bar/{name}_{kind}.png"),
+            ResourceId::new(&format!(
+                "minecraft:textures/gui/sprites/boss_bar/{name}_{kind}.png"
+            )),
             0.0,
         ));
     };
@@ -3585,44 +3738,49 @@ fn build_sprite_atlas(
         boss_bar_sprite(SpriteId::BossBarNotchedProgress(i as u8), name, "progress");
     }
     let mut images: Vec<(SpriteId, Vec<u8>, u32, u32, f32)> = Vec::new();
-    for (id, asset_key, border) in sprites
+    for (id, resource_id, border) in sprites
         .iter()
-        .map(|&(id, key, border)| (id, key.to_string(), border))
-        .chain(effect_icons)
-        .chain(boss_bar_sprites)
+        .map(|(id, key, border)| (*id, Ok(key.clone()), *border))
+        .chain(effect_icons.chain(boss_bar_sprites))
     {
-        let path = resolve_asset_path(jar_assets_dir, asset_index, &asset_key);
-        match crate::assets::load_image(&path) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
+        let key = resource_id.as_ref().ok();
+        match resource_id
+            .as_ref()
+            .map_err(|error| error.to_string())
+            .and_then(|key| load_gui_sprite(font_sources.resources, key))
+        {
+            Ok(rgba) => {
                 let w = rgba.width();
                 let h = rgba.height();
                 images.push((id, rgba.into_raw(), w, h, border));
             }
             Err(e) => {
-                tracing::warn!("Failed to load sprite {asset_key}: {e}");
+                if let Some(key) = key {
+                    tracing::warn!(
+                        "Failed to load sprite {}/{}: {e}",
+                        key.namespace(),
+                        key.path()
+                    );
+                } else {
+                    tracing::warn!("Invalid resource ID for sprite {id:?}: {e}");
+                }
                 images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
             }
         }
     }
 
     // Steve head: 8x8 face composited with the 8x8 hat overlay from the wide skin.
-    let steve_path = resolve_asset_path(
-        jar_assets_dir,
-        asset_index,
-        "minecraft/textures/entity/player/wide/steve.png",
-    );
-    match crate::assets::load_image(&steve_path) {
-        Ok(img) => {
-            let rgba = img.to_rgba8();
-            match extract_face_8x8(rgba.as_raw(), rgba.width(), rgba.height()) {
-                Some(out) => images.push((SpriteId::SteveHead, out, 8, 8, 0.0)),
-                None => {
-                    tracing::warn!("Steve skin too small: {}x{}", rgba.width(), rgba.height());
-                    images.push((SpriteId::SteveHead, vec![255, 0, 255, 255], 1, 1, 0.0));
-                }
+    match load_gui_sprite(
+        font_sources.resources,
+        &resource_id!("minecraft:textures/entity/player/wide/steve.png"),
+    ) {
+        Ok(rgba) => match extract_face_8x8(rgba.as_raw(), rgba.width(), rgba.height()) {
+            Some(out) => images.push((SpriteId::SteveHead, out, 8, 8, 0.0)),
+            None => {
+                tracing::warn!("Steve skin too small: {}x{}", rgba.width(), rgba.height());
+                images.push((SpriteId::SteveHead, vec![255, 0, 255, 255], 1, 1, 0.0));
             }
-        }
+        },
         Err(e) => {
             tracing::warn!("Failed to load Steve skin: {e}");
             images.push((SpriteId::SteveHead, vec![255, 0, 255, 255], 1, 1, 0.0));
@@ -3631,14 +3789,11 @@ fn build_sprite_atlas(
 
     // Locator bar background: pre-tile the 12x5 nine-slice (borders L/R 5,
     // 2px center repeated) to its fixed 182x5 draw size.
-    let locator_bg_path = resolve_asset_path(
-        jar_assets_dir,
-        asset_index,
-        "minecraft/textures/gui/sprites/hud/locator_bar_background.png",
-    );
-    match crate::assets::load_image(&locator_bg_path) {
-        Ok(img) => {
-            let rgba = img.to_rgba8();
+    match load_gui_sprite(
+        font_sources.resources,
+        &resource_id!("minecraft:textures/gui/sprites/hud/locator_bar_background.png"),
+    ) {
+        Ok(rgba) => {
             if rgba.width() == 12 && rgba.height() == 5 {
                 let src = rgba.as_raw();
                 let mut out = vec![0u8; 182 * 5 * 4];
@@ -3681,18 +3836,16 @@ fn build_sprite_atlas(
         (
             SpriteId::LocatorArrowUp0,
             SpriteId::LocatorArrowUp1,
-            "minecraft/textures/gui/sprites/hud/locator_bar_arrow_up.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/locator_bar_arrow_up.png"),
         ),
         (
             SpriteId::LocatorArrowDown0,
             SpriteId::LocatorArrowDown1,
-            "minecraft/textures/gui/sprites/hud/locator_bar_arrow_down.png",
+            resource_id!("minecraft:textures/gui/sprites/hud/locator_bar_arrow_down.png"),
         ),
     ] {
-        let path = resolve_asset_path(jar_assets_dir, asset_index, asset_key);
-        let frames = match crate::assets::load_image(&path) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
+        let frames = match load_gui_sprite(font_sources.resources, &asset_key) {
+            Ok(rgba) => {
                 if rgba.width() == 7 && rgba.height() == 10 {
                     let src = rgba.into_raw();
                     let frame_bytes = 7 * 5 * 4;
@@ -3738,98 +3891,98 @@ fn build_sprite_atlas(
     for (id, path, src, max_w, max_h) in [
         (
             SpriteId::RecipeBookBackground,
-            "minecraft/textures/gui/recipe_book.png",
+            resource_id!("minecraft:textures/gui/recipe_book.png"),
             (1, 1),
             147,
             166,
         ),
         (
             SpriteId::InventoryBackground,
-            "minecraft/textures/gui/container/inventory.png",
+            resource_id!("minecraft:textures/gui/container/inventory.png"),
             (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::CraftingTableBackground,
-            "minecraft/textures/gui/container/crafting_table.png",
+            resource_id!("minecraft:textures/gui/container/crafting_table.png"),
             (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::FurnaceBackground,
-            "minecraft/textures/gui/container/furnace.png",
+            resource_id!("minecraft:textures/gui/container/furnace.png"),
             (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::BlastFurnaceBackground,
-            "minecraft/textures/gui/container/blast_furnace.png",
+            resource_id!("minecraft:textures/gui/container/blast_furnace.png"),
             (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::SmokerBackground,
-            "minecraft/textures/gui/container/smoker.png",
+            resource_id!("minecraft:textures/gui/container/smoker.png"),
             (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::Generic54Top,
-            "minecraft/textures/gui/container/generic_54.png",
+            resource_id!("minecraft:textures/gui/container/generic_54.png"),
             (0, 0),
             INV_TEX_W,
             125,
         ),
         (
             SpriteId::Generic54Bottom,
-            "minecraft/textures/gui/container/generic_54.png",
+            resource_id!("minecraft:textures/gui/container/generic_54.png"),
             (0, 126),
             INV_TEX_W,
             96,
         ),
         (
             SpriteId::ShulkerBoxBackground,
-            "minecraft/textures/gui/container/shulker_box.png",
+            resource_id!("minecraft:textures/gui/container/shulker_box.png"),
             (0, 0),
             INV_TEX_W,
             167,
         ),
         (
             SpriteId::AnvilBackground,
-            "minecraft/textures/gui/container/anvil.png",
+            resource_id!("minecraft:textures/gui/container/anvil.png"),
             (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::EnchantingTableBackground,
-            "minecraft/textures/gui/container/enchanting_table.png",
+            resource_id!("minecraft:textures/gui/container/enchanting_table.png"),
             (0, 0),
             INV_TEX_W,
             INV_TEX_H,
         ),
         (
             SpriteId::CreativeItemsBackground,
-            "minecraft/textures/gui/container/creative_inventory/tab_items.png",
+            resource_id!("minecraft:textures/gui/container/creative_inventory/tab_items.png"),
             (0, 0),
             195,
             136,
         ),
         (
             SpriteId::CreativeSearchBackground,
-            "minecraft/textures/gui/container/creative_inventory/tab_item_search.png",
+            resource_id!("minecraft:textures/gui/container/creative_inventory/tab_item_search.png"),
             (0, 0),
             195,
             136,
         ),
         (
             SpriteId::CreativeInventoryBackground,
-            "minecraft/textures/gui/container/creative_inventory/tab_inventory.png",
+            resource_id!("minecraft:textures/gui/container/creative_inventory/tab_inventory.png"),
             (0, 0),
             195,
             136,
@@ -3838,20 +3991,23 @@ fn build_sprite_atlas(
         // portal camera overlay. TODO: animate.
         (
             SpriteId::NetherPortal,
-            "minecraft/textures/block/nether_portal.png",
+            resource_id!("minecraft:textures/block/nether_portal.png"),
             (0, 0),
             16,
             16,
         ),
     ] {
-        let path = resolve_asset_path(jar_assets_dir, asset_index, path);
-        match crate::assets::load_image(&path) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
+        match load_gui_sprite(font_sources.resources, &path) {
+            Ok(rgba) => {
                 let (src_x, src_y) = src;
                 let full_w = rgba.width();
                 let crop_w = max_w.min(full_w.saturating_sub(src_x));
                 let crop_h = max_h.min(rgba.height().saturating_sub(src_y));
+                if crop_w == 0 || crop_h == 0 {
+                    tracing::warn!("Sprite {id:?} is too small for crop at {src:?}");
+                    images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
+                    continue;
+                }
                 let mut cropped = vec![0u8; (crop_w * crop_h * 4) as usize];
                 for y in 0..crop_h {
                     let src_off = (((src_y + y) * full_w + src_x) * 4) as usize;
@@ -3873,19 +4029,20 @@ fn build_sprite_atlas(
         for (state_idx, state_name) in ["unselected", "selected"].iter().enumerate() {
             for col in 1..=7u32 {
                 let id = CREATIVE_TAB_SPRITES[row_idx][state_idx][(col - 1) as usize];
-                let asset_key = format!(
-                    "minecraft/textures/gui/sprites/container/creative_inventory/tab_{row_name}_{state_name}_{col}.png"
+                let resource_name = format!(
+                    "minecraft:textures/gui/sprites/container/creative_inventory/tab_{row_name}_{state_name}_{col}.png"
                 );
-                let path = resolve_asset_path(jar_assets_dir, asset_index, &asset_key);
-                match crate::assets::load_image(&path) {
-                    Ok(img) => {
-                        let rgba = img.to_rgba8();
+                let image = ResourceId::new(&resource_name)
+                    .map_err(|error| error.to_string())
+                    .and_then(|id| load_gui_sprite(font_sources.resources, &id));
+                match image {
+                    Ok(rgba) => {
                         let w = rgba.width();
                         let h = rgba.height();
                         images.push((id, rgba.into_raw(), w, h, 0.0));
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to load creative tab sprite {asset_key}: {e}");
+                        tracing::warn!("Failed to load creative tab sprite {resource_name}: {e}");
                         images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
                     }
                 }
@@ -3899,21 +4056,19 @@ fn build_sprite_atlas(
     for (id, asset_key, logical_h, used_h) in [
         (
             SpriteId::MinecraftLogo,
-            "minecraft/textures/gui/title/minecraft.png",
+            resource_id!("minecraft:textures/gui/title/minecraft.png"),
             64u32,
             44u32,
         ),
         (
             SpriteId::MinecraftEdition,
-            "minecraft/textures/gui/title/edition.png",
+            resource_id!("minecraft:textures/gui/title/edition.png"),
             16,
             14,
         ),
     ] {
-        let path = resolve_asset_path(jar_assets_dir, asset_index, asset_key);
-        match crate::assets::load_image(&path) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
+        match load_gui_sprite(font_sources.resources, &asset_key) {
+            Ok(rgba) => {
                 let (w, h) = (rgba.width(), rgba.height());
                 let used = (h * used_h).div_ceil(logical_h).min(h);
                 let mut raw = rgba.into_raw();
@@ -3931,47 +4086,48 @@ fn build_sprite_atlas(
     // 176 at 1080p, 264 at 1440p, 396 at 4K on the default auto scale. The
     // atlas sampler is NEAREST, so 256 is the size that straddles that range
     // with the least resampling either way.
-    const POMME_LOGO_SIZE: u32 = 256;
-    match image::load_from_memory(crate::assets::POMME_ICON_PNG) {
-        Ok(img) => {
-            images.push((
-                SpriteId::PommeLogo,
-                downscale_straight_alpha(&img.to_rgba8(), POMME_LOGO_SIZE, POMME_LOGO_SIZE)
-                    .into_raw(),
-                POMME_LOGO_SIZE,
-                POMME_LOGO_SIZE,
-                0.0,
-            ));
-        }
-        Err(e) => tracing::warn!("Failed to load pomme logo: {e}"),
-    }
+    images.push((
+        SpriteId::PommeLogo,
+        pomme_logo.to_vec(),
+        POMME_LOGO_SIZE,
+        POMME_LOGO_SIZE,
+        0.0,
+    ));
 
     // The Bedrock title draws at 55% of the screen width, 1056 px at 1080p, so
     // 1024 keeps the NEAREST sampler close to 1:1 there.
     const BEDROCK_TITLE_W: u32 = 1024;
-    if let Some(dir) = bedrock_ui_dir {
-        match crate::assets::load_image(&dir.join("title.png")) {
-            Ok(img) => {
-                let h = (img.height() * BEDROCK_TITLE_W).div_ceil(img.width());
+    match load_gui_sprite(
+        font_sources.resources,
+        &resource_id!("minecraft:textures/ui/title.png"),
+    ) {
+        Ok(img) => {
+            let h = (img.height() * BEDROCK_TITLE_W).div_ceil(img.width());
+            images.push((
+                SpriteId::BedrockTitle,
+                downscale_straight_alpha(&img, BEDROCK_TITLE_W, h).into_raw(),
+                BEDROCK_TITLE_W,
+                h,
+                0.0,
+            ));
+        }
+        Err(e) => tracing::debug!("No Bedrock title yet: {e}"),
+    }
+    for (id, key, nine_slice) in BEDROCK_SPRITES {
+        match load_gui_sprite(font_sources.resources, &key) {
+            Ok(rgba) => {
+                let (w, h) = (rgba.width(), rgba.height());
                 images.push((
-                    SpriteId::BedrockTitle,
-                    downscale_straight_alpha(&img.to_rgba8(), BEDROCK_TITLE_W, h).into_raw(),
-                    BEDROCK_TITLE_W,
+                    id,
+                    rgba.into_raw(),
+                    w,
                     h,
-                    0.0,
+                    nine_slice.as_ref().map_or(0.0, |id| {
+                        load_bedrock_nine_slice(font_sources.resources, id)
+                    }),
                 ));
             }
-            Err(e) => tracing::debug!("No Bedrock title yet: {e}"),
-        }
-        for (id, stem) in BEDROCK_SPRITES {
-            match crate::assets::load_image(&dir.join(format!("{stem}.png"))) {
-                Ok(img) => {
-                    let rgba = img.to_rgba8();
-                    let (w, h) = (rgba.width(), rgba.height());
-                    images.push((id, rgba.into_raw(), w, h, bedrock_nine_slice(dir, stem)));
-                }
-                Err(e) => tracing::debug!("No Bedrock sprite {stem} yet: {e}"),
-            }
+            Err(e) => tracing::debug!("No Bedrock sprite {key} yet: {e}"),
         }
     }
 
@@ -4038,20 +4194,20 @@ fn build_sprite_atlas(
     )
 }
 
-fn load_overlay_rgba(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    asset_key: &str,
-) -> (Vec<u8>, u32, u32) {
-    let path = resolve_asset_path(jar_assets_dir, asset_index, asset_key);
-    match crate::assets::load_image(&path) {
-        Ok(img) => {
-            let rgba = img.to_rgba8();
+const UNDERWATER: ResourceId = resource_id!("minecraft:textures/misc/underwater.png");
+
+fn load_overlay_rgba(resources: &ResourceManager, id: &ResourceId) -> (Vec<u8>, u32, u32) {
+    match util::load_resource_image(resources, id, MAX_SPRITE_BYTES) {
+        Ok(rgba) => {
             let (w, h) = (rgba.width(), rgba.height());
             (rgba.into_raw(), w, h)
         }
         Err(e) => {
-            tracing::warn!("Failed to load overlay texture {asset_key}: {e}");
+            tracing::warn!(
+                "Failed to load overlay texture {}/{}: {e}",
+                id.namespace(),
+                id.path()
+            );
             (vec![255, 0, 255, 255], 1, 1)
         }
     }
@@ -4060,19 +4216,14 @@ fn load_overlay_rgba(
 /// Compose the full-screen camera overlay textures (vignette + pumpkin blur)
 /// side by side into one linear-sampled image. Returns the image and each
 /// half's UV rect, inset half a texel so filtering never crosses the seam.
-fn build_camera_overlay_texture(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-) -> (AtlasImage, [f32; 4], [f32; 4]) {
+fn build_camera_overlay_texture(resources: &ResourceManager) -> (AtlasImage, [f32; 4], [f32; 4]) {
     let (vig, vw, vh) = load_overlay_rgba(
-        jar_assets_dir,
-        asset_index,
-        "minecraft/textures/misc/vignette.png",
+        resources,
+        &resource_id!("minecraft:textures/misc/vignette.png"),
     );
     let (pump, pw, ph) = load_overlay_rgba(
-        jar_assets_dir,
-        asset_index,
-        "minecraft/textures/misc/pumpkinblur.png",
+        resources,
+        &resource_id!("minecraft:textures/misc/pumpkinblur.png"),
     );
 
     let w = vw + pw;
@@ -4103,6 +4254,16 @@ fn build_camera_overlay_texture(
         vignette_uv,
         pumpkin_uv,
     )
+}
+
+fn load_single_texture(
+    device: &rhi::backend::Device,
+    resources: &ResourceManager,
+    id: &ResourceId,
+    name: &str,
+) -> rhi::backend::Texture {
+    let (pixels, w, h) = load_overlay_rgba(resources, id);
+    util::create_sampled_texture(device, name, &pixels, w, h)
 }
 
 struct FontTextureUpload<'a> {
@@ -4181,6 +4342,46 @@ fn create_font_texture(
     });
     if let Err(error) = uploaded {
         destroy_texture_resources(device, &mut texture);
+        return Err(error);
+    }
+    Ok(texture)
+}
+
+/// Upload a fresh ordinary 2D image, retaining the caller's sampler ownership.
+fn create_ui_texture(
+    device: &rhi::backend::Device,
+    image: &AtlasImage,
+    format: rhi::TextureFormat,
+    name: &str,
+) -> Result<rhi::backend::Texture, String> {
+    let desc = rhi::TextureDesc {
+        format,
+        ..util::sampled_texture_desc(name, image.width, image.height)
+    };
+    let texture = rhi::backend::Texture::try_new(device, &desc)?;
+    let uploaded = rhi::backend::Buffer::try_with_data(
+        device,
+        name,
+        &image.pixels,
+        rhi::BufferUsages::COPY_SRC,
+    )
+    .and_then(|staging| {
+        let result = util::upload_image_array(
+            device,
+            staging.handle(),
+            texture.handle(),
+            util::ImageArrayExtent {
+                width: image.width,
+                height: image.height,
+                layers: 1,
+            },
+            format.texel_size().into(),
+        );
+        staging.destroy(device);
+        result
+    });
+    if let Err(error) = uploaded {
+        texture.destroy(device);
         return Err(error);
     }
     Ok(texture)
@@ -5216,18 +5417,15 @@ mod tests {
 
     #[test]
     fn bedrock_nine_slice_reads_the_number_form_only() {
-        let dir = std::env::temp_dir().join(format!("pomme-nine-slice-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        for (stem, json) in [
-            ("number", r#"{ "nineslice_size": 2, "base_size": [4, 4] }"#),
-            ("array", r#"{ "nineslice_size": [1, 2, 1, 2] }"#),
-        ] {
-            std::fs::write(dir.join(format!("{stem}.json")), json).unwrap();
-        }
-        assert_eq!(bedrock_nine_slice(&dir, "number"), 2.0);
-        assert_eq!(bedrock_nine_slice(&dir, "array"), 0.0);
-        assert_eq!(bedrock_nine_slice(&dir, "missing"), 0.0);
-        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(
+            bedrock_nine_slice(br#"{ "nineslice_size": 2, "base_size": [4, 4] }"#),
+            2.0
+        );
+        assert_eq!(
+            bedrock_nine_slice(br#"{ "nineslice_size": [1, 2, 1, 2] }"#),
+            0.0
+        );
+        assert_eq!(bedrock_nine_slice(b""), 0.0);
     }
 
     #[test]

@@ -4,8 +4,6 @@
 //! each frame and written to a per-frame vertex buffer; the uniform holds the
 //! screen-space projection.
 
-use std::path::Path;
-
 use glam::{Mat4, Vec3, Vec4};
 
 use super::entity_renderer::WHITE_TINT;
@@ -13,7 +11,10 @@ use super::skin_preview::{
     PREVIEW_ALPHA_CUTOFF, Uniform, Vertex, create_pipeline, preview_push_constant_range,
     push_preview_style, write_uniform,
 };
-use crate::assets::{AssetIndex, load_image, resolve_asset_path};
+use crate::resources::{ResourceId, ResourceManager, resource_id};
+
+const BOOK_TEXTURE: ResourceId =
+    resource_id!("minecraft:textures/entity/enchantment/enchanting_table_book.png");
 use crate::renderer::{BookPreview, rhi, util};
 
 /// Base mesh of one book part, posed per frame.
@@ -42,8 +43,7 @@ impl BookPreviewPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &ResourceManager,
     ) -> Self {
         let mvp_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
         let tex_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
@@ -62,23 +62,7 @@ impl BookPreviewPipeline {
             "book_mvp",
         );
 
-        let path = resolve_asset_path(
-            jar_assets_dir,
-            asset_index,
-            "minecraft/textures/entity/enchantment/enchanting_table_book.png",
-        );
-        let (pixels, tex_w, tex_h) = match load_image(&path) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
-                let (w, h) = (rgba.width(), rgba.height());
-                (rgba.into_raw(), w, h)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load enchanting book texture: {e}");
-                (vec![255, 0, 255, 255], 1, 1)
-            }
-        };
-        let texture = util::create_sampled_texture(device, "book_texture", &pixels, tex_w, tex_h);
+        let texture = load_book_texture(device, resources);
 
         let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
         let tex_set = util::create_texture_group(device, tex_layout, texture.handle(), sampler);
@@ -106,6 +90,17 @@ impl BookPreviewPipeline {
             parts,
             vert_count,
         }
+    }
+
+    /// The caller must idle the device before replacing the shared texture set.
+    pub fn reload_texture(&mut self, device: &rhi::backend::Device, resources: &ResourceManager) {
+        let texture = load_book_texture(device, resources);
+        self.tex_set.replace(
+            device,
+            self.tex_layout,
+            &util::texture_binding(texture.handle(), self.sampler),
+        );
+        std::mem::replace(&mut self.texture, texture).destroy(device);
     }
 
     /// Draws the book in its GUI box, replicating vanilla's picture-in-picture
@@ -208,6 +203,26 @@ impl BookPreviewPipeline {
         self.mvp_layout.destroy(device);
         self.tex_layout.destroy(device);
     }
+}
+
+fn load_book_texture(
+    device: &rhi::backend::Device,
+    resources: &ResourceManager,
+) -> rhi::backend::Texture {
+    let image = util::load_resource_image(resources, &BOOK_TEXTURE, util::MAX_RESOURCE_IMAGE_BYTES);
+    let (pixels, tex_w, tex_h) = match image {
+        Ok(image) => {
+            let (w, h) = image.dimensions();
+            (image.into_raw(), w, h)
+        }
+        Err(error) => {
+            // Preserve the existing magenta fallback without bypassing pack filters
+            // or retrying a selected resource's read/decode failure via the filesystem.
+            tracing::warn!("Failed to load enchanting book texture: {error}");
+            (vec![255, 0, 255, 255], 1, 1)
+        }
+    };
+    util::create_sampled_texture(device, "book_texture", &pixels, tex_w, tex_h)
 }
 
 /// The seven `BookModel` parts, in `setupAnim` application order.

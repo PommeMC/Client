@@ -2758,8 +2758,7 @@ fn dialog_reference_label(reference: &DialogReference) -> String {
         DialogReference::Holder(DialogHolder::Nbt(NbtTag::String(id))) => id.to_string(),
         DialogReference::ProtocolId(id) => format!("#{id}"),
         DialogReference::Holder(_) => crate::lang::translate("menu.custom_screen_info.title")
-            .unwrap_or("Server Dialog")
-            .to_owned(),
+            .unwrap_or_else(|| "Server Dialog".to_owned()),
     }
 }
 

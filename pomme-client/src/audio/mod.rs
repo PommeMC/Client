@@ -3,20 +3,19 @@ mod openal;
 mod sounds;
 
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError};
 
 use self::decoder::{StreamDecoder, decode_all};
 use self::openal::{Buffer, Context, Source, SourceState};
-use self::sounds::{SoundVariant, SoundsIndex};
-use crate::assets::AssetIndex;
+use self::sounds::{SoundAsset, SoundVariant, SoundsIndex};
 use crate::entity::components::Position;
-use crate::resource_pack::ResourcePackManager;
+use crate::resources::{ResourceId, ResourceManager};
 
 const MENU_MUSIC_EVENT: &str = "music.menu";
 const UI_CLICK_EVENT: &str = "ui.button.click";
@@ -29,6 +28,12 @@ const LOGICAL_SOUND_RETENTION_TICKS: i32 = 20;
 const MENU_MUSIC_STARTING_DELAY_TICKS: i32 = 100;
 const MENU_MUSIC_MIN_DELAY_TICKS: i32 = 20;
 const MENU_MUSIC_MAX_DELAY_TICKS: i32 = 600;
+
+/// Worker-only encoded input limits, independent of the existing PCM cache.
+/// Static decoding releases its input after decoding. Each active stream owns
+/// its input until dropped; no compressed-file cache or eager prefetch exists.
+const MAX_ENCODED_SOUND_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ACTIVE_STREAM_BYTES: usize = 256 * 1024 * 1024;
 
 /// Sound categories, matching the protocol `SoundSource` order so a packet's
 /// source index maps straight onto a volume slot.
@@ -134,7 +139,7 @@ pub struct QueuedSubtitle {
 #[derive(Clone, Debug)]
 struct ResolvedSound {
     sound_id: String,
-    path: PathBuf,
+    asset: SoundAsset,
     entry_volume: f32,
     entry_pitch: f32,
     stream: bool,
@@ -145,7 +150,7 @@ struct ResolvedSound {
 struct PlayCommand {
     id: u64,
     sound_id: String,
-    path: PathBuf,
+    asset: SoundAsset,
     category: SoundCategory,
     volume: f32,
     pitch: f32,
@@ -198,8 +203,6 @@ pub struct AudioEngine {
     command_tx: Option<Sender<AudioCommand>>,
     event_rx: Receiver<AudioEvent>,
     worker: Option<JoinHandle<()>>,
-    jar_assets_dir: PathBuf,
-    asset_index: Option<AssetIndex>,
     sounds: SoundsIndex,
     volumes: [f32; SoundCategory::COUNT],
     subtitles_enabled: bool,
@@ -216,13 +219,14 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
-    pub fn new(
-        jar_assets_dir: &Path,
-        asset_index: Option<AssetIndex>,
-        packs: &ResourcePackManager,
-        volumes: [f32; SoundCategory::COUNT],
-    ) -> Self {
-        let sounds = SoundsIndex::load(jar_assets_dir, &asset_index, packs);
+    pub fn new(resources: &ResourceManager, volumes: [f32; SoundCategory::COUNT]) -> Self {
+        let sounds = match SoundsIndex::load(resources) {
+            Ok(sounds) => sounds,
+            Err(error) => {
+                tracing::warn!(%error, "audio disabled: failed to load sound registry");
+                return Self::disabled();
+            }
+        };
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         // The worker reports with `try_send`, and a dropped `Finished` would
         // park the menu-music delay at `i32::MAX` forever.
@@ -235,13 +239,18 @@ impl AudioEngine {
                 let context = match Context::open_default(false) {
                     Ok(context) => context,
                     Err(e) => {
-                        let _ = init_tx.send(Err(e));
+                        if let Err(error) = init_tx.send(Err(e)) {
+                            tracing::debug!(initialization_result = ?error.0, "Audio startup receiver disconnected before initialization failure was reported");
+                        }
                         return;
                     }
                 };
                 let version = context.version().unwrap_or_else(|| "unknown".to_string());
                 let limits = (context.static_source_limit, context.streaming_source_limit);
-                let _ = init_tx.send(Ok((version, limits)));
+                if init_tx.send(Ok((version, limits))).is_err() {
+                    tracing::debug!("Audio startup receiver disconnected; stopping worker");
+                    return;
+                }
                 AudioWorker::new(context, volumes, command_rx, event_tx).run();
             });
 
@@ -259,12 +268,16 @@ impl AudioEngine {
                          Releases ship the library next to the binary; for a dev \
                          build run `just openal` to stage it."
                     );
-                    let _ = handle.join();
+                    if handle.join().is_err() {
+                        tracing::warn!("OpenAL worker panicked after initialization failed");
+                    }
                     (None, None)
                 }
                 Err(e) => {
                     tracing::warn!("audio disabled: OpenAL worker exited during startup ({e})");
-                    let _ = handle.join();
+                    if handle.join().is_err() {
+                        tracing::warn!("OpenAL worker panicked during startup");
+                    }
                     (None, None)
                 }
             },
@@ -274,14 +287,18 @@ impl AudioEngine {
             }
         };
 
+        Self::attached(command_tx, event_rx, worker, sounds, volumes)
+    }
+
+    /// Bootstrap without installed sources must not open a device or worker.
+    pub(crate) fn disabled() -> Self {
+        let (_, event_rx) = crossbeam_channel::unbounded();
         Self::attached(
-            command_tx,
+            None,
             event_rx,
-            worker,
-            jar_assets_dir.to_path_buf(),
-            asset_index,
-            sounds,
-            volumes,
+            None,
+            SoundsIndex::default(),
+            [1.0; SoundCategory::COUNT],
         )
     }
 
@@ -290,8 +307,6 @@ impl AudioEngine {
         command_tx: Option<Sender<AudioCommand>>,
         event_rx: Receiver<AudioEvent>,
         worker: Option<JoinHandle<()>>,
-        jar_assets_dir: PathBuf,
-        asset_index: Option<AssetIndex>,
         sounds: SoundsIndex,
         volumes: [f32; SoundCategory::COUNT],
     ) -> Self {
@@ -299,8 +314,6 @@ impl AudioEngine {
             command_tx,
             event_rx,
             worker,
-            jar_assets_dir,
-            asset_index,
             sounds,
             volumes,
             subtitles_enabled: false,
@@ -324,8 +337,6 @@ impl AudioEngine {
             Some(command_tx),
             event_rx,
             None,
-            PathBuf::new(),
-            None,
             SoundsIndex::default(),
             [1.0; SoundCategory::COUNT],
         );
@@ -342,8 +353,17 @@ impl AudioEngine {
 
     /// Rebuilds the sound-event registry against the current resource-pack
     /// stack and clears native sources/buffers that may reference old assets.
-    pub fn reload_assets(&mut self, packs: &ResourcePackManager) {
-        self.sounds = SoundsIndex::load(&self.jar_assets_dir, &self.asset_index, packs);
+    pub fn reload_assets(&mut self, resources: &ResourceManager) {
+        let sounds = match SoundsIndex::load(resources) {
+            Ok(sounds) => sounds,
+            Err(error) => {
+                tracing::warn!(%error, "failed to reload sound registry; retaining previous audio state");
+                return;
+            }
+        };
+        // A valid empty registry replaces the old one too. Lookup failure above
+        // leaves both live selections and the worker's sources/cache untouched.
+        self.sounds = sounds;
         self.forget_active_sounds();
         self.send(AudioCommand::ReloadAssets);
     }
@@ -400,7 +420,7 @@ impl AudioEngine {
         self.send(AudioCommand::Play(PlayCommand {
             id,
             sound_id: sound.sound_id,
-            path: sound.path,
+            asset: sound.asset,
             category: SoundCategory::Ui,
             volume: volume * sound.entry_volume,
             pitch: pitch * sound.entry_pitch,
@@ -484,7 +504,7 @@ impl AudioEngine {
         self.send(AudioCommand::Play(PlayCommand {
             id,
             sound_id: sound.sound_id,
-            path: sound.path,
+            asset: sound.asset,
             category: SoundCategory::from_index(category),
             volume: instance_volume,
             pitch: pitch * sound.entry_pitch,
@@ -612,7 +632,7 @@ impl AudioEngine {
         self.send(AudioCommand::Play(PlayCommand {
             id,
             sound_id: sound.sound_id,
-            path: sound.path,
+            asset: sound.asset,
             category: SoundCategory::Music,
             volume: sound.entry_volume,
             pitch: sound.entry_pitch,
@@ -640,7 +660,7 @@ impl AudioEngine {
     fn resolve_variant(&self, event: &str, variant: SoundVariant) -> ResolvedSound {
         ResolvedSound {
             sound_id: canonical_sound_id(event),
-            path: variant.path,
+            asset: variant.asset,
             entry_volume: variant.volume,
             entry_pitch: variant.pitch,
             stream: variant.stream,
@@ -663,8 +683,10 @@ impl AudioEngine {
 
 impl Drop for AudioEngine {
     fn drop(&mut self) {
-        if let Some(tx) = self.command_tx.take() {
-            let _ = tx.send(AudioCommand::Shutdown);
+        if let Some(tx) = self.command_tx.take()
+            && tx.send(AudioCommand::Shutdown).is_err()
+        {
+            tracing::debug!("Audio worker already disconnected during shutdown");
         }
         if let Some(worker) = self.worker.take()
             && worker.join().is_err()
@@ -679,7 +701,11 @@ struct AudioWorker {
     volumes: [f32; SoundCategory::COUNT],
     commands: Receiver<AudioCommand>,
     events: Sender<AudioEvent>,
-    static_buffers: HashMap<PathBuf, Rc<Buffer>>,
+    // IDs identify winners only within one registry view. The engine alone owns
+    // the sender; FIFO ReloadAssets drops all voices and PCM before any play
+    // from the new registry. No other producer can submit an old view later.
+    // Queued old plays pin their selected sources until that reload boundary.
+    static_buffers: HashMap<ResourceId, Rc<Buffer>>,
     active: HashMap<u64, ActiveSound>,
 }
 
@@ -765,7 +791,7 @@ impl AudioWorker {
                 // entity sound that never got a source.
                 if !self.play(play) {
                     if report_completion {
-                        let _ = self.events.try_send(AudioEvent::Finished(id));
+                        self.report_event(AudioEvent::Finished(id));
                     }
                     self.report_entity_sound_ended(entity_id);
                 }
@@ -832,6 +858,8 @@ impl AudioWorker {
                 self.clear_active();
             }
             AudioCommand::ReloadAssets => {
+                // Also drops the decoders' encoded bytes. No cached PCM survives
+                // this registry boundary, even for an unchanged logical ID.
                 self.clear_active();
                 self.static_buffers.clear();
             }
@@ -848,7 +876,7 @@ impl AudioWorker {
             tracing::warn!("failed to stop OpenAL source: {e}");
         }
         if sound.report_completion {
-            let _ = self.events.try_send(AudioEvent::Finished(id));
+            self.report_event(AudioEvent::Finished(id));
         }
         self.report_entity_sound_ended(sound.entity_id);
     }
@@ -890,7 +918,7 @@ impl AudioWorker {
         if at_capacity {
             tracing::debug!(
                 "OpenAL source pool exhausted; dropping sound {}",
-                play.path.display()
+                play.asset.content.id()
             );
             return false;
         }
@@ -915,18 +943,18 @@ impl AudioWorker {
         }
 
         let (source, kind) = if play.stream {
-            match self.start_stream(source, &play.path) {
+            match self.start_stream(source, &play.asset) {
                 Ok((source, stream)) => (source, ActiveKind::Stream(stream)),
                 Err(e) => {
-                    tracing::warn!("failed to stream sound {}: {e}", play.path.display());
+                    tracing::warn!(asset = ?play.asset, "failed to stream sound: {e}");
                     return false;
                 }
             }
         } else {
-            let buffer = match self.static_buffer(&play.path) {
+            let buffer = match self.static_buffer(&play.asset) {
                 Ok(buffer) => buffer,
                 Err(e) => {
-                    tracing::warn!("failed to decode sound {}: {e}", play.path.display());
+                    tracing::warn!(asset = ?play.asset, "failed to decode sound: {e}");
                     return false;
                 }
             };
@@ -956,26 +984,48 @@ impl AudioWorker {
         true
     }
 
-    fn static_buffer(&mut self, path: &Path) -> Result<Rc<Buffer>, String> {
-        if let Some(buffer) = self.static_buffers.get(path) {
+    fn static_buffer(&mut self, asset: &SoundAsset) -> Result<Rc<Buffer>, String> {
+        if let Some(buffer) = self.static_buffers.get(asset.content.id()) {
             return Ok(Rc::clone(buffer));
         }
-        let decoded = decode_all(path)?;
+        let bytes = asset
+            .content
+            .read_bytes(MAX_ENCODED_SOUND_BYTES)
+            .map_err(|error| error.to_string())?;
+        let decoded = decode_all(Arc::from(bytes), asset.content.id().clone())?;
         let buffer = Rc::new(
             self.context
                 .create_buffer(decoded.format, &decoded.samples)?,
         );
         self.static_buffers
-            .insert(path.to_path_buf(), Rc::clone(&buffer));
+            .insert(asset.content.id().clone(), Rc::clone(&buffer));
         Ok(buffer)
     }
 
     fn start_stream(
         &self,
         source: Source,
-        path: &Path,
+        asset: &SoundAsset,
     ) -> Result<(Source, StreamPlayback), String> {
-        let mut decoder = StreamDecoder::open(path)?;
+        let active_bytes: usize = self
+            .active
+            .values()
+            .map(|sound| match &sound.kind {
+                ActiveKind::Stream(stream) => stream.decoder.encoded_len(),
+                ActiveKind::Static { .. } => 0,
+            })
+            .sum();
+        // Admission runs after gain/source-capacity checks. The single worker
+        // may hold one extra bounded read while checking the aggregate budget;
+        // rejected input is dropped, and refusals use normal completion reports.
+        let bytes = asset
+            .content
+            .read_bytes(MAX_ENCODED_SOUND_BYTES)
+            .map_err(|error| error.to_string())?;
+        if bytes.len() > MAX_ACTIVE_STREAM_BYTES.saturating_sub(active_bytes) {
+            return Err("active compressed audio budget exceeded".to_string());
+        }
+        let mut decoder = StreamDecoder::from_bytes(Arc::from(bytes), asset.content.id().clone())?;
         let mut queued = VecDeque::new();
         let mut finished_decoding = false;
         for _ in 0..4 {
@@ -1055,7 +1105,7 @@ impl AudioWorker {
                 continue;
             };
             if sound.report_completion {
-                let _ = self.events.try_send(AudioEvent::Finished(id));
+                self.report_event(AudioEvent::Finished(id));
             }
             self.report_entity_sound_ended(sound.entity_id);
         }
@@ -1065,9 +1115,25 @@ impl AudioWorker {
     /// must call this exactly once or the engine's count never reaches zero.
     fn report_entity_sound_ended(&self, entity_id: Option<i32>) {
         if let Some(entity_id) = entity_id {
-            let _ = self
-                .events
-                .try_send(AudioEvent::EntitySoundEnded(entity_id));
+            self.report_event(AudioEvent::EntitySoundEnded(entity_id));
+        }
+    }
+
+    fn report_event(&self, event: AudioEvent) {
+        match self.events.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Disconnected(event)) => {
+                tracing::debug!(
+                    ?event,
+                    "Audio event receiver disconnected; completion no longer consumed"
+                );
+            }
+            Err(TrySendError::Full(event)) => {
+                tracing::warn!(
+                    ?event,
+                    "Audio event queue full; sound completion could not be reported"
+                );
+            }
         }
     }
 }

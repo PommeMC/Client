@@ -1,19 +1,22 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 
 use regex::Regex;
 use serde_json::Value;
 
-use crate::assets::{self, AssetId, AssetIndex};
+use crate::assets::{self, AssetId};
 use crate::chat_component::normalize_identifier;
 use crate::renderer::pipelines::menu_overlay::ATLAS_CELL;
-use crate::resource_pack::ResourcePackManager;
+use crate::resources::{Resource, ResourceId, ResourceManager};
+
+const MAX_JSON_BYTES: usize = 1024 * 1024;
+const MAX_PNG_BYTES: usize = 32 * 1024 * 1024;
+const MAX_DECODED_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 enum Recipe {
-    Direct(String),
+    Direct(ResourceId),
     Unstitch {
-        resource: String,
+        resource: ResourceId,
         x: f64,
         y: f64,
         width: f64,
@@ -22,84 +25,112 @@ enum Recipe {
         divisor_y: f64,
     },
     Paletted {
-        texture: String,
-        palette_key: String,
-        palette_value: String,
+        texture: ResourceId,
+        palette_key: ResourceId,
+        palette_value: ResourceId,
     },
 }
 
 struct AssetLookup<'a> {
-    jar_assets_dir: &'a Path,
-    asset_index: &'a Option<AssetIndex>,
-    packs: &'a ResourcePackManager,
+    resources: &'a ResourceManager,
 }
 
 impl AssetLookup<'_> {
-    fn resolve(&self, key: &str) -> PathBuf {
-        assets::resolve_asset_path_with_packs(
-            self.jar_assets_dir,
-            self.asset_index,
-            key,
-            Some(self.packs),
-        )
+    fn resolve(&self, id: &ResourceId) -> Option<Resource> {
+        self.resources
+            .get_resource(id)
+            .map_err(|error| tracing::warn!(%id, %error, "Could not resolve inline-object texture"))
+            .ok()?
     }
 
-    fn texture_exists(&self, resource: &str) -> bool {
-        self.resolve(&texture_key(resource)).exists()
+    fn existing_texture(&self, resource: &str) -> Option<ResourceId> {
+        let id = texture_id(resource)?;
+        self.resolve(&id)?;
+        Some(id)
     }
 
-    fn load_texture(&self, resource: &str) -> Option<(Vec<u8>, u32, u32)> {
-        crate::renderer::util::load_png(&self.resolve(&texture_key(resource)))
+    fn load_texture(&self, id: &ResourceId) -> Option<(Vec<u8>, u32, u32)> {
+        let resource = self.resolve(id).or_else(|| {
+            tracing::warn!(%id, "Missing inline-object texture");
+            None
+        })?;
+        Self::decode_texture(&resource)
     }
 
-    /// Every copy of the atlas definition, base assets first, so later packs'
-    /// sources apply on top. A server-sent atlas id that escapes the assets
-    /// directory resolves to nothing.
-    fn atlas_definition_stack(&self, atlas_key: &str) -> Vec<PathBuf> {
-        assets::resource_stack_paths(
-            self.jar_assets_dir,
-            self.asset_index,
-            atlas_key,
-            Some(self.packs),
-        )
+    fn decode_texture(resource: &Resource) -> Option<(Vec<u8>, u32, u32)> {
+        let content = resource.content();
+        let bytes = content
+            .read_bytes(MAX_PNG_BYTES)
+            .map_err(|error| tracing::warn!(%error, "Could not read inline-object texture"))
+            .ok()?;
+        crate::renderer::util::load_png_reader(bytes.as_slice(), MAX_DECODED_BYTES)
+            .map_err(|error| {
+                tracing::warn!(id = %content.id(), origin = ?content.origin(), %error, "Invalid inline-object PNG")
+            })
+            .ok()
     }
 
     /// The sprite's frames: one for a plain texture, the animation's strip
     /// otherwise (`SpriteContents`).
-    fn load_direct_sprite(&self, resource: &str) -> Option<SpriteFrames> {
-        let (rgba, w, h) = self.load_texture(resource)?;
-        let animation = self.animation_meta(resource);
+    fn load_direct_sprite(&self, id: &ResourceId) -> Option<SpriteFrames> {
+        // Resolve once for decoding and its lazy metadata; never look up the
+        // sidecar independently or retry a lower image after a read failure.
+        let resource = self.resolve(id).or_else(|| {
+            tracing::warn!(%id, "Missing inline-object texture");
+            None
+        })?;
+        let (rgba, w, h) = Self::decode_texture(&resource)?;
+        let animation = Self::animation_meta(&resource);
         let (frame_w, frame_h) = match &animation {
             Some(animation) => animation.frame_size(w, h),
             None => (w, h),
         };
+        if frame_w == 0 || frame_h == 0 || frame_w > w || frame_h > h {
+            tracing::warn!(%id, w, h, frame_w, frame_h, "Invalid inline-object frame dimensions");
+            return None;
+        }
         let columns = (w / frame_w.max(1)).max(1);
         let rows = (h / frame_h.max(1)).max(1);
-        let frame_count = (columns * rows) as usize;
+        let frame_count = columns.checked_mul(rows)? as usize;
         let sequence = match &animation {
             Some(animation) => animation.sequence(frame_count),
             None => vec![(0, 1)],
         };
         let mut frames = Vec::new();
         for index in 0..frame_count {
-            let x = (index as u32 % columns) * frame_w;
-            let y = (index as u32 / columns) * frame_h;
+            let x = (index as u32 % columns).checked_mul(frame_w)?;
+            let y = (index as u32 / columns).checked_mul(frame_h)?;
             let (pixels, fw, fh) = crop_rgba(&rgba, w, h, x, y, frame_w, frame_h)?;
             frames.push((pixels, fw, fh));
         }
         SpriteFrames::new(frames, sequence)
     }
 
-    fn animation_meta(&self, resource: &str) -> Option<AnimationMeta> {
-        let path = self.resolve(&format!("{}.mcmeta", texture_key(resource)));
-        let text = std::fs::read_to_string(path).ok()?;
-        let value = serde_json::from_str::<Value>(&text).ok()?;
+    fn animation_meta(resource: &Resource) -> Option<AnimationMeta> {
+        // Malformed or unreadable metadata keeps the legacy still-image default.
+        let content = resource
+            .metadata()
+            .map_err(|error| tracing::warn!(%error, "Could not resolve inline-object animation"))
+            .ok()??;
+        let bytes = content
+            .read_bytes(MAX_JSON_BYTES)
+            .map_err(|error| tracing::warn!(%error, "Could not read inline-object animation"))
+            .ok()?;
+        let value = serde_json::from_slice::<Value>(&bytes)
+            .map_err(|error| tracing::warn!(id = %content.id(), %error, "Invalid inline-object animation"))
+            .ok()?;
         AnimationMeta::parse(value.get("animation")?)
     }
 }
 
-fn texture_key(resource: &str) -> String {
-    AssetId::parse(resource).asset_key("textures", ".png")
+fn texture_id(resource: &str) -> Option<ResourceId> {
+    let resource = ResourceId::new(resource).ok()?;
+    ResourceId::new(&format!(
+        "{}:textures/{}.png",
+        resource.namespace(),
+        resource.path()
+    ))
+    .ok()
 }
 
 /// A sprite's animation metadata (vanilla `AnimationMetadataSection`).
@@ -271,31 +302,46 @@ pub fn is_known_atlas(atlas: &str) -> bool {
 }
 
 pub fn load_atlas_sprite(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: &ResourcePackManager,
+    resources: &ResourceManager,
     atlas: &str,
     sprite: &str,
 ) -> Option<SpriteFrames> {
-    let lookup = AssetLookup {
-        jar_assets_dir,
-        asset_index,
-        packs,
+    let lookup = AssetLookup { resources };
+    let sprite_id = ResourceId::new(sprite).ok()?;
+    let sprite = AssetId {
+        namespace: sprite_id.namespace(),
+        path: sprite_id.path(),
     };
-    let sprite = AssetId::parse(sprite);
     let mut candidate: Option<Recipe> = None;
 
-    let atlas_key = AssetId::parse(atlas).asset_key("atlases", ".json");
-    for path in lookup.atlas_definition_stack(&atlas_key) {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
+    let atlas = ResourceId::new(atlas).ok()?;
+    let atlas_id = ResourceId::new(&format!(
+        "{}:atlases/{}.json",
+        atlas.namespace(),
+        atlas.path()
+    ))
+    .ok()?;
+    let stack = resources
+        .get_resource_stack(&atlas_id)
+        .map_err(|error| tracing::warn!(%error, "Could not load inline-object atlas stack"))
+        .ok()?;
+    // All logical pack contributions, low-to-high, including each built-in
+    // physical layer. Bad definitions skip only their own contribution.
+    for resource in stack {
+        let content = resource.content();
+        let bytes = match content.read_bytes(MAX_JSON_BYTES) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(%error, "Could not read inline-object atlas definition");
+                continue;
+            }
         };
-        let Ok(value) = serde_json::from_str::<Value>(&text) else {
-            tracing::warn!(
-                "Could not parse inline-object atlas definition {}",
-                path.display()
-            );
-            continue;
+        let value = match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(id = %content.id(), origin = ?content.origin(), %error, "Could not parse inline-object atlas definition");
+                continue;
+            }
         };
         let Some(sources) = value.get("sources").and_then(Value::as_array) else {
             continue;
@@ -385,7 +431,7 @@ fn apply_source(
             };
             let path = join_resource_path(source_path, rest);
             let resource = format!("{}:{path}", sprite.namespace);
-            if lookup.texture_exists(&resource) {
+            if let Some(resource) = lookup.existing_texture(&resource) {
                 *candidate = Some(Recipe::Direct(resource));
             }
         }
@@ -397,8 +443,10 @@ fn apply_source(
                 .get("sprite")
                 .and_then(Value::as_str)
                 .unwrap_or(resource);
-            if AssetId::parse(target) == sprite && lookup.texture_exists(resource) {
-                *candidate = Some(Recipe::Direct(normalize_identifier(resource)));
+            if AssetId::parse(target) == sprite
+                && let Some(resource) = lookup.existing_texture(resource)
+            {
+                *candidate = Some(Recipe::Direct(resource));
             }
         }
         Some("filter") => {
@@ -421,9 +469,9 @@ fn apply_source(
             let Some(resource) = map.get("resource").and_then(Value::as_str) else {
                 return;
             };
-            if !lookup.texture_exists(resource) {
+            let Some(resource) = lookup.existing_texture(resource) else {
                 return;
-            }
+            };
             let divisor_x = map.get("divisor_x").and_then(Value::as_f64).unwrap_or(1.0);
             let divisor_y = map.get("divisor_y").and_then(Value::as_f64).unwrap_or(1.0);
             let Some(regions) = map.get("regions").and_then(Value::as_array) else {
@@ -448,7 +496,7 @@ fn apply_source(
                     continue;
                 };
                 *candidate = Some(Recipe::Unstitch {
-                    resource: normalize_identifier(resource),
+                    resource: resource.clone(),
                     x,
                     y,
                     width,
@@ -479,12 +527,14 @@ fn apply_source(
                         continue;
                     };
                     if sprite.path == format!("{}{separator}{suffix}", source.path)
-                        && lookup.texture_exists(texture)
+                        && let Some(texture) = lookup.existing_texture(texture)
+                        && let Some(palette_key) = texture_id(palette_key)
+                        && let Some(palette_value) = texture_id(palette_value)
                     {
                         *candidate = Some(Recipe::Paletted {
-                            texture: normalize_identifier(texture),
-                            palette_key: normalize_identifier(palette_key),
-                            palette_value: normalize_identifier(palette_value),
+                            texture,
+                            palette_key,
+                            palette_value,
                         });
                     }
                 }
@@ -525,10 +575,10 @@ fn crop_rgba(
     cw: u32,
     ch: u32,
 ) -> Option<(Vec<u8>, u32, u32)> {
-    if cw == 0 || ch == 0 || x >= w || y >= h || x + cw > w || y + ch > h {
+    if cw == 0 || ch == 0 || x >= w || y >= h || x.checked_add(cw)? > w || y.checked_add(ch)? > h {
         return None;
     }
-    let mut out = vec![0u8; (cw * ch * 4) as usize];
+    let mut out = vec![0u8; (cw as usize).checked_mul(ch as usize)?.checked_mul(4)?];
     for row in 0..ch {
         let src = (((y + row) * w + x) * 4) as usize;
         let dst = (row * cw * 4) as usize;

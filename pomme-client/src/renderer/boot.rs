@@ -21,7 +21,7 @@ impl BootScreen {
         font_sources: FontSources<'_>,
         vsync: bool,
     ) -> Result<Self, RendererError> {
-        let (ctx, swapchain, frames, menu) = bring_up(window, font_sources, None, vsync)?;
+        let (ctx, swapchain, frames, menu) = bring_up(window, font_sources, vsync)?;
         Ok(Self {
             menu,
             swapchain,
@@ -64,7 +64,6 @@ impl BootScreen {
 pub(super) fn bring_up(
     window: &Window,
     font_sources: FontSources<'_>,
-    bedrock_ui_dir: Option<&std::path::Path>,
     vsync: bool,
 ) -> Result<
     (
@@ -85,7 +84,6 @@ pub(super) fn bring_up(
         &ctx.device,
         swapchain.targets(),
         font_sources,
-        bedrock_ui_dir,
         font_layer_limit,
     )
     .map_err(RendererError::Font)?;

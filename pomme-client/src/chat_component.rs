@@ -306,7 +306,9 @@ impl Component {
                 fallback,
                 args,
             } => {
-                let template = crate::lang::translate(key)
+                let translation = crate::lang::translate(key);
+                let template = translation
+                    .as_deref()
                     .or(fallback.as_deref())
                     .unwrap_or(key.as_str());
                 visit_translation(template, args, &style, plain, bindings, visitor);
@@ -668,7 +670,9 @@ fn keybind_display_name<'a>(key: &'a str, bindings: &KeyBindings) -> std::borrow
             .next()
             .map(InputKey::display_name)
             .unwrap_or_else(|| NOT_BOUND.resolve()),
-        None => std::borrow::Cow::Borrowed(crate::lang::translate(key).unwrap_or(key)),
+        None => crate::lang::translate(key)
+            .map(std::borrow::Cow::Owned)
+            .unwrap_or(std::borrow::Cow::Borrowed(key)),
     }
 }
 
@@ -1496,7 +1500,7 @@ mod tests {
             let component = Component::new(Content::Keybind(key.into()));
             assert_eq!(
                 component.plain_text(),
-                crate::lang::translate(key).unwrap_or(key)
+                crate::lang::translate(key).unwrap_or_else(|| key.to_owned())
             );
         }
     }

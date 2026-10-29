@@ -75,7 +75,7 @@ impl SubtitleOverlayState {
         }
         self.subtitles.push(Subtitle {
             key: key.to_string(),
-            text: crate::lang::translate(key).unwrap_or(key).to_string(),
+            text: crate::lang::translate(key).unwrap_or_else(|| key.to_owned()),
             range,
             played_at: vec![PlayedAt { pos, time: now }],
         });

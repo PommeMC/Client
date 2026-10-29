@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::io::Cursor;
 
-use crate::assets::{AssetId, AssetIndex};
+use crate::assets::AssetId;
 use crate::renderer::{packing, rhi, util};
+use crate::resources::{ResourceContent, ResourceError, ResourceId, ResourceManager};
 use crate::world::block::model::TextureId;
 use crate::world::block::render_assets::BlockRenderAssets;
 
@@ -396,12 +397,28 @@ fn static_animation_layout(width: u32, height: u32) -> AnimationLayout {
     }
 }
 
-fn read_texture_metadata(metadata_path: Option<&Path>) -> Option<TextureMetadataFile> {
-    let Some(metadata_path) = metadata_path else {
-        return Some(TextureMetadataFile::default());
+// Per-image limits allow HD sprites and animation sheets without trusting
+// encoded sizes or header dimensions. PNG's internal decoder limit is
+// unchanged.
+const MAX_TEXTURE_PNG_BYTES: usize = 32 * 1024 * 1024;
+const MAX_TEXTURE_RGBA_BYTES: usize = 256 * 1024 * 1024;
+const MAX_TEXTURE_METADATA_BYTES: usize = 1024 * 1024;
+
+fn read_texture_metadata(
+    content: Option<&ResourceContent>,
+) -> Result<TextureMetadataFile, Box<dyn std::error::Error>> {
+    let Some(content) = content else {
+        return Ok(TextureMetadataFile::default());
     };
-    let json = std::fs::read_to_string(metadata_path).ok()?;
-    serde_json::from_str(&json).ok()
+    let bytes = content.read_bytes(MAX_TEXTURE_METADATA_BYTES)?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "invalid texture metadata {} from {:?}: {error}",
+            content.id(),
+            content.origin()
+        )
+        .into()
+    })
 }
 
 fn animation_layout_from_metadata(
@@ -567,53 +584,31 @@ fn sprite_alpha_mask_from_rgba(
     }
 }
 
-fn resolve_texture_resource(
-    asset_key: &str,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-) -> (PathBuf, Option<PathBuf>) {
-    if let Some((path, metadata)) =
-        packs.and_then(|packs| packs.resolve_asset_with_metadata(asset_key))
-    {
-        return (path, metadata);
-    }
-
-    let path = asset_index
-        .as_ref()
-        .and_then(|index| index.resolve(asset_key))
-        .unwrap_or_else(|| jar_assets_dir.join(asset_key));
-    let metadata_key = format!("{asset_key}.mcmeta");
-    let metadata = packs
-        .and_then(|packs| packs.resolve_asset(&metadata_key))
-        .or_else(|| {
-            asset_index
-                .as_ref()
-                .and_then(|index| index.resolve(&metadata_key))
-        })
-        .or_else(|| {
-            let path = jar_assets_dir.join(&metadata_key);
-            path.exists().then_some(path)
-        });
-    (path, metadata)
-}
-
-fn load_source(
-    name: &str,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-    retain_alpha_mask: bool,
-) -> Source {
-    let asset_key = atlas_asset_path(name);
-    let (file_path, metadata_path) =
-        resolve_texture_resource(&asset_key, jar_assets_dir, asset_index, packs);
-    match util::load_png(&file_path) {
-        Some((data, width, height)) => {
-            let Some(metadata) = read_texture_metadata(metadata_path.as_deref()) else {
-                tracing::warn!("Invalid texture metadata: {name}");
-                return Source::empty(name);
-            };
+fn load_source(name: &str, resources: &ResourceManager, retain_alpha_mask: bool) -> Source {
+    let load = || -> Result<_, Box<dyn std::error::Error>> {
+        // Preserve the legacy bare block/item/entity key mapping, including
+        // custom namespaces, before validating the logical resource ID.
+        let asset_key = atlas_asset_path(name);
+        let id = ResourceId::new(&asset_key.replacen('/', ":", 1))?;
+        let resource = resources
+            .get_resource(&id)?
+            .ok_or_else(|| ResourceError::Missing(id.clone()))?;
+        let content = resource.content();
+        let bytes = content.read_bytes(MAX_TEXTURE_PNG_BYTES)?;
+        let (data, width, height) =
+            util::load_png_reader(Cursor::new(bytes), MAX_TEXTURE_RGBA_BYTES).map_err(|error| {
+                format!(
+                    "invalid texture PNG {id} from {:?}: {error}",
+                    content.origin()
+                )
+            })?;
+        // Resolve only this winner's lazy sidecar. Never retry a lower PNG on
+        // read/decode/metadata errors or bypass pack filters via a file path.
+        let metadata = read_texture_metadata(resource.metadata()?.as_ref())?;
+        Ok((data, width, height, metadata))
+    };
+    match load() {
+        Ok((data, width, height, metadata)) => {
             let Some(animation) =
                 animation_layout_from_metadata(metadata.animation.as_ref(), width, height)
             else {
@@ -647,8 +642,8 @@ fn load_source(
                 animation: sprite_animation,
             }
         }
-        None => {
-            tracing::warn!("Missing texture: {name}");
+        Err(error) => {
+            tracing::warn!(texture = name, %error, "Using missing texture sprite");
             Source::empty(name)
         }
     }
@@ -683,11 +678,9 @@ pub(crate) struct AtlasCpu {
 impl TextureAtlas {
     pub fn build(
         device: &rhi::backend::Device,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &ResourceManager,
         texture_names: &HashSet<&str>,
         generated_item_textures: &HashSet<&str>,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
     ) -> Result<Self, String> {
         let AtlasCpu {
             uv_map,
@@ -697,13 +690,11 @@ impl TextureAtlas {
             mut sources,
             placements,
             missing,
-        } = Self::build_cpu(
-            jar_assets_dir,
-            asset_index,
-            texture_names,
-            generated_item_textures,
-            packs,
-        );
+        } = Self::build_cpu(resources, texture_names, generated_item_textures);
+
+        if atlas_size > device.max_texture_size {
+            return Err(format!("Atlas dimension {atlas_size} exceeds device limit"));
+        }
 
         let sprite_rects = rhi::backend::Buffer::try_with_data(
             device,
@@ -892,21 +883,18 @@ impl TextureAtlas {
     }
 
     /// The CPU half of [`Self::build`]: loads and packs every sprite into the
-    /// level-0 atlas pixels and UV map, with no GPU work.
+    /// level-0 atlas pixels and UV map, with no GPU work. Resource providers
+    /// stay on the calling thread; the result contains only owned CPU data.
     pub(crate) fn build_cpu(
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &ResourceManager,
         texture_names: &HashSet<&str>,
         generated_item_textures: &HashSet<&str>,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
     ) -> AtlasCpu {
         let mut sources: Vec<Source> = Vec::with_capacity(texture_names.len());
         for &name in texture_names {
             sources.push(load_source(
                 name,
-                jar_assets_dir,
-                asset_index,
-                packs,
+                resources,
                 generated_item_textures.contains(name),
             ));
         }
@@ -2118,12 +2106,17 @@ mod tests {
     #[test]
     fn generated_sprite_uses_same_resource_pack_source_as_atlas() {
         let root = test_temp_dir("item_pack_source");
-        let jar_assets = root.join("jar");
         let instance = root.join("instance");
-        let base_dir = jar_assets.join("minecraft/textures/item");
+        let base_pack = instance.join("resourcepacks/base_pack");
+        let base_dir = base_pack.join("assets/minecraft/textures/item");
         let pack_dir = instance.join("resourcepacks/test_pack/assets/minecraft/textures/item");
         std::fs::create_dir_all(&base_dir).unwrap();
         std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(
+            base_pack.join("pack.mcmeta"),
+            r#"{"pack":{"pack_format":84,"description":"base"}}"#,
+        )
+        .unwrap();
         std::fs::write(
             instance.join("resourcepacks/test_pack/pack.mcmeta"),
             r#"{"pack":{"pack_format":84,"description":"test"}}"#,
@@ -2147,9 +2140,24 @@ mod tests {
         replacement.put_pixel(1, 3, image::Rgba([255, 255, 255, 255]));
         replacement.save(&pack_path).unwrap();
 
-        let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
-        packs.enable_local_pack("test_pack");
-        let source = load_source("item/cocoa_beans", &jar_assets, &None, Some(&packs), true);
+        let mut packs = crate::resources::packs::ResourceConfiguration::new(
+            instance.join("resourcepacks/.server_cache"),
+        );
+        packs
+            .set_resource_pack_paths(vec![instance.join("resourcepacks")])
+            .unwrap();
+        for name in ["base_pack", "test_pack"] {
+            let pack_id = packs
+                .resource_packs()
+                .filter(|info| info.provenance == crate::resources::packs::PackProvenance::Local)
+                .find(|info| info.name == name)
+                .unwrap()
+                .pack_id()
+                .clone();
+            packs.enable_resource_pack(&pack_id).unwrap();
+        }
+        let resources = ResourceManager::from_configuration(&packs).unwrap();
+        let source = load_source("item/cocoa_beans", &resources, true);
         let mask = source.alpha_mask.as_ref().unwrap();
         assert_eq!((source.w, source.h), (2, 4));
         assert!(!mask.is_opaque_in_any_frame(0, 0));

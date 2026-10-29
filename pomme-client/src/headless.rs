@@ -13,7 +13,6 @@ use crate::app::core::AppCore;
 use crate::app::phases::in_game::{GameState, section_bits};
 use crate::app::{QuickPlay, TICK_RATE};
 use crate::args::LaunchArgs;
-use crate::assets::AssetIndex;
 use crate::benchmark::{BenchMode, CHUNK_LOAD_MIN_RD, ChunkLoadBench, ChunkLoadStep};
 use crate::dirs::DataDirs;
 use crate::net::NetworkEvent;
@@ -21,6 +20,8 @@ use crate::net::connection::{ConnectArgs, ConnectionHandle, Transport, spawn_con
 use crate::position::ChunkPos;
 use crate::renderer::RenderTimings;
 use crate::renderer::chunk::mesh_source::CpuMeshAssets;
+use crate::resources::ResourceManager;
+use crate::resources::packs::ResourceConfiguration;
 use crate::singleplayer::World;
 use crate::ui::chat::ChatOptions;
 use crate::ui::menu::{SkinOptions, saved_chunk_detail};
@@ -59,6 +60,16 @@ pub fn run(
     dirs: &DataDirs,
     rt: &tokio::runtime::Runtime,
 ) -> i32 {
+    let mut configuration =
+        ResourceConfiguration::new(dirs.game_dir.join("resourcepacks/.server_cache"));
+    configuration.set_installation(Some(dirs.installation_location(version)));
+    let resources = match ResourceManager::from_configuration(&configuration) {
+        Ok(resources) => resources,
+        Err(error) => {
+            tracing::error!(%error, jar = %dirs.client_jar.display(), "Failed to open headless resources");
+            return 1;
+        }
+    };
     let (transport, mut world) = match open(play, dirs, rd) {
         Ok(opened) => opened,
         Err(reason) => {
@@ -66,10 +77,7 @@ pub fn run(
             return 1;
         }
     };
-    let assets = CpuMeshAssets::load(
-        &dirs.jar_assets_dir,
-        AssetIndex::load(&dirs.indexes_dir, &dirs.objects_dir, version),
-    );
+    let assets = CpuMeshAssets::load(&resources);
     let chat_options = ChatOptions::default();
     let skin_options = SkinOptions::default();
     let connection = spawn_connection(
@@ -86,7 +94,6 @@ pub fn run(
     );
     let mut game = GameState::new(
         &assets,
-        None,
         rd,
         world.is_some(),
         chat_options,
@@ -107,8 +114,14 @@ pub fn run(
     drop(connection);
     if let Some(mut world) = world {
         world.begin_close();
+        let mut last_poll_error = None;
         while !world.is_closed() {
-            let _ = world.poll();
+            if let Err(error) = world.poll()
+                && last_poll_error.as_ref() != Some(&error)
+            {
+                tracing::warn!(%error, "Failed to poll world while waiting for shutdown");
+                last_poll_error = Some(error);
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
     }

@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use glam::{Mat3, Mat4, Vec3};
 
 use crate::renderer::camera::CameraUniform;
@@ -10,7 +8,7 @@ use crate::renderer::pipelines::item_display::{DisplayResolver, DisplayTransform
 use crate::renderer::pipelines::item_entity::{self, ItemEntityPipeline, ItemPipelineShared};
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::rhi;
-use crate::world::block::model::CardinalLightType;
+use crate::world::block::model::{CardinalLightType, ItemDefinitionSources, ModelSources};
 
 pub struct HeldItemInfo {
     /// The item, whose model JSON gives the display transforms.
@@ -77,11 +75,12 @@ pub struct HeldItemPipeline {
 }
 
 impl HeldItemPipeline {
-    pub fn new(
+    pub(crate) fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
         atlas: &TextureAtlas,
-        jar_assets_dir: &Path,
+        models: ModelSources,
+        items: ItemDefinitionSources,
         lightmap: &Lightmap,
     ) -> Self {
         let shared = ItemPipelineShared::new(device, atlas, lightmap, "held_item");
@@ -89,16 +88,30 @@ impl HeldItemPipeline {
         Self {
             pipeline,
             shared,
-            right_display: DisplayResolver::new(jar_assets_dir, &["firstperson_righthand"]),
+            right_display: DisplayResolver::new(
+                &["firstperson_righthand"],
+                models.clone(),
+                items.clone(),
+            ),
             left_display: DisplayResolver::new(
-                jar_assets_dir,
                 &["firstperson_lefthand", "firstperson_righthand"],
+                models,
+                items,
             ),
         }
     }
 
-    pub fn rebind_atlas(&mut self, device: &rhi::backend::Device, atlas: &TextureAtlas) {
+    pub(crate) fn rebind_assets(
+        &mut self,
+        device: &rhi::backend::Device,
+        atlas: &TextureAtlas,
+        models: ModelSources,
+        items: ItemDefinitionSources,
+    ) {
         self.shared.rebind_atlas(device, atlas);
+        self.right_display
+            .replace_definition_sources(models.clone(), items.clone());
+        self.left_display.replace_definition_sources(models, items);
     }
 
     #[allow(clippy::too_many_arguments)]

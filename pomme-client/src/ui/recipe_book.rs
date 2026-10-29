@@ -1130,7 +1130,7 @@ fn render_toggle(
 
 /// A vanilla lang string, or `fallback` when the key is missing.
 fn lang_or(key: &str, fallback: &str) -> String {
-    crate::lang::translate(key).unwrap_or(fallback).to_owned()
+    crate::lang::translate(key).unwrap_or_else(|| fallback.to_owned())
 }
 
 pub fn click_hits_book(
@@ -1256,11 +1256,9 @@ fn direct_trim_pattern_name(pattern: &TrimPatternHolder) -> String {
             };
             let ident: azalea_registry::identifier::Identifier = key.clone().into_ident();
             let translation_key = format!("trim_pattern.minecraft.{}", ident.path());
-            crate::lang::translate(&translation_key)
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    format!("{} Armor Trim", crate::lang::title_case_snake(ident.path()))
-                })
+            crate::lang::translate(&translation_key).unwrap_or_else(|| {
+                format!("{} Armor Trim", crate::lang::title_case_snake(ident.path()))
+            })
         }
     }
 }
@@ -1279,7 +1277,6 @@ fn direct_trim_material_name(
             let ident: azalea_registry::identifier::Identifier = key.clone().into_ident();
             let translation_key = format!("trim_material.minecraft.{}", ident.path());
             crate::lang::translate(&translation_key)
-                .map(str::to_owned)
                 .unwrap_or_else(|| crate::lang::title_case_snake(ident.path()))
         }
     }
@@ -1296,8 +1293,7 @@ fn stack_tooltip_lines(stack: &ResolvedSlotStack) -> Vec<TooltipLine> {
     if let Some(trim) = &stack.direct_trim {
         let insert_at = lines.len().min(1);
         let upgrade = crate::lang::translate("item.minecraft.smithing_template.upgrade")
-            .unwrap_or("Upgrade")
-            .to_owned();
+            .unwrap_or_else(|| "Upgrade".to_owned());
         lines.insert(insert_at, TooltipLine::new(upgrade, WHITE));
         lines.insert(
             insert_at + 1,

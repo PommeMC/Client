@@ -18,6 +18,7 @@ enum State {
     Waiting,
     Running(pomme_install::Progress),
     Failed,
+    ReloadFailed,
     Done,
     /// The update is in; this binary hands over to it.
     Updated(PathBuf),
@@ -161,14 +162,22 @@ impl Install {
         }
     }
 
-    /// A click or tap retries a failed download.
+    /// A click or tap retries the failed download or source activation.
     pub fn retry(&self, core: &AppCore) {
-        if matches!(*self.state.lock().unwrap(), State::Waiting | State::Failed) {
+        let restart = {
+            let mut state = self.state.lock().expect("install state lock poisoned");
+            if matches!(*state, State::ReloadFailed) {
+                *state = State::Done;
+                return;
+            }
+            matches!(*state, State::Waiting | State::Failed)
+        };
+        if restart {
             self.start(core);
         }
     }
 
-    pub fn frame(&mut self, core: &AppCore) -> Step {
+    pub fn frame(&mut self, core: &mut AppCore) -> Step {
         let state = self.state.lock().unwrap().clone();
         let (progress, status) = match state {
             State::Waiting => (0.0, String::new()),
@@ -182,6 +191,10 @@ impl Install {
             State::Failed => (
                 0.0,
                 "Download failed. Check your connection, then tap or click to retry.".to_owned(),
+            ),
+            State::ReloadFailed => (
+                0.0,
+                "Resource reload failed. Check the logs, then tap or click to retry.".to_owned(),
             ),
             State::Updated(exe) => match crate::update::relaunch(&exe) {
                 Ok(()) => return Step::Relaunched,
@@ -199,6 +212,14 @@ impl Install {
                 (0.0, String::new())
             }
             State::Done => {
+                if let Err(error) = core.reload_installed_assets() {
+                    tracing::error!(%error, "Installed resources could not activate; keeping the boot screen");
+                    *self.state.lock().expect("install state lock poisoned") = State::ReloadFailed;
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return Step::Running;
+                }
                 // The full renderer makes its own surface on this window.
                 self.screen = None;
                 if let Some(window) = self.window.take() {

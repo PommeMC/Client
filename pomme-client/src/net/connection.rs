@@ -46,7 +46,7 @@ pub enum ConnectionError {
     Encryption(String),
 
     /// A client-side disconnect with a vanilla translation key.
-    #[error("{}", crate::lang::translate(.0).unwrap_or(.0))]
+    #[error("{}", crate::lang::translate(.0).unwrap_or_else(|| (.0).to_string()))]
     ClientDisconnect(&'static str),
 
     #[error("joining {0} servers is not supported yet")]

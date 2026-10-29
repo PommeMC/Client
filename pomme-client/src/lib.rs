@@ -30,7 +30,7 @@ mod player;
 mod position;
 mod recipe;
 mod renderer;
-mod resource_pack;
+pub(crate) mod resources;
 mod shaderpack;
 mod singleplayer;
 #[cfg(test)]
@@ -170,7 +170,9 @@ pub fn run(args: LaunchArgs, platform: Platform) {
     });
     let _ = world::block::BlockStateTable::for_protocol(protocol);
 
-    data_dirs.ensure_game_dir().ok();
+    if let Err(error) = data_dirs.ensure_game_dir() {
+        tracing::warn!(path = %data_dirs.game_dir.display(), %error, "Failed to create installation directory");
+    }
     tracing::info!("Installation directory: {}", data_dirs.game_dir.display());
 
     // A single connection needs only a few async workers; the default runtime

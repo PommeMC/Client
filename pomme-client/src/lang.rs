@@ -1,41 +1,68 @@
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use azalea_registry::builtin::ItemKind;
 
 use crate::player::inventory::item_resource_name;
+use crate::resources::{ResourceError, ResourceId, ResourceManager};
 
-static LANG: OnceLock<HashMap<String, String>> = OnceLock::new();
+static LANG: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+const MAX_LANGUAGE_BYTES: usize = 8 * 1024 * 1024;
 
-/// Loads the translations once they're on disk; before a first-run download
-/// has put them there, a later call fills the table instead.
-pub fn load(jar_assets_dir: &Path) {
-    if let Some(map) = read(jar_assets_dir) {
-        let _ = LANG.set(map);
+/// Merge English dictionaries in namespace order, then low-to-high source
+/// priority, as in vanilla ClientLanguage. Reject invalid layers as a whole.
+/// Enumeration/lookup failures preserve the previous table; successful empty
+/// loads clear it. Only owned CPU strings are published, never resource
+/// handles. A missing first-run dictionary can be populated by a later reload.
+pub(crate) fn reload(resources: &ResourceManager) -> Result<(), ResourceError> {
+    let mut map = HashMap::new();
+    for namespace in resources.namespaces()? {
+        let id = ResourceId::new(&format!("{namespace}:lang/en_us.json"))?;
+        for resource in resources.get_resource_stack(&id)? {
+            let content = resource.content();
+            let bytes = match content.read_bytes(MAX_LANGUAGE_BYTES) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!(%error, "Skipping unreadable English language layer");
+                    continue;
+                }
+            };
+            match parse(&bytes) {
+                Ok(layer) => map.extend(layer),
+                Err(error) => {
+                    tracing::warn!(%id, origin = ?content.origin(), %error, "Skipping invalid English language layer");
+                }
+            }
+        }
     }
+    *LANG
+        .get_or_init(|| RwLock::new(HashMap::new()))
+        .write()
+        .expect("language lock poisoned") = map;
+    Ok(())
 }
 
-fn read(jar_assets_dir: &Path) -> Option<HashMap<String, String>> {
-    let path = jar_assets_dir.join("minecraft/lang/en_us.json");
-    serde_json::from_str(&std::fs::read_to_string(&path).ok()?)
-        .inspect_err(|e| tracing::warn!("Couldn't parse {}: {e}", path.display()))
-        .ok()
+fn parse(bytes: &[u8]) -> Result<HashMap<String, String>, serde_json::Error> {
+    serde_json::from_slice(bytes)
 }
 
-pub fn translate(key: &str) -> Option<&'static str> {
-    LANG.get()?.get(key).map(String::as_str)
+pub fn translate(key: &str) -> Option<String> {
+    LANG.get()?
+        .read()
+        .expect("language lock poisoned")
+        .get(key)
+        .cloned()
 }
 
 pub fn item_display_name(kind: ItemKind) -> String {
     let bare = item_resource_name(kind);
     let block_key = format!("block.minecraft.{bare}");
     if let Some(name) = translate(&block_key) {
-        return name.to_string();
+        return name;
     }
     let item_key = format!("item.minecraft.{bare}");
     if let Some(name) = translate(&item_key) {
-        return name.to_string();
+        return name;
     }
     title_case_snake(&bare)
 }
@@ -55,12 +82,16 @@ pub(crate) fn title_case_snake(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::read;
+    use super::parse;
     use crate::test_util::test_temp_dir;
 
     #[test]
     fn reads_only_a_parsable_file() {
         let dir = test_temp_dir("lang");
+        let read = |dir: &std::path::Path| {
+            let bytes = std::fs::read(dir.join("minecraft/lang/en_us.json")).ok()?;
+            parse(&bytes).ok()
+        };
         assert_eq!(read(&dir), None);
 
         let lang = dir.join("minecraft/lang");

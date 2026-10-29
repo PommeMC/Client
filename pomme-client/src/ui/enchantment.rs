@@ -564,12 +564,10 @@ fn clue_spans(registries: &RegistryHolder, clue: i16, level: i16) -> Option<Vec<
     let path = id.path();
 
     let key = format!("enchantment.{}.{}", id.namespace(), path);
-    let mut name = crate::lang::translate(&key)
-        .map(str::to_string)
-        .unwrap_or_else(|| crate::lang::title_case_snake(path));
+    let mut name =
+        crate::lang::translate(&key).unwrap_or_else(|| crate::lang::title_case_snake(path));
     if level != 1 || !MAX_LEVEL_ONE.contains(&path) {
         let numeral = crate::lang::translate(&format!("enchantment.level.{level}"))
-            .map(str::to_string)
             .unwrap_or_else(|| level.to_string());
         name = format!("{name} {numeral}");
     }

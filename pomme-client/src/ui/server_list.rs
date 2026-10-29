@@ -216,7 +216,7 @@ async fn ping_server(
 fn decode_favicon(data: &str) -> Option<Vec<u8>> {
     let b64 = data.strip_prefix("data:image/png;base64,").unwrap_or(data);
     let png_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).ok()?;
-    let img = image::load_from_memory(&png_bytes).ok()?.to_rgba8();
+    let img = image::load_from_memory(&png_bytes).ok()?.into_rgba8();
     Some(img.into_raw())
 }
 

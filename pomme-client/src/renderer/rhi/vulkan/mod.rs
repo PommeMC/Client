@@ -111,7 +111,9 @@ impl Device {
     }
 
     pub fn wait_idle(&self) {
-        let _ = self.raw.wait_idle();
+        if let Err(error) = self.raw.wait_idle() {
+            tracing::error!(%error, "Failed to wait for Vulkan device idle");
+        }
     }
 
     /// Drops the framebuffers holding any of `textures`, made outside the RHI
@@ -196,7 +198,9 @@ impl Device {
     /// Nothing may use the device afterwards, and every resource made from
     /// it must already be destroyed.
     pub unsafe fn destroy(&mut self) {
-        let _ = self.raw.wait_idle();
+        if let Err(error) = self.raw.wait_idle() {
+            tracing::error!(%error, "Failed to wait for Vulkan device idle during destruction");
+        }
         self.targets.destroy(self);
         self.bind_groups.destroy(&self.raw);
         self.raw.destroy_command_pool(self.command_pool, None);
@@ -337,7 +341,9 @@ impl Buffer {
 
     pub fn destroy(self, device: &Device) {
         device.raw.destroy_buffer(self.raw, None);
-        device.allocator().free(self.allocation).ok();
+        if let Err(error) = device.allocator().free(self.allocation) {
+            tracing::error!(%error, "Failed to free Vulkan buffer allocation");
+        }
     }
 }
 
@@ -495,7 +501,9 @@ impl Texture {
         device.targets.forget(device, &[self.handle()]);
         device.raw.destroy_image_view(self.view, None);
         device.raw.destroy_image(self.raw, None);
-        device.allocator().free(self.allocation).ok();
+        if let Err(error) = device.allocator().free(self.allocation) {
+            tracing::error!(%error, "Failed to free Vulkan image allocation");
+        }
     }
 }
 
@@ -1729,7 +1737,9 @@ impl Frames {
     }
 
     pub fn wait_all(&self, device: &Device) {
-        let _ = device.raw.wait_for_fences(&self.in_flight, true, u64::MAX);
+        if let Err(error) = device.raw.wait_for_fences(&self.in_flight, true, u64::MAX) {
+            tracing::error!(%error, "Failed to wait for all Vulkan in-flight frame fences");
+        }
     }
 
     pub fn acquire(&self, device: &Device, swapchain: &Swapchain) -> Result<Acquired, vk::Error> {
@@ -1822,9 +1832,18 @@ impl Frames {
         let device = &ctx.device;
         if !ctx.present_wait {
             let previous = (self.index + MAX_FRAMES_IN_FLIGHT - 1) % MAX_FRAMES_IN_FLIGHT;
-            let _ = device
+            match device
                 .raw
-                .wait_for_fences(&[self.in_flight[previous]], true, timeout_ns);
+                .wait_for_fences(&[self.in_flight[previous]], true, timeout_ns)
+            {
+                Ok(()) => {}
+                Err(vk::Error::Timeout) => {
+                    tracing::trace!(timeout_ns, "Vulkan frame pacing wait exhausted its budget");
+                }
+                Err(error) => {
+                    tracing::error!(%error, "Failed to wait for Vulkan frame pacing fence");
+                }
+            }
             return true;
         }
         if self.present_id < 2 {
@@ -2145,8 +2164,10 @@ pub struct BindGroup {
 
 impl BindGroup {
     pub fn destroy(self, device: &Device) {
-        if self.raw != vk::DescriptorSet::null() {
-            let _ = device.raw.free_descriptor_sets(self.pool, &[self.raw]);
+        if self.raw != vk::DescriptorSet::null()
+            && let Err(error) = device.raw.free_descriptor_sets(self.pool, &[self.raw])
+        {
+            tracing::error!(%error, "Failed to free Vulkan descriptor set");
         }
     }
 

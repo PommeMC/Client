@@ -1,14 +1,13 @@
 use std::f32::consts::{FRAC_PI_2, PI};
-use std::path::Path;
 
 use azalea_block::BlockState;
 use glam::{Quat, Vec3};
 
-use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::position::BlockPos;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::{CUBE_FACE_DIRS, cube_face_geometry};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
+use crate::resources::{ResourceError, ResourceId, ResourceManager};
 use crate::world::block::BlockStateData;
 use crate::world::block::model::{BakedQuad, Direction, direction_from_positions};
 use crate::world::block::render_assets::BlockRenderView;
@@ -50,8 +49,7 @@ impl BlockOverlayPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &ResourceManager,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
         let texture_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
@@ -73,7 +71,7 @@ impl BlockOverlayPipeline {
             "block_overlay_camera",
         );
 
-        let atlas = load_destroy_atlas(device, jar_assets_dir, asset_index);
+        let atlas = load_destroy_atlas(device, resources);
 
         let atlas_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
 
@@ -111,6 +109,18 @@ impl BlockOverlayPipeline {
             atlas,
             atlas_sampler,
         }
+    }
+
+    /// The caller must idle the device before replacing the shared texture set.
+    /// Geometry, stage UVs and the nearest sampler are retained.
+    pub fn reload_texture(&mut self, device: &rhi::backend::Device, resources: &ResourceManager) {
+        let atlas = load_destroy_atlas(device, resources);
+        self.texture_set.replace(
+            device,
+            self.texture_layout,
+            &util::texture_binding(atlas.handle(), self.atlas_sampler),
+        );
+        std::mem::replace(&mut self.atlas, atlas).destroy(device);
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
@@ -287,34 +297,50 @@ fn face_rotation(dir: Direction) -> Quat {
 
 fn load_destroy_atlas(
     device: &rhi::backend::Device,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    resources: &ResourceManager,
 ) -> rhi::backend::Texture {
     let mut atlas_pixels = Vec::new();
     let mut tile_size = 16u32;
 
     for stage in 0..STAGE_COUNT {
-        let key = format!("minecraft/textures/block/destroy_stage_{stage}.png");
-        let path = resolve_asset_path(jar_assets_dir, asset_index, &key);
-        if let Some((pixels, w, _h)) = util::load_png(&path) {
-            tile_size = w;
-            atlas_pixels.extend_from_slice(&pixels);
-        } else {
-            atlas_pixels.extend(std::iter::repeat_n(
-                0u8,
-                (tile_size * tile_size * 4) as usize,
-            ));
+        let key = format!("minecraft:textures/block/destroy_stage_{stage}.png");
+        let image = ResourceId::new(&key)
+            .and_then(|id| {
+                resources
+                    .get_resource(&id)?
+                    .ok_or(ResourceError::Missing(id))?
+                    .content()
+                    .read_bytes(util::MAX_RESOURCE_IMAGE_BYTES)
+            })
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                // Preserve legacy PNG conversion without a new decoded-size cap.
+                util::load_png_reader(bytes.as_slice(), usize::MAX)
+                    .map_err(|error| error.to_string())
+            });
+        match image {
+            Ok((pixels, w, _h)) => {
+                tile_size = w;
+                atlas_pixels.extend_from_slice(&pixels);
+            }
+            Err(error) => {
+                tracing::warn!("Failed to load {key}, using transparent stage fallback: {error}");
+                atlas_pixels.extend(std::iter::repeat_n(
+                    0u8,
+                    (tile_size * tile_size * 4) as usize,
+                ));
+            }
         }
     }
 
+    // Assumes uniformly sized square stages. Mixed sizes or missing stages before
+    // a size change can leave fewer pixels than the upload dimensions require;
+    // retained for parity pending broader asset validation.
     let atlas_w = tile_size;
     let atlas_h = tile_size * STAGE_COUNT;
-
     let texture =
         util::create_sampled_texture(device, "destroy_atlas", &atlas_pixels, atlas_w, atlas_h);
-
     tracing::info!("Block overlay: loaded {STAGE_COUNT} destroy stages ({atlas_w}x{atlas_h})");
-
     texture
 }
 

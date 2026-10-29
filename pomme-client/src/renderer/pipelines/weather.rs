@@ -1,12 +1,10 @@
-use std::path::Path;
-
-use crate::assets::AssetIndex;
 use crate::renderer::camera::{Camera, CameraUniform};
 use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::chunk::mesher::BiomeClimate;
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::pipelines::sky::SkyState;
 use crate::renderer::{rhi, shader, util};
+use crate::resources::{ResourceId, ResourceManager, resource_id};
 
 /// Block radius of the rain/snow grid sampled around the camera (vanilla
 /// `weatherRadius`). Also used for the per-column distance alpha falloff.
@@ -14,6 +12,8 @@ pub const WEATHER_RADIUS: i32 = 10;
 
 const COLUMNS_PER_SIDE: usize = (2 * WEATHER_RADIUS + 1) as usize;
 const MAX_WEATHER_VERTS: usize = COLUMNS_PER_SIDE * COLUMNS_PER_SIDE * 6;
+const RAIN_TEXTURE: ResourceId = resource_id!("minecraft:textures/environment/rain.png");
+const SNOW_TEXTURE: ResourceId = resource_id!("minecraft:textures/environment/snow.png");
 
 /// Approximate overworld sea level; used for the height-adjusted snow line.
 const SEA_LEVEL: i32 = 63;
@@ -94,8 +94,7 @@ impl WeatherPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &ResourceManager,
         lightmap: &Lightmap,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
@@ -126,20 +125,10 @@ impl WeatherPipeline {
         // vertically as the UV scrolls.
         let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST_REPEAT);
 
-        let rain = util::load_asset_texture(
-            device,
-            jar_assets_dir,
-            asset_index,
-            "minecraft/textures/environment/rain.png",
-        );
+        let rain = load_weather_texture(device, resources, &RAIN_TEXTURE);
         let rain_set = util::create_texture_group(device, tex_layout, rain.handle(), sampler);
 
-        let snow = util::load_asset_texture(
-            device,
-            jar_assets_dir,
-            asset_index,
-            "minecraft/textures/environment/snow.png",
-        );
+        let snow = load_weather_texture(device, resources, &SNOW_TEXTURE);
         let snow_set = util::create_texture_group(device, tex_layout, snow.handle(), sampler);
 
         Self {
@@ -157,6 +146,26 @@ impl WeatherPipeline {
             rain,
             snow,
         }
+    }
+
+    /// The caller must idle the device before replacing the shared texture
+    /// sets.
+    pub fn reload_textures(&mut self, device: &rhi::backend::Device, resources: &ResourceManager) {
+        // Finish both uploads before rebinding or releasing either live texture.
+        let rain = load_weather_texture(device, resources, &RAIN_TEXTURE);
+        let snow = load_weather_texture(device, resources, &SNOW_TEXTURE);
+        self.rain_set.replace(
+            device,
+            self.tex_layout,
+            &util::texture_binding(rain.handle(), self.sampler),
+        );
+        self.snow_set.replace(
+            device,
+            self.tex_layout,
+            &util::texture_binding(snow.handle(), self.sampler),
+        );
+        std::mem::replace(&mut self.rain, rain).destroy(device);
+        std::mem::replace(&mut self.snow, snow).destroy(device);
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
@@ -402,6 +411,29 @@ fn snow_uv(game_time: u64, partial: f32, x: i32, z: i32) -> (f32, f32) {
     let v_drift = rng.next_double() as f32 + time * rng.next_gaussian() as f32 * 0.001;
     let v_base = -(((game_time & 0x1FF) as f32) + partial) / 512.0;
     (u, v_base + v_drift)
+}
+
+fn load_weather_texture(
+    device: &rhi::backend::Device,
+    resources: &ResourceManager,
+    key: &ResourceId,
+) -> rhi::backend::Texture {
+    let image = util::load_resource_image(resources, key, util::MAX_RESOURCE_IMAGE_BYTES);
+    let (pixels, w, h) = match image {
+        Ok(image) => {
+            let (w, h) = image.dimensions();
+            (image.into_raw(), w, h)
+        }
+        Err(error) => {
+            // Preserve the existing opaque-white consumer fallback, without
+            // bypassing a selected resource or a pack filter via the filesystem.
+            tracing::warn!("Failed to load {key}, using opaque-white fallback: {error}");
+            (vec![255u8; 16 * 16 * 4], 16, 16)
+        }
+    };
+
+    tracing::info!("Weather: loaded {key} ({w}x{h})");
+    util::create_sampled_texture(device, &key.to_string(), &pixels, w, h)
 }
 
 fn create_pipeline(

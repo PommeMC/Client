@@ -1,13 +1,253 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, RwLock};
 
 use glam::{Mat3, Mat4, Quat, Vec3};
 use serde::Deserialize;
 
+use super::colormap::Colormap;
 use super::render_assets::{FaceTextures, Tint};
-use crate::assets::{AssetId, AssetIndex, resolve_asset_path_with_packs};
-use crate::renderer::chunk::mesher::Colormap;
+use crate::assets::AssetId;
+use crate::resources::{Resource, ResourceContent, ResourceError, ResourceId, ResourceManager};
+
+const MAX_BLOCKSTATE_JSON_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MODEL_JSON_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ITEM_DEFINITION_JSON_BYTES: usize = 8 * 1024 * 1024;
+
+fn resolve_definition(
+    resources: &ResourceManager,
+    id: &ResourceId,
+    kind: &str,
+) -> Option<Resource> {
+    match resources.get_resource(id) {
+        Ok(Some(resource)) => Some(resource),
+        Ok(None) => {
+            tracing::warn!("{id}: {kind} disappeared during acquisition; skipping");
+            None
+        }
+        Err(error) => {
+            tracing::warn!("{id}: failed to resolve {kind}: {error}; skipping");
+            None
+        }
+    }
+}
+
+fn read_definition_bytes(
+    content: &ResourceContent,
+    kind: &str,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
+    match content.read_bytes(max_bytes) {
+        Ok(bytes) => Some(bytes),
+        Err(error) => {
+            let id = content.id();
+            tracing::warn!("{id}: failed to read {kind}: {error}; skipping");
+            None
+        }
+    }
+}
+
+/// Winning modern item definitions shared by baking and held-display lookup.
+/// Raw owned bytes preserve the tolerant Value interpreter without retaining
+/// application-thread resource providers. Clones pin the same generation.
+#[derive(Clone, Default)]
+pub(crate) struct ItemDefinitionSources(Arc<HashMap<String, Vec<u8>>>);
+
+impl ItemDefinitionSources {
+    pub(crate) fn load(resources: &ResourceManager) -> Result<Self, ResourceError> {
+        let ids = resources.list_resource_ids("items", |id| {
+            id.path().starts_with("items/") && id.path().ends_with(".json")
+        })?;
+        let mut entries = HashMap::with_capacity(ids.len());
+        let mut total_bytes = 0;
+        for id in ids {
+            let Some(resource) = resolve_definition(resources, &id, "item definition") else {
+                continue;
+            };
+            let Some(path) = id
+                .path()
+                .strip_prefix("items/")
+                .and_then(|path| path.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            let Ok(key) = ResourceId::new(&format!("{}:{path}", id.namespace())) else {
+                continue;
+            };
+            if let Some(bytes) = read_definition_bytes(
+                resource.content(),
+                "item definition",
+                MAX_ITEM_DEFINITION_JSON_BYTES,
+            ) {
+                total_bytes += bytes.len();
+                entries.insert(key.to_short_string(), bytes);
+            }
+        }
+        tracing::info!(
+            "Item definition catalog: {} definitions, {total_bytes} bytes",
+            entries.len()
+        );
+        Ok(Self(Arc::new(entries)))
+    }
+
+    pub(crate) fn item_json(&self, item_id: &str) -> Option<serde_json::Value> {
+        let key = ResourceId::new(item_id).ok()?.to_short_string();
+        serde_json::from_slice(self.0.get(&key)?).ok()
+    }
+
+    fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_files(files: &[(&str, std::path::PathBuf)]) -> Self {
+        Self(Arc::new(
+            files
+                .iter()
+                .map(|(id, path)| {
+                    (
+                        ResourceId::new(id).unwrap().to_short_string(),
+                        std::fs::read(path).unwrap(),
+                    )
+                })
+                .collect(),
+        ))
+    }
+}
+
+/// One immutable winning-model catalog shared by geometry and display readers.
+/// Only owned bytes cross into the worker; no provider or manager is retained.
+/// Keep raw JSON so the tolerant display reader is independent of ModelFile's
+/// geometry validation. Clones pin the same reload generation.
+#[derive(Clone, Default)]
+pub(crate) struct ModelSources(Arc<HashMap<String, Vec<u8>>>);
+
+impl ModelSources {
+    pub(crate) fn load(resources: &ResourceManager) -> Result<Self, ResourceError> {
+        let ids = resources.list_resource_ids("models", |id| {
+            id.path().starts_with("models/") && id.path().ends_with(".json")
+        })?;
+        let mut entries = HashMap::with_capacity(ids.len());
+        let mut total_bytes = 0;
+        for id in ids {
+            let Some(resource) = resolve_definition(resources, &id, "model") else {
+                continue;
+            };
+            let Some(path) = id
+                .path()
+                .strip_prefix("models/")
+                .and_then(|path| path.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            let Some(key) = model_key(&format!("{}:{path}", id.namespace())) else {
+                continue;
+            };
+            if let Some(bytes) =
+                read_definition_bytes(resource.content(), "model", MAX_MODEL_JSON_BYTES)
+            {
+                total_bytes += bytes.len();
+                entries.insert(key, bytes);
+            }
+        }
+        tracing::info!(
+            "Model catalog: {} definitions, {total_bytes} bytes",
+            entries.len()
+        );
+        Ok(Self(Arc::new(entries)))
+    }
+
+    fn bytes(&self, model_id: &str) -> Option<&[u8]> {
+        self.0.get(&model_key(model_id)?).map(Vec::as_slice)
+    }
+
+    pub(crate) fn model_json(&self, model_id: &str) -> Option<serde_json::Value> {
+        serde_json::from_slice(self.bytes(model_id)?).ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_files(files: &[(&str, std::path::PathBuf)]) -> Self {
+        Self(Arc::new(
+            files
+                .iter()
+                .map(|(id, path)| (model_key(id).unwrap(), std::fs::read(path).unwrap()))
+                .collect(),
+        ))
+    }
+}
+
+/// Unqualified references always mean minecraft, even in a custom namespace.
+fn model_key(model_id: &str) -> Option<String> {
+    ResourceId::new(model_id)
+        .ok()
+        .map(|id| id.to_short_string())
+}
+
+/// Consumer-owned snapshot: resource handles never cross into the model worker.
+pub(crate) struct BlockstateSources(Vec<BlockstateSource>);
+
+struct BlockstateSource {
+    id: ResourceId,
+    origin: String,
+    bytes: Vec<u8>,
+}
+
+impl BlockstateSources {
+    /// Enumeration failure rejects the snapshot; individual winning-resource
+    /// failures skip that definition without consulting a lower-priority
+    /// source.
+    pub(crate) fn load(resources: &ResourceManager) -> Result<Self, ResourceError> {
+        let ids = resources.list_resource_ids("blockstates", |id| {
+            id.path().starts_with("blockstates/") && id.path().ends_with(".json")
+        })?;
+        let mut entries = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(resource) = resolve_definition(resources, &id, "blockstate") else {
+                continue;
+            };
+            if let Some(bytes) =
+                read_definition_bytes(resource.content(), "blockstate", MAX_BLOCKSTATE_JSON_BYTES)
+            {
+                entries.push(BlockstateSource {
+                    id,
+                    origin: format!("{:?}", resource.content().origin()),
+                    bytes,
+                });
+            }
+        }
+        Ok(Self(entries))
+    }
+
+    pub(super) fn parse(self) -> BlockstateDefinitions {
+        let mut definitions = Vec::with_capacity(self.0.len());
+        for source in self.0 {
+            let Some(path) = source
+                .id
+                .path()
+                .strip_prefix("blockstates/")
+                .and_then(|path| path.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            let name = if source.id.namespace() == "minecraft" {
+                path.to_owned()
+            } else {
+                format!("{}:{path}", source.id.namespace())
+            };
+            match serde_json::from_slice::<BlockstateFile>(&source.bytes) {
+                Ok(blockstate) => definitions.push((name, blockstate)),
+                Err(error) => tracing::warn!(
+                    "{} in {}: blockstate JSON is invalid ({error}); skipping",
+                    source.id,
+                    source.origin
+                ),
+            }
+        }
+        BlockstateDefinitions(definitions)
+    }
+}
+
+/// Parsed once on the worker and shared by texture mapping and geometry baking.
+pub(super) struct BlockstateDefinitions(Vec<(String, BlockstateFile)>);
 
 #[derive(Deserialize)]
 struct BlockstateFile {
@@ -513,35 +753,23 @@ pub struct MultipartEntry {
     pub model: Arc<BakedModel>,
 }
 
-pub fn load_all_block_textures(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
+pub(super) fn load_all_block_textures(
+    models: &ModelSources,
+    blockstates: &BlockstateDefinitions,
 ) -> HashMap<String, FaceTextures> {
     let mut results = HashMap::new();
     let mut model_cache = HashMap::new();
 
-    for_each_blockstate(
-        jar_assets_dir,
-        asset_index,
-        packs,
-        |block_name, blockstate| {
-            let model_ref = extract_default_model_ref(blockstate)?;
-            let resolved = resolve_model(
-                &model_ref.model,
-                jar_assets_dir,
-                asset_index,
-                &mut model_cache,
-                packs,
-            );
-            let face_textures = build_face_textures(block_name, &resolved.textures)?;
-            results.insert(block_name.to_string(), face_textures);
-            Some(())
-        },
-    );
+    for_each_blockstate(blockstates, |block_name, blockstate| {
+        let model_ref = extract_default_model_ref(blockstate)?;
+        let resolved = resolve_model(&model_ref.model, models, &mut model_cache);
+        let face_textures = build_face_textures(block_name, &resolved.textures)?;
+        results.insert(block_name.to_string(), face_textures);
+        Some(())
+    });
 
     tracing::info!(
-        "Loaded {} block texture mappings from vanilla assets",
+        "Loaded {} block texture mappings from blockstate resources",
         results.len()
     );
     results
@@ -550,81 +778,68 @@ pub fn load_all_block_textures(
 type BakedModelMap = HashMap<String, HashMap<String, Arc<BakedModel>>>;
 type MultipartMap = HashMap<String, Vec<MultipartEntry>>;
 
-pub fn bake_all_models(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
+pub(super) fn bake_all_models(
+    models: &ModelSources,
+    blockstates: &BlockstateDefinitions,
 ) -> (BakedModelMap, MultipartMap) {
     let mut results: BakedModelMap = HashMap::new();
     let mut multipart_results: HashMap<String, Vec<MultipartEntry>> = HashMap::new();
     let mut model_cache = HashMap::new();
     let mut total = 0u32;
 
-    for_each_blockstate(
-        jar_assets_dir,
-        asset_index,
-        packs,
-        |block_name, blockstate| {
-            total += 1;
-            let mut variants_map: HashMap<String, Arc<BakedModel>> = HashMap::new();
-            // Variants (and multipart cases) naming the same model, rotation
-            // and uvlock share one bake. Per block, since tints are.
-            let mut shared: HashMap<(String, i32, i32, bool), Arc<BakedModel>> = HashMap::new();
-            let mut bake = |model_ref: &ModelRef| {
-                let key = (
-                    model_ref.model.clone(),
-                    model_ref.x,
-                    model_ref.y,
-                    model_ref.uvlock,
-                );
-                if let Some(baked) = shared.get(&key) {
-                    return Some(Arc::clone(baked));
-                }
-                let resolved = resolve_model(
-                    &model_ref.model,
-                    jar_assets_dir,
-                    asset_index,
-                    &mut model_cache,
-                    packs,
-                );
-                let mut baked =
-                    bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)?;
-                apply_block_tints(&mut baked, block_name);
-                let baked = Arc::new(baked);
-                shared.insert(key, Arc::clone(&baked));
-                Some(baked)
-            };
+    for_each_blockstate(blockstates, |block_name, blockstate| {
+        total += 1;
+        let mut variants_map: HashMap<String, Arc<BakedModel>> = HashMap::new();
+        // Variants (and multipart cases) naming the same model, rotation
+        // and uvlock share one bake. Per block, since tints are.
+        let mut shared: HashMap<(String, i32, i32, bool), Arc<BakedModel>> = HashMap::new();
+        let mut bake = |model_ref: &ModelRef| {
+            let key = (
+                model_ref.model.clone(),
+                model_ref.x,
+                model_ref.y,
+                model_ref.uvlock,
+            );
+            if let Some(baked) = shared.get(&key) {
+                return Some(Arc::clone(baked));
+            }
+            let resolved = resolve_model(&model_ref.model, models, &mut model_cache);
+            let mut baked = bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)?;
+            apply_block_tints(&mut baked, block_name);
+            let baked = Arc::new(baked);
+            shared.insert(key, Arc::clone(&baked));
+            Some(baked)
+        };
 
-            if let Some(variants) = &blockstate.variants {
-                for (variant_key, variant_entry) in variants {
-                    if let Some(baked) = bake(variant_entry.first()?) {
-                        variants_map.insert(variant_key.clone(), baked);
-                    }
-                }
-            } else if let Some(multipart) = &blockstate.multipart {
-                let mut entries = Vec::new();
-                for case in multipart {
-                    if let Some(baked) = bake(case.apply.first()?) {
-                        entries.push(MultipartEntry {
-                            when: parse_when_condition(&case.when),
-                            model: baked,
-                        });
-                    }
-                }
-                if !entries.is_empty() {
-                    multipart_results.insert(block_name.to_string(), entries);
+        if let Some(variants) = &blockstate.variants {
+            for (variant_key, variant_entry) in variants {
+                if let Some(baked) = bake(variant_entry.first()?) {
+                    variants_map.insert(variant_key.clone(), baked);
                 }
             }
-
-            if !variants_map.is_empty() {
-                results.insert(block_name.to_string(), variants_map);
+        } else if let Some(multipart) = &blockstate.multipart {
+            let mut entries = Vec::new();
+            for case in multipart {
+                if let Some(baked) = bake(case.apply.first()?) {
+                    entries.push(MultipartEntry {
+                        when: parse_when_condition(&case.when),
+                        model: baked,
+                    });
+                }
             }
-            Some(())
-        },
-    );
+            if !entries.is_empty() {
+                multipart_results.insert(block_name.to_string(), entries);
+            }
+        }
+
+        if !variants_map.is_empty() {
+            results.insert(block_name.to_string(), variants_map);
+        }
+        Some(())
+    });
 
     let mut missing_names: Vec<String> = Vec::new();
-    for_each_blockstate(jar_assets_dir, asset_index, packs, |block_name, _| {
+    for_each_blockstate(blockstates, |block_name, _| {
         if !results.contains_key(block_name)
             && !multipart_results.contains_key(block_name)
             && !crate::world::block_entity::is_block_entity_block(block_name)
@@ -672,32 +887,6 @@ pub enum ItemTintSource {
     MapColor { default: u32 },
     CustomModelData { index: usize, default: u32 },
     Team { default: u32 },
-}
-
-/// Every `minecraft/items/*.json` name across the jar and the active packs,
-/// so a pack can add an item, not only replace one. Vanilla walks every pack
-/// in `FallbackResourceManager`.
-fn item_definition_names(
-    jar_assets_dir: &Path,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-) -> std::collections::BTreeSet<String> {
-    let pack_dirs = packs
-        .into_iter()
-        .flat_map(|packs| packs.active_pack_dirs())
-        .map(|dir| dir.join("assets"));
-    std::iter::once(jar_assets_dir.to_path_buf())
-        .chain(pack_dirs)
-        .filter_map(|root| std::fs::read_dir(root.join("minecraft").join("items")).ok())
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            entry
-                .file_name()
-                .to_str()?
-                .strip_suffix(".json")
-                .map(str::to_owned)
-        })
-        .collect()
 }
 
 fn opaque(color: u32) -> u32 {
@@ -809,10 +998,10 @@ fn parse_item_tint_sources(
         .collect()
 }
 
-pub fn bake_item_models(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
+pub(super) fn bake_item_models(
+    items: &ItemDefinitionSources,
+    grass_colormap: &Colormap,
+    models: &ModelSources,
 ) -> BakedItemModels {
     let mut item_models: HashMap<String, BakedModel> = HashMap::new();
     let mut flat_item_textures: HashSet<String> = HashSet::new();
@@ -820,12 +1009,6 @@ pub fn bake_item_models(
     let mut gui_transforms: HashMap<String, DisplayTransform> = HashMap::new();
     let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut tint_sources: HashMap<String, Vec<ItemTintSource>> = HashMap::new();
-    let grass_colormap = Colormap::load(
-        jar_assets_dir,
-        asset_index,
-        "minecraft/textures/colormap/grass.png",
-        packs,
-    );
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
 
     let mut bake = |name: &str, parts: &[ModelPart]| {
@@ -839,13 +1022,7 @@ pub fn bake_item_models(
         let mut gui_transform: Option<DisplayTransform> = None;
         let mut gui_light: Option<GuiLight> = None;
         for part in parts {
-            let resolved = resolve_model(
-                &part.path,
-                jar_assets_dir,
-                asset_index,
-                &mut model_cache,
-                packs,
-            );
+            let resolved = resolve_model(&part.path, models, &mut model_cache);
             match ground_transform {
                 None => ground_transform = Some(resolved.ground_transform),
                 Some(existing) if existing.abs_diff_eq(resolved.ground_transform, 1.0e-6) => {}
@@ -870,7 +1047,7 @@ pub fn bake_item_models(
                     part.path
                 ),
             }
-            let part_tints = match parse_item_tint_sources(&part.tints, &grass_colormap) {
+            let part_tints = match parse_item_tint_sources(&part.tints, grass_colormap) {
                 Ok(tints) => tints,
                 Err(error) => {
                     tracing::error!("Couldn't parse item model '{name}': {error}");
@@ -943,15 +1120,8 @@ pub fn bake_item_models(
         }
     };
 
-    for item_name in item_definition_names(jar_assets_dir, packs) {
-        let item_name = item_name.as_str();
-        let item_asset_key = format!("minecraft/items/{item_name}.json");
-        let item_path =
-            resolve_asset_path_with_packs(jar_assets_dir, asset_index, &item_asset_key, packs);
-        let Ok(contents) = std::fs::read_to_string(item_path) else {
-            continue;
-        };
-        let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&contents) else {
+    for item_name in items.names() {
+        let Some(json) = items.item_json(item_name) else {
             continue;
         };
 
@@ -976,13 +1146,7 @@ pub fn bake_item_models(
 
     // The mesh comes from the special renderer, but the chest's display
     // transforms live in `item/template_chest` like any other item's.
-    let chest = resolve_model(
-        "item/template_chest",
-        jar_assets_dir,
-        asset_index,
-        &mut model_cache,
-        packs,
-    );
+    let chest = resolve_model("item/template_chest", models, &mut model_cache);
     item_models.insert(
         "chest".to_string(),
         bake_chest_item_model(chest.gui_transform, chest.gui_light),
@@ -1574,80 +1738,12 @@ fn parse_when_condition(when: &Option<serde_json::Value>) -> HashMap<String, Str
 }
 
 fn for_each_blockstate(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
+    blockstates: &BlockstateDefinitions,
     mut callback: impl FnMut(&str, &BlockstateFile) -> Option<()>,
 ) {
-    let Some(blockstates_dir) = resolve_blockstates_dir(jar_assets_dir, asset_index, packs) else {
-        tracing::warn!("Blockstates directory not found");
-        return;
-    };
-
-    let entries = match std::fs::read_dir(&blockstates_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!("Failed to read blockstates dir: {e}");
-            return;
-        }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(blockstate) = serde_json::from_str::<BlockstateFile>(&contents) else {
-            continue;
-        };
-
-        callback(name, &blockstate);
+    for (name, blockstate) in &blockstates.0 {
+        callback(name, blockstate);
     }
-}
-
-fn resolve_blockstates_dir(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-) -> Option<PathBuf> {
-    let candidates = [
-        jar_assets_dir.join("assets/minecraft/blockstates"),
-        jar_assets_dir.join("jar/assets/minecraft/blockstates"),
-        PathBuf::from("reference/assets/assets/minecraft/blockstates"),
-    ];
-
-    for c in &candidates {
-        if c.is_dir() {
-            return Some(c.clone());
-        }
-    }
-
-    // Also check the original simple path
-    let path = jar_assets_dir.join("minecraft/blockstates");
-    if path.is_dir() {
-        return Some(path);
-    }
-
-    if asset_index.is_some() {
-        let test_path = resolve_asset_path_with_packs(
-            jar_assets_dir,
-            asset_index,
-            "minecraft/blockstates/stone.json",
-            packs,
-        );
-        if test_path.exists() {
-            return test_path.parent().map(|p| p.to_path_buf());
-        }
-    }
-
-    None
 }
 
 fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<ModelRef> {
@@ -1686,10 +1782,8 @@ struct ResolvedModel {
 
 fn resolve_model(
     model_id: &str,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    models: &ModelSources,
     cache: &mut HashMap<String, ModelFile>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> ResolvedModel {
     let mut texture_map: HashMap<String, String> = HashMap::new();
     let mut elements: Option<Vec<ElementDef>> = None;
@@ -1700,7 +1794,7 @@ fn resolve_model(
     let mut current_id = model_id.to_string();
 
     for _ in 0..20 {
-        let Some(model) = load_model(&current_id, jar_assets_dir, asset_index, cache, packs) else {
+        let Some(model) = load_model(&current_id, models, cache) else {
             break;
         };
 
@@ -1768,20 +1862,14 @@ fn resolve_ref(value: &str, map: &HashMap<String, String>, depth: u32) -> String
 
 fn load_model<'a>(
     model_id: &str,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    models: &ModelSources,
     cache: &'a mut HashMap<String, ModelFile>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> Option<&'a ModelFile> {
     if cache.contains_key(model_id) {
         return cache.get(model_id);
     }
 
-    let asset_key = model_id_to_asset_key(model_id);
-    let file_path = resolve_model_path(jar_assets_dir, asset_index, &asset_key, packs)?;
-
-    let contents = std::fs::read_to_string(&file_path).ok()?;
-    let model: ModelFile = match serde_json::from_str(&contents) {
+    let model: ModelFile = match serde_json::from_slice(models.bytes(model_id)?) {
         Ok(model) => model,
         Err(error) => {
             // Vanilla rejects the model too, but it says so rather than going quiet.
@@ -1791,30 +1879,6 @@ fn load_model<'a>(
     };
     cache.insert(model_id.to_string(), model);
     cache.get(model_id)
-}
-
-fn resolve_model_path(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    asset_key: &str,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-) -> Option<PathBuf> {
-    let primary = resolve_asset_path_with_packs(jar_assets_dir, asset_index, asset_key, packs);
-    if primary.exists() {
-        return Some(primary);
-    }
-
-    let ref_path = Path::new("reference/assets/assets")
-        .join(asset_key.strip_prefix("minecraft/").unwrap_or(asset_key));
-    if ref_path.exists() {
-        return Some(ref_path);
-    }
-
-    None
-}
-
-fn model_id_to_asset_key(model_id: &str) -> String {
-    AssetId::parse(model_id).asset_key("models", ".json")
 }
 
 fn texture_to_name(texture_ref: &str) -> Option<String> {
@@ -3064,7 +3128,16 @@ mod tests {
         .unwrap();
         std::fs::write(models.join("generated.json"), r#"{}"#).unwrap();
 
-        let baked = bake_item_models(&jar, &None, None);
+        let sources = ModelSources::from_test_files(&[
+            ("item/holey", models.join("holey.json")),
+            ("item/unresolved", models.join("unresolved.json")),
+            ("item/generated", models.join("generated.json")),
+        ]);
+        let items = ItemDefinitionSources::from_test_files(&[
+            ("holey", items.join("holey.json")),
+            ("unresolved", items.join("unresolved.json")),
+        ]);
+        let baked = bake_item_models(&items, &Colormap::fallback(), &sources);
         assert_eq!(
             baked.flat_texture_keys.get("holey").map(Vec::as_slice),
             Some([Some("item/zero".to_string())].as_slice())
@@ -3101,7 +3174,11 @@ mod tests {
         .unwrap();
 
         let mut cache = HashMap::new();
-        let resolved = resolve_model("block/child", &root, &None, &mut cache, None);
+        let sources = ModelSources::from_test_files(&[
+            ("block/child", models.join("child.json")),
+            ("block/parent", models.join("parent.json")),
+        ]);
+        let resolved = resolve_model("block/child", &sources, &mut cache);
         assert_eq!(resolved.gui_transform, gui_transform(135.0));
         assert_eq!(resolved.gui_light, GuiLight::Front);
 
@@ -3158,9 +3235,46 @@ mod tests {
         )
         .unwrap();
 
-        let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
-        packs.enable_local_pack("test_pack");
-        let baked = bake_item_models(&jar, &None, Some(&packs));
+        let mut packs = crate::resources::packs::ResourceConfiguration::new(
+            instance.join("resourcepacks/.server_cache"),
+        );
+        packs
+            .set_resource_pack_paths(vec![instance.join("resourcepacks")])
+            .unwrap();
+        let pack_id = packs
+            .resource_packs()
+            .filter(|info| info.provenance == crate::resources::packs::PackProvenance::Local)
+            .find(|info| info.name == "test_pack")
+            .unwrap()
+            .pack_id()
+            .clone();
+        packs.enable_resource_pack(&pack_id).unwrap();
+        let sources = ModelSources::from_test_files(&[
+            ("item/base", models.join("base.json")),
+            ("item/generated", models.join("generated.json")),
+            (
+                "other:item/replacement",
+                pack_models.join("replacement.json"),
+            ),
+        ]);
+        let fixture_jar = root.join("fixture.jar");
+        let mut archive = zip::ZipWriter::new(std::fs::File::create(&fixture_jar).unwrap());
+        archive
+            .start_file(
+                "assets/minecraft/items/test_item.json",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        std::io::Write::write_all(
+            &mut archive,
+            &std::fs::read(items.join("test_item.json")).unwrap(),
+        )
+        .unwrap();
+        archive.finish().unwrap();
+        let resources =
+            ResourceManager::from_sources(packs.fixture_sources(&fixture_jar).unwrap()).unwrap();
+        let items = ItemDefinitionSources::load(&resources).unwrap();
+        let baked = bake_item_models(&items, &Colormap::fallback(), &sources);
         assert_eq!(
             baked.flat_texture_keys.get("test_item").map(Vec::as_slice),
             Some([Some("other:item/replacement".to_string())].as_slice())
@@ -3206,7 +3320,9 @@ mod tests {
         .unwrap();
 
         let mut cache = HashMap::new();
-        let resolved = resolve_model("block/test_core", &root, &None, &mut cache, None);
+        let sources =
+            ModelSources::from_test_files(&[("block/test_core", models.join("test_core.json"))]);
+        let resolved = resolve_model("block/test_core", &sources, &mut cache);
         let baked = bake_resolved_model(&resolved, 0, 0, Tint::None).unwrap();
         assert_eq!(baked.quads.len(), 6);
         assert!(

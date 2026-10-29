@@ -16,11 +16,11 @@ use crate::renderer::ParticleQuad;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::renderer::chunk::block_lighter::{self, LightLevels, WorldLight};
 use crate::renderer::chunk::mesher::{
-    BiomeClimate, Colormap, blend_color, dry_foliage_color, foliage_color, grass_color,
-    tint_sample_y,
+    BiomeClimate, blend_color, dry_foliage_color, foliage_color, grass_color, tint_sample_y,
 };
 use crate::renderer::pipelines::particle::MAX_PARTICLE_QUADS as MAX_PARTICLES;
 use crate::world::block::BlockStateTable;
+use crate::world::block::colormap::Colormap;
 use crate::world::block::render_assets::{BlockRenderView, Tint};
 use crate::world::chunk::ChunkStore;
 

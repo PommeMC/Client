@@ -14,6 +14,6 @@ pub fn update_saving(
     panorama: &mut Panorama,
     world: &World,
 ) -> bool {
-    draw_status(core, dt, gfx, panorama, saving_level_text(), None);
+    draw_status(core, dt, gfx, panorama, &saving_level_text(), None);
     world.is_closed()
 }

@@ -1,13 +1,25 @@
 use std::f32::consts::TAU;
-use std::path::Path;
 
 use glam::{Mat4, Vec3, Vec4};
 
-use crate::assets::AssetIndex;
 use crate::renderer::camera::Camera;
 use crate::renderer::{rhi, shader, util};
+use crate::resources::{ResourceId, ResourceManager, resource_id};
 use crate::world::block::model::CardinalLightType;
 use crate::world::environment::{EnvAttributes, Skybox};
+
+const END_SKY_TEXTURE: ResourceId = resource_id!("minecraft:textures/environment/end_sky.png");
+const SUN_TEXTURE: ResourceId = resource_id!("minecraft:textures/environment/celestial/sun.png");
+const MOON_TEXTURES: [ResourceId; 8] = [
+    resource_id!("minecraft:textures/environment/celestial/moon/full_moon.png"),
+    resource_id!("minecraft:textures/environment/celestial/moon/waning_gibbous.png"),
+    resource_id!("minecraft:textures/environment/celestial/moon/third_quarter.png"),
+    resource_id!("minecraft:textures/environment/celestial/moon/waning_crescent.png"),
+    resource_id!("minecraft:textures/environment/celestial/moon/new_moon.png"),
+    resource_id!("minecraft:textures/environment/celestial/moon/waxing_crescent.png"),
+    resource_id!("minecraft:textures/environment/celestial/moon/first_quarter.png"),
+    resource_id!("minecraft:textures/environment/celestial/moon/waxing_gibbous.png"),
+];
 
 const STAR_COUNT: u32 = 1500;
 const SUN_SIZE: f32 = 30.0;
@@ -165,8 +177,7 @@ impl SkyPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &ResourceManager,
     ) -> Self {
         let ubo_layout =
             rhi::backend::create_bind_group_layout(device, util::VERTEX_FRAGMENT_UNIFORM);
@@ -189,39 +200,19 @@ impl SkyPipeline {
             "sky_uniform",
         );
 
-        let sun = util::load_asset_texture(
-            device,
-            jar_assets_dir,
-            asset_index,
-            "minecraft/textures/environment/celestial/sun.png",
-        );
+        let sun = load_celestial_texture(device, resources, &SUN_TEXTURE);
         let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR);
         let sun_set = util::create_texture_group(device, tex_layout, sun.handle(), sampler);
 
-        let moon_phase_paths = [
-            "minecraft/textures/environment/celestial/moon/full_moon.png",
-            "minecraft/textures/environment/celestial/moon/waning_gibbous.png",
-            "minecraft/textures/environment/celestial/moon/third_quarter.png",
-            "minecraft/textures/environment/celestial/moon/waning_crescent.png",
-            "minecraft/textures/environment/celestial/moon/new_moon.png",
-            "minecraft/textures/environment/celestial/moon/waxing_crescent.png",
-            "minecraft/textures/environment/celestial/moon/first_quarter.png",
-            "minecraft/textures/environment/celestial/moon/waxing_gibbous.png",
-        ];
         let mut moons = Vec::with_capacity(8);
         let mut moon_sets = [rhi::backend::BindGroup::default(); 8];
-        for (i, &path) in moon_phase_paths.iter().enumerate() {
-            let moon = util::load_asset_texture(device, jar_assets_dir, asset_index, path);
+        for (i, path) in MOON_TEXTURES.iter().enumerate() {
+            let moon = load_celestial_texture(device, resources, path);
             moon_sets[i] = util::create_texture_group(device, tex_layout, moon.handle(), sampler);
             moons.push(moon);
         }
 
-        let end_sky = util::load_asset_texture(
-            device,
-            jar_assets_dir,
-            asset_index,
-            "minecraft/textures/environment/end_sky.png",
-        );
+        let end_sky = load_celestial_texture(device, resources, &END_SKY_TEXTURE);
         let end_sky_sampler =
             rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST_REPEAT);
         let end_sky_set =
@@ -253,6 +244,40 @@ impl SkyPipeline {
             moons,
             end_sky,
             end_sky_sampler,
+        }
+    }
+
+    /// The caller must idle the device before replacing the shared texture
+    /// sets.
+    pub fn reload_textures(&mut self, device: &rhi::backend::Device, resources: &ResourceManager) {
+        // Finish all ten uploads before rebinding or releasing any live texture.
+        let sun = load_celestial_texture(device, resources, &SUN_TEXTURE);
+        let moons: Vec<_> = MOON_TEXTURES
+            .iter()
+            .map(|key| load_celestial_texture(device, resources, key))
+            .collect();
+        let end_sky = load_celestial_texture(device, resources, &END_SKY_TEXTURE);
+        self.end_sky_set.replace(
+            device,
+            self.tex_layout,
+            &util::texture_binding(end_sky.handle(), self.end_sky_sampler),
+        );
+        self.sun_set.replace(
+            device,
+            self.tex_layout,
+            &util::texture_binding(sun.handle(), self.sampler),
+        );
+        for (set, moon) in self.moon_sets.iter_mut().zip(&moons) {
+            set.replace(
+                device,
+                self.tex_layout,
+                &util::texture_binding(moon.handle(), self.sampler),
+            );
+        }
+        std::mem::replace(&mut self.sun, sun).destroy(device);
+        std::mem::replace(&mut self.end_sky, end_sky).destroy(device);
+        for moon in std::mem::replace(&mut self.moons, moons) {
+            moon.destroy(device);
         }
     }
 
@@ -674,6 +699,29 @@ fn build_sunrise_fan(verts: &mut Vec<SkyVertex>) {
         verts.push(ring[i]);
         verts.push(ring[i + 1]);
     }
+}
+
+fn load_celestial_texture(
+    device: &rhi::backend::Device,
+    resources: &ResourceManager,
+    key: &ResourceId,
+) -> rhi::backend::Texture {
+    let image = util::load_resource_image(resources, key, util::MAX_RESOURCE_IMAGE_BYTES);
+    let (pixels, w, h) = match image {
+        Ok(image) => {
+            let (w, h) = image.dimensions();
+            (image.into_raw(), w, h)
+        }
+        Err(error) => {
+            // Preserve the existing opaque-white consumer fallback, without
+            // bypassing a selected resource or a pack filter via the filesystem.
+            tracing::warn!("Failed to load {key}, using opaque-white fallback: {error}");
+            (vec![255u8; 16 * 16 * 4], 16, 16)
+        }
+    };
+
+    tracing::info!("Sky: loaded {key} ({w}x{h})");
+    util::create_sampled_texture(device, &key.to_string(), &pixels, w, h)
 }
 
 fn create_pipelines(

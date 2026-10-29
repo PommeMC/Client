@@ -49,7 +49,6 @@ use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::pipelines::post_effect::PostEffect;
 use crate::renderer::pipelines::shaderpack::PackWorld;
 use crate::renderer::{Renderer, SkyState};
-use crate::resource_pack::ResourcePackManager;
 use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
@@ -439,7 +438,6 @@ impl GameState {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         mesh_source: &impl MeshSource,
-        resource_packs: Option<&ResourcePackManager>,
         render_distance: u32,
         singleplayer: bool,
         chat_options: crate::ui::chat::ChatOptions,
@@ -458,7 +456,6 @@ impl GameState {
         let mesh_dispatcher = mesh_source.create_mesh_dispatcher(
             block_registry.owned_render_view(),
             biome_climate,
-            resource_packs,
             Default::default(),
         );
 
@@ -1465,7 +1462,9 @@ impl GameState {
                     n,
                     rd,
                 );
-                let _ = tx.send(bfs);
+                if tx.send(bfs).is_err() {
+                    tracing::debug!("Visibility result receiver disconnected");
+                }
             });
             self.vis_task = Some(rx);
         }
@@ -3894,7 +3893,8 @@ pub fn update_game(
                 20.0 * gs,
                 gs,
                 common::FONT_SIZE * gs,
-                crate::lang::translate("multiplayer.stopSleeping").unwrap_or("Leave Bed"),
+                &crate::lang::translate("multiplayer.stopSleeping")
+                    .unwrap_or_else(|| "Leave Bed".to_owned()),
                 true,
             );
             if hovered && core.input.left_just_pressed() && !chat_takes_click {
@@ -4550,8 +4550,11 @@ pub fn update_game(
         );
     }
     if game.options_from_game {
-        // TODO: a resource-pack toggle's `menu.reload_assets` is only applied
-        // once back on the title screen.
+        if core.process_resource_pack_requests()
+            && let Err(error) = core.reload_live_resource_assets(game, &mut gfx.renderer)
+        {
+            tracing::error!(%error, "Failed to reload selected packs; resource sources unchanged");
+        }
         core.apply_font_options(&mut gfx.renderer);
         if !core.menu.is_options_screen() {
             game.options_from_game = false;

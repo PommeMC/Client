@@ -1222,8 +1222,8 @@ fn build_scoreboard(
 }
 
 /// Vanilla `Gui.SAVING_LEVEL`, shared by the indicator and the saving screen.
-pub fn saving_level_text() -> &'static str {
-    crate::lang::translate("menu.savingLevel").unwrap_or("Saving world")
+pub fn saving_level_text() -> String {
+    crate::lang::translate("menu.savingLevel").unwrap_or_else(|| "Saving world".to_owned())
 }
 
 /// Vanilla `Hud.extractSavingIndicator`: "Saving world" text 5 GUI units from
@@ -1239,8 +1239,8 @@ pub fn build_saving_indicator(
 ) {
     let text = saving_level_text();
     let fs = FONT_SIZE * gs;
-    let w = text_width_fn(text, fs);
-    let mut span = TextSpan::new(text.into(), WHITE);
+    let w = text_width_fn(&text, fs);
+    let mut span = TextSpan::new(text, WHITE);
     span.color[3] *= alpha;
     elements.push(MenuElement::McText {
         x: (screen_w - w - 5.0 * gs).round(),

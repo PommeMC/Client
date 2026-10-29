@@ -17,7 +17,7 @@ pub(crate) const MAX_FRAMES_IN_FLIGHT: usize = 3;
 const KEEPS_SURFACE_WHEN_SUSPENDED: bool = cfg!(target_os = "ios");
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use azalea_block::BlockState;
@@ -52,7 +52,6 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 use crate::app::input::InputState;
-use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::block_lighter::LightLevels;
@@ -60,6 +59,8 @@ use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::held_item::{HandRenderSelection, HeldHand};
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::ui::font::{FontOptions, FontSources};
+use crate::world::block::colormap::Colormaps;
+use crate::world::block::model::{BlockstateSources, ItemDefinitionSources, ModelSources};
 use crate::world::block::render_assets::{BlockRenderAssets, BlockRenderView};
 
 /// The live atlas's layout, so meshes bake in UVs that match it.
@@ -70,14 +71,6 @@ impl MeshSource for Renderer {
 
     fn uv_map(&self) -> &AtlasUVMap {
         &self.atlas.uv_map
-    }
-
-    fn jar_assets_dir(&self) -> &Path {
-        &self.jar_assets_dir
-    }
-
-    fn asset_index(&self) -> &Option<AssetIndex> {
-        &self.asset_index
     }
 }
 
@@ -94,6 +87,15 @@ pub enum RendererError {
 
     #[error("failed to build the texture atlas: {0}")]
     Atlas(String),
+
+    #[error("failed to enumerate Minecraft blockstates: {0}")]
+    Blockstates(String),
+
+    #[error("failed to enumerate Minecraft geometry models: {0}")]
+    ModelDefinitions(String),
+
+    #[error("failed to enumerate Minecraft item definitions: {0}")]
+    ItemDefinitions(String),
 }
 
 /// The loading splash: logo, progress bar and status line.
@@ -246,8 +248,6 @@ pub struct Renderer {
     camera: Camera,
 
     render_assets: Arc<BlockRenderAssets>,
-    jar_assets_dir: PathBuf,
-    asset_index: Option<AssetIndex>,
 
     chunk_pipeline: ChunkPipeline,
     lightmap: Lightmap,
@@ -307,28 +307,28 @@ impl Renderer {
         window: Arc<Window>,
         font_sources: FontSources<'_>,
         game_dir: &Path,
-        cache_dir: &Path,
+        _cache_dir: &Path,
         vsync: bool,
-        panorama_dir: &Path,
-        bedrock_ui_dir: &Path,
     ) -> Result<Self, RendererError> {
         let FontSources {
-            jar_assets_dir,
-            asset_index,
-            packs,
+            resources,
             options: font_options,
         } = font_sources;
-        let render_assets_handle = {
-            let jar_assets_dir = jar_assets_dir.to_path_buf();
-            let asset_index = asset_index.clone();
-            let cache_dir = cache_dir.to_path_buf();
-            std::thread::spawn(move || {
-                BlockRenderAssets::load(&jar_assets_dir, &asset_index, Some(&cache_dir), None)
-            })
-        };
+        // Providers are application-thread-only. The model worker receives
+        // decoded CPU pixels and owned JSON bytes, never resource handles.
+        let colormaps = Colormaps::load(resources);
+        let blockstates = BlockstateSources::load(resources)
+            .map_err(|error| RendererError::Blockstates(error.to_string()))?;
+        let models = ModelSources::load(resources)
+            .map_err(|error| RendererError::ModelDefinitions(error.to_string()))?;
+        let items = ItemDefinitionSources::load(resources)
+            .map_err(|error| RendererError::ItemDefinitions(error.to_string()))?;
+        let render_assets_handle = std::thread::spawn(move || {
+            BlockRenderAssets::load(colormaps, blockstates, models, items)
+        });
 
         let (ctx, swapchain_state, mut frames, mut menu_pipeline) =
-            boot::bring_up(&window, font_sources, Some(bedrock_ui_dir), vsync)?;
+            boot::bring_up(&window, font_sources, vsync)?;
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
@@ -337,7 +337,7 @@ impl Renderer {
         let sh = swapchain_extent.height as f32;
 
         let mut splash = |menu: &mut MenuOverlayPipeline, progress: f32, status: &str| {
-            let _ = Self::render_splash(
+            if let Err(error) = Self::render_splash(
                 &ctx,
                 &swapchain_state,
                 &mut frames,
@@ -346,7 +346,9 @@ impl Renderer {
                 sh,
                 progress,
                 status,
-            );
+            ) {
+                tracing::warn!(%error, status, "Failed to render loading splash");
+            }
         };
 
         splash(&mut menu_pipeline, 0.0, "Loading block models...");
@@ -364,11 +366,9 @@ impl Renderer {
             chunk::atlas::atlas_texture_names(&render_assets);
         let atlas = TextureAtlas::build(
             &ctx.device,
-            jar_assets_dir,
-            asset_index,
+            resources,
             &texture_names,
             &generated_item_textures,
-            None,
         )
         .map_err(RendererError::Atlas)?;
 
@@ -378,52 +378,28 @@ impl Renderer {
         let chunk_pipeline =
             ChunkPipeline::new(&ctx.device, swapchain_state.targets(), &atlas, &lightmap);
 
-        let hand_pipeline = HandPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-            &lightmap,
-        );
+        let hand_pipeline =
+            HandPipeline::new(&ctx.device, swapchain_state.targets(), resources, &lightmap);
 
-        let block_overlay_pipeline = BlockOverlayPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-        );
+        let block_overlay_pipeline =
+            BlockOverlayPipeline::new(&ctx.device, swapchain_state.targets(), resources);
 
         splash(&mut menu_pipeline, 0.7, "Loading sky and panorama...");
 
-        let sky_pipeline = SkyPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-        );
+        let sky_pipeline = SkyPipeline::new(&ctx.device, swapchain_state.targets(), resources);
 
-        let weather_pipeline = WeatherPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-            &lightmap,
-        );
+        let weather_pipeline =
+            WeatherPipeline::new(&ctx.device, swapchain_state.targets(), resources, &lightmap);
 
         let particle_pipeline =
             ParticlePipeline::new(&ctx.device, swapchain_state.targets(), &atlas, &lightmap);
 
-        let cloud_pipeline = CloudPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-        );
+        let cloud_pipeline = CloudPipeline::new(&ctx.device, swapchain_state.targets(), resources);
 
         let panorama_pipeline = PanoramaPipeline::new(
             &ctx.device,
             swapchain_state.targets(),
-            pipelines::panorama::resolve_panorama_faces(panorama_dir, jar_assets_dir, asset_index),
+            pipelines::panorama::load_panorama_faces(resources),
         );
 
         splash(&mut menu_pipeline, 0.9, "Finalizing...");
@@ -437,12 +413,8 @@ impl Renderer {
             false,
         );
 
-        let book_preview = BookPreviewPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-        );
+        let book_preview =
+            BookPreviewPipeline::new(&ctx.device, swapchain_state.targets(), resources);
 
         let entity_outline =
             EntityOutline::new(&ctx.device, swapchain_state.targets(), swapchain_extent);
@@ -454,31 +426,16 @@ impl Renderer {
             post_effects.blurred_sampler(),
         );
 
-        let entity_renderer = EntityRenderer::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-            packs,
-            &lightmap,
-        );
+        let entity_renderer =
+            EntityRenderer::new(&ctx.device, swapchain_state.targets(), resources, &lightmap);
 
         let moving_block_buffers = MovingBlockBuffers::new(&ctx.device);
 
-        let entity_shadow_pipeline = EntityShadowPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-        );
+        let entity_shadow_pipeline =
+            EntityShadowPipeline::new(&ctx.device, swapchain_state.targets(), resources);
 
-        let block_entity_pipeline = BlockEntityPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-            &lightmap,
-        );
+        let block_entity_pipeline =
+            BlockEntityPipeline::new(&ctx.device, swapchain_state.targets(), resources, &lightmap);
 
         let chunk_border_pipeline = pipelines::chunk_borders::ChunkBorderPipeline::new(
             &ctx.device,
@@ -498,7 +455,8 @@ impl Renderer {
             &ctx.device,
             swapchain_state.targets(),
             &atlas,
-            jar_assets_dir,
+            render_assets.model_sources().clone(),
+            render_assets.item_definition_sources().clone(),
             &lightmap,
         );
 
@@ -528,8 +486,6 @@ impl Renderer {
             swapchain: swapchain_state,
             camera,
             render_assets,
-            jar_assets_dir: jar_assets_dir.to_path_buf(),
-            asset_index: asset_index.clone(),
             atlas,
             chunk_pipeline,
             lightmap,
@@ -1475,31 +1431,57 @@ impl Renderer {
 
     pub fn reload_assets(
         &mut self,
-        packs: &crate::resource_pack::ResourcePackManager,
+        resources: &crate::resources::ResourceManager,
         font_options: FontOptions,
     ) {
+        let blockstates = match BlockstateSources::load(resources) {
+            Ok(blockstates) => blockstates,
+            Err(error) => {
+                tracing::warn!(
+                    "Keeping previous render assets after blockstate enumeration failure: {error}"
+                );
+                return;
+            }
+        };
+        let models = match ModelSources::load(resources) {
+            Ok(models) => models,
+            Err(error) => {
+                tracing::warn!(
+                    "Keeping previous render assets after model enumeration failure: {error}"
+                );
+                return;
+            }
+        };
+        let items = match ItemDefinitionSources::load(resources) {
+            Ok(items) => items,
+            Err(error) => {
+                tracing::warn!(
+                    "Keeping previous render assets after item definition enumeration failure: {error}"
+                );
+                return;
+            }
+        };
+        let colormaps = Colormaps::load(resources);
         self.ctx.device.wait_idle();
 
         self.render_assets = Arc::new(BlockRenderAssets::load(
-            &self.jar_assets_dir,
-            &self.asset_index,
-            None,
-            Some(packs),
+            colormaps,
+            blockstates,
+            models,
+            items,
         ));
 
         self.item_entity_pipeline.clear_meshes(&self.ctx.device);
-        self.atlas.destroy(&self.ctx.device);
         let (texture_names, generated_item_textures) =
             chunk::atlas::atlas_texture_names(&self.render_assets);
-        self.atlas = TextureAtlas::build(
+        let replacement = TextureAtlas::build(
             &self.ctx.device,
-            &self.jar_assets_dir,
-            &self.asset_index,
+            resources,
             &texture_names,
             &generated_item_textures,
-            Some(packs),
         )
         .expect("failed to rebuild atlas");
+        let mut old_atlas = std::mem::replace(&mut self.atlas, replacement);
 
         self.chunk_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
@@ -1507,8 +1489,12 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.gui_item_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
-        self.held_item_pipeline
-            .rebind_atlas(&self.ctx.device, &self.atlas);
+        self.held_item_pipeline.rebind_assets(
+            &self.ctx.device,
+            &self.atlas,
+            self.render_assets.model_sources().clone(),
+            self.render_assets.item_definition_sources().clone(),
+        );
         self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
         // The pack binds the old atlas; it rebuilds on the next frame.
@@ -1517,14 +1503,52 @@ impl Renderer {
         {
             pack.destroy(&self.ctx.device);
         }
-        self.entity_renderer.reload_armor_assets(
-            &self.ctx.device,
-            &self.jar_assets_dir,
-            &self.asset_index,
-            packs,
-        );
+        old_atlas.destroy(&self.ctx.device);
+        self.entity_renderer
+            .reload_mob_textures(&self.ctx.device, resources);
+        self.entity_renderer
+            .reload_armor_assets(&self.ctx.device, resources);
+        self.entity_renderer
+            .reload_default_player_textures(&self.ctx.device, resources);
+        if let Some(old_skin) = self
+            .hand_pipeline
+            .reload_default_skin(&self.ctx.device, resources)
+        {
+            // Rebind both consumers before retiring the hand-owned texture.
+            self.skin_preview.rebind_skin(
+                &self.ctx.device,
+                self.hand_pipeline.skin_texture(),
+                self.hand_pipeline.skin_sampler(),
+            );
+            old_skin.destroy(&self.ctx.device);
+        }
 
-        self.reload_fonts(packs, font_options);
+        self.reload_fonts_idle(resources, font_options);
+        if let Err(error) = self.menu_pipeline.reload_gui_assets(
+            &self.ctx.device,
+            FontSources {
+                resources,
+                options: font_options,
+            },
+        ) {
+            tracing::warn!("Keeping previous GUI/HUD assets after reload failure: {error}");
+        }
+        self.menu_pipeline
+            .reload_camera_overlays(&self.ctx.device, resources);
+        self.reload_panorama_resources(resources);
+        self.cloud_pipeline.reload_resources(resources);
+        self.weather_pipeline
+            .reload_textures(&self.ctx.device, resources);
+        self.sky_pipeline
+            .reload_textures(&self.ctx.device, resources);
+        self.entity_shadow_pipeline
+            .reload_texture(&self.ctx.device, resources);
+        self.block_overlay_pipeline
+            .reload_texture(&self.ctx.device, resources);
+        self.book_preview
+            .reload_texture(&self.ctx.device, resources);
+        self.block_entity_pipeline
+            .reload_textures(&self.ctx.device, resources);
 
         warm_item_meshes(
             &self.ctx.device,
@@ -1543,17 +1567,24 @@ impl Renderer {
     /// Vanilla `FontManager.updateOptions`: only the font sets change.
     pub fn reload_fonts(
         &mut self,
-        packs: &crate::resource_pack::ResourcePackManager,
+        resources: &crate::resources::ResourceManager,
+        font_options: FontOptions,
+    ) {
+        self.ctx.device.wait_idle();
+        self.reload_fonts_idle(resources, font_options);
+    }
+
+    /// Shared by font-option changes and the already-idle full resource reload.
+    fn reload_fonts_idle(
+        &mut self,
+        resources: &crate::resources::ResourceManager,
         font_options: FontOptions,
     ) {
         self.font_options = font_options;
-        self.ctx.device.wait_idle();
         if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
             &self.ctx.device,
             FontSources {
-                jar_assets_dir: &self.jar_assets_dir,
-                asset_index: &self.asset_index,
-                packs,
+                resources,
                 options: font_options,
             },
         ) {
@@ -1561,28 +1592,10 @@ impl Renderer {
         }
     }
 
-    pub fn reload_panorama(&mut self, panorama_dir: &Path) {
-        let faces = pipelines::panorama::resolve_panorama_faces(
-            panorama_dir,
-            &self.jar_assets_dir,
-            &self.asset_index,
-        );
+    fn reload_panorama_resources(&mut self, resources: &crate::resources::ResourceManager) {
+        let faces = pipelines::panorama::load_panorama_faces(resources);
         self.panorama_pipeline
             .reload_cubemap(&self.ctx.device, faces);
-    }
-
-    /// Brings the Bedrock title and button sprites into the menu atlas when
-    /// their files arrived after the atlas was built.
-    pub fn load_bedrock_sprites(&mut self, bedrock_ui_dir: &Path) {
-        if self.menu_pipeline.has_sprite(SpriteId::BedrockTitle) {
-            return;
-        }
-        self.menu_pipeline.reload_sprite_atlas(
-            &self.ctx.device,
-            &self.jar_assets_dir,
-            &self.asset_index,
-            Some(bedrock_ui_dir),
-        );
     }
 
     pub fn trigger_skin_swing(&mut self) {
@@ -1597,7 +1610,7 @@ impl Renderer {
                 // In-flight frames may still reference the old skin texture,
                 // hand mesh, and preview pipeline about to be destroyed.
                 self.ctx.device.wait_idle();
-                self.hand_pipeline.reload_skin(&self.ctx.device, &skin);
+                let old_skin = self.hand_pipeline.reload_skin(&self.ctx.device, &skin);
                 self.skin_preview.destroy(&self.ctx.device);
                 self.skin_preview = SkinPreviewPipeline::new(
                     &self.ctx.device,
@@ -1606,6 +1619,7 @@ impl Renderer {
                     self.hand_pipeline.skin_sampler(),
                     skin.slim,
                 );
+                old_skin.destroy(&self.ctx.device);
                 self.update_player_entity_skin(uuid, &skin);
             }
             Err(e) => tracing::warn!("Failed to load player skin: {e}"),
@@ -2553,7 +2567,7 @@ async fn fetch_skin_image(skin_url: &str) -> Result<(Vec<u8>, u32, u32), String>
         .map_err(pomme_auth::error_chain)?;
 
     let img = image::load_from_memory(&skin_bytes).map_err(pomme_auth::error_chain)?;
-    let rgba = img.to_rgba8();
+    let rgba = img.into_rgba8();
     let w = rgba.width();
     let h = rgba.height();
     process_legacy_skin(rgba.into_raw(), w, h)

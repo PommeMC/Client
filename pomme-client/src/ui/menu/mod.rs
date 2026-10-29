@@ -328,17 +328,6 @@ impl PanoramaTheme {
             _ => Self::Java,
         }
     }
-
-    /// The panorama cubemap each theme draws: vanilla's ships in the version
-    /// jar, Pomme's alongside the rest of the branded assets, Bedrock's with
-    /// its downloaded UI textures.
-    pub fn panorama_dir(self, dirs: &crate::dirs::DataDirs) -> std::path::PathBuf {
-        match self {
-            Self::Java => dirs.jar_assets_dir.clone(),
-            Self::Pomme => dirs.pomme_assets_dir.join("panoramas"),
-            Self::Bedrock => dirs.bedrock_ui_dir(),
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -780,18 +769,22 @@ pub struct MainMenu {
     /// The options were saved, so the game should broadcast them.
     options_saved: bool,
     bench_render_distance: crate::benchmark::BenchRenderDistance,
-    /// The title screen's splash line, rolled at launch and on every return
-    /// from a world like vanilla's fresh `TitleScreen`. `None` renders nothing.
+    /// The title screen's splash line, rolled at launch, on resource reload
+    /// and on every return from a world like vanilla's fresh `TitleScreen`.
+    /// `None` renders nothing.
     pub splash: Option<String>,
     menu_open_time: Option<Instant>,
     last_favicon_count: usize,
     favicon_dirty_since: Option<Instant>,
-    pub active_packs: Vec<crate::resource_pack::PackInfo>,
-    pub available_packs: Vec<crate::resource_pack::PackInfo>,
+    /// The selected packs; a failed reload can leave the active sources
+    /// unchanged.
+    pub active_packs: Vec<crate::resources::packs::PackInfo>,
+    pub available_packs: Vec<crate::resources::packs::PackInfo>,
     pub packs_dir: PathBuf,
-    pub pack_toggle: Option<(String, bool)>,
+    pub pack_toggle: Option<(crate::resources::packs::PackId, bool)>,
     pub rescan_packs: bool,
     pub reload_assets: bool,
+    pub resource_reload_failed: bool,
     /// Set by a Font Settings toggle, applied by `AppCore::apply_font_options`.
     pub reload_fonts: bool,
     pack_search: TextFieldState,
@@ -949,6 +942,7 @@ impl MainMenu {
             pack_toggle: None,
             rescan_packs: false,
             reload_assets: false,
+            resource_reload_failed: false,
             reload_fonts: false,
             pack_search: TextFieldState::new(MAX_SEARCH),
         };
@@ -1285,17 +1279,12 @@ impl MainMenu {
     }
 
     /// Picks the title screen's splash line. Separate from `new` because the
-    /// asset index it reads through isn't built until after the menu is.
-    pub fn load_splash(
-        &mut self,
-        jar_assets_dir: &Path,
-        asset_index: &Option<crate::assets::AssetIndex>,
-    ) {
+    /// resource manager it reads through isn't built until after the menu is.
+    pub fn load_splash(&mut self, resources: &crate::resources::ResourceManager) {
         let now =
             time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
         self.splash = splash::pick(
-            jar_assets_dir,
-            asset_index,
+            resources,
             &self.username,
             now.month() as u32,
             u32::from(now.day()),
@@ -1624,7 +1613,11 @@ mod tests {
         menu.set_screen(Screen::Options, &key_bindings);
         assert!(menu.take_options_saved());
         assert!(!menu.take_options_saved());
-        std::fs::remove_dir_all(&dir).ok();
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove menu test directory {}: {error}", dir.display()),
+        }
     }
 
     #[test]
@@ -1693,7 +1686,7 @@ mod tests {
         menu.save_settings(&key_bindings);
         let saved = load_settings(&dir).render_distance;
         let chunk_detail = saved_chunk_detail(&dir);
-        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&dir).expect("remove menu test directory");
         assert_eq!(saved, 12);
         assert_eq!(menu.render_distance, 2);
         assert_eq!(chunk_detail, 4);
