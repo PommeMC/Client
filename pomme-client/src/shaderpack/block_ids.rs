@@ -31,16 +31,16 @@ impl Entry {
             [namespace, name, states @ ..] => (*namespace, *name, states),
             [] => unreachable!("split yields at least one part"),
         };
-        let properties = states
-            .iter()
-            .filter_map(|state| match state.split('=').collect::<Vec<_>>()[..] {
-                [key, value] => Some((key.to_owned(), value.to_owned())),
-                _ => {
-                    tracing::warn!("block.properties: {text}: {state} isn't key=value");
-                    None
-                }
-            })
-            .collect();
+        // A repeated key keeps its last value, as Iris's map does.
+        let mut properties: Vec<(String, String)> = Vec::new();
+        for state in states {
+            let [key, value] = state.split('=').collect::<Vec<_>>()[..] else {
+                tracing::warn!("block.properties: {text}: {state} isn't key=value");
+                continue;
+            };
+            properties.retain(|(k, _)| k != key);
+            properties.push((key.to_owned(), value.to_owned()));
+        }
         Self {
             tag,
             namespace: namespace.to_owned(),
@@ -85,9 +85,97 @@ impl BlockIds {
         )
     }
 
+    /// Iris's `LegacyIdMap`: the old numeric ids a pack without
+    /// `block.properties` reads.
+    pub fn legacy() -> Self {
+        const COLORS: [&str; 16] = [
+            "white",
+            "orange",
+            "magenta",
+            "light_blue",
+            "yellow",
+            "lime",
+            "pink",
+            "gray",
+            "light_gray",
+            "cyan",
+            "purple",
+            "blue",
+            "brown",
+            "green",
+            "red",
+            "black",
+        ];
+        const WOODS: [&str; 6] = ["oak", "birch", "jungle", "spruce", "acacia", "dark_oak"];
+        fn blocks(id: i32, names: impl IntoIterator<Item = impl AsRef<str>>) -> (i32, Vec<Entry>) {
+            (
+                id,
+                names
+                    .into_iter()
+                    .map(|n| Entry::parse(n.as_ref()))
+                    .collect(),
+            )
+        }
+        Self(vec![
+            blocks(1, ["stone", "granite", "diorite", "andesite"]),
+            blocks(2, ["grass_block"]),
+            blocks(4, ["cobblestone"]),
+            blocks(50, ["torch"]),
+            blocks(89, ["glowstone"]),
+            blocks(124, ["redstone_lamp"]),
+            blocks(12, ["sand"]),
+            blocks(24, ["sandstone"]),
+            blocks(41, ["gold_block"]),
+            blocks(42, ["iron_block"]),
+            blocks(57, ["diamond_block"]),
+            blocks(-123, ["emerald_block"]),
+            blocks(35, COLORS.map(|p| format!("{p}_wool"))),
+            blocks(9, ["water"]),
+            blocks(11, ["lava"]),
+            blocks(79, ["ice"]),
+            blocks(18, WOODS.map(|p| format!("{p}_leaves"))),
+            blocks(95, COLORS.map(|p| format!("{p}_stained_glass"))),
+            blocks(160, COLORS.map(|p| format!("{p}_stained_glass_pane"))),
+            blocks(31, ["grass", "seagrass", "sweet_berry_bush"]),
+            blocks(59, ["wheat", "carrots", "potatoes"]),
+            blocks(
+                37,
+                [
+                    "dandelion",
+                    "poppy",
+                    "blue_orchid",
+                    "allium",
+                    "azure_bluet",
+                    "red_tulip",
+                    "pink_tulip",
+                    "white_tulip",
+                    "orange_tulip",
+                    "oxeye_daisy",
+                    "cornflower",
+                    "lily_of_the_valley",
+                    "wither_rose",
+                ],
+            ),
+            blocks(
+                175,
+                [
+                    "sunflower",
+                    "lilac",
+                    "tall_grass",
+                    "large_fern",
+                    "rose_bush",
+                    "peony",
+                    "tall_seagrass",
+                ],
+            ),
+            blocks(51, ["fire"]),
+            blocks(111, ["lily_pad"]),
+        ])
+    }
+
     /// Each state's id: the first block entry naming its block whose
     /// properties it has, else the first such tag entry, else -1. A property
-    /// the block lacks is ignored.
+    /// the block lacks is ignored, as are entries naming air.
     fn state_ids(&self, table: BlockStateTable, tags: &BlockTags) -> Vec<i32> {
         let mut blocks: HashMap<&str, Vec<(i32, &Entry)>> = HashMap::new();
         let mut tag_entries = Vec::new();
@@ -95,7 +183,7 @@ impl BlockIds {
             for entry in entries {
                 if entry.tag {
                     tag_entries.push((*id, entry));
-                } else if entry.namespace == "minecraft" {
+                } else if entry.namespace == "minecraft" && entry.name != "air" {
                     blocks.entry(&entry.name).or_default().push((*id, entry));
                 }
             }
@@ -117,8 +205,9 @@ impl BlockIds {
                     .find(|(_, entry)| matches(entry));
                 let tag = || {
                     tag_entries.iter().find(|(_, entry)| {
-                        tags.contains(&format!("{}:{}", entry.namespace, entry.name), data.id())
-                            && matches(entry)
+                        // Iris matches tag names ignoring case.
+                        let tag = format!("{}:{}", entry.namespace, entry.name).to_lowercase();
+                        tags.contains(&tag, data.id()) && matches(entry)
                     })
                 };
                 block.or_else(tag).map_or(-1, |(id, _)| *id)
@@ -174,6 +263,19 @@ mod tests {
         assert!(tagged.tag);
         assert_eq!(tagged.name, "leaves");
         assert_eq!(tagged.properties.len(), 1);
+        let repeated = entry("stone:a=1:a=2");
+        assert_eq!(repeated.properties, [("a".to_owned(), "2".to_owned())]);
+    }
+
+    #[test]
+    fn packs_without_block_properties_read_the_legacy_ids() {
+        let table = BlockStateTable::native();
+        let state_ids = BlockIds::legacy().state_ids(table, &BlockTags::default());
+        let id = |name| state_ids[table.find_state(name, &[]).id() as usize];
+        assert_eq!(id("stone"), 1);
+        assert_eq!(id("white_wool"), 35);
+        assert_eq!(id("emerald_block"), -123);
+        assert_eq!(id("dirt"), -1);
     }
 
     #[test]

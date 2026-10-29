@@ -113,8 +113,9 @@ impl ShaderPack {
             .collect();
         let block_ids = source
             .read("block.properties")
-            .map(|text| block_ids::BlockIds::parse(&properties::preprocess(&text, &macros)))
-            .unwrap_or_default();
+            .map_or_else(block_ids::BlockIds::legacy, |text| {
+                block_ids::BlockIds::parse(&properties::preprocess(&text, &macros))
+            });
         Ok(Self {
             name,
             source,
