@@ -273,6 +273,15 @@ impl BlockStateData {
             )
     }
 
+    /// Vanilla `Block.shouldRenderFace`: a neighbour's face against this
+    /// block is hidden when it can occlude and its occlusion shape (the
+    /// outline, here) is the full block, whatever its model's quads.
+    pub(crate) fn occludes_neighbor_faces(&self) -> bool {
+        !self.is_air
+            && self.light.can_occlude
+            && self.outline_boxes().is_none_or(is_full_cube_shape)
+    }
+
     /// `None` is a full cube; an empty slice is not targetable.
     pub(crate) fn outline_boxes(&self) -> Option<&'static [LocalBox]> {
         self.outline.or(self.shape)
@@ -1783,6 +1792,23 @@ mod tests {
                 .dampening,
             0
         );
+    }
+
+    #[test]
+    fn full_occluders_hide_their_neighbours_faces() {
+        let block_state_table = BlockStateTable::native();
+        let occludes = |name| {
+            block_state_table
+                .block_state_data(block_state_table.first_state_of(name).unwrap())
+                .occludes_neighbor_faces()
+        };
+        // Grass's extra overlay quads and mud's lower collision don't matter.
+        for name in ["stone", "grass_block", "mud", "soul_sand"] {
+            assert!(occludes(name), "{name}");
+        }
+        for name in ["air", "glass", "oak_leaves", "oak_slab", "dirt_path"] {
+            assert!(!occludes(name), "{name}");
+        }
     }
 
     #[test]
