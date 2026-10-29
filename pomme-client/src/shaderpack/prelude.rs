@@ -135,6 +135,7 @@ const GL_DEPTH: &str = "    gl_Position.z = (gl_Position.z + gl_Position.w) * 0.
 pub struct Preludes {
     vertex_decls: String,
     vertex_main: String,
+    attributes: &'static [(&'static str, &'static str)],
     fragment_decls: String,
     fragment_main: String,
 }
@@ -212,8 +213,13 @@ impl Preludes {
             ),
             // Iris reads the lightmap coordinate as TexCoord2 too.
             vertex_main: format!(
-                "\nvoid main() {{\n{stage}{setup}    pomme_MultiTexCoord2 = pomme_MultiTexCoord1;\n    pomme_matrices({model_view}, {projection});\n    pack_main();\n{GL_DEPTH}{flip}}}\n"
+                "\nvoid main() {{\n{stage}{setup}    pomme_MultiTexCoord2 = pomme_MultiTexCoord1;\n    pomme_matrices({model_view}, {projection});\n    pomme_attributes();\n    pack_main();\n{GL_DEPTH}{flip}}}\n"
             ),
+            attributes: if matches!(geometry, Geometry::Terrain | Geometry::Water) {
+                &[("mc_Entity", "pomme_mc_Entity")]
+            } else {
+                &[]
+            },
             fragment_decls: format!("{FRAME}{MATRICES}{POLYFILLS}{fragment_inputs}"),
             fragment_main: format!(
                 "\nvoid main() {{\n{stage}    pomme_matrices({fragment_view}, {projection});\n    pack_main();\n}}\n"
@@ -225,6 +231,7 @@ impl Preludes {
         Prelude {
             decls: &self.vertex_decls,
             main: &self.vertex_main,
+            attributes: self.attributes,
         }
     }
 
@@ -232,6 +239,7 @@ impl Preludes {
         Prelude {
             decls: &self.fragment_decls,
             main: &self.fragment_main,
+            attributes: &[],
         }
     }
 }
@@ -282,6 +290,8 @@ layout(location = 2) in uint pomme_in_uv;
 layout(location = 3) in uint pomme_in_sprite;
 layout(location = 4) in vec4 pomme_in_light_tint;
 layout(location = 7) in vec4 pomme_in_shade;
+layout(location = 8) in uint pomme_in_entity;
+vec4 pomme_mc_Entity;
 {origin}
 // Level-0 sprite rectangles in atlas texels, as the atlas uploads them.
 layout(std430, set = 2, binding = 0) readonly buffer PommeSprites {{
@@ -313,6 +323,8 @@ const TERRAIN_SETUP: &str = "
     vec2 atlas_uv = (vec2(rect.xy) + sprite_uv * vec2(rect.zw)) / pomme_atlas_size.xy;
     pomme_MultiTexCoord0 = vec4(atlas_uv, 0.0, 1.0);
     pomme_MultiTexCoord1 = vec4(round(pomme_in_light_tint.r * 255.0), float(pomme_in_uv >> 24), 0.0, 1.0);
+    // Iris's unpacking: the block id, then whether the quad is a fluid's.
+    pomme_mc_Entity = vec4(float(int(pomme_in_entity >> 1u) - 1), float(pomme_in_entity & 1u), 0.0, 1.0);
 ";
 
 /// [`TERRAIN_SETUP`] and Iris's terrain colour: the tint, with the ambient

@@ -4,8 +4,9 @@
 # `gbuffers_textured_lit`, normal shading and the shadows of a pillar, the
 # planks, the cow, the chest and the player (its `shadow` program, the sun
 # tilted by `sunPathRotation`) from its composite pass, and the sky blended
-# toward a custom uniform from its `shaders.properties`. Then packs off again,
-# with the same sky shots to compare.
+# toward a custom uniform from its `shaders.properties`. The stone pillar is
+# tinted red, its `block.properties` id read through `mc_Entity`. Then packs
+# off again, with the same sky shots to compare.
 
 [[step]]
 wait_ms = 2000

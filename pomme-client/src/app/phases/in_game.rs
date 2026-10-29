@@ -4420,10 +4420,19 @@ pub fn update_game(
             shader_pack.unwrap_or_default().display()
         );
     }
-    let format = gfx.renderer.wanted_terrain_format();
-    if format != game.mesh_dispatcher.format() {
-        gfx.renderer.set_terrain_format(format);
-        game.mesh_dispatcher = game.mesh_dispatcher.with_format(format);
+    let block_ids = gfx.renderer.pack_block_ids();
+    if !game.mesh_dispatcher.meshes_for(block_ids.as_ref()) {
+        // TODO: rebuild after a datapack reload replaces the block tags.
+        let pack = block_ids.map(|ids| {
+            Arc::new(crate::shaderpack::block_ids::PackBlockIds::new(
+                ids,
+                game.block_registry.block_state_table(),
+                game.block_registry.tags(),
+            ))
+        });
+        game.mesh_dispatcher = game.mesh_dispatcher.with_pack(pack);
+        gfx.renderer
+            .set_terrain_format(game.mesh_dispatcher.format());
         game.rebuild_meshes();
     }
     if let Err(e) = gfx.renderer.render_world(

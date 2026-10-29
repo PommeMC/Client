@@ -2,6 +2,7 @@
 //! and translating their GLSL for Pomme's Vulkan renderer. Iris's behaviour
 //! is the spec.
 
+pub mod block_ids;
 pub mod directives;
 pub mod expr;
 pub mod glsl;
@@ -16,6 +17,7 @@ pub mod uniforms;
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use glsl::compile::{self, CompileError, ShaderStage};
 use glsl::translate::{self, ProgramSource, TranslateError, Translated};
@@ -35,6 +37,8 @@ pub struct ShaderPack {
     /// The option and standard macros `shaders.properties` is read with.
     macros: BTreeMap<String, String>,
     pub custom_uniforms: CustomUniforms,
+    /// `block.properties`, for terrain's `mc_Entity`.
+    pub block_ids: Arc<block_ids::BlockIds>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -107,6 +111,11 @@ impl ShaderPack {
         let dimensions = read_properties("dimension.properties")
             .into_iter()
             .collect();
+        let block_ids = source
+            .read("block.properties")
+            .map_or_else(block_ids::BlockIds::legacy, |text| {
+                block_ids::BlockIds::parse(&properties::preprocess(&text, &macros))
+            });
         Ok(Self {
             name,
             source,
@@ -115,6 +124,7 @@ impl ShaderPack {
             overrides,
             macros,
             custom_uniforms,
+            block_ids: Arc::new(block_ids),
         })
     }
 
@@ -395,6 +405,7 @@ impl ShaderPack {
             overrides: Overrides::new(),
             macros: BTreeMap::new(),
             custom_uniforms: CustomUniforms::default(),
+            block_ids: Arc::default(),
         }
     }
 }
