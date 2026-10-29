@@ -433,7 +433,6 @@ pub enum NetworkEvent {
         entity_type: EntityKind,
         position: Position,
         velocity: DVec3,
-        y_rot_deg: f32,
         x_rot_deg: f32,
         head_y_rot_deg: f32,
     },
@@ -566,6 +565,15 @@ pub enum NetworkEvent {
     /// Entity event 45: a fox eats the food in its mouth.
     FoxEat {
         id: i32,
+    },
+    /// Entity event 64: an armadillo peeks out of its shell.
+    ArmadilloPeek {
+        id: i32,
+    },
+    /// Entity events 58 / 59: a goat starts / stops lowering its head to ram.
+    GoatRam {
+        id: i32,
+        lowering: bool,
     },
     SquidTentacleReset {
         id: i32,

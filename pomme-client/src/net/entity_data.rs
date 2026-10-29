@@ -242,6 +242,9 @@ pub(super) fn from_azalea(value: &EntityDataValue) -> Option<Value> {
         EntityDataValue::SnifferState(state) => Value::Int(*state as i32),
         EntityDataValue::CopperGolemState(state) => Value::Int(*state as i32),
         EntityDataValue::WeatheringCopperState(state) => Value::Int(*state as i32),
+        // TODO: azalea's `ArmadilloStateKind` lacks UNROLLING (id 3), so a
+        // translated session fails to decode that state.
+        EntityDataValue::ArmadilloState(state) => Value::Int(*state as i32),
         _ => return None,
     })
 }

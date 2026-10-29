@@ -203,6 +203,8 @@ pub struct EntityRenderInfo {
     /// Axolotl animator factors and baby animation clocks.
     pub axolotl: entity_model::AxolotlAnims,
     pub panda: entity_model::PandaAnims,
+    pub armadillo: entity_model::ArmadilloAnims,
+    pub goat: entity_model::GoatAnims,
     pub parrot: entity_model::ParrotAnims,
     /// `DolphinRenderState.isMoving`.
     pub dolphin_moving: bool,
@@ -292,6 +294,8 @@ impl Default for EntityRenderInfo {
             fox: entity_model::FoxAnims::default(),
             axolotl: entity_model::AxolotlAnims::default(),
             panda: entity_model::PandaAnims::default(),
+            armadillo: entity_model::ArmadilloAnims::default(),
+            goat: entity_model::GoatAnims::default(),
             parrot: entity_model::ParrotAnims::default(),
             dolphin_moving: false,
             turtle: entity_model::TurtleAnims::default(),
@@ -979,6 +983,8 @@ enum AnimationType {
     PolarBear,
     Fox,
     Panda,
+    Armadillo,
+    Goat,
     Bee,
     Parrot,
     Dolphin,
@@ -1215,6 +1221,10 @@ fn mob_definitions() -> Vec<MobDef> {
     const DOLPHIN_BABY_TEX: &[&[&str]] = tex_table!("dolphin" => "dolphin_baby");
     const TURTLE_TEX: &[&[&str]] = tex_table!("turtle" => "turtle");
     const TURTLE_BABY_TEX: &[&[&str]] = tex_table!("turtle" => "turtle_baby");
+    const ARMADILLO_TEX: &[&[&str]] = tex_table!("armadillo" => "armadillo");
+    const ARMADILLO_BABY_TEX: &[&[&str]] = tex_table!("armadillo" => "armadillo_baby");
+    const GOAT_TEX: &[&[&str]] = tex_table!("goat" => "goat");
+    const GOAT_BABY_TEX: &[&[&str]] = tex_table!("goat" => "goat_baby");
     // Indexed by `Llama.Variant` id.
     const LLAMA_TEX: &[&[&str]] =
         tex_table!("llama" => "llama_creamy", "llama_white", "llama_brown", "llama_gray");
@@ -1361,6 +1371,34 @@ fn mob_definitions() -> Vec<MobDef> {
             baby: Some(opaque(
                 entity_model::bake_baby_cow_model(),
                 MOOSHROOM_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Armadillo,
+            anim: AnimationType::Armadillo,
+            adult: vec![opaque(
+                entity_model::bake_armadillo_model(),
+                ARMADILLO_TEX,
+                64,
+            )],
+            baby: Some(opaque(
+                entity_model::bake_baby_armadillo_model(),
+                ARMADILLO_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Goat,
+            anim: AnimationType::Goat,
+            adult: vec![opaque(entity_model::bake_goat_model(), GOAT_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_goat_model(),
+                GOAT_BABY_TEX,
                 64,
             )),
             adult_overlays: vec![],
@@ -2682,6 +2720,24 @@ impl EntityRenderer {
                 info.bat_elapsed_secs,
                 info.bat_resting,
             ),
+            AnimationType::Armadillo => entity_model::compute_armadillo_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.is_baby,
+                &info.armadillo,
+            ),
+            AnimationType::Goat => entity_model::compute_goat_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.is_baby,
+                &info.goat,
+            ),
             AnimationType::Axolotl => entity_model::compute_axolotl_anim(
                 model,
                 info.is_baby,
@@ -3522,6 +3578,8 @@ pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
         // Explicit `BABY_DIMENSIONS` eye heights.
         EntityKind::Fox | EntityKind::PolarBear if is_baby => 0.34375,
         EntityKind::Panda if is_baby => 0.28125,
+        EntityKind::Armadillo if is_baby => 0.21875,
+        EntityKind::Goat if is_baby => 0.59375,
         EntityKind::Axolotl | EntityKind::Dolphin if is_baby => 0.09375,
         EntityKind::Mooshroom if is_baby => 0.69,
         // Explicit `eyeHeight`s, halved; the 0.85 ratio would miss them.
