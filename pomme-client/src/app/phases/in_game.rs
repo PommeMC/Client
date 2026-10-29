@@ -1173,7 +1173,7 @@ impl GameState {
     }
 
     /// Forgets every column's scheduling state, for a new level or dispatcher.
-    /// The first loaded column not meshed yet.
+    /// [`MeshColumns::first_unmeshed`] over the loaded columns.
     #[cfg(feature = "test-harness")]
     pub fn first_unmeshed_column(&self) -> Option<ChunkPos> {
         self.mesh_columns
