@@ -136,7 +136,7 @@ impl MainMenu {
                         code.verification_uri
                     )],
                     Some(code.user_code.clone()),
-                    vec!["Open Link", "Cancel"],
+                    vec!["Open Link", "Copy Code", "Cancel"],
                 ),
                 (None, SignIn::Failed(reason)) => (
                     vec!["Sign-in failed:".into(), reason.clone()],
@@ -215,6 +215,11 @@ impl MainMenu {
         let mut action = MenuAction::None;
         match pressed {
             Some("Sign In" | "Try Again") => self.start_sign_in(),
+            Some("Copy Code") => {
+                if let SignIn::Code(code) = &*self.sign_in.read() {
+                    common::set_clipboard(&code.user_code);
+                }
+            }
             Some("Open Link") => {
                 if let SignIn::Code(code) = &*self.sign_in.read() {
                     crate::util::open_url(&code.verification_uri);
