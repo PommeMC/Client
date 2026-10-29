@@ -271,7 +271,7 @@ void main() {
 /// The geometry a `gbuffers_*` program draws in milestone 1.
 pub fn gbuffers_geometry(program: Gbuffers) -> Geometry {
     match program {
-        Gbuffers::Entities => Geometry::Entity,
+        Gbuffers::Entities | Gbuffers::EntitiesTrans | Gbuffers::SpiderEyes => Geometry::Entity,
         Gbuffers::Block => Geometry::BlockEntity,
         Gbuffers::Water => Geometry::Water,
         Gbuffers::SkyBasic | Gbuffers::SkyTextured => Geometry::Sky,
@@ -297,6 +297,8 @@ mod corpus {
             Gbuffers::Terrain,
             Gbuffers::Water,
             Gbuffers::Entities,
+            Gbuffers::EntitiesTrans,
+            Gbuffers::SpiderEyes,
             Gbuffers::Block,
         ] {
             match pack.gbuffers(dimension, program) {

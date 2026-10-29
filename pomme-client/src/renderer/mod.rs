@@ -769,6 +769,7 @@ impl Renderer {
         frame: usize,
         mode: &RenderMode,
     ) -> bool {
+        use pipelines::entity_renderer::PackLayer;
         use pipelines::shaderpack::{PackFrame, PackGeometry, PackRenderer};
         let RenderMode::World {
             sky,
@@ -940,6 +941,21 @@ impl Renderer {
         terrain(&mut pack, PackGeometry::Terrain, View::Camera);
         draw_entities(&mut pack, PackGeometry::Entities, &frustum, None);
         draw_block_entities(&mut pack, PackGeometry::BlockEntities);
+        // TODO: `separateEntityDraws`, which draws these after translucent
+        // terrain instead.
+        for layer in PackLayer::ALL {
+            if !entity_renderer.has_pack_layer(layer) {
+                continue;
+            }
+            let geometry = layer.geometry();
+            if let Some((mut pass, binding)) = pack.begin_geometry(device, encoder, frame, geometry)
+            {
+                entity_renderer.pack_binding = Some(binding);
+                entity_renderer.draw_pack_layer(&mut pass, frame, layer);
+                entity_renderer.pack_binding = None;
+                pack.end_geometry(encoder, pass, geometry);
+            }
+        }
         pack.copy_opaque_depth(encoder, false);
         pack.run_full_screen(device, encoder, frame, true);
         water(&mut pack, PackGeometry::Water, &frustum);
@@ -2002,18 +2018,24 @@ impl Renderer {
                     }
 
                     let t_cull = std::time::Instant::now();
-                    // Solid (no discard) first so it lays down depth and early-Z lets
-                    // the front-to-back order reject occluded fragments; cutout after.
-                    self.moving_block_buffers
-                        .upload(&self.ctx.device, frame, moving_blocks);
-                    self.chunk_pipeline.bind(&mut pass, frame, false);
-                    self.chunk_buffers
-                        .draw_indirect(&pass, frame, false, View::Camera);
-                    self.moving_block_buffers.draw(&pass, frame, false);
-                    self.chunk_pipeline.bind(&mut pass, frame, true);
-                    self.chunk_buffers
-                        .draw_indirect(&pass, frame, true, View::Camera);
-                    self.moving_block_buffers.draw(&pass, frame, true);
+                    // A pack that failed to build leaves its vertex format until
+                    // the next frame remeshes; skip those.
+                    let vanilla_terrain = self.chunk_buffers.format() == TerrainFormat::Vanilla;
+                    if vanilla_terrain {
+                        // Solid (no discard) first so it lays down depth and early-Z
+                        // lets the front-to-back order reject occluded fragments;
+                        // cutout after.
+                        self.moving_block_buffers
+                            .upload(&self.ctx.device, frame, moving_blocks);
+                        self.chunk_pipeline.bind(&mut pass, frame, false);
+                        self.chunk_buffers
+                            .draw_indirect(&pass, frame, false, View::Camera);
+                        self.moving_block_buffers.draw(&pass, frame, false);
+                        self.chunk_pipeline.bind(&mut pass, frame, true);
+                        self.chunk_buffers
+                            .draw_indirect(&pass, frame, true, View::Camera);
+                        self.moving_block_buffers.draw(&pass, frame, true);
+                    }
                     let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
                     let anchor = self.camera.anchor();
@@ -2074,9 +2096,11 @@ impl Renderer {
                     // blends over them; depth-tested (occluded by geometry in front)
                     // but doesn't write depth. CPU frustum-culled, reusing the entity
                     // frustum/eye.
-                    self.chunk_pipeline.bind_water(&mut pass, frame);
-                    self.chunk_buffers
-                        .draw_water(&pass, &ent_frustum, anchor, eye);
+                    if vanilla_terrain {
+                        self.chunk_pipeline.bind_water(&mut pass, frame);
+                        self.chunk_buffers
+                            .draw_water(&pass, &ent_frustum, anchor, eye);
+                    }
 
                     // Clouds draw after opaque world geometry (so terrain occludes
                     // them) and before weather, depth-tested against the scene.

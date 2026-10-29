@@ -1041,6 +1041,10 @@ impl ChunkBufferStore {
         );
     }
 
+    pub fn format(&self) -> TerrainFormat {
+        self.format
+    }
+
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.vtx_free.reset();

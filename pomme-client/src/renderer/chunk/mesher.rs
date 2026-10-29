@@ -29,6 +29,9 @@ struct TerrainVertex {
     tint: u32,
     /// The packed `mc_Entity` a shader pack reads (see [`PackBlockIds`]).
     entity: u32,
+    /// Its face shade with directional shading off, which Iris gives a pack
+    /// without `oldLighting`: the dimension's up face, or 1 for a fluid.
+    flat_shade: f32,
 }
 
 include!("packing_consts.rs");
@@ -55,7 +58,7 @@ pub struct PackedVertex {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PackVertex {
     pub vertex: PackedVertex,
-    /// Ambient occlusion and face shade, then padding.
+    /// Ambient occlusion, face shade and flat shade, then padding.
     pub shade: [u8; 4],
     pub entity: u32,
 }
@@ -171,7 +174,12 @@ fn pack_shader_vertex(v: &TerrainVertex) -> PackVertex {
     let unorm8 = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     PackVertex {
         vertex: packed_with_shade(v, 1.0),
-        shade: [unorm8(v.light.ao), unorm8(v.light.face), 0, 0],
+        shade: [
+            unorm8(v.light.ao),
+            unorm8(v.light.face),
+            unorm8(v.flat_shade),
+            0,
+        ],
         entity: v.entity,
     }
 }
@@ -1120,6 +1128,7 @@ impl MeshDispatcher {
             y,
             z,
         );
+        snapshot.flatten_shade(&mut sink.vertices);
         MovingBlockMesh {
             vertices: TerrainVertices::pack(self.format(), &sink.vertices),
             solid: sink.solid,
@@ -1597,6 +1606,17 @@ impl ChunkStoreSnapshot {
         })
     }
 
+    /// Iris's `CardinalLighting.byFace` with directional shading off, for a
+    /// shader pack's block quads: every face takes the up value.
+    fn flatten_shade(&self, vertices: &mut [TerrainVertex]) {
+        if self.pack.is_none() {
+            return;
+        }
+        for vertex in vertices {
+            vertex.flat_shade = self.cardinal_lighting.up;
+        }
+    }
+
     fn get_block_state(&self, x: i32, y: i32, z: i32) -> azalea_block::BlockState {
         if let Some(state) = self.blocks.as_ref().and_then(|b| b.get(x, y, z)) {
             return state;
@@ -1904,6 +1924,9 @@ fn mesh_chunk_snapshot(
                         for vertex in &mut sink.vertices[first_vertex..] {
                             vertex.entity = entity;
                         }
+                    }
+                    if !fluid {
+                        snapshot.flatten_shade(&mut sink.vertices[first_vertex..]);
                     }
                     by += step;
                 }
@@ -2568,6 +2591,7 @@ fn emit_lod_cube(
         for i in 0..4 {
             sink.vertices.push(TerrainVertex {
                 entity: 0,
+                flat_shade: 1.0,
                 position: [
                     block_pos[0] + positions[i][0] * s,
                     block_pos[1] + positions[i][1] * sy,
@@ -2621,6 +2645,7 @@ fn emit_missing_cube(
         for (pos, uv) in positions.iter().zip(uvs) {
             sink.vertices.push(TerrainVertex {
                 entity: 0,
+                flat_shade: 1.0,
                 position: [
                     block_pos[0] + pos[0],
                     block_pos[1] + pos[1],
@@ -2691,6 +2716,7 @@ fn emit_face_into(
     for i in 0..4 {
         vertices.push(TerrainVertex {
             entity: 0,
+            flat_shade: 1.0,
             position: [
                 block_pos[0] + positions[i][0],
                 block_pos[1] + positions[i][1],
@@ -2809,6 +2835,7 @@ mod terrain_uv_tests {
     fn packed(sprite_uv: [f32; 2]) -> PackedVertex {
         pack_vertex(&TerrainVertex {
             entity: 0,
+            flat_shade: 1.0,
             position: [0.0; 3],
             sprite_uv,
             sprite: 0,
@@ -2859,6 +2886,7 @@ mod terrain_uv_tests {
     fn light_packs_block_and_sky_with_the_shaded_tint() {
         let vertex = pack_vertex(&TerrainVertex {
             entity: 0,
+            flat_shade: 1.0,
             position: [0.0; 3],
             sprite_uv: [0.0; 2],
             sprite: 0,
@@ -2875,6 +2903,7 @@ mod terrain_uv_tests {
         assert_eq!(size_of::<PackVertex>(), 24);
         let vertex = pack_shader_vertex(&TerrainVertex {
             entity: 0,
+            flat_shade: 0.9,
             position: [0.0; 3],
             sprite_uv: [0.0; 2],
             sprite: 0,
@@ -2886,7 +2915,7 @@ mod terrain_uv_tests {
             tint: super::pack_tint_shifted([1.0, 0.5, 0.0]),
         });
         assert_eq!(vertex.vertex.light_tint, [112, 255, 128, 0]);
-        assert_eq!(vertex.shade, [51, 153, 0, 0]);
+        assert_eq!(vertex.shade, [51, 153, 230, 0]);
     }
 }
 
