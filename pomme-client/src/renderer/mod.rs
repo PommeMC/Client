@@ -26,7 +26,7 @@ use camera::{Camera, CameraUniform};
 use chunk::atlas::{AtlasUVMap, TextureAtlas};
 use chunk::buffer::{ChunkBufferStore, View};
 use chunk::mesh_source::MeshSource;
-use chunk::mesher::ChunkMeshData;
+use chunk::mesher::{ChunkMeshData, TerrainFormat};
 use chunk::moving_blocks::{MovingBlockBuffers, MovingBlockRender};
 use glam::dvec3;
 use pipelines::block_entity::BlockEntityPipeline;
@@ -78,6 +78,10 @@ impl MeshSource for Renderer {
 
     fn asset_index(&self) -> &Option<AssetIndex> {
         &self.asset_index
+    }
+
+    fn terrain_format(&self) -> TerrainFormat {
+        self.chunk_buffers.format()
     }
 }
 
@@ -1330,6 +1334,22 @@ impl Renderer {
     pub fn clear_chunk_meshes(&mut self) {
         self.wait_for_all_frames();
         self.chunk_buffers.clear();
+    }
+
+    /// The terrain vertex format to mesh in: a shader pack's while one can
+    /// draw the world.
+    pub fn wanted_terrain_format(&self) -> TerrainFormat {
+        if self.shader_pack.is_some() && self.camera.top_down().is_none() {
+            TerrainFormat::ShaderPack
+        } else {
+            TerrainFormat::Vanilla
+        }
+    }
+
+    /// Drops every chunk mesh and draws them in `format` from now on.
+    pub fn set_terrain_format(&mut self, format: TerrainFormat) {
+        self.wait_for_all_frames();
+        self.chunk_buffers.set_format(&self.ctx.device, format);
     }
 
     pub fn render_assets(&self) -> &BlockRenderAssets {

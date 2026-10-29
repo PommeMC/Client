@@ -10,7 +10,7 @@ use std::sync::Arc;
 use glam::{DVec3, IVec2, IVec3, Mat4, Vec3, Vec4};
 
 use crate::renderer::chunk::atlas::TextureAtlas;
-use crate::renderer::chunk::buffer::CHUNK_VERTEX_BUFFERS;
+use crate::renderer::chunk::buffer::PACK_CHUNK_VERTEX_BUFFERS;
 use crate::renderer::entity_model::EntityVertex;
 use crate::renderer::pipelines::entity_renderer::PackShadow;
 use crate::renderer::pipelines::lightmap::Lightmap;
@@ -707,8 +707,8 @@ impl PackRenderer {
         let sky_buffers = [SkyVertex::BUFFER];
         let vertex_buffers: &[rhi::VertexBufferLayout] = match geometry.map(PackGeometry::drawn) {
             Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured) => &sky_buffers,
-            Some(PackGeometry::Terrain) => &CHUNK_VERTEX_BUFFERS,
-            Some(PackGeometry::Water) => &CHUNK_VERTEX_BUFFERS[..1],
+            Some(PackGeometry::Terrain) => &PACK_CHUNK_VERTEX_BUFFERS,
+            Some(PackGeometry::Water) => &PACK_CHUNK_VERTEX_BUFFERS[..1],
             Some(PackGeometry::Entities) => &entity_buffers,
             Some(PackGeometry::BlockEntities) => &block_entity_buffers,
             Some(_) => unreachable!("drawn geometries aren't shadow ones"),

@@ -1177,6 +1177,20 @@ impl GameState {
         self.mesh_columns.reset();
     }
 
+    /// Meshes every loaded column again from scratch, after the renderer
+    /// dropped its meshes.
+    pub fn rebuild_meshes(&mut self) {
+        self.reset_mesh_columns();
+        self.remesh_all_columns();
+        self.section_vis.clear();
+        self.section_vis_epoch.clear();
+        self.vis_mask.clear();
+        self.vis_tiers.clear();
+        self.vis_task = None;
+        self.vis_valid = false;
+        self.pending_load_rescan = true;
+    }
+
     /// Marks every loaded column for remeshing (F3+A).
     pub fn remesh_all_columns(&mut self) {
         let loaded: Vec<ChunkPos> = self.chunk_store.loaded_positions().collect();
@@ -4397,6 +4411,12 @@ pub fn update_game(
             "Shader pack {}: {e}",
             shader_pack.unwrap_or_default().display()
         );
+    }
+    let format = gfx.renderer.wanted_terrain_format();
+    if format != game.mesh_dispatcher.format() {
+        gfx.renderer.set_terrain_format(format);
+        game.mesh_dispatcher = game.mesh_dispatcher.with_format(format);
+        game.rebuild_meshes();
     }
     if let Err(e) = gfx.renderer.render_world(
         game.block_registry.render_view(),

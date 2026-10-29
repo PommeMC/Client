@@ -44,6 +44,74 @@ pub struct PackedVertex {
     pub light_tint: [u8; 4],
 }
 
+/// The terrain vertex while a shader pack draws: a [`PackedVertex`] with the
+/// tint unshaded, and the ambient occlusion and face shade kept apart, as
+/// Iris's vertex keeps them for the pack's `separateAo` and `oldLighting`.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PackVertex {
+    pub vertex: PackedVertex,
+    /// Ambient occlusion and face shade, then padding.
+    pub shade: [u8; 4],
+}
+
+/// Which terrain vertex the mesher writes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerrainFormat {
+    #[default]
+    Vanilla,
+    ShaderPack,
+}
+
+impl TerrainFormat {
+    pub fn vertex_size(self) -> u64 {
+        match self {
+            Self::Vanilla => size_of::<PackedVertex>() as u64,
+            Self::ShaderPack => size_of::<PackVertex>() as u64,
+        }
+    }
+}
+
+/// A mesh's vertices in its [`TerrainFormat`].
+pub enum TerrainVertices {
+    Vanilla(Vec<PackedVertex>),
+    ShaderPack(Vec<PackVertex>),
+}
+
+impl TerrainVertices {
+    fn pack(format: TerrainFormat, vertices: &[TerrainVertex]) -> Self {
+        match format {
+            TerrainFormat::Vanilla => Self::Vanilla(vertices.iter().map(pack_vertex).collect()),
+            TerrainFormat::ShaderPack => {
+                Self::ShaderPack(vertices.iter().map(pack_shader_vertex).collect())
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Vanilla(v) => v.len(),
+            Self::ShaderPack(v) => v.len(),
+        }
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Vanilla(v) => bytemuck::cast_slice(v),
+            Self::ShaderPack(v) => bytemuck::cast_slice(v),
+        }
+    }
+
+    /// The vanilla vertices, or `None` in a shader pack's format.
+    #[cfg(any(test, feature = "cpu-bench"))]
+    pub fn vanilla(&self) -> Option<&[PackedVertex]> {
+        match self {
+            Self::Vanilla(v) => Some(v),
+            Self::ShaderPack(_) => None,
+        }
+    }
+}
+
 impl PackedVertex {
     /// The sprite-local UV in `TERRAIN_UV_FIXED_SCALE` units.
     #[cfg(any(test, feature = "cpu-bench"))]
@@ -76,6 +144,19 @@ fn pack_sprite_uv(x: f32) -> u32 {
 }
 
 fn pack_vertex(v: &TerrainVertex) -> PackedVertex {
+    packed_with_shade(v, v.light.shade())
+}
+
+fn pack_shader_vertex(v: &TerrainVertex) -> PackVertex {
+    let unorm8 = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    PackVertex {
+        vertex: packed_with_shade(v, 1.0),
+        shade: [unorm8(v.light.ao), unorm8(v.light.face), 0, 0],
+    }
+}
+
+/// `v` with its tint multiplied by `shade`.
+fn packed_with_shade(v: &TerrainVertex, shade: f32) -> PackedVertex {
     PackedVertex {
         pos: [
             quantize_coord(v.position[0]),
@@ -88,7 +169,7 @@ fn pack_vertex(v: &TerrainVertex) -> PackedVertex {
             | u32::from(v.light.sky) << 24,
         light_tint: {
             let [_, r, g, b] = v.tint.to_le_bytes();
-            let shaded = |c: u8| (f32::from(c) * v.light.shade + 0.5) as u8;
+            let shaded = |c: u8| (f32::from(c) * shade + 0.5) as u8;
             [v.light.block, shaded(r), shaded(g), shaded(b)]
         },
     }
@@ -150,7 +231,7 @@ pub struct SectionMesh {
     pub section_index: i32,
     /// Vertices already quantized against the section origin in the worker, so
     /// upload is a plain memcpy.
-    pub vertices: Vec<PackedVertex>,
+    pub vertices: TerrainVertices,
     /// Section-local bounds of the un-quantized vertex positions, for
     /// culling (rebase via the section origin).
     pub aabb: ChunkAABB,
@@ -182,7 +263,7 @@ impl MeshSink {
     /// (recording the split), the section-local AABB from the float positions
     /// and the vertices quantized so upload is a plain memcpy; `None` if it
     /// drew nothing. Leaves the sink empty for the next section.
-    fn finish(&mut self, section_index: i32) -> Option<SectionMesh> {
+    fn finish(&mut self, section_index: i32, format: TerrainFormat) -> Option<SectionMesh> {
         let section = (!self.solid.is_empty() || !self.cutout.is_empty() || !self.water.is_empty())
             .then(|| {
                 let mut indices = Vec::with_capacity(self.solid.len() + self.cutout.len());
@@ -190,7 +271,7 @@ impl MeshSink {
                 indices.extend_from_slice(&self.cutout);
                 SectionMesh {
                     section_index,
-                    vertices: self.vertices.iter().map(pack_vertex).collect(),
+                    vertices: TerrainVertices::pack(format, &self.vertices),
                     aabb: section_aabb(&self.vertices),
                     indices,
                     solid_index_count: self.solid.len() as u32,
@@ -217,7 +298,7 @@ impl MeshSink {
 
 /// One moving block's terrain mesh, from [`MeshDispatcher::mesh_moving_block`].
 pub struct MovingBlockMesh {
-    pub vertices: Vec<PackedVertex>,
+    pub vertices: TerrainVertices,
     pub solid: Vec<u32>,
     pub cutout: Vec<u32>,
 }
@@ -717,6 +798,7 @@ pub struct MeshDispatcher {
     /// The dimension's face-shade table; a dimension change builds a new
     /// dispatcher.
     cardinal_lighting: CardinalLighting,
+    format: TerrainFormat,
     pool: Arc<BufferPool>,
 }
 
@@ -828,8 +910,26 @@ impl MeshDispatcher {
             dry_foliage_colormap,
             biome_climate,
             cardinal_lighting,
+            format: TerrainFormat::default(),
             pool: Arc::new(BufferPool::new(worker_count)),
         }
+    }
+
+    pub fn format(&self) -> TerrainFormat {
+        self.format
+    }
+
+    /// Sets the vertex format before any meshing.
+    pub fn set_format(&mut self, format: TerrainFormat) {
+        self.format = format;
+    }
+
+    /// A fresh dispatcher on the same assets meshing in `format`; dropping
+    /// this one discards its queued work in the old format.
+    pub fn with_format(&self, format: TerrainFormat) -> Self {
+        let mut dispatcher = self.recreate_for_version(self.render_view.clone());
+        dispatcher.format = format;
+        dispatcher
     }
 
     /// Negotiation precedes world population. Capture the session's new view
@@ -995,7 +1095,7 @@ impl MeshDispatcher {
             z,
         );
         MovingBlockMesh {
-            vertices: sink.vertices.iter().map(pack_vertex).collect(),
+            vertices: TerrainVertices::pack(self.format, &sink.vertices),
             solid: sink.solid,
             cutout: sink.cutout,
         }
@@ -1025,6 +1125,7 @@ impl MeshDispatcher {
             dry_foliage_colormap: Arc::clone(&self.dry_foliage_colormap),
             biome_climate: Arc::clone(&self.biome_climate),
             cardinal_lighting: self.cardinal_lighting,
+            format: self.format,
             min_y: chunk_store.min_y(),
             height: chunk_store.height(),
             blocks: None,
@@ -1298,6 +1399,7 @@ struct ChunkStoreSnapshot {
     dry_foliage_colormap: Arc<Colormap>,
     biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     cardinal_lighting: CardinalLighting,
+    format: TerrainFormat,
     min_y: i32,
     height: u32,
     /// The meshed span's blocks, copied in by `mesh_chunk_snapshot`.
@@ -1770,7 +1872,7 @@ fn mesh_chunk_snapshot(
             }
             local_z += step;
         }
-        if let Some(section) = sink.finish(si) {
+        if let Some(section) = sink.finish(si, snapshot.format) {
             sections.push(section);
         }
     }
@@ -2658,7 +2760,8 @@ mod fluid_height_tests {
 #[cfg(test)]
 mod terrain_uv_tests {
     use super::{
-        LightLevels, PackedVertex, TERRAIN_UV_FIXED_SCALE, TerrainVertex, VertexLight, pack_vertex,
+        LightLevels, PackVertex, PackedVertex, TERRAIN_UV_FIXED_SCALE, TerrainVertex, VertexLight,
+        pack_shader_vertex, pack_vertex,
     };
 
     fn packed(sprite_uv: [f32; 2]) -> PackedVertex {
@@ -2721,6 +2824,24 @@ mod terrain_uv_tests {
         });
         assert_eq!(vertex.uv >> 24, 240);
         assert_eq!(vertex.light_tint, [112, 128, 64, 0]);
+    }
+
+    #[test]
+    fn shader_packs_get_the_tint_unshaded_and_the_shades_apart() {
+        assert_eq!(size_of::<PackVertex>(), 20);
+        let vertex = pack_shader_vertex(&TerrainVertex {
+            position: [0.0; 3],
+            sprite_uv: [0.0; 2],
+            sprite: 0,
+            face: 0,
+            light: VertexLight {
+                ao: 0.2,
+                ..VertexLight::flat(0.6, LightLevels::new(15, 7))
+            },
+            tint: super::pack_tint_shifted([1.0, 0.5, 0.0]),
+        });
+        assert_eq!(vertex.vertex.light_tint, [112, 255, 128, 0]);
+        assert_eq!(vertex.shade, [51, 153, 0, 0]);
     }
 }
 
