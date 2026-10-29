@@ -3,9 +3,9 @@
 # `gbuffers_skytextured` programs, terrain, a cow and a chest through its
 # `gbuffers_textured_lit`, normal shading and the shadows of a pillar, the
 # planks, the cow, the chest and the player (its `shadow` program, the sun
-# tilted by `sunPathRotation`) from its composite pass, and the sky blended toward a custom uniform from its
-# `shaders.properties`. Then packs off again, with the same sky shots to
-# compare.
+# tilted by `sunPathRotation`) from its composite pass, and the sky blended
+# toward a custom uniform from its `shaders.properties`. Then packs off again,
+# with the same sky shots to compare.
 
 [[step]]
 wait_ms = 2000
@@ -145,6 +145,16 @@ wait_ms = 1500
 
 [[step]]
 screenshot = "off"
+
+# With no pack, the first-person player casts no blob shadow.
+[[step]]
+chat = "/tp @s 60.5 -60 50.5 0 90"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "off_self"
 
 # The sun overhead at noon, the moon and stars at midnight, then the sunset
 # glow to the west at dusk.

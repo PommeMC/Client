@@ -40,8 +40,8 @@ use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::entity_model::triangle_wave;
 use crate::renderer::pipelines::block_entity;
 use crate::renderer::pipelines::entity_renderer::{
-    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, armor_render_infos, dye_color_tint, jeb_sheep_tint,
-    standing_eye_height, wool_color_tint,
+    EntityRenderInfo, MAX_OVERLAYS, PackShadow, WHITE_TINT, armor_render_infos, dye_color_tint,
+    jeb_sheep_tint, standing_eye_height, wool_color_tint,
 };
 use crate::renderer::pipelines::entity_shadow::{ShadowCaster, ShadowScene};
 use crate::renderer::pipelines::lightmap::LightmapInfo;
@@ -3976,7 +3976,7 @@ pub fn update_game(
     });
 
     use crate::entity::glowing::{appears_glowing, outline_color, scoreboard_name};
-    use crate::renderer::pipelines::entity_renderer::{PackShadow, Visibility};
+    use crate::renderer::pipelines::entity_renderer::Visibility;
     let spectating = crate::player::is_spectator(game.player.game_mode);
     let spectator_outlines = spectating && core.input.performing_action(Action::SpectatorOutlines);
     let viewer = scoreboard_name(&game.tab_list, core.user.uuid, Some(core.user.uuid));
@@ -4872,7 +4872,8 @@ fn moving_block_renders(
 
 /// Vanilla `extractShadow`'s casters: every rendered entity, and each resting
 /// item entity once, at its own position rather than its bobbing copies'.
-/// Items being picked up are gone in vanilla, so they cast none.
+/// Items being picked up are gone in vanilla, so they cast none, and the
+/// first-person player is only in the list for shader pack shadows.
 fn shadow_casters(
     entities: &[EntityRenderInfo],
     items: &crate::entity::ItemEntityStore,
@@ -4880,7 +4881,10 @@ fn shadow_casters(
     partial_tick: f32,
 ) -> Vec<ShadowCaster> {
     let (item_radius, item_strength) = crate::entity::shadow::ITEM;
-    let entities = entities.iter().map(|e| e.shadow);
+    let entities = entities
+        .iter()
+        .filter(|e| e.pack_shadow != PackShadow::FirstPersonPlayer)
+        .map(|e| e.shadow);
     // A full-strength shadow fades out 16 blocks from the camera.
     let items = items
         .visible_items(camera_pos, 16.0)
