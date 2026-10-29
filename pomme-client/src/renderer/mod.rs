@@ -892,12 +892,13 @@ impl Renderer {
             pack.copy_opaque_depth(encoder, true);
             water(&mut pack, PackGeometry::ShadowWater, &planes);
         }
-        if !*eyes_in_water {
-            let draws = self
-                .sky_pipeline
-                .draws(&self.camera, sky, pack.sun_path_rotation());
-            pack.draw_sky(device, encoder, frame, &self.sky_pipeline, &draws);
-        }
+        // Drawn underwater too, as Iris does; the pack fogs it.
+        // TODO: skipped in lava and powder snow, or under an effect that
+        // blocks the sky (`LevelRenderer.addSkyPass`).
+        let draws = self
+            .sky_pipeline
+            .draws(&self.camera, sky, pack.sun_path_rotation());
+        pack.draw_sky(device, encoder, frame, &self.sky_pipeline, &draws);
 
         let frustum = self.camera.frustum_planes();
         let cull_distance = entity_cull_distance(*render_distance);

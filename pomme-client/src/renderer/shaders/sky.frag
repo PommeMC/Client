@@ -42,7 +42,7 @@ vec3 fogged(vec3 color) {
 void main() {
     if (stage == SUN || stage == MOON) {
         vec4 tex = texture(sampler2D(celestial_tex, celestial_tex_sampler), v_uv);
-        if (tex.a < 0.1) discard;
+        if (tex.a == 0.0) discard;
         out_color = tex * color;
     } else if (stage == CUSTOM_SKY) {
         out_color = texture(sampler2D(celestial_tex, celestial_tex_sampler), v_uv) * color;
