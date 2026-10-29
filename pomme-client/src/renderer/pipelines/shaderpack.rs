@@ -892,6 +892,8 @@ impl PackRenderer {
     /// Begins `geometry`'s pass into its program's buffers and the depth
     /// target, with the program bound; `None` if the pack has no program
     /// for it.
+    // TODO: Iris draws a geometry with no program, even through the fallback
+    // chain, with its built-in fallback shader into colortex0.
     pub fn begin_geometry(
         &mut self,
         device: &rhi::backend::Device,

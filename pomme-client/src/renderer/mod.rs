@@ -856,10 +856,11 @@ impl Renderer {
             },
         );
         pack.clear(encoder, sky.fog_color);
-        if !*eyes_in_water {
-            let draws = self.sky_pipeline.draws(&self.camera, sky);
-            pack.draw_sky(device, encoder, frame, &self.sky_pipeline, &draws);
-        }
+        // Drawn underwater too, as Iris does; the pack fogs it.
+        // TODO: skipped in lava and powder snow, or under an effect that
+        // blocks the sky (`LevelRenderer.addSkyPass`).
+        let draws = self.sky_pipeline.draws(&self.camera, sky);
+        pack.draw_sky(device, encoder, frame, &self.sky_pipeline, &draws);
         self.moving_block_buffers
             .upload(device, frame, moving_blocks);
 
