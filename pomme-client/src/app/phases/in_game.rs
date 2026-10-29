@@ -4140,6 +4140,7 @@ pub fn update_game(
                     sniffer: extras.sniffer,
                     allay: extras.allay,
                     copper_golem: extras.copper_golem,
+                    llama_decor: extras.llama_decor,
                     golem_attack_ticks: extras.golem_attack_ticks,
                     golem_offer_flower_ticks: extras.golem_offer_flower_ticks,
                     body_transform: extras.body_transform,
@@ -5029,6 +5030,7 @@ struct EntityExtras {
     sniffer: crate::renderer::entity_model::SnifferAnims,
     allay: crate::renderer::entity_model::AllayAnims,
     copper_golem: crate::renderer::entity_model::CopperGolemAnims,
+    llama_decor: Option<crate::renderer::pipelines::entity_renderer::LlamaDecor>,
     golem_attack_ticks: f32,
     golem_offer_flower_ticks: u32,
 }
@@ -5074,7 +5076,7 @@ fn entity_extras(
     game_time: i64,
 ) -> EntityExtras {
     match e.entity_type {
-        EntityKind::Cow => EntityExtras {
+        EntityKind::Cow | EntityKind::Mooshroom => EntityExtras {
             variant_index: e.variant,
             ..Default::default()
         },
@@ -5157,6 +5159,7 @@ fn entity_extras(
             ..equine_extras(e, alpha)
         },
         EntityKind::SkeletonHorse | EntityKind::ZombieHorse => equine_extras(e, alpha),
+        EntityKind::Llama | EntityKind::TraderLlama => llama_extras(e),
         EntityKind::Squid | EntityKind::GlowSquid => squid_extras(e, alpha),
         EntityKind::Bat => EntityExtras {
             bat_elapsed_secs: e.bat_anim_start.map(|s| anim_clock_secs(e, s, alpha)),
@@ -5187,6 +5190,40 @@ fn entity_extras(
             ..Default::default()
         },
         _ => EntityExtras::default(),
+    }
+}
+
+/// Vanilla `LlamaRenderer.extractRenderState` and `LlamaDecorLayer.submit`:
+/// babies show neither a chest nor a carpet, and a body item with an
+/// equipment asset replaces the trader decor.
+fn llama_extras(e: &crate::entity::LivingEntity) -> EntityExtras {
+    use crate::renderer::pipelines::entity_renderer::{
+        ArmorRenderInfo, LlamaDecor, equipment_render_info,
+    };
+    let has_chest = !e.is_baby && e.has_chest;
+    let body = e
+        .equipment(EquipmentSlot::Body)
+        .and_then(equipment_render_info);
+    let equipment = match body {
+        Some(body) if !e.is_baby => Some(body),
+        // `EquipmentAssets.TRADER_LLAMA(_BABY)` with an empty stack.
+        _ if e.entity_type == EntityKind::TraderLlama => Some(ArmorRenderInfo {
+            asset_id: if e.is_baby {
+                "minecraft:trader_llama_baby".into()
+            } else {
+                "minecraft:trader_llama".into()
+            },
+            dyed_color: None,
+        }),
+        _ => None,
+    };
+    EntityExtras {
+        variant_index: e.variant + if has_chest { 4 } else { 0 },
+        llama_decor: equipment.map(|equipment| LlamaDecor {
+            equipment,
+            has_chest,
+        }),
+        ..Default::default()
     }
 }
 

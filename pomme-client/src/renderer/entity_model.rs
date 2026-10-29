@@ -4,7 +4,9 @@ use crate::renderer::chunk::mesher::pack_uv;
 use crate::renderer::rhi;
 
 mod copper_golem_anim;
+mod llama;
 mod sniffer_anim;
+pub use llama::*;
 
 /// An entity or block-entity model vertex: its position, UV and face normal.
 #[repr(C)]
@@ -2634,14 +2636,14 @@ pub fn bake_snow_golem_model() -> BakedEntityModel {
             Vec3::new(0.0, 4.0, 0.0),
             vec![shrunk(vbox((0, 0), (-4.0, -8.0, -4.0), (8.0, 8.0, 8.0)))],
         ),
-        EntityPart {
-            default_rotation: Vec3::new(0.0, 0.0, 1.0),
-            ..vpart("left_arm", None, Vec3::new(5.0, 6.0, 1.0), vec![arm()])
-        },
-        EntityPart {
-            default_rotation: Vec3::new(0.0, std::f32::consts::PI, -1.0),
-            ..vpart("right_arm", None, Vec3::new(-5.0, 6.0, -1.0), vec![arm()])
-        },
+        rotated(
+            vpart("left_arm", None, Vec3::new(5.0, 6.0, 1.0), vec![arm()]),
+            Vec3::new(0.0, 0.0, 1.0),
+        ),
+        rotated(
+            vpart("right_arm", None, Vec3::new(-5.0, 6.0, -1.0), vec![arm()]),
+            Vec3::new(0.0, std::f32::consts::PI, -1.0),
+        ),
         vpart(
             "upper_body",
             None,
@@ -3526,6 +3528,14 @@ fn vpart(name: &str, parent: Option<usize>, offset: Vec3, cubes: Vec<ModelCube>)
         default_rotation: Vec3::ZERO,
         cubes,
         parent,
+    }
+}
+
+/// `vpart` with a `PartPose.offsetAndRotation` rest rotation.
+fn rotated(part: EntityPart, rotation: Vec3) -> EntityPart {
+    EntityPart {
+        default_rotation: rotation,
+        ..part
     }
 }
 
