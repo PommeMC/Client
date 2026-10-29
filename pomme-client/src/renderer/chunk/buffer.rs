@@ -3,17 +3,18 @@ use std::mem::offset_of;
 
 use glam::DVec3;
 
-use super::mesher::{ChunkAABB, ChunkMeshData, PackedVertex, SectionMesh};
+use super::mesher::{
+    ChunkAABB, ChunkMeshData, PackVertex, PackedVertex, SectionMesh, TerrainFormat,
+};
 use crate::position::ChunkPos;
 use crate::renderer::rhi::IndirectDrawFeatures;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
 
 const BUCKET_VERTICES: u32 = 32768;
 const BUCKET_INDICES: u32 = 49152;
-const VERTEX_SIZE: u64 = size_of::<PackedVertex>() as u64;
 const INDEX_SIZE: u64 = size_of::<u32>() as u64;
 const BYTES_PER_BUCKET: u64 =
-    BUCKET_VERTICES as u64 * VERTEX_SIZE + BUCKET_INDICES as u64 * INDEX_SIZE;
+    BUCKET_VERTICES as u64 * size_of::<PackedVertex>() as u64 + BUCKET_INDICES as u64 * INDEX_SIZE;
 const MIN_BUCKETS: u32 = 128;
 const MAX_BUCKETS: u32 = 2048;
 const VRAM_BUDGET_FRACTION: f64 = 0.25;
@@ -153,43 +154,74 @@ impl ChunkMeta {
     }
 }
 
+/// [`PackedVertex`]'s attributes; a [`PackVertex`] starts with one.
+const VERTEX_ATTRIBUTES: [rhi::VertexAttribute; 5] = {
+    const POS: u32 = offset_of!(PackedVertex, pos) as u32;
+    [
+        // pos, split into xy + z lanes
+        rhi::VertexAttribute {
+            location: 0,
+            format: rhi::VertexFormat::Unorm16x2,
+            offset: POS,
+        },
+        rhi::VertexAttribute {
+            location: 1,
+            format: rhi::VertexFormat::Unorm16,
+            offset: POS + 4,
+        },
+        rhi::VertexAttribute {
+            location: 2,
+            format: rhi::VertexFormat::Uint32,
+            offset: offset_of!(PackedVertex, uv) as u32,
+        },
+        rhi::VertexAttribute {
+            location: 3,
+            format: rhi::VertexFormat::Uint16,
+            offset: offset_of!(PackedVertex, sprite) as u32,
+        },
+        rhi::VertexAttribute {
+            location: 4,
+            format: rhi::VertexFormat::Unorm8x4,
+            offset: offset_of!(PackedVertex, light_tint) as u32,
+        },
+    ]
+};
+
+const PACK_VERTEX_ATTRIBUTES: [rhi::VertexAttribute; 6] = {
+    let [pos_xy, pos_z, uv, sprite, light_tint] = VERTEX_ATTRIBUTES;
+    [
+        pos_xy,
+        pos_z,
+        uv,
+        sprite,
+        light_tint,
+        rhi::VertexAttribute {
+            location: 7,
+            format: rhi::VertexFormat::Unorm8x4,
+            offset: offset_of!(PackVertex, shade) as u32,
+        },
+    ]
+};
+
 /// Vertex input for the chunk pipeline: buffer 0 is the packed per-vertex
 /// pool, buffer 1 is the meta buffer read per-instance (origin + fade),
 /// indexed by the `first_instance` the cull shader writes.
-pub const CHUNK_VERTEX_BUFFERS: [rhi::VertexBufferLayout<'static>; 2] = {
-    const POS: u32 = offset_of!(PackedVertex, pos) as u32;
+pub const CHUNK_VERTEX_BUFFERS: [rhi::VertexBufferLayout<'static>; 2] =
+    chunk_vertex_buffers(size_of::<PackedVertex>(), &VERTEX_ATTRIBUTES);
+
+/// [`CHUNK_VERTEX_BUFFERS`] over [`PackVertex`]es, for a shader pack.
+pub const PACK_CHUNK_VERTEX_BUFFERS: [rhi::VertexBufferLayout<'static>; 2] =
+    chunk_vertex_buffers(size_of::<PackVertex>(), &PACK_VERTEX_ATTRIBUTES);
+
+const fn chunk_vertex_buffers(
+    stride: usize,
+    attributes: &'static [rhi::VertexAttribute],
+) -> [rhi::VertexBufferLayout<'static>; 2] {
     [
         rhi::VertexBufferLayout {
-            stride: size_of::<PackedVertex>() as u32,
+            stride: stride as u32,
             step_mode: rhi::VertexStepMode::Vertex,
-            attributes: &[
-                // pos, split into xy + z lanes
-                rhi::VertexAttribute {
-                    location: 0,
-                    format: rhi::VertexFormat::Unorm16x2,
-                    offset: POS,
-                },
-                rhi::VertexAttribute {
-                    location: 1,
-                    format: rhi::VertexFormat::Unorm16,
-                    offset: POS + 4,
-                },
-                rhi::VertexAttribute {
-                    location: 2,
-                    format: rhi::VertexFormat::Uint32,
-                    offset: offset_of!(PackedVertex, uv) as u32,
-                },
-                rhi::VertexAttribute {
-                    location: 3,
-                    format: rhi::VertexFormat::Uint16,
-                    offset: offset_of!(PackedVertex, sprite) as u32,
-                },
-                rhi::VertexAttribute {
-                    location: 4,
-                    format: rhi::VertexFormat::Unorm8x4,
-                    offset: offset_of!(PackedVertex, light_tint) as u32,
-                },
-            ],
+            attributes,
         },
         rhi::VertexBufferLayout {
             stride: size_of::<ChunkMeta>() as u32,
@@ -208,7 +240,7 @@ pub const CHUNK_VERTEX_BUFFERS: [rhi::VertexBufferLayout<'static>; 2] = {
             ],
         },
     ]
-};
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -416,6 +448,9 @@ pub struct ChunkBufferStore {
     staging_buffer: rhi::backend::Buffer,
     staging_size: u64,
     use_staging: bool,
+    format: TerrainFormat,
+    /// Vertices the pool holds, in either format.
+    pool_vertices: u32,
 
     /// Exact-size sub-allocators over the vertex and index pools (in elements).
     vtx_free: FreeList,
@@ -462,30 +497,32 @@ pub struct ChunkBufferStore {
 impl ChunkBufferStore {
     pub fn new(device: &rhi::backend::Device, indirect_draw: IndirectDrawFeatures) -> Self {
         let total_buckets = compute_bucket_count(device.device_local_bytes);
-        let vertex_size = total_buckets as u64 * BUCKET_VERTICES as u64 * VERTEX_SIZE;
+        let pool_vertices = total_buckets * BUCKET_VERTICES;
+        let format = TerrainFormat::Vanilla;
+        let vertex_size = u64::from(pool_vertices) * format.vertex_size();
         let index_size = total_buckets as u64 * BUCKET_INDICES as u64 * INDEX_SIZE;
 
         let use_staging = device.discrete;
 
-        let create_pool = |label: &str, size: u64, usage: rhi::BufferUsages| {
-            if use_staging {
-                rhi::backend::Buffer::new(
-                    device,
-                    label,
-                    size,
-                    usage | rhi::BufferUsages::COPY_DST,
-                    rhi::MemoryLocation::Device,
-                )
-            } else {
-                rhi::backend::Buffer::new(device, label, size, usage, rhi::MemoryLocation::Host)
-            }
-        };
-        let vertex_buffer = create_pool("vertex_pool", vertex_size, rhi::BufferUsages::VERTEX);
-        let index_buffer = create_pool("index_pool", index_size, rhi::BufferUsages::INDEX);
+        let vertex_buffer = create_pool(
+            device,
+            use_staging,
+            "vertex_pool",
+            vertex_size,
+            rhi::BufferUsages::VERTEX,
+        );
+        let index_buffer = create_pool(
+            device,
+            use_staging,
+            "index_pool",
+            index_size,
+            rhi::BufferUsages::INDEX,
+        );
 
         // Discrete GPUs batch a frame's uploads through this buffer in one
         // transfer, so size it to hold several columns and keep sub-flushes rare.
         // The integrated path writes mapped memory directly and never touches it.
+        // Sized for vanilla vertices; a shader pack's larger ones flush sooner.
         let staging_size = if use_staging {
             BYTES_PER_BUCKET * 16
         } else {
@@ -511,7 +548,7 @@ impl ChunkBufferStore {
             staging_size / 1024,
         );
 
-        let vtx_free = FreeList::new(total_buckets * BUCKET_VERTICES);
+        let vtx_free = FreeList::new(pool_vertices);
         let idx_free = FreeList::new(total_buckets * BUCKET_INDICES);
 
         // Per-section packing yields many more draws than buckets, so pre-size
@@ -553,6 +590,8 @@ impl ChunkBufferStore {
             staging_buffer,
             staging_size,
             use_staging,
+            format,
+            pool_vertices,
             vtx_free,
             idx_free,
             chunks: HashMap::new(),
@@ -622,7 +661,8 @@ impl ChunkBufferStore {
         // so no packing or rebasing is needed — just one slice per section.
         struct Plan<'a> {
             section_index: i32,
-            verts: &'a [PackedVertex],
+            verts: &'a [u8],
+            vertex_count: u32,
             indices: &'a [u32],
             water_indices: &'a [u32],
             vtx_off: u32,
@@ -727,10 +767,7 @@ impl ChunkBufferStore {
                 // Verts and indices share the staging buffer (two halves). A chunk
                 // too large for one half is skipped rather than overflowing the
                 // buffer. This is permanent, so it's not reported for retry.
-                let v_bytes: usize = upload_secs
-                    .iter()
-                    .map(|s| s.vertices.len() * VERTEX_SIZE as usize)
-                    .sum();
+                let v_bytes: usize = upload_secs.iter().map(|s| s.vertices.bytes().len()).sum();
                 let i_bytes: usize = upload_secs
                     .iter()
                     .map(|s| (s.indices.len() + s.water_indices.len()) * INDEX_SIZE as usize)
@@ -771,10 +808,15 @@ impl ChunkBufferStore {
                     pool_full = true;
                     break;
                 };
+                debug_assert_eq!(
+                    sec.vertices.bytes().len() as u64,
+                    u64::from(vcount) * self.format.vertex_size()
+                );
                 taken.push((vtx_off, vcount, idx_off, icount));
                 plans.push(Plan {
                     section_index: sec.section_index,
-                    verts: &sec.vertices,
+                    verts: sec.vertices.bytes(),
+                    vertex_count: vcount,
                     indices: &sec.indices,
                     water_indices: &sec.water_indices,
                     vtx_off,
@@ -800,10 +842,7 @@ impl ChunkBufferStore {
             }
 
             if self.use_staging {
-                let mv: usize = plans
-                    .iter()
-                    .map(|p| p.verts.len() * VERTEX_SIZE as usize)
-                    .sum();
+                let mv: usize = plans.iter().map(|p| p.verts.len()).sum();
                 let mi: usize = plans
                     .iter()
                     .map(|p| (p.indices.len() + p.water_indices.len()) * INDEX_SIZE as usize)
@@ -818,12 +857,11 @@ impl ChunkBufferStore {
                     stg_i = 0;
                 }
                 for p in &plans {
-                    self.staging_buffer
-                        .write_at(stg_v, bytemuck::cast_slice(p.verts));
-                    let vbytes = p.verts.len() * VERTEX_SIZE as usize;
+                    self.staging_buffer.write_at(stg_v, p.verts);
+                    let vbytes = p.verts.len();
                     copy_v.push(rhi::BufferCopy {
                         src_offset: stg_v as u64,
-                        dst_offset: p.vtx_off as u64 * VERTEX_SIZE,
+                        dst_offset: u64::from(p.vtx_off) * self.format.vertex_size(),
                         size: vbytes as u64,
                     });
                     stg_v += vbytes;
@@ -839,9 +877,8 @@ impl ChunkBufferStore {
                 }
             } else {
                 for p in &plans {
-                    let base = p.vtx_off as usize * VERTEX_SIZE as usize;
-                    self.vertex_buffer
-                        .write_at(base, bytemuck::cast_slice(p.verts));
+                    let base = u64::from(p.vtx_off) * self.format.vertex_size();
+                    self.vertex_buffer.write_at(base as usize, p.verts);
                     p.write_indices(
                         &mut self.index_buffer,
                         p.idx_off as usize * INDEX_SIZE as usize,
@@ -861,7 +898,7 @@ impl ChunkBufferStore {
                 water_index_count: p.water_indices.len() as u32,
                 idx_len: (p.indices.len() + p.water_indices.len()) as u32,
                 vertex_offset: p.vtx_off as i32,
-                vtx_len: p.verts.len() as u32,
+                vtx_len: p.vertex_count,
                 // A re-meshed section swaps instantly; a freshly revealed one fades in.
                 uploaded_at: if was_present.contains(&p.section_index) {
                     now.checked_sub(std::time::Duration::from_secs(2))
@@ -985,6 +1022,28 @@ impl ChunkBufferStore {
         }
     }
 
+    /// Drops every mesh and, for a new format, remakes the vertex pool at its
+    /// stride. The caller waits for in-flight frames first.
+    pub fn set_format(&mut self, device: &rhi::backend::Device, format: TerrainFormat) {
+        self.clear();
+        if format == self.format {
+            return;
+        }
+        self.format = format;
+        std::mem::take(&mut self.vertex_buffer).destroy(device);
+        self.vertex_buffer = create_pool(
+            device,
+            self.use_staging,
+            "vertex_pool",
+            u64::from(self.pool_vertices) * format.vertex_size(),
+            rhi::BufferUsages::VERTEX,
+        );
+    }
+
+    pub fn format(&self) -> TerrainFormat {
+        self.format
+    }
+
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.vtx_free.reset();
@@ -993,6 +1052,33 @@ impl ChunkBufferStore {
         self.camera.meta.clear();
         self.meta_dirty = true;
         self.fade_enabled = false;
+    }
+
+    /// Where the pools' ranges overlap, if they do: live sections, slices
+    /// awaiting reclaim and free ranges must never share a vertex or index.
+    #[cfg(feature = "test-harness")]
+    pub fn slice_overlap(&self) -> Option<String> {
+        let mut vertex = self.vtx_free.free.clone();
+        let mut index = self.idx_free.free.clone();
+        let live = self
+            .chunks
+            .values()
+            .flat_map(|c| &c.sections)
+            .map(|s| (s.vertex_offset as u32, s.vtx_len, s.first_index, s.idx_len));
+        let retired = self.pending_free.iter().map(|&(_, slice)| slice);
+        for (vtx_off, vtx_len, idx_off, idx_len) in live.chain(retired) {
+            vertex.push((vtx_off, vtx_len));
+            index.push((idx_off, idx_len));
+        }
+        [("vertex", vertex), ("index", index)]
+            .into_iter()
+            .find_map(|(pool, mut ranges)| {
+                ranges.sort_unstable();
+                ranges
+                    .windows(2)
+                    .find(|w| w[0].0 + w[0].1 > w[1].0)
+                    .map(|w| format!("{pool} ranges {:?} and {:?} overlap", w[0], w[1]))
+            })
     }
 
     pub fn chunk_count(&self) -> u32 {
@@ -1278,6 +1364,27 @@ impl ChunkBufferStore {
         self.compute_pipeline.destroy(device);
         self.compute_layout.destroy(device);
         self.cull_layout.destroy(device);
+    }
+}
+
+/// A chunk pool: device-local behind the staging buffer, or host-visible.
+fn create_pool(
+    device: &rhi::backend::Device,
+    use_staging: bool,
+    label: &str,
+    size: u64,
+    usage: rhi::BufferUsages,
+) -> rhi::backend::Buffer {
+    if use_staging {
+        rhi::backend::Buffer::new(
+            device,
+            label,
+            size,
+            usage | rhi::BufferUsages::COPY_DST,
+            rhi::MemoryLocation::Device,
+        )
+    } else {
+        rhi::backend::Buffer::new(device, label, size, usage, rhi::MemoryLocation::Host)
     }
 }
 

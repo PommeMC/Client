@@ -20,7 +20,7 @@ use std::path::Path;
 use glsl::compile::{self, CompileError, ShaderStage};
 use glsl::translate::{self, ProgramSource, TranslateError, Translated};
 use include::IncludeError;
-use prelude::{Geometry, Preludes};
+use prelude::{Geometry, Preludes, TerrainLighting};
 use preprocess::Overrides;
 use programs::Gbuffers;
 use source::{PackSource, SourceError};
@@ -66,6 +66,7 @@ pub struct ProgramText {
     pub path: String,
     pub vertex: String,
     pub fragment: String,
+    pub lighting: TerrainLighting,
 }
 
 /// A compiled program: SPIR-V and the interface the renderer binds.
@@ -143,6 +144,10 @@ impl ShaderPack {
             vertex: preprocess::prepare(&vertex, &self.overrides),
             fragment: preprocess::prepare(&fragment, &self.overrides),
             path,
+            lighting: TerrainLighting {
+                separate_ao: self.property_bool("separateAo", false),
+                old_lighting: self.property_bool("oldLighting", false),
+            },
         }))
     }
 
@@ -185,7 +190,7 @@ impl ShaderPack {
 
 /// Translates `program` for `geometry`'s vertex format.
 fn translate(program: &ProgramText, geometry: Geometry) -> Result<Translated, PackError> {
-    let preludes = Preludes::new(geometry);
+    let preludes = Preludes::new(geometry, program.lighting);
     translate::translate(
         ProgramSource {
             vertex: &program.vertex,
@@ -250,13 +255,14 @@ void main() {
 }
 "
         .to_owned(),
+        lighting: TerrainLighting::default(),
     }
 }
 
 /// The geometry a `gbuffers_*` program draws in milestone 1.
 pub fn gbuffers_geometry(program: Gbuffers) -> Geometry {
     match program {
-        Gbuffers::Entities => Geometry::Entity,
+        Gbuffers::Entities | Gbuffers::EntitiesTrans | Gbuffers::SpiderEyes => Geometry::Entity,
         Gbuffers::Block => Geometry::BlockEntity,
         Gbuffers::Water => Geometry::Water,
         Gbuffers::SkyBasic | Gbuffers::SkyTextured => Geometry::Sky,
@@ -282,6 +288,8 @@ mod corpus {
             Gbuffers::Terrain,
             Gbuffers::Water,
             Gbuffers::Entities,
+            Gbuffers::EntitiesTrans,
+            Gbuffers::SpiderEyes,
             Gbuffers::Block,
         ] {
             match pack.gbuffers(dimension, program) {
@@ -408,6 +416,7 @@ uniform int renderStage;
 void main() { gl_FragData[0] = vec4(renderStage == 4 ? 1.0 : 0.0); }
 "
             .to_owned(),
+            lighting: TerrainLighting::default(),
         };
         let compiled = compile(&program, Geometry::Sky).unwrap();
         assert!(

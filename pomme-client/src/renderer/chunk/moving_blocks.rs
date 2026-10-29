@@ -121,26 +121,26 @@ impl MovingBlockBuffers {
         blocks: &[MovingBlockRender],
     ) {
         self.draws.clear();
-        let mut vertices: Vec<PackedVertex> = Vec::new();
+        let mut vertices: Vec<u8> = Vec::new();
+        let mut vertex_count = 0;
         let mut indices: Vec<u32> = Vec::new();
         let mut meta: Vec<ChunkMeta> = Vec::new();
         for block in blocks {
             let mesh = &block.mesh;
             self.draws.push(Draw {
-                vertex_offset: vertices.len() as i32,
+                vertex_offset: vertex_count as i32,
                 first_index: indices.len() as u32,
                 solid_count: mesh.solid.len() as u32,
                 cutout_count: mesh.cutout.len() as u32,
             });
-            vertices.extend_from_slice(&mesh.vertices);
+            vertices.extend_from_slice(mesh.vertices.bytes());
+            vertex_count += mesh.vertices.len();
             indices.extend_from_slice(&mesh.solid);
             indices.extend_from_slice(&mesh.cutout);
             meta.push(ChunkMeta::instance(block.origin));
         }
         let buffers = &mut self.frames[frame];
-        buffers
-            .vertices
-            .write(device, bytemuck::cast_slice(&vertices));
+        buffers.vertices.write(device, &vertices);
         buffers
             .indices
             .write(device, bytemuck::cast_slice(&indices));
