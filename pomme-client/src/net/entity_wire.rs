@@ -169,6 +169,7 @@ fn entity_event(id: i32, event: i8) -> Option<NetworkEvent> {
             id,
             offering: false,
         },
+        45 => NetworkEvent::FoxEat { id },
         56 => NetworkEvent::WolfShaking { id, shaking: false },
         63 => NetworkEvent::SnifferDigging { id },
         _ => return None,
