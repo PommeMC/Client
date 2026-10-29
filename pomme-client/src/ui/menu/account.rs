@@ -136,7 +136,13 @@ impl MainMenu {
                         code.verification_uri
                     )],
                     Some(code.user_code.clone()),
-                    vec!["Open Link", "Copy Code", "Cancel"],
+                    // TODO: Android's clipboard, through JNI; `set_clipboard`
+                    // can't copy there yet.
+                    if cfg!(target_os = "android") {
+                        vec!["Open Link", "Cancel"]
+                    } else {
+                        vec!["Open Link", "Copy Code", "Cancel"]
+                    },
                 ),
                 (None, SignIn::Failed(reason)) => (
                     vec!["Sign-in failed:".into(), reason.clone()],
@@ -150,8 +156,10 @@ impl MainMenu {
         let fs = common::FONT_SIZE * gs;
         let code_fs = fs * CODE_SCALE;
         let btn_h = common::BTN_H * gs;
-        let btn_w = ACCOUNT_BTN_W * gs;
         let gap = BTN_GAP * gs;
+        let n = buttons.len() as f32;
+        // Narrower than usual where the row wouldn't fit the window.
+        let btn_w = ((screen_w - (n + 1.0) * gap) / n).min(ACCOUNT_BTN_W * gs);
         let spacing = 8.0 * gs;
         let cx = screen_w / 2.0;
         let code_h = code.as_ref().map_or(0.0, |_| code_fs + spacing);
@@ -187,26 +195,23 @@ impl MainMenu {
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
         let mut pressed = None;
-        let n = buttons.len() as f32;
         let row_x = cx - (n * btn_w + (n - 1.0) * gap) / 2.0;
         for (i, label) in buttons.into_iter().enumerate() {
             let x = row_x + (i as f32) * (btn_w + gap);
-            if !label.is_empty()
-                && push_button_f(
-                    &mut elements,
-                    &mut ctx,
-                    &mut any_hovered,
-                    input.cursor,
-                    input.clicked,
-                    x,
-                    y,
-                    btn_w,
-                    btn_h,
-                    gs,
-                    label,
-                    true,
-                )
-            {
+            if push_button_f(
+                &mut elements,
+                &mut ctx,
+                &mut any_hovered,
+                input.cursor,
+                input.clicked,
+                x,
+                y,
+                btn_w,
+                btn_h,
+                gs,
+                label,
+                true,
+            ) {
                 pressed = Some(label);
             }
         }
