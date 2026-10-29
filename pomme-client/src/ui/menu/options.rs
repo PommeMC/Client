@@ -227,7 +227,7 @@ impl MainMenu {
     fn discrete_slider_span(&self, prefix: &str) -> Option<f32> {
         Some(match prefix {
             "Render Distance:" => self.render_distance_max() as f32 - 2.0,
-            "Chunk Detail:" => 40.0,
+            "Chunk Detail:" => super::CHUNK_DETAIL_SPAN,
             "Simulation Distance:" => 27.0,
             "Max Framerate:" => 25.0,
             "FOV:" => 80.0,
@@ -270,7 +270,11 @@ impl MainMenu {
             "Render Distance: {} chunks",
             self.render_distance.min(rd_max)
         );
-        let cd = format!("Chunk Detail: {} chunks", self.chunk_detail);
+        let cd = if self.chunk_detail >= super::CHUNK_DETAIL_OFF {
+            "Chunk Detail: Off".to_string()
+        } else {
+            format!("Chunk Detail: {} chunks", self.chunk_detail)
+        };
         let sd = format!("Simulation Distance: {} chunks", self.simulation_distance);
         let mf = if self.max_framerate >= super::MAX_FRAMERATE_UNLIMITED {
             "Max Framerate: Unlimited".to_string()
@@ -335,7 +339,9 @@ impl MainMenu {
             OptRow::Pair(&attack_label, "Chunk Fade-in: 1.0s"),
         ];
         let rd_frac = ((self.render_distance as f32 - 2.0) / (rd_max as f32 - 2.0)).clamp(0.0, 1.0);
-        let cd_frac = ((self.chunk_detail as f32 - 8.0) / 40.0).clamp(0.0, 1.0);
+        let cd_frac = (self.chunk_detail.saturating_sub(super::CHUNK_DETAIL_MIN) as f32
+            / super::CHUNK_DETAIL_SPAN)
+            .clamp(0.0, 1.0);
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
         let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
         let sliders: &[(&str, f32)] = &[
@@ -1562,7 +1568,9 @@ impl MainMenu {
             let span = self.discrete_slider_span(prefix).unwrap_or(1.0);
             match *prefix {
                 "Render Distance:" => self.render_distance = (2.0 + v * span).round() as u32,
-                "Chunk Detail:" => self.chunk_detail = (8.0 + v * span).round() as u32,
+                "Chunk Detail:" => {
+                    self.chunk_detail = super::CHUNK_DETAIL_MIN + (v * span).round() as u32
+                }
                 "Simulation Distance:" => {
                     self.simulation_distance = (5.0 + v * span).round() as u32
                 }

@@ -142,6 +142,11 @@ fn default_max_framerate() -> u32 {
 /// vanilla, which treats the slider's max as unlimited).
 pub const MAX_FRAMERATE_UNLIMITED: u32 = 260;
 
+const CHUNK_DETAIL_MIN: u32 = 8;
+/// Top of the Chunk Detail slider, where every column meshes at full detail.
+pub const CHUNK_DETAIL_OFF: u32 = 49;
+const CHUNK_DETAIL_SPAN: f32 = (CHUNK_DETAIL_OFF - CHUNK_DETAIL_MIN) as f32;
+
 fn default_fov_effect_scale() -> f32 {
     1.0
 }
@@ -199,7 +204,7 @@ fn default_japanese_glyph_variants() -> bool {
 }
 
 fn default_chunk_detail() -> u32 {
-    8
+    CHUNK_DETAIL_OFF
 }
 
 fn default_volume() -> f32 {
@@ -212,7 +217,7 @@ impl Default for Settings {
             key_bindings: KeyBindings::default(),
             gui_scale: 0,
             render_distance: 12,
-            chunk_detail: 8,
+            chunk_detail: CHUNK_DETAIL_OFF,
             simulation_distance: 12,
             fov: 70,
             fov_effect_scale: 1.0,

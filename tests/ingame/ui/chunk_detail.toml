@@ -1,0 +1,95 @@
+# The Chunk Detail slider defaults to Off at its right end and steps down to
+# 8 chunks at its left. Ends back on Off, since the options save.
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+# Options...
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+# Video Settings...
+[[step]]
+cursor = [133, 110]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor = [213, 120]
+
+[[step]]
+scroll = -10.0
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "off"
+
+[[step]]
+cursor = [60, 118]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "eight"
+
+[[step]]
+cursor = [207, 118]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+# Done, then Done again on Options.
+[[step]]
+cursor = [213, 223]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor = [213, 223]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }

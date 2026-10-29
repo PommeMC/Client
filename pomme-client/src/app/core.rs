@@ -3840,12 +3840,16 @@ fn server_view_distance_update(announced: u32, last_request: u32) -> Option<u32>
 }
 
 /// LOD level for a column: full detail within `detail` chunks (the Chunk
-/// Detail setting), half resolution to twice that, quarter beyond.
+/// Detail setting), half resolution to twice that, quarter beyond. Off keeps
+/// every column at full detail.
 pub(crate) fn chunk_lod(
     pos: crate::position::ChunkPos,
     player: crate::position::ChunkPos,
     detail: u32,
 ) -> u32 {
+    if detail >= crate::ui::menu::CHUNK_DETAIL_OFF {
+        return 0;
+    }
     let dx = (pos.x - player.x).unsigned_abs();
     let dz = (pos.z - player.z).unsigned_abs();
     let dist = dx.max(dz);
@@ -4345,5 +4349,17 @@ mod tests {
         assert_eq!(player.absorption, 8.0);
         sync_player_attribute_mirrors(&mut player, |kind| kind == AttributeKind::MaxAbsorption);
         assert_eq!(player.absorption, 4.0);
+    }
+
+    #[test]
+    fn chunk_detail_off_keeps_every_column_at_full_detail() {
+        use crate::position::ChunkPos;
+        let player = ChunkPos::new(0, 0);
+        let far = ChunkPos::new(100, -100);
+        assert_eq!(super::chunk_lod(far, player, 8), 2);
+        assert_eq!(
+            super::chunk_lod(far, player, crate::ui::menu::CHUNK_DETAIL_OFF),
+            0
+        );
     }
 }

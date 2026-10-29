@@ -94,7 +94,7 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
             Ok(Value::Null)
         }
         Command::Scroll { y } => {
-            if game.gui_open() {
+            if game.gui_open() || game.options_from_game {
                 core.input.on_menu_scroll_xy(0.0, *y);
                 Ok(Value::Null)
             } else {
