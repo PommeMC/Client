@@ -4120,6 +4120,8 @@ pub fn update_game(
                     allay: extras.allay,
                     copper_golem: extras.copper_golem,
                     llama_decor: extras.llama_decor,
+                    dolphin_moving: extras.dolphin_moving,
+                    turtle: extras.turtle,
                     golem_attack_ticks: extras.golem_attack_ticks,
                     golem_offer_flower_ticks: extras.golem_offer_flower_ticks,
                     body_transform: extras.body_transform,
@@ -5004,6 +5006,8 @@ struct EntityExtras {
     allay: crate::renderer::entity_model::AllayAnims,
     copper_golem: crate::renderer::entity_model::CopperGolemAnims,
     llama_decor: Option<crate::renderer::pipelines::entity_renderer::LlamaDecor>,
+    dolphin_moving: bool,
+    turtle: crate::renderer::entity_model::TurtleAnims,
     golem_attack_ticks: f32,
     golem_offer_flower_ticks: u32,
 }
@@ -5143,6 +5147,20 @@ fn entity_extras(
         | EntityKind::TropicalFish
         | EntityKind::Pufferfish => fish_extras(e, alpha),
         EntityKind::IronGolem => golem_extras(e, alpha),
+        // `DolphinRenderer.extractRenderState`.
+        EntityKind::Dolphin => EntityExtras {
+            dolphin_moving: e.velocity.x * e.velocity.x + e.velocity.z * e.velocity.z > 1.0e-7,
+            ..Default::default()
+        },
+        // `TurtleRenderer.extractRenderState`.
+        EntityKind::Turtle => EntityExtras {
+            turtle: crate::renderer::entity_model::TurtleAnims {
+                on_land: !e.is_in_water && e.on_ground,
+                laying_egg: e.laying_egg,
+                has_egg: !e.is_baby && e.has_egg,
+            },
+            ..Default::default()
+        },
         EntityKind::Sniffer => EntityExtras {
             sniffer: sniffer_anims(e, alpha),
             ..Default::default()

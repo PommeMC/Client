@@ -194,6 +194,8 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::WanderingTrader
             | EntityKind::SulfurCube
             | EntityKind::Mooshroom
+            | EntityKind::Dolphin
+            | EntityKind::Turtle
     ) || is_equine(&kind)
         || is_llama(kind)
 }
@@ -218,8 +220,20 @@ fn is_baby_kind(kind: EntityKind) -> bool {
 /// every subclass index up by one; older wire versions are lifted to the
 /// 26.x numbering so `apply_entity_data` matches one index per field.
 fn normalize_ageable_index(kind: EntityKind, index: u8) -> u8 {
-    if is_ageable_mob(kind) && index >= 17 && crate::version::session_protocol() < 775 {
+    normalize_ageable_index_at(kind, index, crate::version::session_protocol())
+}
+
+fn normalize_ageable_index_at(kind: EntityKind, index: u8, protocol: i32) -> u8 {
+    let index = if is_ageable_mob(kind) && index >= 17 && protocol < 775 {
         index + 1
+    } else {
+        index
+    };
+    // Before 1.21.5 (770) `Turtle.HOME_POS` was synched ahead of the egg
+    // flags (and the travel state after them); it shares 18 with `HAS_EGG`
+    // but never matches as a bool.
+    if kind == EntityKind::Turtle && index >= 19 && protocol < 770 {
+        index - 1
     } else {
         index
     }
@@ -391,6 +405,9 @@ pub struct LivingEntity {
     pub copper_golem: CopperGolemAnim,
     /// Sulfur cube fuse ticks left, -1 while unprimed (`SulfurCube.fuse`).
     pub sulfur_fuse: i32,
+    /// `Turtle.HAS_EGG` / `LAYING_EGG`.
+    pub has_egg: bool,
+    pub laying_egg: bool,
     pub puff_state: u8,
     /// Glow squid post-hurt dim timer, synced then decremented client-side.
     pub dark_ticks: i32,
@@ -438,6 +455,19 @@ pub struct LivingEntity {
     interp_head_y_rot_steps: i32,
 }
 
+/// A baby's (width, height) from the adult's: vanilla `BABY_DIMENSIONS`,
+/// explicit or scaled, else the generic half scale.
+pub(crate) fn baby_dimensions(kind: EntityKind, width: f32, height: f32) -> (f32, f32) {
+    let scale = match kind {
+        EntityKind::Squid | EntityKind::GlowSquid => return (0.5, 0.5),
+        // Their `getAgeScale`.
+        EntityKind::Dolphin => 0.65,
+        EntityKind::Turtle => 0.3,
+        _ => 0.5,
+    };
+    (width * scale, height * scale)
+}
+
 pub(crate) fn living_entity_dimensions(entity: &LivingEntity) -> EntityDimensions {
     let mut dims = EntityDimensions::of(entity.entity_type);
     // `Sniffer.DIGGING_DIMENSIONS`, then the same age scale.
@@ -445,18 +475,7 @@ pub(crate) fn living_entity_dimensions(entity: &LivingEntity) -> EntityDimension
         dims.height -= 0.4;
     }
     if entity.is_baby {
-        // `Squid.BABY_DIMENSIONS` is an explicit 0.5x0.5, not the generic
-        // half scale.
-        if matches!(
-            entity.entity_type,
-            EntityKind::Squid | EntityKind::GlowSquid
-        ) {
-            dims.width = 0.5;
-            dims.height = 0.5;
-        } else {
-            dims.width *= 0.5;
-            dims.height *= 0.5;
-        }
+        (dims.width, dims.height) = baby_dimensions(entity.entity_type, dims.width, dims.height);
     }
     dims
 }
@@ -613,6 +632,8 @@ impl LivingEntity {
             allay: AllayAnim::default(),
             copper_golem: CopperGolemAnim::default(),
             sulfur_fuse: -1,
+            has_egg: false,
+            laying_egg: false,
             puff_state: 0,
             dark_ticks: 0,
             golem_attack_ticks: 0,
@@ -1565,6 +1586,8 @@ impl EntityStore {
                     entity.bat_anim_start = Some(entity.age_in_ticks + 1);
                 }
             }
+            (EntityKind::Turtle, 18, Bool(b)) => entity.has_egg = b,
+            (EntityKind::Turtle, 19, Bool(b)) => entity.laying_egg = b,
             // Salmon size ids clamp to SMALL..LARGE; a pufferfish puff state
             // outside 0/1 renders big (vanilla `switch` default).
             // `Sniffer.onSyncedDataUpdated`: every update stops all five
@@ -1920,6 +1943,8 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::WanderingTrader
                 | EntityKind::SulfurCube
                 | EntityKind::Mooshroom
+                | EntityKind::Dolphin
+                | EntityKind::Turtle
         )
 }
 
@@ -1934,6 +1959,7 @@ fn probes_water(kind: &EntityKind) -> bool {
             | EntityKind::Salmon
             | EntityKind::TropicalFish
             | EntityKind::Pufferfish
+            | EntityKind::Turtle
     )
 }
 
@@ -1970,6 +1996,35 @@ mod tests {
         let mut store = EntityStore::new();
         spawn(&mut store, 1, EntityKind::Cat, Position::default());
         assert_eq!(store.living[&1].variant, CAT_DEFAULT_VARIANT);
+    }
+
+    /// `Turtle.HAS_EGG`/`LAYING_EGG` land at 18/19 on every wire: 26.1 added
+    /// the age-locked flag ahead of them, 1.21.5 dropped `HOME_POS`.
+    #[test]
+    fn turtle_egg_flags_normalize_across_versions() {
+        let turtle = EntityKind::Turtle;
+        for (protocol, has_egg, laying_egg) in [(776, 18, 19), (770, 17, 18), (769, 18, 19)] {
+            assert_eq!(normalize_ageable_index_at(turtle, has_egg, protocol), 18);
+            assert_eq!(normalize_ageable_index_at(turtle, laying_egg, protocol), 19);
+        }
+        // Pre-1.21.5 `HOME_POS` (17) shares 18 but is a block pos.
+        assert_eq!(normalize_ageable_index_at(turtle, 17, 769), 18);
+
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, turtle, Position::default());
+        store.apply_entity_data(1, 16, MetaValue::Bool(true));
+        store.apply_entity_data(1, 18, MetaValue::Bool(true));
+        store.apply_entity_data(1, 19, MetaValue::Bool(true));
+        let e = &store.living[&1];
+        assert!(e.is_baby && e.has_egg && e.laying_egg);
+        // `Turtle.BABY_DIMENSIONS` scales by 0.3, the dolphin's by 0.65.
+        let dims = living_entity_dimensions(e);
+        assert!((dims.width - 1.2 * 0.3).abs() < 1e-6);
+
+        spawn(&mut store, 2, EntityKind::Dolphin, Position::default());
+        store.apply_entity_data(2, 16, MetaValue::Bool(true));
+        let dims = living_entity_dimensions(&store.living[&2]);
+        assert!((dims.height - 0.6 * 0.65).abs() < 1e-6);
     }
 
     /// `LivingEntity.aiStep` zeroes velocity components under 0.003 (a
