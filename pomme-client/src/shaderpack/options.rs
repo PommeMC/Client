@@ -45,11 +45,11 @@ pub fn discover(source: &PackSource) -> BTreeMap<String, OptionValue> {
         .collect()
 }
 
-/// The names `text` tests with `#ifdef` or `#ifndef`; `#if defined(...)`
-/// doesn't count, as in OptiFine.
+/// The names `text` tests with `#ifdef` or `#ifndef` and nothing after;
+/// `#if defined(...)` doesn't count, as in OptiFine.
 fn tested(text: &str) -> BTreeSet<String> {
     static IFDEF: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?m)^\s*#\s*ifn?def\s+(\w+)").expect("static regex"));
+        LazyLock::new(|| Regex::new(r"(?m)^\s*#\s*ifn?def\s+(\w+)\s*$").expect("static regex"));
     IFDEF
         .captures_iter(text)
         .map(|caps| caps[1].to_owned())
@@ -109,13 +109,14 @@ mod tests {
                 "lib/settings.glsl".to_owned(),
                 b"#define BLOOM // bloom\n//#define FOG\n#define QUALITY 2 // [1 2 3]\n\
                   #define STRENGTH 1.5 // how strong\n#define PI 3.14159\n#define NAME_ONLY\n\
-                  #define UNTESTED // never tested\n"
+                  #define UNTESTED // never tested\n#define TRAILING\n"
                     .to_vec(),
             ),
             (
                 "composite.fsh".to_owned(),
                 b"#include \"/lib/settings.glsl\"\n#ifdef BLOOM\n#endif\n#ifndef FOG\n#endif\n\
-                  #if defined(UNTESTED)\n#endif\n#ifdef NAME_ONLY\n#endif\n"
+                  #if defined(UNTESTED)\n#endif\n#ifdef NAME_ONLY\n#endif\n\
+                  #ifdef TRAILING // what it does\n#endif\n"
                     .to_vec(),
             ),
             (
@@ -134,6 +135,7 @@ mod tests {
         assert_eq!(options["NAME_ONLY"], OptionValue::Toggle(false));
         assert!(!options.contains_key("STRENGTH"));
         assert!(!options.contains_key("UNTESTED"));
+        assert!(!options.contains_key("TRAILING"));
         assert!(!options.contains_key("PI"));
         assert!(!options.contains_key("NOT_GLSL"));
 
