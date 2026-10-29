@@ -36,7 +36,9 @@ struct Settings {
     key_bindings: KeyBindings,
     gui_scale: u32,
     render_distance: u32,
-    #[serde(default = "default_chunk_detail")]
+    // Renamed when the default became Off, so saves holding the old default
+    // of 8 move to Off too.
+    #[serde(rename = "chunk_detail_v2", default = "default_chunk_detail")]
     chunk_detail: u32,
     simulation_distance: u32,
     #[serde(default = "default_fov")]
@@ -1667,6 +1669,16 @@ mod tests {
         assert_eq!(settled(&mut menu), Some(vec!["face".to_owned()]));
         menu.set_screen(Screen::Main, &key_bindings);
         assert_eq!(settled(&mut menu), both);
+    }
+
+    #[test]
+    fn saves_from_before_chunk_detail_off_load_as_off() {
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        fields.remove("chunk_detail_v2");
+        fields.insert("chunk_detail".into(), 8.into());
+        let settings: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(settings.chunk_detail, CHUNK_DETAIL_OFF);
     }
 
     #[test]
