@@ -465,6 +465,13 @@ impl ParticleStore {
         Some((region, color))
     }
 
+    /// `texture`'s atlas region, if the atlas has it.
+    fn item_region(&self, texture: &str) -> Option<AtlasRegion> {
+        self.uv_map
+            .has_region(texture)
+            .then(|| self.uv_map.get_region(texture))
+    }
+
     /// Vanilla `LivingEntity.spawnItemParticles`: item crumbs thrown from the
     /// mouth along the look direction while eating.
     pub fn add_item_use_particles(
@@ -475,19 +482,12 @@ impl ParticleStore {
         x_rot_deg: f32,
         y_rot_deg: f32,
     ) {
-        if !self.uv_map.has_region(texture) {
+        let Some(region) = self.item_region(texture) else {
             return;
-        }
-        let region = self.uv_map.get_region(texture);
+        };
         let x_rot = -(x_rot_deg as f64).to_radians();
         let y_rot = -(y_rot_deg as f64).to_radians();
         for _ in 0..count {
-            let d = dvec3(
-                (fastrand::f64() - 0.5) * 0.1,
-                fastrand::f64() * 0.1 + 0.1,
-                0.0,
-            );
-            let d = rot_y(rot_x(d, x_rot), y_rot);
             let p = dvec3(
                 (fastrand::f64() - 0.5) * 0.3,
                 -fastrand::f64() * 0.6 - 0.3,
@@ -496,7 +496,79 @@ impl ParticleStore {
             let p = rot_y(rot_x(p, x_rot), y_rot) + eye_pos;
             self.push(Particle::breaking_item(
                 p,
-                dvec3(d.x, d.y + 0.05, d.z),
+                crumb_velocity(x_rot, y_rot),
+                region,
+            ));
+        }
+    }
+
+    /// Vanilla `Fox.handleEntityEvent(45)`: eight crumbs of the food in its
+    /// mouth, half its look vector ahead of its feet.
+    pub fn add_fox_eating_particles(
+        &mut self,
+        texture: &str,
+        pos: DVec3,
+        look: crate::entity::components::LookDirection,
+        camera_pos: DVec3,
+    ) {
+        let Some(region) = self.item_region(texture) else {
+            return;
+        };
+        let x_rot = -f64::from(look.x_rot_rad());
+        let y_rot = -f64::from(look.y_rot_rad());
+        let ahead = look.as_vec().as_dvec3() / 2.0;
+        let p = dvec3(pos.x + ahead.x, pos.y, pos.z + ahead.z);
+        if beyond_particle_range(camera_pos, p) {
+            return;
+        }
+        for _ in 0..8 {
+            self.push(Particle::breaking_item(
+                p,
+                crumb_velocity(x_rot, y_rot),
+                region,
+            ));
+        }
+    }
+
+    /// Vanilla `Panda.addEatingParticles`: six crumbs of the held item in
+    /// front of the head. `ClientLevel.addParticle` culls each past 32 blocks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_panda_eating_particles(
+        &mut self,
+        texture: &str,
+        pos: DVec3,
+        eye_y: f64,
+        x_rot_deg: f32,
+        y_rot_deg: f32,
+        body_y_rot_deg: f32,
+        camera_pos: DVec3,
+    ) {
+        let Some(region) = self.item_region(texture) else {
+            return;
+        };
+        let rand = || f64::from(fastrand::f32());
+        let x_rot = f64::from(-x_rot_deg.to_radians());
+        let y_rot = f64::from(-y_rot_deg.to_radians());
+        let body_rot = f64::from(-body_y_rot_deg.to_radians());
+        for _ in 0..6 {
+            let v = dvec3(
+                (rand() - 0.5) * 0.1,
+                rand() * 0.1 + 0.1,
+                (rand() - 0.5) * 0.1,
+            );
+            let v = rot_y(rot_x(v, x_rot), y_rot);
+            let p = dvec3(
+                (rand() - 0.5) * 0.8,
+                -rand() * 0.6 - 0.3,
+                1.0 + (rand() - 0.5) * 0.4,
+            );
+            let p = rot_y(p, body_rot) + dvec3(pos.x, eye_y + 1.0, pos.z);
+            if beyond_particle_range(camera_pos, p) {
+                continue;
+            }
+            self.push(Particle::breaking_item(
+                p,
+                dvec3(v.x, v.y + 0.05, v.z),
                 region,
             ));
         }
@@ -661,6 +733,17 @@ pub(crate) fn next_gaussian() -> f64 {
             return v1 * (-2.0 * s.ln() / s).sqrt();
         }
     }
+}
+
+/// The velocity vanilla throws item crumbs with: a small random push up and
+/// sideways, turned by the eater's `x_rot` and `y_rot` (radians, negated).
+fn crumb_velocity(x_rot: f64, y_rot: f64) -> DVec3 {
+    let d = dvec3(
+        (fastrand::f64() - 0.5) * 0.1,
+        fastrand::f64() * 0.1 + 0.1,
+        0.0,
+    );
+    rot_y(rot_x(d, x_rot), y_rot) + dvec3(0.0, 0.05, 0.0)
 }
 
 /// Vanilla `Vec3.xRot`: rotation about the X axis.

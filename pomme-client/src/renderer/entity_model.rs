@@ -6,13 +6,17 @@ use crate::renderer::rhi;
 mod bee;
 mod copper_golem_anim;
 mod dolphin;
+mod fox;
 mod llama;
+mod panda;
 mod parrot;
 mod sniffer_anim;
 mod turtle;
 pub use bee::*;
 pub use dolphin::*;
+pub use fox::*;
 pub use llama::*;
+pub use panda::*;
 pub use parrot::*;
 pub use turtle::*;
 
@@ -4117,6 +4121,12 @@ fn vanilla_rot(x: f32, y: f32, z: f32) -> Vec3 {
     Vec3::new(x, y, z)
 }
 
+/// The walk swing vanilla models share, `cos(pos * 0.6662 + phase) * 1.4 *
+/// speed`.
+fn walk_swing(walk_pos: f32, walk_speed: f32, phase: f32) -> f32 {
+    (walk_pos * 0.6662 + phase).cos() * 1.4 * walk_speed
+}
+
 /// Vanilla head look, `Ry(yaw)·Rx(pitch)`.
 fn head_rotation(head_x_rot_deg: f32, local_head_y_rot_deg: f32) -> Vec3 {
     vanilla_rot(
@@ -4659,9 +4669,9 @@ pub fn compute_wolf_anim(
     let tail_wag = if inputs.is_angry {
         0.0
     } else {
-        (walk_pos * 0.6662).cos() * 1.4 * walk_speed
+        walk_swing(walk_pos, walk_speed, 0.0)
     };
-    let walk = |phase: f32| (walk_pos * 0.6662 + phase).cos() * 1.4 * walk_speed;
+    let walk = |phase| walk_swing(walk_pos, walk_speed, phase);
 
     for (i, part) in model.parts.iter().enumerate() {
         let name = part.name.as_str();
@@ -5046,6 +5056,68 @@ impl KfDeltas {
             }
             if self.scale[i] != Vec3::ZERO {
                 anim.scale.push((i, Vec3::ONE + self.scale[i]));
+            }
+        }
+        anim
+    }
+}
+
+/// A vanilla `ModelPart` pose set, mutated in `setupAnim` order (absolute
+/// assignments and `+=` alike, after `resetPose`), then emitted against the
+/// rest pose. Hidden parts emit a zero scale, which also hides their
+/// children like vanilla's `visible = false`.
+struct ModelPose {
+    pos: Vec<Vec3>,
+    rot: Vec<Vec3>,
+    scale: Vec<Vec3>,
+    visible: Vec<bool>,
+}
+
+impl ModelPose {
+    /// Vanilla `resetPose`.
+    fn new(model: &BakedEntityModel) -> Self {
+        let n = model.parts.len();
+        Self {
+            pos: model.parts.iter().map(|p| p.offset).collect(),
+            rot: model.parts.iter().map(|p| p.default_rotation).collect(),
+            scale: vec![Vec3::ONE; n],
+            visible: vec![true; n],
+        }
+    }
+
+    /// Adds keyframe offsets (`offsetRotation`/`offsetPos`/`offsetScale`).
+    fn add_kf(&mut self, d: &KfDeltas) {
+        for i in 0..self.pos.len() {
+            self.rot[i] += d.rot[i];
+            self.pos[i] += d.pos[i];
+            self.scale[i] += d.scale[i];
+        }
+    }
+
+    /// The `QuadrupedModel.setupAnim` leg pattern over (right hind, left
+    /// hind, right front, left front): diagonal pairs in phase.
+    fn swing_legs(&mut self, [rh, lh, rf, lf]: [usize; 4], swing: impl Fn(f32) -> f32) {
+        use std::f32::consts::PI;
+        self.rot[rh].x = swing(0.0);
+        self.rot[lh].x = swing(PI);
+        self.rot[rf].x = swing(PI);
+        self.rot[lf].x = swing(0.0);
+    }
+
+    fn emit(&self, model: &BakedEntityModel) -> PartAnim {
+        let mut anim = PartAnim::default();
+        for (i, part) in model.parts.iter().enumerate() {
+            if self.rot[i] != part.default_rotation {
+                anim.rotation.push((i, self.rot[i]));
+            }
+            let t = self.pos[i] - part.offset;
+            if t != Vec3::ZERO {
+                anim.translation.push((i, t));
+            }
+            if !self.visible[i] {
+                anim.scale.push((i, Vec3::ZERO));
+            } else if self.scale[i] != Vec3::ONE {
+                anim.scale.push((i, self.scale[i]));
             }
         }
         anim

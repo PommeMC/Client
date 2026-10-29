@@ -1,0 +1,100 @@
+# Pandas, three-quarter view from above: back row the seven adult genes in id
+# order (normal, lazy, worried, playful, brown, weak, aggressive; recessive
+# brown/weak need a matching hidden gene, a lone one shows normal), front row
+# their babies on the separate 64x64 baby mesh, plus a brown main gene with a
+# normal hidden gene that renders normal.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+deterministic = true
+
+# A pillar to look down from.
+[[step]]
+chat = "/fill 0 -60 0 0 -56 0 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 0.5 -55 0.5 0 40"
+
+[[step]]
+expect = { player = { position = [0.5, -55.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:panda -7 -60 10 {NoAI:1b,MainGene:\"normal\",HiddenGene:\"normal\",Rotation:[160f,0f]}"
+
+[[step]]
+expect = { entity = "panda", baby = false }
+
+[[step]]
+chat = "/summon minecraft:panda -4.5 -60 10 {NoAI:1b,MainGene:\"lazy\",HiddenGene:\"normal\",Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:panda -2 -60 10 {NoAI:1b,MainGene:\"worried\",HiddenGene:\"normal\",Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:panda 0.5 -60 10 {NoAI:1b,MainGene:\"playful\",HiddenGene:\"normal\",Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:panda 3 -60 10 {NoAI:1b,MainGene:\"brown\",HiddenGene:\"brown\",Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:panda 5.5 -60 10 {NoAI:1b,MainGene:\"weak\",HiddenGene:\"weak\",Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:panda 8 -60 10 {NoAI:1b,MainGene:\"aggressive\",HiddenGene:\"normal\",Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:panda -6 -60 6 {NoAI:1b,Age:-24000,MainGene:\"normal\",HiddenGene:\"normal\",Rotation:[160f,0f]}"
+
+[[step]]
+expect = { entity = "panda", baby = true }
+
+[[step]]
+chat = "/summon minecraft:panda -4 -60 6 {NoAI:1b,Age:-24000,MainGene:\"lazy\",HiddenGene:\"normal\",Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:panda -2 -60 6 {NoAI:1b,Age:-24000,MainGene:\"worried\",HiddenGene:\"normal\",Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:panda 0 -60 6 {NoAI:1b,Age:-24000,MainGene:\"playful\",HiddenGene:\"normal\",Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:panda 2 -60 6 {NoAI:1b,Age:-24000,MainGene:\"brown\",HiddenGene:\"brown\",Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:panda 4 -60 6 {NoAI:1b,Age:-24000,MainGene:\"weak\",HiddenGene:\"weak\",Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:panda 6 -60 6 {NoAI:1b,Age:-24000,MainGene:\"aggressive\",HiddenGene:\"normal\",Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:panda 8 -60 6 {NoAI:1b,Age:-24000,MainGene:\"brown\",HiddenGene:\"normal\",Rotation:[160f,0f]}"
+
+[[step]]
+look_at = [0.5, -59.5, 8.0]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "pandas"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/fill 0 -60 0 0 -56 0 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"

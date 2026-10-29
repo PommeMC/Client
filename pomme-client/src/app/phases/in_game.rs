@@ -4142,6 +4142,8 @@ pub fn update_game(
                     copper_golem: extras.copper_golem,
                     llama_decor: extras.llama_decor,
                     bee: extras.bee,
+                    fox: extras.fox,
+                    panda: extras.panda,
                     parrot: extras.parrot,
                     dolphin_moving: extras.dolphin_moving,
                     turtle: extras.turtle,
@@ -5045,6 +5047,8 @@ struct EntityExtras {
     copper_golem: crate::renderer::entity_model::CopperGolemAnims,
     llama_decor: Option<crate::renderer::pipelines::entity_renderer::LlamaDecor>,
     bee: crate::renderer::entity_model::BeeAnims,
+    fox: crate::renderer::entity_model::FoxAnims,
+    panda: crate::renderer::entity_model::PandaAnims,
     parrot: crate::renderer::entity_model::ParrotAnims,
     dolphin_moving: bool,
     turtle: crate::renderer::entity_model::TurtleAnims,
@@ -5202,6 +5206,8 @@ fn entity_extras(
             ..Default::default()
         },
         EntityKind::Bee => bee_extras(e, alpha, game_time),
+        EntityKind::Fox => fox_extras(e, alpha),
+        EntityKind::Panda => panda_extras(e, alpha),
         EntityKind::Parrot => parrot_extras(e, alpha),
         EntityKind::Sniffer => EntityExtras {
             sniffer: sniffer_anims(e, alpha),
@@ -5256,6 +5262,73 @@ fn llama_extras(e: &crate::entity::LivingEntity) -> EntityExtras {
             equipment,
             has_chest,
         }),
+        ..Default::default()
+    }
+}
+
+/// Vanilla `FoxRenderer.extractRenderState` and `setupRotations` (the
+/// pounce / faceplant pitch). `variant_index = variant * 2 + sleeping`.
+// TODO: `FoxHeldItemLayer` (the item in the fox's mouth).
+fn fox_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    let f = &e.fox;
+    let fox = crate::renderer::entity_model::FoxAnims {
+        head_roll_angle: e.interested_angle(alpha) * 0.11 * std::f32::consts::PI,
+        crouch_amount: lerp(alpha, f.crouch_amount_o, f.crouch_amount),
+        is_crouching: f.is_crouching(),
+        is_sleeping: f.is_sleeping(),
+        is_sitting: e.is_sitting,
+        is_faceplanted: f.is_faceplanted(),
+        is_pouncing: f.is_pouncing(),
+        leg_motion_pos: if f.is_faceplanted() {
+            crate::renderer::entity_model::advance_fox_leg_motion_pos(e.is_baby)
+        } else {
+            0.0
+        },
+    };
+    let x_rot = e.view_look(alpha).x_rot_deg();
+    EntityExtras {
+        variant_index: e.variant * 2 + u32::from(fox.is_sleeping),
+        body_transform: (fox.is_pouncing || fox.is_faceplanted)
+            .then(|| glam::Mat4::from_rotation_x((-x_rot).to_radians())),
+        fox,
+        ..Default::default()
+    }
+}
+
+/// Vanilla `PandaRenderer.extractRenderState` and `setupRotations`;
+/// `variant_index` is the shown gene.
+// TODO: `PandaHoldsItemLayer` (the held bamboo/cake while sitting).
+fn panda_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    let p = &e.panda;
+    let panda = crate::renderer::entity_model::PandaAnims {
+        is_unhappy: e.unhappy_counter > 0,
+        is_sneezing: p.is_sneezing(),
+        sneeze_time: p.sneeze_counter,
+        is_eating: p.is_eating(),
+        is_scared: p.is_scared,
+        sit_amount: lerp(alpha, p.sit_amount_o, p.sit_amount),
+        lie_on_back_amount: lerp(alpha, p.on_back_amount_o, p.on_back_amount),
+        roll_amount: if e.is_baby {
+            0.0
+        } else {
+            lerp(alpha, p.roll_amount_o, p.roll_amount)
+        },
+        roll_time: if p.roll_counter > 0 {
+            p.roll_counter as f32 + alpha
+        } else {
+            0.0
+        },
+    };
+    let x_rot = e.view_look(alpha).x_rot_deg();
+    EntityExtras {
+        variant_index: p.variant(),
+        body_transform: crate::renderer::entity_model::panda_body_transform(
+            &panda,
+            e.is_baby,
+            x_rot,
+            e.age_in_ticks as f32 + alpha,
+        ),
+        panda,
         ..Default::default()
     }
 }
@@ -5557,10 +5630,7 @@ fn wolf_extras(e: &crate::entity::LivingEntity, alpha: f32, game_time: i64) -> E
         overlay_tints,
         is_angry,
         tail_angle,
-        head_roll_angle: (e.prev_interested_angle
-            + (e.interested_angle - e.prev_interested_angle) * alpha)
-            * 0.15
-            * PI,
+        head_roll_angle: e.interested_angle(alpha) * 0.15 * PI,
         shake_anim: e.prev_shake_anim + (e.shake_anim - e.prev_shake_anim) * alpha,
         base_tint: Some([wet, wet, wet, 1.0]),
         ..Default::default()

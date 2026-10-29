@@ -1,0 +1,77 @@
+# Foxes, three-quarter view from above: red and snow adults, then sleeping
+# (legs hidden, sleep texture), sitting and crouching. Front row: babies on
+# their own 32x32 mesh, standing, sleeping (snow) and sitting.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+deterministic = true
+
+# A pillar to look down from.
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 0.5 -57 0.5 0 40"
+
+[[step]]
+expect = { player = { position = [0.5, -57.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:fox -2.5 -60 6.5 {NoAI:1b,Rotation:[160f,0f]}"
+
+[[step]]
+expect = { entity = "fox", baby = false }
+
+[[step]]
+chat = "/summon minecraft:fox -1 -60 6.5 {NoAI:1b,Type:\"snow\",Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:fox 0.5 -60 6.5 {NoAI:1b,Sleeping:1b,Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:fox 2 -60 6.5 {NoAI:1b,Type:\"snow\",Sitting:1b,Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:fox 3.5 -60 6.5 {NoAI:1b,Crouching:1b,Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:fox -1.5 -60 4.5 {NoAI:1b,Age:-24000,Rotation:[160f,0f]}"
+
+[[step]]
+expect = { entity = "fox", baby = true }
+
+[[step]]
+chat = "/summon minecraft:fox 0.5 -60 4.5 {NoAI:1b,Age:-24000,Type:\"snow\",Sleeping:1b,Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:fox 2.5 -60 4.5 {NoAI:1b,Age:-24000,Sitting:1b,Rotation:[160f,0f]}"
+
+[[step]]
+look_at = [0.5, -59.5, 5.5]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "foxes"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"
