@@ -2178,8 +2178,6 @@ fn sleeping_head_pitch_deg(is_sleeping: bool, head_x_rot_deg: f32) -> f32 {
     if is_sleeping { 0.0 } else { head_x_rot_deg }
 }
 
-/// Vanilla `GameRenderer.renderItemInHand`: not while asleep, with the HUD
-/// hidden (F1), or in spectator.
 /// What a shader pack reads about the player's surroundings (Iris's
 /// `BiomeUniforms` and `blindness`).
 fn pack_world(game: &mut GameState) -> PackWorld {
@@ -2219,6 +2217,8 @@ fn pack_world(game: &mut GameState) -> PackWorld {
     }
 }
 
+/// Vanilla `GameRenderer.renderItemInHand`: not while asleep, with the HUD
+/// hidden (F1), or in spectator.
 pub(crate) fn renders_first_person_hand(game: &GameState) -> bool {
     hand_visible(
         game.player.is_sleeping(),
