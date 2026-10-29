@@ -1061,6 +1061,33 @@ impl ChunkBufferStore {
         self.fade_enabled = false;
     }
 
+    /// Where the pools' ranges overlap, if they do: live sections, slices
+    /// awaiting reclaim and free ranges must never share a vertex or index.
+    #[cfg(feature = "test-harness")]
+    pub fn slice_overlap(&self) -> Option<String> {
+        let mut vertex = self.vtx_free.free.clone();
+        let mut index = self.idx_free.free.clone();
+        let live = self
+            .chunks
+            .values()
+            .flat_map(|c| &c.sections)
+            .map(|s| (s.vertex_offset as u32, s.vtx_len, s.first_index, s.idx_len));
+        let retired = self.pending_free.iter().map(|&(_, slice)| slice);
+        for (vtx_off, vtx_len, idx_off, idx_len) in live.chain(retired) {
+            vertex.push((vtx_off, vtx_len));
+            index.push((idx_off, idx_len));
+        }
+        [("vertex", vertex), ("index", index)]
+            .into_iter()
+            .find_map(|(pool, mut ranges)| {
+                ranges.sort_unstable();
+                ranges
+                    .windows(2)
+                    .find(|w| w[0].0 + w[0].1 > w[1].0)
+                    .map(|w| format!("{pool} ranges {:?} and {:?} overlap", w[0], w[1]))
+            })
+    }
+
     pub fn chunk_count(&self) -> u32 {
         self.chunks.len() as u32
     }

@@ -53,6 +53,9 @@ option = { shader_pack = "pomme_test" }
 wait_ms = 3000
 
 [[step]]
+expect = { terrain = "settled" }
+
+[[step]]
 screenshot = "pack"
 
 # The shadows fall south, away from the noon sun tilted north.
@@ -115,6 +118,9 @@ chat = "/tp @s 60.5 -60 50.5 90 -10"
 wait_ms = 1000
 
 [[step]]
+expect = { terrain = "settled" }
+
+[[step]]
 screenshot = "pack_dusk"
 
 [[step]]
@@ -135,6 +141,9 @@ option = { shader_pack = "pomme_nofinal" }
 wait_ms = 3000
 
 [[step]]
+expect = { terrain = "settled" }
+
+[[step]]
 screenshot = "no_final"
 
 [[step]]
@@ -142,6 +151,9 @@ option = { shader_pack = "" }
 
 [[step]]
 wait_ms = 1500
+
+[[step]]
+expect = { terrain = "settled" }
 
 [[step]]
 screenshot = "off"
@@ -184,6 +196,9 @@ chat = "/tp @s 60.5 -60 50.5 90 -10"
 
 [[step]]
 wait_ms = 1000
+
+[[step]]
+expect = { terrain = "settled" }
 
 [[step]]
 screenshot = "off_dusk"

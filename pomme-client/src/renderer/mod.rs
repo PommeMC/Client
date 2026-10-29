@@ -1293,6 +1293,12 @@ impl Renderer {
         self.chunk_buffers.chunk_count()
     }
 
+    /// See [`ChunkBufferStore::slice_overlap`].
+    #[cfg(feature = "test-harness")]
+    pub fn chunk_slice_overlap(&self) -> Option<String> {
+        self.chunk_buffers.slice_overlap()
+    }
+
     /// Sections actually drawn after frustum culling (lags a few frames). The
     /// graph's occluded sections are omitted before the cull, so this also
     /// drops when occlusion hides geometry — useful for the F3 overlay.

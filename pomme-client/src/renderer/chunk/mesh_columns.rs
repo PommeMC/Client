@@ -64,6 +64,15 @@ impl MeshColumns {
         Some(self.meta.get(pos)).filter(|meta| meta.holds(pos))
     }
 
+    /// The first of `loaded` not meshed yet, or with sections waiting to
+    /// mesh again.
+    #[cfg(feature = "test-harness")]
+    pub fn first_unmeshed(&self, loaded: impl IntoIterator<Item = ChunkPos>) -> Option<ChunkPos> {
+        loaded
+            .into_iter()
+            .find(|&pos| self.get(pos).is_none_or(|meta| meta.dirty_sections != 0))
+    }
+
     /// Which load of `pos` the columns are tracking, if any.
     pub fn incarnation(&self, pos: ChunkPos) -> Option<u64> {
         self.get(pos).map(|meta| meta.incarnation)
