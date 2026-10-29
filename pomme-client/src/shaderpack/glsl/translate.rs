@@ -293,8 +293,10 @@ pub fn translate(
         vertex_globals.varyings.push(varying.clone());
         fragment_globals.varyings.push(varying);
     }
-    hoist_global_initializers(&mut vertex);
-    hoist_global_initializers(&mut fragment);
+    for tu in [&mut vertex, &mut fragment] {
+        hoist_global_initializers(tu);
+        drop_unreachable(tu);
+    }
 
     let (uniforms, uniform_size) = layout_uniforms(&vertex_globals, &fragment_globals);
     let (samplers, albedo) = sampler_bindings(&vertex_globals, &fragment_globals, geometry);
@@ -754,6 +756,36 @@ fn hoist_global_initializers(tu: &mut ast::TranslationUnit) {
             return;
         }
     }
+}
+
+/// Drops what follows a `discard`, `return`, `break` or `continue` in its
+/// block, which never runs. naga's GLSL front end leaves a function call
+/// there half-built, and its validator then rejects the program, as with
+/// Complementary's sun and moon `discard`ing before their colour maths.
+fn drop_unreachable(tu: &mut ast::TranslationUnit) {
+    struct Unreachable;
+    impl VisitorMut for Unreachable {
+        fn visit_compound_statement(&mut self, block: &mut ast::CompoundStatement) -> Visit {
+            reachable(&mut block.statement_list);
+            Visit::Children
+        }
+
+        fn visit_switch_statement(&mut self, switch: &mut ast::SwitchStatement) -> Visit {
+            reachable(&mut switch.body);
+            Visit::Children
+        }
+    }
+    tu.visit_mut(&mut Unreachable);
+}
+
+/// Keeps `statements` up to each jump, and again from the next `case` label.
+fn reachable(statements: &mut Vec<ast::Statement>) {
+    let mut live = true;
+    statements.retain(|s| {
+        let keep = live || matches!(s.content, ast::StatementData::CaseLabel(_));
+        live = keep && !matches!(s.content, ast::StatementData::Jump(_));
+        keep
+    });
 }
 
 fn take_simple_initializer(initializer: &mut Option<ast::Initializer>) -> Option<ast::Expr> {
@@ -1282,6 +1314,22 @@ void main() {
             "{}",
             t.fragment
         );
+    }
+
+    #[test]
+    fn code_after_a_jump_is_dropped() {
+        let t = translated(
+            "#version 120\nvoid main() { gl_Position = ftransform(); }\n",
+            "#version 120\nfloat clamped(float x) { return min(x, 1.0); }\n\
+             void main() {\n\
+                 vec3 c = vec3(0.5);\n\
+                 if (c.x > 0.1) { discard; c *= clamped(length(c)); }\n\
+                 switch (int(c.y)) { case 0: c.x = 1.0; break; c.x = 2.0; case 1: c.x = 3.0; }\n\
+                 gl_FragColor = vec4(c, 1.0);\n\
+             }\n",
+        );
+        assert!(!t.fragment.contains("c.x = 2."), "{}", t.fragment);
+        assert!(t.fragment.contains("c.x = 3."), "{}", t.fragment);
     }
 
     #[test]
