@@ -38,8 +38,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0
       fancy-ansi:
-        specifier: ^0.1.3
-        version: 0.1.3
+        specifier: ^0.2.2
+        version: 0.2.2
       react:
         specifier: ^19.3.1
         version: 19.3.1
@@ -1028,8 +1028,13 @@ packages:
     resolution: {integrity: sha512-kVscqXk4OCp68SZ0dkgEKVi6/8ij300KBWTJq32P/dYeWTSwK41WyTxalN1eRmA5Z9UU/LX9D7FWSmV9SAYx6g==}
     engines: {node: '>=0.10.0'}
 
-  fancy-ansi@0.1.3:
-    resolution: {integrity: sha512-tRQVTo5jjdSIiydqgzIIEZpKddzSsfGLsSVt6vWdjVm7fbvDTiQkyoPu6Z3dIPlAM4OZk0jP5jmTCX4G8WGgBw==}
+  fancy-ansi@0.2.2:
+    resolution: {integrity: sha512-OieQMQVPhP53t5YSzPiFyh6T/y2CfibXuFR9hhpXLRTy9tTmYmgaFOpyABGXPumlxILymZyl5xoRj92nEp5mhA==}
+    peerDependencies:
+      tailwindcss: ^3 || ^4
+    peerDependenciesMeta:
+      tailwindcss:
+        optional: true
 
   fast-deep-equal@3.1.3:
     resolution: {integrity: sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==}
@@ -2349,7 +2354,7 @@ snapshots:
 
   esutils@2.0.3: {}
 
-  fancy-ansi@0.1.3:
+  fancy-ansi@0.2.2:
     dependencies:
       escape-html: 1.0.3
 
