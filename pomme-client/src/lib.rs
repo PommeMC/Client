@@ -31,6 +31,12 @@ mod position;
 mod recipe;
 mod renderer;
 mod resource_pack;
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "Resources API is consumed by the follow-up migration PR"
+)]
+pub(crate) mod resources;
 mod shaderpack;
 mod singleplayer;
 #[cfg(test)]
