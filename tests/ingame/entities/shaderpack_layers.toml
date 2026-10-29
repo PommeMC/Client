@@ -1,0 +1,95 @@
+# Entity layers through a shader pack (fixtures/shaderpacks/pomme_test) at
+# night: the slime's shell blends through the translucent program's fallback,
+# the spider's eyes glow through `gbuffers_spidereyes`, and the charged
+# creeper's swirl adds over it. An invisible zombie, seen from spectator,
+# blends with its back faces culled. Then packs off, with the same views.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/time set 18000"
+
+[[step]]
+chat = "/tp @s -59.5 -60 -60.5 0 20"
+
+[[step]]
+expect = { player = { position = [-59.5, -60.0, -60.5] } }
+
+[[step]]
+chat = "/summon minecraft:spider -61.5 -60 -57 {NoAI:1b,Rotation:[180f,0f],Tags:[\"layers\"]}"
+
+[[step]]
+chat = "/summon minecraft:slime -59.5 -60 -56.5 {NoAI:1b,Size:1,Rotation:[180f,0f],Tags:[\"layers\"]}"
+
+[[step]]
+chat = "/summon minecraft:creeper -57.5 -60 -57 {NoAI:1b,powered:1b,Rotation:[180f,0f],Tags:[\"layers\"]}"
+
+[[step]]
+chat = "/summon minecraft:zombie -59.5 -60 -58.5 {NoAI:1b,Rotation:[150f,0f],Tags:[\"layers\"]}"
+
+[[step]]
+chat = "/effect give @e[type=zombie,tag=layers] minecraft:invisibility infinite 0 true"
+
+[[step]]
+expect = { entity = "creeper" }
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+deterministic = true
+
+[[step]]
+option = { shader_pack = "pomme_test" }
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "pack"
+
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "pack_seen"
+
+[[step]]
+option = { shader_pack = "" }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+screenshot = "off_seen"
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "off"
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+chat = "/kill @e[tag=layers]"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/gamerule advance_time true"
