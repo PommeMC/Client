@@ -260,10 +260,11 @@ fn column_nearby(fade_enabled: bool, pos: ChunkPos, eye: DVec3) -> bool {
 }
 
 /// Rebuilds the draw list into `out`: one [`ChunkMeta`] per uploaded section
-/// the occlusion mask keeps, with its fade-in factor at `now`.
+/// the occlusion mask keeps (all of them without one), with its fade-in
+/// factor at `now`.
 pub(crate) fn build_meta(
     chunks: &HashMap<ChunkPos, ChunkAlloc>,
-    chunk_visibility: &HashMap<ChunkPos, u32>,
+    chunk_visibility: Option<&HashMap<ChunkPos, u32>>,
     fade_enabled: bool,
     eye: DVec3,
     now: std::time::Instant,
@@ -277,7 +278,9 @@ pub(crate) fn build_meta(
 
         // CPU omission: the visibility graph's mask skips sections proven
         // occluded, so they never reach the GPU cull (absent => all draw).
-        let col_vis = chunk_visibility.get(pos).copied().unwrap_or(u32::MAX);
+        let col_vis = chunk_visibility
+            .and_then(|v| v.get(pos).copied())
+            .unwrap_or(u32::MAX);
 
         for sec in &alloc.sections {
             if col_vis & (1u32 << sec.section_index) == 0 {
@@ -422,7 +425,6 @@ pub struct ChunkBufferStore {
     /// the CPU visibility graph. A column absent here defaults to fully
     /// visible, so freshly-loaded-but-not-yet-graphed columns still draw.
     chunk_visibility: HashMap<ChunkPos, u32>,
-    cached_meta: Vec<ChunkMeta>,
     meta_dirty: bool,
     /// End of the current fade-in window. While `now < fade_until` the
     /// per-section fade values change each frame, so `cached_meta` must be
@@ -431,27 +433,18 @@ pub struct ChunkBufferStore {
     /// Eye position at the last front-to-back sort; the sort (an early-Z
     /// optimization) is only redone once the camera moves past a threshold.
     last_sort_cam: DVec3,
-    /// Frame slots still needing the latest `cached_meta` uploaded. Set to
-    /// `MAX_FRAMES_IN_FLIGHT` whenever the draw list changes, decremented per
-    /// frame; at steady state the per-frame meta copy stops.
-    meta_upload_pending: u32,
 
     compute_pipeline: rhi::backend::ComputePipeline,
     compute_layout: rhi::backend::PipelineLayout,
     cull_layout: rhi::backend::BindGroupLayout,
-    cull_sets: Vec<rhi::backend::BindGroup>,
 
-    meta_buffers: Vec<rhi::backend::Buffer>,
-    // Solid (no-discard, early-Z) draw list, written by the cull shader.
-    indirect_buffers: Vec<rhi::backend::Buffer>,
-    count_buffers: Vec<rhi::backend::Buffer>,
-    // Cutout (discard) draw list. Same sections, the back of each section's
-    // index slice; drawn in a second pass after solid lays down depth.
-    indirect_cutout_buffers: Vec<rhi::backend::Buffer>,
-    count_cutout_buffers: Vec<rhi::backend::Buffer>,
-    /// Both draw counts, copied after each cull for the debug overlay.
+    camera: DrawList,
+    /// A shader pack's shadow view, made on its first cull.
+    shadow: Option<DrawList>,
+    /// The shadow list needs rebuilding from the sections.
+    shadow_dirty: bool,
+    /// The camera's draw counts, copied after each cull for the debug overlay.
     count_readbacks: Vec<rhi::backend::Buffer>,
-    frustum_buffers: Vec<rhi::backend::Buffer>,
     fade_enabled: bool,
     /// Post-cull section draw count read back from the GPU (lags a few frames);
     /// exposed for the debug overlay so occlusion's effect is visible.
@@ -529,27 +522,6 @@ impl ChunkBufferStore {
         let meta_size = (max_meta * size_of::<ChunkMeta>()) as u64;
         let indirect_size = (max_meta * size_of::<DrawCommand>()) as u64;
 
-        let (meta_buffers, indirect_buffers, indirect_cutout_buffers) =
-            create_draw_list_buffers(device, meta_size, indirect_size);
-        let frustum_buffers = util::create_per_frame_host_buffers(
-            device,
-            FRUSTUM_SIZE,
-            rhi::BufferUsages::UNIFORM,
-            "frustum_ubo",
-        );
-
-        let create_count_buffers = |name: &str| {
-            util::create_per_frame_host_buffers(
-                device,
-                COUNT_SIZE,
-                rhi::BufferUsages::STORAGE
-                    | rhi::BufferUsages::INDIRECT
-                    | rhi::BufferUsages::COPY_SRC,
-                name,
-            )
-        };
-        let count_buffers = create_count_buffers("draw_count");
-        let count_cutout_buffers = create_count_buffers("draw_count_cutout");
         let count_readbacks = (0..MAX_FRAMES_IN_FLIGHT)
             .map(|_| {
                 rhi::backend::Buffer::new(
@@ -563,6 +535,7 @@ impl ChunkBufferStore {
             .collect();
 
         let cull_layout = rhi::backend::create_bind_group_layout(device, CULL_BINDINGS);
+        let camera = DrawList::new(device, cull_layout, meta_size, indirect_size);
         let compute_layout = rhi::backend::create_pipeline_layout(device, &[cull_layout], None);
 
         let compute_pipeline = rhi::backend::create_compute_pipeline(
@@ -572,7 +545,7 @@ impl ChunkBufferStore {
             shader::include_shader!("cull.comp"),
         );
 
-        let mut this = Self {
+        Self {
             indirect_draw,
             max_meta,
             vertex_buffer,
@@ -584,45 +557,20 @@ impl ChunkBufferStore {
             idx_free,
             chunks: HashMap::new(),
             chunk_visibility: HashMap::new(),
-            cached_meta: Vec::new(),
             meta_dirty: true,
             fade_until: std::time::Instant::now(),
             last_sort_cam: DVec3::MAX,
-            meta_upload_pending: 0,
             compute_pipeline,
             compute_layout,
             cull_layout,
-            cull_sets: vec![rhi::backend::BindGroup::default(); MAX_FRAMES_IN_FLIGHT],
-            meta_buffers,
-            indirect_buffers,
-            count_buffers,
-            indirect_cutout_buffers,
-            count_cutout_buffers,
+            camera,
+            shadow: None,
+            shadow_dirty: true,
             count_readbacks,
-            frustum_buffers,
             fade_enabled: false,
             last_draw_count: 0,
             frame_seq: 0,
             pending_free: VecDeque::new(),
-        };
-        this.rebind_cull(device, meta_size, indirect_size);
-        this
-    }
-
-    /// Points each frame's cull group at that frame's buffers.
-    fn rebind_cull(&mut self, device: &rhi::backend::Device, meta_size: u64, indirect_size: u64) {
-        let storage = rhi::backend::BindingResource::storage;
-        let uniform = rhi::backend::BindingResource::uniform;
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            let bindings = [
-                (0, storage(&self.meta_buffers[i], meta_size)),
-                (1, uniform(&self.frustum_buffers[i], FRUSTUM_SIZE)),
-                (2, storage(&self.indirect_buffers[i], indirect_size)),
-                (3, storage(&self.count_buffers[i], COUNT_SIZE)),
-                (4, storage(&self.indirect_cutout_buffers[i], indirect_size)),
-                (5, storage(&self.count_cutout_buffers[i], COUNT_SIZE)),
-            ];
-            self.cull_sets[i].replace(device, self.cull_layout, &bindings);
         }
     }
 
@@ -971,22 +919,11 @@ impl ChunkBufferStore {
         // bind group; wait the GPU out before freeing them.
         device.wait_idle();
 
-        for buffers in [
-            &mut self.meta_buffers,
-            &mut self.indirect_buffers,
-            &mut self.indirect_cutout_buffers,
-        ] {
-            util::destroy_buffers(device, buffers);
-        }
-
         let meta_size = (new_max * size_of::<ChunkMeta>()) as u64;
         let indirect_size = (new_max * size_of::<DrawCommand>()) as u64;
-        (
-            self.meta_buffers,
-            self.indirect_buffers,
-            self.indirect_cutout_buffers,
-        ) = create_draw_list_buffers(device, meta_size, indirect_size);
-        self.rebind_cull(device, meta_size, indirect_size);
+        for list in std::iter::once(&mut self.camera).chain(&mut self.shadow) {
+            list.regrow(device, self.cull_layout, meta_size, indirect_size);
+        }
 
         self.max_meta = new_max;
     }
@@ -1053,7 +990,7 @@ impl ChunkBufferStore {
         self.vtx_free.reset();
         self.idx_free.reset();
         self.pending_free.clear();
-        self.cached_meta.clear();
+        self.camera.meta.clear();
         self.meta_dirty = true;
         self.fade_enabled = false;
     }
@@ -1099,41 +1036,23 @@ impl ChunkBufferStore {
         if content_changed {
             build_meta(
                 &self.chunks,
-                &self.chunk_visibility,
+                Some(&self.chunk_visibility),
                 self.fade_enabled,
                 eye,
                 now,
-                &mut self.cached_meta,
+                &mut self.camera.meta,
             );
             self.meta_dirty = false;
+            self.shadow_dirty = true;
         }
 
         let cam_moved = (eye - self.last_sort_cam).length_squared() > SORT_RECAM_SQ;
         if content_changed || cam_moved {
-            sort_meta(&mut self.cached_meta, eye);
+            sort_meta(&mut self.camera.meta, eye);
             self.last_sort_cam = eye;
             // Draw list reordered: every frame slot's meta buffer needs the refresh.
-            self.meta_upload_pending = MAX_FRAMES_IN_FLIGHT as u32;
+            self.camera.upload_pending = MAX_FRAMES_IN_FLIGHT as u32;
         }
-
-        let count = self.cached_meta.len() as u32;
-        // Each frame slot has its own meta buffer; copy only into slots that
-        // haven't yet seen the current draw list. Steady state stops copying.
-        if self.meta_upload_pending > 0 {
-            let meta_bytes = bytemuck::cast_slice(&self.cached_meta);
-            self.meta_buffers[frame].write(meta_bytes);
-            self.meta_upload_pending -= 1;
-        }
-
-        let frustum_data = FrustumData {
-            planes: *frustum,
-            chunk_count: count,
-            cam_block: anchor.as_ivec3().to_array(),
-            frac: (eye - anchor).as_vec3().to_array(),
-            _pad: 0.0,
-        };
-        let frustum_bytes = bytemuck::bytes_of(&frustum_data);
-        self.frustum_buffers[frame].write(frustum_bytes);
 
         // This frame slot's GPU work has completed (fence-waited at frame start),
         // so its readback holds the previous cull's total (solid + cutout draws).
@@ -1141,35 +1060,20 @@ impl ChunkBufferStore {
             let counts: [u32; 2] = bytemuck::pod_read_unaligned(&bytes[..8]);
             counts[0] + counts[1]
         });
-        for buffer in [
-            &mut self.count_buffers[frame],
-            &mut self.count_cutout_buffers[frame],
-        ] {
-            buffer.write(&0u32.to_ne_bytes());
-        }
-
-        // Without drawIndirectCount the whole indirect buffer is drawn, so slots
-        // the cull shader leaves unfilled must read as no-op draws, not stale data.
-        if !self.indirect_draw.count {
-            for buffer in [
-                &mut self.indirect_buffers[frame],
-                &mut self.indirect_cutout_buffers[frame],
-            ] {
-                buffer.zero();
-            }
-        }
-
-        encoder.dispatch(
+        self.camera.cull(
+            encoder,
             &self.compute_pipeline,
-            self.cull_sets[frame],
-            [count.div_ceil(64), 1, 1],
+            frame,
+            frustum,
+            anchor,
+            eye,
+            !self.indirect_draw.count,
         );
-        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect);
         encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::CopySrc);
         let readback = self.count_readbacks[frame].handle();
         for (i, count) in [
-            &self.count_buffers[frame],
-            &self.count_cutout_buffers[frame],
+            &self.camera.count_buffers[frame],
+            &self.camera.count_cutout_buffers[frame],
         ]
         .into_iter()
         .enumerate()
@@ -1191,16 +1095,67 @@ impl ChunkBufferStore {
         }
     }
 
-    /// Issue one render layer's indirect draws. `cutout` selects the discard
-    /// pass's draw list (drawn after `solid`, which lays down depth); the
-    /// caller binds the matching pipeline first. Both layers share the
-    /// vertex/index/meta buffers and the cull-written draw lists.
+    /// Culls every section, the camera's occluded ones too, against a shader
+    /// pack's shadow view `frustum`, after this frame's
+    /// [`Self::dispatch_cull`].
+    pub fn dispatch_shadow_cull(
+        &mut self,
+        device: &rhi::backend::Device,
+        encoder: &rhi::backend::CommandEncoder,
+        frame: usize,
+        frustum: &[[f32; 4]; 6],
+        anchor: DVec3,
+        eye: DVec3,
+    ) {
+        if self.chunks.is_empty() {
+            return;
+        }
+        let shadow = self.shadow.get_or_insert_with(|| {
+            let meta_size = (self.max_meta * size_of::<ChunkMeta>()) as u64;
+            let indirect_size = (self.max_meta * size_of::<DrawCommand>()) as u64;
+            DrawList::new(device, self.cull_layout, meta_size, indirect_size)
+        });
+        if self.shadow_dirty {
+            build_meta(
+                &self.chunks,
+                None,
+                self.fade_enabled,
+                eye,
+                std::time::Instant::now(),
+                &mut shadow.meta,
+            );
+            shadow.upload_pending = MAX_FRAMES_IN_FLIGHT as u32;
+            self.shadow_dirty = false;
+        }
+        shadow.cull(
+            encoder,
+            &self.compute_pipeline,
+            frame,
+            frustum,
+            anchor,
+            eye,
+            !self.indirect_draw.count,
+        );
+    }
+
+    /// Issue one render layer's indirect draws for `view`. `cutout` selects
+    /// the discard pass's draw list (drawn after `solid`, which lays down
+    /// depth); the caller binds the matching pipeline first. Both layers share
+    /// the vertex/index/meta buffers and the cull-written draw lists.
     pub fn draw_indirect(
         &self,
         pass: &rhi::backend::RenderPassEncoder,
         frame: usize,
         cutout: bool,
+        view: View,
     ) {
+        let list = match view {
+            View::Camera => &self.camera,
+            View::Shadow => match &self.shadow {
+                Some(shadow) => shadow,
+                None => return,
+            },
+        };
         if self.chunks.is_empty() {
             return;
         }
@@ -1212,20 +1167,20 @@ impl ChunkBufferStore {
             .sum::<u32>();
         let (indirect, count) = if cutout {
             (
-                self.indirect_cutout_buffers[frame].handle(),
-                self.count_cutout_buffers[frame].handle(),
+                list.indirect_cutout_buffers[frame].handle(),
+                list.count_cutout_buffers[frame].handle(),
             )
         } else {
             (
-                self.indirect_buffers[frame].handle(),
-                self.count_buffers[frame].handle(),
+                list.indirect_buffers[frame].handle(),
+                list.count_buffers[frame].handle(),
             )
         };
 
         // Binding 0: packed vertex pool. Binding 1: the meta buffer, read per
         // instance for the section origin + fade (indexed by `first_instance`).
         pass.set_vertex_buffer(0, self.vertex_buffer.handle());
-        pass.set_vertex_buffer(1, self.meta_buffers[frame].handle());
+        pass.set_vertex_buffer(1, list.meta_buffers[frame].handle());
         pass.set_index_buffer(self.index_buffer.handle());
         let stride = size_of::<DrawCommand>() as u32;
         if self.indirect_draw.count {
@@ -1314,55 +1269,191 @@ impl ChunkBufferStore {
         for buffer in [&mut self.vertex_buffer, &mut self.index_buffer] {
             std::mem::take(buffer).destroy(device);
         }
-        for buffers in [
-            &mut self.meta_buffers,
-            &mut self.indirect_buffers,
-            &mut self.count_buffers,
-            &mut self.indirect_cutout_buffers,
-            &mut self.count_cutout_buffers,
-            &mut self.count_readbacks,
-            &mut self.frustum_buffers,
-        ] {
-            util::destroy_buffers(device, buffers);
+        for list in std::iter::once(&mut self.camera).chain(&mut self.shadow) {
+            list.destroy(device);
         }
+        util::destroy_buffers(device, &mut self.count_readbacks);
         std::mem::take(&mut self.staging_buffer).destroy(device);
 
         self.compute_pipeline.destroy(device);
         self.compute_layout.destroy(device);
-        util::destroy_bind_groups(device, self.cull_sets.drain(..));
         self.cull_layout.destroy(device);
     }
 }
 
-/// The per-frame meta and solid/cutout indirect buffers, the ones
-/// `ensure_meta_capacity` regrows.
-fn create_draw_list_buffers(
-    device: &rhi::backend::Device,
-    meta_size: u64,
-    indirect_size: u64,
-) -> (
-    Vec<rhi::backend::Buffer>,
-    Vec<rhi::backend::Buffer>,
-    Vec<rhi::backend::Buffer>,
-) {
-    let indirect = |name: &str| {
-        util::create_per_frame_host_buffers(
-            device,
-            indirect_size,
-            rhi::BufferUsages::STORAGE | rhi::BufferUsages::INDIRECT,
-            name,
-        )
-    };
-    (
-        util::create_per_frame_host_buffers(
+/// Which view's draw lists [`ChunkBufferStore::draw_indirect`] draws.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Camera,
+    /// A shader pack's shadow pass.
+    Shadow,
+}
+
+/// One view's sections and, per frame slot, the cull's frustum and the draw
+/// lists it writes.
+struct DrawList {
+    meta: Vec<ChunkMeta>,
+    /// Frame slots still needing the latest `meta` uploaded. Set to
+    /// `MAX_FRAMES_IN_FLIGHT` whenever the draw list changes, decremented per
+    /// frame; at steady state the per-frame meta copy stops.
+    upload_pending: u32,
+    cull_sets: Vec<rhi::backend::BindGroup>,
+    meta_buffers: Vec<rhi::backend::Buffer>,
+    frustum_buffers: Vec<rhi::backend::Buffer>,
+    // Solid (no-discard, early-Z) draw list, written by the cull shader.
+    indirect_buffers: Vec<rhi::backend::Buffer>,
+    count_buffers: Vec<rhi::backend::Buffer>,
+    // Cutout (discard) draw list. Same sections, the back of each section's
+    // index slice; drawn in a second pass after solid lays down depth.
+    indirect_cutout_buffers: Vec<rhi::backend::Buffer>,
+    count_cutout_buffers: Vec<rhi::backend::Buffer>,
+}
+
+impl DrawList {
+    fn new(
+        device: &rhi::backend::Device,
+        layout: rhi::backend::BindGroupLayout,
+        meta_size: u64,
+        indirect_size: u64,
+    ) -> Self {
+        let count = |name: &str| {
+            util::create_per_frame_host_buffers(
+                device,
+                COUNT_SIZE,
+                rhi::BufferUsages::STORAGE
+                    | rhi::BufferUsages::INDIRECT
+                    | rhi::BufferUsages::COPY_SRC,
+                name,
+            )
+        };
+        let mut this = Self {
+            meta: Vec::new(),
+            upload_pending: 0,
+            cull_sets: vec![rhi::backend::BindGroup::default(); MAX_FRAMES_IN_FLIGHT],
+            meta_buffers: Vec::new(),
+            frustum_buffers: util::create_per_frame_host_buffers(
+                device,
+                FRUSTUM_SIZE,
+                rhi::BufferUsages::UNIFORM,
+                "frustum_ubo",
+            ),
+            indirect_buffers: Vec::new(),
+            count_buffers: count("draw_count"),
+            indirect_cutout_buffers: Vec::new(),
+            count_cutout_buffers: count("draw_count_cutout"),
+        };
+        this.regrow(device, layout, meta_size, indirect_size);
+        this
+    }
+
+    /// Remakes the per-frame meta and indirect buffers at these sizes and
+    /// points each frame's cull group at its buffers.
+    fn regrow(
+        &mut self,
+        device: &rhi::backend::Device,
+        layout: rhi::backend::BindGroupLayout,
+        meta_size: u64,
+        indirect_size: u64,
+    ) {
+        for buffers in [
+            &mut self.meta_buffers,
+            &mut self.indirect_buffers,
+            &mut self.indirect_cutout_buffers,
+        ] {
+            util::destroy_buffers(device, buffers);
+        }
+        let indirect = |name: &str| {
+            util::create_per_frame_host_buffers(
+                device,
+                indirect_size,
+                rhi::BufferUsages::STORAGE | rhi::BufferUsages::INDIRECT,
+                name,
+            )
+        };
+        self.meta_buffers = util::create_per_frame_host_buffers(
             device,
             meta_size,
             rhi::BufferUsages::STORAGE | rhi::BufferUsages::VERTEX,
             "chunk_meta",
-        ),
-        indirect("indirect_cmds"),
-        indirect("indirect_cmds_cutout"),
-    )
+        );
+        self.indirect_buffers = indirect("indirect_cmds");
+        self.indirect_cutout_buffers = indirect("indirect_cmds_cutout");
+        self.upload_pending = MAX_FRAMES_IN_FLIGHT as u32;
+
+        let storage = rhi::backend::BindingResource::storage;
+        let uniform = rhi::backend::BindingResource::uniform;
+        for i in 0..MAX_FRAMES_IN_FLIGHT {
+            let bindings = [
+                (0, storage(&self.meta_buffers[i], meta_size)),
+                (1, uniform(&self.frustum_buffers[i], FRUSTUM_SIZE)),
+                (2, storage(&self.indirect_buffers[i], indirect_size)),
+                (3, storage(&self.count_buffers[i], COUNT_SIZE)),
+                (4, storage(&self.indirect_cutout_buffers[i], indirect_size)),
+                (5, storage(&self.count_cutout_buffers[i], COUNT_SIZE)),
+            ];
+            self.cull_sets[i].replace(device, layout, &bindings);
+        }
+    }
+
+    /// Records the cull of `meta` against `frustum` into this frame slot's
+    /// draw lists, uploading `meta` first if the slot hasn't seen it.
+    /// `zero_indirect`: without drawIndirectCount the whole indirect buffer
+    /// is drawn, so slots the cull leaves unfilled must read as no-op draws.
+    #[allow(clippy::too_many_arguments)]
+    fn cull(
+        &mut self,
+        encoder: &rhi::backend::CommandEncoder,
+        pipeline: &rhi::backend::ComputePipeline,
+        frame: usize,
+        frustum: &[[f32; 4]; 6],
+        anchor: DVec3,
+        eye: DVec3,
+        zero_indirect: bool,
+    ) {
+        if self.upload_pending > 0 {
+            self.meta_buffers[frame].write(bytemuck::cast_slice(&self.meta));
+            self.upload_pending -= 1;
+        }
+        let count = self.meta.len() as u32;
+        let frustum_data = FrustumData {
+            planes: *frustum,
+            chunk_count: count,
+            cam_block: anchor.as_ivec3().to_array(),
+            frac: (eye - anchor).as_vec3().to_array(),
+            _pad: 0.0,
+        };
+        self.frustum_buffers[frame].write(bytemuck::bytes_of(&frustum_data));
+        for buffer in [
+            &mut self.count_buffers[frame],
+            &mut self.count_cutout_buffers[frame],
+        ] {
+            buffer.write(&0u32.to_ne_bytes());
+        }
+        if zero_indirect {
+            for buffer in [
+                &mut self.indirect_buffers[frame],
+                &mut self.indirect_cutout_buffers[frame],
+            ] {
+                buffer.zero();
+            }
+        }
+        encoder.dispatch(pipeline, self.cull_sets[frame], [count.div_ceil(64), 1, 1]);
+        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect);
+    }
+
+    fn destroy(&mut self, device: &rhi::backend::Device) {
+        for buffers in [
+            &mut self.meta_buffers,
+            &mut self.frustum_buffers,
+            &mut self.indirect_buffers,
+            &mut self.count_buffers,
+            &mut self.indirect_cutout_buffers,
+            &mut self.count_cutout_buffers,
+        ] {
+            util::destroy_buffers(device, buffers);
+        }
+        util::destroy_bind_groups(device, self.cull_sets.drain(..));
+    }
 }
 
 #[cfg(test)]
@@ -1387,7 +1478,7 @@ mod tests {
         let eye = DVec3::new(8.0, 8.0, 8.0);
 
         let mut meta = Vec::new();
-        build_meta(&chunks, &vis, true, eye, now, &mut meta);
+        build_meta(&chunks, Some(&vis), true, eye, now, &mut meta);
         sort_meta(&mut meta, eye);
 
         assert_eq!(meta.len(), 2);
@@ -1397,7 +1488,10 @@ mod tests {
         let far_vis = f32::from_bits(meta[1].visibility);
         assert!((far_vis - 0.5).abs() < 0.01, "far fade {far_vis}");
 
-        build_meta(&chunks, &vis, false, eye, now, &mut meta);
+        build_meta(&chunks, Some(&vis), false, eye, now, &mut meta);
         assert!(meta.iter().all(|m| f32::from_bits(m.visibility) == 1.0));
+
+        build_meta(&chunks, None, false, eye, now, &mut meta);
+        assert_eq!(meta.len(), 3);
     }
 }

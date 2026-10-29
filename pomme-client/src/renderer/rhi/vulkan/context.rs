@@ -211,6 +211,7 @@ impl Context {
         let enabled_features = vk::PhysicalDeviceFeatures {
             multi_draw_indirect: indirect_draw.multi_draw.into(),
             draw_indirect_first_instance: vk::TRUE,
+            depth_clamp: physical_device.get_features().depth_clamp,
             ..Default::default()
         };
         let mut vk12_features = vk::PhysicalDeviceVulkan12Features {

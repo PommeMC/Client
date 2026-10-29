@@ -31,5 +31,5 @@ void main() {
     v_visibility = in_visibility;
     v_fog_color = fog_color.rgb;
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
-    v_sprite = in_sprite;
+    v_sprite = in_sprite & ((1u << SPRITE_BITS) - 1u);
 }

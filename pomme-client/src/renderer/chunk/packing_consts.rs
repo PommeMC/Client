@@ -12,3 +12,7 @@ pub const POS_BIAS: f32 = 4.0;
 /// Sprite-local terrain UVs: one sprite spans 0..=4095, in 12 bits per axis.
 pub const TERRAIN_UV_FIXED_SCALE: f32 = 4095.0;
 pub const TERRAIN_UV_BITS: u32 = 12;
+
+/// Bits of `PackedVertex::sprite` holding the sprite id; the 3 above hold the
+/// quad's face (`Direction` + 1, 0 when it has none), for shader packs.
+pub const SPRITE_BITS: u32 = 13;

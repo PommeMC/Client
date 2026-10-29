@@ -48,6 +48,11 @@ pub struct Lightmap {
 }
 
 impl Lightmap {
+    /// The texture and its sampler, for binding elsewhere (shader packs).
+    pub fn texture(&self) -> (rhi::backend::TextureHandle, rhi::backend::Sampler) {
+        (self.texture.handle(), self.sampler)
+    }
+
     pub fn new(device: &rhi::backend::Device) -> Self {
         let texture = post::create_target(device, EXTENT, "lightmap");
         // Vanilla `getClampToEdge(FilterMode.LINEAR)`.
@@ -88,6 +93,11 @@ impl Lightmap {
             },
             needs_update: true,
         }
+    }
+
+    /// The Brightness option, as the last tick passed it.
+    pub fn brightness(&self) -> f32 {
+        self.info.ambient_color[3]
     }
 
     /// Vanilla `LightmapRenderStateExtractor.extract` after a tick: the next

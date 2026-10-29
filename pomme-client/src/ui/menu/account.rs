@@ -54,6 +54,7 @@ impl MainMenu {
     ) {
         let state = Arc::clone(&self.sign_in);
         *state.write() = SignIn::Requesting;
+        self.focus = None;
         self.sign_in_task = Some(self.rt.spawn(async move {
             *state.write() = match sign_in.await {
                 Ok(Some(account)) => SignIn::Done(account),
@@ -79,6 +80,7 @@ impl MainMenu {
             task.abort();
         }
         *self.sign_in.write() = SignIn::Idle;
+        self.focus = None;
     }
 
     pub(super) fn build_account(
@@ -105,12 +107,12 @@ impl MainMenu {
             return result;
         }
 
-        let (lines, code, buttons): (Vec<String>, Option<String>, [&str; 2]) =
+        let (lines, code, buttons): (Vec<String>, Option<String>, Vec<&str>) =
             match (&self.access_token, &*self.sign_in.read()) {
                 (Some(_), _) => (
                     vec![format!("Signed in as {}", self.username)],
                     None,
-                    ["Sign Out", "Back"],
+                    vec!["Sign Out", "Back"],
                 ),
                 (None, SignIn::Idle) if gated => (
                     vec![
@@ -118,15 +120,15 @@ impl MainMenu {
                         "Sign in with the Microsoft account that owns Minecraft.".into(),
                     ],
                     None,
-                    ["Sign In", leave],
+                    vec!["Sign In", leave],
                 ),
                 (None, SignIn::Idle) => (
                     vec!["Sign in with a Microsoft account to join online servers.".into()],
                     None,
-                    ["Sign In", leave],
+                    vec!["Sign In", leave],
                 ),
                 (None, SignIn::Requesting) => {
-                    (vec!["Contacting Microsoft...".into()], None, ["", "Cancel"])
+                    (vec!["Contacting Microsoft...".into()], None, vec!["Cancel"])
                 }
                 (None, SignIn::Code(code)) => (
                     vec![format!(
@@ -134,12 +136,18 @@ impl MainMenu {
                         code.verification_uri
                     )],
                     Some(code.user_code.clone()),
-                    ["Open Link", "Cancel"],
+                    // TODO: Android's clipboard, through JNI; `set_clipboard`
+                    // can't copy there yet.
+                    if cfg!(target_os = "android") {
+                        vec!["Open Link", "Cancel"]
+                    } else {
+                        vec!["Open Link", "Copy Code", "Cancel"]
+                    },
                 ),
                 (None, SignIn::Failed(reason)) => (
                     vec!["Sign-in failed:".into(), reason.clone()],
                     None,
-                    ["Try Again", leave],
+                    vec!["Try Again", leave],
                 ),
                 (None, SignIn::Done(_)) => unreachable!("handled above"),
             };
@@ -148,8 +156,10 @@ impl MainMenu {
         let fs = common::FONT_SIZE * gs;
         let code_fs = fs * CODE_SCALE;
         let btn_h = common::BTN_H * gs;
-        let btn_w = ACCOUNT_BTN_W * gs;
         let gap = BTN_GAP * gs;
+        let n = buttons.len() as f32;
+        // Narrower than usual where the row wouldn't fit the window.
+        let btn_w = ((screen_w - (n + 1.0) * gap) / n).min(ACCOUNT_BTN_W * gs);
         let spacing = 8.0 * gs;
         let cx = screen_w / 2.0;
         let code_h = code.as_ref().map_or(0.0, |_| code_fs + spacing);
@@ -185,26 +195,23 @@ impl MainMenu {
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
         let mut pressed = None;
-        for (label, x) in [
-            (buttons[0], cx - btn_w - gap / 2.0),
-            (buttons[1], cx + gap / 2.0),
-        ] {
-            if !label.is_empty()
-                && push_button_f(
-                    &mut elements,
-                    &mut ctx,
-                    &mut any_hovered,
-                    input.cursor,
-                    input.clicked,
-                    x,
-                    y,
-                    btn_w,
-                    btn_h,
-                    gs,
-                    label,
-                    true,
-                )
-            {
+        let row_x = cx - (n * btn_w + (n - 1.0) * gap) / 2.0;
+        for (i, label) in buttons.into_iter().enumerate() {
+            let x = row_x + (i as f32) * (btn_w + gap);
+            if push_button_f(
+                &mut elements,
+                &mut ctx,
+                &mut any_hovered,
+                input.cursor,
+                input.clicked,
+                x,
+                y,
+                btn_w,
+                btn_h,
+                gs,
+                label,
+                true,
+            ) {
                 pressed = Some(label);
             }
         }
@@ -213,6 +220,11 @@ impl MainMenu {
         let mut action = MenuAction::None;
         match pressed {
             Some("Sign In" | "Try Again") => self.start_sign_in(),
+            Some("Copy Code") => {
+                if let SignIn::Code(code) = &*self.sign_in.read() {
+                    common::set_clipboard(&code.user_code);
+                }
+            }
             Some("Open Link") => {
                 if let SignIn::Code(code) = &*self.sign_in.read() {
                     crate::util::open_url(&code.verification_uri);

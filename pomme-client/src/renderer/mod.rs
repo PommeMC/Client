@@ -24,7 +24,7 @@ use azalea_block::BlockState;
 pub use camera::CloudMode;
 use camera::{Camera, CameraUniform};
 use chunk::atlas::{AtlasUVMap, TextureAtlas};
-use chunk::buffer::ChunkBufferStore;
+use chunk::buffer::{ChunkBufferStore, View};
 use chunk::mesh_source::MeshSource;
 use chunk::mesher::ChunkMeshData;
 use chunk::moving_blocks::{MovingBlockBuffers, MovingBlockRender};
@@ -279,6 +279,16 @@ pub struct Renderer {
     entity_shadow_pipeline: EntityShadowPipeline,
     moving_block_buffers: MovingBlockBuffers,
     block_entity_pipeline: BlockEntityPipeline,
+    /// The selected shader pack, and its render path once built.
+    shader_pack: Option<(
+        crate::shaderpack::ShaderPack,
+        Option<pipelines::shaderpack::PackRenderer>,
+    )>,
+    /// The pack last asked for, loaded or not, so a broken one isn't retried
+    /// every frame.
+    shader_pack_selected: Option<std::path::PathBuf>,
+    /// What the selected pack reads about the player's surroundings.
+    pack_world: pipelines::shaderpack::PackWorld,
     chunk_buffers: ChunkBufferStore,
     frames: rhi::backend::Frames,
     screenshot: screenshot::ScreenshotCapture,
@@ -537,6 +547,9 @@ impl Renderer {
             entity_shadow_pipeline,
             moving_block_buffers,
             block_entity_pipeline,
+            shader_pack: None,
+            shader_pack_selected: None,
+            pack_world: Default::default(),
             chunk_border_pipeline,
             item_entity_pipeline,
             held_item_pipeline,
@@ -723,6 +736,211 @@ impl Renderer {
         )
     }
 
+    /// Selects the shader pack at `path`, or turns packs off with `None`. The
+    /// pack's programs compile on the next world frame.
+    pub fn set_shader_pack(&mut self, path: Option<&std::path::Path>) -> Result<(), String> {
+        if self.shader_pack_selected.as_deref() == path {
+            return Ok(());
+        }
+        self.shader_pack_selected = path.map(std::path::Path::to_path_buf);
+        if let Some((_, Some(mut pack))) = self.shader_pack.take() {
+            self.ctx.device.wait_idle();
+            pack.destroy(&self.ctx.device);
+        }
+        let Some(path) = path else {
+            return Ok(());
+        };
+        let pack = crate::shaderpack::ShaderPack::open(path).map_err(|e| e.to_string())?;
+        self.shader_pack = Some((pack, None));
+        Ok(())
+    }
+
+    /// Sets what the shader pack reads about the player's surroundings.
+    pub fn set_pack_world(&mut self, world: pipelines::shaderpack::PackWorld) {
+        self.pack_world = world;
+    }
+
+    /// Draws a world frame's geometry and full-screen passes through the
+    /// selected shader pack, before the swapchain pass draws its `final`;
+    /// `false` when no pack draws this frame.
+    fn render_pack_world(
+        &mut self,
+        encoder: &rhi::backend::CommandEncoder,
+        frame: usize,
+        mode: &RenderMode,
+    ) -> bool {
+        use pipelines::shaderpack::{PackFrame, PackGeometry, PackRenderer};
+        let RenderMode::World {
+            sky,
+            moving_blocks,
+            entities,
+            block_entities,
+            render_distance,
+            hand_light,
+            eyes_in_water,
+            ..
+        } = mode
+        else {
+            return false;
+        };
+        if self.camera.top_down().is_some() {
+            return false;
+        }
+        let dimension = match sky.skybox {
+            crate::world::environment::Skybox::Overworld => "minecraft:overworld",
+            crate::world::environment::Skybox::End => "minecraft:the_end",
+            crate::world::environment::Skybox::None => "minecraft:the_nether",
+        };
+        let Some((files, built)) = &mut self.shader_pack else {
+            return false;
+        };
+        if built.as_ref().is_some_and(|p| p.dimension() != dimension) {
+            self.ctx.device.wait_idle();
+            if let Some(mut pack) = built.take() {
+                pack.destroy(&self.ctx.device);
+            }
+        }
+        if built.is_none() {
+            match PackRenderer::new(
+                &self.ctx.device,
+                files,
+                dimension,
+                self.swapchain.extent,
+                self.swapchain.targets(),
+                &self.atlas,
+                &self.lightmap,
+            ) {
+                Ok(pack) => *built = Some(pack),
+                Err(e) => {
+                    tracing::error!("Shader pack {} failed: {e}", files.name);
+                    self.shader_pack = None;
+                    return false;
+                }
+            }
+        }
+        let Some(mut pack) = self.shader_pack.as_mut().and_then(|(_, p)| p.take()) else {
+            return false;
+        };
+
+        let device = &self.ctx.device;
+        let (view, projection) = self.camera.pack_matrices();
+        let (near, far) = self.camera.planes();
+        let anchor = self.camera.anchor();
+        let eye = self.camera_render_position();
+        let attributes = &sky.attributes;
+        pack.prepare(
+            frame,
+            &PackFrame {
+                view,
+                projection,
+                camera: eye,
+                eye: self.camera.eye_from_anchor(),
+                anchor: anchor.as_ivec3(),
+                day_time: sky.day_time,
+                sun_angle_degrees: attributes.sun_angle,
+                moon_phase: attributes.moon_phase,
+                rain: sky.rain(),
+                fog_color: sky.fog_color,
+                sky_color: attributes.sky_color,
+                fog: [attributes.fog_start_distance, attributes.fog_end_distance],
+                near,
+                far,
+                eye_light: [
+                    f32::from(hand_light.block()) * 16.0,
+                    f32::from(hand_light.sky()) * 16.0,
+                ],
+                eye_in_water: *eyes_in_water,
+                screen_brightness: self.lightmap.brightness(),
+                atlas_size: self.atlas.size,
+                world: self.pack_world.clone(),
+            },
+        );
+        pack.clear(encoder, sky.fog_color);
+        self.moving_block_buffers
+            .upload(device, frame, moving_blocks);
+        let shadow_planes = pack.shadow_view_projection().map(|shadow| {
+            let planes = Camera::planes_from_view_projection(shadow);
+            self.chunk_buffers
+                .dispatch_shadow_cull(device, encoder, frame, &planes, anchor, eye);
+            planes
+        });
+
+        let chunks = &self.chunk_buffers;
+        let moving_blocks = &self.moving_block_buffers;
+        let terrain = |pack: &mut PackRenderer, geometry, view| {
+            if let Some((pass, _)) = pack.begin_geometry(device, encoder, frame, geometry) {
+                pass.set_bind_group(3, pack.atlas_group);
+                for cutout in [false, true] {
+                    chunks.draw_indirect(&pass, frame, cutout, view);
+                    moving_blocks.draw(&pass, frame, cutout);
+                }
+                pack.end_geometry(encoder, pass, geometry);
+            }
+        };
+        let water = |pack: &mut PackRenderer, geometry, frustum: &[[f32; 4]; 6]| {
+            if let Some((pass, _)) = pack.begin_geometry(device, encoder, frame, geometry) {
+                pass.set_bind_group(3, pack.atlas_group);
+                chunks.draw_water(&pass, frustum, anchor, eye);
+                pack.end_geometry(encoder, pass, geometry);
+            }
+        };
+
+        // Iris's shadow pass: terrain from the sun or moon, `shadowtex1`
+        // copied before its translucents.
+        if let Some(planes) = shadow_planes {
+            terrain(&mut pack, PackGeometry::ShadowTerrain, View::Shadow);
+            pack.copy_opaque_depth(encoder, true);
+            water(&mut pack, PackGeometry::ShadowWater, &planes);
+        }
+        // Drawn underwater too, as Iris does; the pack fogs it.
+        // TODO: skipped in lava and powder snow, or under an effect that
+        // blocks the sky (`LevelRenderer.addSkyPass`).
+        let draws = self
+            .sky_pipeline
+            .draws(&self.camera, sky, pack.sun_path_rotation());
+        pack.draw_sky(device, encoder, frame, &self.sky_pipeline, &draws);
+
+        let frustum = self.camera.frustum_planes();
+        let cull_distance = entity_cull_distance(*render_distance);
+        terrain(&mut pack, PackGeometry::Terrain, View::Camera);
+        if let Some((mut pass, binding)) =
+            pack.begin_geometry(device, encoder, frame, PackGeometry::Entities)
+        {
+            self.entity_renderer.pack_binding = Some(binding);
+            self.entity_renderer.draw(
+                &mut pass,
+                frame,
+                entities,
+                &frustum,
+                anchor,
+                eye,
+                cull_distance,
+            );
+            self.entity_renderer.pack_binding = None;
+            pack.end_geometry(encoder, pass, PackGeometry::Entities);
+        }
+        if let Some((mut pass, binding)) =
+            pack.begin_geometry(device, encoder, frame, PackGeometry::BlockEntities)
+        {
+            self.block_entity_pipeline.pack_binding = Some(binding);
+            self.block_entity_pipeline
+                .draw(&mut pass, frame, anchor, block_entities);
+            self.block_entity_pipeline.pack_binding = None;
+            pack.end_geometry(encoder, pass, PackGeometry::BlockEntities);
+        }
+        pack.copy_opaque_depth(encoder, false);
+        pack.run_full_screen(device, encoder, frame, true);
+        water(&mut pack, PackGeometry::Water, &frustum);
+        pack.run_full_screen(device, encoder, frame, false);
+        // TODO: particles, weather, clouds, dropped items, the block-break
+        // overlay and entity shadows through their `gbuffers_*` programs; the
+        // block outline and chunk borders over the pack's depth.
+        if let Some((_, slot)) = &mut self.shader_pack {
+            *slot = Some(pack);
+        }
+        true
+    }
+
     fn recreate_swapchain(&mut self) -> Result<(), RendererError> {
         self.ctx.device.wait_idle();
 
@@ -791,6 +1009,17 @@ impl Renderer {
             .resize(&self.ctx.device, self.swapchain.extent);
         self.post_effects
             .resize(&self.ctx.device, self.swapchain.extent);
+        if let Some((_, slot)) = &mut self.shader_pack
+            && let Some(pack) = slot
+        {
+            if targets == old_targets {
+                pack.resize(&self.ctx.device, self.swapchain.extent);
+            } else {
+                // The final pass draws into the swapchain's format.
+                pack.destroy(&self.ctx.device);
+                *slot = None;
+            }
+        }
         self.menu_pipeline.set_blur_texture(
             &self.ctx.device,
             self.post_effects.blurred_texture(),
@@ -1254,6 +1483,12 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
+        // The pack binds the old atlas; it rebuilds on the next frame.
+        if let Some((_, pack)) = &mut self.shader_pack
+            && let Some(mut pack) = pack.take()
+        {
+            pack.destroy(&self.ctx.device);
+        }
         self.entity_renderer.reload_armor_assets(
             &self.ctx.device,
             &self.jar_assets_dir,
@@ -1678,6 +1913,8 @@ impl Renderer {
             self.gui_item_atlas.end_bake_pass(&encoder, bake);
         }
 
+        let pack_drawn = self.render_pack_world(&encoder, frame, &mode);
+
         let mut pass = encoder.begin_render_pass(
             &self.ctx.device,
             &self
@@ -1718,107 +1955,128 @@ impl Renderer {
                 book_preview,
                 eyes_in_water,
             } => {
-                // Vanilla water fog hides the sky dome and clouds; the framebuffer
-                // is cleared to the water fog color, so skipping them tints the view
-                // when looking up out of geometry.
-                if !*eyes_in_water {
-                    self.sky_pipeline.update_and_draw(
+                let cull_ms = if pack_drawn {
+                    if let Some((_, Some(pack))) = &mut self.shader_pack {
+                        pack.draw_final(&self.ctx.device, &mut pass, frame);
+                    }
+                    0.0
+                } else {
+                    // Vanilla water fog hides the sky dome and clouds; the framebuffer
+                    // is cleared to the water fog color, so skipping them tints the view
+                    // when looking up out of geometry.
+                    if !*eyes_in_water {
+                        self.sky_pipeline.update_and_draw(
+                            &mut pass,
+                            frame,
+                            &self.camera,
+                            sky,
+                            *render_distance,
+                        );
+                    }
+
+                    let t_cull = std::time::Instant::now();
+                    // Solid (no discard) first so it lays down depth and early-Z lets
+                    // the front-to-back order reject occluded fragments; cutout after.
+                    self.moving_block_buffers
+                        .upload(&self.ctx.device, frame, moving_blocks);
+                    self.chunk_pipeline.bind(&mut pass, frame, false);
+                    self.chunk_buffers
+                        .draw_indirect(&pass, frame, false, View::Camera);
+                    self.moving_block_buffers.draw(&pass, frame, false);
+                    self.chunk_pipeline.bind(&mut pass, frame, true);
+                    self.chunk_buffers
+                        .draw_indirect(&pass, frame, true, View::Camera);
+                    self.moving_block_buffers.draw(&pass, frame, true);
+                    let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
+
+                    let anchor = self.camera.anchor();
+                    let eye = self.camera_render_position();
+
+                    if let Some((block_pos, stage, state)) = destroy_info {
+                        self.block_overlay_pipeline.draw(
+                            &mut pass,
+                            frame,
+                            *block_render,
+                            *state,
+                            block_pos,
+                            anchor,
+                            *stage,
+                        );
+                    }
+
+                    let ent_frustum = self.camera.frustum_planes();
+                    let ent_cull_dist = entity_cull_distance(*render_distance);
+
+                    self.entity_shadow_pipeline
+                        .draw(&mut pass, frame, shadows, anchor, eye);
+
+                    self.entity_renderer.draw(
                         &mut pass,
                         frame,
-                        &self.camera,
-                        sky,
-                        *render_distance,
-                    );
-                }
-
-                let t_cull = std::time::Instant::now();
-                // Solid (no discard) first so it lays down depth and early-Z lets
-                // the front-to-back order reject occluded fragments; cutout after.
-                self.moving_block_buffers
-                    .upload(&self.ctx.device, frame, moving_blocks);
-                self.chunk_pipeline.bind(&mut pass, frame, false);
-                self.chunk_buffers.draw_indirect(&pass, frame, false);
-                self.moving_block_buffers.draw(&pass, frame, false);
-                self.chunk_pipeline.bind(&mut pass, frame, true);
-                self.chunk_buffers.draw_indirect(&pass, frame, true);
-                self.moving_block_buffers.draw(&pass, frame, true);
-                let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
-
-                let anchor = self.camera.anchor();
-                let eye = self.camera_render_position();
-
-                if let Some((block_pos, stage, state)) = destroy_info {
-                    self.block_overlay_pipeline.draw(
-                        &mut pass,
-                        frame,
-                        *block_render,
-                        *state,
-                        block_pos,
+                        entities,
+                        &ent_frustum,
                         anchor,
-                        *stage,
+                        eye,
+                        ent_cull_dist,
                     );
-                }
 
-                let ent_frustum = self.camera.frustum_planes();
-                // Entities aren't sent beyond the server's tracking range; a
-                // generous render-distance cap just trims anything stray.
-                let ent_cull_dist = (*render_distance * 16) as f32 + 16.0;
+                    self.block_entity_pipeline
+                        .draw(&mut pass, frame, anchor, block_entities);
 
-                self.entity_shadow_pipeline
-                    .draw(&mut pass, frame, shadows, anchor, eye);
+                    self.item_entity_pipeline.draw(
+                        &self.ctx.device,
+                        &mut pass,
+                        frame,
+                        item_entities,
+                    );
 
-                self.entity_renderer.draw(
-                    &mut pass,
-                    frame,
-                    entities,
-                    &ent_frustum,
-                    anchor,
-                    eye,
-                    ent_cull_dist,
-                );
+                    // Break particles draw after entities but before translucent
+                    // water: they write depth, and pomme's water doesn't, so this
+                    // lets water blend over particles behind it (vanilla draws
+                    // particles after all translucents into a depth-sharing
+                    // target).
+                    self.particle_pipeline.update_and_draw(
+                        &mut pass,
+                        frame,
+                        &self.camera,
+                        particles,
+                    );
 
-                self.block_entity_pipeline
-                    .draw(&mut pass, frame, anchor, block_entities);
+                    // Translucent water draws after opaque terrain and entities so it
+                    // blends over them; depth-tested (occluded by geometry in front)
+                    // but doesn't write depth. CPU frustum-culled, reusing the entity
+                    // frustum/eye.
+                    self.chunk_pipeline.bind_water(&mut pass, frame);
+                    self.chunk_buffers
+                        .draw_water(&pass, &ent_frustum, anchor, eye);
 
-                self.item_entity_pipeline
-                    .draw(&self.ctx.device, &mut pass, frame, item_entities);
+                    // Clouds draw after opaque world geometry (so terrain occludes
+                    // them) and before weather, depth-tested against the scene.
+                    if !*eyes_in_water {
+                        self.cloud_pipeline.update_and_draw(
+                            &mut pass,
+                            frame,
+                            &self.camera,
+                            sky,
+                            *cloud_mode,
+                        );
+                    }
 
-                // Break particles draw after entities but before translucent
-                // water: they write depth, and pomme's water doesn't, so this
-                // lets water blend over particles behind it (vanilla draws
-                // particles after all translucents into a depth-sharing
-                // target).
-                self.particle_pipeline
-                    .update_and_draw(&mut pass, frame, &self.camera, particles);
-
-                // Translucent water draws after opaque terrain and entities so it
-                // blends over them; depth-tested (occluded by geometry in front)
-                // but doesn't write depth. CPU frustum-culled, reusing the entity
-                // frustum/eye.
-                self.chunk_pipeline.bind_water(&mut pass, frame);
-                self.chunk_buffers
-                    .draw_water(&pass, &ent_frustum, anchor, eye);
-
-                // Clouds draw after opaque world geometry (so terrain occludes
-                // them) and before weather, depth-tested against the scene.
-                if !*eyes_in_water {
-                    self.cloud_pipeline.update_and_draw(
+                    // Weather draws after opaque world geometry (depth-tested against
+                    // terrain) but before the depth clear for the hand pass.
+                    self.weather_pipeline.update_and_draw(
                         &mut pass,
                         frame,
                         &self.camera,
                         sky,
-                        *cloud_mode,
+                        weather,
                     );
-                }
 
-                // Weather draws after opaque world geometry (depth-tested against
-                // terrain) but before the depth clear for the hand pass.
-                self.weather_pipeline
-                    .update_and_draw(&mut pass, frame, &self.camera, sky, weather);
-
-                if *show_chunk_borders {
-                    self.chunk_border_pipeline.draw(&mut pass, frame);
-                }
+                    if *show_chunk_borders {
+                        self.chunk_border_pipeline.draw(&mut pass, frame);
+                    }
+                    cull_ms
+                };
 
                 pass.clear_depth(scissor);
 
@@ -2370,6 +2628,9 @@ impl Drop for Renderer {
         self.ctx.device.wait_idle();
 
         self.screenshot.destroy(&self.ctx.device);
+        if let Some((_, Some(mut pack))) = self.shader_pack.take() {
+            pack.destroy(&self.ctx.device);
+        }
         self.chunk_buffers.destroy(&self.ctx.device);
         self.chunk_pipeline.destroy(&self.ctx.device);
         self.lightmap.destroy(&self.ctx.device);
@@ -2401,6 +2662,12 @@ impl Drop for Renderer {
 
         self.swapchain.destroy(&self.ctx);
     }
+}
+
+/// Entities aren't sent beyond the server's tracking range; a generous
+/// render-distance cap just trims anything stray.
+fn entity_cull_distance(render_distance: u32) -> f32 {
+    (render_distance * 16) as f32 + 16.0
 }
 
 #[cfg(test)]

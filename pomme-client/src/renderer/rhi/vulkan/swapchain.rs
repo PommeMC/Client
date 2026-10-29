@@ -207,10 +207,7 @@ impl Swapchain {
 
     /// The targets of pipelines that draw into the swapchain.
     pub fn targets(&self) -> super::PipelineTargets {
-        super::PipelineTargets {
-            color: self.format.format,
-            depth: true,
-        }
+        super::PipelineTargets::new(self.format.format, true)
     }
 
     /// Image `index`, as the RHI takes it.

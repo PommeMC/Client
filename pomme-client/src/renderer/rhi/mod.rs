@@ -155,6 +155,14 @@ pub enum TextureUse {
     ShaderRead,
     ColorAttachment,
     Present,
+    /// A depth texture as a pass's depth target.
+    DepthAttachment,
+    /// A depth texture sampled by a shader.
+    DepthRead,
+    /// A depth texture as a copy's source.
+    DepthCopySrc,
+    /// A depth texture as a copy's destination, or being cleared.
+    DepthCopyDst,
 }
 
 /// `range` of `texture` moving from one use to the next.
@@ -236,10 +244,20 @@ flags! {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TextureFormat {
     R8Unorm,
+    Rg8Unorm,
     Rgba8Unorm,
+    Rgba16Unorm,
+    Rgb10a2Unorm,
+    R16Float,
+    Rg16Float,
+    Rgba16Float,
+    R32Float,
+    Rg32Float,
+    Rgba32Float,
+    Rg11b10Float,
     Depth32Float,
 }
 
@@ -248,7 +266,15 @@ impl TextureFormat {
     pub fn texel_size(self) -> u32 {
         match self {
             Self::R8Unorm => 1,
-            Self::Rgba8Unorm | Self::Depth32Float => 4,
+            Self::Rg8Unorm | Self::R16Float => 2,
+            Self::Rgba8Unorm
+            | Self::Rgb10a2Unorm
+            | Self::Rg16Float
+            | Self::R32Float
+            | Self::Rg11b10Float
+            | Self::Depth32Float => 4,
+            Self::Rgba16Unorm | Self::Rgba16Float | Self::Rg32Float => 8,
+            Self::Rgba32Float => 16,
         }
     }
 }
@@ -349,17 +375,46 @@ impl<Texture> DepthAttachment<Texture> {
     }
 }
 
+/// The most color targets a pass or pipeline can have.
+pub const MAX_COLOR_TARGETS: usize = 8;
+
 /// The formats a pipeline draws into, as WebGPU pipelines name their targets'
 /// formats rather than a pass.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PipelineTargets<Format> {
-    pub color: Format,
+    /// The color target at location 0; `None` draws depth alone.
+    pub color: Option<Format>,
+    /// Further color targets, at locations 1, 2, ...
+    pub extra_colors: [Option<Format>; MAX_COLOR_TARGETS - 1],
     /// Whether there's a `Depth32Float` target.
     pub depth: bool,
 }
 
+impl<Format: Copy> PipelineTargets<Format> {
+    /// One color target, and a depth target if `depth`.
+    pub const fn new(color: Format, depth: bool) -> Self {
+        Self {
+            color: Some(color),
+            extra_colors: [None; MAX_COLOR_TARGETS - 1],
+            depth,
+        }
+    }
+
+    /// A depth target alone.
+    pub const fn depth_only() -> Self {
+        Self {
+            color: None,
+            extra_colors: [None; MAX_COLOR_TARGETS - 1],
+            depth: true,
+        }
+    }
+}
+
 pub struct RenderPassDesc<Texture, Format> {
-    pub color: ColorAttachment<Texture, Format>,
+    /// The color target at location 0; `None` draws depth alone.
+    pub color: Option<ColorAttachment<Texture, Format>>,
+    /// Further color targets, matching the pipelines' `extra_colors`.
+    pub extra_colors: Vec<ColorAttachment<Texture, Format>>,
     pub depth: Option<DepthAttachment<Texture>>,
     pub extent: Extent,
 }
@@ -375,12 +430,13 @@ impl<Texture, Format> RenderPassDesc<Texture, Format> {
         extent: Extent,
     ) -> Self {
         Self {
-            color: ColorAttachment {
+            color: Some(ColorAttachment {
                 texture: image,
                 format,
                 load,
                 store: StoreOp::Store,
-            },
+            }),
+            extra_colors: Vec::new(),
             depth: Some(DepthAttachment::cleared(depth)),
             extent,
         }
@@ -407,6 +463,8 @@ pub struct SamplerDesc {
     pub address_mode: AddressMode,
     pub mipmap_filter: FilterMode,
     pub lod_max_clamp: f32,
+    /// A comparison sampler for depth textures (GLSL's `sampler2DShadow`).
+    pub compare: Option<CompareFunction>,
 }
 
 impl SamplerDesc {
@@ -422,6 +480,7 @@ impl SamplerDesc {
             address_mode,
             mipmap_filter: FilterMode::Nearest,
             lod_max_clamp: 0.0,
+            compare: None,
         }
     }
 
@@ -726,6 +785,9 @@ pub struct RenderPipelineDesc<'a> {
     pub depth: Option<DepthState>,
     /// `None` writes the color unblended.
     pub blend: Option<BlendState>,
+    /// Clamps depth instead of clipping at the near and far planes, where the
+    /// device can.
+    pub depth_clamp: bool,
 }
 
 impl<'a> RenderPipelineDesc<'a> {
@@ -747,6 +809,7 @@ impl<'a> RenderPipelineDesc<'a> {
             front_face: FrontFace::Ccw,
             depth: None,
             blend: None,
+            depth_clamp: false,
         }
     }
 }

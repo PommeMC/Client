@@ -33,7 +33,7 @@ pub fn bench(c: &mut Criterion) {
         for (case, fade_enabled) in [("fading", true), ("static", false)] {
             group.bench_function(format!("{case}/rd{rd}"), |b| {
                 b.iter(|| {
-                    build_meta(&chunks, &vis, fade_enabled, EYE, now, &mut meta);
+                    build_meta(&chunks, Some(&vis), fade_enabled, EYE, now, &mut meta);
                     sort_meta(&mut meta, EYE);
                     black_box(meta.len())
                 })

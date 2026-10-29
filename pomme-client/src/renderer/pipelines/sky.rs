@@ -1,7 +1,7 @@
 use std::f32::consts::TAU;
 use std::path::Path;
 
-use glam::Vec3;
+use glam::{Mat4, Vec3, Vec4};
 
 use crate::assets::AssetIndex;
 use crate::renderer::camera::Camera;
@@ -21,25 +21,71 @@ const END_SKY_REPEATS: f32 = 16.0;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct SkyVertex {
+pub struct SkyVertex {
     position: [f32; 3],
     uv: [f32; 2],
+}
+
+impl SkyVertex {
+    pub const BUFFER: rhi::VertexBufferLayout<'static> =
+        rhi::vertex_buffer!(Self, [Float32x3, Float32x2]);
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct SkyUniform {
     view_proj: [[f32; 4]; 4],
-    sky_color: [f32; 4],
-    sunrise_color: [f32; 4],
     /// rgb: the fog colour (sRGB), w: vanilla's `FogSkyEnd`.
     fog_color: [f32; 4],
-    sun_angle: f32,
-    moon_angle: f32,
-    star_angle: f32,
-    star_brightness: f32,
-    celestial_alpha: f32,
-    _pad: [f32; 3],
+}
+
+/// What a sky draw is: Iris's render stage for it (`MC_RENDER_STAGE_*`),
+/// which `sky.frag` branches on too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SkyStage {
+    Sky = 1,
+    Sunset = 2,
+    CustomSky = 3,
+    Sun = 4,
+    Moon = 5,
+    Stars = 6,
+    Void = 7,
+}
+
+impl SkyStage {
+    /// Whether a pack draws it with `gbuffers_skytextured` rather than
+    /// `gbuffers_skybasic`.
+    pub fn textured(self) -> bool {
+        matches!(self, Self::CustomSky | Self::Sun | Self::Moon)
+    }
+
+    /// Whether it adds onto the sky, vanilla's `OVERLAY` blend.
+    pub fn overlay(self) -> bool {
+        matches!(self, Self::Sun | Self::Moon | Self::Stars)
+    }
+}
+
+/// The push block `sky.vert` and a pack's sky prelude read.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SkyPush {
+    /// Vanilla's pose for the element, on top of the sky's view.
+    pose: [[f32; 4]; 4],
+    /// Vanilla's colour modulator for it.
+    color: [f32; 4],
+    stage: u32,
+}
+
+pub const SKY_PUSH_SIZE: u32 = size_of::<SkyPush>() as u32;
+
+/// One element of the sky, as vanilla's `SkyRenderer.render` draws it.
+#[derive(Clone, Copy)]
+pub struct SkyDraw {
+    pub stage: SkyStage,
+    push: SkyPush,
+    texture: rhi::backend::BindGroup,
+    vertices: (u32, u32),
 }
 
 #[derive(Clone)]
@@ -107,18 +153,7 @@ pub struct SkyPipeline {
     end_sky_set: rhi::backend::BindGroup,
     ubo_buffers: Vec<rhi::backend::Buffer>,
     vertex_buffer: rhi::backend::Buffer,
-    top_disc_offset: u32,
-    top_disc_count: u32,
-    star_offset: u32,
-    star_count: u32,
-    sun_offset: u32,
-    moon_offset: u32,
-    sunrise_offset: u32,
-    sunrise_count: u32,
-    dark_disc_offset: u32,
-    dark_disc_count: u32,
-    end_sky_offset: u32,
-    end_sky_count: u32,
+    ranges: Ranges,
     sun: rhi::backend::Texture,
     sampler: rhi::backend::Sampler,
     moons: Vec<rhi::backend::Texture>,
@@ -141,7 +176,7 @@ impl SkyPipeline {
             &[ubo_layout, tex_layout],
             Some(rhi::PushConstants {
                 visibility: rhi::ShaderStages::VERTEX_FRAGMENT,
-                size: 4,
+                size: SKY_PUSH_SIZE,
             }),
         );
 
@@ -192,21 +227,12 @@ impl SkyPipeline {
         let end_sky_set =
             util::create_texture_group(device, tex_layout, end_sky.handle(), end_sky_sampler);
 
-        let geom = build_all_geometry();
-        let vertex_bytes = bytemuck::cast_slice::<SkyVertex, u8>(&geom.vertices);
+        let (vertices, ranges) = build_all_geometry();
         let vertex_buffer = rhi::backend::Buffer::with_data(
             device,
             "sky_vertices",
-            vertex_bytes,
+            bytemuck::cast_slice(&vertices),
             rhi::BufferUsages::VERTEX,
-        );
-
-        tracing::info!(
-            "Sky pipeline initialized ({} top_disc, {} star, 6 sun, 6 moon, {} sunrise, {} dark_disc vertices)",
-            geom.top_disc_count,
-            geom.star_count,
-            geom.sunrise_count,
-            geom.dark_disc_count
         );
 
         Self {
@@ -221,18 +247,7 @@ impl SkyPipeline {
             end_sky_set,
             ubo_buffers,
             vertex_buffer,
-            top_disc_offset: geom.top_disc_offset,
-            top_disc_count: geom.top_disc_count,
-            star_offset: geom.star_offset,
-            star_count: geom.star_count,
-            sun_offset: geom.sun_offset,
-            moon_offset: geom.moon_offset,
-            sunrise_offset: geom.sunrise_offset,
-            sunrise_count: geom.sunrise_count,
-            dark_disc_offset: geom.dark_disc_offset,
-            dark_disc_count: geom.dark_disc_count,
-            end_sky_offset: geom.end_sky_offset,
-            end_sky_count: geom.end_sky_count,
+            ranges,
             sun,
             sampler,
             moons,
@@ -249,91 +264,74 @@ impl SkyPipeline {
         sky: &SkyState,
         render_distance: u32,
     ) {
-        if sky.skybox == Skybox::None {
-            return;
-        }
-        let attributes = &sky.attributes;
-        let sky_color = attributes.sky_color.extend(1.0).to_array();
-        let sunrise_argb = attributes.sunrise_sunset_color.to_array();
-        let moon_phase_idx = usize::from(attributes.moon_phase % 8);
         // `AtmosphericFogEnvironment.setupFog`'s sky end.
-        let sky_fog_end = ((render_distance * 16) as f32).min(attributes.sky_fog_end_distance);
-
-        let celestial_alpha = 1.0 - sky.rain();
-
-        let view_proj = camera.sky_view_projection();
-
+        let sky_fog_end = ((render_distance * 16) as f32).min(sky.attributes.sky_fog_end_distance);
         let uniform = SkyUniform {
-            view_proj: view_proj.to_cols_array_2d(),
-            sky_color,
-            sunrise_color: sunrise_argb,
+            view_proj: camera.sky_view_projection().to_cols_array_2d(),
             fog_color: sky.fog_color.extend(sky_fog_end).to_array(),
-            sun_angle: attributes.sun_angle.to_radians(),
-            moon_angle: attributes.moon_angle.to_radians(),
-            star_angle: attributes.star_angle.to_radians(),
-            star_brightness: attributes.star_brightness,
-            celestial_alpha,
-            _pad: [0.0; 3],
         };
+        self.ubo_buffers[frame].write(bytemuck::bytes_of(&uniform));
 
-        let bytes = bytemuck::bytes_of(&uniform);
-        self.ubo_buffers[frame].write(bytes);
-
-        let push_mode = |pass: &rhi::backend::RenderPassEncoder, mode: u32| {
-            pass.set_push_constants(
-                rhi::ShaderStages::VERTEX_FRAGMENT,
-                0,
-                bytemuck::bytes_of(&mode),
-            );
-        };
-        let bind = |pass: &mut rhi::backend::RenderPassEncoder,
-                    pipeline: rhi::backend::RenderPipeline| {
-            pass.set_pipeline(&pipeline);
-            pass.set_vertex_buffer(0, self.vertex_buffer.handle());
-            pass.set_bind_groups(0, &[self.ubo_sets[frame], self.sun_set]);
-        };
-
-        bind(pass, self.pipeline);
-        // Vanilla `SkyRenderer.renderEndSky`.
-        // TODO: the end flash.
-        if sky.skybox == Skybox::End {
-            pass.set_bind_group(1, self.end_sky_set);
-            push_mode(pass, 6);
-            pass.draw(self.end_sky_count, 1, self.end_sky_offset, 0);
-            return;
+        let mut overlay = None;
+        for draw in self.draws(camera, sky, 0.0) {
+            let blend = draw.stage.overlay();
+            if overlay != Some(blend) {
+                overlay = Some(blend);
+                pass.set_pipeline(if blend {
+                    &self.overlay_pipeline
+                } else {
+                    &self.pipeline
+                });
+                pass.set_bind_group(0, self.ubo_sets[frame]);
+            }
+            self.record(pass, &draw, 1);
         }
-        push_mode(pass, 0);
-        pass.draw(self.top_disc_count, 1, self.top_disc_offset, 0);
+    }
 
-        // The chunk-load benchmark's top-down view keeps the sky backdrop but drops
-        // the sun, moon, stars, and sunrise glow so only terrain reads.
-        if camera.top_down().is_some() {
-            return;
-        }
+    /// [`elements`] with their textures and vertices; `tilt` is a shader
+    /// pack's `sunPathRotation`.
+    pub fn draws(&self, camera: &Camera, sky: &SkyState, tilt: f32) -> Vec<SkyDraw> {
+        elements(sky, camera.top_down().is_some(), tilt)
+            .into_iter()
+            .map(|(stage, pose, color)| {
+                let (texture, vertices) = match stage {
+                    SkyStage::Sky => (self.sun_set, self.ranges.top_disc),
+                    SkyStage::Sunset => (self.sun_set, self.ranges.sunrise),
+                    SkyStage::CustomSky => (self.end_sky_set, self.ranges.end_sky),
+                    SkyStage::Sun => (self.sun_set, self.ranges.sun),
+                    SkyStage::Moon => (
+                        self.moon_sets[usize::from(sky.attributes.moon_phase % 8)],
+                        self.ranges.moon,
+                    ),
+                    SkyStage::Stars => (self.sun_set, self.ranges.stars),
+                    SkyStage::Void => (self.sun_set, self.ranges.dark_disc),
+                };
+                SkyDraw {
+                    stage,
+                    push: SkyPush {
+                        pose: pose.to_cols_array_2d(),
+                        color: color.to_array(),
+                        stage: stage as u32,
+                    },
+                    texture,
+                    vertices,
+                }
+            })
+            .collect()
+    }
 
-        if sunrise_argb[3] > 0.001 {
-            push_mode(pass, 5);
-            pass.draw(self.sunrise_count, 1, self.sunrise_offset, 0);
-        }
-
-        bind(pass, self.overlay_pipeline);
-        push_mode(pass, 2);
-        pass.draw(6, 1, self.sun_offset, 0);
-
-        pass.set_bind_group(1, self.moon_sets[moon_phase_idx]);
-        push_mode(pass, 3);
-        pass.draw(6, 1, self.moon_offset, 0);
-
-        if attributes.star_brightness > 0.0 {
-            push_mode(pass, 1);
-            pass.draw(self.star_count, 1, self.star_offset, 0);
-        }
-
-        if sky.dark_disc {
-            bind(pass, self.pipeline);
-            push_mode(pass, 4);
-            pass.draw(self.dark_disc_count, 1, self.dark_disc_offset, 0);
-        }
+    /// Records `draw` into a pass whose pipeline layout takes the sky push
+    /// block, its texture bound at `texture_set`.
+    pub fn record(&self, pass: &rhi::backend::RenderPassEncoder, draw: &SkyDraw, texture_set: u32) {
+        pass.set_vertex_buffer(0, self.vertex_buffer.handle());
+        pass.set_bind_group(texture_set, draw.texture);
+        pass.set_push_constants(
+            rhi::ShaderStages::VERTEX_FRAGMENT,
+            0,
+            bytemuck::bytes_of(&draw.push),
+        );
+        let (first, count) = draw.vertices;
+        pass.draw(count, 1, first, 0);
     }
 
     pub fn recreate_pipeline(
@@ -373,6 +371,81 @@ impl SkyPipeline {
     }
 }
 
+/// Vanilla's `rotateDegrees(YP, -90)` then `rotate(XP, angle)` for the sun,
+/// moon and stars, with Iris's `sunPathRotation` `tilt` about Z between.
+pub fn celestial_pose(degrees: f32, tilt: f32) -> Mat4 {
+    Mat4::from_rotation_y(-90f32.to_radians())
+        * Mat4::from_rotation_z(tilt.to_radians())
+        * Mat4::from_rotation_x(degrees.to_radians())
+}
+
+/// Vanilla `SkyRenderer.render`'s elements in order, each with its pose and
+/// colour modulator. The chunk-load benchmark's `top_down` view keeps the
+/// sky backdrop but drops the sun, moon, stars and sunrise glow so only
+/// terrain reads.
+fn elements(sky: &SkyState, top_down: bool, tilt: f32) -> Vec<(SkyStage, Mat4, Vec4)> {
+    let attributes = &sky.attributes;
+    match sky.skybox {
+        Skybox::None => return Vec::new(),
+        // Vanilla `SkyRenderer.renderEndSky`: grey 0x28.
+        // TODO: the end flash.
+        Skybox::End => {
+            let grey = Vec3::splat(40.0 / 255.0).extend(1.0);
+            return vec![(SkyStage::CustomSky, Mat4::IDENTITY, grey)];
+        }
+        Skybox::Overworld => {}
+    }
+    let mut elements = vec![(
+        SkyStage::Sky,
+        Mat4::IDENTITY,
+        attributes.sky_color.extend(1.0),
+    )];
+    if top_down {
+        return elements;
+    }
+
+    let sunrise = attributes.sunrise_sunset_color;
+    if sunrise.w > 0.001 {
+        let flip = if attributes.sun_angle.to_radians().sin() < 0.0 {
+            180.0
+        } else {
+            0.0
+        };
+        let pose = Mat4::from_rotation_x(90f32.to_radians())
+            * Mat4::from_rotation_z((flip + 90f32).to_radians())
+            * Mat4::from_scale(Vec3::new(1.0, 1.0, sunrise.w));
+        elements.push((SkyStage::Sunset, pose, sunrise));
+    }
+
+    let celestial = |degrees| celestial_pose(degrees, tilt);
+    let rain_brightness = Vec4::new(1.0, 1.0, 1.0, 1.0 - sky.rain());
+    elements.push((
+        SkyStage::Sun,
+        celestial(attributes.sun_angle),
+        rain_brightness,
+    ));
+    elements.push((
+        SkyStage::Moon,
+        celestial(attributes.moon_angle),
+        rain_brightness,
+    ));
+    if attributes.star_brightness > 0.0 {
+        elements.push((
+            SkyStage::Stars,
+            celestial(attributes.star_angle),
+            Vec4::splat(attributes.star_brightness),
+        ));
+    }
+    if sky.dark_disc {
+        elements.push((
+            SkyStage::Void,
+            Mat4::from_translation(Vec3::new(0.0, 12.0, 0.0)),
+            Vec4::W,
+        ));
+    }
+    elements
+}
+
 struct JavaRandom {
     seed: u64,
 }
@@ -400,67 +473,38 @@ impl JavaRandom {
     }
 }
 
-struct Geometry {
-    vertices: Vec<SkyVertex>,
-    top_disc_offset: u32,
-    top_disc_count: u32,
-    star_offset: u32,
-    star_count: u32,
-    sun_offset: u32,
-    moon_offset: u32,
-    sunrise_offset: u32,
-    sunrise_count: u32,
-    dark_disc_offset: u32,
-    dark_disc_count: u32,
-    end_sky_offset: u32,
-    end_sky_count: u32,
+/// Each element's first vertex and vertex count in `sky_vertices`.
+struct Ranges {
+    top_disc: (u32, u32),
+    stars: (u32, u32),
+    sun: (u32, u32),
+    moon: (u32, u32),
+    sunrise: (u32, u32),
+    dark_disc: (u32, u32),
+    end_sky: (u32, u32),
 }
 
-fn build_all_geometry() -> Geometry {
+fn build_all_geometry() -> (Vec<SkyVertex>, Ranges) {
     let mut verts = Vec::new();
-
-    let top_disc_offset = 0u32;
-    build_sky_disc(&mut verts, 16.0);
-    let top_disc_count = verts.len() as u32;
-
-    let star_offset = verts.len() as u32;
-    build_stars(&mut verts);
-    let star_count = verts.len() as u32 - star_offset;
-
-    let sun_offset = verts.len() as u32;
-    build_celestial_quad(&mut verts, SUN_SIZE);
-
-    let moon_offset = verts.len() as u32;
-    build_celestial_quad(&mut verts, MOON_SIZE);
-
-    let sunrise_offset = verts.len() as u32;
-    build_sunrise_fan(&mut verts);
-    let sunrise_count = verts.len() as u32 - sunrise_offset;
-
-    // Built at -16 and drawn 12 higher, so its fog distances are vanilla's.
-    let dark_disc_offset = verts.len() as u32;
-    build_sky_disc(&mut verts, -16.0);
-    let dark_disc_count = verts.len() as u32 - dark_disc_offset;
-
-    let end_sky_offset = verts.len() as u32;
-    build_end_sky(&mut verts);
-    let end_sky_count = verts.len() as u32 - end_sky_offset;
-
-    Geometry {
-        vertices: verts,
-        top_disc_offset,
-        top_disc_count,
-        star_offset,
-        star_count,
-        sun_offset,
-        moon_offset,
-        sunrise_offset,
-        sunrise_count,
-        dark_disc_offset,
-        dark_disc_count,
-        end_sky_offset,
-        end_sky_count,
-    }
+    let mut add = |build: &dyn Fn(&mut Vec<SkyVertex>)| {
+        let first = verts.len() as u32;
+        build(&mut verts);
+        (first, verts.len() as u32 - first)
+    };
+    let ranges = Ranges {
+        top_disc: add(&|v| build_sky_disc(v, 16.0)),
+        stars: add(&build_stars),
+        sun: add(&|v| build_celestial_quad(v, SUN_SIZE, CELESTIAL_UVS)),
+        // Each phase is its own texture, its quad's uvs turned half a turn.
+        moon: add(&|v| {
+            build_celestial_quad(v, MOON_SIZE, CELESTIAL_UVS.map(|[u, v]| [1.0 - u, 1.0 - v]))
+        }),
+        sunrise: add(&build_sunrise_fan),
+        // Built at -16 and drawn 12 higher, so its fog distances are vanilla's.
+        dark_disc: add(&|v| build_sky_disc(v, -16.0)),
+        end_sky: add(&build_end_sky),
+    };
+    (verts, ranges)
 }
 
 /// Vanilla `SkyRenderer.buildEndSky`: the inside of a cube, one face turned
@@ -590,14 +634,15 @@ fn rotation_matrix_towards(direction: Vec3, up: Vec3, z_rotation: f32) -> glam::
     basis * z_rot
 }
 
-fn build_celestial_quad(verts: &mut Vec<SkyVertex>, size: f32) {
+const CELESTIAL_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
+fn build_celestial_quad(verts: &mut Vec<SkyVertex>, size: f32, uvs: [[f32; 2]; 4]) {
     let corners = [
         [-size, CELESTIAL_DIST, -size],
         [size, CELESTIAL_DIST, -size],
         [size, CELESTIAL_DIST, size],
         [-size, CELESTIAL_DIST, size],
     ];
-    let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
 
     for &idx in &[0usize, 1, 2, 0, 2, 3] {
         verts.push(SkyVertex {
@@ -643,11 +688,14 @@ fn create_pipelines(
             layout,
             &rhi::RenderPipelineDesc {
                 blend: Some(blend),
+                // Clipping the disc where it passes behind the eye can open a
+                // pixel-wide crack along the edges its triangles share.
+                depth_clamp: true,
                 ..rhi::RenderPipelineDesc::new(
                     label,
                     shader::include_shader!("sky.vert"),
                     shader::include_shader!("sky.frag"),
-                    &[rhi::vertex_buffer!(SkyVertex, [Float32x3, Float32x2])],
+                    &[SkyVertex::BUFFER],
                 )
             },
         )
@@ -656,4 +704,105 @@ fn create_pipelines(
         create("sky", rhi::BlendState::TRANSLUCENT),
         create("sky overlay", rhi::BlendState::OVERLAY),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stages(sky: &SkyState, top_down: bool) -> Vec<SkyStage> {
+        elements(sky, top_down, 0.0)
+            .into_iter()
+            .map(|(s, _, _)| s)
+            .collect()
+    }
+
+    #[test]
+    fn elements_follow_vanilla_order_and_conditions() {
+        let mut sky = SkyState::default_day();
+        sky.attributes.star_brightness = 0.0;
+        sky.attributes.sunrise_sunset_color = Vec4::ZERO;
+        assert_eq!(
+            stages(&sky, false),
+            [SkyStage::Sky, SkyStage::Sun, SkyStage::Moon]
+        );
+        assert_eq!(stages(&sky, true), [SkyStage::Sky]);
+
+        sky.attributes.star_brightness = 0.5;
+        sky.attributes.sunrise_sunset_color = Vec4::new(1.0, 0.5, 0.2, 0.8);
+        sky.dark_disc = true;
+        assert_eq!(
+            stages(&sky, false),
+            [
+                SkyStage::Sky,
+                SkyStage::Sunset,
+                SkyStage::Sun,
+                SkyStage::Moon,
+                SkyStage::Stars,
+                SkyStage::Void,
+            ]
+        );
+
+        sky.skybox = Skybox::End;
+        assert_eq!(stages(&sky, false), [SkyStage::CustomSky]);
+        sky.skybox = Skybox::None;
+        assert!(stages(&sky, false).is_empty());
+    }
+
+    #[test]
+    fn sun_path_rotation_tilts_the_sun() {
+        let sun = celestial_pose(0.0, 30.0).transform_point3(Vec3::new(0.0, 100.0, 0.0));
+        let (s, c) = 30f32.to_radians().sin_cos();
+        assert!(
+            sun.abs_diff_eq(Vec3::new(0.0, 100.0 * c, -100.0 * s), 1e-3),
+            "{sun}"
+        );
+    }
+
+    #[test]
+    fn stages_are_iris_render_stages() {
+        use crate::shaderpack::preprocess::render_stage;
+        for (stage, name) in [
+            (SkyStage::Sky, "SKY"),
+            (SkyStage::Sunset, "SUNSET"),
+            (SkyStage::CustomSky, "CUSTOM_SKY"),
+            (SkyStage::Sun, "SUN"),
+            (SkyStage::Moon, "MOON"),
+            (SkyStage::Stars, "STARS"),
+            (SkyStage::Void, "VOID"),
+        ] {
+            assert_eq!(stage as usize, render_stage(name));
+        }
+    }
+
+    #[test]
+    fn poses_match_vanilla_pose_stacks() {
+        let mut sky = SkyState::default_day();
+        sky.attributes.sun_angle = 30.0;
+        sky.attributes.sunrise_sunset_color = Vec4::new(1.0, 0.5, 0.2, 0.5);
+        let elements = elements(&sky, false, 0.0);
+        let pose = |stage| elements.iter().find(|e| e.0 == stage).unwrap().1;
+        let close = |a: Vec3, b: Vec3| assert!(a.abs_diff_eq(b, 1e-3), "{a} != {b}");
+
+        // `rotateDegrees(YP, -90)` then `rotate(XP, angle)`: the sun, overhead
+        // at angle 0, swings toward -x as the angle grows.
+        let sun = pose(SkyStage::Sun);
+        let (s, c) = 30f32.to_radians().sin_cos();
+        close(
+            sun.transform_point3(Vec3::new(0.0, 100.0, 0.0)),
+            Vec3::new(-100.0 * s, 100.0 * c, 0.0),
+        );
+
+        // `rotateDegrees(XP, 90)`, `rotateDegrees(ZP, 90)`, `scale(1, 1, a)`:
+        // the fan's centre lies on the horizon, its depth squashed by alpha.
+        let sunset = pose(SkyStage::Sunset);
+        close(
+            sunset.transform_point3(Vec3::new(0.0, 100.0, 0.0)),
+            Vec3::new(-100.0, 0.0, 0.0),
+        );
+        close(
+            sunset.transform_point3(Vec3::new(0.0, 0.0, -40.0)),
+            Vec3::new(0.0, 20.0, 0.0),
+        );
+    }
 }

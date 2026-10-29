@@ -230,10 +230,7 @@ impl GuiItemAtlas {
     }
 
     pub fn targets(&self) -> rhi::backend::PipelineTargets {
-        rhi::backend::PipelineTargets {
-            color: rhi::backend::texture_format(COLOR_FORMAT),
-            depth: true,
-        }
+        rhi::backend::PipelineTargets::new(rhi::backend::texture_format(COLOR_FORMAT), true)
     }
 
     pub fn get_or_allocate(
@@ -299,12 +296,13 @@ impl GuiItemAtlas {
             rhi::TextureUse::ColorAttachment,
         );
         let desc = rhi::backend::RenderPassDesc {
-            color: rhi::backend::ColorAttachment {
+            color: Some(rhi::backend::ColorAttachment {
                 texture: self.color.handle(),
                 format: rhi::backend::texture_format(COLOR_FORMAT),
                 load: rhi::LoadOp::Load,
                 store: rhi::StoreOp::Store,
-            },
+            }),
+            extra_colors: Vec::new(),
             depth: Some(rhi::backend::DepthAttachment::cleared(self.depth.handle())),
             extent: rhi::Extent {
                 width: self.atlas_px,

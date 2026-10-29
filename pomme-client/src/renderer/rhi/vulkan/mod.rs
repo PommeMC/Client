@@ -14,9 +14,9 @@ use pyronyx::vk;
 use super::{
     Acquired, AddressMode, BindGroupLayoutEntry, BindingType, BlendFactor, BlendState, Blit,
     BufferCopy, BufferUsages, BufferUse, CompareFunction, CullMode, Extent, FilterMode, FrontFace,
-    LoadOp, MemoryLocation, Presented, PushConstants, Rect, RenderPipelineDesc, SamplerDesc,
-    ShaderStages, StoreOp, TexelCopy, TextureDesc, TextureFormat, TextureRange, TextureUsages,
-    TextureUse, TextureViewDimension, Topology, VertexFormat, VertexStepMode,
+    LoadOp, MAX_COLOR_TARGETS, MemoryLocation, Presented, PushConstants, Rect, RenderPipelineDesc,
+    SamplerDesc, ShaderStages, StoreOp, TexelCopy, TextureDesc, TextureFormat, TextureRange,
+    TextureUsages, TextureUse, TextureViewDimension, Topology, VertexFormat, VertexStepMode,
 };
 use crate::renderer::MAX_FRAMES_IN_FLIGHT;
 
@@ -71,6 +71,9 @@ pub struct Device {
     /// A GPU with memory of its own, which uploads reach through a copy.
     pub discrete: bool,
     pub max_texture_array_layers: u32,
+    /// The widest 2D texture, in texels.
+    pub max_texture_size: u32,
+    depth_clamp: bool,
 }
 
 impl Device {
@@ -102,6 +105,8 @@ impl Device {
             device_local_bytes,
             discrete: properties.device_type == vk::PhysicalDeviceType::DiscreteGpu,
             max_texture_array_layers: properties.limits.max_image_array_layers,
+            max_texture_size: properties.limits.max_image_dimension2_d,
+            depth_clamp: physical_device.get_features().depth_clamp == vk::TRUE,
         }
     }
 
@@ -513,7 +518,17 @@ impl TextureHandle {
 pub fn texture_format(format: TextureFormat) -> vk::Format {
     match format {
         TextureFormat::R8Unorm => vk::Format::R8Unorm,
+        TextureFormat::Rg8Unorm => vk::Format::R8G8Unorm,
         TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8Unorm,
+        TextureFormat::Rgba16Unorm => vk::Format::R16G16B16A16Unorm,
+        TextureFormat::Rgb10a2Unorm => vk::Format::A2B10G10R10UnormPack32,
+        TextureFormat::R16Float => vk::Format::R16Sfloat,
+        TextureFormat::Rg16Float => vk::Format::R16G16Sfloat,
+        TextureFormat::Rgba16Float => vk::Format::R16G16B16A16Sfloat,
+        TextureFormat::R32Float => vk::Format::R32Sfloat,
+        TextureFormat::Rg32Float => vk::Format::R32G32Sfloat,
+        TextureFormat::Rgba32Float => vk::Format::R32G32B32A32Sfloat,
+        TextureFormat::Rg11b10Float => vk::Format::B10G11R11UfloatPack32,
         TextureFormat::Depth32Float => vk::Format::D32Sfloat,
     }
 }
@@ -567,6 +582,15 @@ pub fn try_create_sampler(device: &Device, desc: &SamplerDesc) -> Result<Sampler
         address_mode_v: address,
         address_mode_w: address,
         max_lod: desc.lod_max_clamp,
+        compare_enable: if desc.compare.is_some() {
+            vk::TRUE
+        } else {
+            vk::FALSE
+        },
+        compare_op: match desc.compare {
+            Some(CompareFunction::Less) => vk::CompareOp::Less,
+            Some(CompareFunction::LessEqual) | None => vk::CompareOp::LessOrEqual,
+        },
         ..Default::default()
     };
     device
@@ -778,11 +802,27 @@ pub fn create_render_pipeline(
     layout: PipelineLayout,
     desc: &RenderPipelineDesc,
 ) -> RenderPipeline {
-    let render_pass = device
-        .targets
-        .compatible_pass(device, targets.color, targets.depth);
-    let vert_module = shader_module(device, desc.vertex_shader);
-    let frag_module = shader_module(device, desc.fragment_shader);
+    try_create_render_pipeline(device, targets, layout, desc)
+        .unwrap_or_else(|e| panic!("failed to create {} pipeline: {e}", desc.label))
+}
+
+/// [`create_render_pipeline`] for shaders that may not be valid, such as a
+/// shader pack's.
+pub fn try_create_render_pipeline(
+    device: &Device,
+    targets: PipelineTargets,
+    layout: PipelineLayout,
+    desc: &RenderPipelineDesc,
+) -> Result<RenderPipeline, String> {
+    let render_pass = device.targets.compatible_pass(device, &targets);
+    let vert_module = try_shader_module(device, desc.vertex_shader)?;
+    let frag_module = match try_shader_module(device, desc.fragment_shader) {
+        Ok(module) => module,
+        Err(e) => {
+            device.raw.destroy_shader_module(vert_module, None);
+            return Err(e);
+        }
+    };
     let stages = [
         (vk::ShaderStageFlags::Vertex, vert_module),
         (vk::ShaderStageFlags::Fragment, frag_module),
@@ -857,6 +897,7 @@ pub fn create_render_pipeline(
             FrontFace::Cw => vk::FrontFace::Clockwise,
         },
         line_width: 1.0,
+        depth_clamp_enable: (desc.depth_clamp && device.depth_clamp).into(),
         ..Default::default()
     };
     if let Some(bias) = desc.depth.and_then(|depth| depth.bias) {
@@ -883,10 +924,23 @@ pub fn create_render_pipeline(
         None => vk::PipelineDepthStencilStateCreateInfo::default(),
     };
 
-    let blend_attachment = color_blend_attachment(desc.blend);
+    // Vulkan doesn't guarantee blending 32-bit float targets: they're
+    // written unblended.
+    let blend_attachments: Vec<_> = targets
+        .color
+        .into_iter()
+        .chain(targets.extra_colors.iter().flatten().copied())
+        .map(|format| {
+            let blendable = !matches!(
+                format,
+                vk::Format::R32Sfloat | vk::Format::R32G32Sfloat | vk::Format::R32G32B32A32Sfloat
+            );
+            color_blend_attachment(desc.blend.filter(|_| blendable))
+        })
+        .collect();
     let color_blending = vk::PipelineColorBlendStateCreateInfo {
-        attachment_count: 1,
-        attachments: &blend_attachment,
+        attachment_count: blend_attachments.len() as u32,
+        attachments: blend_attachments.as_ptr(),
         ..Default::default()
     };
 
@@ -915,22 +969,19 @@ pub fn create_render_pipeline(
     }];
 
     let mut pipeline = vk::Pipeline::null();
-    device
-        .raw
-        .create_graphics_pipelines(
-            vk::PipelineCache::null(),
-            &pipeline_info,
-            None,
-            slice::from_mut(&mut pipeline),
-        )
-        .unwrap_or_else(|e| panic!("failed to create {} pipeline: {e:?}", desc.label));
-
+    let created = device.raw.create_graphics_pipelines(
+        vk::PipelineCache::null(),
+        &pipeline_info,
+        None,
+        slice::from_mut(&mut pipeline),
+    );
     device.raw.destroy_shader_module(vert_module, None);
     device.raw.destroy_shader_module(frag_module, None);
-    RenderPipeline {
+    created.map_err(|e| format!("{e:?}"))?;
+    Ok(RenderPipeline {
         raw: pipeline,
         layout,
-    }
+    })
 }
 
 pub type TextureTransition = super::TextureTransition<TextureHandle>;
@@ -939,12 +990,21 @@ impl TextureUse {
     fn layout(self) -> vk::ImageLayout {
         match self {
             Self::Undefined => vk::ImageLayout::Undefined,
-            Self::CopySrc => vk::ImageLayout::TransferSrcOptimal,
-            Self::CopyDst => vk::ImageLayout::TransferDstOptimal,
+            Self::CopySrc | Self::DepthCopySrc => vk::ImageLayout::TransferSrcOptimal,
+            Self::CopyDst | Self::DepthCopyDst => vk::ImageLayout::TransferDstOptimal,
             Self::ShaderRead => vk::ImageLayout::ShaderReadOnlyOptimal,
             Self::ColorAttachment => vk::ImageLayout::ColorAttachmentOptimal,
             Self::Present => vk::ImageLayout::PresentSrcKHR,
+            Self::DepthAttachment => vk::ImageLayout::DepthStencilAttachmentOptimal,
+            Self::DepthRead => vk::ImageLayout::ShaderReadOnlyOptimal,
         }
+    }
+
+    fn is_depth(self) -> bool {
+        matches!(
+            self,
+            Self::DepthAttachment | Self::DepthRead | Self::DepthCopySrc | Self::DepthCopyDst
+        )
     }
 
     /// The access and stage that must finish before leaving this use.
@@ -964,17 +1024,23 @@ impl TextureUse {
     fn dst(self) -> (vk::AccessFlags, vk::PipelineStageFlags) {
         match self {
             Self::Undefined => unreachable!("textures can't move to Undefined"),
-            Self::CopySrc => (
+            Self::CopySrc | Self::DepthCopySrc => (
                 vk::AccessFlags::TransferRead,
                 vk::PipelineStageFlags::Transfer,
             ),
-            Self::CopyDst => (
+            Self::CopyDst | Self::DepthCopyDst => (
                 vk::AccessFlags::TransferWrite,
                 vk::PipelineStageFlags::Transfer,
             ),
-            Self::ShaderRead => (
+            Self::ShaderRead | Self::DepthRead => (
                 vk::AccessFlags::ShaderRead,
-                vk::PipelineStageFlags::FragmentShader,
+                vk::PipelineStageFlags::VertexShader | vk::PipelineStageFlags::FragmentShader,
+            ),
+            Self::DepthAttachment => (
+                vk::AccessFlags::DepthStencilAttachmentRead
+                    | vk::AccessFlags::DepthStencilAttachmentWrite,
+                vk::PipelineStageFlags::EarlyFragmentTests
+                    | vk::PipelineStageFlags::LateFragmentTests,
             ),
             Self::ColorAttachment => (
                 vk::AccessFlags::ColorAttachmentWrite,
@@ -1042,7 +1108,14 @@ impl CommandEncoder {
                     new_layout: t.to.layout(),
                     src_access_mask,
                     dst_access_mask,
-                    subresource_range: vk_range(t.range),
+                    subresource_range: vk::ImageSubresourceRange {
+                        aspect_mask: if t.from.is_depth() || t.to.is_depth() {
+                            vk::ImageAspectFlags::Depth
+                        } else {
+                            vk::ImageAspectFlags::Color
+                        },
+                        ..vk_range(t.range)
+                    },
                     ..Default::default()
                 }
             })
@@ -1161,6 +1234,44 @@ impl CommandEncoder {
         );
     }
 
+    /// Clears a depth `image` ([`TextureUse::DepthCopyDst`]) to `depth`.
+    pub fn clear_depth(&self, image: TextureHandle, depth: f32) {
+        self.cmd.clear_depth_stencil_image(
+            image.image,
+            TextureUse::DepthCopyDst.layout(),
+            &vk::ClearDepthStencilValue { depth, stencil: 0 },
+            &[DEPTH_SUBRESOURCE_RANGE],
+        );
+    }
+
+    /// Copies `extent` of a depth texture `src` ([`TextureUse::DepthCopySrc`])
+    /// into `dst` ([`TextureUse::DepthCopyDst`]).
+    pub fn copy_depth(&self, src: TextureHandle, dst: TextureHandle, extent: Extent) {
+        let layers = vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::Depth,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        self.cmd.copy_image(
+            src.image,
+            TextureUse::DepthCopySrc.layout(),
+            dst.image,
+            TextureUse::DepthCopyDst.layout(),
+            &[vk::ImageCopy {
+                src_subresource: layers,
+                src_offset: vk::Offset3D::default(),
+                dst_subresource: layers,
+                dst_offset: vk::Offset3D::default(),
+                extent: vk::Extent3D {
+                    width: extent.width,
+                    height: extent.height,
+                    depth: 1,
+                },
+            }],
+        );
+    }
+
     /// Uploads `copies` of `staging` into `range` of a fresh `image`, leaving
     /// it ready to sample.
     pub fn upload_texture(
@@ -1185,32 +1296,33 @@ impl CommandEncoder {
     /// covering its extent, as WebGPU starts every pass.
     pub fn begin_render_pass(&self, device: &Device, desc: &RenderPassDesc) -> RenderPassEncoder {
         let (render_pass, framebuffer) = device.targets.get(&device.raw, desc);
-        let clear_values = [
-            vk::ClearValue {
+        let mut clear_values: Vec<_> = pass_colors(desc)
+            .map(|color| vk::ClearValue {
                 color: vk::ClearColorValue {
-                    float32: match desc.color.load {
+                    float32: match color.load {
                         LoadOp::Clear(color) => color,
                         LoadOp::Load => [0.0; 4],
                     },
                 },
-            },
-            vk::ClearValue {
+            })
+            .collect();
+        if let Some(depth) = desc.depth {
+            clear_values.push(vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
-                    depth: match desc.depth.map(|depth| depth.load) {
-                        Some(LoadOp::Clear(depth)) => depth,
-                        _ => 1.0,
+                    depth: match depth.load {
+                        LoadOp::Clear(depth) => depth,
+                        LoadOp::Load => 1.0,
                     },
                     stencil: 0,
                 },
-            },
-        ];
-        let attachments = 1 + usize::from(desc.depth.is_some());
+            });
+        }
         RenderPassEncoder::begin(
             self.cmd,
             render_pass,
             framebuffer,
             desc.extent,
-            &clear_values[..attachments],
+            &clear_values,
         )
     }
 
@@ -1782,10 +1894,12 @@ struct TargetCache {
     framebuffers: HashMap<FramebufferKey, vk::Framebuffer>,
 }
 
+/// A pass's color targets: format, and whether it loads, in location order.
+type ColorKeys = [Option<(vk::Format, bool)>; MAX_COLOR_TARGETS];
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct PassKey {
-    color: vk::Format,
-    color_load: bool,
+    colors: ColorKeys,
     color_store: StoreOp,
     depth: Option<(bool, StoreOp)>,
 }
@@ -1793,36 +1907,55 @@ struct PassKey {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct FramebufferKey {
     render_pass: vk::RenderPass,
-    color: vk::ImageView,
+    colors: [vk::ImageView; MAX_COLOR_TARGETS],
     depth: vk::ImageView,
     width: u32,
     height: u32,
+}
+
+/// The color keys of `targets`, none loading.
+fn target_colors(targets: &PipelineTargets) -> ColorKeys {
+    let mut colors = [None; MAX_COLOR_TARGETS];
+    colors[0] = targets.color.map(|f| (f, false));
+    for (slot, format) in colors[1..].iter_mut().zip(targets.extra_colors) {
+        *slot = format.map(|f| (f, false));
+    }
+    colors
+}
+
+/// The color attachments of `desc`, in location order.
+fn pass_colors(desc: &RenderPassDesc) -> impl Iterator<Item = &ColorAttachment> {
+    desc.color.iter().chain(&desc.extra_colors)
 }
 
 impl RenderTargets {
     /// A pass for making pipelines that draw into `color`, and a depth target
     /// if `depth`: Vulkan makes a pipeline against a pass, and any with the
     /// same formats will do.
-    fn compatible_pass(&self, device: &Device, color: vk::Format, depth: bool) -> vk::RenderPass {
+    fn compatible_pass(&self, device: &Device, targets: &PipelineTargets) -> vk::RenderPass {
         self.cache().pass(
             &device.raw,
             PassKey {
-                color,
-                color_load: false,
+                colors: target_colors(targets),
                 color_store: StoreOp::Store,
-                depth: depth.then_some((false, StoreOp::Discard)),
+                depth: targets.depth.then_some((false, StoreOp::Discard)),
             },
         )
     }
 
     fn get(&self, device: &vk::Device, desc: &RenderPassDesc) -> (vk::RenderPass, vk::Framebuffer) {
         let mut cache = self.cache();
+        let mut colors = [None; MAX_COLOR_TARGETS];
+        let mut views = [vk::ImageView::null(); MAX_COLOR_TARGETS];
+        for (i, color) in pass_colors(desc).enumerate() {
+            colors[i] = Some((color.format, matches!(color.load, LoadOp::Load)));
+            views[i] = color.texture.view;
+        }
         let render_pass = cache.pass(
             device,
             PassKey {
-                color: desc.color.format,
-                color_load: matches!(desc.color.load, LoadOp::Load),
-                color_store: desc.color.store,
+                colors,
+                color_store: desc.color.as_ref().map_or(StoreOp::Store, |c| c.store),
                 depth: desc
                     .depth
                     .map(|depth| (matches!(depth.load, LoadOp::Load), depth.store)),
@@ -1830,7 +1963,7 @@ impl RenderTargets {
         );
         let key = FramebufferKey {
             render_pass,
-            color: desc.color.texture.view,
+            colors: views,
             depth: desc
                 .depth
                 .map_or(vk::ImageView::null(), |depth| depth.texture.view),
@@ -1838,10 +1971,18 @@ impl RenderTargets {
             height: desc.extent.height,
         };
         let framebuffer = *cache.framebuffers.entry(key).or_insert_with(|| {
-            let attachments = [key.color, key.depth];
+            let mut attachments: Vec<vk::ImageView> = key
+                .colors
+                .iter()
+                .copied()
+                .filter(|view| *view != vk::ImageView::null())
+                .collect();
+            if desc.depth.is_some() {
+                attachments.push(key.depth);
+            }
             let info = vk::FramebufferCreateInfo {
                 render_pass,
-                attachment_count: 1 + u32::from(desc.depth.is_some()),
+                attachment_count: attachments.len() as u32,
                 attachments: attachments.as_ptr(),
                 width: key.width,
                 height: key.height,
@@ -1859,7 +2000,7 @@ impl RenderTargets {
         self.cache().framebuffers.retain(|key, &mut framebuffer| {
             let stale = textures
                 .iter()
-                .any(|texture| texture.view == key.color || texture.view == key.depth);
+                .any(|texture| key.colors.contains(&texture.view) || texture.view == key.depth);
             if stale {
                 device.raw.destroy_framebuffer(framebuffer, None);
             }
@@ -1914,12 +2055,20 @@ fn create_render_pass(device: &vk::Device, key: PassKey) -> vk::RenderPass {
         final_layout: layout,
         ..Default::default()
     };
-    let mut attachments = vec![attachment(
-        key.color,
-        key.color_load,
-        key.color_store,
-        vk::ImageLayout::ColorAttachmentOptimal,
-    )];
+    let mut attachments: Vec<_> = key
+        .colors
+        .iter()
+        .flatten()
+        .map(|&(format, load)| {
+            attachment(
+                format,
+                load,
+                key.color_store,
+                vk::ImageLayout::ColorAttachmentOptimal,
+            )
+        })
+        .collect();
+    let color_count = attachments.len() as u32;
     if let Some((load, store)) = key.depth {
         attachments.push(attachment(
             vk::Format::D32Sfloat,
@@ -1928,18 +2077,20 @@ fn create_render_pass(device: &vk::Device, key: PassKey) -> vk::RenderPass {
             vk::ImageLayout::DepthStencilAttachmentOptimal,
         ));
     }
-    let color_ref = vk::AttachmentReference {
-        attachment: 0,
-        layout: vk::ImageLayout::ColorAttachmentOptimal,
-    };
+    let color_refs: Vec<_> = (0..color_count)
+        .map(|attachment| vk::AttachmentReference {
+            attachment,
+            layout: vk::ImageLayout::ColorAttachmentOptimal,
+        })
+        .collect();
     let depth_ref = vk::AttachmentReference {
-        attachment: 1,
+        attachment: color_count,
         layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
     };
     let subpass = vk::SubpassDescription {
         pipeline_bind_point: vk::PipelineBindPoint::Graphics,
-        color_attachment_count: 1,
-        color_attachments: &color_ref,
+        color_attachment_count: color_count,
+        color_attachments: color_refs.as_ptr(),
         depth_stencil_attachment: if key.depth.is_some() {
             &depth_ref
         } else {
@@ -2070,7 +2221,12 @@ impl BindGroupPools {
 }
 
 fn shader_module(device: &Device, spirv: &[u8]) -> vk::ShaderModule {
-    let code = read_spv(&mut io::Cursor::new(spirv)).expect("failed to read SPIR-V bytecode");
+    try_shader_module(device, spirv).unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn try_shader_module(device: &Device, spirv: &[u8]) -> Result<vk::ShaderModule, String> {
+    let code = read_spv(&mut io::Cursor::new(spirv))
+        .map_err(|e| format!("failed to read SPIR-V bytecode: {e}"))?;
     let info = vk::ShaderModuleCreateInfo {
         code_size: code.len() * 4,
         code: code.as_ptr(),
@@ -2079,7 +2235,7 @@ fn shader_module(device: &Device, spirv: &[u8]) -> vk::ShaderModule {
     device
         .raw
         .create_shader_module(&info, None)
-        .expect("failed to create shader module")
+        .map_err(|e| format!("failed to create shader module: {e:?}"))
 }
 
 // The code below is extracted from ash-rs/ash under the MIT license;

@@ -47,7 +47,7 @@ fn main() {
     fs::write(
         Path::new(&out_dir).join("packing.glsl"),
         format!(
-            "const float POS_RANGE = {POS_RANGE:?};\nconst float POS_BIAS = {POS_BIAS:?};\nconst float TERRAIN_UV_FIXED_SCALE = {TERRAIN_UV_FIXED_SCALE:?};\nconst uint TERRAIN_UV_BITS = {TERRAIN_UV_BITS}u;\n{UNPACK_SPRITE_UV}"
+            "const float POS_RANGE = {POS_RANGE:?};\nconst float POS_BIAS = {POS_BIAS:?};\nconst float TERRAIN_UV_FIXED_SCALE = {TERRAIN_UV_FIXED_SCALE:?};\nconst uint TERRAIN_UV_BITS = {TERRAIN_UV_BITS}u;\nconst uint SPRITE_BITS = {SPRITE_BITS}u;\n{UNPACK_SPRITE_UV}"
         ),
     )
     .expect("failed to write packing.glsl");

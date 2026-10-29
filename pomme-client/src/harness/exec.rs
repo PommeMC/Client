@@ -216,6 +216,9 @@ fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Valu
     if let Some(brightness) = options.brightness {
         core.menu.brightness = brightness.clamp(0.0, 1.0);
     }
+    if let Some(pack) = &options.shader_pack {
+        core.menu.shader_pack = (!pack.is_empty()).then(|| pack.clone());
+    }
     core.menu.save_options(&core.input.key_bindings);
     Ok(Value::Null)
 }

@@ -31,6 +31,7 @@ mod position;
 mod recipe;
 mod renderer;
 mod resource_pack;
+mod shaderpack;
 mod singleplayer;
 #[cfg(test)]
 mod test_util;

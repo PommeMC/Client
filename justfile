@@ -34,6 +34,11 @@ client-release *args: openal
 bench *args:
     @cargo run --release -p pomme-client --features cpu-bench -- --cpu-bench {{ args }}
 
+# Compiles every shader pack in a local folder's milestone programs and lists
+# which fail, e.g. `just shaderpack-corpus ~/.minecraft/shaderpacks`.
+shaderpack-corpus dir:
+    @POMME_SHADERPACK_CORPUS="{{ dir }}" cargo test -p pomme-client --lib shaderpack::corpus -- --ignored --nocapture
+
 # An order-independent hash of the mesher's output per bench scene, to prove
 # a mesher or vertex-format refactor leaves it unchanged.
 mesh-hash *args:

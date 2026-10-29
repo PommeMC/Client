@@ -113,6 +113,9 @@ struct Settings {
     ui_volume: f32,
     #[serde(default = "default_cloud_mode")]
     cloud_mode: u8,
+    /// The selected shader pack's file or folder name in `shaderpacks/`.
+    #[serde(default)]
+    shader_pack: Option<String>,
     #[serde(default = "default_attack_indicator")]
     attack_indicator: u8,
     #[serde(default)]
@@ -248,6 +251,7 @@ impl Default for Settings {
             voice_volume: 1.0,
             ui_volume: 1.0,
             cloud_mode: 2,
+            shader_pack: None,
             attack_indicator: 1,
             display_mode: 0,
             theme: PanoramaTheme::Java.to_u8(),
@@ -752,6 +756,9 @@ pub struct MainMenu {
     skin_main_hand_right: bool,
     pub display_mode: DisplayMode,
     pub cloud_mode: CloudMode,
+    /// The selected shader pack, by its name in [`Self::shader_packs_dir`].
+    pub shader_pack: Option<String>,
+    pub shader_packs_dir: PathBuf,
     pub attack_indicator: crate::ui::hud::AttackIndicatorMode,
     /// `AbstractSliderButton.canChangeValue` for the focused slider: armed
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
@@ -911,6 +918,8 @@ impl MainMenu {
             skin_main_hand_right: settings.skin_main_hand_right,
             display_mode: DisplayMode::from_u8(settings.display_mode),
             cloud_mode: CloudMode::from_u8(settings.cloud_mode),
+            shader_pack: settings.shader_pack.clone(),
+            shader_packs_dir: game_dir.join("shaderpacks"),
             attack_indicator: crate::ui::hud::AttackIndicatorMode::from_u8(
                 settings.attack_indicator,
             ),
@@ -1155,6 +1164,7 @@ impl MainMenu {
                 skin_hat: self.skin_hat,
                 skin_main_hand_right: self.skin_main_hand_right,
                 cloud_mode: self.cloud_mode.to_u8(),
+                shader_pack: self.shader_pack.clone(),
                 attack_indicator: self.attack_indicator.to_u8(),
                 display_mode: self.display_mode.to_u8(),
                 theme: self.theme.to_u8(),
