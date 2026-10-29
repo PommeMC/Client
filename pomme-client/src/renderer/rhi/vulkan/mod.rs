@@ -71,6 +71,7 @@ pub struct Device {
     /// A GPU with memory of its own, which uploads reach through a copy.
     pub discrete: bool,
     pub max_texture_array_layers: u32,
+    depth_clamp: bool,
 }
 
 impl Device {
@@ -102,6 +103,7 @@ impl Device {
             device_local_bytes,
             discrete: properties.device_type == vk::PhysicalDeviceType::DiscreteGpu,
             max_texture_array_layers: properties.limits.max_image_array_layers,
+            depth_clamp: physical_device.get_features().depth_clamp == vk::TRUE,
         }
     }
 
@@ -892,6 +894,7 @@ pub fn try_create_render_pipeline(
             FrontFace::Cw => vk::FrontFace::Clockwise,
         },
         line_width: 1.0,
+        depth_clamp_enable: (desc.depth_clamp && device.depth_clamp).into(),
         ..Default::default()
     };
     if let Some(bias) = desc.depth.and_then(|depth| depth.bias) {

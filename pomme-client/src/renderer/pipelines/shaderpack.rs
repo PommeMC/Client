@@ -658,6 +658,8 @@ impl PackRenderer {
             }),
             blend: (sky || geometry.is_some_and(PackGeometry::water))
                 .then_some(rhi::BlendState::TRANSLUCENT),
+            // As the normal sky does, so the disc has no cracks.
+            depth_clamp: sky,
             ..rhi::RenderPipelineDesc::new(&compiled.path, vertex, fragment, vertex_buffers)
         };
         let overlay = rhi::RenderPipelineDesc {
