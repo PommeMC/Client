@@ -1,0 +1,106 @@
+# Llamas side on: the four coats, chests and carpets on adults, then trader
+# llamas and babies (a baby never shows its chest or a carpet, but a baby
+# trader llama keeps its own decor).
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+deterministic = true
+
+# A pillar to look down from.
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 0.5 -57 0.5 0 40"
+
+[[step]]
+expect = { player = { position = [0.5, -57.0, 0.5] } }
+
+# Creamy, chested white, carpeted brown, chested and carpeted gray.
+[[step]]
+chat = "/summon minecraft:llama -3 -60 6.5 {NoAI:1b,Variant:0,Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:llama -1 -60 6.5 {NoAI:1b,Variant:1,ChestedHorse:1b,Rotation:[90f,0f]}"
+
+[[step]]
+chat = '/summon minecraft:llama 1 -60 6.5 {NoAI:1b,Variant:2,equipment:{body:{id:"minecraft:red_carpet",count:1}},Rotation:[90f,0f]}'
+
+[[step]]
+chat = '/summon minecraft:llama 3 -60 6.5 {NoAI:1b,Variant:3,ChestedHorse:1b,equipment:{body:{id:"minecraft:light_blue_carpet",count:1}},Rotation:[90f,0f]}'
+
+[[step]]
+expect = { entity = "llama", baby = false }
+
+[[step]]
+look_at = [0.0, -59.0, 6.5]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "llamas"
+
+# Clear the bodies and their drops (chests, carpets, leather).
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+chat = "/kill @e[type=item]"
+
+# Trader llama, carpeted trader llama (the carpet wins), baby trader llama,
+# and a chested, carpeted baby llama (neither shows).
+[[step]]
+chat = "/summon minecraft:trader_llama -3 -60 6.5 {NoAI:1b,Variant:0,Rotation:[90f,0f]}"
+
+[[step]]
+chat = '/summon minecraft:trader_llama -1 -60 6.5 {NoAI:1b,Variant:2,equipment:{body:{id:"minecraft:lime_carpet",count:1}},Rotation:[90f,0f]}'
+
+[[step]]
+chat = "/summon minecraft:trader_llama 1 -60 6.5 {NoAI:1b,Variant:1,Age:-24000,Rotation:[90f,0f]}"
+
+[[step]]
+chat = '/summon minecraft:llama 2.5 -60 6.5 {NoAI:1b,Variant:3,Age:-24000,ChestedHorse:1b,equipment:{body:{id:"minecraft:red_carpet",count:1}},Rotation:[90f,0f]}'
+
+[[step]]
+expect = { entity = "trader_llama", baby = true }
+
+[[step]]
+expect = { entity = "llama", baby = true }
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "trader_llamas"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+chat = "/kill @e[type=item]"
+
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"

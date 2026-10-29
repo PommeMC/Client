@@ -193,7 +193,9 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::Sniffer
             | EntityKind::WanderingTrader
             | EntityKind::SulfurCube
+            | EntityKind::Mooshroom
     ) || is_equine(&kind)
+        || is_llama(kind)
 }
 
 /// Kinds whose entity-data index 16 is the baby flag: `AgeableMob`
@@ -481,7 +483,7 @@ fn pushes_local_player(entity: &LivingEntity) -> bool {
 // TODO: AbstractHorse.isPushable is `!isVehicle()`; ridden equines aren't
 // tracked.
 fn accepts_reciprocal_push(entity: &LivingEntity) -> bool {
-    is_equine(&entity.entity_type) || entity.health > 0.0
+    is_equine(&entity.entity_type) || is_llama(entity.entity_type) || entity.health > 0.0
 }
 
 /// `Entity.push(Entity)` impulses as (local player, remote entity).
@@ -1525,6 +1527,11 @@ impl EntityStore {
                 entity.is_open_mouth = f & 0x40 != 0;
             }
             (EntityKind::Donkey | EntityKind::Mule, 19, Bool(b)) => entity.has_chest = b,
+            (k, 19, Bool(b)) if is_llama(k) => entity.has_chest = b,
+            // `Llama.Variant` and `MushroomCow.Variant` ids clamp (vanilla
+            // `ByIdMap` CLAMP).
+            (k, 21, Int(v)) if is_llama(k) => entity.variant = v.clamp(0, 3) as u32,
+            (EntityKind::Mooshroom, 18, Int(v)) => entity.variant = v.clamp(0, 1) as u32,
             // Horse packed variant: `color | markings << 8`, both wrapping
             // their id ranges (vanilla `ByIdMap` WRAP).
             (EntityKind::Horse, 19, Int(v)) => {
@@ -1865,8 +1872,15 @@ pub fn is_equine(kind: &EntityKind) -> bool {
     )
 }
 
+/// Vanilla `Llama` and its `TraderLlama` subclass: `AbstractHorse`s that
+/// pomme renders apart from the horse family.
+pub fn is_llama(kind: EntityKind) -> bool {
+    matches!(kind, EntityKind::Llama | EntityKind::TraderLlama)
+}
+
 pub fn is_living_mob(kind: &EntityKind) -> bool {
     is_equine(kind)
+        || is_llama(*kind)
         || matches!(
             kind,
             EntityKind::Player
@@ -1905,6 +1919,7 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::CopperGolem
                 | EntityKind::WanderingTrader
                 | EntityKind::SulfurCube
+                | EntityKind::Mooshroom
         )
 }
 
@@ -2007,6 +2022,33 @@ mod tests {
         assert_eq!(state(&store), (SnifferState::Searching, None));
         store.apply_entity_data(1, 18, MetaValue::Int(9));
         assert_eq!(state(&store), (SnifferState::Idling, None));
+    }
+
+    /// `AbstractChestedHorse.DATA_ID_CHEST` (19), `Llama.DATA_VARIANT_ID`
+    /// (21) and `MushroomCow.DATA_TYPE` (18); out-of-range variant ids clamp.
+    #[test]
+    fn llama_and_mooshroom_synced_data() {
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::TraderLlama, Position::default());
+        spawn(&mut store, 2, EntityKind::Mooshroom, Position::default());
+
+        store.apply_entity_data(1, 19, MetaValue::Bool(true));
+        store.apply_entity_data(1, 21, MetaValue::Int(2));
+        assert!(store.living[&1].has_chest);
+        assert_eq!(store.living[&1].variant, 2);
+        store.apply_entity_data(1, 21, MetaValue::Int(7));
+        assert_eq!(store.living[&1].variant, 3);
+        store.apply_entity_data(1, 21, MetaValue::Int(-1));
+        assert_eq!(store.living[&1].variant, 0);
+        store.apply_entity_data(1, 16, MetaValue::Bool(true));
+        assert!(store.living[&1].is_baby);
+
+        store.apply_entity_data(2, 18, MetaValue::Int(1));
+        assert_eq!(store.living[&2].variant, 1);
+        store.apply_entity_data(2, 18, MetaValue::Int(5));
+        assert_eq!(store.living[&2].variant, 1);
+        store.apply_entity_data(2, 16, MetaValue::Bool(true));
+        assert!(store.living[&2].is_baby);
     }
 
     fn tick(store: &mut EntityStore) {

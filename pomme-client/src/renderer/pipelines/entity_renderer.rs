@@ -78,10 +78,16 @@ fn effective_item_component<'a, T: DataComponentTrait>(item: &'a ItemStack) -> O
 
 pub fn armor_render_info(item: Option<&ItemStack>, slot: EquipmentSlot) -> Option<ArmorRenderInfo> {
     let item = item?;
-    let equippable = effective_item_component::<Equippable>(item)?;
-    if equippable.slot != slot {
+    if effective_item_component::<Equippable>(item)?.slot != slot {
         return None;
     }
+    equipment_render_info(item)
+}
+
+/// The stack's equipment asset and dye, whatever its `Equippable` slot
+/// (vanilla `LlamaDecorLayer` checks only `assetId().isPresent()`).
+pub fn equipment_render_info(item: &ItemStack) -> Option<ArmorRenderInfo> {
+    let equippable = effective_item_component::<Equippable>(item)?;
     let asset_id = equippable.asset_id.as_ref()?.to_string().into();
     let dyed_color =
         effective_item_component::<DyedColor>(item).map(|color| color.rgb as u32 & 0x00ff_ffff);
@@ -89,6 +95,14 @@ pub fn armor_render_info(item: Option<&ItemStack>, slot: EquipmentSlot) -> Optio
         asset_id,
         dyed_color,
     })
+}
+
+/// Vanilla `LlamaDecorLayer`: an equipment asset's `llama_body` layers on
+/// the decor model, whose chests show with the base model's.
+#[derive(Clone, Debug)]
+pub struct LlamaDecor {
+    pub equipment: ArmorRenderInfo,
+    pub has_chest: bool,
 }
 
 /// Armor slots in `EntityRenderInfo::armor` order.
@@ -181,6 +195,8 @@ pub struct EntityRenderInfo {
     pub sniffer: entity_model::SnifferAnims,
     pub allay: entity_model::AllayAnims,
     pub copper_golem: entity_model::CopperGolemAnims,
+    /// Llama carpet or trader decor.
+    pub llama_decor: Option<LlamaDecor>,
     /// Iron golem countdowns; the punch one is partial-tick adjusted.
     pub golem_attack_ticks: f32,
     pub golem_offer_flower_ticks: u32,
@@ -261,6 +277,7 @@ impl Default for EntityRenderInfo {
             sniffer: entity_model::SnifferAnims::default(),
             allay: entity_model::AllayAnims::default(),
             copper_golem: entity_model::CopperGolemAnims::default(),
+            llama_decor: None,
             golem_attack_ticks: 0.0,
             golem_offer_flower_ticks: 0,
             base_tint: WHITE_TINT,
@@ -391,6 +408,7 @@ struct ArmorLayerDef {
 struct ArmorAssetDef {
     humanoid: Vec<ArmorLayerDef>,
     leggings: Vec<ArmorLayerDef>,
+    llama_body: Vec<ArmorLayerDef>,
 }
 
 struct ArmorTextureLayer {
@@ -432,6 +450,7 @@ fn rgb_tint(rgb: u32) -> [f32; 4] {
 struct ArmorAsset {
     humanoid: Vec<ArmorTextureLayer>,
     leggings: Vec<ArmorTextureLayer>,
+    llama_body: Vec<ArmorTextureLayer>,
 }
 
 struct ArmorMesh {
@@ -443,6 +462,9 @@ struct ArmorMeshes {
     humanoid: [ArmorMesh; 4],
     husk: [ArmorMesh; 4],
     zombie_villager: [ArmorMesh; 4],
+    /// `LLAMA_DECOR` chestless and chested; the baby never shows a chest.
+    llama_decor: [ArmorMesh; 2],
+    baby_llama_decor: ArmorMesh,
 }
 
 impl MobEntry {
@@ -712,8 +734,15 @@ fn load_armor_asset_defs(
             };
             let humanoid = layers("humanoid");
             let leggings = layers("humanoid_leggings");
-            (!humanoid.is_empty() || !leggings.is_empty())
-                .then_some((id, ArmorAssetDef { humanoid, leggings }))
+            let llama_body = layers("llama_body");
+            (!humanoid.is_empty() || !leggings.is_empty() || !llama_body.is_empty()).then_some((
+                id,
+                ArmorAssetDef {
+                    humanoid,
+                    leggings,
+                    llama_body,
+                },
+            ))
         })
         .collect()
 }
@@ -747,8 +776,8 @@ fn build_armor_texture_layer(
     }
 }
 
-/// Loads every equipment definition with humanoid layers and uploads its
-/// textures.
+/// Loads every equipment definition with humanoid or llama layers and
+/// uploads its textures.
 fn load_armor_assets(
     device: &rhi::backend::Device,
     texture_layout: rhi::backend::BindGroupLayout,
@@ -777,6 +806,7 @@ fn load_armor_assets(
                 ArmorAsset {
                     humanoid: def.humanoid.into_iter().map(build).collect(),
                     leggings: def.leggings.into_iter().map(build).collect(),
+                    llama_body: def.llama_body.into_iter().map(build).collect(),
                 },
             )
         })
@@ -804,14 +834,20 @@ fn build_armor_meshes(device: &rhi::backend::Device) -> ArmorMeshes {
         humanoid: bake(entity_model::bake_humanoid_armor_model),
         husk: bake(entity_model::bake_husk_armor_model),
         zombie_villager: bake(entity_model::bake_zombie_villager_armor_model),
+        llama_decor: [false, true]
+            .map(|chest| build_armor_mesh(device, entity_model::bake_llama_decor_model(chest))),
+        baby_llama_decor: build_armor_mesh(device, entity_model::bake_baby_llama_decor_model()),
     }
 }
 
 fn destroy_armor_assets(device: &rhi::backend::Device, assets: &mut HashMap<String, ArmorAsset>) {
-    for layer in assets
-        .drain()
-        .flat_map(|(_, asset)| asset.humanoid.into_iter().chain(asset.leggings))
-    {
+    for layer in assets.drain().flat_map(|(_, asset)| {
+        asset
+            .humanoid
+            .into_iter()
+            .chain(asset.leggings)
+            .chain(asset.llama_body)
+    }) {
         layer.texture.destroy(device);
         layer.set.destroy(device);
     }
@@ -1119,6 +1155,15 @@ fn mob_definitions() -> Vec<MobDef> {
     const SULFUR_CUBE_INNER_TEX: &[&[&str]] = tex_table!("sulfur_cube" => "sulfur_cube_inner");
     const SULFUR_CUBE_INNER_SMALL_TEX: &[&[&str]] =
         tex_table!("sulfur_cube" => "sulfur_cube_inner_small");
+    // Indexed by `Llama.Variant` id.
+    const LLAMA_TEX: &[&[&str]] =
+        tex_table!("llama" => "llama_creamy", "llama_white", "llama_brown", "llama_gray");
+    const LLAMA_BABY_TEX: &[&[&str]] = tex_table!("llama" =>
+        "llama_creamy_baby", "llama_white_baby", "llama_brown_baby", "llama_gray_baby");
+    // Indexed by `MushroomCow.Variant` id.
+    const MOOSHROOM_TEX: &[&[&str]] = tex_table!("cow" => "mooshroom_red", "mooshroom_brown");
+    const MOOSHROOM_BABY_TEX: &[&[&str]] =
+        tex_table!("cow" => "mooshroom_red_baby", "mooshroom_brown_baby");
     const COD_TEX: &[&[&str]] = tex_table!("fish" => "cod");
     const SALMON_TEX: &[&[&str]] = tex_table!("fish" => "salmon");
     const PUFFERFISH_TEX: &[&[&str]] = tex_table!("fish" => "pufferfish");
@@ -1223,7 +1268,44 @@ fn mob_definitions() -> Vec<MobDef> {
         ]
     }
 
+    // Vanilla `LlamaRenderer`, shared by the trader llama. The variant pool
+    // is the four coats chestless, then chested. `LlamaDecorLayer` draws in
+    // the equipment pass (`EntityRenderInfo::llama_decor`).
+    let llama = |kind| MobDef {
+        kind,
+        anim: AnimationType::Quadruped,
+        adult: vec![
+            opaque(entity_model::bake_llama_model(false), LLAMA_TEX, 128),
+            opaque(entity_model::bake_llama_model(true), LLAMA_TEX, 128),
+        ],
+        baby: Some(opaque(
+            entity_model::bake_baby_llama_model(),
+            LLAMA_BABY_TEX,
+            64,
+        )),
+        adult_overlays: vec![],
+        baby_overlays: vec![],
+    };
+
     vec![
+        llama(EntityKind::Llama),
+        llama(EntityKind::TraderLlama),
+        // Vanilla `MushroomCowRenderer`: the cow meshes.
+        // TODO: `MushroomCowMushroomLayer` (three mushroom block models on
+        // the back and head) needs block models drawn through the entity
+        // pass.
+        MobDef {
+            kind: EntityKind::Mooshroom,
+            anim: AnimationType::Quadruped,
+            adult: vec![opaque(entity_model::bake_cow_model(), MOOSHROOM_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_cow_model(),
+                MOOSHROOM_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
         MobDef {
             kind: EntityKind::Pig,
             anim: AnimationType::Quadruped,
@@ -2168,11 +2250,23 @@ impl EntityRenderer {
         armor: &'a ArmorRenderInfo,
         slot: usize,
     ) -> impl Iterator<Item = (rhi::backend::BindGroup, [f32; 4])> + 'a {
+        self.equipment_layers(armor, move |asset| asset.layers_for(slot))
+    }
+
+    /// Vanilla `EquipmentLayerRenderer.renderLayers`: the asset's layers of
+    /// one type, skipping those whose colour resolves to 0.
+    fn equipment_layers<'a>(
+        &'a self,
+        equipment: &'a ArmorRenderInfo,
+        layer_type: impl Fn(&'a ArmorAsset) -> &'a [ArmorTextureLayer] + 'a,
+    ) -> impl Iterator<Item = (rhi::backend::BindGroup, [f32; 4])> + 'a {
         self.armor_assets
-            .get(&*armor.asset_id)
+            .get(&*equipment.asset_id)
             .into_iter()
-            .flat_map(move |asset| asset.layers_for(slot))
-            .filter_map(move |layer| armor_layer_tint(layer, armor).map(|tint| (layer.set, tint)))
+            .flat_map(layer_type)
+            .filter_map(move |layer| {
+                armor_layer_tint(layer, equipment).map(|tint| (layer.set, tint))
+            })
     }
 
     fn collect_armor_draws(
@@ -2182,6 +2276,15 @@ impl EntityRenderer {
     ) -> Vec<DrawRecord> {
         let mut records = Vec::new();
         for (vi, v) in vis.iter().enumerate() {
+            if let Some(decor) = &v.info.llama_decor {
+                let mesh = if v.info.is_baby {
+                    &self.armor_meshes.baby_llama_decor
+                } else {
+                    &self.armor_meshes.llama_decor[decor.has_chest as usize]
+                };
+                let layers = self.equipment_layers(&decor.equipment, |asset| &asset.llama_body);
+                self.push_equipment_draws(vi, v, mesh, layers, instances, &mut records);
+            }
             // TODO: baby armor (vanilla `HUMANOID_BABY` layer type +
             // `HumanoidModel.createBabyArmorMeshSet`) needs anisotropic
             // `CubeDeformation`, which pomme's model format lacks.
@@ -2195,45 +2298,58 @@ impl EntityRenderer {
                 let Some(mesh) = self.armor_meshes.for_entity(v.info.entity_kind, slot) else {
                     continue;
                 };
-                // TODO: armor trims and foil (`EquipmentLayerRenderer`) need a
-                // trim atlas and an entity glint pass.
-                let mut layers = self.armor_layers(armor, slot).peekable();
-                if layers.peek().is_none() {
-                    continue;
-                }
-
-                let anim = self.compute_anim(v.entry.anim, &mesh.model, v.info);
-                let part_transforms = mesh.model.compute_part_transforms(&anim);
-                for (texture_set, tint) in layers {
-                    for (part, (start, part_count)) in mesh.model.part_ranges.iter().enumerate() {
-                        if *part_count == 0 {
-                            continue;
-                        }
-                        let first_instance = instances.len() as u32;
-                        let model = v.entity_mat * part_transforms[part];
-                        instances.push(
-                            vi,
-                            EntityInstance {
-                                model: model.to_cols_array_2d(),
-                                tint,
-                                // Vanilla armor is `NO_OVERLAY`: no hurt/death red.
-                                overlay_color: NO_OVERLAY,
-                                uv_params: [0.0, 0.0, ARMOR_ALPHA_CUTOFF, v.info.light.lane()],
-                            },
-                        );
-                        records.push(DrawRecord {
-                            texture_set,
-                            vertex_buffer: mesh.vertex_buffer.handle(),
-                            part_start: *start,
-                            part_count: *part_count,
-                            first_instance,
-                            instance_count: 1,
-                        });
-                    }
-                }
+                let layers = self.armor_layers(armor, slot);
+                self.push_equipment_draws(vi, v, mesh, layers, instances, &mut records);
             }
         }
         records
+    }
+
+    /// One draw per part per equipment layer, posed by the mob's animation.
+    // TODO: armor trims and foil (`EquipmentLayerRenderer`) need a trim atlas
+    // and an entity glint pass.
+    fn push_equipment_draws(
+        &self,
+        vi: usize,
+        v: &VisEntity<'_>,
+        mesh: &ArmorMesh,
+        layers: impl Iterator<Item = (rhi::backend::BindGroup, [f32; 4])>,
+        instances: &mut Instances,
+        records: &mut Vec<DrawRecord>,
+    ) {
+        let mut layers = layers.peekable();
+        if layers.peek().is_none() {
+            return;
+        }
+        let anim = self.compute_anim(v.entry.anim, &mesh.model, v.info);
+        let part_transforms = mesh.model.compute_part_transforms(&anim);
+        for (texture_set, tint) in layers {
+            for (part, (start, part_count)) in mesh.model.part_ranges.iter().enumerate() {
+                if *part_count == 0 {
+                    continue;
+                }
+                let first_instance = instances.len() as u32;
+                let model = v.entity_mat * part_transforms[part];
+                instances.push(
+                    vi,
+                    EntityInstance {
+                        model: model.to_cols_array_2d(),
+                        tint,
+                        // Vanilla equipment is `NO_OVERLAY`: no hurt/death red.
+                        overlay_color: NO_OVERLAY,
+                        uv_params: [0.0, 0.0, ARMOR_ALPHA_CUTOFF, v.info.light.lane()],
+                    },
+                );
+                records.push(DrawRecord {
+                    texture_set,
+                    vertex_buffer: mesh.vertex_buffer.handle(),
+                    part_start: *start,
+                    part_count: *part_count,
+                    first_instance,
+                    instance_count: 1,
+                });
+            }
+        }
     }
 
     fn compute_anim(
@@ -2786,6 +2902,8 @@ impl EntityRenderer {
             .iter_mut()
             .chain(self.armor_meshes.husk.iter_mut())
             .chain(self.armor_meshes.zombie_villager.iter_mut())
+            .chain(self.armor_meshes.llama_decor.iter_mut())
+            .chain([&mut self.armor_meshes.baby_llama_decor])
         {
             std::mem::take(&mut mesh.vertex_buffer).destroy(device);
         }
@@ -3090,8 +3208,12 @@ const PLAYER_MODEL_SCALE: f32 = 0.9375;
 pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
     match kind {
         EntityKind::Villager if is_baby => 0.63,
-        // An explicit `eyeHeight(1.05)`, which the 0.85 ratio would miss.
-        EntityKind::Sniffer if is_baby => dimensions::EntityDimensions::eye_height(kind) * 0.5,
+        // Explicit `BABY_DIMENSIONS` eye heights.
+        EntityKind::Mooshroom if is_baby => 0.69,
+        // Explicit `eyeHeight`s, halved; the 0.85 ratio would miss them.
+        EntityKind::Sniffer | EntityKind::Llama | EntityKind::TraderLlama if is_baby => {
+            dimensions::EntityDimensions::eye_height(kind) * 0.5
+        }
         _ if is_baby => entity_bounds(kind, is_baby).1 * dimensions::DEFAULT_EYE_HEIGHT_RATIO,
         _ => dimensions::EntityDimensions::eye_height(kind),
     }
@@ -3508,6 +3630,36 @@ mod tests {
         ArmorDye, EquipmentClientInfoJson, OverlayKind, Route, Visibility, armor_layer_defs,
         armor_render_info, body_route, equipment_texture_key, layer_route,
     };
+
+    /// `LlamaDecorLayer` takes any equippable asset, whatever its slot.
+    #[test]
+    fn equipment_render_info_ignores_the_equippable_slot() {
+        let carpet = ItemStack::new(ItemKind::LightBlueCarpet, 1);
+        let info = super::equipment_render_info(&carpet).expect("carpets have an asset");
+        assert_eq!(&*info.asset_id, "minecraft:light_blue_carpet");
+        let helmet = ItemStack::new(ItemKind::DiamondHelmet, 1);
+        assert_eq!(
+            &*super::equipment_render_info(&helmet).unwrap().asset_id,
+            "minecraft:diamond"
+        );
+        assert!(super::equipment_render_info(&ItemStack::new(ItemKind::Stone, 1)).is_none());
+    }
+
+    /// The trader llama's decor resolves through its `llama_body` layer
+    /// like a carpet's.
+    #[test]
+    fn llama_body_layers_resolve_their_own_texture_dir() {
+        let info: EquipmentClientInfoJson = serde_json::from_str(
+            r#"{"layers":{"llama_body":[{"texture":"minecraft:trader_llama"}]}}"#,
+        )
+        .expect("valid equipment fixture");
+        let layers = armor_layer_defs(&info.layers["llama_body"], "llama_body");
+        assert_eq!(
+            layers[0].texture_key,
+            "minecraft/textures/entity/equipment/llama_body/trader_llama.png"
+        );
+        assert_eq!(layers[0].dye, ArmorDye::None);
+    }
 
     fn invisible(visibility: Visibility, glowing: bool) -> EntityRenderInfo {
         EntityRenderInfo {
