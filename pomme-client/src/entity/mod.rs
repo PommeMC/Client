@@ -1589,6 +1589,11 @@ impl LivingEntity {
         }
     }
 
+    /// Vanilla `LivingEntity.tickHeadTurn`.
+    // TODO: a `Mob` turns its body through `BodyRotationControl.clientTick`
+    // instead: the body snaps to its yaw while moving, follows the head past
+    // `getMaxHeadYRot` (75 by default, 15 for a goat, 1 for an axolotl), and
+    // turns to face the head after it holds still for 10 ticks.
     pub fn tick_body_rotation(&mut self) {
         let dx = self.position.x - self.prev_position.x;
         let dz = self.position.z - self.prev_position.z;
