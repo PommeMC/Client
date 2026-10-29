@@ -884,11 +884,47 @@ impl Renderer {
                 pack.end_geometry(encoder, pass, geometry);
             }
         };
+        let cull_distance = entity_cull_distance(*render_distance);
+        let entity_renderer = &mut self.entity_renderer;
+        let mut draw_entities =
+            |pack: &mut PackRenderer, geometry, frustum: &[[f32; 4]; 6], shadow| {
+                if let Some((mut pass, binding)) =
+                    pack.begin_geometry(device, encoder, frame, geometry)
+                {
+                    entity_renderer.pack_binding = Some(binding);
+                    entity_renderer.draw(
+                        &mut pass,
+                        frame,
+                        entities,
+                        frustum,
+                        anchor,
+                        eye,
+                        cull_distance,
+                        shadow,
+                    );
+                    entity_renderer.pack_binding = None;
+                    pack.end_geometry(encoder, pass, geometry);
+                }
+            };
+        let block_entity_pipeline = &mut self.block_entity_pipeline;
+        let mut draw_block_entities = |pack: &mut PackRenderer, geometry| {
+            if let Some((mut pass, binding)) = pack.begin_geometry(device, encoder, frame, geometry)
+            {
+                block_entity_pipeline.pack_binding = Some(binding);
+                block_entity_pipeline.draw(&mut pass, frame, anchor, block_entities);
+                block_entity_pipeline.pack_binding = None;
+                pack.end_geometry(encoder, pass, geometry);
+            }
+        };
 
-        // Iris's shadow pass: terrain from the sun or moon, `shadowtex1`
-        // copied before its translucents.
+        // Iris's shadow pass: terrain, entities and block entities from the
+        // sun or moon, `shadowtex1` copied before its translucents.
+        // TODO: `shadowDistanceRenderMul` and `entityShadowDistanceMul`.
         if let Some(planes) = shadow_planes {
             terrain(&mut pack, PackGeometry::ShadowTerrain, View::Shadow);
+            let casters = Some(pack.shadow_casters);
+            draw_entities(&mut pack, PackGeometry::ShadowEntities, &planes, casters);
+            draw_block_entities(&mut pack, PackGeometry::ShadowBlockEntities);
             pack.copy_opaque_depth(encoder, true);
             water(&mut pack, PackGeometry::ShadowWater, &planes);
         }
@@ -901,33 +937,9 @@ impl Renderer {
         pack.draw_sky(device, encoder, frame, &self.sky_pipeline, &draws);
 
         let frustum = self.camera.frustum_planes();
-        let cull_distance = entity_cull_distance(*render_distance);
         terrain(&mut pack, PackGeometry::Terrain, View::Camera);
-        if let Some((mut pass, binding)) =
-            pack.begin_geometry(device, encoder, frame, PackGeometry::Entities)
-        {
-            self.entity_renderer.pack_binding = Some(binding);
-            self.entity_renderer.draw(
-                &mut pass,
-                frame,
-                entities,
-                &frustum,
-                anchor,
-                eye,
-                cull_distance,
-            );
-            self.entity_renderer.pack_binding = None;
-            pack.end_geometry(encoder, pass, PackGeometry::Entities);
-        }
-        if let Some((mut pass, binding)) =
-            pack.begin_geometry(device, encoder, frame, PackGeometry::BlockEntities)
-        {
-            self.block_entity_pipeline.pack_binding = Some(binding);
-            self.block_entity_pipeline
-                .draw(&mut pass, frame, anchor, block_entities);
-            self.block_entity_pipeline.pack_binding = None;
-            pack.end_geometry(encoder, pass, PackGeometry::BlockEntities);
-        }
+        draw_entities(&mut pack, PackGeometry::Entities, &frustum, None);
+        draw_block_entities(&mut pack, PackGeometry::BlockEntities);
         pack.copy_opaque_depth(encoder, false);
         pack.run_full_screen(device, encoder, frame, true);
         water(&mut pack, PackGeometry::Water, &frustum);
@@ -2018,6 +2030,7 @@ impl Renderer {
                         anchor,
                         eye,
                         ent_cull_dist,
+                        None,
                     );
 
                     self.block_entity_pipeline

@@ -12,6 +12,7 @@ use glam::{DVec3, IVec2, IVec3, Mat4, Vec3, Vec4};
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::chunk::buffer::CHUNK_VERTEX_BUFFERS;
 use crate::renderer::entity_model::EntityVertex;
+use crate::renderer::pipelines::entity_renderer::PackShadow;
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::pipelines::sky::{
     SKY_PUSH_SIZE, SkyDraw, SkyPipeline, SkyVertex, celestial_pose,
@@ -36,6 +37,10 @@ const BUFFERS: usize = 32;
 pub enum PackGeometry {
     /// The `shadow` program over solid and cutout terrain.
     ShadowTerrain,
+    /// `shadow_entities`, or `shadow`, over entities.
+    ShadowEntities,
+    /// `shadow_block`, or `shadow`, over block entities.
+    ShadowBlockEntities,
     /// The `shadow` program over translucent terrain.
     ShadowWater,
     SkyBasic,
@@ -47,28 +52,39 @@ pub enum PackGeometry {
 }
 
 impl PackGeometry {
+    /// The geometry it draws: itself, or the one a shadow geometry casts.
+    fn drawn(self) -> Self {
+        match self {
+            Self::ShadowTerrain => Self::Terrain,
+            Self::ShadowEntities => Self::Entities,
+            Self::ShadowBlockEntities => Self::BlockEntities,
+            Self::ShadowWater => Self::Water,
+            other => other,
+        }
+    }
+
     /// Whether it draws into the shadow maps.
     pub fn shadow(self) -> bool {
-        matches!(self, Self::ShadowTerrain | Self::ShadowWater)
+        self != self.drawn()
     }
 
     /// Whether it draws chunk sections, which read the sprite rectangles.
     fn terrain(self) -> bool {
-        matches!(
-            self,
-            Self::Terrain | Self::Water | Self::ShadowTerrain | Self::ShadowWater
-        )
+        matches!(self.drawn(), Self::Terrain | Self::Water)
     }
 
     /// Whether it draws `draw_water`'s translucent sections.
     fn water(self) -> bool {
-        matches!(self, Self::Water | Self::ShadowWater)
+        self.drawn() == Self::Water
     }
 
     /// Its `gbuffers_*` program, if it isn't a shadow one.
     fn gbuffers(self) -> Option<Gbuffers> {
         Some(match self {
-            Self::ShadowTerrain | Self::ShadowWater => return None,
+            Self::ShadowTerrain
+            | Self::ShadowEntities
+            | Self::ShadowBlockEntities
+            | Self::ShadowWater => return None,
             Self::SkyBasic => Gbuffers::SkyBasic,
             Self::SkyTextured => Gbuffers::SkyTextured,
             Self::Terrain => Gbuffers::Terrain,
@@ -80,18 +96,63 @@ impl PackGeometry {
 
     /// Its program's source in `pack`'s `dimension`, `None` if it has none.
     fn source(self, pack: &ShaderPack, dimension: &str) -> Result<Option<ProgramText>, PackError> {
-        match self.gbuffers() {
-            Some(program) => pack.gbuffers(dimension, program),
+        if let Some(program) = self.gbuffers() {
+            return pack.gbuffers(dimension, program);
+        }
+        let own = match self {
+            Self::ShadowEntities => pack.program(dimension, "shadow_entities")?,
+            Self::ShadowBlockEntities => pack.program(dimension, "shadow_block")?,
+            _ => None,
+        };
+        match own {
+            Some(text) => Ok(Some(text)),
             None => pack.program(dimension, "shadow"),
         }
     }
 
     /// The vertices it draws.
     fn vertices(self) -> Geometry {
-        match self.gbuffers() {
-            Some(program) => shaderpack::gbuffers_geometry(program),
-            None if self == Self::ShadowWater => Geometry::Water,
-            None => Geometry::Terrain,
+        let program = self.drawn().gbuffers();
+        shaderpack::gbuffers_geometry(program.expect("drawn geometry has a gbuffers program"))
+    }
+}
+
+/// Which entities a pack's shadow pass draws: `shaders.properties`'s
+/// `shadowEntities`, `shadowPlayer` and `shadowBlockEntities`, with Iris's
+/// defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShadowCasters {
+    entities: bool,
+    player: bool,
+    block_entities: bool,
+}
+
+impl ShadowCasters {
+    fn read(pack: &ShaderPack) -> Self {
+        Self {
+            entities: pack.property_bool("shadowEntities", true),
+            player: pack.property_bool("shadowPlayer", false),
+            // TODO: `shadowLightBlockEntities`, which keeps the light-emitting
+            // ones with this off.
+            block_entities: pack.property_bool("shadowBlockEntities", true),
+        }
+    }
+
+    /// Whether an entity that is `role` to the pass casts a shadow.
+    pub fn casts(self, role: PackShadow) -> bool {
+        match role {
+            PackShadow::Entity => self.entities,
+            PackShadow::Player | PackShadow::FirstPersonPlayer => self.entities || self.player,
+            PackShadow::Spectator => false,
+        }
+    }
+
+    /// Whether the pass draws `geometry` at all.
+    fn draws(self, geometry: PackGeometry) -> bool {
+        match geometry {
+            PackGeometry::ShadowEntities => self.casts(PackShadow::Player),
+            PackGeometry::ShadowBlockEntities => self.block_entities,
+            _ => true,
         }
     }
 }
@@ -246,6 +307,7 @@ pub struct PackRenderer {
     final_pass: Option<Program>,
     lightmap: (rhi::backend::TextureHandle, rhi::backend::Sampler),
     shadow_settings: ShadowSettings,
+    pub shadow_casters: ShadowCasters,
     shadow_targets: Option<ShadowTargets>,
     /// The shadow view's projection times model-view, from the last
     /// [`Self::prepare`].
@@ -304,8 +366,11 @@ impl PackRenderer {
         atlas: &TextureAtlas,
         lightmap: &Lightmap,
     ) -> Result<Self, String> {
+        let shadow_casters = ShadowCasters::read(pack);
         let gbuffers: Vec<(PackGeometry, CompiledProgram)> = [
             PackGeometry::ShadowTerrain,
+            PackGeometry::ShadowEntities,
+            PackGeometry::ShadowBlockEntities,
             PackGeometry::ShadowWater,
             PackGeometry::SkyBasic,
             PackGeometry::SkyTextured,
@@ -315,6 +380,7 @@ impl PackRenderer {
             PackGeometry::Water,
         ]
         .into_iter()
+        .filter(|&g| shadow_casters.draws(g))
         .filter_map(|g| {
             let text = g.source(pack, dimension).transpose()?;
             Some(text.and_then(|t| shaderpack::compile(&t, g.vertices()).map(|c| (g, c))))
@@ -457,6 +523,7 @@ impl PackRenderer {
             final_pass: None,
             lightmap: lightmap.texture(),
             shadow_settings: settings.shadow.clone(),
+            shadow_casters,
             shadow_targets,
             shadow_view_projection: Mat4::IDENTITY,
             previous: None,
@@ -613,7 +680,7 @@ impl PackRenderer {
                 size: 16,
             }),
             // The block-entity push block: model, tint, overlay, uv params.
-            Some(PackGeometry::BlockEntities) => Some(rhi::PushConstants {
+            Some(g) if g.drawn() == PackGeometry::BlockEntities => Some(rhi::PushConstants {
                 visibility: rhi::ShaderStages::VERTEX,
                 size: 112,
             }),
@@ -638,12 +705,13 @@ impl PackRenderer {
         let entity_buffers = crate::renderer::pipelines::entity_renderer::INSTANCED_BUFFERS;
         let block_entity_buffers = [EntityVertex::BUFFER];
         let sky_buffers = [SkyVertex::BUFFER];
-        let vertex_buffers: &[rhi::VertexBufferLayout] = match geometry {
+        let vertex_buffers: &[rhi::VertexBufferLayout] = match geometry.map(PackGeometry::drawn) {
             Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured) => &sky_buffers,
-            Some(PackGeometry::Terrain | PackGeometry::ShadowTerrain) => &CHUNK_VERTEX_BUFFERS,
-            Some(PackGeometry::Water | PackGeometry::ShadowWater) => &CHUNK_VERTEX_BUFFERS[..1],
+            Some(PackGeometry::Terrain) => &CHUNK_VERTEX_BUFFERS,
+            Some(PackGeometry::Water) => &CHUNK_VERTEX_BUFFERS[..1],
             Some(PackGeometry::Entities) => &entity_buffers,
             Some(PackGeometry::BlockEntities) => &block_entity_buffers,
+            Some(_) => unreachable!("drawn geometries aren't shadow ones"),
             None => &[],
         };
         let desc = rhi::RenderPipelineDesc {
@@ -1790,6 +1858,47 @@ mod tests {
 
     fn close(a: Vec3, b: Vec3) {
         assert!(a.abs_diff_eq(b, 1e-4), "{a} != {b}");
+    }
+
+    #[test]
+    fn entities_cast_with_their_own_program_or_shadow() {
+        let pack = ShaderPack::for_test(
+            &[
+                "shadow.vsh",
+                "shadow.fsh",
+                "shadow_block.vsh",
+                "shadow_block.fsh",
+            ],
+            &[],
+        );
+        let path = |g: PackGeometry| {
+            g.source(&pack, "minecraft:overworld")
+                .unwrap()
+                .unwrap()
+                .path
+        };
+        assert_eq!(path(PackGeometry::ShadowEntities), "shadow");
+        assert_eq!(path(PackGeometry::ShadowBlockEntities), "shadow_block");
+        assert_eq!(path(PackGeometry::ShadowTerrain), "shadow");
+        assert_eq!(PackGeometry::ShadowEntities.vertices(), Geometry::Entity);
+    }
+
+    #[test]
+    fn shadow_casters_follow_the_properties() {
+        let casters = |properties| ShadowCasters::read(&ShaderPack::for_test(&[], properties));
+        let iris = casters(&[]);
+        assert!(iris.casts(PackShadow::Entity) && iris.casts(PackShadow::FirstPersonPlayer));
+        assert!(!iris.casts(PackShadow::Spectator));
+        assert!(iris.draws(PackGeometry::ShadowBlockEntities));
+
+        let player = casters(&[("shadowEntities", "false"), ("shadowPlayer", "true")]);
+        assert!(!player.casts(PackShadow::Entity) && player.casts(PackShadow::Player));
+        let none = casters(&[
+            ("shadowEntities", "false"),
+            ("shadowBlockEntities", "false"),
+        ]);
+        assert!(!none.draws(PackGeometry::ShadowEntities));
+        assert!(!none.draws(PackGeometry::ShadowBlockEntities));
     }
 
     #[test]

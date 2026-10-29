@@ -1,9 +1,9 @@
 # A shader pack (fixtures/shaderpacks/pomme_test) draws the world: the sky
 # through its `gbuffers_skybasic` (the disc tinted red by `renderStage`) and
 # `gbuffers_skytextured` programs, terrain, a cow and a chest through its
-# `gbuffers_textured_lit`, normal shading and the shadows of a pillar and the
-# planks (its `shadow` program, the sun tilted by `sunPathRotation`) from its
-# composite pass, and the sky blended toward a custom uniform from its
+# `gbuffers_textured_lit`, normal shading and the shadows of a pillar, the
+# planks, the cow, the chest and the player (its `shadow` program, the sun
+# tilted by `sunPathRotation`) from its composite pass, and the sky blended toward a custom uniform from its
 # `shaders.properties`. Then packs off again, with the same sky shots to
 # compare.
 
@@ -64,6 +64,26 @@ wait_ms = 1000
 
 [[step]]
 screenshot = "pack_shadow"
+
+# The cow and the chest cast shadows too.
+[[step]]
+chat = "/tp @s 60.5 -60 58.5 180 35"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "pack_entity_shadow"
+
+# In first person the player still casts one, south of its feet.
+[[step]]
+chat = "/tp @s 60.5 -60 50.5 0 90"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "pack_self_shadow"
 
 # The sun overhead at noon, the moon and stars at midnight, then the sunset
 # glow to the west at dusk.

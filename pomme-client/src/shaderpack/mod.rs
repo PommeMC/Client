@@ -162,6 +162,15 @@ impl ShaderPack {
         Ok(None)
     }
 
+    /// A `shaders.properties` switch, `default` when it's unset or not
+    /// `true`/`false`.
+    pub fn property_bool(&self, name: &str, default: bool) -> bool {
+        self.properties
+            .get(name)
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(default)
+    }
+
     /// `program.<path>.enabled` in `shaders.properties` reading false: a
     /// boolean expression over the pack's options, such as `!SSAO`.
     fn disabled(&self, path: &str) -> bool {
@@ -292,8 +301,14 @@ mod corpus {
             out.push((text, Geometry::Final));
         }
         if let Ok(Some(text)) = pack.program(dimension, "shadow") {
-            out.push((text.clone(), Geometry::Terrain));
-            out.push((text, Geometry::Water));
+            for geometry in [
+                Geometry::Terrain,
+                Geometry::Entity,
+                Geometry::BlockEntity,
+                Geometry::Water,
+            ] {
+                out.push((text.clone(), geometry));
+            }
         }
         out
     }
@@ -352,35 +367,33 @@ mod corpus {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use super::*;
-
-    fn pack(files: &[&str]) -> ShaderPack {
-        ShaderPack {
+impl ShaderPack {
+    /// A pack of empty programs at `files`, with `properties`.
+    pub(crate) fn for_test(files: &[&str], properties: &[(&str, &str)]) -> Self {
+        let empty = b"#version 120\nvoid main() {}\n";
+        Self {
             name: "test".into(),
             source: PackSource::Zip(
                 files
                     .iter()
-                    .map(|f| {
-                        (
-                            (*f).to_owned(),
-                            b"#version 120
-void main() {}
-"
-                            .to_vec(),
-                        )
-                    })
-                    .collect::<HashMap<_, _>>(),
+                    .map(|f| ((*f).to_owned(), empty.to_vec()))
+                    .collect(),
             ),
-            properties: BTreeMap::new(),
+            properties: properties
+                .iter()
+                .map(|&(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
             dimensions: BTreeMap::new(),
             overrides: Overrides::new(),
             macros: BTreeMap::new(),
             custom_uniforms: CustomUniforms::default(),
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn sky_programs_read_the_render_stage() {
@@ -432,14 +445,17 @@ void main",
 
     #[test]
     fn a_dimension_folder_replaces_the_root() {
-        let pack = pack(&[
-            "composite.vsh",
-            "composite.fsh",
-            "final.vsh",
-            "final.fsh",
-            "world-1/final.vsh",
-            "world-1/final.fsh",
-        ]);
+        let pack = ShaderPack::for_test(
+            &[
+                "composite.vsh",
+                "composite.fsh",
+                "final.vsh",
+                "final.fsh",
+                "world-1/final.vsh",
+                "world-1/final.fsh",
+            ],
+            &[],
+        );
         let path = |dimension, name| pack.program(dimension, name).unwrap().map(|p| p.path);
         assert_eq!(
             path("minecraft:the_nether", "final").as_deref(),

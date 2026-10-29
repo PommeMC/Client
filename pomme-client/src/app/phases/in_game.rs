@@ -3976,7 +3976,7 @@ pub fn update_game(
     });
 
     use crate::entity::glowing::{appears_glowing, outline_color, scoreboard_name};
-    use crate::renderer::pipelines::entity_renderer::Visibility;
+    use crate::renderer::pipelines::entity_renderer::{PackShadow, Visibility};
     let spectating = crate::player::is_spectator(game.player.game_mode);
     let spectator_outlines = spectating && core.input.performing_action(Action::SpectatorOutlines);
     let viewer = scoreboard_name(&game.tab_list, core.user.uuid, Some(core.user.uuid));
@@ -4038,6 +4038,17 @@ pub fn update_game(
                         &name,
                     ),
                     visibility: visibility(e.is_invisible, &name),
+                    pack_shadow: if game.riding_vehicle_id == Some(entity_id) {
+                        PackShadow::Player
+                    } else if e
+                        .player_uuid
+                        .and_then(|id| game.tab_list.players.get(&id))
+                        .is_some_and(|p| crate::player::is_spectator(p.game_mode))
+                    {
+                        PackShadow::Spectator
+                    } else {
+                        PackShadow::Entity
+                    },
                     light: entity_light(
                         &world_light,
                         e.entity_type,
@@ -4123,15 +4134,16 @@ pub fn update_game(
             .collect()
     };
 
-    // Vanilla only extracts the local player while it's the camera entity.
-    if game.camera_entity.is_none()
-        && should_render_local_player(
-            benchmark_running,
-            gfx.renderer.is_first_person(),
-            game.player.is_sleeping(),
-            game.player.death_animation_finished(),
-        )
-    {
+    // Vanilla only extracts the local player while it's the camera entity;
+    // Iris's shadow pass draws it in first person too.
+    let finished = game.player.death_animation_finished();
+    let shown = should_render_local_player(
+        benchmark_running,
+        gfx.renderer.is_first_person(),
+        game.player.is_sleeping(),
+        finished,
+    );
+    if game.camera_entity.is_none() && (shown || !benchmark_running && !finished && !spectating) {
         let interp_pos = game
             .player
             .prev_position
@@ -4165,6 +4177,13 @@ pub fn update_game(
             player_uuid: Some(core.user.uuid),
             outline_color: outline(game.player.glowing, true, &|| viewer.clone()),
             visibility: visibility(game.player.invisible, &|| viewer.clone()),
+            pack_shadow: if spectating {
+                PackShadow::Spectator
+            } else if shown {
+                PackShadow::Player
+            } else {
+                PackShadow::FirstPersonPlayer
+            },
             light: player_light,
             armor: armor_render_infos(game.player.inventory.armor_slots()),
             has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),

@@ -1,6 +1,6 @@
 #version 120
 
-// Pomme's test pack: terrain seen from the sun, in its colours.
+// Pomme's test pack: the world seen from the sun, in its colours.
 
 varying vec2 texcoord;
 varying vec4 glcolor;
