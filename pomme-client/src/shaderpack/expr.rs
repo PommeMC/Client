@@ -168,25 +168,36 @@ fn binary(op: BinOp, a: &Expr, b: &Expr, cx: &mut Context) -> Value {
             _ => compare(op, x as f32, y as f32),
         };
     }
-    let (Some((x, xn)), Some((y, yn))) = (a.components(), b.components()) else {
-        return Value::Float(0.0);
-    };
     let f: fn(f32, f32) -> f32 = match op {
         BinOp::Add => |x, y| x + y,
         BinOp::Sub => |x, y| x - y,
         BinOp::Mul => |x, y| x * y,
         BinOp::Div => |x, y| x / y,
         BinOp::Rem => |x, y| x % y,
-        _ => return compare(op, x.x, y.x),
+        _ => return compare(op, a.as_f32(), b.as_f32()),
     };
-    let (x, y) = (broadcast(x, xn), broadcast(y, yn));
-    let out: [f32; 4] = std::array::from_fn(|i| f(x[i], y[i]));
-    Value::from_components(out.into(), xn.max(yn))
+    componentwise(&[a, b], |c| f(c[0], c[1]))
 }
 
-/// A scalar spread to every component.
-fn broadcast(v: Vec4, len: usize) -> Vec4 {
-    if len == 1 { Vec4::splat(v.x) } else { v }
+/// `f` over each component of `args`, a scalar spread to every component;
+/// zero with a matrix among them.
+fn componentwise(args: &[Value], f: impl Fn(&[f32]) -> f32) -> Value {
+    let Some(parts) = args
+        .iter()
+        .map(|v| v.components())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Value::Float(0.0);
+    };
+    let len = parts.iter().map(|&(_, n)| n).max().unwrap_or(1);
+    let out: [f32; 4] = std::array::from_fn(|i| {
+        let column: Vec<f32> = parts
+            .iter()
+            .map(|&(v, n)| if n == 1 { v.x } else { v[i] })
+            .collect();
+        f(&column)
+    });
+    Value::from_components(out.into(), len)
 }
 
 fn compare(op: BinOp, x: f32, y: f32) -> Value {
@@ -250,16 +261,10 @@ fn call(name: &str, args: &[Expr], slot: usize, cx: &mut Context) -> Value {
                 };
                 Value::Int(out.unwrap_or(0))
             } else {
-                Value::Float(
-                    values
-                        .iter()
-                        .map(|v| v.as_f32())
-                        .reduce(pick)
-                        .unwrap_or(0.0),
-                )
+                componentwise(&values, |c| c.iter().copied().reduce(pick).unwrap_or(0.0))
             }
         }
-        "clamp" => Value::Float(f(0).max(f(1)).min(f(2))),
+        "clamp" => componentwise(&values, |c| c[1].max(c[2].min(c[0]))),
         "smoothstep" => {
             let t = ((f(2) - f(0)) / (f(1) - f(0))).clamp(0.0, 1.0);
             Value::Float(t * t * (3.0 - 2.0 * t))
@@ -286,13 +291,12 @@ fn call(name: &str, args: &[Expr], slot: usize, cx: &mut Context) -> Value {
     }
 }
 
-/// `smooth([id,] value, [fadeUp, [fadeDown]])`: eases toward `value`,
-/// halving the gap every tenth of the fade time, in seconds, as Iris's
-/// `SmoothFloat` does. Iris ignores the id and keeps a state per call.
+/// `smooth(value, [fade | fadeUp, fadeDown])`, its id already dropped:
+/// eases toward `value`, halving the gap every tenth of the fade time, in
+/// seconds, as Iris's `SmoothFloat` does.
 fn smooth(values: &[Value], slot: usize, cx: &mut Context) -> f32 {
     let args: Vec<f32> = values.iter().map(|v| v.as_f32()).collect();
     let (target, up, down) = match args[..] {
-        [_, value, up, down] => (value, up, down),
         [value, up, down] => (value, up, down),
         [value, fade] => (value, fade, fade),
         [value] => (value, 1.0, 1.0),
@@ -494,6 +498,13 @@ impl Parser<'_> {
                     }
                 }
                 let slot = if name == "smooth" {
+                    // Iris takes a leading number as the call's id and
+                    // ignores it.
+                    if args.len() > 1
+                        && matches!(args[0], Expr::Literal(Value::Int(_) | Value::Float(_)))
+                    {
+                        args.remove(0);
+                    }
                     *self.smooth_slots += 1;
                     *self.smooth_slots - 1
                 } else {
@@ -525,7 +536,7 @@ fn check_arity(name: &str, count: usize) -> Result<(), ExprError> {
         "min" | "max" | "in" => count >= 2,
         "if" => count >= 3 && count % 2 == 1,
         "random" => count == 0 || count == 2,
-        "smooth" => (1..=4).contains(&count),
+        "smooth" => (1..=3).contains(&count),
         "vec2" | "vec3" | "vec4" => count >= 1,
         _ => return Err(ExprError(format!("unknown function `{name}`"))),
     };
@@ -578,8 +589,16 @@ mod tests {
         assert_eq!(eval("between(5, 1, 4)"), Value::Bool(false));
         assert_eq!(eval("equals(1.0, 1.05, 0.1)"), Value::Bool(true));
         assert_eq!(eval("clamp(5.0, 0.0, 1.0)"), Value::Float(1.0));
+        assert_eq!(
+            eval("clamp(vec3(-1.0, 0.5, 2.0), 0.0, 1.0)"),
+            Value::Vec3(Vec3::new(0.0, 0.5, 1.0))
+        );
         assert_eq!(eval("max(1, 4, 2)"), Value::Int(4));
         assert_eq!(eval("min(1.5, 4)"), Value::Float(1.5));
+        assert_eq!(
+            eval("min(vec2(1.0, 4.0), vec2(3.0, 2.0))"),
+            Value::Vec2(Vec2::new(1.0, 2.0))
+        );
         assert_eq!(eval("fmod(-1.0, 4.0)"), Value::Float(3.0));
         assert_eq!(eval("vec3(1.0, 2.0, 3.0).y"), Value::Float(2.0));
         assert_eq!(eval("vec2(1.0) * 2.0"), Value::Vec2(Vec2::splat(2.0)));
@@ -604,24 +623,29 @@ mod tests {
 
     #[test]
     fn smooth_eases_per_call() {
-        let mut slots = 0;
-        let expr = Expr::parse("smooth(1, target, 1, 1)", &mut slots).unwrap();
-        assert_eq!(slots, 1);
-        let mut state = vec![None; slots];
-        let mut run = |target: f32, frame_time: f32| {
-            let lookup = |_: &str| Some(Value::Float(target));
-            expr.eval(&mut Context {
-                lookup: &lookup,
-                frame_time,
-                smooth: &mut state,
-                missing: Vec::new(),
-            })
-            .as_f32()
-        };
         // The first frame takes the value, then the gap halves every tenth
-        // of the fade time.
-        assert_eq!(run(0.0, 0.0), 0.0);
-        assert!((run(1.0, 0.1) - 0.5).abs() < 1e-4);
+        // of the fade time; a leading number is the id.
+        for (text, eased) in [
+            ("smooth(1, target, 1, 1)", 0.5),
+            ("smooth(5, target, 2)", 1.0 - 0.5f32.sqrt()),
+        ] {
+            let mut slots = 0;
+            let expr = Expr::parse(text, &mut slots).unwrap();
+            assert_eq!(slots, 1);
+            let mut state = vec![None; slots];
+            let mut run = |target: f32, frame_time: f32| {
+                let lookup = |_: &str| Some(Value::Float(target));
+                expr.eval(&mut Context {
+                    lookup: &lookup,
+                    frame_time,
+                    smooth: &mut state,
+                    missing: Vec::new(),
+                })
+                .as_f32()
+            };
+            assert_eq!(run(0.0, 0.0), 0.0);
+            assert!((run(1.0, 0.1) - eased).abs() < 1e-4, "{text}");
+        }
     }
 
     #[test]

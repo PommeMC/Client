@@ -78,7 +78,8 @@ fn option(line: &str) -> Option<(String, u8, OptionValue)> {
 }
 
 /// The macros the options define, with the player's `overrides` applied: a
-/// toggle that's on defines its name, a value option its value.
+/// toggle that's on defines its name as 1, as Iris's properties preprocessor
+/// does, a value option its value.
 pub fn macros(
     options: &BTreeMap<String, OptionValue>,
     overrides: &Overrides,
@@ -87,7 +88,7 @@ pub fn macros(
         .iter()
         .filter_map(|(name, default)| {
             match overrides.get(name).unwrap_or(default) {
-                OptionValue::Toggle(true) => Some(String::new()),
+                OptionValue::Toggle(true) => Some("1".to_owned()),
                 OptionValue::Toggle(false) => None,
                 OptionValue::Value(v) => Some(v.clone()),
             }
@@ -144,7 +145,7 @@ mod tests {
             ("QUALITY".to_owned(), OptionValue::Value("3".into())),
         ]);
         let macros = macros(&options, &overrides);
-        assert_eq!(macros["FOG"], "");
+        assert_eq!(macros["FOG"], "1");
         assert_eq!(macros["QUALITY"], "3");
         assert!(!macros.contains_key("NAME_ONLY"));
     }
