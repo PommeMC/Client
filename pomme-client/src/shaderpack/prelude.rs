@@ -316,13 +316,13 @@ const TERRAIN_SETUP: &str = "
 ";
 
 /// [`TERRAIN_SETUP`] and Iris's terrain colour: the tint, with the ambient
-/// occlusion (and with `oldLighting` the face shade) multiplied in, or in the
-/// alpha under `separateAo`.
+/// occlusion and face shade (the flat one unless `oldLighting`) multiplied
+/// in, or in the alpha under `separateAo`.
 fn terrain_setup(lighting: TerrainLighting) -> String {
     let shade = if lighting.old_lighting {
         "pomme_in_shade.x * pomme_in_shade.y"
     } else {
-        "pomme_in_shade.x"
+        "pomme_in_shade.x * pomme_in_shade.z"
     };
     let color = if lighting.separate_ao {
         "vec4(pomme_in_light_tint.gba, pomme_shade)"
@@ -431,7 +431,7 @@ mod tests {
             };
             Preludes::new(Geometry::Terrain, lighting).vertex_main
         };
-        assert!(color(false, false).contains("pomme_shade = pomme_in_shade.x;"));
+        assert!(color(false, false).contains("pomme_in_shade.x * pomme_in_shade.z;"));
         assert!(color(false, false).contains("pomme_in_light_tint.gba * pomme_shade, 1.0)"));
         assert!(color(true, false).contains("vec4(pomme_in_light_tint.gba, pomme_shade)"));
         assert!(color(false, true).contains("pomme_in_shade.x * pomme_in_shade.y"));
