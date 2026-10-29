@@ -14,10 +14,6 @@ use std::cmp::Reverse;
 /// Per-rect pixel origin inside the atlas, or `None` if it did not fit.
 pub(crate) type Placements = Vec<Option<(u32, u32)>>;
 
-/// Shelf packing strands the unused height at the tail of every shelf, so seed
-/// the atlas from ~1.4x the raw area. Same factor as `chunk::atlas`.
-const SHELF_SLACK: f64 = 1.4;
-
 /// A rect's footprint once its gutter is counted. Vanilla bakes the pad into
 /// the cell the same way and on all four sides (`Stitcher.registerSprite`), so
 /// even rects against the atlas boundary keep their moat.
@@ -52,7 +48,9 @@ pub(crate) fn fit_atlas_size(
         .map(|&(w, h)| u64::from(padded(w, pad)) * u64::from(padded(h, pad)))
         .sum();
 
-    let seed = ((total_area as f64) * SHELF_SLACK).sqrt().ceil();
+    // No allowance for shelf waste: one can skip a size that fits, and
+    // doubling recovers from a seed too small.
+    let seed = (total_area as f64).sqrt().ceil();
     // Clamp before `next_power_of_two`, which panics on overflow in debug.
     let mut atlas_size = if seed >= f64::from(max_size) {
         max_size
