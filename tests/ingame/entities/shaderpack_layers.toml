@@ -53,6 +53,9 @@ option = { shader_pack = "pomme_test" }
 wait_ms = 3000
 
 [[step]]
+expect = { terrain = "settled" }
+
+[[step]]
 screenshot = "pack"
 
 [[step]]
@@ -69,6 +72,9 @@ option = { shader_pack = "" }
 
 [[step]]
 wait_ms = 1500
+
+[[step]]
+expect = { terrain = "settled" }
 
 [[step]]
 screenshot = "off_seen"
