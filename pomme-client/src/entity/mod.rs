@@ -700,6 +700,24 @@ impl LivingEntity {
             // `LivingEntity.aiStep` for an entity that can't simulate movement.
             self.velocity *= 0.98;
         }
+        // `LivingEntity.aiStep` then zeroes tiny components.
+        let v = &mut self.velocity;
+        if self.entity_type == EntityKind::Player {
+            if v.x * v.x + v.z * v.z < 9.0e-6 {
+                v.x = 0.0;
+                v.z = 0.0;
+            }
+        } else {
+            if v.x.abs() < 0.003 {
+                v.x = 0.0;
+            }
+            if v.z.abs() < 0.003 {
+                v.z = 0.0;
+            }
+        }
+        if v.y.abs() < 0.003 {
+            v.y = 0.0;
+        }
 
         self.prev_head_y_rot_deg = self.head_y_rot_deg;
         if self.interp_head_y_rot_steps > 0 {
@@ -1937,6 +1955,28 @@ mod tests {
         let mut store = EntityStore::new();
         spawn(&mut store, 1, EntityKind::Cat, Position::default());
         assert_eq!(store.living[&1].variant, CAT_DEFAULT_VARIANT);
+    }
+
+    /// `LivingEntity.aiStep` zeroes velocity components under 0.003 (a
+    /// player's horizontal pair by its squared length) after the 0.98 decay.
+    #[test]
+    fn tiny_remote_velocities_zero_each_tick() {
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::Pig, Position::default());
+        spawn(&mut store, 2, EntityKind::Player, Position::default());
+        store.set_living_motion(1, DVec3::new(0.003, 0.5, -0.004));
+        store.set_living_motion(2, DVec3::new(0.002, 0.002, 0.002));
+        let velocity = |store: &mut EntityStore, id| {
+            let e = store.living.get_mut(&id).unwrap();
+            e.tick_interpolation();
+            e.velocity
+        };
+        let v = velocity(&mut store, 1);
+        assert_eq!((v.x, v.z), (0.0, -0.004 * 0.98));
+        assert!((v.y - 0.49).abs() < 1e-12);
+        assert_eq!(velocity(&mut store, 2), DVec3::ZERO);
+        store.set_living_motion(2, DVec3::new(0.0035, 0.0, 0.0));
+        assert_eq!(velocity(&mut store, 2).x, 0.0035 * 0.98);
     }
 
     /// `Sniffer.onSyncedDataUpdated`: each state update restarts the one
