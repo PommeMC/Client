@@ -54,6 +54,7 @@ impl MainMenu {
     ) {
         let state = Arc::clone(&self.sign_in);
         *state.write() = SignIn::Requesting;
+        self.focus = None;
         self.sign_in_task = Some(self.rt.spawn(async move {
             *state.write() = match sign_in.await {
                 Ok(Some(account)) => SignIn::Done(account),
@@ -79,6 +80,7 @@ impl MainMenu {
             task.abort();
         }
         *self.sign_in.write() = SignIn::Idle;
+        self.focus = None;
     }
 
     pub(super) fn build_account(
