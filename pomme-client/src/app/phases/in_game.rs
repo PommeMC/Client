@@ -4117,6 +4117,8 @@ pub fn update_game(
                     bat_resting: e.bat_resting,
                     bat_elapsed_secs: extras.bat_elapsed_secs,
                     sniffer: extras.sniffer,
+                    allay: extras.allay,
+                    copper_golem: extras.copper_golem,
                     golem_attack_ticks: extras.golem_attack_ticks,
                     golem_offer_flower_ticks: extras.golem_offer_flower_ticks,
                     body_transform: extras.body_transform,
@@ -4994,6 +4996,8 @@ struct EntityExtras {
     tentacle_angle: f32,
     bat_elapsed_secs: Option<f32>,
     sniffer: crate::renderer::entity_model::SnifferAnims,
+    allay: crate::renderer::entity_model::AllayAnims,
+    copper_golem: crate::renderer::entity_model::CopperGolemAnims,
     golem_attack_ticks: f32,
     golem_offer_flower_ticks: u32,
 }
@@ -5063,9 +5067,28 @@ fn entity_extras(
         },
         EntityKind::Slime => EntityExtras {
             overlay_tints: SLOT0_TINTS,
-            body_transform: Some(slime_body_transform(e, alpha)),
+            body_transform: Some(cube_body_transform(e, alpha, true)),
             ..Default::default()
         },
+        EntityKind::SulfurCube => sulfur_cube_extras(e, alpha),
+        EntityKind::Allay => EntityExtras {
+            allay: crate::renderer::entity_model::AllayAnims {
+                dancing: e.allay.dancing,
+                spinning: e.allay.is_spinning(),
+                spinning_progress: e
+                    .allay
+                    .prev_spinning_ticks
+                    .lerp(e.allay.spinning_ticks, alpha)
+                    / 15.0,
+                holding_progress: e
+                    .allay
+                    .prev_holding_ticks
+                    .lerp(e.allay.holding_ticks, alpha)
+                    / 5.0,
+            },
+            ..Default::default()
+        },
+        EntityKind::CopperGolem => copper_golem_extras(e, alpha),
         EntityKind::Witch => EntityExtras {
             nose_wobble_speed: 0.01 * (entity_id % 10) as f32,
             ..Default::default()
@@ -5148,11 +5171,72 @@ fn anim_clock_secs(e: &crate::entity::LivingEntity, start: u32, alpha: f32) -> f
     (e.age_in_ticks as f32 - start as f32 + alpha).max(0.0) * 0.05
 }
 
-/// Vanilla `AbstractCubeMobRenderer.applySizeAndSquish` plus the slime-only
+/// Copper golem: weathering picks the body and eyes textures.
+fn copper_golem_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    let g = &e.copper_golem;
+    let clock = |start| Some(anim_clock_secs(e, start, alpha));
+    let interaction = |state| match g.interaction {
+        Some((s, start)) if s == state => clock(start),
+        _ => None,
+    };
+    let (overlay_tints, overlay_variants) = slot0_overlay(g.weather + 1);
+    EntityExtras {
+        variant_index: g.weather,
+        overlay_tints,
+        overlay_variants,
+        copper_golem: crate::renderer::entity_model::CopperGolemAnims {
+            holding_item: e.has_item_in_hand(),
+            idle: g.idle_anim_start.and_then(clock),
+            get_item: interaction(1),
+            get_no_item: interaction(2),
+            drop_item: interaction(3),
+            drop_no_item: interaction(4),
+        },
+        ..Default::default()
+    }
+}
+
+/// Vanilla `SulfurCubeRenderer.scale`: a carried block stops the squish and
+/// hides the inner cube, and a lit fuse swells it like primed TNT.
+fn sulfur_cube_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    let carries_block = e.equipment(EquipmentSlot::Body).is_some();
+    let fuse = if e.sulfur_fuse >= 0 {
+        e.sulfur_fuse as f32 - alpha + 1.0
+    } else {
+        0.0
+    };
+    // `TntRenderer.getSwellAmount`.
+    let swell = if fuse > 0.0 && fuse < 10.0 {
+        1.0 + (1.0 - fuse / 10.0).clamp(0.0, 1.0).powi(4) * 0.3
+    } else {
+        1.0
+    };
+    let (extra_downscale, v_offset) = if e.is_baby { (1.0, 1.24) } else { (0.5, 0.98) };
+    let one_pixel_up = if e.is_invisible { 0.0 } else { 1.0 / 16.0 };
+    EntityExtras {
+        overlay_tints: if carries_block {
+            [None; MAX_OVERLAYS]
+        } else {
+            SLOT0_TINTS
+        },
+        body_transform: Some(
+            cube_body_transform(e, alpha, !carries_block)
+                * glam::Mat4::from_scale(glam::Vec3::splat(swell * extra_downscale))
+                * glam::Mat4::from_translation(glam::Vec3::new(0.0, one_pixel_up - v_offset, 0.0)),
+        ),
+        ..Default::default()
+    }
+}
+
+/// Vanilla `AbstractCubeMobRenderer.applySizeAndSquish` plus
 /// `downscaleSlightly` (0.999 shrink + a 0.001 drop that tucks the inner body
 /// under the shell surface; vanilla's +0.001 is in flipped space = down).
-fn slime_body_transform(e: &crate::entity::LivingEntity, alpha: f32) -> glam::Mat4 {
-    let squish = e.prev_squish + (e.squish - e.prev_squish) * alpha;
+fn cube_body_transform(e: &crate::entity::LivingEntity, alpha: f32, squishes: bool) -> glam::Mat4 {
+    let squish = if squishes {
+        e.prev_squish + (e.squish - e.prev_squish) * alpha
+    } else {
+        0.0
+    };
     let size = e.slime_size as f32;
     let ss = squish / (size * 0.5 + 1.0);
     let w = 1.0 / (ss + 1.0);

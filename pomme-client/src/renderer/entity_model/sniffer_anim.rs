@@ -961,10 +961,10 @@ mod tests {
     use super::*;
 
     /// Pins each table's shape against `SnifferAnimation.java`, so a bad
-    /// regeneration fails: (length, looping, channels, keyframes).
+    /// regeneration fails.
     #[test]
     fn tables_match_the_vanilla_definitions() {
-        for (anim, length, looping, channels, frames) in [
+        super::super::assert_kf_tables(&[
             (&SNIFFER_SNIFFSNIFF, 8.0, true, 1, 9),
             (&SNIFFER_LONGSNIFF, 1.0, false, 2, 11),
             (&SNIFFER_WALK, 2.0, true, 17, 102),
@@ -972,15 +972,6 @@ mod tests {
             (&SNIFFER_DIG, 8.0, false, 19, 116),
             (&SNIFFER_STAND_UP, 3.0, false, 18, 51),
             (&SNIFFER_HAPPY, 2.0, true, 3, 15),
-        ] {
-            assert_eq!(anim.length, length);
-            assert_eq!(anim.looping, looping);
-            assert_eq!(anim.channels.len(), channels);
-            let total: usize = anim.channels.iter().map(|c| c.frames.len()).sum();
-            assert_eq!(total, frames);
-            for c in anim.channels {
-                assert!(c.frames.windows(2).all(|w| w[0].t <= w[1].t));
-            }
-        }
+        ]);
     }
 }

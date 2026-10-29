@@ -3,6 +3,7 @@ use glam::{Mat4, Vec3};
 use crate::renderer::chunk::mesher::pack_uv;
 use crate::renderer::rhi;
 
+mod copper_golem_anim;
 mod sniffer_anim;
 
 /// An entity or block-entity model vertex: its position, UV and face normal.
@@ -2574,6 +2575,177 @@ pub fn bake_iron_golem_model() -> BakedEntityModel {
     bake_model(parts, 128, 128)
 }
 
+/// Vanilla `AllayModel.createBodyLayer`.
+pub fn bake_allay_model() -> BakedEntityModel {
+    let arm = |u, v, x| ModelCube {
+        deformation: -0.01,
+        ..vbox((u, v), (x, -0.5, -1.0), (1.0, 4.0, 2.0))
+    };
+    let wing = vbox((16, 14), (0.0, 1.0, 0.0), (0.0, 5.0, 8.0));
+    let parts = vec![
+        vpart("root", None, Vec3::new(0.0, 23.5, 0.0), vec![]),
+        vpart(
+            "head",
+            Some(0),
+            Vec3::new(0.0, -3.99, 0.0),
+            vec![vbox((0, 0), (-2.5, -5.0, -2.5), (5.0, 5.0, 5.0))],
+        ),
+        vpart(
+            "body",
+            Some(0),
+            Vec3::new(0.0, -4.0, 0.0),
+            vec![
+                vbox((0, 10), (-1.5, 0.0, -1.0), (3.0, 4.0, 2.0)),
+                ModelCube {
+                    deformation: -0.2,
+                    ..vbox((0, 16), (-1.5, 0.0, -1.0), (3.0, 5.0, 2.0))
+                },
+            ],
+        ),
+        vpart(
+            "right_arm",
+            Some(2),
+            Vec3::new(-1.75, 0.5, 0.0),
+            vec![arm(23, 0, -0.75)],
+        ),
+        vpart(
+            "left_arm",
+            Some(2),
+            Vec3::new(1.75, 0.5, 0.0),
+            vec![arm(23, 6, -0.25)],
+        ),
+        vpart("right_wing", Some(2), Vec3::new(-0.5, 0.0, 0.6), vec![wing]),
+        vpart("left_wing", Some(2), Vec3::new(0.5, 0.0, 0.6), vec![wing]),
+    ];
+    bake_model(parts, 32, 32)
+}
+
+/// Vanilla `SnowGolemModel.createBodyLayer`.
+pub fn bake_snow_golem_model() -> BakedEntityModel {
+    let shrunk = |cube: ModelCube| ModelCube {
+        deformation: -0.5,
+        ..cube
+    };
+    let arm = || shrunk(vbox((32, 0), (-1.0, 0.0, -1.0), (12.0, 2.0, 2.0)));
+    let parts = vec![
+        vpart(
+            "head",
+            None,
+            Vec3::new(0.0, 4.0, 0.0),
+            vec![shrunk(vbox((0, 0), (-4.0, -8.0, -4.0), (8.0, 8.0, 8.0)))],
+        ),
+        EntityPart {
+            default_rotation: Vec3::new(0.0, 0.0, 1.0),
+            ..vpart("left_arm", None, Vec3::new(5.0, 6.0, 1.0), vec![arm()])
+        },
+        EntityPart {
+            default_rotation: Vec3::new(0.0, std::f32::consts::PI, -1.0),
+            ..vpart("right_arm", None, Vec3::new(-5.0, 6.0, -1.0), vec![arm()])
+        },
+        vpart(
+            "upper_body",
+            None,
+            Vec3::new(0.0, 13.0, 0.0),
+            vec![shrunk(vbox(
+                (0, 16),
+                (-5.0, -10.0, -5.0),
+                (10.0, 10.0, 10.0),
+            ))],
+        ),
+        vpart(
+            "lower_body",
+            None,
+            Vec3::new(0.0, 24.0, 0.0),
+            vec![shrunk(vbox(
+                (0, 36),
+                (-6.0, -12.0, -6.0),
+                (12.0, 12.0, 12.0),
+            ))],
+        ),
+    ];
+    bake_model(parts, 64, 64)
+}
+
+/// Vanilla `CopperGolemModel.createBodyLayer`. Its mesh is translated 24 down,
+/// folded into the top-level offsets here.
+pub fn bake_copper_golem_model() -> BakedEntityModel {
+    let parts = vec![
+        vpart(
+            "body",
+            None,
+            Vec3::new(0.0, 19.0, 0.0),
+            vec![vbox((0, 15), (-4.0, -6.0, -3.0), (8.0, 6.0, 6.0))],
+        ),
+        vpart(
+            "head",
+            Some(0),
+            Vec3::new(0.0, -6.0, 0.0),
+            vec![
+                ModelCube {
+                    deformation: 0.015,
+                    ..vbox((0, 0), (-4.0, -5.0, -5.0), (8.0, 5.0, 10.0))
+                },
+                vbox((56, 0), (-1.0, -2.0, -6.0), (2.0, 3.0, 2.0)),
+                ModelCube {
+                    deformation: -0.015,
+                    ..vbox((37, 8), (-1.0, -9.0, -1.0), (2.0, 4.0, 2.0))
+                },
+                ModelCube {
+                    deformation: -0.015,
+                    ..vbox((37, 0), (-2.0, -13.0, -2.0), (4.0, 4.0, 4.0))
+                },
+            ],
+        ),
+        vpart(
+            "right_arm",
+            Some(0),
+            Vec3::new(-4.0, -6.0, 0.0),
+            vec![vbox((36, 16), (-3.0, -1.0, -2.0), (3.0, 10.0, 4.0))],
+        ),
+        vpart(
+            "left_arm",
+            Some(0),
+            Vec3::new(4.0, -6.0, 0.0),
+            vec![vbox((50, 16), (0.0, -1.0, -2.0), (3.0, 10.0, 4.0))],
+        ),
+        vpart(
+            "right_leg",
+            None,
+            Vec3::new(0.0, 19.0, 0.0),
+            vec![vbox((0, 27), (-4.0, 0.0, -2.0), (4.0, 5.0, 4.0))],
+        ),
+        vpart(
+            "left_leg",
+            None,
+            Vec3::new(0.0, 19.0, 0.0),
+            vec![vbox((16, 27), (0.0, 0.0, -2.0), (4.0, 5.0, 4.0))],
+        ),
+    ];
+    bake_model(parts, 64, 64)
+}
+
+/// Vanilla `SulfurCubeModel` and `SmallSulfurCubeModel`: the translucent
+/// outer cube or the inner one, centred on the model origin.
+pub fn bake_sulfur_cube_model(small: bool, inner: bool) -> BakedEntityModel {
+    let (tex, half, sheet) = match (small, inner) {
+        (false, false) => ((0, 0), 9.0, 128),
+        (false, true) => ((0, 36), 8.0, 128),
+        (true, false) => ((0, 0), 5.0, 64),
+        (true, true) => ((0, 20), 4.0, 64),
+    };
+    let parts = vec![vpart(
+        "cube",
+        None,
+        Vec3::ZERO,
+        vec![vbox(
+            tex,
+            (-half, -half, -half),
+            (2.0 * half, 2.0 * half, 2.0 * half),
+        )],
+    )];
+    bake_model(parts, sheet, sheet)
+}
+
 /// Skeleton: humanoid layout with thin 2×12×2 limbs, 64×32 sheet
 /// (`SkeletonModel.createDefaultSkeletonMesh`).
 fn skeleton_parts() -> Vec<EntityPart> {
@@ -3996,6 +4168,163 @@ pub fn compute_golem_anim(
     anim
 }
 
+/// Allay `AllayRenderState` inputs beyond the shared look and walk.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct AllayAnims {
+    pub dancing: bool,
+    pub spinning: bool,
+    pub spinning_progress: f32,
+    pub holding_progress: f32,
+}
+
+/// Vanilla `AllayModel.setupAnim`.
+pub fn compute_allay_anim(
+    model: &BakedEntityModel,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+    age_in_ticks: f32,
+    a: &AllayAnims,
+) -> PartAnim {
+    use std::f32::consts::{FRAC_PI_3, FRAC_PI_4, PI};
+    let flap = age_in_ticks * 20.0f32.to_radians() + walk_pos;
+    let flap_amount = flap.cos() * PI * 0.15 + walk_speed;
+    let idle_bob = age_in_ticks * 9.0f32.to_radians();
+    let flying = (walk_speed / 0.3).min(1.0);
+    let idle = 1.0 - flying;
+    let holding = a.holding_progress;
+
+    let mut root = Vec3::ZERO;
+    let head = if a.dancing {
+        let dance = age_in_ticks * 8.0f32.to_radians() + walk_speed;
+        let unspun = 1.0 - a.spinning_progress;
+        if a.spinning {
+            root.y = PI * 4.0 * a.spinning_progress;
+        }
+        root.z = dance.cos() * 16.0f32.to_radians() * unspun;
+        Vec3::new(
+            0.0,
+            dance.cos() * 30.0f32.to_radians() * unspun,
+            dance.cos() * 14.0f32.to_radians() * unspun,
+        )
+    } else {
+        head_rotation(head_x_rot_deg, local_head_y_rot_deg)
+    };
+    let wing_x = 0.43633232 * idle;
+    let arm_x = holding * lerp(flying, -FRAC_PI_3, -1.134464);
+    let arm_bob = 0.43633232 - (idle_bob + 4.712389).cos() * PI * 0.075 * idle * (1.0 - holding);
+    let mut anim = PartAnim::default();
+    for (i, part) in model.parts.iter().enumerate() {
+        let rot = match part.name.as_str() {
+            "root" => {
+                anim.translation
+                    .push((i, Vec3::new(0.0, idle_bob.cos() * 0.25 * idle, 0.0)));
+                root
+            }
+            "head" => head,
+            "body" => Vec3::new(flying * FRAC_PI_4, 0.0, 0.0),
+            "right_wing" => Vec3::new(wing_x, -FRAC_PI_4 + flap_amount, 0.0),
+            "left_wing" => Vec3::new(wing_x, FRAC_PI_4 - flap_amount, 0.0),
+            "right_arm" => Vec3::new(arm_x, 0.27925268 * holding, arm_bob),
+            "left_arm" => Vec3::new(arm_x, -0.27925268 * holding, -arm_bob),
+            _ => continue,
+        };
+        anim.rotation.push((i, rot));
+    }
+    anim
+}
+
+/// Vanilla `SnowGolemModel.setupAnim`: the upper body turns a quarter of the
+/// head yaw and carries the arms round with it.
+pub fn compute_snow_golem_anim(
+    model: &BakedEntityModel,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
+) -> PartAnim {
+    let body_y = local_head_y_rot_deg.to_radians() * 0.25;
+    let (sin, cos) = body_y.sin_cos();
+    let mut anim = PartAnim::default();
+    for (i, part) in model.parts.iter().enumerate() {
+        let rest = part.default_rotation;
+        let (rot, pos) = match part.name.as_str() {
+            "head" => (head_rotation(head_x_rot_deg, local_head_y_rot_deg), None),
+            "upper_body" => (Vec3::new(0.0, body_y, 0.0), None),
+            "left_arm" => (
+                Vec3::new(rest.x, body_y, rest.z),
+                Some(Vec3::new(cos * 5.0, part.offset.y, -sin * 5.0)),
+            ),
+            "right_arm" => (
+                Vec3::new(rest.x, body_y + std::f32::consts::PI, rest.z),
+                Some(Vec3::new(-cos * 5.0, part.offset.y, sin * 5.0)),
+            ),
+            _ => continue,
+        };
+        anim.rotation.push((i, rot));
+        if let Some(pos) = pos {
+            anim.translation.push((i, pos - part.offset));
+        }
+    }
+    anim
+}
+
+/// Copper golem `AnimationState` clocks (seconds since start; `None` =
+/// stopped).
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct CopperGolemAnims {
+    pub holding_item: bool,
+    pub idle: Option<f32>,
+    pub get_item: Option<f32>,
+    pub get_no_item: Option<f32>,
+    pub drop_item: Option<f32>,
+    pub drop_no_item: Option<f32>,
+}
+
+/// Vanilla `CopperGolemModel.setupAnim`.
+pub fn compute_copper_golem_anim(
+    model: &BakedEntityModel,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+    c: &CopperGolemAnims,
+) -> PartAnim {
+    use copper_golem_anim::*;
+    let mut d = KfDeltas::new(model);
+    d.set_rot(
+        model,
+        part_index(&model.parts, "head"),
+        head_rotation(head_x_rot_deg, local_head_y_rot_deg),
+    );
+    let walk = if c.holding_item {
+        &COPPER_GOLEM_WALK_ITEM
+    } else {
+        &COPPER_GOLEM_WALK
+    };
+    apply_kf_walk(walk, model, walk_pos, walk_speed, 2.0, 2.5, &mut d);
+    if c.holding_item {
+        // `poseHeldItemArmsIfStill`; `side` mirrors the left arm's limits.
+        for (name, side) in [("right_arm", -1.0f32), ("left_arm", 1.0)] {
+            let idx = part_index(&model.parts, name);
+            let r = &mut d.rot[idx];
+            r.x = r.x.min(-0.87266463);
+            r.y = side * (side * r.y).max(0.1134464);
+            r.z = side * (side * r.z).max(0.064577185);
+            d.touched_rot[idx] = true;
+        }
+    }
+    for (anim, clock) in [
+        (&COPPER_GOLEM_IDLE, c.idle),
+        (&COPPER_GOLEM_CHEST_INTERACTION_NOITEM_GET, c.get_item),
+        (&COPPER_GOLEM_CHEST_INTERACTION_NOITEM_NOGET, c.get_no_item),
+        (&COPPER_GOLEM_CHEST_INTERACTION_ITEM_DROP, c.drop_item),
+        (&COPPER_GOLEM_CHEST_INTERACTION_ITEM_NODROP, c.drop_no_item),
+    ] {
+        apply_kf_anim(anim, model, clock, &mut d);
+    }
+    d.emit(model)
+}
+
 /// Skeleton: standard humanoid limb swing; when aggressive the arms take the
 /// vanilla `HumanoidModel` `BOW_AND_ARROW` aim pose tracking the head (no held
 /// bow item is rendered). `age_in_ticks` is currently unused but kept for
@@ -4716,6 +5045,22 @@ fn apply_kf_walk(
     let millis = (walk_pos * 50.0 * speed_factor) as i64;
     let scale = (walk_speed * scale_factor).min(1.0);
     apply_kf_scaled(anim, model, millis as f32 / 1000.0, scale, d);
+}
+
+/// Checks keyframe tables against their vanilla definitions: (table, length,
+/// looping, channels, keyframes), with every channel's times in order.
+#[cfg(test)]
+fn assert_kf_tables(cases: &[(&KfAnim, f32, bool, usize, usize)]) {
+    for &(anim, length, looping, channels, frames) in cases {
+        assert_eq!(anim.length, length);
+        assert_eq!(anim.looping, looping);
+        assert_eq!(anim.channels.len(), channels);
+        let total: usize = anim.channels.iter().map(|c| c.frames.len()).sum();
+        assert_eq!(total, frames);
+        for c in anim.channels {
+            assert!(c.frames.windows(2).all(|w| w[0].t <= w[1].t));
+        }
+    }
 }
 
 /// `RabbitAnimation.HOP` (0.75s, looping) — transcribed from the decompiled

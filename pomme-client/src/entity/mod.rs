@@ -99,6 +99,77 @@ impl SnifferState {
     }
 }
 
+/// The client half of vanilla `Allay.tick`: its held-item and dance clocks.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AllayAnim {
+    pub dancing: bool,
+    pub holding_ticks: f32,
+    pub prev_holding_ticks: f32,
+    dancing_ticks: f32,
+    pub spinning_ticks: f32,
+    pub prev_spinning_ticks: f32,
+}
+
+impl AllayAnim {
+    fn tick(&mut self, has_item_in_hand: bool) {
+        self.prev_holding_ticks = self.holding_ticks;
+        let step = if has_item_in_hand { 1.0 } else { -1.0 };
+        self.holding_ticks = (self.holding_ticks + step).clamp(0.0, 5.0);
+        if self.dancing {
+            self.dancing_ticks += 1.0;
+            self.prev_spinning_ticks = self.spinning_ticks;
+            let step = if self.is_spinning() { 1.0 } else { -1.0 };
+            self.spinning_ticks = (self.spinning_ticks + step).clamp(0.0, 15.0);
+        } else {
+            self.dancing_ticks = 0.0;
+            self.spinning_ticks = 0.0;
+            self.prev_spinning_ticks = 0.0;
+        }
+    }
+
+    /// `Allay.isSpinning`.
+    pub fn is_spinning(&self) -> bool {
+        self.dancing_ticks % 55.0 < 15.0
+    }
+}
+
+/// Vanilla `CopperGolem`'s synced weathering and state, and the client
+/// `setupAnimationStates` clocks they drive.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CopperGolemAnim {
+    /// `WeatheringCopper.WeatherState` id.
+    pub weather: u32,
+    /// `CopperGolemState` id; 0 is idle.
+    pub state: i32,
+    idle_start_tick: u32,
+    pub idle_anim_start: Option<u32>,
+    /// The interaction state playing, and the tick it started at.
+    pub interaction: Option<(i32, u32)>,
+}
+
+impl CopperGolemAnim {
+    /// `CopperGolem.setupAnimationStates` at `tick`, vanilla's `tickCount`.
+    fn tick(&mut self, tick: u32) {
+        if self.state == 0 {
+            self.interaction = None;
+            if self.idle_start_tick == tick {
+                self.idle_anim_start = Some(tick);
+            } else if self.idle_start_tick == 0 {
+                self.idle_start_tick = tick + fastrand::u32(200..240);
+            }
+            if tick == self.idle_start_tick + 10 {
+                self.idle_start_tick = 0;
+            }
+        } else {
+            self.idle_anim_start = None;
+            self.idle_start_tick = 0;
+            if self.interaction.map(|(state, _)| state) != Some(self.state) {
+                self.interaction = Some((self.state, tick));
+            }
+        }
+    }
+}
+
 /// `AgeableMob` descendants on every supported version (Slime joined only
 /// in 26.2, so it's excluded here and special-cased where it matters).
 fn is_ageable_mob(kind: EntityKind) -> bool {
@@ -116,6 +187,8 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::Squid
             | EntityKind::GlowSquid
             | EntityKind::Sniffer
+            | EntityKind::WanderingTrader
+            | EntityKind::SulfurCube
     ) || is_equine(&kind)
 }
 
@@ -308,6 +381,10 @@ pub struct LivingEntity {
     pub sniffer_anim_start: Option<u32>,
     /// Playing `SnifferSoundInstance`s, stopped once digging ends.
     pub sniffer_dig_sounds: Vec<u64>,
+    pub allay: AllayAnim,
+    pub copper_golem: CopperGolemAnim,
+    /// Sulfur cube fuse ticks left, -1 while unprimed (`SulfurCube.fuse`).
+    pub sulfur_fuse: i32,
     pub puff_state: u8,
     /// Glow squid post-hurt dim timer, synced then decremented client-side.
     pub dark_ticks: i32,
@@ -329,6 +406,8 @@ pub struct LivingEntity {
     /// Mob is targeting/attacking (metadata mob-flags bit 0x04). Raises
     /// zombie/skeleton arms.
     pub aggressive: bool,
+    /// Mob-flags bit 0x01.
+    pub no_ai: bool,
     /// Creeper charged/powered flag — shows the blue aura overlay.
     pub powered: bool,
     /// Arm-swing animation timer, counts down from `SWING_DURATION` to 0
@@ -525,6 +604,9 @@ impl LivingEntity {
             sniffer_state: SnifferState::Idling,
             sniffer_anim_start: None,
             sniffer_dig_sounds: Vec::new(),
+            allay: AllayAnim::default(),
+            copper_golem: CopperGolemAnim::default(),
+            sulfur_fuse: -1,
             puff_state: 0,
             dark_ticks: 0,
             golem_attack_ticks: 0,
@@ -540,6 +622,7 @@ impl LivingEntity {
             age_in_ticks: 0,
             custom_name: None,
             aggressive: false,
+            no_ai: false,
             powered: false,
             swing_time: 0,
             flapping: 1.0,
@@ -576,6 +659,13 @@ impl LivingEntity {
 
     pub fn equipment(&self, slot: EquipmentSlot) -> Option<&ItemStack> {
         self.equipment.get(&slot)
+    }
+
+    /// Vanilla `LivingEntity.hasItemInHand`.
+    pub fn has_item_in_hand(&self) -> bool {
+        [EquipmentSlot::Mainhand, EquipmentSlot::Offhand]
+            .into_iter()
+            .any(|slot| self.equipment(slot).is_some())
     }
 
     /// Vanilla `getViewYRot` / `getViewXRot`: the rotation between ticks.
@@ -899,6 +989,18 @@ impl LivingEntity {
         match self.entity_type {
             EntityKind::Chicken => self.tick_flap(),
             EntityKind::Slime => self.tick_squish(),
+            EntityKind::SulfurCube => {
+                if self.sulfur_fuse > 0 {
+                    self.sulfur_fuse -= 1;
+                }
+                self.tick_squish();
+            }
+            EntityKind::Allay => {
+                let in_hand = self.has_item_in_hand();
+                self.allay.tick(in_hand);
+            }
+            // Vanilla's `tickCount` here is one past the age.
+            EntityKind::CopperGolem if !self.no_ai => self.copper_golem.tick(self.age_in_ticks + 1),
             EntityKind::Squid | EntityKind::GlowSquid => {
                 self.tick_squid();
                 if self.dark_ticks > 0 {
@@ -1353,7 +1455,10 @@ impl EntityStore {
             (_, 9, Float(h)) => entity.health = h,
             // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
             // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
-            (k, 15, Byte(f)) if k != EntityKind::Player => entity.aggressive = f & 0x04 != 0,
+            (k, 15, Byte(f)) if k != EntityKind::Player => {
+                entity.no_ai = f & 0x01 != 0;
+                entity.aggressive = f & 0x04 != 0;
+            }
             (k, 16, Bool(b)) if is_baby_kind(k) => entity.is_baby = b,
             // Skeleton: powder-snow stray conversion; drives the vanilla
             // `isShaking` body jitter.
@@ -1361,7 +1466,18 @@ impl EntityStore {
             (EntityKind::Bogged, 16, Bool(b)) => entity.is_sheared = b,
             // Slime size: 16 on 1.21.9-26.1.x, 18 since Slime joined
             // AgeableMob in 26.2.
-            (EntityKind::Slime, 16 | 18, Int(s)) => entity.slime_size = s.clamp(1, 127) as u8,
+            (EntityKind::Slime, 16 | 18, Int(s)) | (EntityKind::SulfurCube, 18, Int(s)) => {
+                entity.slime_size = s.clamp(1, 127) as u8
+            }
+            // `SulfurCube.onSyncedDataUpdated` primes the fuse from MAX_FUSE.
+            (EntityKind::SulfurCube, 19, Int(f)) => entity.sulfur_fuse = f,
+            (EntityKind::Allay, 16, Bool(b)) => entity.allay.dancing = b,
+            (EntityKind::CopperGolem, 16, Int(w)) => {
+                entity.copper_golem.weather = w.clamp(0, 3) as u32
+            }
+            (EntityKind::CopperGolem, 17, Int(s)) => {
+                entity.copper_golem.state = if (0..=4).contains(&s) { s } else { 0 }
+            }
             // Sheep wool byte: low nibble = DyeColor, bit 0x10 = sheared.
             (EntityKind::Sheep, 18, Byte(w)) => {
                 entity.wool_color = Some(w & 0x0F);
@@ -1372,7 +1488,9 @@ impl EntityStore {
             // Zombie-family underwater conversion / zombie villager curing.
             (EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned, 18, Bool(b))
             | (EntityKind::ZombieVillager, 19, Bool(b)) => entity.is_converting = b,
-            (EntityKind::Villager, 18, Int(c)) => entity.unhappy_counter = c,
+            (EntityKind::Villager | EntityKind::WanderingTrader, 18, Int(c)) => {
+                entity.unhappy_counter = c
+            }
             // Vanilla sparse rabbit id map: 99 = evil, unknown ids fall back
             // to brown.
             (EntityKind::Rabbit, 18, Int(v)) => {
@@ -1764,6 +1882,11 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::Pufferfish
                 | EntityKind::IronGolem
                 | EntityKind::Sniffer
+                | EntityKind::Allay
+                | EntityKind::SnowGolem
+                | EntityKind::CopperGolem
+                | EntityKind::WanderingTrader
+                | EntityKind::SulfurCube
         )
 }
 

@@ -240,6 +240,8 @@ pub(super) fn from_azalea(value: &EntityDataValue) -> Option<Value> {
         EntityDataValue::WolfVariant(v) => Value::Variant(Variant::Wolf, v.protocol_id()),
         EntityDataValue::ChickenVariant(v) => Value::Variant(Variant::Chicken, v.protocol_id()),
         EntityDataValue::SnifferState(state) => Value::Int(*state as i32),
+        EntityDataValue::CopperGolemState(state) => Value::Int(*state as i32),
+        EntityDataValue::WeatheringCopperState(state) => Value::Int(*state as i32),
         _ => return None,
     })
 }
@@ -249,6 +251,23 @@ mod tests {
     use pomme_protocol::wire::write_varint;
 
     use super::*;
+
+    #[test]
+    fn copper_golem_states_map_to_their_ids() {
+        use azalea_entity::{CopperGolemStateKind, WeatheringCopperStateKind};
+        assert_eq!(
+            from_azalea(&EntityDataValue::CopperGolemState(
+                CopperGolemStateKind::DroppingItem
+            )),
+            Some(Value::Int(3))
+        );
+        assert_eq!(
+            from_azalea(&EntityDataValue::WeatheringCopperState(
+                WeatheringCopperStateKind::Weathered
+            )),
+            Some(Value::Int(2))
+        );
+    }
 
     #[test]
     fn native_entity_data_becomes_events() {

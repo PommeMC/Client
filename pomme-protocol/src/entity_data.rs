@@ -144,10 +144,9 @@ macro_rules! serializers_26_2 {
     S::Int,
     // ARMADILLO_STATE
     S::Skip(ENUM),
-    // COPPER_GOLEM_STATE
-    S::Skip(ENUM),
-    // WEATHERING_COPPER_STATE
-    S::Skip(ENUM),
+    // COPPER_GOLEM_STATE and WEATHERING_COPPER_STATE: idMapper VarInts.
+    S::Int,
+    S::Int,
     // VECTOR3: ByteBufCodecs.VECTOR3F
     S::Skip(Struct(&[Float, Float, Float])),
     // QUATERNION: ByteBufCodecs.QUATERNIONF
@@ -291,6 +290,30 @@ mod tests {
                 },
                 Value::Variant(Variant::Cow, 7),
                 Value::Item(None),
+            ]
+        );
+    }
+
+    /// `CopperGolem`'s weathering (16) WEATHERED and state (17) DROPPING_ITEM,
+    /// by vanilla's encoder.
+    #[test]
+    fn copper_golem_states_match_vanilla_encoder() {
+        let payload = crate::vanilla_fixtures::case("set_entity_data/copper_golem");
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().unwrap(), 7);
+        let values = codec().read_entity_data(&mut r).expect("valid entity data");
+        r.ensure_eof().unwrap();
+        assert_eq!(
+            values,
+            [
+                DataValue {
+                    index: 16,
+                    value: Value::Int(2),
+                },
+                DataValue {
+                    index: 17,
+                    value: Value::Int(3),
+                },
             ]
         );
     }

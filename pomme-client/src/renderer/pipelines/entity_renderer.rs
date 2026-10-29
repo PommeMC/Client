@@ -179,6 +179,8 @@ pub struct EntityRenderInfo {
     pub bat_elapsed_secs: Option<f32>,
     /// Sniffer search flag + its five animation clocks.
     pub sniffer: entity_model::SnifferAnims,
+    pub allay: entity_model::AllayAnims,
+    pub copper_golem: entity_model::CopperGolemAnims,
     /// Iron golem countdowns; the punch one is partial-tick adjusted.
     pub golem_attack_ticks: f32,
     pub golem_offer_flower_ticks: u32,
@@ -257,6 +259,8 @@ impl Default for EntityRenderInfo {
             bat_resting: false,
             bat_elapsed_secs: None,
             sniffer: entity_model::SnifferAnims::default(),
+            allay: entity_model::AllayAnims::default(),
+            copper_golem: entity_model::CopperGolemAnims::default(),
             golem_attack_ticks: 0.0,
             golem_offer_flower_ticks: 0,
             base_tint: WHITE_TINT,
@@ -912,6 +916,9 @@ enum AnimationType {
     Squid,
     Bat,
     Sniffer,
+    Allay,
+    SnowGolem,
+    CopperGolem,
     /// Cod, salmon, tropical fish, pufferfish.
     Fish,
     Golem,
@@ -1097,6 +1104,21 @@ fn mob_definitions() -> Vec<MobDef> {
     const BAT_TEX: &[&[&str]] = tex_table!("bat" => "bat");
     const SNIFFER_TEX: &[&[&str]] = tex_table!("sniffer" => "sniffer");
     const SNIFFLET_TEX: &[&[&str]] = tex_table!("sniffer" => "snifflet");
+    const ALLAY_TEX: &[&[&str]] = tex_table!("allay" => "allay");
+    const SNOW_GOLEM_TEX: &[&[&str]] = tex_table!("snow_golem" => "snow_golem");
+    const WANDERING_TRADER_TEX: &[&[&str]] = tex_table!("wandering_trader" => "wandering_trader");
+    // Indexed by `WeatheringCopper.WeatherState`.
+    const COPPER_GOLEM_TEX: &[&[&str]] = tex_table!("copper_golem" =>
+        "copper_golem", "copper_golem_exposed", "copper_golem_weathered", "copper_golem_oxidized");
+    const COPPER_GOLEM_EYES_TEX: &[&[&str]] = tex_table!("copper_golem" =>
+        "copper_golem_eyes", "copper_golem_eyes_exposed", "copper_golem_eyes_weathered",
+        "copper_golem_eyes_oxidized");
+    const SULFUR_CUBE_OUTER_TEX: &[&[&str]] = tex_table!("sulfur_cube" => "sulfur_cube_outer");
+    const SULFUR_CUBE_OUTER_SMALL_TEX: &[&[&str]] =
+        tex_table!("sulfur_cube" => "sulfur_cube_outer_small");
+    const SULFUR_CUBE_INNER_TEX: &[&[&str]] = tex_table!("sulfur_cube" => "sulfur_cube_inner");
+    const SULFUR_CUBE_INNER_SMALL_TEX: &[&[&str]] =
+        tex_table!("sulfur_cube" => "sulfur_cube_inner_small");
     const COD_TEX: &[&[&str]] = tex_table!("fish" => "cod");
     const SALMON_TEX: &[&[&str]] = tex_table!("fish" => "salmon");
     const PUFFERFISH_TEX: &[&[&str]] = tex_table!("fish" => "pufferfish");
@@ -1148,6 +1170,17 @@ fn mob_definitions() -> Vec<MobDef> {
             tex_size,
             overlay_kind: OverlayKind::Opaque,
             invisible_outline: false,
+        }
+    }
+    // Vanilla `entityTranslucent`, as a body or a layer.
+    fn translucent(
+        model: BakedEntityModel,
+        tex_variants: &'static [&'static [&'static str]],
+        tex_size: u32,
+    ) -> VariantDef {
+        VariantDef {
+            overlay_kind: OverlayKind::BodyTranslucent,
+            ..opaque(model, tex_variants, tex_size)
         }
     }
 
@@ -1706,6 +1739,93 @@ fn mob_definitions() -> Vec<MobDef> {
             )),
             adult_overlays: vec![],
             baby_overlays: vec![],
+        },
+        // TODO: `ItemInHandLayer` (the held item) needs a held-item layer.
+        MobDef {
+            kind: EntityKind::Allay,
+            anim: AnimationType::Allay,
+            adult: vec![translucent(entity_model::bake_allay_model(), ALLAY_TEX, 32)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // TODO: `SnowGolemHeadLayer` (the carved pumpkin) needs block models
+        // rendered inside an entity pose.
+        MobDef {
+            kind: EntityKind::SnowGolem,
+            anim: AnimationType::SnowGolem,
+            adult: vec![opaque(
+                entity_model::bake_snow_golem_model(),
+                SNOW_GOLEM_TEX,
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // Variant = weathering state. TODO: `ItemInHandLayer`,
+        // `BlockDecorationLayer` (the antenna block) and `CustomHeadLayer`
+        // need held-item and block-model layers.
+        MobDef {
+            kind: EntityKind::CopperGolem,
+            anim: AnimationType::CopperGolem,
+            adult: vec![opaque(
+                entity_model::bake_copper_golem_model(),
+                COPPER_GOLEM_TEX,
+                64,
+            )],
+            baby: None,
+            // Slot 0: the glowing eyes, same variant as the body.
+            adult_overlays: vec![VariantDef {
+                model: entity_model::bake_copper_golem_model(),
+                tex_variants: COPPER_GOLEM_EYES_TEX,
+                tex_size: 64,
+                overlay_kind: OverlayKind::EyesTranslucent,
+                invisible_outline: false,
+            }],
+            baby_overlays: vec![],
+        },
+        // TODO: `CustomHeadLayer` and `CrossedArmsItemLayer` need a
+        // held-item layer, as on the villager.
+        MobDef {
+            kind: EntityKind::WanderingTrader,
+            anim: AnimationType::Villager,
+            adult: vec![opaque(
+                entity_model::bake_villager_model(false),
+                WANDERING_TRADER_TEX,
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // Slot 0: the inner cube, drawn before the shell. TODO: a contained
+        // block replaces the inner cube, which needs block models rendered
+        // inside an entity pose; the lit fuse's white flash needs an overlay
+        // flash.
+        MobDef {
+            kind: EntityKind::SulfurCube,
+            anim: AnimationType::Static,
+            adult: vec![translucent(
+                entity_model::bake_sulfur_cube_model(false, false),
+                SULFUR_CUBE_OUTER_TEX,
+                128,
+            )],
+            baby: Some(translucent(
+                entity_model::bake_sulfur_cube_model(true, false),
+                SULFUR_CUBE_OUTER_SMALL_TEX,
+                64,
+            )),
+            adult_overlays: vec![translucent(
+                entity_model::bake_sulfur_cube_model(false, true),
+                SULFUR_CUBE_INNER_TEX,
+                128,
+            )],
+            baby_overlays: vec![translucent(
+                entity_model::bake_sulfur_cube_model(true, true),
+                SULFUR_CUBE_INNER_SMALL_TEX,
+                64,
+            )],
         },
         MobDef {
             kind: EntityKind::Cod,
@@ -2279,6 +2399,26 @@ impl EntityRenderer {
                 info.walk_anim_speed,
                 &info.sniffer,
             ),
+            AnimationType::Allay => entity_model::compute_allay_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.age_in_ticks,
+                &info.allay,
+            ),
+            AnimationType::SnowGolem => {
+                entity_model::compute_snow_golem_anim(model, info.head_x_rot_deg, local_head_y)
+            }
+            AnimationType::CopperGolem => entity_model::compute_copper_golem_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                &info.copper_golem,
+            ),
             AnimationType::Fish => entity_model::compute_fish_anim(
                 model,
                 info.age_in_ticks,
@@ -2420,6 +2560,8 @@ impl EntityRenderer {
             let mut translucent = VariantGroups::default();
             // An invisible glowing mob's parts that only leave their outline.
             let mut outline_only = VariantGroups::default();
+            // Translucent bodies, drawn after their translucent layers.
+            let mut translucent_bodies = Vec::new();
             for (vi, v) in vis.iter().enumerate() {
                 let base = v
                     .entry
@@ -2429,6 +2571,9 @@ impl EntityRenderer {
                 match body_route(v.info) {
                     Route::Draw if base.overlay_kind == OverlayKind::OpaqueCulled => {
                         culled.add(base, texture_set, member);
+                    }
+                    Route::Draw if base.overlay_kind == OverlayKind::BodyTranslucent => {
+                        translucent_bodies.push((base, texture_set, member));
                     }
                     Route::Draw => opaque.add(base, texture_set, member),
                     Route::Translucent => {
@@ -2465,7 +2610,10 @@ impl EntityRenderer {
                 }
             }
 
-            let body = collect_overlays(&vis, OverlayKind::BodyTranslucent, &mut outline_only);
+            let mut body = collect_overlays(&vis, OverlayKind::BodyTranslucent, &mut outline_only);
+            for (base, texture_set, member) in translucent_bodies {
+                body.add(base, texture_set, member);
+            }
             let eyes = collect_overlays(&vis, OverlayKind::EyesTranslucent, &mut outline_only);
             let swirl = collect_overlays(&vis, OverlayKind::SwirlAdditive, &mut outline_only);
 
@@ -3009,7 +3157,10 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
         EntityKind::Pufferfish => (0.7, 0.7),
         EntityKind::IronGolem => (1.4, 2.7),
         EntityKind::Player => (0.6, 1.8),
-        _ => (1.0, 1.0),
+        _ => {
+            let d = dimensions::EntityDimensions::of(kind);
+            (d.width, d.height)
+        }
     };
     let s = if is_baby { 0.5 } else { 1.0 };
     (w * s, h * s)

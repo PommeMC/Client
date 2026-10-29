@@ -53,6 +53,7 @@ import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.clock.WorldClocks;
 import net.minecraft.world.entity.PositionMoveRotation;
 import net.minecraft.world.entity.Relative;
+import net.minecraft.world.entity.animal.golem.CopperGolemState;
 import net.minecraft.world.entity.animal.sniffer.Sniffer;
 import net.minecraft.world.item.equipment.trim.TrimPattern;
 import net.minecraft.world.level.ChunkPos;
@@ -60,6 +61,7 @@ import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.WeatheringCopper;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
@@ -101,6 +103,12 @@ public final class CodecOracle {
         encode("set_entity_data/sniffer_state", ClientboundSetEntityDataPacket.STREAM_CODEC::encode,
                 new ClientboundSetEntityDataPacket(7, List.of(SynchedEntityData.DataValue.create(
                         new EntityDataAccessor<>(18, EntityDataSerializers.SNIFFER_STATE), Sniffer.State.DIGGING))));
+        encode("set_entity_data/copper_golem", ClientboundSetEntityDataPacket.STREAM_CODEC::encode,
+                new ClientboundSetEntityDataPacket(7, List.of(
+                        SynchedEntityData.DataValue.create(new EntityDataAccessor<>(16,
+                                EntityDataSerializers.WEATHERING_COPPER_STATE), WeatheringCopper.WeatherState.WEATHERED),
+                        SynchedEntityData.DataValue.create(new EntityDataAccessor<>(17,
+                                EntityDataSerializers.COPPER_GOLEM_STATE), CopperGolemState.DROPPING_ITEM))));
 
         JsonObject out = new JsonObject();
         out.addProperty("version", SharedConstants.getCurrentVersion().name());
