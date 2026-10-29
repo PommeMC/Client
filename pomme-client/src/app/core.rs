@@ -2639,6 +2639,13 @@ impl AppCore {
                     // The server excludes the breaking player from the
                     // broadcast; the local break's effects come from
                     // `predict_destroy`. TODO: the other level events.
+                    // 1010/1011 (jukebox start/stop) only notify nearby
+                    // entities so far. TODO: the song itself and the
+                    // now-playing HUD line.
+                    if event_type == 1010 || event_type == 1011 {
+                        game.entity_store
+                            .set_record_playing_nearby(pos, event_type == 1010);
+                    }
                     if event_type == 2001
                         && let Some(state) = game.block_registry.block_state_table().try_state(data)
                     {
@@ -3545,6 +3552,7 @@ impl AppCore {
         let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(
             dx,
+            0.0,
             dz,
             &mut game.player_walk_pos,
             &mut game.player_walk_speed,

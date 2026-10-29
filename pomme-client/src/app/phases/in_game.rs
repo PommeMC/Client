@@ -37,7 +37,7 @@ use crate::renderer::chunk::mesh_columns::MeshColumns;
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
-use crate::renderer::entity_model::triangle_wave;
+use crate::renderer::entity_model::{lerp, triangle_wave};
 use crate::renderer::pipelines::block_entity;
 use crate::renderer::pipelines::entity_renderer::{
     EntityRenderInfo, MAX_OVERLAYS, PackShadow, WHITE_TINT, armor_render_infos, dye_color_tint,
@@ -4141,6 +4141,8 @@ pub fn update_game(
                     allay: extras.allay,
                     copper_golem: extras.copper_golem,
                     llama_decor: extras.llama_decor,
+                    bee: extras.bee,
+                    parrot: extras.parrot,
                     dolphin_moving: extras.dolphin_moving,
                     turtle: extras.turtle,
                     golem_attack_ticks: extras.golem_attack_ticks,
@@ -5042,6 +5044,8 @@ struct EntityExtras {
     allay: crate::renderer::entity_model::AllayAnims,
     copper_golem: crate::renderer::entity_model::CopperGolemAnims,
     llama_decor: Option<crate::renderer::pipelines::entity_renderer::LlamaDecor>,
+    bee: crate::renderer::entity_model::BeeAnims,
+    parrot: crate::renderer::entity_model::ParrotAnims,
     dolphin_moving: bool,
     turtle: crate::renderer::entity_model::TurtleAnims,
     golem_attack_ticks: f32,
@@ -5197,6 +5201,8 @@ fn entity_extras(
             },
             ..Default::default()
         },
+        EntityKind::Bee => bee_extras(e, alpha, game_time),
+        EntityKind::Parrot => parrot_extras(e, alpha),
         EntityKind::Sniffer => EntityExtras {
             sniffer: sniffer_anims(e, alpha),
             ..Default::default()
@@ -5250,6 +5256,48 @@ fn llama_extras(e: &crate::entity::LivingEntity) -> EntityExtras {
             equipment,
             has_chest,
         }),
+        ..Default::default()
+    }
+}
+
+/// Vanilla `BeeRenderer.extractRenderState` and `getTextureLocation`
+/// (variants: plain, nectar, angry, angry with nectar).
+fn bee_extras(e: &crate::entity::LivingEntity, alpha: f32, game_time: i64) -> EntityExtras {
+    // `NeutralMob.isAngry`.
+    let is_angry = e.anger_end_time > 0 && e.anger_end_time - game_time > 0;
+    let has_nectar = e.bee.has_nectar();
+    EntityExtras {
+        variant_index: u32::from(is_angry) * 2 + u32::from(has_nectar),
+        bee: crate::renderer::entity_model::BeeAnims {
+            roll_amount: lerp(alpha, e.bee.prev_roll_amount, e.bee.roll_amount),
+            has_stinger: !e.bee.has_stung(),
+            is_on_ground: e.on_ground && e.velocity.length_squared() < 1.0e-7,
+            is_angry,
+        },
+        ..Default::default()
+    }
+}
+
+/// Vanilla `ParrotRenderer.extractRenderState` (`ParrotModel.getPose`).
+fn parrot_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    use crate::renderer::entity_model::ParrotPose;
+    let flap = lerp(alpha, e.prev_flap, e.flap);
+    let flap_speed = lerp(alpha, e.prev_flap_speed, e.flap_speed);
+    let pose = if e.party_parrot {
+        ParrotPose::Party
+    } else if e.is_sitting {
+        ParrotPose::Sitting
+    } else if !e.on_ground {
+        ParrotPose::Flying
+    } else {
+        ParrotPose::Standing
+    };
+    EntityExtras {
+        variant_index: e.variant,
+        parrot: crate::renderer::entity_model::ParrotAnims {
+            flap_angle: (flap.sin() + 1.0) * flap_speed,
+            pose,
+        },
         ..Default::default()
     }
 }

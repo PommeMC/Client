@@ -3,13 +3,17 @@ use glam::{Mat4, Vec3};
 use crate::renderer::chunk::mesher::pack_uv;
 use crate::renderer::rhi;
 
+mod bee;
 mod copper_golem_anim;
 mod dolphin;
 mod llama;
+mod parrot;
 mod sniffer_anim;
 mod turtle;
+pub use bee::*;
 pub use dolphin::*;
 pub use llama::*;
+pub use parrot::*;
 pub use turtle::*;
 
 /// An entity or block-entity model vertex: its position, UV and face normal.
@@ -79,10 +83,12 @@ fn quadruped_legs(
 /// shape — positional indexing into a shared parts builder goes stale
 /// silently.
 fn part_index(parts: &[EntityPart], name: &str) -> usize {
-    parts
-        .iter()
-        .position(|p| p.name == name)
-        .unwrap_or_else(|| panic!("mesh has a {name} part"))
+    find_part(parts, name).unwrap_or_else(|| panic!("mesh has a {name} part"))
+}
+
+/// Index of the named part, for parts only some meshes have.
+fn find_part(parts: &[EntityPart], name: &str) -> Option<usize> {
+    parts.iter().position(|p| p.name == name)
 }
 
 /// Mirror a cube's geometry across x=0 WITHOUT flipping UVs (e.g. chicken
@@ -165,6 +171,15 @@ impl PartAnim {
             .iter()
             .find(|&&(j, _)| j == i)
             .map_or(model.parts[i].default_rotation, |r| r.1)
+    }
+
+    /// The named part's emitted translation, else zero.
+    fn translation_of(&self, model: &BakedEntityModel, name: &str) -> Vec3 {
+        let i = part_index(&model.parts, name);
+        self.translation
+            .iter()
+            .find(|&&(j, _)| j == i)
+            .map_or(Vec3::ZERO, |t| t.1)
     }
 }
 
@@ -2610,10 +2625,7 @@ pub fn bake_iron_golem_model() -> BakedEntityModel {
 
 /// Vanilla `AllayModel.createBodyLayer`.
 pub fn bake_allay_model() -> BakedEntityModel {
-    let arm = |u, v, x| ModelCube {
-        deformation: -0.01,
-        ..vbox((u, v), (x, -0.5, -1.0), (1.0, 4.0, 2.0))
-    };
+    let arm = |u, v, x| deformed(vbox((u, v), (x, -0.5, -1.0), (1.0, 4.0, 2.0)), -0.01);
     let wing = vbox((16, 14), (0.0, 1.0, 0.0), (0.0, 5.0, 8.0));
     let parts = vec![
         vpart("root", None, Vec3::new(0.0, 23.5, 0.0), vec![]),
@@ -2629,10 +2641,7 @@ pub fn bake_allay_model() -> BakedEntityModel {
             Vec3::new(0.0, -4.0, 0.0),
             vec![
                 vbox((0, 10), (-1.5, 0.0, -1.0), (3.0, 4.0, 2.0)),
-                ModelCube {
-                    deformation: -0.2,
-                    ..vbox((0, 16), (-1.5, 0.0, -1.0), (3.0, 5.0, 2.0))
-                },
+                deformed(vbox((0, 16), (-1.5, 0.0, -1.0), (3.0, 5.0, 2.0)), -0.2),
             ],
         ),
         vpart(
@@ -2655,10 +2664,7 @@ pub fn bake_allay_model() -> BakedEntityModel {
 
 /// Vanilla `SnowGolemModel.createBodyLayer`.
 pub fn bake_snow_golem_model() -> BakedEntityModel {
-    let shrunk = |cube: ModelCube| ModelCube {
-        deformation: -0.5,
-        ..cube
-    };
+    let shrunk = |cube| deformed(cube, -0.5);
     let arm = || shrunk(vbox((32, 0), (-1.0, 0.0, -1.0), (12.0, 2.0, 2.0)));
     let parts = vec![
         vpart(
@@ -2714,19 +2720,10 @@ pub fn bake_copper_golem_model() -> BakedEntityModel {
             Some(0),
             Vec3::new(0.0, -6.0, 0.0),
             vec![
-                ModelCube {
-                    deformation: 0.015,
-                    ..vbox((0, 0), (-4.0, -5.0, -5.0), (8.0, 5.0, 10.0))
-                },
+                deformed(vbox((0, 0), (-4.0, -5.0, -5.0), (8.0, 5.0, 10.0)), 0.015),
                 vbox((56, 0), (-1.0, -2.0, -6.0), (2.0, 3.0, 2.0)),
-                ModelCube {
-                    deformation: -0.015,
-                    ..vbox((37, 8), (-1.0, -9.0, -1.0), (2.0, 4.0, 2.0))
-                },
-                ModelCube {
-                    deformation: -0.015,
-                    ..vbox((37, 0), (-2.0, -13.0, -2.0), (4.0, 4.0, 4.0))
-                },
+                deformed(vbox((37, 8), (-1.0, -9.0, -1.0), (2.0, 4.0, 2.0)), -0.015),
+                deformed(vbox((37, 0), (-2.0, -13.0, -2.0), (4.0, 4.0, 4.0)), -0.015),
             ],
         ),
         vpart(
@@ -3578,6 +3575,27 @@ fn mirrored(cube: ModelCube) -> ModelCube {
     }
 }
 
+/// A box with `CubeDeformation(g)`.
+fn deformed(cube: ModelCube, g: f32) -> ModelCube {
+    ModelCube {
+        deformation: g,
+        ..cube
+    }
+}
+
+/// Vanilla `Mth.rotLerpRad`.
+fn rot_lerp_rad(a: f32, from: f32, to: f32) -> f32 {
+    use std::f32::consts::PI;
+    let mut diff = to - from;
+    while diff < -PI {
+        diff += PI * 2.0;
+    }
+    while diff >= PI {
+        diff -= PI * 2.0;
+    }
+    from + a * diff
+}
+
 fn villager_parts() -> Vec<EntityPart> {
     vec![
         vpart(
@@ -4109,7 +4127,7 @@ fn head_rotation(head_x_rot_deg: f32, local_head_y_rot_deg: f32) -> Vec3 {
 }
 
 /// Vanilla `Mth.lerp(delta, from, to)`.
-fn lerp(delta: f32, from: f32, to: f32) -> f32 {
+pub(crate) fn lerp(delta: f32, from: f32, to: f32) -> f32 {
     from + delta * (to - from)
 }
 
@@ -5052,7 +5070,7 @@ fn apply_kf_scaled(
         elapsed_secs
     };
     for ch in anim.channels {
-        let Some(idx) = model.parts.iter().position(|p| p.name == ch.part) else {
+        let Some(idx) = find_part(&model.parts, ch.part) else {
             continue;
         };
         let v = kf_sample(ch.frames, t) * target_scale;

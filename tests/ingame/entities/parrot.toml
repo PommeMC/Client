@@ -1,0 +1,86 @@
+# Parrots, three-quarter view from above: the five variants standing,
+# one sitting, one hovering (flying pose: legs tucked, wings out) and one
+# partying by a playing jukebox (the client hears the jukebox's level
+# event and bobs the parrot's head and body in a circle).
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+deterministic = true
+
+# A pillar to look down from.
+[[step]]
+chat = "/fill -50 -60 0 -50 -58 0 minecraft:stone"
+
+[[step]]
+chat = "/tp @s -49.5 -57 0.5 0 40"
+
+[[step]]
+expect = { player = { position = [-49.5, -57.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:parrot -52.5 -60 3.5 {NoAI:1b,Variant:0,Rotation:[150f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:parrot -51.5 -60 3.5 {NoAI:1b,Variant:1,Rotation:[150f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:parrot -50.5 -60 3.5 {NoAI:1b,Variant:2,Rotation:[150f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:parrot -49.5 -60 3.5 {NoAI:1b,Variant:3,Rotation:[210f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:parrot -48.5 -60 3.5 {NoAI:1b,Variant:4,Rotation:[210f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:parrot -51.5 -60 5.5 {NoAI:1b,Variant:2,Sitting:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:parrot -50 -59 5.5 {NoAI:1b,NoGravity:1b,Variant:1,Rotation:[180f,0f]}"
+
+# The party parrot, beside a jukebox that starts playing once a disc goes in.
+[[step]]
+chat = "/setblock -46 -60 6 minecraft:jukebox"
+
+[[step]]
+chat = "/summon minecraft:parrot -47.5 -60 5.5 {NoAI:1b,Variant:0,Rotation:[180f,0f]}"
+
+# The jukebox's level event only reaches parrots the client already has.
+[[step]]
+expect = { entity = "parrot", at = [-47.5, -60.0, 5.5] }
+
+[[step]]
+chat = "/item replace block -46 -60 6 container.0 with minecraft:music_disc_cat"
+
+[[step]]
+look_at = [-50.0, -59.5, 4.5]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "parrots"
+
+[[step]]
+chat = "/kill @e[type=minecraft:parrot]"
+
+[[step]]
+chat = "/setblock -46 -60 6 minecraft:air"
+
+[[step]]
+chat = "/fill -50 -60 0 -50 -58 0 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"
