@@ -1750,7 +1750,8 @@ fn mob_definitions() -> Vec<MobDef> {
             baby_overlays: vec![],
         },
         // TODO: `SnowGolemHeadLayer` (the carved pumpkin) needs block models
-        // rendered inside an entity pose.
+        // rendered inside an entity pose, and the pumpkin flag (bit 0x10 of
+        // `DATA_PUMPKIN_ID`) tracked.
         MobDef {
             kind: EntityKind::SnowGolem,
             anim: AnimationType::SnowGolem,
@@ -1801,8 +1802,8 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         // Slot 0: the inner cube, drawn before the shell. TODO: a contained
         // block replaces the inner cube, which needs block models rendered
-        // inside an entity pose; the lit fuse's white flash needs an overlay
-        // flash.
+        // inside an entity pose; a worn skull needs `CustomHeadLayer`; the lit
+        // fuse's white flash needs an overlay flash.
         MobDef {
             kind: EntityKind::SulfurCube,
             anim: AnimationType::Static,

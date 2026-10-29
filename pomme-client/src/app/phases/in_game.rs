@@ -5216,7 +5216,7 @@ fn copper_golem_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExt
 
 /// Vanilla `SulfurCubeRenderer.scale`: a carried block stops the squish and
 /// hides the inner cube, and a lit fuse swells it like primed TNT. A skull in
-/// the body or head slot is worn instead, which only hides the inner cube.
+/// the body or head slot only hides the inner cube.
 fn sulfur_cube_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
     let body = e.equipment(EquipmentSlot::Body);
     // TODO: a non-block body item resolves to air in vanilla, which still

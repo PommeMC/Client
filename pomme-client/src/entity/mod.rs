@@ -999,6 +999,7 @@ impl LivingEntity {
             }
             // Vanilla's `tickCount` here is one past the age.
             EntityKind::CopperGolem if !self.no_ai => self.copper_golem.tick(self.age_in_ticks + 1),
+            EntityKind::CopperGolem => self.copper_golem.head_spun = false,
             EntityKind::Squid | EntityKind::GlowSquid => {
                 self.tick_squid();
                 if self.dark_ticks > 0 {
