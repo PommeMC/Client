@@ -563,6 +563,15 @@ pub enum NetworkEvent {
     SnifferDigging {
         id: i32,
     },
+    /// Entity event 64: an armadillo peeks out of its shell.
+    ArmadilloPeek {
+        id: i32,
+    },
+    /// Entity events 58 / 59: a goat starts / stops lowering its head to ram.
+    GoatRam {
+        id: i32,
+        lowering: bool,
+    },
     SquidTentacleReset {
         id: i32,
     },

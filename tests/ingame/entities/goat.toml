@@ -1,0 +1,62 @@
+# Goats at rest, three-quarter view from above: an adult with both horns, an
+# adult that lost its left horn, and a baby (its own mesh, head pitched down
+# 22.5 degrees).
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+deterministic = true
+
+# A pillar to look down from.
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 0.5 -57 0.5 0 40"
+
+[[step]]
+expect = { player = { position = [0.5, -57.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:goat -1.5 -60 5.5 {NoAI:1b,Rotation:[150f,0f]}"
+
+[[step]]
+expect = { entity = "goat", baby = false }
+
+[[step]]
+chat = "/summon minecraft:goat 0.5 -60 6.5 {NoAI:1b,HasLeftHorn:0b,Rotation:[210f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:goat 2.5 -60 5 {NoAI:1b,Age:-24000,Rotation:[210f,0f]}"
+
+[[step]]
+expect = { entity = "goat", baby = true }
+
+[[step]]
+look_at = [0.5, -59.5, 5.5]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "goats"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"

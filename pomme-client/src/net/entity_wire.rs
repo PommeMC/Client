@@ -170,7 +170,13 @@ fn entity_event(id: i32, event: i8) -> Option<NetworkEvent> {
             offering: false,
         },
         56 => NetworkEvent::WolfShaking { id, shaking: false },
+        58 => NetworkEvent::GoatRam { id, lowering: true },
+        59 => NetworkEvent::GoatRam {
+            id,
+            lowering: false,
+        },
         63 => NetworkEvent::SnifferDigging { id },
+        64 => NetworkEvent::ArmadilloPeek { id },
         _ => return None,
     })
 }

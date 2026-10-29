@@ -3,21 +3,25 @@ use glam::{Mat4, Vec3};
 use crate::renderer::chunk::mesher::pack_uv;
 use crate::renderer::rhi;
 
+mod armadillo;
 mod axolotl;
 mod bee;
 mod copper_golem_anim;
 mod dolphin;
 mod fox;
+mod goat;
 mod llama;
 mod panda;
 mod parrot;
 mod polar_bear;
 mod sniffer_anim;
 mod turtle;
+pub use armadillo::*;
 pub use axolotl::*;
 pub use bee::*;
 pub use dolphin::*;
 pub use fox::*;
+pub use goat::*;
 pub use llama::*;
 pub use panda::*;
 pub use parrot::*;
@@ -4125,13 +4129,13 @@ fn vanilla_rot(x: f32, y: f32, z: f32) -> Vec3 {
     Vec3::new(x, y, z)
 }
 
-/// Vanilla head look, `Ry(yaw)·Rx(pitch)`.
 /// The walk swing vanilla models share, `cos(pos * 0.6662 + phase) * 1.4 *
 /// speed`.
 fn walk_swing(walk_pos: f32, walk_speed: f32, phase: f32) -> f32 {
     (walk_pos * 0.6662 + phase).cos() * 1.4 * walk_speed
 }
 
+/// Vanilla head look, `Ry(yaw)·Rx(pitch)`.
 fn head_rotation(head_x_rot_deg: f32, local_head_y_rot_deg: f32) -> Vec3 {
     vanilla_rot(
         head_x_rot_deg.to_radians(),

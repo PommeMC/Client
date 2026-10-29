@@ -4124,6 +4124,8 @@ pub fn update_game(
                     fox: extras.fox,
                     axolotl: extras.axolotl,
                     panda: extras.panda,
+                    armadillo: extras.armadillo,
+                    goat: extras.goat,
                     parrot: extras.parrot,
                     dolphin_moving: extras.dolphin_moving,
                     turtle: extras.turtle,
@@ -5015,6 +5017,8 @@ struct EntityExtras {
     fox: crate::renderer::entity_model::FoxAnims,
     axolotl: crate::renderer::entity_model::AxolotlAnims,
     panda: crate::renderer::entity_model::PandaAnims,
+    armadillo: crate::renderer::entity_model::ArmadilloAnims,
+    goat: crate::renderer::entity_model::GoatAnims,
     parrot: crate::renderer::entity_model::ParrotAnims,
     dolphin_moving: bool,
     turtle: crate::renderer::entity_model::TurtleAnims,
@@ -5157,6 +5161,19 @@ fn entity_extras(
         | EntityKind::TropicalFish
         | EntityKind::Pufferfish => fish_extras(e, alpha),
         EntityKind::IronGolem => golem_extras(e, alpha),
+        EntityKind::Armadillo => EntityExtras {
+            armadillo: armadillo_anims(e, alpha),
+            ..Default::default()
+        },
+        // `GoatRenderer.extractRenderState`.
+        EntityKind::Goat => EntityExtras {
+            goat: crate::renderer::entity_model::GoatAnims {
+                has_left_horn: e.goat.has_left_horn,
+                has_right_horn: e.goat.has_right_horn,
+                ramming_x_head_rot: e.goat.ramming_x_head_rot(e.is_baby),
+            },
+            ..Default::default()
+        },
         // `DolphinRenderer.extractRenderState`.
         EntityKind::Dolphin => EntityExtras {
             dolphin_moving: e.velocity.x * e.velocity.x + e.velocity.z * e.velocity.z > 1.0e-7,
@@ -5379,6 +5396,25 @@ fn axolotl_anims(
         }
     }
     anims
+}
+
+/// Vanilla `ArmadilloRenderer.extractRenderState`.
+fn armadillo_anims(
+    e: &crate::entity::LivingEntity,
+    alpha: f32,
+) -> crate::renderer::entity_model::ArmadilloAnims {
+    let a = &e.armadillo;
+    // `AnimationState.getTimeInMillis`, whose start may sit before tick 0
+    // after a `fastForward`.
+    let clock = |start: Option<i64>| {
+        start.map(|s| ((e.age_in_ticks as f32 + alpha - s as f32) * 50.0) as i64 as f32 / 1000.0)
+    };
+    crate::renderer::entity_model::ArmadilloAnims {
+        hiding_in_shell: a.hiding_in_shell(),
+        roll_out: clock(a.roll_out_start),
+        roll_up: clock(a.roll_up_start),
+        peek: clock(a.peek_start),
+    }
 }
 
 /// Vanilla `SnifferRenderer.extractRenderState`.

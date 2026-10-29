@@ -268,6 +268,41 @@ impl AxolotlSim {
     }
 }
 
+/// Vanilla `Armadillo.ArmadilloState`, in id order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ArmadilloState {
+    #[default]
+    Idle,
+    Rolling,
+    Scared,
+    Unrolling,
+}
+
+impl ArmadilloState {
+    /// `ByIdMap.continuous` with `OutOfBoundsStrategy.ZERO`.
+    fn from_id(id: i32) -> Self {
+        match id {
+            1 => Self::Rolling,
+            2 => Self::Scared,
+            3 => Self::Unrolling,
+            _ => Self::Idle,
+        }
+    }
+
+    /// `shouldHideInShell`.
+    fn hides_in_shell(self, ticks_in_state: u64) -> bool {
+        match self {
+            Self::Idle => false,
+            Self::Rolling => ticks_in_state > 5,
+            Self::Scared => true,
+            Self::Unrolling => ticks_in_state < 26,
+        }
+    }
+}
+
+/// `ArmadilloState.SCARED.animationDuration()`.
+const ARMADILLO_SCARED_ANIMATION_TICKS: i64 = 50;
+
 /// Vanilla `Fox` client state: the synced flags byte and the crouch spring
 /// (`Fox.tick`). The interested head tilt reuses the wolf's spring.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -455,6 +490,104 @@ impl PandaSim {
     }
 }
 
+/// The client half of vanilla `Armadillo`: the synced state, the ticks spent
+/// in it, and the start ticks of its three `AnimationState`s.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ArmadilloSim {
+    pub state: ArmadilloState,
+    in_state_ticks: u64,
+    pub roll_out_start: Option<i64>,
+    pub roll_up_start: Option<i64>,
+    pub peek_start: Option<i64>,
+    peek_received: bool,
+}
+
+impl ArmadilloSim {
+    /// `onSyncedDataUpdated`.
+    fn set_state(&mut self, id: i32) {
+        self.state = ArmadilloState::from_id(id);
+        self.in_state_ticks = 0;
+    }
+
+    /// `isScared`.
+    pub fn is_scared(&self) -> bool {
+        self.state != ArmadilloState::Idle
+    }
+
+    /// `shouldHideInShell`.
+    pub fn hiding_in_shell(&self) -> bool {
+        self.state.hides_in_shell(self.in_state_ticks)
+    }
+
+    /// `setupAnimationStates` then `++inStateTicks`, at vanilla's
+    /// post-increment `tickCount`.
+    fn tick(&mut self, tick_count: i64) {
+        use ArmadilloState as S;
+        let (roll_out, roll_up) = (self.state == S::Unrolling, self.state == S::Rolling);
+        for (clock, on) in [
+            (&mut self.roll_out_start, roll_out),
+            (&mut self.roll_up_start, roll_up),
+        ] {
+            if !on {
+                *clock = None;
+            } else if clock.is_none() {
+                *clock = Some(tick_count);
+            }
+        }
+        if self.state != S::Scared {
+            self.peek_start = None;
+        } else {
+            if self.peek_received {
+                self.peek_start = None;
+                self.peek_received = false;
+            }
+            if self.in_state_ticks == 0 {
+                // `start` then `fastForward(animationDuration, 1)`: entering
+                // the state shows the peek's last frame.
+                self.peek_start = Some(tick_count - ARMADILLO_SCARED_ANIMATION_TICKS);
+            } else if self.peek_start.is_none() {
+                self.peek_start = Some(tick_count);
+            }
+        }
+        self.in_state_ticks += 1;
+    }
+}
+
+/// The client half of vanilla `Goat`: horn flags and the ram's head-lowering
+/// counter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GoatSim {
+    pub has_left_horn: bool,
+    pub has_right_horn: bool,
+    lowering_head: bool,
+    lower_head_tick: i32,
+}
+
+impl Default for GoatSim {
+    fn default() -> Self {
+        Self {
+            has_left_horn: true,
+            has_right_horn: true,
+            lowering_head: false,
+            lower_head_tick: 0,
+        }
+    }
+}
+
+impl GoatSim {
+    /// `Goat.aiStep`'s head-lowering counter.
+    fn tick(&mut self) {
+        let step = if self.lowering_head { 1 } else { -2 };
+        self.lower_head_tick = (self.lower_head_tick + step).clamp(0, 20);
+    }
+
+    /// `Goat.getRammingXHeadRot`, radians.
+    pub fn ramming_x_head_rot(&self, is_baby: bool) -> f32 {
+        let max = if is_baby { 52.5 } else { 30.0 };
+        self.lower_head_tick as f32 / 20.0 * max * (std::f32::consts::PI / 180.0)
+    }
+}
+
 /// A 0..1 pose amount stepping `up` toward 1 while `on`, else `down`
 /// toward 0.
 fn spring(cur: f32, on: bool, up: f32, down: f32) -> f32 {
@@ -485,6 +618,8 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::WanderingTrader
             | EntityKind::SulfurCube
             | EntityKind::Mooshroom
+            | EntityKind::Armadillo
+            | EntityKind::Goat
             | EntityKind::Fox
             | EntityKind::Panda
             | EntityKind::Bee
@@ -713,6 +848,8 @@ pub struct LivingEntity {
     pub fox: FoxSim,
     pub panda: PandaSim,
     pub axolotl: AxolotlSim,
+    pub armadillo: ArmadilloSim,
+    pub goat: GoatSim,
     /// `Turtle.HAS_EGG` / `LAYING_EGG`.
     pub has_egg: bool,
     pub laying_egg: bool,
@@ -768,7 +905,8 @@ pub struct LivingEntity {
 pub(crate) fn baby_dimensions(kind: EntityKind, width: f32, height: f32) -> (f32, f32) {
     let scale = match kind {
         EntityKind::Squid | EntityKind::GlowSquid => return (0.5, 0.5),
-        EntityKind::Fox => 0.6,
+        EntityKind::Goat => return (0.45, 0.65),
+        EntityKind::Armadillo | EntityKind::Fox => 0.6,
         // Their `getAgeScale`.
         EntityKind::Dolphin => 0.65,
         EntityKind::Turtle => 0.3,
@@ -787,6 +925,8 @@ pub(crate) fn living_entity_dimensions(entity: &LivingEntity) -> EntityDimension
         (dims.width, dims.height) = baby_dimensions(entity.entity_type, dims.width, dims.height);
     }
     dims.height *= entity.stand_height_scale();
+    // TODO: `Goat.getDefaultDimensions` scales by 0.7 in `Pose.LONG_JUMPING`;
+    // pomme tracks only the crouching pose.
     dims
 }
 
@@ -948,6 +1088,8 @@ impl LivingEntity {
             fox: FoxSim::default(),
             panda: PandaSim::default(),
             axolotl: AxolotlSim::default(),
+            armadillo: ArmadilloSim::default(),
+            goat: GoatSim::default(),
             has_egg: false,
             laying_egg: false,
             puff_state: 0,
@@ -1383,6 +1525,15 @@ impl LivingEntity {
             // TODO: `Bee.tick`'s falling-nectar drip particles (no drip
             // particle type yet).
             EntityKind::Bee => self.bee.tick(),
+            // `Armadillo.tick`; a scared armadillo's `getMaxHeadYRot` is 0,
+            // so `clampHeadRotationToBody` pins the head to the body.
+            EntityKind::Armadillo => {
+                self.armadillo.tick(i64::from(self.age_in_ticks) + 1);
+                if self.armadillo.is_scared() {
+                    self.head_y_rot_deg += wrap_degrees(self.body_y_rot_deg - self.head_y_rot_deg);
+                }
+            }
+            EntityKind::Goat => self.goat.tick(),
             EntityKind::Fox => self.fox.tick(),
             // `Axolotl.baseTick` runs before the interpolation step, where a
             // remote entity's rotation still equals the `setOldPosAndRot`
@@ -1982,6 +2133,9 @@ impl EntityStore {
                     entity.bat_anim_start = Some(entity.age_in_ticks + 1);
                 }
             }
+            (EntityKind::Armadillo, 18, Int(id)) => entity.armadillo.set_state(id),
+            (EntityKind::Goat, 19, Bool(b)) => entity.goat.has_left_horn = b,
+            (EntityKind::Goat, 20, Bool(b)) => entity.goat.has_right_horn = b,
             (EntityKind::Turtle, 18, Bool(b)) => entity.has_egg = b,
             (EntityKind::Turtle, 19, Bool(b)) => entity.laying_egg = b,
             // `Axolotl.Variant.byId`: out-of-range ids fall back to LUCY.
@@ -2131,6 +2285,26 @@ impl EntityStore {
         }
     }
 
+    /// `Armadillo.handleEntityEvent` 64: restart the peek animation. Returns
+    /// where to play the peek sound.
+    pub fn armadillo_peek(&mut self, id: i32) -> Option<Position> {
+        let entity = self.living.get_mut(&id)?;
+        if entity.entity_type != EntityKind::Armadillo {
+            return None;
+        }
+        entity.armadillo.peek_received = true;
+        Some(entity.position)
+    }
+
+    /// Goat entity events 58 / 59: start / stop lowering the head to ram.
+    pub fn set_goat_lowering_head(&mut self, id: i32, lowering: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Goat
+        {
+            entity.goat.lowering_head = lowering;
+        }
+    }
+
     /// Iron golem punch (entity event 4): vanilla runs a 10-tick swing.
     pub fn golem_punch(&mut self, id: i32) {
         if let Some(entity) = self.living.get_mut(&id)
@@ -2206,7 +2380,10 @@ impl EntityStore {
         let thundering = self.thundering;
         for (&id, entity) in &mut self.living {
             entity.tick_interpolation();
-            entity.tick_body_rotation();
+            // A scared armadillo's body control skips its client tick.
+            if !(entity.entity_type == EntityKind::Armadillo && entity.armadillo.is_scared()) {
+                entity.tick_body_rotation();
+            }
             let dx = entity.position.x - entity.prev_position.x;
             let dz = entity.position.z - entity.prev_position.z;
             if entity.health <= 0.0 {
@@ -2381,6 +2558,8 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::Fox
                 | EntityKind::Panda
                 | EntityKind::Mooshroom
+                | EntityKind::Armadillo
+                | EntityKind::Goat
                 | EntityKind::Dolphin
                 | EntityKind::Turtle
                 | EntityKind::Axolotl
@@ -2656,6 +2835,79 @@ mod tests {
         assert_eq!(store.living[&2].variant, 1);
         store.apply_entity_data(2, 16, MetaValue::Bool(true));
         assert!(store.living[&2].is_baby);
+    }
+
+    /// `Armadillo.setupAnimationStates`: each state runs its one clock;
+    /// entering SCARED fast-forwards the peek to its end, and a peek event
+    /// restarts it on the next tick.
+    #[test]
+    fn armadillo_state_drives_shell_and_clocks() {
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::Armadillo, Position::default());
+        store.living.get_mut(&1).unwrap().age_in_ticks = 100;
+        let sim = |store: &EntityStore| store.living[&1].armadillo.clone();
+
+        store.apply_entity_data(1, 18, MetaValue::Int(2));
+        assert!(sim(&store).hiding_in_shell());
+        tick(&mut store);
+        assert_eq!(sim(&store).peek_start, Some(101 - 50));
+        assert!(store.armadillo_peek(1).is_some());
+        tick(&mut store);
+        assert_eq!(sim(&store).peek_start, Some(102));
+
+        store.apply_entity_data(1, 18, MetaValue::Int(3));
+        tick(&mut store);
+        let s = sim(&store);
+        assert_eq!(
+            (s.roll_out_start, s.roll_up_start, s.peek_start),
+            (Some(103), None, None)
+        );
+        assert!(s.hiding_in_shell());
+        for _ in 0..25 {
+            tick(&mut store);
+        }
+        assert!(!sim(&store).hiding_in_shell());
+
+        store.apply_entity_data(1, 18, MetaValue::Int(1));
+        for _ in 0..5 {
+            tick(&mut store);
+        }
+        let s = sim(&store);
+        assert_eq!((s.roll_out_start, s.roll_up_start), (None, Some(129)));
+        assert!(!s.hiding_in_shell());
+        tick(&mut store);
+        assert!(sim(&store).hiding_in_shell());
+
+        store.apply_entity_data(1, 18, MetaValue::Int(7));
+        tick(&mut store);
+        assert_eq!(
+            sim(&store),
+            ArmadilloSim {
+                in_state_ticks: 1,
+                ..Default::default()
+            }
+        );
+    }
+
+    /// `Goat.aiStep`: the ram counter climbs one a tick to 20 and falls two.
+    #[test]
+    fn goat_ram_events_lower_the_head() {
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::Goat, Position::default());
+        store.set_goat_lowering_head(1, true);
+        for _ in 0..25 {
+            tick(&mut store);
+        }
+        let goat = &store.living[&1].goat;
+        assert_eq!(goat.lower_head_tick, 20);
+        assert_eq!(goat.ramming_x_head_rot(false), 30f32.to_radians());
+        store.set_goat_lowering_head(1, false);
+        tick(&mut store);
+        assert_eq!(store.living[&1].goat.lower_head_tick, 18);
+
+        store.apply_entity_data(1, 19, MetaValue::Bool(false));
+        assert!(!store.living[&1].goat.has_left_horn);
+        assert!(store.living[&1].goat.has_right_horn);
     }
 
     /// `Axolotl.DATA_VARIANT` (18) and `DATA_PLAYING_DEAD` (19): the adult

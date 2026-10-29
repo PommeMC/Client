@@ -2823,6 +2823,22 @@ impl AppCore {
                 NetworkEvent::SnifferDigging { id } => {
                     super::sniffer::start_digging_sound(&mut self.audio, game, id);
                 }
+                // `Armadillo.handleEntityEvent`: a local sound at its position.
+                NetworkEvent::ArmadilloPeek { id } => {
+                    if let Some(pos) = game.entity_store.armadillo_peek(id) {
+                        self.audio.play_world_sound(
+                            &crate::audio::SoundRef::event("entity.armadillo.peek"),
+                            crate::audio::CATEGORY_NEUTRAL,
+                            pos,
+                            1.0,
+                            1.0,
+                            fastrand::u64(..),
+                        );
+                    }
+                }
+                NetworkEvent::GoatRam { id, lowering } => {
+                    game.entity_store.set_goat_lowering_head(id, lowering);
+                }
                 NetworkEvent::SquidTentacleReset { id } => {
                     game.entity_store.squid_tentacle_reset(id);
                 }

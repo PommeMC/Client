@@ -53,6 +53,7 @@ import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.clock.WorldClocks;
 import net.minecraft.world.entity.PositionMoveRotation;
 import net.minecraft.world.entity.Relative;
+import net.minecraft.world.entity.animal.armadillo.Armadillo;
 import net.minecraft.world.entity.animal.golem.CopperGolemState;
 import net.minecraft.world.entity.animal.sniffer.Sniffer;
 import net.minecraft.world.item.equipment.trim.TrimPattern;
@@ -109,6 +110,10 @@ public final class CodecOracle {
                                 EntityDataSerializers.WEATHERING_COPPER_STATE), WeatheringCopper.WeatherState.WEATHERED),
                         SynchedEntityData.DataValue.create(new EntityDataAccessor<>(17,
                                 EntityDataSerializers.COPPER_GOLEM_STATE), CopperGolemState.DROPPING_ITEM))));
+        encode("set_entity_data/armadillo_state", ClientboundSetEntityDataPacket.STREAM_CODEC::encode,
+                new ClientboundSetEntityDataPacket(7, List.of(SynchedEntityData.DataValue.create(
+                        new EntityDataAccessor<>(18, EntityDataSerializers.ARMADILLO_STATE),
+                        Armadillo.ArmadilloState.UNROLLING))));
 
         JsonObject out = new JsonObject();
         out.addProperty("version", SharedConstants.getCurrentVersion().name());
