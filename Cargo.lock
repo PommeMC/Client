@@ -555,7 +555,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -588,7 +588,7 @@ dependencies = [
  "simdnbt",
  "thiserror 2.0.21",
  "tracing",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -633,7 +633,7 @@ dependencies = [
  "simdnbt",
  "thiserror 2.0.21",
  "tracing",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -652,7 +652,7 @@ dependencies = [
  "rsa_public_encrypt_pkcs1",
  "sha1",
  "sha2 0.11.1",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -672,7 +672,7 @@ dependencies = [
  "parking_lot",
  "thiserror 2.0.21",
  "tracing",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -690,7 +690,7 @@ dependencies = [
  "serde",
  "simdnbt",
  "tracing",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -741,7 +741,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -1267,7 +1267,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a347dcabdae9c31b0825fd6a8bed285ec9c2acb89c47827126d52fa4f59cece3"
 dependencies = [
  "fnv",
- "uuid 1.28.0",
+ "uuid 1.29.0",
  "web-time",
 ]
 
@@ -2885,7 +2885,7 @@ dependencies = [
  "fnv",
  "gilrs-core",
  "log",
- "uuid 1.28.0",
+ "uuid 1.29.0",
  "vec_map",
 ]
 
@@ -2903,7 +2903,7 @@ dependencies = [
  "nix",
  "objc2-core-foundation",
  "objc2-io-kit",
- "uuid 1.28.0",
+ "uuid 1.29.0",
  "vec_map",
  "wasm-bindgen",
  "web-sys",
@@ -3708,7 +3708,7 @@ dependencies = [
  "serde_json",
  "sha1_smol",
  "toml 1.1.8+spec-1.1.0",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4405,7 +4405,7 @@ dependencies = [
  "portable-atomic",
  "smallvec",
  "tagptr",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -5703,7 +5703,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
- "uuid 1.28.0",
+ "uuid 1.29.0",
  "winit",
  "winresource",
  "zip 9.0.5",
@@ -6679,7 +6679,7 @@ dependencies = [
  "serde",
  "serde_json",
  "url",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -7482,7 +7482,7 @@ dependencies = [
  "tokio-util",
  "toml 1.1.8+spec-1.1.0",
  "tracing",
- "uuid 1.28.0",
+ "uuid 1.29.0",
  "wincode",
  "zstd",
 ]
@@ -7519,7 +7519,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -7556,7 +7556,7 @@ dependencies = [
  "text_components",
  "thiserror 2.0.21",
  "tokio",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -7580,7 +7580,7 @@ dependencies = [
  "steel-utils",
  "text_components",
  "tracing",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -7613,7 +7613,7 @@ dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "tracing",
  "unicode_names2",
- "uuid 1.28.0",
+ "uuid 1.29.0",
  "wincode",
  "zip 8.6.0",
 ]
@@ -8045,7 +8045,7 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "url",
- "uuid 1.28.0",
+ "uuid 1.29.0",
  "walkdir",
 ]
 
@@ -8297,7 +8297,7 @@ dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "url",
  "urlpattern",
- "uuid 1.28.0",
+ "uuid 1.29.0",
  "walkdir",
 ]
 
@@ -8365,7 +8365,7 @@ dependencies = [
  "serde_json",
  "simdnbt",
  "supports-hyperlinks",
- "uuid 1.28.0",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -9000,9 +9000,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.28.0"
+version = "1.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
+checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
@@ -10285,7 +10285,7 @@ dependencies = [
  "serde_repr",
  "tracing",
  "uds_windows",
- "uuid 1.28.0",
+ "uuid 1.29.0",
  "windows-sys 0.61.2",
  "winnow 1.0.2",
  "zbus_macros",
