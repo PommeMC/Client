@@ -298,6 +298,10 @@ impl BlockRenderAssets {
                         let model = self
                             .resolve_model(block_state_data.id, &block_state_data.properties)
                             .cloned();
+                        // TODO: the occlusion graph reads this for vanilla's
+                        // `isSolidRender` (`canOcclude` and a full occlusion shape),
+                        // but it still counts the model's quads and ignores
+                        // `canOcclude`, so glass counts as solid there.
                         let opaque_full_cube = !block_state_data.is_air
                             && model.as_ref().is_some_and(|m| m.is_full_cube);
                         let occludes = block_state_data.occludes_neighbor_faces();
