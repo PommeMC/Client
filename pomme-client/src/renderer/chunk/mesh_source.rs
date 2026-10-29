@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::assets::AssetIndex;
 use crate::renderer::chunk::atlas::{AtlasUVMap, TextureAtlas, atlas_texture_names};
-use crate::renderer::chunk::mesher::{BiomeClimate, MeshDispatcher};
+use crate::renderer::chunk::mesher::{BiomeClimate, MeshDispatcher, TerrainFormat};
 use crate::resource_pack::ResourcePackManager;
 use crate::world::block::model::CardinalLightType;
 use crate::world::block::render_assets::{BlockRenderAssets, OwnedBlockRenderView};
@@ -18,6 +18,11 @@ pub trait MeshSource {
     fn jar_assets_dir(&self) -> &Path;
     fn asset_index(&self) -> &Option<AssetIndex>;
 
+    /// The vertex format the meshes are drawn in.
+    fn terrain_format(&self) -> TerrainFormat {
+        TerrainFormat::Vanilla
+    }
+
     fn create_mesh_dispatcher(
         &self,
         render_view: OwnedBlockRenderView,
@@ -25,7 +30,7 @@ pub trait MeshSource {
         packs: Option<&ResourcePackManager>,
         cardinal_light: CardinalLightType,
     ) -> MeshDispatcher {
-        MeshDispatcher::load(
+        let mut dispatcher = MeshDispatcher::load(
             render_view,
             self.uv_map().clone(),
             self.jar_assets_dir(),
@@ -33,7 +38,9 @@ pub trait MeshSource {
             packs,
             biome_climate,
             cardinal_light.table(),
-        )
+        );
+        dispatcher.set_format(self.terrain_format());
+        dispatcher
     }
 }
 

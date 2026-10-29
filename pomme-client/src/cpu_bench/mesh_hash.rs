@@ -26,8 +26,12 @@ pub fn scene_hashes(assets: &Assets, scene: Scene) -> [u64; 2] {
         for hasher in &mut hashers {
             section.section_index.hash(hasher);
         }
+        let vertices = section
+            .vertices
+            .vanilla()
+            .expect("benches mesh vanilla vertices");
         for indices in [solid, cutout, &section.water_indices[..]] {
-            let vertex = |i: u32| &section.vertices[i as usize];
+            let vertex = |i: u32| &vertices[i as usize];
             quads_hash(indices, |i| geometry(vertex(i))).hash(&mut hashers[0]);
             triangles_hash(indices, |i| {
                 let v = vertex(i);

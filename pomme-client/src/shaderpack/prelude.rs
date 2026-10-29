@@ -13,12 +13,21 @@ use crate::renderer::chunk::mesher::{
     POS_BIAS, POS_RANGE, SPRITE_BITS, TERRAIN_UV_BITS, TERRAIN_UV_FIXED_SCALE,
 };
 
+/// How a pack wants terrain's `gl_Color`, from `shaders.properties`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerrainLighting {
+    /// `separateAo`: ambient occlusion in the alpha, not the colour.
+    pub separate_ao: bool,
+    /// `oldLighting`: vanilla's face shade kept, which Iris otherwise drops.
+    pub old_lighting: bool,
+}
+
 /// The vertex formats a pack program can be fed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Geometry {
-    /// `PackedVertex` plus the section's `ChunkMeta`.
+    /// `PackVertex` plus the section's `ChunkMeta`.
     Terrain,
-    /// `PackedVertex`, the section origin in a push constant (`draw_water`).
+    /// `PackVertex`, the section origin in a push constant (`draw_water`).
     Water,
     /// `EntityVertex` plus the entity renderer's per-instance data.
     Entity,
@@ -138,23 +147,35 @@ impl Geometry {
 }
 
 impl Preludes {
-    pub fn new(geometry: Geometry) -> Self {
+    pub fn new(geometry: Geometry, lighting: TerrainLighting) -> Self {
         let (inputs, setup, model_view) = match geometry {
-            Geometry::Terrain => (terrain_inputs(TERRAIN_ORIGIN), TERRAIN_SETUP, "pomme_view"),
-            Geometry::Water => (terrain_inputs(WATER_ORIGIN), TERRAIN_SETUP, "pomme_view"),
-            Geometry::Entity => (ENTITY_INPUTS.to_owned(), ENTITY_SETUP, ENTITY_MODEL_VIEW),
+            Geometry::Terrain => (
+                terrain_inputs(TERRAIN_ORIGIN),
+                terrain_setup(lighting),
+                "pomme_view",
+            ),
+            Geometry::Water => (
+                terrain_inputs(WATER_ORIGIN),
+                terrain_setup(lighting),
+                "pomme_view",
+            ),
+            Geometry::Entity => (
+                ENTITY_INPUTS.to_owned(),
+                ENTITY_SETUP.to_owned(),
+                ENTITY_MODEL_VIEW,
+            ),
             Geometry::BlockEntity => (
                 BLOCK_ENTITY_INPUTS.to_owned(),
-                ENTITY_SETUP,
+                ENTITY_SETUP.to_owned(),
                 ENTITY_MODEL_VIEW,
             ),
             Geometry::Sky => (
                 format!("{SKY_DRAW}{SKY_INPUTS}"),
-                SKY_SETUP,
+                SKY_SETUP.to_owned(),
                 "pomme_view * pomme_sky_pose",
             ),
             Geometry::FullScreen | Geometry::Final => {
-                (String::new(), FULL_SCREEN_SETUP, "mat4(1.0)")
+                (String::new(), FULL_SCREEN_SETUP.to_owned(), "mat4(1.0)")
             }
         };
         let stage = match geometry {
@@ -260,6 +281,7 @@ layout(location = 1) in float pomme_in_pos_z;
 layout(location = 2) in uint pomme_in_uv;
 layout(location = 3) in uint pomme_in_sprite;
 layout(location = 4) in vec4 pomme_in_light_tint;
+layout(location = 7) in vec4 pomme_in_shade;
 {origin}
 // Level-0 sprite rectangles in atlas texels, as the atlas uploads them.
 layout(std430, set = 2, binding = 0) readonly buffer PommeSprites {{
@@ -291,9 +313,24 @@ const TERRAIN_SETUP: &str = "
     vec2 atlas_uv = (vec2(rect.xy) + sprite_uv * vec2(rect.zw)) / pomme_atlas_size.xy;
     pomme_MultiTexCoord0 = vec4(atlas_uv, 0.0, 1.0);
     pomme_MultiTexCoord1 = vec4(round(pomme_in_light_tint.r * 255.0), float(pomme_in_uv >> 24), 0.0, 1.0);
-    // TODO: vanilla's face shade is baked in here; Iris drops it for packs.
-    pomme_Color = vec4(pomme_in_light_tint.gba, 1.0);
 ";
+
+/// [`TERRAIN_SETUP`] and Iris's terrain colour: the tint, with the ambient
+/// occlusion and face shade (the flat one unless `oldLighting`) multiplied
+/// in, or in the alpha under `separateAo`.
+fn terrain_setup(lighting: TerrainLighting) -> String {
+    let shade = if lighting.old_lighting {
+        "pomme_in_shade.x * pomme_in_shade.y"
+    } else {
+        "pomme_in_shade.x * pomme_in_shade.z"
+    };
+    let color = if lighting.separate_ao {
+        "vec4(pomme_in_light_tint.gba, pomme_shade)"
+    } else {
+        "vec4(pomme_in_light_tint.gba * pomme_shade, 1.0)"
+    };
+    format!("{TERRAIN_SETUP}    float pomme_shade = {shade};\n    pomme_Color = {color};\n")
+}
 
 const ENTITY_INPUTS: &str = "
 layout(location = 0) in vec3 pomme_in_position;
@@ -380,3 +417,23 @@ const FULL_SCREEN_SETUP: &str = "
     pomme_MultiTexCoord0 = vec4(uv, 0.0, 1.0);
     pomme_MultiTexCoord1 = vec4(240.0, 240.0, 0.0, 1.0);
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terrain_colour_follows_the_packs_lighting() {
+        let color = |separate_ao, old_lighting| {
+            let lighting = TerrainLighting {
+                separate_ao,
+                old_lighting,
+            };
+            Preludes::new(Geometry::Terrain, lighting).vertex_main
+        };
+        assert!(color(false, false).contains("pomme_in_shade.x * pomme_in_shade.z;"));
+        assert!(color(false, false).contains("pomme_in_light_tint.gba * pomme_shade, 1.0)"));
+        assert!(color(true, false).contains("vec4(pomme_in_light_tint.gba, pomme_shade)"));
+        assert!(color(false, true).contains("pomme_in_shade.x * pomme_in_shade.y"));
+    }
+}
