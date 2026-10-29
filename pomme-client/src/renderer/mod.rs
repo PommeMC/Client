@@ -79,10 +79,6 @@ impl MeshSource for Renderer {
     fn asset_index(&self) -> &Option<AssetIndex> {
         &self.asset_index
     }
-
-    fn terrain_format(&self) -> TerrainFormat {
-        self.chunk_buffers.format()
-    }
 }
 
 #[derive(Error, Debug)]
@@ -1336,14 +1332,13 @@ impl Renderer {
         self.chunk_buffers.clear();
     }
 
-    /// The terrain vertex format to mesh in: a shader pack's while one can
-    /// draw the world.
-    pub fn wanted_terrain_format(&self) -> TerrainFormat {
-        if self.shader_pack.is_some() && self.camera.top_down().is_none() {
-            TerrainFormat::ShaderPack
-        } else {
-            TerrainFormat::Vanilla
-        }
+    /// The block ids to mesh terrain for: the shader pack's while one can
+    /// draw the world, else none for vanilla.
+    pub fn pack_block_ids(&self) -> Option<Arc<crate::shaderpack::block_ids::BlockIds>> {
+        self.shader_pack
+            .as_ref()
+            .filter(|_| self.camera.top_down().is_none())
+            .map(|(pack, _)| Arc::clone(&pack.block_ids))
     }
 
     /// Drops every chunk mesh and draws them in `format` from now on.

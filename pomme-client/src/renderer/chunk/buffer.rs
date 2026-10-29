@@ -187,7 +187,7 @@ const VERTEX_ATTRIBUTES: [rhi::VertexAttribute; 5] = {
     ]
 };
 
-const PACK_VERTEX_ATTRIBUTES: [rhi::VertexAttribute; 6] = {
+const PACK_VERTEX_ATTRIBUTES: [rhi::VertexAttribute; 7] = {
     let [pos_xy, pos_z, uv, sprite, light_tint] = VERTEX_ATTRIBUTES;
     [
         pos_xy,
@@ -199,6 +199,11 @@ const PACK_VERTEX_ATTRIBUTES: [rhi::VertexAttribute; 6] = {
             location: 7,
             format: rhi::VertexFormat::Unorm8x4,
             offset: offset_of!(PackVertex, shade) as u32,
+        },
+        rhi::VertexAttribute {
+            location: 8,
+            format: rhi::VertexFormat::Uint32,
+            offset: offset_of!(PackVertex, entity) as u32,
         },
     ]
 };
@@ -743,10 +748,12 @@ impl ChunkBufferStore {
             // soon-reused slice).
             self.meta_dirty = true;
 
+            // A mesh from before a format change is remeshed anyway.
             let upload_secs: Vec<&SectionMesh> = mesh
                 .sections
                 .iter()
                 .filter(|s| accepted.contains(&s.section_index))
+                .filter(|s| s.vertices.format() == self.format)
                 .collect();
 
             if upload_secs.is_empty() {
@@ -1032,10 +1039,6 @@ impl ChunkBufferStore {
             u64::from(self.pool_vertices) * format.vertex_size(),
             rhi::BufferUsages::VERTEX,
         );
-    }
-
-    pub fn format(&self) -> TerrainFormat {
-        self.format
     }
 
     pub fn clear(&mut self) {
