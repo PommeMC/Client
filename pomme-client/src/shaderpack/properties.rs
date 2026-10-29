@@ -121,8 +121,8 @@ pub fn preprocess(text: &str, macros: &BTreeMap<String, String>) -> String {
 }
 
 /// `text` with each macro name replaced by its value, until none are left.
-/// A macro with no value, a switched-on toggle, stays as its name so
-/// `program.X.enabled = TOGGLE` still reads it.
+/// A macro with no value stays as its name, so a condition still reads it
+/// as defined.
 fn expand(text: &str, macros: &BTreeMap<String, String>) -> String {
     static IDENT: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\b[A-Za-z_]\w*\b").expect("static regex"));
