@@ -35,7 +35,7 @@ chat = "/setblock 62 -60 54 minecraft:chest[facing=north]"
 chat = "/fill 63 -60 55 64 -59 56 minecraft:oak_planks"
 
 [[step]]
-chat = "/fill 60 -60 53 60 -58 53 minecraft:stone"
+chat = "/fill 54 -60 53 54 -58 53 minecraft:stone"
 
 [[step]]
 expect = { entity = "cow" }
@@ -57,7 +57,7 @@ screenshot = "pack"
 
 # The shadows fall south, away from the noon sun tilted north.
 [[step]]
-chat = "/tp @s 60.5 -60 58.5 180 35"
+chat = "/tp @s 54.5 -60 58.5 180 35"
 
 [[step]]
 wait_ms = 1000
@@ -177,7 +177,7 @@ chat = "/kill @e[type=item]"
 chat = "/fill 62 -60 54 64 -59 56 minecraft:air"
 
 [[step]]
-chat = "/fill 60 -60 53 60 -58 53 minecraft:air"
+chat = "/fill 54 -60 53 54 -58 53 minecraft:air"
 
 [[step]]
 press = { action = "key.toggleGui" }

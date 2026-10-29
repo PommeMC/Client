@@ -229,7 +229,9 @@ pub struct PackRenderer {
     far_depth: rhi::backend::Texture,
     nearest: rhi::backend::Sampler,
     linear: rhi::backend::Sampler,
+    /// `linear` and `nearest` comparing, for `sampler2DShadow`s.
     shadow: rhi::backend::Sampler,
+    shadow_nearest: rhi::backend::Sampler,
     frame_buffers: Vec<rhi::backend::Buffer>,
     empty_layout: rhi::backend::BindGroupLayout,
     empty_group: rhi::backend::BindGroup,
@@ -362,7 +364,7 @@ impl PackRenderer {
             list.dedup();
         }
         let shadow_targets = gbuffers.iter().any(|(g, _)| g.shadow()).then(|| {
-            let size = settings.shadow.resolution.max(1);
+            let size = settings.shadow.resolution.clamp(1, device.max_texture_size);
             let extent = rhi::Extent {
                 width: size,
                 height: size,
@@ -390,13 +392,17 @@ impl PackRenderer {
 
         let nearest = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
         let linear = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR);
-        let shadow = rhi::backend::create_sampler(
-            device,
-            &rhi::SamplerDesc {
-                compare: Some(rhi::CompareFunction::LessEqual),
-                ..rhi::SamplerDesc::LINEAR
-            },
-        );
+        let compare = |desc| {
+            rhi::backend::create_sampler(
+                device,
+                &rhi::SamplerDesc {
+                    compare: Some(rhi::CompareFunction::LessEqual),
+                    ..desc
+                },
+            )
+        };
+        let shadow = compare(rhi::SamplerDesc::LINEAR);
+        let shadow_nearest = compare(rhi::SamplerDesc::NEAREST);
         let empty_layout = rhi::backend::create_bind_group_layout(device, &[]);
         let empty_group = device.create_bind_group(empty_layout, &[]);
         let sprite_layout = rhi::backend::create_bind_group_layout(
@@ -437,6 +443,7 @@ impl PackRenderer {
             nearest,
             linear,
             shadow,
+            shadow_nearest,
             frame_buffers,
             empty_layout,
             empty_group,
@@ -779,10 +786,13 @@ impl PackRenderer {
                     _ => (self.white.handle(), self.nearest),
                 }
             };
-            let sampler = if s.kind == SamplerKind::Tex2DShadow {
-                self.shadow
-            } else {
-                sampler
+            // A `sampler2DShadow` always compares, as Vulkan needs, keeping
+            // its filter; Iris compares only with `shadowHardwareFiltering`
+            // and leaves the read without it to the driver.
+            let sampler = match s.kind {
+                SamplerKind::Tex2DShadow if sampler == self.nearest => self.shadow_nearest,
+                SamplerKind::Tex2DShadow => self.shadow,
+                _ => sampler,
             };
             bindings.push((s.binding, R::Texture(texture)));
             bindings.push((s.binding + 1, R::Sampler(sampler)));
@@ -810,8 +820,8 @@ impl PackRenderer {
             (texture.handle(), filter(nearest))
         };
         Some(match name {
-            "shadowtex0" | "watershadow" => depth(false),
-            "shadowtex1" => depth(true),
+            "shadowtex0" | "watershadow" | "shadowtex0HW" => depth(false),
+            "shadowtex1" | "shadowtex1HW" => depth(true),
             "shadow" => depth(watershadow),
             _ => {
                 let i = shadow_buffer_index(name)?;
@@ -1325,7 +1335,7 @@ impl PackRenderer {
         ] {
             std::mem::take(texture).destroy(device);
         }
-        for sampler in [self.nearest, self.linear, self.shadow] {
+        for sampler in [self.nearest, self.linear, self.shadow, self.shadow_nearest] {
             sampler.destroy(device);
         }
         util::destroy_buffers(device, &mut self.frame_buffers);

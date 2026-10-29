@@ -71,6 +71,8 @@ pub struct Device {
     /// A GPU with memory of its own, which uploads reach through a copy.
     pub discrete: bool,
     pub max_texture_array_layers: u32,
+    /// The widest 2D texture, in texels.
+    pub max_texture_size: u32,
     depth_clamp: bool,
 }
 
@@ -103,6 +105,7 @@ impl Device {
             device_local_bytes,
             discrete: properties.device_type == vk::PhysicalDeviceType::DiscreteGpu,
             max_texture_array_layers: properties.limits.max_image_array_layers,
+            max_texture_size: properties.limits.max_image_dimension2_d,
             depth_clamp: physical_device.get_features().depth_clamp == vk::TRUE,
         }
     }
