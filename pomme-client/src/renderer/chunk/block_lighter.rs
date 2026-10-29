@@ -83,29 +83,36 @@ impl LightLevels {
     }
 }
 
-/// A terrain vertex's light, as vanilla's BLOCK vertex carries it: the colour
-/// factor (ambient occlusion × face shade) and the smooth block and sky light
+/// A terrain vertex's light: the ambient occlusion and face shade vanilla's
+/// BLOCK vertex multiplies into its colour, and the smooth block and sky light
 /// coordinates, each 0..240.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct VertexLight {
-    pub shade: f32,
+    pub ao: f32,
+    pub face: f32,
     pub block: u8,
     pub sky: u8,
 }
 
 impl VertexLight {
-    /// A flat-lit vertex: `levels` at face shade `shade`.
-    pub fn flat(shade: f32, levels: LightLevels) -> Self {
+    /// A flat-lit vertex: `levels` at face shade `face`, with no occlusion.
+    pub fn flat(face: f32, levels: LightLevels) -> Self {
         Self {
-            shade,
+            ao: 1.0,
+            face,
             block: levels.block() * 16,
             sky: levels.sky() * 16,
         }
     }
 
+    /// Vanilla's colour factor, ambient occlusion × face shade.
+    pub fn shade(self) -> f32 {
+        self.ao * self.face
+    }
+
     /// What the quad's diagonal balances.
     pub fn brightness(self) -> f32 {
-        self.shade * f32::from(self.block.max(self.sky))
+        self.shade() * f32::from(self.block.max(self.sky))
     }
 }
 
@@ -588,7 +595,8 @@ pub(super) fn ambient_occlusion(
             (shades[vertex], lights[vertex])
         };
         out[target] = VertexLight {
-            shade: shade * face_shade,
+            ao: shade,
+            face: face_shade,
             block: light.block as u8,
             sky: light.sky as u8,
         };

@@ -73,6 +73,7 @@ enum Expect {
     Sound(SoundExpect),
     Block(BlockExpect),
     Biome(BiomeExpect),
+    Terrain(TerrainExpect),
     Menu(MenuExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
@@ -215,6 +216,14 @@ struct BlockExpect {
 struct BiomeExpect {
     biome: String,
     at: [i32; 3],
+}
+
+/// `settled`: every loaded column meshed, and the chunk pools' ranges
+/// consistent (vanilla's `hasRenderedAllSections`).
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerrainExpect {
+    terrain: String,
 }
 
 /// The open menu: a container's menu type (`generic_9x3`), `inventory`,
@@ -517,7 +526,7 @@ impl Script {
 
 /// Whether `expect` holds now; the error describes what was seen instead.
 fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
-    let AppPhase::InGame { game, .. } = phase else {
+    let AppPhase::InGame { gfx, game, .. } = phase else {
         return Err(format!("not in game ({})", exec::phase_name(phase)));
     };
     match expect {
@@ -677,6 +686,15 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                         .is_none_or(|kind| entity.as_ref() == Some(kind)),
                 || format!("{at:?} holds {seen} with block entity {entity:?}"),
             )
+        }
+        Expect::Terrain(TerrainExpect { terrain }) => {
+            if terrain != "settled" {
+                return Err(format!("unknown terrain state {terrain}"));
+            }
+            if let Some(pos) = game.first_unmeshed_column() {
+                return Err(format!("{pos:?} isn't meshed yet"));
+            }
+            gfx.renderer.chunk_slice_overlap().map_or(Ok(()), Err)
         }
         Expect::Biome(BiomeExpect { biome, at }) => {
             let seen = protocol::biome(game, *at);

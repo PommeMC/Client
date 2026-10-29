@@ -1646,14 +1646,7 @@ impl AppCore {
             dry_foliage,
         );
 
-        game.reset_mesh_columns();
-        game.section_vis.clear();
-        game.section_vis_epoch.clear();
-        game.vis_mask.clear();
-        game.vis_tiers.clear();
-        game.vis_task = None;
-        game.vis_valid = false;
-        game.pending_load_rescan = true;
+        game.rebuild_meshes();
     }
 
     fn clear_server_ui(&mut self, game: &mut GameState, renderer: &mut Renderer) {
@@ -3591,6 +3584,7 @@ impl AppCore {
         let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(
             dx,
+            0.0,
             dz,
             &mut game.player_walk_pos,
             &mut game.player_walk_speed,

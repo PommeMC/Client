@@ -41,6 +41,9 @@ pub struct ProgramSource<'a> {
 pub struct Prelude<'a> {
     pub decls: &'a str,
     pub main: &'a str,
+    /// The pack attributes this geometry feeds, as GLSL expressions; the
+    /// rest read their defaults.
+    pub attributes: &'a [(&'a str, &'a str)],
 }
 
 /// A loose uniform the pack declared, at its std140 offset in the block.
@@ -327,15 +330,23 @@ pub fn translate(
     let shared = shared_decls(&uniforms, uniform_size, &samplers, albedo);
 
     let mut vs = header(vertex_prelude.decls, &shared);
+    // The prelude's `main` calls `pomme_attributes` before the pack's.
+    let mut fed = String::new();
     for a in &vertex_globals.attributes {
-        // Pack-specific attributes (mc_Entity, at_tangent, ...) aren't fed in
-        // milestone 1: they read their defaults.
-        let default = if a.name == "mc_Entity" { "-1.0" } else { "0.0" };
-        vs.push_str(&format!(
-            "{} {}{} = {}({default});\n",
-            a.ty, a.name, a.array, a.ty
-        ));
+        let value = vertex_prelude
+            .attributes
+            .iter()
+            .find(|(name, _)| *name == a.name)
+            .map_or(
+                if a.name == "mc_Entity" { "-1.0" } else { "0.0" },
+                |(_, value)| value,
+            );
+        vs.push_str(&format!("{} {}{};\n", a.ty, a.name, a.array));
+        if a.array.is_empty() {
+            fed.push_str(&format!("    {} = {}({value});\n", a.name, a.ty));
+        }
     }
+    vs.push_str(&format!("void pomme_attributes() {{\n{fed}}}\n"));
     for v in &vertex_globals.varyings {
         vs.push_str(&interface_decl("out", locations[&v.name], v));
     }
@@ -1176,11 +1187,13 @@ mod tests {
                 mat4 pomme_ModelViewMatrix; mat4 pomme_ProjectionMatrix; mat4 pomme_TextureMatrix[2];\n\
                 mat3 pomme_NormalMatrix;\n\
                 vec4 pomme_ftransform() { return pomme_ProjectionMatrix * pomme_ModelViewMatrix * pomme_Vertex; }\n",
-        main: "void main() { pack_main(); }\n",
+        main: "void main() { pomme_attributes(); pack_main(); }\n",
+        attributes: &[],
     };
     const FS_PRELUDE: Prelude = Prelude {
         decls: "",
         main: "void main() { pack_main(); }\n",
+        attributes: &[],
     };
 
     fn translated(vs: &str, fs: &str) -> Translated {
@@ -1203,6 +1216,31 @@ mod tests {
             }
         }
         t
+    }
+
+    #[test]
+    fn fed_attributes_read_the_preludes_values() {
+        let vs = Prelude {
+            attributes: &[("mc_Entity", "pomme_mc_Entity")],
+            ..VS_PRELUDE
+        };
+        let t = translate(
+            ProgramSource {
+                vertex: "#version 120\nattribute vec4 mc_Entity;\nattribute vec4 at_tangent;\n\
+                         void main() { gl_Position = ftransform() * mc_Entity.x * at_tangent.x; }\n",
+                fragment: "#version 120\nvoid main() { gl_FragColor = vec4(1.0); }\n",
+            },
+            vs,
+            FS_PRELUDE,
+            true,
+        )
+        .unwrap();
+        assert!(
+            t.vertex.contains("mc_Entity = vec4(pomme_mc_Entity);"),
+            "{}",
+            t.vertex
+        );
+        assert!(t.vertex.contains("at_tangent = vec4(0.0);"), "{}", t.vertex);
     }
 
     #[test]
