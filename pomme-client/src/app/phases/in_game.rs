@@ -1172,7 +1172,6 @@ impl GameState {
         }
     }
 
-    /// Forgets every column's scheduling state, for a new level or dispatcher.
     /// [`MeshColumns::first_unmeshed`] over the loaded columns.
     #[cfg(feature = "test-harness")]
     pub fn first_unmeshed_column(&self) -> Option<ChunkPos> {
@@ -1180,6 +1179,7 @@ impl GameState {
             .first_unmeshed(self.chunk_store.loaded_positions())
     }
 
+    /// Forgets every column's scheduling state, for a new level or dispatcher.
     pub fn reset_mesh_columns(&mut self) {
         self.mesh_columns.reset();
     }
