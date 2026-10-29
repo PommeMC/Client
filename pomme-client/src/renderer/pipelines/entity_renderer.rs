@@ -1318,6 +1318,10 @@ fn mob_definitions() -> Vec<MobDef> {
             baby_overlays: vec![],
         },
         // TODO: `DolphinCarryingItemLayer` (the item held in its mouth).
+        // TODO: `Dolphin.tick`'s client bubble trail (DOLPHIN particles while
+        // fast in water, which needs it in `probes_water`), entity event 38's
+        // happy-villager particles when fed, and a stranded dolphin's client
+        // hops and turns.
         MobDef {
             kind: EntityKind::Dolphin,
             anim: AnimationType::Dolphin,
