@@ -662,6 +662,7 @@ impl ChunkBufferStore {
         struct Plan<'a> {
             section_index: i32,
             verts: &'a [u8],
+            vertex_count: u32,
             indices: &'a [u32],
             water_indices: &'a [u32],
             vtx_off: u32,
@@ -807,10 +808,15 @@ impl ChunkBufferStore {
                     pool_full = true;
                     break;
                 };
+                debug_assert_eq!(
+                    sec.vertices.bytes().len() as u64,
+                    u64::from(vcount) * self.format.vertex_size()
+                );
                 taken.push((vtx_off, vcount, idx_off, icount));
                 plans.push(Plan {
                     section_index: sec.section_index,
                     verts: sec.vertices.bytes(),
+                    vertex_count: vcount,
                     indices: &sec.indices,
                     water_indices: &sec.water_indices,
                     vtx_off,
@@ -892,7 +898,7 @@ impl ChunkBufferStore {
                 water_index_count: p.water_indices.len() as u32,
                 idx_len: (p.indices.len() + p.water_indices.len()) as u32,
                 vertex_offset: p.vtx_off as i32,
-                vtx_len: p.verts.len() as u32,
+                vtx_len: p.vertex_count,
                 // A re-meshed section swaps instantly; a freshly revealed one fades in.
                 uploaded_at: if was_present.contains(&p.section_index) {
                     now.checked_sub(std::time::Duration::from_secs(2))
