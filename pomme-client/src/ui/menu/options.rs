@@ -50,6 +50,7 @@ const CHAT_SCALE: &str = "Chat Text Size:";
 const CHAT_LINE_SPACING: &str = "Line Spacing:";
 const CHAT_DELAY: &str = "Chat Delay:";
 const MENU_BACKGROUND_BLUR: &str = "Menu Background Blur:";
+const DISTANT_TERRAIN: &str = "Distant Terrain:";
 
 /// Vanilla `genericValueOrOffLabel`.
 fn menu_background_blur_label(radius: u8) -> String {
@@ -228,6 +229,7 @@ impl MainMenu {
         Some(match prefix {
             "Render Distance:" => self.render_distance_max() as f32 - 2.0,
             "Chunk Detail:" => super::CHUNK_DETAIL_SPAN,
+            DISTANT_TERRAIN => super::DISTANT_TERRAIN_STEPS as f32,
             "Simulation Distance:" => 27.0,
             "Max Framerate:" => 25.0,
             "FOV:" => 80.0,
@@ -274,6 +276,11 @@ impl MainMenu {
             "Chunk Detail: Off".to_string()
         } else {
             format!("Chunk Detail: {} chunks", self.chunk_detail)
+        };
+        let dt = if self.distant_terrain == 0 {
+            format!("{DISTANT_TERRAIN} Off")
+        } else {
+            format!("{DISTANT_TERRAIN} {} chunks", self.distant_terrain)
         };
         let sd = format!("Simulation Distance: {} chunks", self.simulation_distance);
         let mf = if self.max_framerate >= super::MAX_FRAMERATE_UNLIMITED {
@@ -327,7 +334,7 @@ impl MainMenu {
             // TODO: static stub, not wired (see mesher::enqueue).
             OptRow::Pair("Prioritize Chunk Updates: None", &sd),
             OptRow::Pair("Smooth Lighting: ON", &clouds_label),
-            OptRow::PairLeft(&cd),
+            OptRow::Pair(&cd, &dt),
             OptRow::Pair("Particles: All", "Mipmap Levels: 4"),
             OptRow::Pair(entity_shadows_label, "Entity Distance: 100%"),
             OptRow::Pair(&blur_label, "Cloud Range: 128"),
@@ -342,11 +349,14 @@ impl MainMenu {
         let cd_frac = (self.chunk_detail.saturating_sub(super::CHUNK_DETAIL_MIN) as f32
             / super::CHUNK_DETAIL_SPAN)
             .clamp(0.0, 1.0);
+        let dt_frac = super::distant_terrain_step(self.distant_terrain) as f32
+            / super::DISTANT_TERRAIN_STEPS as f32;
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
         let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
         let sliders: &[(&str, f32)] = &[
             ("Render Distance:", rd_frac),
             ("Chunk Detail:", cd_frac),
+            (DISTANT_TERRAIN, dt_frac),
             ("Simulation Distance:", sd_frac),
             ("Max Framerate:", mf_frac),
             (BRIGHTNESS, self.brightness),
@@ -1570,6 +1580,9 @@ impl MainMenu {
                 "Render Distance:" => self.render_distance = (2.0 + v * span).round() as u32,
                 "Chunk Detail:" => {
                     self.chunk_detail = super::CHUNK_DETAIL_MIN + (v * span).round() as u32
+                }
+                DISTANT_TERRAIN => {
+                    self.distant_terrain = super::distant_terrain_chunks((v * span).round() as u32)
                 }
                 "Simulation Distance:" => {
                     self.simulation_distance = (5.0 + v * span).round() as u32

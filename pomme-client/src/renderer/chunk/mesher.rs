@@ -986,6 +986,17 @@ impl MeshDispatcher {
 
     /// (grass, foliage, dry foliage) colormaps, shared with the particle
     /// store for break-particle tinting.
+    /// How each block state looks in distant terrain, from this
+    /// dispatcher's textures, colormaps and biomes.
+    pub(crate) fn distant_colors(&self) -> Arc<crate::renderer::distant::colors::DistantColors> {
+        Arc::new(crate::renderer::distant::colors::DistantColors::new(
+            self.render_view.as_view(),
+            &self.uv_map,
+            Arc::clone(&self.biome_climate),
+            self.colormaps(),
+        ))
+    }
+
     pub fn colormaps(&self) -> (Arc<Colormap>, Arc<Colormap>, Arc<Colormap>) {
         (
             Arc::clone(&self.grass_colormap),

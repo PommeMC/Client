@@ -13,6 +13,10 @@ pub const MIN_FOV_DEGREES: f32 = 30.0;
 #[allow(dead_code)]
 pub const MAX_FOV_DEGREES: f32 = 110.0;
 const NEAR: f32 = 0.1;
+/// Near plane of distant terrain's projection. Its nearest column is past
+/// the loaded chunks, so a near plane this far out keeps depth precise
+/// across thousands of blocks.
+const DISTANT_NEAR: f32 = 16.0;
 /// Floor of the dynamic far plane (vanilla floors at `cloudRange * 16`
 /// instead; pomme's fixed-reach clouds derive their fade from this).
 pub(crate) const MIN_FAR: f32 = 1000.0;
@@ -577,10 +581,23 @@ impl Camera {
     }
 
     pub fn view_projection_with_fov(&self, fov: f32) -> Mat4 {
+        self.view_projection_with_planes(fov, NEAR, self.depth_far)
+    }
+
+    /// The view projection distant terrain draws with, out to `far` blocks.
+    pub fn distant_view_projection(&self, far: f32) -> Mat4 {
+        self.view_projection_with_planes(
+            self.fov_radians(self.render_partial_tick),
+            DISTANT_NEAR,
+            far,
+        )
+    }
+
+    fn view_projection_with_planes(&self, fov: f32, near: f32, far: f32) -> Mat4 {
         let offset = self.third_person_offset();
         let (forward, up) = self.view_basis();
         let view = self.view_effect_matrix() * view::look_to_mat4(offset, forward, up);
-        let mut proj = proj::directx::perspective(fov, self.aspect_ratio, NEAR, self.depth_far);
+        let mut proj = proj::directx::perspective(fov, self.aspect_ratio, near, far);
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
     }
@@ -616,13 +633,15 @@ const WATER_FOG_END: f32 = 96.0;
 
 impl CameraUniform {
     /// The camera with its fog: `sky`'s fog colour, and the environmental band
-    /// from its fog distances.
+    /// from its fog distances, scaled by `haze_scale` out of water (distant
+    /// terrain stretches the haze over its distance).
     /// TODO: the rain offsets `AtmosphericFogEnvironment` applies to them.
     pub fn new(
         camera: &Camera,
         sky: &SkyState,
         render_distance_chunks: u32,
         eyes_in_water: bool,
+        haze_scale: f32,
     ) -> Self {
         let fog_color = sky.fog_color.to_array();
         let anchor = camera.anchor();
@@ -654,8 +673,8 @@ impl CameraUniform {
             (
                 blocks - span,
                 blocks,
-                attributes.fog_start_distance,
-                attributes.fog_end_distance,
+                attributes.fog_start_distance * haze_scale,
+                attributes.fog_end_distance * haze_scale,
                 fog_color,
             )
         };

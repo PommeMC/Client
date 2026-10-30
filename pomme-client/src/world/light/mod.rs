@@ -206,6 +206,11 @@ pub(crate) struct LevelLightEngine {
 }
 
 impl LevelLightEngine {
+    /// Whether the dimension has sky light.
+    pub fn has_sky(&self) -> bool {
+        self.sky.is_some()
+    }
+
     pub fn new(height: u32, min_y: i32, has_sky: bool) -> Self {
         Self {
             block: BlockLightEngine::new(),

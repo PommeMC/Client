@@ -475,11 +475,16 @@ pub struct ChunkRing<T> {
     slots: Box<[T]>,
 }
 
-const RING_SIDE: i32 = MAX_VIEW_DISTANCE as i32 * 2 + 1;
+pub(crate) const RING_SIDE: i32 = MAX_VIEW_DISTANCE as i32 * 2 + 1;
 
 /// A column's slot in a `side`×`side` square that wraps around the world.
 fn ring_index(pos: ChunkPos, side: i32) -> usize {
     (pos.z.rem_euclid(side) * side + pos.x.rem_euclid(side)) as usize
+}
+
+/// A column's slot in a [`ChunkRing`].
+pub(crate) fn ring_slot(pos: ChunkPos) -> usize {
+    ring_index(pos, RING_SIDE)
 }
 
 impl<T> ChunkRing<T> {

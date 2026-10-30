@@ -119,6 +119,8 @@ pub struct OptionSet {
     pub shader_pack: Option<String>,
     /// Render Distance in chunks, clamped to the slider's range.
     pub render_distance: Option<u32>,
+    /// Distant Terrain in chunks, 0 for off, else clamped to 32..256.
+    pub distant_terrain: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]

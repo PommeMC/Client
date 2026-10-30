@@ -54,6 +54,9 @@ pub struct AtlasUVMap {
     /// built; later ones fall back to the name lookup.
     by_texture: Vec<AtlasRegion>,
     sprite_alpha_masks: HashMap<String, SpriteAlphaMask>,
+    /// Each sprite's alpha-weighted average colour (its first frame), for
+    /// terrain drawn too far out to texture.
+    average_colors: HashMap<String, [u8; 4]>,
     /// Level-0 rectangles by sprite index, as `(x, y, width, height)`.
     rects: Vec<[u32; 4]>,
     missing: AtlasRegion,
@@ -63,6 +66,7 @@ impl AtlasUVMap {
     fn new(
         regions: HashMap<String, AtlasRegion>,
         sprite_alpha_masks: HashMap<String, SpriteAlphaMask>,
+        average_colors: HashMap<String, [u8; 4]>,
         rects: Vec<[u32; 4]>,
         missing: AtlasRegion,
     ) -> Self {
@@ -74,6 +78,7 @@ impl AtlasUVMap {
             regions,
             by_texture,
             sprite_alpha_masks,
+            average_colors,
             rects,
             missing,
         }
@@ -100,6 +105,10 @@ impl AtlasUVMap {
 
     pub(crate) fn sprite_alpha_mask(&self, name: &str) -> Option<&SpriteAlphaMask> {
         self.sprite_alpha_masks.get(name)
+    }
+
+    pub(crate) fn average_color(&self, name: &str) -> Option<[u8; 4]> {
+        self.average_colors.get(name).copied()
     }
 
     /// Each sprite's texture name, by sprite index.
@@ -966,6 +975,7 @@ impl TextureAtlas {
 
         let mut regions = HashMap::new();
         let mut sprite_alpha_masks = HashMap::new();
+        let mut average_colors = HashMap::new();
         let mut rects = vec![missing_region.pixel_rect.map(u32::from)];
         for src in &sources {
             match placements.get(src.name.as_str()) {
@@ -992,6 +1002,7 @@ impl TextureAtlas {
                     if let Some(mask) = &src.alpha_mask {
                         sprite_alpha_masks.insert(src.name.clone(), mask.clone());
                     }
+                    average_colors.insert(src.name.clone(), average_rgba(&src.data, src.w, src.h));
                     regions.insert(src.name.clone(), region);
                 }
                 _ => {
@@ -1000,7 +1011,13 @@ impl TextureAtlas {
             }
         }
 
-        let uv_map = AtlasUVMap::new(regions, sprite_alpha_masks, rects, missing_region);
+        let uv_map = AtlasUVMap::new(
+            regions,
+            sprite_alpha_masks,
+            average_colors,
+            rects,
+            missing_region,
+        );
 
         AtlasCpu {
             uv_map,
@@ -1033,6 +1050,27 @@ fn effective_mip_level(sources: &[Source]) -> u32 {
         .fold(MAX_MIP_LEVEL, |level, source| {
             level.min(source.w.trailing_zeros().min(source.h.trailing_zeros()))
         })
+}
+
+/// The alpha-weighted mean colour of the first `w`x`h` RGBA texels, with
+/// their mean alpha: a sprite's first frame, transparent texels not
+/// darkening it.
+fn average_rgba(data: &[u8], w: u32, h: u32) -> [u8; 4] {
+    let texels = (w * h) as usize;
+    let mut sum = [0u64; 3];
+    let mut alpha = 0u64;
+    for texel in data.as_chunks::<4>().0.iter().take(texels) {
+        let a = u64::from(texel[3]);
+        for (total, &channel) in sum.iter_mut().zip(texel) {
+            *total += u64::from(channel) * a;
+        }
+        alpha += a;
+    }
+    if alpha == 0 {
+        return [0; 4];
+    }
+    let [r, g, b] = sum.map(|total| (total / alpha) as u8);
+    [r, g, b, (alpha / texels as u64) as u8]
 }
 
 fn build_mip_chain(
@@ -1568,6 +1606,16 @@ mod tests {
     use crate::test_util::test_temp_dir;
 
     #[test]
+    fn the_average_colour_skips_transparent_texels_and_later_frames() {
+        // A 2x1 sprite: opaque red, clear green; then a white second frame.
+        let data = [
+            255, 0, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255,
+        ];
+        assert_eq!(average_rgba(&data, 2, 1), [255, 0, 0, 127]);
+        assert_eq!(average_rgba(&[0; 8], 2, 1), [0; 4]);
+    }
+
+    #[test]
     fn texture_ids_find_the_region_their_name_does() {
         let built = TextureId::intern("test/region_before_build");
         assert_eq!(TextureId::intern("test/region_before_build"), built);
@@ -1580,7 +1628,7 @@ mod tests {
             ("test/region_before_build".to_owned(), named),
             ("test/region_after_build".to_owned(), late_named),
         ]);
-        let uv_map = AtlasUVMap::new(regions, HashMap::new(), Vec::new(), missing);
+        let uv_map = AtlasUVMap::new(regions, HashMap::new(), HashMap::new(), Vec::new(), missing);
         // Interned after the map was built: found through the name instead.
         let late = TextureId::intern("test/region_after_build");
         assert_eq!(uv_map.region(built).pixel_rect, named.pixel_rect);

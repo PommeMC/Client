@@ -2,6 +2,7 @@ pub mod block_entity_model;
 pub mod boot;
 pub mod camera;
 pub mod chunk;
+pub(crate) mod distant;
 pub mod entity_model;
 pub(crate) mod fog;
 pub(crate) mod packing;
@@ -12,6 +13,11 @@ pub(crate) mod shader;
 pub(crate) mod util;
 
 pub(crate) const MAX_FRAMES_IN_FLIGHT: usize = 3;
+
+/// The overworld's ambient haze end (`fog_end_distance`), which distant
+/// terrain scales up to its own distance.
+const AMBIENT_HAZE_END: f32 = 1024.0;
+
 /// iOS keeps a backgrounded app's view and Metal layer, so its surface
 /// outlives a suspend; Android takes the native window away.
 const KEEPS_SURFACE_WHEN_SUSPENDED: bool = cfg!(target_os = "ios");
@@ -209,6 +215,8 @@ enum RenderMode<'a> {
         weather: &'a [WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
+        /// How far distant terrain draws, in chunks; 0 for none.
+        distant_terrain: u32,
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
@@ -290,6 +298,8 @@ pub struct Renderer {
     /// What the selected pack reads about the player's surroundings.
     pack_world: pipelines::shaderpack::PackWorld,
     chunk_buffers: ChunkBufferStore,
+    distant_buffers: distant::gpu::DistantBuffers,
+    distant_pipeline: pipelines::distant::DistantPipeline,
     frames: rhi::backend::Frames,
     screenshot: screenshot::ScreenshotCapture,
     swapchain_dirty: bool,
@@ -486,6 +496,13 @@ impl Renderer {
         );
 
         let chunk_buffers = ChunkBufferStore::new(&ctx.device, ctx.indirect_draw);
+        let distant_buffers = distant::gpu::DistantBuffers::new(&ctx.device);
+        let distant_pipeline = pipelines::distant::DistantPipeline::new(
+            &ctx.device,
+            swapchain_state.targets(),
+            &lightmap,
+            &distant_buffers,
+        );
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
@@ -560,6 +577,8 @@ impl Renderer {
             gui_item_atlas,
             font_options,
             chunk_buffers,
+            distant_buffers,
+            distant_pipeline,
             frames,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
             swapchain_dirty: false,
@@ -995,6 +1014,7 @@ impl Renderer {
             self.chunk_pipeline.destroy(&self.ctx.device);
             self.chunk_pipeline =
                 ChunkPipeline::new(&self.ctx.device, targets, &self.atlas, &self.lightmap);
+            self.distant_pipeline.rebuild(&self.ctx.device, targets);
 
             self.hand_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
@@ -1360,6 +1380,60 @@ impl Renderer {
         self.chunk_buffers.clear();
     }
 
+    /// New and dropped distant terrain sections.
+    pub(crate) fn upload_distant(
+        &mut self,
+        updates: impl IntoIterator<Item = distant::worker::DistantUpdate>,
+    ) {
+        for update in updates {
+            self.distant_buffers.upload(update);
+        }
+    }
+
+    /// Whether a real chunk is loaded at `pos`, where distant terrain gives
+    /// way to it.
+    pub fn set_distant_column_loaded(&mut self, pos: ChunkPos, loaded: bool) {
+        self.distant_buffers.set_column_loaded(pos, loaded);
+    }
+
+    /// Drops all distant terrain and forgets every loaded chunk, for a new
+    /// level.
+    pub fn reset_distant(&mut self) {
+        self.wait_for_all_frames();
+        self.distant_buffers.clear();
+        self.distant_buffers.clear_mask();
+    }
+
+    /// Whether distant terrain is uploaded at block column `x`/`z`.
+    #[cfg(feature = "test-harness")]
+    pub fn has_distant_column(&self, x: i32, z: i32) -> bool {
+        self.distant_buffers.has_column(x, z)
+    }
+
+    /// Whether distant terrain out to `chunks` draws this frame: on, and
+    /// the vanilla terrain path drawing (not a shader pack's, nor the
+    /// top-down benchmark view).
+    fn distant_draws(&self, chunks: u32) -> bool {
+        chunks > 0
+            && self.shader_pack.is_none()
+            && self.chunk_buffers.format() == TerrainFormat::Vanilla
+            && self.camera.top_down().is_none()
+    }
+
+    /// The render distance the fog bands use, in chunks, and the scale of
+    /// the ambient haze: pushed out to distant terrain's distance while it
+    /// draws, so real chunks run into it without a wall of fog.
+    fn distant_fog(&self, render_distance: u32, distant_terrain: u32) -> (u32, f32) {
+        if !self.distant_draws(distant_terrain) {
+            return (render_distance, 1.0);
+        }
+        let blocks = (distant_terrain * 16) as f32;
+        (
+            render_distance.max(distant_terrain),
+            (blocks / AMBIENT_HAZE_END).max(1.0),
+        )
+    }
+
     /// The block ids to mesh terrain for: the shader pack's while one can
     /// draw the world, else none for vanilla.
     pub fn pack_block_ids(&self) -> Option<Arc<crate::shaderpack::block_ids::BlockIds>> {
@@ -1415,6 +1489,7 @@ impl Renderer {
         weather: &[WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
+        distant_terrain: u32,
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
@@ -1472,6 +1547,7 @@ impl Renderer {
                 weather,
                 cloud_mode,
                 render_distance,
+                distant_terrain,
                 player_preview,
                 book_preview,
                 eyes_in_water,
@@ -1760,6 +1836,7 @@ impl Renderer {
         // Fence signalled: reclaim chunk slices the GPU is now provably done with,
         // and read back any screenshot copy recorded for this frame index.
         self.chunk_buffers.begin_frame(&self.ctx.device);
+        self.distant_buffers.begin_frame();
         self.screenshot.collect_ready(frame, &self.ctx.device);
 
         let t_acquire = std::time::Instant::now();
@@ -1777,11 +1854,15 @@ impl Renderer {
         if let RenderMode::World {
             ref sky,
             render_distance,
+            distant_terrain,
             eyes_in_water,
             ..
         } = mode
         {
-            let uniform = CameraUniform::new(&self.camera, sky, render_distance, eyes_in_water);
+            let (fog_distance, haze_scale) = self.distant_fog(render_distance, distant_terrain);
+            let uniform =
+                CameraUniform::new(&self.camera, sky, fog_distance, eyes_in_water, haze_scale);
+            self.distant_pipeline.update_camera(frame, &uniform);
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
@@ -2006,6 +2087,7 @@ impl Renderer {
                 weather,
                 cloud_mode,
                 render_distance,
+                distant_terrain,
                 player_preview,
                 book_preview,
                 eyes_in_water,
@@ -2019,14 +2101,28 @@ impl Renderer {
                     // Vanilla water fog hides the sky dome and clouds; the framebuffer
                     // is cleared to the water fog color, so skipping them tints the view
                     // when looking up out of geometry.
+                    let (fog_distance, _) = self.distant_fog(*render_distance, *distant_terrain);
                     if !*eyes_in_water {
                         self.sky_pipeline.update_and_draw(
                             &mut pass,
                             frame,
                             &self.camera,
                             sky,
-                            *render_distance,
+                            fog_distance,
                         );
+                    }
+                    if self.distant_draws(*distant_terrain) {
+                        // Its own projection, so its depth means nothing to
+                        // the chunks: they start from a cleared buffer, and
+                        // the loaded-column mask keeps it out of theirs.
+                        self.distant_pipeline.bind(&mut pass, frame);
+                        self.distant_buffers.draw(
+                            &pass,
+                            &self.camera,
+                            self.camera_render_position(),
+                            f64::from(*distant_terrain * 16),
+                        );
+                        pass.clear_depth(scissor);
                     }
 
                     let t_cull = std::time::Instant::now();
@@ -2697,6 +2793,8 @@ impl Drop for Renderer {
         }
         self.chunk_buffers.destroy(&self.ctx.device);
         self.chunk_pipeline.destroy(&self.ctx.device);
+        self.distant_buffers.destroy(&self.ctx.device);
+        self.distant_pipeline.destroy(&self.ctx.device);
         self.lightmap.destroy(&self.ctx.device);
         self.hand_pipeline.destroy(&self.ctx.device);
         self.block_overlay_pipeline.destroy(&self.ctx.device);

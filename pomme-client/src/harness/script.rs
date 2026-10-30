@@ -76,6 +76,7 @@ enum Expect {
     Block(BlockExpect),
     Biome(BiomeExpect),
     Terrain(TerrainExpect),
+    Distant(DistantExpect),
     Menu(MenuExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
@@ -226,6 +227,20 @@ struct BiomeExpect {
 #[serde(deny_unknown_fields)]
 struct TerrainExpect {
     terrain: String,
+}
+
+/// Distant terrain is drawn at a block column, `{ at = [x, z] }`: the
+/// finest section holding it is meshed and uploaded.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DistantExpect {
+    distant_terrain: DistantAt,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DistantAt {
+    at: [i32; 2],
 }
 
 /// The open menu: a container's menu type (`generic_9x3`), `inventory`,
@@ -704,6 +719,11 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
             }
             gfx.renderer.chunk_slice_overlap().map_or(Ok(()), Err)
         }
+        Expect::Distant(DistantExpect {
+            distant_terrain: DistantAt { at: [x, z] },
+        }) => ensure(gfx.renderer.has_distant_column(*x, *z), || {
+            format!("no distant terrain at {x}, {z}")
+        }),
         Expect::Biome(BiomeExpect { biome, at }) => {
             let seen = protocol::biome(game, *at);
             ensure(seen == *biome, || format!("{at:?} is in {seen}"))
@@ -833,6 +853,7 @@ mod tests {
                 brightness: None,
                 shader_pack: None,
                 render_distance: None,
+                distant_terrain: None,
             }))
         );
         assert_eq!(

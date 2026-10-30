@@ -430,6 +430,8 @@ impl GameState {
             self.mesh_dispatcher = self
                 .mesh_dispatcher
                 .recreate_for_version(self.block_registry.owned_render_view());
+            self.distant
+                .set_colors(self.mesh_dispatcher.distant_colors());
         }
     }
 
@@ -441,6 +443,8 @@ impl GameState {
         self.biome_climate = Arc::new(colors);
         self.mesh_dispatcher
             .set_biome_climate(Arc::clone(&self.biome_climate));
+        self.distant
+            .set_colors(self.mesh_dispatcher.distant_colors());
     }
 
     /// Resets the level for a new dimension, with a mesh dispatcher for its
@@ -473,6 +477,12 @@ impl GameState {
         // next tick samples the new level's.
         self.biome_weights = Default::default();
         self.environment_probe = EnvironmentProbe::new(self.resolve_environment());
+        // The old level's columns stay as its distant terrain; the name
+        // still names it until `DimensionName`.
+        for pos in self.chunk_store.loaded_positions() {
+            self.distant
+                .capture(&self.dimension, pos, &self.chunk_store);
+        }
         self.chunk_store = ChunkStore::new_with_dimension(render_distance, height, min_y);
         self.light_engine = crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
         // The old level's block entities, moving blocks among them.
@@ -498,6 +508,8 @@ impl GameState {
             None,
             cardinal_light,
         );
+        self.distant
+            .set_colors(self.mesh_dispatcher.distant_colors());
         self.reset_mesh_columns();
     }
 
@@ -558,6 +570,8 @@ impl GameState {
 
     /// The caller removes the column's mesh.
     pub fn unload_chunk(&mut self, pos: crate::position::ChunkPos) {
+        self.distant
+            .capture(&self.dimension, pos, &self.chunk_store);
         self.chunk_store.unload_chunk(&pos);
         self.block_entity_anim.drop_chunk(pos.x, pos.z);
         self.light_engine.on_chunk_unloaded((pos.x, pos.z));
@@ -1233,6 +1247,7 @@ impl AppCore {
         self.menu.restore_bench_render_distance();
         self.clear_server_resource_packs(&mut gfx.renderer);
         gfx.renderer.clear_chunk_meshes();
+        gfx.renderer.reset_distant();
         if let Some(p) = &mut self.presence {
             p.set_in_menu(&self.version);
         }
@@ -1646,6 +1661,8 @@ impl AppCore {
         );
         let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
         game.mesh_dispatcher = mesh_dispatcher;
+        game.distant
+            .set_colors(game.mesh_dispatcher.distant_colors());
         game.particle_store = crate::particle::ParticleStore::new(
             renderer.uv_map().clone(),
             grass,
@@ -1770,6 +1787,7 @@ impl AppCore {
                 NetworkEvent::DimensionInfo(dim) => {
                     game.enter_dimension(dim, self.menu.render_distance, &*renderer);
                     renderer.clear_chunk_meshes();
+                    renderer.reset_distant();
                 }
                 NetworkEvent::DimensionName { name } => {
                     game.dimension = name;
@@ -1779,12 +1797,18 @@ impl AppCore {
                     data,
                     heightmaps,
                     light,
-                } => game.load_chunk(pos, &data, &heightmaps, &light),
+                } => {
+                    game.load_chunk(pos, &data, &heightmaps, &light);
+                    if game.chunk_store.get_chunk(&pos).is_some() {
+                        renderer.set_distant_column_loaded(pos, true);
+                    }
+                }
                 NetworkEvent::LightUpdate { pos, light } => game.apply_light_update(pos, &light),
                 NetworkEvent::ChunkBiomes { chunks } => game.replace_biomes(&chunks),
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.unload_chunk(pos);
                     renderer.remove_chunk_mesh(&pos);
+                    renderer.set_distant_column_loaded(pos, false);
                 }
                 NetworkEvent::ChunkCacheCenter { x, z } => {
                     tracing::debug!("Chunk cache center: [{x}, {z}]");

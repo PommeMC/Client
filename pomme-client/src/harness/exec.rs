@@ -222,6 +222,9 @@ fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Valu
     if let Some(chunks) = options.render_distance {
         core.menu.render_distance = chunks.clamp(2, core.menu.render_distance_max());
     }
+    if let Some(chunks) = options.distant_terrain {
+        core.menu.set_distant_terrain(chunks);
+    }
     core.menu.save_options(&core.input.key_bindings);
     Ok(Value::Null)
 }

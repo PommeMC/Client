@@ -148,6 +148,9 @@ pub struct GameState {
     pub player_walk_speed: f32,
     pub player_prev_walk_speed: f32,
     pub mesh_dispatcher: MeshDispatcher,
+    /// The chunks the server has forgotten, kept to draw past the loaded
+    /// ones.
+    pub(crate) distant: crate::renderer::distant::worker::DistantTerrain,
     /// Whether the server is this process, which the pause menu labels.
     pub singleplayer: bool,
     pub paused: bool,
@@ -463,6 +466,8 @@ impl GameState {
         );
 
         let chunk_store = ChunkStore::new(render_distance);
+        let distant =
+            crate::renderer::distant::worker::DistantTerrain::new(mesh_dispatcher.distant_colors());
         Self {
             light_engine: crate::world::light::LevelLightEngine::new(
                 chunk_store.height(),
@@ -504,6 +509,7 @@ impl GameState {
             player_walk_speed: 0.0,
             player_prev_walk_speed: 0.0,
             mesh_dispatcher,
+            distant,
             singleplayer,
             paused: false,
             dead: false,
@@ -1293,6 +1299,12 @@ impl GameState {
     pub fn drain_and_upload_meshes(&mut self, renderer: &mut Renderer) {
         let batch = self.drain_meshes();
         let upload_start = std::time::Instant::now();
+        let dimension = self.dimension.as_str();
+        renderer.upload_distant(
+            self.distant
+                .drain()
+                .filter(|update| &*update.dimension == dimension),
+        );
         let dropped = renderer.upload_chunk_meshes(&batch);
         self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
         self.clear_dropped_meshed(dropped);
@@ -4385,6 +4397,19 @@ pub fn update_game(
     } else {
         core.menu.render_distance
     };
+    // Off without sky light (see `renderer::distant`'s TODO); capturing
+    // stops with it.
+    let distant_terrain = if game.light_engine.has_sky() {
+        core.menu.distant_terrain
+    } else {
+        0
+    };
+    game.distant.set_view(
+        &game.dimension,
+        game.player.position.x,
+        game.player.position.z,
+        distant_terrain,
+    );
     let inventory = &game.player.inventory;
     let main_stack = &inventory.hotbar_slots()[core.input.selected_slot() as usize];
     let shown_hands = game
@@ -4483,6 +4508,7 @@ pub fn update_game(
             core.menu.cloud_mode
         },
         effective_rd,
+        distant_terrain,
         player_preview,
         book_preview,
         game.player.eyes_in_water,
