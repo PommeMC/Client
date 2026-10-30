@@ -1,4 +1,4 @@
-//! Distant terrain on the GPU: section meshes in one vertex arena, the
+//! Distant terrain on the GPU: section meshes in vertex arenas, the
 //! loaded-column mask that keeps them out of real chunks, and the draws.
 
 use std::collections::{HashMap, VecDeque};
@@ -15,8 +15,10 @@ use crate::renderer::chunk::tlsf::Tlsf;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi};
 use crate::world::chunk::{RING_SIDE, ring_slot};
 
-/// Vertices the arena holds: 48 MB at 12 bytes each.
+/// Vertices an arena holds: 48 MB at 12 bytes each.
 const ARENA_VERTICES: u32 = 4 << 20;
+/// Arenas there may be: 384 MB of vertices.
+const MAX_ARENAS: usize = 8;
 /// Quads one draw covers, which the shared index buffer has room for; a
 /// larger section draws in several.
 const QUADS_PER_DRAW: u32 = 1 << 16;
@@ -25,8 +27,30 @@ const VERTEX_SIZE: u64 = size_of::<DistantVertex>() as u64;
 const _: () = assert!(RING_SIDE == 257);
 const MASK_WORDS: usize = ((RING_SIDE * RING_SIDE) as usize).div_ceil(32);
 
-/// A section's mesh in the arena, and the height it spans.
+/// A vertex buffer, sub-allocated.
+struct Arena {
+    buffer: rhi::backend::Buffer,
+    vertices: Tlsf,
+}
+
+impl Arena {
+    fn new(device: &rhi::backend::Device) -> Self {
+        Self {
+            buffer: rhi::backend::Buffer::new(
+                device,
+                "distant_vertices",
+                u64::from(ARENA_VERTICES) * VERTEX_SIZE,
+                rhi::BufferUsages::VERTEX,
+                rhi::MemoryLocation::Host,
+            ),
+            vertices: Tlsf::new(ARENA_VERTICES),
+        }
+    }
+}
+
+/// A section's mesh in an arena, and the height it spans.
 struct Uploaded {
+    arena: usize,
     first_vertex: u32,
     vertices: u32,
     min_y: u16,
@@ -34,8 +58,8 @@ struct Uploaded {
 }
 
 pub(crate) struct DistantBuffers {
-    vertex_buffer: rhi::backend::Buffer,
-    vertices: Tlsf,
+    /// Grown one at a time as sections fill them.
+    arenas: Vec<Arena>,
     index_buffer: rhi::backend::Buffer,
     sections: HashMap<SectionKey, Uploaded>,
     /// The dimension the sections are of, and its `min_y`.
@@ -45,9 +69,9 @@ pub(crate) struct DistantBuffers {
     mask: rhi::backend::Buffer,
     mask_words: Vec<u32>,
     frame_seq: u64,
-    /// Freed vertex ranges, by the frame from which no in-flight frame can
-    /// still draw them.
-    pending_free: VecDeque<(u64, u32)>,
+    /// Freed vertex ranges as (arena, first vertex), by the frame from
+    /// which no in-flight frame can still draw them.
+    pending_free: VecDeque<(u64, usize, u32)>,
 }
 
 impl DistantBuffers {
@@ -56,14 +80,7 @@ impl DistantBuffers {
             .flat_map(|quad| [0, 1, 2, 2, 3, 0].map(|i| quad * 4 + i))
             .collect();
         Self {
-            vertex_buffer: rhi::backend::Buffer::new(
-                device,
-                "distant_vertices",
-                u64::from(ARENA_VERTICES) * VERTEX_SIZE,
-                rhi::BufferUsages::VERTEX,
-                rhi::MemoryLocation::Host,
-            ),
-            vertices: Tlsf::new(ARENA_VERTICES),
+            arenas: vec![Arena::new(device)],
             index_buffer: rhi::backend::Buffer::with_data(
                 device,
                 "distant_quad_indices",
@@ -98,18 +115,19 @@ impl DistantBuffers {
     /// frame, after its fence wait.
     pub fn begin_frame(&mut self) {
         self.frame_seq += 1;
-        while let Some(&(at, first_vertex)) = self.pending_free.front()
+        while let Some(&(at, arena, first_vertex)) = self.pending_free.front()
             && at <= self.frame_seq
         {
             self.pending_free.pop_front();
-            self.vertices.free(first_vertex);
+            self.arenas[arena].vertices.free(first_vertex);
         }
     }
 
     fn retire(&mut self, key: SectionKey) {
         if let Some(old) = self.sections.remove(&key) {
             let at = self.frame_seq + MAX_FRAMES_IN_FLIGHT as u64;
-            self.pending_free.push_back((at, old.first_vertex));
+            self.pending_free
+                .push_back((at, old.arena, old.first_vertex));
         }
     }
 
@@ -141,7 +159,27 @@ impl DistantBuffers {
             .write_at(word * size_of::<u32>(), &value.to_ne_bytes());
     }
 
-    pub fn upload(&mut self, update: DistantUpdate) {
+    /// Room for `count` vertices: in an arena with it, else in a new one
+    /// while there may be more.
+    fn alloc(&mut self, device: &rhi::backend::Device, count: u32) -> Option<(usize, u32)> {
+        if let Some(found) = self
+            .arenas
+            .iter_mut()
+            .enumerate()
+            .find_map(|(i, arena)| Some((i, arena.vertices.alloc(count)?)))
+        {
+            return Some(found);
+        }
+        if self.arenas.len() == MAX_ARENAS {
+            return None;
+        }
+        let mut arena = Arena::new(device);
+        let first_vertex = arena.vertices.alloc(count)?;
+        self.arenas.push(arena);
+        Some((self.arenas.len() - 1, first_vertex))
+    }
+
+    pub fn upload(&mut self, device: &rhi::backend::Device, update: DistantUpdate) {
         if self.dimension.as_ref() != Some(&update.dimension) {
             self.clear();
             self.dimension = Some(Arc::clone(&update.dimension));
@@ -156,17 +194,18 @@ impl DistantBuffers {
             if count == 0 {
                 continue;
             }
-            let Some(first_vertex) = self.vertices.alloc(count) else {
+            let Some((arena, first_vertex)) = self.alloc(device, count) else {
                 tracing::warn!("No room for distant terrain section {:?}", mesh.key);
                 continue;
             };
-            self.vertex_buffer.write_at(
+            self.arenas[arena].buffer.write_at(
                 (u64::from(first_vertex) * VERTEX_SIZE) as usize,
                 bytemuck::cast_slice(&mesh.vertices),
             );
             self.sections.insert(
                 mesh.key,
                 Uploaded {
+                    arena,
                     first_vertex,
                     vertices: count,
                     min_y: mesh.min_y,
@@ -239,9 +278,11 @@ impl DistantBuffers {
             0,
             bytemuck::cast_slice(&view_proj.to_cols_array()),
         );
-        pass.set_vertex_buffer(0, self.vertex_buffer.handle());
         pass.set_index_buffer(self.index_buffer.handle());
-        for key in self.visible(eye, radius) {
+        let mut visible = self.visible(eye, radius);
+        visible.sort_unstable_by_key(|key| self.sections[key].arena);
+        let mut bound = None;
+        for key in visible {
             let section = &self.sections[&key];
             let (ox, oz) = key.origin();
             let origin = DVec3::new(f64::from(ox), f64::from(self.min_y), f64::from(oz));
@@ -250,6 +291,10 @@ impl DistantBuffers {
             let max = origin + DVec3::new(width, f64::from(section.max_y), width) - eye;
             if !in_frustum(&planes, min.as_vec3(), max.as_vec3()) {
                 continue;
+            }
+            if bound != Some(section.arena) {
+                pass.set_vertex_buffer(0, self.arenas[section.arena].buffer.handle());
+                bound = Some(section.arena);
             }
             let rel = (origin - anchor).as_vec3();
             pass.set_push_constants(
@@ -272,11 +317,10 @@ impl DistantBuffers {
     }
 
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
-        for buffer in [
-            &mut self.vertex_buffer,
-            &mut self.index_buffer,
-            &mut self.mask,
-        ] {
+        for arena in self.arenas.drain(..) {
+            arena.buffer.destroy(device);
+        }
+        for buffer in [&mut self.index_buffer, &mut self.mask] {
             std::mem::take(buffer).destroy(device);
         }
     }

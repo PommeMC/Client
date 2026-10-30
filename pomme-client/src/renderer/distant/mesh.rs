@@ -1,6 +1,8 @@
 //! Distant terrain sections as geometry: each run a box, faces another run
 //! covers left out.
 
+use std::collections::HashMap;
+
 use super::column::{Run, RunKey};
 use super::store::{SECTION_COLUMNS, Section, SectionKey};
 
@@ -22,7 +24,7 @@ pub(crate) struct DistantVertex {
 }
 
 /// A face's direction, as `distant.vert` reads it.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 enum Face {
     Up,
@@ -62,7 +64,12 @@ pub(crate) struct SectionMesh {
     pub max_y: u16,
 }
 
-/// `colors` gives a run's top and side colour.
+/// Top or bottom faces alike in height, colour and light, as a bit per
+/// column: bit `x` of row `z`.
+type FlatFaces = HashMap<(Face, u32, [u8; 3], u8), [u64; SECTION_COLUMNS as usize]>;
+
+/// `colors` gives a run's top and side colour. Tops and bottoms alike merge
+/// into rectangles; sides are a quad per uncovered stretch.
 pub(crate) fn mesh_section(
     key: SectionKey,
     section: &Section,
@@ -70,6 +77,7 @@ pub(crate) fn mesh_section(
 ) -> SectionMesh {
     let w = key.column_width() as u32;
     let mut vertices = Vec::new();
+    let mut flat = FlatFaces::new();
     let (mut min_y, mut max_y) = (u16::MAX, 0);
     for z in 0..SECTION_COLUMNS {
         for x in 0..SECTION_COLUMNS {
@@ -87,30 +95,19 @@ pub(crate) fn mesh_section(
                 let (bottom, top) = (u32::from(run.bottom), u32::from(run.top) + 1);
                 min_y = min_y.min(run.bottom);
                 max_y = max_y.max(run.top + 1);
-                let mut quad =
-                    |corners, face, rgb| push_quad(&mut vertices, corners, light, face, rgb);
+                let mut flat_face = |face: Face, y| {
+                    flat.entry((face, y, top_rgb, light))
+                        .or_insert([0; SECTION_COLUMNS as usize])[z as usize] |= 1 << x;
+                };
                 let above_touches = i > 0 && runs[i - 1].bottom == run.top + 1;
                 if !above_touches {
-                    quad(
-                        [[x0, top, z0], [x1, top, z0], [x1, top, z1], [x0, top, z1]],
-                        Face::Up,
-                        top_rgb,
-                    );
+                    flat_face(Face::Up, top);
                 }
                 let below_touches = runs
                     .get(i + 1)
                     .is_some_and(|below| below.top + 1 == run.bottom);
                 if run.bottom > 0 && !below_touches {
-                    quad(
-                        [
-                            [x0, bottom, z0],
-                            [x0, bottom, z1],
-                            [x1, bottom, z1],
-                            [x1, bottom, z0],
-                        ],
-                        Face::Down,
-                        top_rgb,
-                    );
+                    flat_face(Face::Down, bottom);
                 }
                 for (&(face, ..), neighbour) in SIDES.iter().zip(&neighbours) {
                     for (low, high) in uncovered(bottom, top, neighbour) {
@@ -128,10 +125,21 @@ pub(crate) fn mesh_section(
                                 [[x1, low, z0], [x1, high, z0], [x1, high, z1], [x1, low, z1]]
                             }
                         };
-                        quad(corners, face, side_rgb);
+                        push_quad(&mut vertices, corners, light, face, side_rgb);
                     }
                 }
             }
+        }
+    }
+    for ((face, y, rgb, light), mut rows) in flat {
+        for (x, z, width, depth) in rectangles(&mut rows) {
+            let (x0, z0) = (x * w, z * w);
+            let (x1, z1) = (x0 + width * w, z0 + depth * w);
+            let corners = match face {
+                Face::Up => [[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]],
+                _ => [[x0, y, z0], [x0, y, z1], [x1, y, z1], [x1, y, z0]],
+            };
+            push_quad(&mut vertices, corners, light, face, rgb);
         }
     }
     SectionMesh {
@@ -140,6 +148,27 @@ pub(crate) fn mesh_section(
         min_y: min_y.min(max_y),
         max_y,
     }
+}
+
+/// Greedy rectangles covering the set bits of `rows` (bit `x` of row `z`),
+/// as `(x, z, width, depth)` in columns; clears `rows`.
+fn rectangles(rows: &mut [u64; SECTION_COLUMNS as usize]) -> Vec<(u32, u32, u32, u32)> {
+    let mut out = Vec::new();
+    for z in 0..rows.len() {
+        while rows[z] != 0 {
+            let x = rows[z].trailing_zeros();
+            let width = (!(rows[z] >> x)).trailing_zeros();
+            let mask = (u64::MAX >> (64 - width)) << x;
+            let mut end = z + 1;
+            while end < rows.len() && rows[end] & mask == mask {
+                rows[end] &= !mask;
+                end += 1;
+            }
+            rows[z] &= !mask;
+            out.push((x, z as u32, width, (end - z) as u32));
+        }
+    }
+    out
 }
 
 /// The parts of `[low, high)` none of `neighbour`'s runs cover, highest
@@ -244,10 +273,24 @@ mod tests {
 
     #[test]
     fn equal_neighbours_hide_their_shared_sides() {
+        // Two side by side: their tops merge, their shared sides go.
         let pair = |i| if i < 2 { vec![run(5, 0)] } else { Vec::new() };
-        assert_eq!(quads(pair), 2 + 2 * 3);
-        // A flat chunk: one top per column, and only the chunk's outer
-        // sides, which stay because they're in the middle of nothing.
-        assert_eq!(quads(|_| vec![run(5, 0)]), 256 + 4 * 16);
+        assert_eq!(quads(pair), 1 + 2 * 3);
+        // A flat chunk: one top, and the chunk's outer sides, which stay
+        // because they're in the middle of nothing.
+        assert_eq!(quads(|_| vec![run(5, 0)]), 1 + 4 * 16);
+    }
+
+    #[test]
+    fn flat_faces_merge_into_rectangles() {
+        let mut rows = [0u64; SECTION_COLUMNS as usize];
+        // An L: a 3x2 block with one more cell under its left edge.
+        rows[0] = 0b111;
+        rows[1] = 0b111;
+        rows[2] = 0b001;
+        assert_eq!(rectangles(&mut rows), [(0, 0, 3, 2), (0, 2, 1, 1)]);
+        assert!(rows.iter().all(|&row| row == 0));
+        rows[5] = u64::MAX;
+        assert_eq!(rectangles(&mut rows), [(0, 5, 64, 1)]);
     }
 }

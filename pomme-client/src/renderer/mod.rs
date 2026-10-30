@@ -1386,7 +1386,7 @@ impl Renderer {
         updates: impl IntoIterator<Item = distant::worker::DistantUpdate>,
     ) {
         for update in updates {
-            self.distant_buffers.upload(update);
+            self.distant_buffers.upload(&self.ctx.device, update);
         }
     }
 

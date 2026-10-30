@@ -27,6 +27,9 @@ layout(location = 2) out float v_fog;
 // the anchor: what distant.frag finds the column's chunk from.
 layout(location = 3) out vec2 v_column_pos;
 layout(location = 4) flat out ivec2 v_anchor;
+// A side face's step from v_column_pos into the column it faces; zero for
+// tops and bottoms.
+layout(location = 5) flat out vec2 v_outward;
 
 // mesh.rs `Face`: up, down, north, south, west, east.
 const vec2 FACE_NUDGE[6] = vec2[](
@@ -46,6 +49,8 @@ void main() {
     v_color = in_color.rgb * sample_lightmap(lightmap_uv).rgb;
     v_fog_color = fog_color.rgb;
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
-    v_column_pos = world.xz + FACE_NUDGE[min(in_light_face.y, 5u)];
+    vec2 nudge = FACE_NUDGE[min(in_light_face.y, 5u)];
+    v_column_pos = world.xz + nudge;
     v_anchor = camera_block.xz;
+    v_outward = -2.0 * nudge;
 }

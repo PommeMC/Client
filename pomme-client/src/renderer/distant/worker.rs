@@ -8,7 +8,7 @@ use crossbeam_channel::{Receiver, Sender};
 use parking_lot::RwLock;
 
 use super::colors::DistantColors;
-use super::column::build_column;
+use super::column::build_chunk;
 use super::mesh::{SectionMesh, mesh_section};
 use super::store::{SectionKey, Store};
 use crate::position::ChunkPos;
@@ -184,22 +184,7 @@ impl Worker {
                 light,
                 min_y,
             } => {
-                let columns = {
-                    let chunk = chunk.read();
-                    (0..256)
-                        .map(|i| {
-                            build_column(
-                                &chunk,
-                                light.as_deref(),
-                                i % 16,
-                                i / 16,
-                                min_y,
-                                |state| self.colors.shows(state),
-                                |state| self.colors.fills(state),
-                            )
-                        })
-                        .collect()
-                };
+                let columns = build_chunk(&chunk.read(), light.as_deref(), min_y, &self.colors);
                 let (store, store_min_y) = self.stores.entry(Arc::clone(&dimension)).or_default();
                 *store_min_y = min_y;
                 let touched = store.capture(pos, columns);

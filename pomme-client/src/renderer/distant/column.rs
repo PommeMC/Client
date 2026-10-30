@@ -4,6 +4,7 @@
 
 use azalea_block::BlockState;
 
+use super::colors::DistantColors;
 use crate::world::chunk::{Chunk, ChunkLightData, SectionBlocks};
 
 /// What a run is made of. `biome` is 0 for blocks whose colour doesn't
@@ -105,6 +106,20 @@ pub(crate) fn build_column(
         }
     }
     runs
+}
+
+/// Every column of `chunk`, by `z * 16 + x`.
+pub(crate) fn build_chunk(
+    chunk: &Chunk,
+    light: Option<&ChunkLightData>,
+    min_y: i32,
+    colors: &DistantColors,
+) -> Vec<Vec<Run>> {
+    let shows = |state| colors.shows(state);
+    let fills = |state| colors.fills(state);
+    (0..256)
+        .map(|i| build_column(chunk, light, i % 16, i / 16, min_y, shows, fills))
+        .collect()
 }
 
 /// `columns` side by side as one coarser column: each height slice between
