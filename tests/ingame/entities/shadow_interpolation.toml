@@ -1,0 +1,677 @@
+# A mob's shadow while it interpolates: each round nudges the pig by one
+# wire step (1/4096 of a block), which starts an interpolation, and every
+# frame of it must match the still one. The nudge flips a few pixels along
+# the pig's edges; a lost shadow changes thousands.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+# A pillar to look down from.
+
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 0.5 -57 0.5 0 50"
+
+[[step]]
+chat = '/summon minecraft:pig 0.5 -60 4.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}'
+
+[[step]]
+expect = { entity = "pig" }
+
+[[step]]
+look_at = [0.5, -60.0, 4.5]
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+deterministic = true
+
+# Chat fades after 10 seconds.
+
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "still"
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~0.000244140625 ~ ~'
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_0_0"
+
+[[step]]
+match_screenshots = ["still", "moved_0_0"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_0_1"
+
+[[step]]
+match_screenshots = ["still", "moved_0_1"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_0_2"
+
+[[step]]
+match_screenshots = ["still", "moved_0_2"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_0_3"
+
+[[step]]
+match_screenshots = ["still", "moved_0_3"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_0_4"
+
+[[step]]
+match_screenshots = ["still", "moved_0_4"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_0_5"
+
+[[step]]
+match_screenshots = ["still", "moved_0_5"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_0_6"
+
+[[step]]
+match_screenshots = ["still", "moved_0_6"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_0_7"
+
+[[step]]
+match_screenshots = ["still", "moved_0_7"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_0_8"
+
+[[step]]
+match_screenshots = ["still", "moved_0_8"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_0_9"
+
+[[step]]
+match_screenshots = ["still", "moved_0_9"]
+max_differing_pixels = 100
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~-0.000244140625 ~ ~'
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_1_0"
+
+[[step]]
+match_screenshots = ["still", "moved_1_0"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_1_1"
+
+[[step]]
+match_screenshots = ["still", "moved_1_1"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_1_2"
+
+[[step]]
+match_screenshots = ["still", "moved_1_2"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_1_3"
+
+[[step]]
+match_screenshots = ["still", "moved_1_3"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_1_4"
+
+[[step]]
+match_screenshots = ["still", "moved_1_4"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_1_5"
+
+[[step]]
+match_screenshots = ["still", "moved_1_5"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_1_6"
+
+[[step]]
+match_screenshots = ["still", "moved_1_6"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_1_7"
+
+[[step]]
+match_screenshots = ["still", "moved_1_7"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_1_8"
+
+[[step]]
+match_screenshots = ["still", "moved_1_8"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_1_9"
+
+[[step]]
+match_screenshots = ["still", "moved_1_9"]
+max_differing_pixels = 100
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~0.000244140625 ~ ~'
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_2_0"
+
+[[step]]
+match_screenshots = ["still", "moved_2_0"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_2_1"
+
+[[step]]
+match_screenshots = ["still", "moved_2_1"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_2_2"
+
+[[step]]
+match_screenshots = ["still", "moved_2_2"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_2_3"
+
+[[step]]
+match_screenshots = ["still", "moved_2_3"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_2_4"
+
+[[step]]
+match_screenshots = ["still", "moved_2_4"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_2_5"
+
+[[step]]
+match_screenshots = ["still", "moved_2_5"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_2_6"
+
+[[step]]
+match_screenshots = ["still", "moved_2_6"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_2_7"
+
+[[step]]
+match_screenshots = ["still", "moved_2_7"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_2_8"
+
+[[step]]
+match_screenshots = ["still", "moved_2_8"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_2_9"
+
+[[step]]
+match_screenshots = ["still", "moved_2_9"]
+max_differing_pixels = 100
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~-0.000244140625 ~ ~'
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_3_0"
+
+[[step]]
+match_screenshots = ["still", "moved_3_0"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_3_1"
+
+[[step]]
+match_screenshots = ["still", "moved_3_1"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_3_2"
+
+[[step]]
+match_screenshots = ["still", "moved_3_2"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_3_3"
+
+[[step]]
+match_screenshots = ["still", "moved_3_3"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_3_4"
+
+[[step]]
+match_screenshots = ["still", "moved_3_4"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_3_5"
+
+[[step]]
+match_screenshots = ["still", "moved_3_5"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_3_6"
+
+[[step]]
+match_screenshots = ["still", "moved_3_6"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_3_7"
+
+[[step]]
+match_screenshots = ["still", "moved_3_7"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_3_8"
+
+[[step]]
+match_screenshots = ["still", "moved_3_8"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_3_9"
+
+[[step]]
+match_screenshots = ["still", "moved_3_9"]
+max_differing_pixels = 100
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~0.000244140625 ~ ~'
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_4_0"
+
+[[step]]
+match_screenshots = ["still", "moved_4_0"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_4_1"
+
+[[step]]
+match_screenshots = ["still", "moved_4_1"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_4_2"
+
+[[step]]
+match_screenshots = ["still", "moved_4_2"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_4_3"
+
+[[step]]
+match_screenshots = ["still", "moved_4_3"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_4_4"
+
+[[step]]
+match_screenshots = ["still", "moved_4_4"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_4_5"
+
+[[step]]
+match_screenshots = ["still", "moved_4_5"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_4_6"
+
+[[step]]
+match_screenshots = ["still", "moved_4_6"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_4_7"
+
+[[step]]
+match_screenshots = ["still", "moved_4_7"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_4_8"
+
+[[step]]
+match_screenshots = ["still", "moved_4_8"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_4_9"
+
+[[step]]
+match_screenshots = ["still", "moved_4_9"]
+max_differing_pixels = 100
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~-0.000244140625 ~ ~'
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_5_0"
+
+[[step]]
+match_screenshots = ["still", "moved_5_0"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_5_1"
+
+[[step]]
+match_screenshots = ["still", "moved_5_1"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_5_2"
+
+[[step]]
+match_screenshots = ["still", "moved_5_2"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_5_3"
+
+[[step]]
+match_screenshots = ["still", "moved_5_3"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_5_4"
+
+[[step]]
+match_screenshots = ["still", "moved_5_4"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_5_5"
+
+[[step]]
+match_screenshots = ["still", "moved_5_5"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_5_6"
+
+[[step]]
+match_screenshots = ["still", "moved_5_6"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_5_7"
+
+[[step]]
+match_screenshots = ["still", "moved_5_7"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_5_8"
+
+[[step]]
+match_screenshots = ["still", "moved_5_8"]
+max_differing_pixels = 100
+
+[[step]]
+wait_ms = 30
+
+[[step]]
+screenshot = "moved_5_9"
+
+[[step]]
+match_screenshots = ["still", "moved_5_9"]
+max_differing_pixels = 100
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+chat = "/kill @e[type=pig]"
+
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"

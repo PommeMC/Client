@@ -57,6 +57,8 @@ struct StepFile {
     match_screenshots: Option<[String; 2]>,
     expect: Option<Expect>,
     timeout_ms: Option<u64>,
+    /// How many pixels `match_screenshots` lets differ (default 0).
+    max_differing_pixels: Option<usize>,
 }
 
 /// What an `expect` step waits for, told apart by its fields.
@@ -257,8 +259,8 @@ enum Step {
     Wait(Duration),
     Screenshot(String),
     /// Two of the script's screenshots, which must match pixel for pixel to
-    /// within [`MATCH_TOLERANCE`].
-    MatchScreenshots([String; 2]),
+    /// within [`MATCH_TOLERANCE`], but for at most this many pixels.
+    MatchScreenshots([String; 2], usize),
     Expect(Expect, Duration),
 }
 
@@ -321,7 +323,10 @@ impl StepFile {
             steps.push(Step::Screenshot(name));
         }
         if let Some(names) = self.match_screenshots {
-            steps.push(Step::MatchScreenshots(names));
+            steps.push(Step::MatchScreenshots(
+                names,
+                self.max_differing_pixels.unwrap_or(0),
+            ));
         }
         if let Some(expect) = self.expect {
             steps.push(Step::Expect(expect, timeout.unwrap_or(DEFAULT_TIMEOUT)));
@@ -425,7 +430,7 @@ impl Script {
                 };
                 exec::screenshot_progress(phase, &path, started)
             }
-            Step::MatchScreenshots(names) => Some(self.match_screenshots(names)),
+            Step::MatchScreenshots(names, allowed) => Some(self.match_screenshots(names, *allowed)),
             Step::Expect(expect, timeout) => match check(expect, phase) {
                 Ok(()) => Some(Ok(())),
                 Err(e) if started.elapsed() > *timeout => Some(Err(e)),
@@ -457,7 +462,7 @@ impl Script {
     // `world/deterministic`'s grass beside the magma block flips one shade of
     // red between shots about one run in four (not the camera, the light, a
     // remesh or the atlas upload), where vanilla holds it.
-    fn match_screenshots(&self, [a, b]: &[String; 2]) -> Result<(), String> {
+    fn match_screenshots(&self, [a, b]: &[String; 2], allowed: usize) -> Result<(), String> {
         let load = |name: &String| {
             image::open(self.shot_path(name))
                 .map(|image| image.into_rgba8())
@@ -476,7 +481,7 @@ impl Script {
                     .any(|(c, d)| c.abs_diff(d) > MATCH_TOLERANCE)
             })
             .count();
-        ensure(differing == 0, || {
+        ensure(differing <= allowed, || {
             format!("{a} and {b} differ in {differing} pixels")
         })
     }
@@ -810,6 +815,7 @@ mod tests {
             deterministic = true
             [[step]]
             match_screenshots = ["first", "second"]
+            max_differing_pixels = 64
             "#,
         )
         .unwrap();
@@ -817,7 +823,7 @@ mod tests {
         assert_eq!(steps[20], Step::Run(Command::Deterministic));
         assert_eq!(
             steps[21],
-            Step::MatchScreenshots(["first".into(), "second".into()])
+            Step::MatchScreenshots(["first".into(), "second".into()], 64)
         );
         assert_eq!(
             steps[19],

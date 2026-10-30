@@ -2560,7 +2560,6 @@ impl AppCore {
                     entity_type,
                     position,
                     velocity,
-                    y_rot_deg,
                     x_rot_deg,
                     head_y_rot_deg,
                 } => {
@@ -2572,7 +2571,6 @@ impl AppCore {
                             entity_type,
                             position,
                             LookDirection::new(head_y_rot_deg, x_rot_deg),
-                            y_rot_deg,
                             uuid,
                         );
                         if entity_type == azalea_registry::builtin::EntityKind::Player {
@@ -2834,6 +2832,22 @@ impl AppCore {
                             renderer.camera_render_position(),
                         );
                     }
+                }
+                // `Armadillo.handleEntityEvent`: a local sound at its position.
+                NetworkEvent::ArmadilloPeek { id } => {
+                    if let Some(pos) = game.entity_store.armadillo_peek(id) {
+                        self.audio.play_world_sound(
+                            &crate::audio::SoundRef::event("entity.armadillo.peek"),
+                            crate::audio::CATEGORY_NEUTRAL,
+                            pos,
+                            1.0,
+                            1.0,
+                            fastrand::u64(..),
+                        );
+                    }
+                }
+                NetworkEvent::GoatRam { id, lowering } => {
+                    game.entity_store.set_goat_lowering_head(id, lowering);
                 }
                 NetworkEvent::SquidTentacleReset { id } => {
                     game.entity_store.squid_tentacle_reset(id);

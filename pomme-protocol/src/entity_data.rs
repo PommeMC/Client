@@ -142,8 +142,8 @@ macro_rules! serializers_26_2 {
     ]))),
     // SNIFFER_STATE: an idMapper VarInt, read like INT.
     S::Int,
-    // ARMADILLO_STATE
-    S::Skip(ENUM),
+    // ARMADILLO_STATE: an idMapper VarInt, read like INT.
+    S::Int,
     // COPPER_GOLEM_STATE and WEATHERING_COPPER_STATE: idMapper VarInts.
     S::Int,
     S::Int,
@@ -331,6 +331,24 @@ mod tests {
             [DataValue {
                 index: 18,
                 value: Value::Int(5),
+            }]
+        );
+    }
+
+    /// `Armadillo.ARMADILLO_STATE` (index 18) set to UNROLLING by vanilla's
+    /// encoder.
+    #[test]
+    fn armadillo_state_matches_vanilla_encoder() {
+        let payload = crate::vanilla_fixtures::case("set_entity_data/armadillo_state");
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().unwrap(), 7);
+        let values = codec().read_entity_data(&mut r).expect("valid entity data");
+        r.ensure_eof().unwrap();
+        assert_eq!(
+            values,
+            [DataValue {
+                index: 18,
+                value: Value::Int(3),
             }]
         );
     }
