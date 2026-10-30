@@ -60,6 +60,40 @@ use crate::world::block::model::CardinalLightType;
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
+/// The F3 "Mesh gate" line: among in-frustum columns, the sections drawn and
+/// those skipped as occluded (the per-section occlusion win). Kept as each
+/// walk lands and as columns unload, so F3 doesn't walk every column per
+/// frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MeshGate {
+    pub visible: u32,
+    pub hidden: u32,
+}
+
+impl MeshGate {
+    /// An in-frustum column's share: its `mask` out of `sections`.
+    fn column(mask: u32, sections: u32) -> Self {
+        let visible = mask.count_ones();
+        Self {
+            visible,
+            hidden: sections.saturating_sub(visible),
+        }
+    }
+
+    fn add(&mut self, mask: u32, sections: u32) {
+        let column = Self::column(mask, sections);
+        self.visible += column.visible;
+        self.hidden += column.hidden;
+    }
+
+    /// Takes back what [`Self::add`] counted for the same column.
+    pub(crate) fn remove(&mut self, mask: u32, sections: u32) {
+        let column = Self::column(mask, sections);
+        self.visible -= column.visible;
+        self.hidden -= column.hidden;
+    }
+}
+
 /// Which screen a server-opened container renders as.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ContainerScreen {
@@ -348,9 +382,10 @@ pub struct GameState {
     /// edited section's visibility.
     pub section_vis_epoch: HashMap<(ChunkPos, i32), u64>,
     /// Cached per-column frustum tier (0 in view, 1 margin, 2 behind),
-    /// recomputed each time an occlusion walk completes. Only the F3
-    /// overlay reads it now.
+    /// recomputed each time an occlusion walk completes, so an unloading
+    /// column can leave `mesh_gate`.
     pub vis_tiers: HashMap<ChunkPos, u8>,
+    pub mesh_gate: MeshGate,
     pub vis_valid: bool,
     /// Camera 8-block bucket that last triggered an occlusion walk — movement,
     /// not rotation, drives recomputes (vanilla's cadence).
@@ -612,6 +647,7 @@ impl GameState {
             compiled: HashMap::new(),
             section_vis_epoch: HashMap::new(),
             vis_tiers: HashMap::new(),
+            mesh_gate: MeshGate::default(),
             vis_valid: false,
             last_vis_cam: (i32::MIN, i32::MIN, i32::MIN),
             vis_task: None,
@@ -1193,6 +1229,7 @@ impl GameState {
         self.section_vis_epoch.clear();
         self.vis_mask.clear();
         self.vis_tiers.clear();
+        self.mesh_gate = MeshGate::default();
         self.vis_task = None;
         self.vis_valid = false;
         self.pending_load_rescan = true;
@@ -1435,6 +1472,7 @@ impl GameState {
             if self.vis_valid {
                 self.vis_valid = false;
                 self.vis_tiers.clear();
+                self.mesh_gate = MeshGate::default();
             }
             return;
         }
@@ -1502,9 +1540,11 @@ impl GameState {
         let min_y = self.chunk_store.min_y() as f32;
         let max_y = min_y + self.chunk_store.height() as f32;
         let full = section_mask(self.chunk_store.section_count());
+        let sections = self.chunk_store.section_count() as u32;
 
         let mut tiers = HashMap::new();
         let mut masks = HashMap::new();
+        let mut gate = MeshGate::default();
         for pos in self.chunk_store.loaded_positions() {
             let near = column_is_near(pos, eye_f);
             let tier = if near {
@@ -1521,10 +1561,14 @@ impl GameState {
             };
             // A fully-occluded column (no visible section) drops to the hidden tier.
             let tier = if tier == 0 && mask == 0 { 2 } else { tier };
+            if tier == 0 {
+                gate.add(mask, sections);
+            }
             tiers.insert(pos, tier);
             masks.insert(pos, mask);
         }
         self.vis_tiers = tiers;
+        self.mesh_gate = gate;
         self.vis_mask = masks.clone();
         self.vis_valid = true;
 
@@ -2778,21 +2822,10 @@ pub fn update_game(
             chunk_count: gfx.renderer.loaded_chunk_count(),
             sections_drawn: gfx.renderer.sections_drawn(),
             occlusion_on: game.chunk_occlusion_enabled,
-            mesh_gate: game.vis_valid.then(|| {
-                // Among in-frustum columns: sections we mesh vs sections skipped as
-                // occluded (the per-section occlusion win). Middle slot unused.
-                let n = game.chunk_store.section_count() as u32;
-                let mut visible = 0u32;
-                let mut hidden = 0u32;
-                for (pos, &mask) in &game.vis_mask {
-                    if game.vis_tiers.get(pos).copied().unwrap_or(0) == 0 {
-                        let v = mask.count_ones();
-                        visible += v;
-                        hidden += n.saturating_sub(v);
-                    }
-                }
-                (visible, 0, hidden)
-            }),
+            // The middle slot is unused.
+            mesh_gate: game
+                .vis_valid
+                .then_some((game.mesh_gate.visible, 0, game.mesh_gate.hidden)),
             gpu_name: gfx.renderer.gpu_name(),
             vulkan_version: gfx.renderer.api_version(),
             screen_w: gfx.renderer.screen_width(),
@@ -5898,9 +5931,31 @@ fn lightmap_info(game: &GameState, brightness: f32, partial_tick: f32) -> Lightm
 #[cfg(test)]
 mod tests {
     use super::{
-        detached_distance, has_red_overlay, scroll_wheel, section_bit, section_bits,
+        MeshGate, detached_distance, has_red_overlay, scroll_wheel, section_bit, section_bits,
         tick_block_light_flicker,
     };
+
+    #[test]
+    fn mesh_gate_counts_masks_and_takes_them_back() {
+        let mut gate = MeshGate::default();
+        gate.add(0b1011, 24);
+        gate.add(0, 24);
+        assert_eq!(
+            gate,
+            MeshGate {
+                visible: 3,
+                hidden: 45
+            }
+        );
+        gate.remove(0b1011, 24);
+        assert_eq!(
+            gate,
+            MeshGate {
+                visible: 0,
+                hidden: 24
+            }
+        );
+    }
 
     #[test]
     fn block_light_flicker_stays_within_its_steady_bound() {
