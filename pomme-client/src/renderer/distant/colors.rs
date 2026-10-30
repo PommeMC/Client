@@ -69,22 +69,14 @@ impl DistantColors {
                     return HIDDEN;
                 };
                 let data = table.block_state_data(state);
-                let (top, side, tint, tint_sides) = match data.fluid().kind {
-                    FluidKind::Water => {
-                        let water = color("water_still");
-                        (water, water, Tint::Water, true)
-                    }
-                    FluidKind::Lava => {
-                        let lava = color("lava_still");
-                        (lava, lava, Tint::None, false)
-                    }
-                    FluidKind::Empty => {
-                        if data.is_invisible() || !data.has_collision() {
-                            return HIDDEN;
-                        }
-                        let Some(faces) = view.get_textures(state) else {
-                            return HIDDEN;
-                        };
+                // A solid block shows as itself, waterlogged or not; a fluid
+                // shows where nothing solid holds it, seagrass and kelp
+                // as water (Distant Horizons' `FullDataToRenderDataTransformer`).
+                let solid = (!data.is_invisible() && data.has_collision())
+                    .then(|| view.get_textures(state))
+                    .flatten();
+                let (top, side, tint, tint_sides) = match (solid, data.fluid().kind) {
+                    (Some(faces), _) => {
                         let fixed = match faces.tint {
                             Tint::Constant(rgb) => Some(int_to_rgb(rgb as i32)),
                             Tint::Redstone => Some(data.redstone_wire_rgb()),
@@ -102,6 +94,15 @@ impl DistantColors {
                         };
                         (top, side, tint, faces.side_overlay.is_none())
                     }
+                    (None, FluidKind::Water) => {
+                        let water = color("water_still");
+                        (water, water, Tint::Water, true)
+                    }
+                    (None, FluidKind::Lava) => {
+                        let lava = color("lava_still");
+                        (lava, lava, Tint::None, false)
+                    }
+                    (None, FluidKind::Empty) => return HIDDEN,
                 };
                 StateLook {
                     shows: Shows::Yes {

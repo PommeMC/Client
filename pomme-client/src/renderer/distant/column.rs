@@ -51,6 +51,16 @@ pub(crate) fn build_column(
     shows: impl Fn(BlockState) -> Shows,
     fills: impl Fn(BlockState) -> bool,
 ) -> Vec<Run> {
+    // Sky and block light `y` above `min_y`.
+    let light_at = |y: i32| {
+        light.map_or((15, 0), |light| {
+            let world_y = y + min_y;
+            (
+                light.get_sky_light(x as i32, world_y, z as i32),
+                light.get_block_light(x as i32, world_y, z as i32),
+            )
+        })
+    };
     let mut runs: Vec<Run> = Vec::new();
     let mut extending = false;
     for (index, section) in chunk.sections.iter().enumerate().rev() {
@@ -78,21 +88,25 @@ pub(crate) fn build_column(
                 run.bottom = y as u16;
                 continue;
             }
-            let world_y = y + min_y + 1;
-            let (sky, block) = light.map_or((15, 0), |light| {
-                (
-                    light.get_sky_light(x as i32, world_y, z as i32),
-                    light.get_block_light(x as i32, world_y, z as i32),
-                )
-            });
+            let (sky, block) = light_at(y + 1);
             if sky == 0 && fills(state) {
-                runs.push(Run {
-                    key,
-                    top: y as u16,
-                    bottom: 0,
-                    sky,
-                    block,
+                // A dark cave under a roof fills in, the roof reaching down
+                // over it (Distant Horizons' cave culling); else this run
+                // reaches the bottom.
+                let roof = runs.last_mut().filter(|roof| {
+                    let gap_top = i32::from(roof.bottom) - 1;
+                    gap_top > y && fills(roof.key.state) && light_at(gap_top).0 == 0
                 });
+                match roof {
+                    Some(roof) => roof.bottom = 0,
+                    None => runs.push(Run {
+                        key,
+                        top: y as u16,
+                        bottom: 0,
+                        sky,
+                        block,
+                    }),
+                }
                 return runs;
             }
             runs.push(Run {
@@ -291,6 +305,11 @@ mod tests {
         let chunk = column_of(&[(40, dirt()), (30, stone()), (29, stone()), (10, dirt())]);
         let runs = build_column(&chunk, Some(&light), 0, 0, -64, shows, fills);
         assert_eq!(runs, [run(dirt(), 40, 40, 15), run(stone(), 30, 0, 0)]);
+
+        // A cave dark to its roof: the roof reaches down over it instead.
+        let chunk = column_of(&[(40, dirt()), (31, stone()), (20, stone()), (10, dirt())]);
+        let runs = build_column(&chunk, Some(&light), 0, 0, -64, shows, fills);
+        assert_eq!(runs, [run(dirt(), 40, 40, 15), run(stone(), 31, 0, 15)]);
     }
 
     #[test]

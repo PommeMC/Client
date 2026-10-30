@@ -317,10 +317,14 @@ impl Worker {
                 let (store, min_y) =
                     store(&mut self.stores, self.cache.as_deref(), &view.dimension);
                 store.evict_beyond(view.x, view.z, view.radius + KEEP_MARGIN);
+                // Those with nothing seen mesh empty, so a parent knows its
+                // children are all there.
                 let wanted: HashSet<SectionKey> =
                     SectionKey::all_wanted(view.x, view.z, view.radius)
                         .into_iter()
-                        .filter(|key| store.load(*key))
+                        .inspect(|key| {
+                            store.load(*key);
+                        })
                         .collect();
                 let removed: Vec<SectionKey> = self.meshed.difference(&wanted).copied().collect();
                 for key in &removed {
@@ -370,11 +374,13 @@ impl Worker {
         nearest.truncate(MESHES_PER_BATCH);
         let meshes = nearest
             .iter()
-            .filter_map(|&key| {
+            .map(|&key| {
                 self.dirty.remove(&key);
                 self.meshed.insert(key);
-                let section = store.get(key)?;
-                Some(mesh_section(key, section, |run| self.colors.colors(run)))
+                match store.get(key) {
+                    Some(section) => mesh_section(key, section, |run| self.colors.colors(run)),
+                    None => SectionMesh::empty(key),
+                }
             })
             .collect();
         let _ = self.updates.send(DistantUpdate {

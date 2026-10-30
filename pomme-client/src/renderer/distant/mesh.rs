@@ -17,8 +17,9 @@ pub(crate) struct DistantVertex {
     pub y: u16,
     /// Sky light in the high nibble, block light in the low.
     pub light: u8,
-    /// Which way the face points ([`Face`]), so the shaders can tell
-    /// whose column it is.
+    /// Which way the face points ([`Face`]) in the low 3 bits, so the
+    /// shaders can tell whose column it is; then which way the corner moves
+    /// out along `x` (bits 3-4) and `z` (5-6): 1 for positive, 3 negative.
     pub face: u8,
     pub color: [u8; 4],
 }
@@ -62,6 +63,18 @@ pub(crate) struct SectionMesh {
     pub vertices: Vec<DistantVertex>,
     pub min_y: u16,
     pub max_y: u16,
+}
+
+impl SectionMesh {
+    /// A section with nothing seen in it.
+    pub fn empty(key: SectionKey) -> Self {
+        Self {
+            key,
+            vertices: Vec::new(),
+            min_y: 0,
+            max_y: 0,
+        }
+    }
 }
 
 /// Top or bottom faces alike in height, colour and light, as a bit per
@@ -110,7 +123,7 @@ pub(crate) fn mesh_section(
                     flat_face(Face::Down, bottom);
                 }
                 for (&(face, ..), neighbour) in SIDES.iter().zip(&neighbours) {
-                    for (low, high) in uncovered(bottom, top, neighbour) {
+                    for (low, high, sky) in uncovered(bottom, top, neighbour) {
                         let corners = match face {
                             Face::North => {
                                 [[x0, low, z0], [x0, high, z0], [x1, high, z0], [x1, low, z0]]
@@ -125,6 +138,7 @@ pub(crate) fn mesh_section(
                                 [[x1, low, z0], [x1, high, z0], [x1, high, z1], [x1, low, z1]]
                             }
                         };
+                        let light = sky.map_or(light, |sky| sky << 4 | run.block);
                         push_quad(&mut vertices, corners, light, face, side_rgb);
                     }
                 }
@@ -172,9 +186,12 @@ fn rectangles(rows: &mut [u64; SECTION_COLUMNS as usize]) -> Vec<(u32, u32, u32,
 }
 
 /// The parts of `[low, high)` none of `neighbour`'s runs cover, highest
-/// first. A neighbour outside the section has no runs, so the section's
-/// border faces always draw: a coarser or missing neighbour can't hide them.
-fn uncovered(low: u32, high: u32, neighbour: &[Run]) -> Vec<(u32, u32)> {
+/// first, each with the sky light of the air it faces: that over the
+/// neighbour's run under it, as Distant Horizons lights a side under an
+/// overhang, or `None` with no run under it. A neighbour outside the
+/// section has no runs, so the section's border faces always draw: a
+/// coarser or missing neighbour can't hide them.
+fn uncovered(low: u32, high: u32, neighbour: &[Run]) -> Vec<(u32, u32, Option<u8>)> {
     let mut open = Vec::new();
     let mut cursor = high;
     // Runs go top to bottom, so walk down.
@@ -183,19 +200,16 @@ fn uncovered(low: u32, high: u32, neighbour: &[Run]) -> Vec<(u32, u32)> {
         if run_low >= cursor {
             continue;
         }
-        if run_high <= low {
-            break;
-        }
         if run_high < cursor {
-            open.push((run_high, cursor));
+            open.push((run_high.max(low), cursor, Some(run.sky)));
         }
-        cursor = run_low.max(low);
+        cursor = run_low;
         if cursor <= low {
             return open;
         }
     }
     if cursor > low {
-        open.push((low, cursor));
+        open.push((low, cursor, None));
     }
     open
 }
@@ -209,11 +223,25 @@ fn push_quad(
     rgb: [u8; 3],
 ) {
     let [r, g, b] = rgb.map(|c| (f32::from(c) * face.shade()).round() as u8);
+    // Each corner moves out along the quad's own plane, closing pinholes
+    // where quads meet (Distant Horizons' `LodQuadBuilder` micro offset).
+    let micro_offset = |axis: usize, value: u32| {
+        let (min, max) = corners.iter().fold((u32::MAX, 0), |(lo, hi), c| {
+            (lo.min(c[axis]), hi.max(c[axis]))
+        });
+        if min == max {
+            0
+        } else if value == min {
+            3
+        } else {
+            1
+        }
+    };
     vertices.extend(corners.map(|[x, y, z]| DistantVertex {
         xz: x | z << 16,
         y: y as u16,
         light,
-        face: face as u8,
+        face: face as u8 | micro_offset(0, x) << 3 | micro_offset(2, z) << 5,
         color: [r, g, b, 255],
     }));
 }
@@ -225,6 +253,10 @@ mod tests {
     use crate::renderer::distant::store::Store;
 
     fn run(top: u16, bottom: u16) -> Run {
+        lit(top, bottom, 15)
+    }
+
+    fn lit(top: u16, bottom: u16, sky: u8) -> Run {
         Run {
             key: RunKey {
                 state: azalea_block::BlockState::AIR,
@@ -232,7 +264,7 @@ mod tests {
             },
             top,
             bottom,
-            sky: 15,
+            sky,
             block: 0,
         }
     }
@@ -240,14 +272,22 @@ mod tests {
     #[test]
     fn a_neighbour_hides_the_side_it_covers() {
         // A 0..10 box beside a 0..4 one shows only 4..10.
-        assert_eq!(uncovered(0, 10, &[run(3, 0)]), [(4, 10)]);
+        assert_eq!(uncovered(0, 10, &[run(3, 0)]), [(4, 10, Some(15))]);
         // Beside a floating 4..6 run: above and below it.
-        assert_eq!(uncovered(0, 10, &[run(5, 4)]), [(6, 10), (0, 4)]);
+        assert_eq!(
+            uncovered(0, 10, &[run(5, 4)]),
+            [(6, 10, Some(15)), (0, 4, None)]
+        );
         // Beside a taller one: nothing.
         assert!(uncovered(2, 5, &[run(9, 0)]).is_empty());
         // Beside nothing, or a run wholly above or below: the whole side.
-        assert_eq!(uncovered(2, 5, &[]), [(2, 5)]);
-        assert_eq!(uncovered(2, 5, &[run(9, 7), run(0, 0)]), [(2, 5)]);
+        assert_eq!(uncovered(2, 5, &[]), [(2, 5, None)]);
+        assert_eq!(uncovered(2, 5, &[run(9, 7), run(0, 0)]), [(2, 5, Some(15))]);
+        // Under an overhang, lit by the dim air over the floor beside it.
+        assert_eq!(
+            uncovered(2, 9, &[run(12, 9), lit(3, 0, 4)]),
+            [(4, 9, Some(4))]
+        );
     }
 
     /// Quads in the level-0 mesh of chunk 0 with `columns` (by `z * 16 + x`).

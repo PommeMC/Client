@@ -48,7 +48,8 @@ impl Arena {
     }
 }
 
-/// A section's mesh in an arena, and the height it spans.
+/// A section's mesh in an arena, and the height it spans; no vertices for
+/// a section with nothing in it.
 struct Uploaded {
     arena: usize,
     first_vertex: u32,
@@ -124,7 +125,9 @@ impl DistantBuffers {
     }
 
     fn retire(&mut self, key: SectionKey) {
-        if let Some(old) = self.sections.remove(&key) {
+        if let Some(old) = self.sections.remove(&key)
+            && old.vertices > 0
+        {
             let at = self.frame_seq + MAX_FRAMES_IN_FLIGHT as u64;
             self.pending_free
                 .push_back((at, old.arena, old.first_vertex));
@@ -191,17 +194,19 @@ impl DistantBuffers {
         for mesh in update.meshes {
             self.retire(mesh.key);
             let count = mesh.vertices.len() as u32;
-            if count == 0 {
-                continue;
-            }
-            let Some((arena, first_vertex)) = self.alloc(device, count) else {
-                tracing::warn!("No room for distant terrain section {:?}", mesh.key);
-                continue;
+            let (arena, first_vertex) = if count == 0 {
+                (0, 0)
+            } else {
+                let Some((arena, first_vertex)) = self.alloc(device, count) else {
+                    tracing::warn!("No room for distant terrain section {:?}", mesh.key);
+                    continue;
+                };
+                self.arenas[arena].buffer.write_at(
+                    (u64::from(first_vertex) * VERTEX_SIZE) as usize,
+                    bytemuck::cast_slice(&mesh.vertices),
+                );
+                (arena, first_vertex)
             };
-            self.arenas[arena].buffer.write_at(
-                (u64::from(first_vertex) * VERTEX_SIZE) as usize,
-                bytemuck::cast_slice(&mesh.vertices),
-            );
             self.sections.insert(
                 mesh.key,
                 Uploaded {
@@ -215,20 +220,25 @@ impl DistantBuffers {
         }
     }
 
-    /// Whether the finest section holding block column `x`/`z` is uploaded.
+    /// Whether the finest section holding block column `x`/`z` is uploaded
+    /// with something in it.
     #[cfg(feature = "test-harness")]
     pub fn has_column(&self, x: i32, z: i32) -> bool {
         let width = super::store::SECTION_COLUMNS;
-        self.sections.contains_key(&SectionKey {
+        let key = SectionKey {
             level: 0,
             x: x.div_euclid(width),
             z: z.div_euclid(width),
-        })
+        };
+        self.sections
+            .get(&key)
+            .is_some_and(|section| section.vertices > 0)
     }
 
     /// The sections to draw from `eye` out to `radius` blocks: each at the
-    /// coarsest level its distance allows, finer ones where they're
-    /// uploaded.
+    /// finest level its distance allows, or its parent's until all four
+    /// children in range are uploaded (Distant Horizons'
+    /// `LodQuadTree.onDetailLevelTooLow`).
     fn visible(&self, eye: DVec3, radius: f64) -> Vec<SectionKey> {
         let mut out = Vec::new();
         let mut stack: Vec<SectionKey> = self
@@ -241,17 +251,15 @@ impl DistantBuffers {
             if key.distance(eye.x, eye.z) > radius {
                 continue;
             }
-            let uploaded: Vec<SectionKey> = key
-                .children()
-                .filter(|_| key.splits(eye.x, eye.z))
-                .into_iter()
-                .flatten()
-                .filter(|child| self.sections.contains_key(child))
-                .collect();
-            if uploaded.is_empty() {
-                out.push(key);
-            } else {
-                stack.extend(uploaded);
+            let ready = key.children().filter(|children| {
+                key.splits(eye.x, eye.z)
+                    && children.iter().all(|child| {
+                        self.sections.contains_key(child) || child.distance(eye.x, eye.z) > radius
+                    })
+            });
+            match ready {
+                Some(children) => stack.extend(children),
+                None => out.push(key),
             }
         }
         out
@@ -284,6 +292,9 @@ impl DistantBuffers {
         let mut bound = None;
         for key in visible {
             let section = &self.sections[&key];
+            if section.vertices == 0 {
+                continue;
+            }
             let (ox, oz) = key.origin();
             let origin = DVec3::new(f64::from(ox), f64::from(self.min_y), f64::from(oz));
             let width = f64::from(key.width());

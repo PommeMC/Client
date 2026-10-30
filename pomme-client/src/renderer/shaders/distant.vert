@@ -31,6 +31,10 @@ layout(location = 4) flat out ivec2 v_anchor;
 // tops and bottoms.
 layout(location = 5) flat out vec2 v_outward;
 
+// Distant Horizons' micro offset: how far a corner moves out along its
+// quad's plane.
+const float MICRO_OFFSET = 0.01;
+
 // mesh.rs `Face`: up, down, north, south, west, east.
 const vec2 FACE_NUDGE[6] = vec2[](
     vec2(0.0), vec2(0.0),
@@ -38,8 +42,15 @@ const vec2 FACE_NUDGE[6] = vec2[](
     vec2(0.5, 0.0), vec2(-0.5, 0.0)
 );
 
+// A corner's micro offset along one axis, from its 2 bits (mesh.rs
+// `DistantVertex::face`).
+float micro_offset(uint bits) {
+    return (bits & 1u) == 0u ? 0.0 : ((bits & 2u) == 0u ? MICRO_OFFSET : -MICRO_OFFSET);
+}
+
 void main() {
     vec3 local = vec3(float(in_xz & 0xFFFFu), float(in_y), float(in_xz >> 16));
+    local.xz += vec2(micro_offset(in_light_face.y >> 3), micro_offset(in_light_face.y >> 5));
     vec3 world = origin.xyz + local;
     vec3 rel = world - camera_pos.xyz;
     gl_Position = distant_view_proj * vec4(rel, 1.0);
@@ -49,7 +60,7 @@ void main() {
     v_color = in_color.rgb * sample_lightmap(lightmap_uv).rgb;
     v_fog_color = fog_color.rgb;
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
-    vec2 nudge = FACE_NUDGE[min(in_light_face.y, 5u)];
+    vec2 nudge = FACE_NUDGE[min(in_light_face.y & 7u, 5u)];
     v_column_pos = world.xz + nudge;
     v_anchor = camera_block.xz;
     v_outward = -2.0 * nudge;

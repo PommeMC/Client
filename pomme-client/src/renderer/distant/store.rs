@@ -17,6 +17,9 @@ pub(crate) const SECTION_COLUMNS: i32 = 64;
 pub(crate) const LEVELS: u8 = 5;
 /// The layout of a section file; a file of another is ignored.
 const FORMAT: u8 = 1;
+/// Distant Horizons' default (Medium) horizontal quality: columns `2^l`
+/// blocks wide from `DROP_OFF << l` blocks out, so full detail reaches 384.
+const DROP_OFF: f64 = 192.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct SectionKey {
@@ -73,9 +76,13 @@ impl SectionKey {
     }
 
     /// Whether, seen from `x`/`z`, this section is too close to draw at its
-    /// level and its four children draw instead.
+    /// level and its four children draw instead: Distant Horizons'
+    /// `LodQuadTree.calcExpectedDetailLevel`, from the section's centre.
     pub fn splits(self, x: f64, z: f64) -> bool {
-        self.level > 0 && self.distance(x, z) < 1.5 * f64::from(self.width())
+        let (ox, oz) = self.origin();
+        let half = f64::from(self.width()) / 2.0;
+        let centre = (f64::from(ox) + half - x).hypot(f64::from(oz) + half - z);
+        self.level > 0 && centre < DROP_OFF * f64::from(self.column_width())
     }
 
     /// Whether drawing from `x`/`z` out to `radius` blocks can reach this
@@ -342,7 +349,8 @@ impl Store {
                         let (x, z) = (i % across * 2, i / across * 2);
                         let at =
                             |dx: usize, dz: usize| columns[(z + dz) * finer + x + dx].as_slice();
-                        merge_columns(&[at(0, 0), at(1, 0), at(0, 1), at(1, 1)])
+                        // Distant Horizons' order, which settles ties.
+                        merge_columns(&[at(0, 0), at(0, 1), at(1, 0), at(1, 1)])
                     })
                     .collect();
             }
@@ -441,9 +449,12 @@ mod tests {
     #[test]
     fn nearer_sections_split_into_finer_levels() {
         let key = |level, x| SectionKey { level, x, z: 0 };
-        // A level-4 section (1024 wide) splits within 1536 blocks.
-        assert!(key(4, 0).splits(500.0, 8.0));
-        assert!(!key(4, 3).splits(500.0, 8.0));
+        // Full detail out to 384 blocks from a section's centre, then a
+        // level per doubling.
+        assert!(key(1, 0).splits(64.0 + 383.0, 64.0));
+        assert!(!key(1, 0).splits(64.0 + 385.0, 64.0));
+        assert!(key(4, 0).splits(512.0 + 3071.0, 512.0));
+        assert!(!key(4, 0).splits(512.0 + 3073.0, 512.0));
         // Level 0 never splits.
         assert!(!key(0, 0).splits(8.0, 8.0));
         // A level-3 child of a far level-4 section isn't wanted; one under
