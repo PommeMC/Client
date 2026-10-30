@@ -36,9 +36,12 @@ const COMPACT_VERTICES_PER_FRAME: u32 = 1 << 18;
 const FRONTIER_SLACK: u64 = 16;
 /// Frames before compaction tries again after running out of room.
 const COMPACT_BACKOFF_FRAMES: u64 = 600;
-/// Draws an arena's meta and indirect buffers start with room for. Growing
-/// them waits the GPU out, so start generously.
-const INITIAL_META: usize = 8192;
+/// Draws the meta and indirect buffers start with room for. Growing them
+/// waits the GPU out, so start generously.
+const INITIAL_META: usize = 16384;
+/// Arenas the draw count buffers have room for: far more than any budget
+/// allows.
+const MAX_ARENAS: usize = 256;
 
 /// The cull pass's bindings: meta, frustum, solid indirect/count, cutout
 /// indirect/count.
@@ -50,7 +53,8 @@ const CULL_BINDINGS: &[rhi::BindGroupLayoutEntry] = &[
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
 ];
-const COUNT_SIZE: u64 = 4;
+/// A draw count per arena.
+const COUNTS_SIZE: u64 = (MAX_ARENAS * size_of::<u32>()) as u64;
 const FRUSTUM_SIZE: u64 = size_of::<FrustumData>() as u64;
 /// Per-section fade-in length, shared by the opaque indirect path and water.
 const FADE_DURATION_MS: f32 = 1000.0;
@@ -76,8 +80,12 @@ fn column_dist_sq(pos: ChunkPos, eye: DVec3) -> f64 {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct ChunkMeta {
     /// Section-local vertex bounds; the cull shader rebases them via `origin`.
-    aabb_min: [f32; 4],
-    aabb_max: [f32; 4],
+    aabb_min: [f32; 3],
+    /// Where the section's arena's draws start in the draw lists.
+    draw_base: u32,
+    aabb_max: [f32; 3],
+    /// The section's arena, which picks its draw count.
+    arena: u32,
     index_count: u32,
     first_index: u32,
     vertex_offset: i32,
@@ -248,7 +256,8 @@ fn column_nearby(fade_enabled: bool, pos: ChunkPos, eye: DVec3) -> bool {
 
 /// Rebuilds the draw lists into `out`, one per arena: one [`ChunkMeta`] per
 /// uploaded section the occlusion mask keeps (all of them without one), with
-/// its fade-in factor at `now`.
+/// its fade-in factor at `now`. The lists are uploaded back to back, each
+/// arena's draws starting where the previous arena's end.
 pub(crate) fn build_meta(
     chunks: &HashMap<ChunkPos, ChunkAlloc>,
     chunk_visibility: Option<&HashMap<ChunkPos, u32>>,
@@ -274,9 +283,13 @@ pub(crate) fn build_meta(
                 continue;
             }
             let vis = ChunkBufferStore::section_visibility(nearby, sec, now);
+            let [min_x, min_y, min_z, _] = sec.aabb.min;
+            let [max_x, max_y, max_z, _] = sec.aabb.max;
             out[sec.arena as usize].push(ChunkMeta {
-                aabb_min: sec.aabb.min,
-                aabb_max: sec.aabb.max,
+                aabb_min: [min_x, min_y, min_z],
+                draw_base: 0,
+                aabb_max: [max_x, max_y, max_z],
+                arena: u32::from(sec.arena),
                 index_count: sec.index_count,
                 first_index: sec.first_index,
                 vertex_offset: sec.vertex_offset,
@@ -285,6 +298,13 @@ pub(crate) fn build_meta(
                 solid_index_count: sec.solid_index_count,
             });
         }
+    }
+    let mut base = 0;
+    for list in out {
+        for meta in list.iter_mut() {
+            meta.draw_base = base;
+        }
+        base += list.len() as u32;
     }
 }
 
@@ -451,35 +471,22 @@ struct Starved {
     need: Need,
 }
 
-/// One vertex and one index heap, sub-allocated by [`Tlsf`], with the draw
-/// lists culled over the sections they hold: a heap of vanilla's
-/// `UberGpuBuffer`, its vertex and index halves paired so each arena draws in
-/// one call.
+/// One vertex and one index heap, sub-allocated by [`Tlsf`]: a heap of
+/// vanilla's `UberGpuBuffer`, its vertex and index halves paired so each
+/// arena draws in one call. Only device memory, so adding one never needs a
+/// fresh host memory block, whose first use stalls.
 struct Arena {
     vertex_buffer: rhi::backend::Buffer,
     index_buffer: rhi::backend::Buffer,
     vertices: Tlsf,
     indices: Tlsf,
-    /// Capacity (in draws) of the draw lists' meta and indirect buffers.
-    max_meta: usize,
-    camera: DrawList,
-    /// A shader pack's shadow view, made on its first cull.
-    shadow: Option<DrawList>,
-    /// The camera's draw counts, copied after each cull for the debug overlay.
-    count_readbacks: Vec<rhi::backend::Buffer>,
     /// Empty, and destroyed at this `frame_seq` once no in-flight frame reads
     /// it. Never allocated from or drawn meanwhile.
     doomed: Option<u64>,
 }
 
 impl Arena {
-    fn new(
-        device: &rhi::backend::Device,
-        use_staging: bool,
-        format: TerrainFormat,
-        cull_layout: rhi::backend::BindGroupLayout,
-    ) -> Self {
-        let (meta_size, indirect_size) = list_sizes(INITIAL_META);
+    fn new(device: &rhi::backend::Device, use_staging: bool, format: TerrainFormat) -> Self {
         Self {
             vertex_buffer: create_pool(
                 device,
@@ -497,20 +504,6 @@ impl Arena {
             ),
             vertices: Tlsf::new(ARENA_VERTICES),
             indices: Tlsf::new(ARENA_INDICES),
-            max_meta: INITIAL_META,
-            camera: DrawList::new(device, cull_layout, meta_size, indirect_size),
-            shadow: None,
-            count_readbacks: (0..MAX_FRAMES_IN_FLIGHT)
-                .map(|_| {
-                    rhi::backend::Buffer::new(
-                        device,
-                        "draw_count_readback",
-                        2 * COUNT_SIZE,
-                        rhi::BufferUsages::COPY_DST,
-                        rhi::MemoryLocation::Readback,
-                    )
-                })
-                .collect(),
             doomed: None,
         }
     }
@@ -519,31 +512,9 @@ impl Arena {
         self.vertices.used() == 0 && self.indices.used() == 0
     }
 
-    /// Grows the draw lists to hold `needed` draws. The caller waits for
-    /// in-flight frames first, since their bind groups use the old buffers.
-    fn regrow(
-        &mut self,
-        device: &rhi::backend::Device,
-        layout: rhi::backend::BindGroupLayout,
-        needed: usize,
-    ) {
-        let max_meta = (needed.saturating_mul(3) / 2)
-            .next_power_of_two()
-            .max(self.max_meta * 2);
-        let (meta_size, indirect_size) = list_sizes(max_meta);
-        for list in std::iter::once(&mut self.camera).chain(&mut self.shadow) {
-            list.regrow(device, layout, meta_size, indirect_size);
-        }
-        self.max_meta = max_meta;
-    }
-
-    fn destroy(mut self, device: &rhi::backend::Device) {
+    fn destroy(self, device: &rhi::backend::Device) {
         self.vertex_buffer.destroy(device);
         self.index_buffer.destroy(device);
-        for list in std::iter::once(&mut self.camera).chain(&mut self.shadow) {
-            list.destroy(device);
-        }
-        util::destroy_buffers(device, &mut self.count_readbacks);
     }
 }
 
@@ -559,10 +530,6 @@ fn list_sizes(draws: usize) -> (u64, u64) {
 /// doomed.
 fn live(slot: &Option<Arena>) -> Option<&Arena> {
     slot.as_ref().filter(|arena| arena.doomed.is_none())
-}
-
-fn live_mut(slot: &mut Option<Arena>) -> Option<&mut Arena> {
-    slot.as_mut().filter(|arena| arena.doomed.is_none())
 }
 
 /// A vertex and an index slice from one live arena other than `exclude`,
@@ -648,9 +615,18 @@ pub struct ChunkBufferStore {
     /// the CPU visibility graph. A column absent here defaults to fully
     /// visible, so freshly-loaded-but-not-yet-graphed columns still draw.
     chunk_visibility: HashMap<ChunkPos, u32>,
-    /// Per arena, the camera's and the shadow view's draw lists.
+    /// Per arena, the camera's and the shadow view's draws.
     camera_meta: Vec<Vec<ChunkMeta>>,
     shadow_meta: Vec<Vec<ChunkMeta>>,
+    /// Capacity (in draws, over every arena) of the draw lists' meta and
+    /// indirect buffers.
+    max_meta: usize,
+    camera: DrawList,
+    /// A shader pack's shadow view, made on its first cull.
+    shadow: Option<DrawList>,
+    /// The camera's per-arena draw counts, solid then cutout, copied after
+    /// each cull for the debug overlay.
+    count_readbacks: Vec<rhi::backend::Buffer>,
     meta_dirty: bool,
     /// End of the current fade-in window. While `now < fade_until` the
     /// per-section fade values change each frame, so the draw lists must be
@@ -739,6 +715,20 @@ impl ChunkBufferStore {
             chunk_visibility: HashMap::new(),
             camera_meta: Vec::new(),
             shadow_meta: Vec::new(),
+            max_meta: INITIAL_META,
+            camera: DrawList::new(device, cull_layout, INITIAL_META),
+            shadow: None,
+            count_readbacks: (0..MAX_FRAMES_IN_FLIGHT)
+                .map(|_| {
+                    rhi::backend::Buffer::new(
+                        device,
+                        "draw_count_readback",
+                        2 * COUNTS_SIZE,
+                        rhi::BufferUsages::COPY_DST,
+                        rhi::MemoryLocation::Readback,
+                    )
+                })
+                .collect(),
             meta_dirty: true,
             fade_until: std::time::Instant::now(),
             last_sort_cam: DVec3::MAX,
@@ -1081,25 +1071,28 @@ impl ChunkBufferStore {
         needs_remesh
     }
 
-    /// Grow each arena's meta and indirect buffers to hold its sections'
-    /// draws. No-op while capacity suffices.
+    /// Grow the draw lists' meta and indirect buffers to hold every
+    /// section's draw. No-op while capacity suffices.
     fn ensure_meta_capacity(&mut self, device: &rhi::backend::Device) {
-        let mut sections = vec![0usize; self.arenas.len()];
-        for sec in self.chunks.values().flat_map(|c| &c.sections) {
-            sections[sec.arena as usize] += 1;
+        let needed: usize = self.chunks.values().map(|c| c.sections.len()).sum();
+        if needed <= self.max_meta {
+            return;
         }
-        let mut waited = false;
-        for (arena, needed) in self.arenas.iter_mut().zip(sections) {
-            let Some(arena) = arena.as_mut().filter(|a| needed > a.max_meta) else {
-                continue;
-            };
-            // The meta/indirect buffers are referenced by every in-flight frame's
-            // bind group; wait the GPU out before freeing them.
-            if !std::mem::replace(&mut waited, true) {
-                device.wait_idle();
-            }
-            arena.regrow(device, self.cull_layout, needed);
+        // The meta/indirect buffers are referenced by every in-flight frame's
+        // bind group; wait the GPU out before freeing them.
+        device.wait_idle();
+        self.max_meta = (needed.saturating_mul(3) / 2)
+            .next_power_of_two()
+            .max(self.max_meta * 2);
+        let (layout, draws) = (self.cull_layout, self.max_meta);
+        for list in self.draw_lists_mut() {
+            list.regrow(device, layout, draws);
         }
+    }
+
+    /// The camera's draw list and a shader pack's shadow one, if made.
+    fn draw_lists_mut(&mut self) -> impl Iterator<Item = &mut DrawList> {
+        std::iter::once(&mut self.camera).chain(&mut self.shadow)
     }
 
     /// Return one slice's vertex and index ranges to its arena.
@@ -1136,6 +1129,9 @@ impl ChunkBufferStore {
         if arenas == 0 {
             return true;
         }
+        if arenas as usize >= MAX_ARENAS {
+            return false;
+        }
         let bytes = arena_bytes(self.format);
         match device.device_local_budget() {
             Some(budget) => {
@@ -1150,7 +1146,7 @@ impl ChunkBufferStore {
     }
 
     fn add_arena(&mut self, device: &rhi::backend::Device) {
-        let arena = Arena::new(device, self.use_staging, self.format, self.cull_layout);
+        let arena = Arena::new(device, self.use_staging, self.format);
         match self.arenas.iter().position(Option::is_none) {
             Some(id) => self.arenas[id] = Some(arena),
             None => self.arenas.push(Some(arena)),
@@ -1645,56 +1641,43 @@ impl ChunkBufferStore {
             }
             self.last_sort_cam = eye;
             // Draw lists reordered: every frame slot's meta buffer needs the refresh.
-            for arena in self.arenas.iter_mut().flatten() {
-                arena.camera.upload_pending = MAX_FRAMES_IN_FLIGHT as u32;
-            }
+            self.camera.upload_pending = MAX_FRAMES_IN_FLIGHT as u32;
         }
 
         // This frame slot's GPU work has completed (fence-waited at frame start),
-        // so its readbacks hold the previous cull's totals (solid + cutout draws).
-        self.last_draw_count = 0;
-        for (slot, meta) in self.arenas.iter_mut().zip(&self.camera_meta) {
-            let Some(arena) = live_mut(slot).filter(|_| !meta.is_empty()) else {
-                continue;
-            };
-            self.last_draw_count += arena.count_readbacks[frame].read(|bytes| {
-                let counts: [u32; 2] = bytemuck::pod_read_unaligned(&bytes[..8]);
-                counts[0] + counts[1]
-            });
-            arena.camera.cull(
-                encoder,
-                &self.compute_pipeline,
-                frame,
-                meta,
-                frustum,
-                anchor,
-                eye,
-                !self.indirect_draw.count,
-            );
-        }
+        // so its readback holds the previous cull's totals (solid + cutout draws).
+        self.last_draw_count = self.count_readbacks[frame].read(|bytes| {
+            let (counts, _) = bytes.as_chunks::<4>();
+            counts.iter().map(|&count| u32::from_ne_bytes(count)).sum()
+        });
+        self.camera.cull(
+            encoder,
+            &self.compute_pipeline,
+            frame,
+            &self.camera_meta,
+            frustum,
+            anchor,
+            eye,
+            !self.indirect_draw.count,
+        );
         encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::CopySrc);
-        for (slot, meta) in self.arenas.iter().zip(&self.camera_meta) {
-            let Some(arena) = live(slot).filter(|_| !meta.is_empty()) else {
-                continue;
-            };
-            let readback = arena.count_readbacks[frame].handle();
-            for (i, count) in [
-                &arena.camera.count_buffers[frame],
-                &arena.camera.count_cutout_buffers[frame],
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                encoder.copy_buffer(
-                    count.handle(),
-                    readback,
-                    &[rhi::BufferCopy {
-                        src_offset: 0,
-                        dst_offset: i as u64 * COUNT_SIZE,
-                        size: COUNT_SIZE,
-                    }],
-                );
-            }
+        let readback = self.count_readbacks[frame].handle();
+        for (i, count) in [
+            &self.camera.count_buffers[frame],
+            &self.camera.count_cutout_buffers[frame],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            encoder.copy_buffer(
+                count.handle(),
+                readback,
+                &[rhi::BufferCopy {
+                    src_offset: 0,
+                    dst_offset: i as u64 * COUNTS_SIZE,
+                    size: COUNTS_SIZE,
+                }],
+            );
         }
         encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::HostRead);
 
@@ -1727,42 +1710,32 @@ impl ChunkBufferStore {
                 std::time::Instant::now(),
                 &mut self.shadow_meta,
             );
-            for shadow in self
-                .arenas
-                .iter_mut()
-                .flatten()
-                .filter_map(|a| a.shadow.as_mut())
-            {
+            if let Some(shadow) = &mut self.shadow {
                 shadow.upload_pending = MAX_FRAMES_IN_FLIGHT as u32;
             }
             self.shadow_dirty = false;
         }
-        for (slot, meta) in self.arenas.iter_mut().zip(&self.shadow_meta) {
-            let Some(arena) = live_mut(slot).filter(|_| !meta.is_empty()) else {
-                continue;
-            };
-            let (meta_size, indirect_size) = list_sizes(arena.max_meta);
-            let shadow = arena.shadow.get_or_insert_with(|| {
-                DrawList::new(device, self.cull_layout, meta_size, indirect_size)
-            });
-            shadow.cull(
-                encoder,
-                &self.compute_pipeline,
-                frame,
-                meta,
-                frustum,
-                anchor,
-                eye,
-                !self.indirect_draw.count,
-            );
-        }
+        let shadow = self
+            .shadow
+            .get_or_insert_with(|| DrawList::new(device, self.cull_layout, self.max_meta));
+        shadow.cull(
+            encoder,
+            &self.compute_pipeline,
+            frame,
+            &self.shadow_meta,
+            frustum,
+            anchor,
+            eye,
+            !self.indirect_draw.count,
+        );
     }
 
     /// Issue one render layer's indirect draws for `view`, one call per
-    /// arena. `cutout` selects the discard pass's draw lists (drawn after
-    /// `solid`, which lays down depth); the caller binds the matching pipeline
-    /// first. Both layers share each arena's vertex/index/meta buffers and
-    /// the cull-written draw lists.
+    /// arena over its range of the draw lists. `cutout` selects the discard
+    /// pass's draw lists (drawn after `solid`, which lays down depth); the
+    /// caller binds the matching pipeline first. Both layers share each
+    /// arena's vertex/index buffers, the meta buffer and the cull-written
+    /// draw lists.
     pub fn draw_indirect(
         &self,
         pass: &rhi::backend::RenderPassEncoder,
@@ -1773,48 +1746,50 @@ impl ChunkBufferStore {
         if self.chunks.is_empty() {
             return;
         }
-        let metas = match view {
-            View::Camera => &self.camera_meta,
-            View::Shadow => &self.shadow_meta,
+        let (metas, list) = match (view, &self.shadow) {
+            (View::Camera, _) => (&self.camera_meta, &self.camera),
+            (View::Shadow, Some(shadow)) => (&self.shadow_meta, shadow),
+            (View::Shadow, None) => return,
         };
-        for (slot, meta) in self.arenas.iter().zip(metas) {
+        let (indirect, count) = if cutout {
+            (
+                list.indirect_cutout_buffers[frame].handle(),
+                list.count_cutout_buffers[frame].handle(),
+            )
+        } else {
+            (
+                list.indirect_buffers[frame].handle(),
+                list.count_buffers[frame].handle(),
+            )
+        };
+        // Binding 1: the meta buffer, read per instance for the section
+        // origin + fade (indexed by `first_instance`).
+        pass.set_vertex_buffer(1, list.meta_buffers[frame].handle());
+        let stride = size_of::<DrawCommand>() as u32;
+        for (id, (slot, meta)) in self.arenas.iter().zip(metas).enumerate() {
             let Some(arena) = live(slot).filter(|_| !meta.is_empty()) else {
                 continue;
             };
-            let list = match view {
-                View::Camera => &arena.camera,
-                View::Shadow => match &arena.shadow {
-                    Some(shadow) => shadow,
-                    None => continue,
-                },
-            };
-            let max_draws = meta.len() as u32;
-            let (indirect, count) = if cutout {
-                (
-                    list.indirect_cutout_buffers[frame].handle(),
-                    list.count_cutout_buffers[frame].handle(),
-                )
-            } else {
-                (
-                    list.indirect_buffers[frame].handle(),
-                    list.count_buffers[frame].handle(),
-                )
-            };
-
-            // Binding 0: the arena's packed vertices. Binding 1: its meta
-            // buffer, read per instance for the section origin + fade (indexed
-            // by `first_instance`).
+            // Binding 0: the arena's packed vertices.
             pass.set_vertex_buffer(0, arena.vertex_buffer.handle());
-            pass.set_vertex_buffer(1, list.meta_buffers[frame].handle());
             pass.set_index_buffer(arena.index_buffer.handle());
-            let stride = size_of::<DrawCommand>() as u32;
+            let max_draws = meta.len() as u32;
+            let offset = u64::from(meta[0].draw_base * stride);
             if self.indirect_draw.count {
-                pass.draw_indexed_indirect_count(indirect, count, max_draws, stride);
+                let count_offset = (id * size_of::<u32>()) as u64;
+                pass.draw_indexed_indirect_count(
+                    indirect,
+                    offset,
+                    count,
+                    count_offset,
+                    max_draws,
+                    stride,
+                );
             } else if self.indirect_draw.multi_draw {
-                pass.draw_indexed_indirect(indirect, 0, max_draws, stride);
+                pass.draw_indexed_indirect(indirect, offset, max_draws, stride);
             } else {
                 for i in 0..max_draws {
-                    pass.draw_indexed_indirect(indirect, (i * stride) as u64, 1, stride);
+                    pass.draw_indexed_indirect(indirect, offset + u64::from(i * stride), 1, stride);
                 }
             }
         }
@@ -1902,6 +1877,10 @@ impl ChunkBufferStore {
             arena.destroy(device);
         }
         std::mem::take(&mut self.staging_buffer).destroy(device);
+        for list in self.draw_lists_mut() {
+            list.destroy(device);
+        }
+        util::destroy_buffers(device, &mut self.count_readbacks);
 
         self.compute_pipeline.destroy(device);
         self.compute_layout.destroy(device);
@@ -1940,8 +1919,8 @@ pub enum View {
     Shadow,
 }
 
-/// One view's sections and, per frame slot, the cull's frustum and the draw
-/// lists it writes.
+/// One view's sections over every arena and, per frame slot, the cull's
+/// frustum and the draw lists it writes, a range and a draw count per arena.
 struct DrawList {
     /// Frame slots still needing the latest meta uploaded. Set to
     /// `MAX_FRAMES_IN_FLIGHT` whenever the draw list changes, decremented per
@@ -1963,13 +1942,12 @@ impl DrawList {
     fn new(
         device: &rhi::backend::Device,
         layout: rhi::backend::BindGroupLayout,
-        meta_size: u64,
-        indirect_size: u64,
+        draws: usize,
     ) -> Self {
         let count = |name: &str| {
             util::create_per_frame_host_buffers(
                 device,
-                COUNT_SIZE,
+                COUNTS_SIZE,
                 rhi::BufferUsages::STORAGE
                     | rhi::BufferUsages::INDIRECT
                     | rhi::BufferUsages::COPY_SRC,
@@ -1991,19 +1969,19 @@ impl DrawList {
             indirect_cutout_buffers: Vec::new(),
             count_cutout_buffers: count("draw_count_cutout"),
         };
-        this.regrow(device, layout, meta_size, indirect_size);
+        this.regrow(device, layout, draws);
         this
     }
 
-    /// Remakes the per-frame meta and indirect buffers at these sizes and
+    /// Remakes the per-frame meta and indirect buffers to hold `draws` and
     /// points each frame's cull group at its buffers.
     fn regrow(
         &mut self,
         device: &rhi::backend::Device,
         layout: rhi::backend::BindGroupLayout,
-        meta_size: u64,
-        indirect_size: u64,
+        draws: usize,
     ) {
+        let (meta_size, indirect_size) = list_sizes(draws);
         for buffers in [
             &mut self.meta_buffers,
             &mut self.indirect_buffers,
@@ -2036,17 +2014,17 @@ impl DrawList {
                 (0, storage(&self.meta_buffers[i], meta_size)),
                 (1, uniform(&self.frustum_buffers[i], FRUSTUM_SIZE)),
                 (2, storage(&self.indirect_buffers[i], indirect_size)),
-                (3, storage(&self.count_buffers[i], COUNT_SIZE)),
+                (3, storage(&self.count_buffers[i], COUNTS_SIZE)),
                 (4, storage(&self.indirect_cutout_buffers[i], indirect_size)),
-                (5, storage(&self.count_cutout_buffers[i], COUNT_SIZE)),
+                (5, storage(&self.count_cutout_buffers[i], COUNTS_SIZE)),
             ];
             self.cull_sets[i].replace(device, layout, &bindings);
         }
     }
 
-    /// Records the cull of `meta`, this list's sections, against `frustum`
-    /// into this frame slot's draw lists, uploading `meta` first if the slot
-    /// hasn't seen it.
+    /// Records the cull of `metas`, this list's sections per arena, against
+    /// `frustum` into this frame slot's draw lists, uploading `metas` back to
+    /// back first if the slot hasn't seen them.
     /// `zero_indirect`: without drawIndirectCount the whole indirect buffer
     /// is drawn, so slots the cull leaves unfilled must read as no-op draws.
     #[allow(clippy::too_many_arguments)]
@@ -2055,17 +2033,22 @@ impl DrawList {
         encoder: &rhi::backend::CommandEncoder,
         pipeline: &rhi::backend::ComputePipeline,
         frame: usize,
-        meta: &[ChunkMeta],
+        metas: &[Vec<ChunkMeta>],
         frustum: &[[f32; 4]; 6],
         anchor: DVec3,
         eye: DVec3,
         zero_indirect: bool,
     ) {
         if self.upload_pending > 0 {
-            self.meta_buffers[frame].write(bytemuck::cast_slice(meta));
+            let mut offset = 0;
+            for meta in metas {
+                let bytes: &[u8] = bytemuck::cast_slice(meta);
+                self.meta_buffers[frame].write_at(offset, bytes);
+                offset += bytes.len();
+            }
             self.upload_pending -= 1;
         }
-        let count = meta.len() as u32;
+        let count = metas.iter().map(Vec::len).sum::<usize>() as u32;
         let frustum_data = FrustumData {
             planes: *frustum,
             chunk_count: count,
@@ -2078,7 +2061,7 @@ impl DrawList {
             &mut self.count_buffers[frame],
             &mut self.count_cutout_buffers[frame],
         ] {
-            buffer.write(&0u32.to_ne_bytes());
+            buffer.zero();
         }
         if zero_indirect {
             for buffer in [
@@ -2145,5 +2128,23 @@ mod tests {
 
         build_meta(&chunks, None, false, eye, now, &mut metas);
         assert_eq!(metas[0].len(), 3);
+    }
+
+    #[test]
+    fn build_meta_lays_arenas_out_back_to_back() {
+        let now = Instant::now();
+        let pos = ChunkPos::new(0, 0);
+        let mut alloc = ChunkAlloc::synthetic(pos, -64, [0, 1, 2], now);
+        alloc.sections[2].arena = 2;
+        let chunks = HashMap::from([(pos, alloc)]);
+
+        let mut metas = [Vec::new(), Vec::new(), Vec::new()];
+        build_meta(&chunks, None, false, DVec3::ZERO, now, &mut metas);
+
+        let layout: Vec<Vec<(u32, u32)>> = metas
+            .iter()
+            .map(|list| list.iter().map(|m| (m.arena, m.draw_base)).collect())
+            .collect();
+        assert_eq!(layout, [vec![(0, 0), (0, 0)], vec![], vec![(2, 2)]]);
     }
 }

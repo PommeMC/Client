@@ -705,14 +705,24 @@ impl MemoryType {
 
         mem_block.sub_allocator.free(allocation.chunk_id)?;
 
-        // We only want to destroy this now-empty block if it is either a
-        // dedicated/personal allocation, or a block supporting sub-allocations
-        // that is not the last one (ensuring there's always at least one
-        // block/allocator readily available).
-        let is_dedicated_or_not_last_general_block =
-            !mem_block.sub_allocator.supports_general_allocations()
-                || self.active_general_blocks > 1;
-        if mem_block.sub_allocator.is_empty() && is_dedicated_or_not_last_general_block {
+        // A now-empty dedicated/personal block is destroyed. A general one is
+        // kept unless another general block is already empty, as VMA does: a
+        // fresh block stalls its first submit, so allocating one back and
+        // forth would stall each time.
+        let is_spare = |block: &MemoryBlock| {
+            block.sub_allocator.supports_general_allocations() && block.sub_allocator.is_empty()
+        };
+        let destroy = if mem_block.sub_allocator.supports_general_allocations() {
+            is_spare(mem_block)
+                && self
+                    .memory_blocks
+                    .iter()
+                    .enumerate()
+                    .any(|(i, block)| i != block_idx && block.as_ref().is_some_and(is_spare))
+        } else {
+            mem_block.sub_allocator.is_empty()
+        };
+        if destroy {
             let block = self.memory_blocks[block_idx]
                 .take()
                 .ok_or_else(|| AllocationError::Internal("Memory block must be Some.".into()))?;

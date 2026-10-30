@@ -1552,16 +1552,24 @@ impl RenderPassEncoder {
     }
 
     /// Like [`Self::draw_indexed_indirect`], with the draw count read from
-    /// `count_buffer` and capped at `max_draws`.
+    /// `count_buffer` at `count_offset` and capped at `max_draws`.
     pub fn draw_indexed_indirect_count(
         &self,
         buffer: BufferHandle,
+        offset: u64,
         count_buffer: BufferHandle,
+        count_offset: u64,
         max_draws: u32,
         stride: u32,
     ) {
-        self.cmd
-            .draw_indexed_indirect_count(buffer.0, 0, count_buffer.0, 0, max_draws, stride);
+        self.cmd.draw_indexed_indirect_count(
+            buffer.0,
+            offset,
+            count_buffer.0,
+            count_offset,
+            max_draws,
+            stride,
+        );
     }
 
     /// Clears depth to 1.0 inside `rect` mid-pass.
