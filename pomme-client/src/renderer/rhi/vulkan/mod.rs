@@ -282,6 +282,31 @@ impl Buffer {
         usage: BufferUsages,
         location: MemoryLocation,
     ) -> Result<Self, String> {
+        Self::create(device, label, size, usage, location, false)
+    }
+
+    /// Like [`Self::new`], in memory of its own, which goes back to the
+    /// driver when the buffer is destroyed instead of staying in a shared
+    /// block.
+    pub fn dedicated(
+        device: &Device,
+        label: &str,
+        size: u64,
+        usage: BufferUsages,
+        location: MemoryLocation,
+    ) -> Self {
+        Self::create(device, label, size, usage, location, true)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn create(
+        device: &Device,
+        label: &str,
+        size: u64,
+        usage: BufferUsages,
+        location: MemoryLocation,
+        dedicated: bool,
+    ) -> Result<Self, String> {
         let info = vk::BufferCreateInfo {
             size,
             usage: buffer_usage_flags(usage),
@@ -302,6 +327,11 @@ impl Buffer {
                 MemoryLocation::Readback => pomme_gpu_allocator::MemoryLocation::GpuToCpu,
             },
             true,
+            if dedicated {
+                AllocationScheme::DedicatedBuffer(raw)
+            } else {
+                AllocationScheme::GpuAllocatorManaged
+            },
         ) {
             Ok(allocation) => allocation,
             Err(error) => {
@@ -392,6 +422,7 @@ fn allocate(
     requirements: vk::MemoryRequirements,
     location: pomme_gpu_allocator::MemoryLocation,
     linear: bool,
+    allocation_scheme: AllocationScheme,
 ) -> Result<Allocation, String> {
     device
         .allocator()
@@ -400,7 +431,7 @@ fn allocate(
             requirements,
             location,
             linear,
-            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+            allocation_scheme,
         })
         .map_err(|error| format!("failed to allocate memory for {label}: {error}"))
 }
@@ -481,6 +512,7 @@ impl Texture {
             device.raw.get_image_memory_requirements(raw),
             pomme_gpu_allocator::MemoryLocation::GpuOnly,
             false,
+            AllocationScheme::GpuAllocatorManaged,
         ) {
             Ok(allocation) => allocation,
             Err(error) => {

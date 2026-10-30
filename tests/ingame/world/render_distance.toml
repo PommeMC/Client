@@ -1,0 +1,64 @@
+# Render Distance down and back up: the far columns go when it drops and
+# come back when it rises, settling each time with every loaded column meshed
+# and uploaded and no two pool ranges overlapping. The test server's view
+# distance is 4, so 4 is the most this reaches.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+# A pillar to look out from.
+[[step]]
+chat = "/fill 0 -60 0 0 -51 0 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 0.5 -50 0.5 0 20"
+
+[[step]]
+deterministic = true
+
+[[step]]
+option = { render_distance = 2 }
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "near"
+
+[[step]]
+option = { render_distance = 4 }
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+# Vanilla's sections can report compiled before its chunks are back.
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "far"
+
+# Back to the default, which the server's 4 caps.
+[[step]]
+option = { render_distance = 12 }
+
+[[step]]
+chat = "/fill 0 -60 0 0 -51 0 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"
