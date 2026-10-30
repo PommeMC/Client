@@ -1243,9 +1243,7 @@ impl GameState {
         self.remesh_all_columns();
         self.section_vis.clear();
         self.section_vis_epoch.clear();
-        self.vis_mask.clear();
-        self.vis_tiers.clear();
-        self.mesh_gate = MeshGate::default();
+        self.clear_visibility();
         self.vis_task = None;
         self.vis_valid = false;
         self.pending_load_rescan = true;
@@ -1487,8 +1485,7 @@ impl GameState {
         if !self.position_set {
             if self.vis_valid {
                 self.vis_valid = false;
-                self.vis_tiers.clear();
-                self.mesh_gate = MeshGate::default();
+                self.clear_visibility();
             }
             return;
         }
@@ -1544,6 +1541,14 @@ impl GameState {
             });
             self.vis_task = Some(rx);
         }
+    }
+
+    /// Drops the last walk's per-column masks and tiers and the totals made
+    /// from them.
+    pub(crate) fn clear_visibility(&mut self) {
+        self.vis_mask.clear();
+        self.vis_tiers.clear();
+        self.mesh_gate = MeshGate::default();
     }
 
     /// Combine a finished walk with the current camera frustum into per-column

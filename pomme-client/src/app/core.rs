@@ -492,6 +492,7 @@ impl GameState {
         self.section_vis.clear();
         self.section_vis_epoch.clear();
         self.compiled.clear();
+        self.clear_visibility();
         self.mesh_dispatcher = mesh_source.create_mesh_dispatcher(
             self.block_registry.owned_render_view(),
             Arc::clone(&self.biome_climate),

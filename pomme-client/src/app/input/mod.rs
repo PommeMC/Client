@@ -50,7 +50,8 @@ pub struct InputState {
     /// A harness `press` waiting for the next frame.
     #[cfg(feature = "test-harness")]
     harness_press: Option<(KeyCode, bool)>,
-    /// The key a harness `press` released, for the in-game release handling.
+    /// The key a harness `press` released last frame, for the in-game release
+    /// handling.
     #[cfg(feature = "test-harness")]
     harness_released: Option<KeyCode>,
     /// Harness `text` waiting for the next frame.
@@ -700,6 +701,7 @@ impl InputState {
         #[cfg(feature = "test-harness")]
         {
             self.harness_ctrl = false;
+            self.harness_released = None;
             if let Some((code, ctrl)) = self.harness_press.take() {
                 self.harness_ctrl = ctrl;
                 self.on_key(code, ElementState::Pressed, false);
