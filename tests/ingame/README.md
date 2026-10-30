@@ -153,6 +153,12 @@ deterministic = true                          # holds flicker, particles,
                                               # bobbing and the autosave
                                               # indicator still for the rest of
                                               # the script
+[[step]]
+chunk_arenas = { vertices = 65536, max = 1 }  # chunk arenas this small, this
+                                              # many at most, so a small render
+                                              # distance fills them; a new size
+                                              # remeshes everything (no-op on
+                                              # vanilla)
 
 [[step]]
 wait_ms = 1000
@@ -183,7 +189,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | A chat line | `chat` (text it contains) |
 | A block | `block` (state name, e.g. `air`), `at`, optional `block_entity` (type) |
 | A biome | `biome` (name, e.g. `swamp`), `at` |
-| Settled terrain | `terrain = "settled"`: every loaded column meshed and uploaded (none waiting for pool space), and no two of the chunk pools' ranges overlapping |
+| Settled terrain | `terrain = "settled"`: every loaded column meshed and uploaded (none nearer than the eviction frontier waiting for pool space), and no two of the chunk pools' ranges overlapping; `terrain = "compacted"` also waits for no chunk arena left to drain or free |
 | The local player | `player = { ... }` with any of `health`, `food`, `level`, `game_mode`, `effect`, `no_effect`, `max_health`, `raining`, `hand`, `dimension`, `day_time`, `position` (within 0.01), `y_rot` (within 0.01), `spectating` (the kind of entity the camera follows, empty for none) and `post_effect` (the spectator view effect drawn: `creeper`, `spider`, `invert`, or empty) |
 | The open menu | `menu` (a container's menu type, e.g. `generic_9x3`, or `inventory`, `creative`, `pause`, `none`), optional `title`; on the creative screen also `tab` (its vanilla id, e.g. `building_blocks`), `row` (the first catalog row shown) and `search` |
 | The HUD text | `hud = { ... }` with any of `title`, `subtitle` and `sidebar_title` (`""` when none is shown), `boss_bars` (every name, top to bottom), `sidebar` (every row as `"name number"`, top to bottom) and `tab_list` (every listed player as `{ name, game_mode? }`, in tab order) |

@@ -1305,6 +1305,20 @@ impl Renderer {
         self.chunk_buffers.starved_column()
     }
 
+    /// See [`ChunkBufferStore::compacting`].
+    #[cfg(feature = "test-harness")]
+    pub fn chunk_arenas_compacting(&self) -> bool {
+        self.chunk_buffers.compacting()
+    }
+
+    /// See [`ChunkBufferStore::set_arena_limits`].
+    #[cfg(feature = "test-harness")]
+    pub fn set_chunk_arena_limits(&mut self, vertices: u32, max: usize) -> bool {
+        self.wait_for_all_frames();
+        self.chunk_buffers
+            .set_arena_limits(&self.ctx.device, vertices, max)
+    }
+
     /// Sections actually drawn after frustum culling (lags a few frames). The
     /// graph's occluded sections are omitted before the cull, so this also
     /// drops when occlusion hides geometry — useful for the F3 overlay.

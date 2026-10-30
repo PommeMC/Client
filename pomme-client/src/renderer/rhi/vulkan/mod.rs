@@ -66,8 +66,6 @@ pub struct Device {
     command_pool: vk::CommandPool,
     targets: RenderTargets,
     bind_groups: BindGroupPools,
-    /// The largest heap of GPU-local memory, in bytes.
-    pub device_local_bytes: u64,
     /// A GPU with memory of its own, which uploads reach through a copy.
     pub discrete: bool,
     pub max_texture_array_layers: u32,
@@ -77,11 +75,13 @@ pub struct Device {
     physical_device: vk::PhysicalDevice,
     /// `VK_EXT_memory_budget` is enabled.
     memory_budget: bool,
-    /// The heap `device_local_bytes` measures.
-    device_local_heap: usize,
+    /// Each memory type's flags and heap.
+    memory_types: Vec<(vk::MemoryPropertyFlags, usize)>,
+    /// Each heap's size, in bytes.
+    heap_sizes: Vec<u64>,
 }
 
-/// A memory heap's budget for this process and what it uses of it, in bytes.
+/// Memory heaps' budget for this process and what it uses of them, in bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct MemoryBudget {
     pub budget: u64,
@@ -98,19 +98,14 @@ impl Device {
         memory_budget: bool,
     ) -> Self {
         let memory = physical_device.get_memory_properties();
-        let (device_local_heap, device_local_bytes) = memory.memory_types
-            [..memory.memory_type_count as usize]
+        let memory_types = memory.memory_types[..memory.memory_type_count as usize]
             .iter()
-            .filter(|ty| {
-                ty.property_flags
-                    .contains(vk::MemoryPropertyFlags::DeviceLocal)
-            })
-            .map(|ty| {
-                let heap = ty.heap_index as usize;
-                (heap, memory.memory_heaps[heap].size)
-            })
-            .max_by_key(|&(_, size)| size)
-            .unwrap_or((0, 0));
+            .map(|ty| (ty.property_flags, ty.heap_index as usize))
+            .collect();
+        let heap_sizes = memory.memory_heaps[..memory.memory_heap_count as usize]
+            .iter()
+            .map(|heap| heap.size)
+            .collect();
         let properties = physical_device.get_properties();
         Self {
             raw,
@@ -119,20 +114,54 @@ impl Device {
             command_pool,
             targets: RenderTargets::default(),
             bind_groups: BindGroupPools::default(),
-            device_local_bytes,
             discrete: properties.device_type == vk::PhysicalDeviceType::DiscreteGpu,
             max_texture_array_layers: properties.limits.max_image_array_layers,
             max_texture_size: properties.limits.max_image_dimension2_d,
             depth_clamp: physical_device.get_features().depth_clamp == vk::TRUE,
             physical_device: *physical_device,
             memory_budget,
-            device_local_heap,
+            memory_types,
+            heap_sizes,
         }
     }
 
-    /// The device-local heap's budget and use right now, from
-    /// `VK_EXT_memory_budget`; `None` without it.
-    pub fn device_local_budget(&self) -> Option<MemoryBudget> {
+    /// The heaps the allocator may put `location` memory in: the first
+    /// memory type with the flags it prefers, and for host memory the first
+    /// with the ones it falls back to, as an APU's small VRAM carve-out
+    /// fills and system memory takes over.
+    fn heaps(&self, location: MemoryLocation) -> Vec<usize> {
+        use vk::MemoryPropertyFlags as Flags;
+        let first = |flags: Flags| {
+            self.memory_types
+                .iter()
+                .find(|(ty, _)| ty.contains(flags))
+                .map(|&(_, heap)| heap)
+        };
+        let host = Flags::HostVisible | Flags::HostCoherent;
+        let mut heaps: Vec<usize> = match location {
+            MemoryLocation::Device => vec![first(Flags::DeviceLocal)],
+            MemoryLocation::Host => vec![first(host | Flags::DeviceLocal), first(host)],
+            MemoryLocation::Readback => vec![first(host | Flags::HostCached), first(host)],
+        }
+        .into_iter()
+        .flatten()
+        .collect();
+        heaps.sort_unstable();
+        heaps.dedup();
+        heaps
+    }
+
+    /// The size of the heaps `location` memory may go in, in bytes.
+    pub fn memory_bytes(&self, location: MemoryLocation) -> u64 {
+        self.heaps(location)
+            .into_iter()
+            .map(|heap| self.heap_sizes[heap])
+            .sum()
+    }
+
+    /// The budget and use right now of the heaps `location` memory may go
+    /// in, from `VK_EXT_memory_budget`; `None` without it.
+    pub fn memory_budget(&self, location: MemoryLocation) -> Option<MemoryBudget> {
         if !self.memory_budget {
             return None;
         }
@@ -148,9 +177,10 @@ impl Device {
         };
         // SAFETY: both structs outlive the call, which only writes them.
         unsafe { call(self.physical_device.handle(), &raw mut properties) };
+        let heaps = self.heaps(location);
         Some(MemoryBudget {
-            budget: budget.heap_budget[self.device_local_heap],
-            usage: budget.heap_usage[self.device_local_heap],
+            budget: heaps.iter().map(|&heap| budget.heap_budget[heap]).sum(),
+            usage: heaps.iter().map(|&heap| budget.heap_usage[heap]).sum(),
         })
     }
 

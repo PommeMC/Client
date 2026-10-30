@@ -83,6 +83,15 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
             game.block_light_flicker = 0.0;
             Ok(Value::Null)
         }
+        Command::ChunkArenas(arenas) => {
+            if gfx
+                .renderer
+                .set_chunk_arena_limits(arenas.vertices, arenas.max)
+            {
+                game.rebuild_meshes();
+            }
+            Ok(Value::Null)
+        }
         Command::Hover(target) => hover(core, gfx, game, target),
         Command::Cursor { at } => {
             let gs = gui_scale(core, gfx);
