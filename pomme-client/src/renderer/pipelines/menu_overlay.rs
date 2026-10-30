@@ -3894,7 +3894,7 @@ fn build_sprite_atlas(
     }
 
     // `LogoRenderer` blits only the top 44/64 of minecraft.png and 14/16 of
-    // edition.png. The files are supersampled and packs may use any size, so
+    // edition.png. The logo is supersampled and packs may use any size, so
     // crop by fraction; a row-major prefix is contiguous, so it's a truncate.
     for (id, image, logical_h, used_h) in [
         (
