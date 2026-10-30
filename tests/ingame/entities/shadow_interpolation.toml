@@ -1,0 +1,178 @@
+# A mob's shadow while it interpolates: a teleport to the same spot starts an
+# interpolation toward where the pig already stands, and every frame of it
+# must match the still one, shadow included.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+# A pillar to look down from.
+
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 0.5 -57 0.5 0 50"
+
+[[step]]
+chat = '/summon minecraft:pig 0.5 -60 4.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}'
+
+[[step]]
+expect = { entity = "pig" }
+
+[[step]]
+look_at = [0.5, -60.0, 4.5]
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+deterministic = true
+
+# Chat fades after 10 seconds.
+
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "still"
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~ ~ ~'
+
+[[step]]
+wait_ms = 20
+
+[[step]]
+screenshot = "moved_0"
+
+[[step]]
+match_screenshots = ["still", "moved_0"]
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~ ~ ~'
+
+[[step]]
+wait_ms = 20
+
+[[step]]
+screenshot = "moved_1"
+
+[[step]]
+match_screenshots = ["still", "moved_1"]
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~ ~ ~'
+
+[[step]]
+wait_ms = 20
+
+[[step]]
+screenshot = "moved_2"
+
+[[step]]
+match_screenshots = ["still", "moved_2"]
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~ ~ ~'
+
+[[step]]
+wait_ms = 20
+
+[[step]]
+screenshot = "moved_3"
+
+[[step]]
+match_screenshots = ["still", "moved_3"]
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~ ~ ~'
+
+[[step]]
+wait_ms = 20
+
+[[step]]
+screenshot = "moved_4"
+
+[[step]]
+match_screenshots = ["still", "moved_4"]
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~ ~ ~'
+
+[[step]]
+wait_ms = 20
+
+[[step]]
+screenshot = "moved_5"
+
+[[step]]
+match_screenshots = ["still", "moved_5"]
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~ ~ ~'
+
+[[step]]
+wait_ms = 20
+
+[[step]]
+screenshot = "moved_6"
+
+[[step]]
+match_screenshots = ["still", "moved_6"]
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~ ~ ~'
+
+[[step]]
+wait_ms = 20
+
+[[step]]
+screenshot = "moved_7"
+
+[[step]]
+match_screenshots = ["still", "moved_7"]
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~ ~ ~'
+
+[[step]]
+wait_ms = 20
+
+[[step]]
+screenshot = "moved_8"
+
+[[step]]
+match_screenshots = ["still", "moved_8"]
+
+[[step]]
+chat = '/execute as @e[type=pig] at @s run tp @s ~ ~ ~'
+
+[[step]]
+wait_ms = 20
+
+[[step]]
+screenshot = "moved_9"
+
+[[step]]
+match_screenshots = ["still", "moved_9"]
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+chat = "/kill @e[type=pig]"
+
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"
