@@ -138,7 +138,10 @@ pub(crate) fn mesh_section(
                                 [[x1, low, z0], [x1, high, z0], [x1, high, z1], [x1, low, z1]]
                             }
                         };
-                        let light = sky.map_or(light, |sky| sky << 4 | run.block);
+                        // Facing nothing, as at the edge of what's been seen: the
+                        // sky over the column, as the run's own can be deep water's.
+                        let sky = sky.unwrap_or(runs[0].sky);
+                        let light = sky << 4 | run.block;
                         push_quad(&mut vertices, corners, light, face, side_rgb);
                     }
                 }
@@ -290,8 +293,8 @@ mod tests {
         );
     }
 
-    /// Quads in the level-0 mesh of chunk 0 with `columns` (by `z * 16 + x`).
-    fn quads(columns: impl Fn(usize) -> Vec<Run>) -> usize {
+    /// The level-0 mesh of chunk 0 with `columns` (by `z * 16 + x`).
+    fn mesh(columns: impl Fn(usize) -> Vec<Run>) -> SectionMesh {
         let mut store = Store::default();
         store.capture(ChunkPos::new(0, 0), (0..256).map(columns).collect());
         let key = SectionKey {
@@ -299,8 +302,31 @@ mod tests {
             x: 0,
             z: 0,
         };
-        let mesh = mesh_section(key, store.get(key).unwrap(), |_| ([0; 3], [0; 3]));
-        mesh.vertices.len() / 4
+        mesh_section(key, store.get(key).unwrap(), |_| ([0; 3], [0; 3]))
+    }
+
+    fn quads(columns: impl Fn(usize) -> Vec<Run>) -> usize {
+        mesh(columns).vertices.len() / 4
+    }
+
+    #[test]
+    fn sides_facing_nothing_take_the_sky_over_their_column() {
+        // A lit run over a dark one at the section's west edge: both west
+        // sides face nothing, so neither is drawn dark.
+        let mesh = mesh(|i| {
+            if i == 0 {
+                vec![lit(20, 15, 15), lit(10, 0, 0)]
+            } else {
+                Vec::new()
+            }
+        });
+        let west: Vec<u8> = mesh
+            .vertices
+            .iter()
+            .filter(|v| v.face & 7 == Face::West as u8)
+            .map(|v| v.light >> 4)
+            .collect();
+        assert_eq!(west, [15; 8]);
     }
 
     #[test]
