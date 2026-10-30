@@ -12,17 +12,13 @@ impl Position {
         Self(dvec3(x, y, z))
     }
 
-    /// Performs a linear interpolation between `self` and `rhs` based on the
-    /// value `s`.
-    ///
-    /// When `s` is `0.0`, the result will be equal to `self`.  When `s` is
-    /// `1.0`, the result will be equal to `rhs`. When `s` is outside of
-    /// range `[0, 1]`, the result is linearly extrapolated.
+    /// Vanilla `Vec3.lerp`: `self + s * (rhs - self)`, exact when both ends
+    /// match, so a standing mob's feet stay on the block top.
     #[doc(alias = "mix")]
     #[inline]
     #[must_use]
     pub fn lerp(self, rhs: Self, s: f64) -> Self {
-        Self(self.0.lerp(rhs.0, s))
+        Self(self.0.lerp_monotonic(rhs.0, s))
     }
 }
 
@@ -236,5 +232,16 @@ mod tests {
 
         assert_eq!(LookDirection::new(0.0, 360.0).x_rot_deg(), 0.0);
         assert_eq!(LookDirection::new(0.0, 450.0).x_rot_deg(), 90.0);
+    }
+
+    #[test]
+    fn lerp_between_equal_positions_is_exact() {
+        // `a * (1 - s) + b * s` lands on -60.00000000000001 here.
+        for y in [-60.0, -63.0] {
+            let p = Position::new(0.5, y, 0.5);
+            assert_eq!(p.lerp(p, 1.0 / 3.0), p);
+        }
+        let mid = Position::new(0.0, 0.0, 0.0).lerp(Position::new(2.0, -4.0, 6.0), 0.5);
+        assert_eq!(mid, Position::new(1.0, -2.0, 3.0));
     }
 }

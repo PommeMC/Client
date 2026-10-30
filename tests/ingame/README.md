@@ -163,6 +163,8 @@ screenshot = "equipped"                       # target/ingame/<script>/equipped.
 match_screenshots = ["first", "second"]       # fails unless two shots match
                                               # pixel for pixel, to within a
                                               # shade per channel
+max_differing_pixels = 100                    # but for this many pixels
+                                              # (default 0)
 
 [[step]]
 expect = { slot = 6, item = "iron_chestplate" }
