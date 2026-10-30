@@ -117,6 +117,8 @@ pub struct OptionSet {
     pub brightness: Option<f32>,
     /// A shader pack's name in `shaderpacks/`, or `""` for none.
     pub shader_pack: Option<String>,
+    /// Render Distance in chunks, clamped to the slider's range.
+    pub render_distance: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]

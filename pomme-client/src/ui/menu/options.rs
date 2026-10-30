@@ -244,7 +244,7 @@ impl MainMenu {
 
     /// Upper bound of the render distance slider: the server-announced view
     /// distance while connected (can exceed 32), 32 otherwise.
-    fn render_distance_max(&self) -> u32 {
+    pub(crate) fn render_distance_max(&self) -> u32 {
         if self.server_render_distance > 0 {
             self.server_render_distance.max(3)
         } else {

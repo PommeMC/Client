@@ -694,6 +694,9 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
             if let Some(pos) = game.first_unmeshed_column() {
                 return Err(format!("{pos:?} isn't meshed yet"));
             }
+            if let Some(pos) = gfx.renderer.starved_chunk_column() {
+                return Err(format!("{pos:?}'s mesh doesn't fit the chunk pools"));
+            }
             gfx.renderer.chunk_slice_overlap().map_or(Ok(()), Err)
         }
         Expect::Biome(BiomeExpect { biome, at }) => {
@@ -823,6 +826,7 @@ mod tests {
                 menu_background_blur: None,
                 brightness: None,
                 shader_pack: None,
+                render_distance: None,
             }))
         );
         assert_eq!(

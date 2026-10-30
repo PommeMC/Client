@@ -1299,6 +1299,12 @@ impl Renderer {
         self.chunk_buffers.slice_overlap()
     }
 
+    /// See [`ChunkBufferStore::starved_column`].
+    #[cfg(feature = "test-harness")]
+    pub fn starved_chunk_column(&self) -> Option<crate::position::ChunkPos> {
+        self.chunk_buffers.starved_column()
+    }
+
     /// Sections actually drawn after frustum culling (lags a few frames). The
     /// graph's occluded sections are omitted before the cull, so this also
     /// drops when occlusion hides geometry — useful for the F3 overlay.
@@ -1753,7 +1759,7 @@ impl Renderer {
 
         // Fence signalled: reclaim chunk slices the GPU is now provably done with,
         // and read back any screenshot copy recorded for this frame index.
-        self.chunk_buffers.begin_frame();
+        self.chunk_buffers.begin_frame(&self.ctx.device);
         self.screenshot.collect_ready(frame, &self.ctx.device);
 
         let t_acquire = std::time::Instant::now();

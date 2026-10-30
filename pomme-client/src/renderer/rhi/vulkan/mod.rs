@@ -74,6 +74,18 @@ pub struct Device {
     /// The widest 2D texture, in texels.
     pub max_texture_size: u32,
     depth_clamp: bool,
+    physical_device: vk::PhysicalDevice,
+    /// `VK_EXT_memory_budget` is enabled.
+    memory_budget: bool,
+    /// The heap `device_local_bytes` measures.
+    device_local_heap: usize,
+}
+
+/// A memory heap's budget for this process and what it uses of it, in bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct MemoryBudget {
+    pub budget: u64,
+    pub usage: u64,
 }
 
 impl Device {
@@ -83,17 +95,22 @@ impl Device {
         allocator: Allocator,
         queue: vk::Queue,
         command_pool: vk::CommandPool,
+        memory_budget: bool,
     ) -> Self {
         let memory = physical_device.get_memory_properties();
-        let device_local_bytes = memory.memory_types[..memory.memory_type_count as usize]
+        let (device_local_heap, device_local_bytes) = memory.memory_types
+            [..memory.memory_type_count as usize]
             .iter()
             .filter(|ty| {
                 ty.property_flags
                     .contains(vk::MemoryPropertyFlags::DeviceLocal)
             })
-            .map(|ty| memory.memory_heaps[ty.heap_index as usize].size)
-            .max()
-            .unwrap_or(0);
+            .map(|ty| {
+                let heap = ty.heap_index as usize;
+                (heap, memory.memory_heaps[heap].size)
+            })
+            .max_by_key(|&(_, size)| size)
+            .unwrap_or((0, 0));
         let properties = physical_device.get_properties();
         Self {
             raw,
@@ -107,7 +124,34 @@ impl Device {
             max_texture_array_layers: properties.limits.max_image_array_layers,
             max_texture_size: properties.limits.max_image_dimension2_d,
             depth_clamp: physical_device.get_features().depth_clamp == vk::TRUE,
+            physical_device: *physical_device,
+            memory_budget,
+            device_local_heap,
         }
+    }
+
+    /// The device-local heap's budget and use right now, from
+    /// `VK_EXT_memory_budget`; `None` without it.
+    pub fn device_local_budget(&self) -> Option<MemoryBudget> {
+        if !self.memory_budget {
+            return None;
+        }
+        let call = self
+            .physical_device
+            .fns()
+            .v1_1
+            .get_physical_device_memory_properties2?;
+        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut properties = vk::PhysicalDeviceMemoryProperties2 {
+            next: (&raw mut budget).cast(),
+            ..Default::default()
+        };
+        // SAFETY: both structs outlive the call, which only writes them.
+        unsafe { call(self.physical_device.handle(), &raw mut properties) };
+        Some(MemoryBudget {
+            budget: budget.heap_budget[self.device_local_heap],
+            usage: budget.heap_usage[self.device_local_heap],
+        })
     }
 
     pub fn wait_idle(&self) {

@@ -219,6 +219,9 @@ fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Valu
     if let Some(pack) = &options.shader_pack {
         core.menu.shader_pack = (!pack.is_empty()).then(|| pack.clone());
     }
+    if let Some(chunks) = options.render_distance {
+        core.menu.render_distance = chunks.clamp(2, core.menu.render_distance_max());
+    }
     core.menu.save_options(&core.input.key_bindings);
     Ok(Value::Null)
 }
