@@ -93,6 +93,7 @@ pub fn run(
         skin_options,
         Rc::new(BlockDefinitions::new()),
         crate::version::selected_protocol(),
+        None,
     );
 
     let code = drive(

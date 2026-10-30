@@ -1,7 +1,11 @@
 //! What the client keeps of the terrain it has seen: per level of detail,
-//! sections of 64x64 columns.
+//! sections of 64x64 columns, in memory around the player and on disk.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
+use std::path::PathBuf;
+
+use azalea_block::BlockState;
 
 use super::column::{Run, RunKey, merge_columns};
 use crate::position::ChunkPos;
@@ -11,6 +15,8 @@ pub(crate) const SECTION_COLUMNS: i32 = 64;
 /// Levels of detail: at level `l` a column is `1 << l` blocks wide, so a
 /// chunk is `16 >> l` columns across and level 4 is one column per chunk.
 pub(crate) const LEVELS: u8 = 5;
+/// The layout of a section file; a file of another is ignored.
+const FORMAT: u8 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct SectionKey {
@@ -79,6 +85,28 @@ impl SectionKey {
         self.distance(x, z) <= radius && self.parent().is_none_or(|parent| parent.splits(x, z))
     }
 
+    /// Every section [`Self::wanted`] from `x`/`z` out to `radius` blocks.
+    pub fn all_wanted(x: f64, z: f64, radius: f64) -> Vec<Self> {
+        let top = LEVELS - 1;
+        let width = f64::from(SECTION_COLUMNS << top);
+        let range =
+            |c: f64| ((c - radius) / width).floor() as i32..=((c + radius) / width).floor() as i32;
+        let mut stack: Vec<Self> = range(z)
+            .flat_map(|z| range(x).map(move |x| Self { level: top, x, z }))
+            .collect();
+        let mut out = Vec::new();
+        while let Some(key) = stack.pop() {
+            if key.distance(x, z) > radius {
+                continue;
+            }
+            out.push(key);
+            if key.splits(x, z) {
+                stack.extend(key.children().into_iter().flatten());
+            }
+        }
+        out
+    }
+
     /// The horizontal distance from block position `x`/`z` to the
     /// section's nearest edge; 0 inside it.
     pub fn distance(self, x: f64, z: f64) -> f64 {
@@ -100,9 +128,13 @@ fn pack(run: &Run, palette_index: u32) -> u64 {
         | u64::from(run.block) << 52
 }
 
+fn palette_index(packed: u64) -> usize {
+    (packed & 0xFF_FFFF) as usize
+}
+
 fn unpack(packed: u64, palette: &[RunKey]) -> Run {
     Run {
-        key: palette[(packed & 0xFF_FFFF) as usize],
+        key: palette[palette_index(packed)],
         top: (packed >> 24 & 0xFFF) as u16,
         bottom: (packed >> 36 & 0xFFF) as u16,
         sky: (packed >> 48 & 0xF) as u8,
@@ -128,17 +160,72 @@ impl Section {
         }
     }
 
+    /// `key`'s palette index, adding it if it's new.
+    fn intern(&mut self, key: RunKey) -> u32 {
+        *self.lookup.entry(key).or_insert_with(|| {
+            self.palette.push(key);
+            (self.palette.len() - 1) as u32
+        })
+    }
+
     fn set_column(&mut self, index: usize, runs: &[Run]) {
         self.columns[index] = runs
             .iter()
-            .map(|run| {
-                let palette_index = *self.lookup.entry(run.key).or_insert_with(|| {
-                    self.palette.push(run.key);
-                    (self.palette.len() - 1) as u32
-                });
-                pack(run, palette_index)
-            })
+            .map(|run| pack(run, self.intern(run.key)))
             .collect();
+    }
+
+    /// The section as a section file: the palette, then each column's
+    /// packed runs, zlib-compressed.
+    fn encode(&self) -> Vec<u8> {
+        let mut out = vec![FORMAT];
+        out.extend((self.palette.len() as u32).to_le_bytes());
+        for key in &self.palette {
+            out.extend(key.state.id().to_le_bytes());
+            out.extend(key.biome.to_le_bytes());
+        }
+        for column in &self.columns {
+            out.extend((column.len() as u16).to_le_bytes());
+            for packed in column {
+                out.extend(packed.to_le_bytes());
+            }
+        }
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        zlib.write_all(&out)
+            .and_then(|()| zlib.finish())
+            .expect("compressing into memory")
+    }
+
+    /// The section [`Self::encode`] wrote; `None` for a file of another
+    /// format or a damaged one.
+    fn decode(file: &[u8]) -> Option<Self> {
+        let mut bytes = Vec::new();
+        flate2::read::ZlibDecoder::new(file)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        let mut rest = bytes.as_slice();
+        if take::<1>(&mut rest)? != [FORMAT] {
+            return None;
+        }
+        let mut section = Self::new();
+        for _ in 0..u32::from_le_bytes(take(&mut rest)?) {
+            let state = u16::from_le_bytes(take(&mut rest)?);
+            section.intern(RunKey {
+                state: BlockState::try_from(u32::from(state)).ok()?,
+                biome: u32::from_le_bytes(take(&mut rest)?),
+            });
+        }
+        let palette = section.palette.len();
+        for column in &mut section.columns {
+            let runs = u16::from_le_bytes(take(&mut rest)?);
+            *column = (0..runs)
+                .map(|_| {
+                    let packed = u64::from_le_bytes(take(&mut rest)?);
+                    (palette_index(packed) < palette).then_some(packed)
+                })
+                .collect::<Option<_>>()?;
+        }
+        Some(section)
     }
 
     /// Column `x`/`z`'s runs, top to bottom; none outside the section.
@@ -153,13 +240,93 @@ impl Section {
     }
 }
 
-/// One dimension's sections at every level.
+/// The next `N` bytes of `rest`, taking them off it.
+fn take<const N: usize>(rest: &mut &[u8]) -> Option<[u8; N]> {
+    let (taken, after) = rest.split_first_chunk()?;
+    *rest = after;
+    Some(*taken)
+}
+
+/// One dimension's sections at every level: those near the player in
+/// memory, and every one seen in `dir`, a file per section.
 #[derive(Default)]
 pub(crate) struct Store {
     sections: HashMap<SectionKey, Section>,
+    dir: Option<PathBuf>,
+    /// Sections changed since they were last written.
+    unsaved: HashSet<SectionKey>,
+    /// Sections `dir` has no file for.
+    absent: HashSet<SectionKey>,
 }
 
 impl Store {
+    pub fn new(dir: Option<PathBuf>) -> Self {
+        Self {
+            dir,
+            ..Self::default()
+        }
+    }
+
+    /// Writes what's unsaved, then keeps further sections in `dir`.
+    pub fn set_dir(&mut self, dir: Option<PathBuf>) {
+        if self.dir != dir {
+            self.flush();
+            self.dir = dir;
+            self.absent.clear();
+        }
+    }
+
+    fn path(&self, key: SectionKey) -> Option<PathBuf> {
+        let SectionKey { level, x, z } = key;
+        Some(self.dir.as_ref()?.join(format!("{level}.{x}.{z}.bin")))
+    }
+
+    /// Reads `key` from disk unless it's in memory already. Returns whether
+    /// it's in memory now.
+    pub fn load(&mut self, key: SectionKey) -> bool {
+        if self.sections.contains_key(&key) {
+            return true;
+        }
+        if self.absent.contains(&key) {
+            return false;
+        }
+        let Some(path) = self.path(key) else {
+            return false;
+        };
+        let read = std::fs::read(&path).ok();
+        match read.as_deref().and_then(Section::decode) {
+            Some(section) => {
+                self.sections.insert(key, section);
+                true
+            }
+            None => {
+                if read.is_some() {
+                    tracing::warn!("Ignoring unreadable distant terrain {}", path.display());
+                }
+                self.absent.insert(key);
+                false
+            }
+        }
+    }
+
+    fn save(&self, key: SectionKey) {
+        let (Some(path), Some(section)) = (self.path(key), self.sections.get(&key)) else {
+            return;
+        };
+        let written = std::fs::create_dir_all(path.parent().expect("a section file has a folder"))
+            .and_then(|()| crate::util::write_atomic(&path, &section.encode()));
+        if let Err(error) = written {
+            tracing::warn!("Failed to save distant terrain {}: {error}", path.display());
+        }
+    }
+
+    /// Writes every section changed since it was last written.
+    pub fn flush(&mut self) {
+        for key in std::mem::take(&mut self.unsaved) {
+            self.save(key);
+        }
+    }
+
     /// Writes a chunk's columns, `level0` by `z * 16 + x`, into every level,
     /// merging them down for the coarser ones. Returns the sections it
     /// touched.
@@ -183,13 +350,17 @@ impl Store {
                 let x = pos.x * across as i32 + (i % across) as i32;
                 let z = pos.z * across as i32 + (i / across) as i32;
                 let (key, index) = SectionKey::holding(level, x, z);
+                if !touched.contains(&key) {
+                    // Onto what's on disk, so the rest of it isn't lost.
+                    self.load(key);
+                    self.absent.remove(&key);
+                    self.unsaved.insert(key);
+                    touched.push(key);
+                }
                 self.sections
                     .entry(key)
                     .or_insert_with(Section::new)
                     .set_column(index, runs);
-                if !touched.contains(&key) {
-                    touched.push(key);
-                }
             }
         }
         touched
@@ -199,12 +370,8 @@ impl Store {
         self.sections.get(&key)
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = SectionKey> + '_ {
-        self.sections.keys().copied()
-    }
-
-    /// Drops the sections farther than `radius` blocks from `x`/`z`,
-    /// returning their keys.
+    /// Drops the sections farther than `radius` blocks from `x`/`z`, saving
+    /// those unsaved, and returns their keys.
     pub fn evict_beyond(&mut self, x: f64, z: f64, radius: f64) -> Vec<SectionKey> {
         let far: Vec<SectionKey> = self
             .sections
@@ -213,6 +380,9 @@ impl Store {
             .filter(|key| key.distance(x, z) > radius)
             .collect();
         for key in &far {
+            if self.unsaved.remove(key) {
+                self.save(*key);
+            }
             self.sections.remove(key);
         }
         far
@@ -284,6 +454,64 @@ mod tests {
     }
 
     #[test]
+    fn wanted_sections_are_found_without_a_store() {
+        let (x, z, radius) = (-300.0, 2000.0, 1500.0);
+        let found: HashSet<SectionKey> = SectionKey::all_wanted(x, z, radius).into_iter().collect();
+        let brute: HashSet<SectionKey> = (0..LEVELS)
+            .flat_map(|level| {
+                let span = 4096 >> level >> 6;
+                (-span..=span).flat_map(move |sx| {
+                    (-span..=span).map(move |sz| SectionKey {
+                        level,
+                        x: sx,
+                        z: sz,
+                    })
+                })
+            })
+            .filter(|key| key.wanted(x, z, radius))
+            .collect();
+        assert!(!brute.is_empty());
+        assert_eq!(found, brute);
+    }
+
+    #[test]
+    fn sections_survive_a_file() {
+        let mut section = Section::new();
+        let runs = [run(5, 4095, 100), run(9, 99, 0)];
+        section.set_column(0, &runs);
+        section.set_column(4095, &[run(9, 7, 7)]);
+        let read = Section::decode(&section.encode()).unwrap();
+        assert_eq!(read.column(0, 0).collect::<Vec<_>>(), runs);
+        assert_eq!(read.column(63, 63).collect::<Vec<_>>(), [run(9, 7, 7)]);
+        assert_eq!(read.column(1, 0).count(), 0);
+        assert!(Section::decode(b"not a section").is_none());
+    }
+
+    #[test]
+    fn evicted_sections_come_back_from_disk() {
+        let dir = std::env::temp_dir().join(format!("pomme-distant-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = Store::new(Some(dir.clone()));
+        store.capture(ChunkPos::new(100, 0), vec![vec![run(1, 10, 0)]; 256]);
+        store.evict_beyond(8.0, 8.0, 500.0);
+        assert_eq!(store.sections.len(), 0);
+
+        // A later capture beside it shares its level-4 section, which keeps
+        // what was saved.
+        let mut store = Store::new(Some(dir.clone()));
+        store.capture(ChunkPos::new(101, 0), vec![vec![run(2, 20, 0)]; 256]);
+        let section = store.get(SectionKey::holding(4, 100, 0).0).unwrap();
+        assert_eq!(section.column(36, 0).collect::<Vec<_>>(), [run(1, 10, 0)]);
+        assert_eq!(section.column(37, 0).collect::<Vec<_>>(), [run(2, 20, 0)]);
+        assert!(!store.load(SectionKey {
+            level: 0,
+            x: -9,
+            z: 0
+        }));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn eviction_drops_sections_beyond_the_radius() {
         let mut store = Store::default();
         store.capture(ChunkPos::new(0, 0), vec![Vec::new(); 256]);
@@ -293,6 +521,6 @@ mod tests {
         let gone = store.evict_beyond(8.0, 8.0, 500.0);
         assert_eq!(gone.len(), LEVELS as usize);
         assert!(gone.iter().all(|key| key.x > 0));
-        assert_eq!(store.keys().count(), LEVELS as usize);
+        assert_eq!(store.sections.len(), LEVELS as usize);
     }
 }

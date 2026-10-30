@@ -432,6 +432,27 @@ impl GameState {
                 .recreate_for_version(self.block_registry.owned_render_view());
             self.distant
                 .set_colors(self.mesh_dispatcher.distant_colors());
+            self.set_distant_cache_key();
+        }
+    }
+
+    /// Distant terrain stores block states and biomes by id, so it keeps
+    /// them apart per block table and biome registry.
+    fn set_distant_cache_key(&mut self) {
+        if let Some(biomes) = crate::net::connection::biome_registry(&self.registries) {
+            self.distant.set_cache_key(
+                self.block_registry.block_state_table().table_slot(),
+                biomes.map.keys(),
+            );
+        }
+    }
+
+    /// Keeps every loaded column as distant terrain of the current
+    /// dimension.
+    pub fn keep_loaded_columns(&self) {
+        for pos in self.chunk_store.loaded_positions() {
+            self.distant
+                .capture(&self.dimension, pos, &self.chunk_store);
         }
     }
 
@@ -479,10 +500,7 @@ impl GameState {
         self.environment_probe = EnvironmentProbe::new(self.resolve_environment());
         // The old level's columns stay as its distant terrain; the name
         // still names it until `DimensionName`.
-        for pos in self.chunk_store.loaded_positions() {
-            self.distant
-                .capture(&self.dimension, pos, &self.chunk_store);
-        }
+        self.keep_loaded_columns();
         self.chunk_store = ChunkStore::new_with_dimension(render_distance, height, min_y);
         self.light_engine = crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
         // The old level's block entities, moving blocks among them.
@@ -2002,6 +2020,7 @@ impl AppCore {
                 }
                 NetworkEvent::Registries(registries) => {
                     game.registries = registries;
+                    game.set_distant_cache_key();
                 }
                 NetworkEvent::DialogRegistry(registry) => {
                     game.dialog_registry = registry;

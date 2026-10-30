@@ -230,7 +230,8 @@ struct TerrainExpect {
 }
 
 /// Distant terrain is drawn at a block column, `{ at = [x, z] }`: the
-/// finest section holding it is meshed and uploaded.
+/// finest section holding it is meshed and uploaded; with `gone = true`,
+/// it isn't.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DistantExpect {
@@ -241,6 +242,8 @@ struct DistantExpect {
 #[serde(deny_unknown_fields)]
 struct DistantAt {
     at: [i32; 2],
+    #[serde(default)]
+    gone: bool,
 }
 
 /// The open menu: a container's menu type (`generic_9x3`), `inventory`,
@@ -720,9 +723,10 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
             gfx.renderer.chunk_slice_overlap().map_or(Ok(()), Err)
         }
         Expect::Distant(DistantExpect {
-            distant_terrain: DistantAt { at: [x, z] },
-        }) => ensure(gfx.renderer.has_distant_column(*x, *z), || {
-            format!("no distant terrain at {x}, {z}")
+            distant_terrain: DistantAt { at: [x, z], gone },
+        }) => ensure(gfx.renderer.has_distant_column(*x, *z) != *gone, || {
+            let state = if *gone { "still" } else { "no" };
+            format!("{state} distant terrain at {x}, {z}")
         }),
         Expect::Biome(BiomeExpect { biome, at }) => {
             let seen = protocol::biome(game, *at);

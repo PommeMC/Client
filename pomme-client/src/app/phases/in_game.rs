@@ -367,6 +367,14 @@ pub struct GameState {
     pub chunk_occlusion_enabled: bool,
 }
 
+impl Drop for GameState {
+    /// The columns still loaded stay as distant terrain, written to disk as
+    /// `distant` drops.
+    fn drop(&mut self) {
+        self.keep_loaded_columns();
+    }
+}
+
 impl GameState {
     /// The day time is the dimension's default clock.
     pub fn sync_day_time(&mut self) {
@@ -449,6 +457,7 @@ impl GameState {
         skin_options: crate::ui::menu::SkinOptions,
         block_definitions: Rc<BlockDefinitions>,
         protocol: i32,
+        distant_cache: Option<std::path::PathBuf>,
     ) -> Self {
         let block_registry = BlockRegistry::new(
             block_definitions,
@@ -466,8 +475,10 @@ impl GameState {
         );
 
         let chunk_store = ChunkStore::new(render_distance);
-        let distant =
-            crate::renderer::distant::worker::DistantTerrain::new(mesh_dispatcher.distant_colors());
+        let distant = crate::renderer::distant::worker::DistantTerrain::new(
+            mesh_dispatcher.distant_colors(),
+            distant_cache,
+        );
         Self {
             light_engine: crate::world::light::LevelLightEngine::new(
                 chunk_store.height(),

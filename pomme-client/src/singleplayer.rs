@@ -18,7 +18,7 @@ pub const UNAVAILABLE_MESSAGE: &str = "This build was compiled without singlepla
 #[cfg(feature = "singleplayer")]
 mod steel {
     use std::fs::{File, OpenOptions, TryLockError};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use pomme_singleplayer::{
         Difficulty, GameType, LaunchOptions, PendingWorld, Progress, ServerTransport, WorldHandle,
@@ -67,6 +67,7 @@ mod steel {
         // released, not after.
         server: Server,
         _lock: SessionLock,
+        dir: PathBuf,
     }
 
     impl World {
@@ -107,6 +108,11 @@ mod steel {
         /// Whether the server has finished saving and stopped.
         pub fn is_closed(&self) -> bool {
             self.handle().is_none_or(WorldHandle::is_finished)
+        }
+
+        /// The save folder.
+        pub fn dir(&self) -> &Path {
+            &self.dir
         }
     }
 
@@ -149,6 +155,7 @@ mod steel {
             World {
                 server: Server::Starting(pending),
                 _lock: lock,
+                dir: dir.to_path_buf(),
             },
             client,
         ))
@@ -176,6 +183,10 @@ mod steel {
         }
 
         pub const fn is_closed(&self) -> bool {
+            match *self {}
+        }
+
+        pub const fn dir(&self) -> &Path {
             match *self {}
         }
     }

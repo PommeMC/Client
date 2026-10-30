@@ -28,7 +28,7 @@ use crate::app::phases::saving::update_saving;
 use crate::app::phases::{AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
 use crate::app::state_slot::StateSlot;
 use crate::dirs::DataDirs;
-use crate::net::connection::{ConnectArgs, ConnectionHandle, spawn_connection};
+use crate::net::connection::{ConnectArgs, ConnectionHandle, Transport, spawn_connection};
 use crate::renderer::{self, Renderer};
 use crate::singleplayer::World;
 use crate::user::UserData;
@@ -194,6 +194,18 @@ fn start_connecting(
     // a different session protocol. The registry receives explicit metadata.
     let protocol = crate::version::selected_protocol();
     let block_definitions = Rc::clone(&core.block_definitions);
+    // A world keeps its distant terrain in its own folder; a server's goes
+    // under the game folder.
+    let distant_cache = match (&world, &connect_args.transport) {
+        (Some(world), _) => Some(world.dir().join("distant_terrain")),
+        (None, Transport::Remote { server, .. }) => Some(
+            core.data_dirs
+                .game_dir
+                .join("distant_terrain")
+                .join(crate::renderer::distant::worker::folder_name(server)),
+        ),
+        (None, Transport::Memory { .. }) => None,
+    };
     let connection = spawn_connection(&core.tokio_rt, connect_args);
     let game = GameState::new(
         &*gfx.renderer,
@@ -204,6 +216,7 @@ fn start_connecting(
         core.menu.skin_options(),
         block_definitions,
         protocol,
+        distant_cache,
     );
     core.apply_cursor_grab(&gfx.window, None);
     AppPhase::Connecting {

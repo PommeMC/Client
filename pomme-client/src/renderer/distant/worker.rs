@@ -1,10 +1,14 @@
 //! The distant terrain thread: turns chunks the server forgets into columns,
-//! keeps them per dimension, and meshes the sections around the player.
+//! keeps them per dimension, on disk too, and meshes the sections around the
+//! player.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use parking_lot::RwLock;
 
 use super::colors::DistantColors;
@@ -21,6 +25,8 @@ const MESHES_PER_BATCH: usize = 16;
 const KEEP_MARGIN: f64 = 1024.0;
 /// How far the player moves, in blocks, before the thread hears of it.
 const VIEW_STEP: f64 = 32.0;
+/// How often changed sections are written to disk.
+const SAVE_EVERY: Duration = Duration::from_secs(60);
 
 enum Job {
     Capture {
@@ -32,6 +38,11 @@ enum Job {
     },
     Colors(Arc<DistantColors>),
     View(View),
+    /// Where sections are kept on disk, a folder per dimension; `None`
+    /// keeps them in memory only.
+    Cache(Option<PathBuf>),
+    /// Writes what's unsaved and ends the thread.
+    Stop,
 }
 
 #[derive(Clone)]
@@ -57,26 +68,59 @@ pub(crate) struct DistantUpdate {
     pub removed: Vec<SectionKey>,
 }
 
-/// The game's handle on the thread.
+/// The game's handle on the thread. Dropping it waits for the thread to
+/// write what's unsaved.
 pub(crate) struct DistantTerrain {
     jobs: Sender<Job>,
     updates: Receiver<DistantUpdate>,
+    thread: Option<JoinHandle<()>>,
     /// The last view sent, so small moves don't flood the thread.
     view: Option<View>,
+    /// This server's or world's folder of distant terrain.
+    cache_root: Option<PathBuf>,
+    /// The folder last sent, under `cache_root`.
+    cache: Option<PathBuf>,
 }
 
 impl DistantTerrain {
-    pub fn new(colors: Arc<DistantColors>) -> Self {
+    pub fn new(colors: Arc<DistantColors>, cache_root: Option<PathBuf>) -> Self {
         let (jobs, job_rx) = crossbeam_channel::unbounded();
         let (update_tx, updates) = crossbeam_channel::unbounded();
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("distant-terrain".into())
             .spawn(move || Worker::new(colors, update_tx).run(&job_rx))
             .expect("failed to spawn the distant terrain thread");
         Self {
             jobs,
             updates,
+            thread: Some(thread),
             view: None,
+            cache_root,
+            cache: None,
+        }
+    }
+
+    /// Keeps sections under the cache root, in a folder for the block
+    /// states of table `slot` and the server's `biomes`, since the runs
+    /// store both by id.
+    pub fn set_cache_key(
+        &mut self,
+        slot: usize,
+        biomes: impl IntoIterator<Item = impl std::fmt::Display>,
+    ) {
+        let mut hash = sha1_smol::Sha1::new();
+        for biome in biomes {
+            hash.update(biome.to_string().as_bytes());
+            hash.update(&[0]);
+        }
+        let digest = hash.digest().to_string();
+        let cache = self
+            .cache_root
+            .as_ref()
+            .map(|root| root.join(format!("{slot}-{}", &digest[..16])));
+        if cache != self.cache {
+            self.cache.clone_from(&cache);
+            let _ = self.jobs.send(Job::Cache(cache));
         }
     }
 
@@ -136,11 +180,51 @@ impl DistantTerrain {
     }
 }
 
+impl Drop for DistantTerrain {
+    fn drop(&mut self) {
+        let _ = self.jobs.send(Job::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// `name` as a single folder name: anything but letters, digits, `-`, `_`
+/// and `.` becomes `_`.
+pub(crate) fn folder_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn dimension_dir(cache: Option<&Path>, dimension: &str) -> Option<PathBuf> {
+    Some(cache?.join(folder_name(dimension)))
+}
+
+/// `dimension`'s store and `min_y`, made with its folder under `cache`.
+fn store<'a>(
+    stores: &'a mut HashMap<Arc<str>, (Store, i32)>,
+    cache: Option<&Path>,
+    dimension: &Arc<str>,
+) -> &'a mut (Store, i32) {
+    stores
+        .entry(Arc::clone(dimension))
+        .or_insert_with(|| (Store::new(dimension_dir(cache, dimension)), 0))
+}
+
 struct Worker {
     colors: Arc<DistantColors>,
     updates: Sender<DistantUpdate>,
     /// Per dimension, its sections and `min_y`.
     stores: HashMap<Arc<str>, (Store, i32)>,
+    cache: Option<PathBuf>,
+    last_save: Instant,
     view: Option<View>,
     /// The viewed dimension's sections to mesh.
     dirty: HashSet<SectionKey>,
@@ -154,6 +238,8 @@ impl Worker {
             colors,
             updates,
             stores: HashMap::new(),
+            cache: None,
+            last_save: Instant::now(),
             view: None,
             dirty: HashSet::new(),
             meshed: HashSet::new(),
@@ -161,18 +247,36 @@ impl Worker {
     }
 
     fn run(mut self, jobs: &Receiver<Job>) {
-        loop {
-            if self.dirty.is_empty() {
-                match jobs.recv() {
-                    Ok(job) => self.handle(job),
-                    Err(_) => return,
+        'run: loop {
+            let wait = if self.dirty.is_empty() {
+                SAVE_EVERY.saturating_sub(self.last_save.elapsed())
+            } else {
+                Duration::ZERO
+            };
+            let first = match jobs.recv_timeout(wait) {
+                Ok(job) => Some(job),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+            for job in first.into_iter().chain(jobs.try_iter()) {
+                if matches!(job, Job::Stop) {
+                    break 'run;
                 }
-            }
-            while let Ok(job) = jobs.try_recv() {
                 self.handle(job);
             }
             self.mesh_nearest();
+            if self.last_save.elapsed() >= SAVE_EVERY {
+                self.save();
+            }
         }
+        self.save();
+    }
+
+    fn save(&mut self) {
+        for (store, _) in self.stores.values_mut() {
+            store.flush();
+        }
+        self.last_save = Instant::now();
     }
 
     fn handle(&mut self, job: Job) {
@@ -185,7 +289,8 @@ impl Worker {
                 min_y,
             } => {
                 let columns = build_chunk(&chunk.read(), light.as_deref(), min_y, &self.colors);
-                let (store, store_min_y) = self.stores.entry(Arc::clone(&dimension)).or_default();
+                let (store, store_min_y) =
+                    store(&mut self.stores, self.cache.as_deref(), &dimension);
                 *store_min_y = min_y;
                 let touched = store.capture(pos, columns);
                 if let Some(view) = &self.view
@@ -209,10 +314,14 @@ impl Worker {
                     self.meshed.clear();
                     self.dirty.clear();
                 }
-                let (store, min_y) = self.stores.entry(Arc::clone(&view.dimension)).or_default();
+                let (store, min_y) =
+                    store(&mut self.stores, self.cache.as_deref(), &view.dimension);
                 store.evict_beyond(view.x, view.z, view.radius + KEEP_MARGIN);
                 let wanted: HashSet<SectionKey> =
-                    store.keys().filter(|key| view.wants(*key)).collect();
+                    SectionKey::all_wanted(view.x, view.z, view.radius)
+                        .into_iter()
+                        .filter(|key| store.load(*key))
+                        .collect();
                 let removed: Vec<SectionKey> = self.meshed.difference(&wanted).copied().collect();
                 for key in &removed {
                     self.meshed.remove(key);
@@ -229,6 +338,13 @@ impl Worker {
                 }
                 self.view = Some(view);
             }
+            Job::Cache(cache) => {
+                for (dimension, (store, _)) in &mut self.stores {
+                    store.set_dir(dimension_dir(cache.as_deref(), dimension));
+                }
+                self.cache = cache;
+            }
+            Job::Stop => unreachable!("the run loop ends on it"),
         }
     }
 
