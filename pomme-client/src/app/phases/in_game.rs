@@ -1346,7 +1346,11 @@ impl GameState {
     /// neighbourhood was loaded and lit, and it must have a mesh — an empty one
     /// counts, as vanilla's empty `CompiledSectionMesh` does.
     pub fn camera_section_ready(&self, camera_block: glam::IVec3) -> bool {
-        let column = ChunkPos::new(camera_block.x >> 4, camera_block.z >> 4);
+        let column = ChunkPos::containing(BlockPos::new(
+            camera_block.x,
+            camera_block.y,
+            camera_block.z,
+        ));
         let neighbourhood_lit = crate::world::chunk::column_neighborhood(column).all(|p| {
             self.chunk_store.get_chunk(&p).is_some()
                 && self.light_engine.light_on_in_column((p.x, p.z))

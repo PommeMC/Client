@@ -1406,6 +1406,7 @@ impl ChunkBufferStore {
     /// Once the arenas' contents would fit one fewer, drains the emptiest
     /// into the rest, a bounded amount per frame, so freeing it can shrink
     /// the total.
+    ///
     /// Not while columns are starved: they want the room, and the arena it
     /// frees would only be added back for them.
     fn compact(&mut self, device: &rhi::backend::Device) {
@@ -1608,10 +1609,7 @@ impl ChunkBufferStore {
         anchor: DVec3,
         eye: DVec3,
     ) {
-        let column = |eye| {
-            let block = BlockPos::containing(eye);
-            ChunkPos::new(block.x >> 4, block.z >> 4)
-        };
+        let column = |eye| ChunkPos::containing(BlockPos::containing(eye));
         if !self.starved.is_empty() && self.eye.is_some_and(|last| column(last) != column(eye)) {
             self.retry_due = true;
         }
