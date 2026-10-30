@@ -899,37 +899,8 @@ impl ApplicationHandler for App {
                                 }
                             } else if !event.state.is_pressed()
                                 && let Some(code) = key
-                                && (self
-                                    .core
-                                    .input
-                                    .key_bindings
-                                    .matches_key(Action::DebugModifier, code)
-                                    || self
-                                        .core
-                                        .input
-                                        .key_bindings
-                                        .matches_key(Action::ToggleOverlay, code))
                             {
-                                // Overlay toggles on F3 release, unless a chord
-                                // consumed it; runs in every in-game sub-state.
-                                let overlay = self
-                                    .core
-                                    .input
-                                    .key_bindings
-                                    .matches_key(Action::ToggleOverlay, code);
-                                let modifier_held =
-                                    self.core.input.action_held(Action::DebugModifier);
-                                let modifier = self
-                                    .core
-                                    .input
-                                    .key_bindings
-                                    .matches_key(Action::DebugModifier, code);
-                                game.handle_f3_release(
-                                    overlay,
-                                    modifier,
-                                    modifier_held,
-                                    &connection,
-                                );
+                                game.on_key_released(code, &self.core.input, &connection);
                             }
 
                             AppPhase::InGame {

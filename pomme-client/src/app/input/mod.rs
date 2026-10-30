@@ -50,6 +50,9 @@ pub struct InputState {
     /// A harness `press` waiting for the next frame.
     #[cfg(feature = "test-harness")]
     harness_press: Option<(KeyCode, bool)>,
+    /// The key a harness `press` released, for the in-game release handling.
+    #[cfg(feature = "test-harness")]
+    harness_released: Option<KeyCode>,
     /// Harness `text` waiting for the next frame.
     #[cfg(feature = "test-harness")]
     harness_text: Option<String>,
@@ -179,6 +182,8 @@ impl InputState {
             harness_ctrl: false,
             #[cfg(feature = "test-harness")]
             harness_press: None,
+            #[cfg(feature = "test-harness")]
+            harness_released: None,
             #[cfg(feature = "test-harness")]
             harness_text: None,
             mouse_delta: (0.0, 0.0),
@@ -699,6 +704,7 @@ impl InputState {
                 self.harness_ctrl = ctrl;
                 self.on_key(code, ElementState::Pressed, false);
                 self.on_key(code, ElementState::Released, false);
+                self.harness_released = Some(code);
             }
         }
         self.up_pressed = false;
@@ -737,6 +743,12 @@ impl InputState {
     #[cfg(feature = "test-harness")]
     pub fn press_key(&mut self, code: KeyCode, ctrl: bool) {
         self.harness_press = Some((code, ctrl));
+    }
+
+    /// The key a harness `press` released, once.
+    #[cfg(feature = "test-harness")]
+    pub fn take_harness_release(&mut self) -> Option<KeyCode> {
+        self.harness_released.take()
     }
 
     /// Types `text` into the focused field on the next frame, as the

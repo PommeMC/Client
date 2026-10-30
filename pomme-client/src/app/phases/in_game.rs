@@ -1092,6 +1092,22 @@ impl GameState {
         handled
     }
 
+    /// A key's release in game: the overlay toggles on F3 release, unless a
+    /// chord consumed it, in every in-game sub-state.
+    pub fn on_key_released(
+        &mut self,
+        code: winit::keyboard::KeyCode,
+        input: &crate::app::input::InputState,
+        connection: &ConnectionHandle,
+    ) {
+        let overlay = input.key_bindings.matches_key(Action::ToggleOverlay, code);
+        let modifier = input.key_bindings.matches_key(Action::DebugModifier, code);
+        if overlay || modifier {
+            let f3_held = input.action_held(Action::DebugModifier);
+            self.handle_f3_release(overlay, modifier, f3_held, connection);
+        }
+    }
+
     /// Settle debug releases once all modifiers are up. Chords suppress the
     /// overlay toggle; releasing a modifier applies an open game-mode switcher.
     pub fn handle_f3_release(
@@ -2430,6 +2446,11 @@ pub fn update_game(
         game.paused = true;
         game.pause_screen = PauseScreen::Main;
         core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+
+    #[cfg(feature = "test-harness")]
+    if let Some(code) = core.input.take_harness_release() {
+        game.on_key_released(code, &core.input, connection);
     }
 
     let disconnect_reason =
