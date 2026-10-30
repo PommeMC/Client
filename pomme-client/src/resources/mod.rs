@@ -6,8 +6,8 @@
 //! is a separate operation. Providers open storage and hydrate asset indexes.
 //! Its root metadata parser is private; resource sidecars remain queryable.
 //! Source priority: selected packs above selected theme assets above the
-//! optional external index above JAR above embedded Pomme resources. Bootstrap
-//! needs only the embedded pack.
+//! optional external index above extracted assets above embedded Pomme
+//! resources. Bootstrap needs only the embedded pack.
 //! Built-ins are separate layers of one pack, not a composite source.
 //! Filters apply between logical packs, not within their physical layers.
 //! Overlays belong in source composition, not loaders. This layer

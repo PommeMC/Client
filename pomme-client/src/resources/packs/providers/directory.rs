@@ -1,20 +1,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use super::{
     PackResourceProvider, ReadStream, ResourceOrigin, ThreadSafePackResourceProvider,
     canonical_directory, check_directory, enumeration_error, is_file, lookup_error, matches_prefix,
-    open_file, overlay_directory, resolve_within, source_file, valid_namespace, validate_query,
+    open_file, overlay_directory, valid_namespace, validate_query, validate_storage_path,
 };
 use crate::resources::resource::{ResourceContent, ResourceError, ResourceId};
 
 /// Pack assets or a native namespace-root directory with sparse translations.
 #[derive(Clone)]
 pub(in crate::resources::packs) struct DirectoryPackResourceProvider {
-    root: PathBuf,
+    // Missing assets at setup are valid for metadata/filter-only packs.
+    root: Option<PathBuf>,
     layout: DirectoryState,
     origin: ResourceOrigin,
 }
@@ -36,9 +37,7 @@ pub(in crate::resources::packs) enum DirectoryLayout {
 
 #[derive(Clone)]
 enum DirectoryState {
-    StandardAssets {
-        pack_root: PathBuf,
-    },
+    StandardAssets,
     NamespaceRoot {
         namespace: String,
         remappings: Option<Arc<BTreeMap<ResourceId, PathBuf>>>,
@@ -55,6 +54,9 @@ impl DirectoryPackResourceProvider {
                 root: pack_root,
                 overlay,
             } => {
+                let pack_root = canonical_directory(&pack_root).map_err(|source| {
+                    enumeration_error(&origin, "open source directory", source)
+                })?;
                 let directory = overlay
                     .as_deref()
                     .map(overlay_directory)
@@ -63,15 +65,14 @@ impl DirectoryPackResourceProvider {
                         enumeration_error(&origin, "open overlay directory", source)
                     })?;
                 let root = pack_root.join(directory.unwrap_or_default()).join("assets");
-                let source = Self {
-                    root,
-                    layout: DirectoryState::StandardAssets { pack_root },
-                    origin,
-                };
-                source.assets_root().map_err(|error| {
-                    enumeration_error(&source.origin, "open pack assets directory", error)
+                let root = Self::prepare_assets_root(&pack_root, &root).map_err(|source| {
+                    enumeration_error(&origin, "open pack assets directory", source)
                 })?;
-                Ok(source)
+                Ok(Self {
+                    root,
+                    layout: DirectoryState::StandardAssets,
+                    origin,
+                })
             }
             DirectoryLayout::Mapped {
                 root,
@@ -79,13 +80,16 @@ impl DirectoryPackResourceProvider {
                 remappings,
             } => {
                 validate_query(Some(&namespace), "")?;
+                validate_storage_path(&namespace).map_err(|source| {
+                    enumeration_error(&origin, "validate mapped namespace", source)
+                })?;
                 if let Some(remappings) = &remappings {
                     for (id, path) in remappings.iter() {
                         if id.namespace() != namespace
-                            || path.as_os_str().is_empty()
-                            || path
-                                .components()
-                                .any(|component| !matches!(component, Component::Normal(_)))
+                            || validate_storage_path(id.path()).is_err()
+                            || !path
+                                .to_str()
+                                .is_some_and(|path| validate_storage_path(path).is_ok())
                         {
                             return Err(enumeration_error(
                                 &origin,
@@ -105,7 +109,7 @@ impl DirectoryPackResourceProvider {
                     enumeration_error(&origin, "open source directory", source)
                 })?;
                 Ok(Self {
-                    root,
+                    root: Some(root),
                     layout: DirectoryState::NamespaceRoot {
                         namespace,
                         remappings,
@@ -116,20 +120,11 @@ impl DirectoryPackResourceProvider {
         }
     }
 
-    fn assets_root(&self) -> io::Result<Option<PathBuf>> {
-        let DirectoryState::StandardAssets { pack_root } = &self.layout else {
-            let root = resolve_within(&self.root, &self.root)?;
-            check_directory(&root)?;
-            return Ok(Some(root));
-        };
-        let boundary = canonical_directory(pack_root)?;
-        let relative = self
-            .root
-            .strip_prefix(pack_root)
-            .map_err(io::Error::other)?;
-        let mut current = boundary.clone();
-        // Validate each ancestor, including overlay roots and dangling links,
-        // before accepting an absent assets tree. Recheck on every operation.
+    fn prepare_assets_root(pack_root: &Path, root: &Path) -> io::Result<Option<PathBuf>> {
+        let relative = root.strip_prefix(pack_root).map_err(io::Error::other)?;
+        let mut current = pack_root.to_owned();
+        // Validate overlay/assets components only at setup. The pack root was
+        // already validated and anchored; later accesses trust this layout.
         for component in relative.components() {
             current.push(component);
             match std::fs::symlink_metadata(&current) {
@@ -137,7 +132,6 @@ impl DirectoryPackResourceProvider {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(error),
             }
-            current = resolve_within(&boundary, &current)?;
             check_directory(&current)?;
         }
         Ok(Some(current))
@@ -145,7 +139,7 @@ impl DirectoryPackResourceProvider {
 
     fn accepts_namespace(&self, namespace: &str) -> bool {
         match &self.layout {
-            DirectoryState::StandardAssets { .. } => true,
+            DirectoryState::StandardAssets => true,
             DirectoryState::NamespaceRoot {
                 namespace: configured,
                 ..
@@ -172,41 +166,42 @@ impl DirectoryPackResourceProvider {
         Some(PathBuf::from(path))
     }
 
-    fn locate(&self, id: &ResourceId) -> io::Result<Option<PathBuf>> {
+    /// Resolve the prepared layout without filesystem I/O.
+    fn resource_path(&self, id: &ResourceId) -> io::Result<Option<PathBuf>> {
+        validate_storage_path(id.namespace())?;
+        validate_storage_path(id.path())?;
         if !self.accepts_namespace(id.namespace()) {
             return Ok(None);
         }
-        let Some(root) = self.assets_root()? else {
+        let Some(root) = &self.root else {
             return Ok(None);
         };
         let relative = match &self.layout {
-            DirectoryState::StandardAssets { .. } => PathBuf::from(id.namespace()).join(id.path()),
+            DirectoryState::StandardAssets => PathBuf::from(id.namespace()).join(id.path()),
             DirectoryState::NamespaceRoot { .. } => self
                 .remapped_path(id)
                 .unwrap_or_else(|| PathBuf::from(id.path())),
         };
-        // Only the final resolved resource is confined to the source assets root.
-        source_file(&root, &root.join(relative))
+        Ok(Some(root.join(relative)))
+    }
+
+    fn locate(&self, id: &ResourceId) -> io::Result<Option<PathBuf>> {
+        let Some(path) = self.resource_path(id)? else {
+            return Ok(None);
+        };
+        Ok(is_file(&path)?.then_some(path))
     }
 
     fn collect_resources(
         &self,
-        root: &Path,
         directory: &Path,
         namespace: &str,
         prefix: &str,
-        active: &mut BTreeSet<PathBuf>,
         resources: &mut BTreeSet<ResourceId>,
     ) -> io::Result<()> {
-        // Track only the current ancestry: aliases remain visible under each
-        // logical name, while symlink cycles cannot recurse indefinitely.
-        if !active.insert(directory.to_path_buf()) {
-            return Ok(());
-        }
         let entries = match std::fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                active.remove(directory);
                 return Ok(());
             }
             Err(error) => return Err(error),
@@ -225,39 +220,21 @@ impl DirectoryPackResourceProvider {
             let Ok(id) = ResourceId::new(&format!("{namespace}:{path}")) else {
                 continue;
             };
-            if self.remapped_path(&id).is_some() {
+            // Like Files.find's supplied attributes, classify each entry once
+            // without following links encountered during the walk.
+            let kind = entry.file_type()?;
+            if self.remapped_path(&id).is_some() && !kind.is_dir() {
                 // A shadowed file is irrelevant; directories can still contain
                 // ordinary descendants whose IDs are not remapped.
-                match std::fs::metadata(entry.path()) {
-                    Ok(metadata) if metadata.is_dir() => {}
-                    Ok(_) => continue,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-            let Some((resolved, metadata)) = Self::entry_within(root, &entry.path())? else {
                 continue;
-            };
-            if metadata.is_dir() {
-                self.collect_resources(root, &resolved, namespace, &path, active, resources)?;
-            } else if is_file(&resolved)? {
+            }
+            if kind.is_dir() {
+                self.collect_resources(&entry.path(), namespace, &path, resources)?;
+            } else if kind.is_file() {
                 resources.insert(id);
             }
         }
-        active.remove(directory);
         Ok(())
-    }
-
-    /// Missing descendants can race enumeration; escapes and other failures
-    /// are errors, just as in exact lookup.
-    fn entry_within(root: &Path, path: &Path) -> io::Result<Option<(PathBuf, std::fs::Metadata)>> {
-        let result = resolve_within(root, path)
-            .and_then(|path| std::fs::metadata(&path).map(|metadata| (path, metadata)));
-        match result {
-            Ok(entry) => Ok(Some(entry)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
-        }
     }
 }
 
@@ -281,7 +258,7 @@ impl PackResourceProvider for DirectoryPackResourceProvider {
     }
 
     fn open(&self, id: &ResourceId) -> io::Result<ReadStream> {
-        let path = self.locate(id)?.ok_or_else(|| {
+        let path = self.resource_path(id)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("missing resource {id:?}"))
         })?;
         open_file(&path)
@@ -290,23 +267,33 @@ impl PackResourceProvider for DirectoryPackResourceProvider {
     fn namespaces(&self) -> Result<BTreeSet<String>, ResourceError> {
         let enumerate = || -> io::Result<_> {
             let mut namespaces = BTreeSet::new();
-            let Some(root) = self.assets_root()? else {
+            let Some(root) = self.root.as_deref() else {
                 return Ok(namespaces);
             };
             if let DirectoryState::NamespaceRoot { namespace, .. } = &self.layout {
                 namespaces.insert(namespace.clone());
                 return Ok(namespaces);
             }
-            for entry in std::fs::read_dir(&root)? {
+            let entries = match std::fs::read_dir(root) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(namespaces),
+                Err(error) => return Err(error),
+            };
+            for entry in entries {
                 let entry = entry?;
                 let name = entry.file_name();
                 let Some(namespace) = name.to_str().filter(|name| valid_namespace(name)) else {
                     continue;
                 };
-                if Self::entry_within(&root, &entry.path())?
-                    .is_some_and(|(_, metadata)| metadata.is_dir())
-                {
-                    namespaces.insert(namespace.to_owned());
+                // Vanilla getNamespaces follows directory links. Keep I/O
+                // failures typed rather than hiding them in Path::is_dir.
+                match std::fs::metadata(entry.path()) {
+                    Ok(metadata) if metadata.is_dir() => {
+                        namespaces.insert(namespace.to_owned());
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
                 }
             }
             Ok(namespaces)
@@ -325,25 +312,28 @@ impl PackResourceProvider for DirectoryPackResourceProvider {
             return Ok(BTreeSet::new());
         }
         let enumerate = || -> io::Result<_> {
+            validate_storage_path(namespace)?;
+            if !prefix.is_empty() {
+                validate_storage_path(prefix)?;
+            }
             let mut resources = BTreeSet::new();
-            let Some(root) = self.assets_root()? else {
+            let Some(root) = self.root.as_deref() else {
                 return Ok(resources);
             };
-            let path = match &self.layout {
-                DirectoryState::StandardAssets { .. } => root.join(namespace).join(prefix),
-                DirectoryState::NamespaceRoot { .. } => root.join(prefix),
+            let relative = match &self.layout {
+                DirectoryState::StandardAssets => PathBuf::from(namespace).join(prefix),
+                DirectoryState::NamespaceRoot { .. } => PathBuf::from(prefix),
             };
-            if let Some((directory, metadata)) = Self::entry_within(&root, &path)?
-                && metadata.is_dir()
-            {
-                self.collect_resources(
-                    &root,
-                    &directory,
-                    namespace,
-                    prefix,
-                    &mut BTreeSet::new(),
-                    &mut resources,
-                )?;
+            let start = root.join(relative);
+            // Files.find does not follow a link at the walk's start either;
+            // ancestors of the requested prefix resolve normally.
+            match std::fs::symlink_metadata(&start) {
+                Ok(metadata) if metadata.is_dir() => {
+                    self.collect_resources(&start, namespace, prefix, &mut resources)?;
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
             }
             if let DirectoryState::NamespaceRoot {
                 remappings: Some(remappings),
@@ -356,9 +346,17 @@ impl PackResourceProvider for DirectoryPackResourceProvider {
                     for candidate in [id, &companion] {
                         if matches_prefix(candidate.path(), prefix)
                             && let Some(relative) = self.remapped_path(candidate)
-                            && source_file(&root, &root.join(relative))?.is_some()
                         {
-                            resources.insert(candidate.clone());
+                            // A standalone translation is an ordinary file
+                            // candidate, not a directory-walk entry.
+                            match std::fs::metadata(root.join(relative)) {
+                                Ok(metadata) if metadata.is_file() => {
+                                    resources.insert(candidate.clone());
+                                }
+                                Ok(_) => {}
+                                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                                Err(error) => return Err(error),
+                            }
                         }
                     }
                 }

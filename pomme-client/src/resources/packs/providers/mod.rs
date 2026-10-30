@@ -30,14 +30,21 @@ impl<T: PackResourceProvider + Send + Sync> ThreadSafePackResourceProvider for T
 }
 
 /// Resource bytes from one source layer, with syntax-checked logical IDs.
-/// Filesystem adapters must check resolved storage paths at lookup and open.
+/// Filesystem adapters lexically validate storage paths at lookup and open.
+/// Source roots and local-pack symlink policy are validated during setup, then
+/// trusted: access never revalidates source usability or policy. Later on-disk
+/// changes are outside that guarantee; providers do not pin immutable bytes.
+/// Enumeration classifies entries, not their ancestors: tree walks do not
+/// follow encountered links, while standalone mapped/indexed files use ordinary
+/// candidate metadata. Setup does not guarantee link-free descendants.
 /// Current adapters access the assets tree; other resource domains are not
-/// wired. Access failures must not become absence or empty results.
-/// Providers and resource acquisition stay on the application thread.
+/// wired. Ordinary candidate I/O errors must not become absence or empty
+/// results. Providers and resource acquisition stay on the application thread.
 pub(in crate::resources) trait PackResourceProvider {
     fn origin(&self) -> &ResourceOrigin;
 
-    /// Exact lookup: None is absence in a usable source, Err is access failure.
+    /// Exact lookup: candidate NotFound is None, other I/O failures are Err.
+    /// A root removed after setup may therefore permit lower-source fallback.
     /// Handles may retain this source. Sidecars are ordinary IDs; the
     /// manager selects metadata.
     fn get_resource(
@@ -63,9 +70,10 @@ pub(in crate::resources) trait PackResourceProvider {
     /// Recursive logical directory prefix, not a physical path or glob. Empty
     /// means all paths in the namespace; otherwise matching descendants under
     /// `prefix/` only. Namespace and prefix use resource ID characters, not
-    /// filesystem component rules. Invalid syntax is Err; storage containment
-    /// is the adapter's responsibility. Nonempty prefixes cannot end in `/`.
-    /// Returns unique checked IDs, including .mcmeta files; callers may filter.
+    /// filesystem component rules. Invalid syntax is Err; filesystem adapters
+    /// additionally reject unsafe components. Nonempty prefixes cannot end in
+    /// `/`. Returns unique checked IDs, including .mcmeta files; callers
+    /// may filter.
     fn list_resources(
         &self,
         namespace: &str,
@@ -73,18 +81,9 @@ pub(in crate::resources) trait PackResourceProvider {
     ) -> Result<BTreeSet<ResourceId>, ResourceError>;
 }
 
-/// Checks current root accessibility, not future access or descendant contents.
+/// Setup-only accessibility check, not future access or descendant contents.
 fn check_directory(root: &Path) -> io::Result<()> {
     std::fs::read_dir(root).map(|_| ())
-}
-
-fn open_directory(root: &Path, origin: &ResourceOrigin) -> Result<(), ResourceError> {
-    check_directory(root).map_err(|source| ResourceError::Io {
-        operation: "open source directory",
-        id: None,
-        origin: origin.clone(),
-        source,
-    })
 }
 
 fn overlay_directory(directory: &str) -> io::Result<&str> {
@@ -102,32 +101,29 @@ fn overlay_directory(directory: &str) -> io::Result<&str> {
     Ok(if directory == "." { "" } else { directory })
 }
 
-/// Validate the source before treating missing descendants as absence.
+/// Validate and anchor the source once during provider setup.
 fn canonical_directory(root: &Path) -> io::Result<PathBuf> {
     check_directory(root)?;
     root.canonicalize()
 }
 
-/// Resolve symlinks and dot components before applying a component-wise gate.
-/// This is not atomic with opening: concurrent filesystem changes can race it.
-fn resolve_within(root: &Path, path: &Path) -> io::Result<PathBuf> {
-    let path = path.canonicalize()?;
-    if !path.starts_with(root) {
+/// Logical IDs intentionally have a broader character contract. Native paths
+/// must not normalize empty/dot/parent segments or replace the anchored root.
+fn validate_storage_path(path: &str) -> io::Result<()> {
+    if path
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+        || path.contains(['\\', ':'])
+        || Path::new(path)
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
         return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "resource resolves outside its storage boundary",
+            io::ErrorKind::InvalidInput,
+            "invalid filesystem resource path",
         ));
     }
-    Ok(path)
-}
-
-fn source_file(root: &Path, path: &Path) -> io::Result<Option<PathBuf>> {
-    let path = match resolve_within(root, path) {
-        Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    Ok(is_file(&path)?.then_some(path))
+    Ok(())
 }
 
 fn is_file(path: &Path) -> io::Result<bool> {
@@ -143,7 +139,16 @@ fn is_file(path: &Path) -> io::Result<bool> {
 }
 
 fn open_file(path: &Path) -> io::Result<ReadStream> {
-    File::open(path).map(|file| Box::new(file) as ReadStream)
+    let file = File::open(path)?;
+    // Inspect only the opened candidate, not its path or source ancestors.
+    // File::open alone can accept a directory on some platforms.
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("resource is not a file: {}", path.display()),
+        ));
+    }
+    Ok(Box::new(file))
 }
 
 fn lookup_error(id: &ResourceId, origin: &ResourceOrigin, source: io::Error) -> ResourceError {

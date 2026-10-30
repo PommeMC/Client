@@ -102,7 +102,9 @@ fn extracted_marker(versions_dir: &Path, version: &str) -> PathBuf {
 /// marker; older launchers extracted in place and wrote the marker last, so
 /// one without it may be half done.
 pub fn is_installed(assets_dir: &Path, versions_dir: &Path, version: &str) -> bool {
-    index_path(assets_dir, version).exists() && extracted_marker(versions_dir, version).exists()
+    index_path(assets_dir, version).exists()
+        && extracted_marker(versions_dir, version).exists()
+        && extracted_dir(versions_dir, version).join("assets").is_dir()
 }
 
 /// Downloads whatever of `version` is missing or damaged, reporting through
@@ -151,7 +153,7 @@ pub async fn install(
     write_atomic(&index_path(assets_dir, version), &index_bytes).await?;
 
     let out = extracted_dir(versions_dir, version);
-    if !extracted_marker(versions_dir, version).exists() {
+    if !extracted_marker(versions_dir, version).exists() || !out.join("assets").is_dir() {
         report(0, 1, "Downloading the client jar...");
         let client = &version_json.downloads.client;
         let jar = fetch_verified(http, &client.url, &client.sha1, Hash::Sha1).await?;

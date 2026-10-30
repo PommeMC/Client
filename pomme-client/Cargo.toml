@@ -38,6 +38,7 @@ rsa = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
 regex = { workspace = true }
+glob = { workspace = true }
 zip = { workspace = true }
 self_cell = { workspace = true }
 tokio = { workspace = true, features = ["tracing", "net", "time"] }

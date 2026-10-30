@@ -165,7 +165,9 @@ pub(crate) enum ResourceError {
 }
 
 /// Reopenable resource or sidecar, independent of the manager's lifetime.
-/// Pins a source, not immutable bytes; each open repeats its storage checks.
+/// Pins a source, not immutable bytes. Setup validation is trusted; each open
+/// performs ordinary candidate I/O, without revalidating source roots or
+/// policy.
 #[derive(Clone)]
 pub(crate) struct ResourceContent {
     id: ResourceId,
@@ -232,9 +234,9 @@ impl ResourceContent {
 }
 
 /// Opt-in transferable content, retaining the selected source independently of
-/// the manager. Pins a source, not immutable bytes; open repeats storage
-/// checks. Streams are created, used and dropped on the opening thread, not
-/// transferred.
+/// the manager. Pins a source, not immutable bytes; open trusts setup
+/// validation and performs ordinary candidate I/O. Streams are created, used
+/// and dropped on the opening thread, not transferred.
 #[derive(Clone)]
 pub(crate) struct ThreadSafeResourceContent {
     id: ResourceId,

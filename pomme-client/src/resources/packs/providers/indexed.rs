@@ -6,8 +6,8 @@ use std::{fs, io};
 
 use super::{
     PackResourceProvider, ReadStream, ResourceOrigin, ThreadSafePackResourceProvider,
-    canonical_directory, enumeration_error, id_from_key, lookup_error, matches_prefix,
-    open_directory, open_file, source_file, validate_query,
+    canonical_directory, enumeration_error, id_from_key, is_file, lookup_error, matches_prefix,
+    open_file, validate_query,
 };
 use crate::resources::resource::{ResourceContent, ResourceError, ResourceId};
 
@@ -48,7 +48,7 @@ impl AssetIndex {
             .collect();
 
         Ok(Self {
-            objects_dir: objects_dir.to_path_buf(),
+            objects_dir: canonical_directory(objects_dir)?,
             hashes,
         })
     }
@@ -57,13 +57,9 @@ impl AssetIndex {
         self.hashes.keys().map(String::as_str)
     }
 
-    fn objects_dir(&self) -> &Path {
-        &self.objects_dir
-    }
-
     /// Error-aware lookup for the resource boundary. A malformed hash must not
     /// become a filesystem path.
-    fn resolve_checked(&self, asset_key: &str) -> io::Result<Option<PathBuf>> {
+    fn object_path(&self, asset_key: &str) -> io::Result<Option<PathBuf>> {
         let Some(hash) = self.hashes.get(asset_key) else {
             return Ok(None);
         };
@@ -73,16 +69,14 @@ impl AssetIndex {
                 format!("invalid asset-index hash for {asset_key}"),
             ));
         }
-        let path = self.objects_dir.join(&hash[..2]).join(hash);
-        match fs::metadata(&path) {
-            Ok(metadata) if metadata.is_file() => Ok(Some(path)),
-            Ok(_) => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("asset-index object is not a file: {}", path.display()),
-            )),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
-        }
+        Ok(Some(self.objects_dir.join(&hash[..2]).join(hash)))
+    }
+
+    fn resolve_checked(&self, asset_key: &str) -> io::Result<Option<PathBuf>> {
+        let Some(path) = self.object_path(asset_key)? else {
+            return Ok(None);
+        };
+        Ok(is_file(&path)?.then_some(path))
     }
 }
 
@@ -99,7 +93,6 @@ impl IndexedPackResourceProvider {
                 origin: origin.clone(),
                 source,
             })?;
-        open_directory(asset_index.objects_dir(), &origin)?;
         Ok(Self {
             asset_index: Arc::new(asset_index),
             origin,
@@ -107,12 +100,8 @@ impl IndexedPackResourceProvider {
     }
 
     fn locate(&self, id: &ResourceId) -> io::Result<Option<PathBuf>> {
-        let root = canonical_directory(self.asset_index.objects_dir())?;
         let key = format!("{}/{}", id.namespace(), id.path());
-        let Some(path) = self.asset_index.resolve_checked(&key)? else {
-            return Ok(None);
-        };
-        source_file(&root, &path)
+        self.asset_index.resolve_checked(&key)
     }
 }
 
@@ -136,15 +125,14 @@ impl PackResourceProvider for IndexedPackResourceProvider {
     }
 
     fn open(&self, id: &ResourceId) -> io::Result<ReadStream> {
-        let path = self.locate(id)?.ok_or_else(|| {
+        let key = format!("{}/{}", id.namespace(), id.path());
+        let path = self.asset_index.object_path(&key)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("missing resource {id:?}"))
         })?;
         open_file(&path)
     }
 
     fn namespaces(&self) -> Result<BTreeSet<String>, ResourceError> {
-        canonical_directory(self.asset_index.objects_dir())
-            .map_err(|source| enumeration_error(&self.origin, "enumerate namespaces", source))?;
         Ok(self
             .asset_index
             .keys()
@@ -160,7 +148,6 @@ impl PackResourceProvider for IndexedPackResourceProvider {
     ) -> Result<BTreeSet<ResourceId>, ResourceError> {
         validate_query(Some(namespace), prefix)?;
         let enumerate = || -> io::Result<_> {
-            let root = canonical_directory(self.asset_index.objects_dir())?;
             let mut resources = BTreeSet::new();
             for key in self.asset_index.keys() {
                 let Some(id) = id_from_key(key) else {
@@ -169,10 +156,17 @@ impl PackResourceProvider for IndexedPackResourceProvider {
                 if id.namespace() != namespace || !matches_prefix(id.path(), prefix) {
                     continue;
                 }
-                if let Some(path) = self.asset_index.resolve_checked(key)?
-                    && source_file(&root, &path)?.is_some()
-                {
-                    resources.insert(id);
+                if let Some(path) = self.asset_index.object_path(key)? {
+                    // Index targets are standalone file candidates; their
+                    // prepared objects root and hash-bucket ancestors are trusted.
+                    match fs::metadata(path) {
+                        Ok(metadata) if metadata.is_file() => {
+                            resources.insert(id);
+                        }
+                        Ok(_) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    }
                 }
             }
             Ok(resources)

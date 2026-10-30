@@ -61,7 +61,7 @@ impl ResourceManager {
 
     /// Highest-priority match for a checked ID; access errors never fall back.
     /// Lazy metadata comes from the winning source or higher, never lower.
-    /// JAR images may use external sidecars, but not the reverse.
+    /// Extracted images may use external sidecars, but not the reverse.
     pub(crate) fn get_resource(&self, id: &ResourceId) -> Result<Option<Resource>, ResourceError> {
         for (pack_index, pack) in self.packs.iter().enumerate().rev() {
             for (source_index, source) in pack.sources.iter().enumerate().rev() {
@@ -74,7 +74,7 @@ impl ResourceManager {
                     let metadata_id = ResourceId::new(&format!("{id}.mcmeta"))?;
                     for (index, candidate) in metadata_packs.iter().enumerate().rev() {
                         // Keep the physical-layer boundary even within one pack:
-                        // external content cannot inherit a lower JAR sidecar.
+                        // external content cannot inherit a lower extracted sidecar.
                         let start = if index == 0 { source_index } else { 0 };
                         for source in candidate.sources[start..].iter().rev() {
                             if let Some(sidecar) = source.clone().get_resource(&metadata_id)? {

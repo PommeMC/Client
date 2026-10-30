@@ -1,16 +1,21 @@
 use std::collections::{HashMap, HashSet};
+use std::fs::FileType;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use super::filter::ResourceFilter;
 use super::format::{PackFormat, read_installed_pack_format};
-use super::metadata::{self as keys, PackMetadata};
+use super::metadata::PackMetadata;
 use super::theme::{ConfiguredTheme, ThemeSpecification};
 use super::{
     PackCompat, PackId, PackInfo, PackProvenance, PackStorage, ResourcePackDescriptor,
     ResourcePackLocation, ResourcePackSource,
 };
 use crate::resources::{ResourceError, ResourceOrigin, ResourceSources};
+
+const SYMLINK_RULE_PREFIX: &str = "prefix";
+const SYMLINK_RULE_GLOB: &str = "glob";
+const SYMLINK_RULE_REGEX: &str = "regex";
 
 struct RegisteredPack {
     source: ResourcePackSource,
@@ -23,23 +28,31 @@ impl RegisteredPack {
     fn new(
         source: ResourcePackSource,
         target: Option<PackFormat>,
+        symlinks: &[SymlinkRule],
     ) -> Result<Self, ConfigurationError> {
         let pack_id = PackId::allocate();
-        Self::from_source(source, pack_id, target)
+        let location = prepare_location(&source.location, symlinks)?;
+        let metadata = registration_metadata(&location)?;
+        Ok(Self::from_prepared_source(
+            source, pack_id, target, metadata,
+        ))
     }
 
-    fn from_source(
+    /// Consume this operation's validated metadata without reopening the
+    /// source. Retain the original location for subsequent setup-time
+    /// revalidation.
+    fn from_prepared_source(
         source: ResourcePackSource,
         pack_id: PackId,
         target: Option<PackFormat>,
-    ) -> Result<Self, ConfigurationError> {
-        let metadata = registration_metadata(&source.location)?;
+        metadata: Option<PackMetadata>,
+    ) -> Self {
         let info = PackInfo::from_metadata(metadata.as_ref(), &source, pack_id, target);
-        Ok(Self {
+        Self {
             source,
             metadata,
             info,
-        })
+        }
     }
 }
 
@@ -47,6 +60,8 @@ impl RegisteredPack {
 pub(crate) struct InstallationLocation {
     pub version: String,
     pub client_jar: PathBuf,
+    /// Parent of the extracted `assets` directory; the JAR is metadata-only.
+    pub extracted_root: PathBuf,
     pub index_file: PathBuf,
     pub objects_dir: PathBuf,
 }
@@ -61,6 +76,7 @@ pub(crate) struct ResourceConfiguration {
     active_packs: Vec<PackId>,
     known_packs: Vec<RegisteredPack>,
     discovered_packs: HashMap<PathBuf, PackId>,
+    allowed_symlinks: Vec<SymlinkRule>,
 }
 
 impl ResourceConfiguration {
@@ -75,7 +91,26 @@ impl ResourceConfiguration {
             active_packs: Vec::new(),
             known_packs: Vec::new(),
             discovered_packs: HashMap::new(),
+            allowed_symlinks: Vec::new(),
         }
+    }
+
+    /// Load one native-filesystem policy snapshot. None, unreadable files and
+    /// any invalid rule deny every symlink; refresh is explicit, not per
+    /// lookup.
+    pub(crate) fn set_allowed_symlinks_file(&mut self, path: Option<PathBuf>) {
+        self.allowed_symlinks = match path {
+            None => Vec::new(),
+            Some(path) => {
+                match std::fs::read_to_string(&path).and_then(|text| parse_symlinks(&text)) {
+                    Ok(rules) => rules,
+                    Err(error) => {
+                        tracing::warn!(path = %path.display(), %error, "Cannot load allowed symlinks; denying all symlinks");
+                        Vec::new()
+                    }
+                }
+            }
+        };
     }
 
     /// Replace the complete installation, refreshing compatibility even when
@@ -123,10 +158,23 @@ impl ResourceConfiguration {
         });
     }
 
-    /// Owned snapshot, low-to-high: Pomme, Minecraft (JAR then index),
-    /// selected theme, selections. No installation is needed to open the
-    /// embedded bootstrap stack.
+    /// Owned snapshot, low-to-high: Pomme, Minecraft (extracted assets then
+    /// index), selected theme, selections. No installation is needed to
+    /// open the embedded bootstrap stack.
     pub(crate) fn sources(&self) -> Result<ResourceSources, ResourceError> {
+        if let Some((location, pack_id)) = &self.installation {
+            std::fs::read_dir(location.extracted_root.join("assets")).map_err(|source| {
+                ResourceError::Io {
+                    operation: "open installed extracted assets",
+                    id: None,
+                    origin: ResourceOrigin {
+                        pack_id: pack_id.clone(),
+                        name: "Minecraft built-in assets".to_owned(),
+                    },
+                    source,
+                }
+            })?;
+        }
         let mut sources =
             builtin_descriptors(self.embedded_pack_id.clone(), self.installation.as_ref());
         if let Some(theme) = &self.selected_theme
@@ -149,12 +197,14 @@ impl ResourceConfiguration {
                 pack_id: pack.info.pack_id.clone(),
                 name: pack.info.name.clone(),
             };
-            if let ResourcePackLocation::Directory(path) = &pack.source.location {
-                Self::validate_directory_pack_root(path, &origin)?;
-            }
-            let metadata = pack
-                .source
-                .location
+            let location = prepare_location(&pack.source.location, &self.allowed_symlinks)
+                .map_err(|source| ResourceError::Io {
+                    operation: "validate pack symlinks",
+                    id: None,
+                    origin: origin.clone(),
+                    source: io::Error::other(source),
+                })?;
+            let metadata = location
                 .read_metadata()
                 .and_then(|metadata| metadata.map(PackMetadata::require_object).transpose())
                 .map_err(|source| ResourceError::Io {
@@ -174,7 +224,7 @@ impl ResourceConfiguration {
                     })?,
                 None => (ResourceFilter::default(), Vec::new()),
             };
-            let storage = match &pack.source.location {
+            let storage = match &location {
                 ResourcePackLocation::Zip(path) => PackStorage::Zip {
                     path: path.clone(),
                     overlays,
@@ -193,27 +243,13 @@ impl ResourceConfiguration {
         Ok(descriptors)
     }
 
-    fn validate_directory_pack_root(
-        root: &Path,
-        origin: &ResourceOrigin,
-    ) -> Result<(), ResourceError> {
-        std::fs::read_dir(root)
-            .map(|_| ())
-            .map_err(|source| ResourceError::Io {
-                operation: "open source directory",
-                id: None,
-                origin: origin.clone(),
-                source,
-            })
-    }
-
     /// Register a new disabled record, even if the same source is already
     /// known.
     pub(crate) fn register_resource_pack(
         &mut self,
         source: ResourcePackSource,
     ) -> Result<PackId, super::ConfigurationError> {
-        let pack = RegisteredPack::new(source, self.target_format)?;
+        let pack = RegisteredPack::new(source, self.target_format, &self.allowed_symlinks)?;
         let id = pack.info.pack_id.clone();
         self.known_packs.push(pack);
         Ok(id)
@@ -255,6 +291,9 @@ impl ResourceConfiguration {
     }
 
     /// Transactionally discover the proposed roots, without enabling packs.
+    /// Roots and entry keys use lexical path identity without absolutization;
+    /// rescanning the same entry path reuses its opaque ID, while differently
+    /// named aliases can remain separate packs. Cache exclusion is lexical too.
     /// Returns whether discovery-owned active selections were removed.
     pub(crate) fn set_resource_pack_paths(
         &mut self,
@@ -263,32 +302,14 @@ impl ResourceConfiguration {
         let mut roots = Vec::new();
         let mut seen_roots = HashSet::new();
         for path in paths {
-            let root = path.canonicalize().map_err(|source| {
-                ConfigurationError::io("canonicalize discovery root", &path, source)
-            })?;
-            if seen_roots.insert(root.clone()) {
-                roots.push(root);
+            if seen_roots.insert(path.clone()) {
+                roots.push(path);
             }
         }
-        let cache = if roots.is_empty() {
-            None
-        } else {
-            match self.server_cache_dir.canonicalize() {
-                Ok(path) => Some(path),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                Err(source) => {
-                    return Err(ConfigurationError::io(
-                        "canonicalize server cache",
-                        &self.server_cache_dir,
-                        source,
-                    ));
-                }
-            }
-        };
         let mut candidates = Vec::new();
         let mut discovered = HashMap::new();
         for root in &roots {
-            if cache.as_ref().is_some_and(|cache| root.starts_with(cache)) {
+            if root.starts_with(&self.server_cache_dir) {
                 continue;
             }
             let entries = std::fs::read_dir(root)
@@ -298,78 +319,68 @@ impl ResourceConfiguration {
                     ConfigurationError::io("read discovery entry", root, source)
                 })?;
                 let entry_path = entry.path();
-                let path = entry_path.canonicalize().map_err(|source| {
-                    ConfigurationError::io("canonicalize pack", &entry_path, source)
-                })?;
-                if entry_path == self.server_cache_dir
-                    || cache.as_ref().is_some_and(|cache| path.starts_with(cache))
+                if entry_path.starts_with(&self.server_cache_dir)
+                    || discovered.contains_key(&entry_path)
                 {
                     continue;
                 }
-                let metadata = std::fs::metadata(&path)
-                    .map_err(|source| ConfigurationError::io("inspect pack", &path, source))?;
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if discovered.contains_key(&path) {
-                    continue;
-                }
-                let location = if metadata.is_dir() {
-                    let metadata_path = path.join(keys::PACK_METADATA_FILE);
-                    match std::fs::metadata(&metadata_path) {
-                        Ok(_) => {}
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                        Err(source) => {
-                            return Err(ConfigurationError::io(
-                                "inspect pack metadata",
-                                &metadata_path,
-                                source,
-                            ));
-                        }
+                // Validate before reading pack metadata. Keep the original
+                // entry for identity and policy revalidation, not its target.
+                let candidate = (|| -> io::Result<_> {
+                    let (effective, kind) =
+                        prepare_pack_path(&entry_path, entry.file_type()?, &self.allowed_symlinks)?;
+                    let (location, prepared) = if kind.is_dir() {
+                        (
+                            ResourcePackLocation::Directory(entry_path.clone()),
+                            ResourcePackLocation::Directory(effective),
+                        )
+                    } else if kind.is_file()
+                        && effective.extension().is_some_and(|ext| ext == "zip")
+                    {
+                        (
+                            ResourcePackLocation::Zip(entry_path.clone()),
+                            ResourcePackLocation::Zip(effective),
+                        )
+                    } else {
+                        return Ok(None);
+                    };
+                    // Missing metadata is not a discovered pack. Read/decode
+                    // once after policy validation, then move it into the record.
+                    Ok(prepared
+                        .read_metadata()?
+                        .map(|metadata| (location, metadata)))
+                })();
+                let (location, metadata) = match candidate {
+                    Ok(Some(candidate)) => candidate,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        tracing::warn!(path = %entry_path.display(), %error, "Cannot prepare resource pack; skipping pack");
+                        continue;
                     }
-                    ResourcePackLocation::Directory(path.clone())
-                } else if entry_path.extension().is_some_and(|ext| ext == "zip") {
-                    ResourcePackLocation::Zip(path.clone())
-                } else {
-                    continue;
                 };
+                let name = entry.file_name().to_string_lossy().into_owned();
                 let source = ResourcePackSource {
                     location,
                     provenance: PackProvenance::Local,
                     fallback_name: name,
                 };
-                let existing = self.discovered_packs.get(&path).and_then(|id| {
+                let existing = self.discovered_packs.get(&entry_path).and_then(|id| {
                     self.known_packs
                         .iter()
                         .find(|pack| &pack.info.pack_id == id)
                 });
-                let prepared = if let Some(existing) = existing {
-                    RegisteredPack::from_source(
-                        source,
-                        existing.info.pack_id.clone(),
-                        self.target_format,
-                    )
-                } else {
-                    RegisteredPack::new(source, self.target_format)
-                };
-                let mut pack = match prepared {
-                    Ok(pack) => pack,
-                    Err(
-                        error @ ConfigurationError::Io {
-                            operation: "read pack.mcmeta",
-                            ..
-                        },
-                    ) => {
-                        tracing::warn!(path = %path.display(), %error, "Failed to read resource pack metadata; skipping pack");
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-                if pack.metadata.is_none() {
-                    continue;
-                }
+                let pack_id =
+                    existing.map_or_else(PackId::allocate, |pack| pack.info.pack_id.clone());
+                let mut pack = RegisteredPack::from_prepared_source(
+                    source,
+                    pack_id,
+                    self.target_format,
+                    Some(metadata),
+                );
                 let pack_id = pack.info.pack_id.clone();
                 pack.info.enabled = self.active_packs.contains(&pack_id);
                 candidates.push(pack);
-                discovered.insert(path, pack_id);
+                discovered.insert(entry_path, pack_id);
             }
         }
         let removed: HashSet<_> = self
@@ -417,11 +428,7 @@ impl ResourceConfiguration {
             .iter_mut()
             .find(|pack| &pack.info.pack_id == pack_id)
             .ok_or_else(|| ConfigurationError::UnknownPack(pack_id.clone()))?;
-        let location = &pack.source.location;
-        if let ResourcePackLocation::Directory(path) = location {
-            std::fs::read_dir(path)
-                .map_err(|source| ConfigurationError::io("open pack directory", path, source))?;
-        }
+        let location = prepare_location(&pack.source.location, &self.allowed_symlinks)?;
         location
             .read_metadata()
             .and_then(|metadata| metadata.map(PackMetadata::require_object).transpose())
@@ -510,8 +517,8 @@ fn builtin_descriptors(
     }];
     if let Some((location, pack_id)) = installation {
         let storage = vec![
-            PackStorage::Zip {
-                path: location.client_jar.clone(),
+            PackStorage::Directory {
+                root: location.extracted_root.clone(),
                 overlays: Vec::new(),
             },
             PackStorage::Indexed {
@@ -576,11 +583,181 @@ impl std::error::Error for ConfigurationError {
 fn registration_metadata(
     location: &ResourcePackLocation,
 ) -> Result<Option<PackMetadata>, ConfigurationError> {
-    if let ResourcePackLocation::Directory(path) = location {
-        std::fs::read_dir(path)
-            .map_err(|source| ConfigurationError::io("open pack directory", path, source))?;
-    }
     location
         .read_metadata()
         .map_err(|source| ConfigurationError::io("read pack.mcmeta", location.path(), source))
+}
+
+/// Native Rust matching, NOT Java PathMatcher/Pattern parity. Accepted patterns
+/// can differ too (glob syntax, Unicode classes, case and platform separators).
+/// Full Java compatibility is deferred for a follow-up issue after review.
+enum SymlinkRule {
+    Prefix(String),
+    Glob(glob::Pattern),
+    Regex(regex::Regex),
+}
+
+fn parse_symlinks(text: &str) -> io::Result<Vec<SymlinkRule>> {
+    let mut rules = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (tag, pattern) = if let Some(tagged) = line.strip_prefix('[') {
+            tagged.split_once(']').ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("line {}: unterminated rule type", index + 1),
+                )
+            })?
+        } else {
+            (SYMLINK_RULE_PREFIX, line)
+        };
+        let rule = match tag {
+            SYMLINK_RULE_PREFIX => SymlinkRule::Prefix(pattern.to_owned()),
+            SYMLINK_RULE_GLOB => {
+                SymlinkRule::Glob(glob::Pattern::new(pattern).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("line {}: {error}", index + 1),
+                    )
+                })?)
+            }
+            // Grouping keeps alternatives and inline flags inside the
+            // whole-string anchors, unlike search or ^/$ line matching.
+            SYMLINK_RULE_REGEX => {
+                // Reject malformed raw syntax before it can escape the wrapper.
+                regex::Regex::new(pattern).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("line {}: {error}", index + 1),
+                    )
+                })?;
+                SymlinkRule::Regex(regex::Regex::new(&format!(r"\A(?:{pattern})\z")).map_err(
+                    |error| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("line {}: {error}", index + 1),
+                        )
+                    },
+                )?)
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("line {}: unknown rule type {tag:?}", index + 1),
+                ));
+            }
+        };
+        rules.push(rule);
+    }
+    Ok(rules)
+}
+
+fn validate_symlink(path: &Path, rules: &[SymlinkRule]) -> io::Result<PathBuf> {
+    let target = std::fs::read_link(path)?;
+    // Match the stored, native target, not a canonical destination. Never use
+    // lossy UTF-8: unsupported OS strings fail closed. Cross-platform string
+    // representation differences remain part of the Java-compatibility gap.
+    let allowed = target.to_str().is_some_and(|target| {
+        rules.iter().any(|rule| match rule {
+            SymlinkRule::Prefix(prefix) => target.starts_with(prefix),
+            SymlinkRule::Glob(pattern) => pattern.matches_with(
+                target,
+                glob::MatchOptions {
+                    case_sensitive: true,
+                    require_literal_separator: true,
+                    require_literal_leading_dot: false,
+                },
+            ),
+            SymlinkRule::Regex(pattern) => pattern.is_match(target),
+        })
+    });
+    if !allowed {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "forbidden symlink {} -> {}",
+                path.display(),
+                target.display()
+            ),
+        ));
+    }
+    Ok(target)
+}
+
+/// Management-boundary validation, not a sandbox: ancestors are not walked,
+/// descendant link targets are not traversed, and later filesystem edits race
+/// access. Explicit installation, index and theme roots do not use this gate.
+/// The caller supplies its no-follow classification; only a root link needs a
+/// second classification, for the distinct effective target.
+fn prepare_pack_path(
+    path: &Path,
+    mut kind: FileType,
+    rules: &[SymlinkRule],
+) -> io::Result<(PathBuf, FileType)> {
+    let mut effective = path.to_owned();
+    if kind.is_symlink() {
+        // Preserve PackDetector's single top-link rule, including its odd
+        // CWD-relative interpretation of a relative stored target. Do NOT
+        // validate that target then open the original path (which would follow
+        // relative to the link parent and could open a different, unchecked tree).
+        effective = validate_symlink(path, rules)?;
+        kind = std::fs::symlink_metadata(&effective)?.file_type();
+    }
+    if kind.is_dir() {
+        validate_pack_tree(&effective, rules)?;
+    } else if !kind.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "pack root is not a directory or regular file: {}",
+                effective.display()
+            ),
+        ));
+    }
+    Ok((effective, kind))
+}
+
+fn validate_pack_tree(root: &Path, rules: &[SymlinkRule]) -> io::Result<()> {
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            validate_symlink(&entry.path(), rules)?;
+        } else if kind.is_dir() {
+            validate_pack_tree(&entry.path(), rules)?;
+        }
+    }
+    Ok(())
+}
+
+fn prepare_location(
+    location: &ResourcePackLocation,
+    rules: &[SymlinkRule],
+) -> Result<ResourcePackLocation, ConfigurationError> {
+    let kind = std::fs::symlink_metadata(location.path())
+        .map_err(|source| {
+            ConfigurationError::io("validate pack symlinks", location.path(), source)
+        })?
+        .file_type();
+    let (path, kind) = prepare_pack_path(location.path(), kind, rules).map_err(|source| {
+        ConfigurationError::io("validate pack symlinks", location.path(), source)
+    })?;
+    // The tree walk already opens directory roots. Check the declared type
+    // here instead of probing their readiness again before metadata reads.
+    match location {
+        ResourcePackLocation::Directory(_) if kind.is_dir() => {
+            Ok(ResourcePackLocation::Directory(path))
+        }
+        ResourcePackLocation::Zip(_) if kind.is_file() => Ok(ResourcePackLocation::Zip(path)),
+        _ => Err(ConfigurationError::io(
+            "validate pack symlinks",
+            location.path(),
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pack root does not match its declared storage type",
+            ),
+        )),
+    }
 }
