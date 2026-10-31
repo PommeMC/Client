@@ -366,10 +366,9 @@ pub struct GameState {
     pub last_update_phases: crate::benchmark::UpdatePhases,
     /// Which loaded columns need (re)meshing.
     mesh_columns: MeshColumns,
-    /// Per-column bitmask of currently-visible section indices (bit `si` set =
-    /// section is in-frustum and not occluded). Computed in
-    /// `update_visibility`.
-    pub vis_mask: HashMap<ChunkPos, u32>,
+    /// The last walk's in-frustum columns and their visible-section masks, so
+    /// an unloading column can leave `mesh_gate`.
+    pub in_view_masks: HashMap<ChunkPos, u32>,
     /// Per-section cave-cull visibility (vanilla `VisibilitySet`). Fed by mesh
     /// results; consumed by the occlusion walk.
     pub section_vis: HashMap<(ChunkPos, i32), VisibilitySet>,
@@ -381,10 +380,6 @@ pub struct GameState {
     /// buffer's per-section geometry gate so a stale bulk can't re-stale an
     /// edited section's visibility.
     pub section_vis_epoch: HashMap<(ChunkPos, i32), u64>,
-    /// Cached per-column frustum tier (0 in view, 1 margin, 2 behind),
-    /// recomputed each time an occlusion walk completes, so an unloading
-    /// column can leave `mesh_gate`.
-    pub vis_tiers: HashMap<ChunkPos, u8>,
     pub mesh_gate: MeshGate,
     pub vis_valid: bool,
     /// Camera 8-block bucket that last triggered an occlusion walk — movement,
@@ -642,11 +637,10 @@ impl GameState {
             chunk_load_upload: None,
             last_update_phases: crate::benchmark::UpdatePhases::default(),
             mesh_columns: MeshColumns::default(),
-            vis_mask: HashMap::new(),
+            in_view_masks: HashMap::new(),
             section_vis: HashMap::new(),
             compiled: HashMap::new(),
             section_vis_epoch: HashMap::new(),
-            vis_tiers: HashMap::new(),
             mesh_gate: MeshGate::default(),
             vis_valid: false,
             last_vis_cam: (i32::MIN, i32::MIN, i32::MIN),
@@ -1543,17 +1537,14 @@ impl GameState {
         }
     }
 
-    /// Drops the last walk's per-column masks and tiers and the totals made
-    /// from them.
+    /// Drops the last walk's in-view masks and the totals made from them.
     pub(crate) fn clear_visibility(&mut self) {
-        self.vis_mask.clear();
-        self.vis_tiers.clear();
+        self.in_view_masks.clear();
         self.mesh_gate = MeshGate::default();
     }
 
     /// Combine a finished walk with the current camera frustum into per-column
-    /// draw masks (occluded sections omitted) and tiers, and push them to the
-    /// GPU cull.
+    /// draw masks (occluded sections omitted), and push them to the GPU cull.
     fn apply_visibility(&mut self, renderer: &mut Renderer, bfs: &HashMap<ChunkPos, u32>) {
         let planes = renderer.frustum_planes();
         let planes_wide = renderer.frustum_planes_dilated(VIS_MARGIN_RADIANS);
@@ -1563,16 +1554,11 @@ impl GameState {
         let full = section_mask(self.chunk_store.section_count());
         let sections = self.chunk_store.section_count() as u32;
 
-        let mut tiers = HashMap::new();
         let mut masks = HashMap::new();
+        let mut in_view = HashMap::new();
         let mut gate = MeshGate::default();
         for pos in self.chunk_store.loaded_positions() {
             let near = column_is_near(pos, eye_f);
-            let tier = if near {
-                0
-            } else {
-                column_frustum_tier(pos, eye_f, &planes, &planes_wide, min_y, max_y)
-            };
             // Near columns always draw fully; otherwise a column draws only the
             // sections the graph proved occlusion-visible (none => fully hidden).
             let mask = if near {
@@ -1580,17 +1566,17 @@ impl GameState {
             } else {
                 bfs.get(&pos).copied().unwrap_or(0)
             };
-            // A fully-occluded column (no visible section) drops to the hidden tier.
-            let tier = if tier == 0 && mask == 0 { 2 } else { tier };
-            if tier == 0 {
+            if mask != 0
+                && (near
+                    || column_frustum_tier(pos, eye_f, &planes, &planes_wide, min_y, max_y) == 0)
+            {
                 gate.add(mask, sections);
+                in_view.insert(pos, mask);
             }
-            tiers.insert(pos, tier);
             masks.insert(pos, mask);
         }
-        self.vis_tiers = tiers;
+        self.in_view_masks = in_view;
         self.mesh_gate = gate;
-        self.vis_mask = masks.clone();
         self.vis_valid = true;
 
         // With occlusion off, push full masks (frustum still applies on the GPU).

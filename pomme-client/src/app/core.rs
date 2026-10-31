@@ -568,10 +568,7 @@ impl GameState {
             });
         self.forget_mesh_column(pos);
         self.compiled.remove(&pos);
-        let mask = self.vis_mask.remove(&pos);
-        if self.vis_tiers.remove(&pos) == Some(0)
-            && let Some(mask) = mask
-        {
+        if let Some(mask) = self.in_view_masks.remove(&pos) {
             let sections = self.chunk_store.section_count() as u32;
             self.mesh_gate.remove(mask, sections);
         }

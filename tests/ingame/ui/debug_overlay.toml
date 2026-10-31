@@ -36,8 +36,9 @@ screenshot = "open"
 [[step]]
 press = { key = "key.keyboard.f3" }
 
+# The open shot's chat line fades too.
 [[step]]
-wait_ms = 500
+wait_ms = 11000
 
 [[step]]
 screenshot = "closed"
