@@ -1,0 +1,101 @@
+# Particles through a shader pack (fixtures/shaderpacks/pomme_test): a broken
+# block's bits go through `gbuffers_particles` (tinted magenta in the particle
+# stage) and end rod sparks through `gbuffers_particles_translucent` (tinted
+# cyan). Then packs off, with the same particles in their own colours. The
+# broken blocks' drops are cleared at the end.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/tp @s -100.5 -60 60.5 0 15"
+
+[[step]]
+expect = { player = { position = [-100.5, -60.0, 60.5] } }
+
+[[step]]
+chat = "/fill -101 -60 63 -101 -58 63 minecraft:stone"
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+option = { shader_pack = "pomme_test" }
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+expect = { terrain = "settled" }
+
+[[step]]
+chat = "/setblock -101 -59 63 minecraft:air destroy"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+screenshot = "pack_break"
+
+[[step]]
+chat = "/particle minecraft:end_rod -100.5 -59 63.5 0.3 0.3 0.3 0 40 force"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "pack_end_rod"
+
+[[step]]
+chat = "/setblock -101 -59 63 minecraft:stone"
+
+[[step]]
+option = { shader_pack = "" }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+expect = { terrain = "settled" }
+
+[[step]]
+chat = "/setblock -101 -59 63 minecraft:air destroy"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+screenshot = "off_break"
+
+[[step]]
+chat = "/particle minecraft:end_rod -100.5 -59 63.5 0.3 0.3 0.3 0 40 force"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "off_end_rod"
+
+[[step]]
+chat = "/fill -101 -60 63 -101 -58 63 minecraft:air"
+
+[[step]]
+chat = "/kill @e[type=item]"
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/gamerule advance_time true"

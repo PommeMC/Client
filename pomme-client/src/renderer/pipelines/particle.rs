@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use glam::Vec3;
 
 use crate::renderer::camera::{Camera, CameraUniform};
@@ -32,11 +34,16 @@ pub struct ParticleQuad {
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct ParticleVertex {
+pub struct ParticleVertex {
     position: [f32; 3],
     uv: [f32; 2],
     color: u32,
     light: f32,
+}
+
+impl ParticleVertex {
+    pub const BUFFER: rhi::VertexBufferLayout<'static> =
+        rhi::vertex_buffer!(Self, [Float32x3, Float32x2, Unorm8x4, Float32]);
 }
 
 pub struct ParticlePipeline {
@@ -52,6 +59,8 @@ pub struct ParticlePipeline {
     /// The shared [`Lightmap`]'s group, set 2.
     lightmap_set: rhi::backend::BindGroup,
     vertex_buffers: Vec<rhi::backend::Buffer>,
+    /// This frame's opaque and translucent vertex ranges.
+    layers: [Range<u32>; 2],
 }
 
 impl ParticlePipeline {
@@ -101,6 +110,7 @@ impl ParticlePipeline {
             camera_buffers,
             lightmap_set: lightmap.group,
             vertex_buffers,
+            layers: [0..0, 0..0],
         };
         this.rebind_atlas(device, atlas);
         this
@@ -119,13 +129,9 @@ impl ParticlePipeline {
         self.camera_buffers[frame].write(bytes);
     }
 
-    pub fn update_and_draw(
-        &mut self,
-        pass: &mut rhi::backend::RenderPassEncoder,
-        frame: usize,
-        camera: &Camera,
-        quads: &[ParticleQuad],
-    ) {
+    /// Builds this frame's billboards facing `camera`.
+    pub fn prepare(&mut self, frame: usize, camera: &Camera, quads: &[ParticleQuad]) {
+        self.layers = [0..0, 0..0];
         if quads.is_empty() {
             return;
         }
@@ -165,12 +171,17 @@ impl ParticlePipeline {
 
         let bytes = bytemuck::cast_slice::<ParticleVertex, u8>(&verts);
         self.vertex_buffers[frame].write(bytes);
+        let opaque_verts = opaque_verts as u32;
+        self.layers = [0..opaque_verts, opaque_verts..verts.len() as u32];
+    }
 
+    /// Draws [`Self::prepare`]'s billboards.
+    pub fn draw(&self, pass: &mut rhi::backend::RenderPassEncoder, frame: usize) {
         pass.set_vertex_buffer(0, self.vertex_buffers[frame].handle());
-        for (pipeline, range) in [
-            (self.pipeline, 0..opaque_verts),
-            (self.translucent_pipeline, opaque_verts..verts.len()),
-        ] {
+        for (pipeline, range) in [self.pipeline, self.translucent_pipeline]
+            .into_iter()
+            .zip(&self.layers)
+        {
             if range.is_empty() {
                 continue;
             }
@@ -179,8 +190,27 @@ impl ParticlePipeline {
                 0,
                 &[self.camera_sets[frame], self.atlas_set, self.lightmap_set],
             );
-            pass.draw(range.len() as u32, 1, range.start as u32, 0);
+            pass.draw(range.len() as u32, 1, range.start, 0);
         }
+    }
+
+    /// Whether [`Self::prepare`] built any billboards of the layer.
+    pub fn has_layer(&self, translucent: bool) -> bool {
+        !self.layers[usize::from(translucent)].is_empty()
+    }
+
+    /// Draws one layer through a shader pack's program, which the pass has
+    /// bound at sets 0-2.
+    pub fn draw_pack(
+        &self,
+        pass: &rhi::backend::RenderPassEncoder,
+        frame: usize,
+        translucent: bool,
+    ) {
+        let range = self.layers[usize::from(translucent)].clone();
+        pass.set_vertex_buffer(0, self.vertex_buffers[frame].handle());
+        pass.set_bind_group(3, self.atlas_set);
+        pass.draw(range.len() as u32, 1, range.start, 0);
     }
 
     pub fn recreate_pipeline(
@@ -235,10 +265,7 @@ fn create_pipeline(
                 "particle",
                 shader::include_shader!("particle.vert"),
                 shader::include_shader!("particle.frag"),
-                &[rhi::vertex_buffer!(
-                    ParticleVertex,
-                    [Float32x3, Float32x2, Unorm8x4, Float32]
-                )],
+                &[ParticleVertex::BUFFER],
             )
         },
     )

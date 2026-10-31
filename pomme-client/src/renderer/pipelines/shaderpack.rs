@@ -1,8 +1,8 @@
 //! A loaded shader pack's render path, Iris's pipeline in milestone 1: the
 //! `shadow` program draws terrain into the shadow maps from the sun or moon,
-//! the `gbuffers_*` programs draw the sky, terrain, entities and block
-//! entities into the pack's `colortex` targets, `deferred*` and `composite*`
-//! passes run over them, and `final` writes the swapchain.
+//! the `gbuffers_*` programs draw the sky, terrain, entities, block entities
+//! and particles into the pack's `colortex` targets, `deferred*` and
+//! `composite*` passes run over them, and `final` writes the swapchain.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -14,11 +14,13 @@ use crate::renderer::chunk::buffer::PACK_CHUNK_VERTEX_BUFFERS;
 use crate::renderer::entity_model::EntityVertex;
 use crate::renderer::pipelines::entity_renderer::{PackShadow, SWIRL_BLEND};
 use crate::renderer::pipelines::lightmap::Lightmap;
+use crate::renderer::pipelines::particle::ParticleVertex;
 use crate::renderer::pipelines::sky::{
     SKY_PUSH_SIZE, SkyDraw, SkyPipeline, SkyVertex, celestial_pose,
 };
 use crate::renderer::rhi::{self, TextureTransition, TextureUse};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, util};
+use crate::shaderpack::alpha_test::AlphaTest;
 use crate::shaderpack::directives::{
     BufferSettings, ShadowSettings, TargetSettings, buffer_index, shadow_buffer_index,
 };
@@ -52,7 +54,11 @@ pub enum PackGeometry {
     /// Emissive eye layers.
     EntityEyes,
     BlockEntities,
+    /// Opaque and cutout particles.
+    Particles,
     Water,
+    /// Translucent particles, after water.
+    ParticlesTranslucent,
 }
 
 impl PackGeometry {
@@ -96,7 +102,9 @@ impl PackGeometry {
             Self::EntitiesTranslucent => Gbuffers::EntitiesTrans,
             Self::EntityEyes => Gbuffers::SpiderEyes,
             Self::BlockEntities => Gbuffers::Block,
+            Self::Particles => Gbuffers::Particles,
             Self::Water => Gbuffers::Water,
+            Self::ParticlesTranslucent => Gbuffers::ParticlesTrans,
         })
     }
 
@@ -113,6 +121,22 @@ impl PackGeometry {
         match own {
             Some(text) => Ok(Some(text)),
             None => pack.program(dimension, "shadow"),
+        }
+    }
+
+    /// Iris's alpha test for the vanilla render type it draws (`ShaderKey`,
+    /// with Sodium's terrain keys).
+    fn alpha_test(self) -> AlphaTest {
+        match self {
+            // TODO: cutout terrain tests at half alpha (`SODIUM_TERRAIN_CUTOUT`),
+            // once its draws are told apart.
+            Self::ShadowTerrain | Self::Terrain | Self::SkyBasic | Self::SkyTextured => {
+                AlphaTest::OFF
+            }
+            Self::EntityEyes => AlphaTest::NON_ZERO,
+            // `ENTITIES_CUTOUT`, most entities' render type.
+            // TODO: `ENTITIES_SOLID` ones aren't tested.
+            _ => AlphaTest::ONE_TENTH,
         }
     }
 
@@ -403,20 +427,24 @@ impl PackRenderer {
             PackGeometry::EntitiesTranslucent,
             PackGeometry::EntityEyes,
             PackGeometry::BlockEntities,
+            PackGeometry::Particles,
             PackGeometry::Water,
+            PackGeometry::ParticlesTranslucent,
         ]
         .into_iter()
         .filter(|&g| shadow_casters.draws(g))
         .filter_map(|g| {
             let text = g.source(pack, dimension).transpose()?;
-            Some(text.and_then(|t| shaderpack::compile(&t, g.vertices()).map(|c| (g, c))))
+            Some(text.and_then(|t| {
+                shaderpack::compile(&t, g.vertices(), g.alpha_test()).map(|c| (g, c))
+            }))
         })
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?;
         let screen = |prefix: &str, geometry| -> Result<Vec<CompiledProgram>, String> {
             full_screen_names(prefix)
                 .filter_map(|name| pack.program(dimension, &name).transpose())
-                .map(|t| t.and_then(|t| shaderpack::compile(&t, geometry)))
+                .map(|t| t.and_then(|t| shaderpack::compile(&t, geometry, AlphaTest::OFF)))
                 .collect::<Result<_, _>>()
                 .map_err(|e| e.to_string())
         };
@@ -425,7 +453,7 @@ impl PackRenderer {
         let final_pass = pack
             .program(dimension, "final")
             .map(|t| t.unwrap_or_else(shaderpack::copy_program))
-            .and_then(|t| shaderpack::compile(&t, Geometry::Final))
+            .and_then(|t| shaderpack::compile(&t, Geometry::Final, AlphaTest::OFF))
             .map_err(|e| e.to_string())?;
 
         // Targets: every buffer a program writes or reads, set up by the
@@ -731,6 +759,7 @@ impl PackRenderer {
         let entity_buffers = crate::renderer::pipelines::entity_renderer::INSTANCED_BUFFERS;
         let block_entity_buffers = [EntityVertex::BUFFER];
         let sky_buffers = [SkyVertex::BUFFER];
+        let particle_buffers = [ParticleVertex::BUFFER];
         let vertex_buffers: &[rhi::VertexBufferLayout] = match geometry.map(PackGeometry::drawn) {
             Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured) => &sky_buffers,
             Some(PackGeometry::Terrain) => &PACK_CHUNK_VERTEX_BUFFERS,
@@ -741,6 +770,7 @@ impl PackRenderer {
                 | PackGeometry::EntityEyes,
             ) => &entity_buffers,
             Some(PackGeometry::BlockEntities) => &block_entity_buffers,
+            Some(PackGeometry::Particles | PackGeometry::ParticlesTranslucent) => &particle_buffers,
             Some(_) => unreachable!("drawn geometries aren't shadow ones"),
             None => &[],
         };
@@ -763,7 +793,14 @@ impl PackRenderer {
             }),
             blend: match geometry {
                 Some(PackGeometry::EntityEyes) => Some(SPIDER_EYES_BLEND),
-                Some(g) if sky || g.water() || g == PackGeometry::EntitiesTranslucent => {
+                Some(g)
+                    if sky
+                        || g.water()
+                        || matches!(
+                            g,
+                            PackGeometry::EntitiesTranslucent | PackGeometry::ParticlesTranslucent
+                        ) =>
+                {
                     Some(rhi::BlendState::TRANSLUCENT)
                 }
                 _ => None,

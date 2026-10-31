@@ -2,6 +2,7 @@
 //! and translating their GLSL for Pomme's Vulkan renderer. Iris's behaviour
 //! is the spec.
 
+pub mod alpha_test;
 pub mod block_ids;
 pub mod directives;
 pub mod expr;
@@ -19,6 +20,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use alpha_test::AlphaTest;
 use glsl::compile::{self, CompileError, ShaderStage};
 use glsl::translate::{self, ProgramSource, TranslateError, Translated};
 use include::IncludeError;
@@ -71,6 +73,8 @@ pub struct ProgramText {
     pub vertex: String,
     pub fragment: String,
     pub lighting: TerrainLighting,
+    /// The pack's `alphaTest.<program>`, over the geometry's own.
+    pub alpha_test: Option<AlphaTest>,
 }
 
 /// A compiled program: SPIR-V and the interface the renderer binds.
@@ -158,6 +162,10 @@ impl ShaderPack {
                 separate_ao: self.property_bool("separateAo", false),
                 old_lighting: self.property_bool("oldLighting", false),
             },
+            alpha_test: self
+                .properties
+                .get(&format!("alphaTest.{name}"))
+                .and_then(|v| AlphaTest::parse(v)),
         }))
     }
 
@@ -198,9 +206,19 @@ impl ShaderPack {
     }
 }
 
-/// Translates `program` for `geometry`'s vertex format.
-fn translate(program: &ProgramText, geometry: Geometry) -> Result<Translated, PackError> {
+/// Translates `program` for `geometry`'s vertex format, a geometry program
+/// alpha tested by `alpha_test` unless the pack overrides it.
+fn translate(
+    program: &ProgramText,
+    geometry: Geometry,
+    alpha_test: AlphaTest,
+) -> Result<Translated, PackError> {
     let preludes = Preludes::new(geometry, program.lighting);
+    let alpha_test = if geometry.is_geometry() {
+        program.alpha_test.unwrap_or(alpha_test)
+    } else {
+        AlphaTest::OFF
+    };
     translate::translate(
         ProgramSource {
             vertex: &program.vertex,
@@ -209,6 +227,7 @@ fn translate(program: &ProgramText, geometry: Geometry) -> Result<Translated, Pa
         preludes.vertex(),
         preludes.fragment(),
         geometry.is_geometry(),
+        alpha_test,
     )
     .map_err(|error| PackError::Translate {
         program: program.path.clone(),
@@ -217,8 +236,12 @@ fn translate(program: &ProgramText, geometry: Geometry) -> Result<Translated, Pa
 }
 
 /// Translates and compiles `program` for `geometry`'s vertex format.
-pub fn compile(program: &ProgramText, geometry: Geometry) -> Result<CompiledProgram, PackError> {
-    let interface = translate(program, geometry)?;
+pub fn compile(
+    program: &ProgramText,
+    geometry: Geometry,
+    alpha_test: AlphaTest,
+) -> Result<CompiledProgram, PackError> {
+    let interface = translate(program, geometry, alpha_test)?;
     let compile_stage = |stage, source: &str| {
         compile::compile(stage, source).map_err(|error| PackError::Compile {
             program: program.path.clone(),
@@ -266,6 +289,7 @@ void main() {
 "
         .to_owned(),
         lighting: TerrainLighting::default(),
+        alpha_test: None,
     }
 }
 
@@ -276,6 +300,7 @@ pub fn gbuffers_geometry(program: Gbuffers) -> Geometry {
         Gbuffers::Block => Geometry::BlockEntity,
         Gbuffers::Water => Geometry::Water,
         Gbuffers::SkyBasic | Gbuffers::SkyTextured => Geometry::Sky,
+        Gbuffers::Particles | Gbuffers::ParticlesTrans => Geometry::Particle,
         _ => Geometry::Terrain,
     }
 }
@@ -301,6 +326,8 @@ mod corpus {
             Gbuffers::EntitiesTrans,
             Gbuffers::SpiderEyes,
             Gbuffers::Block,
+            Gbuffers::Particles,
+            Gbuffers::ParticlesTrans,
         ] {
             match pack.gbuffers(dimension, program) {
                 Ok(Some(text)) => out.push((text, gbuffers_geometry(program))),
@@ -359,13 +386,13 @@ mod corpus {
             {
                 total += 1;
                 if let Ok(dump) = std::env::var("POMME_SHADERPACK_DUMP")
-                    && let Ok(t) = translate(&text, geometry)
+                    && let Ok(t) = translate(&text, geometry, AlphaTest::ONE_TENTH)
                 {
                     let base = format!("{dump}/{}", text.path.replace('/', "_"));
                     std::fs::write(format!("{base}.vert"), &t.vertex).unwrap();
                     std::fs::write(format!("{base}.frag"), &t.fragment).unwrap();
                 }
-                match compile(&text, geometry) {
+                match compile(&text, geometry, AlphaTest::ONE_TENTH) {
                     Ok(_) => println!("  ok   {}", text.path),
                     Err(e) => {
                         failed += 1;
@@ -428,8 +455,9 @@ void main() { gl_FragData[0] = vec4(renderStage == 4 ? 1.0 : 0.0); }
 "
             .to_owned(),
             lighting: TerrainLighting::default(),
+            alpha_test: None,
         };
-        let compiled = compile(&program, Geometry::Sky).unwrap();
+        let compiled = compile(&program, Geometry::Sky, AlphaTest::OFF).unwrap();
         assert!(
             compiled
                 .interface
@@ -438,6 +466,36 @@ void main() { gl_FragData[0] = vec4(renderStage == 4 ? 1.0 : 0.0); }
                 .all(|u| u.name != "renderStage")
         );
         assert_eq!(standard_macros()["MC_RENDER_STAGE_SUN"], "4");
+    }
+
+    #[test]
+    fn particle_programs_read_their_vertices() {
+        let program = ProgramText {
+            path: "gbuffers_particles".to_owned(),
+            vertex: "#version 120
+varying vec4 color;
+void main() {
+    gl_Position = ftransform();
+    color = gl_Color * (gl_TextureMatrix[1] * gl_MultiTexCoord1);
+}
+"
+            .to_owned(),
+            fragment: "#version 120
+varying vec4 color;
+uniform int renderStage;
+void main() { gl_FragData[0] = renderStage == 19 ? color : vec4(0.0); }
+"
+            .to_owned(),
+            lighting: TerrainLighting::default(),
+            alpha_test: None,
+        };
+        compile(
+            &program,
+            gbuffers_geometry(Gbuffers::ParticlesTrans),
+            AlphaTest::ONE_TENTH,
+        )
+        .unwrap();
+        assert_eq!(standard_macros()["MC_RENDER_STAGE_PARTICLES"], "19");
     }
 
     #[test]
@@ -457,7 +515,7 @@ const int colortex0Format = RGBA8;
 #endif
 void main",
         );
-        let compiled = compile(&program, Geometry::Final).unwrap();
+        let compiled = compile(&program, Geometry::Final, AlphaTest::OFF).unwrap();
         let mut settings = directives::TargetSettings::default();
         settings.read(&compiled.text);
         assert_eq!(settings.colortex.formats[&0], "RGBA16F");
