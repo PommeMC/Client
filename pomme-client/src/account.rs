@@ -6,8 +6,8 @@ use std::path::Path;
 
 use pomme_auth::{AuthAccount, SecretStore};
 
-/// The OS credential store on desktop, shared with the launcher; Android has
-/// none, so a file in the app's private storage.
+/// The OS credential store on desktop; Android has none, so a file in the
+/// app's private storage.
 // TODO: wrap the Android file in the Android Keystore.
 pub fn store(game_dir: &Path) -> Box<dyn SecretStore> {
     #[cfg(target_os = "android")]

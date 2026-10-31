@@ -17,15 +17,13 @@ concurrency:
 
 jobs:
   # What a pull request touches, so it skips the checks it can't affect: a
-  # docs-only change builds nothing, and the launcher's jobs only run for it
-  # and the crates it uses. Pushes and manual runs check everything.
+  # docs-only change builds nothing. Pushes and manual runs check everything.
   changes:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
     outputs:
       code: ${{ github.event_name != 'pull_request' || steps.code.outputs.code == 'true' }}
-      launcher: ${{ github.event_name != 'pull_request' || steps.launcher.outputs.launcher == 'true' }}
     steps:
       - uses: dorny/paths-filter@v3
         if: github.event_name == 'pull_request'
@@ -37,25 +35,6 @@ jobs:
               - '**'
               - '!**/*.md'
               - '!LICENSE*'
-
-      - uses: dorny/paths-filter@v3
-        if: github.event_name == 'pull_request'
-        id: launcher
-        with:
-          filters: |
-            launcher:
-              - 'pomme-launcher/**'
-              - 'pomme-auth/**'
-              - 'pomme-dirs/**'
-              - 'pomme-install/**'
-              - 'pomme-protocol/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'rust-toolchain.toml'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - '.github/workflows/ci.yml'
 
   # Desktop clippy never compiles the `cfg(target_os = "android")` code.
   android:
@@ -231,79 +210,6 @@ jobs:
           print(f"{len(boxes)} checkboxes match their label mappings")
           PY
 
-  launcher-frontend:
-    needs: changes
-    if: needs.changes.outputs.launcher == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 10
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: Install dependencies
-        run: pnpm install
-
-      - name: Format check
-        run: pnpm --filter pomme-launcher format:check
-
-      - name: Lint
-        run: pnpm --filter pomme-launcher lint
-
-      - name: Type check
-        run: pnpm --filter pomme-launcher exec tsc --noEmit
-
-  launcher:
-    needs: changes
-    if: needs.changes.outputs.launcher == 'true'
-    strategy:
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: true
-
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: clippy, rustfmt
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: launcher
-          cache-on-failure: true
-
-      - name: Install Linux dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
-      - name: Format check
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo fmt -p pomme-launcher -- --check
-
-      - name: Clippy
-        run: cargo clippy -p pomme-launcher --release --all-targets --all-features -- -D warnings
-
-      - name: Check bindings are up to date
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          cargo run -p pomme-launcher --quiet --bin generate-bindings
-          if ! git diff --exit-code -- ./pomme-launcher/src/bindings; then
-            echo "::error::pomme-launcher/src/bindings is stale. Run 'cargo run -p pomme-launcher --bin generate-bindings' and commit."
-            exit 1
-          fi
-
   # The one required check: it passes once every other job has passed or been
   # skipped, so jobs can be split or skipped without touching the ruleset.
   ci:
@@ -317,8 +223,6 @@ jobs:
       - test
       - singleplayer
       - pr-template
-      - launcher-frontend
-      - launcher
     runs-on: ubuntu-latest
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')

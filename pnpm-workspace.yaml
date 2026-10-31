@@ -1,4 +1,0 @@
-packages:
-  - "pomme-launcher"
-allowBuilds:
-  unrs-resolver: false

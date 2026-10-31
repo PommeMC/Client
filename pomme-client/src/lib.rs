@@ -108,7 +108,6 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         *app = Some(platform.android_app.clone());
     }
 
-    // Ahead of the launch-token guard, which bench builds have no launcher for.
     #[cfg(feature = "cpu-bench")]
     if args.cpu_bench.is_some() || args.mesh_hash {
         let version = args.version.as_deref().unwrap_or(NATIVE.name);
