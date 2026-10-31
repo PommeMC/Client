@@ -14,7 +14,7 @@ const UNPACK_SPRITE_UV: &str = "vec2 unpack_sprite_uv(uint uv) {
 
 fn main() {
     // `mobile` covers what Android and iOS share: touch, the soft keyboard,
-    // no launcher.
+    // no self-update.
     println!("cargo::rustc-check-cfg=cfg(mobile)");
     if matches!(
         std::env::var("CARGO_CFG_TARGET_OS").as_deref(),
