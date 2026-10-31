@@ -276,6 +276,7 @@ pub fn gbuffers_geometry(program: Gbuffers) -> Geometry {
         Gbuffers::Block => Geometry::BlockEntity,
         Gbuffers::Water => Geometry::Water,
         Gbuffers::SkyBasic | Gbuffers::SkyTextured => Geometry::Sky,
+        Gbuffers::Particles | Gbuffers::ParticlesTrans => Geometry::Particle,
         _ => Geometry::Terrain,
     }
 }
@@ -301,6 +302,8 @@ mod corpus {
             Gbuffers::EntitiesTrans,
             Gbuffers::SpiderEyes,
             Gbuffers::Block,
+            Gbuffers::Particles,
+            Gbuffers::ParticlesTrans,
         ] {
             match pack.gbuffers(dimension, program) {
                 Ok(Some(text)) => out.push((text, gbuffers_geometry(program))),
@@ -438,6 +441,30 @@ void main() { gl_FragData[0] = vec4(renderStage == 4 ? 1.0 : 0.0); }
                 .all(|u| u.name != "renderStage")
         );
         assert_eq!(standard_macros()["MC_RENDER_STAGE_SUN"], "4");
+    }
+
+    #[test]
+    fn particle_programs_read_their_vertices() {
+        let program = ProgramText {
+            path: "gbuffers_particles".to_owned(),
+            vertex: "#version 120
+varying vec4 color;
+void main() {
+    gl_Position = ftransform();
+    color = gl_Color * (gl_TextureMatrix[1] * gl_MultiTexCoord1);
+}
+"
+            .to_owned(),
+            fragment: "#version 120
+varying vec4 color;
+uniform int renderStage;
+void main() { gl_FragData[0] = renderStage == 19 ? color : vec4(0.0); }
+"
+            .to_owned(),
+            lighting: TerrainLighting::default(),
+        };
+        compile(&program, gbuffers_geometry(Gbuffers::ParticlesTrans)).unwrap();
+        assert_eq!(standard_macros()["MC_RENDER_STAGE_PARTICLES"], "19");
     }
 
     #[test]

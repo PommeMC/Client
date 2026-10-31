@@ -1,8 +1,8 @@
 //! A loaded shader pack's render path, Iris's pipeline in milestone 1: the
 //! `shadow` program draws terrain into the shadow maps from the sun or moon,
-//! the `gbuffers_*` programs draw the sky, terrain, entities and block
-//! entities into the pack's `colortex` targets, `deferred*` and `composite*`
-//! passes run over them, and `final` writes the swapchain.
+//! the `gbuffers_*` programs draw the sky, terrain, entities, block entities
+//! and particles into the pack's `colortex` targets, `deferred*` and
+//! `composite*` passes run over them, and `final` writes the swapchain.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use crate::renderer::chunk::buffer::PACK_CHUNK_VERTEX_BUFFERS;
 use crate::renderer::entity_model::EntityVertex;
 use crate::renderer::pipelines::entity_renderer::{PackShadow, SWIRL_BLEND};
 use crate::renderer::pipelines::lightmap::Lightmap;
+use crate::renderer::pipelines::particle::ParticleVertex;
 use crate::renderer::pipelines::sky::{
     SKY_PUSH_SIZE, SkyDraw, SkyPipeline, SkyVertex, celestial_pose,
 };
@@ -52,7 +53,11 @@ pub enum PackGeometry {
     /// Emissive eye layers.
     EntityEyes,
     BlockEntities,
+    /// Opaque and cutout particles.
+    Particles,
     Water,
+    /// Translucent particles, after water.
+    ParticlesTranslucent,
 }
 
 impl PackGeometry {
@@ -96,7 +101,9 @@ impl PackGeometry {
             Self::EntitiesTranslucent => Gbuffers::EntitiesTrans,
             Self::EntityEyes => Gbuffers::SpiderEyes,
             Self::BlockEntities => Gbuffers::Block,
+            Self::Particles => Gbuffers::Particles,
             Self::Water => Gbuffers::Water,
+            Self::ParticlesTranslucent => Gbuffers::ParticlesTrans,
         })
     }
 
@@ -403,7 +410,9 @@ impl PackRenderer {
             PackGeometry::EntitiesTranslucent,
             PackGeometry::EntityEyes,
             PackGeometry::BlockEntities,
+            PackGeometry::Particles,
             PackGeometry::Water,
+            PackGeometry::ParticlesTranslucent,
         ]
         .into_iter()
         .filter(|&g| shadow_casters.draws(g))
@@ -731,6 +740,7 @@ impl PackRenderer {
         let entity_buffers = crate::renderer::pipelines::entity_renderer::INSTANCED_BUFFERS;
         let block_entity_buffers = [EntityVertex::BUFFER];
         let sky_buffers = [SkyVertex::BUFFER];
+        let particle_buffers = [ParticleVertex::BUFFER];
         let vertex_buffers: &[rhi::VertexBufferLayout] = match geometry.map(PackGeometry::drawn) {
             Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured) => &sky_buffers,
             Some(PackGeometry::Terrain) => &PACK_CHUNK_VERTEX_BUFFERS,
@@ -741,6 +751,7 @@ impl PackRenderer {
                 | PackGeometry::EntityEyes,
             ) => &entity_buffers,
             Some(PackGeometry::BlockEntities) => &block_entity_buffers,
+            Some(PackGeometry::Particles | PackGeometry::ParticlesTranslucent) => &particle_buffers,
             Some(_) => unreachable!("drawn geometries aren't shadow ones"),
             None => &[],
         };
@@ -763,7 +774,14 @@ impl PackRenderer {
             }),
             blend: match geometry {
                 Some(PackGeometry::EntityEyes) => Some(SPIDER_EYES_BLEND),
-                Some(g) if sky || g.water() || g == PackGeometry::EntitiesTranslucent => {
+                Some(g)
+                    if sky
+                        || g.water()
+                        || matches!(
+                            g,
+                            PackGeometry::EntitiesTranslucent | PackGeometry::ParticlesTranslucent
+                        ) =>
+                {
                     Some(rhi::BlendState::TRANSLUCENT)
                 }
                 _ => None,

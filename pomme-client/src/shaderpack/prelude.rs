@@ -35,6 +35,8 @@ pub enum Geometry {
     BlockEntity,
     /// `SkyVertex` with the sky push block (`SkyPipeline::draws`).
     Sky,
+    /// `ParticleVertex`: billboard corners, anchor-relative.
+    Particle,
     /// A full-screen triangle (`deferred`, `composite`).
     FullScreen,
     /// `final`, flipped onto the upright swapchain.
@@ -175,6 +177,11 @@ impl Preludes {
                 SKY_SETUP.to_owned(),
                 "pomme_view * pomme_sky_pose",
             ),
+            Geometry::Particle => (
+                PARTICLE_INPUTS.to_owned(),
+                PARTICLE_SETUP.to_owned(),
+                "pomme_view * pomme_eye_offset()",
+            ),
             Geometry::FullScreen | Geometry::Final => {
                 (String::new(), FULL_SCREEN_SETUP.to_owned(), "mat4(1.0)")
             }
@@ -187,6 +194,7 @@ impl Preludes {
                 Geometry::Water => "TERRAIN_TRANSLUCENT",
                 Geometry::Entity => "ENTITIES",
                 Geometry::BlockEntity => "BLOCK_ENTITIES",
+                Geometry::Particle => "PARTICLES",
                 _ => "NONE",
             })
             .to_string(),
@@ -419,6 +427,22 @@ const SKY_SETUP: &str = "
     }
     pomme_MultiTexCoord0 = vec4(pomme_in_tex_coords, 0.0, 1.0);
     pomme_MultiTexCoord1 = vec4(240.0, 240.0, 0.0, 1.0);
+";
+
+const PARTICLE_INPUTS: &str = "
+layout(location = 0) in vec3 pomme_in_position;
+layout(location = 1) in vec2 pomme_in_tex_coords;
+layout(location = 2) in vec4 pomme_in_color;
+layout(location = 3) in float pomme_in_light;
+";
+
+// Vanilla's particle format carries no normal.
+const PARTICLE_SETUP: &str = "
+    pomme_Vertex = vec4(pomme_in_position, 1.0);
+    pomme_Normal = vec3(0.0, 0.0, 1.0);
+    pomme_Color = pomme_in_color;
+    pomme_MultiTexCoord0 = vec4(pomme_in_tex_coords, 0.0, 1.0);
+    pomme_MultiTexCoord1 = pomme_light_coords(pomme_in_light);
 ";
 
 const FULL_SCREEN_SETUP: &str = "

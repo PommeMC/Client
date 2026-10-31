@@ -2,7 +2,7 @@
 //! `gbuffers_*` ones.
 
 /// A geometry program milestone 1 draws with, or one of their fallbacks.
-// TODO: the clouds, hand, weather, particle and glint programs.
+// TODO: the clouds, hand, weather and glint programs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Gbuffers {
     Basic,
@@ -16,6 +16,8 @@ pub enum Gbuffers {
     Water,
     SkyBasic,
     SkyTextured,
+    Particles,
+    ParticlesTrans,
 }
 
 impl Gbuffers {
@@ -32,6 +34,8 @@ impl Gbuffers {
             Self::Water => "gbuffers_water",
             Self::SkyBasic => "gbuffers_skybasic",
             Self::SkyTextured => "gbuffers_skytextured",
+            Self::Particles => "gbuffers_particles",
+            Self::ParticlesTrans => "gbuffers_particles_translucent",
         }
     }
 
@@ -42,8 +46,9 @@ impl Gbuffers {
             Self::Basic => return None,
             Self::Textured | Self::SkyBasic => Self::Basic,
             Self::TexturedLit | Self::SkyTextured | Self::SpiderEyes => Self::Textured,
-            Self::Terrain | Self::Entities => Self::TexturedLit,
+            Self::Terrain | Self::Entities | Self::Particles => Self::TexturedLit,
             Self::EntitiesTrans => Self::Entities,
+            Self::ParticlesTrans => Self::Particles,
             Self::Block | Self::Water => Self::Terrain,
         })
     }
@@ -70,6 +75,8 @@ mod tests {
             Gbuffers::Water,
             Gbuffers::SkyBasic,
             Gbuffers::SkyTextured,
+            Gbuffers::Particles,
+            Gbuffers::ParticlesTrans,
         ] {
             let mut at = program;
             while let Some(next) = at.fallback() {
@@ -82,5 +89,10 @@ mod tests {
         assert_eq!(Gbuffers::SkyTextured.fallback(), Some(Gbuffers::Textured));
         assert_eq!(Gbuffers::EntitiesTrans.fallback(), Some(Gbuffers::Entities));
         assert_eq!(Gbuffers::SpiderEyes.fallback(), Some(Gbuffers::Textured));
+        assert_eq!(
+            Gbuffers::ParticlesTrans.fallback(),
+            Some(Gbuffers::Particles)
+        );
+        assert_eq!(Gbuffers::Particles.fallback(), Some(Gbuffers::TexturedLit));
     }
 }
