@@ -492,6 +492,7 @@ impl GameState {
         self.section_vis.clear();
         self.section_vis_epoch.clear();
         self.compiled.clear();
+        self.clear_visibility();
         self.mesh_dispatcher = mesh_source.create_mesh_dispatcher(
             self.block_registry.owned_render_view(),
             Arc::clone(&self.biome_climate),
@@ -567,8 +568,10 @@ impl GameState {
             });
         self.forget_mesh_column(pos);
         self.compiled.remove(&pos);
-        self.vis_mask.remove(&pos);
-        self.vis_tiers.remove(&pos);
+        if let Some(mask) = self.in_view_masks.remove(&pos) {
+            let sections = self.chunk_store.section_count() as u32;
+            self.mesh_gate.remove(mask, sections);
+        }
         self.section_vis.retain(|(p, _), _| *p != pos);
         self.section_vis_epoch.retain(|(p, _), _| *p != pos);
     }
