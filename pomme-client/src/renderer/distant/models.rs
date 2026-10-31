@@ -204,7 +204,7 @@ impl ModelFactory {
         });
         self.tiles.push(ModelTile {
             id,
-            levels: mip_tile(flags.darkened, &faces),
+            levels: mip_tile(flags.darkened, leaves, &faces),
         });
         self.by_faces.insert(faces, id);
         id
@@ -309,15 +309,17 @@ fn compute_bounds(face: &FaceTexture, check: WriteCheck) -> [usize; 4] {
 }
 
 /// Voxy's `MipGen.putTextures`: the faces laid out in a tile, transparent
-/// texels taking the colour of the nearest drawn one (unless the sprites
-/// mip dark), then halved down to 2x2 faces.
-fn mip_tile(darkened: bool, faces: &[FaceTexture; 6]) -> Vec<Vec<u8>> {
+/// texels taking the colour of the nearest drawn one, then halved down to
+/// 2x2 faces. Voxy leaves sprites that mip dark black there; leaves fill
+/// theirs anyway, since coarse distant leaves draw them solid
+/// ([`ModelInfo::holes`]).
+fn mip_tile(darkened: bool, leaves: bool, faces: &[FaceTexture; 6]) -> Vec<Vec<u8>> {
     let width = TILE_WIDTH as usize;
     let mut tile = vec![0u32; width * TILE_HEIGHT as usize];
     for (i, face) in faces.iter().enumerate() {
         let (x, y) = ((i >> 1) * SIZE, (i & 1) * SIZE);
         let mut colours = *face.colour;
-        if !darkened && colours.iter().any(|c| c >> 24 == 0) {
+        if (!darkened || leaves) && colours.iter().any(|c| c >> 24 == 0) {
             solidify(&mut colours);
         }
         for (j, &colour) in colours.iter().enumerate() {
@@ -435,4 +437,40 @@ fn linear_to_srgb(linear: f32) -> u8 {
         1.055 * linear.powf(1.0 / 2.4) - 0.055
     };
     (c * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Six faces of green with a clear texel at the corner of each.
+    fn holey_faces() -> [FaceTexture; 6] {
+        std::array::from_fn(|_| {
+            let mut colour = Box::new([u32::from_le_bytes([0, 200, 0, 255]); TEXELS]);
+            colour[0] = 0;
+            FaceTexture {
+                colour,
+                depth: Box::new([1; TEXELS]),
+            }
+        })
+    }
+
+    #[test]
+    fn leaves_fill_their_holes_where_dark_sprites_stay_black() {
+        // The clear texel takes its neighbour's colour, keeping zero alpha so
+        // full detail still cuts it out.
+        let filled = [0, 200, 0, 0];
+        for (darkened, leaves, corner) in [
+            (true, true, filled),
+            (true, false, [0; 4]),
+            (false, false, filled),
+        ] {
+            let levels = mip_tile(darkened, leaves, &holey_faces());
+            assert_eq!(
+                levels[0][..4],
+                corner,
+                "darkened {darkened}, leaves {leaves}"
+            );
+        }
+    }
 }
