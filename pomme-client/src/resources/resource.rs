@@ -1,11 +1,10 @@
 use std::borrow::Cow;
 use std::io::Read;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::{fmt, io};
 
+use super::pack_resources::{IoSupplier, METADATA_EXTENSION};
 use super::packs::PackId;
-use super::packs::providers::{SharedPackResourceProvider, ThreadSafePackResourceProvider};
 
 /// Owned byte stream; dropping it releases its backing state.
 pub(crate) type ReadStream = Box<dyn Read + 'static>;
@@ -69,6 +68,14 @@ impl ResourceId {
 
     pub(crate) fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Appending the metadata suffix preserves the already validated ID.
+    pub(super) fn sidecar(&self) -> Self {
+        Self {
+            namespace: self.namespace.clone(),
+            path: Cow::Owned(format!("{}{METADATA_EXTENSION}", self.path)),
+        }
     }
 
     /// Omits only the default `minecraft` namespace.
@@ -168,20 +175,25 @@ pub(crate) enum ResourceError {
 /// Pins a source, not immutable bytes. Setup validation is trusted; each open
 /// performs ordinary candidate I/O, without revalidating source roots or
 /// policy.
+/// PackResources suppliers and their handles are application-thread-local.
 #[derive(Clone)]
 pub(crate) struct ResourceContent {
     id: ResourceId,
     origin: ResourceOrigin,
-    source: SharedPackResourceProvider,
+    supplier: IoSupplier<ReadStream>,
 }
 
 impl ResourceContent {
-    /// Requires an ID already located in this source.
-    pub(super) fn new(id: ResourceId, source: SharedPackResourceProvider) -> Self {
+    /// Retains exactly the selected supplier, without relookup or opening it.
+    pub(super) fn from_supplier(
+        id: ResourceId,
+        origin: ResourceOrigin,
+        supplier: IoSupplier<ReadStream>,
+    ) -> Self {
         Self {
             id,
-            origin: source.origin().clone(),
-            source,
+            origin,
+            supplier,
         }
     }
 
@@ -193,77 +205,15 @@ impl ResourceContent {
         &self.origin
     }
 
-    /// Retains the exact selected source without lookup or content I/O.
-    /// Only the resulting content handle is transferable, not resource
-    /// metadata.
-    pub(crate) fn into_thread_safe(self) -> Result<ThreadSafeResourceContent, ResourceError> {
-        let source = self
-            .source
-            .thread_safe_source()
-            .map_err(|source| ResourceError::Io {
-                operation: "prepare thread-safe resource",
-                id: Some(self.id.clone()),
-                origin: self.origin.clone(),
-                source,
-            })?;
-        Ok(ThreadSafeResourceContent {
-            id: self.id,
-            origin: self.origin,
+    /// Missing or changed backing content never triggers source fallback.
+    /// Later Read errors are io::Error; the handle retains ID/origin context.
+    pub(crate) fn open(&self) -> Result<ReadStream, ResourceError> {
+        (self.supplier)().map_err(|source| ResourceError::Io {
+            operation: "open resource",
+            id: Some(self.id.clone()),
+            origin: self.origin.clone(),
             source,
         })
-    }
-
-    /// Missing or changed backing content never triggers source fallback.
-    /// Later Read errors are io::Error; the handle retains ID/origin context.
-    pub(crate) fn open(&self) -> Result<ReadStream, ResourceError> {
-        self.source
-            .open(&self.id)
-            .map_err(|source| ResourceError::Io {
-                operation: "open resource",
-                id: Some(self.id.clone()),
-                origin: self.origin.clone(),
-                source,
-            })
-    }
-
-    /// Reopens this content and reads at most one byte past the limit to
-    /// detect oversized input, retaining ID/origin context on read errors.
-    pub(crate) fn read_bytes(&self, limit: usize) -> Result<Vec<u8>, ResourceError> {
-        read_bounded(self.open()?, limit, &self.id, &self.origin)
-    }
-}
-
-/// Opt-in transferable content, retaining the selected source independently of
-/// the manager. Pins a source, not immutable bytes; open trusts setup
-/// validation and performs ordinary candidate I/O. Streams are created, used
-/// and dropped on the opening thread, not transferred.
-#[derive(Clone)]
-pub(crate) struct ThreadSafeResourceContent {
-    id: ResourceId,
-    origin: ResourceOrigin,
-    source: Arc<dyn ThreadSafePackResourceProvider>,
-}
-
-impl ThreadSafeResourceContent {
-    pub(crate) fn id(&self) -> &ResourceId {
-        &self.id
-    }
-
-    pub(crate) fn origin(&self) -> &ResourceOrigin {
-        &self.origin
-    }
-
-    /// Missing or changed backing content never triggers source fallback.
-    /// Later Read errors are io::Error; the handle retains ID/origin context.
-    pub(crate) fn open(&self) -> Result<ReadStream, ResourceError> {
-        self.source
-            .open(&self.id)
-            .map_err(|source| ResourceError::Io {
-                operation: "open resource",
-                id: Some(self.id.clone()),
-                origin: self.origin.clone(),
-                source,
-            })
     }
 
     /// Reopens this content and reads at most one byte past the limit to

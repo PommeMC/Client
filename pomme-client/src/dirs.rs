@@ -56,9 +56,24 @@ impl DataDirs {
         pomme_dirs::create_profile(&self.game_dir)
     }
 
-    /// `version`'s assets are downloaded, so the client can start on them.
+    /// The client also needs the cached JAR for installed format metadata.
+    /// Older extracted-only installs get one normal installer repair pass.
     pub fn is_installed(&self, version: &str) -> bool {
         pomme_install::is_installed(&self.assets_dir, &self.versions_dir, version)
+            && pomme_install::client_jar_path(&self.versions_dir, version).is_file()
+    }
+
+    pub(crate) fn installation_location(
+        &self,
+        version: &str,
+    ) -> crate::resources::packs::InstallationLocation {
+        crate::resources::packs::InstallationLocation {
+            version: version.to_owned(),
+            client_jar: pomme_install::client_jar_path(&self.versions_dir, version),
+            extracted_root: self.versions_dir.join(version).join("extracted"),
+            index_file: self.indexes_dir.join(format!("{version}.json")),
+            objects_dir: self.objects_dir.clone(),
+        }
     }
 
     /// The downloaded Bedrock UI textures the Bedrock theme draws.

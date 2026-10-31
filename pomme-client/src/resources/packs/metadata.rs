@@ -1,19 +1,14 @@
 use std::io;
-use std::path::Path;
 
-use serde::Deserialize;
 use serde_json::Value;
 
-use super::filter::ResourceFilter;
 use super::format::{MAX_COMPONENT, PackFormat, PackFormatRange, format_component};
-use super::{PackCompat, PackId, PackInfo, ResourcePackSource, metadata};
-use crate::resources::ResourceOrigin;
+use super::{PackCompat, metadata};
+use crate::chat_component::Component;
+use crate::resources::pack_resources::PackType;
 
-pub(super) const PACK_METADATA_FILE: &str = "pack.mcmeta";
 pub(super) const PACK_SECTION: &str = "pack";
 pub(super) const PACK_DESCRIPTION: &str = "description";
-pub(super) const PACK_NAME: &str = "name";
-pub(super) const FILTER_SECTION: &str = "filter";
 pub(super) const OVERLAYS_SECTION: &str = "overlays";
 pub(super) const OVERLAY_ENTRIES: &str = "entries";
 pub(super) const OVERLAY_DIRECTORY: &str = "directory";
@@ -27,177 +22,70 @@ pub(super) const PACK_MAX_FORMAT: &str = "max_format";
 pub(super) const FORMAT_MIN_INCLUSIVE: &str = "min_inclusive";
 pub(super) const FORMAT_MAX_INCLUSIVE: &str = "max_inclusive";
 
-// Installed JAR version.json, distinct from selected-pack metadata.
-pub(super) const VERSION_METADATA_FILE: &str = "version.json";
-pub(super) const VERSION_RESOURCE_FORMAT: &str = "resource";
-pub(super) const VERSION_RESOURCE_MAJOR: &str = "resource_major";
-pub(super) const VERSION_RESOURCE_MINOR: &str = "resource_minor";
-
-const LAST_PRE_MINOR_RESOURCE_FORMAT: u32 = 64;
-
-/// A single root decode, with independent section failures. Discovery can use
-/// presentation metadata even when a resource-only section is invalid.
-pub(super) struct PackMetadata {
-    object: bool,
-    name: Option<String>,
-    description: Option<String>,
-    format_range: Option<PackFormatRange>,
-    filter: io::Result<ResourceFilter>,
-    overlays: io::Result<Vec<OverlayEntry>>,
-    overlay_warnings: Vec<String>,
+pub(super) fn last_pre_minor_format(pack_type: PackType) -> u32 {
+    match pack_type {
+        PackType::ClientResources => 64,
+        PackType::ServerData => 81,
+    }
 }
 
-impl PackMetadata {
-    /// Local ZIPs use the original archive, not the legacy extraction cache.
-    /// Discovery omits metadata-less packs; manual registration permits them.
-    pub(super) fn read(root: &Path, archive: Option<&Path>) -> io::Result<Option<Self>> {
-        if let Some(path) = archive {
-            let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
-            match archive.by_name(metadata::PACK_METADATA_FILE) {
-                Ok(metadata) => Self::decode(metadata).map(Some),
-                Err(zip::result::ZipError::FileNotFound) => Ok(None),
-                Err(error) => Err(error.into()),
-            }
-        } else {
-            match std::fs::File::open(root.join(metadata::PACK_METADATA_FILE)) {
-                Ok(metadata) => Self::decode(metadata).map(Some),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(error),
-            }
-        }
-    }
-
-    fn decode(reader: impl io::Read) -> io::Result<Self> {
-        let root: Value = serde_json::from_reader(reader)?;
-        let pack = root.get(metadata::PACK_SECTION);
-        let text = |key| {
-            pack.and_then(|pack| pack.get(key))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        };
-        let mut overlay_warnings = Vec::new();
-        let overlays = parse_overlays(root.get(metadata::OVERLAYS_SECTION), &mut overlay_warnings);
-        Ok(Self {
-            object: root.is_object(),
-            name: text(metadata::PACK_NAME),
-            description: text(metadata::PACK_DESCRIPTION),
-            format_range: pack.and_then(parse_resource_pack_range),
-            filter: parse_filter(root.get(metadata::FILTER_SECTION)),
-            overlays,
-            overlay_warnings,
-        })
-    }
-
-    pub(super) fn format_range(&self) -> Option<PackFormatRange> {
-        self.format_range
-    }
-
-    pub(super) fn require_object(self) -> io::Result<Self> {
-        if self.object {
-            Ok(self)
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "pack.mcmeta must be an object",
-            ))
-        }
-    }
-
-    pub(super) fn resource_sections(
-        self,
-        target: Option<PackFormat>,
-        origin: &ResourceOrigin,
-    ) -> io::Result<(ResourceFilter, Vec<String>)> {
-        // Replay validation warnings even on failure, but never during discovery.
-        for directory in self.overlay_warnings {
-            tracing::warn!(directory, "Unknown or broken overlay entry; skipping");
-        }
-        // Overlay failures reject registration before filter errors are logged.
-        let overlays = self
-            .overlays?
-            .into_iter()
-            .filter_map(|entry| {
-                target
-                    .filter(|target| entry.range.contains(*target))
-                    .map(|_| entry.directory)
+/// Decode the shared rich description once: both Vanilla codecs require the
+/// same component, so a malformed description cannot be rescued by fallback.
+/// Only format decoding can fall back here; raw metadata access happens before
+/// this helper and never enters this recovery path.
+pub(super) fn decode_pack_section(
+    section: &Value,
+    pack_type: PackType,
+    target: Option<PackFormat>,
+    pack_id: &str,
+) -> io::Result<(Component, PackCompat)> {
+    let description = section
+        .get(PACK_DESCRIPTION)
+        .ok_or_else(|| invalid_format("pack.description is required"))?;
+    let description = Component::from_value(description)
+        .map_err(|error| invalid_format(format!("pack.description: {error}")))?;
+    let range = match parse_pack_range(section, pack_type) {
+        Ok(range) => range,
+        Err(error) => {
+            tracing::warn!(pack = pack_id, %error, "Error reading pack format metadata; using description-only fallback");
+            DeclaredFormatRange::Legacy(LegacyFormatRange {
+                min: i32::MAX,
+                max: i32::MAX,
             })
-            .collect();
-        let filter = self.filter.unwrap_or_else(|error| {
-            // Vanilla 26.3 logs and ignores the entire invalid filter section,
-            // never retaining a successfully compiled prefix of its block list.
-            tracing::error!(
-                pack = %origin.name,
-                pack_id = ?origin.pack_id,
-                %error,
-                "Invalid pack.mcmeta filter metadata; ignoring entire filter section (Rust regex syntax, not full Java Pattern support)"
-            );
-            ResourceFilter::default()
-        });
-        Ok((filter, overlays))
-    }
-}
-
-impl PackInfo {
-    pub(super) fn from_metadata(
-        metadata: Option<&PackMetadata>,
-        source: &ResourcePackSource,
-        pack_id: PackId,
-        target: Option<PackFormat>,
-    ) -> Self {
-        let (name, description, compat) = match metadata {
-            Some(metadata) => (
-                metadata
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| source.fallback_name.clone()),
-                metadata
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| source.fallback_name.clone()),
-                PackCompat::for_format(metadata.format_range(), target),
-            ),
-            None => (
-                source.fallback_name.clone(),
-                source.fallback_name.clone(),
-                PackCompat::Unknown,
-            ),
-        };
-        Self {
-            pack_id,
-            name,
-            description,
-            compat,
-            provenance: source.provenance.clone(),
-            enabled: false,
         }
-    }
-}
-
-/// A present filter section requires `block`; unknown fields are ignored.
-#[derive(Deserialize)]
-struct PackFilterSpec {
-    block: Vec<FilterSpec>,
-}
-
-#[derive(Deserialize)]
-struct FilterSpec {
-    // Omission and JSON null are wildcards; other values must be strings.
-    namespace: Option<String>,
-    path: Option<String>,
-}
-
-fn parse_filter(section: Option<&Value>) -> io::Result<ResourceFilter> {
-    let Some(section) = section else {
-        return Ok(ResourceFilter::default());
     };
-    let spec: PackFilterSpec = serde_json::from_value(section.clone())?;
-    ResourceFilter::compile(
-        spec.block
-            .into_iter()
-            .map(|rule| (rule.namespace, rule.path))
-            .collect(),
-    )
-    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    Ok((description, range.compatibility(target)))
+}
+
+/// Validate the entire section even without a bootstrap target, replaying
+/// formatless-entry warnings even when a later entry rejects the list.
+pub(super) fn selected_overlay_directories(
+    section: Option<&Value>,
+    pack_type: PackType,
+    target: Option<PackFormat>,
+    pack_id: &str,
+) -> io::Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    let entries = parse_overlays(section, &mut warnings, pack_type);
+    for directory in warnings {
+        tracing::warn!(
+            pack = pack_id,
+            directory,
+            "Unknown or broken overlay entry; skipping"
+        );
+    }
+    Ok(entries?
+        .into_iter()
+        .filter_map(|entry| {
+            target
+                .filter(|target| entry.range.contains(*target))
+                .map(|_| entry.directory)
+        })
+        .collect())
+}
+
+fn invalid_format(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
 fn parse_bound(value: &Value, default_minor: u32) -> Option<PackFormat> {
@@ -243,17 +131,38 @@ impl LegacyFormatRange {
     }
 }
 
-enum OverlayFormatRange {
+enum DeclaredFormatRange {
     Modern(PackFormatRange),
     Legacy(LegacyFormatRange),
 }
 
 struct OverlayEntry {
     directory: String,
-    range: OverlayFormatRange,
+    range: DeclaredFormatRange,
 }
 
-impl OverlayFormatRange {
+impl DeclaredFormatRange {
+    fn compatibility(&self, target: Option<PackFormat>) -> PackCompat {
+        match self {
+            Self::Modern(range) => PackCompat::for_format(Some(*range), target),
+            Self::Legacy(range) => {
+                let Some(target) = target else {
+                    return PackCompat::Unknown;
+                };
+                let target = (i64::from(target.major()), target.minor());
+                if range.min == i32::MAX {
+                    PackCompat::Unknown
+                } else if target > (i64::from(range.max), 0) {
+                    PackCompat::TooOld
+                } else if target < (i64::from(range.min), 0) {
+                    PackCompat::TooNew
+                } else {
+                    PackCompat::Compatible
+                }
+            }
+        }
+    }
+
     fn contains(&self, target: PackFormat) -> bool {
         match self {
             Self::Modern(range) => target >= range.min() && target <= range.max(),
@@ -284,7 +193,9 @@ fn parse_legacy_range(value: &Value) -> Option<LegacyFormatRange> {
 fn parse_overlays(
     section: Option<&Value>,
     warnings: &mut Vec<String>,
+    pack_type: PackType,
 ) -> io::Result<Vec<OverlayEntry>> {
+    let boundary = last_pre_minor_format(pack_type);
     let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
     let Some(section) = section else {
         return Ok(Vec::new());
@@ -322,26 +233,23 @@ fn parse_overlays(
                 parse_legacy_range(value).ok_or_else(|| invalid("invalid overlay formats"))
             })
             .transpose()?;
-        requires_legacy |= modern
-            .is_some_and(|range| range.min().major() <= LAST_PRE_MINOR_RESOURCE_FORMAT)
-            || legacy.is_some_and(|range| {
-                i64::from(range.min) <= i64::from(LAST_PRE_MINOR_RESOURCE_FORMAT)
-            });
-        parsed.push((directory, modern, legacy));
-    }
-    let mut validated = Vec::with_capacity(parsed.len());
-    for (directory, modern, legacy) in parsed {
         if modern.is_none() && legacy.is_none() {
             warnings.push(directory.to_owned());
             continue;
         }
+        requires_legacy |= modern.is_some_and(|range| range.min().major() <= boundary)
+            || legacy.is_some_and(|range| i64::from(range.min) <= i64::from(boundary));
+        parsed.push((directory, modern, legacy));
+    }
+    let mut validated = Vec::with_capacity(parsed.len());
+    for (directory, modern, legacy) in parsed {
         if requires_legacy && legacy.is_none() {
-            return Err(invalid(
-                "formats is required in every version-bearing overlay when any overlay supports format 64 or older",
-            ));
+            return Err(invalid_format(format!(
+                "formats is required in every version-bearing overlay when any overlay supports format {boundary} or older"
+            )));
         }
         let range = if let Some(range) = modern {
-            if range.min().major() > LAST_PRE_MINOR_RESOURCE_FORMAT && !requires_legacy {
+            if range.min().major() > boundary && !requires_legacy {
                 if legacy.is_some() {
                     return Err(invalid("formats is deprecated for modern-only overlays"));
                 }
@@ -349,22 +257,22 @@ fn parse_overlays(
                 let legacy = legacy.ok_or_else(|| invalid("overlay requires formats"))?;
                 if i64::from(legacy.min) != i64::from(range.min().major())
                     || (i64::from(legacy.max) != i64::from(range.max().major())
-                        && i64::from(legacy.max) != i64::from(LAST_PRE_MINOR_RESOURCE_FORMAT))
+                        && i64::from(legacy.max) != i64::from(boundary))
                 {
                     return Err(invalid(
                         "overlay formats disagrees with min_format/max_format",
                     ));
                 }
             }
-            OverlayFormatRange::Modern(range)
+            DeclaredFormatRange::Modern(range)
         } else {
             let legacy = legacy.ok_or_else(|| invalid("overlay requires formats"))?;
-            if i64::from(legacy.max) > i64::from(LAST_PRE_MINOR_RESOURCE_FORMAT) {
-                return Err(invalid(
-                    "overlay formats above 64 requires min_format/max_format",
-                ));
+            if i64::from(legacy.max) > i64::from(boundary) {
+                return Err(invalid_format(format!(
+                    "overlay formats above {boundary} requires min_format/max_format"
+                )));
             }
-            OverlayFormatRange::Legacy(legacy)
+            DeclaredFormatRange::Legacy(legacy)
         };
         validated.push(OverlayEntry {
             directory: directory.to_owned(),
@@ -374,58 +282,75 @@ fn parse_overlays(
     Ok(validated)
 }
 
-/// Root client-resource policy from Vanilla 26.3 PackFormat.IntermediaryFormat.
-/// Unknown fields remain untouched. Invalid or absent versions leave discovery
-/// to the caller, with unknown compatibility rather than an unbounded range.
-fn parse_resource_pack_range(pack: &Value) -> Option<PackFormatRange> {
+fn parse_pack_range(pack: &Value, pack_type: PackType) -> io::Result<DeclaredFormatRange> {
+    let boundary = last_pre_minor_format(pack_type);
     let main = match pack.get(metadata::PACK_FORMAT) {
-        Some(value) => Some(format_component(value)?),
+        Some(value) => Some(
+            value
+                .as_i64()
+                .and_then(|value| i32::try_from(value).ok())
+                .ok_or_else(|| invalid_format("pack_format must be a signed Java integer"))?,
+        ),
         None => None,
     };
     let supported = match pack.get(metadata::PACK_SUPPORTED_FORMATS) {
-        Some(value) => {
-            let range = parse_legacy_range(value)?;
-            // Preserve the root API's non-negative compatibility bounds.
-            Some((
-                u32::try_from(range.min).ok()?,
-                u32::try_from(range.max).ok()?,
-            ))
-        }
+        Some(value) => Some(
+            parse_legacy_range(value)
+                .ok_or_else(|| invalid_format("invalid supported_formats range"))?,
+        ),
         None => None,
     };
-    let valid_main = |min, max| main.is_some_and(|main| main >= 15 && main >= min && main <= max);
+    let valid_main = |min: i64, max: i64| {
+        main.is_some_and(|main| main >= 15 && i64::from(main) >= min && i64::from(main) <= max)
+    };
 
     if pack.get(metadata::PACK_MIN_FORMAT).is_some()
         || pack.get(metadata::PACK_MAX_FORMAT).is_some()
     {
-        let range = parse_modern_range(pack)?;
+        let range = parse_modern_range(pack)
+            .ok_or_else(|| invalid_format("invalid or unpaired min_format/max_format"))?;
         let min = range.min().major();
         let max = range.max().major();
-        if min > LAST_PRE_MINOR_RESOURCE_FORMAT {
-            if supported.is_some() || (main.is_some() && !valid_main(min, max)) {
-                return None;
+        if min > boundary {
+            if supported.is_some()
+                || (main.is_some() && !valid_main(i64::from(min), i64::from(max)))
+            {
+                return Err(invalid_format(
+                    "modern-only pack has deprecated supported_formats or invalid pack_format",
+                ));
             }
         } else {
-            let (old_min, old_max) = supported?;
-            if old_min != min
-                || (old_max != max && old_max != LAST_PRE_MINOR_RESOURCE_FORMAT)
-                || !valid_main(min, max)
+            let old = supported.ok_or_else(|| invalid_format("pack requires supported_formats"))?;
+            if i64::from(old.min) != i64::from(min)
+                || (i64::from(old.max) != i64::from(max)
+                    && i64::from(old.max) != i64::from(boundary))
+                || !valid_main(i64::from(min), i64::from(max))
             {
-                return None;
+                return Err(invalid_format(
+                    "pack legacy fields disagree with min_format/max_format or pack_format is missing/invalid",
+                ));
             }
         }
-        Some(range)
-    } else if let Some((min, max)) = supported {
-        if max > LAST_PRE_MINOR_RESOURCE_FORMAT || !valid_main(min, max) {
-            return None;
+        Ok(DeclaredFormatRange::Modern(range))
+    } else if let Some(range) = supported {
+        if i64::from(range.max) > i64::from(boundary)
+            || !valid_main(i64::from(range.min), i64::from(range.max))
+        {
+            return Err(invalid_format(
+                "supported_formats requires modern bounds or a valid pack_format within its range",
+            ));
         }
-        PackFormatRange::new(PackFormat::new(min, 0)?, PackFormat::new(max, 0)?)
+        Ok(DeclaredFormatRange::Legacy(range))
     } else {
-        let main = main?;
-        if main > LAST_PRE_MINOR_RESOURCE_FORMAT {
-            return None;
+        let main = main.ok_or_else(|| invalid_format("missing pack format version information"))?;
+        if i64::from(main) > i64::from(boundary) {
+            return Err(invalid_format(format!(
+                "pack_format above {boundary} requires min_format/max_format"
+            )));
         }
-        let format = PackFormat::new(main, 0)?;
-        PackFormatRange::new(format, format)
+        Ok(DeclaredFormatRange::Legacy(LegacyFormatRange {
+            min: main,
+            max: main,
+        }))
     }
 }

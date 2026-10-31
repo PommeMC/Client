@@ -34,7 +34,7 @@ mod resource_pack;
 #[allow(
     dead_code,
     unused_imports,
-    reason = "Resources API is consumed by the follow-up migration PR"
+    reason = "Resource views are initialized; asset-consumer API adoption is deferred"
 )]
 pub(crate) mod resources;
 mod shaderpack;

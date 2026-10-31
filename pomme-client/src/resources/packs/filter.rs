@@ -1,4 +1,8 @@
+use std::io;
+
 use regex::Regex;
+use serde::Deserialize;
+use serde_json::Value;
 
 use crate::resources::ResourceId;
 
@@ -34,7 +38,7 @@ struct Filter {
 }
 
 impl ResourceFilter {
-    fn namespace_blocked(&self, namespace: &str) -> bool {
+    pub(in crate::resources) fn namespace_blocked(&self, namespace: &str) -> bool {
         self.filters.iter().any(|rule| {
             rule.namespace
                 .as_ref()
@@ -42,7 +46,7 @@ impl ResourceFilter {
         })
     }
 
-    fn path_blocked(&self, path: &str) -> bool {
+    pub(in crate::resources) fn path_blocked(&self, path: &str) -> bool {
         self.filters.iter().any(|rule| {
             rule.path
                 .as_ref()
@@ -55,4 +59,31 @@ impl ResourceFilter {
         // ANY namespace AND ANY path across the filters, NOT paired rules.
         self.namespace_blocked(id.namespace()) && self.path_blocked(id.path())
     }
+}
+
+/// A present filter section requires `block`; unknown fields are ignored.
+#[derive(Deserialize)]
+struct PackFilterSpec {
+    block: Vec<FilterSpec>,
+}
+
+#[derive(Deserialize)]
+struct FilterSpec {
+    // Omission and JSON null are wildcards; other values must be strings.
+    namespace: Option<String>,
+    path: Option<String>,
+}
+
+pub(in crate::resources) fn parse_filter(section: Option<&Value>) -> io::Result<ResourceFilter> {
+    let Some(section) = section else {
+        return Ok(ResourceFilter::default());
+    };
+    let spec: PackFilterSpec = serde_json::from_value(section.clone())?;
+    ResourceFilter::compile(
+        spec.block
+            .into_iter()
+            .map(|rule| (rule.namespace, rule.path))
+            .collect(),
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }

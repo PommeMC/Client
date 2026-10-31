@@ -1,6 +1,7 @@
 //! Installs a Minecraft version's assets the way the client reads them: the
 //! asset index and objects under `assets/`, and the client jar's `assets/`
-//! extracted under `versions/<version>/extracted/`.
+//! extracted under `versions/<version>/extracted/`. The verified client JAR is
+//! cached alongside the extraction for installed version metadata.
 //!
 //! Every download is checked against the sha1 Mojang publishes, retried, and
 //! written beside its final path then renamed, so an interrupted install
@@ -90,6 +91,11 @@ fn extracted_dir(versions_dir: &Path, version: &str) -> PathBuf {
     versions_dir.join(version).join("extracted")
 }
 
+/// Cached client JAR; resource content still comes from extracted assets.
+pub fn client_jar_path(versions_dir: &Path, version: &str) -> PathBuf {
+    versions_dir.join(version).join(format!("{version}.jar"))
+}
+
 /// Written into a version's extraction once it's complete.
 const EXTRACTED_MARKER: &str = ".extracted";
 
@@ -100,7 +106,9 @@ fn extracted_marker(versions_dir: &Path, version: &str) -> PathBuf {
 /// The version's index and its jar's extraction are in place. Each is
 /// written only once it's complete, the extraction with its `.extracted`
 /// marker; older launchers extracted in place and wrote the marker last, so
-/// one without it may be half done.
+/// one without it may be half done. This extraction-readiness check remains
+/// compatible with older installs; clients needing JAR metadata also check
+/// `client_jar_path` and run `install` to provision a missing cache.
 pub fn is_installed(assets_dir: &Path, versions_dir: &Path, version: &str) -> bool {
     index_path(assets_dir, version).exists()
         && extracted_marker(versions_dir, version).exists()
@@ -153,10 +161,17 @@ pub async fn install(
     write_atomic(&index_path(assets_dir, version), &index_bytes).await?;
 
     let out = extracted_dir(versions_dir, version);
-    if !extracted_marker(versions_dir, version).exists() || !out.join("assets").is_dir() {
+    let needs_extraction =
+        !extracted_marker(versions_dir, version).exists() || !out.join("assets").is_dir();
+    let jar_path = client_jar_path(versions_dir, version);
+    if needs_extraction || !jar_path.is_file() {
         report(0, 1, "Downloading the client jar...");
         let client = &version_json.downloads.client;
         let jar = fetch_verified(http, &client.url, &client.sha1, Hash::Sha1).await?;
+        write_atomic(&jar_path, &jar).await?;
+        if !needs_extraction {
+            return Ok(());
+        }
         let mut part = out.as_os_str().to_owned();
         part.push(".part");
         let part = PathBuf::from(part);

@@ -1,26 +1,41 @@
 //! Resource bytes, independent of particles, render assets and the GPU.
-//! Shared resource view for all standard asset consumers through registered
+//! Resource view for subsequent asset-consumer adoption through repository
 //! sources. Server-data domains are not implemented.
 //!
-//! Resource configuration owns locations, discovery and selection; downloading
-//! is a separate operation. Providers open storage and hydrate asset indexes.
-//! Its root metadata parser is private; resource sidecars remain queryable.
-//! Source priority: selected packs above selected theme assets above the
-//! optional external index above extracted assets above embedded Pomme
-//! resources. Bootstrap needs only the embedded pack.
-//! Built-ins are separate layers of one pack, not a composite source.
-//! Filters apply between logical packs, not within their physical layers.
+//! Repository sources own locations and discovery; the repository owns pack
+//! selection. Downloading is separate. PackResources suppliers open storage
+//! and hydrate asset indexes. Root metadata decoding is private; resource
+//! sidecars remain queryable. Bootstrap needs only the embedded Pomme pack.
+//! AppCore activates that bootstrap first, then configures local discovery,
+//! installation and theme sources. Optional local packs stay disabled here;
+//! existing UI/server selection still controls the filesystem asset stack.
+//! The Vanilla supplier exposes extracted and indexed entries with their own
+//! root/fallback metadata: managers apply filters between those entries too,
+//! even with the same logical origin.
+//! Ordinary directory/ZIP overlays remain one composed entry with primary-only
+//! root metadata. Existing application asset consumers remain on their separate
+//! filesystem-based stack until migration.
 //! Overlays belong in source composition, not loaders. This layer
 //! does not merge JSON, decode images or build atlases.
 //!
 //! A manager fixes source order, not filesystem contents. Handles outlive it
 //! and pin a source or pathname, not immutable bytes; reopening may change or
 //! fail. Sources must retain required storage leases. Streams close on drop.
-//! Reload opens candidates before activation, then rebuilds consumers
-//! synchronously. Providers and ordinary handles remain on the application
-//! thread; content alone can opt into a transferable handle with local streams.
+//! Reload opens candidates before activation, then invokes a synchronous
+//! rebuild callback (empty until consumer adoption). Suppliers and resource
+//! handles remain on the application thread; they do not provide a transferable
+//! content API.
 
-mod manager;
+#[allow(
+    dead_code,
+    reason = "Manager consumer API; application asset consumers are not yet migrated"
+)]
+pub(crate) mod managers;
+#[allow(
+    dead_code,
+    reason = "PackResources consumer API; adopted during a later migration"
+)]
+pub(crate) mod pack_resources;
 pub(crate) mod packs;
 mod resource;
 
@@ -33,14 +48,12 @@ macro_rules! resource_id {
     };
 }
 
-pub(crate) use manager::ResourceManager;
+#[allow(
+    unused_imports,
+    reason = "Manager consumer API; application asset consumers are not yet migrated"
+)]
+pub(crate) use managers::ResourceManager;
 pub(crate) use resource::{
     ReadStream, Resource, ResourceContent, ResourceError, ResourceId, ResourceOrigin,
-    ThreadSafeResourceContent,
 };
 pub(crate) use resource_id;
-
-/// Owned registration snapshot issued by pack management in low-to-high order.
-/// Storage, compiled filters and physical layers stay private to resources.
-/// This fixes registrations, not filesystem contents; reload rereads metadata.
-pub(crate) struct ResourceSources(Vec<packs::ResourcePackDescriptor>);
