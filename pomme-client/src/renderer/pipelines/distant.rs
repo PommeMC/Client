@@ -3,15 +3,18 @@ use crate::renderer::distant::gpu::DistantBuffers;
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{rhi, shader, util};
 
-/// Set 1: the drawn-column mask `distant.frag` discards with.
-const MASK_LAYOUT: &[rhi::BindGroupLayoutEntry] = &[rhi::BindGroupLayoutEntry::storage(
-    rhi::ShaderStages::FRAGMENT,
-)];
+/// Set 1: the drawn-column mask `distant.frag` discards with, then the
+/// model atlas and its sampler.
+const MASK_MODELS_LAYOUT: &[rhi::BindGroupLayoutEntry] = &[
+    rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::FRAGMENT),
+    rhi::BindGroupLayoutEntry::texture(rhi::ShaderStages::FRAGMENT),
+    rhi::BindGroupLayoutEntry::sampler(rhi::ShaderStages::FRAGMENT),
+];
 
 /// [`crate::renderer::distant::mesh::DistantVertex`]: packed x/z, y, light
-/// and face, colour.
+/// and face, colour, model and flags.
 const VERTEX_BUFFERS: [rhi::VertexBufferLayout<'static>; 1] = [rhi::VertexBufferLayout {
-    stride: 12,
+    stride: 16,
     step_mode: rhi::VertexStepMode::Vertex,
     attributes: &[
         rhi::VertexAttribute {
@@ -34,11 +37,22 @@ const VERTEX_BUFFERS: [rhi::VertexBufferLayout<'static>; 1] = [rhi::VertexBuffer
             format: rhi::VertexFormat::Unorm8x4,
             offset: 8,
         },
+        rhi::VertexAttribute {
+            location: 4,
+            format: rhi::VertexFormat::Uint16,
+            offset: 12,
+        },
+        rhi::VertexAttribute {
+            location: 5,
+            format: rhi::VertexFormat::Uint8x2,
+            offset: 14,
+        },
     ],
 }];
 
-/// Distant terrain: coloured boxes behind the real chunks, under the
-/// camera's fog and the lightmap; opaque, then see-through blended over it.
+/// Distant terrain: boxes textured with their block's model behind the
+/// real chunks, under the camera's fog and the lightmap; opaque, then
+/// see-through blended over it.
 pub struct DistantPipeline {
     pipelines: [rhi::backend::RenderPipeline; 2],
     pipeline_layout: rhi::backend::PipelineLayout,
@@ -59,7 +73,7 @@ impl DistantPipeline {
         buffers: &DistantBuffers,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
-        let mask_layout = rhi::backend::create_bind_group_layout(device, MASK_LAYOUT);
+        let mask_layout = rhi::backend::create_bind_group_layout(device, MASK_MODELS_LAYOUT);
         // The view projection (once a frame), then the section origin.
         let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
@@ -78,13 +92,23 @@ impl DistantPipeline {
         );
         let mask_set = device.create_bind_group(
             mask_layout,
-            &[(
-                0,
-                rhi::backend::BindingResource::storage(
-                    buffers.mask(),
-                    DistantBuffers::mask_bytes(),
+            &[
+                (
+                    0,
+                    rhi::backend::BindingResource::storage(
+                        buffers.mask(),
+                        DistantBuffers::mask_bytes(),
+                    ),
                 ),
-            )],
+                (
+                    1,
+                    rhi::backend::BindingResource::Texture(buffers.model_atlas()),
+                ),
+                (
+                    2,
+                    rhi::backend::BindingResource::Sampler(buffers.model_sampler()),
+                ),
+            ],
         );
         Self {
             pipelines,

@@ -1881,6 +1881,7 @@ impl Renderer {
 
         let encoder = self.frames.begin(&self.ctx.device)?;
         self.atlas.record_animation_upload(&encoder, frame);
+        self.distant_buffers.record_model_upload(&encoder, frame);
         self.lightmap.record(&self.ctx.device, &encoder);
 
         let scissor = rhi::Rect::covering(self.swapchain.extent);

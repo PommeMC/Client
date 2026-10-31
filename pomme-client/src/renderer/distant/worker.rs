@@ -14,6 +14,7 @@ use parking_lot::RwLock;
 use super::colors::DistantColors;
 use super::column::build_chunk;
 use super::mesh::{SectionMesh, mesh_section};
+use super::models::{ModelFactory, ModelTile};
 use super::store::{SectionKey, Store};
 use crate::position::ChunkPos;
 use crate::world::chunk::{Chunk, ChunkLightData, ChunkStore};
@@ -60,12 +61,14 @@ impl View {
     }
 }
 
-/// New and dropped section meshes for one dimension.
+/// New and dropped section meshes for one dimension, and the models new
+/// ones are the first to use.
 pub(crate) struct DistantUpdate {
     pub dimension: Arc<str>,
     pub min_y: i32,
     pub meshes: Vec<SectionMesh>,
     pub removed: Vec<SectionKey>,
+    pub tiles: Vec<ModelTile>,
 }
 
 /// The game's handle on the thread. Dropping it waits for the thread to
@@ -220,6 +223,7 @@ fn store<'a>(
 
 struct Worker {
     colors: Arc<DistantColors>,
+    models: ModelFactory,
     updates: Sender<DistantUpdate>,
     /// Per dimension, its sections and `min_y`.
     stores: HashMap<Arc<str>, (Store, i32)>,
@@ -236,6 +240,7 @@ impl Worker {
     fn new(colors: Arc<DistantColors>, updates: Sender<DistantUpdate>) -> Self {
         Self {
             colors,
+            models: ModelFactory::new(),
             updates,
             stores: HashMap::new(),
             cache: None,
@@ -301,6 +306,10 @@ impl Worker {
                 }
             }
             Job::Colors(colors) => {
+                if !colors.same_models(&self.colors) {
+                    // Ids start over; the new tiles overwrite the old.
+                    self.models = ModelFactory::new();
+                }
                 self.colors = colors;
                 self.dirty.extend(self.meshed.iter().copied());
             }
@@ -338,6 +347,7 @@ impl Worker {
                         min_y: *min_y,
                         meshes: Vec::new(),
                         removed,
+                        tiles: Vec::new(),
                     });
                 }
                 self.view = Some(view);
@@ -378,12 +388,9 @@ impl Worker {
                 self.dirty.remove(&key);
                 self.meshed.insert(key);
                 match store.get(key) {
-                    Some(section) => mesh_section(
-                        key,
-                        section,
-                        |run| self.colors.colors(run),
-                        |run| self.colors.alpha(run.state),
-                    ),
+                    Some(section) => mesh_section(key, section, |run| {
+                        self.colors.run_look(&mut self.models, run)
+                    }),
                     None => SectionMesh::empty(key),
                 }
             })
@@ -393,6 +400,7 @@ impl Worker {
             min_y: *min_y,
             meshes,
             removed: Vec::new(),
+            tiles: self.models.take_tiles(),
         });
     }
 }

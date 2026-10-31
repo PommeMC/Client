@@ -9,6 +9,7 @@ use super::fixtures::{Assets, Scene, build_world, columns_within};
 use crate::position::ChunkPos;
 use crate::renderer::distant::column::build_chunk;
 use crate::renderer::distant::mesh::mesh_section;
+use crate::renderer::distant::models::ModelFactory;
 use crate::renderer::distant::store::{LEVELS, SectionKey, Store};
 
 pub fn bench(c: &mut Criterion, assets: &Assets) {
@@ -36,14 +37,14 @@ pub fn bench(c: &mut Criterion, assets: &Assets) {
         for level in [0, LEVELS - 1] {
             let key = SectionKey { level, x: 0, z: 0 };
             let section = store.get(key).expect("chunk (0, 0)'s sections");
+            // Models bake once, before the meshing measured.
+            let mut models = ModelFactory::new();
+            mesh_section(key, section, |run| colors.run_look(&mut models, run));
             group.bench_function(format!("mesh/{}/level{level}", scene.name()), |b| {
                 b.iter(|| {
-                    black_box(mesh_section(
-                        key,
-                        section,
-                        |run| colors.colors(run),
-                        |run| colors.alpha(run.state),
-                    ))
+                    black_box(mesh_section(key, section, |run| {
+                        colors.run_look(&mut models, run)
+                    }))
                 })
             });
         }

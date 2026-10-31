@@ -990,8 +990,8 @@ impl MeshDispatcher {
     /// dispatcher's textures, colormaps and biomes.
     pub(crate) fn distant_colors(&self) -> Arc<crate::renderer::distant::colors::DistantColors> {
         Arc::new(crate::renderer::distant::colors::DistantColors::new(
-            self.render_view.as_view(),
-            &self.uv_map,
+            self.render_view.clone(),
+            Arc::clone(&self.uv_map),
             Arc::clone(&self.biome_climate),
             self.colormaps(),
         ))

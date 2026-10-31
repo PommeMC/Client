@@ -5,9 +5,11 @@
 // TODO: generation beyond what's been seen, textures, shader packs, and
 // dimensions without sky light (a cave roof would cover them).
 
+pub(crate) mod bakery;
 pub(crate) mod colors;
 pub(crate) mod column;
 pub(crate) mod gpu;
 pub(crate) mod mesh;
+pub(crate) mod models;
 pub(crate) mod store;
 pub(crate) mod worker;

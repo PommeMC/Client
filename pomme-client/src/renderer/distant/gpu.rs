@@ -1,5 +1,6 @@
-//! Distant terrain on the GPU: section meshes in vertex arenas, the
-//! drawn-column mask that keeps them out of real chunks, and the draws.
+//! Distant terrain on the GPU: section meshes in vertex arenas, the model
+//! atlas they sample, the drawn-column mask that keeps them out of real
+//! chunks, and the draws.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -7,17 +8,20 @@ use std::sync::Arc;
 use glam::DVec3;
 
 use super::mesh::DistantVertex;
+use super::models::{
+    ATLAS_COLUMNS, ATLAS_ROWS, MODEL_MIP_LEVELS, ModelTile, TILE_HEIGHT, TILE_WIDTH,
+};
 use super::store::{LEVELS, SectionKey};
 use super::worker::DistantUpdate;
 use crate::position::ChunkPos;
 use crate::renderer::camera::Camera;
 use crate::renderer::chunk::tlsf::Tlsf;
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, util};
 use crate::world::chunk::{RING_SIDE, ring_slot};
 
-/// Vertices an arena holds: 48 MB at 12 bytes each.
+/// Vertices an arena holds: 64 MB at 16 bytes each.
 const ARENA_VERTICES: u32 = 4 << 20;
-/// Arenas there may be: 384 MB of vertices.
+/// Arenas there may be: 512 MB of vertices.
 const MAX_ARENAS: usize = 8;
 /// Quads one draw covers, which the shared index buffer has room for; a
 /// larger section draws in several.
@@ -26,6 +30,18 @@ const VERTEX_SIZE: u64 = size_of::<DistantVertex>() as u64;
 /// `distant.frag` hard-codes the ring's side.
 const _: () = assert!(RING_SIDE == 257);
 const MASK_WORDS: usize = ((RING_SIDE * RING_SIDE) as usize).div_ceil(32);
+/// A model tile's bytes, every level.
+const TILE_BYTES: usize = {
+    let mut bytes = 0;
+    let mut level = 0;
+    while level < MODEL_MIP_LEVELS {
+        bytes += ((TILE_WIDTH >> level) * (TILE_HEIGHT >> level) * 4) as usize;
+        level += 1;
+    }
+    bytes
+};
+/// Model tiles uploaded a frame; more wait for the next.
+const TILES_PER_FRAME: usize = 256;
 
 /// A vertex buffer, sub-allocated.
 struct Arena {
@@ -75,6 +91,12 @@ pub(crate) struct DistantBuffers {
     /// Freed vertex ranges as (arena, first vertex), by the frame from
     /// which no in-flight frame can still draw them.
     pending_free: VecDeque<(u64, usize, u32)>,
+    /// Every model's six faces and their mips, a tile each.
+    model_atlas: rhi::backend::Texture,
+    model_sampler: rhi::backend::Sampler,
+    /// Tiles waiting for [`Self::record_model_upload`].
+    pending_tiles: VecDeque<ModelTile>,
+    tile_staging: Vec<rhi::backend::Buffer>,
 }
 
 impl DistantBuffers {
@@ -82,6 +104,31 @@ impl DistantBuffers {
         let quad_indices: Vec<u32> = (0..QUADS_PER_DRAW)
             .flat_map(|quad| [0, 1, 2, 2, 3, 0].map(|i| quad * 4 + i))
             .collect();
+        let model_atlas = rhi::backend::Texture::new(
+            device,
+            &rhi::TextureDesc {
+                mip_levels: MODEL_MIP_LEVELS,
+                ..util::sampled_texture_desc(
+                    "distant_models",
+                    ATLAS_COLUMNS * TILE_WIDTH,
+                    ATLAS_ROWS * TILE_HEIGHT,
+                )
+            },
+        );
+        let atlas = model_atlas.handle();
+        device.submit(|encoder| {
+            encoder.transition_textures(&[atlas_transition(
+                atlas,
+                rhi::TextureUse::Undefined,
+                rhi::TextureUse::CopyDst,
+            )]);
+            encoder.clear_texture(atlas, MODEL_ATLAS_RANGE, [0.0; 4]);
+            encoder.transition_textures(&[atlas_transition(
+                atlas,
+                rhi::TextureUse::CopyDst,
+                rhi::TextureUse::ShaderRead,
+            )]);
+        });
         Self {
             arenas: vec![Arena::new(device)],
             index_buffer: rhi::backend::Buffer::with_data(
@@ -103,7 +150,76 @@ impl DistantBuffers {
             mask_words: vec![0; MASK_WORDS],
             frame_seq: 0,
             pending_free: VecDeque::new(),
+            model_atlas,
+            // Voxy's `ModelStore` sampler.
+            model_sampler: rhi::backend::create_sampler(
+                device,
+                &rhi::SamplerDesc {
+                    mipmap_filter: rhi::FilterMode::Linear,
+                    lod_max_clamp: (MODEL_MIP_LEVELS - 1) as f32,
+                    ..rhi::SamplerDesc::NEAREST
+                },
+            ),
+            pending_tiles: VecDeque::new(),
+            tile_staging: util::create_per_frame_host_buffers(
+                device,
+                (TILE_BYTES * TILES_PER_FRAME) as u64,
+                rhi::BufferUsages::COPY_SRC,
+                "distant_model_staging",
+            ),
         }
+    }
+
+    pub fn model_atlas(&self) -> rhi::backend::TextureHandle {
+        self.model_atlas.handle()
+    }
+
+    pub fn model_sampler(&self) -> rhi::backend::Sampler {
+        self.model_sampler
+    }
+
+    /// Writes the waiting model tiles into the atlas, as many as fit this
+    /// frame's staging.
+    pub fn record_model_upload(&mut self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
+        if self.pending_tiles.is_empty() {
+            return;
+        }
+        let staging = &mut self.tile_staging[frame];
+        let mut copies = Vec::new();
+        let mut offset = 0;
+        for tile in self
+            .pending_tiles
+            .drain(..TILES_PER_FRAME.min(self.pending_tiles.len()))
+        {
+            let (x, y) = (
+                u32::from(tile.id) % ATLAS_COLUMNS * TILE_WIDTH,
+                u32::from(tile.id) / ATLAS_COLUMNS * TILE_HEIGHT,
+            );
+            for (level, pixels) in (0..).zip(&tile.levels) {
+                staging.write_at(offset, pixels);
+                copies.push(rhi::TexelCopy {
+                    buffer_offset: offset as u64,
+                    mip_level: level,
+                    layer: 0,
+                    origin: [x >> level, y >> level],
+                    width: TILE_WIDTH >> level,
+                    height: TILE_HEIGHT >> level,
+                });
+                offset += pixels.len();
+            }
+        }
+        let atlas = self.model_atlas.handle();
+        encoder.transition_textures(&[atlas_transition(
+            atlas,
+            rhi::TextureUse::ShaderRead,
+            rhi::TextureUse::CopyDst,
+        )]);
+        encoder.copy_buffer_to_texture(staging.handle(), atlas, &copies);
+        encoder.transition_textures(&[atlas_transition(
+            atlas,
+            rhi::TextureUse::CopyDst,
+            rhi::TextureUse::ShaderRead,
+        )]);
     }
 
     pub fn mask(&self) -> &rhi::backend::Buffer {
@@ -190,6 +306,7 @@ impl DistantBuffers {
             self.dimension = Some(Arc::clone(&update.dimension));
         }
         self.min_y = update.min_y;
+        self.pending_tiles.extend(update.tiles);
         for key in update.removed {
             self.retire(key);
         }
@@ -320,7 +437,7 @@ impl DistantBuffers {
             pass.set_push_constants(
                 rhi::ShaderStages::VERTEX,
                 64,
-                bytemuck::cast_slice(&[rel.x, rel.y, rel.z, 0.0]),
+                bytemuck::cast_slice(&[rel.x, rel.y, rel.z, width as f32]),
             );
             let quads = (end - first) / 4;
             for first_quad in (0..quads).step_by(QUADS_PER_DRAW as usize) {
@@ -343,6 +460,28 @@ impl DistantBuffers {
         for buffer in [&mut self.index_buffer, &mut self.mask] {
             std::mem::take(buffer).destroy(device);
         }
+        util::destroy_buffers(device, &mut self.tile_staging);
+        self.model_sampler.destroy(device);
+        std::mem::take(&mut self.model_atlas).destroy(device);
+    }
+}
+
+/// Every level of the model atlas.
+const MODEL_ATLAS_RANGE: rhi::TextureRange = rhi::TextureRange {
+    mips: MODEL_MIP_LEVELS,
+    ..rhi::TextureRange::BASE
+};
+
+fn atlas_transition(
+    atlas: rhi::backend::TextureHandle,
+    from: rhi::TextureUse,
+    to: rhi::TextureUse,
+) -> rhi::backend::TextureTransition {
+    rhi::backend::TextureTransition {
+        texture: atlas,
+        range: MODEL_ATLAS_RANGE,
+        from,
+        to,
     }
 }
 

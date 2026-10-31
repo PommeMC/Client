@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use super::column::{Run, RunKey};
+use super::models::{FACE_DISCARD, FACE_DISCARD_WHEN_MERGED, FACE_EMPTY, FACE_TRANSLUCENT};
 use super::store::{SECTION_COLUMNS, Section, SectionKey};
 
 /// One corner of a quad; four in a row make a quad, drawn with a shared
@@ -22,7 +23,57 @@ pub(crate) struct DistantVertex {
     /// out along `x` (bits 3-4) and `z` (5-6): 1 for positive, 3 negative;
     /// bit 7 for a seam ([`mesh_section`]).
     pub face: u8,
+    /// The tint over the model's texture, or with no model the run's own
+    /// colour.
     pub color: [u8; 4],
+    /// [`RunLook::model`].
+    pub model: u16,
+    /// The face's [`super::models`] flags, discarding resolved for the
+    /// quad's size.
+    pub flags: u8,
+    pub _pad: u8,
+}
+
+/// How a run draws.
+#[derive(Clone, Copy)]
+pub(crate) struct RunLook {
+    /// Its baked model ([`super::models`]); 0 for none, drawn in its colours
+    /// alone.
+    pub model: u16,
+    /// Blended over what's behind it: water.
+    pub translucent: bool,
+    /// Hides the faces of runs it touches.
+    pub occludes: bool,
+    /// The model's face flags, by Voxy face index.
+    pub faces: [u8; 6],
+    /// The top's and bottom's colour, then the sides'.
+    pub top: [u8; 4],
+    pub side: [u8; 4],
+}
+
+impl RunLook {
+    /// What `face` draws with; `None` where the model draws nothing.
+    fn paint(&self, face: Face) -> Option<Paint> {
+        let flags = self.faces[face.voxy_index()];
+        (flags & FACE_EMPTY == 0).then_some(Paint {
+            model: self.model,
+            flags,
+            color: match face {
+                Face::Up | Face::Down => self.top,
+                _ => self.side,
+            },
+            translucent: self.translucent,
+        })
+    }
+}
+
+/// What a face draws with: faces alike in it (and in light) merge.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Paint {
+    model: u16,
+    flags: u8,
+    color: [u8; 4],
+    translucent: bool,
 }
 
 /// A face's direction, as `distant.vert` reads it.
@@ -38,14 +89,16 @@ enum Face {
 }
 
 impl Face {
-    /// Vanilla's directional shade (`Direction` brightness under the
-    /// overworld's cardinal lighting).
-    fn shade(self) -> f32 {
+    /// Its index in a model's faces
+    /// ([`crate::world::block::model::Direction::VALUES`]).
+    fn voxy_index(self) -> usize {
         match self {
-            Self::Up => 1.0,
-            Self::Down => 0.5,
-            Self::North | Self::South => 0.8,
-            Self::West | Self::East => 0.6,
+            Self::Down => 0,
+            Self::Up => 1,
+            Self::North => 2,
+            Self::South => 3,
+            Self::West => 4,
+            Self::East => 5,
         }
     }
 }
@@ -81,18 +134,17 @@ impl SectionMesh {
     }
 }
 
-/// Top or bottom faces alike in height, colour and light, as a bit per
+/// Top or bottom faces alike in height, paint and light, as a bit per
 /// column: bit `x` of row `z`.
-type FlatFaces = HashMap<(Face, u32, [u8; 4], u8), [u64; SECTION_COLUMNS as usize]>;
+type FlatFaces = HashMap<(Face, u32, Paint, u8), [u64; SECTION_COLUMNS as usize]>;
 
-/// Seams alike in span, colour and light along one chunk border, as a bit
+/// Seams alike in span, paint and light along one chunk border, as a bit
 /// per column along it: by face, the border's column, top and bottom, then
 /// the rest.
-type Seams = HashMap<(Face, u32, u32, u32, [u8; 4], u8), u64>;
+type Seams = HashMap<(Face, u32, u32, u32, Paint, u8), u64>;
 
-/// `colors` gives a run's top and side colour, `alpha` how opaque it is.
-/// Tops and bottoms alike merge into rectangles; sides are a quad per
-/// uncovered stretch.
+/// `look` tells how a run draws. Tops and bottoms alike merge into
+/// rectangles; sides are a quad per uncovered stretch.
 ///
 /// See-through runs, water, hide nothing behind them, so the sea floor
 /// keeps its top and its sides beside water. They draw no side facing
@@ -104,11 +156,11 @@ type Seams = HashMap<(Face, u32, u32, u32, [u8; 4], u8), u64>;
 pub(crate) fn mesh_section(
     key: SectionKey,
     section: &Section,
-    colors: impl Fn(RunKey) -> ([u8; 3], [u8; 3]),
-    alpha: impl Fn(RunKey) -> u8,
+    mut look: impl FnMut(RunKey) -> RunLook,
 ) -> SectionMesh {
     let w = key.column_width() as u32;
-    let opaque = |run: &Run| alpha(run.key) == 255;
+    let mut looks = HashMap::new();
+    let mut look_of = |run: Run| *looks.entry(run.key).or_insert_with(|| look(run.key));
     // Opaque quads, then see-through ones.
     let mut quads = [Vec::new(), Vec::new()];
     let mut flat = FlatFaces::new();
@@ -120,33 +172,37 @@ pub(crate) fn mesh_section(
             if runs.is_empty() {
                 continue;
             }
-            let neighbours: [Vec<Run>; 4] =
-                SIDES.map(|(_, dx, dz)| section.column(x + dx, z + dz).collect());
+            let run_looks: Vec<RunLook> = runs.iter().map(|&run| look_of(run)).collect();
+            let neighbours: [Vec<(Run, RunLook)>; 4] = SIDES.map(|(_, dx, dz)| {
+                section
+                    .column(x + dx, z + dz)
+                    .map(|run| (run, look_of(run)))
+                    .collect()
+            });
             let (x0, z0) = (x as u32 * w, z as u32 * w);
             let (x1, z1) = (x0 + w, z0 + w);
-            for (i, run) in runs.iter().enumerate() {
-                let a = alpha(run.key);
-                let see_through = a < 255;
-                let ([r, g, b], [sr, sg, sb]) = colors(run.key);
-                let (top_rgba, side_rgba) = ([r, g, b, a], [sr, sg, sb, a]);
+            for (i, (run, look)) in runs.iter().zip(&run_looks).enumerate() {
+                let see_through = look.translucent;
                 let light = run.sky << 4 | run.block;
                 let (bottom, top) = (u32::from(run.bottom), u32::from(run.top) + 1);
                 min_y = min_y.min(run.bottom);
                 max_y = max_y.max(run.top + 1);
                 let mut flat_face = |face: Face, y| {
-                    flat.entry((face, y, top_rgba, light))
-                        .or_insert([0; SECTION_COLUMNS as usize])[z as usize] |= 1 << x;
+                    if let Some(paint) = look.paint(face) {
+                        flat.entry((face, y, paint, light))
+                            .or_insert([0; SECTION_COLUMNS as usize])[z as usize] |= 1 << x;
+                    }
                 };
                 // A face against a run hides unless only the run is see-through.
-                let hidden_by = |other: &Run| opaque(other) || see_through;
+                let hidden_by = |other: &RunLook| other.occludes || see_through;
                 let above_hides =
-                    i > 0 && runs[i - 1].bottom == run.top + 1 && hidden_by(&runs[i - 1]);
+                    i > 0 && runs[i - 1].bottom == run.top + 1 && hidden_by(&run_looks[i - 1]);
                 if !above_hides {
                     flat_face(Face::Up, top);
                 }
-                let below_hides = runs
-                    .get(i + 1)
-                    .is_some_and(|below| below.top + 1 == run.bottom && hidden_by(below));
+                let below_hides = runs.get(i + 1).is_some_and(|below| {
+                    below.top + 1 == run.bottom && hidden_by(&run_looks[i + 1])
+                });
                 if run.bottom > 0 && !below_hides {
                     flat_face(Face::Down, bottom);
                 }
@@ -158,18 +214,22 @@ pub(crate) fn mesh_section(
                         (Face::West, x0 % 16 == 0, x, z),
                         (Face::East, x1 % 16 == 0, x, z),
                     ] {
-                        if on_border {
+                        if on_border && let Some(paint) = look.paint(face) {
                             *seams
-                                .entry((face, line, top, bottom, side_rgba, light))
+                                .entry((face, line, top, bottom, paint, light))
                                 .or_default() |= 1 << along;
                         }
                     }
                 }
                 for (&(face, ..), neighbour) in SIDES.iter().zip(&neighbours) {
+                    let Some(paint) = look.paint(face) else {
+                        continue;
+                    };
                     // Water beside an opaque run doesn't hide it.
                     let covering = neighbour
                         .iter()
-                        .filter(|other| see_through || opaque(other));
+                        .filter(|(_, other)| see_through || other.occludes)
+                        .map(|(run, _)| run);
                     for (low, high, sky) in uncovered(bottom, top, covering) {
                         if see_through && sky.is_none() {
                             continue;
@@ -179,13 +239,13 @@ pub(crate) fn mesh_section(
                         // sky over the column, as the run's own can be deep water's.
                         let sky = sky.unwrap_or(runs[0].sky);
                         let light = sky << 4 | run.block;
-                        push_quad(&mut quads, corners, light, face, side_rgba, false);
+                        push_quad(&mut quads, corners, light, face, paint, false, w);
                     }
                 }
             }
         }
     }
-    for ((face, y, rgba, light), mut rows) in flat {
+    for ((face, y, paint, light), mut rows) in flat {
         for (x, z, width, depth) in rectangles(&mut rows) {
             let (x0, z0) = (x * w, z * w);
             let (x1, z1) = (x0 + width * w, z0 + depth * w);
@@ -193,10 +253,10 @@ pub(crate) fn mesh_section(
                 Face::Up => [[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]],
                 _ => [[x0, y, z0], [x0, y, z1], [x1, y, z1], [x1, y, z0]],
             };
-            push_quad(&mut quads, corners, light, face, rgba, false);
+            push_quad(&mut quads, corners, light, face, paint, false, w);
         }
     }
-    for ((face, line, top, bottom, rgba, light), mut bits) in seams {
+    for ((face, line, top, bottom, paint, light), mut bits) in seams {
         while bits != 0 {
             let (start, len, mask) = lowest_span(bits);
             bits &= !mask;
@@ -207,7 +267,7 @@ pub(crate) fn mesh_section(
                 _ => (across, along),
             };
             let corners = side_corners(face, xs, zs, bottom, top);
-            push_quad(&mut quads, corners, light, face, rgba, true);
+            push_quad(&mut quads, corners, light, face, paint, true, w);
         }
     }
     let [mut vertices, translucent] = quads;
@@ -300,23 +360,38 @@ fn uncovered<'a>(
     open
 }
 
-/// A quad of `face`, its colour shaded for the direction it points, into
-/// `quads`' opaque or see-through half by its alpha.
+/// A quad of `face` into `quads`' opaque or see-through half. A model face
+/// short of its side discards once the quad spans more than one column,
+/// where its gaps would otherwise stretch.
 fn push_quad(
     quads: &mut [Vec<DistantVertex>; 2],
     corners: [[u32; 3]; 4],
     light: u8,
     face: Face,
-    [r, g, b, a]: [u8; 4],
+    paint: Paint,
     seam: bool,
+    w: u32,
 ) {
-    let [r, g, b] = [r, g, b].map(|c| (f32::from(c) * face.shade()).round() as u8);
+    let extent = |axis: usize| {
+        corners.iter().fold((u32::MAX, 0), |(lo, hi), c| {
+            (lo.min(c[axis]), hi.max(c[axis]))
+        })
+    };
+    let merged = (0..3).any(|axis| {
+        let (min, max) = extent(axis);
+        max - min > w
+    });
+    let mut flags = paint.flags & !FACE_DISCARD_WHEN_MERGED;
+    if merged && paint.flags & FACE_DISCARD_WHEN_MERGED != 0 {
+        flags |= FACE_DISCARD;
+    }
+    if paint.translucent {
+        flags |= FACE_TRANSLUCENT;
+    }
     // Each corner moves out along the quad's own plane, closing pinholes
     // where quads meet (Distant Horizons' `LodQuadBuilder` micro offset).
     let micro_offset = |axis: usize, value: u32| {
-        let (min, max) = corners.iter().fold((u32::MAX, 0), |(lo, hi), c| {
-            (lo.min(c[axis]), hi.max(c[axis]))
-        });
+        let (min, max) = extent(axis);
         if min == max {
             0
         } else if value == min {
@@ -325,12 +400,15 @@ fn push_quad(
             1
         }
     };
-    quads[usize::from(a < 255)].extend(corners.map(|[x, y, z]| DistantVertex {
+    quads[usize::from(paint.translucent)].extend(corners.map(|[x, y, z]| DistantVertex {
         xz: x | z << 16,
         y: y as u16,
         light,
         face: face as u8 | micro_offset(0, x) << 3 | micro_offset(2, z) << 5 | u8::from(seam) << 7,
-        color: [r, g, b, a],
+        color: paint.color,
+        model: paint.model,
+        flags,
+        _pad: 0,
     }));
 }
 
@@ -388,12 +466,18 @@ mod tests {
             x: 0,
             z: 0,
         };
-        mesh_section(
-            key,
-            store.get(key).unwrap(),
-            |_| ([0; 3], [0; 3]),
-            |key| if key.biome == 1 { 128 } else { 255 },
-        )
+        mesh_section(key, store.get(key).unwrap(), |key| {
+            let water = key.biome == 1;
+            let alpha = if water { 128 } else { 255 };
+            RunLook {
+                model: 0,
+                translucent: water,
+                occludes: !water,
+                faces: [0; 6],
+                top: [0, 0, 0, alpha],
+                side: [0, 0, 0, alpha],
+            }
+        })
     }
 
     fn quads(columns: impl Fn(usize) -> Vec<Run>) -> usize {

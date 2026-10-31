@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::assets::{AssetId, AssetIndex};
 use crate::renderer::{packing, rhi, util};
@@ -47,6 +48,17 @@ impl AtlasRegion {
     };
 }
 
+/// A block sprite's first frame, level 0.
+#[derive(Clone)]
+pub(crate) struct SpritePixels {
+    pub width: u32,
+    pub height: u32,
+    /// RGBA, row by row from the top.
+    pub rgba: Arc<[u8]>,
+    /// Mipped as `dark_cutout`, which leaves transparent texels black.
+    pub dark_cutout: bool,
+}
+
 #[derive(Clone)]
 pub struct AtlasUVMap {
     regions: HashMap<String, AtlasRegion>,
@@ -54,9 +66,9 @@ pub struct AtlasUVMap {
     /// built; later ones fall back to the name lookup.
     by_texture: Vec<AtlasRegion>,
     sprite_alpha_masks: HashMap<String, SpriteAlphaMask>,
-    /// Each sprite's alpha-weighted average colour (its first frame), for
-    /// terrain drawn too far out to texture.
-    average_colors: HashMap<String, [u8; 4]>,
+    /// Each block sprite's pixels, which distant terrain bakes its models
+    /// from.
+    sprite_pixels: HashMap<String, SpritePixels>,
     /// Level-0 rectangles by sprite index, as `(x, y, width, height)`.
     rects: Vec<[u32; 4]>,
     missing: AtlasRegion,
@@ -66,7 +78,7 @@ impl AtlasUVMap {
     fn new(
         regions: HashMap<String, AtlasRegion>,
         sprite_alpha_masks: HashMap<String, SpriteAlphaMask>,
-        average_colors: HashMap<String, [u8; 4]>,
+        sprite_pixels: HashMap<String, SpritePixels>,
         rects: Vec<[u32; 4]>,
         missing: AtlasRegion,
     ) -> Self {
@@ -78,7 +90,7 @@ impl AtlasUVMap {
             regions,
             by_texture,
             sprite_alpha_masks,
-            average_colors,
+            sprite_pixels,
             rects,
             missing,
         }
@@ -107,8 +119,15 @@ impl AtlasUVMap {
         self.sprite_alpha_masks.get(name)
     }
 
+    pub(crate) fn sprite_pixels(&self, name: &str) -> Option<&SpritePixels> {
+        self.sprite_pixels.get(name)
+    }
+
+    /// A block sprite's alpha-weighted average colour, for terrain drawn too
+    /// far out to texture.
     pub(crate) fn average_color(&self, name: &str) -> Option<[u8; 4]> {
-        self.average_colors.get(name).copied()
+        let sprite = self.sprite_pixels(name)?;
+        Some(average_rgba(&sprite.rgba, sprite.width, sprite.height))
     }
 
     /// Each sprite's texture name, by sprite index.
@@ -975,7 +994,7 @@ impl TextureAtlas {
 
         let mut regions = HashMap::new();
         let mut sprite_alpha_masks = HashMap::new();
-        let mut average_colors = HashMap::new();
+        let mut sprite_pixels = HashMap::new();
         let mut rects = vec![missing_region.pixel_rect.map(u32::from)];
         for src in &sources {
             match placements.get(src.name.as_str()) {
@@ -1002,7 +1021,18 @@ impl TextureAtlas {
                     if let Some(mask) = &src.alpha_mask {
                         sprite_alpha_masks.insert(src.name.clone(), mask.clone());
                     }
-                    average_colors.insert(src.name.clone(), average_rgba(&src.data, src.w, src.h));
+                    if let Some(mip) = &src.mip_source {
+                        let texels = (src.w * src.h * 4) as usize;
+                        sprite_pixels.insert(
+                            src.name.clone(),
+                            SpritePixels {
+                                width: src.w,
+                                height: src.h,
+                                rgba: src.data[..texels].into(),
+                                dark_cutout: mip.strategy == MipmapStrategy::DarkCutout,
+                            },
+                        );
+                    }
                     regions.insert(src.name.clone(), region);
                 }
                 _ => {
@@ -1014,7 +1044,7 @@ impl TextureAtlas {
         let uv_map = AtlasUVMap::new(
             regions,
             sprite_alpha_masks,
-            average_colors,
+            sprite_pixels,
             rects,
             missing_region,
         );
