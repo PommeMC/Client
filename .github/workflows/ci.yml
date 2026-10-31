@@ -77,7 +77,7 @@ jobs:
       - name: Add the iOS target
         run: rustup target add aarch64-apple-ios
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: target/moltenvk
           key: moltenvk-${{ hashFiles('tools/fetch_moltenvk.py') }}
