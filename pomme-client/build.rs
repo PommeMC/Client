@@ -84,6 +84,7 @@ fn main() {
         "item_instance.glsl",
         "lightmap.glsl",
         "light.glsl",
+        "distant_models.glsl",
     ] {
         println!(
             "cargo:rerun-if-changed={}",

@@ -384,15 +384,15 @@ impl Worker {
                 for key in back {
                     self.mark_dirty(key, now);
                 }
-                if !removed.is_empty() {
-                    let _ = self.updates.send(DistantUpdate {
-                        dimension: Arc::clone(&view.dimension),
-                        min_y: view.min_y,
-                        meshes: Vec::new(),
-                        removed,
-                        tiles: Vec::new(),
-                    });
-                }
+                // Sent even with nothing removed: the renderer draws every
+                // section at the view's `min_y`, which may have changed.
+                let _ = self.updates.send(DistantUpdate {
+                    dimension: Arc::clone(&view.dimension),
+                    min_y: view.min_y,
+                    meshes: Vec::new(),
+                    removed,
+                    tiles: Vec::new(),
+                });
                 self.view = Some(view);
             }
             Job::Evicted(keys) => {

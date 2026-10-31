@@ -517,7 +517,7 @@ impl DistantBuffers {
             pass.set_push_constants(
                 rhi::ShaderStages::VERTEX,
                 64,
-                bytemuck::cast_slice(&[rel.x, rel.y, rel.z, width as f32]),
+                bytemuck::cast_slice(&[rel.x, rel.y, rel.z, key.column_width() as f32]),
             );
             let quads = (end - first) / 4;
             for first_quad in (0..quads).step_by(QUADS_PER_DRAW as usize) {
