@@ -19,7 +19,8 @@ pub(crate) struct DistantVertex {
     pub light: u8,
     /// Which way the face points ([`Face`]) in the low 3 bits, so the
     /// shaders can tell whose column it is; then which way the corner moves
-    /// out along `x` (bits 3-4) and `z` (5-6): 1 for positive, 3 negative.
+    /// out along `x` (bits 3-4) and `z` (5-6): 1 for positive, 3 negative;
+    /// bit 7 for a seam ([`mesh_section`]).
     pub face: u8,
     pub color: [u8; 4],
 }
@@ -81,16 +82,29 @@ impl SectionMesh {
 /// column: bit `x` of row `z`.
 type FlatFaces = HashMap<(Face, u32, [u8; 3], u8), [u64; SECTION_COLUMNS as usize]>;
 
-/// `colors` gives a run's top and side colour. Tops and bottoms alike merge
-/// into rectangles; sides are a quad per uncovered stretch.
+/// Seams alike in height, colour and light along one chunk border, as a
+/// bit per column along it: by face, the border's column, then the rest.
+type Seams = HashMap<(Face, u32, u32, [u8; 3], u8), u64>;
+
+/// `colors` gives a run's top and side colour, `fluid` whether it's water
+/// or lava. Tops and bottoms alike merge into rectangles; sides are a quad
+/// per uncovered stretch.
+///
+/// A fluid's surface also gets seams: sides along every chunk border, from
+/// its top to the bottom of the world, which `distant.frag` keeps only where
+/// they face a loaded chunk. They close the fluid off where the loaded area
+/// ends, which mesh time can't know, so the real water's edge doesn't look
+/// into it.
 pub(crate) fn mesh_section(
     key: SectionKey,
     section: &Section,
     colors: impl Fn(RunKey) -> ([u8; 3], [u8; 3]),
+    fluid: impl Fn(RunKey) -> bool,
 ) -> SectionMesh {
     let w = key.column_width() as u32;
     let mut vertices = Vec::new();
     let mut flat = FlatFaces::new();
+    let mut seams = Seams::new();
     let (mut min_y, mut max_y) = (u16::MAX, 0);
     for z in 0..SECTION_COLUMNS {
         for x in 0..SECTION_COLUMNS {
@@ -102,6 +116,25 @@ pub(crate) fn mesh_section(
                 SIDES.map(|(_, dx, dz)| section.column(x + dx, z + dz).collect());
             let (x0, z0) = (x as u32 * w, z as u32 * w);
             let (x1, z1) = (x0 + w, z0 + w);
+            if fluid(runs[0].key) {
+                let surface = &runs[0];
+                let (top, rgb, light) = (
+                    u32::from(surface.top) + 1,
+                    colors(surface.key).1,
+                    surface.sky << 4 | surface.block,
+                );
+                let (x, z) = (x as u32, z as u32);
+                for (face, on_border, line, along) in [
+                    (Face::North, z0 % 16 == 0, z, x),
+                    (Face::South, z1 % 16 == 0, z, x),
+                    (Face::West, x0 % 16 == 0, x, z),
+                    (Face::East, x1 % 16 == 0, x, z),
+                ] {
+                    if on_border {
+                        *seams.entry((face, line, top, rgb, light)).or_default() |= 1 << along;
+                    }
+                }
+            }
             for (i, run) in runs.iter().enumerate() {
                 let (top_rgb, side_rgb) = colors(run.key);
                 let light = run.sky << 4 | run.block;
@@ -124,25 +157,12 @@ pub(crate) fn mesh_section(
                 }
                 for (&(face, ..), neighbour) in SIDES.iter().zip(&neighbours) {
                     for (low, high, sky) in uncovered(bottom, top, neighbour) {
-                        let corners = match face {
-                            Face::North => {
-                                [[x0, low, z0], [x0, high, z0], [x1, high, z0], [x1, low, z0]]
-                            }
-                            Face::South => {
-                                [[x1, low, z1], [x1, high, z1], [x0, high, z1], [x0, low, z1]]
-                            }
-                            Face::West => {
-                                [[x0, low, z1], [x0, high, z1], [x0, high, z0], [x0, low, z0]]
-                            }
-                            Face::Up | Face::Down | Face::East => {
-                                [[x1, low, z0], [x1, high, z0], [x1, high, z1], [x1, low, z1]]
-                            }
-                        };
+                        let corners = side_corners(face, [x0, x1], [z0, z1], low, high);
                         // Facing nothing, as at the edge of what's been seen: the
                         // sky over the column, as the run's own can be deep water's.
                         let sky = sky.unwrap_or(runs[0].sky);
                         let light = sky << 4 | run.block;
-                        push_quad(&mut vertices, corners, light, face, side_rgb);
+                        push_quad(&mut vertices, corners, light, face, side_rgb, false);
                     }
                 }
             }
@@ -156,7 +176,21 @@ pub(crate) fn mesh_section(
                 Face::Up => [[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]],
                 _ => [[x0, y, z0], [x0, y, z1], [x1, y, z1], [x1, y, z0]],
             };
-            push_quad(&mut vertices, corners, light, face, rgb);
+            push_quad(&mut vertices, corners, light, face, rgb, false);
+        }
+    }
+    for ((face, line, top, rgb, light), mut bits) in seams {
+        while bits != 0 {
+            let (start, len, mask) = lowest_span(bits);
+            bits &= !mask;
+            let along = [start * w, (start + len) * w];
+            let across = [line * w, (line + 1) * w];
+            let (xs, zs) = match face {
+                Face::North | Face::South => (along, across),
+                _ => (across, along),
+            };
+            let corners = side_corners(face, xs, zs, 0, top);
+            push_quad(&mut vertices, corners, light, face, rgb, true);
         }
     }
     SectionMesh {
@@ -167,15 +201,39 @@ pub(crate) fn mesh_section(
     }
 }
 
+/// The corners of the side facing `face` of the box spanning `xs` and `zs`,
+/// from `low` to `high`.
+fn side_corners(
+    face: Face,
+    [x0, x1]: [u32; 2],
+    [z0, z1]: [u32; 2],
+    low: u32,
+    high: u32,
+) -> [[u32; 3]; 4] {
+    match face {
+        Face::North => [[x0, low, z0], [x0, high, z0], [x1, high, z0], [x1, low, z0]],
+        Face::South => [[x1, low, z1], [x1, high, z1], [x0, high, z1], [x0, low, z1]],
+        Face::West => [[x0, low, z1], [x0, high, z1], [x0, high, z0], [x0, low, z0]],
+        Face::Up | Face::Down | Face::East => {
+            [[x1, low, z0], [x1, high, z0], [x1, high, z1], [x1, low, z1]]
+        }
+    }
+}
+
+/// The lowest stretch of set bits in `bits`: its first bit, length and mask.
+fn lowest_span(bits: u64) -> (u32, u32, u64) {
+    let start = bits.trailing_zeros();
+    let len = (!(bits >> start)).trailing_zeros();
+    (start, len, (u64::MAX >> (64 - len)) << start)
+}
+
 /// Greedy rectangles covering the set bits of `rows` (bit `x` of row `z`),
 /// as `(x, z, width, depth)` in columns; clears `rows`.
 fn rectangles(rows: &mut [u64; SECTION_COLUMNS as usize]) -> Vec<(u32, u32, u32, u32)> {
     let mut out = Vec::new();
     for z in 0..rows.len() {
         while rows[z] != 0 {
-            let x = rows[z].trailing_zeros();
-            let width = (!(rows[z] >> x)).trailing_zeros();
-            let mask = (u64::MAX >> (64 - width)) << x;
+            let (x, width, mask) = lowest_span(rows[z]);
             let mut end = z + 1;
             while end < rows.len() && rows[end] & mask == mask {
                 rows[end] &= !mask;
@@ -224,6 +282,7 @@ fn push_quad(
     light: u8,
     face: Face,
     rgb: [u8; 3],
+    seam: bool,
 ) {
     let [r, g, b] = rgb.map(|c| (f32::from(c) * face.shade()).round() as u8);
     // Each corner moves out along the quad's own plane, closing pinholes
@@ -244,7 +303,7 @@ fn push_quad(
         xz: x | z << 16,
         y: y as u16,
         light,
-        face: face as u8 | micro_offset(0, x) << 3 | micro_offset(2, z) << 5,
+        face: face as u8 | micro_offset(0, x) << 3 | micro_offset(2, z) << 5 | u8::from(seam) << 7,
         color: [r, g, b, 255],
     }));
 }
@@ -293,8 +352,9 @@ mod tests {
         );
     }
 
-    /// The level-0 mesh of chunk 0 with `columns` (by `z * 16 + x`).
-    fn mesh(columns: impl Fn(usize) -> Vec<Run>) -> SectionMesh {
+    /// The level-0 mesh of chunk 0 with `columns` (by `z * 16 + x`), every
+    /// run water or none.
+    fn mesh(columns: impl Fn(usize) -> Vec<Run>, water: bool) -> SectionMesh {
         let mut store = Store::default();
         store.capture(ChunkPos::new(0, 0), (0..256).map(columns).collect());
         let key = SectionKey {
@@ -302,24 +362,41 @@ mod tests {
             x: 0,
             z: 0,
         };
-        mesh_section(key, store.get(key).unwrap(), |_| ([0; 3], [0; 3]))
+        mesh_section(
+            key,
+            store.get(key).unwrap(),
+            |_| ([0; 3], [0; 3]),
+            |_| water,
+        )
     }
 
     fn quads(columns: impl Fn(usize) -> Vec<Run>) -> usize {
-        mesh(columns).vertices.len() / 4
+        mesh(columns, false).vertices.len() / 4
+    }
+
+    #[test]
+    fn water_gets_a_merged_seam_along_each_chunk_border() {
+        let mesh = mesh(|_| vec![run(10, 0)], true);
+        let seams: Vec<_> = mesh.vertices.iter().filter(|v| v.face >> 7 == 1).collect();
+        // One quad down from the surface to the bottom per side of the chunk.
+        assert_eq!(seams.len(), 4 * 4);
+        assert!(seams.iter().all(|v| v.y == 0 || v.y == 11));
     }
 
     #[test]
     fn sides_facing_nothing_take_the_sky_over_their_column() {
         // A lit run over a dark one at the section's west edge: both west
         // sides face nothing, so neither is drawn dark.
-        let mesh = mesh(|i| {
-            if i == 0 {
-                vec![lit(20, 15, 15), lit(10, 0, 0)]
-            } else {
-                Vec::new()
-            }
-        });
+        let mesh = mesh(
+            |i| {
+                if i == 0 {
+                    vec![lit(20, 15, 15), lit(10, 0, 0)]
+                } else {
+                    Vec::new()
+                }
+            },
+            false,
+        );
         let west: Vec<u8> = mesh
             .vertices
             .iter()

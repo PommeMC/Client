@@ -37,7 +37,14 @@ pub fn bench(c: &mut Criterion, assets: &Assets) {
             let key = SectionKey { level, x: 0, z: 0 };
             let section = store.get(key).expect("chunk (0, 0)'s sections");
             group.bench_function(format!("mesh/{}/level{level}", scene.name()), |b| {
-                b.iter(|| black_box(mesh_section(key, section, |run| colors.colors(run))))
+                b.iter(|| {
+                    black_box(mesh_section(
+                        key,
+                        section,
+                        |run| colors.colors(run),
+                        |run| colors.fluid(run.state),
+                    ))
+                })
             });
         }
     }

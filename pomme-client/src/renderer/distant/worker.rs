@@ -378,7 +378,12 @@ impl Worker {
                 self.dirty.remove(&key);
                 self.meshed.insert(key);
                 match store.get(key) {
-                    Some(section) => mesh_section(key, section, |run| self.colors.colors(run)),
+                    Some(section) => mesh_section(
+                        key,
+                        section,
+                        |run| self.colors.colors(run),
+                        |run| self.colors.fluid(run.state),
+                    ),
                     None => SectionMesh::empty(key),
                 }
             })

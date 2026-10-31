@@ -30,6 +30,7 @@ struct StateLook {
     /// The tint covers the sides too; a grass block's sides keep their
     /// dirt.
     tint_sides: bool,
+    fluid: bool,
 }
 
 const HIDDEN: StateLook = StateLook {
@@ -39,6 +40,7 @@ const HIDDEN: StateLook = StateLook {
     side: UNKNOWN,
     tint: Tint::None,
     tint_sides: false,
+    fluid: false,
 };
 
 pub(crate) struct DistantColors {
@@ -75,6 +77,7 @@ impl DistantColors {
                 let solid = (!data.is_invisible() && data.has_collision())
                     .then(|| view.get_textures(state))
                     .flatten();
+                let fluid = solid.is_none();
                 let (top, side, tint, tint_sides) = match (solid, data.fluid().kind) {
                     (Some(faces), _) => {
                         let fixed = match faces.tint {
@@ -108,6 +111,7 @@ impl DistantColors {
                     shows: Shows::Yes {
                         tinted: tint != Tint::None,
                     },
+                    fluid,
                     fills: data.occludes_neighbor_faces(),
                     top,
                     side,
@@ -138,6 +142,11 @@ impl DistantColors {
 
     pub fn fills(&self, state: BlockState) -> bool {
         self.look(state).fills
+    }
+
+    /// Whether it shows as water or lava.
+    pub fn fluid(&self, state: BlockState) -> bool {
+        self.look(state).fluid
     }
 
     /// A run's top and side colours, tinted for its biome.

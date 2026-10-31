@@ -30,6 +30,8 @@ layout(location = 4) flat out ivec2 v_anchor;
 // A side face's step from v_column_pos into the column it faces; zero for
 // tops and bottoms.
 layout(location = 5) flat out vec2 v_outward;
+// 1 for a seam (mesh.rs `mesh_section`).
+layout(location = 6) flat out uint v_seam;
 
 // Distant Horizons' micro offset: how far a corner moves out along its
 // quad's plane.
@@ -64,4 +66,5 @@ void main() {
     v_column_pos = world.xz + nudge;
     v_anchor = camera_block.xz;
     v_outward = -2.0 * nudge;
+    v_seam = in_light_face.y >> 7;
 }

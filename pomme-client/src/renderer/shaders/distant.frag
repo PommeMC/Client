@@ -14,6 +14,7 @@ layout(location = 2) in float v_fog;
 layout(location = 3) in vec2 v_column_pos;
 layout(location = 4) flat in ivec2 v_anchor;
 layout(location = 5) flat in vec2 v_outward;
+layout(location = 6) flat in uint v_seam;
 
 layout(location = 0) out vec4 out_color;
 
@@ -30,9 +31,10 @@ bool loaded_at(vec2 pos) {
 
 void main() {
     // Nothing over a real chunk, nor a side facing one: the chunk draws its
-    // own edge, and through its water this one would show as a wall.
-    if (loaded_at(v_column_pos)
-        || (v_outward != vec2(0.0) && loaded_at(v_column_pos + v_outward))) {
+    // own edge, and through its water this one would show as a wall. A
+    // seam is the opposite, drawn only facing one.
+    bool faces_loaded = v_outward != vec2(0.0) && loaded_at(v_column_pos + v_outward);
+    if (loaded_at(v_column_pos) || faces_loaded == (v_seam == 0u)) {
         discard;
     }
     out_color = vec4(apply_fog(v_color, v_fog, v_fog_color), 1.0);
