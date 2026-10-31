@@ -230,7 +230,7 @@ impl Preludes {
             },
             fragment_decls: format!("{FRAME}{MATRICES}{POLYFILLS}{fragment_inputs}"),
             fragment_main: format!(
-                "\nvoid main() {{\n{stage}    pomme_matrices({fragment_view}, {projection});\n    pack_main();\n}}\n"
+                "\nvoid main() {{\n{stage}    pomme_matrices({fragment_view}, {projection});\n    pack_main();\n    pomme_alpha_test();\n}}\n"
             ),
         }
     }

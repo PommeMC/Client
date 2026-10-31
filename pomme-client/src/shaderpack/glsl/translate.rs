@@ -17,6 +17,7 @@ use glsl_lang::transpiler::glsl::{
 use glsl_lang::visitor::{HostMut, Visit, VisitorMut};
 
 use super::compile::ShaderStage;
+use crate::shaderpack::alpha_test::AlphaTest;
 
 /// The pack's uniforms block, set 0 binding 0; the prelude's frame data is
 /// binding 1.
@@ -287,6 +288,7 @@ pub fn translate(
     vertex_prelude: Prelude,
     fragment_prelude: Prelude,
     geometry: bool,
+    alpha_test: AlphaTest,
 ) -> Result<Translated, TranslateError> {
     let mut vertex = parse(ShaderStage::Vertex, source.vertex)?;
     let mut fragment = parse(ShaderStage::Fragment, source.fragment)?;
@@ -378,6 +380,13 @@ pub fn translate(
         outputs = outputs.max(location + 1);
     }
     fs.push_str(&show(&fragment));
+    // Iris tests only `gl_FragData[0]`, not a declared output.
+    let discard = if fragment_outputs.contains(&0) {
+        alpha_test.discard("pomme_FragData0.a")
+    } else {
+        String::new()
+    };
+    fs.push_str(&format!("void pomme_alpha_test() {{\n{discard}}}\n"));
     fs.push_str(fragment_prelude.main);
 
     Ok(Translated {
@@ -1192,11 +1201,15 @@ mod tests {
     };
     const FS_PRELUDE: Prelude = Prelude {
         decls: "",
-        main: "void main() { pack_main(); }\n",
+        main: "void main() { pack_main(); pomme_alpha_test(); }\n",
         attributes: &[],
     };
 
     fn translated(vs: &str, fs: &str) -> Translated {
+        alpha_tested(vs, fs, AlphaTest::OFF)
+    }
+
+    fn alpha_tested(vs: &str, fs: &str, alpha_test: AlphaTest) -> Translated {
         let t = translate(
             ProgramSource {
                 vertex: vs,
@@ -1205,6 +1218,7 @@ mod tests {
             VS_PRELUDE,
             FS_PRELUDE,
             true,
+            alpha_test,
         )
         .unwrap();
         for (stage, src) in [
@@ -1233,6 +1247,7 @@ mod tests {
             vs,
             FS_PRELUDE,
             true,
+            AlphaTest::OFF,
         )
         .unwrap();
         assert!(
@@ -1290,6 +1305,27 @@ mod tests {
              void main() { albedo = texture(colortex0, uv); extra = vec4(uv, 0, 1); }\n",
         );
         assert_eq!(t.outputs, 2);
+    }
+
+    #[test]
+    fn the_alpha_test_reads_frag_data_zero_only() {
+        let vs = "#version 120\nvoid main() { gl_Position = ftransform(); }\n";
+        let old = alpha_tested(
+            vs,
+            "#version 120\nvoid main() { gl_FragData[0] = vec4(1.0); }\n",
+            AlphaTest::ONE_TENTH,
+        );
+        assert!(
+            old.fragment
+                .contains("if (!(pomme_FragData0.a > 0.1)) discard;")
+        );
+        let new = alpha_tested(
+            vs,
+            "#version 330 compatibility\nlayout(location = 0) out vec4 color;\n\
+             void main() { color = vec4(1.0); }\n",
+            AlphaTest::ONE_TENTH,
+        );
+        assert!(!new.fragment.contains("discard"));
     }
 
     #[test]

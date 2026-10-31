@@ -20,6 +20,7 @@ use crate::renderer::pipelines::sky::{
 };
 use crate::renderer::rhi::{self, TextureTransition, TextureUse};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, util};
+use crate::shaderpack::alpha_test::AlphaTest;
 use crate::shaderpack::directives::{
     BufferSettings, ShadowSettings, TargetSettings, buffer_index, shadow_buffer_index,
 };
@@ -120,6 +121,22 @@ impl PackGeometry {
         match own {
             Some(text) => Ok(Some(text)),
             None => pack.program(dimension, "shadow"),
+        }
+    }
+
+    /// Iris's alpha test for the vanilla render type it draws (`ShaderKey`,
+    /// with Sodium's terrain keys).
+    fn alpha_test(self) -> AlphaTest {
+        match self {
+            // TODO: cutout terrain tests at half alpha (`SODIUM_TERRAIN_CUTOUT`),
+            // once its draws are told apart.
+            Self::ShadowTerrain | Self::Terrain | Self::SkyBasic | Self::SkyTextured => {
+                AlphaTest::OFF
+            }
+            Self::EntityEyes => AlphaTest::NON_ZERO,
+            // `ENTITIES_CUTOUT`, most entities' render type.
+            // TODO: `ENTITIES_SOLID` ones aren't tested.
+            _ => AlphaTest::ONE_TENTH,
         }
     }
 
@@ -418,14 +435,16 @@ impl PackRenderer {
         .filter(|&g| shadow_casters.draws(g))
         .filter_map(|g| {
             let text = g.source(pack, dimension).transpose()?;
-            Some(text.and_then(|t| shaderpack::compile(&t, g.vertices()).map(|c| (g, c))))
+            Some(text.and_then(|t| {
+                shaderpack::compile(&t, g.vertices(), g.alpha_test()).map(|c| (g, c))
+            }))
         })
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?;
         let screen = |prefix: &str, geometry| -> Result<Vec<CompiledProgram>, String> {
             full_screen_names(prefix)
                 .filter_map(|name| pack.program(dimension, &name).transpose())
-                .map(|t| t.and_then(|t| shaderpack::compile(&t, geometry)))
+                .map(|t| t.and_then(|t| shaderpack::compile(&t, geometry, AlphaTest::OFF)))
                 .collect::<Result<_, _>>()
                 .map_err(|e| e.to_string())
         };
@@ -434,7 +453,7 @@ impl PackRenderer {
         let final_pass = pack
             .program(dimension, "final")
             .map(|t| t.unwrap_or_else(shaderpack::copy_program))
-            .and_then(|t| shaderpack::compile(&t, Geometry::Final))
+            .and_then(|t| shaderpack::compile(&t, Geometry::Final, AlphaTest::OFF))
             .map_err(|e| e.to_string())?;
 
         // Targets: every buffer a program writes or reads, set up by the
