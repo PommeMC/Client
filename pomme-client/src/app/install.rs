@@ -134,7 +134,13 @@ impl Install {
                 }
             },
         };
-        match BootScreen::new(&window, core.font_sources(), None, core.menu.vsync) {
+        match BootScreen::new(
+            &window,
+            core.resources(),
+            core.font_sources(),
+            None,
+            core.menu.vsync,
+        ) {
             Ok(screen) => self.screen = Some(screen),
             Err(e) => {
                 super::report_renderer_failure(&e);

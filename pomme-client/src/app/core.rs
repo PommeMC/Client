@@ -1107,16 +1107,15 @@ fn cursor_step(grabbed: bool, stale: bool, want: bool, focused: bool) -> (Cursor
     }
 }
 
-/// The asset index, the menu's splash and the audio engine, which `AppCore`
-/// builds from the version's assets.
+/// The asset index and audio engine, which `AppCore` builds from the version's
+/// assets.
 fn load_assets(
     data_dirs: &DataDirs,
     version: &str,
     resource_packs: &ResourcePackManager,
-    menu: &mut MainMenu,
+    menu: &MainMenu,
 ) -> (Option<AssetIndex>, crate::audio::AudioEngine) {
     let asset_index = AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, version);
-    menu.load_splash(&data_dirs.jar_assets_dir, &asset_index);
     let audio = crate::audio::AudioEngine::new(
         &data_dirs.jar_assets_dir,
         asset_index.clone(),
@@ -1180,14 +1179,14 @@ impl AppCore {
             .expect("embedded Pomme resources must open without filesystem access");
         resources
             .reload(opened, |_| {
-                // Asset consumers have not adopted this view yet.
+                // The menu has not been constructed yet.
             })
             .expect("embedded Pomme resource view must initialize");
 
         let resource_packs = ResourcePackManager::new(&data_dirs.game_dir);
 
         let mut input = InputState::new();
-        let mut menu = MainMenu::new(
+        let menu = MainMenu::new(
             &data_dirs.game_dir,
             data_dirs.bedrock_assets_dir.clone(),
             Arc::clone(&tokio_rt),
@@ -1199,7 +1198,7 @@ impl AppCore {
 
         let display_mode = menu.display_mode;
 
-        let (asset_index, audio) = load_assets(&data_dirs, &version, &resource_packs, &mut menu);
+        let (asset_index, audio) = load_assets(&data_dirs, &version, &resource_packs, &menu);
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
         let (head_tx, head_rx) = crossbeam_channel::unbounded();
 
@@ -1249,6 +1248,7 @@ impl AppCore {
             player_faces_packed: false,
             game_dynamic_atlas_keys: HashSet::new(),
         };
+        core.menu.load_splash(&core.resources);
         core.configure_resources();
         core
     }
@@ -1300,6 +1300,10 @@ impl AppCore {
         });
     }
 
+    pub(crate) fn resources(&self) -> &dyn crate::resources::ResourceManager {
+        &self.resources
+    }
+
     pub(crate) fn reload_resource_theme(&mut self, theme: PanoramaTheme) -> std::io::Result<()> {
         self.set_resource_theme(theme);
         self.reload_resources()
@@ -1311,10 +1315,9 @@ impl AppCore {
     fn reload_resources(&mut self) -> std::io::Result<()> {
         self.resource_repository.reload()?;
         let opened = self.resource_repository.open_all_enabled()?;
-        self.resources.reload(opened, |_| {
-            // No new-stack asset consumers yet; their existing reloads stay
-            // separate.
-        })
+        let menu = &mut self.menu;
+        self.resources
+            .reload(opened, |resources| menu.load_splash(resources))
     }
 
     pub fn build_menu_input(&mut self, dt: f32) -> MenuInput {
@@ -1450,8 +1453,7 @@ impl AppCore {
             p.set_in_menu(&self.version);
         }
         self.apply_cursor_grab(&gfx.window, None);
-        self.menu
-            .load_splash(&self.data_dirs.jar_assets_dir, &self.asset_index);
+        self.menu.load_splash(&self.resources);
     }
 
     /// Releases the cursor, warping it to the window center only when it was
@@ -1996,7 +1998,7 @@ impl AppCore {
             &self.data_dirs,
             &self.version,
             &self.resource_packs,
-            &mut self.menu,
+            &self.menu,
         );
         self.asset_index = asset_index;
         self.audio = audio;

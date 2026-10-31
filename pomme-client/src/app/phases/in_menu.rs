@@ -195,8 +195,13 @@ pub fn update_menu(
                 gfx.renderer
                     .load_bedrock_sprites(&core.data_dirs.bedrock_ui_dir());
             }
-            if let Err(error) = core.reload_resource_theme(theme) {
-                tracing::warn!(%error, "Theme resource activation failed; retaining the last good resource view, existing panorama/sprites changed independently");
+            match core.reload_resource_theme(theme) {
+                Ok(()) => gfx
+                    .renderer
+                    .reload_resource_images(core.resources(), &core.data_dirs.bedrock_ui_dir()),
+                Err(error) => {
+                    tracing::warn!(%error, "Theme resource activation failed; retaining the last good resource view, existing panorama/sprites changed independently");
+                }
             }
             core.menu.start_transition_open();
         }

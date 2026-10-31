@@ -678,6 +678,7 @@ impl ApplicationHandler for App {
 
                 let loading = match Renderer::begin(
                     &window,
+                    self.core.resources(),
                     self.core.font_sources(),
                     &self.core.data_dirs.cache_dir,
                     self.core.menu.vsync,
