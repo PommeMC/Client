@@ -80,6 +80,17 @@ pub enum Command {
     /// bobbing and the autosave indicator, so two runs of a script draw the
     /// same frames.
     Deterministic,
+    /// Shrinks or caps the chunk arenas, so a small render distance fills
+    /// them.
+    ChunkArenas(ChunkArenas),
+}
+
+/// Chunk arenas of `vertices` each, at most `max` of them.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChunkArenas {
+    pub vertices: u32,
+    pub max: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -117,6 +128,8 @@ pub struct OptionSet {
     pub brightness: Option<f32>,
     /// A shader pack's name in `shaderpacks/`, or `""` for none.
     pub shader_pack: Option<String>,
+    /// Render Distance in chunks, clamped to the slider's range.
+    pub render_distance: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]

@@ -83,6 +83,15 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
             game.block_light_flicker = 0.0;
             Ok(Value::Null)
         }
+        Command::ChunkArenas(arenas) => {
+            if gfx
+                .renderer
+                .set_chunk_arena_limits(arenas.vertices, arenas.max)
+            {
+                game.rebuild_meshes();
+            }
+            Ok(Value::Null)
+        }
         Command::Hover(target) => hover(core, gfx, game, target),
         Command::Cursor { at } => {
             let gs = gui_scale(core, gfx);
@@ -218,6 +227,9 @@ fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Valu
     }
     if let Some(pack) = &options.shader_pack {
         core.menu.shader_pack = (!pack.is_empty()).then(|| pack.clone());
+    }
+    if let Some(chunks) = options.render_distance {
+        core.menu.render_distance = chunks.clamp(2, core.menu.render_distance_max());
     }
     core.menu.save_options(&core.input.key_bindings);
     Ok(Value::Null)

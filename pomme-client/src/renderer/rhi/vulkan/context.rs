@@ -227,9 +227,14 @@ impl Context {
         } else {
             &[]
         };
+        // Its struct chains on `vkGetPhysicalDeviceMemoryProperties2`, core in 1.1.
+        let memory_budget = physical_device.get_properties().api_version >= vk::API_VERSION_1_1
+            && supports_extensions(&physical_device, &[pyronyx::ext::memory_budget::NAME]);
+        tracing::info!("VK_EXT_memory_budget: {memory_budget}");
         let device_extension_names: Vec<*const c_char> = DEVICE_EXTENSIONS
             .iter()
             .chain(optional_extensions)
+            .chain(memory_budget.then_some(&pyronyx::ext::memory_budget::NAME))
             .map(|ext| ext.as_ptr())
             .collect();
 
@@ -291,6 +296,7 @@ impl Context {
                 allocator,
                 graphics_queue,
                 command_pool,
+                memory_budget,
             ),
             graphics_family,
             present_queue,

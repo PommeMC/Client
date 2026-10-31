@@ -249,7 +249,7 @@ impl crate::world::piston::PistonLevel for ClientPistonLevel<'_> {
     }
 
     fn is_loaded(&self, pos: crate::position::BlockPos) -> bool {
-        let chunk = crate::position::ChunkPos::new(pos.x.div_euclid(16), pos.z.div_euclid(16));
+        let chunk = crate::position::ChunkPos::containing(pos);
         self.game.chunk_store.get_chunk(&chunk).is_some()
     }
 
@@ -2368,8 +2368,7 @@ impl AppCore {
                     }
                 }
                 NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => {
-                    let chunk_pos =
-                        crate::position::ChunkPos::new(pos.x.div_euclid(16), pos.z.div_euclid(16));
+                    let chunk_pos = crate::position::ChunkPos::containing(pos);
                     if game.chunk_store.get_chunk(&chunk_pos).is_some() {
                         game.chunk_store.block_entities.insert(
                             pos,
