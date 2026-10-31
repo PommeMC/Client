@@ -177,6 +177,7 @@ impl DistantColors {
                 translucent: a < 255,
                 occludes: a == 255,
                 faces: [0; 6],
+                holes: false,
                 top: [r, g, b, a],
                 side: [sr, sg, sb, a],
             };
@@ -188,6 +189,7 @@ impl DistantColors {
             translucent: info.translucent,
             occludes: info.occludes,
             faces: info.faces,
+            holes: info.holes,
             top: [r, g, b, 255],
             side: [r, g, b, 255],
         }

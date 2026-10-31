@@ -46,12 +46,24 @@ pub(crate) struct RunLook {
     pub occludes: bool,
     /// The model's face flags, by Voxy face index.
     pub faces: [u8; 6],
+    /// [`super::models::ModelInfo::holes`].
+    pub holes: bool,
     /// The top's and bottom's colour, then the sides'.
     pub top: [u8; 4],
     pub side: [u8; 4],
 }
 
 impl RunLook {
+    /// Its texture's holes cut out, as vanilla draws leaves, so it hides
+    /// nothing behind it.
+    fn cut_out(self) -> Self {
+        Self {
+            occludes: false,
+            faces: self.faces.map(|flags| flags | FACE_DISCARD),
+            ..self
+        }
+    }
+
     /// What `face` draws with; `None` where the model draws nothing.
     fn paint(&self, face: Face) -> Option<Paint> {
         let flags = self.faces[face.voxy_index()];
@@ -160,7 +172,18 @@ pub(crate) fn mesh_section(
 ) -> SectionMesh {
     let w = key.column_width() as u32;
     let mut looks = HashMap::new();
-    let mut look_of = |run: Run| *looks.entry(run.key).or_insert_with(|| look(run.key));
+    // Holes show at full detail, beside real chunks; coarser, the mips
+    // already blend them away, and staying solid keeps forests cheap.
+    let mut look_of = |run: Run| {
+        *looks.entry(run.key).or_insert_with(|| {
+            let look = look(run.key);
+            if key.level == 0 && look.holes {
+                look.cut_out()
+            } else {
+                look
+            }
+        })
+    };
     // Opaque quads, then see-through ones.
     let mut quads = [Vec::new(), Vec::new()];
     let mut flat = FlatFaces::new();
@@ -456,16 +479,12 @@ mod tests {
         );
     }
 
-    /// The level-0 mesh of chunk 0 with `columns` (by `z * 16 + x`), runs
-    /// of biome 1 see-through as water.
-    fn mesh(columns: impl Fn(usize) -> Vec<Run>) -> SectionMesh {
+    /// The `level` mesh of chunk 0 with `columns` (by `z * 16 + x`), runs
+    /// of biome 1 see-through as water, of biome 2 leaves.
+    fn mesh_at(level: u8, columns: impl Fn(usize) -> Vec<Run>) -> SectionMesh {
         let mut store = Store::default();
         store.capture(ChunkPos::new(0, 0), (0..256).map(columns).collect());
-        let key = SectionKey {
-            level: 0,
-            x: 0,
-            z: 0,
-        };
+        let key = SectionKey { level, x: 0, z: 0 };
         mesh_section(key, store.get(key).unwrap(), |key| {
             let water = key.biome == 1;
             let alpha = if water { 128 } else { 255 };
@@ -474,24 +493,33 @@ mod tests {
                 translucent: water,
                 occludes: !water,
                 faces: [0; 6],
+                holes: key.biome == 2,
                 top: [0, 0, 0, alpha],
                 side: [0, 0, 0, alpha],
             }
         })
     }
 
+    fn mesh(columns: impl Fn(usize) -> Vec<Run>) -> SectionMesh {
+        mesh_at(0, columns)
+    }
+
     fn quads(columns: impl Fn(usize) -> Vec<Run>) -> usize {
         mesh(columns).vertices.len() / 4
     }
 
-    fn water(top: u16, bottom: u16) -> Run {
+    fn in_biome(biome: u32, top: u16, bottom: u16) -> Run {
         Run {
             key: RunKey {
-                biome: 1,
+                biome,
                 ..run(top, bottom).key
             },
             ..run(top, bottom)
         }
+    }
+
+    fn water(top: u16, bottom: u16) -> Run {
+        in_biome(1, top, bottom)
     }
 
     #[test]
@@ -544,6 +572,24 @@ mod tests {
             .map(|v| v.light >> 4)
             .collect();
         assert_eq!(west, [15; 8]);
+    }
+
+    #[test]
+    fn leaves_cut_their_holes_out_at_full_detail_only() {
+        let pair = |i| {
+            if i < 2 {
+                vec![in_biome(2, 5, 0)]
+            } else {
+                Vec::new()
+            }
+        };
+        // The pair's shared sides stay, seen through each other's holes.
+        let full = mesh_at(0, pair);
+        assert_eq!(full.vertices.len() / 4, 1 + 2 * 4);
+        assert!(full.vertices.iter().all(|v| v.flags & FACE_DISCARD != 0));
+        let coarse = mesh_at(1, pair);
+        assert!(!coarse.vertices.is_empty());
+        assert!(coarse.vertices.iter().all(|v| v.flags & FACE_DISCARD == 0));
     }
 
     #[test]

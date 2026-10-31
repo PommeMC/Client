@@ -52,6 +52,8 @@ pub(crate) struct ModelInfo {
     pub occludes: bool,
     /// By Voxy face index ([`crate::world::block::model::Direction::VALUES`]).
     pub faces: [u8; 6],
+    /// Solid only as Voxy draws leaves; their texture has holes.
+    pub holes: bool,
 }
 
 /// Model 0's place: states without a model draw in their colours, never
@@ -60,6 +62,7 @@ const UNTEXTURED: ModelInfo = ModelInfo {
     translucent: false,
     occludes: true,
     faces: [0; 6],
+    holes: false,
 };
 
 /// A new model's tile and its mips, to upload to the atlas.
@@ -197,6 +200,7 @@ impl ModelFactory {
             translucent: layer == Layer::Translucent,
             occludes: fully_opaque,
             faces: face_flags,
+            holes: leaves,
         });
         self.tiles.push(ModelTile {
             id,
