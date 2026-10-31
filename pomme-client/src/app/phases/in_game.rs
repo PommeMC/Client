@@ -1208,10 +1208,7 @@ impl GameState {
 
     /// The chunk column the player stands in.
     pub fn player_chunk(&self) -> ChunkPos {
-        ChunkPos::new(
-            (self.player.position.x as i32).div_euclid(16),
-            (self.player.position.z as i32).div_euclid(16),
-        )
+        ChunkPos::containing(BlockPos::containing(*self.player.position))
     }
 
     /// Runs one light update (vanilla `ClientLevel.update`, called per frame

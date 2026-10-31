@@ -43,6 +43,11 @@ impl ChunkPos {
     pub const fn new(x: i32, z: i32) -> Self {
         Self { x, z }
     }
+
+    /// Vanilla `ChunkPos.containing`: the column holding `pos`.
+    pub const fn containing(pos: BlockPos) -> Self {
+        Self::new(pos.x >> 4, pos.z >> 4)
+    }
 }
 
 // TODO: drop this once the serverbound packets carrying positions are
@@ -50,5 +55,20 @@ impl ChunkPos {
 impl From<BlockPos> for azalea_core::position::BlockPos {
     fn from(pos: BlockPos) -> Self {
         Self::new(pos.x, pos.y, pos.z)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::dvec3;
+
+    use super::*;
+
+    #[test]
+    fn columns_floor_negative_coordinates() {
+        let column = |x, z| ChunkPos::containing(BlockPos::containing(dvec3(x, 64.0, z)));
+        assert_eq!(column(0.5, 15.9), ChunkPos::new(0, 0));
+        assert_eq!(column(-0.5, -16.0), ChunkPos::new(-1, -1));
+        assert_eq!(column(-16.5, 16.0), ChunkPos::new(-2, 1));
     }
 }
