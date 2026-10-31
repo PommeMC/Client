@@ -4424,6 +4424,7 @@ pub fn update_game(
     };
     game.distant.set_view(
         &game.dimension,
+        game.chunk_store.min_y(),
         game.player.position.x,
         game.player.position.z,
         distant_terrain,

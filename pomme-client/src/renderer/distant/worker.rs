@@ -54,6 +54,8 @@ enum Job {
 #[derive(Clone)]
 struct View {
     dimension: Arc<str>,
+    /// The dimension's lowest block, which the runs stand on.
+    min_y: i32,
     x: f64,
     z: f64,
     /// In blocks.
@@ -168,19 +170,21 @@ impl DistantTerrain {
 
     /// Where the player is and how far to keep and draw, in chunks; 0 stops
     /// keeping new chunks.
-    pub fn set_view(&mut self, dimension: &str, x: f64, z: f64, chunks: u32) {
+    pub fn set_view(&mut self, dimension: &str, min_y: i32, x: f64, z: f64, chunks: u32) {
         if chunks == 0 {
             self.view = None;
             return;
         }
         let view = View {
             dimension: dimension.into(),
+            min_y,
             x,
             z,
             radius: f64::from(chunks * 16),
         };
         let unchanged = self.view.as_ref().is_some_and(|last| {
             last.dimension == view.dimension
+                && last.min_y == view.min_y
                 && last.radius == view.radius
                 && (last.x - x).hypot(last.z - z) < VIEW_STEP
         });
@@ -222,23 +226,23 @@ fn dimension_dir(cache: Option<&Path>, dimension: &str) -> Option<PathBuf> {
     Some(cache?.join(folder_name(dimension)))
 }
 
-/// `dimension`'s store and `min_y`, made with its folder under `cache`.
+/// `dimension`'s store, made with its folder under `cache`.
 fn store<'a>(
-    stores: &'a mut HashMap<Arc<str>, (Store, i32)>,
+    stores: &'a mut HashMap<Arc<str>, Store>,
     cache: Option<&Path>,
     dimension: &Arc<str>,
-) -> &'a mut (Store, i32) {
+) -> &'a mut Store {
     stores
         .entry(Arc::clone(dimension))
-        .or_insert_with(|| (Store::new(dimension_dir(cache, dimension)), 0))
+        .or_insert_with(|| Store::new(dimension_dir(cache, dimension)))
 }
 
 struct Worker {
     colors: Arc<DistantColors>,
     models: ModelFactory,
     updates: Sender<DistantUpdate>,
-    /// Per dimension, its sections and `min_y`.
-    stores: HashMap<Arc<str>, (Store, i32)>,
+    /// Per dimension, its sections.
+    stores: HashMap<Arc<str>, Store>,
     cache: Option<PathBuf>,
     last_save: Instant,
     view: Option<View>,
@@ -305,7 +309,7 @@ impl Worker {
     }
 
     fn save(&mut self) {
-        for (store, _) in self.stores.values_mut() {
+        for store in self.stores.values_mut() {
             store.flush();
         }
         self.last_save = Instant::now();
@@ -321,10 +325,8 @@ impl Worker {
                 min_y,
             } => {
                 let columns = build_chunk(&chunk.read(), light.as_deref(), min_y, &self.colors);
-                let (store, store_min_y) =
-                    store(&mut self.stores, self.cache.as_deref(), &dimension);
-                *store_min_y = min_y;
-                let touched = store.capture(pos, columns);
+                let touched = store(&mut self.stores, self.cache.as_deref(), &dimension)
+                    .capture(pos, columns);
                 if let Some(view) = self.view.clone()
                     && view.dimension == dimension
                 {
@@ -356,8 +358,7 @@ impl Worker {
                     self.dirty.clear();
                     self.evicted.clear();
                 }
-                let (store, min_y) =
-                    store(&mut self.stores, self.cache.as_deref(), &view.dimension);
+                let store = store(&mut self.stores, self.cache.as_deref(), &view.dimension);
                 store.evict_beyond(view.x, view.z, view.radius + KEEP_MARGIN);
                 // Those with nothing seen mesh empty, so a parent knows its
                 // children are all there.
@@ -368,7 +369,6 @@ impl Worker {
                             store.load(*key);
                         })
                         .collect();
-                let min_y = *min_y;
                 let removed: Vec<SectionKey> = self.meshed.difference(&wanted).copied().collect();
                 for key in &removed {
                     self.meshed.remove(key);
@@ -387,7 +387,7 @@ impl Worker {
                 if !removed.is_empty() {
                     let _ = self.updates.send(DistantUpdate {
                         dimension: Arc::clone(&view.dimension),
-                        min_y,
+                        min_y: view.min_y,
                         meshes: Vec::new(),
                         removed,
                         tiles: Vec::new(),
@@ -406,7 +406,7 @@ impl Worker {
                 }
             }
             Job::Cache(cache) => {
-                for (dimension, (store, _)) in &mut self.stores {
+                for (dimension, store) in &mut self.stores {
                     store.set_dir(dimension_dir(cache.as_deref(), dimension));
                 }
                 self.cache = cache;
@@ -424,7 +424,7 @@ impl Worker {
             self.dirty.clear();
             return;
         };
-        let Some((store, min_y)) = self.stores.get(&view.dimension) else {
+        let Some(store) = self.stores.get(&view.dimension) else {
             self.dirty.clear();
             return;
         };
@@ -459,7 +459,7 @@ impl Worker {
             .collect();
         let _ = self.updates.send(DistantUpdate {
             dimension: Arc::clone(&view.dimension),
-            min_y: *min_y,
+            min_y: view.min_y,
             meshes,
             removed: Vec::new(),
             tiles: self.models.take_tiles(),
