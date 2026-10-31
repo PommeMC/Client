@@ -1319,6 +1319,12 @@ impl GameState {
         let dropped = renderer.upload_chunk_meshes(&batch);
         self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
         self.clear_dropped_meshed(dropped);
+        // Distant terrain gives way once a column draws, not once it loads:
+        // the ring loaded around the view waits on its neighbours to compile.
+        for mesh in &batch {
+            let drawn = self.compiled.get(&mesh.pos).is_some_and(|mask| *mask != 0);
+            renderer.set_distant_column_drawn(mesh.pos, drawn);
+        }
     }
 
     /// The frame's ready meshes, stale ones dropped and the rest's CPU-side

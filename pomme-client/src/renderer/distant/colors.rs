@@ -30,7 +30,8 @@ struct StateLook {
     /// The tint covers the sides too; a grass block's sides keep their
     /// dirt.
     tint_sides: bool,
-    fluid: bool,
+    /// How opaque it draws: 255 but for water.
+    alpha: u8,
 }
 
 const HIDDEN: StateLook = StateLook {
@@ -40,7 +41,7 @@ const HIDDEN: StateLook = StateLook {
     side: UNKNOWN,
     tint: Tint::None,
     tint_sides: false,
-    fluid: false,
+    alpha: 255,
 };
 
 pub(crate) struct DistantColors {
@@ -65,6 +66,7 @@ impl DistantColors {
                 .average_color(name)
                 .map_or(UNKNOWN, |[r, g, b, _]| [r, g, b])
         };
+        let water_alpha = uv_map.average_color("water_still").map_or(255, |[.., a]| a);
         let states = (0..table.state_count() as u32)
             .map(|id| {
                 let Ok(state) = BlockState::try_from(id) else {
@@ -77,7 +79,7 @@ impl DistantColors {
                 let solid = (!data.is_invisible() && data.has_collision())
                     .then(|| view.get_textures(state))
                     .flatten();
-                let fluid = solid.is_none();
+                let mut alpha = 255;
                 let (top, side, tint, tint_sides) = match (solid, data.fluid().kind) {
                     (Some(faces), _) => {
                         let fixed = match faces.tint {
@@ -99,6 +101,7 @@ impl DistantColors {
                     }
                     (None, FluidKind::Water) => {
                         let water = color("water_still");
+                        alpha = water_alpha;
                         (water, water, Tint::Water, true)
                     }
                     (None, FluidKind::Lava) => {
@@ -111,7 +114,7 @@ impl DistantColors {
                     shows: Shows::Yes {
                         tinted: tint != Tint::None,
                     },
-                    fluid,
+                    alpha,
                     fills: data.occludes_neighbor_faces(),
                     top,
                     side,
@@ -144,9 +147,9 @@ impl DistantColors {
         self.look(state).fills
     }
 
-    /// Whether it shows as water or lava.
-    pub fn fluid(&self, state: BlockState) -> bool {
-        self.look(state).fluid
+    /// How opaque it draws: 255 but for water.
+    pub fn alpha(&self, state: BlockState) -> u8 {
+        self.look(state).alpha
     }
 
     /// A run's top and side colours, tinted for its biome.

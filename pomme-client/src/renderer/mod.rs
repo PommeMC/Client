@@ -1390,10 +1390,10 @@ impl Renderer {
         }
     }
 
-    /// Whether a real chunk is loaded at `pos`, where distant terrain gives
-    /// way to it.
-    pub fn set_distant_column_loaded(&mut self, pos: ChunkPos, loaded: bool) {
-        self.distant_buffers.set_column_loaded(pos, loaded);
+    /// Whether a real chunk draws at `pos`, where distant terrain gives way
+    /// to it.
+    pub fn set_distant_column_drawn(&mut self, pos: ChunkPos, drawn: bool) {
+        self.distant_buffers.set_column_drawn(pos, drawn);
     }
 
     /// Drops all distant terrain and forgets every loaded chunk, for a new
@@ -2114,14 +2114,17 @@ impl Renderer {
                     if self.distant_draws(*distant_terrain) {
                         // Its own projection, so its depth means nothing to
                         // the chunks: they start from a cleared buffer, and
-                        // the loaded-column mask keeps it out of theirs.
-                        self.distant_pipeline.bind(&mut pass, frame);
-                        self.distant_buffers.draw(
-                            &pass,
-                            &self.camera,
-                            self.camera_render_position(),
-                            f64::from(*distant_terrain * 16),
-                        );
+                        // the drawn-column mask keeps it out of theirs.
+                        for translucent in [false, true] {
+                            self.distant_pipeline.bind(&mut pass, frame, translucent);
+                            self.distant_buffers.draw(
+                                &pass,
+                                &self.camera,
+                                self.camera_render_position(),
+                                f64::from(*distant_terrain * 16),
+                                translucent,
+                            );
+                        }
                         pass.clear_depth(scissor);
                     }
 

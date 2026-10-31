@@ -20,7 +20,7 @@ layout(location = 1) in uint in_y;
 layout(location = 2) in uvec2 in_light_face;
 layout(location = 3) in vec4 in_color;
 
-layout(location = 0) out vec3 v_color;
+layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec3 v_fog_color;
 layout(location = 2) out float v_fog;
 // Anchor-relative x/z, nudged half a block into the face's own column, and
@@ -59,7 +59,7 @@ void main() {
 
     uint light = in_light_face.x;
     vec2 lightmap_uv = vec2(float(light & 0xFu), float(light >> 4)) * 16.0;
-    v_color = in_color.rgb * sample_lightmap(lightmap_uv).rgb;
+    v_color = vec4(in_color.rgb * sample_lightmap(lightmap_uv).rgb, in_color.a);
     v_fog_color = fog_color.rgb;
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     vec2 nudge = FACE_NUDGE[min(in_light_face.y & 7u, 5u)];

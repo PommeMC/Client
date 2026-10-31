@@ -42,7 +42,7 @@ pub fn bench(c: &mut Criterion, assets: &Assets) {
                         key,
                         section,
                         |run| colors.colors(run),
-                        |run| colors.fluid(run.state),
+                        |run| colors.alpha(run.state),
                     ))
                 })
             });

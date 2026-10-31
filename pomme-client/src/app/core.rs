@@ -1817,16 +1817,13 @@ impl AppCore {
                     light,
                 } => {
                     game.load_chunk(pos, &data, &heightmaps, &light);
-                    if game.chunk_store.get_chunk(&pos).is_some() {
-                        renderer.set_distant_column_loaded(pos, true);
-                    }
                 }
                 NetworkEvent::LightUpdate { pos, light } => game.apply_light_update(pos, &light),
                 NetworkEvent::ChunkBiomes { chunks } => game.replace_biomes(&chunks),
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.unload_chunk(pos);
                     renderer.remove_chunk_mesh(&pos);
-                    renderer.set_distant_column_loaded(pos, false);
+                    renderer.set_distant_column_drawn(pos, false);
                 }
                 NetworkEvent::ChunkCacheCenter { x, z } => {
                     tracing::debug!("Chunk cache center: [{x}, {z}]");

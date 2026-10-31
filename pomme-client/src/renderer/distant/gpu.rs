@@ -1,5 +1,5 @@
 //! Distant terrain on the GPU: section meshes in vertex arenas, the
-//! loaded-column mask that keeps them out of real chunks, and the draws.
+//! drawn-column mask that keeps them out of real chunks, and the draws.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -54,6 +54,8 @@ struct Uploaded {
     arena: usize,
     first_vertex: u32,
     vertices: u32,
+    /// [`super::mesh::SectionMesh::translucent_start`].
+    translucent_start: u32,
     min_y: u16,
     max_y: u16,
 }
@@ -66,7 +68,7 @@ pub(crate) struct DistantBuffers {
     /// The dimension the sections are of, and its `min_y`.
     dimension: Option<Arc<str>>,
     min_y: i32,
-    /// Bit per [`ring_slot`]: a real chunk is loaded there.
+    /// Bit per [`ring_slot`]: a real chunk draws there.
     mask: rhi::backend::Buffer,
     mask_words: Vec<u32>,
     frame_seq: u64,
@@ -149,11 +151,11 @@ impl DistantBuffers {
         self.mask.zero();
     }
 
-    pub fn set_column_loaded(&mut self, pos: ChunkPos, loaded: bool) {
+    pub fn set_column_drawn(&mut self, pos: ChunkPos, drawn: bool) {
         let slot = ring_slot(pos);
         let (word, bit) = (slot / 32, 1u32 << (slot % 32));
         let value = &mut self.mask_words[word];
-        if loaded {
+        if drawn {
             *value |= bit;
         } else {
             *value &= !bit;
@@ -213,6 +215,7 @@ impl DistantBuffers {
                     arena,
                     first_vertex,
                     vertices: count,
+                    translucent_start: mesh.translucent_start,
                     min_y: mesh.min_y,
                     max_y: mesh.max_y,
                 },
@@ -265,14 +268,15 @@ impl DistantBuffers {
         out
     }
 
-    /// Draws the sections in view out to `radius` blocks. The caller has
-    /// bound the distant pipeline.
+    /// Draws the opaque or see-through faces of the sections in view out to
+    /// `radius` blocks. The caller has bound the matching distant pipeline.
     pub fn draw(
         &self,
         pass: &rhi::backend::RenderPassEncoder,
         camera: &Camera,
         eye: DVec3,
         radius: f64,
+        translucent: bool,
     ) {
         if self.sections.is_empty() {
             return;
@@ -292,7 +296,12 @@ impl DistantBuffers {
         let mut bound = None;
         for key in visible {
             let section = &self.sections[&key];
-            if section.vertices == 0 {
+            let (first, end) = if translucent {
+                (section.translucent_start, section.vertices)
+            } else {
+                (0, section.translucent_start)
+            };
+            if first == end {
                 continue;
             }
             let (ox, oz) = key.origin();
@@ -313,14 +322,14 @@ impl DistantBuffers {
                 64,
                 bytemuck::cast_slice(&[rel.x, rel.y, rel.z, 0.0]),
             );
-            let quads = section.vertices / 4;
+            let quads = (end - first) / 4;
             for first_quad in (0..quads).step_by(QUADS_PER_DRAW as usize) {
                 let count = (quads - first_quad).min(QUADS_PER_DRAW);
                 pass.draw_indexed(
                     count * 6,
                     1,
                     0,
-                    (section.first_vertex + first_quad * 4) as i32,
+                    (section.first_vertex + first + first_quad * 4) as i32,
                     0,
                 );
             }

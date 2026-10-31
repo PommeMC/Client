@@ -382,7 +382,7 @@ impl Worker {
                         key,
                         section,
                         |run| self.colors.colors(run),
-                        |run| self.colors.fluid(run.state),
+                        |run| self.colors.alpha(run.state),
                     ),
                     None => SectionMesh::empty(key),
                 }
