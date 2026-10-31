@@ -28,6 +28,9 @@ const KEEP_MARGIN: f64 = 1024.0;
 const VIEW_STEP: f64 = 32.0;
 /// How often changed sections are written to disk.
 const SAVE_EVERY: Duration = Duration::from_secs(60);
+/// How long a section a capture changed waits for more before it's meshed,
+/// so a burst of captures meshes it once.
+const SETTLE: Duration = Duration::from_millis(250);
 
 enum Job {
     Capture {
@@ -39,6 +42,8 @@ enum Job {
     },
     Colors(Arc<DistantColors>),
     View(View),
+    /// Sections the renderer evicted or dropped for room.
+    Evicted(Vec<SectionKey>),
     /// Where sections are kept on disk, a folder per dimension; `None`
     /// keeps them in memory only.
     Cache(Option<PathBuf>),
@@ -154,6 +159,13 @@ impl DistantTerrain {
         let _ = self.jobs.send(Job::Colors(colors));
     }
 
+    /// Sections the renderer had no room for, meshed again once nearer.
+    pub fn evicted(&self, keys: Vec<SectionKey>) {
+        if !keys.is_empty() {
+            let _ = self.jobs.send(Job::Evicted(keys));
+        }
+    }
+
     /// Where the player is and how far to keep and draw, in chunks; 0 stops
     /// keeping new chunks.
     pub fn set_view(&mut self, dimension: &str, x: f64, z: f64, chunks: u32) {
@@ -230,10 +242,12 @@ struct Worker {
     cache: Option<PathBuf>,
     last_save: Instant,
     view: Option<View>,
-    /// The viewed dimension's sections to mesh.
-    dirty: HashSet<SectionKey>,
+    /// The viewed dimension's sections to mesh, by when.
+    dirty: HashMap<SectionKey, Instant>,
     /// The viewed dimension's sections with a mesh sent.
     meshed: HashSet<SectionKey>,
+    /// Sections the renderer had no room for, by how far they were.
+    evicted: HashMap<SectionKey, f64>,
 }
 
 impl Worker {
@@ -246,17 +260,30 @@ impl Worker {
             cache: None,
             last_save: Instant::now(),
             view: None,
-            dirty: HashSet::new(),
+            dirty: HashMap::new(),
             meshed: HashSet::new(),
+            evicted: HashMap::new(),
         }
+    }
+
+    /// Queues `key` to mesh from `ready`, no longer evicted.
+    fn mark_dirty(&mut self, key: SectionKey, ready: Instant) {
+        self.evicted.remove(&key);
+        self.dirty.insert(key, ready);
+    }
+
+    /// Whether `key`, if evicted, is now a section nearer than it was.
+    fn wants_back(&self, view: &View, key: SectionKey) -> bool {
+        self.evicted
+            .get(&key)
+            .is_none_or(|&was| key.distance(view.x, view.z) + f64::from(key.width()) < was)
     }
 
     fn run(mut self, jobs: &Receiver<Job>) {
         'run: loop {
-            let wait = if self.dirty.is_empty() {
-                SAVE_EVERY.saturating_sub(self.last_save.elapsed())
-            } else {
-                Duration::ZERO
+            let wait = match self.dirty.values().min() {
+                Some(ready) => ready.saturating_duration_since(Instant::now()),
+                None => SAVE_EVERY.saturating_sub(self.last_save.elapsed()),
             };
             let first = match jobs.recv_timeout(wait) {
                 Ok(job) => Some(job),
@@ -298,11 +325,15 @@ impl Worker {
                     store(&mut self.stores, self.cache.as_deref(), &dimension);
                 *store_min_y = min_y;
                 let touched = store.capture(pos, columns);
-                if let Some(view) = &self.view
+                if let Some(view) = self.view.clone()
                     && view.dimension == dimension
                 {
-                    self.dirty
-                        .extend(touched.into_iter().filter(|key| view.wants(*key)));
+                    let ready = Instant::now() + SETTLE;
+                    for key in touched {
+                        if view.wants(key) && self.wants_back(&view, key) {
+                            self.mark_dirty(key, ready);
+                        }
+                    }
                 }
             }
             Job::Colors(colors) => {
@@ -311,7 +342,8 @@ impl Worker {
                     self.models = ModelFactory::new();
                 }
                 self.colors = colors;
-                self.dirty.extend(self.meshed.iter().copied());
+                let now = Instant::now();
+                self.dirty.extend(self.meshed.iter().map(|&key| (key, now)));
             }
             Job::View(view) => {
                 if self
@@ -322,6 +354,7 @@ impl Worker {
                     // The renderer drops the old dimension's meshes itself.
                     self.meshed.clear();
                     self.dirty.clear();
+                    self.evicted.clear();
                 }
                 let (store, min_y) =
                     store(&mut self.stores, self.cache.as_deref(), &view.dimension);
@@ -335,22 +368,42 @@ impl Worker {
                             store.load(*key);
                         })
                         .collect();
+                let min_y = *min_y;
                 let removed: Vec<SectionKey> = self.meshed.difference(&wanted).copied().collect();
                 for key in &removed {
                     self.meshed.remove(key);
                 }
-                self.dirty.retain(|key| wanted.contains(key));
-                self.dirty.extend(wanted.difference(&self.meshed).copied());
+                self.dirty.retain(|key, _| wanted.contains(key));
+                self.evicted.retain(|key, _| wanted.contains(key));
+                let now = Instant::now();
+                let back: Vec<SectionKey> = wanted
+                    .difference(&self.meshed)
+                    .copied()
+                    .filter(|&key| self.wants_back(&view, key))
+                    .collect();
+                for key in back {
+                    self.mark_dirty(key, now);
+                }
                 if !removed.is_empty() {
                     let _ = self.updates.send(DistantUpdate {
                         dimension: Arc::clone(&view.dimension),
-                        min_y: *min_y,
+                        min_y,
                         meshes: Vec::new(),
                         removed,
                         tiles: Vec::new(),
                     });
                 }
                 self.view = Some(view);
+            }
+            Job::Evicted(keys) => {
+                let Some(view) = &self.view else {
+                    return;
+                };
+                for key in keys {
+                    self.meshed.remove(&key);
+                    self.dirty.remove(&key);
+                    self.evicted.insert(key, key.distance(view.x, view.z));
+                }
             }
             Job::Cache(cache) => {
                 for (dimension, (store, _)) in &mut self.stores {
@@ -375,7 +428,16 @@ impl Worker {
             self.dirty.clear();
             return;
         };
-        let mut nearest: Vec<SectionKey> = self.dirty.iter().copied().collect();
+        let now = Instant::now();
+        let mut nearest: Vec<SectionKey> = self
+            .dirty
+            .iter()
+            .filter(|&(_, &ready)| ready <= now)
+            .map(|(&key, _)| key)
+            .collect();
+        if nearest.is_empty() {
+            return;
+        }
         nearest.sort_by(|a, b| {
             a.distance(view.x, view.z)
                 .total_cmp(&b.distance(view.x, view.z))

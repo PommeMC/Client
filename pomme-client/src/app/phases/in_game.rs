@@ -1311,11 +1311,12 @@ impl GameState {
         let batch = self.drain_meshes();
         let upload_start = std::time::Instant::now();
         let dimension = self.dimension.as_str();
-        renderer.upload_distant(
+        let evicted = renderer.upload_distant(
             self.distant
                 .drain()
                 .filter(|update| &*update.dimension == dimension),
         );
+        self.distant.evicted(evicted);
         let dropped = renderer.upload_chunk_meshes(&batch);
         self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
         self.clear_dropped_meshed(dropped);

@@ -67,7 +67,7 @@ impl SectionKey {
         Some([child(0, 0), child(1, 0), child(0, 1), child(1, 1)])
     }
 
-    fn parent(self) -> Option<Self> {
+    pub fn parent(self) -> Option<Self> {
         (self.level + 1 < LEVELS).then(|| Self {
             level: self.level + 1,
             x: self.x.div_euclid(2),

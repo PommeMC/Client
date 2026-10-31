@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use glam::DVec3;
 
-use super::mesh::DistantVertex;
+use super::mesh::{DistantVertex, SectionMesh};
 use super::models::{
     ATLAS_COLUMNS, ATLAS_ROWS, MODEL_MIP_LEVELS, ModelTile, TILE_HEIGHT, TILE_WIDTH,
 };
@@ -96,6 +96,9 @@ pub(crate) struct DistantBuffers {
     model_sampler: rhi::backend::Sampler,
     /// Tiles waiting for [`Self::record_model_upload`].
     pending_tiles: VecDeque<ModelTile>,
+    /// Meshes waiting for the room evicting made, which frees a few frames
+    /// on.
+    waiting: Vec<SectionMesh>,
     tile_staging: Vec<rhi::backend::Buffer>,
 }
 
@@ -161,6 +164,7 @@ impl DistantBuffers {
                 },
             ),
             pending_tiles: VecDeque::new(),
+            waiting: Vec::new(),
             tile_staging: util::create_per_frame_host_buffers(
                 device,
                 (TILE_BYTES * TILES_PER_FRAME) as u64,
@@ -259,6 +263,7 @@ impl DistantBuffers {
         for key in keys {
             self.retire(key);
         }
+        self.waiting.clear();
         self.dimension = None;
     }
 
@@ -300,44 +305,119 @@ impl DistantBuffers {
         Some((self.arenas.len() - 1, first_vertex))
     }
 
-    pub fn upload(&mut self, device: &rhi::backend::Device, update: DistantUpdate) {
-        if self.dimension.as_ref() != Some(&update.dimension) {
-            self.clear();
-            self.dimension = Some(Arc::clone(&update.dimension));
+    /// Takes the worker's updates, then the meshes waiting for room. With
+    /// the arenas full, a mesh makes room by evicting the finer sections
+    /// farther from `eye` than it, farthest first, their parents drawing in
+    /// their place; a mesh with none farther is dropped. Returns the
+    /// sections evicted or dropped, for the worker to mesh again once
+    /// nearer.
+    pub fn upload(
+        &mut self,
+        device: &rhi::backend::Device,
+        updates: impl IntoIterator<Item = DistantUpdate>,
+        eye: DVec3,
+    ) -> Vec<SectionKey> {
+        let mut meshes = std::mem::take(&mut self.waiting);
+        for update in updates {
+            if self.dimension.as_ref() != Some(&update.dimension) {
+                self.clear();
+                meshes.clear();
+                self.dimension = Some(Arc::clone(&update.dimension));
+            }
+            self.min_y = update.min_y;
+            self.pending_tiles.extend(update.tiles);
+            for key in update.removed {
+                self.retire(key);
+                meshes.retain(|mesh| mesh.key != key);
+            }
+            for mesh in update.meshes {
+                meshes.retain(|waiting| waiting.key != mesh.key);
+                meshes.push(mesh);
+            }
         }
-        self.min_y = update.min_y;
-        self.pending_tiles.extend(update.tiles);
-        for key in update.removed {
-            self.retire(key);
-        }
-        for mesh in update.meshes {
-            self.retire(mesh.key);
-            let count = mesh.vertices.len() as u32;
-            let (arena, first_vertex) = if count == 0 {
-                (0, 0)
-            } else {
-                let Some((arena, first_vertex)) = self.alloc(device, count) else {
-                    tracing::warn!("No room for distant terrain section {:?}", mesh.key);
-                    continue;
-                };
-                self.arenas[arena].buffer.write_at(
-                    (u64::from(first_vertex) * VERTEX_SIZE) as usize,
-                    bytemuck::cast_slice(&mesh.vertices),
-                );
-                (arena, first_vertex)
+        let mut gone = Vec::new();
+        for mesh in meshes {
+            let Err(mesh) = self.place(device, mesh) else {
+                continue;
             };
-            self.sections.insert(
-                mesh.key,
-                Uploaded {
-                    arena,
-                    first_vertex,
-                    vertices: count,
-                    translucent_start: mesh.translucent_start,
-                    min_y: mesh.min_y,
-                    max_y: mesh.max_y,
-                },
-            );
+            let distance = mesh.key.distance(eye.x, eye.z);
+            if self.evict_beyond(distance, mesh.vertices.len() as u32, eye, &mut gone) {
+                self.waiting.push(mesh);
+            } else {
+                gone.push(mesh.key);
+            }
         }
+        gone
+    }
+
+    /// Puts `mesh` in an arena in place of its section's last; gives it
+    /// back without room.
+    fn place(
+        &mut self,
+        device: &rhi::backend::Device,
+        mesh: SectionMesh,
+    ) -> Result<(), SectionMesh> {
+        let count = mesh.vertices.len() as u32;
+        let (arena, first_vertex) = if count == 0 {
+            (0, 0)
+        } else {
+            let Some((arena, first_vertex)) = self.alloc(device, count) else {
+                return Err(mesh);
+            };
+            self.arenas[arena].buffer.write_at(
+                (u64::from(first_vertex) * VERTEX_SIZE) as usize,
+                bytemuck::cast_slice(&mesh.vertices),
+            );
+            (arena, first_vertex)
+        };
+        self.retire(mesh.key);
+        self.sections.insert(
+            mesh.key,
+            Uploaded {
+                arena,
+                first_vertex,
+                vertices: count,
+                translucent_start: mesh.translucent_start,
+                min_y: mesh.min_y,
+                max_y: mesh.max_y,
+            },
+        );
+        Ok(())
+    }
+
+    /// Retires sections farther from `eye` than `distance` whose parent is
+    /// uploaded to draw instead, farthest first, until they held `count`
+    /// vertices; whether there were any.
+    fn evict_beyond(
+        &mut self,
+        distance: f64,
+        count: u32,
+        eye: DVec3,
+        gone: &mut Vec<SectionKey>,
+    ) -> bool {
+        let mut far: Vec<(f64, SectionKey)> = self
+            .sections
+            .iter()
+            .filter(|(key, section)| {
+                section.vertices > 0
+                    && key
+                        .parent()
+                        .is_some_and(|parent| self.sections.contains_key(&parent))
+            })
+            .map(|(key, _)| (key.distance(eye.x, eye.z), *key))
+            .filter(|&(far, _)| far > distance)
+            .collect();
+        far.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut freed = 0;
+        for &(_, key) in &far {
+            if freed >= count {
+                break;
+            }
+            freed += self.sections[&key].vertices;
+            self.retire(key);
+            gone.push(key);
+        }
+        !far.is_empty()
     }
 
     /// Whether the finest section holding block column `x`/`z` is uploaded

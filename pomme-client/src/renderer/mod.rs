@@ -1380,14 +1380,14 @@ impl Renderer {
         self.chunk_buffers.clear();
     }
 
-    /// New and dropped distant terrain sections.
+    /// New and dropped distant terrain sections; returns those evicted for
+    /// room ([`distant::gpu::DistantBuffers::upload`]).
     pub(crate) fn upload_distant(
         &mut self,
         updates: impl IntoIterator<Item = distant::worker::DistantUpdate>,
-    ) {
-        for update in updates {
-            self.distant_buffers.upload(&self.ctx.device, update);
-        }
+    ) -> Vec<distant::store::SectionKey> {
+        let eye = self.camera_render_position();
+        self.distant_buffers.upload(&self.ctx.device, updates, eye)
     }
 
     /// Whether a real chunk draws at `pos`, where distant terrain gives way
