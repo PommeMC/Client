@@ -3894,24 +3894,27 @@ fn build_sprite_atlas(
     }
 
     // `LogoRenderer` blits only the top 44/64 of minecraft.png and 14/16 of
-    // edition.png. The files are supersampled and packs may use any size, so
-    // crop by fraction; a row-major prefix is contiguous, so it's a truncate.
-    for (id, asset_key, logical_h, used_h) in [
+    // edition.png. Both are supersampled, so crop by fraction; a row-major
+    // prefix is contiguous, so it's a truncate.
+    for (id, image, logical_h, used_h) in [
         (
             SpriteId::MinecraftLogo,
-            "minecraft/textures/gui/title/minecraft.png",
+            crate::assets::load_image(&resolve_asset_path(
+                jar_assets_dir,
+                asset_index,
+                "minecraft/textures/gui/title/minecraft.png",
+            )),
             64u32,
             44u32,
         ),
         (
             SpriteId::MinecraftEdition,
-            "minecraft/textures/gui/title/edition.png",
+            image::load_from_memory(crate::assets::POMME_EDITION_PNG),
             16,
             14,
         ),
     ] {
-        let path = resolve_asset_path(jar_assets_dir, asset_index, asset_key);
-        match crate::assets::load_image(&path) {
+        match image {
             Ok(img) => {
                 let rgba = img.to_rgba8();
                 let (w, h) = (rgba.width(), rgba.height());
@@ -3921,7 +3924,7 @@ fn build_sprite_atlas(
                 images.push((id, raw, w, used, 0.0));
             }
             Err(e) => {
-                tracing::warn!("Failed to load title sprite {asset_key}: {e}");
+                tracing::warn!("Failed to load title sprite {id:?}: {e}");
                 images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
             }
         }

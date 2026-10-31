@@ -69,6 +69,13 @@ pub(crate) fn valid_asset_key(asset_key: &str) -> bool {
 pub const POMME_ICON_PNG: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"));
 
+/// The "Rust Edition" banner under the title logo, laid out like the jar's
+/// `edition.png`.
+pub const POMME_EDITION_PNG: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/gui/title/edition.png"
+));
+
 pub fn load_image(path: &Path) -> Result<image::DynamicImage, image::ImageError> {
     image::open(path).or_else(|_| {
         let data = std::fs::read(path).map_err(image::ImageError::IoError)?;
