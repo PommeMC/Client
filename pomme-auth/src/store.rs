@@ -8,8 +8,8 @@ pub trait SecretStore: Send + Sync {
     fn write(&self, key: &str, value: &str);
 }
 
-/// The OS credential store, under the launcher's service name so the
-/// launcher and the desktop client see the same accounts.
+/// The OS credential store, under the old launcher's service name so the
+/// accounts it saved still load.
 #[cfg(feature = "keyring")]
 pub struct KeyringStore;
 
