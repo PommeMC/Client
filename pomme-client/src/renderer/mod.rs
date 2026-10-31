@@ -59,6 +59,7 @@ use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::held_item::{HandRenderSelection, HeldHand};
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
+use crate::resources::ResourceManager;
 use crate::ui::font::{FontOptions, FontSources};
 use crate::world::block::render_assets::{BlockRenderAssets, BlockRenderView};
 
@@ -303,8 +304,10 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         window: Arc<Window>,
+        resources: &dyn ResourceManager,
         font_sources: FontSources<'_>,
         game_dir: &Path,
         cache_dir: &Path,
@@ -327,8 +330,13 @@ impl Renderer {
             })
         };
 
-        let (ctx, swapchain_state, mut frames, mut menu_pipeline) =
-            boot::bring_up(&window, font_sources, Some(bedrock_ui_dir), vsync)?;
+        let (ctx, swapchain_state, mut frames, mut menu_pipeline) = boot::bring_up(
+            &window,
+            resources,
+            font_sources,
+            Some(bedrock_ui_dir),
+            vsync,
+        )?;
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
@@ -1599,6 +1607,22 @@ impl Renderer {
             return;
         }
         self.menu_pipeline.reload_sprite_atlas(
+            &self.ctx.device,
+            &self.jar_assets_dir,
+            &self.asset_index,
+            Some(bedrock_ui_dir),
+        );
+    }
+
+    /// Refreshes the menu's resource images after successful view activation.
+    /// Activation sites with a live renderer must call this explicitly.
+    pub fn reload_resource_images(
+        &mut self,
+        resources: &dyn ResourceManager,
+        bedrock_ui_dir: &Path,
+    ) {
+        self.menu_pipeline.reload_resource_images(
+            resources,
             &self.ctx.device,
             &self.jar_assets_dir,
             &self.asset_index,

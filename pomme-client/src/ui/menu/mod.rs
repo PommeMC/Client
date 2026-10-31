@@ -26,6 +26,7 @@ use crate::renderer::pipelines::menu_overlay::{
     ICON_LINK, ICON_PAINTBRUSH, ICON_RETRY, ICON_UNIVERSAL_ACCESS, ICON_USER, ICON_USERS,
     MenuElement, SpriteId, TooltipLine,
 };
+use crate::resources::ResourceManager;
 use crate::ui::chat::ChatOptions;
 use crate::ui::font::FontOptions;
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
@@ -1284,22 +1285,24 @@ impl MainMenu {
         }
     }
 
-    /// Picks the title screen's splash line. Separate from `new` because the
-    /// asset index it reads through isn't built until after the menu is.
-    pub fn load_splash(
-        &mut self,
-        jar_assets_dir: &Path,
-        asset_index: &Option<crate::assets::AssetIndex>,
-    ) {
+    /// Picks from the active resource view. Absence clears the splash;
+    /// read/decode failure retains the last good line without rolling back
+    /// resource activation.
+    pub fn load_splash(&mut self, resources: &dyn ResourceManager) {
         let now =
             time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-        self.splash = splash::pick(
-            jar_assets_dir,
-            asset_index,
+        let picked = splash::pick(
+            resources,
             &self.username,
             now.month() as u32,
             u32::from(now.day()),
         );
+        match picked {
+            Ok(splash) => self.splash = splash,
+            Err(error) => {
+                tracing::warn!(%error, "Failed to load minecraft:texts/splashes.txt; retaining the last good splash");
+            }
+        }
     }
 
     fn is_server_list_screen(&self) -> bool {

@@ -31,8 +31,15 @@ use crate::player::tab_list::{PlayerChatValidation, TabList};
 use crate::renderer::Renderer;
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::resource_pack::ResourcePackManager;
+use crate::resources::managers::ReloadableResourceManager;
+use crate::resources::pack_resources::PackType;
+use crate::resources::packs::{
+    BuiltinRepositorySource, FolderRepositorySource, InstallationLocation, PackRepository,
+    RegisteredRepositorySource, SymlinkPolicy, ThemeSpecification,
+};
 use crate::ui::menu::{
     CREDITS_KEY_CTRL_L, CREDITS_KEY_CTRL_R, CREDITS_KEY_SPACE, CREDITS_KEY_UP, MainMenu, MenuInput,
+    PanoramaTheme,
 };
 use crate::ui::text::InlineObject;
 use crate::user::UserData;
@@ -916,6 +923,12 @@ pub struct AppCore {
     pub data_dirs: DataDirs,
     pub version: String,
     pub resource_packs: ResourcePackManager,
+    // Initialized independently of the existing UI/server-selected asset stack.
+    builtin_resources: BuiltinRepositorySource,
+    folder_resources: FolderRepositorySource,
+    registered_resources: RegisteredRepositorySource,
+    resource_repository: PackRepository,
+    resources: ReloadableResourceManager,
     pub(crate) block_definitions: Rc<BlockDefinitions>,
     pub pending_pack_download: Option<PendingPackDownload>,
     pub asset_index: Option<AssetIndex>,
@@ -1001,16 +1014,15 @@ fn cursor_step(grabbed: bool, stale: bool, want: bool, focused: bool) -> (Cursor
     }
 }
 
-/// The asset index, the menu's splash and the audio engine, which `AppCore`
-/// builds from the version's assets.
+/// The asset index and audio engine, which `AppCore` builds from the version's
+/// assets.
 fn load_assets(
     data_dirs: &DataDirs,
     version: &str,
     resource_packs: &ResourcePackManager,
-    menu: &mut MainMenu,
+    menu: &MainMenu,
 ) -> (Option<AssetIndex>, crate::audio::AudioEngine) {
     let asset_index = AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, version);
-    menu.load_splash(&data_dirs.jar_assets_dir, &asset_index);
     let audio = crate::audio::AudioEngine::new(
         &data_dirs.jar_assets_dir,
         asset_index.clone(),
@@ -1054,10 +1066,33 @@ impl AppCore {
         user: UserData,
         window_size: winit::dpi::LogicalSize<u32>,
     ) -> Self {
+        let pack_type = PackType::ClientResources;
+        let builtin_resources = BuiltinRepositorySource::new(None);
+        let folder_resources = FolderRepositorySource::new(Vec::new(), None, pack_type, None);
+        let registered_resources = RegisteredRepositorySource::new(pack_type, None);
+        let mut resource_repository = PackRepository::new(vec![
+            Box::new(builtin_resources.clone()),
+            Box::new(folder_resources.clone()),
+            Box::new(registered_resources.clone()),
+        ]);
+        let mut resources = ReloadableResourceManager::new(pack_type);
+        // Establish an embedded-only view before any external discovery can fail.
+        resource_repository
+            .reload()
+            .expect("embedded Pomme resource catalog must load without filesystem access");
+        let opened = resource_repository
+            .open_all_enabled()
+            .expect("embedded Pomme resources must open without filesystem access");
+        resources
+            .reload(opened, |_| {
+                // The menu has not been constructed yet.
+            })
+            .expect("embedded Pomme resource view must initialize");
+
         let resource_packs = ResourcePackManager::new(&data_dirs.game_dir);
 
         let mut input = InputState::new();
-        let mut menu = MainMenu::new(
+        let menu = MainMenu::new(
             &data_dirs.game_dir,
             data_dirs.bedrock_assets_dir.clone(),
             Arc::clone(&tokio_rt),
@@ -1069,11 +1104,11 @@ impl AppCore {
 
         let display_mode = menu.display_mode;
 
-        let (asset_index, audio) = load_assets(&data_dirs, &version, &resource_packs, &mut menu);
+        let (asset_index, audio) = load_assets(&data_dirs, &version, &resource_packs, &menu);
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
         let (head_tx, head_rx) = crossbeam_channel::unbounded();
 
-        Self {
+        let mut core = Self {
             user,
             presence,
             display_mode,
@@ -1085,6 +1120,11 @@ impl AppCore {
             data_dirs,
             version,
             resource_packs,
+            builtin_resources,
+            folder_resources,
+            registered_resources,
+            resource_repository,
+            resources,
             block_definitions: Rc::new(BlockDefinitions::new()),
             pending_pack_download: None,
             asset_index,
@@ -1109,7 +1149,77 @@ impl AppCore {
             inline_atlas_dirty: false,
             player_faces_packed: false,
             game_dynamic_atlas_keys: HashSet::new(),
+        };
+        core.menu.load_splash(&core.resources);
+        core.configure_resources();
+        core
+    }
+
+    fn configure_resources(&mut self) {
+        let policy_path = self.data_dirs.game_dir.join("allowed_symlinks.txt");
+        let policy = SymlinkPolicy::load(Some(&policy_path));
+        self.folder_resources.set_symlink_policy(policy.clone());
+        self.registered_resources.set_symlink_policy(policy);
+
+        let root = self.data_dirs.game_dir.join("resourcepacks");
+        // The existing pack manager normally creates this first, but ignores
+        // errors. Discovery logs and skips any root it still cannot list.
+        if !root.is_dir()
+            && let Err(error) = std::fs::create_dir_all(&root)
+        {
+            tracing::warn!(path = %root.display(), %error, "Cannot create resource pack directory");
         }
+        let cache = root.join(".server_cache");
+        self.folder_resources.set_paths(vec![root], Some(cache));
+        self.set_resource_theme(self.menu.theme());
+        let installation = self
+            .data_dirs
+            .is_installed(&self.version)
+            .then(|| self.data_dirs.installation_location(&self.version));
+        self.set_resource_installation(installation);
+        if let Err(error) = self.reload_resources() {
+            tracing::warn!(%error, "Resource setup failed; retaining the embedded Pomme view, existing asset startup is unchanged");
+        }
+    }
+
+    fn set_resource_installation(&self, installation: Option<InstallationLocation>) {
+        self.builtin_resources.set_installation(installation);
+        let target = self.builtin_resources.target_format();
+        self.folder_resources.set_target_format(target);
+        self.registered_resources.set_target_format(target);
+    }
+
+    fn set_resource_theme(&self, theme: PanoramaTheme) {
+        self.builtin_resources.set_theme(match theme {
+            PanoramaTheme::Java => None,
+            PanoramaTheme::Pomme => Some(ThemeSpecification::Pomme {
+                root: self.data_dirs.pomme_assets_dir.clone(),
+            }),
+            PanoramaTheme::Bedrock => Some(ThemeSpecification::Bedrock {
+                root: pomme_install::bedrock::dir(&self.data_dirs.bedrock_assets_dir)
+                    .join("resource_pack"),
+            }),
+        });
+    }
+
+    pub(crate) fn resources(&self) -> &dyn crate::resources::ResourceManager {
+        &self.resources
+    }
+
+    pub(crate) fn reload_resource_theme(&mut self, theme: PanoramaTheme) -> std::io::Result<()> {
+        self.set_resource_theme(theme);
+        self.reload_resources()
+    }
+
+    /// Catalog publication and view activation are separate transactions:
+    /// opening/preparation can fail after the catalog advances. Any failure
+    /// leaves the last good active view intact, not necessarily its catalog.
+    fn reload_resources(&mut self) -> std::io::Result<()> {
+        self.resource_repository.reload()?;
+        let opened = self.resource_repository.open_all_enabled()?;
+        let menu = &mut self.menu;
+        self.resources
+            .reload(opened, |resources| menu.load_splash(resources))
     }
 
     pub fn build_menu_input(&mut self, dt: f32) -> MenuInput {
@@ -1237,8 +1347,7 @@ impl AppCore {
             p.set_in_menu(&self.version);
         }
         self.apply_cursor_grab(&gfx.window, None);
-        self.menu
-            .load_splash(&self.data_dirs.jar_assets_dir, &self.asset_index);
+        self.menu.load_splash(&self.resources);
     }
 
     /// Releases the cursor, warping it to the window center only when it was
@@ -1696,15 +1805,25 @@ impl AppCore {
 
     /// Rebuilds what was built from assets that didn't exist yet, once the
     /// first-run download has put them on disk.
-    pub(crate) fn reload_installed_assets(&mut self) {
+    pub(crate) fn reload_installed_assets(&mut self) -> std::io::Result<()> {
+        if !self.data_dirs.is_installed(&self.version) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Minecraft {} installation is not ready", self.version),
+            ));
+        }
+        self.set_resource_installation(Some(self.data_dirs.installation_location(&self.version)));
+        self.set_resource_theme(self.menu.theme());
+        self.reload_resources()?;
         let (asset_index, audio) = load_assets(
             &self.data_dirs,
             &self.version,
             &self.resource_packs,
-            &mut self.menu,
+            &self.menu,
         );
         self.asset_index = asset_index;
         self.audio = audio;
+        Ok(())
     }
 
     pub(crate) fn reload_pack_assets(&mut self, renderer: &mut Renderer) {

@@ -28,6 +28,8 @@ sha1_smol = "1"
 open = "5"
 base64 = "0.23"
 zip = { version = "9.0", default-features = false, features = ["deflate"] }
+# Pin the reviewed MutBorrow/self-referential API used by ZIP entry streams.
+self_cell = "=1.2.2"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["json"] }
 # Shared by pomme-client and pomme-protocol; the versions must agree so
@@ -37,6 +39,7 @@ glam = "0.34"
 # client
 pyronyx = "=0.5.0"
 regex = "1"
+glob = "=0.3.4"
 # Secure chat. rsa, sha1 and sha2 match the versions azalea-crypto pins.
 chrono = { version = "0.4.44", features = ["serde"] }
 rand = "0.10.2"

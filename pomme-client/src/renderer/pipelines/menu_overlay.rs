@@ -1,9 +1,12 @@
 use std::collections::HashMap;
+use std::io::{self, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, packing, rhi, shader, util};
+use crate::resources::pack_resources::POMME_ICON;
+use crate::resources::{ResourceError, ResourceManager};
 use crate::ui::font::{FontSources, GLYPH_ATLAS_SIZE, GlyphAtlasPixels, GlyphInfo, GlyphMap};
 use crate::ui::text::{InlineObject, PREFIX_CODE, TextSpan, font_spans};
 
@@ -367,6 +370,7 @@ impl MenuGeometry {
     fn new(
         font_sources: FontSources<'_>,
         bedrock_ui_dir: Option<&Path>,
+        pomme_logo: Option<&image::RgbaImage>,
         font_layer_limit: u32,
     ) -> (Self, MenuAtlases) {
         let (atlas, font) = build_font_atlas();
@@ -374,6 +378,7 @@ impl MenuGeometry {
             font_sources.jar_assets_dir,
             font_sources.asset_index,
             bedrock_ui_dir,
+            pomme_logo,
         );
         let (mc_glyph_map, glyphs) = match GlyphMap::load(font_sources, font_layer_limit) {
             Ok((map, pixels)) => (Some(map), Some(pixels)),
@@ -1492,6 +1497,7 @@ impl MenuGeometry {
 
 pub struct MenuOverlayPipeline {
     pub geometry: MenuGeometry,
+    pomme_logo: Option<image::RgbaImage>,
     pipeline: rhi::backend::RenderPipeline,
     /// Vanilla `RenderPipelines.CROSSHAIR`: same shaders, INVERT blend.
     invert_pipeline: rhi::backend::RenderPipeline,
@@ -1520,11 +1526,24 @@ impl MenuOverlayPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
+        resources: &dyn ResourceManager,
         font_sources: FontSources<'_>,
         bedrock_ui_dir: Option<&Path>,
         font_layer_limit: u32,
     ) -> Result<Self, String> {
-        let (geometry, atlases) = MenuGeometry::new(font_sources, bedrock_ui_dir, font_layer_limit);
+        let pomme_logo = match load_pomme_logo(resources) {
+            Ok(logo) => logo,
+            Err(error) => {
+                tracing::warn!(%error, id = %POMME_ICON, "Failed to load Pomme logo; omitting the sprite");
+                None
+            }
+        };
+        let (geometry, atlases) = MenuGeometry::new(
+            font_sources,
+            bedrock_ui_dir,
+            pomme_logo.as_ref(),
+            font_layer_limit,
+        );
 
         let globals_layout =
             rhi::backend::create_bind_group_layout(device, util::VERTEX_FRAGMENT_UNIFORM);
@@ -1643,6 +1662,7 @@ impl MenuOverlayPipeline {
 
         Ok(Self {
             geometry,
+            pomme_logo,
             pipeline,
             invert_pipeline,
             pipeline_layout,
@@ -1848,7 +1868,48 @@ impl MenuOverlayPipeline {
         asset_index: &Option<AssetIndex>,
         bedrock_ui_dir: Option<&Path>,
     ) {
-        let (atlas, sprites) = build_sprite_atlas(jar_assets_dir, asset_index, bedrock_ui_dir);
+        let (atlas, sprites) = build_sprite_atlas(
+            jar_assets_dir,
+            asset_index,
+            bedrock_ui_dir,
+            self.pomme_logo.as_ref(),
+        );
+        self.publish_sprite_atlas(device, atlas, sprites);
+    }
+
+    /// Missing content clears the logo; I/O/decode errors retain the last good
+    /// pixels and atlas without rolling back the already-active resource view.
+    pub fn reload_resource_images(
+        &mut self,
+        resources: &dyn ResourceManager,
+        device: &rhi::backend::Device,
+        jar_assets_dir: &Path,
+        asset_index: &Option<AssetIndex>,
+        bedrock_ui_dir: Option<&Path>,
+    ) {
+        let pomme_logo = match load_pomme_logo(resources) {
+            Ok(logo) => logo,
+            Err(error) => {
+                tracing::warn!(%error, id = %POMME_ICON, "Failed to load Pomme logo; retaining the last good image and atlas");
+                return;
+            }
+        };
+        let (atlas, sprites) = build_sprite_atlas(
+            jar_assets_dir,
+            asset_index,
+            bedrock_ui_dir,
+            pomme_logo.as_ref(),
+        );
+        self.publish_sprite_atlas(device, atlas, sprites);
+        self.pomme_logo = pomme_logo;
+    }
+
+    fn publish_sprite_atlas(
+        &mut self,
+        device: &rhi::backend::Device,
+        atlas: SpriteAtlas,
+        sprites: AtlasImage,
+    ) {
         device.wait_idle();
         std::mem::replace(&mut self.sprite.texture, sprite_texture(device, &sprites))
             .destroy(device);
@@ -2636,10 +2697,59 @@ fn bedrock_nine_slice(dir: &Path, stem: &str) -> f32 {
         .map_or(0.0, |size| size as f32)
 }
 
+fn load_pomme_logo(resources: &dyn ResourceManager) -> io::Result<Option<image::RgbaImage>> {
+    let Some(resource) = resources.get_resource(&POMME_ICON)? else {
+        return Ok(None);
+    };
+    let content = resource.content();
+    let mut stream = content.open().map_err(|error| {
+        let kind = match &error {
+            ResourceError::Io { source, .. } => source.kind(),
+            _ => io::ErrorKind::Other,
+        };
+        io::Error::new(kind, error)
+    })?;
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).map_err(|source| {
+        io::Error::new(
+            source.kind(),
+            ResourceError::Io {
+                operation: "read Pomme logo",
+                id: Some(content.id().clone()),
+                origin: content.origin().clone(),
+                source,
+            },
+        )
+    })?;
+    let image = image::load_from_memory(&bytes).map_err(|source| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            ResourceError::Io {
+                operation: "decode Pomme logo",
+                id: Some(content.id().clone()),
+                origin: content.origin().clone(),
+                source: io::Error::new(io::ErrorKind::InvalidData, source),
+            },
+        )
+    })?;
+
+    // The credits roll draws the mark at 44 GUI units, so 44 * gui_scale px:
+    // 176 at 1080p, 264 at 1440p, 396 at 4K on the default auto scale. The
+    // atlas sampler is NEAREST, so 256 is the size that straddles that range
+    // with the least resampling either way.
+    const POMME_LOGO_SIZE: u32 = 256;
+    Ok(Some(downscale_straight_alpha(
+        &image.to_rgba8(),
+        POMME_LOGO_SIZE,
+        POMME_LOGO_SIZE,
+    )))
+}
+
 fn build_sprite_atlas(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     bedrock_ui_dir: Option<&Path>,
+    pomme_logo: Option<&image::RgbaImage>,
 ) -> (SpriteAtlas, AtlasImage) {
     let sprites: &[(SpriteId, &str, f32)] = &[
         (
@@ -3927,23 +4037,14 @@ fn build_sprite_atlas(
         }
     }
 
-    // The credits roll draws the mark at 44 GUI units, so 44 * gui_scale px:
-    // 176 at 1080p, 264 at 1440p, 396 at 4K on the default auto scale. The
-    // atlas sampler is NEAREST, so 256 is the size that straddles that range
-    // with the least resampling either way.
-    const POMME_LOGO_SIZE: u32 = 256;
-    match image::load_from_memory(crate::assets::POMME_ICON_PNG) {
-        Ok(img) => {
-            images.push((
-                SpriteId::PommeLogo,
-                downscale_straight_alpha(&img.to_rgba8(), POMME_LOGO_SIZE, POMME_LOGO_SIZE)
-                    .into_raw(),
-                POMME_LOGO_SIZE,
-                POMME_LOGO_SIZE,
-                0.0,
-            ));
-        }
-        Err(e) => tracing::warn!("Failed to load pomme logo: {e}"),
+    if let Some(logo) = pomme_logo {
+        images.push((
+            SpriteId::PommeLogo,
+            logo.as_raw().clone(),
+            logo.width(),
+            logo.height(),
+            0.0,
+        ));
     }
 
     // The Bedrock title draws at 55% of the screen width, 1056 px at 1080p, so

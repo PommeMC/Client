@@ -5692,6 +5692,7 @@ dependencies = [
  "freetype-rs",
  "gilrs",
  "glam",
+ "glob",
  "glsl-lang",
  "image",
  "jni 0.22.4",
@@ -5721,6 +5722,7 @@ dependencies = [
  "reqwest",
  "rsa",
  "scopeguard",
+ "self_cell",
  "serde",
  "serde_json",
  "sha1",
@@ -6848,6 +6850,12 @@ dependencies = [
  "servo_arc",
  "smallvec",
 ]
+
+[[package]]
+name = "self_cell"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b12e76d157a900eb52e81bc6e9f3069344290341720e9178cde2407113ac8d89"
 
 [[package]]
 name = "semver"

@@ -5,6 +5,7 @@ use winit::window::Window;
 
 use super::pipelines::menu_overlay::MenuOverlayPipeline;
 use super::{RendererError, rhi};
+use crate::resources::ResourceManager;
 use crate::ui::font::FontSources;
 
 pub struct BootScreen {
@@ -18,10 +19,12 @@ pub struct BootScreen {
 impl BootScreen {
     pub fn new(
         window: &Window,
+        resources: &dyn ResourceManager,
         font_sources: FontSources<'_>,
         vsync: bool,
     ) -> Result<Self, RendererError> {
-        let (ctx, swapchain, frames, menu) = bring_up(window, font_sources, None, vsync)?;
+        let (ctx, swapchain, frames, menu) =
+            bring_up(window, resources, font_sources, None, vsync)?;
         Ok(Self {
             menu,
             swapchain,
@@ -63,6 +66,7 @@ impl BootScreen {
 /// window then shown.
 pub(super) fn bring_up(
     window: &Window,
+    resources: &dyn ResourceManager,
     font_sources: FontSources<'_>,
     bedrock_ui_dir: Option<&std::path::Path>,
     vsync: bool,
@@ -84,6 +88,7 @@ pub(super) fn bring_up(
     let menu = MenuOverlayPipeline::new(
         &ctx.device,
         swapchain.targets(),
+        resources,
         font_sources,
         bedrock_ui_dir,
         font_layer_limit,

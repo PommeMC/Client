@@ -1,8 +1,8 @@
 //! Vanilla `SplashManager`: the yellow line that hangs off the title logo.
 
-use std::path::Path;
+use std::io::{self, Read};
 
-use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::resources::{ResourceError, ResourceManager, resource_id};
 
 /// The one line `SplashManager.prepare` drops from the pool, by hash.
 const FILTERED_HASH: i32 = 125_780_783;
@@ -24,38 +24,60 @@ fn dated_splash(month: u32, day: u32) -> Option<&'static str> {
 }
 
 /// Reads `texts/splashes.txt` and picks this session's line, per
-/// `SplashManager.getSplash`. `None` when the file is missing or empty, which
-/// vanilla renders as no splash at all.
+/// `SplashManager.getSplash`. `None` when the resource is missing, filtered or
+/// empty, which vanilla renders as no splash at all. Read/decode errors
+/// propagate.
 pub(super) fn pick(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    resources: &dyn ResourceManager,
     username: &str,
     month: u32,
     day: u32,
-) -> Option<String> {
+) -> io::Result<Option<String>> {
     if let Some(fixed) = dated_splash(month, day) {
-        return Some(fixed.to_string());
+        return Ok(Some(fixed.to_owned()));
     }
 
-    let path = resolve_asset_path(jar_assets_dir, asset_index, "minecraft/texts/splashes.txt");
-    let text = std::fs::read_to_string(&path)
-        .inspect_err(|e| tracing::warn!("Failed to load splashes.txt: {e}"))
-        .ok()?;
+    let id = resource_id!("minecraft:texts/splashes.txt");
+    let Some(resource) = resources.get_resource(&id)? else {
+        return Ok(None);
+    };
+    let content = resource.content();
+    let mut stream = content.open().map_err(|error| {
+        let kind = match &error {
+            ResourceError::Io { source, .. } => source.kind(),
+            _ => io::ErrorKind::Other,
+        };
+        io::Error::new(kind, error)
+    })?;
+    let mut text = String::new();
+    stream.read_to_string(&mut text).map_err(|source| {
+        io::Error::new(
+            source.kind(),
+            ResourceError::Io {
+                operation: "read splash text",
+                id: Some(content.id().clone()),
+                origin: content.origin().clone(),
+                source,
+            },
+        )
+    })?;
     let splashes: Vec<&str> = text
         .lines()
         .map(str::trim)
         .filter(|line| java_hash(line) != FILTERED_HASH)
         .collect();
     if splashes.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     // Vanilla rolls once against the pool size and takes 42 as the cue for the
     // player's own name, so the odds shift with how many splashes are loaded.
     if fastrand::usize(0..splashes.len()) == 42 {
-        return Some(format!("{} IS YOU", username.to_uppercase()));
+        return Ok(Some(format!("{} IS YOU", username.to_uppercase())));
     }
-    Some(splashes[fastrand::usize(0..splashes.len())].to_string())
+    Ok(Some(
+        splashes[fastrand::usize(0..splashes.len())].to_string(),
+    ))
 }
 
 #[cfg(test)]
