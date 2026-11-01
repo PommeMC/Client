@@ -2178,7 +2178,12 @@ impl DrawList {
                 buffer.zero();
             }
         }
-        encoder.dispatch(pipeline, self.cull_sets[frame], [count.div_ceil(64), 1, 1]);
+        encoder.dispatch(
+            pipeline,
+            self.cull_sets[frame],
+            &[],
+            [count.div_ceil(64), 1, 1],
+        );
         encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect);
     }
 

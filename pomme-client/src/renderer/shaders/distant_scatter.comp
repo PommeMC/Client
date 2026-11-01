@@ -1,0 +1,30 @@
+#version 450
+
+// Voxy's `util/scatter.comp`: section records written where the frame's
+// scatter list says, so a frame's uploads land at one point of the frame.
+// The list is 80-byte chunks: a `uvec4` of four destination indices, then
+// the four `uvec4`s to write there.
+
+layout(local_size_x = 128) in;
+
+layout(set = 0, binding = 0, std430) readonly restrict buffer Input {
+    uvec4 in_data[];
+};
+layout(set = 0, binding = 1, std430) writeonly restrict buffer Sections {
+    uvec4 section_data[];
+};
+
+layout(push_constant) uniform ScatterPc {
+    uint count;
+};
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (count <= id) {
+        return;
+    }
+    uint chunk = (id >> 2u) * 5u;
+    uint inner = id & 3u;
+    uint location = in_data[chunk][inner];
+    section_data[location & 0x7FFFFFFFu] = in_data[chunk + 1u + inner];
+}

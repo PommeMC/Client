@@ -1149,6 +1149,18 @@ impl BufferUse {
                 vk::AccessFlags::ShaderWrite,
                 vk::PipelineStageFlags::ComputeShader,
             ),
+            Self::Storage => (
+                vk::AccessFlags::ShaderRead | vk::AccessFlags::ShaderWrite,
+                vk::PipelineStageFlags::ComputeShader,
+            ),
+            Self::FragmentWrite => (
+                vk::AccessFlags::ShaderWrite,
+                vk::PipelineStageFlags::FragmentShader,
+            ),
+            Self::ShaderRead => (
+                vk::AccessFlags::ShaderRead,
+                vk::PipelineStageFlags::VertexShader | vk::PipelineStageFlags::FragmentShader,
+            ),
             Self::Indirect => (
                 vk::AccessFlags::IndirectCommandRead,
                 vk::PipelineStageFlags::DrawIndirect,
@@ -1226,6 +1238,12 @@ impl CommandEncoder {
             &[],
             &[],
         );
+    }
+
+    /// Fills `size` bytes of `buffer` from `offset` with `value`, as a
+    /// transfer ([`BufferUse::CopyDst`]).
+    pub fn fill_buffer(&self, buffer: BufferHandle, offset: u64, size: u64, value: u32) {
+        self.cmd.fill_buffer(buffer.0, offset, size, value);
     }
 
     pub fn copy_buffer(&self, src: BufferHandle, dst: BufferHandle, copies: &[BufferCopy]) {
@@ -1406,8 +1424,34 @@ impl CommandEncoder {
         )
     }
 
-    /// Dispatches `groups` workgroups of `pipeline` with `group` bound at 0.
-    pub fn dispatch(&self, pipeline: &ComputePipeline, group: BindGroup, groups: [u32; 3]) {
+    /// Dispatches `groups` workgroups of `pipeline` with `group` bound at 0
+    /// and `push` as its push constants.
+    pub fn dispatch(
+        &self,
+        pipeline: &ComputePipeline,
+        group: BindGroup,
+        push: &[u8],
+        groups: [u32; 3],
+    ) {
+        self.bind_compute(pipeline, group, push);
+        self.cmd.dispatch(groups[0], groups[1], groups[2]);
+    }
+
+    /// As [`Self::dispatch`], the workgroup counts read from `buffer` at
+    /// `offset` ([`BufferUse::Indirect`]).
+    pub fn dispatch_indirect(
+        &self,
+        pipeline: &ComputePipeline,
+        group: BindGroup,
+        push: &[u8],
+        buffer: BufferHandle,
+        offset: u64,
+    ) {
+        self.bind_compute(pipeline, group, push);
+        self.cmd.dispatch_indirect(buffer.0, offset);
+    }
+
+    fn bind_compute(&self, pipeline: &ComputePipeline, group: BindGroup, push: &[u8]) {
         self.cmd
             .bind_pipeline(vk::PipelineBindPoint::Compute, pipeline.raw);
         self.cmd.bind_descriptor_sets(
@@ -1417,7 +1461,10 @@ impl CommandEncoder {
             &[group.raw],
             &[],
         );
-        self.cmd.dispatch(groups[0], groups[1], groups[2]);
+        if !push.is_empty() {
+            self.cmd
+                .push_constants(pipeline.layout.0, vk::ShaderStageFlags::Compute, 0, push);
+        }
     }
 }
 

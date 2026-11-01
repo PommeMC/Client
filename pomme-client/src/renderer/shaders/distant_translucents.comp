@@ -1,0 +1,29 @@
+#version 450
+
+// Voxy's `gl46/buildtranslucents.comp`: the translucent draws placed by
+// their distance bucket's prefix sum, so the list runs far to near.
+
+layout(local_size_x = 128) in;
+
+#define DISTANT_SET 0
+#define SCENE_BINDING 0
+#define DRAW_BUFFER_BINDING 1
+#define DRAW_COUNTS_BINDING 2
+#define SECTION_METADATA_BINDING 3
+#define RENDER_LIST_BINDING 4
+#define TRANSLUCENT_DATA_BINDING 5
+#include "distant_section.glsl"
+
+void main() {
+    if (gl_GlobalInvocationID.x >= translucent_draw_count) {
+        return;
+    }
+    uint draw_id = translucent_data[gl_GlobalInvocationID.x + TRANSLUCENT_BUCKETS];
+    SectionMeta meta = section_data[render_list[draw_id]];
+    uint detail = section_detail(meta);
+    uvec3 rel = abs(section_position(meta) - (camera_section >> detail));
+    uint distance = (rel.x + rel.y + rel.z) << detail;
+    distance = (TRANSLUCENT_BUCKETS - 1u) - min(distance, TRANSLUCENT_BUCKETS - 1u);
+    uint draw_ptr = atomicAdd(translucent_data[distance], 1u) + TRANSLUCENT_OFFSET;
+    write_draw(draw_ptr, draw_id, section_quad_start(meta), meta.b.x & 0xFFFFu);
+}

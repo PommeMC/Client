@@ -501,8 +501,8 @@ impl Renderer {
             &ctx.device,
             swapchain_state.targets(),
             &lightmap,
-            distant_buffers.layout(),
-            distant_buffers.bounds().layout(),
+            &distant_buffers,
+            ctx.indirect_draw.fragment_stores,
         );
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
@@ -1387,7 +1387,7 @@ impl Renderer {
         &mut self,
         updates: impl IntoIterator<Item = distant::worker::DistantUpdate>,
     ) {
-        self.distant_buffers.upload(&self.ctx.device, updates);
+        self.distant_buffers.upload(updates);
     }
 
     /// The distant sections the last frame's traversal asked for, and those
@@ -1432,6 +1432,7 @@ impl Renderer {
     /// top-down benchmark view).
     fn distant_draws(&self, chunks: u32) -> bool {
         chunks > 0
+            && self.distant_buffers.supported()
             && self.shader_pack.is_none()
             && self.chunk_buffers.format() == TerrainFormat::Vanilla
             && self.camera.top_down().is_none()
@@ -1899,6 +1900,7 @@ impl Renderer {
         let encoder = self.frames.begin(&self.ctx.device)?;
         self.atlas.record_animation_upload(&encoder, frame);
         self.distant_buffers.record_model_upload(&encoder, frame);
+        self.distant_buffers.record_uploads(&encoder, frame);
         self.lightmap.record(&self.ctx.device, &encoder);
 
         let scissor = rhi::Rect::covering(self.swapchain.extent);

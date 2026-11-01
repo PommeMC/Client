@@ -5,14 +5,11 @@
 // `gl_VertexIndex >> 2`; its corners come from its model's face data, lit
 // through the lightmap. Fog comes later, in distant_blit.frag.
 
-#include "camera_ubo.glsl"
 #include "lightmap.glsl"
 #include "distant_models.glsl"
-
-layout(push_constant) uniform DistantPc {
-    // The camera's view projection with the distant near and far planes.
-    mat4 distant_view_proj;
-};
+#define DISTANT_SET 0
+#define SCENE_BINDING 0
+#include "distant_section.glsl"
 
 layout(set = 1, binding = 0) readonly buffer Quads {
     uvec2 quads[];
@@ -24,10 +21,9 @@ layout(set = 1, binding = 1) readonly buffer Models {
 layout(set = 1, binding = 2) readonly buffer Tints {
     uint tints[];
 };
-// Per draw (`gl_InstanceIndex`): the section's corner relative to the
-// camera anchor, and its level's scale, blocks per voxel.
+// Per draw (`gl_InstanceIndex`): the section's packed key.
 layout(set = 3, binding = 0) readonly buffer Positions {
-    vec4 positions[];
+    uvec2 positions[];
 };
 
 // Voxy's `interData`: quad flags (cutout bit 0, translucent 1, tint state
@@ -51,7 +47,12 @@ vec3 swizzle(uint axis, vec3 data) {
 }
 
 void main() {
-    vec4 origin_scale = positions[gl_InstanceIndex];
+    // `setupQuad`: the section's corner relative to the camera's section,
+    // and its level's scale, blocks per voxel.
+    uvec2 pos = positions[gl_InstanceIndex];
+    uint lod = lod_level(pos);
+    ivec3 base_section = (lod_position(pos) << lod) - camera_section;
+    vec4 origin_scale = vec4(vec3(base_section << 5), float(1u << lod));
     uvec2 quad = quads[gl_VertexIndex >> 2];
     uint corner = gl_VertexIndex & 3u;
     uint face = field(quad, 3u, 0u);
@@ -75,7 +76,7 @@ void main() {
     vec2 extent = bounds.yw + size - 1.0;
     vec2 mask = vec2(corner >> 1u & 1u, corner & 1u);
     vec3 point = origin_scale.xyz + (start + swizzle(axis, vec3(extent * mask, 0.0))) * origin_scale.w;
-    gl_Position = distant_view_proj * vec4(point - camera_pos.xyz, 1.0);
+    gl_Position = distant_view_proj * vec4(point, 1.0);
     v_uv = bounds.xz + extent * mask;
 
     // `makeQuadFlags`: a face short of its side cuts out once a quad spans

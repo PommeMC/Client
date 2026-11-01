@@ -191,12 +191,19 @@ impl<Texture> TextureTransition<Texture> {
 pub enum BufferUse {
     CopySrc,
     CopyDst,
+    /// Written by a compute shader.
     StorageWrite,
+    /// Read or written by a compute shader.
+    Storage,
+    /// Written by a fragment shader.
+    FragmentWrite,
+    /// Read by a vertex or fragment shader.
+    ShaderRead,
     Indirect,
     HostRead,
 }
 
-/// The optional features behind the chunk pass's indirect draws.
+/// The optional features behind the GPU-driven passes.
 #[derive(Clone, Copy, Debug)]
 pub struct IndirectDrawFeatures {
     /// A draw count read from a buffer (`vkCmdDrawIndexedIndirectCount`,
@@ -206,6 +213,10 @@ pub struct IndirectDrawFeatures {
     /// Several indirect draws per call (`multiDrawIndirect`). Without it each
     /// draw-list slot is its own call.
     pub multi_draw: bool,
+    /// Fragment shaders may write storage buffers
+    /// (`fragmentStoresAndAtomics`), which the distant terrain's occlusion
+    /// pass records its results with.
+    pub fragment_stores: bool,
 }
 
 pub enum Acquired {

@@ -85,6 +85,7 @@ fn main() {
         "lightmap.glsl",
         "light.glsl",
         "distant_models.glsl",
+        "distant_section.glsl",
     ] {
         println!(
             "cargo:rerun-if-changed={}",
@@ -104,6 +105,13 @@ fn main() {
         ("distant_bound.frag", shaderc::ShaderKind::Fragment),
         ("distant_setup.frag", shaderc::ShaderKind::Fragment),
         ("distant_blit.frag", shaderc::ShaderKind::Fragment),
+        ("distant_cull.vert", shaderc::ShaderKind::Vertex),
+        ("distant_cull.frag", shaderc::ShaderKind::Fragment),
+        ("distant_scatter.comp", shaderc::ShaderKind::Compute),
+        ("distant_prep.comp", shaderc::ShaderKind::Compute),
+        ("distant_cmdgen.comp", shaderc::ShaderKind::Compute),
+        ("distant_prefix_sum.comp", shaderc::ShaderKind::Compute),
+        ("distant_translucents.comp", shaderc::ShaderKind::Compute),
         ("cube.vert", shaderc::ShaderKind::Vertex),
         ("cube.frag", shaderc::ShaderKind::Fragment),
         ("panorama.vert", shaderc::ShaderKind::Vertex),
