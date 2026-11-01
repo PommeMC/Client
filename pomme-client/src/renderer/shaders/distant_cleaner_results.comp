@@ -1,0 +1,37 @@
+#version 450
+
+// Voxy's `hierarchical/cleaner/result_transformer.comp`: the sorted ids
+// become their nodes' keys for the CPU (all ones for a freed node), each
+// node's last render frame pushed 60 frames ahead so it isn't picked again
+// at once.
+
+#define OUTPUT_SIZE 256
+
+layout(local_size_x = OUTPUT_SIZE) in;
+
+layout(set = 0, binding = 0, std430) readonly restrict buffer MinVisibility {
+    uint min_vis_ids[OUTPUT_SIZE];
+};
+
+layout(set = 0, binding = 1, std430) readonly restrict buffer NodeData {
+    uvec4 nodes[];
+};
+
+layout(set = 0, binding = 2, std430) writeonly restrict buffer Output {
+    uvec2 output_keys[OUTPUT_SIZE];
+};
+
+layout(set = 0, binding = 3, std430) writeonly restrict buffer LastRenderFrame {
+    uint last_render_frame[];
+};
+
+layout(push_constant) uniform ResultsPc {
+    uint frame_id;
+};
+
+void main() {
+    uint id = min_vis_ids[gl_LocalInvocationID.x];
+    uvec4 node = nodes[id];
+    output_keys[gl_LocalInvocationID.x] = node == uvec4(0xFFFFFFFFu) ? uvec2(0xFFFFFFFFu) : node.xy;
+    last_render_frame[id] = frame_id + 60u;
+}

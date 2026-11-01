@@ -15,6 +15,8 @@ pub(crate) const MAX_NODES: u32 = 1 << 20;
 pub(crate) const NODE_BYTES: u64 = MAX_NODES as u64 * 16;
 /// Scatter indices with this bit go to the node buffer.
 pub(crate) const NODE_SCATTER_BIT: u32 = 1 << 31;
+/// Visibility-set ids with this bit were allocated, the rest freed.
+const VISIBILITY_RESET_BIT: u32 = 1 << 31;
 const NULL: u32 = (1 << 24) - 1;
 const EMPTY: u32 = (1 << 24) - 2;
 
@@ -239,6 +241,9 @@ pub(crate) struct NodeGraph {
     top_index: HashMap<u32, usize>,
     /// Nodes whose record changed since [`Self::take_dirty`].
     dirty: HashSet<u32>,
+    /// Ids allocated ([`VISIBILITY_RESET_BIT`]) or freed, for the cleaner's
+    /// last-drawn frames (`cleanerIdResetClear`).
+    pub visibility_sets: HashSet<u32>,
     /// Keys the worker should mesh and keep meshed, and those it should
     /// stop; section ids no node holds any more.
     pub watch: Vec<SectionKey>,
@@ -258,6 +263,7 @@ impl NodeGraph {
             top_ids: Vec::new(),
             top_index: HashMap::new(),
             dirty: HashSet::new(),
+            visibility_sets: HashSet::new(),
             watch: Vec::new(),
             unwatch: Vec::new(),
             freed: Vec::new(),
@@ -266,6 +272,11 @@ impl NodeGraph {
 
     pub fn top_ids(&self) -> &[u32] {
         &self.top_ids
+    }
+
+    /// The id every node lies below (`getEndNodeId`).
+    pub fn end_id(&self) -> u32 {
+        self.nodes.len() as u32
     }
 
     /// Meshes still owed by the worker, for the traversal's request cap
@@ -318,6 +329,15 @@ impl NodeGraph {
         self.dirty.insert(id);
     }
 
+    /// `ICleaner`: `id` was allocated or freed, so its last-drawn frame is
+    /// reset or cleared; an allocation undoes a free of the same id.
+    fn track(&mut self, id: u32, allocated: bool) {
+        let reset = id | VISIBILITY_RESET_BIT;
+        let (insert, remove) = if allocated { (reset, id) } else { (id, reset) };
+        self.visibility_sets.remove(&remove);
+        self.visibility_sets.insert(insert);
+    }
+
     /// `count` consecutive ids, cleared.
     fn allocate(&mut self, count: u32) -> u32 {
         let base = self
@@ -342,12 +362,14 @@ impl NodeGraph {
             request: None,
             geometry_in_flight: false,
         });
+        self.track(id, true);
         self.invalidate(id);
     }
 
     fn free_node(&mut self, id: u32) {
         self.nodes[id as usize] = None;
         self.ids.free(id);
+        self.track(id, false);
         self.invalidate(id);
     }
 
@@ -467,8 +489,7 @@ impl NodeGraph {
         if section.quads.is_empty() {
             return Mesh::Empty;
         }
-        // TODO: a full store drops the mesh until the node cleaner frees
-        // room; the section stays watched, so a later build fills it in.
+        // Out of ids, the mesh is dropped until a later build.
         upload(section).map_or(Mesh::Empty, Mesh::Id)
     }
 
@@ -632,6 +653,8 @@ impl NodeGraph {
         let key = node.key;
         self.nodes[to as usize] = Some(node);
         self.ids.free(from);
+        self.track(to, true);
+        self.track(from, false);
         let entry = self.entries.get_mut(&key).expect("a node's entry");
         let (Entry::Leaf(id) | Entry::Inner(id)) = entry else {
             unreachable!("a node's entry is a node");
@@ -859,6 +882,51 @@ impl NodeGraph {
         }
     }
 
+    /// The cleaner wants `key`'s mesh gone (`removeNodeGeometry`): an inner
+    /// node loses it, to be asked for again when wanted; a leaf's parent
+    /// takes the leaf's place, its children removed, unless the parent has
+    /// no mesh yet, which is asked for instead. A top-level leaf keeps its
+    /// mesh, nothing standing in for it.
+    pub fn remove_node_geometry(&mut self, key: SectionKey) {
+        let Some(&entry) = self.entries.get(&key) else {
+            return;
+        };
+        match entry {
+            Entry::Single(_) | Entry::Child(_) => {}
+            Entry::Inner(id) => self.clear_geometry(key, id),
+            Entry::Leaf(_) => {
+                if self.top_keys.contains(&key) {
+                    return;
+                }
+                let parent_key = key.ancestor(key.level + 1);
+                let Entry::Inner(parent) = self.entries[&parent_key] else {
+                    unreachable!("a leaf's parent is inner");
+                };
+                if self.node(parent).mesh == Mesh::Null {
+                    self.process_request(parent_key);
+                } else {
+                    self.remove_recursive(parent_key, true);
+                    self.entries.insert(parent_key, Entry::Leaf(parent));
+                }
+            }
+        }
+    }
+
+    /// `clearGeometryInternal`. Voxy keeps watching the node for child
+    /// changes; here those arrive with meshes, so the node's existence
+    /// stays as it was until its mesh is asked for again.
+    fn clear_geometry(&mut self, key: SectionKey, id: u32) {
+        let mesh = self.node(id).mesh;
+        if let Mesh::Id(_) = mesh {
+            self.unwatch.push(key);
+            self.free_mesh(mesh);
+            let node = self.node_mut(id);
+            node.mesh = Mesh::Null;
+            node.geometry_in_flight = false;
+            self.invalidate(id);
+        }
+    }
+
     /// `makeLeafChildRequest`: a request for each child the existence has,
     /// each watched from here on.
     fn make_leaf_child_request(&mut self, id: u32) {
@@ -1015,6 +1083,51 @@ mod tests {
         assert_eq!(freed, vec![101, 102]);
         let records = graph.take_dirty();
         assert!(records.iter().all(|&(_, record)| record == [u32::MAX; 4]));
+    }
+
+    #[test]
+    fn the_cleaner_strips_an_inner_node_and_folds_a_leaf_into_its_parent() {
+        let mut graph = NodeGraph::new();
+        graph.set_roots(&HashSet::from([top()]));
+        let mut upload = uploader();
+        graph.process_geometry_result(built(top(), 4, 0b1), &mut upload);
+        graph.process_request(top());
+        let child = child_key(top(), 0);
+        graph.process_geometry_result(built(child, 2, 0), &mut upload);
+        let reset = |id| id | VISIBILITY_RESET_BIT;
+        assert_eq!(graph.visibility_sets, HashSet::from([reset(0), reset(1)]));
+        graph.watch.clear();
+        graph.take_dirty();
+
+        // An inner node: its mesh goes, its children stay.
+        graph.remove_node_geometry(top());
+        assert_eq!(graph.freed, vec![101]);
+        assert_eq!(graph.unwatch, vec![top()]);
+        let (_, record) = graph.take_dirty()[0];
+        assert_eq!(record[2] & 0xFF_FFFF, NULL);
+        assert_eq!(graph.entries[&top()], Entry::Inner(0));
+
+        // A leaf whose parent has no mesh: the parent is asked for instead.
+        graph.remove_node_geometry(child);
+        assert_eq!(graph.watch, vec![top()]);
+        assert_eq!(graph.entries[&child], Entry::Leaf(1));
+
+        // With the parent meshed, the leaf goes and the parent is a leaf.
+        graph.process_geometry_result(built(top(), 4, 0b1), &mut upload);
+        graph.freed.clear();
+        graph.unwatch.clear();
+        graph.remove_node_geometry(child);
+        assert_eq!(graph.entries[&top()], Entry::Leaf(0));
+        assert!(!graph.entries.contains_key(&child));
+        assert_eq!(graph.freed, vec![102]);
+        assert_eq!(graph.unwatch, vec![child]);
+        assert_eq!(graph.ids.used, 1);
+        assert_eq!(graph.visibility_sets, HashSet::from([reset(0), 1]));
+
+        // A top-level leaf keeps its mesh.
+        graph.remove_node_geometry(top());
+        assert_eq!(graph.freed, vec![102]);
+        assert_eq!(graph.entries[&top()], Entry::Leaf(0));
     }
 
     #[test]

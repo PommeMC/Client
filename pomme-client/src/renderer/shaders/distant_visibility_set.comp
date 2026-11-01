@@ -1,0 +1,29 @@
+#version 450
+
+// Voxy's `hierarchical/cleaner/batch_visibility_set.comp`: the listed
+// nodes' last render frame set to now (bit 31 of the id: just allocated)
+// or cleared (freed).
+
+layout(local_size_x = 128) in;
+
+layout(set = 0, binding = 0, std430) writeonly restrict buffer LastRenderFrame {
+    uint last_render_frame[];
+};
+
+layout(set = 0, binding = 1, std430) readonly restrict buffer Ids {
+    uint ids[];
+};
+
+layout(push_constant) uniform SetPc {
+    uint count;
+    uint set_to;
+};
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (count <= i) {
+        return;
+    }
+    uint id = ids[i];
+    last_render_frame[id & 0x7FFFFFFFu] = (id & 0x80000000u) != 0u ? set_to : 0xFFFFFFFFu;
+}

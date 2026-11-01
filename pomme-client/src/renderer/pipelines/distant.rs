@@ -13,10 +13,10 @@ use glam::{DVec3, Mat4};
 use crate::renderer::camera::{Camera, CameraUniform};
 use crate::renderer::chunk::buffer::DrawCommand;
 use crate::renderer::distant::gpu::{
-    COUNTS_BYTES, COUNTS_CULL_DRAW, CUBE_FIRST_INDEX, DISTANT_FAR, DRAWS_BYTES, DistantBuffers,
-    MAX_LISTED, POSITIONS_BYTES, QUEUE_META_BYTES, RENDER_LIST_BYTES, REQUESTS_BYTES, Region,
-    SCRATCH_BYTES, SECTIONS_BYTES, TOP_IDS_BYTES, TRANSLUCENT_BUCKETS, TRANSLUCENT_BYTES,
-    VISIBILITY_BYTES,
+    CLEANER_IDS_BYTES, CLEANER_KEYS_BYTES, COUNTS_BYTES, COUNTS_CULL_DRAW, CUBE_FIRST_INDEX,
+    DISTANT_FAR, DRAWS_BYTES, DistantBuffers, MAX_LISTED, NODE_VISIBILITY_BYTES, POSITIONS_BYTES,
+    QUEUE_META_BYTES, RENDER_LIST_BYTES, REQUESTS_BYTES, Region, SCRATCH_BYTES, SECTIONS_BYTES,
+    TOP_IDS_BYTES, TRANSLUCENT_BUCKETS, TRANSLUCENT_BYTES, VISIBILITY_BYTES, VISIBILITY_SETS_BYTES,
 };
 use crate::renderer::distant::nodes::NODE_BYTES;
 use crate::renderer::distant::section::LEVELS;
@@ -81,7 +81,8 @@ const COMPUTE_UNIFORM: rhi::BindGroupLayoutEntry =
 const COMPUTE_STORAGE: rhi::BindGroupLayoutEntry =
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE);
 /// `distant_traversal.comp`: the scene, then the request queue, render
-/// list, nodes, queue metadata, source and sink queues, and the Hi-Z.
+/// list, nodes, queue metadata, source and sink queues, the Hi-Z and the
+/// nodes' last-drawn frames.
 const TRAVERSAL_SET: &[rhi::BindGroupLayoutEntry] = &[
     COMPUTE_UNIFORM,
     COMPUTE_STORAGE,
@@ -92,7 +93,17 @@ const TRAVERSAL_SET: &[rhi::BindGroupLayoutEntry] = &[
     COMPUTE_STORAGE,
     rhi::BindGroupLayoutEntry::texture(rhi::ShaderStages::COMPUTE),
     rhi::BindGroupLayoutEntry::sampler(rhi::ShaderStages::COMPUTE),
+    COMPUTE_STORAGE,
 ];
+/// `distant_visibility_set.comp`: the last-drawn frames and the frame's
+/// ids.
+const VISIBILITY_SET_SET: &[rhi::BindGroupLayoutEntry] = &[COMPUTE_STORAGE; 2];
+/// `distant_cleaner_sort.comp`: the last-drawn frames, the output ids and
+/// the nodes.
+const CLEANER_SORT_SET: &[rhi::BindGroupLayoutEntry] = &[COMPUTE_STORAGE; 3];
+/// `distant_cleaner_results.comp`: the output ids, the nodes, the output
+/// keys and the last-drawn frames.
+const CLEANER_RESULTS_SET: &[rhi::BindGroupLayoutEntry] = &[COMPUTE_STORAGE; 4];
 /// `distant_prep.comp`: the draw counts and the render list.
 const PREP_SET: &[rhi::BindGroupLayoutEntry] = &[COMPUTE_STORAGE; 2];
 /// `distant_cmdgen.comp`: the scene, then the draws, counts, sections,
@@ -206,6 +217,12 @@ pub struct DistantPipeline {
     cmdgen: util::ComputePass,
     prefix_sum: util::ComputePass,
     translucents: util::ComputePass,
+    /// The cleaner (`NodeCleaner`): the nodes' last-drawn frames kept up as
+    /// nodes come and go, the longest-undrawn sorted out, and their keys
+    /// made for the CPU.
+    visibility_set: util::ComputePass,
+    cleaner_sort: util::ComputePass,
+    cleaner_results: util::ComputePass,
     sampler: rhi::backend::Sampler,
     targets: Option<Targets>,
     /// Set 2 of the quads, which [`Lightmap`] owns.
@@ -281,6 +298,10 @@ impl DistantPipeline {
         let visibility = |binding| storage_binding(binding, draw.visibility, VISIBILITY_BYTES);
         let translucent = |binding| storage_binding(binding, draw.translucent, TRANSLUCENT_BYTES);
         let render_list = |binding| storage_binding(binding, draw.render_list, RENDER_LIST_BYTES);
+        let nodes = |binding| storage_binding(binding, draw.nodes, NODE_BYTES);
+        let node_visibility =
+            |binding| storage_binding(binding, draw.node_visibility, NODE_VISIBILITY_BYTES);
+        let cleaner_ids = |binding| storage_binding(binding, draw.cleaner_ids, CLEANER_IDS_BYTES);
         let cull_sets = (0..MAX_FRAMES_IN_FLIGHT)
             .map(|frame| {
                 device.create_bind_group(
@@ -289,8 +310,8 @@ impl DistantPipeline {
                 )
             })
             .collect();
-        let pass = |label, shader, entries, frames, bindings: &dyn Fn(usize) -> Vec<_>| {
-            util::ComputePass::new(device, label, shader, entries, None, frames, bindings)
+        let pass = |label, shader, entries, push, frames, bindings: &dyn Fn(usize) -> Vec<_>| {
+            util::ComputePass::new(device, label, shader, entries, push, frames, bindings)
         };
         Self {
             quads: create_quad_pipelines(device, quads_layout),
@@ -309,6 +330,7 @@ impl DistantPipeline {
                 "distant prep",
                 shader::include_shader!("distant_prep.comp"),
                 PREP_SET,
+                None,
                 1,
                 &|_| vec![counts(0), render_list(1)],
             ),
@@ -316,6 +338,7 @@ impl DistantPipeline {
                 "distant command generation",
                 shader::include_shader!("distant_cmdgen.comp"),
                 CMDGEN_SET,
+                None,
                 MAX_FRAMES_IN_FLIGHT,
                 &|frame| {
                     vec![
@@ -334,6 +357,7 @@ impl DistantPipeline {
                 "distant prefix sum",
                 shader::include_shader!("distant_prefix_sum.comp"),
                 PREFIX_SET,
+                None,
                 1,
                 &|_| vec![translucent(0)],
             ),
@@ -341,6 +365,7 @@ impl DistantPipeline {
                 "distant translucents",
                 shader::include_shader!("distant_translucents.comp"),
                 TRANSLUCENTS_SET,
+                None,
                 MAX_FRAMES_IN_FLIGHT,
                 &|frame| {
                     vec![
@@ -350,6 +375,44 @@ impl DistantPipeline {
                         sections(3),
                         render_list(4),
                         translucent(5),
+                    ]
+                },
+            ),
+            // Its push constants are the count and the frame to set.
+            visibility_set: pass(
+                "distant visibility set",
+                shader::include_shader!("distant_visibility_set.comp"),
+                VISIBILITY_SET_SET,
+                push(rhi::ShaderStages::COMPUTE, 8),
+                MAX_FRAMES_IN_FLIGHT,
+                &|frame| {
+                    vec![
+                        node_visibility(0),
+                        storage_binding(1, buffers.visibility_sets(frame), VISIBILITY_SETS_BYTES),
+                    ]
+                },
+            ),
+            cleaner_sort: pass(
+                "distant cleaner sort",
+                shader::include_shader!("distant_cleaner_sort.comp"),
+                CLEANER_SORT_SET,
+                None,
+                1,
+                &|_| vec![node_visibility(0), cleaner_ids(1), nodes(2)],
+            ),
+            // Its push constant is the frame.
+            cleaner_results: pass(
+                "distant cleaner results",
+                shader::include_shader!("distant_cleaner_results.comp"),
+                CLEANER_RESULTS_SET,
+                push(rhi::ShaderStages::COMPUTE, 4),
+                1,
+                &|_| {
+                    vec![
+                        cleaner_ids(0),
+                        nodes(1),
+                        storage_binding(2, draw.cleaner_keys, CLEANER_KEYS_BYTES),
+                        node_visibility(3),
                     ]
                 },
             ),
@@ -487,6 +550,7 @@ impl DistantPipeline {
                             storage_binding(6, sink, SCRATCH_BYTES),
                             (7, rhi::backend::BindingResource::Texture(hiz.handle())),
                             (8, rhi::backend::BindingResource::Sampler(self.sampler)),
+                            storage_binding(9, draw.node_visibility, NODE_VISIBILITY_BYTES),
                         ],
                     )
                 })
@@ -527,9 +591,9 @@ impl DistantPipeline {
     /// Voxy's `renderOpaque` and `runPipeline` up to the blit, after the
     /// chunks' solid and cutout passes, whose depth `frame_depth` holds:
     /// the bound pass, last frame's opaque draws into the image, the Hi-Z
-    /// from its depth, the traversal picking this frame's sections, the
-    /// occlusion pass over them, this frame's draw list, and the newly seen
-    /// and translucent draws.
+    /// from its depth, the cleaner's passes, the traversal picking this
+    /// frame's sections, the occlusion pass over them, this frame's draw
+    /// list, and the newly seen and translucent draws.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -554,10 +618,11 @@ impl DistantPipeline {
         // section, and the projection moved by where it is within it.
         let camera_section = (eye / 32.0).floor();
         let sub_pos = (eye - camera_section * 32.0).as_vec3();
+        let frame_id = buffers.frame_id();
         self.scene_buffers[frame].write(bytemuck::bytes_of(&SceneUniform {
             view_proj: (view_proj * Mat4::from_translation(-sub_pos)).to_cols_array(),
             camera_section: camera_section.as_ivec3().to_array(),
-            frame_id: buffers.frame_id(),
+            frame_id,
             camera_sub_pos: sub_pos.to_array(),
             occlusion_skipped: u32::from(self.cull.is_none()),
             hiz_size: targets.hiz_width << 16 | targets.hiz_height,
@@ -626,14 +691,15 @@ impl DistantPipeline {
         buffers.draw(&pass, Region::Opaque);
         pass.end();
 
-        // `innerPrimaryWork`: the Hi-Z from the depth so far, then the
-        // traversal.
+        // `innerPrimaryWork`: the Hi-Z from the depth so far, the cleaner,
+        // then the traversal.
         encoder.transition_textures(&[TextureTransition::color(
             depth,
             TextureUse::DepthAttachment,
             TextureUse::DepthRead,
         )]);
         self.build_hiz(device, encoder, targets);
+        self.clean(encoder, frame, frame_id, buffers);
         buffers.record_traversal_setup(encoder, frame);
         self.traverse(encoder, frame, targets, buffers.top_count(), queue_meta);
         buffers.record_request_readback(encoder, frame);
@@ -722,6 +788,45 @@ impl DistantPipeline {
             TextureTransition::color(color, TextureUse::ColorAttachment, TextureUse::ShaderRead),
             TextureTransition::color(depth, TextureUse::DepthAttachment, TextureUse::DepthRead),
         ]);
+    }
+
+    /// `NodeCleaner.updateIds` and `tick`: the nodes allocated and freed
+    /// since last frame set in the last-drawn frames; then, when the arena
+    /// is nearly full, the longest-undrawn nodes sorted out and their keys
+    /// read back for the CPU to drop the meshes of.
+    fn clean(
+        &self,
+        encoder: &rhi::backend::CommandEncoder,
+        frame: usize,
+        frame_id: u32,
+        buffers: &mut DistantBuffers,
+    ) {
+        let sets = buffers.write_visibility_sets(frame);
+        if sets > 0 {
+            encoder.dispatch(
+                &self.visibility_set.pipeline,
+                self.visibility_set.set(frame),
+                bytemuck::bytes_of(&[sets, frame_id]),
+                [sets.div_ceil(128), 1, 1],
+            );
+            encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage);
+        }
+        if let Some(groups) = buffers.record_cleaner_setup(encoder, frame) {
+            encoder.dispatch(
+                &self.cleaner_sort.pipeline,
+                self.cleaner_sort.set(0),
+                &[],
+                [groups, 1, 1],
+            );
+            encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage);
+            encoder.dispatch(
+                &self.cleaner_results.pipeline,
+                self.cleaner_results.set(0),
+                &frame_id.to_le_bytes(),
+                [1, 1, 1],
+            );
+            buffers.record_cleaner_readback(encoder, frame);
+        }
     }
 
     /// `HiZBuffer.buildMipChain`: each level a full-screen pass over the
@@ -943,6 +1048,9 @@ impl DistantPipeline {
             &mut self.cmdgen,
             &mut self.prefix_sum,
             &mut self.translucents,
+            &mut self.visibility_set,
+            &mut self.cleaner_sort,
+            &mut self.cleaner_results,
         ] {
             pass.destroy(device);
         }

@@ -49,6 +49,11 @@ layout(set = 0, binding = 6, std430) writeonly restrict buffer QueueSink {
 layout(set = 0, binding = 7) uniform texture2D hiz;
 layout(set = 0, binding = 8) uniform sampler hiz_sampler;
 
+// Per node, the frame it was last drawn, for the cleaner.
+layout(set = 0, binding = 9, std430) writeonly restrict buffer LastRenderFrame {
+    uint last_render_frame[];
+};
+
 layout(push_constant) uniform TraversalPc {
     uint queue_index;
 };
@@ -257,10 +262,13 @@ void enqueue_children(Node node) {
 }
 
 void enqueue_render(Node node) {
-    if (section_count < render_list_max && node.mesh != EMPTY_MESH) {
-        uint index = atomicAdd(section_count, 1u);
-        if (index < render_list_max) {
-            render_list[index] = node.mesh;
+    if (section_count < render_list_max) {
+        last_render_frame[node.id] = frame_id;
+        if (node.mesh != EMPTY_MESH) {
+            uint index = atomicAdd(section_count, 1u);
+            if (index < render_list_max) {
+                render_list[index] = node.mesh;
+            }
         }
     }
 }

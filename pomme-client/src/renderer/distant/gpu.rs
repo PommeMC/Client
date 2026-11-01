@@ -16,7 +16,7 @@ use super::models::{
     ATLAS_COLUMNS, ATLAS_ROWS, BlockModel, CAPACITY, MODEL_MIP_LEVELS, ModelTile, TILE_HEIGHT,
     TILE_WIDTH,
 };
-use super::nodes::{NODE_BYTES, NODE_SCATTER_BIT, NodeGraph};
+use super::nodes::{MAX_NODES, NODE_BYTES, NODE_SCATTER_BIT, NodeGraph};
 use super::section::{LEVELS, SIDE, SectionKey};
 use super::worker::DistantUpdate;
 use crate::position::ChunkPos;
@@ -100,6 +100,18 @@ pub(crate) const REQUESTS_BYTES: u64 = 8 + MAX_REQUESTS as u64 * 8;
 pub(crate) const QUEUE_META_BYTES: u64 = LEVELS as u64 * 16;
 pub(crate) const SCRATCH_BYTES: u64 = MAX_LISTED as u64 * 4;
 pub(crate) const TOP_IDS_BYTES: u64 = MAX_ROOTS as u64 * 4;
+/// Per node, the frame the traversal last drew it (the cleaner's
+/// `visibilityBuffer`).
+pub(crate) const NODE_VISIBILITY_BYTES: u64 = MAX_NODES as u64 * 4;
+/// Nodes a cleaner pass picks (`OUTPUT_COUNT`): their ids, then their keys.
+const CLEANER_OUTPUT: u32 = 256;
+pub(crate) const CLEANER_IDS_BYTES: u64 = CLEANER_OUTPUT as u64 * 4;
+pub(crate) const CLEANER_KEYS_BYTES: u64 = CLEANER_OUTPUT as u64 * 8;
+/// Nodes a workgroup of the cleaner's sort covers (64 threads of 8).
+const CLEANER_SORT_GROUP: u32 = 512;
+/// Visibility sets a frame's list holds.
+const MAX_VISIBILITY_SETS: usize = 1 << 16;
+pub(crate) const VISIBILITY_SETS_BYTES: u64 = MAX_VISIBILITY_SETS as u64 * 4;
 /// Byte offsets within the draw-count buffer (`distant_section.glsl`).
 pub(crate) const COUNTS_OPAQUE: u64 = 12;
 pub(crate) const COUNTS_TRANSLUCENT: u64 = 16;
@@ -158,6 +170,9 @@ pub(crate) struct DrawBuffers<'a> {
     pub requests: &'a rhi::backend::Buffer,
     pub queue_meta: &'a rhi::backend::Buffer,
     pub scratch: [&'a rhi::backend::Buffer; 2],
+    pub node_visibility: &'a rhi::backend::Buffer,
+    pub cleaner_ids: &'a rhi::backend::Buffer,
+    pub cleaner_keys: &'a rhi::backend::Buffer,
 }
 
 pub(crate) struct DistantBuffers {
@@ -174,25 +189,37 @@ pub(crate) struct DistantBuffers {
     meshes: HashMap<u32, Uploaded>,
     index_buffer: rhi::backend::Buffer,
     pending: VecDeque<Pending>,
+    /// Results held until the arena has room for their quads (Voxy's
+    /// `geometryUpdateQueue`).
+    waiting: HashMap<SectionKey, BuiltSection>,
     graph: NodeGraph,
     /// Per frame in flight: the arena's staging, the scatter list, the
-    /// top-level node ids, the queue metadata's staging and the request
-    /// queue's readback.
+    /// top-level node ids, the queue metadata's staging, the visibility
+    /// sets, and the request queue's and the cleaner's readbacks.
     quad_staging: Vec<rhi::backend::Buffer>,
     scatter_staging: Vec<rhi::backend::Buffer>,
     scatter: util::ComputePass,
     top_ids: Vec<rhi::backend::Buffer>,
     queue_meta_staging: Vec<rhi::backend::Buffer>,
+    visibility_sets: Vec<rhi::backend::Buffer>,
     request_readbacks: Vec<rhi::backend::Buffer>,
+    cleaner_readbacks: Vec<rhi::backend::Buffer>,
+    /// Per frame in flight, whether its cleaner readback holds a pass's
+    /// keys.
+    cleaner_pending: [bool; MAX_FRAMES_IN_FLIGHT],
     /// The buffers the GPU passes keep between frames: the node tree, the
     /// traversal's request queue, queue metadata and scratch queues, the
-    /// render list, the draw-count buffer, draw list, draw positions,
-    /// section visibility and translucent buckets.
+    /// render list, the nodes' last-drawn frames and the cleaner's output,
+    /// the draw-count buffer, draw list, draw positions, section visibility
+    /// and translucent buckets.
     nodes: rhi::backend::Buffer,
     requests: rhi::backend::Buffer,
     queue_meta: rhi::backend::Buffer,
     scratch: [rhi::backend::Buffer; 2],
     render_list: rhi::backend::Buffer,
+    node_visibility: rhi::backend::Buffer,
+    cleaner_ids: rhi::backend::Buffer,
+    cleaner_keys: rhi::backend::Buffer,
     counts: rhi::backend::Buffer,
     draws: rhi::backend::Buffer,
     positions: rhi::backend::Buffer,
@@ -295,6 +322,14 @@ impl DistantBuffers {
         let scratch = ["distant_queue_a", "distant_queue_b"]
             .map(|name| device_buffer(name, SCRATCH_BYTES, storage));
         let render_list = device_buffer("distant_render_list", RENDER_LIST_BYTES, storage);
+        let node_visibility =
+            device_buffer("distant_node_visibility", NODE_VISIBILITY_BYTES, storage);
+        let cleaner_ids = device_buffer("distant_cleaner_ids", CLEANER_IDS_BYTES, storage);
+        let cleaner_keys = device_buffer(
+            "distant_cleaner_keys",
+            CLEANER_KEYS_BYTES,
+            storage | rhi::BufferUsages::COPY_SRC,
+        );
         let counts = device_buffer(
             "distant_draw_counts",
             COUNTS_BYTES,
@@ -322,8 +357,10 @@ impl DistantBuffers {
                 rhi::TextureUse::CopyDst,
                 rhi::TextureUse::ShaderRead,
             )]);
-            // No nodes, nothing seen, nothing to draw before the first frame.
+            // No nodes, none drawn, nothing seen, nothing to draw before the
+            // first frame.
             encoder.fill_buffer(nodes.handle(), 0, NODE_BYTES, u32::MAX);
+            encoder.fill_buffer(node_visibility.handle(), 0, NODE_VISIBILITY_BYTES, u32::MAX);
             encoder.fill_buffer(visibility.handle(), 0, VISIBILITY_BYTES, 0);
             encoder.fill_buffer(counts.handle(), 0, COUNTS_BYTES, 0);
             encoder.fill_buffer(render_list.handle(), 0, 4, 0);
@@ -350,6 +387,19 @@ impl DistantBuffers {
         );
         let per_frame =
             |bytes, usage, name| util::create_per_frame_host_buffers(device, bytes, usage, name);
+        let readbacks = |name, bytes| -> Vec<rhi::backend::Buffer> {
+            (0..MAX_FRAMES_IN_FLIGHT)
+                .map(|_| {
+                    rhi::backend::Buffer::new(
+                        device,
+                        name,
+                        bytes,
+                        rhi::BufferUsages::COPY_DST,
+                        rhi::MemoryLocation::Readback,
+                    )
+                })
+                .collect()
+        };
         let scatter_staging = per_frame(SCATTER_BYTES, storage, "distant_scatter");
         // The record count, as its push constant.
         let scatter = util::ComputePass::new(
@@ -385,6 +435,7 @@ impl DistantBuffers {
                 rhi::BufferUsages::INDEX,
             ),
             pending: VecDeque::new(),
+            waiting: HashMap::new(),
             graph: NodeGraph::new(),
             quad_staging: per_frame(
                 STAGING_BYTES,
@@ -399,22 +450,18 @@ impl DistantBuffers {
                 rhi::BufferUsages::COPY_SRC,
                 "distant_queue_meta_staging",
             ),
-            request_readbacks: (0..MAX_FRAMES_IN_FLIGHT)
-                .map(|_| {
-                    rhi::backend::Buffer::new(
-                        device,
-                        "distant_request_readback",
-                        REQUESTS_BYTES,
-                        rhi::BufferUsages::COPY_DST,
-                        rhi::MemoryLocation::Readback,
-                    )
-                })
-                .collect(),
+            visibility_sets: per_frame(VISIBILITY_SETS_BYTES, storage, "distant_visibility_sets"),
+            request_readbacks: readbacks("distant_request_readback", REQUESTS_BYTES),
+            cleaner_readbacks: readbacks("distant_cleaner_readback", CLEANER_KEYS_BYTES),
+            cleaner_pending: [false; MAX_FRAMES_IN_FLIGHT],
             nodes,
             requests,
             queue_meta,
             scratch,
             render_list,
+            node_visibility,
+            cleaner_ids,
+            cleaner_keys,
             counts,
             draws,
             positions,
@@ -461,6 +508,9 @@ impl DistantBuffers {
             requests: &self.requests,
             queue_meta: &self.queue_meta,
             scratch: self.scratch.each_ref(),
+            node_visibility: &self.node_visibility,
+            cleaner_ids: &self.cleaner_ids,
+            cleaner_keys: &self.cleaner_keys,
         }
     }
 
@@ -471,6 +521,11 @@ impl DistantBuffers {
 
     pub fn top_count(&self) -> u32 {
         self.graph.top_ids().len() as u32
+    }
+
+    /// The ids whose last-drawn frame the visibility-set pass sets.
+    pub fn visibility_sets(&self, frame: usize) -> &rhi::backend::Buffer {
+        &self.visibility_sets[frame]
     }
 
     /// The quads' indices, then the cube's from [`CUBE_FIRST_INDEX`].
@@ -639,13 +694,61 @@ impl DistantBuffers {
     /// After the traversal: its requests into this frame's readback, read
     /// by [`Self::begin_frame`] once the frame is done.
     pub fn record_request_readback(&self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
-        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::CopySrc);
-        encoder.copy_buffer(
-            self.requests.handle(),
-            self.request_readbacks[frame].handle(),
-            &[rhi::BufferCopy::from_start(REQUESTS_BYTES)],
+        record_readback(
+            encoder,
+            &self.requests,
+            &self.request_readbacks[frame],
+            REQUESTS_BYTES,
         );
-        encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::HostRead);
+    }
+
+    /// Writes this frame's visibility sets: the nodes allocated and freed
+    /// since last time, as many as fit, the rest next frame; how many.
+    pub fn write_visibility_sets(&mut self, frame: usize) -> u32 {
+        let sets = &mut self.graph.visibility_sets;
+        let ids: Vec<u32> = sets.iter().copied().take(MAX_VISIBILITY_SETS).collect();
+        for id in &ids {
+            sets.remove(id);
+        }
+        self.visibility_sets[frame].write_at(0, bytemuck::cast_slice(&ids));
+        ids.len() as u32
+    }
+
+    /// Before the cleaner's sort, when it should run (`shouldCleanGeometry`,
+    /// less than an eighth of the arena free; Voxy keeps a fixed 256 MB
+    /// free, the arena here being sized to the device): its output reset to
+    /// an id no node has; the sort's workgroups.
+    pub fn record_cleaner_setup(
+        &mut self,
+        encoder: &rhi::backend::CommandEncoder,
+        frame: usize,
+    ) -> Option<u32> {
+        let capacity = self.quads.capacity();
+        let groups = self.graph.end_id().div_ceil(CLEANER_SORT_GROUP);
+        if capacity - self.quads.used() >= capacity / 8 || groups == 0 {
+            return None;
+        }
+        encoder.transition_buffers(rhi::BufferUse::Storage, rhi::BufferUse::CopyDst);
+        encoder.fill_buffer(
+            self.cleaner_ids.handle(),
+            0,
+            CLEANER_IDS_BYTES,
+            MAX_NODES - 2,
+        );
+        encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::Storage);
+        self.cleaner_pending[frame] = true;
+        Some(groups)
+    }
+
+    /// After the cleaner's results: the keys to drop into this frame's
+    /// readback.
+    pub fn record_cleaner_readback(&self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
+        record_readback(
+            encoder,
+            &self.cleaner_keys,
+            &self.cleaner_readbacks[frame],
+            CLEANER_KEYS_BYTES,
+        );
     }
 
     pub fn bounds(&self) -> &BoundStore {
@@ -653,8 +756,9 @@ impl DistantBuffers {
     }
 
     /// Reclaims the ranges and buffers no in-flight frame reads any more,
-    /// and takes up the requests the traversal made the last time this
-    /// frame slot ran. Call once a frame, after its fence wait.
+    /// and takes up the requests the traversal made, and the meshes the
+    /// cleaner picked, the last time this frame slot ran. Call once a
+    /// frame, after its fence wait.
     pub fn begin_frame(&mut self, device: &rhi::backend::Device, frame: usize) {
         self.frame_seq += 1;
         self.bounds.free_retired(device, self.frame_seq);
@@ -665,16 +769,28 @@ impl DistantBuffers {
             self.ids.free(section.id);
             self.quads.free(section.ptr);
         }
-        let keys: Vec<SectionKey> = self.request_readbacks[frame].read(|bytes| {
-            let words: &[u32] = bytemuck::cast_slice(&bytes[..REQUESTS_BYTES as usize]);
-            let count = (words[0] as usize).min(MAX_REQUESTS as usize);
-            words[2..2 + count * 2]
-                .chunks(2)
-                .map(|key| SectionKey::unpack(u64::from(key[0]) << 32 | u64::from(key[1])))
-                .collect()
-        });
+        self.place_waiting();
+        let keys: Vec<u64> = read_words(
+            &mut self.request_readbacks[frame],
+            REQUESTS_BYTES,
+            |words| {
+                let count = (words[0] as usize).min(MAX_REQUESTS as usize);
+                packed_keys(&words[2..2 + count * 2]).collect()
+            },
+        );
         for key in keys {
-            self.graph.process_request(key);
+            self.graph.process_request(SectionKey::unpack(key));
+        }
+        if std::mem::take(&mut self.cleaner_pending[frame]) {
+            let keys: Vec<u64> = read_words(
+                &mut self.cleaner_readbacks[frame],
+                CLEANER_KEYS_BYTES,
+                |words| packed_keys(words).filter(|&key| key != u64::MAX).collect(),
+            );
+            for key in keys {
+                self.graph.remove_node_geometry(SectionKey::unpack(key));
+            }
+            self.free_released();
         }
     }
 
@@ -699,6 +815,7 @@ impl DistantBuffers {
     /// Drops every section, as on a dimension change. The bounds stay: they
     /// track the chunk store, which [`Self::clear_bounds`] follows.
     pub fn clear(&mut self) {
+        self.waiting.clear();
         self.graph.clear();
         self.free_released();
         self.ring = None;
@@ -737,7 +854,8 @@ impl DistantBuffers {
         }
     }
 
-    /// Takes the worker's updates into the graph and the arena.
+    /// Takes the worker's updates: the models and tints up, the sections
+    /// into the graph and the arena as room allows.
     pub fn upload(&mut self, updates: impl IntoIterator<Item = DistantUpdate>) {
         for update in updates {
             if self
@@ -757,12 +875,29 @@ impl DistantBuffers {
                 );
                 self.pending_tiles.push_back(tile);
             }
-            let (quads, ids, pending) = (&mut self.quads, &mut self.ids, &mut self.pending);
             for section in update.sections {
-                self.graph.process_geometry_result(section, &mut |section| {
-                    place(quads, ids, pending, section)
-                });
+                self.waiting.insert(section.key, section);
             }
+        }
+        self.place_waiting();
+    }
+
+    /// Takes the waiting results whose quads fit the arena into the graph.
+    fn place_waiting(&mut self) {
+        if self.waiting.is_empty() {
+            return;
+        }
+        let keys: Vec<SectionKey> = self.waiting.keys().copied().collect();
+        for key in keys {
+            let quads = self.waiting[&key].quads.len() as u32;
+            if quads > 0 && !self.quads.fits(quads) {
+                continue;
+            }
+            let section = self.waiting.remove(&key).expect("listed");
+            let (quads, ids, pending) = (&mut self.quads, &mut self.ids, &mut self.pending);
+            self.graph.process_geometry_result(section, &mut |section| {
+                place(quads, ids, pending, section)
+            });
         }
         self.free_released();
     }
@@ -858,6 +993,9 @@ impl DistantBuffers {
             scratch_a,
             scratch_b,
             &mut self.render_list,
+            &mut self.node_visibility,
+            &mut self.cleaner_ids,
+            &mut self.cleaner_keys,
             &mut self.counts,
             &mut self.draws,
             &mut self.positions,
@@ -873,7 +1011,9 @@ impl DistantBuffers {
             &mut self.scatter_staging,
             &mut self.top_ids,
             &mut self.queue_meta_staging,
+            &mut self.visibility_sets,
             &mut self.request_readbacks,
+            &mut self.cleaner_readbacks,
             &mut self.tile_staging,
         ] {
             util::destroy_buffers(device, buffers);
@@ -886,15 +1026,47 @@ impl DistantBuffers {
     }
 }
 
+/// Copies `source` into `readback` for the CPU to read once the frame is
+/// done.
+fn record_readback(
+    encoder: &rhi::backend::CommandEncoder,
+    source: &rhi::backend::Buffer,
+    readback: &rhi::backend::Buffer,
+    bytes: u64,
+) {
+    encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::CopySrc);
+    encoder.copy_buffer(
+        source.handle(),
+        readback.handle(),
+        &[rhi::BufferCopy::from_start(bytes)],
+    );
+    encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::HostRead);
+}
+
+/// The first `bytes` of `readback`, as `u32`s.
+fn read_words<R>(
+    readback: &mut rhi::backend::Buffer,
+    bytes: u64,
+    read: impl FnOnce(&[u32]) -> R,
+) -> R {
+    readback.read(|data| read(bytemuck::cast_slice(&data[..bytes as usize])))
+}
+
+/// The packed keys in `words`, a `uvec2` each, high word first.
+fn packed_keys(words: &[u32]) -> impl Iterator<Item = u64> + '_ {
+    words
+        .chunks(2)
+        .map(|key| u64::from(key[0]) << 32 | u64::from(key[1]))
+}
+
 /// Places `section`'s quads in the arena and queues their upload
-/// (`uploadSection`); its id, or `None` when the arena is full.
+/// (`uploadSection`); its id, or `None` when out of ids.
 fn place(
     quads: &mut Tlsf,
     ids: &mut Tlsf,
     pending: &mut VecDeque<Pending>,
     section: BuiltSection,
 ) -> Option<u32> {
-    // TODO: the node cleaner (Voxy's `NodeCleaner`) frees room here.
     let ptr = quads.alloc(section.quads.len() as u32)?;
     let Some(id) = ids.alloc(1) else {
         quads.free(ptr);

@@ -1,0 +1,136 @@
+#version 450
+
+// Voxy's `hierarchical/cleaner/sort_visibility.comp`: the 256 nodes drawn
+// longest ago, for the CPU to drop the meshes of. A fuzzy sort: each
+// workgroup starts from a copy of the output, works its nodes into it by
+// exchanging ids along it, then works the newcomers into the output the
+// same way. Only nodes with a mesh, below the top level and without a
+// request in flight take part.
+
+#define WORK_SIZE 64
+#define ELEMS_PER_THREAD 8
+#define OUTPUT_SIZE 256
+#define OPS_PER_THREAD (OUTPUT_SIZE / WORK_SIZE)
+// section.rs `LEVELS - 1`.
+#define TOP_LEVEL 4
+// An id copied in from the output, not to be worked into it again.
+#define EXTERNAL (1u << 31u)
+#define NEVER 0xFFFFFFFFu
+
+layout(local_size_x = WORK_SIZE) in;
+
+#include "distant_section.glsl"
+
+layout(set = 0, binding = 0, std430) readonly restrict buffer LastRenderFrame {
+    uint last_render_frame[];
+};
+
+layout(set = 0, binding = 1, std430) volatile restrict buffer MinVisibility {
+    uint min_vis_ids[OUTPUT_SIZE];
+};
+
+layout(set = 0, binding = 2, std430) readonly restrict buffer NodeData {
+    uvec4 nodes[];
+};
+
+const uint NULL_MESH = (1u << 24u) - 1u;
+const uint EMPTY_MESH = (1u << 24u) - 2u;
+
+shared uint initial_sort[OUTPUT_SIZE];
+
+// Puts `id` at `at` of `list` when the id there was drawn later, giving back
+// the one displaced to carry on with; `id` itself when not; NEVER when `id`
+// is already there. Once for the workgroup's list and once for the output.
+#define DEFINE_EXCHANGE(name, list) \
+uint name(uint at, uint id) { \
+    uint value = last_render_frame[id]; \
+    while (true) { \
+        uint existing = list[at]; \
+        if (existing == id) { \
+            return NEVER; \
+        } \
+        if (last_render_frame[existing & ~EXTERNAL] <= value) { \
+            return id; \
+        } \
+        if (atomicCompSwap(list[at], existing, id) == existing) { \
+            return existing; \
+        } \
+    } \
+}
+DEFINE_EXCHANGE(exchange_local, initial_sort)
+DEFINE_EXCHANGE(exchange_global, min_vis_ids)
+
+// Voxy indexes the frames by the flagged id here; the flag is masked off.
+void bubble_initial(uint vis, uint id) {
+    uint start = 0u;
+    if (last_render_frame[initial_sort[(OUTPUT_SIZE - 1u) >> 1u] & ~EXTERNAL] <= vis) {
+        start = (OUTPUT_SIZE - 1u) >> 1u;
+    }
+    for (uint i = start; i < OUTPUT_SIZE; i++) {
+        id = exchange_local(i, id);
+    }
+}
+
+void bubble_global(uint start, uint id) {
+    for (uint i = start; i < OUTPUT_SIZE; i++) {
+        id = exchange_global(i, id);
+        if (id == NEVER) {
+            break;
+        }
+    }
+}
+
+bool should_sort(uint id) {
+    uvec4 node = nodes[id];
+    if (node == uvec4(NEVER)) {
+        return false;
+    }
+    uint mesh = node.z & 0xFFFFFFu;
+    if (mesh == EMPTY_MESH || mesh == NULL_MESH) {
+        return false;
+    }
+    if (lod_level(node.xy) == TOP_LEVEL) {
+        return false;
+    }
+    return (node.z & (1u << 24u)) == 0u;
+}
+
+void main() {
+    for (uint i = 0u; i < OPS_PER_THREAD; i++) {
+        uint slot = gl_LocalInvocationID.x * OPS_PER_THREAD + i;
+        initial_sort[slot] = min_vis_ids[slot] | EXTERNAL;
+    }
+    barrier();
+    for (uint i = 0u; i < ELEMS_PER_THREAD; i++) {
+        uint id = gl_GlobalInvocationID.x * ELEMS_PER_THREAD + i;
+        uint vis = last_render_frame[id];
+        if (vis == NEVER) {
+            continue;
+        }
+        if (last_render_frame[min_vis_ids[OUTPUT_SIZE - 1u]] <= vis) {
+            continue;
+        }
+        if (!should_sort(id)) {
+            continue;
+        }
+        bubble_initial(vis, id);
+    }
+    barrier();
+    for (uint i = 0u; i < OPS_PER_THREAD; i++) {
+        barrier();
+        uint slot = gl_LocalInvocationID.x * OPS_PER_THREAD + i;
+        uint sid = initial_sort[slot];
+        if ((sid & EXTERNAL) != 0u) {
+            continue;
+        }
+        uint vis = last_render_frame[sid];
+        if (last_render_frame[min_vis_ids[OUTPUT_SIZE - 1u]] <= vis) {
+            continue;
+        }
+        uint start = slot;
+        if (last_render_frame[min_vis_ids[(slot + OUTPUT_SIZE) >> 1u]] <= vis) {
+            start = (slot + OUTPUT_SIZE) >> 1u;
+        }
+        bubble_global(start, sid);
+    }
+}
