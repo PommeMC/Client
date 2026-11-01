@@ -2022,6 +2022,50 @@ mod tests {
                 assert!(state.replaceable.is_some(), "{}", data.protocol);
                 assert!(state.full_face_sturdy.is_some(), "{}", data.protocol);
             }
+            // Vanilla FenceBlock post: 6/16..10/16, 24/16 tall.
+            // LanternBlock: standing union bounds 5/16..11/16, 9/16 tall.
+            // BedBlock: mattress top 9/16; legs begin at the block floor.
+            for (name, props, expected_bounds) in [
+                (
+                    "oak_fence",
+                    &[
+                        ("north", "false"),
+                        ("east", "false"),
+                        ("south", "false"),
+                        ("west", "false"),
+                    ][..],
+                    [0.375, 0.0, 0.375, 0.625, 1.5, 0.625],
+                ),
+                (
+                    "lantern",
+                    &[("hanging", "false")][..],
+                    [0.3125, 0.0, 0.3125, 0.6875, 0.5625, 0.6875],
+                ),
+                (
+                    "red_bed",
+                    &[("facing", "north"), ("part", "foot")][..],
+                    [0.0, 0.0, 0.0, 1.0, 0.5625, 1.0],
+                ),
+            ] {
+                let state = table
+                    .iter()
+                    .find(|s| {
+                        s.id() == name && props.iter().all(|(k, v)| s.properties.get(k) == Some(*v))
+                    })
+                    .unwrap();
+                let boxes = state.collision_boxes().expect("partial vanilla shape");
+                let bounds = boxes.iter().fold(boxes[0], |mut bounds, b| {
+                    for axis in 0..3 {
+                        bounds[axis] = bounds[axis].min(b[axis]);
+                        bounds[axis + 3] = bounds[axis + 3].max(b[axis + 3]);
+                    }
+                    bounds
+                });
+                assert_eq!(bounds, expected_bounds, "{} {name}", data.protocol);
+                if name == "oak_fence" {
+                    assert_eq!(boxes, &[expected_bounds], "{} {name}", data.protocol);
+                }
+            }
             let mud = table.iter().find(|state| state.id() == "mud").unwrap();
             assert_eq!(
                 mud.collision_boxes(),
