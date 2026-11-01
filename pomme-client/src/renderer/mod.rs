@@ -907,6 +907,22 @@ impl Renderer {
                     pack.end_geometry(encoder, pass, geometry);
                 }
             };
+        let particles = &self.particle_pipeline;
+        // Iris draws opaque particles before deferred and translucent ones
+        // after water, where vanilla submits each layer.
+        let draw_particles = |pack: &mut PackRenderer, translucent: bool| {
+            let geometry = if translucent {
+                PackGeometry::ParticlesTranslucent
+            } else {
+                PackGeometry::Particles
+            };
+            if particles.has_layer(translucent)
+                && let Some((pass, _)) = pack.begin_geometry(device, encoder, frame, geometry)
+            {
+                particles.draw_pack(&pass, frame, translucent);
+                pack.end_geometry(encoder, pass, geometry);
+            }
+        };
         let block_entity_pipeline = &mut self.block_entity_pipeline;
         let mut draw_block_entities = |pack: &mut PackRenderer, geometry| {
             if let Some((mut pass, binding)) = pack.begin_geometry(device, encoder, frame, geometry)
@@ -956,11 +972,13 @@ impl Renderer {
                 pack.end_geometry(encoder, pass, geometry);
             }
         }
+        draw_particles(&mut pack, false);
         pack.copy_opaque_depth(encoder, false);
         pack.run_full_screen(device, encoder, frame, true);
         water(&mut pack, PackGeometry::Water, &frustum);
+        draw_particles(&mut pack, true);
         pack.run_full_screen(device, encoder, frame, false);
-        // TODO: particles, weather, clouds, dropped items, the block-break
+        // TODO: weather, clouds, dropped items, the block-break
         // overlay and entity shadows through their `gbuffers_*` programs; the
         // block outline and chunk borders over the pack's depth.
         if let Some((_, slot)) = &mut self.shader_pack {
@@ -1962,6 +1980,10 @@ impl Renderer {
             self.gui_item_atlas.end_bake_pass(&encoder, bake);
         }
 
+        if let RenderMode::World { particles, .. } = &mode {
+            self.particle_pipeline
+                .prepare(frame, &self.camera, particles);
+        }
         let pack_drawn = self.render_pack_world(&encoder, frame, &mode);
 
         let mut pass = encoder.begin_render_pass(
@@ -1996,7 +2018,7 @@ impl Renderer {
                 entities,
                 item_entities,
                 block_entities,
-                particles,
+                particles: _,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -2091,12 +2113,7 @@ impl Renderer {
                     // lets water blend over particles behind it (vanilla draws
                     // particles after all translucents into a depth-sharing
                     // target).
-                    self.particle_pipeline.update_and_draw(
-                        &mut pass,
-                        frame,
-                        &self.camera,
-                        particles,
-                    );
+                    self.particle_pipeline.draw(&mut pass, frame);
 
                     // Translucent water draws after opaque terrain and entities so it
                     // blends over them; depth-tested (occluded by geometry in front)
