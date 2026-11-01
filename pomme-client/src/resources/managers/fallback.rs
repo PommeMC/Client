@@ -14,6 +14,8 @@ use crate::resources::{
 pub(super) type PathFilter = Rc<dyn Fn(&str) -> bool>;
 type MetadataFinder = Rc<dyn Fn() -> Result<Option<ResourceContent>, ResourceError>>;
 
+// Deferred metadata lookups own both provenance and the backend, not the
+// manager.
 #[derive(Clone)]
 struct ContentSource {
     origin: ResourceOrigin,
@@ -55,35 +57,19 @@ impl PackEntry {
     }
 }
 
-struct ListedResource {
-    source: Rc<dyn PackResources>,
-    content: ResourceContent,
-    priority: usize,
+// Borrow sources only during enumeration; returned handles own their suppliers.
+struct PackContentReference<'a> {
+    source: &'a ContentSource,
+    supplier: IoSupplier<ReadStream>,
 }
 
-impl ListedResource {
-    fn new(
-        source: &ContentSource,
-        id: ResourceId,
-        supplier: IoSupplier<ReadStream>,
-        priority: usize,
-    ) -> Self {
-        Self {
-            source: source.pack.clone(),
-            content: source.content(id, supplier),
-            priority,
-        }
-    }
-}
-
-struct EntryStack {
+struct EntryStack<'a> {
     metadata_id: ResourceId,
-    files: Vec<ListedResource>,
-    // Small per-pack map: Rc object identity, not registration position or name.
-    metadata: Vec<ListedResource>,
+    files: Vec<PackContentReference<'a>>,
+    metadata: Vec<PackContentReference<'a>>,
 }
 
-impl EntryStack {
+impl<'a> EntryStack<'a> {
     fn new(id: &ResourceId) -> Self {
         Self {
             metadata_id: id.sidecar(),
@@ -92,16 +78,54 @@ impl EntryStack {
         }
     }
 
-    fn insert_metadata(&mut self, metadata: ListedResource) {
+    fn apply_filter(&mut self, base_id: &ResourceId, entry: &PackEntry) {
+        if entry.is_filtered(base_id) {
+            self.files.clear();
+        } else if entry.is_filtered(&self.metadata_id) {
+            // Deliberate Vanilla else-if: a file filter does not also erase metadata.
+            self.metadata.clear();
+        }
+    }
+
+    fn push_file(&mut self, source: &'a ContentSource, supplier: IoSupplier<ReadStream>) {
+        self.files.push(PackContentReference { source, supplier });
+    }
+
+    fn set_metadata(&mut self, source: &'a ContentSource, supplier: IoSupplier<ReadStream>) {
+        let metadata = PackContentReference { source, supplier };
         if let Some(previous) = self
             .metadata
             .iter_mut()
-            .find(|entry| Rc::ptr_eq(&entry.source, &metadata.source))
+            .find(|entry| Rc::ptr_eq(&entry.source.pack, &source.pack))
         {
             *previous = metadata;
         } else {
             self.metadata.push(metadata);
         }
+    }
+
+    fn into_resources(self, file_id: &ResourceId) -> Option<Vec<Resource>> {
+        if self.files.is_empty() {
+            return None;
+        }
+        Some(
+            self.files
+                .into_iter()
+                .map(|PackContentReference { source, supplier }| {
+                    let content = source.content(file_id.clone(), supplier);
+                    let metadata = self
+                        .metadata
+                        .iter()
+                        .find(|entry| Rc::ptr_eq(&entry.source.pack, &source.pack))
+                        .map(|entry| {
+                            entry
+                                .source
+                                .content(self.metadata_id.clone(), Rc::clone(&entry.supplier))
+                        });
+                    Resource::new(content, constant_metadata(metadata))
+                })
+                .collect(),
+        )
     }
 }
 
@@ -165,6 +189,8 @@ impl FallbackResourceManager {
 }
 
 impl ResourceManager for FallbackResourceManager {
+    /// Scan high to low; defer metadata lookup to the owned winning-to-top
+    /// snapshot.
     fn get_resource(&self, id: &ResourceId) -> io::Result<Option<Resource>> {
         if id.namespace() != self.namespace {
             return Ok(None);
@@ -194,6 +220,8 @@ impl ResourceManager for FallbackResourceManager {
         Ok(HashSet::from([self.namespace.clone()]))
     }
 
+    /// Scan high to low with source-local metadata; filters affect only lower
+    /// entries.
     fn get_resource_stack(&self, id: &ResourceId) -> io::Result<Vec<Resource>> {
         if id.namespace() != self.namespace {
             return Ok(Vec::new());
@@ -238,13 +266,15 @@ impl ResourceManager for FallbackResourceManager {
         Ok(resources)
     }
 
+    /// Filter previous winners, then enumerate low to high; metadata uses
+    /// priority, not identity.
     fn list_resources(
         &self,
         directory: &str,
         selector: &Selector<'_>,
     ) -> io::Result<BTreeMap<ResourceId, Resource>> {
-        let mut files: BTreeMap<ResourceId, ListedResource> = BTreeMap::new();
-        let mut metadata: BTreeMap<ResourceId, ListedResource> = BTreeMap::new();
+        let mut files: BTreeMap<ResourceId, (usize, ResourceContent)> = BTreeMap::new();
+        let mut metadata: BTreeMap<ResourceId, (usize, ResourceContent)> = BTreeMap::new();
         for (priority, entry) in self.entries.iter().enumerate() {
             files.retain(|id, _| !entry.is_filtered(id));
             metadata.retain(|id, _| !entry.is_filtered(id));
@@ -260,14 +290,12 @@ impl ResourceManager for FallbackResourceManager {
                                 if let Some(base) = metadata_base(&id, &source.origin)
                                     && selector(&base)
                                 {
-                                    let record =
-                                        ListedResource::new(source, id.clone(), supplier, priority);
-                                    metadata.insert(id, record);
+                                    let content = source.content(id.clone(), supplier);
+                                    metadata.insert(id, (priority, content));
                                 }
                             } else if selector(&id) {
-                                let record =
-                                    ListedResource::new(source, id.clone(), supplier, priority);
-                                files.insert(id, record);
+                                let content = source.content(id.clone(), supplier);
+                                files.insert(id, (priority, content));
                             }
                         },
                     )
@@ -284,31 +312,27 @@ impl ResourceManager for FallbackResourceManager {
         }
         Ok(files
             .into_iter()
-            .map(|(id, file)| {
+            .map(|(id, (priority, content))| {
                 let sidecar = metadata
                     .remove(&id.sidecar())
-                    .filter(|metadata| metadata.priority >= file.priority)
-                    .map(|metadata| metadata.content);
-                (id, Resource::new(file.content, constant_metadata(sidecar)))
+                    .filter(|(metadata_priority, _)| *metadata_priority >= priority)
+                    .map(|(_, content)| content);
+                (id, Resource::new(content, constant_metadata(sidecar)))
             })
             .collect())
     }
 
+    /// Filter then append low to high; each stack pairs metadata by source
+    /// identity, not priority.
     fn list_resource_stacks(
         &self,
         directory: &str,
         selector: &Selector<'_>,
     ) -> io::Result<BTreeMap<ResourceId, Vec<Resource>>> {
-        let mut stacks: BTreeMap<ResourceId, EntryStack> = BTreeMap::new();
-        for (priority, entry) in self.entries.iter().enumerate() {
+        let mut stacks: BTreeMap<ResourceId, EntryStack<'_>> = BTreeMap::new();
+        for entry in &self.entries {
             for (id, stack) in &mut stacks {
-                if entry.is_filtered(id) {
-                    stack.files.clear();
-                } else if entry.is_filtered(&stack.metadata_id) {
-                    // Deliberate Vanilla else-if: a file filter does not also
-                    // erase source-local metadata, including repeated Rc entries.
-                    stack.metadata.clear();
-                }
+                stack.apply_filter(id, entry);
             }
             if let Some(source) = &entry.source {
                 source
@@ -325,17 +349,13 @@ impl ResourceManager for FallbackResourceManager {
                                     let stack = stacks
                                         .entry(base.clone())
                                         .or_insert_with(|| EntryStack::new(&base));
-                                    stack.insert_metadata(ListedResource::new(
-                                        source, id, supplier, priority,
-                                    ));
+                                    stack.set_metadata(source, supplier);
                                 }
                             } else if selector(&id) {
                                 let stack = stacks
                                     .entry(id.clone())
                                     .or_insert_with(|| EntryStack::new(&id));
-                                stack
-                                    .files
-                                    .push(ListedResource::new(source, id, supplier, priority));
+                                stack.push_file(source, supplier);
                             }
                         },
                     )
@@ -350,26 +370,10 @@ impl ResourceManager for FallbackResourceManager {
                     })?;
             }
         }
-        let mut result = BTreeMap::new();
-        for (id, stack) in stacks {
-            if stack.files.is_empty() {
-                continue;
-            }
-            let resources = stack
-                .files
-                .into_iter()
-                .map(|file| {
-                    let metadata = stack
-                        .metadata
-                        .iter()
-                        .find(|metadata| Rc::ptr_eq(&metadata.source, &file.source))
-                        .map(|metadata| metadata.content.clone());
-                    Resource::new(file.content, constant_metadata(metadata))
-                })
-                .collect();
-            result.insert(id, resources);
-        }
-        Ok(result)
+        Ok(stacks
+            .into_iter()
+            .filter_map(|(id, stack)| stack.into_resources(&id).map(|resources| (id, resources)))
+            .collect())
     }
 
     fn list_packs(&self) -> Box<dyn Iterator<Item = &dyn PackResources> + '_> {
