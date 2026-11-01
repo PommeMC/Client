@@ -2299,6 +2299,82 @@ pub(crate) fn renders_first_person_hand(game: &GameState) -> bool {
     )
 }
 
+/// Vanilla `LevelExtractor.extractBlockOutline` under
+/// `GameRenderer.shouldRenderBlockOutline`: the targeted block's outline
+/// shape and its origin, unless the HUD is hidden or the player can't build
+/// there.
+fn block_outline(
+    game: &GameState,
+    selected_slot: u8,
+) -> Option<(
+    glam::DVec3,
+    &'static [crate::physics::block_shape::LocalBox],
+)> {
+    let Some(HitResult::Block(hit)) = camera_target(game) else {
+        return None;
+    };
+    if game.hide_gui {
+        return None;
+    }
+    let pos = hit.block_pos;
+    let block_state_data = block_state_data_at(game, pos);
+    // TODO: also skip blocks outside the world border once it's tracked.
+    if block_state_data.is_air() {
+        return None;
+    }
+    // TODO: gate on `abilities.mayBuild` rather than the game mode once it's
+    // tracked.
+    match game.player.game_mode {
+        3 if !crate::player::interaction::interactable_in_spectator(block_state_data) => {
+            return None;
+        }
+        // TODO: shown while the held item's `can_break` or `can_place_on`
+        // matches the block.
+        2 => return None,
+        _ => {}
+    }
+    let held_item = game.player.inventory.hand_stacks(selected_slot)[0]
+        .map(|data| crate::player::inventory::item_resource_name(data.kind));
+    let boxes = crate::physics::block_shape::outline_shape_holding_data(
+        block_state_data,
+        held_item.as_deref(),
+    );
+    Some((
+        block_state_data.outline_shape_position(pos.x, pos.y, pos.z),
+        boxes,
+    ))
+}
+
+/// Vanilla `Minecraft.hitResult`.
+// TODO: pick from a spectated entity; the target is cast from the player's
+// own body, so nothing counts as targeted while spectating one.
+fn camera_target(game: &GameState) -> Option<HitResult> {
+    game.camera_entity
+        .is_none()
+        .then_some(game.interaction.target)?
+}
+
+fn block_state_data_at(
+    game: &GameState,
+    pos: crate::position::BlockPos,
+) -> &crate::world::block::BlockStateData {
+    game.block_registry
+        .block_state_data(game.chunk_store.get_block_state(pos.x, pos.y, pos.z))
+}
+
+/// Vanilla `Hud.canRenderCrosshairForSpectator`: the target is a block shown
+/// as interactable in spectator mode, or a menu-providing entity.
+fn spectator_crosshair(game: &GameState) -> bool {
+    match camera_target(game) {
+        Some(HitResult::Block(hit)) => crate::player::interaction::interactable_in_spectator(
+            block_state_data_at(game, hit.block_pos),
+        ),
+        // TODO: container minecarts and chest boats, once the pick ray
+        // reaches non-living entities.
+        _ => false,
+    }
+}
+
 fn hand_visible(sleeping: bool, hide_gui: bool, game_mode: u8) -> bool {
     !sleeping && !hide_gui && game_mode != 3
 }
@@ -2345,10 +2421,7 @@ fn bed_orientation(
     game: &GameState,
     sleeping_pos: Option<crate::position::BlockPos>,
 ) -> Option<BedDirection> {
-    let pos = sleeping_pos?;
-    game.block_registry
-        .block_state_data(game.chunk_store.get_block_state(pos.x, pos.y, pos.z))
-        .bed_direction()
+    block_state_data_at(game, sleeping_pos?).bed_direction()
 }
 
 /// Vanilla `LivingEntityRenderer`: hurt or dying entities take the red overlay.
@@ -3050,6 +3123,7 @@ pub fn update_game(
             game.player.experience_progress,
             bar,
             game.player.game_mode,
+            spectator_crosshair(game),
             game.player.inventory.hotbar_slots(),
             game.player.inventory.offhand(),
             core.menu.main_hand_right(),
@@ -3875,6 +3949,7 @@ pub fn update_game(
             game.advanced_item_tooltips,
             core.input.left_held(),
             core.input.right_held(),
+            core.input.shift_held(),
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
         player_preview = crate::ui::creative_inventory::player_preview(
@@ -4040,6 +4115,7 @@ pub fn update_game(
         let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
         (pos, stage, state)
     });
+    let block_outline = block_outline(game, core.input.selected_slot());
 
     use crate::entity::glowing::{appears_glowing, outline_color, scoreboard_name};
     use crate::renderer::pipelines::entity_renderer::Visibility;
@@ -4503,6 +4579,7 @@ pub fn update_game(
         game.scoreboard.member_team_color(&core.user.username),
         renders_first_person_hand(game),
         destroy_info,
+        block_outline,
         game.show_chunk_borders,
         sky,
         ShadowScene {

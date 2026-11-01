@@ -622,6 +622,7 @@ pub fn build_hud(
     experience_progress: f32,
     bar: ContextualBarKind<'_>,
     game_mode: u8,
+    spectator_crosshair: bool,
     hotbar: &[ItemStack],
     offhand: &ItemStack,
     main_hand_right: bool,
@@ -640,10 +641,8 @@ pub fn build_hud(
     let cx = screen_w / 2.0;
     let cy = screen_h / 2.0;
 
-    // Vanilla also shows the crosshair in spectator when looking at a menu
-    // provider, and hides it for the F3 3D-crosshair entry; neither concept
-    // exists here yet.
-    if first_person && game_mode != 3 {
+    // TODO: vanilla also hides it for the F3 3D-crosshair entry.
+    if first_person && (game_mode != 3 || spectator_crosshair) {
         build_crosshair(elements, cx, cy, gs, attack);
     }
 

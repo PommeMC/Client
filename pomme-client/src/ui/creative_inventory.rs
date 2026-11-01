@@ -64,6 +64,9 @@ const INV_OFFHAND_X: f32 = 35.0;
 const INV_OFFHAND_Y: f32 = 20.0;
 const INV_TRASH_X: f32 = 173.0;
 const INV_TRASH_Y: f32 = 112.0;
+/// `InventoryMenu`'s slots: crafting result and grid, armour, main, hotbar,
+/// offhand.
+const INVENTORY_MENU_SLOTS: u16 = 46;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CreativeTab {
@@ -207,6 +210,12 @@ impl CreativeTab {
                 items: ItemSource::Empty,
             },
         }
+    }
+
+    /// The tab whose [`Self::id`] is `id`.
+    #[cfg(feature = "test-harness")]
+    pub fn from_id(id: &str) -> Option<Self> {
+        TABS.into_iter().find(|tab| tab.id() == id)
     }
 
     /// The vanilla `creative_mode_tab` registry id.
@@ -455,6 +464,7 @@ pub fn build_creative_inventory(
     advanced_tooltips: bool,
     left_held: bool,
     right_held: bool,
+    shift: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> CreativeAction {
     // Vanilla creative keyPressed: T on a non-search tab jumps to the search
@@ -684,7 +694,15 @@ pub fn build_creative_inventory(
         && let Some(kind) = hit.click
     {
         let double = matches!(kind, ClickKind::Left) && is_double_click(state, hit.slot);
-        if hit.slot == SLOT_TRASH {
+        if hit.slot == SLOT_TRASH && shift {
+            // Vanilla `slotClicked`: a quick-move on the destroy slot empties
+            // every `inventoryMenu` slot and keeps the carried stack.
+            action = CreativeAction::SetSlots(
+                (0..INVENTORY_MENU_SLOTS)
+                    .map(|slot| (slot, ItemStack::Empty))
+                    .collect(),
+            );
+        } else if hit.slot == SLOT_TRASH {
             state.cursor_item = ItemStack::Empty;
         } else if double && state.cursor_item.is_present() {
             let items = double_click_gather(state, inventory);
@@ -830,12 +848,15 @@ fn split_for_drop(stack: &ItemStackData, whole_stack: bool) -> (ItemStack, ItemS
     (stack_with_count(stack, 1), ItemStack::Present(remaining))
 }
 
-/// A cell the harness can hover in an item tab: a hotbar slot (36-44) or a
-/// catalog cell, counted from the top-left at the current scroll.
+/// What the harness can hover: in an item tab, a hotbar slot (36-44) or a
+/// catalog cell counted from the top-left at the current scroll; any tab's
+/// button; or the inventory tab's trash slot.
 #[cfg(any(test, feature = "test-harness"))]
 pub enum HoverTarget {
     Hotbar(u16),
     Catalog(usize),
+    Tab(CreativeTab),
+    Trash,
 }
 
 /// The screen centre of `target`, laid out as `build_creative_inventory`
@@ -849,10 +870,20 @@ pub fn slot_center(
     screen_h: f32,
     gs: f32,
 ) -> Result<(f32, f32), String> {
-    if state.tab.is_inventory_tab() {
-        return Err("hover only knows the item tabs' layout".into());
-    }
+    let (scale, ox, oy) = panel_layout(screen_w, screen_h, gs);
     let (x, y) = match target {
+        HoverTarget::Tab(tab) => {
+            let [x, y, w, h] = tab_hit_rect(tab, ox, oy, scale);
+            return Ok((
+                x + w / 2.0 + offset[0] * scale,
+                y + h / 2.0 + offset[1] * scale,
+            ));
+        }
+        HoverTarget::Trash if state.tab.is_inventory_tab() => (INV_TRASH_X, INV_TRASH_Y),
+        HoverTarget::Trash => return Err("the trash slot is on the inventory tab".into()),
+        _ if state.tab.is_inventory_tab() => {
+            return Err("hover only knows the item tabs' layout".into());
+        }
         HoverTarget::Hotbar(slot @ 36..=44) => {
             (GRID_ORIGIN_X + f32::from(slot - 36) * SLOT_STRIDE, HOTBAR_Y)
         }
@@ -863,7 +894,6 @@ pub fn slot_center(
         ),
         HoverTarget::Catalog(cell) => return Err(format!("catalog cell {cell} isn't on screen")),
     };
-    let (scale, ox, oy) = panel_layout(screen_w, screen_h, gs);
     Ok(slot_xy(
         ox,
         oy,
@@ -944,21 +974,23 @@ fn tab_hit_test(
     if !clicked {
         return None;
     }
-    let tab_w = TAB_W * scale;
-    let tab_h = TAB_H * scale;
-    for &tab in TABS.iter() {
-        let meta = tab.meta();
-        let x = tab_x(meta.col, scale, ox);
-        let hit_y_off = match meta.row {
-            Row::Top => TAB_TOP_HIT_Y,
-            Row::Bottom => TAB_BOTTOM_HIT_Y,
-        };
-        let hit_y = oy + hit_y_off * scale;
-        if hit_test(cursor, [x, hit_y, tab_w, tab_h]) {
-            return Some(tab);
-        }
-    }
-    None
+    TABS.into_iter()
+        .find(|&tab| hit_test(cursor, tab_hit_rect(tab, ox, oy, scale)))
+}
+
+/// `tab`'s clickable box: `[x, y, w, h]` on screen.
+fn tab_hit_rect(tab: CreativeTab, ox: f32, oy: f32, scale: f32) -> [f32; 4] {
+    let meta = tab.meta();
+    let hit_y = match meta.row {
+        Row::Top => TAB_TOP_HIT_Y,
+        Row::Bottom => TAB_BOTTOM_HIT_Y,
+    };
+    [
+        tab_x(meta.col, scale, ox),
+        oy + hit_y * scale,
+        TAB_W * scale,
+        TAB_H * scale,
+    ]
 }
 
 fn slot_xy(ox: f32, oy: f32, scale: f32, sx: f32, sy: f32) -> (f32, f32) {
@@ -1748,6 +1780,7 @@ mod tests {
         /// The drop key, with Ctrl held when `Some(true)`.
         drop: Option<bool>,
         throttled: bool,
+        shift: bool,
     }
 
     const SCREEN: (f32, f32) = (390.0, 272.0);
@@ -1776,6 +1809,7 @@ mod tests {
             false,
             false,
             false,
+            frame.shift,
             &|_, _| 0.0,
         )
     }
@@ -1799,6 +1833,44 @@ mod tests {
             }
             _ => panic!("expected a drop"),
         }
+    }
+
+    #[test]
+    fn shift_clicking_the_trash_empties_the_inventory_and_keeps_the_cursor() {
+        let mut state = CreativeState::new();
+        state.select_tab(CreativeTab::SurvivalInventory);
+        state.cursor_item = ItemStack::new(ItemKind::Dirt, 3);
+        let trash = slot_center(
+            &state,
+            HoverTarget::Trash,
+            [0.0; 2],
+            SCREEN.0,
+            SCREEN.1,
+            2.0,
+        )
+        .unwrap();
+        let click = |shift| Frame {
+            cursor: trash,
+            clicked: true,
+            shift,
+            ..Default::default()
+        };
+
+        let CreativeAction::SetSlots(slots) = run(&mut state, &Inventory::new(), click(true))
+        else {
+            panic!("expected SetSlots");
+        };
+        assert!(
+            slots
+                .iter()
+                .map(|(slot, _)| *slot)
+                .eq(0..INVENTORY_MENU_SLOTS)
+        );
+        assert!(slots.iter().all(|(_, stack)| stack.is_empty()));
+        assert_eq!(state.cursor_item.count(), 3);
+
+        run(&mut state, &Inventory::new(), click(false));
+        assert!(state.cursor_item.is_empty());
     }
 
     #[test]
