@@ -2,3 +2,10 @@
 # msvc's link.exe is the slow one, so swap in the toolchain-bundled lld there.
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"
+
+# sometimes linux defaults to rust-lld which can't find vulkan;
+# force use of lld.
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-C", "link-arg=-fuse-ld=lld"
+]
