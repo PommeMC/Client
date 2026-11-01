@@ -16,6 +16,8 @@ use super::column::build_chunk;
 use super::mesh::{SectionMesh, mesh_section};
 use super::models::{ModelFactory, ModelTile};
 use super::store::{SectionKey, Store};
+use super::voxel::States;
+use super::world::World;
 use crate::position::ChunkPos;
 use crate::world::chunk::{Chunk, ChunkLightData, ChunkStore};
 
@@ -237,12 +239,21 @@ fn store<'a>(
         .or_insert_with(|| Store::new(dimension_dir(cache, dimension)))
 }
 
+/// Voxy's sections go in a folder of their own beside the columns' until
+/// the columns go.
+fn world_dir(cache: Option<&Path>, dimension: &str) -> Option<PathBuf> {
+    Some(dimension_dir(cache, dimension)?.join("voxy"))
+}
+
 struct Worker {
     colors: Arc<DistantColors>,
     models: ModelFactory,
     updates: Sender<DistantUpdate>,
     /// Per dimension, its sections.
     stores: HashMap<Arc<str>, Store>,
+    /// Per dimension, its Voxy sections.
+    worlds: HashMap<Arc<str>, World>,
+    states: States,
     cache: Option<PathBuf>,
     last_save: Instant,
     view: Option<View>,
@@ -257,10 +268,12 @@ struct Worker {
 impl Worker {
     fn new(colors: Arc<DistantColors>, updates: Sender<DistantUpdate>) -> Self {
         Self {
+            states: States::new(colors.table()),
             colors,
             models: ModelFactory::new(),
             updates,
             stores: HashMap::new(),
+            worlds: HashMap::new(),
             cache: None,
             last_save: Instant::now(),
             view: None,
@@ -312,6 +325,9 @@ impl Worker {
         for store in self.stores.values_mut() {
             store.flush();
         }
+        for world in self.worlds.values_mut() {
+            world.flush();
+        }
         self.last_save = Instant::now();
     }
 
@@ -324,9 +340,15 @@ impl Worker {
                 light,
                 min_y,
             } => {
-                let columns = build_chunk(&chunk.read(), light.as_deref(), min_y, &self.colors);
+                let chunk = chunk.read();
+                let columns = build_chunk(&chunk, light.as_deref(), min_y, &self.colors);
                 let touched = store(&mut self.stores, self.cache.as_deref(), &dimension)
                     .capture(pos, columns);
+                let cache = self.cache.as_deref();
+                self.worlds
+                    .entry(Arc::clone(&dimension))
+                    .or_insert_with(|| World::new(world_dir(cache, &dimension)))
+                    .ingest_chunk(&self.states, pos, &chunk, light.as_deref(), min_y);
                 if let Some(view) = self.view.clone()
                     && view.dimension == dimension
                 {
@@ -342,6 +364,7 @@ impl Worker {
                 if !colors.same_models(&self.colors) {
                     // Ids start over; the new tiles overwrite the old.
                     self.models = ModelFactory::new();
+                    self.states = States::new(colors.table());
                 }
                 self.colors = colors;
                 let now = Instant::now();
@@ -360,6 +383,9 @@ impl Worker {
                 }
                 let store = store(&mut self.stores, self.cache.as_deref(), &view.dimension);
                 store.evict_beyond(view.x, view.z, view.radius + KEEP_MARGIN);
+                if let Some(world) = self.worlds.get_mut(&view.dimension) {
+                    world.evict_beyond(view.x, view.z, view.radius + KEEP_MARGIN);
+                }
                 // Those with nothing seen mesh empty, so a parent knows its
                 // children are all there.
                 let wanted: HashSet<SectionKey> =
@@ -408,6 +434,9 @@ impl Worker {
             Job::Cache(cache) => {
                 for (dimension, store) in &mut self.stores {
                     store.set_dir(dimension_dir(cache.as_deref(), dimension));
+                }
+                for (dimension, world) in &mut self.worlds {
+                    world.set_dir(world_dir(cache.as_deref(), dimension));
                 }
                 self.cache = cache;
             }

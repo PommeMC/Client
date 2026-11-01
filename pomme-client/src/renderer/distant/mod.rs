@@ -11,5 +11,8 @@ pub(crate) mod column;
 pub(crate) mod gpu;
 pub(crate) mod mesh;
 pub(crate) mod models;
+pub(crate) mod section;
 pub(crate) mod store;
+pub(crate) mod voxel;
 pub(crate) mod worker;
+pub(crate) mod world;

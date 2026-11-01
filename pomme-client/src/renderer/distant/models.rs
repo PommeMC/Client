@@ -131,11 +131,7 @@ impl ModelFactory {
             // TODO: a model atlas that grows past its capacity.
             return 0;
         }
-        let leaves = view
-            .block_state_table()
-            .block_state_data(state)
-            .id()
-            .ends_with("_leaves");
+        let leaves = view.block_state_table().block_state_data(state).is_leaves();
         let mut layer = None;
         if flags.translucent {
             layer = Some(if faces.iter().any(has_translucent_pixel) {

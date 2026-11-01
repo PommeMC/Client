@@ -256,6 +256,11 @@ impl BlockStateData {
         self.is_air
     }
 
+    /// Vanilla `LeavesBlock`: every leaf block's id ends so.
+    pub(crate) fn is_leaves(&self) -> bool {
+        self.id.ends_with("_leaves")
+    }
+
     /// `getRenderShape() == RenderShape.INVISIBLE`: the blocks overriding it.
     pub(crate) fn is_invisible(&self) -> bool {
         self.is_air

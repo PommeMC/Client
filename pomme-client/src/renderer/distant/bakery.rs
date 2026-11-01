@@ -334,7 +334,7 @@ impl Bakery {
             return None;
         }
         // Voxy forces leaves into the solid layer.
-        let leaves = data.id().ends_with("_leaves");
+        let leaves = data.is_leaves();
         let mut flags = BakeFlags::default();
         let (mut opaque, mut translucent): (Vec<Quad<'a>>, Vec<Quad<'a>>) =
             (Vec::new(), Vec::new());

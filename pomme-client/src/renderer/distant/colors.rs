@@ -15,8 +15,8 @@ use crate::renderer::chunk::atlas::AtlasUVMap;
 use crate::renderer::chunk::mesher::{
     BiomeClimate, Colormap, dry_foliage_color, foliage_color, grass_color, int_to_rgb,
 };
-use crate::world::block::FluidKind;
 use crate::world::block::render_assets::{OwnedBlockRenderView, Tint};
+use crate::world::block::{BlockStateTable, FluidKind};
 
 /// Texture colour where a sprite is missing.
 const UNKNOWN: [u8; 3] = [128, 128, 128];
@@ -154,6 +154,10 @@ impl DistantColors {
 
     pub fn fills(&self, state: BlockState) -> bool {
         self.look(state).fills
+    }
+
+    pub fn table(&self) -> BlockStateTable {
+        self.render_view.block_state_table()
     }
 
     /// Whether `models` were baked from the same textures and state ids as
