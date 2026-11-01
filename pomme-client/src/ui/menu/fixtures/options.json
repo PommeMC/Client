@@ -1,0 +1,220 @@
+{
+  "key_bindings": {
+    "key.attack": [
+      "key.mouse.left",
+      "key.gamepad.right.trigger.2"
+    ],
+    "key.back": [
+      "key.keyboard.s"
+    ],
+    "key.chat": [
+      "key.keyboard.t",
+      "key.gamepad.dpad.right"
+    ],
+    "key.close": [
+      "key.gamepad.east"
+    ],
+    "key.command": [
+      "key.keyboard.slash"
+    ],
+    "key.debug.chunkOcclusion": [
+      "key.keyboard.o"
+    ],
+    "key.debug.clearChat": [
+      "key.keyboard.d"
+    ],
+    "key.debug.copyLocation": [
+      "key.keyboard.c"
+    ],
+    "key.debug.copyRecreateCommand": [
+      "key.keyboard.i"
+    ],
+    "key.debug.dumpVersion": [
+      "key.keyboard.v"
+    ],
+    "key.debug.modifier": [
+      "key.keyboard.f3"
+    ],
+    "key.debug.overlay": [
+      "key.keyboard.f3"
+    ],
+    "key.debug.reloadChunk": [
+      "key.keyboard.a"
+    ],
+    "key.debug.showAdvancedTooltips": [
+      "key.keyboard.h"
+    ],
+    "key.debug.showChunkBorders": [
+      "key.keyboard.g"
+    ],
+    "key.debug.spectate": [
+      "key.keyboard.n"
+    ],
+    "key.debug.switchGameMode": [
+      "key.keyboard.f4"
+    ],
+    "key.drop": [
+      "key.keyboard.q"
+    ],
+    "key.forward": [
+      "key.keyboard.w"
+    ],
+    "key.fullscreen": [
+      "key.keyboard.f11"
+    ],
+    "key.hotbar.1": [
+      "key.keyboard.1"
+    ],
+    "key.hotbar.2": [
+      "key.keyboard.2"
+    ],
+    "key.hotbar.3": [
+      "key.keyboard.3"
+    ],
+    "key.hotbar.4": [
+      "key.keyboard.4"
+    ],
+    "key.hotbar.5": [
+      "key.keyboard.5"
+    ],
+    "key.hotbar.6": [
+      "key.keyboard.6"
+    ],
+    "key.hotbar.7": [
+      "key.keyboard.7"
+    ],
+    "key.hotbar.8": [
+      "key.keyboard.8"
+    ],
+    "key.hotbar.9": [
+      "key.keyboard.9"
+    ],
+    "key.hotbar.next": [
+      "key.gamepad.right.trigger"
+    ],
+    "key.hotbar.previous": [
+      "key.gamepad.left.trigger"
+    ],
+    "key.inventory": [
+      "key.keyboard.e",
+      "key.gamepad.north"
+    ],
+    "key.jump": [
+      "key.keyboard.space",
+      "key.gamepad.south"
+    ],
+    "key.left": [
+      "key.keyboard.a"
+    ],
+    "key.menu": [
+      "key.gamepad.start"
+    ],
+    "key.pickItem": [
+      "key.mouse.middle"
+    ],
+    "key.playerlist": [
+      "key.keyboard.tab",
+      "key.gamepad.select"
+    ],
+    "key.right": [
+      "key.keyboard.d"
+    ],
+    "key.screenshot": [
+      "key.keyboard.f2"
+    ],
+    "key.sneak": [
+      "key.keyboard.left.shift",
+      "key.gamepad.left.thumb"
+    ],
+    "key.spectatorHotbar": [
+      "key.mouse.middle"
+    ],
+    "key.spectatorOutlines": [],
+    "key.sprint": [
+      "key.keyboard.left.control",
+      "key.gamepad.west"
+    ],
+    "key.swapOffhand": [
+      "key.keyboard.f"
+    ],
+    "key.toggleGui": [
+      "key.keyboard.f1"
+    ],
+    "key.togglePerspective": [
+      "key.keyboard.f5",
+      "key.gamepad.dpad.up"
+    ],
+    "key.toggleSpectatorShaderEffects": [
+      "key.keyboard.f4"
+    ],
+    "key.use": [
+      "key.mouse.right",
+      "key.gamepad.left.trigger.2"
+    ]
+  },
+  "gui_scale": 0,
+  "render_distance": 12,
+  "chunk_detail_v2": 49,
+  "distant_terrain": 0,
+  "simulation_distance": 12,
+  "fov": 70,
+  "fov_effect_scale": 1.0,
+  "damage_tilt_strength": 1.0,
+  "brightness": 0.5,
+  "sensitivity": 0.5,
+  "invert_mouse_x": false,
+  "invert_mouse_y": false,
+  "view_bobbing": true,
+  "menu_background_blurriness": 5,
+  "show_subtitles": false,
+  "vignette": true,
+  "entity_shadows": true,
+  "show_autosave_indicator": true,
+  "vsync": true,
+  "max_framerate": 120,
+  "show_online_status": true,
+  "show_current_server": true,
+  "skin_cape": true,
+  "skin_jacket": true,
+  "skin_left_sleeve": true,
+  "skin_right_sleeve": true,
+  "skin_left_pants": true,
+  "skin_right_pants": true,
+  "skin_hat": true,
+  "skin_main_hand_right": true,
+  "master_volume": 1.0,
+  "music_volume": 1.0,
+  "jukebox_volume": 1.0,
+  "weather_volume": 1.0,
+  "blocks_volume": 1.0,
+  "hostile_volume": 1.0,
+  "friendly_volume": 1.0,
+  "players_volume": 1.0,
+  "ambient_volume": 1.0,
+  "voice_volume": 1.0,
+  "ui_volume": 1.0,
+  "cloud_mode": 2,
+  "shader_pack": null,
+  "attack_indicator": 1,
+  "display_mode": 0,
+  "theme": 1,
+  "chat": {
+    "visibility": "Full",
+    "opacity": 1.0,
+    "line_spacing": 0.0,
+    "text_background_opacity": 0.5,
+    "scale": 1.0,
+    "width": 1.0,
+    "height_focused": 1.0,
+    "height_unfocused": 0.4375,
+    "delay_secs": 0.0,
+    "colors": true,
+    "links": true,
+    "links_prompt": true,
+    "auto_suggestions": true,
+    "only_secure": false,
+    "save_drafts": false
+  },
+  "force_unicode_font": false,
+  "japanese_glyph_variants": false
+}

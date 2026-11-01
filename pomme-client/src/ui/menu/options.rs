@@ -2096,6 +2096,67 @@ mod tests {
     use super::*;
     use crate::ui::text_edit::KeyMods;
 
+    /// Preserves the persisted JSON format and every options screen's visible
+    /// copy.
+    #[test]
+    fn options_screen_labels_and_json_fixture() {
+        let mut snapshot = String::new();
+        for screen in [
+            Screen::Options,
+            Screen::OptionsVideo,
+            Screen::OptionsControls,
+            Screen::OptionsMouse,
+            Screen::OptionsKeybinds,
+            Screen::OptionsChatSettings,
+            Screen::OptionsFontSettings,
+            Screen::OptionsAccessibility,
+            Screen::OptionsMusicSounds,
+            Screen::OptionsSkinCustomization,
+            Screen::OptionsOnline,
+            Screen::OptionsLanguage,
+            Screen::OptionsTelemetry,
+            Screen::OptionsResourcePacks,
+            Screen::OptionsCredits,
+        ] {
+            let mut bindings = KeyBindings::default();
+            let mut menu = test_menu("pomme-options-snapshot", &mut bindings);
+            menu.japanese_glyph_variants = false;
+            menu.screen = screen;
+            let frame = menu.build(
+                1000.0,
+                2000.0,
+                &MenuInput::default(),
+                &mut bindings,
+                |s, fs| s.len() as f32 * fs,
+            );
+            snapshot.push_str("---\n");
+            for element in frame.elements {
+                if let MenuElement::Text { text, .. } = element {
+                    snapshot.push_str(&text);
+                    snapshot.push('\n');
+                }
+            }
+        }
+        let mut settings = Settings::default();
+        settings.japanese_glyph_variants = false;
+        let json = serde_json::to_string_pretty(&settings).unwrap();
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/menu/fixtures");
+        if std::env::var_os("POMME_UPDATE_OPTIONS_FIXTURES").is_some() {
+            std::fs::create_dir_all(&fixtures).unwrap();
+            std::fs::write(fixtures.join("options-labels.txt"), &snapshot).unwrap();
+            std::fs::write(fixtures.join("options.json"), &json).unwrap();
+        }
+        assert_eq!(
+            snapshot,
+            std::fs::read_to_string(fixtures.join("options-labels.txt")).unwrap()
+        );
+        let fixture = std::fs::read_to_string(fixtures.join("options.json")).unwrap();
+        let loaded: Settings = serde_json::from_str(&fixture).unwrap();
+        assert_eq!(serde_json::to_string_pretty(&loaded).unwrap(), fixture);
+        assert_eq!(json, fixture);
+    }
+
     #[test]
     fn disabled_prefixes_match_dynamic_option_labels() {
         let disabled = &["Simulation Distance:", "Graphics:"];
