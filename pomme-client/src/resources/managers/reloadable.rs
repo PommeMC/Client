@@ -18,7 +18,7 @@ impl ReloadableResourceManager {
     pub(crate) fn new(pack_type: PackType) -> Self {
         Self {
             pack_type,
-            active: MultiPackResourceManager::empty(pack_type),
+            active: MultiPackResourceManager::empty(),
         }
     }
 

@@ -74,7 +74,7 @@ impl MultiPackResourceManager {
         })
     }
 
-    pub(super) fn empty(_pack_type: PackType) -> Self {
+    pub(super) fn empty() -> Self {
         Self {
             packs: Vec::new(),
             namespaces: BTreeMap::new(),
