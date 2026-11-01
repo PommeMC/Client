@@ -496,12 +496,13 @@ impl Renderer {
         );
 
         let chunk_buffers = ChunkBufferStore::new(&ctx.device, ctx.indirect_draw);
-        let distant_buffers = distant::gpu::DistantBuffers::new(&ctx.device);
+        let distant_buffers = distant::gpu::DistantBuffers::new(&ctx.device, ctx.indirect_draw);
         let distant_pipeline = pipelines::distant::DistantPipeline::new(
             &ctx.device,
             swapchain_state.targets(),
             &lightmap,
             distant_buffers.layout(),
+            distant_buffers.bounds().layout(),
         );
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
@@ -1405,10 +1406,11 @@ impl Renderer {
         self.distant_buffers.set_view(view);
     }
 
-    /// Whether a real chunk draws at `pos`, where distant terrain gives way
-    /// to it.
-    pub fn set_distant_column_drawn(&mut self, pos: ChunkPos, drawn: bool) {
-        self.distant_buffers.set_column_drawn(pos, drawn);
+    /// Which of column `pos`'s sections draw (a bit per section from
+    /// `min_section` up), where distant terrain gives way to them.
+    pub fn set_distant_column_sections(&mut self, pos: ChunkPos, sections: u32, min_section: i32) {
+        self.distant_buffers
+            .set_column_sections(&self.ctx.device, pos, sections, min_section);
     }
 
     /// Drops all distant terrain and forgets every loaded chunk, for a new
@@ -1416,7 +1418,7 @@ impl Renderer {
     pub fn reset_distant(&mut self) {
         self.wait_for_all_frames();
         self.distant_buffers.clear();
-        self.distant_buffers.clear_mask();
+        self.distant_buffers.clear_bounds();
     }
 
     /// Whether distant terrain is uploaded at block column `x`/`z`.
@@ -1851,7 +1853,7 @@ impl Renderer {
         // Fence signalled: reclaim chunk slices the GPU is now provably done with,
         // and read back any screenshot copy recorded for this frame index.
         self.chunk_buffers.begin_frame(&self.ctx.device);
-        self.distant_buffers.begin_frame();
+        self.distant_buffers.begin_frame(&self.ctx.device);
         self.screenshot.collect_ready(frame, &self.ctx.device);
 
         let t_acquire = std::time::Instant::now();
@@ -2067,11 +2069,15 @@ impl Renderer {
 
         let pack_drawn = self.render_pack_world(&encoder, frame, &mode);
 
+        // Depth kept past the pass: distant terrain draws against it in
+        // passes of its own, then the frame goes on.
         let mut pass = encoder.begin_render_pass(
             &self.ctx.device,
-            &self
-                .swapchain
-                .pass(image_index, rhi::LoadOp::Clear(clear_color)),
+            &self.swapchain.pass_keeping_depth(
+                image_index,
+                rhi::LoadOp::Clear(clear_color),
+                rhi::LoadOp::Clear(1.0),
+            ),
         );
 
         let sw = self.swapchain.extent.width as f32;
@@ -2127,25 +2133,6 @@ impl Renderer {
                             fog_distance,
                         );
                     }
-                    if self.distant_draws(*distant_terrain) {
-                        // Its own projection, so its depth means nothing to
-                        // the chunks: they start from a cleared buffer, and
-                        // the drawn-column mask keeps it out of theirs.
-                        let eye = self.camera_render_position();
-                        let extent = self.swapchain.extent;
-                        self.distant_buffers.traverse(
-                            &self.camera,
-                            eye,
-                            [extent.width, extent.height],
-                        );
-                        for translucent in [false, true] {
-                            self.distant_pipeline.bind(&mut pass, frame, translucent);
-                            self.distant_buffers
-                                .draw(&pass, &self.camera, eye, translucent);
-                        }
-                        pass.clear_depth(scissor);
-                    }
-
                     let t_cull = std::time::Instant::now();
                     // A pack that failed to build leaves its vertex format until
                     // the next frame remeshes; skip those.
@@ -2166,6 +2153,45 @@ impl Renderer {
                         self.moving_block_buffers.draw(&pass, frame, true);
                     }
                     let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
+
+                    if self.distant_draws(*distant_terrain) {
+                        // Voxy draws after the chunks' solid and cutout
+                        // passes: bounded by their depth, into its own
+                        // image, then laid into the frame.
+                        let eye = self.camera_render_position();
+                        let extent = self.swapchain.extent;
+                        self.distant_buffers.traverse(
+                            &self.camera,
+                            eye,
+                            [extent.width, extent.height],
+                        );
+                        pass.end();
+                        self.distant_pipeline.render(
+                            &self.ctx.device,
+                            &encoder,
+                            frame,
+                            &mut self.distant_buffers,
+                            &self.camera,
+                            eye,
+                            self.swapchain.depth.handle(),
+                            extent,
+                        );
+                        pass = encoder.begin_render_pass(
+                            &self.ctx.device,
+                            &self.swapchain.pass_keeping_depth(
+                                image_index,
+                                rhi::LoadOp::Load,
+                                rhi::LoadOp::Load,
+                            ),
+                        );
+                        self.distant_pipeline.composite(
+                            &mut pass,
+                            frame,
+                            &self.camera,
+                            (*render_distance * 16) as f32,
+                            (*distant_terrain * 16) as f32,
+                        );
+                    }
 
                     let anchor = self.camera.anchor();
                     let eye = self.camera_render_position();

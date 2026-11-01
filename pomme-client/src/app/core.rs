@@ -1823,7 +1823,7 @@ impl AppCore {
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.unload_chunk(pos);
                     renderer.remove_chunk_mesh(&pos);
-                    renderer.set_distant_column_drawn(pos, false);
+                    renderer.set_distant_column_sections(pos, 0, 0);
                 }
                 NetworkEvent::ChunkCacheCenter { x, z } => {
                     tracing::debug!("Chunk cache center: [{x}, {z}]");

@@ -482,11 +482,6 @@ fn ring_index(pos: ChunkPos, side: i32) -> usize {
     (pos.z.rem_euclid(side) * side + pos.x.rem_euclid(side)) as usize
 }
 
-/// A column's slot in a [`ChunkRing`].
-pub(crate) fn ring_slot(pos: ChunkPos) -> usize {
-    ring_index(pos, RING_SIDE)
-}
-
 impl<T> ChunkRing<T> {
     pub fn new(mut init: impl FnMut() -> T) -> Self {
         Self {

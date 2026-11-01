@@ -307,7 +307,7 @@ impl TextureDesc<'static> {
             extent.width,
             extent.height,
             TextureFormat::Depth32Float,
-            TextureUsages::RENDER_ATTACHMENT,
+            TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
         )
     }
 }
@@ -670,6 +670,8 @@ pub enum FrontFace {
 pub enum CompareFunction {
     Less,
     LessEqual,
+    Greater,
+    Always,
 }
 
 #[derive(Clone, Copy)]

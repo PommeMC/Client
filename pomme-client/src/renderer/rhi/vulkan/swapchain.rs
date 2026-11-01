@@ -228,6 +228,24 @@ impl Swapchain {
         )
     }
 
+    /// As [`Self::pass`], but the depth buffer loads as `depth` says and is
+    /// kept after the pass, for a frame drawn in several passes.
+    pub fn pass_keeping_depth(
+        &self,
+        index: u32,
+        color: rhi::LoadOp<[f32; 4]>,
+        depth: rhi::LoadOp<f32>,
+    ) -> super::RenderPassDesc {
+        super::RenderPassDesc {
+            depth: Some(super::DepthAttachment {
+                texture: self.depth.handle(),
+                load: depth,
+                store: rhi::StoreOp::Store,
+            }),
+            ..self.pass(index, color)
+        }
+    }
+
     pub fn is_fifo(&self) -> bool {
         self.present_mode == vk::PresentModeKHR::Fifo
     }

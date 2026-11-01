@@ -1317,11 +1317,13 @@ impl GameState {
         let dropped = renderer.upload_chunk_meshes(&batch);
         self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
         self.clear_dropped_meshed(dropped);
-        // Distant terrain gives way once a column draws, not once it loads:
-        // the ring loaded around the view waits on its neighbours to compile.
+        // Distant terrain gives way once a column's sections draw, not once
+        // they load: the ring loaded around the view waits on its
+        // neighbours to compile.
+        let min_section = self.chunk_store.min_y().div_euclid(16);
         for mesh in &batch {
-            let drawn = self.compiled.get(&mesh.pos).is_some_and(|mask| *mask != 0);
-            renderer.set_distant_column_drawn(mesh.pos, drawn);
+            let sections = self.compiled.get(&mesh.pos).copied().unwrap_or(0);
+            renderer.set_distant_column_sections(mesh.pos, sections, min_section);
         }
     }
 

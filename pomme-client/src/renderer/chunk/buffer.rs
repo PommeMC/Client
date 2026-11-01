@@ -207,14 +207,15 @@ const fn chunk_vertex_buffers(
     ]
 }
 
+/// `VkDrawIndexedIndirectCommand`.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct DrawCommand {
-    index_count: u32,
-    instance_count: u32,
-    first_index: u32,
-    vertex_offset: i32,
-    first_instance: u32,
+pub(crate) struct DrawCommand {
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub first_index: u32,
+    pub vertex_offset: i32,
+    pub first_instance: u32,
 }
 
 /// Camera-relative frustum test of a section-local AABB, mirroring `cull.comp`

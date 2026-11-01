@@ -21,9 +21,10 @@ use super::section::{LEVELS, SIDE, SectionKey};
 use super::worker::DistantUpdate;
 use crate::position::ChunkPos;
 use crate::renderer::camera::Camera;
+use crate::renderer::chunk::buffer::DrawCommand;
 use crate::renderer::chunk::tlsf::Tlsf;
+use crate::renderer::rhi::IndirectDrawFeatures;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, util};
-use crate::world::chunk::{RING_SIDE, ring_slot};
 
 /// Quads an arena holds: 64 MB at 8 bytes each.
 const ARENA_QUADS: u32 = 8 << 20;
@@ -31,10 +32,6 @@ const ARENA_QUADS: u32 = 8 << 20;
 const MAX_ARENAS: usize = 8;
 /// Quads the shared index buffer covers, the most a group can hold.
 const QUADS_PER_DRAW: u32 = 1 << 16;
-/// `distant.frag` hard-codes the ring's side.
-const _: () = assert!(RING_SIDE == 257);
-const MASK_WORDS: usize = ((RING_SIDE * RING_SIDE) as usize).div_ceil(32);
-const MASK_BYTES: u64 = (MASK_WORDS * size_of::<u32>()) as u64;
 const MODELS_BYTES: u64 = (CAPACITY * size_of::<BlockModel>()) as u64;
 const TINTS_BYTES: u64 = (TINT_BIOMES * TINT_KINDS * size_of::<u32>()) as u64;
 /// A model tile's bytes, every level.
@@ -59,7 +56,13 @@ const MAX_REQUESTS: usize = 4000;
 /// How long a request waits before it's asked again.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// Voxy's far plane: 3000 chunks.
-const FAR: f32 = 3000.0 * 16.0;
+pub(crate) const DISTANT_FAR: f32 = 3000.0 * 16.0;
+/// Drawn chunk sections the bound store starts with room for.
+const BOUND_CAPACITY: u32 = 1 << 15;
+/// Sections a frame may draw, and the draws they may take (one per group).
+const MAX_DRAW_SECTIONS: usize = 1 << 15;
+const MAX_DRAWS: usize = MAX_DRAW_SECTIONS * GROUPS;
+pub(crate) const POSITIONS_BYTES: u64 = (MAX_DRAW_SECTIONS * 16) as u64;
 
 /// A quad buffer, sub-allocated, with the bind group that reads it.
 struct Arena {
@@ -79,6 +82,16 @@ struct Uploaded {
     /// [`BuiltSection::aabb`].
     aabb: u32,
     child_existence: u8,
+    /// The last frame drawn, for evicting the least recent.
+    last_drawn: u64,
+}
+
+/// One arena's share of a frame's draw list: where its opaque and its
+/// translucent commands start, and how many.
+#[derive(Clone, Copy, Default)]
+struct ArenaDraws {
+    opaque: (u32, u32),
+    translucent: (u32, u32),
 }
 
 impl Uploaded {
@@ -123,14 +136,21 @@ pub(crate) struct DistantBuffers {
     /// Sections dropped since the last [`Self::take_requests`], for the
     /// worker to stop keeping up to date.
     dropped: Vec<SectionKey>,
-    /// Each section's last frame drawn, for evicting the least recent.
-    last_drawn: HashMap<SectionKey, u64>,
     /// The sections to draw this frame, from the last traversal.
-    visible: Vec<SectionKey>,
+    visible: Vec<(SectionKey, Uploaded)>,
+    /// The ring of top-level sections the last traversal walked: its
+    /// centre, radius and height range, so sections outside it are swept
+    /// only when it moves.
+    ring: Option<(i32, i32, i32, i32, i32)>,
+    indirect: IndirectDrawFeatures,
+    /// Per frame in flight, the draw list (`cmdBuffer`) and each draw's
+    /// section origin and scale (`positionBuffer`), by `first_instance`.
+    commands: Vec<rhi::backend::Buffer>,
+    positions: Vec<rhi::backend::Buffer>,
+    /// Each arena's draws in the current frame's list.
+    draws: Vec<ArenaDraws>,
     view: Option<View>,
-    /// Bit per [`ring_slot`]: a real chunk draws there.
-    mask: rhi::backend::Buffer,
-    mask_words: Vec<u32>,
+    bounds: BoundStore,
     frame_seq: u64,
     /// Freed quad ranges as (arena, first quad), by the frame from which no
     /// in-flight frame can still draw them.
@@ -148,19 +168,17 @@ pub(crate) struct DistantBuffers {
 }
 
 /// Set 1: the arena's quads, the models, the biome tints, the model atlas
-/// and its sampler, then the drawn-column mask `distant.frag` discards
-/// with.
+/// and its sampler.
 const LAYOUT: &[rhi::BindGroupLayoutEntry] = &[
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::VERTEX),
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::VERTEX),
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::VERTEX),
     rhi::BindGroupLayoutEntry::texture(rhi::ShaderStages::FRAGMENT),
     rhi::BindGroupLayoutEntry::sampler(rhi::ShaderStages::FRAGMENT),
-    rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::FRAGMENT),
 ];
 
 impl DistantBuffers {
-    pub fn new(device: &rhi::backend::Device) -> Self {
+    pub fn new(device: &rhi::backend::Device, indirect: IndirectDrawFeatures) -> Self {
         // Voxy's `SharedIndexBuffer`: corner 1 leads both triangles, so it's
         // the provoking vertex the flat attributes come from.
         let quad_indices: Vec<u32> = (0..QUADS_PER_DRAW)
@@ -213,11 +231,24 @@ impl DistantBuffers {
             requested: HashMap::new(),
             requests: Vec::new(),
             dropped: Vec::new(),
-            last_drawn: HashMap::new(),
             visible: Vec::new(),
+            ring: None,
+            indirect,
+            commands: util::create_per_frame_host_buffers(
+                device,
+                (MAX_DRAWS * size_of::<DrawCommand>()) as u64,
+                rhi::BufferUsages::INDIRECT,
+                "distant_draws",
+            ),
+            positions: util::create_per_frame_host_buffers(
+                device,
+                POSITIONS_BYTES,
+                rhi::BufferUsages::STORAGE,
+                "distant_draw_positions",
+            ),
+            draws: Vec::new(),
             view: None,
-            mask: storage("distant_mask", MASK_BYTES),
-            mask_words: vec![0; MASK_WORDS],
+            bounds: BoundStore::new(device),
             frame_seq: 0,
             pending_free: VecDeque::new(),
             model_atlas,
@@ -279,10 +310,6 @@ impl DistantBuffers {
                     4,
                     rhi::backend::BindingResource::Sampler(self.model_sampler),
                 ),
-                (
-                    5,
-                    rhi::backend::BindingResource::storage(&self.mask, MASK_BYTES),
-                ),
             ],
         );
         self.arenas.push(Arena {
@@ -336,10 +363,15 @@ impl DistantBuffers {
         )]);
     }
 
-    /// Reclaims the ranges no in-flight frame reads any more. Call once a
-    /// frame, after its fence wait.
-    pub fn begin_frame(&mut self) {
+    pub fn bounds(&self) -> &BoundStore {
+        &self.bounds
+    }
+
+    /// Reclaims the ranges and buffers no in-flight frame reads any more.
+    /// Call once a frame, after its fence wait.
+    pub fn begin_frame(&mut self, device: &rhi::backend::Device) {
         self.frame_seq += 1;
+        self.bounds.free_retired(device, self.frame_seq);
         while let Some(&(at, arena, ptr)) = self.pending_free.front()
             && at <= self.frame_seq
         {
@@ -356,11 +388,10 @@ impl DistantBuffers {
             let at = self.frame_seq + MAX_FRAMES_IN_FLIGHT as u64;
             self.pending_free.push_back((at, old.arena, old.ptr));
         }
-        self.last_drawn.remove(&key);
     }
 
-    /// Drops every section, as on a dimension change. The mask stays: it
-    /// tracks the chunk store, which [`Self::clear_mask`] follows.
+    /// Drops every section, as on a dimension change. The bounds stay: they
+    /// track the chunk store, which [`Self::clear_bounds`] follows.
     pub fn clear(&mut self) {
         let keys: Vec<SectionKey> = self.sections.keys().copied().collect();
         for key in keys {
@@ -370,25 +401,26 @@ impl DistantBuffers {
         self.requests.clear();
         self.dropped.clear();
         self.visible.clear();
+        self.ring = None;
         self.view = None;
     }
 
-    pub fn clear_mask(&mut self) {
-        self.mask_words.fill(0);
-        self.mask.zero();
+    pub fn clear_bounds(&mut self) {
+        self.bounds.clear();
     }
 
-    pub fn set_column_drawn(&mut self, pos: ChunkPos, drawn: bool) {
-        let slot = ring_slot(pos);
-        let (word, bit) = (slot / 32, 1u32 << (slot % 32));
-        let value = &mut self.mask_words[word];
-        if drawn {
-            *value |= bit;
-        } else {
-            *value &= !bit;
-        }
-        self.mask
-            .write_at(word * size_of::<u32>(), &value.to_ne_bytes());
+    /// Which of column `pos`'s sections draw (bit `i` for the `i`th from
+    /// the dimension's bottom, `min_section`), bounding distant terrain
+    /// there.
+    pub fn set_column_sections(
+        &mut self,
+        device: &rhi::backend::Device,
+        pos: ChunkPos,
+        sections: u32,
+        min_section: i32,
+    ) {
+        self.bounds
+            .set_column(device, self.frame_seq, pos, sections, min_section);
     }
 
     /// Where the player is and how far to draw; `None` draws nothing.
@@ -428,7 +460,7 @@ impl DistantBuffers {
                 .sections
                 .iter()
                 .filter(|(key, section)| section.quads > 0 && key.level != LEVELS - 1)
-                .map(|(key, _)| (self.last_drawn.get(key).copied().unwrap_or(0), *key))
+                .map(|(key, section)| (section.last_drawn, *key))
                 .collect();
             if stale.is_empty() {
                 return None;
@@ -511,6 +543,7 @@ impl DistantBuffers {
                 offsets: section.offsets,
                 aabb: section.aabb,
                 child_existence: section.child_existence,
+                last_drawn: self.frame_seq,
             },
         );
     }
@@ -539,10 +572,17 @@ impl DistantBuffers {
 
     /// Whether every child `key` has is known, so the traversal can step
     /// down into them (Voxy's child request finishing).
-    fn children_ready(&self, key: SectionKey) -> bool {
-        self.sections.get(&key).is_some_and(|section| {
-            children(key, section.child_existence).all(|child| self.sections.contains_key(&child))
-        })
+    fn children_ready(&self, key: SectionKey, existence: u8) -> bool {
+        children(key, existence).all(|child| self.sections.contains_key(&child))
+    }
+
+    /// Draws `key` this frame.
+    fn show(&mut self, key: SectionKey, section: Uploaded) {
+        self.sections
+            .get_mut(&key)
+            .expect("a copy of a known section")
+            .last_drawn = self.frame_seq;
+        self.visible.push((key, section));
     }
 
     /// Whether the finest section holding block column `x`/`z` is uploaded
@@ -568,7 +608,7 @@ impl DistantBuffers {
             return;
         };
         let now = Instant::now();
-        let view_proj = camera.distant_view_projection(FAR);
+        let view_proj = camera.distant_view_projection(DISTANT_FAR);
         let planes = Camera::planes_from_view_projection(view_proj);
         let min_sss = SUBDIVISION_SIZE * SUBDIVISION_SIZE / (viewport[0] * viewport[1]) as f32;
         let render_distance = view.radius * view.radius;
@@ -587,33 +627,34 @@ impl DistantBuffers {
             (view.min_y + view.height - 1).div_euclid(top_width),
         );
         let mut queue: VecDeque<SectionKey> = VecDeque::new();
-        let mut roots = HashSet::new();
         for x in cx - ring..=cx + ring {
             for z in cz - ring..=cz + ring {
                 for y in min_sec..=max_sec {
-                    let key = SectionKey {
+                    queue.push_back(SectionKey {
                         level: top,
                         x,
                         y,
                         z,
-                    };
-                    roots.insert(key);
-                    queue.push_back(key);
+                    });
                 }
             }
         }
-        let gone: Vec<SectionKey> = self
-            .sections
-            .keys()
-            .copied()
-            .filter(|key| !roots.contains(&key.ancestor(top)))
-            .collect();
-        for key in gone {
-            self.retire(key);
-            self.dropped.push(key);
+        if self.ring != Some((cx, cz, ring, min_sec, max_sec)) {
+            self.ring = Some((cx, cz, ring, min_sec, max_sec));
+            let roots: HashSet<SectionKey> = queue.iter().copied().collect();
+            let gone: Vec<SectionKey> = self
+                .sections
+                .keys()
+                .copied()
+                .filter(|key| !roots.contains(&key.ancestor(top)))
+                .collect();
+            for key in gone {
+                self.retire(key);
+                self.dropped.push(key);
+            }
+            self.requested
+                .retain(|key, _| roots.contains(&key.ancestor(top)));
         }
-        self.requested
-            .retain(|key, _| roots.contains(&key.ancestor(top)));
 
         while let Some(key) = queue.pop_front() {
             let min = origin(&key) - eye;
@@ -629,19 +670,16 @@ impl DistantBuffers {
             if !in_frustum(&planes, min.as_vec3(), max.as_vec3()) {
                 continue;
             }
-            let has_mesh = self.sections.contains_key(&key);
+            let section = self.sections.get(&key).copied();
             if key.level != 0 && screen_size(view_proj, min.as_vec3(), size as f32) > min_sss {
-                if self.children_ready(key) {
-                    let existence = self.sections[&key].child_existence;
-                    queue.extend(children(key, existence));
+                if let Some(section) = section
+                    && self.children_ready(key, section.child_existence)
+                {
+                    queue.extend(children(key, section.child_existence));
                 } else {
-                    match self
-                        .sections
-                        .get(&key)
-                        .map(|section| section.child_existence)
-                    {
-                        Some(existence) => {
-                            for child in children(key, existence) {
+                    match section {
+                        Some(section) => {
+                            for child in children(key, section.child_existence) {
                                 if !self.sections.contains_key(&child) {
                                     self.request(child, now);
                                 }
@@ -661,94 +699,87 @@ impl DistantBuffers {
                         }
                     };
                     let (fx, fz) = (far(min.x, max.x), far(min.z, max.z));
-                    if has_mesh && fx * fx + fz * fz + 16.0 * 16.0 * 16.0 <= render_distance {
-                        self.visible.push(key);
+                    if let Some(section) = section
+                        && fx * fx + fz * fz + 16.0 * 16.0 * 16.0 <= render_distance
+                    {
+                        self.show(key, section);
                     }
                 }
-            } else if has_mesh {
-                self.visible.push(key);
+            } else if let Some(section) = section {
+                self.show(key, section);
             } else {
                 self.request(key, now);
             }
         }
-        for key in &self.visible {
-            self.last_drawn.insert(*key, self.frame_seq);
-        }
     }
 
-    /// Draws the opaque or see-through groups of the visible sections
-    /// (`cmdgen.comp`, `buildtranslucents.comp`): face groups turned away
-    /// from the camera are left out; translucent sections go far to near.
-    /// The caller has bound the matching distant pipeline.
-    pub fn draw(
-        &self,
-        pass: &rhi::backend::RenderPassEncoder,
-        camera: &Camera,
-        eye: DVec3,
-        translucent: bool,
-    ) {
-        if self.visible.is_empty() {
-            return;
-        }
-        let view_proj = camera.distant_view_projection(FAR);
-        let planes = Camera::planes_from_view_projection(view_proj);
-        let anchor = camera.anchor();
-        pass.set_push_constants(
-            rhi::ShaderStages::VERTEX,
-            0,
-            bytemuck::cast_slice(&view_proj.to_cols_array()),
-        );
-        pass.set_index_buffer(self.index_buffer.handle());
+    pub fn position_buffer(&self, frame: usize) -> &rhi::backend::Buffer {
+        &self.positions[frame]
+    }
+
+    /// `cmdgen.comp` and `buildtranslucents.comp` on the CPU, until the GPU
+    /// traversal: the visible sections' draws into `frame`'s list, an arena
+    /// at a time, face groups turned away from the camera left out, each
+    /// draw's section in the position list by its `first_instance`; the
+    /// translucent draws after, far to near within each arena.
+    pub fn build_draws(&mut self, frame: usize, camera: &Camera, eye: DVec3) {
+        let eye_offset = (eye - camera.anchor()).as_vec3();
         let camera_section =
             [eye.x, eye.y, eye.z].map(|c| (c.floor() as i32).div_euclid(SIDE as i32));
-        let relative = |key: &SectionKey| {
-            [key.x, key.y, key.z]
-                .into_iter()
-                .zip(camera_section)
-                .map(|(c, cam)| c - (cam >> key.level))
-                .collect::<Vec<i32>>()
-        };
+        let view_proj = camera.distant_view_projection(DISTANT_FAR);
+        let planes = Camera::planes_from_view_projection(view_proj);
         // Sections whose quads all lie outside the view go, as Voxy's raster
         // cull of their bounds drops them until the GPU traversal lands.
-        let mut order: Vec<&SectionKey> = self
+        // The rest by arena, each with its anchor-relative origin and scale
+        // (its position entry) and where it stands from the camera's
+        // section at its level.
+        let mut visible: Vec<(Uploaded, [f32; 4], [i32; 3])> = self
             .visible
             .iter()
-            .filter(|key| {
-                let section = &self.sections[key];
-                if section.quads == 0 || (translucent && section.group(0).1 == 0) {
-                    return false;
+            .filter_map(|&(key, section)| {
+                if section.quads == 0 {
+                    return None;
                 }
-                let corner = (origin(key) - eye).as_vec3();
+                let origin = (origin(&key) - camera.anchor()).as_vec3();
+                let corner = origin - eye_offset;
                 let (min, max) = section.bounds();
                 let scale = (1 << key.level) as f32;
-                in_frustum(&planes, corner + min * scale, corner + max * scale)
+                let cam = camera_section.map(|c| c >> key.level);
+                in_frustum(&planes, corner + min * scale, corner + max * scale).then(|| {
+                    (
+                        section,
+                        [origin.x, origin.y, origin.z, scale],
+                        [key.x - cam[0], key.y - cam[1], key.z - cam[2]],
+                    )
+                })
             })
+            .take(MAX_DRAW_SECTIONS)
             .collect();
-        if translucent {
-            order.sort_by_key(|key| {
-                let rel = relative(key);
-                std::cmp::Reverse(rel.iter().map(|c| c.abs()).sum::<i32>() << key.level)
-            });
-        } else {
-            order.sort_unstable_by_key(|key| self.sections[key].arena);
-        }
-        let mut bound = None;
-        for key in order {
-            let section = &self.sections[key];
-            if bound != Some(section.arena) {
-                pass.set_bind_group(1, self.arenas[section.arena].group);
-                bound = Some(section.arena);
-            }
-            let origin = (origin(key) - anchor).as_vec3();
-            pass.set_push_constants(
-                rhi::ShaderStages::VERTEX,
-                64,
-                bytemuck::cast_slice(&[origin.x, origin.y, origin.z, (1 << key.level) as f32]),
-            );
-            let groups: Vec<usize> = if translucent {
-                vec![0]
-            } else {
-                let rel = relative(key);
+        visible.sort_unstable_by_key(|(section, ..)| section.arena);
+
+        let mut commands: Vec<DrawCommand> = Vec::with_capacity(visible.len() * 4);
+        let push =
+            |commands: &mut Vec<DrawCommand>, section: &Uploaded, group: usize, id: usize| {
+                let (first, count) = section.group(group);
+                if count > 0 {
+                    commands.push(DrawCommand {
+                        index_count: count * 6,
+                        instance_count: 1,
+                        first_index: 0,
+                        vertex_offset: (first * 4) as i32,
+                        first_instance: id as u32,
+                    });
+                }
+            };
+        let span = |commands: &[DrawCommand], first: u32| (first, commands.len() as u32 - first);
+        self.draws = vec![ArenaDraws::default(); self.arenas.len()];
+        let mut start = 0;
+        for run in visible.chunk_by(|a, b| a.0.arena == b.0.arena) {
+            let ids = start..start + run.len();
+            start = ids.end;
+            let first = commands.len() as u32;
+            for (id, (section, _, rel)) in ids.clone().zip(run) {
+                push(&mut commands, section, 1, id);
                 let facing = [
                     rel[1] > -1,
                     rel[1] < 1,
@@ -757,16 +788,61 @@ impl DistantBuffers {
                     rel[0] > -1,
                     rel[0] < 1,
                 ];
-                std::iter::once(1)
-                    .chain((0..6).filter(|&face| facing[face]).map(|face| face + 2))
-                    .collect()
-            };
-            for group in groups {
-                let (first, count) = section.group(group);
-                if count == 0 {
-                    continue;
+                for (face, _) in facing.iter().enumerate().filter(|&(_, &faces)| faces) {
+                    push(&mut commands, section, face + 2, id);
                 }
-                pass.draw_indexed(count * 6, 1, 0, (first * 4) as i32, 0);
+            }
+            let opaque = span(&commands, first);
+            let first = commands.len() as u32;
+            let mut order: Vec<(i32, usize)> = ids
+                .zip(run)
+                .filter(|(_, (section, ..))| section.group(0).1 > 0)
+                .map(|(id, (_, position, rel))| {
+                    // The section's distance in its level's voxels.
+                    (
+                        rel.iter().map(|c| c.abs()).sum::<i32>() * position[3] as i32,
+                        id,
+                    )
+                })
+                .collect();
+            order.sort_unstable_by_key(|&(distance, _)| std::cmp::Reverse(distance));
+            for (_, id) in order {
+                push(&mut commands, &visible[id].0, 0, id);
+            }
+            self.draws[run[0].0.arena] = ArenaDraws {
+                opaque,
+                translucent: span(&commands, first),
+            };
+        }
+        let positions: Vec<[f32; 4]> = visible.iter().map(|(_, position, _)| *position).collect();
+        self.commands[frame].write_at(0, bytemuck::cast_slice(&commands));
+        self.positions[frame].write_at(0, bytemuck::cast_slice(&positions));
+    }
+
+    /// Issues `frame`'s draw list ([`Self::build_draws`]), the opaque or
+    /// the translucent draws, an indirect draw per arena. The caller has
+    /// bound the matching distant pipeline and its sets.
+    pub fn draw(&self, pass: &rhi::backend::RenderPassEncoder, frame: usize, translucent: bool) {
+        pass.set_index_buffer(self.index_buffer.handle());
+        let stride = size_of::<DrawCommand>() as u32;
+        for (arena, draws) in self.arenas.iter().zip(&self.draws) {
+            let (first, count) = if translucent {
+                draws.translucent
+            } else {
+                draws.opaque
+            };
+            if count == 0 {
+                continue;
+            }
+            pass.set_bind_group(1, arena.group);
+            let buffer = self.commands[frame].handle();
+            let offset = u64::from(first * stride);
+            if self.indirect.multi_draw {
+                pass.draw_indexed_indirect(buffer, offset, count, stride);
+            } else {
+                for i in 0..count {
+                    pass.draw_indexed_indirect(buffer, offset + u64::from(i * stride), 1, stride);
+                }
             }
         }
     }
@@ -776,17 +852,175 @@ impl DistantBuffers {
             arena.group.destroy(device);
             arena.buffer.destroy(device);
         }
-        for buffer in [
-            &mut self.index_buffer,
-            &mut self.mask,
-            &mut self.models,
-            &mut self.tints,
-        ] {
+        for buffer in [&mut self.index_buffer, &mut self.models, &mut self.tints] {
             std::mem::take(buffer).destroy(device);
         }
+        util::destroy_buffers(device, &mut self.commands);
+        util::destroy_buffers(device, &mut self.positions);
+        self.bounds.destroy(device);
         util::destroy_buffers(device, &mut self.tile_staging);
         self.model_sampler.destroy(device);
         std::mem::take(&mut self.model_atlas).destroy(device);
+        self.layout.destroy(device);
+    }
+}
+
+/// Voxy's `ChunkBoundStore`: the drawn chunk sections' coordinates for the
+/// bound pass, a slot each in a buffer the pass instances over, the last
+/// slot moving into a freed one.
+pub(crate) struct BoundStore {
+    layout: rhi::backend::BindGroupLayout,
+    buffer: rhi::backend::Buffer,
+    group: rhi::backend::BindGroup,
+    capacity: u32,
+    slots: Vec<[i32; 3]>,
+    index: HashMap<[i32; 3], u32>,
+    /// Per column, which of its sections have a slot.
+    columns: HashMap<ChunkPos, u32>,
+    /// Buffers in-flight frames may still read, by the frame they're free
+    /// from.
+    retired: VecDeque<(u64, rhi::backend::Buffer, rhi::backend::BindGroup)>,
+}
+
+impl BoundStore {
+    fn new(device: &rhi::backend::Device) -> Self {
+        let layout = rhi::backend::create_bind_group_layout(
+            device,
+            &[rhi::BindGroupLayoutEntry::storage(
+                rhi::ShaderStages::VERTEX,
+            )],
+        );
+        let (buffer, group) = Self::make_buffer(device, layout, BOUND_CAPACITY);
+        Self {
+            layout,
+            buffer,
+            group,
+            capacity: BOUND_CAPACITY,
+            slots: Vec::new(),
+            index: HashMap::new(),
+            columns: HashMap::new(),
+            retired: VecDeque::new(),
+        }
+    }
+
+    fn make_buffer(
+        device: &rhi::backend::Device,
+        layout: rhi::backend::BindGroupLayout,
+        capacity: u32,
+    ) -> (rhi::backend::Buffer, rhi::backend::BindGroup) {
+        let bytes = u64::from(capacity) * 16;
+        let buffer = rhi::backend::Buffer::new(
+            device,
+            "distant_chunk_bounds",
+            bytes,
+            rhi::BufferUsages::STORAGE,
+            rhi::MemoryLocation::Host,
+        );
+        let group = device.create_bind_group(
+            layout,
+            &[(0, rhi::backend::BindingResource::storage(&buffer, bytes))],
+        );
+        (buffer, group)
+    }
+
+    pub fn layout(&self) -> rhi::backend::BindGroupLayout {
+        self.layout
+    }
+
+    pub fn group(&self) -> rhi::backend::BindGroup {
+        self.group
+    }
+
+    pub fn count(&self) -> u32 {
+        self.slots.len() as u32
+    }
+
+    fn write(&mut self, slot: u32) {
+        let [x, y, z] = self.slots[slot as usize];
+        self.buffer
+            .write_at(slot as usize * 16, bytemuck::bytes_of(&[x, y, z, 0]));
+    }
+
+    fn set_column(
+        &mut self,
+        device: &rhi::backend::Device,
+        frame_seq: u64,
+        pos: ChunkPos,
+        sections: u32,
+        min_section: i32,
+    ) {
+        let was = self.columns.get(&pos).copied().unwrap_or(0);
+        if was == sections {
+            return;
+        }
+        for bit in 0..32 {
+            let (had, has) = (was & 1 << bit != 0, sections & 1 << bit != 0);
+            let key = [pos.x, min_section + bit, pos.z];
+            if had && !has {
+                self.remove(key);
+            } else if has && !had {
+                self.add(device, frame_seq, key);
+            }
+        }
+        if sections == 0 {
+            self.columns.remove(&pos);
+        } else {
+            self.columns.insert(pos, sections);
+        }
+    }
+
+    fn add(&mut self, device: &rhi::backend::Device, frame_seq: u64, key: [i32; 3]) {
+        if self.count() == self.capacity {
+            self.capacity *= 2;
+            let (buffer, group) = Self::make_buffer(device, self.layout, self.capacity);
+            let old = (
+                frame_seq + MAX_FRAMES_IN_FLIGHT as u64,
+                std::mem::replace(&mut self.buffer, buffer),
+                std::mem::replace(&mut self.group, group),
+            );
+            self.retired.push_back(old);
+            for slot in 0..self.count() {
+                self.write(slot);
+            }
+        }
+        let slot = self.count();
+        self.slots.push(key);
+        self.index.insert(key, slot);
+        self.write(slot);
+    }
+
+    fn remove(&mut self, key: [i32; 3]) {
+        let Some(slot) = self.index.remove(&key) else {
+            return;
+        };
+        let last = self.slots.pop().expect("a slot was indexed");
+        if slot < self.count() {
+            self.slots[slot as usize] = last;
+            self.index.insert(last, slot);
+            self.write(slot);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.slots.clear();
+        self.index.clear();
+        self.columns.clear();
+    }
+
+    fn free_retired(&mut self, device: &rhi::backend::Device, frame_seq: u64) {
+        while let Some(&(at, ..)) = self.retired.front()
+            && at <= frame_seq
+        {
+            let (_, buffer, group) = self.retired.pop_front().expect("peeked");
+            group.destroy(device);
+            buffer.destroy(device);
+        }
+    }
+
+    fn destroy(&mut self, device: &rhi::backend::Device) {
+        self.free_retired(device, u64::MAX);
+        self.group.destroy(device);
+        std::mem::take(&mut self.buffer).destroy(device);
         self.layout.destroy(device);
     }
 }

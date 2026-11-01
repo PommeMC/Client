@@ -3,9 +3,8 @@
 // Distant terrain (renderer/distant): Voxy's `quads3.vert` and
 // `quad_util.glsl`. Each quad is eight bytes in the bound arena, read by
 // `gl_VertexIndex >> 2`; its corners come from its model's face data, lit
-// through the lightmap and fogged like terrain.
+// through the lightmap. Fog comes later, in distant_blit.frag.
 
-#include "fog.glsl"
 #include "camera_ubo.glsl"
 #include "lightmap.glsl"
 #include "distant_models.glsl"
@@ -13,9 +12,6 @@
 layout(push_constant) uniform DistantPc {
     // The camera's view projection with the distant near and far planes.
     mat4 distant_view_proj;
-    // The section's corner relative to the camera anchor, and its level's
-    // scale: blocks per voxel.
-    vec4 origin_scale;
 };
 
 layout(set = 1, binding = 0) readonly buffer Quads {
@@ -28,18 +24,17 @@ layout(set = 1, binding = 1) readonly buffer Models {
 layout(set = 1, binding = 2) readonly buffer Tints {
     uint tints[];
 };
+// Per draw (`gl_InstanceIndex`): the section's corner relative to the
+// camera anchor, and its level's scale, blocks per voxel.
+layout(set = 3, binding = 0) readonly buffer Positions {
+    vec4 positions[];
+};
 
-// Voxy's `interData`: quad flags (cutout bit 0, tint state 2-3, face 4-6,
-// width-1 8-11, height-1 12-15, model 16-31), the lightmap colour, the
-// tint colour.
+// Voxy's `interData`: quad flags (cutout bit 0, translucent 1, tint state
+// 2-3, face 4-6, width-1 8-11, height-1 12-15, model 16-31), the lightmap
+// colour, the tint colour.
 layout(location = 0) flat out uvec3 v_data;
 layout(location = 1) out vec2 v_uv;
-layout(location = 2) out vec3 v_fog_color;
-layout(location = 3) out float v_fog;
-// Anchor-relative x/z and the anchor: what distant.frag finds the column's
-// chunk from.
-layout(location = 4) out vec2 v_column_pos;
-layout(location = 5) flat out ivec2 v_anchor;
 
 // Vanilla's directional shade (the overworld's cardinal lighting), by face.
 const float FACE_SHADE[6] = float[](0.5, 1.0, 0.8, 0.8, 0.6, 0.6);
@@ -56,6 +51,7 @@ vec3 swizzle(uint axis, vec3 data) {
 }
 
 void main() {
+    vec4 origin_scale = positions[gl_InstanceIndex];
     uvec2 quad = quads[gl_VertexIndex >> 2];
     uint corner = gl_VertexIndex & 3u;
     uint face = field(quad, 3u, 0u);
@@ -79,8 +75,7 @@ void main() {
     vec2 extent = bounds.yw + size - 1.0;
     vec2 mask = vec2(corner >> 1u & 1u, corner & 1u);
     vec3 point = origin_scale.xyz + (start + swizzle(axis, vec3(extent * mask, 0.0))) * origin_scale.w;
-    vec3 rel = point - camera_pos.xyz;
-    gl_Position = distant_view_proj * vec4(rel, 1.0);
+    gl_Position = distant_view_proj * vec4(point - camera_pos.xyz, 1.0);
     v_uv = bounds.xz + extent * mask;
 
     // `makeQuadFlags`: a face short of its side cuts out once a quad spans
@@ -106,9 +101,4 @@ void main() {
         tint = tints[tint * TINT_BIOMES + field(quad, 9u, 46u)];
     }
     v_data = uvec3(flags, packUnorm4x8(vec4(lit, 1.0)), tint);
-
-    v_fog_color = fog_color.rgb;
-    v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
-    v_column_pos = point.xz;
-    v_anchor = camera_block.xz;
 }

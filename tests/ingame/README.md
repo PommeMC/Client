@@ -160,6 +160,12 @@ deterministic = true                          # holds flicker, particles,
 wait_ms = 1000
 
 [[step]]
+frame_times = { ms = 5000 }                   # times the frames for 5 s; the
+                                              # report line gives the frame
+                                              # rate, its 1% low, and the CPU
+                                              # and GPU-wait share of a frame
+
+[[step]]
 screenshot = "equipped"                       # target/ingame/<script>/equipped.png
 
 [[step]]

@@ -1,39 +1,20 @@
 #version 450
 
 // Voxy's `quads.frag`: the quad's face texture repeated per block from the
-// model atlas, cut out, tinted and lit.
+// model atlas, cut out, tinted and lit; nothing nearer than the far side of
+// the drawn chunks' boxes (distant_bound.vert).
 
-#include "fog.glsl"
 #include "distant_models.glsl"
 
 // Every model's face textures (models.rs).
 layout(set = 1, binding = 3) uniform texture2D model_atlas;
 layout(set = 1, binding = 4) uniform sampler model_sampler;
-// One bit per chunk column, ring-indexed as `world/chunk.rs` `ring_slot`:
-// set where a real chunk draws instead.
-layout(set = 1, binding = 5) readonly buffer DrawnColumns {
-    uint drawn[];
-};
+layout(set = 3, binding = 1) uniform texture2D depth_bound;
 
 layout(location = 0) flat in uvec3 v_data;
 layout(location = 1) in vec2 v_uv;
-layout(location = 2) in vec3 v_fog_color;
-layout(location = 3) in float v_fog;
-layout(location = 4) in vec2 v_column_pos;
-layout(location = 5) flat in ivec2 v_anchor;
 
 layout(location = 0) out vec4 out_color;
-
-// `world/chunk.rs` RING_SIDE.
-const int RING_SIDE = 257;
-
-// Whether a real chunk draws under anchor-relative `pos`.
-bool drawn_at(vec2 pos) {
-    ivec2 chunk = (v_anchor + ivec2(floor(pos))) >> 4;
-    ivec2 ring = ((chunk % RING_SIDE) + RING_SIDE) % RING_SIDE;
-    uint slot = uint(ring.y * RING_SIDE + ring.x);
-    return (drawn[slot >> 5] & (1u << (slot & 31u))) != 0u;
-}
 
 void main() {
     uint flags = v_data.x;
@@ -53,7 +34,7 @@ void main() {
     if (any(notEqual(clamp(tile, vec2(0.0), size), tile))) {
         discard;
     }
-    if (drawn_at(v_column_pos)) {
+    if (gl_FragCoord.z < texelFetch(sampler2D(depth_bound, model_sampler), ivec2(gl_FragCoord.xy), 0).r) {
         discard;
     }
     // Cut out by the unmipped alpha, which mips would smear.
@@ -76,5 +57,5 @@ void main() {
         color.rgb *= unpackUnorm4x8(v_data.z).rgb;
     }
     color.rgb *= unpackUnorm4x8(v_data.y).rgb;
-    out_color = vec4(apply_fog(color.rgb, v_fog, v_fog_color), color.a);
+    out_color = color;
 }
