@@ -743,28 +743,68 @@ fn translate_set_player_team_26_1_reset_color() {
     assert_eq!(&translated[..], &expected[..]);
 }
 
-/// The registry tables must agree with azalea's 26.2 enums on the id anchors
-/// the remaps pivot around.
+/// Every native registry id must match the runtime enum used by remapping.
 #[test]
 fn registry_table_matches_azalea() {
     use azalea_registry::Registry;
-    use azalea_registry::builtin::{Attribute, BlockEntityKind, EntityKind};
+    use azalea_registry::builtin::*;
     use pomme_protocol::{ClientRegistry, RegistryTable};
 
-    let t = RegistryTable::native();
-    let index = |reg, name: &str| t.names(reg).iter().position(|n| n == name).unwrap() as u32;
-    assert_eq!(
-        EntityKind::SulfurCube.to_u32(),
-        index(ClientRegistry::EntityType, "sulfur_cube")
-    );
-    assert_eq!(
-        Attribute::AirDragModifier.to_u32(),
-        index(ClientRegistry::Attribute, "air_drag_modifier")
-    );
-    assert_eq!(
-        BlockEntityKind::PotentSulfur.to_u32(),
-        index(ClientRegistry::BlockEntityType, "potent_sulfur")
-    );
+    let mut mismatches = Vec::new();
+    macro_rules! check {
+        ($kind:ident, $reg:ident) => {{
+            let names = RegistryTable::native().names(ClientRegistry::$reg);
+            assert!(
+                $kind::from_u32(names.len() as u32).is_none(),
+                "{} has more ids than the native registry",
+                stringify!($kind)
+            );
+            for (id, name) in names.iter().enumerate() {
+                let value = $kind::from_u32(id as u32).expect("builtin id");
+                assert_eq!(value.to_u32(), id as u32);
+                let azalea = value.to_str().trim_start_matches("minecraft:");
+                if azalea != name {
+                    mismatches.push((stringify!($kind), azalea.to_owned(), name.clone()));
+                }
+            }
+        }};
+    }
+    // Exhaustive match makes a new ClientRegistry require an enum comparison.
+    for registry in ClientRegistry::ALL {
+        match registry {
+            ClientRegistry::Attribute => check!(Attribute, Attribute),
+            ClientRegistry::BlockEntityType => check!(BlockEntityKind, BlockEntityType),
+            ClientRegistry::CommandArgumentType => check!(CommandArgumentKind, CommandArgumentType),
+            ClientRegistry::ConsumeEffectType => check!(ConsumeEffectKind, ConsumeEffectType),
+            ClientRegistry::DataComponentType => check!(DataComponentKind, DataComponentType),
+            ClientRegistry::DebugSubscription => check!(DebugSubscription, DebugSubscription),
+            ClientRegistry::EntityType => check!(EntityKind, EntityType),
+            ClientRegistry::GameEvent => check!(GameEvent, GameEvent),
+            ClientRegistry::Item => check!(ItemKind, Item),
+            ClientRegistry::Menu => check!(MenuKind, Menu),
+            ClientRegistry::NumberFormatType => check!(NumberFormatKind, NumberFormatType),
+            ClientRegistry::ParticleType => check!(ParticleKind, ParticleType),
+            ClientRegistry::PositionSourceType => check!(PositionSourceKind, PositionSourceType),
+            ClientRegistry::RecipeDisplay => check!(RecipeDisplay, RecipeDisplay),
+            ClientRegistry::RecipeSerializer => check!(RecipeSerializer, RecipeSerializer),
+            ClientRegistry::SlotDisplay => check!(SlotDisplay, SlotDisplay),
+            ClientRegistry::SoundEvent => check!(SoundEvent, SoundEvent),
+        }
+    }
+    // azalea names brigadier's own argument types in the minecraft namespace;
+    // vanilla registers them as brigadier:* (ArgumentTypeInfos.bootstrap).
+    let brigadier = ["bool", "float", "double", "integer", "long", "string"];
+    let expected: Vec<_> = brigadier
+        .iter()
+        .map(|t| {
+            (
+                "CommandArgumentKind",
+                t.to_string(),
+                format!("brigadier:{t}"),
+            )
+        })
+        .collect();
+    assert_eq!(mismatches, expected);
 }
 
 /// A 26.1 `add_entity`'s type id comes out as the wrong kind in 26.2's
