@@ -357,6 +357,8 @@ pub struct PackRenderer {
     lightmap: (rhi::backend::TextureHandle, rhi::backend::Sampler),
     shadow_settings: ShadowSettings,
     pub shadow_casters: ShadowCasters,
+    /// Iris's `sky` directive: whether the sky starts with the horizon.
+    pub horizon: bool,
     shadow_targets: Option<ShadowTargets>,
     /// The shadow view's projection times model-view, from the last
     /// [`Self::prepare`].
@@ -579,6 +581,7 @@ impl PackRenderer {
             lightmap: lightmap.texture(),
             shadow_settings: settings.shadow.clone(),
             shadow_casters,
+            horizon: pack.property_bool("sky", true),
             shadow_targets,
             shadow_view_projection: Mat4::IDENTITY,
             previous: None,
