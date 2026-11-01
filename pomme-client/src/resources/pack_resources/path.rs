@@ -6,6 +6,7 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
@@ -258,7 +259,7 @@ fn locate(path: PathBuf) -> io::Result<Option<IoSupplier<ReadStream>>> {
 }
 
 pub(super) fn file_supplier(path: PathBuf) -> IoSupplier<ReadStream> {
-    Rc::new(move || File::open(&path).map(|file| Box::new(file) as ReadStream))
+    Arc::new(move || File::open(&path).map(|file| Box::new(file) as ReadStream))
 }
 
 /// Shared metadata envelope parsing; each pack view owns its successful cache.

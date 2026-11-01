@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 use std::io;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use pomme_protocol::KnownPack;
 use serde_json::Value;
@@ -44,11 +44,11 @@ pub(crate) use vanilla::{VanillaPackResources, VanillaResourcesSupplier};
 pub(crate) const METADATA_EXTENSION: &str = ".mcmeta";
 pub(crate) const PACK_META: &str = "pack.mcmeta";
 
-/// Owned, repeatable, application-thread supplier; invocation may fail.
+/// Owned, repeatable supplier shared across threads; invocation may fail.
 /// Captures must retain any needed storage leases rather than borrow a pack or
 /// manager. Owned streams are memory-safe beyond those objects' lifetimes, but
 /// continued usability after explicit pack closure is a backend policy.
-pub(crate) type IoSupplier<T> = Rc<dyn Fn() -> io::Result<T> + 'static>;
+pub(crate) type IoSupplier<T> = Arc<dyn Fn() -> io::Result<T> + Send + Sync + 'static>;
 
 /// Enumeration transfers identifiers and unopened suppliers to the caller.
 pub(crate) type ResourceOutput<'a> = dyn FnMut(ResourceId, IoSupplier<ReadStream>) + 'a;

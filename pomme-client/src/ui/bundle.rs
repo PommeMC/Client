@@ -195,7 +195,12 @@ impl Sound {
         }
     }
 
-    pub fn play(self, audio: &crate::audio::AudioEngine, pos: crate::entity::components::Position) {
+    pub fn play(
+        self,
+        audio: &crate::audio::AudioEngine,
+        resources: &dyn crate::resources::ResourceManager,
+        pos: crate::entity::components::Position,
+    ) {
         // `playInsertSound` / `playRemoveOneSound`: 0.8 volume, pitch 0.8-1.2.
         let (event, volume, pitch) = match self {
             Self::Insert => ("item.bundle.insert", 0.8, 0.8 + fastrand::f32() * 0.4),
@@ -203,6 +208,7 @@ impl Sound {
             Self::InsertFail => ("item.bundle.insert_fail", 1.0, 1.0),
         };
         audio.play_world_sound(
+            resources,
             &crate::audio::SoundRef::event(event),
             crate::audio::CATEGORY_PLAYERS,
             pos,

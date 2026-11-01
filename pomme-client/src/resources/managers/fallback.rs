@@ -120,7 +120,7 @@ impl<'a> EntryStack<'a> {
                         .map(|entry| {
                             entry
                                 .source
-                                .content(self.metadata_id.clone(), Rc::clone(&entry.supplier))
+                                .content(self.metadata_id.clone(), entry.supplier.clone())
                         });
                     Resource::new(content, constant_metadata(metadata))
                 })

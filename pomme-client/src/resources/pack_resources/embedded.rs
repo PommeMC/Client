@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::io::{self, Cursor};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -166,7 +167,7 @@ impl PackResources for EmbeddedPackResources {
 }
 
 fn static_supplier(bytes: &'static [u8]) -> IoSupplier<ReadStream> {
-    Rc::new(move || Ok(Box::new(Cursor::new(bytes)) as ReadStream))
+    Arc::new(move || Ok(Box::new(Cursor::new(bytes)) as ReadStream))
 }
 
 #[cfg(test)]

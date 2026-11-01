@@ -8,12 +8,14 @@ use crate::app::phases::in_game::GameState;
 use crate::audio::{AudioEngine, CATEGORY_NEUTRAL, SoundRef};
 use crate::entity::SnifferState;
 use crate::position::BlockPos;
+use crate::resources::ResourceManager;
 use crate::world::block::model::Direction;
 use crate::world::block::sound::block_sounds_for_id;
 
 /// `ClientLevel.playLocalSound(Entity, ..)` with the sniffer's sound source.
 fn play_bound(
     audio: &mut AudioEngine,
+    resources: &dyn ResourceManager,
     game: &mut GameState,
     id: i32,
     event: &str,
@@ -22,6 +24,7 @@ fn play_bound(
 ) -> Option<u64> {
     super::core::play_entity_sound(
         audio,
+        resources,
         game,
         id,
         &SoundRef::event(event),
@@ -33,19 +36,36 @@ fn play_bound(
 }
 
 /// `ClientPacketListener.handleEntityEvent` case 63.
-pub(super) fn start_digging_sound(audio: &mut AudioEngine, game: &mut GameState, id: i32) {
+pub(super) fn start_digging_sound(
+    audio: &mut AudioEngine,
+    resources: &dyn ResourceManager,
+    game: &mut GameState,
+    id: i32,
+) {
     if game.entity_store.living.get(&id).map(|e| e.entity_type) != Some(EntityKind::Sniffer) {
         return;
     }
-    if let Some(sound) = play_bound(audio, game, id, "entity.sniffer.digging", 1.0, 1.0)
-        && let Some(e) = game.entity_store.living.get_mut(&id)
+    if let Some(sound) = play_bound(
+        audio,
+        resources,
+        game,
+        id,
+        "entity.sniffer.digging",
+        1.0,
+        1.0,
+    ) && let Some(e) = game.entity_store.living.get_mut(&id)
     {
         e.sniffer_dig_sounds.push(sound);
     }
 }
 
 /// Runs after the entity tick, so ages are the post-increment `tickCount`.
-pub(super) fn tick(audio: &mut AudioEngine, game: &mut GameState, camera_pos: DVec3) {
+pub(super) fn tick(
+    audio: &mut AudioEngine,
+    resources: &dyn ResourceManager,
+    game: &mut GameState,
+    camera_pos: DVec3,
+) {
     let sniffers: Vec<i32> = game
         .entity_store
         .living
@@ -64,9 +84,17 @@ pub(super) fn tick(audio: &mut AudioEngine, game: &mut GameState, camera_pos: DV
             }
         }
         match e.sniffer_state {
-            SnifferState::Digging => emit_digging_particles(audio, game, id, camera_pos),
+            SnifferState::Digging => emit_digging_particles(audio, resources, game, id, camera_pos),
             SnifferState::Searching if e.age_in_ticks.is_multiple_of(20) => {
-                play_bound(audio, game, id, "entity.sniffer.searching", 1.0, 1.0);
+                play_bound(
+                    audio,
+                    resources,
+                    game,
+                    id,
+                    "entity.sniffer.searching",
+                    1.0,
+                    1.0,
+                );
             }
             _ => {}
         }
@@ -76,6 +104,7 @@ pub(super) fn tick(audio: &mut AudioEngine, game: &mut GameState, camera_pos: DV
 /// `Sniffer.emitDiggingParticles`.
 fn emit_digging_particles(
     audio: &mut AudioEngine,
+    resources: &dyn ResourceManager,
     game: &mut GameState,
     id: i32,
     camera_pos: DVec3,
@@ -122,7 +151,7 @@ fn emit_digging_particles(
         let hit =
             &block_sounds_for_id(game.block_registry.block_state_table(), data.id()).hit_event;
         if !hit.is_empty() {
-            play_bound(audio, game, id, hit, 0.5, 0.5);
+            play_bound(audio, resources, game, id, hit, 0.5, 0.5);
         }
     }
 }

@@ -22,9 +22,9 @@
 //! and pin a source or pathname, not immutable bytes; reopening may change or
 //! fail. Sources must retain required storage leases. Streams close on drop.
 //! Reload opens candidates before activation, then invokes a synchronous
-//! rebuild callback (empty until consumer adoption). Suppliers and resource
-//! handles remain on the application thread; they do not provide a transferable
-//! content API.
+//! rebuild callback. Managers, pack views and lazy metadata lookup remain
+//! application-thread-local; selected ResourceContent handles and their owned
+//! readers can move across threads.
 
 #[allow(
     dead_code,

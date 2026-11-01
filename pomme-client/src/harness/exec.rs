@@ -56,6 +56,7 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
                     game,
                     connection,
                     &core.audio,
+                    core.resources(),
                     vec![click.operation()],
                 );
                 Ok(Value::Null)

@@ -1,11 +1,12 @@
 //! ZIP-backed resources following Vanilla's FilePackResources.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use self_cell::{MutBorrow, self_cell};
@@ -178,7 +179,7 @@ impl PackMetadataResources for FilePackResources {
     fn close(&self) -> io::Result<()> {
         let mut state = self.access.state.borrow_mut();
         if let ZipState::Opened(opened) = &*state {
-            opened.closed.set(true);
+            opened.closed.store(true, Ordering::Release);
             *state = ZipState::Unopened;
         }
         Ok(())
@@ -350,12 +351,12 @@ struct SharedZipFileAccess {
 
 enum ZipState {
     Unopened,
-    Opened(Rc<OpenedZip>),
+    Opened(Arc<OpenedZip>),
     Failed(Arc<io::Error>),
 }
 
 impl SharedZipFileAccess {
-    fn get_or_open(&self) -> io::Result<Rc<OpenedZip>> {
+    fn get_or_open(&self) -> io::Result<Arc<OpenedZip>> {
         let mut state = self.state.borrow_mut();
         match &*state {
             ZipState::Opened(opened) => return Ok(opened.clone()),
@@ -366,9 +367,9 @@ impl SharedZipFileAccess {
         }
         match open_archive(&self.path) {
             Ok(archive) => {
-                let opened = Rc::new(OpenedZip {
+                let opened = Arc::new(OpenedZip {
                     archive,
-                    closed: Cell::new(false),
+                    closed: AtomicBool::new(false),
                 });
                 *state = ZipState::Opened(opened.clone());
                 Ok(opened)
@@ -386,20 +387,20 @@ impl SharedZipFileAccess {
 
 struct OpenedZip {
     archive: Archive,
-    closed: Cell<bool>,
+    closed: AtomicBool,
 }
 
 impl OpenedZip {
     fn ensure_open(&self) -> io::Result<()> {
-        if self.closed.get() {
+        if self.closed.load(Ordering::Acquire) {
             return Err(io::Error::other("ZIP pack is closed"));
         }
         Ok(())
     }
 }
 
-fn entry_supplier(opened: Rc<OpenedZip>, index: usize) -> IoSupplier<ReadStream> {
-    Rc::new(move || {
+fn entry_supplier(opened: Arc<OpenedZip>, index: usize) -> IoSupplier<ReadStream> {
+    Arc::new(move || {
         opened.ensure_open()?;
         Ok(Box::new(FilePackStream {
             entry: open_entry(&opened.archive, index)?,
@@ -410,7 +411,7 @@ fn entry_supplier(opened: Rc<OpenedZip>, index: usize) -> IoSupplier<ReadStream>
 
 struct FilePackStream {
     entry: OwnedZipEntry,
-    opened: Rc<OpenedZip>,
+    opened: Arc<OpenedZip>,
 }
 
 impl Read for FilePackStream {

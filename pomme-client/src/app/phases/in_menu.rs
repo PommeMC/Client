@@ -88,7 +88,7 @@ pub fn update_menu(
     panorama.update(dt);
 
     core.audio.start_menu_music();
-    core.audio.update_menu_music(dt);
+    core.update_menu_music(dt);
 
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
@@ -167,7 +167,7 @@ pub fn update_menu(
 
     if result.clicked_button {
         gfx.renderer.trigger_skin_swing();
-        core.audio.play_ui_click();
+        core.audio.play_ui_click(core.resources());
     }
 
     match action {

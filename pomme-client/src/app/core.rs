@@ -32,6 +32,7 @@ use crate::renderer::Renderer;
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::occlusion_graph::Update as VisUpdate;
 use crate::resource_pack::ResourcePackManager;
+use crate::resources::ResourceManager;
 use crate::resources::managers::ReloadableResourceManager;
 use crate::resources::pack_resources::PackType;
 use crate::resources::packs::{
@@ -351,6 +352,7 @@ fn panda_eating_particles(game: &mut GameState, camera_pos: glam::DVec3) {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn play_entity_sound(
     audio: &mut crate::audio::AudioEngine,
+    resources: &dyn ResourceManager,
     game: &mut GameState,
     entity_id: i32,
     sound: &crate::audio::SoundRef,
@@ -366,6 +368,7 @@ pub(super) fn play_entity_sound(
         .then_some(game.player.position)
         .or_else(|| game.entity_positions.get(&entity_id).copied())?;
     audio.play_entity_sound(
+        resources,
         sound,
         category,
         crate::audio::EntitySoundTarget { id: entity_id, pos },
@@ -379,13 +382,18 @@ pub(super) fn play_entity_sound(
 /// pistons' pushes alike, where it stands: vanilla `LocalPlayer.playSound`,
 /// which plays them locally while the server sends them only to other
 /// players.
-pub(crate) fn play_movement_sounds(audio: &crate::audio::AudioEngine, game: &mut GameState) {
+pub(crate) fn play_movement_sounds(
+    audio: &crate::audio::AudioEngine,
+    resources: &dyn ResourceManager,
+    game: &mut GameState,
+) {
     let silent = game.silent_entities.contains(&game.player.entity_id);
     for queued in std::mem::take(&mut game.player.movement_sounds.pending) {
         if queued.unless_silent && silent {
             continue;
         }
         audio.play_world_sound(
+            resources,
             &crate::audio::SoundRef::event(queued.event),
             crate::audio::CATEGORY_PLAYERS,
             game.player.position,
@@ -400,6 +408,7 @@ pub(crate) fn play_movement_sounds(audio: &crate::audio::AudioEngine, game: &mut
 /// particles.
 fn block_break_effect(
     audio: &crate::audio::AudioEngine,
+    resources: &dyn ResourceManager,
     game: &mut GameState,
     pos: crate::position::BlockPos,
     state: azalea_block::BlockState,
@@ -408,6 +417,7 @@ fn block_break_effect(
     if !block_state_data.is_air() {
         crate::player::interaction::play_break_sound_for_id(
             audio,
+            resources,
             game.block_registry.block_state_table(),
             block_state_data.id(),
             pos,
@@ -1112,16 +1122,11 @@ fn cursor_step(grabbed: bool, stale: bool, want: bool, focused: bool) -> (Cursor
 fn load_assets(
     data_dirs: &DataDirs,
     version: &str,
-    resource_packs: &ResourcePackManager,
+    resources: &dyn ResourceManager,
     menu: &MainMenu,
 ) -> (Option<AssetIndex>, crate::audio::AudioEngine) {
     let asset_index = AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, version);
-    let audio = crate::audio::AudioEngine::new(
-        &data_dirs.jar_assets_dir,
-        asset_index.clone(),
-        resource_packs,
-        menu.category_volumes(),
-    );
+    let audio = crate::audio::AudioEngine::new(resources, menu.category_volumes());
     (asset_index, audio)
 }
 
@@ -1198,7 +1203,7 @@ impl AppCore {
 
         let display_mode = menu.display_mode;
 
-        let (asset_index, audio) = load_assets(&data_dirs, &version, &resource_packs, &menu);
+        let (asset_index, audio) = load_assets(&data_dirs, &version, &resources, &menu);
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
         let (head_tx, head_rx) = crossbeam_channel::unbounded();
 
@@ -1304,6 +1309,10 @@ impl AppCore {
         &self.resources
     }
 
+    pub(crate) fn update_menu_music(&mut self, dt: f32) {
+        self.audio.update_menu_music(&self.resources, dt);
+    }
+
     pub(crate) fn reload_resource_theme(&mut self, theme: PanoramaTheme) -> std::io::Result<()> {
         self.set_resource_theme(theme);
         self.reload_resources()
@@ -1316,8 +1325,11 @@ impl AppCore {
         self.resource_repository.reload()?;
         let opened = self.resource_repository.open_all_enabled()?;
         let menu = &mut self.menu;
-        self.resources
-            .reload(opened, |resources| menu.load_splash(resources))
+        let audio = &mut self.audio;
+        self.resources.reload(opened, |resources| {
+            menu.load_splash(resources);
+            audio.reload_assets(resources);
+        })
     }
 
     pub fn build_menu_input(&mut self, dt: f32) -> MenuInput {
@@ -1994,12 +2006,8 @@ impl AppCore {
         self.set_resource_installation(Some(self.data_dirs.installation_location(&self.version)));
         self.set_resource_theme(self.menu.theme());
         self.reload_resources()?;
-        let (asset_index, audio) = load_assets(
-            &self.data_dirs,
-            &self.version,
-            &self.resource_packs,
-            &self.menu,
-        );
+        let (asset_index, audio) =
+            load_assets(&self.data_dirs, &self.version, &self.resources, &self.menu);
         self.asset_index = asset_index;
         self.audio = audio;
         Ok(())
@@ -2008,7 +2016,7 @@ impl AppCore {
     pub(crate) fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
         self.menu.active_packs = self.resource_packs.active_pack_info();
         renderer.reload_assets(&self.resource_packs, self.menu.font_options());
-        self.audio.reload_assets(&self.resource_packs);
+        self.audio.reload_assets(&self.resources);
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects
             .retain(|_, entry| matches!(entry.content, InlineObjectContent::Head { .. }));
@@ -2784,7 +2792,7 @@ impl AppCore {
                             action_parameter,
                         );
                         for (pos, state) in std::mem::take(&mut level.destroyed) {
-                            block_break_effect(&self.audio, game, pos, state);
+                            block_break_effect(&self.audio, &self.resources, game, pos, state);
                         }
                     } else if action_id == 1 {
                         // Chest/shulker: the open-viewer count.
@@ -2799,8 +2807,15 @@ impl AppCore {
                     pitch,
                     seed,
                 } => {
-                    self.audio
-                        .play_world_sound(&sound, category, pos, volume, pitch, seed);
+                    self.audio.play_world_sound(
+                        &self.resources,
+                        &sound,
+                        category,
+                        pos,
+                        volume,
+                        pitch,
+                        seed,
+                    );
                 }
                 NetworkEvent::PlayEntitySound {
                     sound,
@@ -2812,6 +2827,7 @@ impl AppCore {
                 } => {
                     play_entity_sound(
                         &mut self.audio,
+                        &self.resources,
                         game,
                         entity_id,
                         &sound,
@@ -3089,7 +3105,7 @@ impl AppCore {
                     if event_type == 2001
                         && let Some(state) = game.block_registry.block_state_table().try_state(data)
                     {
-                        block_break_effect(&self.audio, game, pos, state);
+                        block_break_effect(&self.audio, &self.resources, game, pos, state);
                     }
                 }
                 NetworkEvent::LevelParticles {
@@ -3216,6 +3232,7 @@ impl AppCore {
                     if id == game.player.entity_id {
                         game.interaction.complete_using(
                             &self.audio,
+                            &self.resources,
                             &mut game.particle_store,
                             game.player.position.into(),
                             game.player.eye_pos().into(),
@@ -3233,7 +3250,7 @@ impl AppCore {
                     game.entity_store.start_rabbit_jump(id);
                 }
                 NetworkEvent::SnifferDigging { id } => {
-                    super::sniffer::start_digging_sound(&mut self.audio, game, id);
+                    super::sniffer::start_digging_sound(&mut self.audio, &self.resources, game, id);
                 }
                 NetworkEvent::FoxEat { id } => {
                     if let Some(fox) = game.entity_store.living.get(&id)
@@ -3251,6 +3268,7 @@ impl AppCore {
                 NetworkEvent::ArmadilloPeek { id } => {
                     if let Some(pos) = game.entity_store.armadillo_peek(id) {
                         self.audio.play_world_sound(
+                            &self.resources,
                             &crate::audio::SoundRef::event("entity.armadillo.peek"),
                             crate::audio::CATEGORY_NEUTRAL,
                             pos,
@@ -3296,6 +3314,7 @@ impl AppCore {
                     if id == game.player.entity_id {
                         let pitch = (fastrand::f32() - fastrand::f32()) * 0.2 + 1.0;
                         self.audio.play_world_sound(
+                            &self.resources,
                             &crate::audio::SoundRef::event("entity.player.death"),
                             crate::audio::CATEGORY_PLAYERS,
                             game.player.position,
@@ -3328,6 +3347,7 @@ impl AppCore {
                     {
                         // Vanilla plays this client-side in handleTakeItemEntity.
                         self.audio.play_world_sound(
+                            &self.resources,
                             &crate::audio::SoundRef::event("entity.item.pickup"),
                             crate::audio::CATEGORY_PLAYERS,
                             item_pos,
@@ -3674,8 +3694,13 @@ impl AppCore {
             self.tick_remote_entities(game);
         }
         game.position_remote_riders();
-        super::sniffer::tick(&mut self.audio, game, renderer.camera_render_position());
-        super::copper_golem::tick(&self.audio, game);
+        super::sniffer::tick(
+            &mut self.audio,
+            &self.resources,
+            game,
+            renderer.camera_render_position(),
+        );
+        super::copper_golem::tick(&self.audio, &self.resources, game);
         panda_eating_particles(game, renderer.camera_render_position());
     }
 
@@ -3775,6 +3800,7 @@ impl AppCore {
                 hand_stacks.each_ref().map(Option::as_ref),
                 &connection.packet_tx,
                 &self.audio,
+                &self.resources,
                 game.player.position.into(),
                 game.player.eye_pos().into(),
                 game.player.look_dir,
@@ -4002,6 +4028,7 @@ impl AppCore {
             &game.chunk_store,
             &connection.packet_tx,
             &self.audio,
+            &self.resources,
             game.player.position.into(),
             player_aabb,
             game.player.eye_pos().into(),
@@ -4021,6 +4048,7 @@ impl AppCore {
             hand_stacks,
             &connection.packet_tx,
             &self.audio,
+            &self.resources,
             game.player.position.into(),
             game.player.eye_pos().into(),
             game.player.look_dir,

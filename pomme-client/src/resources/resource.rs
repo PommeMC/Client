@@ -6,8 +6,8 @@ use std::{fmt, io};
 use super::pack_resources::{IoSupplier, METADATA_EXTENSION};
 use super::packs::PackId;
 
-/// Owned byte stream; dropping it releases its backing state.
-pub(crate) type ReadStream = Box<dyn Read + 'static>;
+/// Owned, transferable byte stream; dropping it releases its backing state.
+pub(crate) type ReadStream = Box<dyn Read + Send + 'static>;
 
 /// Logical pack provenance and diagnostic display metadata, not source
 /// identity. Compare pack_id for identity; names can change and layers can
@@ -187,7 +187,8 @@ pub(crate) enum ResourceError {
 /// Pins a source, not immutable bytes. Setup validation is trusted; each open
 /// performs ordinary candidate I/O, without revalidating source roots or
 /// policy.
-/// PackResources suppliers and their handles are application-thread-local.
+/// Content handles and their streams can move across threads; pack views,
+/// managers and lazy metadata lookup remain application-thread-local.
 #[derive(Clone)]
 pub(crate) struct ResourceContent {
     id: ResourceId,
