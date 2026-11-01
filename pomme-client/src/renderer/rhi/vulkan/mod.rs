@@ -470,6 +470,9 @@ fn buffer_usage_flags(usage: BufferUsages) -> vk::BufferUsageFlags {
 pub struct Texture {
     raw: vk::Image,
     view: vk::ImageView,
+    /// A view per level when there are several, for attaching or sampling
+    /// one level alone ([`Self::mip_handle`]).
+    mip_views: Vec<vk::ImageView>,
     allocation: Allocation,
 }
 
@@ -520,9 +523,10 @@ impl Texture {
                 return Err(error);
             }
         };
-        let texture = Self {
+        let mut texture = Self {
             raw,
             view: vk::ImageView::null(),
+            mip_views: Vec::new(),
             allocation,
         };
         if let Err(error) = unsafe {
@@ -535,26 +539,45 @@ impl Texture {
             texture.destroy(device);
             return Err(format!("failed to bind image memory for {label}: {error}"));
         }
-        let view_info = vk::ImageViewCreateInfo {
-            image: raw,
-            view_type: match desc.dimension {
-                TextureViewDimension::D2 => vk::ImageViewType::Type2D,
-                TextureViewDimension::D2Array => vk::ImageViewType::Type2DArray,
-                TextureViewDimension::Cube => vk::ImageViewType::Cube,
-            },
-            format,
-            subresource_range: vk::ImageSubresourceRange {
-                level_count: desc.mip_levels,
-                layer_count: desc.layers,
-                ..subresource_range(desc.format)
-            },
-            ..Default::default()
+        let view = |first_mip, mips| {
+            let info = vk::ImageViewCreateInfo {
+                image: raw,
+                view_type: match desc.dimension {
+                    TextureViewDimension::D2 => vk::ImageViewType::Type2D,
+                    TextureViewDimension::D2Array => vk::ImageViewType::Type2DArray,
+                    TextureViewDimension::Cube => vk::ImageViewType::Cube,
+                },
+                format,
+                subresource_range: vk::ImageSubresourceRange {
+                    base_mip_level: first_mip,
+                    level_count: mips,
+                    layer_count: desc.layers,
+                    ..subresource_range(desc.format)
+                },
+                ..Default::default()
+            };
+            device
+                .raw
+                .create_image_view(&info, None)
+                .map_err(|error| format!("failed to create image view for {label}: {error}"))
         };
-        match device.raw.create_image_view(&view_info, None) {
-            Ok(view) => Ok(Self { view, ..texture }),
+        let views = view(0, desc.mip_levels).and_then(|whole| {
+            texture.view = whole;
+            let levels = if desc.mip_levels > 1 {
+                0..desc.mip_levels
+            } else {
+                0..0
+            };
+            levels.map(|level| view(level, 1)).collect()
+        });
+        match views {
+            Ok(mip_views) => {
+                texture.mip_views = mip_views;
+                Ok(texture)
+            }
             Err(error) => {
                 texture.destroy(device);
-                Err(format!("failed to create image view for {label}: {error}"))
+                Err(error)
             }
         }
     }
@@ -566,10 +589,24 @@ impl Texture {
         }
     }
 
+    /// One level of a texture made with several.
+    pub fn mip_handle(&self, level: u32) -> TextureHandle {
+        TextureHandle {
+            image: self.raw,
+            view: self.mip_views[level as usize],
+        }
+    }
+
     /// Frees the texture and any cached framebuffers holding it.
     pub fn destroy(self, device: &Device) {
-        device.targets.forget(device, &[self.handle()]);
-        device.raw.destroy_image_view(self.view, None);
+        let handles: Vec<TextureHandle> = (0..self.mip_views.len() as u32)
+            .map(|level| self.mip_handle(level))
+            .chain([self.handle()])
+            .collect();
+        device.targets.forget(device, &handles);
+        for view in self.mip_views.iter().chain([&self.view]) {
+            device.raw.destroy_image_view(*view, None);
+        }
         device.raw.destroy_image(self.raw, None);
         device.allocator().free(self.allocation).ok();
     }
@@ -1072,7 +1109,7 @@ impl TextureUse {
             Self::Undefined => vk::ImageLayout::Undefined,
             Self::CopySrc | Self::DepthCopySrc => vk::ImageLayout::TransferSrcOptimal,
             Self::CopyDst | Self::DepthCopyDst => vk::ImageLayout::TransferDstOptimal,
-            Self::ShaderRead => vk::ImageLayout::ShaderReadOnlyOptimal,
+            Self::ShaderRead | Self::ComputeRead => vk::ImageLayout::ShaderReadOnlyOptimal,
             Self::ColorAttachment => vk::ImageLayout::ColorAttachmentOptimal,
             Self::Present => vk::ImageLayout::PresentSrcKHR,
             Self::DepthAttachment => vk::ImageLayout::DepthStencilAttachmentOptimal,
@@ -1115,6 +1152,10 @@ impl TextureUse {
             Self::ShaderRead | Self::DepthRead => (
                 vk::AccessFlags::ShaderRead,
                 vk::PipelineStageFlags::VertexShader | vk::PipelineStageFlags::FragmentShader,
+            ),
+            Self::ComputeRead => (
+                vk::AccessFlags::ShaderRead,
+                vk::PipelineStageFlags::ComputeShader,
             ),
             Self::DepthAttachment => (
                 vk::AccessFlags::DepthStencilAttachmentRead

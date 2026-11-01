@@ -8,6 +8,7 @@
 #define SCENE_BINDING 0
 #define SECTION_METADATA_BINDING 1
 #define VISIBILITY_BINDING 2
+#define VISIBILITY_ACCESS readonly
 #define RENDER_LIST_BINDING 3
 #include "distant_section.glsl"
 

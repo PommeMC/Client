@@ -10,6 +10,7 @@ pub(crate) mod build;
 pub(crate) mod colors;
 pub(crate) mod gpu;
 pub(crate) mod models;
+pub(crate) mod nodes;
 pub(crate) mod scan;
 pub(crate) mod section;
 pub(crate) mod voxel;

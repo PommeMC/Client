@@ -43,7 +43,6 @@ impl SectionKey {
             | (self.x as u64 & 0xFF_FFFF) << 4
     }
 
-    #[cfg(test)]
     pub fn unpack(id: u64) -> Self {
         Self {
             level: (id >> 60) as u8,

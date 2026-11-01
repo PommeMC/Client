@@ -120,6 +120,17 @@ pub struct BufferCopy {
     pub size: u64,
 }
 
+impl BufferCopy {
+    /// The first `size` bytes of one buffer over the other's.
+    pub const fn from_start(size: u64) -> Self {
+        Self {
+            src_offset: 0,
+            dst_offset: 0,
+            size,
+        }
+    }
+}
+
 /// One layer of one mip level of a texture, whole, and where its texels sit
 /// tightly packed in a buffer: the buffer-texture copies Pomme makes.
 #[derive(Clone, Copy)]
@@ -152,7 +163,10 @@ pub enum TextureUse {
     Undefined,
     CopySrc,
     CopyDst,
+    /// Sampled by a vertex or fragment shader.
     ShaderRead,
+    /// Sampled by a compute shader.
+    ComputeRead,
     ColorAttachment,
     Present,
     /// A depth texture as a pass's depth target.

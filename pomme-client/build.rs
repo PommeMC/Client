@@ -112,6 +112,8 @@ fn main() {
         ("distant_cmdgen.comp", shaderc::ShaderKind::Compute),
         ("distant_prefix_sum.comp", shaderc::ShaderKind::Compute),
         ("distant_translucents.comp", shaderc::ShaderKind::Compute),
+        ("distant_traversal.comp", shaderc::ShaderKind::Compute),
+        ("distant_hiz.frag", shaderc::ShaderKind::Fragment),
         ("cube.vert", shaderc::ShaderKind::Vertex),
         ("cube.frag", shaderc::ShaderKind::Fragment),
         ("panorama.vert", shaderc::ShaderKind::Vertex),

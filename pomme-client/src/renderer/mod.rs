@@ -1854,7 +1854,7 @@ impl Renderer {
         // Fence signalled: reclaim chunk slices the GPU is now provably done with,
         // and read back any screenshot copy recorded for this frame index.
         self.chunk_buffers.begin_frame(&self.ctx.device);
-        self.distant_buffers.begin_frame(&self.ctx.device);
+        self.distant_buffers.begin_frame(&self.ctx.device, frame);
         self.screenshot.collect_ready(frame, &self.ctx.device);
 
         let t_acquire = std::time::Instant::now();
@@ -2162,11 +2162,7 @@ impl Renderer {
                         // image, then laid into the frame.
                         let eye = self.camera_render_position();
                         let extent = self.swapchain.extent;
-                        self.distant_buffers.traverse(
-                            &self.camera,
-                            eye,
-                            [extent.width, extent.height],
-                        );
+                        self.distant_buffers.update_roots(eye);
                         pass.end();
                         self.distant_pipeline.render(
                             &self.ctx.device,

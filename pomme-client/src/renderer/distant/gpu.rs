@@ -1,15 +1,14 @@
 //! Distant terrain on the GPU (Voxy's `BasicSectionGeometryManager`,
-//! `MDICSectionRenderer` and the node graph `NodeManager` keeps): built
-//! sections' quads in one arena with a metadata record each, the models
-//! they index, the tree walked each frame to pick which to draw
-//! (`traversal_dev.comp`, on the CPU until the GPU traversal lands), and the
-//! draw list the GPU builds from that pick.
+//! `MDICSectionRenderer`, `HierarchicalOcclusionTraverser` and the buffers
+//! `NodeManager` keeps): built sections' quads in one arena with a metadata
+//! record each, the models they index, the node tree the GPU walks each
+//! frame to pick which to draw, the requests it sends back, and the draw
+//! list the GPU builds from that pick.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-use glam::{DVec3, Mat4, Vec3, Vec4Swizzles};
+use glam::DVec3;
 
 use super::build::BuiltSection;
 use super::colors::TINT_KINDS;
@@ -17,10 +16,10 @@ use super::models::{
     ATLAS_COLUMNS, ATLAS_ROWS, BlockModel, CAPACITY, MODEL_MIP_LEVELS, ModelTile, TILE_HEIGHT,
     TILE_WIDTH,
 };
+use super::nodes::{NODE_BYTES, NODE_SCATTER_BIT, NodeGraph};
 use super::section::{LEVELS, SIDE, SectionKey};
 use super::worker::DistantUpdate;
 use crate::position::ChunkPos;
-use crate::renderer::camera::Camera;
 use crate::renderer::chunk::buffer::DrawCommand;
 use crate::renderer::chunk::tlsf::Tlsf;
 use crate::renderer::rhi::IndirectDrawFeatures;
@@ -33,8 +32,9 @@ const MIN_ARENA_BYTES: u64 = 64 << 20;
 const QUADS_PER_DRAW: u32 = 1 << 16;
 /// Sections the metadata buffer holds (Voxy's `maxSectionCount`).
 const MAX_SECTIONS: u32 = 1 << 20;
-/// Sections a frame's render list may hold (Voxy's `MAX_QUEUE_SIZE`).
-const MAX_LISTED: usize = 200_000;
+/// Sections a frame's render list, and nodes a traversal iteration, may
+/// hold (Voxy's `MAX_QUEUE_SIZE`).
+pub(crate) const MAX_LISTED: u32 = 200_000;
 /// The draw list's regions, in draws (`MDICSectionRenderer`).
 const OPAQUE_DRAWS: u32 = 400_000;
 const TRANSLUCENT_DRAWS: u32 = 100_000;
@@ -45,8 +45,8 @@ const TEMPORAL_OFFSET: u32 = OPAQUE_DRAWS + TRANSLUCENT_DRAWS;
 pub(crate) const TRANSLUCENT_BUCKETS: u32 = 1024;
 /// Quads a frame's staging holds for the arena.
 const STAGING_BYTES: u64 = 16 << 20;
-/// Section records a frame's scatter list holds (`distant_scatter.comp`:
-/// chunks of four indices and four records).
+/// Records a frame's scatter list holds (`distant_scatter.comp`: chunks of
+/// four indices and four records).
 const SCATTER_RECORDS: usize = 16384;
 const SCATTER_BYTES: u64 = (SCATTER_RECORDS / 4 * 80) as u64;
 const MODELS_BYTES: u64 = (CAPACITY * size_of::<BlockModel>()) as u64;
@@ -65,13 +65,13 @@ const TILE_BYTES: usize = {
 const TILES_PER_FRAME: usize = 256;
 /// Biome tints per kind in the colour buffer ([`super::colors`]).
 pub(crate) const TINT_BIOMES: usize = 512;
-/// Voxy's `subDivisionSize`: a node is split while it covers more than this
-/// many pixels squared.
-const SUBDIVISION_SIZE: f32 = 64.0;
-/// Meshes asked of the worker at once (Voxy's `TARGET_COUNT`).
-const MAX_REQUESTS: usize = 4000;
-/// How long a request waits before it's asked again.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// Voxy's `TARGET_COUNT`: the requests in flight at which the traversal
+/// stops asking for more.
+const TARGET_REQUESTS: f64 = 4000.0;
+/// Requests a traversal may make a frame (`MAX_REQUEST_QUEUE_SIZE`).
+pub(crate) const MAX_REQUESTS: u32 = 50;
+/// Top-level nodes the ring may hold.
+const MAX_ROOTS: usize = 1 << 14;
 /// Voxy's far plane: 3000 chunks.
 pub(crate) const DISTANT_FAR: f32 = 3000.0 * 16.0;
 /// Drawn chunk sections the bound store starts with room for.
@@ -85,15 +85,21 @@ const CUBE: [u32; 36] = [
 ];
 pub(crate) const CUBE_FIRST_INDEX: u32 = QUADS_PER_DRAW * 6;
 
-/// Byte sizes of the buffers the command generation passes bind.
+/// Byte sizes of the buffers the GPU passes bind.
 pub(crate) const SECTIONS_BYTES: u64 = MAX_SECTIONS as u64 * 32;
-pub(crate) const RENDER_LIST_BYTES: u64 = ((1 + MAX_LISTED) * size_of::<u32>()) as u64;
+pub(crate) const RENDER_LIST_BYTES: u64 = (1 + MAX_LISTED as u64) * 4;
 pub(crate) const COUNTS_BYTES: u64 = 64;
 pub(crate) const DRAWS_BYTES: u64 =
     (OPAQUE_DRAWS + TRANSLUCENT_DRAWS + TEMPORAL_DRAWS) as u64 * size_of::<DrawCommand>() as u64;
-pub(crate) const POSITIONS_BYTES: u64 = (MAX_LISTED * 8) as u64;
+pub(crate) const POSITIONS_BYTES: u64 = MAX_LISTED as u64 * 8;
 pub(crate) const VISIBILITY_BYTES: u64 = MAX_SECTIONS as u64 * 4;
 pub(crate) const TRANSLUCENT_BYTES: u64 = (TRANSLUCENT_BUCKETS + TRANSLUCENT_DRAWS) as u64 * 4;
+/// The request queue: a `uvec2` count, then the keys.
+pub(crate) const REQUESTS_BYTES: u64 = 8 + MAX_REQUESTS as u64 * 8;
+/// Per traversal iteration, a `uvec4`: its dispatch size and node count.
+pub(crate) const QUEUE_META_BYTES: u64 = LEVELS as u64 * 16;
+pub(crate) const SCRATCH_BYTES: u64 = MAX_LISTED as u64 * 4;
+pub(crate) const TOP_IDS_BYTES: u64 = MAX_ROOTS as u64 * 4;
 /// Byte offsets within the draw-count buffer (`distant_section.glsl`).
 pub(crate) const COUNTS_OPAQUE: u64 = 12;
 pub(crate) const COUNTS_TRANSLUCENT: u64 = 16;
@@ -107,16 +113,11 @@ struct Uploaded {
     id: u32,
     /// Its first quad.
     ptr: u32,
-    quads: u32,
-    child_existence: u8,
-    /// The last frame drawn, for evicting the least recent.
-    last_drawn: u64,
 }
 
 /// A section placed in the arena, waiting for a frame's staging to carry
 /// its quads and record up.
 struct Pending {
-    key: SectionKey,
     uploaded: Uploaded,
     quads: Vec<u64>,
     record: [[u32; 4]; 2],
@@ -143,7 +144,7 @@ pub(crate) struct View {
     pub radius: f64,
 }
 
-/// The buffers the command generation passes read and write.
+/// The buffers the GPU passes read and write.
 #[derive(Clone, Copy)]
 pub(crate) struct DrawBuffers<'a> {
     pub sections: &'a rhi::backend::Buffer,
@@ -152,6 +153,11 @@ pub(crate) struct DrawBuffers<'a> {
     pub positions: &'a rhi::backend::Buffer,
     pub visibility: &'a rhi::backend::Buffer,
     pub translucent: &'a rhi::backend::Buffer,
+    pub render_list: &'a rhi::backend::Buffer,
+    pub nodes: &'a rhi::backend::Buffer,
+    pub requests: &'a rhi::backend::Buffer,
+    pub queue_meta: &'a rhi::backend::Buffer,
+    pub scratch: [&'a rhi::backend::Buffer; 2],
 }
 
 pub(crate) struct DistantBuffers {
@@ -162,38 +168,39 @@ pub(crate) struct DistantBuffers {
     arena: rhi::backend::Buffer,
     quads: Tlsf,
     /// Every section's record, by id.
-    sections_buffer: rhi::backend::Buffer,
+    sections: rhi::backend::Buffer,
     ids: Tlsf,
+    /// Every uploaded section, by id.
+    meshes: HashMap<u32, Uploaded>,
     index_buffer: rhi::backend::Buffer,
-    /// Every section the renderer knows, empty ones too (`EMPTY_MESH`).
-    sections: HashMap<SectionKey, Uploaded>,
     pending: VecDeque<Pending>,
-    /// Per frame in flight: the arena's staging, the scatter list, and the
-    /// render list the traversal writes.
+    graph: NodeGraph,
+    /// Per frame in flight: the arena's staging, the scatter list, the
+    /// top-level node ids, the queue metadata's staging and the request
+    /// queue's readback.
     quad_staging: Vec<rhi::backend::Buffer>,
     scatter_staging: Vec<rhi::backend::Buffer>,
     scatter: util::ComputePass,
-    render_lists: Vec<rhi::backend::Buffer>,
-    /// The draw-count buffer, draw list, draw positions, section visibility
-    /// and translucent buckets the GPU passes keep between frames.
+    top_ids: Vec<rhi::backend::Buffer>,
+    queue_meta_staging: Vec<rhi::backend::Buffer>,
+    request_readbacks: Vec<rhi::backend::Buffer>,
+    /// The buffers the GPU passes keep between frames: the node tree, the
+    /// traversal's request queue, queue metadata and scratch queues, the
+    /// render list, the draw-count buffer, draw list, draw positions,
+    /// section visibility and translucent buckets.
+    nodes: rhi::backend::Buffer,
+    requests: rhi::backend::Buffer,
+    queue_meta: rhi::backend::Buffer,
+    scratch: [rhi::backend::Buffer; 2],
+    render_list: rhi::backend::Buffer,
     counts: rhi::backend::Buffer,
     draws: rhi::backend::Buffer,
     positions: rhi::backend::Buffer,
     visibility: rhi::backend::Buffer,
     translucent: rhi::backend::Buffer,
     indirect: IndirectDrawFeatures,
-    /// Sections asked of the worker, and when.
-    requested: HashMap<SectionKey, Instant>,
-    /// Requests since the last [`Self::take_requests`].
-    requests: Vec<SectionKey>,
-    /// Sections dropped since the last [`Self::take_requests`], for the
-    /// worker to stop keeping up to date.
-    dropped: Vec<SectionKey>,
-    /// The sections to draw this frame, from the last traversal.
-    visible: Vec<(SectionKey, Uploaded)>,
-    /// The ring of top-level sections the last traversal walked: its
-    /// centre, radius and height range, so sections outside it are swept
-    /// only when it moves.
+    /// The ring of top-level sections: its centre, radius and height
+    /// range, so the roots change only when it moves.
     ring: Option<(i32, i32, i32, i32, i32)>,
     view: Option<View>,
     bounds: BoundStore,
@@ -223,11 +230,10 @@ const LAYOUT: &[rhi::BindGroupLayoutEntry] = &[
     rhi::BindGroupLayoutEntry::sampler(rhi::ShaderStages::FRAGMENT),
 ];
 
-/// `distant_scatter.comp`'s set: the frame's list and the records.
-const SCATTER_LAYOUT: &[rhi::BindGroupLayoutEntry] = &[
-    rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
-    rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
-];
+/// `distant_scatter.comp`'s set: the frame's list, the records and the
+/// nodes.
+const SCATTER_LAYOUT: &[rhi::BindGroupLayoutEntry] =
+    &[rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE); 3];
 
 impl DistantBuffers {
     pub fn new(device: &rhi::backend::Device, indirect: IndirectDrawFeatures) -> Self {
@@ -267,42 +273,41 @@ impl DistantBuffers {
                 rhi::MemoryLocation::Device,
             )
         };
+        let storage = rhi::BufferUsages::STORAGE;
         let arena_bytes = MAX_ARENA_BYTES
             .min(device.device_local_bytes / 8)
             .max(MIN_ARENA_BYTES)
             / 8
             * 8;
-        let arena = device_buffer("distant_quads", arena_bytes, rhi::BufferUsages::STORAGE);
-        let sections_buffer = device_buffer(
-            "distant_sections",
-            SECTIONS_BYTES,
-            rhi::BufferUsages::STORAGE,
+        let arena = device_buffer("distant_quads", arena_bytes, storage);
+        let sections = device_buffer("distant_sections", SECTIONS_BYTES, storage);
+        let nodes = device_buffer("distant_nodes", NODE_BYTES, storage);
+        let requests = device_buffer(
+            "distant_requests",
+            REQUESTS_BYTES,
+            storage | rhi::BufferUsages::COPY_SRC,
         );
+        let queue_meta = device_buffer(
+            "distant_queue_meta",
+            QUEUE_META_BYTES,
+            storage | rhi::BufferUsages::INDIRECT,
+        );
+        let scratch = ["distant_queue_a", "distant_queue_b"]
+            .map(|name| device_buffer(name, SCRATCH_BYTES, storage));
+        let render_list = device_buffer("distant_render_list", RENDER_LIST_BYTES, storage);
         let counts = device_buffer(
             "distant_draw_counts",
             COUNTS_BYTES,
-            rhi::BufferUsages::STORAGE | rhi::BufferUsages::INDIRECT,
+            storage | rhi::BufferUsages::INDIRECT,
         );
         let draws = device_buffer(
             "distant_draws",
             DRAWS_BYTES,
-            rhi::BufferUsages::STORAGE | rhi::BufferUsages::INDIRECT,
+            storage | rhi::BufferUsages::INDIRECT,
         );
-        let positions = device_buffer(
-            "distant_draw_positions",
-            POSITIONS_BYTES,
-            rhi::BufferUsages::STORAGE,
-        );
-        let visibility = device_buffer(
-            "distant_visibility",
-            VISIBILITY_BYTES,
-            rhi::BufferUsages::STORAGE,
-        );
-        let translucent = device_buffer(
-            "distant_translucent_draws",
-            TRANSLUCENT_BYTES,
-            rhi::BufferUsages::STORAGE,
-        );
+        let positions = device_buffer("distant_draw_positions", POSITIONS_BYTES, storage);
+        let visibility = device_buffer("distant_visibility", VISIBILITY_BYTES, storage);
+        let translucent = device_buffer("distant_translucent_draws", TRANSLUCENT_BYTES, storage);
         let models = host_storage("distant_block_models", MODELS_BYTES);
         let tints = host_storage("distant_biome_tints", TINTS_BYTES);
         device.submit(|encoder| {
@@ -317,9 +322,11 @@ impl DistantBuffers {
                 rhi::TextureUse::CopyDst,
                 rhi::TextureUse::ShaderRead,
             )]);
-            // Nothing seen, nothing to draw, before the first frame.
+            // No nodes, nothing seen, nothing to draw before the first frame.
+            encoder.fill_buffer(nodes.handle(), 0, NODE_BYTES, u32::MAX);
             encoder.fill_buffer(visibility.handle(), 0, VISIBILITY_BYTES, 0);
             encoder.fill_buffer(counts.handle(), 0, COUNTS_BYTES, 0);
+            encoder.fill_buffer(render_list.handle(), 0, 4, 0);
         });
         // Voxy's `ModelStore` sampler.
         let model_sampler = rhi::backend::create_sampler(
@@ -334,28 +341,16 @@ impl DistantBuffers {
         let group = device.create_bind_group(
             layout,
             &[
-                (
-                    0,
-                    rhi::backend::BindingResource::storage(&arena, arena_bytes),
-                ),
-                (
-                    1,
-                    rhi::backend::BindingResource::storage(&models, MODELS_BYTES),
-                ),
-                (
-                    2,
-                    rhi::backend::BindingResource::storage(&tints, TINTS_BYTES),
-                ),
+                util::storage_binding(0, &arena, arena_bytes),
+                util::storage_binding(1, &models, MODELS_BYTES),
+                util::storage_binding(2, &tints, TINTS_BYTES),
                 (3, rhi::backend::BindingResource::Texture(atlas)),
                 (4, rhi::backend::BindingResource::Sampler(model_sampler)),
             ],
         );
-        let scatter_staging = util::create_per_frame_host_buffers(
-            device,
-            SCATTER_BYTES,
-            rhi::BufferUsages::STORAGE,
-            "distant_scatter",
-        );
+        let per_frame =
+            |bytes, usage, name| util::create_per_frame_host_buffers(device, bytes, usage, name);
+        let scatter_staging = per_frame(SCATTER_BYTES, storage, "distant_scatter");
         // The record count, as its push constant.
         let scatter = util::ComputePass::new(
             device,
@@ -369,17 +364,9 @@ impl DistantBuffers {
             MAX_FRAMES_IN_FLIGHT,
             |frame| {
                 vec![
-                    (
-                        0,
-                        rhi::backend::BindingResource::storage(
-                            &scatter_staging[frame],
-                            SCATTER_BYTES,
-                        ),
-                    ),
-                    (
-                        1,
-                        rhi::backend::BindingResource::storage(&sections_buffer, SECTIONS_BYTES),
-                    ),
+                    util::storage_binding(0, &scatter_staging[frame], SCATTER_BYTES),
+                    util::storage_binding(1, &sections, SECTIONS_BYTES),
+                    util::storage_binding(2, &nodes, NODE_BYTES),
                 ]
             },
         );
@@ -388,40 +375,52 @@ impl DistantBuffers {
             group,
             quads: Tlsf::new((arena_bytes / 8) as u32),
             arena,
-            sections_buffer,
+            sections,
             ids: Tlsf::new(MAX_SECTIONS),
+            meshes: HashMap::new(),
             index_buffer: rhi::backend::Buffer::with_data(
                 device,
                 "distant_quad_indices",
                 bytemuck::cast_slice(&indices),
                 rhi::BufferUsages::INDEX,
             ),
-            sections: HashMap::new(),
             pending: VecDeque::new(),
-            quad_staging: util::create_per_frame_host_buffers(
-                device,
+            graph: NodeGraph::new(),
+            quad_staging: per_frame(
                 STAGING_BYTES,
                 rhi::BufferUsages::COPY_SRC,
                 "distant_quad_staging",
             ),
             scatter_staging,
             scatter,
-            render_lists: util::create_per_frame_host_buffers(
-                device,
-                RENDER_LIST_BYTES,
-                rhi::BufferUsages::STORAGE,
-                "distant_render_list",
+            top_ids: per_frame(TOP_IDS_BYTES, storage, "distant_top_nodes"),
+            queue_meta_staging: per_frame(
+                QUEUE_META_BYTES,
+                rhi::BufferUsages::COPY_SRC,
+                "distant_queue_meta_staging",
             ),
+            request_readbacks: (0..MAX_FRAMES_IN_FLIGHT)
+                .map(|_| {
+                    rhi::backend::Buffer::new(
+                        device,
+                        "distant_request_readback",
+                        REQUESTS_BYTES,
+                        rhi::BufferUsages::COPY_DST,
+                        rhi::MemoryLocation::Readback,
+                    )
+                })
+                .collect(),
+            nodes,
+            requests,
+            queue_meta,
+            scratch,
+            render_list,
             counts,
             draws,
             positions,
             visibility,
             translucent,
             indirect,
-            requested: HashMap::new(),
-            requests: Vec::new(),
-            dropped: Vec::new(),
-            visible: Vec::new(),
             ring: None,
             view: None,
             bounds: BoundStore::new(device),
@@ -432,8 +431,7 @@ impl DistantBuffers {
             models,
             tints,
             pending_tiles: VecDeque::new(),
-            tile_staging: util::create_per_frame_host_buffers(
-                device,
+            tile_staging: per_frame(
                 (TILE_BYTES * TILES_PER_FRAME) as u64,
                 rhi::BufferUsages::COPY_SRC,
                 "distant_model_staging",
@@ -452,17 +450,27 @@ impl DistantBuffers {
 
     pub fn draw_buffers(&self) -> DrawBuffers<'_> {
         DrawBuffers {
-            sections: &self.sections_buffer,
+            sections: &self.sections,
             counts: &self.counts,
             draws: &self.draws,
             positions: &self.positions,
             visibility: &self.visibility,
             translucent: &self.translucent,
+            render_list: &self.render_list,
+            nodes: &self.nodes,
+            requests: &self.requests,
+            queue_meta: &self.queue_meta,
+            scratch: self.scratch.each_ref(),
         }
     }
 
-    pub fn render_list(&self, frame: usize) -> &rhi::backend::Buffer {
-        &self.render_lists[frame]
+    /// The top-level nodes' ids, the traversal's first iteration's source.
+    pub fn top_ids(&self, frame: usize) -> &rhi::backend::Buffer {
+        &self.top_ids[frame]
+    }
+
+    pub fn top_count(&self) -> u32 {
+        self.graph.top_ids().len() as u32
     }
 
     /// The quads' indices, then the cube's from [`CUBE_FIRST_INDEX`].
@@ -473,6 +481,20 @@ impl DistantBuffers {
     /// The frame's id as the GPU passes see it.
     pub fn frame_id(&self) -> u32 {
         self.frame_seq as u32 & 0x7FFF_FFFF
+    }
+
+    /// The render distance squared, in blocks.
+    pub fn render_distance_sq(&self) -> f32 {
+        self.view
+            .as_ref()
+            .map_or(0.0, |view| (view.radius * view.radius) as f32)
+    }
+
+    /// Requests the traversal may make this frame: fewer the more wait on
+    /// the worker (`HierarchicalOcclusionTraverser.uploadUniform`).
+    pub fn request_limit(&self) -> u32 {
+        let room = ((TARGET_REQUESTS - self.graph.in_flight() as f64) / TARGET_REQUESTS).max(0.0);
+        ((room * room * f64::from(MAX_REQUESTS)).ceil() as u32).min(MAX_REQUESTS)
     }
 
     /// Writes the waiting model tiles into the atlas, as many as fit this
@@ -519,10 +541,11 @@ impl DistantBuffers {
         )]);
     }
 
-    /// Carries the pending sections up: their quads into the arena through
+    /// Carries the pending sections up, their quads into the arena through
     /// `frame`'s staging and their records through its scatter list
-    /// (`BasicSectionGeometryManager.tick`); as many as fit, the rest next
-    /// frame. A section is known to the traversal from here on.
+    /// (`BasicSectionGeometryManager.tick`), as many as fit, the rest next
+    /// frame; then the changed nodes through the same list
+    /// (`NodeManager.writeChanges`).
     pub fn record_uploads(&mut self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
         let mut copies = Vec::new();
         let mut records: Vec<(u32, [u32; 4])> = Vec::new();
@@ -533,26 +556,21 @@ impl DistantBuffers {
                 break;
             }
             let Pending {
-                key,
                 uploaded,
                 quads,
                 record,
             } = self.pending.pop_front().expect("peeked");
-            if bytes > 0 {
-                self.quad_staging[frame].write_at(used, bytemuck::cast_slice(&quads));
-                copies.push(rhi::BufferCopy {
-                    src_offset: used as u64,
-                    dst_offset: u64::from(uploaded.ptr) * 8,
-                    size: bytes as u64,
-                });
-                used += bytes;
-            }
+            self.quad_staging[frame].write_at(used, bytemuck::cast_slice(&quads));
+            copies.push(rhi::BufferCopy {
+                src_offset: used as u64,
+                dst_offset: u64::from(uploaded.ptr) * 8,
+                size: bytes as u64,
+            });
+            used += bytes;
             for (i, half) in (0..).zip(record) {
                 records.push((uploaded.id * 2 + i, half));
             }
-            self.requested.remove(&key);
-            self.retire(key);
-            self.sections.insert(key, uploaded);
+            self.meshes.insert(uploaded.id, uploaded);
         }
         if !copies.is_empty() {
             encoder.copy_buffer(
@@ -562,6 +580,12 @@ impl DistantBuffers {
             );
             encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::ShaderRead);
         }
+        records.extend(
+            self.graph
+                .take_dirty()
+                .into_iter()
+                .map(|(id, record)| (id | NODE_SCATTER_BIT, record)),
+        );
         if records.is_empty() {
             return;
         }
@@ -590,28 +614,48 @@ impl DistantBuffers {
         encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::ShaderRead);
     }
 
-    /// Writes this frame's render list: the visible sections' ids.
-    pub fn write_render_list(&mut self, frame: usize) {
-        let mut list: Vec<u32> = Vec::with_capacity(self.visible.len() + 1);
-        list.push(0);
-        list.extend(
-            self.visible
-                .iter()
-                .filter(|(_, section)| section.quads > 0)
-                .map(|(_, section)| section.id)
-                .take(MAX_LISTED),
+    /// Before the traversal: this frame's top-level ids and queue metadata
+    /// (the first iteration over the roots, the rest empty), the render
+    /// list and request queue emptied.
+    pub fn record_traversal_setup(&mut self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
+        let top = self.graph.top_ids();
+        self.top_ids[frame].write_at(0, bytemuck::cast_slice(top));
+        let mut meta = [[0u32, 1, 1, 0]; LEVELS as usize];
+        meta[0] = [(top.len() as u32).div_ceil(32), 1, 1, top.len() as u32];
+        self.queue_meta_staging[frame].write_at(0, bytemuck::cast_slice(&meta));
+        encoder.transition_buffers(rhi::BufferUse::Indirect, rhi::BufferUse::CopyDst);
+        encoder.transition_buffers(rhi::BufferUse::Storage, rhi::BufferUse::CopyDst);
+        encoder.copy_buffer(
+            self.queue_meta_staging[frame].handle(),
+            self.queue_meta.handle(),
+            &[rhi::BufferCopy::from_start(QUEUE_META_BYTES)],
         );
-        list[0] = list.len() as u32 - 1;
-        self.render_lists[frame].write_at(0, bytemuck::cast_slice(&list));
+        encoder.fill_buffer(self.render_list.handle(), 0, 4, 0);
+        encoder.fill_buffer(self.requests.handle(), 0, 8, 0);
+        encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::Storage);
+        encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::Indirect);
+    }
+
+    /// After the traversal: its requests into this frame's readback, read
+    /// by [`Self::begin_frame`] once the frame is done.
+    pub fn record_request_readback(&self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
+        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::CopySrc);
+        encoder.copy_buffer(
+            self.requests.handle(),
+            self.request_readbacks[frame].handle(),
+            &[rhi::BufferCopy::from_start(REQUESTS_BYTES)],
+        );
+        encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::HostRead);
     }
 
     pub fn bounds(&self) -> &BoundStore {
         &self.bounds
     }
 
-    /// Reclaims the ranges and buffers no in-flight frame reads any more.
-    /// Call once a frame, after its fence wait.
-    pub fn begin_frame(&mut self, device: &rhi::backend::Device) {
+    /// Reclaims the ranges and buffers no in-flight frame reads any more,
+    /// and takes up the requests the traversal made the last time this
+    /// frame slot ran. Call once a frame, after its fence wait.
+    pub fn begin_frame(&mut self, device: &rhi::backend::Device, frame: usize) {
         self.frame_seq += 1;
         self.bounds.free_retired(device, self.frame_seq);
         while let Some(&(at, section)) = self.pending_free.front()
@@ -619,9 +663,18 @@ impl DistantBuffers {
         {
             self.pending_free.pop_front();
             self.ids.free(section.id);
-            if section.quads > 0 {
-                self.quads.free(section.ptr);
-            }
+            self.quads.free(section.ptr);
+        }
+        let keys: Vec<SectionKey> = self.request_readbacks[frame].read(|bytes| {
+            let words: &[u32] = bytemuck::cast_slice(&bytes[..REQUESTS_BYTES as usize]);
+            let count = (words[0] as usize).min(MAX_REQUESTS as usize);
+            words[2..2 + count * 2]
+                .chunks(2)
+                .map(|key| SectionKey::unpack(u64::from(key[0]) << 32 | u64::from(key[1])))
+                .collect()
+        });
+        for key in keys {
+            self.graph.process_request(key);
         }
     }
 
@@ -631,28 +684,23 @@ impl DistantBuffers {
         self.pending_free.push_back((at, section));
     }
 
-    /// Forgets `key`'s section.
-    fn retire(&mut self, key: SectionKey) {
-        if let Some(old) = self.sections.remove(&key) {
-            self.free_later(old);
+    /// Frees the meshes the graph let go of.
+    fn free_released(&mut self) {
+        for id in std::mem::take(&mut self.graph.freed) {
+            if let Some(section) = self.meshes.remove(&id) {
+                self.free_later(section);
+            } else if let Some(at) = self.pending.iter().position(|p| p.uploaded.id == id) {
+                let pending = self.pending.remove(at).expect("found");
+                self.free_later(pending.uploaded);
+            }
         }
     }
 
     /// Drops every section, as on a dimension change. The bounds stay: they
     /// track the chunk store, which [`Self::clear_bounds`] follows.
     pub fn clear(&mut self) {
-        let keys: Vec<SectionKey> = self.sections.keys().copied().collect();
-        for key in keys {
-            self.retire(key);
-        }
-        let pending: Vec<Uploaded> = self.pending.drain(..).map(|p| p.uploaded).collect();
-        for section in pending {
-            self.free_later(section);
-        }
-        self.requested.clear();
-        self.requests.clear();
-        self.dropped.clear();
-        self.visible.clear();
+        self.graph.clear();
+        self.free_released();
         self.ring = None;
         self.view = None;
     }
@@ -689,43 +737,7 @@ impl DistantBuffers {
         }
     }
 
-    /// Room for `count` quads, else made by dropping the sections drawn
-    /// least recently, whose parents draw in their place.
-    fn alloc(&mut self, count: u32) -> Option<u32> {
-        loop {
-            if let Some(ptr) = self.quads.alloc(count) {
-                return Some(ptr);
-            }
-            // Voxy's `NodeCleaner`: the least recently drawn go, but never a
-            // top-level section, which nothing stands in for.
-            let mut stale: Vec<(u64, SectionKey)> = self
-                .sections
-                .iter()
-                .filter(|(key, section)| section.quads > 0 && key.level != LEVELS - 1)
-                .map(|(key, section)| (section.last_drawn, *key))
-                .collect();
-            if stale.is_empty() {
-                return None;
-            }
-            stale.sort_unstable_by_key(|&(frame, _)| frame);
-            let mut freed = 0;
-            for &(_, key) in &stale {
-                if freed >= count {
-                    break;
-                }
-                freed += self.sections[&key].quads;
-                self.retire(key);
-                self.dropped.push(key);
-            }
-            // Freed ranges come back a few frames on; the mesh waits.
-            if freed < count || self.pending_free.iter().any(|&(at, _)| at > self.frame_seq) {
-                return None;
-            }
-        }
-    }
-
-    /// Takes the worker's updates. A section with no room yet is dropped
-    /// and asked for again once there is.
+    /// Takes the worker's updates into the graph and the arena.
     pub fn upload(&mut self, updates: impl IntoIterator<Item = DistantUpdate>) {
         for update in updates {
             if self
@@ -745,111 +757,38 @@ impl DistantBuffers {
                 );
                 self.pending_tiles.push_back(tile);
             }
+            let (quads, ids, pending) = (&mut self.quads, &mut self.ids, &mut self.pending);
             for section in update.sections {
-                self.place(section);
+                self.graph.process_geometry_result(section, &mut |section| {
+                    place(quads, ids, pending, section)
+                });
             }
         }
+        self.free_released();
     }
 
-    /// Places `section` in the arena and queues its upload
-    /// (`uploadReplaceSection`).
-    fn place(&mut self, section: BuiltSection) {
-        let count = section.quads.len() as u32;
-        let ptr = if count == 0 {
-            0
-        } else if let Some(ptr) = self.alloc(count) {
-            ptr
-        } else {
-            return;
-        };
-        let Some(id) = self.ids.alloc(1) else {
-            if count > 0 {
-                self.quads.free(ptr);
-            }
-            return;
-        };
-        let record = section_record(&section, ptr);
-        self.pending.push_back(Pending {
-            key: section.key,
-            uploaded: Uploaded {
-                id,
-                ptr,
-                quads: count,
-                child_existence: section.child_existence,
-                last_drawn: self.frame_seq,
-            },
-            quads: section.quads,
-            record,
-        });
-    }
-
-    /// The sections asked for since last time, and those dropped.
+    /// The sections the graph asked the worker for since last time, and
+    /// those it dropped.
     pub fn take_requests(&mut self) -> (Vec<SectionKey>, Vec<SectionKey>) {
         (
-            std::mem::take(&mut self.requests),
-            std::mem::take(&mut self.dropped),
+            std::mem::take(&mut self.graph.watch),
+            std::mem::take(&mut self.graph.unwatch),
         )
     }
 
-    fn request(&mut self, key: SectionKey, now: Instant) {
-        if self.requested.len() >= MAX_REQUESTS {
-            return;
-        }
-        let stale = self
-            .requested
-            .get(&key)
-            .is_none_or(|&at| now.duration_since(at) > REQUEST_TIMEOUT);
-        if stale {
-            self.requested.insert(key, now);
-            self.requests.push(key);
-        }
-    }
-
-    /// Whether every child `key` has is known, so the traversal can step
-    /// down into them (Voxy's child request finishing).
-    fn children_ready(&self, key: SectionKey, existence: u8) -> bool {
-        children(key, existence).all(|child| self.sections.contains_key(&child))
-    }
-
-    /// Draws `key` this frame.
-    fn show(&mut self, key: SectionKey, section: Uploaded) {
-        self.sections
-            .get_mut(&key)
-            .expect("a copy of a known section")
-            .last_drawn = self.frame_seq;
-        self.visible.push((key, section));
-    }
-
-    /// Whether the finest section holding block column `x`/`z` is uploaded
+    /// Whether the finest section holding block column `x`/`z` is meshed
     /// with something in it, at any height.
     #[cfg(feature = "test-harness")]
     pub fn has_column(&self, x: i32, z: i32) -> bool {
-        self.sections.iter().any(|(key, section)| {
-            key.level == 0
-                && key.x == x.div_euclid(SIDE as i32)
-                && key.z == z.div_euclid(SIDE as i32)
-                && section.quads > 0
-        })
+        self.graph.has_column(x, z)
     }
 
-    /// `traversal_dev.comp`: walks the tree from the top-level sections
-    /// around `eye`, down into every section that covers more than
-    /// [`SUBDIVISION_SIZE`]² pixels and whose children are all known, asking
-    /// the worker for what's missing; collects what to draw into
-    /// `visible` and drops what the ring left behind.
-    pub fn traverse(&mut self, camera: &Camera, eye: DVec3, viewport: [u32; 2]) {
-        self.visible.clear();
+    /// `RenderDistanceTracker`: the top-level nodes are a ring of sections
+    /// around `eye`, over the dimension's height, remade when it moves.
+    pub fn update_roots(&mut self, eye: DVec3) {
         let Some(view) = self.view.clone() else {
             return;
         };
-        let now = Instant::now();
-        let view_proj = camera.distant_view_projection(DISTANT_FAR);
-        let planes = Camera::planes_from_view_projection(view_proj);
-        let min_sss = SUBDIVISION_SIZE * SUBDIVISION_SIZE / (viewport[0] * viewport[1]) as f32;
-        let render_distance = view.radius * view.radius;
-
-        // `RenderDistanceTracker`: a ring of top-level sections around the
-        // camera, over the dimension's height.
         let top = LEVELS - 1;
         let top_width = (SIDE as i32) << top;
         let ring = (view.radius / f64::from(top_width)).ceil() as i32 + 1;
@@ -861,11 +800,15 @@ impl DistantBuffers {
             view.min_y.div_euclid(top_width),
             (view.min_y + view.height - 1).div_euclid(top_width),
         );
-        let mut queue: VecDeque<SectionKey> = VecDeque::new();
+        if self.ring == Some((cx, cz, ring, min_sec, max_sec)) {
+            return;
+        }
+        self.ring = Some((cx, cz, ring, min_sec, max_sec));
+        let mut roots = HashSet::new();
         for x in cx - ring..=cx + ring {
             for z in cz - ring..=cz + ring {
                 for y in min_sec..=max_sec {
-                    queue.push_back(SectionKey {
+                    roots.insert(SectionKey {
                         level: top,
                         x,
                         y,
@@ -874,78 +817,9 @@ impl DistantBuffers {
                 }
             }
         }
-        if self.ring != Some((cx, cz, ring, min_sec, max_sec)) {
-            self.ring = Some((cx, cz, ring, min_sec, max_sec));
-            let roots: HashSet<SectionKey> = queue.iter().copied().collect();
-            let gone: Vec<SectionKey> = self
-                .sections
-                .keys()
-                .copied()
-                .filter(|key| !roots.contains(&key.ancestor(top)))
-                .collect();
-            for key in gone {
-                self.retire(key);
-                self.dropped.push(key);
-            }
-            self.requested
-                .retain(|key, _| roots.contains(&key.ancestor(top)));
-        }
-
-        while let Some(key) = queue.pop_front() {
-            let min = origin(&key) - eye;
-            let size = f64::from(key.width());
-            let max = min + size;
-            // `isWithinRenderDistance`: the nearest point's distance along
-            // x/z.
-            let near = |lo: f64, hi: f64| lo.max(0.0) + hi.min(0.0);
-            let (nx, nz) = (near(min.x, max.x), near(min.z, max.z));
-            if nx * nx + nz * nz > render_distance {
-                continue;
-            }
-            if !in_frustum(&planes, min.as_vec3(), max.as_vec3()) {
-                continue;
-            }
-            let section = self.sections.get(&key).copied();
-            if key.level != 0 && screen_size(view_proj, min.as_vec3(), size as f32) > min_sss {
-                if let Some(section) = section
-                    && self.children_ready(key, section.child_existence)
-                {
-                    queue.extend(children(key, section.child_existence));
-                } else {
-                    match section {
-                        Some(section) => {
-                            for child in children(key, section.child_existence) {
-                                if !self.sections.contains_key(&child) {
-                                    self.request(child, now);
-                                }
-                            }
-                        }
-                        None => self.request(key, now),
-                    }
-                    // Draw this one meanwhile, if it's wholly within reach
-                    // (`furthestPointToCamera`, with Voxy's buffer room).
-                    let far = |lo: f64, hi: f64| {
-                        if lo > 0.0 {
-                            hi
-                        } else if hi < 0.0 {
-                            lo
-                        } else {
-                            lo.abs().max(hi)
-                        }
-                    };
-                    let (fx, fz) = (far(min.x, max.x), far(min.z, max.z));
-                    if let Some(section) = section
-                        && fx * fx + fz * fz + 16.0 * 16.0 * 16.0 <= render_distance
-                    {
-                        self.show(key, section);
-                    }
-                }
-            } else if let Some(section) = section {
-                self.show(key, section);
-            } else {
-                self.request(key, now);
-            }
-        }
+        assert!(roots.len() <= MAX_ROOTS, "too many top-level sections");
+        self.graph.set_roots(&roots);
+        self.free_released();
     }
 
     /// Issues one region of the draw list the GPU built
@@ -973,10 +847,17 @@ impl DistantBuffers {
 
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
         self.group.destroy(device);
+        let [scratch_a, scratch_b] = &mut self.scratch;
         for buffer in [
             &mut self.arena,
-            &mut self.sections_buffer,
+            &mut self.sections,
             &mut self.index_buffer,
+            &mut self.nodes,
+            &mut self.requests,
+            &mut self.queue_meta,
+            scratch_a,
+            scratch_b,
+            &mut self.render_list,
             &mut self.counts,
             &mut self.draws,
             &mut self.positions,
@@ -987,16 +868,44 @@ impl DistantBuffers {
         ] {
             std::mem::take(buffer).destroy(device);
         }
-        util::destroy_buffers(device, &mut self.quad_staging);
-        util::destroy_buffers(device, &mut self.scatter_staging);
-        util::destroy_buffers(device, &mut self.render_lists);
+        for buffers in [
+            &mut self.quad_staging,
+            &mut self.scatter_staging,
+            &mut self.top_ids,
+            &mut self.queue_meta_staging,
+            &mut self.request_readbacks,
+            &mut self.tile_staging,
+        ] {
+            util::destroy_buffers(device, buffers);
+        }
         self.scatter.destroy(device);
         self.bounds.destroy(device);
-        util::destroy_buffers(device, &mut self.tile_staging);
         self.model_sampler.destroy(device);
         std::mem::take(&mut self.model_atlas).destroy(device);
         self.layout.destroy(device);
     }
+}
+
+/// Places `section`'s quads in the arena and queues their upload
+/// (`uploadSection`); its id, or `None` when the arena is full.
+fn place(
+    quads: &mut Tlsf,
+    ids: &mut Tlsf,
+    pending: &mut VecDeque<Pending>,
+    section: BuiltSection,
+) -> Option<u32> {
+    // TODO: the node cleaner (Voxy's `NodeCleaner`) frees room here.
+    let ptr = quads.alloc(section.quads.len() as u32)?;
+    let Some(id) = ids.alloc(1) else {
+        quads.free(ptr);
+        return None;
+    };
+    pending.push_back(Pending {
+        uploaded: Uploaded { id, ptr },
+        record: section_record(&section, ptr),
+        quads: section.quads,
+    });
+    Some(id)
 }
 
 /// Voxy's `ChunkBoundStore`: the drawn chunk sections' coordinates for the
@@ -1175,24 +1084,6 @@ fn section_record(section: &BuiltSection, ptr: u32) -> [[u32; 4]; 2] {
     ]
 }
 
-/// The block position of `key`'s corner.
-fn origin(key: &SectionKey) -> DVec3 {
-    let [x, y, z] = key.origin();
-    DVec3::new(f64::from(x), f64::from(y), f64::from(z))
-}
-
-/// `key`'s children that `existence` has something in.
-fn children(key: SectionKey, existence: u8) -> impl Iterator<Item = SectionKey> {
-    (0..8u8)
-        .filter(move |&i| existence & 1 << i != 0)
-        .map(move |i| SectionKey {
-            level: key.level - 1,
-            x: key.x * 2 + i32::from(i & 1),
-            z: key.z * 2 + i32::from(i >> 1 & 1),
-            y: key.y * 2 + i32::from(i >> 2),
-        })
-}
-
 /// Every level of the model atlas.
 const MODEL_ATLAS_RANGE: rhi::TextureRange = rhi::TextureRange {
     mips: MODEL_MIP_LEVELS,
@@ -1210,46 +1101,6 @@ fn atlas_transition(
         from,
         to,
     }
-}
-
-/// Whether the box between `min` and `max` (eye-relative) is at least
-/// partly inside `planes`.
-fn in_frustum(planes: &[[f32; 4]; 6], min: Vec3, max: Vec3) -> bool {
-    planes.iter().all(|p| {
-        let corner = |n: f32, lo: f32, hi: f32| if n >= 0.0 { hi } else { lo };
-        p[0] * corner(p[0], min.x, max.x)
-            + p[1] * corner(p[1], min.y, max.y)
-            + p[2] * corner(p[2], min.z, max.z)
-            + p[3]
-            >= 0.0
-    })
-}
-
-/// `screenspace.glsl`'s screen size: half the summed areas of the cube's
-/// projected faces, in units of the viewport.
-fn screen_size(view_proj: Mat4, min: Vec3, size: f32) -> f32 {
-    let project = |p: Vec3| {
-        let clip = view_proj * p.extend(1.0);
-        // NDC to the viewport's 0..1.
-        (clip.xy() / clip.w) * 0.5 + 0.5
-    };
-    let p = |dx: f32, dy: f32, dz: f32| project(min + Vec3::new(dx, dy, dz) * size);
-    let cross = |a: glam::Vec2, b: glam::Vec2| (a.x * b.y - b.x * a.y).abs();
-    let (p000, p100, p010, p001) = (
-        p(0.0, 0.0, 0.0),
-        p(1.0, 0.0, 0.0),
-        p(0.0, 1.0, 0.0),
-        p(0.0, 0.0, 1.0),
-    );
-    let (p111, p011, p101, p110) = (
-        p(1.0, 1.0, 1.0),
-        p(0.0, 1.0, 1.0),
-        p(1.0, 0.0, 1.0),
-        p(1.0, 1.0, 0.0),
-    );
-    let (a, b, c) = (p100 - p000, p010 - p000, p001 - p000);
-    let (d, e, f) = (p011 - p111, p101 - p111, p110 - p111);
-    0.5 * (cross(a, b) + cross(a, c) + cross(c, b) + cross(d, e) + cross(d, f) + cross(f, e))
 }
 
 #[cfg(test)]

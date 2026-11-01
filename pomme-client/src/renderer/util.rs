@@ -136,6 +136,30 @@ pub fn texture_binding(
     ]
 }
 
+/// A storage buffer at `binding`.
+pub fn storage_binding(
+    binding: u32,
+    buffer: &rhi::backend::Buffer,
+    bytes: u64,
+) -> (u32, rhi::backend::BindingResource) {
+    (
+        binding,
+        rhi::backend::BindingResource::storage(buffer, bytes),
+    )
+}
+
+/// A uniform buffer at `binding`.
+pub fn uniform_binding(
+    binding: u32,
+    buffer: &rhi::backend::Buffer,
+    bytes: u64,
+) -> (u32, rhi::backend::BindingResource) {
+    (
+        binding,
+        rhi::backend::BindingResource::uniform(buffer, bytes),
+    )
+}
+
 /// A [`FRAGMENT_TEXTURE`] group pointed at `texture`.
 pub fn create_texture_group(
     device: &rhi::backend::Device,
@@ -158,12 +182,7 @@ pub fn create_uniform_sets(
     let buffers = create_per_frame_host_buffers(device, size, rhi::BufferUsages::UNIFORM, name);
     let groups = buffers
         .iter()
-        .map(|buffer| {
-            device.create_bind_group(
-                layout,
-                &[(0, rhi::backend::BindingResource::uniform(buffer, size))],
-            )
-        })
+        .map(|buffer| device.create_bind_group(layout, &[uniform_binding(0, buffer, size)]))
         .collect();
     (groups, buffers)
 }

@@ -5,7 +5,10 @@
 
 // Voxy's `SceneUniform`: the distant view projection moved by the camera's
 // position within its section, that section, the frame, and whether the
-// occlusion pass was skipped (cmdgen then keeps visibility itself).
+// occlusion pass was skipped (cmdgen then keeps visibility itself); then
+// the traversal's: the Hi-Z's base size (width << 16 | height), the screen
+// area a node splits at, the render list's and the frame's request queue's
+// room, the render distance squared in blocks, and the frustum planes.
 #ifdef SCENE_BINDING
 layout(set = DISTANT_SET, binding = SCENE_BINDING, std140) uniform SceneUniform {
     mat4 distant_view_proj;
@@ -13,6 +16,12 @@ layout(set = DISTANT_SET, binding = SCENE_BINDING, std140) uniform SceneUniform 
     uint frame_id;
     vec3 camera_sub_pos;
     uint occlusion_skipped;
+    uint hiz_size;
+    float min_sss;
+    uint render_list_max;
+    uint request_limit;
+    float render_distance;
+    vec4 frustum[6];
 };
 #endif
 
@@ -86,9 +95,13 @@ layout(set = DISTANT_SET, binding = SECTION_METADATA_BINDING, std430) readonly r
 };
 #endif
 
-// The sections the traversal picked this frame.
+// The sections the traversal picked this frame (`RENDER_LIST_ACCESS` empty
+// for the traversal, which writes it).
 #ifdef RENDER_LIST_BINDING
-layout(set = DISTANT_SET, binding = RENDER_LIST_BINDING, std430) readonly restrict buffer RenderList {
+#ifndef RENDER_LIST_ACCESS
+#define RENDER_LIST_ACCESS readonly
+#endif
+layout(set = DISTANT_SET, binding = RENDER_LIST_BINDING, std430) RENDER_LIST_ACCESS restrict buffer RenderList {
     uint section_count;
     uint render_list[];
 };
@@ -113,9 +126,13 @@ layout(set = DISTANT_SET, binding = DRAW_BUFFER_BINDING, std430) writeonly restr
 #endif
 
 // Per section, the last frame the occlusion pass saw it (low 31 bits) and
-// whether it saw it the frame before (bit 31).
+// whether it saw it the frame before (bit 31); `VISIBILITY_ACCESS` is
+// `readonly` for the occlusion pass's vertex stage, which only reads it.
 #ifdef VISIBILITY_BINDING
-layout(set = DISTANT_SET, binding = VISIBILITY_BINDING, std430) restrict buffer VisibilityBuffer {
+#ifndef VISIBILITY_ACCESS
+#define VISIBILITY_ACCESS
+#endif
+layout(set = DISTANT_SET, binding = VISIBILITY_BINDING, std430) VISIBILITY_ACCESS restrict buffer VisibilityBuffer {
     uint visibility_data[];
 };
 #endif

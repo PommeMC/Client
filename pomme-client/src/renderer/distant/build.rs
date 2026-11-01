@@ -910,7 +910,8 @@ mod tests {
 
     /// Models: 1 stone (opaque), 2 glass (sees through, culls its own
     /// kind), 3 water (translucent fluid), 4 a waterlogged slab-like block
-    /// (holds water, open on top).
+    /// (holds water, open on top), 5 a snow layer (a full occluder below,
+    /// thin faces that can be occluded elsewhere).
     struct Stub;
 
     const OPAQUE_FACE: u64 = 0b0111;
@@ -931,6 +932,7 @@ mod tests {
                 2 => faces(CLEAR_FACE) | 32 << 48,
                 3 => faces(CLEAR_FACE) | (2 | 16 | 32) << 48,
                 4 => faces(OPAQUE_FACE) & !(0xFF << 8) | 0xFF << 8 | 8 << 48,
+                5 => faces(0b0100) & !0xFF | OPAQUE_FACE,
                 _ => 0,
             })
         }
@@ -975,6 +977,21 @@ mod tests {
 
     fn model(quad: u64) -> u16 {
         ((quad & MODEL) >> QUAD_MODEL_SHIFT) as u16
+    }
+
+    #[test]
+    fn a_snow_layer_on_a_block_draws_its_top() {
+        let built = build(&with(&[((5, 6, 7), 1), ((5, 7, 7), 5)]));
+        let described: Vec<(u8, (u32, u32, u32), u16)> = built
+            .quads
+            .iter()
+            .map(|&q| (face(q), position(q), model(q)))
+            .collect();
+        assert!(
+            described.contains(&(1, (5, 7, 7), 5)),
+            "no snow top in {described:?}"
+        );
+        assert!(!described.contains(&(1, (5, 6, 7), 1)), "{described:?}");
     }
 
     #[test]
