@@ -103,6 +103,8 @@ pub enum ContainerScreen {
     ShulkerBox,
     Anvil,
     Enchantment,
+    Hopper,
+    Dispenser,
 }
 
 impl ContainerScreen {
@@ -115,6 +117,8 @@ impl ContainerScreen {
             Self::ShulkerBox => ContainerKind::ShulkerBox,
             Self::Anvil => ContainerKind::Anvil,
             Self::Enchantment => ContainerKind::Enchantment,
+            Self::Hopper => ContainerKind::Hopper,
+            Self::Dispenser => ContainerKind::Dispenser,
         }
     }
 }
@@ -3690,18 +3694,22 @@ pub fn update_game(
                     &mut game.inv_last_click,
                     gs,
                 ),
-                ContainerScreen::ShulkerBox => crate::ui::chest::build_shulker_box(
+                ContainerScreen::ShulkerBox
+                | ContainerScreen::Hopper
+                | ContainerScreen::Dispenser => crate::ui::chest::build_grid_screen(
                     &mut elements,
                     sw,
                     sh,
                     core.input.cursor_pos(),
                     &input,
+                    container.screen.click_kind(),
                     &container.slots,
                     &container.title,
                     &game.cursor_item,
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
                     gs,
+                    &|t, s| gfx.renderer.menu_text_width(t, s),
                 ),
                 ContainerScreen::Anvil => crate::ui::anvil::build_anvil(
                     &mut elements,
