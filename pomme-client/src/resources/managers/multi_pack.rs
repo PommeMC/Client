@@ -163,3 +163,125 @@ fn check_directory(directory: &str) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod resource_manager_tests {
+    use std::collections::{BTreeMap, HashSet};
+    use std::rc::Rc;
+
+    use super::MultiPackResourceManager;
+    use crate::chat_component::Component;
+    use crate::resources::managers::tests;
+    use crate::resources::pack_resources::{
+        EmbeddedPackResources, EmbeddedResourcesSupplier, POMME_ICON, POMME_ICONS_FONT,
+        POMME_UI_FONT, PackResources, PackType,
+    };
+    use crate::resources::packs::{
+        FeatureFlagSet, Pack, PackCompat, PackEnablementConfig, PackLocationInfo, PackMetadata,
+        PackPosition, PackSource,
+    };
+    use crate::resources::{ResourceId, resource_id};
+
+    const ICON: &[u8] = include_bytes!("../../../assets/icon.png");
+    const UI_FONT: &[u8] = include_bytes!("../../renderer/fonts/Montserrat-Medium.ttf");
+    const ICONS_FONT: &[u8] = include_bytes!("../../renderer/fonts/fa-solid-900.ttf");
+
+    fn fixture() -> MultiPackResourceManager {
+        let location = PackLocationInfo {
+            id: "resource-manager-api".to_owned(),
+            title: Component::text("Resource manager API fixture"),
+            source: PackSource::built_in(),
+            known_pack_info: None,
+        };
+        let metadata = PackMetadata {
+            description: Component::text("Resource manager API fixture"),
+            compatibility: PackCompat::Compatible,
+            requested_features: FeatureFlagSet::empty(),
+            overlays: Vec::new(),
+        };
+        let enablement = PackEnablementConfig {
+            required: false,
+            default_position: PackPosition::Top,
+            fixed_position: false,
+        };
+        let pack = Pack::new(
+            location.clone(),
+            metadata,
+            enablement,
+            Rc::new(EmbeddedResourcesSupplier::new()),
+        );
+        let backend: Rc<dyn PackResources> = Rc::new(EmbeddedPackResources::new(location));
+        MultiPackResourceManager::new(PackType::ClientResources, vec![(pack.origin(), backend)])
+            .expect("single embedded pack fixture should construct")
+    }
+
+    #[test]
+    fn test_get_resource() {
+        tests::test_get_resource(&fixture(), &POMME_ICON, ICON);
+    }
+
+    #[test]
+    fn test_get_resource_missing() {
+        tests::test_get_resource_missing(&fixture(), &resource_id!("pomme:textures/missing.png"));
+    }
+
+    #[test]
+    fn test_get_resource_stack() {
+        tests::test_get_resource_stack(&fixture(), &POMME_ICON, &[ICON.to_vec()]);
+    }
+
+    #[test]
+    fn test_get_resource_stack_missing() {
+        tests::test_get_resource_stack(
+            &fixture(),
+            &resource_id!("pomme:textures/missing.png"),
+            &[],
+        );
+    }
+
+    #[test]
+    fn test_list_resources() {
+        tests::test_list_resources(
+            &fixture(),
+            "font",
+            &|_| true,
+            &BTreeMap::from([
+                (POMME_UI_FONT, UI_FONT.to_vec()),
+                (POMME_ICONS_FONT, ICONS_FONT.to_vec()),
+            ]),
+        );
+    }
+
+    #[test]
+    fn test_list_resources_missing_directory() {
+        tests::test_list_resources(&fixture(), "missing", &|_| true, &BTreeMap::new());
+    }
+
+    #[test]
+    fn test_list_resource_stacks() {
+        tests::test_list_resource_stacks(
+            &fixture(),
+            "font",
+            &|_| true,
+            &BTreeMap::from([
+                (POMME_UI_FONT, vec![UI_FONT.to_vec()]),
+                (POMME_ICONS_FONT, vec![ICONS_FONT.to_vec()]),
+            ]),
+        );
+    }
+
+    #[test]
+    fn test_list_resource_stacks_missing_directory() {
+        tests::test_list_resource_stacks(&fixture(), "missing", &|_| true, &BTreeMap::new());
+    }
+
+    #[test]
+    fn test_get_namespaces() {
+        tests::test_get_namespaces(&fixture(), &HashSet::from(["pomme".to_owned()]));
+    }
+
+    #[test]
+    fn test_list_packs() {
+        tests::test_list_packs(&fixture(), &["resource-manager-api"]);
+    }
+}

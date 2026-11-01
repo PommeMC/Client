@@ -169,3 +169,84 @@ impl RepositorySource for FolderRepositorySource {
         Ok(packs)
     }
 }
+
+#[cfg(test)]
+mod repository_source_tests {
+    use std::fs::{self, File};
+    use std::io::{self, Write};
+    use std::path::PathBuf;
+
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
+
+    use super::super::tests;
+    use super::FolderRepositorySource;
+    use crate::resources::pack_resources::PackType;
+
+    const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"fixture"}}"#;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> io::Result<Self> {
+            for attempt in 0.. {
+                let path = std::env::temp_dir().join(format!(
+                    "pomme-folder-source-api-{}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Ok(Self(path)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.0) {
+                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
+            }
+        }
+    }
+
+    fn fixture() -> (TempDir, FolderRepositorySource) {
+        let temp = TempDir::new().unwrap();
+        let source = FolderRepositorySource::new(
+            vec![temp.0.clone()],
+            None,
+            PackType::ClientResources,
+            None,
+        );
+        (temp, source)
+    }
+
+    #[test]
+    fn test_load_packs_empty() {
+        let (_temp, mut source) = fixture();
+        tests::test_load_packs_empty(&mut source);
+    }
+
+    #[test]
+    fn test_load_packs_directory() {
+        let (temp, mut source) = fixture();
+        let path = temp.0.join("directory-pack");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("pack.mcmeta"), METADATA).unwrap();
+        tests::test_load_packs(&mut source, &["file/directory-pack"]);
+    }
+
+    #[test]
+    fn test_load_packs_zip() {
+        let (temp, mut source) = fixture();
+        let mut archive = ZipWriter::new(File::create(temp.0.join("pack.zip")).unwrap());
+        archive
+            .start_file("pack.mcmeta", SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(METADATA).unwrap();
+        drop(archive.finish().unwrap());
+        tests::test_load_packs(&mut source, &["file/pack.zip"]);
+    }
+}

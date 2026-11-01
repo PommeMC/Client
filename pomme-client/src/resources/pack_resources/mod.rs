@@ -144,3 +144,243 @@ pub(crate) trait PackResources: PackMetadataResources {
         self.location().known_pack_info.as_ref()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        dead_code,
+        reason = "Generic API assertions pending user review before fixtures"
+    )]
+
+    use std::collections::HashSet;
+    use std::fmt::Debug;
+    use std::io::{self, Read};
+
+    use pomme_protocol::KnownPack;
+    use serde_json::Value;
+
+    use super::{
+        MetadataSectionType, PackMetadataResources, PackMetadataResourcesExt, PackResources,
+        PackType,
+    };
+    use crate::chat_component::Component;
+    use crate::resources::ResourceId;
+    use crate::resources::packs::PackLocationInfo;
+
+    pub(super) fn test_get_resource<P: PackResources + ?Sized>(
+        pack: &P,
+        pack_type: PackType,
+        id: &ResourceId,
+        expected: &[u8],
+    ) {
+        let supplier = pack
+            .get_resource(pack_type, id)
+            .expect("get_resource should succeed")
+            .expect("get_resource should return a supplier");
+        let mut actual = Vec::new();
+        supplier()
+            .expect("get_resource supplier should open")
+            .read_to_end(&mut actual)
+            .expect("get_resource content should read");
+        assert_eq!(
+            actual, expected,
+            "get_resource bytes for {pack_type:?}, {id:?}"
+        );
+    }
+
+    pub(super) fn test_get_resource_missing<P: PackResources + ?Sized>(
+        pack: &P,
+        pack_type: PackType,
+        id: &ResourceId,
+    ) {
+        assert!(
+            pack.get_resource(pack_type, id)
+                .expect("get_resource should succeed")
+                .is_none(),
+            "get_resource should return None for {pack_type:?}, {id:?}"
+        );
+    }
+
+    pub(super) fn test_list_resources<P: PackResources + ?Sized>(
+        pack: &P,
+        pack_type: PackType,
+        namespace: &str,
+        directory: &str,
+        expected: &[(ResourceId, Vec<u8>)],
+    ) {
+        let mut actual = Vec::new();
+        pack.list_resources(pack_type, namespace, directory, &mut |id, supplier| {
+            let mut bytes = Vec::new();
+            supplier()
+                .expect("list_resources supplier should open")
+                .read_to_end(&mut bytes)
+                .expect("list_resources content should read");
+            actual.push((id, bytes));
+        })
+        .expect("list_resources should succeed");
+        actual.sort();
+        let mut expected = expected.to_vec();
+        expected.sort();
+        assert_eq!(
+            actual, expected,
+            "list_resources IDs and bytes for {pack_type:?}, {namespace:?}, {directory:?}"
+        );
+    }
+
+    pub(super) fn test_get_namespaces<P: PackResources + ?Sized>(
+        pack: &P,
+        pack_type: PackType,
+        expected: &HashSet<String>,
+    ) {
+        let actual = pack
+            .get_namespaces(pack_type)
+            .expect("get_namespaces should succeed");
+        assert_eq!(&actual, expected, "get_namespaces result for {pack_type:?}");
+    }
+
+    pub(super) fn test_pack_id<P: PackResources + ?Sized>(pack: &P, expected: &str) {
+        assert_eq!(pack.pack_id(), expected, "pack_id result");
+    }
+
+    pub(super) fn test_known_pack_info<P: PackResources + ?Sized>(
+        pack: &P,
+        expected: Option<&KnownPack>,
+    ) {
+        assert_eq!(pack.known_pack_info(), expected, "known_pack_info result");
+    }
+
+    pub(super) fn test_location<P: PackMetadataResources + ?Sized>(
+        pack: &P,
+        expected: &PackLocationInfo,
+    ) {
+        let actual = pack.location();
+        assert_eq!(actual.id, expected.id, "location ID");
+        assert_eq!(actual.title, expected.title, "location title");
+        assert_eq!(
+            actual.source.should_add_automatically(),
+            expected.source.should_add_automatically(),
+            "location source automatic selection"
+        );
+        let probe = Component::text("location source probe");
+        assert_eq!(
+            actual.source.decorate(probe.clone()),
+            expected.source.decorate(probe),
+            "location source decoration"
+        );
+        assert_eq!(
+            actual.known_pack_info, expected.known_pack_info,
+            "location known pack"
+        );
+    }
+
+    pub(super) fn test_get_root_resource<P: PackMetadataResources + ?Sized>(
+        pack: &P,
+        path: &[&str],
+        expected: &[u8],
+    ) {
+        let supplier = pack
+            .get_root_resource(path)
+            .expect("get_root_resource should succeed")
+            .expect("get_root_resource should return a supplier");
+        let mut actual = Vec::new();
+        supplier()
+            .expect("get_root_resource supplier should open")
+            .read_to_end(&mut actual)
+            .expect("get_root_resource content should read");
+        assert_eq!(actual, expected, "get_root_resource bytes for {path:?}");
+    }
+
+    pub(super) fn test_get_root_resource_missing<P: PackMetadataResources + ?Sized>(
+        pack: &P,
+        path: &[&str],
+    ) {
+        assert!(
+            pack.get_root_resource(path)
+                .expect("get_root_resource should succeed")
+                .is_none(),
+            "get_root_resource should return None for {path:?}"
+        );
+    }
+
+    pub(super) fn test_metadata_section_json<P: PackMetadataResources + ?Sized>(
+        pack: &P,
+        name: &str,
+        expected: Option<Value>,
+    ) {
+        let actual = pack
+            .metadata_section_json(name)
+            .expect("metadata_section_json should succeed");
+        assert_eq!(
+            actual, expected,
+            "metadata_section_json result for {name:?}"
+        );
+    }
+
+    pub(super) fn test_get_metadata_section<
+        P: PackMetadataResourcesExt + ?Sized,
+        T: PartialEq + Debug,
+    >(
+        pack: &P,
+        section: &MetadataSectionType<T>,
+        expected: Option<T>,
+    ) {
+        let actual = pack
+            .get_metadata_section(section)
+            .expect("get_metadata_section should succeed");
+        assert_eq!(
+            actual, expected,
+            "get_metadata_section result for {:?}",
+            section.name
+        );
+    }
+
+    pub(super) fn test_get_metadata_section_missing<P: PackMetadataResourcesExt + ?Sized>(
+        pack: &P,
+        name: &str,
+    ) {
+        let section = MetadataSectionType::<()> {
+            name: name.to_owned(),
+            decode: |_| panic!("missing metadata section must not invoke the decoder"),
+            encode: |_| Ok(Value::Null),
+        };
+        assert!(
+            pack.get_metadata_section(&section)
+                .expect("get_metadata_section should succeed for a missing section")
+                .is_none(),
+            "get_metadata_section should return None for {name:?}"
+        );
+    }
+
+    pub(super) fn test_get_metadata_section_null<P: PackMetadataResourcesExt + ?Sized>(
+        pack: &P,
+        name: &str,
+    ) {
+        let section = MetadataSectionType {
+            name: name.to_owned(),
+            decode: |value| {
+                assert_eq!(value, &Value::Null, "decoder should receive JSON null");
+                Ok("decoded null")
+            },
+            encode: |_| Ok(Value::Null),
+        };
+        test_get_metadata_section(pack, &section, Some("decoded null"));
+    }
+
+    pub(super) fn test_get_metadata_section_decode_error<
+        P: PackMetadataResourcesExt + ?Sized,
+        T,
+    >(
+        pack: &P,
+        section: &MetadataSectionType<T>,
+        expected_kind: io::ErrorKind,
+    ) {
+        match pack.get_metadata_section(section) {
+            Err(error) => assert_eq!(error.kind(), expected_kind, "metadata decoder error kind"),
+            Ok(_) => panic!("get_metadata_section should propagate the decoder error"),
+        }
+    }
+
+    pub(super) fn test_close<P: PackMetadataResources + ?Sized>(pack: &P) {
+        pack.close().expect("close should succeed");
+    }
+}

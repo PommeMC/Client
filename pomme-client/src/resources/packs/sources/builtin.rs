@@ -419,3 +419,15 @@ fn read_format(path: &Path, expected_version: &str) -> Result<PackFormat, Format
     };
     PackFormat::new(major, minor).ok_or(FormatReadError::InvalidFormat("resource components"))
 }
+
+#[cfg(test)]
+mod repository_source_tests {
+    use super::super::tests;
+    use super::BuiltinRepositorySource;
+
+    #[test]
+    fn test_load_packs() {
+        let mut source = BuiltinRepositorySource::new(None);
+        tests::test_load_packs(&mut source, &["pomme"]);
+    }
+}

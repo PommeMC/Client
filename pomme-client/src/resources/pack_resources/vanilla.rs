@@ -530,3 +530,471 @@ fn canonical_directory(path: &Path) -> io::Result<PathBuf> {
     }
     Ok(root)
 }
+
+#[cfg(test)]
+mod test_fixture {
+    use std::path::PathBuf;
+    use std::{fs, io};
+
+    use serde_json::Map;
+
+    use super::VanillaPackResources;
+    use crate::chat_component::Component;
+    use crate::resources::packs::{PackLocationInfo, PackSource};
+
+    pub(super) struct TempDir(pub(super) PathBuf);
+
+    impl TempDir {
+        fn new() -> io::Result<Self> {
+            for attempt in 0.. {
+                let path = std::env::temp_dir().join(format!(
+                    "pomme-vanilla-location-{}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Ok(Self(path)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.0) {
+                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
+            }
+        }
+    }
+
+    pub(super) fn default_location() -> PackLocationInfo {
+        PackLocationInfo {
+            id: "vanilla-api".into(),
+            title: Component::text("Vanilla API fixture"),
+            source: PackSource::built_in(),
+            known_pack_info: None,
+        }
+    }
+
+    pub(super) fn fixture(location: PackLocationInfo) -> (TempDir, VanillaPackResources) {
+        let temp = TempDir::new().unwrap();
+        let extracted_root = temp.0.join("extracted");
+        let objects_root = temp.0.join("objects");
+        let index_file = temp.0.join("index.json");
+        fs::create_dir(&extracted_root).unwrap();
+        fs::create_dir_all(extracted_root.join("assets/api_test/test/nested")).unwrap();
+        fs::create_dir_all(extracted_root.join("data/api_data/test")).unwrap();
+        fs::write(
+            extracted_root.join("assets/api_test/test/one.txt"),
+            b"client one",
+        )
+        .unwrap();
+        fs::write(
+            extracted_root.join("assets/api_test/test/nested/two.txt"),
+            b"client two",
+        )
+        .unwrap();
+        fs::write(
+            extracted_root.join("data/api_data/test/server.txt"),
+            b"server data",
+        )
+        .unwrap();
+        fs::create_dir(&objects_root).unwrap();
+        fs::write(&index_file, br#"{"objects":{}}"#).unwrap();
+        fs::write(extracted_root.join("root.txt"), b"vanilla root").unwrap();
+        fs::write(
+            extracted_root.join("pack.mcmeta"),
+            br#"{"test":{"value":"vanilla"},"other":{"value":"other"}}"#,
+        )
+        .unwrap();
+        let pack = VanillaPackResources::new(
+            location,
+            extracted_root,
+            &index_file,
+            &objects_root,
+            Map::new(),
+        )
+        .unwrap();
+        (temp, pack)
+    }
+}
+
+#[cfg(test)]
+mod pack_metadata_resources_tests {
+    use pomme_protocol::KnownPack;
+    use serde_json::json;
+
+    use super::test_fixture::{default_location, fixture};
+    use crate::chat_component::Component;
+    use crate::resources::pack_resources::tests;
+    use crate::resources::packs::{PackLocationInfo, PackSource};
+
+    #[test]
+    fn test_get_root_resource() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_get_root_resource(&pack, &["root.txt"], b"vanilla root");
+    }
+
+    #[test]
+    fn test_get_root_resource_missing() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_get_root_resource_missing(&pack, &["missing.txt"]);
+    }
+
+    #[test]
+    fn test_metadata_section_json() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_metadata_section_json(&pack, "test", Some(json!({"value": "vanilla"})));
+    }
+
+    #[test]
+    fn test_metadata_section_missing() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_metadata_section_json(&pack, "missing", None);
+    }
+
+    #[test]
+    fn test_close() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_close(&pack);
+    }
+
+    #[test]
+    fn test_location() {
+        let expected = PackLocationInfo {
+            id: "vanilla-location".into(),
+            title: Component::translate("location.vanilla.title", Vec::new()),
+            source: PackSource::feature(),
+            known_pack_info: Some(KnownPack {
+                namespace: "location_test".into(),
+                id: "vanilla_known".into(),
+                version: "test-1".into(),
+            }),
+        };
+        let (_temp, pack) = fixture(expected.clone());
+        tests::test_location(&pack, &expected);
+    }
+}
+
+#[cfg(test)]
+mod pack_metadata_resources_ext_tests {
+    use std::{fs, io};
+
+    use serde_json::json;
+
+    use super::test_fixture::{default_location, fixture};
+    use crate::resources::pack_resources::{MetadataSectionType, tests};
+
+    #[test]
+    fn test_get_metadata_section() {
+        let (_temp, pack) = fixture(default_location());
+        let section = MetadataSectionType::<String> {
+            name: "test".into(),
+            decode: |value| {
+                value
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "expected string"))
+            },
+            encode: |value| Ok(json!({"value": value})),
+        };
+        tests::test_get_metadata_section(&pack, &section, Some("vanilla".into()));
+    }
+
+    #[test]
+    fn test_get_metadata_section_missing() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_get_metadata_section_missing(&pack, "missing");
+    }
+
+    #[test]
+    fn test_get_metadata_section_null() {
+        let (temp, pack) = fixture(default_location());
+        fs::write(temp.0.join("extracted/pack.mcmeta"), br#"{"null":null}"#).unwrap();
+        tests::test_get_metadata_section_null(&pack, "null");
+    }
+
+    #[test]
+    fn test_get_metadata_section_decode_error() {
+        let (_temp, pack) = fixture(default_location());
+        let section = MetadataSectionType::<String> {
+            name: "test".into(),
+            decode: |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "decoder sentinel",
+                ))
+            },
+            encode: |value| Ok(json!({"value": value})),
+        };
+        tests::test_get_metadata_section_decode_error(&pack, &section, io::ErrorKind::Unsupported);
+    }
+}
+
+#[cfg(test)]
+mod pack_resources_tests {
+    use std::collections::HashSet;
+
+    use pomme_protocol::KnownPack;
+
+    use super::test_fixture::{default_location, fixture};
+    use crate::resources::pack_resources::{PackType, tests};
+    use crate::resources::packs::PackLocationInfo;
+    use crate::resources::resource_id;
+
+    #[test]
+    fn test_get_resource_client() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_get_resource(
+            &pack,
+            PackType::ClientResources,
+            &resource_id!("api_test:test/one.txt"),
+            b"client one",
+        );
+    }
+
+    #[test]
+    fn test_get_resource_server() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_get_resource(
+            &pack,
+            PackType::ServerData,
+            &resource_id!("api_data:test/server.txt"),
+            b"server data",
+        );
+    }
+
+    #[test]
+    fn test_get_resource_missing() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_get_resource_missing(
+            &pack,
+            PackType::ClientResources,
+            &resource_id!("api_test:test/missing.txt"),
+        );
+    }
+
+    #[test]
+    fn test_get_resource_wrong_domain() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_get_resource_missing(
+            &pack,
+            PackType::ServerData,
+            &resource_id!("api_test:test/one.txt"),
+        );
+    }
+
+    #[test]
+    fn test_list_resources_client() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_list_resources(
+            &pack,
+            PackType::ClientResources,
+            "api_test",
+            "test",
+            &[
+                (
+                    resource_id!("api_test:test/one.txt"),
+                    b"client one".to_vec(),
+                ),
+                (
+                    resource_id!("api_test:test/nested/two.txt"),
+                    b"client two".to_vec(),
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_list_resources_server() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_list_resources(
+            &pack,
+            PackType::ServerData,
+            "api_data",
+            "test",
+            &[(
+                resource_id!("api_data:test/server.txt"),
+                b"server data".to_vec(),
+            )],
+        );
+    }
+
+    #[test]
+    fn test_list_resources_empty_directory() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_list_resources(
+            &pack,
+            PackType::ClientResources,
+            "api_test",
+            "",
+            &[
+                (
+                    resource_id!("api_test:test/one.txt"),
+                    b"client one".to_vec(),
+                ),
+                (
+                    resource_id!("api_test:test/nested/two.txt"),
+                    b"client two".to_vec(),
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_list_resources_missing_directory() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_list_resources(&pack, PackType::ClientResources, "api_test", "missing", &[]);
+    }
+
+    #[test]
+    fn test_list_resources_missing_namespace() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_list_resources(&pack, PackType::ClientResources, "missing", "test", &[]);
+    }
+
+    #[test]
+    fn test_list_resources_wrong_domain() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_list_resources(&pack, PackType::ServerData, "api_test", "test", &[]);
+    }
+
+    #[test]
+    fn test_get_namespaces_client() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_get_namespaces(
+            &pack,
+            PackType::ClientResources,
+            &HashSet::from(["api_test".into(), "api_data".into()]),
+        );
+    }
+
+    #[test]
+    fn test_get_namespaces_server() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_get_namespaces(
+            &pack,
+            PackType::ServerData,
+            &HashSet::from(["api_test".into(), "api_data".into()]),
+        );
+    }
+
+    #[test]
+    fn test_pack_id() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_pack_id(&pack, "vanilla-api");
+    }
+
+    #[test]
+    fn test_known_pack_info_none() {
+        let (_temp, pack) = fixture(default_location());
+        tests::test_known_pack_info(&pack, None);
+    }
+
+    #[test]
+    fn test_known_pack_info_some() {
+        let expected = KnownPack {
+            namespace: "api_identity".into(),
+            id: "vanilla_known".into(),
+            version: "api-2".into(),
+        };
+        let location = PackLocationInfo {
+            known_pack_info: Some(expected.clone()),
+            ..default_location()
+        };
+        let (_temp, pack) = fixture(location);
+        tests::test_known_pack_info(&pack, Some(&expected));
+    }
+}
+
+#[cfg(test)]
+mod resources_supplier_tests {
+    use std::path::PathBuf;
+    use std::{fs, io};
+
+    use serde_json::Map;
+
+    use super::VanillaResourcesSupplier;
+    use crate::chat_component::Component;
+    use crate::resources::packs::{
+        FeatureFlagSet, PackCompat, PackLocationInfo, PackMetadata, PackSource, ResourcesSupplier,
+    };
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> io::Result<Self> {
+            for attempt in 0.. {
+                let path = std::env::temp_dir().join(format!(
+                    "pomme-vanilla-supplier-{}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Ok(Self(path)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.0) {
+                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
+            }
+        }
+    }
+
+    fn fixture() -> (TempDir, VanillaResourcesSupplier) {
+        let temp = TempDir::new().unwrap();
+        let extracted_root = temp.0.join("extracted");
+        let objects_root = temp.0.join("objects");
+        let index_file = temp.0.join("index.json");
+        fs::create_dir(&extracted_root).unwrap();
+        fs::create_dir(&objects_root).unwrap();
+        fs::write(&index_file, br#"{"objects":{}}"#).unwrap();
+        let supplier =
+            VanillaResourcesSupplier::new(extracted_root, &index_file, &objects_root, Map::new())
+                .unwrap();
+        (temp, supplier)
+    }
+
+    fn location() -> PackLocationInfo {
+        PackLocationInfo {
+            id: "vanilla-supplier-api".into(),
+            title: Component::text("Supplier API test"),
+            source: PackSource::default(),
+            known_pack_info: None,
+        }
+    }
+
+    #[test]
+    fn test_open_metadata() {
+        let (_temp, supplier) = fixture();
+        let location = location();
+        <dyn ResourcesSupplier>::test_open_metadata(&supplier, &location, "vanilla-supplier-api");
+    }
+
+    #[test]
+    fn test_open_resources() {
+        let (_temp, supplier) = fixture();
+        let location = location();
+        let metadata = PackMetadata {
+            description: Component::text("Supplier API test"),
+            compatibility: PackCompat::Compatible,
+            requested_features: FeatureFlagSet::empty(),
+            overlays: Vec::new(),
+        };
+        <dyn ResourcesSupplier>::test_open_resources(
+            &supplier,
+            &location,
+            &metadata,
+            &["vanilla-supplier-api", "vanilla-supplier-api"],
+        );
+    }
+}

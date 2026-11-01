@@ -42,3 +42,36 @@ fn path_error(operation: &str, path: &Path, error: io::Error) -> io::Error {
         format!("{operation} at {}: {error}", path.display()),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        dead_code,
+        reason = "Generic API assertions pending user review before fixtures"
+    )]
+
+    use super::RepositorySource;
+
+    pub(super) fn test_load_packs_empty<S: RepositorySource + ?Sized>(source: &mut S) {
+        let actual = source.load_packs().expect("load_packs should succeed");
+        assert!(actual.is_empty(), "load_packs should return no packs");
+    }
+
+    pub(super) fn test_load_packs<S: RepositorySource + ?Sized>(
+        source: &mut S,
+        expected_location_ids: &[&str],
+    ) {
+        let actual = source.load_packs().expect("load_packs should succeed");
+        let mut ids: Vec<_> = actual
+            .iter()
+            .map(|pack| pack.location().id.as_str())
+            .collect();
+        ids.sort_unstable();
+        let mut expected = expected_location_ids.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            ids, expected,
+            "load_packs location IDs including multiplicity"
+        );
+    }
+}

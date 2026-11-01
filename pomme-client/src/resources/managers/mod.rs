@@ -95,3 +95,154 @@ pub(crate) trait ResourceManager {
     /// Borrows the configured packs without opening resource content.
     fn list_packs(&self) -> Box<dyn Iterator<Item = &dyn PackResources> + '_>;
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        dead_code,
+        reason = "Generic API assertions pending user review before fixtures"
+    )]
+
+    use std::collections::{BTreeMap, HashSet};
+    use std::io::Read;
+
+    use super::{ResourceManager, Selector};
+    use crate::resources::ResourceId;
+
+    pub(super) fn test_get_resource<M: ResourceManager + ?Sized>(
+        manager: &M,
+        id: &ResourceId,
+        expected: &[u8],
+    ) {
+        let resource = manager
+            .get_resource(id)
+            .expect("get_resource should succeed")
+            .expect("get_resource should return a resource");
+        let mut actual = Vec::new();
+        resource
+            .content()
+            .open()
+            .expect("get_resource content should open")
+            .read_to_end(&mut actual)
+            .expect("get_resource content should read");
+        assert_eq!(actual, expected, "get_resource bytes for {id:?}");
+    }
+
+    pub(super) fn test_get_resource_missing<M: ResourceManager + ?Sized>(
+        manager: &M,
+        id: &ResourceId,
+    ) {
+        assert!(
+            manager
+                .get_resource(id)
+                .expect("get_resource should succeed")
+                .is_none(),
+            "get_resource should return None for {id:?}"
+        );
+    }
+
+    pub(super) fn test_get_resource_stack<M: ResourceManager + ?Sized>(
+        manager: &M,
+        id: &ResourceId,
+        expected: &[Vec<u8>],
+    ) {
+        let resources = manager
+            .get_resource_stack(id)
+            .expect("get_resource_stack should succeed");
+        let mut actual = Vec::new();
+        for resource in resources {
+            let mut bytes = Vec::new();
+            resource
+                .content()
+                .open()
+                .expect("get_resource_stack content should open")
+                .read_to_end(&mut bytes)
+                .expect("get_resource_stack content should read");
+            actual.push(bytes);
+        }
+        assert_eq!(
+            actual, expected,
+            "get_resource_stack bytes in order for {id:?}"
+        );
+    }
+
+    pub(super) fn test_list_resources<M: ResourceManager + ?Sized>(
+        manager: &M,
+        directory: &str,
+        selector: &Selector<'_>,
+        expected: &BTreeMap<ResourceId, Vec<u8>>,
+    ) {
+        let resources = manager
+            .list_resources(directory, selector)
+            .expect("list_resources should succeed");
+        let mut actual = BTreeMap::new();
+        for (id, resource) in resources {
+            let mut bytes = Vec::new();
+            resource
+                .content()
+                .open()
+                .expect("list_resources content should open")
+                .read_to_end(&mut bytes)
+                .expect("list_resources content should read");
+            actual.insert(id, bytes);
+        }
+        assert_eq!(
+            &actual, expected,
+            "list_resources IDs and bytes under {directory:?}"
+        );
+    }
+
+    pub(super) fn test_list_resource_stacks<M: ResourceManager + ?Sized>(
+        manager: &M,
+        directory: &str,
+        selector: &Selector<'_>,
+        expected: &BTreeMap<ResourceId, Vec<Vec<u8>>>,
+    ) {
+        let resources = manager
+            .list_resource_stacks(directory, selector)
+            .expect("list_resource_stacks should succeed");
+        let mut actual = BTreeMap::new();
+        for (id, resources) in resources {
+            let mut stack = Vec::new();
+            for resource in resources {
+                let mut bytes = Vec::new();
+                resource
+                    .content()
+                    .open()
+                    .expect("list_resource_stacks content should open")
+                    .read_to_end(&mut bytes)
+                    .expect("list_resource_stacks content should read");
+                stack.push(bytes);
+            }
+            actual.insert(id, stack);
+        }
+        assert_eq!(
+            &actual, expected,
+            "list_resource_stacks IDs and ordered bytes under {directory:?}"
+        );
+    }
+
+    pub(super) fn test_get_namespaces<M: ResourceManager + ?Sized>(
+        manager: &M,
+        expected: &HashSet<String>,
+    ) {
+        let actual = manager
+            .get_namespaces()
+            .expect("get_namespaces should succeed");
+        assert_eq!(&actual, expected, "get_namespaces result");
+    }
+
+    pub(super) fn test_list_packs<M: ResourceManager + ?Sized>(
+        manager: &M,
+        expected_location_ids: &[&str],
+    ) {
+        let actual: Vec<_> = manager
+            .list_packs()
+            .map(|pack| pack.location().id.as_str())
+            .collect();
+        assert_eq!(
+            actual, expected_location_ids,
+            "list_packs location IDs in order"
+        );
+    }
+}

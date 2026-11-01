@@ -164,3 +164,243 @@ impl PackRepository {
         enabled.into_iter().map(|pack| pack.id().clone()).collect()
     }
 }
+
+#[cfg(test)]
+mod pack_repository_api_tests {
+    use super::{FeatureFlagSet, PackId, PackRepository, RepositorySource};
+
+    pub(super) fn test_new(sources: Vec<Box<dyn RepositorySource>>) {
+        let actual = PackRepository::new(sources);
+        assert_eq!(actual.available_packs().count(), 0, "new available packs");
+        assert!(actual.enabled_ids().is_empty(), "new enabled IDs");
+    }
+
+    pub(super) fn test_reload(repository: &mut PackRepository, expected_location_ids: &[&str]) {
+        repository.reload().expect("reload should succeed");
+        let ids: Vec<_> = repository
+            .available_packs()
+            .map(|pack| pack.location().id.as_str())
+            .collect();
+        assert_eq!(ids, expected_location_ids, "reload available location IDs");
+    }
+
+    pub(super) fn test_get_pack(
+        repository: &PackRepository,
+        id: &PackId,
+        expected_location_id: Option<&str>,
+    ) {
+        let actual = repository
+            .get_pack(id)
+            .map(|pack| pack.location().id.as_str());
+        assert_eq!(actual, expected_location_id, "get_pack location ID");
+    }
+
+    pub(super) fn test_available_packs(
+        repository: &PackRepository,
+        expected_location_ids: &[&str],
+    ) {
+        let ids: Vec<_> = repository
+            .available_packs()
+            .map(|pack| pack.location().id.as_str())
+            .collect();
+        assert_eq!(ids, expected_location_ids, "available_packs location IDs");
+    }
+
+    pub(super) fn test_enabled_ids(repository: &PackRepository, expected: &[PackId]) {
+        assert_eq!(repository.enabled_ids(), expected, "enabled_ids");
+    }
+
+    pub(super) fn test_enabled_packs(repository: &PackRepository, expected_location_ids: &[&str]) {
+        let ids: Vec<_> = repository
+            .enabled_packs()
+            .map(|pack| pack.location().id.as_str())
+            .collect();
+        assert_eq!(ids, expected_location_ids, "enabled_packs location IDs");
+    }
+
+    pub(super) fn test_requested_feature_flags(
+        repository: &PackRepository,
+        expected: FeatureFlagSet,
+    ) {
+        assert_eq!(
+            repository.requested_feature_flags(),
+            expected,
+            "requested_feature_flags"
+        );
+    }
+
+    pub(super) fn test_set_enabled(repository: &mut PackRepository, ids: &[PackId]) {
+        repository.set_enabled(ids);
+        assert_eq!(repository.enabled_ids(), ids, "set_enabled IDs");
+    }
+
+    pub(super) fn test_enable_pack(repository: &mut PackRepository, id: &PackId) {
+        assert!(
+            repository.enable_pack(id),
+            "enable_pack should add the pack"
+        );
+    }
+
+    pub(super) fn test_disable_pack(repository: &mut PackRepository, id: &PackId) {
+        assert!(
+            repository.disable_pack(id),
+            "disable_pack should remove the pack"
+        );
+    }
+
+    pub(super) fn test_open_all_enabled(
+        repository: &PackRepository,
+        expected_location_ids: &[&str],
+    ) {
+        let actual = repository
+            .open_all_enabled()
+            .expect("open_all_enabled should succeed");
+        let ids: Vec<_> = actual
+            .iter()
+            .map(|(_, resources)| resources.location().id.as_str())
+            .collect();
+        assert_eq!(ids, expected_location_ids, "open_all_enabled location IDs");
+    }
+}
+
+#[cfg(test)]
+mod pack_repository_tests {
+    use super::{
+        FeatureFlagSet, Pack, PackId, PackRepository, Rc, RepositorySource, io,
+        pack_repository_api_tests,
+    };
+    use crate::chat_component::Component;
+    use crate::resources::pack_resources::EmbeddedResourcesSupplier;
+    use crate::resources::packs::{
+        PackCompat, PackEnablementConfig, PackLocationInfo, PackMetadata, PackPosition, PackSource,
+    };
+
+    struct Source {
+        pack: Pack,
+    }
+
+    impl RepositorySource for Source {
+        fn load_packs(&mut self) -> io::Result<Vec<Pack>> {
+            Ok(vec![self.pack.clone()])
+        }
+    }
+
+    fn input_pack() -> Pack {
+        Pack::new(
+            PackLocationInfo {
+                id: "api-pack".to_owned(),
+                title: Component::text("API pack"),
+                source: PackSource::default(),
+                known_pack_info: None,
+            },
+            PackMetadata {
+                description: Component::text("API pack description"),
+                compatibility: PackCompat::Compatible,
+                requested_features: FeatureFlagSet::VANILLA,
+                overlays: Vec::new(),
+            },
+            PackEnablementConfig {
+                required: false,
+                default_position: PackPosition::Top,
+                fixed_position: false,
+            },
+            Rc::new(EmbeddedResourcesSupplier::new()),
+        )
+    }
+
+    fn fixture() -> (PackRepository, PackId) {
+        let source = Source { pack: input_pack() };
+        let id = source.pack.id().clone();
+        (PackRepository::new(vec![Box::new(source)]), id)
+    }
+
+    #[test]
+    fn test_new() {
+        pack_repository_api_tests::test_new(vec![Box::new(Source { pack: input_pack() })]);
+    }
+
+    #[test]
+    fn test_reload() {
+        let (mut repository, _) = fixture();
+        pack_repository_api_tests::test_reload(&mut repository, &["api-pack"]);
+    }
+
+    #[test]
+    fn test_get_pack() {
+        let (mut repository, id) = fixture();
+        repository.reload().unwrap();
+        pack_repository_api_tests::test_get_pack(&repository, &id, Some("api-pack"));
+    }
+
+    #[test]
+    fn test_get_pack_missing() {
+        let (mut repository, _) = fixture();
+        repository.reload().unwrap();
+        let unregistered = input_pack();
+        pack_repository_api_tests::test_get_pack(&repository, unregistered.id(), None);
+    }
+
+    #[test]
+    fn test_available_packs() {
+        let (mut repository, _) = fixture();
+        repository.reload().unwrap();
+        pack_repository_api_tests::test_available_packs(&repository, &["api-pack"]);
+    }
+
+    #[test]
+    fn test_enabled_ids() {
+        let (mut repository, id) = fixture();
+        repository.reload().unwrap();
+        repository.set_enabled(std::slice::from_ref(&id));
+        pack_repository_api_tests::test_enabled_ids(&repository, &[id]);
+    }
+
+    #[test]
+    fn test_enabled_packs() {
+        let (mut repository, id) = fixture();
+        repository.reload().unwrap();
+        repository.set_enabled(&[id]);
+        pack_repository_api_tests::test_enabled_packs(&repository, &["api-pack"]);
+    }
+
+    #[test]
+    fn test_requested_feature_flags() {
+        let (mut repository, id) = fixture();
+        repository.reload().unwrap();
+        repository.set_enabled(&[id]);
+        pack_repository_api_tests::test_requested_feature_flags(
+            &repository,
+            FeatureFlagSet::VANILLA,
+        );
+    }
+
+    #[test]
+    fn test_set_enabled() {
+        let (mut repository, id) = fixture();
+        repository.reload().unwrap();
+        pack_repository_api_tests::test_set_enabled(&mut repository, &[id]);
+    }
+
+    #[test]
+    fn test_enable_pack() {
+        let (mut repository, id) = fixture();
+        repository.reload().unwrap();
+        pack_repository_api_tests::test_enable_pack(&mut repository, &id);
+    }
+
+    #[test]
+    fn test_disable_pack() {
+        let (mut repository, id) = fixture();
+        repository.reload().unwrap();
+        repository.set_enabled(std::slice::from_ref(&id));
+        pack_repository_api_tests::test_disable_pack(&mut repository, &id);
+    }
+
+    #[test]
+    fn test_open_all_enabled() {
+        let (mut repository, id) = fixture();
+        repository.reload().unwrap();
+        repository.set_enabled(&[id]);
+        pack_repository_api_tests::test_open_all_enabled(&repository, &["api-pack"]);
+    }
+}
