@@ -84,6 +84,10 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
             Ok(Value::Null)
         }
         Command::Hover(target) => hover(core, gfx, game, target),
+        Command::Modifiers(modifiers) => {
+            core.input.hold_harness_shift(modifiers.shift);
+            Ok(Value::Null)
+        }
         Command::Cursor { at } => {
             let gs = gui_scale(core, gfx);
             core.input.on_cursor_moved(at[0] * gs, at[1] * gs);
@@ -230,15 +234,19 @@ fn hover(
     game: &crate::app::phases::in_game::GameState,
     target: &protocol::Hover,
 ) -> Result<Value, String> {
-    use crate::ui::creative_inventory::{HoverTarget, slot_center};
+    use crate::ui::creative_inventory::{CreativeTab, HoverTarget, slot_center};
 
     if !game.creative_inventory_open {
         return Err("hover needs the creative inventory open".into());
     }
-    let cell = match (target.slot, target.catalog) {
-        (Some(slot), None) => HoverTarget::Hotbar(slot),
-        (None, Some(cell)) => HoverTarget::Catalog(cell),
-        _ => return Err("hover takes one of slot or catalog".into()),
+    let cell = match (target.slot, target.catalog, &target.tab, target.trash) {
+        (Some(slot), None, None, false) => HoverTarget::Hotbar(slot),
+        (None, Some(cell), None, false) => HoverTarget::Catalog(cell),
+        (None, None, Some(id), false) => HoverTarget::Tab(
+            CreativeTab::from_id(id).ok_or_else(|| format!("no creative tab {id}"))?,
+        ),
+        (None, None, None, true) => HoverTarget::Trash,
+        _ => return Err("hover takes one of slot, catalog, tab or trash".into()),
     };
     let w = gfx.renderer.screen_width() as f32;
     let h = gfx.renderer.screen_height() as f32;

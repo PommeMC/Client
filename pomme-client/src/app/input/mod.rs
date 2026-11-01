@@ -47,6 +47,9 @@ pub struct InputState {
     /// Ctrl held by a harness `press`, for one frame.
     #[cfg(feature = "test-harness")]
     harness_ctrl: bool,
+    /// Shift held by harness `modifiers` until the next.
+    #[cfg(feature = "test-harness")]
+    harness_shift: bool,
     /// A harness `press` waiting for the next frame.
     #[cfg(feature = "test-harness")]
     harness_press: Option<(KeyCode, bool)>,
@@ -181,6 +184,8 @@ impl InputState {
             modifiers: Modifiers::default(),
             #[cfg(feature = "test-harness")]
             harness_ctrl: false,
+            #[cfg(feature = "test-harness")]
+            harness_shift: false,
             #[cfg(feature = "test-harness")]
             harness_press: None,
             #[cfg(feature = "test-harness")]
@@ -975,7 +980,16 @@ impl InputState {
     }
 
     pub fn shift_held(&self) -> bool {
+        #[cfg(feature = "test-harness")]
+        if self.harness_shift {
+            return true;
+        }
         self.modifiers.state().shift_key()
+    }
+
+    #[cfg(feature = "test-harness")]
+    pub fn hold_harness_shift(&mut self, held: bool) {
+        self.harness_shift = held;
     }
 
     pub fn ctrl_held(&self) -> bool {

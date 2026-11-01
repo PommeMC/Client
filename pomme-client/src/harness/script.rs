@@ -42,6 +42,7 @@ struct StepFile {
     click: Option<Click>,
     creative_set_slot: Option<CreativeSetSlot>,
     look_at: Option<[f64; 3]>,
+    modifiers: Option<protocol::Modifiers>,
     mouse_down: Option<Mouse>,
     mouse_up: Option<Mouse>,
     press: Option<protocol::Press>,
@@ -285,6 +286,9 @@ impl StepFile {
         }
         if let Some(at) = self.look_at {
             steps.push(Step::Run(Command::LookAt { at }));
+        }
+        if let Some(modifiers) = self.modifiers {
+            steps.push(Step::Run(Command::Modifiers(modifiers)));
         }
         if let Some(button) = self.mouse_down {
             steps.push(Step::Run(Command::MouseDown { button }));

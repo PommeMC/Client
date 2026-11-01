@@ -46,6 +46,9 @@ pub enum Command {
     MouseDown {
         button: Mouse,
     },
+    /// Holds modifier keys for the clicks and key presses that follow, until
+    /// the next `modifiers`.
+    Modifiers(Modifiers),
     /// Presses a key once: a key binding's default key, or a physical key.
     Press(Press),
     /// Assigns inputs to a key binding for this session, unsaved.
@@ -147,15 +150,27 @@ pub struct Bind {
     pub keys: Option<Vec<String>>,
 }
 
-/// A creative item-tab cell: one of `slot` (hotbar, 36-44) or `catalog`,
-/// optionally `offset` GUI pixels from its centre.
+/// A creative-screen target: one of `slot` (hotbar, 36-44) or `catalog`
+/// in an item tab, a `tab` button by its registry id, or the inventory tab's
+/// `trash`; optionally `offset` GUI pixels from its centre.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hover {
     pub slot: Option<u16>,
     pub catalog: Option<usize>,
+    pub tab: Option<String>,
+    #[serde(default)]
+    pub trash: bool,
     #[serde(default)]
     pub offset: [f32; 2],
+}
+
+/// Modifier keys a harness holds down.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Modifiers {
+    #[serde(default)]
+    pub shift: bool,
 }
 
 /// Sets inventory slot `slot` to a copy of slot `from`'s stack, as the

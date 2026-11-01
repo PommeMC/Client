@@ -2299,6 +2299,53 @@ pub(crate) fn renders_first_person_hand(game: &GameState) -> bool {
     )
 }
 
+/// Vanilla `LevelExtractor.extractBlockOutline` under
+/// `GameRenderer.shouldRenderBlockOutline`: the targeted block's outline
+/// shape and its origin, unless the HUD is hidden or the player can't build
+/// there.
+fn block_outline(
+    game: &GameState,
+    selected_slot: u8,
+) -> Option<(
+    glam::DVec3,
+    &'static [crate::physics::block_shape::LocalBox],
+)> {
+    let Some(HitResult::Block(hit)) = game.interaction.target else {
+        return None;
+    };
+    if game.hide_gui {
+        return None;
+    }
+    let pos = hit.block_pos;
+    let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+    let block_state_data = game
+        .block_registry
+        .block_state_table()
+        .block_state_data(state);
+    if block_state_data.is_air() {
+        return None;
+    }
+    match game.player.game_mode {
+        3 if !crate::player::interaction::interactable_in_spectator(block_state_data) => {
+            return None;
+        }
+        // TODO: shown while the held item's `can_break` or `can_place_on`
+        // matches the block.
+        2 => return None,
+        _ => {}
+    }
+    let held_item = game.player.inventory.hand_stacks(selected_slot)[0]
+        .map(|data| crate::player::inventory::item_resource_name(data.kind));
+    let boxes = crate::physics::block_shape::outline_shape_holding_data(
+        block_state_data,
+        held_item.as_deref(),
+    );
+    Some((
+        block_state_data.outline_shape_position(pos.x, pos.y, pos.z),
+        boxes,
+    ))
+}
+
 fn hand_visible(sleeping: bool, hide_gui: bool, game_mode: u8) -> bool {
     !sleeping && !hide_gui && game_mode != 3
 }
@@ -3875,6 +3922,7 @@ pub fn update_game(
             game.advanced_item_tooltips,
             core.input.left_held(),
             core.input.right_held(),
+            core.input.shift_held(),
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
         player_preview = crate::ui::creative_inventory::player_preview(
@@ -4040,6 +4088,7 @@ pub fn update_game(
         let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
         (pos, stage, state)
     });
+    let block_outline = block_outline(game, core.input.selected_slot());
 
     use crate::entity::glowing::{appears_glowing, outline_color, scoreboard_name};
     use crate::renderer::pipelines::entity_renderer::Visibility;
@@ -4503,6 +4552,7 @@ pub fn update_game(
         game.scoreboard.member_team_color(&core.user.username),
         renders_first_person_hand(game),
         destroy_info,
+        block_outline,
         game.show_chunk_borders,
         sky,
         ShadowScene {
