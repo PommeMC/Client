@@ -2048,6 +2048,8 @@ impl Renderer {
                 eyes_in_water,
             } => {
                 let cull_ms = if pack_drawn {
+                    // TODO: the block outline, which packs draw through
+                    // `gbuffers_line`.
                     if let Some((_, Some(pack))) = &mut self.shader_pack {
                         pack.draw_final(&self.ctx.device, &mut pass, frame);
                     }

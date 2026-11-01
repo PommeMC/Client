@@ -2310,11 +2310,10 @@ fn block_outline(
     glam::DVec3,
     &'static [crate::physics::block_shape::LocalBox],
 )> {
-    let Some(HitResult::Block(hit)) = game.interaction.target else {
+    let Some(HitResult::Block(hit)) = camera_target(game) else {
         return None;
     };
-    // The camera entity must be a player; spectated mobs aren't.
-    if game.hide_gui || game.spectated().is_some() {
+    if game.hide_gui {
         return None;
     }
     let pos = hit.block_pos;
@@ -2346,6 +2345,15 @@ fn block_outline(
     ))
 }
 
+/// Vanilla `Minecraft.hitResult`.
+// TODO: pick from a spectated entity; the target is cast from the player's
+// own body, so nothing counts as targeted while spectating one.
+fn camera_target(game: &GameState) -> Option<HitResult> {
+    game.camera_entity
+        .is_none()
+        .then_some(game.interaction.target)?
+}
+
 fn block_state_data_at(
     game: &GameState,
     pos: crate::position::BlockPos,
@@ -2357,7 +2365,7 @@ fn block_state_data_at(
 /// Vanilla `Hud.canRenderCrosshairForSpectator`: the target is a block shown
 /// as interactable in spectator mode, or a menu-providing entity.
 fn spectator_crosshair(game: &GameState) -> bool {
-    match game.interaction.target {
+    match camera_target(game) {
         Some(HitResult::Block(hit)) => crate::player::interaction::interactable_in_spectator(
             block_state_data_at(game, hit.block_pos),
         ),
