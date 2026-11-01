@@ -1,8 +1,8 @@
-# The horizon through a shader pack (fixtures/shaderpacks/pomme_test): high
-# above the flat world, the sky below the top disc's edge goes through
-# `gbuffers_skybasic` as Iris's horizon, tinted red with the disc by
-# `renderStage`, rather than the pack's cleared colour. Then packs off, with
-# the same shot to compare.
+# The horizon through a shader pack (fixtures/shaderpacks/pomme_test): above
+# the flat world, standing on a barrier so both shots share the eye, the sky
+# below the top disc's edge goes through `gbuffers_skybasic` as Iris's
+# horizon, tinted red with the disc by `renderStage`, rather than the pack's
+# cleared colour. Then packs off, with the same shot to compare.
 
 [[step]]
 wait_ms = 2000
@@ -15,6 +15,9 @@ chat = "/gamemode creative"
 
 [[step]]
 chat = "/time set 6000"
+
+[[step]]
+chat = "/setblock 0 -21 0 minecraft:barrier"
 
 [[step]]
 chat = "/tp @s 0.5 -20 0.5 0 10"
@@ -35,6 +38,9 @@ wait_ms = 3000
 expect = { terrain = "settled" }
 
 [[step]]
+expect = { player = { position = [0.5, -20.0, 0.5] } }
+
+[[step]]
 screenshot = "pack_horizon"
 
 [[step]]
@@ -47,10 +53,16 @@ wait_ms = 1500
 expect = { terrain = "settled" }
 
 [[step]]
+expect = { player = { position = [0.5, -20.0, 0.5] } }
+
+[[step]]
 screenshot = "off_horizon"
 
 [[step]]
 press = { action = "key.toggleGui" }
+
+[[step]]
+chat = "/setblock 0 -21 0 minecraft:air"
 
 [[step]]
 chat = "/gamemode survival"
