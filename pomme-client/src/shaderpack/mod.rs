@@ -546,4 +546,20 @@ void main",
             Some("composite")
         );
     }
+
+    #[test]
+    fn the_alpha_test_override_follows_the_loaded_program() {
+        let pack = ShaderPack::for_test(
+            &["gbuffers_textured_lit.vsh", "gbuffers_textured_lit.fsh"],
+            &[
+                ("alphaTest.gbuffers_particles", "GREATER 0.5"),
+                ("alphaTest.gbuffers_textured_lit", "off"),
+            ],
+        );
+        let text = pack
+            .gbuffers("minecraft:overworld", Gbuffers::Particles)
+            .unwrap()
+            .unwrap();
+        assert_eq!(text.alpha_test, Some(AlphaTest::OFF));
+    }
 }

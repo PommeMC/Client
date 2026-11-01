@@ -129,7 +129,8 @@ impl PackGeometry {
     fn alpha_test(self) -> AlphaTest {
         match self {
             // TODO: cutout terrain tests at half alpha (`SODIUM_TERRAIN_CUTOUT`),
-            // once its draws are told apart.
+            // once its draws are told apart, and so does the sunrise fan
+            // (`SKY_BASIC_COLOR`, non-zero alpha), which shares the sky's program.
             Self::ShadowTerrain | Self::Terrain | Self::SkyBasic | Self::SkyTextured => {
                 AlphaTest::OFF
             }
