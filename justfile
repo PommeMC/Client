@@ -192,26 +192,19 @@ codec-fixtures:
     "${bin}javac" --release 25 -nowarn -cp "$cp" -d "$out/classes" tools/codec-oracle/CodecOracle.java
     "${bin}java" -cp "$cp$out/classes" CodecOracle pomme-protocol/src/data/codec-fixtures-26.2.json
 
-# JDK 25 bin dir for stategen; override with `just jdk=<path> stategen`.
-jdk := "C:/Program Files/Amazon Corretto/jdk25.0.2_10/bin"
+# JDK bin directory; override with `just jdk=<path> stategen <version>`.
+jdk := if os() == "windows" { "C:/Program Files/Amazon Corretto/jdk25.0.2_10/bin" } else { "/usr/bin" }
 
-# TODO: Windows only (javac.exe, ';' classpath separator); make portable.
-
-# Regenerate a version's per-state property table by running vanilla's own code
-# (tools/stategen/StateDump.java) against the reference server jar, then
-# compacting the dump with `blockgen state`. Uses the deobf server jar when
-# one exists (pre-26.x); needs the Corretto JDK for 26.x class files. Also
-# writes the version's per-block piston table (piston-<version>.json).
+# Fetch SHA-1-verified official server jars and mappings. Pre-26.1 jars are
+# remapped with pinned AutoRenamingTool 2.0.17: --map server-mappings.txt
+# --reverse --strip-sigs (Mojang named -> obfuscated mappings), with bundled
+# libraries passed via --lib. All downloaded/remapped inputs stay in reference/.
+# The Python runner selects java[.exe], javac[.exe], and the OS classpath separator.
 stategen version="26.2":
     #!/usr/bin/env bash
     set -euo pipefail
-    v="{{ version }}"
-    ref="reference/$v"
-    jdk="{{ jdk }}"
-    mkdir -p tools/stategen/out
-    "$jdk/javac.exe" --release 21 -d tools/stategen/out tools/stategen/StateDump.java
-    "$jdk/java.exe" -cp "$(just _vanilla-classpath "$v")" StateDump "$v" "$ref/generated/state.json" pomme-client/src/world/block/data/piston-"$v".json
-    cargo run -p blockgen -- state "$ref/generated/state.json" pomme-client/src/world/block/data/blocks-"$v".json pomme-client/src/world/block/data/state-"$v".json
+    python=$(command -v python3 || command -v python)
+    "$python" tools/stategen/generate.py state "{{ version }}" --jdk "{{ jdk }}"
 
 # Regenerate the block sound table every version shares by running each
 # version's vanilla (tools/stategen/SoundDump.java), then merging the dumps
@@ -219,31 +212,5 @@ stategen version="26.2":
 soundgen:
     #!/usr/bin/env bash
     set -euo pipefail
-    jdk="{{ jdk }}"
-    mkdir -p tools/stategen/out
-    "$jdk/javac.exe" --release 21 -d tools/stategen/out tools/stategen/SoundDump.java
-    dumps=()
-    for v in $(ls pomme-client/src/world/block/data/state-*.json | sed 's/.*state-\(.*\)\.json/\1/' | sort -Vr); do
-        out="reference/$v/generated/sounds.json"
-        "$jdk/java.exe" -cp "$(just _vanilla-classpath "$v")" SoundDump "$out"
-        dumps+=("$v=$out")
-    done
-    cargo run -p blockgen -- sounds pomme-client/src/world/block/block_sounds.json "${dumps[@]}"
-
-# The classpath that runs a version's vanilla server code with the tools in
-# tools/stategen/out: the deobf server jar when one exists (pre-26.x), and the
-# libraries bundled in the server jar, extracted on first use.
-_vanilla-classpath version:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    v="{{ version }}"
-    ref="reference/$v"
-    classes="$ref/server-$v.jar"
-    if [ -f "$ref/server-$v-deobf.jar" ]; then classes="$ref/server-$v-deobf.jar"; fi
-    if ! find "$ref/bundler" -name '*.jar' 2>/dev/null | grep -q .; then
-        # This unzip build doesn't glob archive members; list them explicitly.
-        unzip -Z1 "$ref/server.jar" | grep '^META-INF/libraries/.*\.jar$' \
-            | xargs unzip -qn "$ref/server.jar" -d "$ref/bundler" >&2
-    fi
-    libs=$(find "$ref/bundler" -name '*.jar' | tr '\n' ';')
-    echo "$classes;${libs}tools/stategen/out"
+    python=$(command -v python3 || command -v python)
+    "$python" tools/stategen/generate.py sounds --jdk "{{ jdk }}"
