@@ -1,4 +1,4 @@
-use std::f32::consts::TAU;
+use std::f32::consts::{FRAC_PI_4, TAU};
 use std::path::Path;
 
 use glam::{Mat4, Vec3, Vec4};
@@ -18,6 +18,10 @@ const SUNRISE_STEPS: u32 = 16;
 const END_SKY_SIZE: f32 = 100.0;
 /// The end sky's texture repeats this many times across a face.
 const END_SKY_REPEATS: f32 = 16.0;
+/// The render distances the horizon's width follows: it stops growing at 16.
+const HORIZON_MIN_DISTANCE: u32 = 2;
+const HORIZON_MAX_DISTANCE: u32 = 16;
+const HORIZONS: usize = (HORIZON_MAX_DISTANCE - HORIZON_MIN_DISTANCE + 1) as usize;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -86,6 +90,27 @@ pub struct SkyDraw {
     push: SkyPush,
     texture: rhi::backend::BindGroup,
     vertices: (u32, u32),
+}
+
+impl SkyDraw {
+    fn new(
+        stage: SkyStage,
+        pose: Mat4,
+        color: Vec4,
+        texture: rhi::backend::BindGroup,
+        vertices: (u32, u32),
+    ) -> Self {
+        Self {
+            stage,
+            push: SkyPush {
+                pose: pose.to_cols_array_2d(),
+                color: color.to_array(),
+                stage: stage as u32,
+            },
+            texture,
+            vertices,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -306,18 +331,27 @@ impl SkyPipeline {
                     SkyStage::Stars => (self.sun_set, self.ranges.stars),
                     SkyStage::Void => (self.sun_set, self.ranges.dark_disc),
                 };
-                SkyDraw {
-                    stage,
-                    push: SkyPush {
-                        pose: pose.to_cols_array_2d(),
-                        color: color.to_array(),
-                        stage: stage as u32,
-                    },
-                    texture,
-                    vertices,
-                }
+                SkyDraw::new(stage, pose, color, texture, vertices)
             })
             .collect()
+    }
+
+    /// Iris's `HorizonRenderer`, which a shader pack's sky starts with: the
+    /// fog-coloured cone under the top disc, so `gbuffers_skybasic` covers
+    /// the sky below the horizon too.
+    // TODO: dimensions with skylight but another skybox.
+    pub fn horizon(&self, sky: &SkyState, render_distance: u32) -> Option<SkyDraw> {
+        matches!(sky.skybox, Skybox::Overworld).then(|| {
+            let index = render_distance.clamp(HORIZON_MIN_DISTANCE, HORIZON_MAX_DISTANCE)
+                - HORIZON_MIN_DISTANCE;
+            SkyDraw::new(
+                SkyStage::Sky,
+                Mat4::IDENTITY,
+                sky.fog_color.extend(1.0),
+                self.sun_set,
+                self.ranges.horizon[index as usize],
+            )
+        })
     }
 
     /// Records `draw` into a pass whose pipeline layout takes the sky push
@@ -482,6 +516,7 @@ struct Ranges {
     sunrise: (u32, u32),
     dark_disc: (u32, u32),
     end_sky: (u32, u32),
+    horizon: [(u32, u32); HORIZONS],
 }
 
 fn build_all_geometry() -> (Vec<SkyVertex>, Ranges) {
@@ -503,6 +538,9 @@ fn build_all_geometry() -> (Vec<SkyVertex>, Ranges) {
         // Built at -16 and drawn 12 higher, so its fog distances are vanilla's.
         dark_disc: add(&|v| build_sky_disc(v, -16.0)),
         end_sky: add(&build_end_sky),
+        horizon: std::array::from_fn(|i| {
+            add(&|v| build_horizon(v, i as u32 + HORIZON_MIN_DISTANCE))
+        }),
     };
     (verts, ranges)
 }
@@ -566,6 +604,22 @@ fn build_sky_disc(verts: &mut Vec<SkyVertex>, y: f32) {
             position: perimeter[i + 1],
             uv,
         });
+    }
+}
+
+/// Iris `HorizonRenderer.buildHorizon`'s fan: from 16 below the eye out to
+/// an octagon 16 above it, `render_distance` chunks wide up to 16.
+fn build_horizon(verts: &mut Vec<SkyVertex>, render_distance: u32) {
+    let radius = (render_distance.min(HORIZON_MAX_DISTANCE) * 16) as f32;
+    let uv = [0.0, 0.0];
+    let rim = |i: i32| {
+        let angle = -i as f32 * FRAC_PI_4;
+        [radius * angle.cos(), 16.0, radius * angle.sin()]
+    };
+    for i in 0..8 {
+        for position in [[0.0, -16.0, 0.0], rim(i), rim(i + 1)] {
+            verts.push(SkyVertex { position, uv });
+        }
     }
 }
 
@@ -747,6 +801,24 @@ mod tests {
         assert_eq!(stages(&sky, false), [SkyStage::CustomSky]);
         sky.skybox = Skybox::None;
         assert!(stages(&sky, false).is_empty());
+    }
+
+    #[test]
+    fn the_horizon_follows_iris() {
+        for (render_distance, radius) in [(2, 32.0), (8, 128.0), (16, 256.0)] {
+            let mut verts = Vec::new();
+            build_horizon(&mut verts, render_distance);
+            assert_eq!(verts.len(), 24);
+            for (i, v) in verts.iter().enumerate() {
+                let p = Vec3::from_array(v.position);
+                if i % 3 == 0 {
+                    assert_eq!(p, Vec3::new(0.0, -16.0, 0.0));
+                } else {
+                    assert_eq!(p.y, 16.0);
+                    assert!((p.with_y(0.0).length() - radius).abs() < 1e-3, "{p}");
+                }
+            }
+        }
     }
 
     #[test]

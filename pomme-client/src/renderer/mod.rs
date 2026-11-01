@@ -932,9 +932,16 @@ impl Renderer {
         // Drawn underwater too, as Iris does; the pack fogs it.
         // TODO: skipped in lava and powder snow, or under an effect that
         // blocks the sky (`LevelRenderer.addSkyPass`).
-        let draws = self
+        let draws: Vec<_> = self
             .sky_pipeline
-            .draws(&self.camera, sky, pack.sun_path_rotation());
+            .horizon(sky, *render_distance)
+            .filter(|_| pack.horizon)
+            .into_iter()
+            .chain(
+                self.sky_pipeline
+                    .draws(&self.camera, sky, pack.sun_path_rotation()),
+            )
+            .collect();
         pack.draw_sky(device, encoder, frame, &self.sky_pipeline, &draws);
 
         let frustum = self.camera.frustum_planes();
