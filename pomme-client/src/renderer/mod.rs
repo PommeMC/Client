@@ -2101,13 +2101,6 @@ impl Renderer {
                             *stage,
                         );
                     }
-                    if let Some((origin, boxes)) = block_outline {
-                        let origin = (*origin - anchor).as_vec3();
-                        let screen = [self.screen_width() as f32, self.screen_height() as f32];
-                        self.block_outline_pipeline
-                            .draw(&mut pass, frame, boxes, origin, screen);
-                    }
-
                     let ent_frustum = self.camera.frustum_planes();
                     let ent_cull_dist = entity_cull_distance(*render_distance);
 
@@ -2141,6 +2134,15 @@ impl Renderer {
                     // particles after all translucents into a depth-sharing
                     // target).
                     self.particle_pipeline.draw(&mut pass, frame);
+
+                    // After entities, block entities and particles, as
+                    // `LevelRenderer.submitFeatures` submits it.
+                    if let Some((origin, boxes)) = block_outline {
+                        let origin = (*origin - anchor).as_vec3();
+                        let screen = [self.screen_width() as f32, self.screen_height() as f32];
+                        self.block_outline_pipeline
+                            .draw(&mut pass, frame, boxes, origin, screen);
+                    }
 
                     // Translucent water draws after opaque terrain and entities so it
                     // blends over them; depth-tested (occluded by geometry in front)

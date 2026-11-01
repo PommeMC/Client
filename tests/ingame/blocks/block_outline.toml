@@ -109,14 +109,29 @@ press = { action = "key.toggleGui" }
 [[step]]
 chat = "/gamemode spectator"
 
+# In reach of the chest.
+[[step]]
+chat = "/tp @s -145.5 -60 -151.5"
+
+[[step]]
+expect = { player = { position = [-145.5, -60.0, -151.5] } }
+
 [[step]]
 look_at = [-145.5, -59.6, -147.5]
 
+# Lets the screenshot lines in chat fade off the crosshair, which spectators
+# see on the chest.
 [[step]]
-wait_ms = 300
+wait_ms = 10500
 
 [[step]]
 screenshot = "spectator_chest"
+
+[[step]]
+chat = "/tp @s -150.5 -60 -151.5"
+
+[[step]]
+expect = { player = { position = [-150.5, -60.0, -151.5] } }
 
 [[step]]
 look_at = [-149.5, -59.6, -147.5]

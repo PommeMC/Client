@@ -2313,18 +2313,18 @@ fn block_outline(
     let Some(HitResult::Block(hit)) = game.interaction.target else {
         return None;
     };
-    if game.hide_gui {
+    // The camera entity must be a player; spectated mobs aren't.
+    if game.hide_gui || game.spectated().is_some() {
         return None;
     }
     let pos = hit.block_pos;
-    let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
-    let block_state_data = game
-        .block_registry
-        .block_state_table()
-        .block_state_data(state);
+    let block_state_data = block_state_data_at(game, pos);
+    // TODO: also skip blocks outside the world border once it's tracked.
     if block_state_data.is_air() {
         return None;
     }
+    // TODO: gate on `abilities.mayBuild` rather than the game mode once it's
+    // tracked.
     match game.player.game_mode {
         3 if !crate::player::interaction::interactable_in_spectator(block_state_data) => {
             return None;
@@ -2344,6 +2344,27 @@ fn block_outline(
         block_state_data.outline_shape_position(pos.x, pos.y, pos.z),
         boxes,
     ))
+}
+
+fn block_state_data_at(
+    game: &GameState,
+    pos: crate::position::BlockPos,
+) -> &crate::world::block::BlockStateData {
+    game.block_registry
+        .block_state_data(game.chunk_store.get_block_state(pos.x, pos.y, pos.z))
+}
+
+/// Vanilla `Hud.canRenderCrosshairForSpectator`: the target is a block shown
+/// as interactable in spectator mode, or a menu-providing entity.
+fn spectator_crosshair(game: &GameState) -> bool {
+    match game.interaction.target {
+        Some(HitResult::Block(hit)) => crate::player::interaction::interactable_in_spectator(
+            block_state_data_at(game, hit.block_pos),
+        ),
+        // TODO: container minecarts and chest boats, once the pick ray
+        // reaches non-living entities.
+        _ => false,
+    }
 }
 
 fn hand_visible(sleeping: bool, hide_gui: bool, game_mode: u8) -> bool {
@@ -2392,10 +2413,7 @@ fn bed_orientation(
     game: &GameState,
     sleeping_pos: Option<crate::position::BlockPos>,
 ) -> Option<BedDirection> {
-    let pos = sleeping_pos?;
-    game.block_registry
-        .block_state_data(game.chunk_store.get_block_state(pos.x, pos.y, pos.z))
-        .bed_direction()
+    block_state_data_at(game, sleeping_pos?).bed_direction()
 }
 
 /// Vanilla `LivingEntityRenderer`: hurt or dying entities take the red overlay.
@@ -3097,6 +3115,7 @@ pub fn update_game(
             game.player.experience_progress,
             bar,
             game.player.game_mode,
+            spectator_crosshair(game),
             game.player.inventory.hotbar_slots(),
             game.player.inventory.offhand(),
             core.menu.main_hand_right(),
