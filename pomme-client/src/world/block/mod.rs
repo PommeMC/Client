@@ -261,6 +261,32 @@ impl BlockStateData {
         self.id.ends_with("_leaves")
     }
 
+    /// Vanilla `LiquidBlock`: the fluid itself, not a block holding one.
+    pub(crate) fn is_fluid_block(&self) -> bool {
+        matches!(self.id, "water" | "lava")
+    }
+
+    /// Vanilla `skipRendering` against a neighbour of its own kind on every
+    /// side: `HalfTransparentBlock`, `LiquidBlock`, mangrove roots and
+    /// powder snow.
+    pub(crate) fn culls_same(&self) -> bool {
+        matches!(
+            self.id,
+            "water"
+                | "lava"
+                | "glass"
+                | "tinted_glass"
+                | "ice"
+                | "frosted_ice"
+                | "blue_ice"
+                | "slime_block"
+                | "honey_block"
+                | "mangrove_roots"
+                | "powder_snow"
+        ) || self.id.ends_with("_stained_glass")
+            || self.id.ends_with("copper_grate")
+    }
+
     /// `getRenderShape() == RenderShape.INVISIBLE`: the blocks overriding it.
     pub(crate) fn is_invisible(&self) -> bool {
         self.is_air

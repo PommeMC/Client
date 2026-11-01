@@ -501,7 +501,7 @@ impl Renderer {
             &ctx.device,
             swapchain_state.targets(),
             &lightmap,
-            &distant_buffers,
+            distant_buffers.layout(),
         );
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
@@ -1380,14 +1380,29 @@ impl Renderer {
         self.chunk_buffers.clear();
     }
 
-    /// New and dropped distant terrain sections; returns those evicted for
-    /// room ([`distant::gpu::DistantBuffers::upload`]).
+    /// Newly meshed distant terrain sections
+    /// ([`distant::gpu::DistantBuffers::upload`]).
     pub(crate) fn upload_distant(
         &mut self,
         updates: impl IntoIterator<Item = distant::worker::DistantUpdate>,
-    ) -> Vec<distant::store::SectionKey> {
-        let eye = self.camera_render_position();
-        self.distant_buffers.upload(&self.ctx.device, updates, eye)
+    ) {
+        self.distant_buffers.upload(&self.ctx.device, updates);
+    }
+
+    /// The distant sections the last frame's traversal asked for, and those
+    /// it dropped ([`distant::gpu::DistantBuffers::take_requests`]).
+    pub(crate) fn take_distant_requests(
+        &mut self,
+    ) -> (
+        Vec<distant::section::SectionKey>,
+        Vec<distant::section::SectionKey>,
+    ) {
+        self.distant_buffers.take_requests()
+    }
+
+    /// Where distant terrain draws from and how far; `None` for not at all.
+    pub(crate) fn set_distant_view(&mut self, view: Option<distant::gpu::View>) {
+        self.distant_buffers.set_view(view);
     }
 
     /// Whether a real chunk draws at `pos`, where distant terrain gives way
@@ -2116,15 +2131,17 @@ impl Renderer {
                         // Its own projection, so its depth means nothing to
                         // the chunks: they start from a cleared buffer, and
                         // the drawn-column mask keeps it out of theirs.
+                        let eye = self.camera_render_position();
+                        let extent = self.swapchain.extent;
+                        self.distant_buffers.traverse(
+                            &self.camera,
+                            eye,
+                            [extent.width, extent.height],
+                        );
                         for translucent in [false, true] {
                             self.distant_pipeline.bind(&mut pass, frame, translucent);
-                            self.distant_buffers.draw(
-                                &pass,
-                                &self.camera,
-                                self.camera_render_position(),
-                                f64::from(*distant_terrain * 16),
-                                translucent,
-                            );
+                            self.distant_buffers
+                                .draw(&pass, &self.camera, eye, translucent);
                         }
                         pass.clear_depth(scissor);
                     }

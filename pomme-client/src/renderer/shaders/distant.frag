@@ -1,28 +1,26 @@
 #version 450
 
+// Voxy's `quads.frag`: the quad's face texture repeated per block from the
+// model atlas, cut out, tinted and lit.
+
 #include "fog.glsl"
 #include "distant_models.glsl"
 
+// Every model's face textures (models.rs).
+layout(set = 1, binding = 3) uniform texture2D model_atlas;
+layout(set = 1, binding = 4) uniform sampler model_sampler;
 // One bit per chunk column, ring-indexed as `world/chunk.rs` `ring_slot`:
 // set where a real chunk draws instead.
-layout(set = 1, binding = 0) readonly buffer DrawnColumns {
+layout(set = 1, binding = 5) readonly buffer DrawnColumns {
     uint drawn[];
 };
-// Every model's face textures (models.rs).
-layout(set = 1, binding = 1) uniform texture2D model_atlas;
-layout(set = 1, binding = 2) uniform sampler model_sampler;
 
-layout(location = 0) in vec4 v_color;
-layout(location = 1) in vec3 v_fog_color;
-layout(location = 2) in float v_fog;
-layout(location = 3) in vec2 v_column_pos;
-layout(location = 4) flat in ivec2 v_anchor;
-layout(location = 5) flat in vec2 v_outward;
-layout(location = 6) flat in uint v_seam;
-layout(location = 7) in vec3 v_light;
-layout(location = 8) in vec2 v_uv;
-layout(location = 9) flat in vec2 v_tile;
-layout(location = 10) flat in uint v_flags;
+layout(location = 0) flat in uvec3 v_data;
+layout(location = 1) in vec2 v_uv;
+layout(location = 2) in vec3 v_fog_color;
+layout(location = 3) in float v_fog;
+layout(location = 4) in vec2 v_column_pos;
+layout(location = 5) flat in ivec2 v_anchor;
 
 layout(location = 0) out vec4 out_color;
 
@@ -37,45 +35,46 @@ bool drawn_at(vec2 pos) {
     return (drawn[slot >> 5] & (1u << (slot & 31u))) != 0u;
 }
 
-// Voxy's `quads.frag`: the face's texel, mipped by how fast the unwrapped
-// texture coordinate moves so the wrap from column to column doesn't pick
-// the smallest mip; cut out by its unmipped alpha; tinted per the face's
-// tint state.
-vec4 model_color(vec2 dx, vec2 dy) {
-    vec2 pos = (v_tile + fract(v_uv) * FACE_SIZE) / ATLAS_SIZE;
-    vec4 color = textureGrad(sampler2D(model_atlas, model_sampler), pos, dx, dy);
+void main() {
+    uint flags = v_data.x;
+    uint face = flags >> 4u & 7u;
+    uint model_id = flags >> 16u;
+    vec2 size = vec2(flags >> 8u & 0xFu, flags >> 12u & 0xFu);
+    // The block within the quad, and the texel within its face.
+    vec2 tile;
+    vec2 texel = modf(v_uv, tile);
+    vec2 face_origin = vec2(model_id % ATLAS_COLUMNS, model_id / ATLAS_COLUMNS) * TILE_SIZE
+        + vec2(face >> 1u, face & 1u) * FACE_SIZE;
+    vec2 pos = (face_origin + texel * FACE_SIZE) / ATLAS_SIZE;
+    // Mipped by how fast the unwrapped coordinate moves, so the wrap from
+    // block to block doesn't pick the smallest mip.
+    vec2 unwrapped = v_uv * (FACE_SIZE / ATLAS_SIZE);
+    vec4 color = textureGrad(sampler2D(model_atlas, model_sampler), pos, dFdx(unwrapped), dFdy(unwrapped));
+    if (any(notEqual(clamp(tile, vec2(0.0), size), tile))) {
+        discard;
+    }
+    if (drawn_at(v_column_pos)) {
+        discard;
+    }
+    // Cut out by the unmipped alpha, which mips would smear.
     vec4 exact = textureLod(sampler2D(model_atlas, model_sampler), pos, 0.0);
-    if ((v_flags & FACE_TRANSLUCENT) != 0u) {
+    if ((flags & 2u) != 0u) {
         if (exact.a == 0.0) {
             discard;
         }
     } else {
         color.a = 1.0;
-        if ((v_flags & FACE_DISCARD) != 0u && exact.a <= 0.1) {
+        if ((flags & 1u) != 0u && exact.a <= 0.1) {
             discard;
         }
     }
-    uint tint = (v_flags >> 2) & 3u;
-    // Partly tinted, as a grass block's side: only its grey texels.
+    // `computeColour`: tint state 2 everywhere, 1 only on grey texels, as a
+    // grass block's side.
+    uint tint = flags >> 2u & 3u;
     bool grey = abs(exact.r - exact.g) < 0.02 && abs(exact.g - exact.b) < 0.02;
     if (tint == 2u || (tint == 1u && grey)) {
-        color.rgb *= v_color.rgb;
+        color.rgb *= unpackUnorm4x8(v_data.z).rgb;
     }
-    return color;
-}
-
-void main() {
-    // Before anything discards.
-    vec2 unwrapped = v_uv * (FACE_SIZE / ATLAS_SIZE);
-    vec2 dx = dFdx(unwrapped);
-    vec2 dy = dFdy(unwrapped);
-    // Nothing over a real chunk, nor a side facing one: the chunk draws its
-    // own edge, and through its water this one would show as a wall. A
-    // seam is the opposite, drawn only facing one.
-    bool faces_drawn = v_outward != vec2(0.0) && drawn_at(v_column_pos + v_outward);
-    if (drawn_at(v_column_pos) || faces_drawn == (v_seam == 0u)) {
-        discard;
-    }
-    vec4 color = (v_flags & TEXTURED) != 0u ? model_color(dx, dy) : v_color;
-    out_color = vec4(apply_fog(color.rgb * v_light, v_fog, v_fog_color), color.a);
+    color.rgb *= unpackUnorm4x8(v_data.y).rgb;
+    out_color = vec4(apply_fog(color.rgb, v_fog, v_fog_color), color.a);
 }

@@ -1,7 +1,8 @@
 #version 450
 
-// Distant terrain (renderer/distant): section-local boxes textured with
-// their block's baked model (Voxy's `quads3.vert`, `quad_util.glsl`), lit
+// Distant terrain (renderer/distant): Voxy's `quads3.vert` and
+// `quad_util.glsl`. Each quad is eight bytes in the bound arena, read by
+// `gl_VertexIndex >> 2`; its corners come from its model's face data, lit
 // through the lightmap and fogged like terrain.
 
 #include "fog.glsl"
@@ -12,90 +13,102 @@
 layout(push_constant) uniform DistantPc {
     // The camera's view projection with the distant near and far planes.
     mat4 distant_view_proj;
-    // The section's corner (at the dimension's min_y), relative to the
-    // camera anchor, and its column width in blocks.
-    vec4 origin;
+    // The section's corner relative to the camera anchor, and its level's
+    // scale: blocks per voxel.
+    vec4 origin_scale;
 };
 
-layout(location = 0) in uint in_xz;
-layout(location = 1) in uint in_y;
-layout(location = 2) in uvec2 in_light_face;
-layout(location = 3) in vec4 in_color;
-layout(location = 4) in uint in_model;
-layout(location = 5) in uvec2 in_flags;
+layout(set = 1, binding = 0) readonly buffer Quads {
+    uvec2 quads[];
+};
+layout(set = 1, binding = 1) readonly buffer Models {
+    BlockModel models[];
+};
+// Biome tints by kind (distant_models.glsl TINT_BIOMES per kind).
+layout(set = 1, binding = 2) readonly buffer Tints {
+    uint tints[];
+};
 
-// The tint over the texture, or with no model the colour, and its alpha.
-layout(location = 0) out vec4 v_color;
-layout(location = 1) out vec3 v_fog_color;
-layout(location = 2) out float v_fog;
-// Anchor-relative x/z, nudged half a block into the face's own column, and
-// the anchor: what distant.frag finds the column's chunk from.
-layout(location = 3) out vec2 v_column_pos;
-layout(location = 4) flat out ivec2 v_anchor;
-// A side face's step from v_column_pos into the column it faces; zero for
-// tops and bottoms.
-layout(location = 5) flat out vec2 v_outward;
-// 1 for a seam (mesh.rs `mesh_section`).
-layout(location = 6) flat out uint v_seam;
-// The lightmap's colour under the face's directional shade.
-layout(location = 7) out vec3 v_light;
-// Where on its face texture the fragment is, a texture per column: the
-// integer part steps a column, the fraction is the texel.
-layout(location = 8) out vec2 v_uv;
-// The face texture's corner in the model atlas, in texels.
-layout(location = 9) flat out vec2 v_tile;
-// The face's flags (distant_models.glsl).
-layout(location = 10) flat out uint v_flags;
+// Voxy's `interData`: quad flags (cutout bit 0, tint state 2-3, face 4-6,
+// width-1 8-11, height-1 12-15, model 16-31), the lightmap colour, the
+// tint colour.
+layout(location = 0) flat out uvec3 v_data;
+layout(location = 1) out vec2 v_uv;
+layout(location = 2) out vec3 v_fog_color;
+layout(location = 3) out float v_fog;
+// Anchor-relative x/z and the anchor: what distant.frag finds the column's
+// chunk from.
+layout(location = 4) out vec2 v_column_pos;
+layout(location = 5) flat out ivec2 v_anchor;
 
-// Distant Horizons' micro offset: how far a corner moves out along its
-// quad's plane.
-const float MICRO_OFFSET = 0.01;
+// Vanilla's directional shade (the overworld's cardinal lighting), by face.
+const float FACE_SHADE[6] = float[](0.5, 1.0, 0.8, 0.8, 0.6, 0.6);
 
-// mesh.rs `Face`: up, down, north, south, west, east.
-const vec2 FACE_NUDGE[6] = vec2[](
-    vec2(0.0), vec2(0.0),
-    vec2(0.0, 0.5), vec2(0.0, -0.5),
-    vec2(0.5, 0.0), vec2(-0.5, 0.0)
-);
-// Vanilla's directional shade (the overworld's cardinal lighting).
-const float FACE_SHADE[6] = float[](1.0, 0.5, 0.8, 0.8, 0.6, 0.6);
-// The face's index in its model's (mesh.rs `Face::voxy_index`).
-const uint MODEL_FACE[6] = uint[](1u, 0u, 2u, 3u, 4u, 5u);
-// Per model face, the block axes its texture's x and y run along
-// (bakery.rs `TILE_AXES`).
-const ivec2 TILE_AXES[6] = ivec2[](
-    ivec2(0, 2), ivec2(0, 2), ivec2(0, 1), ivec2(0, 1), ivec2(1, 2), ivec2(1, 2)
-);
-// A corner's micro offset along one axis, from its 2 bits (mesh.rs
-// `DistantVertex::face`).
-float micro_offset(uint bits) {
-    return (bits & 1u) == 0u ? 0.0 : ((bits & 2u) == 0u ? MICRO_OFFSET : -MICRO_OFFSET);
+uint field(uvec2 quad, uint bits, uint shift) {
+    uint word = shift < 32u ? quad.x : quad.y;
+    return (word >> (shift & 31u)) & ((1u << bits) - 1u);
+}
+
+// `swizzelDataAxis`: a plane's two extents and its depth put on the axes the
+// face's normal leaves free.
+vec3 swizzle(uint axis, vec3 data) {
+    return axis == 0u ? data.xzy : (axis == 1u ? data : data.zxy);
 }
 
 void main() {
-    vec3 local = vec3(float(in_xz & 0xFFFFu), float(in_y), float(in_xz >> 16));
-    uint face = min(in_light_face.y & 7u, 5u);
-    uint model_face = MODEL_FACE[face];
-    vec3 columns = local / origin.w;
-    v_uv = vec2(columns[TILE_AXES[model_face].x], columns[TILE_AXES[model_face].y]);
-    v_tile = vec2(in_model % ATLAS_COLUMNS, in_model / ATLAS_COLUMNS) * TILE_SIZE
-        + vec2(model_face >> 1u, model_face & 1u) * FACE_SIZE;
-    v_flags = in_flags.x | (in_model == 0u ? 0u : TEXTURED);
+    uvec2 quad = quads[gl_VertexIndex >> 2];
+    uint corner = gl_VertexIndex & 3u;
+    uint face = field(quad, 3u, 0u);
+    uint axis = face >> 1u;
+    uint model_id = field(quad, 6u, 26u) | field(quad, 14u, 32u) << 6u;
+    BlockModel model = models[model_id];
+    uint face_data = model.face_data[face];
+    vec2 size = vec2(field(quad, 4u, 3u), field(quad, 4u, 7u)) + 1.0;
 
-    local.xz += vec2(micro_offset(in_light_face.y >> 3), micro_offset(in_light_face.y >> 5));
-    vec3 world = origin.xyz + local;
-    vec3 rel = world - camera_pos.xyz;
+    // `getFaceSize`: the drawn texels' span, grown a hair so quads meet.
+    vec4 bounds = vec4(face_data & 0xFu, face_data >> 4u & 0xFu, face_data >> 8u & 0xFu, face_data >> 12u & 0xFu) / 16.0
+        + vec4(0.0, 1.0 / 16.0, 0.0, 1.0 / 16.0);
+    bounds.xz -= 0.00005;
+    bounds.yw -= bounds.xz;
+    uint inset = face_data >> 16u & 63u;
+    inset += uint(inset == 63u);
+    float depth = float(inset) / 64.0;
+
+    vec3 start = vec3(field(quad, 5u, 21u), field(quad, 5u, 16u), field(quad, 5u, 11u));
+    start += swizzle(axis, vec3(bounds.xz, mix(depth, 1.0 - depth, float(face & 1u))));
+    vec2 extent = bounds.yw + size - 1.0;
+    vec2 mask = vec2(corner >> 1u & 1u, corner & 1u);
+    vec3 point = origin_scale.xyz + (start + swizzle(axis, vec3(extent * mask, 0.0))) * origin_scale.w;
+    vec3 rel = point - camera_pos.xyz;
     gl_Position = distant_view_proj * vec4(rel, 1.0);
+    v_uv = bounds.xz + extent * mask;
 
-    uint light = in_light_face.x;
-    vec2 lightmap_uv = vec2(float(light & 0xFu), float(light >> 4)) * 16.0;
-    v_light = sample_lightmap(lightmap_uv).rgb * FACE_SHADE[face];
-    v_color = in_color;
+    // `makeQuadFlags`: a face short of its side cuts out once a quad spans
+    // more than one block.
+    uint flags = face_data >> 22u & 1u;
+    flags |= uint(any(greaterThan(size, vec2(1.0)))) & (face_data >> 23u & 1u);
+    flags |= uint((model.flags & MODEL_TRANSLUCENT) != 0u) << 1u;
+    flags |= (face_data >> 24u & 3u) << 2u;
+    flags |= face << 4u;
+    flags |= (uint(size.x) - 1u) << 8u | (uint(size.y) - 1u) << 12u;
+    flags |= model_id << 16u;
+
+    // `makeRemainingAttributes`: the quad's light (block high, sky low)
+    // through the lightmap, shaded per face for models with ambient
+    // occlusion; the model's tint, constant or by the quad's biome.
+    uint light = field(quad, 8u, 55u);
+    vec3 lit = sample_lightmap(vec2(float(light >> 4u), float(light & 0xFu)) * 16.0).rgb;
+    if ((model.flags & MODEL_SHADED) != 0u) {
+        lit *= FACE_SHADE[face];
+    }
+    uint tint = model.tint;
+    if ((model.flags & MODEL_BIOME_TINT) != 0u) {
+        tint = tints[tint * TINT_BIOMES + field(quad, 9u, 46u)];
+    }
+    v_data = uvec3(flags, packUnorm4x8(vec4(lit, 1.0)), tint);
+
     v_fog_color = fog_color.rgb;
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
-    vec2 nudge = FACE_NUDGE[face];
-    v_column_pos = world.xz + nudge;
+    v_column_pos = point.xz;
     v_anchor = camera_block.xz;
-    v_outward = -2.0 * nudge;
-    v_seam = in_light_face.y >> 7;
 }

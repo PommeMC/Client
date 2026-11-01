@@ -37,6 +37,7 @@ use crate::renderer::chunk::mesh_columns::MeshColumns;
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
+use crate::renderer::distant::gpu::View as DistantView;
 use crate::renderer::entity_model::{lerp, triangle_wave};
 use crate::renderer::pipelines::block_entity;
 use crate::renderer::pipelines::entity_renderer::{
@@ -1310,13 +1311,9 @@ impl GameState {
     pub fn drain_and_upload_meshes(&mut self, renderer: &mut Renderer) {
         let batch = self.drain_meshes();
         let upload_start = std::time::Instant::now();
-        let dimension = self.dimension.as_str();
-        let evicted = renderer.upload_distant(
-            self.distant
-                .drain()
-                .filter(|update| &*update.dimension == dimension),
-        );
-        self.distant.evicted(evicted);
+        renderer.upload_distant(self.distant.drain());
+        let (wanted, gone) = renderer.take_distant_requests();
+        self.distant.request(wanted, gone);
         let dropped = renderer.upload_chunk_meshes(&batch);
         self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
         self.clear_dropped_meshed(dropped);
@@ -4424,11 +4421,17 @@ pub fn update_game(
     };
     game.distant.set_view(
         &game.dimension,
-        game.chunk_store.min_y(),
         game.player.position.x,
         game.player.position.z,
         distant_terrain,
     );
+    gfx.renderer
+        .set_distant_view((distant_terrain > 0).then(|| DistantView {
+            dimension: game.dimension.as_str().into(),
+            min_y: game.chunk_store.min_y(),
+            height: game.chunk_store.height() as i32,
+            radius: f64::from(distant_terrain * 16),
+        }));
     let inventory = &game.player.inventory;
     let main_stack = &inventory.hotbar_slots()[core.input.selected_slot() as usize];
     let shown_hands = game

@@ -53,6 +53,17 @@ impl SectionKey {
         }
     }
 
+    /// The level-`level` section this one lies in.
+    pub fn ancestor(self, level: u8) -> Self {
+        let shift = level - self.level;
+        Self {
+            level,
+            x: self.x >> shift,
+            y: self.y >> shift,
+            z: self.z >> shift,
+        }
+    }
+
     /// Blocks along a side.
     pub fn width(self) -> i32 {
         (SIDE as i32) << self.level
@@ -79,7 +90,7 @@ impl SectionKey {
 }
 
 /// Air under full sky, which an unseen section is made of.
-const UNSEEN: u64 = voxel::compose(0x0F, voxel::AIR, 0);
+pub(crate) const UNSEEN: u64 = voxel::compose(0x0F, voxel::AIR, 0);
 
 /// A voxel's index: `y`, then `z`, then `x`.
 pub(crate) fn index(x: usize, y: usize, z: usize) -> usize {

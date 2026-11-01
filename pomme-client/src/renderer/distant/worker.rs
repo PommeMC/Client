@@ -1,6 +1,7 @@
-//! The distant terrain thread: turns chunks the server forgets into columns,
-//! keeps them per dimension, on disk too, and meshes the sections around the
-//! player.
+//! The distant terrain thread: turns chunks the server forgets into Voxy
+//! sections (`VoxelIngestService`), keeps them per dimension, on disk too,
+//! and meshes the sections the renderer asks for and keeps them up to date
+//! (`RenderGenerationService`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -11,28 +12,38 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use parking_lot::RwLock;
 
+use super::build::{BuiltSection, Factory};
 use super::colors::DistantColors;
-use super::column::build_chunk;
-use super::mesh::{SectionMesh, mesh_section};
 use super::models::{ModelFactory, ModelTile};
-use super::store::{SectionKey, Store};
+use super::section::{SectionKey, WorldSection};
 use super::voxel::States;
 use super::world::World;
 use crate::position::ChunkPos;
 use crate::world::chunk::{Chunk, ChunkLightData, ChunkStore};
 
 /// Sections meshed between checks for new jobs.
-const MESHES_PER_BATCH: usize = 16;
-/// How far past the view radius sections are kept, in blocks: one level-4
-/// section, so walking back and forth doesn't drop and rebuild them.
+const MESHES_PER_BATCH: usize = 32;
+/// How far past the view radius sections are kept in memory, in blocks: one
+/// top-level section, so walking back and forth doesn't drop and reload
+/// them.
 const KEEP_MARGIN: f64 = 1024.0;
 /// How far the player moves, in blocks, before the thread hears of it.
 const VIEW_STEP: f64 = 32.0;
 /// How often changed sections are written to disk.
 const SAVE_EVERY: Duration = Duration::from_secs(60);
-/// How long a section a capture changed waits for more before it's meshed,
-/// so a burst of captures meshes it once.
+/// How long a section a capture changed waits for more before it's meshed
+/// again, so a burst of captures meshes it once.
 const SETTLE: Duration = Duration::from_millis(250);
+/// The sides a change reaches ([`super::world::Changed::sides`]), as
+/// neighbour offsets.
+const SIDES: [[i32; 3]; 6] = [
+    [0, -1, 0],
+    [0, 1, 0],
+    [-1, 0, 0],
+    [1, 0, 0],
+    [0, 0, -1],
+    [0, 0, 1],
+];
 
 enum Job {
     Capture {
@@ -44,8 +55,10 @@ enum Job {
     },
     Colors(Arc<DistantColors>),
     View(View),
-    /// Sections the renderer evicted or dropped for room.
-    Evicted(Vec<SectionKey>),
+    /// Sections the renderer wants meshed, and kept meshed as they change.
+    Request(Vec<SectionKey>),
+    /// Sections the renderer dropped.
+    Dropped(Vec<SectionKey>),
     /// Where sections are kept on disk, a folder per dimension; `None`
     /// keeps them in memory only.
     Cache(Option<PathBuf>),
@@ -56,28 +69,19 @@ enum Job {
 #[derive(Clone)]
 struct View {
     dimension: Arc<str>,
-    /// The dimension's lowest block, which the runs stand on.
-    min_y: i32,
     x: f64,
     z: f64,
     /// In blocks.
     radius: f64,
 }
 
-impl View {
-    fn wants(&self, key: SectionKey) -> bool {
-        key.wanted(self.x, self.z, self.radius)
-    }
-}
-
-/// New and dropped section meshes for one dimension, and the models new
-/// ones are the first to use.
+/// Newly meshed sections of one dimension, the models new ones are the
+/// first to use, and the biome tints when they changed.
 pub(crate) struct DistantUpdate {
     pub dimension: Arc<str>,
-    pub min_y: i32,
-    pub meshes: Vec<SectionMesh>,
-    pub removed: Vec<SectionKey>,
+    pub sections: Vec<BuiltSection>,
     pub tiles: Vec<ModelTile>,
+    pub tints: Option<Vec<u32>>,
 }
 
 /// The game's handle on the thread. Dropping it waits for the thread to
@@ -113,7 +117,7 @@ impl DistantTerrain {
     }
 
     /// Keeps sections under the cache root, in a folder for the block
-    /// states of table `slot` and the server's `biomes`, since the runs
+    /// states of table `slot` and the server's `biomes`, since the voxels
     /// store both by id.
     pub fn set_cache_key(
         &mut self,
@@ -163,30 +167,31 @@ impl DistantTerrain {
         let _ = self.jobs.send(Job::Colors(colors));
     }
 
-    /// Sections the renderer had no room for, meshed again once nearer.
-    pub fn evicted(&self, keys: Vec<SectionKey>) {
-        if !keys.is_empty() {
-            let _ = self.jobs.send(Job::Evicted(keys));
+    /// Sections the renderer wants, and those it dropped.
+    pub fn request(&self, wanted: Vec<SectionKey>, dropped: Vec<SectionKey>) {
+        if !wanted.is_empty() {
+            let _ = self.jobs.send(Job::Request(wanted));
+        }
+        if !dropped.is_empty() {
+            let _ = self.jobs.send(Job::Dropped(dropped));
         }
     }
 
-    /// Where the player is and how far to keep and draw, in chunks; 0 stops
-    /// keeping new chunks.
-    pub fn set_view(&mut self, dimension: &str, min_y: i32, x: f64, z: f64, chunks: u32) {
+    /// Where the player is and how far to keep, in chunks; 0 stops keeping
+    /// new chunks.
+    pub fn set_view(&mut self, dimension: &str, x: f64, z: f64, chunks: u32) {
         if chunks == 0 {
             self.view = None;
             return;
         }
         let view = View {
             dimension: dimension.into(),
-            min_y,
             x,
             z,
             radius: f64::from(chunks * 16),
         };
         let unchanged = self.view.as_ref().is_some_and(|last| {
             last.dimension == view.dimension
-                && last.min_y == view.min_y
                 && last.radius == view.radius
                 && (last.x - x).hypot(last.z - z) < VIEW_STEP
         });
@@ -224,45 +229,40 @@ pub(crate) fn folder_name(name: &str) -> String {
         .collect()
 }
 
+/// Where `dimension`'s sections go under `cache`: a folder of their own, so
+/// the column files of earlier builds don't mix in.
 fn dimension_dir(cache: Option<&Path>, dimension: &str) -> Option<PathBuf> {
-    Some(cache?.join(folder_name(dimension)))
+    Some(cache?.join(folder_name(dimension)).join("sections"))
 }
 
-/// `dimension`'s store, made with its folder under `cache`.
-fn store<'a>(
-    stores: &'a mut HashMap<Arc<str>, Store>,
+/// `dimension`'s world, made with its folder under `cache`.
+fn world<'a>(
+    worlds: &'a mut HashMap<Arc<str>, World>,
     cache: Option<&Path>,
     dimension: &Arc<str>,
-) -> &'a mut Store {
-    stores
+) -> &'a mut World {
+    worlds
         .entry(Arc::clone(dimension))
-        .or_insert_with(|| Store::new(dimension_dir(cache, dimension)))
-}
-
-/// Voxy's sections go in a folder of their own beside the columns' until
-/// the columns go.
-fn world_dir(cache: Option<&Path>, dimension: &str) -> Option<PathBuf> {
-    Some(dimension_dir(cache, dimension)?.join("voxy"))
+        .or_insert_with(|| World::new(dimension_dir(cache, dimension)))
 }
 
 struct Worker {
     colors: Arc<DistantColors>,
     models: ModelFactory,
+    states: States,
+    factory: Factory,
     updates: Sender<DistantUpdate>,
     /// Per dimension, its sections.
-    stores: HashMap<Arc<str>, Store>,
-    /// Per dimension, its Voxy sections.
     worlds: HashMap<Arc<str>, World>,
-    states: States,
     cache: Option<PathBuf>,
     last_save: Instant,
     view: Option<View>,
-    /// The viewed dimension's sections to mesh, by when.
+    /// Sections to mesh, each from when.
     dirty: HashMap<SectionKey, Instant>,
-    /// The viewed dimension's sections with a mesh sent.
+    /// Sections the renderer holds, kept up to date as captures change them.
     meshed: HashSet<SectionKey>,
-    /// Sections the renderer had no room for, by how far they were.
-    evicted: HashMap<SectionKey, f64>,
+    /// Whether the renderer has the current colours' biome tints.
+    tints_sent: bool,
 }
 
 impl Worker {
@@ -271,29 +271,16 @@ impl Worker {
             states: States::new(colors.table()),
             colors,
             models: ModelFactory::new(),
+            factory: Factory::new(),
             updates,
-            stores: HashMap::new(),
             worlds: HashMap::new(),
             cache: None,
             last_save: Instant::now(),
             view: None,
             dirty: HashMap::new(),
             meshed: HashSet::new(),
-            evicted: HashMap::new(),
+            tints_sent: false,
         }
-    }
-
-    /// Queues `key` to mesh from `ready`, no longer evicted.
-    fn mark_dirty(&mut self, key: SectionKey, ready: Instant) {
-        self.evicted.remove(&key);
-        self.dirty.insert(key, ready);
-    }
-
-    /// Whether `key`, if evicted, is now a section nearer than it was.
-    fn wants_back(&self, view: &View, key: SectionKey) -> bool {
-        self.evicted
-            .get(&key)
-            .is_none_or(|&was| key.distance(view.x, view.z) + f64::from(key.width()) < was)
     }
 
     fn run(mut self, jobs: &Receiver<Job>) {
@@ -322,9 +309,6 @@ impl Worker {
     }
 
     fn save(&mut self) {
-        for store in self.stores.values_mut() {
-            store.flush();
-        }
         for world in self.worlds.values_mut() {
             world.flush();
         }
@@ -341,21 +325,33 @@ impl Worker {
                 min_y,
             } => {
                 let chunk = chunk.read();
-                let columns = build_chunk(&chunk, light.as_deref(), min_y, &self.colors);
-                let touched = store(&mut self.stores, self.cache.as_deref(), &dimension)
-                    .capture(pos, columns);
-                let cache = self.cache.as_deref();
-                self.worlds
-                    .entry(Arc::clone(&dimension))
-                    .or_insert_with(|| World::new(world_dir(cache, &dimension)))
+                let changed = world(&mut self.worlds, self.cache.as_deref(), &dimension)
                     .ingest_chunk(&self.states, pos, &chunk, light.as_deref(), min_y);
-                if let Some(view) = self.view.clone()
-                    && view.dimension == dimension
+                if self
+                    .view
+                    .as_ref()
+                    .is_none_or(|view| view.dimension != dimension)
                 {
-                    let ready = Instant::now() + SETTLE;
-                    for key in touched {
-                        if view.wants(key) && self.wants_back(&view, key) {
-                            self.mark_dirty(key, ready);
+                    return;
+                }
+                // The section and, across the sides the change reached, the
+                // neighbours meshed against it (`WorldUpdater`'s dirty marks).
+                let ready = Instant::now() + SETTLE;
+                for change in changed {
+                    let key = change.key;
+                    let neighbours = SIDES
+                        .iter()
+                        .enumerate()
+                        .filter(|&(side, _)| change.sides & 1 << side != 0)
+                        .map(|(_, [dx, dy, dz])| SectionKey {
+                            x: key.x + dx,
+                            y: key.y + dy,
+                            z: key.z + dz,
+                            ..key
+                        });
+                    for key in std::iter::once(key).chain(neighbours) {
+                        if self.meshed.contains(&key) {
+                            self.dirty.entry(key).or_insert(ready);
                         }
                     }
                 }
@@ -367,6 +363,7 @@ impl Worker {
                     self.states = States::new(colors.table());
                 }
                 self.colors = colors;
+                self.tints_sent = false;
                 let now = Instant::now();
                 self.dirty.extend(self.meshed.iter().map(|&key| (key, now)));
             }
@@ -374,69 +371,35 @@ impl Worker {
                 if self
                     .view
                     .as_ref()
-                    .is_some_and(|last| last.dimension != view.dimension)
+                    .is_none_or(|last| last.dimension != view.dimension)
                 {
                     // The renderer drops the old dimension's meshes itself.
                     self.meshed.clear();
                     self.dirty.clear();
-                    self.evicted.clear();
                 }
-                let store = store(&mut self.stores, self.cache.as_deref(), &view.dimension);
-                store.evict_beyond(view.x, view.z, view.radius + KEEP_MARGIN);
-                if let Some(world) = self.worlds.get_mut(&view.dimension) {
-                    world.evict_beyond(view.x, view.z, view.radius + KEEP_MARGIN);
-                }
-                // Those with nothing seen mesh empty, so a parent knows its
-                // children are all there.
-                let wanted: HashSet<SectionKey> =
-                    SectionKey::all_wanted(view.x, view.z, view.radius)
-                        .into_iter()
-                        .inspect(|key| {
-                            store.load(*key);
-                        })
-                        .collect();
-                let removed: Vec<SectionKey> = self.meshed.difference(&wanted).copied().collect();
-                for key in &removed {
-                    self.meshed.remove(key);
-                }
-                self.dirty.retain(|key, _| wanted.contains(key));
-                self.evicted.retain(|key, _| wanted.contains(key));
-                let now = Instant::now();
-                let back: Vec<SectionKey> = wanted
-                    .difference(&self.meshed)
-                    .copied()
-                    .filter(|&key| self.wants_back(&view, key))
-                    .collect();
-                for key in back {
-                    self.mark_dirty(key, now);
-                }
-                // Sent even with nothing removed: the renderer draws every
-                // section at the view's `min_y`, which may have changed.
-                let _ = self.updates.send(DistantUpdate {
-                    dimension: Arc::clone(&view.dimension),
-                    min_y: view.min_y,
-                    meshes: Vec::new(),
-                    removed,
-                    tiles: Vec::new(),
-                });
+                world(&mut self.worlds, self.cache.as_deref(), &view.dimension).evict_beyond(
+                    view.x,
+                    view.z,
+                    view.radius + KEEP_MARGIN,
+                );
                 self.view = Some(view);
             }
-            Job::Evicted(keys) => {
-                let Some(view) = &self.view else {
-                    return;
-                };
+            Job::Request(keys) => {
+                let now = Instant::now();
+                for key in keys {
+                    self.meshed.insert(key);
+                    self.dirty.insert(key, now);
+                }
+            }
+            Job::Dropped(keys) => {
                 for key in keys {
                     self.meshed.remove(&key);
                     self.dirty.remove(&key);
-                    self.evicted.insert(key, key.distance(view.x, view.z));
                 }
             }
             Job::Cache(cache) => {
-                for (dimension, store) in &mut self.stores {
-                    store.set_dir(dimension_dir(cache.as_deref(), dimension));
-                }
                 for (dimension, world) in &mut self.worlds {
-                    world.set_dir(world_dir(cache.as_deref(), dimension));
+                    world.set_dir(dimension_dir(cache.as_deref(), dimension));
                 }
                 self.cache = cache;
             }
@@ -444,16 +407,12 @@ impl Worker {
         }
     }
 
-    /// Meshes the dirty sections nearest the player, a batch at a time.
+    /// Meshes the ready sections nearest the player, a batch at a time.
     fn mesh_nearest(&mut self) {
         if self.dirty.is_empty() {
             return;
         }
-        let Some(view) = &self.view else {
-            self.dirty.clear();
-            return;
-        };
-        let Some(store) = self.stores.get(&view.dimension) else {
+        let Some(view) = self.view.clone() else {
             self.dirty.clear();
             return;
         };
@@ -473,25 +432,33 @@ impl Worker {
                 .then(b.level.cmp(&a.level))
         });
         nearest.truncate(MESHES_PER_BATCH);
-        let meshes = nearest
-            .iter()
-            .map(|&key| {
-                self.dirty.remove(&key);
-                self.meshed.insert(key);
-                match store.get(key) {
-                    Some(section) => mesh_section(key, section, |run| {
-                        self.colors.run_look(&mut self.models, run)
-                    }),
-                    None => SectionMesh::empty(key),
-                }
-            })
-            .collect();
+        let world = world(&mut self.worlds, self.cache.as_deref(), &view.dimension);
+        let mut sections = Vec::with_capacity(nearest.len());
+        let unseen = WorldSection::unseen();
+        for key in nearest {
+            self.dirty.remove(&key);
+            // The section and the six around it, read from disk if need be.
+            world.load(key);
+            for [dx, dy, dz] in SIDES {
+                world.load(SectionKey {
+                    x: key.x + dx,
+                    y: key.y + dy,
+                    z: key.z + dz,
+                    ..key
+                });
+            }
+            let section = world.get(key).unwrap_or(&unseen);
+            let mut models = self.colors.baking(&mut self.models);
+            sections.push(
+                self.factory
+                    .build(key, section, |k| world.get(k), &mut models),
+            );
+        }
         let _ = self.updates.send(DistantUpdate {
             dimension: Arc::clone(&view.dimension),
-            min_y: view.min_y,
-            meshes,
-            removed: Vec::new(),
+            sections,
             tiles: self.models.take_tiles(),
+            tints: (!std::mem::replace(&mut self.tints_sent, true)).then(|| self.colors.tint_lut()),
         });
     }
 }

@@ -7,7 +7,8 @@ const BLOCK_SHIFT: u32 = 27;
 const BIOME_SHIFT: u32 = 47;
 const LIGHT_SHIFT: u32 = 56;
 const BLOCK_MASK: u64 = ((1 << 20) - 1) << BLOCK_SHIFT;
-const LIGHT_MASK: u64 = 0xFF << LIGHT_SHIFT;
+pub(crate) const BIOME_MASK: u64 = 0x1FF << BIOME_SHIFT;
+pub(crate) const LIGHT_MASK: u64 = 0xFF << LIGHT_SHIFT;
 
 /// Block state 0 is air, whatever kind (`Mapper.AIR`).
 pub(crate) const AIR: u32 = 0;

@@ -79,6 +79,11 @@ impl World {
         }
     }
 
+    /// `key`'s section if it's in memory.
+    pub fn get(&self, key: SectionKey) -> Option<&WorldSection> {
+        self.sections.get(&key)
+    }
+
     /// `key`'s section, loaded, or unseen air where there's none
     /// (`ActiveSectionTracker`).
     fn acquire(&mut self, key: SectionKey) -> &mut WorldSection {

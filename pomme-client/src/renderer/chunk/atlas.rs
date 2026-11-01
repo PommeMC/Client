@@ -123,13 +123,6 @@ impl AtlasUVMap {
         self.sprite_pixels.get(name)
     }
 
-    /// A block sprite's alpha-weighted average colour, for terrain drawn too
-    /// far out to texture.
-    pub(crate) fn average_color(&self, name: &str) -> Option<[u8; 4]> {
-        let sprite = self.sprite_pixels(name)?;
-        Some(average_rgba(&sprite.rgba, sprite.width, sprite.height))
-    }
-
     /// Each sprite's texture name, by sprite index.
     #[cfg(feature = "cpu-bench")]
     pub fn sprite_names(&self) -> HashMap<u16, &str> {
@@ -1082,27 +1075,6 @@ fn effective_mip_level(sources: &[Source]) -> u32 {
         })
 }
 
-/// The alpha-weighted mean colour of the first `w`x`h` RGBA texels, with
-/// their mean alpha: a sprite's first frame, transparent texels not
-/// darkening it.
-fn average_rgba(data: &[u8], w: u32, h: u32) -> [u8; 4] {
-    let texels = (w * h) as usize;
-    let mut sum = [0u64; 3];
-    let mut alpha = 0u64;
-    for texel in data.as_chunks::<4>().0.iter().take(texels) {
-        let a = u64::from(texel[3]);
-        for (total, &channel) in sum.iter_mut().zip(texel) {
-            *total += u64::from(channel) * a;
-        }
-        alpha += a;
-    }
-    if alpha == 0 {
-        return [0; 4];
-    }
-    let [r, g, b] = sum.map(|total| (total / alpha) as u8);
-    [r, g, b, (alpha / texels as u64) as u8]
-}
-
 fn build_mip_chain(
     atlas_pixels: Vec<u8>,
     atlas_size: u32,
@@ -1634,16 +1606,6 @@ fn sprite_transparency(data: &[u8]) -> (bool, bool) {
 mod tests {
     use super::*;
     use crate::test_util::test_temp_dir;
-
-    #[test]
-    fn the_average_colour_skips_transparent_texels_and_later_frames() {
-        // A 2x1 sprite: opaque red, clear green; then a white second frame.
-        let data = [
-            255, 0, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255,
-        ];
-        assert_eq!(average_rgba(&data, 2, 1), [255, 0, 0, 127]);
-        assert_eq!(average_rgba(&[0; 8], 2, 1), [0; 4]);
-    }
 
     #[test]
     fn texture_ids_find_the_region_their_name_does() {

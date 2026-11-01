@@ -297,7 +297,7 @@ fn quat(axis: Vec3, angle: f32) -> Quat {
 }
 
 /// What a bake found across the model's quads.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub(crate) struct BakeFlags {
     /// Some quad's sprite mips as `dark_cutout`.
     pub darkened: bool,
@@ -305,6 +305,10 @@ pub(crate) struct BakeFlags {
     pub translucent: bool,
     /// Some opaque-layer quad leaves texels out.
     pub discard: bool,
+    /// Some quad takes ambient occlusion, so the model shades per face.
+    pub shaded: bool,
+    /// The first tinted quad's tint.
+    pub tint: Tint,
 }
 
 /// Voxy's `SoftwareModelTextureBakery`.
@@ -330,12 +334,20 @@ impl Bakery {
         state: BlockState,
     ) -> Option<([FaceTexture; 6], BakeFlags)> {
         let data = view.block_state_table().block_state_data(state);
-        if data.is_invisible() {
+        // Fluids draw through vanilla's `FluidRenderer`, their block being
+        // invisible.
+        if data.is_invisible() && !data.is_fluid_block() {
             return None;
         }
         // Voxy forces leaves into the solid layer.
         let leaves = data.is_leaves();
-        let mut flags = BakeFlags::default();
+        let mut flags = BakeFlags {
+            darkened: false,
+            translucent: false,
+            discard: false,
+            shaded: false,
+            tint: Tint::None,
+        };
         let (mut opaque, mut translucent): (Vec<Quad<'a>>, Vec<Quad<'a>>) =
             (Vec::new(), Vec::new());
         let mut add = |quad: Quad<'a>, layer_translucent: bool, opaque_texels: bool| {
@@ -355,8 +367,12 @@ impl Bakery {
                 });
             }
         };
-        let fluid = data.fluid().kind;
-        if fluid != FluidKind::Empty && !data.has_collision() {
+        if data.is_fluid_block() {
+            let fluid = data.fluid().kind;
+            flags.shaded = true;
+            if fluid == FluidKind::Water {
+                flags.tint = Tint::Water;
+            }
             for quad in fluid_quads(uv_map, fluid) {
                 add(quad, fluid == FluidKind::Water, true);
             }
@@ -370,6 +386,10 @@ impl Bakery {
                 let Some(sprite) = uv_map.sprite_pixels(name) else {
                     continue;
                 };
+                flags.shaded |= quad.ambient_occlusion;
+                if flags.tint == Tint::None {
+                    flags.tint = quad.tint;
+                }
                 let region = uv_map.region(quad.texture);
                 let meta = if quad.tint == Tint::None {
                     0
