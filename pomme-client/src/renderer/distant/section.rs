@@ -1,7 +1,6 @@
-//! Voxy's world sections: 32x32x32 voxels at each of five levels of detail
-//! (`WorldSection`), what a vanilla section becomes at every level before
-//! it's written in (`VoxelizedSection`, `WorldConversionFactory`,
-//! `WorldVoxilizedSectionMipper`), and a section's file (`SaveLoadSystem3`).
+//! Distant terrain's world sections: 32x32x32 voxels at each of five levels
+//! of detail, what a vanilla section becomes at every level before it's
+//! written in, and a section's file.
 
 use std::io::{Read, Write};
 
@@ -34,8 +33,8 @@ impl SectionKey {
         }
     }
 
-    /// Voxy's `getWorldSectionId`: level in the top nibble, then y (8
-    /// bits), z and x (24 each), 4 bits spare.
+    /// The key as one word: level in the top nibble, then y (8 bits), z and
+    /// x (24 each), 4 bits spare.
     pub fn pack(self) -> u64 {
         u64::from(self.level) << 60
             | (self.y as u64 & 0xFF) << 52
@@ -73,7 +72,7 @@ impl SectionKey {
         [self.x, self.y, self.z].map(|c| c * self.width())
     }
 
-    /// Which of its parent's eight children this is (`getChildIndex`).
+    /// Which of its parent's eight children this is.
     pub fn child_index(self) -> u8 {
         (self.x & 1 | (self.z & 1) << 1 | (self.y & 1) << 2) as u8
     }
@@ -198,8 +197,8 @@ impl VoxelizedSection {
         &self.data[base..base + level_side(level).pow(3)]
     }
 
-    /// `WorldConversionFactory.convert`: `section`'s blocks, biomes and
-    /// light as level 0; `light` gives a block's `block << 4 | sky`.
+    /// `section`'s blocks, biomes and light as level 0; `light` gives a
+    /// block's `block << 4 | sky`.
     pub fn convert(
         &mut self,
         states: &States,
@@ -220,7 +219,7 @@ impl VoxelizedSection {
         }
     }
 
-    /// Air, unlit (`VoxelizedSection.zero`).
+    /// Air, unlit.
     pub fn zero(&mut self) {
         self.non_air_count = 0;
         self.data.fill(0);
@@ -233,8 +232,7 @@ impl VoxelizedSection {
         self.non_air_count = non_air_count;
     }
 
-    /// `WorldVoxilizedSectionMipper.mipSection`: each level from the one
-    /// below, eight voxels to one.
+    /// Each level from the one below, eight voxels to one.
     pub fn mip(&mut self, states: &States) {
         for level in 1..LEVELS {
             let (from, to) = (level_base(level - 1), level_base(level));
@@ -252,8 +250,8 @@ impl VoxelizedSection {
     }
 }
 
-/// `VoxelIngestService.getLightingSupplier` over a column's light at
-/// vanilla section `section_y`: `block << 4 | sky`, 0 without data.
+/// A column's light at vanilla section `section_y`: `block << 4 | sky`, 0
+/// without data.
 pub(crate) fn light_of(
     light: Option<&ChunkLightData>,
     section_y: i32,
@@ -268,8 +266,8 @@ pub(crate) fn light_of(
 }
 
 /// Writes `section` over `into` where the vanilla section lands at the
-/// section's level (`WorldUpdater.insertSectionLvlIntoWorld`): whether
-/// anything changed, and how many blocks the covered voxels held before.
+/// section's level: whether anything changed, and how many blocks the
+/// covered voxels held before.
 pub(crate) fn insert_level(
     section: &VoxelizedSection,
     into: &mut WorldSection,
@@ -289,9 +287,9 @@ pub(crate) fn insert_level(
     (changed, non_air_before)
 }
 
-/// `WorldUpdater.insertUpdate`'s per-level bookkeeping after
-/// [`insert_level`]: level 0's count and emptiness; whether the section
-/// changed and whether its emptiness flipped (bubbled to the parent).
+/// The per-level bookkeeping after [`insert_level`]: level 0's count and
+/// emptiness; whether the section changed and whether its emptiness flipped
+/// (bubbled to the parent).
 pub(crate) fn settle_level(
     into: &mut WorldSection,
     level: u8,
@@ -311,9 +309,9 @@ pub(crate) fn settle_level(
     (changed || emptiness != 0, emptiness)
 }
 
-/// `SaveLoadSystem3.serialize`: the key, a palette's size and the
-/// non-empty children, a `u16` palette index per voxel, then the palette;
-/// little-endian, zlib-compressed (Voxy uses zstd).
+/// A section's file: the key, a palette's size and the non-empty children,
+/// a `u16` palette index per voxel, then the palette; little-endian,
+/// zlib-compressed.
 pub(crate) fn encode(key: SectionKey, section: &WorldSection) -> Vec<u8> {
     let mut palette: Vec<u64> = Vec::new();
     let mut lookup = std::collections::HashMap::new();
@@ -396,7 +394,7 @@ mod tests {
     use crate::world::block::BlockStateTable;
 
     #[test]
-    fn keys_pack_like_voxy_and_find_their_parents() {
+    fn keys_pack_and_find_their_parents() {
         for key in [
             SectionKey {
                 level: 0,

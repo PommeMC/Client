@@ -1,8 +1,8 @@
 #version 450
 
-// Voxy's `quads.frag`: the quad's face texture repeated per block from the
-// model atlas, cut out, tinted and lit; nothing nearer than the far side of
-// the drawn chunks' boxes (distant_bound.vert).
+// The quad's face texture repeated per block from the model atlas, cut out,
+// tinted and lit; nothing nearer than the far side of the drawn chunks'
+// boxes (distant_bound.vert).
 
 #include "distant_models.glsl"
 
@@ -52,8 +52,8 @@ void main() {
             discard;
         }
     }
-    // `computeColour`: tint state 2 everywhere, 1 only on grey texels, as a
-    // grass block's side.
+    // Tint state 2 everywhere, 1 only on grey texels, as a grass block's
+    // side.
     uint tint = flags >> 2u & 3u;
     bool grey = abs(exact.r - exact.g) < 0.02 && abs(exact.g - exact.b) < 0.02;
     if (tint == 2u || (tint == 1u && grey)) {

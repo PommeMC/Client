@@ -1,11 +1,10 @@
 #version 450
 
-// Voxy's `hierarchical/cleaner/sort_visibility.comp`: the 256 nodes drawn
-// longest ago, for the CPU to drop the meshes of. A fuzzy sort: each
-// workgroup starts from a copy of the output, works its nodes into it by
-// exchanging ids along it, then works the newcomers into the output the
-// same way. Only nodes with a mesh, below the top level and without a
-// request in flight take part.
+// The 256 nodes drawn longest ago, for the CPU to drop the meshes of. A
+// fuzzy sort: each workgroup starts from a copy of the output, works its
+// nodes into it by exchanging ids along it, then works the newcomers into
+// the output the same way. Only nodes with a mesh, below the top level and
+// without a request in flight take part.
 
 #define WORK_SIZE 64
 #define ELEMS_PER_THREAD 8
@@ -60,7 +59,7 @@ uint name(uint at, uint id) { \
 DEFINE_EXCHANGE(exchange_local, initial_sort)
 DEFINE_EXCHANGE(exchange_global, min_vis_ids)
 
-// Voxy indexes the frames by the flagged id here; the flag is masked off.
+// The list's ids carry the EXTERNAL flag, masked off to index the frames.
 void bubble_initial(uint vis, uint id) {
     uint start = 0u;
     if (last_render_frame[initial_sort[(OUTPUT_SIZE - 1u) >> 1u] & ~EXTERNAL] <= vis) {

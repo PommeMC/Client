@@ -1,16 +1,16 @@
-//! Voxy's `NodeManager` and `NodeStore`: the tree the GPU traversal walks,
-//! kept on the CPU and mirrored into the node buffer a record at a time.
-//! Every key is one of: a leaf node (a mesh, no children yet), an inner
-//! node (children in a consecutive block of ids), or a request waiting on
-//! the worker (a top-level node's own mesh, or a node's children). The
-//! traversal asks for nodes by key; the worker's meshes answer.
+//! The node graph: the tree the GPU traversal walks, kept on the CPU and
+//! mirrored into the node buffer a record at a time. Every key is one of: a
+//! leaf node (a mesh, no children yet), an inner node (children in a
+//! consecutive block of ids), or a request waiting on the worker (a
+//! top-level node's own mesh, or a node's children). The traversal asks for
+//! nodes by key; the worker's meshes answer.
 
 use std::collections::{HashMap, HashSet};
 
 use super::build::BuiltSection;
 use super::section::SectionKey;
 
-/// Nodes the buffer holds (Voxy's `maxNodeCount`, a power of two).
+/// Nodes the buffer holds, a power of two.
 pub(crate) const MAX_NODES: u32 = 1 << 20;
 pub(crate) const NODE_BYTES: u64 = MAX_NODES as u64 * 16;
 /// Scatter indices with this bit go to the node buffer.
@@ -72,7 +72,7 @@ struct Node {
     geometry_in_flight: bool,
 }
 
-/// What a key is in the graph (`activeSectionMap`).
+/// What a key is in the graph.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Entry {
     Leaf(u32),
@@ -142,8 +142,8 @@ impl ChildRequest {
     }
 }
 
-/// Voxy's `HierarchicalBitSet` as the node store uses it: ids allocated
-/// one or several consecutive at a time and freed one at a time.
+/// The node ids in use: allocated one or several consecutive at a time and
+/// freed one at a time.
 struct IdSet {
     words: Vec<u64>,
     /// No free id lies below this word.
@@ -194,7 +194,7 @@ impl IdSet {
     }
 }
 
-/// Requests by id, with reuse (`ExpandingObjectAllocationList`).
+/// Requests by id, with freed ids reused.
 struct Requests<T> {
     slots: Vec<Option<T>>,
     free: Vec<usize>,
@@ -242,7 +242,7 @@ pub(crate) struct NodeGraph {
     /// Nodes whose record changed since [`Self::take_dirty`].
     dirty: HashSet<u32>,
     /// Ids allocated ([`VISIBILITY_RESET_BIT`]) or freed, for the cleaner's
-    /// last-drawn frames (`cleanerIdResetClear`).
+    /// last-drawn frames.
     pub visibility_sets: HashSet<u32>,
     /// Keys the worker should mesh and keep meshed, and those it should
     /// stop; section ids no node holds any more.
@@ -274,14 +274,14 @@ impl NodeGraph {
         &self.top_ids
     }
 
-    /// The id every node lies below (`getEndNodeId`).
+    /// The id every node lies below.
     pub fn end_id(&self) -> u32 {
         self.nodes.len() as u32
     }
 
-    /// Meshes still owed by the worker, for the traversal's request cap
-    /// (Voxy counts its mesher's queue; a top-level node's empty request,
-    /// open until it gets children, owes none).
+    /// Meshes still owed by the worker, for the traversal's request cap. A
+    /// top-level node's empty request, open until it gets children, owes
+    /// none.
     pub fn in_flight(&self) -> usize {
         let singles = self.singles.slots.iter().flatten();
         let children = self.children.slots.iter().flatten();
@@ -297,10 +297,10 @@ impl NodeGraph {
         dirty.into_iter().map(|id| (id, self.record(id))).collect()
     }
 
-    /// `NodeStore.writeNode`: the key, the mesh under the flags' low byte
-    /// (bit 0 a request in flight), the first child under the high byte
-    /// (bits 2-4 the children less one, bit 5 all children leaves). A freed
-    /// id is all ones.
+    /// A node's record: the key, the mesh under the flags' low byte (bit 0 a
+    /// request in flight), the first child under the high byte (bits 2-4 the
+    /// children less one, bit 5 all children leaves). A freed id is all
+    /// ones.
     fn record(&self, id: u32) -> [u32; 4] {
         let Some(node) = self.nodes[id as usize].as_ref() else {
             return [u32::MAX; 4];
@@ -329,8 +329,8 @@ impl NodeGraph {
         self.dirty.insert(id);
     }
 
-    /// `ICleaner`: `id` was allocated or freed, so its last-drawn frame is
-    /// reset or cleared; an allocation undoes a free of the same id.
+    /// `id` was allocated or freed, so the cleaner's last-drawn frame for it
+    /// is reset or cleared; an allocation undoes a free of the same id.
     fn track(&mut self, id: u32, allocated: bool) {
         let reset = id | VISIBILITY_RESET_BIT;
         let (insert, remove) = if allocated { (reset, id) } else { (id, reset) };
@@ -388,7 +388,8 @@ impl NodeGraph {
         debug_assert!(self.entries.is_empty() && self.ids.used == 0);
     }
 
-    /// `RenderDistanceTracker`: the top-level nodes become `roots`.
+    /// The top-level nodes become `roots`: gone ones are removed with their
+    /// trees, new ones requested.
     pub fn set_roots(&mut self, roots: &HashSet<SectionKey>) {
         let gone: Vec<SectionKey> = self.top_keys.difference(roots).copied().collect();
         for key in gone {
@@ -425,9 +426,8 @@ impl NodeGraph {
         self.remove_recursive(key, false);
     }
 
-    /// The worker meshed `key` (`processGeometryResult`); `upload` places the
-    /// quads and gives their section id, or `None` for none, when the store
-    /// is full.
+    /// The worker meshed `key`; `upload` places the quads and gives their
+    /// section id, or `None` for none, when the store is full.
     pub fn process_geometry_result(
         &mut self,
         section: BuiltSection,
@@ -477,8 +477,7 @@ impl NodeGraph {
         }
     }
 
-    /// `uploadReplaceSection`: `old` goes, the new quads come, an empty
-    /// section taking no room.
+    /// `old` goes, the new quads come, an empty section taking no room.
     fn upload_replace(
         &mut self,
         old: Mesh,
@@ -493,7 +492,6 @@ impl NodeGraph {
         upload(section).map_or(Mesh::Empty, Mesh::Id)
     }
 
-    /// `key`'s children changed (`processChildChange`).
     fn process_child_change(&mut self, key: SectionKey, child_existence: u8) {
         let Some(&entry) = self.entries.get(&key) else {
             return;
@@ -549,8 +547,8 @@ impl NodeGraph {
         self.watch.push(key);
     }
 
-    /// `updateChildSectionsInner`: an inner node's children changed. New
-    /// ones are asked for; gone ones are removed and the block compacted.
+    /// An inner node's children changed. New ones are asked for; gone ones
+    /// are removed and the block compacted.
     fn update_children_inner(&mut self, key: SectionKey, id: u32, child_existence: u8) {
         let existence = self.node(id).child_existence;
         let add = (existence ^ child_existence) & child_existence;
@@ -666,8 +664,8 @@ impl NodeGraph {
         leaf
     }
 
-    /// Removes `key` and everything under it (`_recurseRemoveNode`); with
-    /// `only_children`, the node itself stays as a childless leaf.
+    /// Removes `key` and everything under it; with `only_children`, the node
+    /// itself stays as a childless leaf.
     fn remove_recursive(&mut self, key: SectionKey, only_children: bool) {
         let entry = if only_children {
             self.entries.get(&key).copied()
@@ -725,8 +723,8 @@ impl NodeGraph {
         }
     }
 
-    /// `_removeRequest`: every child request `request_id` holds goes with
-    /// its mesh, entry and watch.
+    /// Every child request `request_id` holds goes with its mesh, entry and
+    /// watch.
     fn remove_request(&mut self, request_id: usize, parent: SectionKey) {
         let mask = self.children.get(request_id).mask;
         for child in set_bits(mask) {
@@ -762,9 +760,9 @@ impl NodeGraph {
         self.top_ids.push(id);
     }
 
-    /// A node's children came back (`finishRequest`): a leaf parent gets a
-    /// block of them and becomes inner; an inner parent's block is remade
-    /// with the old and new children interleaved in child order.
+    /// A node's children came back: a leaf parent gets a block of them and
+    /// becomes inner; an inner parent's block is remade with the old and new
+    /// children interleaved in child order.
     fn finish_child(&mut self, request_id: usize) {
         let request = self.children.release(request_id);
         let parent_key = request.key;
@@ -850,8 +848,8 @@ impl NodeGraph {
         }
     }
 
-    /// The traversal asked for `key` (`processRequest`): a leaf's children,
-    /// or an inner node's own mesh.
+    /// The traversal asked for `key`: a leaf's children, or an inner node's
+    /// own mesh.
     pub fn process_request(&mut self, key: SectionKey) {
         let Some(&entry) = self.entries.get(&key) else {
             return;
@@ -882,11 +880,11 @@ impl NodeGraph {
         }
     }
 
-    /// The cleaner wants `key`'s mesh gone (`removeNodeGeometry`): an inner
-    /// node loses it, to be asked for again when wanted; a leaf's parent
-    /// takes the leaf's place, its children removed, unless the parent has
-    /// no mesh yet, which is asked for instead. A top-level leaf keeps its
-    /// mesh, nothing standing in for it.
+    /// The cleaner wants `key`'s mesh gone: an inner node loses it, to be
+    /// asked for again when wanted; a leaf's parent takes the leaf's place,
+    /// its children removed, unless the parent has no mesh yet, which is
+    /// asked for instead. A top-level leaf keeps its mesh, nothing standing
+    /// in for it.
     pub fn remove_node_geometry(&mut self, key: SectionKey) {
         let Some(&entry) = self.entries.get(&key) else {
             return;
@@ -912,9 +910,9 @@ impl NodeGraph {
         }
     }
 
-    /// `clearGeometryInternal`. Voxy keeps watching the node for child
-    /// changes; here those arrive with meshes, so the node's existence
-    /// stays as it was until its mesh is asked for again.
+    /// An inner node's mesh goes, and the worker stops meshing it. Child
+    /// changes arrive with meshes, so the node's existence stays as it was
+    /// until its mesh is asked for again.
     fn clear_geometry(&mut self, key: SectionKey, id: u32) {
         let mesh = self.node(id).mesh;
         if let Mesh::Id(_) = mesh {
@@ -927,8 +925,8 @@ impl NodeGraph {
         }
     }
 
-    /// `makeLeafChildRequest`: a request for each child the existence has,
-    /// each watched from here on.
+    /// A request for each child the existence has, each watched from here
+    /// on.
     fn make_leaf_child_request(&mut self, id: u32) {
         let (key, child_existence) = {
             let node = self.node(id);

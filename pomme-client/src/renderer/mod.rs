@@ -2162,10 +2162,10 @@ impl Renderer {
                     if distant {
                         self.distant_buffers.update_roots(eye);
                     }
-                    // Voxy draws after the chunks' solid and cutout passes:
-                    // bounded by their depth, into its own image, then laid
-                    // into the frame. Nothing to traverse means nothing to
-                    // draw or request.
+                    // Distant terrain draws after the chunks' solid and cutout
+                    // passes: bounded by their depth, into its own image, then
+                    // laid into the frame. Nothing to traverse means nothing
+                    // to draw or request.
                     if distant && self.distant_buffers.top_count() > 0 {
                         let extent = self.swapchain.extent;
                         pass.end();

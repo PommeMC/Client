@@ -1,11 +1,9 @@
 #version 450
 
-// Voxy's `hiz/blit.fsh`: each level of the Hi-Z holds the farthest of the
-// four texels under it in the level before (level 0 reads the distant
-// image's depth), so a box whose nearest point lies beyond every texel it
-// covers is hidden. Voxy also turns the other texels to the near plane
-// where one is at the far plane; under the max that changes nothing, so it
-// isn't done here.
+// Each level of the Hi-Z holds the farthest of the four texels under it in
+// the level before (level 0 reads the distant image's depth), so a box whose
+// nearest point lies beyond every texel it covers is hidden. A texel at the
+// far plane needs no special case: the max already carries it up.
 
 layout(set = 0, binding = 0) uniform texture2D source;
 layout(set = 0, binding = 1) uniform sampler source_sampler;

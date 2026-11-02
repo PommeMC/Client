@@ -1,8 +1,8 @@
 #version 450
 
-// Voxy's `chunkoutline/outline.vsh`: a box per run of drawn chunk sections,
-// drawn depth-only so the far side of each box bounds what distant terrain
-// may draw within loaded chunks (distant.frag discards nearer fragments).
+// A box per run of drawn chunk sections, drawn depth-only so the far side of
+// each box bounds what distant terrain may draw within loaded chunks
+// (distant.frag discards nearer fragments).
 
 #include "camera_ubo.glsl"
 
@@ -19,8 +19,8 @@ layout(set = 1, binding = 0) readonly buffer Sections {
     ivec4 sections[];
 };
 
-// `shouldRender`: whether the box from `lo` to `hi` (camera-relative, grown
-// a block) has a point within the render distance of the camera.
+// Whether the box from `lo` to `hi` (camera-relative, grown a block) has a
+// point within the render distance of the camera.
 bool should_render(ivec3 lo, ivec3 hi) {
     vec3 nearest = mix(mix(vec3(0.0), vec3(lo), greaterThan(lo, ivec3(0))), vec3(hi), lessThan(hi, ivec3(0)))
         - camera_pos.xyz;

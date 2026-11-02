@@ -1,6 +1,5 @@
-//! One dimension's Voxy world (`WorldEngine`, `WorldUpdater`): its sections
-//! at every level, those near the player in memory and every one seen on
-//! disk, a file per section.
+//! One dimension's distant world: its sections at every level, those near
+//! the player in memory and every one seen on disk, a file per section.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -11,8 +10,8 @@ use crate::position::ChunkPos;
 use crate::world::chunk::{Chunk, ChunkLightData};
 
 /// A section an update changed, and which of its sides the change touched
-/// (`WorldUpdater`'s neighbour mask: down, up, -x, +x, -z, +z), so the
-/// sections across them can be meshed again.
+/// (a bit each: down, up, -x, +x, -z, +z), so the sections across them can
+/// be meshed again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Changed {
     pub key: SectionKey,
@@ -84,8 +83,7 @@ impl World {
         self.sections.get(&key)
     }
 
-    /// `key`'s section, loaded, or unseen air where there's none
-    /// (`ActiveSectionTracker`).
+    /// `key`'s section, loaded, or unseen air where there's none.
     fn acquire(&mut self, key: SectionKey) -> &mut WorldSection {
         self.load(key);
         self.sections
@@ -93,9 +91,9 @@ impl World {
             .or_insert_with(WorldSection::unseen)
     }
 
-    /// `WorldUpdater.insertUpdate`: writes a vanilla section's voxels into
-    /// every level, stopping at the first level nothing changed in, and
-    /// bubbles a section going empty or non-empty up to its parent.
+    /// Writes a vanilla section's voxels into every level, stopping at the
+    /// first level nothing changed in, and bubbles a section going empty or
+    /// non-empty up to its parent.
     pub fn insert_update(&mut self, update: &VoxelizedSection) -> Vec<Changed> {
         let mut changed = Vec::new();
         let mut child: Option<(u8, bool)> = None;
@@ -126,8 +124,8 @@ impl World {
         changed
     }
 
-    /// `VoxelIngestService.processJob` for a column: every vanilla section
-    /// converted, mipped and written in. Returns what changed.
+    /// Takes in a column: every vanilla section converted, mipped and
+    /// written in. Returns what changed.
     pub fn ingest_chunk(
         &mut self,
         states: &States,
@@ -251,7 +249,7 @@ mod tests {
 
     #[test]
     fn evicted_sections_come_back_from_disk() {
-        let dir = std::env::temp_dir().join(format!("pomme-voxy-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pomme-distant-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut world = World::new(Some(dir.clone()));
         world.insert_update(&stone(100, 0, 0, 7));

@@ -1,6 +1,6 @@
 // Distant terrain's models (renderer/distant/models.rs): the atlas, a tile
-// per model with its six face textures two rows of three, and Voxy's
-// `block_model.glsl` record of each.
+// per model with its six face textures two rows of three, and the record of
+// each.
 const uint ATLAS_COLUMNS = 64u;
 const vec2 TILE_SIZE = vec2(48.0, 32.0);
 const vec2 ATLAS_SIZE = vec2(ATLAS_COLUMNS, 32u) * TILE_SIZE;

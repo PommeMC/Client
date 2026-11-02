@@ -1,8 +1,7 @@
 #version 450
 
-// Voxy's `util/prefixsum/simple.comp`: the translucent distance buckets
-// turned into exclusive prefix sums in place, one workgroup over the 1024
-// counts as 256 `uvec4`s.
+// The translucent distance buckets turned into exclusive prefix sums in
+// place, one workgroup over the 1024 counts as 256 `uvec4`s.
 
 #define WORK_SIZE 256
 layout(local_size_x = WORK_SIZE) in;

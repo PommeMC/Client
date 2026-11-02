@@ -1,8 +1,7 @@
 #version 450
 
-// Voxy's `hierarchical/cleaner/batch_visibility_set.comp`: the listed
-// nodes' last render frame set to now (bit 31 of the id: just allocated)
-// or cleared (freed).
+// The listed nodes' last render frame set to now (bit 31 of the id: just
+// allocated) or cleared (freed).
 
 layout(local_size_x = 128) in;
 

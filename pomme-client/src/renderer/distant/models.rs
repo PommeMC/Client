@@ -1,7 +1,6 @@
-//! Voxy's `ModelFactory`, `ModelQueries`, `TextureUtils` and `MipGen`:
-//! block states baked into models, each six face textures with mips in a
-//! tile of the model atlas, plus what the mesher and shaders need to know of
-//! each face.
+//! Distant terrain's models: block states baked into models, each six face
+//! textures with mips in a tile of the model atlas, plus what the mesher and
+//! shaders need to know of each face.
 
 use std::collections::HashMap;
 
@@ -16,8 +15,8 @@ use crate::world::block::render_assets::{BlockRenderView, Tint};
 const SIZE: usize = MODEL_TEXTURE_SIZE;
 /// Mip levels of a face texture: 16, 8, 4 and 2 texels.
 pub(crate) const MODEL_MIP_LEVELS: u32 = SIZE.trailing_zeros();
-/// A model's tile: its six faces two rows of three, Voxy face index `i` at
-/// column `i / 2`, row `i % 2`.
+/// A model's tile: its six faces two rows of three, face index `i` at column
+/// `i / 2`, row `i % 2`.
 pub(crate) const TILE_WIDTH: u32 = SIZE as u32 * 3;
 pub(crate) const TILE_HEIGHT: u32 = SIZE as u32 * 2;
 /// Tiles a row of the model atlas holds, and rows.
@@ -34,12 +33,12 @@ enum Layer {
     Translucent,
 }
 
-/// What the mesher asks of each model (`ModelQueries`): a byte per face,
-/// bit 0 the face occludes what it touches, 1 it covers its whole side, 2 it
-/// can be occluded, 3 it's lit by its own block, 0xFF for no face; in byte 6
-/// whether the model is biome-coloured, translucent, double-sided, holds a
-/// fluid, is a fluid, culls its own kind and is fully opaque; the light it
-/// gives off in bits 55-58.
+/// What the mesher asks of each model: a byte per face, bit 0 the face
+/// occludes what it touches, 1 it covers its whole side, 2 it can be
+/// occluded, 3 it's lit by its own block, 0xFF for no face; in byte 6 whether
+/// the model is biome-coloured, translucent, double-sided, holds a fluid, is
+/// a fluid, culls its own kind and is fully opaque; the light it gives off in
+/// bits 55-58.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Metadata(pub u64);
 
@@ -147,7 +146,7 @@ pub(crate) fn pack_tint(rgb: [f32; 3]) -> u32 {
     u32::from_le_bytes([r, g, b, 255])
 }
 
-/// A model as the shaders read it (`block_model.glsl`).
+/// A model as the shaders read it (`distant_models.glsl`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct BlockModel {
@@ -249,7 +248,9 @@ impl ModelFactory {
         id
     }
 
-    /// Voxy's `processModelResult` and `processTextureBakeResult`.
+    /// Bakes `state`'s faces, picks the model's layer and works out what the
+    /// mesher and shaders need of each face; a model that looks like an
+    /// earlier one is that one.
     fn bake(&mut self, view: BlockRenderView<'_>, uv_map: &AtlasUVMap, state: BlockState) -> u16 {
         let Some((faces, flags)) = self.bakery.render(view, uv_map, state) else {
             return 0;
@@ -397,7 +398,7 @@ fn to_bytes(rgb: [f32; 3]) -> [u8; 3] {
         .expect("three channels")
 }
 
-/// How `TextureUtils` tells a texel was drawn.
+/// How a drawn texel is told from a clear one.
 #[derive(Clone, Copy)]
 enum WriteCheck {
     /// Some quad covered it.
@@ -409,7 +410,7 @@ enum WriteCheck {
 fn was_pixel_written(face: &FaceTexture, check: WriteCheck, i: usize) -> bool {
     match check {
         WriteCheck::Stencil => face.depth[i] & 0xFF != 0,
-        // Voxy: some come out with an alpha of 1 where they're meant to be 0.
+        // Some come out with an alpha of 1 where they're meant to be 0.
         WriteCheck::Alpha => (face.colour[i] >> 24) & 0xFF > 1,
     }
 }
@@ -438,8 +439,8 @@ enum FaceTint {
     All,
 }
 
-/// Voxy's `computeFaceTint`, over the drawn texels that aren't black or
-/// clear.
+/// Which of the face's drawn texels are tinted, counting those that aren't
+/// black or clear.
 fn face_tint(face: &FaceTexture, check: WriteCheck) -> FaceTint {
     let (mut all, mut some, mut written) = (true, false, false);
     for i in 0..TEXELS {
@@ -466,8 +467,8 @@ enum DepthMode {
     Min,
 }
 
-/// Voxy's `computeDepth`: how far in from its side the face's drawn texels
-/// sit, 0 to 1; `None` with nothing drawn.
+/// How far in from its side the face's drawn texels sit, 0 to 1; `None` with
+/// nothing drawn.
 fn compute_depth(face: &FaceTexture, mode: DepthMode, check: WriteCheck) -> Option<f32> {
     let depths = (0..TEXELS)
         .filter(|&i| was_pixel_written(face, check, i))
@@ -482,7 +483,7 @@ fn compute_depth(face: &FaceTexture, mode: DepthMode, check: WriteCheck) -> Opti
     Some((depth as f64 / f64::from((1 << 24) - 1)) as f32)
 }
 
-/// Voxy's `computeBounds`: the drawn texels' `[min_x, max_x, min_y, max_y]`.
+/// The drawn texels' `[min_x, max_x, min_y, max_y]`.
 fn compute_bounds(face: &FaceTexture, check: WriteCheck) -> [usize; 4] {
     let written = |x: usize, y: usize| was_pixel_written(face, check, x + y * SIZE);
     let column = |x| (0..SIZE).any(|y| written(x, y));
@@ -494,10 +495,10 @@ fn compute_bounds(face: &FaceTexture, check: WriteCheck) -> [usize; 4] {
     [min_x, max_x, min_y, max_y]
 }
 
-/// Voxy's `MipGen.putTextures`: the faces laid out in a tile, transparent
-/// texels taking the colour of the nearest drawn one, then halved down to
-/// 2x2 faces. Voxy leaves sprites that mip dark black there; leaves fill
-/// theirs anyway, since coarse distant leaves draw them solid.
+/// The faces laid out in a tile, transparent texels taking the colour of the
+/// nearest drawn one, then halved down to 2x2 faces. Sprites that mip dark
+/// keep their transparent texels black, as `dark_cutout` mips them; leaves
+/// fill theirs anyway, since coarse distant leaves draw them solid.
 fn mip_tile(darkened: bool, leaves: bool, faces: &[FaceTexture; 6]) -> Vec<Vec<u8>> {
     let width = TILE_WIDTH as usize;
     let mut tile = vec![0u32; width * TILE_HEIGHT as usize];
@@ -538,9 +539,9 @@ fn mip_tile(darkened: bool, leaves: bool, faces: &[FaceTexture; 6]) -> Vec<Vec<u
         .collect()
 }
 
-/// Voxy's `MipGen.solidify`: a breadth-first walk out from the drawn
-/// texels, each clear one taking the nearest one's colour and keeping its
-/// own zero alpha, so mips don't bleed black.
+/// A breadth-first walk out from the drawn texels, each clear one taking the
+/// nearest one's colour and keeping its own zero alpha, so mips don't bleed
+/// black.
 fn solidify(colours: &mut [u32; TEXELS]) {
     // Per texel, the distance walked (high byte) and the drawn texel reached.
     let mut nearest = [u16::MAX; TEXELS];
@@ -573,9 +574,9 @@ fn solidify(colours: &mut [u32; TEXELS]) {
     }
 }
 
-/// Voxy's `TextureUtils.mipColours`: the mean of four ABGR texels in linear
-/// space. Dark-mipped sprites count only texels with alpha and still divide
-/// by four, darkening their edges as vanilla's `dark_cutout` does.
+/// The mean of four ABGR texels in linear space. Dark-mipped sprites count
+/// only texels with alpha and still divide by four, darkening their edges as
+/// vanilla's `dark_cutout` does.
 fn mip_colours(darkened: bool, texels: [u32; 4]) -> u32 {
     let mut sum = [0.0f32; 4];
     for texel in texels {

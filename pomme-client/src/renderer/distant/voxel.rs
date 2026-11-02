@@ -1,5 +1,5 @@
-//! Voxy's voxel (`Mapper`): a `u64` of block state, biome and light; and
-//! how eight of them merge into one of the next level (`Mipper`).
+//! Distant terrain's voxel: a `u64` of block state, biome and light; and how
+//! eight of them merge into one of the next level.
 
 use crate::world::block::BlockStateTable;
 
@@ -10,7 +10,7 @@ const BLOCK_MASK: u64 = ((1 << 20) - 1) << BLOCK_SHIFT;
 pub(crate) const BIOME_MASK: u64 = 0x1FF << BIOME_SHIFT;
 pub(crate) const LIGHT_MASK: u64 = 0xFF << LIGHT_SHIFT;
 
-/// Block state 0 is air, whatever kind (`Mapper.AIR`).
+/// Block state 0 is air, whatever kind.
 pub(crate) const AIR: u32 = 0;
 
 /// `light` is `block << 4 | sky`. Air keeps no biome.
@@ -38,9 +38,9 @@ pub(crate) fn with_light(voxel: u64, light: u8) -> u64 {
     voxel & !LIGHT_MASK | u64::from(light) << LIGHT_SHIFT
 }
 
-/// What voxelizing and mipping ask of each block state (`Mapper.StateEntry`):
-/// whether it's air, and its opacity, leaves counting as solid and the rest
-/// as their light dampening.
+/// What voxelizing and mipping ask of each block state: whether it's air,
+/// and its opacity, leaves counting as solid and the rest as their light
+/// dampening.
 pub(crate) struct States {
     air: Box<[bool]>,
     opacity: Box<[u8]>,
@@ -81,10 +81,10 @@ impl States {
             .unwrap_or(0)
     }
 
-    /// Voxy's `Mipper.mip`: of eight children, indexed `x << 2 | y << 1 | z`,
-    /// the most opaque block wins, ties going to the highest index (x, then
-    /// y, then z). All air: air lit by the mean of their light, block light
-    /// rounded down, sky up.
+    /// Of eight children, indexed `x << 2 | y << 1 | z`, the most opaque
+    /// block wins, ties going to the highest index (x, then y, then z). All
+    /// air: air lit by the mean of their light, block light rounded down,
+    /// sky up.
     pub fn mip(&self, children: [u64; 8]) -> u64 {
         let best = children
             .iter()

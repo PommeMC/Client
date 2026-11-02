@@ -1,9 +1,8 @@
-// Distant terrain's GPU records (renderer/distant/gpu.rs), Voxy's
-// `section.glsl`, `pos_util.glsl` and `gl46/bindings.glsl`: the scene
+// Distant terrain's GPU records (renderer/distant/gpu.rs): the scene
 // uniform, a section's metadata, and the buffers the command generation
 // passes share, each declared by the shader that defines its binding.
 
-// Voxy's `SceneUniform`: the distant view projection moved by the camera's
+// The scene uniform: the distant view projection moved by the camera's
 // position within its section, that section, the frame, and whether the
 // occlusion pass was skipped (cmdgen then keeps visibility itself); then
 // the traversal's: the Hi-Z's base size (width << 16 | height), the screen
@@ -41,8 +40,8 @@ ivec3 lod_position(uvec2 pos) {
     return ivec3(x, y, z);
 }
 
-// `BasicSectionGeometryManager.SectionMeta`: the key, the quads' bounds and
-// their start; then the eight groups' quad counts in `u16` pairs.
+// A section's record: the key, the quads' bounds and their start; then the
+// eight groups' quad counts in `u16` pairs.
 struct SectionMeta {
     uvec4 a;
     uvec4 b;
@@ -78,13 +77,13 @@ struct DrawCommand {
     uint base_instance;
 };
 
-// The draw list's regions (`MDICSectionRenderer`), in draws.
+// The draw list's regions, in draws.
 const uint OPAQUE_DRAWS = 400000u;
 const uint TRANSLUCENT_DRAWS = 100000u;
 const uint TRANSLUCENT_OFFSET = OPAQUE_DRAWS;
 const uint TEMPORAL_OFFSET = OPAQUE_DRAWS + TRANSLUCENT_DRAWS;
 // Translucent draws are bucketed by distance before their list is built;
-// the bucket counts lead the list (`TRANSLUCENT_WRITE_BASE`).
+// the bucket counts lead the list.
 const uint TRANSLUCENT_BUCKETS = 1024u;
 // The shared index buffer: this many quads' indices, then the cube's.
 const uint QUADS_PER_DRAW = 65536u;

@@ -1,9 +1,7 @@
-//! Distant terrain on the GPU (Voxy's `BasicSectionGeometryManager`,
-//! `MDICSectionRenderer`, `HierarchicalOcclusionTraverser` and the buffers
-//! `NodeManager` keeps): built sections' quads in one arena with a metadata
-//! record each, the models they index, the node tree the GPU walks each
-//! frame to pick which to draw, the requests it sends back, and the draw
-//! list the GPU builds from that pick.
+//! Distant terrain on the GPU: built sections' quads in one arena with a
+//! metadata record each, the models they index, the node tree the GPU walks
+//! each frame to pick which to draw, the requests it sends back, and the
+//! draw list the GPU builds from that pick.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -30,18 +28,17 @@ const MAX_ARENA_BYTES: u64 = 512 << 20;
 const MIN_ARENA_BYTES: u64 = 64 << 20;
 /// Quads the shared index buffer covers, the most a group can hold.
 const QUADS_PER_DRAW: u32 = 1 << 16;
-/// Sections the metadata buffer holds (Voxy's `maxSectionCount`).
+/// Sections the metadata buffer holds.
 const MAX_SECTIONS: u32 = 1 << 20;
-/// Sections a frame's render list, and nodes a traversal iteration, may
-/// hold (Voxy's `MAX_QUEUE_SIZE`).
+/// Sections a frame's render list, and nodes a traversal iteration, may hold.
 pub(crate) const MAX_LISTED: u32 = 200_000;
-/// The draw list's regions, in draws (`MDICSectionRenderer`).
+/// The draw list's regions, in draws.
 const OPAQUE_DRAWS: u32 = 400_000;
 const TRANSLUCENT_DRAWS: u32 = 100_000;
 const TEMPORAL_DRAWS: u32 = 100_000;
 const TRANSLUCENT_OFFSET: u32 = OPAQUE_DRAWS;
 const TEMPORAL_OFFSET: u32 = OPAQUE_DRAWS + TRANSLUCENT_DRAWS;
-/// Distance buckets the translucent draws sort by (`TRANSLUCENT_WRITE_BASE`).
+/// Distance buckets the translucent draws sort by.
 pub(crate) const TRANSLUCENT_BUCKETS: u32 = 1024;
 /// Quads a frame's staging holds for the arena.
 const STAGING_BYTES: u64 = 16 << 20;
@@ -65,14 +62,13 @@ const TILE_BYTES: usize = {
 const TILES_PER_FRAME: usize = 256;
 /// Biome tints per kind in the colour buffer ([`super::colors`]).
 pub(crate) const TINT_BIOMES: usize = 512;
-/// Voxy's `TARGET_COUNT`: the requests in flight at which the traversal
-/// stops asking for more.
+/// The requests in flight at which the traversal stops asking for more.
 const TARGET_REQUESTS: f64 = 4000.0;
-/// Requests a traversal may make a frame (`MAX_REQUEST_QUEUE_SIZE`).
+/// Requests a traversal may make a frame.
 pub(crate) const MAX_REQUESTS: u32 = 50;
 /// Top-level nodes the ring may hold.
 const MAX_ROOTS: usize = 1 << 14;
-/// Voxy's far plane: 3000 chunks.
+/// The distant projection's far plane: 3000 chunks.
 pub(crate) const DISTANT_FAR: f32 = 3000.0 * 16.0;
 /// Drawn chunk sections the bound store starts with room for.
 const BOUND_CAPACITY: u32 = 1 << 15;
@@ -102,10 +98,9 @@ pub(crate) const REQUESTS_BYTES: u64 = 8 + MAX_REQUESTS as u64 * 8;
 pub(crate) const QUEUE_META_BYTES: u64 = LEVELS as u64 * 16;
 pub(crate) const SCRATCH_BYTES: u64 = MAX_LISTED as u64 * 4;
 pub(crate) const TOP_IDS_BYTES: u64 = MAX_ROOTS as u64 * 4;
-/// Per node, the frame the traversal last drew it (the cleaner's
-/// `visibilityBuffer`).
+/// Per node, the frame the traversal last drew it, which the cleaner sorts by.
 pub(crate) const NODE_VISIBILITY_BYTES: u64 = MAX_NODES as u64 * 4;
-/// Nodes a cleaner pass picks (`OUTPUT_COUNT`): their ids, then their keys.
+/// Nodes a cleaner pass picks: their ids, then their keys.
 const CLEANER_OUTPUT: u32 = 256;
 pub(crate) const CLEANER_IDS_BYTES: u64 = CLEANER_OUTPUT as u64 * 4;
 pub(crate) const CLEANER_KEYS_BYTES: u64 = CLEANER_OUTPUT as u64 * 8;
@@ -195,7 +190,7 @@ pub(crate) struct DistantBuffers {
     layout: rhi::backend::BindGroupLayout,
     /// Set 1: the quads, models, tints and the model atlas.
     group: rhi::backend::BindGroup,
-    /// Every section's quads (`BufferArena`).
+    /// Every section's quads.
     arena: rhi::backend::Buffer,
     quads: Tlsf,
     /// Every section's record, by id.
@@ -205,8 +200,7 @@ pub(crate) struct DistantBuffers {
     meshes: HashMap<u32, Uploaded>,
     index_buffer: rhi::backend::Buffer,
     pending: VecDeque<Pending>,
-    /// Results held until the arena has room for their quads (Voxy's
-    /// `geometryUpdateQueue`).
+    /// Results held until the arena has room for their quads.
     waiting: HashMap<SectionKey, BuiltSection>,
     graph: NodeGraph,
     /// Per frame in flight: the arena's staging, the scatter list, the
@@ -285,8 +279,8 @@ const SCATTER_LAYOUT: &[rhi::BindGroupLayoutEntry] =
 
 impl DistantBuffers {
     pub fn new(device: &rhi::backend::Device, indirect: IndirectDrawFeatures) -> Self {
-        // Voxy's `SharedIndexBuffer`: corner 1 leads both triangles, so it's
-        // the provoking vertex the flat attributes come from; the cube after.
+        // The shared index buffer: corner 1 leads both triangles, so it's the
+        // provoking vertex the flat attributes come from; the cube after.
         let indices: Vec<u32> = (0..QUADS_PER_DRAW)
             .flat_map(|quad| [1, 2, 0, 1, 3, 2].map(|i| quad * 4 + i))
             .chain(CUBE)
@@ -386,7 +380,8 @@ impl DistantBuffers {
             encoder.fill_buffer(counts.handle(), 0, COUNTS_BYTES, 0);
             encoder.fill_buffer(render_list.handle(), 0, 4, 0);
         });
-        // Voxy's `ModelStore` sampler.
+        // The model atlas's sampler: nearest within a level, linear between
+        // the tiles' mip levels.
         let model_sampler = rhi::backend::create_sampler(
             device,
             &rhi::SamplerDesc {
@@ -565,7 +560,7 @@ impl DistantBuffers {
     }
 
     /// Requests the traversal may make this frame: fewer the more wait on
-    /// the worker (`HierarchicalOcclusionTraverser.uploadUniform`).
+    /// the worker.
     pub fn request_limit(&self) -> u32 {
         let room = ((TARGET_REQUESTS - self.graph.in_flight() as f64) / TARGET_REQUESTS).max(0.0);
         ((room * room * f64::from(MAX_REQUESTS)).ceil() as u32).min(MAX_REQUESTS)
@@ -616,10 +611,9 @@ impl DistantBuffers {
     }
 
     /// Carries the pending sections up, their quads into the arena through
-    /// `frame`'s staging and their records through its scatter list
-    /// (`BasicSectionGeometryManager.tick`), as many as fit, the rest next
-    /// frame; then the changed nodes through the same list
-    /// (`NodeManager.writeChanges`).
+    /// `frame`'s staging and their records through its scatter list, as many
+    /// as fit, the rest next frame; then the changed nodes through the same
+    /// list.
     pub fn record_uploads(&mut self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
         let mut copies = Vec::new();
         let mut records: Vec<(u32, [u32; 4])> = Vec::new();
@@ -739,10 +733,10 @@ impl DistantBuffers {
         ids.len() as u32
     }
 
-    /// Before the cleaner's sort, when it should run (`shouldCleanGeometry`,
-    /// less than an eighth of the arena free; Voxy keeps a fixed 256 MB
-    /// free, the arena here being sized to the device): its output reset to
-    /// an id no node has; the sort's workgroups.
+    /// Before the cleaner's sort, when it should run (less than an eighth of
+    /// the arena free, a fraction rather than a fixed amount since the arena
+    /// is sized to the device): its output reset to an id no node has; the
+    /// sort's workgroups.
     pub fn record_cleaner_setup(
         &mut self,
         encoder: &rhi::backend::CommandEncoder,
@@ -992,8 +986,8 @@ impl DistantBuffers {
         self.graph.has_column(x, z)
     }
 
-    /// `RenderDistanceTracker`: the top-level nodes are a ring of sections
-    /// around `eye`, over the dimension's height, remade when it moves.
+    /// The top-level nodes are a ring of sections around `eye`, over the
+    /// dimension's height, remade when it moves.
     pub fn update_roots(&mut self, eye: DVec3) {
         let Some(view) = self.view.clone() else {
             return;
@@ -1031,11 +1025,11 @@ impl DistantBuffers {
         self.free_released();
     }
 
-    /// Issues one region of the draw list the GPU built
-    /// (`renderTerrain`): an indirect draw whose count the generation
-    /// wrote, or, without an indirect count, over the zeroed slots of
-    /// [`Self::record_draw_slots`], one call each without multi-draw. The
-    /// caller has bound the matching distant pipeline and its sets.
+    /// Issues one region of the draw list the GPU built: an indirect draw
+    /// whose count the generation wrote, or, without an indirect count, over
+    /// the zeroed slots of [`Self::record_draw_slots`], one call each without
+    /// multi-draw. The caller has bound the matching distant pipeline and its
+    /// sets.
     pub fn draw(&self, pass: &rhi::backend::RenderPassEncoder, region: Region) {
         let (first, count_offset, max_draws) = region.layout();
         pass.set_bind_group(1, self.group);
@@ -1142,8 +1136,8 @@ fn packed_keys(words: &[u32]) -> impl Iterator<Item = u64> + '_ {
         .map(|key| u64::from(key[0]) << 32 | u64::from(key[1]))
 }
 
-/// Places `section`'s quads in the arena and queues their upload
-/// (`uploadSection`); its id, or `None` when out of ids.
+/// Places `section`'s quads in the arena and queues their upload; its id, or
+/// `None` when out of ids.
 fn place(
     quads: &mut Tlsf,
     ids: &mut Tlsf,
@@ -1163,11 +1157,10 @@ fn place(
     Some(id)
 }
 
-/// Voxy's `StreamedBoundStore`: the chunk sections the chunk renderer draws
-/// (compiled, and shown by the occlusion graph) for the bound pass, as
-/// boxes in a buffer the pass instances over, the last slot moving into a
-/// freed one as in `ChunkBoundStore`. Departures: Voxy streams Sodium's
-/// visible list each frame; here the columns are kept, and each run of
+/// The chunk sections the chunk renderer draws (compiled, and shown by the
+/// occlusion graph) for the bound pass, as boxes in a buffer the pass
+/// instances over, the last slot moving into a freed one. The columns are
+/// kept across frames rather than streamed anew each frame, and each run of
 /// stacked sections is one box, whose far faces are the run's.
 pub(crate) struct BoundStore {
     layout: rhi::backend::BindGroupLayout,

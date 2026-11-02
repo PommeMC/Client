@@ -1,9 +1,9 @@
 #version 450
 
-// Voxy's `gl46/prep.comp`: before the command generation, its dispatch size
-// from the render list, the draw counts back to zero, and the occlusion
-// pass's draw: a box per listed section, from the cube indices after the
-// quads' in the shared index buffer.
+// Before the command generation: its dispatch size from the render list, the
+// draw counts back to zero, and the occlusion pass's draw: a box per listed
+// section, from the cube indices after the quads' in the shared index
+// buffer.
 
 layout(local_size_x = 1) in;
 

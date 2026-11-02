@@ -1,7 +1,6 @@
 #version 450
 
-// Voxy's `gl46/cull/raster.frag`: a fragment that passes the depth test
-// marks its section seen this frame.
+// A fragment that passes the depth test marks its section seen this frame.
 
 #define DISTANT_SET 0
 #define VISIBILITY_BINDING 2

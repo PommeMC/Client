@@ -1,11 +1,10 @@
-//! Voxy's `ScanMesher2D` and `RenderDataFactory.Mesher`: a 32-wide plane of
-//! voxel faces fed one at a time, row by row, merged greedily into quads of
-//! up to 16x16 and written out as Voxy quads.
+//! The plane mesher: a 32-wide plane of voxel faces fed one at a time, row
+//! by row, merged greedily into quads of up to 16x16 and written out as
+//! packed quads.
 
-/// A quad's bits (`quad_format.glsl`): face in 0-2 (`axis << 1 | side`,
-/// axis 0 for y, 1 for z, 2 for x), width-1 in 3-6, height-1 in 7-10, z in
-/// 11-15, y in 16-20, x in 21-25, model id in 26-45, biome in 46-54, light
-/// in 55-62.
+/// A quad's bits: face in 0-2 (`axis << 1 | side`, axis 0 for y, 1 for z,
+/// 2 for x), width-1 in 3-6, height-1 in 7-10, z in 11-15, y in 16-20, x in
+/// 21-25, model id in 26-45, biome in 46-54, light in 55-62.
 pub(crate) const QUAD_MODEL_SHIFT: u32 = 26;
 pub(crate) const QUAD_BIOME_SHIFT: u32 = 46;
 pub(crate) const QUAD_LIGHT_SHIFT: u32 = 55;
@@ -183,9 +182,8 @@ impl Mesher {
         self.index = 0;
     }
 
-    /// `RenderDataFactory.Mesher.emitQuad`: the run ending at column `x` of
-    /// row `z`, `length` along the row and `width` rows deep, placed as a
-    /// quad.
+    /// The run ending at column `x` of row `z`, `length` along the row and
+    /// `width` rows deep, placed as a quad.
     fn emit(&self, x: usize, z: u32, out: &mut Quads) {
         let (mut length, mut width) = (u32::from(self.row_length[x]), u32::from(self.row_depth[x]));
         let data = self.row_data[x];
@@ -222,7 +220,8 @@ impl Mesher {
             length as i32,
             width as i32,
         );
-        // The bounds along the normal span only the layers, Voxy's quirk.
+        // Along the normal the bounds sit flat on the face's layer, with no
+        // depth of their own.
         let (lo, hi) = match axis {
             0 => ([x, position, z], [x + length, position, z + width]),
             1 => ([x, z, position], [x + length, z + width, position]),

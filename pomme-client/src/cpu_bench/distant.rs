@@ -31,9 +31,9 @@ pub fn bench(c: &mut Criterion, assets: &Assets) {
             b.iter(|| black_box(ingest(&mut World::default(), ChunkPos::new(0, 0))))
         });
 
-        let mut voxy = World::default();
+        let mut distant = World::default();
         for pos in columns_within(1) {
-            ingest(&mut voxy, pos);
+            ingest(&mut distant, pos);
         }
         // The section holding the surface at full detail, and the one
         // holding everything at the coarsest.
@@ -41,12 +41,12 @@ pub fn bench(c: &mut Criterion, assets: &Assets) {
             SectionKey::of_vanilla(0, 0, 4, 0),
             SectionKey::of_vanilla(LEVELS - 1, 0, 0, 0),
         ] {
-            let section = voxy.get(key).expect("chunk (0, 0)'s sections");
+            let section = distant.get(key).expect("chunk (0, 0)'s sections");
             let mut models = ModelFactory::new();
             let mut factory = Factory::new();
             let build = |factory: &mut Factory, models: &mut ModelFactory| {
                 factory
-                    .build(key, section, |k| voxy.get(k), &mut colors.baking(models))
+                    .build(key, section, |k| distant.get(k), &mut colors.baking(models))
                     .quads
                     .len()
             };

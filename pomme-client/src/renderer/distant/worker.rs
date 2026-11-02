@@ -1,7 +1,6 @@
-//! The distant terrain thread: turns chunks the server forgets into Voxy
-//! sections (`VoxelIngestService`), keeps them per dimension, on disk too,
-//! and meshes the sections the renderer asks for and keeps them up to date
-//! (`RenderGenerationService`).
+//! The distant terrain thread: turns chunks the server forgets into distant
+//! sections, keeps them per dimension, on disk too, and meshes the sections
+//! the renderer asks for and keeps them up to date.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -335,7 +334,7 @@ impl Worker {
                     return;
                 }
                 // The section and, across the sides the change reached, the
-                // neighbours meshed against it (`WorldUpdater`'s dirty marks).
+                // neighbours meshed against it.
                 let ready = Instant::now() + SETTLE;
                 for change in changed {
                     let key = change.key;

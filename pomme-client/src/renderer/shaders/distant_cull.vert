@@ -1,8 +1,8 @@
 #version 450
 
-// Voxy's `gl46/cull/raster.vert`: each listed section's quad bounds as a
-// box, grown by a block and brought a hair closer, depth-tested against the
-// distant image's depth; the fragment stage records the sections that show.
+// Each listed section's quad bounds as a box, grown by a block and brought a
+// hair closer, depth-tested against the distant image's depth; the fragment
+// stage records the sections that show.
 
 #define DISTANT_SET 0
 #define SCENE_BINDING 0

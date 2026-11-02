@@ -1,7 +1,7 @@
 #version 450
 
-// Voxy's `gl46/buildtranslucents.comp`: the translucent draws placed by
-// their distance bucket's prefix sum, so the list runs far to near.
+// The translucent draws placed by their distance bucket's prefix sum, so the
+// list runs far to near.
 
 layout(local_size_x = 128) in;
 

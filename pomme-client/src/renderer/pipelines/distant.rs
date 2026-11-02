@@ -1,6 +1,4 @@
-//! Distant terrain's passes (Voxy's `BoundRenderer`, `AbstractRenderPipeline`,
-//! `NormalRenderPipeline`, `HiZBuffer`, `HierarchicalOcclusionTraverser` and
-//! `MDICSectionRenderer`): the drawn chunks' boxes into a depth bound; last
+//! Distant terrain's passes: the drawn chunks' boxes into a depth bound; last
 //! frame's draw list into the far terrain's own image under its own
 //! projection where the chunks drew nothing; that depth reduced into the
 //! Hi-Z the node traversal culls by as it picks this frame's sections; the
@@ -26,20 +24,19 @@ use crate::renderer::rhi::backend::TextureTransition;
 use crate::renderer::util::{storage_binding, uniform_binding};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
 
-/// Distant terrain's image: plain RGBA8, as Voxy's.
+/// Distant terrain's image: plain RGBA8, lit as the quads draw.
 const FORMAT: rhi::TextureFormat = rhi::TextureFormat::Rgba8Unorm;
 const DEPTH: rhi::TextureFormat = rhi::TextureFormat::Depth32Float;
-/// The Hi-Z's levels: Voxy reduces into a depth texture; a colour one holds
-/// the same values here and attaches a level at a time.
+/// The Hi-Z's levels: a colour texture holding the reduced depth, so each
+/// level can be attached on its own and written by a full-screen pass.
 const HIZ: rhi::TextureFormat = rhi::TextureFormat::R32Float;
-/// Voxy's `subDivisionSize`: a node is split while it covers more than this
-/// many pixels squared.
+/// A node is split while it covers more than this many pixels squared.
 const SUBDIVISION_SIZE: f32 = 64.0;
 
-/// Voxy's `SceneUniform` (`distant_section.glsl`): the distant view
-/// projection moved by the camera's position within its 32-block section,
-/// that section, the frame, whether the occlusion pass was skipped, and the
-/// traversal's inputs.
+/// The scene uniform (`distant_section.glsl`): the distant view projection
+/// moved by the camera's position within its 32-block section, that section,
+/// the frame, whether the occlusion pass was skipped, and the traversal's
+/// inputs.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SceneUniform {
@@ -153,10 +150,10 @@ struct Targets {
     extent: rhi::Extent,
     color: rhi::backend::Texture,
     depth: rhi::backend::Texture,
-    /// The far side of the drawn chunks' boxes (`depthBoundingBuffer`).
+    /// The far side of the drawn chunks' boxes.
     bound: rhi::backend::Texture,
     /// The depth reduced level by level, each a power of two no larger
-    /// than the screen (`HiZBuffer`).
+    /// than the screen.
     hiz: rhi::backend::Texture,
     hiz_width: u32,
     hiz_height: u32,
@@ -217,9 +214,8 @@ pub struct DistantPipeline {
     cmdgen: util::ComputePass,
     prefix_sum: util::ComputePass,
     translucents: util::ComputePass,
-    /// The cleaner (`NodeCleaner`): the nodes' last-drawn frames kept up as
-    /// nodes come and go, the longest-undrawn sorted out, and their keys
-    /// made for the CPU.
+    /// The cleaner: the nodes' last-drawn frames kept up as nodes come and
+    /// go, the longest-undrawn sorted out, and their keys made for the CPU.
     visibility_set: util::ComputePass,
     cleaner_sort: util::ComputePass,
     cleaner_results: util::ComputePass,
@@ -502,8 +498,8 @@ impl DistantPipeline {
         let color = texture(screen("distant_color", FORMAT), TextureUse::ShaderRead);
         let depth = texture(screen("distant_depth", DEPTH), TextureUse::DepthRead);
         let bound = texture(screen("distant_depth_bound", DEPTH), TextureUse::DepthRead);
-        // `HiZBuffer.alloc`: the screen rounded down to powers of two, a
-        // level per halving down to 2.
+        // The Hi-Z's size: the screen rounded down to powers of two, a level
+        // per halving down to 2.
         let highest_bit = |n: u32| 1u32 << (31 - n.max(1).leading_zeros());
         let (hiz_width, hiz_height) = (highest_bit(extent.width), highest_bit(extent.height));
         let hiz_levels = hiz_width.max(hiz_height).ilog2().max(1);
@@ -588,12 +584,12 @@ impl DistantPipeline {
         });
     }
 
-    /// Voxy's `renderOpaque` and `runPipeline` up to the blit, after the
-    /// chunks' solid and cutout passes, whose depth `frame_depth` holds:
-    /// the bound pass, last frame's opaque draws into the image, the Hi-Z
-    /// from its depth, the cleaner's passes, the traversal picking this
-    /// frame's sections, the occlusion pass over them, this frame's draw
-    /// list, and the newly seen and translucent draws.
+    /// The frame's distant passes up to the blit, after the chunks' solid and
+    /// cutout passes, whose depth `frame_depth` holds: the bound pass, last
+    /// frame's opaque draws into the image, the Hi-Z from its depth, the
+    /// cleaner's passes, the traversal picking this frame's sections, the
+    /// occlusion pass over them, this frame's draw list, and the newly seen
+    /// and translucent draws.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -615,8 +611,8 @@ impl DistantPipeline {
             targets.bound.handle(),
         );
         let view_proj = camera.distant_view_projection(DISTANT_FAR);
-        // `SceneUniform.setup` and `uploadUniform`: the camera's 32-block
-        // section, and the projection moved by where it is within it.
+        // The scene uniform: the camera's 32-block section, and the
+        // projection moved by where it is within it.
         let camera_section = (eye / 32.0).floor();
         let sub_pos = (eye - camera_section * 32.0).as_vec3();
         let frame_id = buffers.frame_id();
@@ -642,9 +638,8 @@ impl DistantPipeline {
         );
         let indices = buffers.index_buffer();
 
-        // `BoundRenderer`: the farthest back face of each drawn section's
-        // box within the render distance, from a depth cleared to the near
-        // plane.
+        // The bound pass: the farthest back face of each drawn section's box
+        // within the render distance, from a depth cleared to the near plane.
         encoder.transition_textures(&[TextureTransition::color(
             bound,
             TextureUse::DepthRead,
@@ -681,8 +676,8 @@ impl DistantPipeline {
             TextureTransition::color(depth, TextureUse::DepthRead, TextureUse::DepthAttachment),
         ]);
 
-        // `initDepthStencil`, then `renderOpaque`: the draw list built last
-        // frame.
+        // The image's depth set up from the chunks', then the opaque draws of
+        // the draw list built last frame.
         let mut pass = self.begin_image_pass(device, encoder, targets, extent, true);
         pass.set_pipeline(&self.setup);
         pass.set_bind_group(0, targets.setup_set);
@@ -691,8 +686,7 @@ impl DistantPipeline {
         buffers.draw(&pass, Region::Opaque);
         pass.end();
 
-        // `innerPrimaryWork`: the Hi-Z from the depth so far, the cleaner,
-        // then the traversal.
+        // The Hi-Z from the depth so far, the cleaner, then the traversal.
         encoder.transition_textures(&[TextureTransition::color(
             depth,
             TextureUse::DepthAttachment,
@@ -709,8 +703,8 @@ impl DistantPipeline {
             TextureUse::DepthAttachment,
         )]);
 
-        // `prep.comp`, after last frame's draws are done with the counts
-        // and positions and the traversal with the render list.
+        // `distant_prep.comp`, after last frame's draws are done with the
+        // counts and positions and the traversal with the render list.
         encoder.transition_buffers_many(&[
             (rhi::BufferUse::Indirect, rhi::BufferUse::Storage),
             (rhi::BufferUse::ShaderRead, rhi::BufferUse::Storage),
@@ -750,7 +744,8 @@ impl DistantPipeline {
             encoder.transition_buffers(rhi::BufferUse::FragmentWrite, rhi::BufferUse::Storage);
         }
 
-        // `cmdgen.comp`, then the translucent draws sorted far to near.
+        // `distant_cmdgen.comp`, then the translucent draws sorted far to
+        // near.
         encoder.dispatch_indirect(
             &self.cmdgen.pipeline,
             self.cmdgen.set(frame),
@@ -779,8 +774,8 @@ impl DistantPipeline {
             (rhi::BufferUse::StorageWrite, rhi::BufferUse::ShaderRead),
         ]);
 
-        // `renderTemporal` and `renderTranslucent`: the sections seen this
-        // frame but not last, then the translucent quads.
+        // The sections seen this frame but not last, then the translucent
+        // quads.
         let mut pass = self.begin_image_pass(device, encoder, targets, extent, false);
         self.bind_quads(&mut pass, frame, targets, false);
         buffers.draw(&pass, Region::Temporal);
@@ -798,10 +793,10 @@ impl DistantPipeline {
         ]);
     }
 
-    /// `NodeCleaner.updateIds` and `tick`: the nodes allocated and freed
-    /// since last frame set in the last-drawn frames; then, when the arena
-    /// is nearly full, the longest-undrawn nodes sorted out and their keys
-    /// read back for the CPU to drop the meshes of.
+    /// The cleaner's passes: the nodes allocated and freed since last frame
+    /// set in the last-drawn frames; then, when the arena is nearly full, the
+    /// longest-undrawn nodes sorted out and their keys read back for the CPU
+    /// to drop the meshes of.
     fn clean(
         &self,
         encoder: &rhi::backend::CommandEncoder,
@@ -837,8 +832,8 @@ impl DistantPipeline {
         }
     }
 
-    /// `HiZBuffer.buildMipChain`: each level a full-screen pass over the
-    /// one before, the first over the image's depth.
+    /// The Hi-Z's levels, each a full-screen pass over the one before, the
+    /// first over the image's depth.
     fn build_hiz(
         &self,
         device: &rhi::backend::Device,
@@ -898,9 +893,9 @@ impl DistantPipeline {
         )]);
     }
 
-    /// `HierarchicalOcclusionTraverser.traverseInternal`: the first
-    /// iteration over the top-level nodes, then one per level below, each
-    /// sized by the nodes the one before pushed.
+    /// The node traversal: the first iteration over the top-level nodes,
+    /// then one per level below, each sized by the nodes the one before
+    /// pushed.
     fn traverse(
         &self,
         encoder: &rhi::backend::CommandEncoder,
@@ -989,9 +984,9 @@ impl DistantPipeline {
         pass.set_bind_group(3, targets.draw_set);
     }
 
-    /// `NormalRenderPipeline.finish`: the image into the frame, fogged, and
-    /// faded over the last tenth of `distant_blocks` (never short of
-    /// `render_distance_blocks`, where the chunks end).
+    /// The image into the frame, fogged, and faded over the last tenth of
+    /// `distant_blocks` (never short of `render_distance_blocks`, where the
+    /// chunks end).
     pub fn composite(
         &self,
         pass: &mut rhi::backend::RenderPassEncoder,
@@ -1155,9 +1150,9 @@ fn fullscreen_pipeline(
     )
 }
 
-/// The opaque quads, then the translucent ones blended as Voxy's translucent
-/// pass does; both write depth under the distant projection. Neither culls
-/// faces: the quads are drawn from every side.
+/// The opaque quads, then the translucent ones alpha-blended over them; both
+/// write depth under the distant projection. Neither culls faces: the quads
+/// are drawn from every side.
 fn create_quad_pipelines(
     device: &rhi::backend::Device,
     layout: rhi::backend::PipelineLayout,

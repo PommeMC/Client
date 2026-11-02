@@ -1,9 +1,9 @@
 #version 450
 
-// Voxy's `util/scatter.comp`: section records and nodes written where the
-// frame's scatter list says, so a frame's uploads land at one point of the
-// frame. The list is 80-byte chunks: a `uvec4` of four destination indices
-// (bit 31 picks the node buffer), then the four `uvec4`s to write there.
+// Section records and nodes written where the frame's scatter list says, so
+// a frame's uploads land at one point of the frame. The list is 80-byte
+// chunks: a `uvec4` of four destination indices (bit 31 picks the node
+// buffer), then the four `uvec4`s to write there.
 
 layout(local_size_x = 128) in;
 

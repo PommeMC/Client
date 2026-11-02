@@ -1,9 +1,8 @@
 #version 450
 
-// Voxy's `post/setup_stencil_depth.frag`: distant terrain's depth target
-// starts at the near plane wherever the chunks drew something, so distant
-// terrain draws only where they didn't (Voxy uses a stencil bit; the depth
-// alone does here, the swapchain depth having no stencil).
+// Distant terrain's depth target starts at the near plane wherever the
+// chunks drew something, so distant terrain draws only where they didn't.
+// The depth alone marks those pixels, the swapchain depth having no stencil.
 
 layout(set = 0, binding = 0) uniform texture2D frame_depth;
 layout(set = 0, binding = 1) uniform sampler depth_sampler;

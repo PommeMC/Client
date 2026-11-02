@@ -1,9 +1,10 @@
-//! Distant terrain: the chunks the server has forgotten, kept as columns
-//! (on disk too, per server or world) and drawn coarsely past the loaded
-//! ones, like Distant Horizons' client-only mode. A Pomme-only system; the game
-//! has nothing like it.
-// TODO: generation beyond what's been seen, textures, shader packs, and
-// dimensions without sky light (a cave roof would cover them).
+//! Distant terrain: the chunks the server has forgotten, kept as sections
+//! at five levels of detail (on disk too, per server or world) and drawn
+//! past the loaded ones from models baked per block state, the GPU choosing
+//! each frame which sections to draw. A Pomme-only system; the game has
+//! nothing like it.
+// TODO: generation beyond what's been seen, shader packs, and dimensions
+// without sky light (a cave roof would cover them).
 
 pub(crate) mod bakery;
 pub(crate) mod build;

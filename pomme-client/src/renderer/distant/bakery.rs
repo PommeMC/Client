@@ -1,7 +1,6 @@
-//! Voxy's model texture bakery (`SoftwareModelTextureBakery`,
-//! `SoftwareRasterizer`): a block state's model drawn from each of its six
-//! sides into a 16x16 face texture on the CPU, colour, depth and which
-//! texels are tinted.
+//! Distant terrain's model texture bakery: a block state's model drawn from
+//! each of its six sides into a 16x16 face texture on the CPU, colour, depth
+//! and which texels are tinted.
 
 use azalea_block::BlockState;
 use glam::{Mat4, Quat, Vec3, Vec4};
@@ -47,8 +46,8 @@ struct Quad<'a> {
     sprite: &'a SpritePixels,
 }
 
-/// Voxy's `SoftwareRasterizer`: a 16x16 target of 64-bit texels, colour in
-/// the low 32 bits, a stencil count, the tint bit and a 24-bit depth in the
+/// A software rasterizer: a 16x16 target of 64-bit texels, colour in the
+/// low 32 bits, a stencil count, the tint bit and a 24-bit depth in the
 /// high.
 struct Rasterizer {
     framebuffer: [u64; TEXELS],
@@ -183,7 +182,7 @@ fn sample(sprite: &SpritePixels, u: f32, v: f32) -> u32 {
     u32::from_le_bytes(sprite.rgba[at..at + 4].try_into().expect("four bytes"))
 }
 
-/// Voxy's `doBlending`: `top` over `below`, both ABGR.
+/// `top` blended over `below`, both ABGR.
 fn blend(below: u32, top: u32) -> u32 {
     let below_alpha = below >> 24;
     if below_alpha == 0 {
@@ -246,9 +245,9 @@ fn fixed_div(a: i32, b: i32) -> i32 {
     (i64::from(a) * FIXED_POINT_BIT_SCALE / i64::from(b)) as i32
 }
 
-/// The six views, by Voxy face index ([`Direction::VALUES`]):
-/// each looks at the block from that side and maps it to clip space, the
-/// face's texels at `x` and `y`.
+/// The six views, by face index ([`Direction::VALUES`]): each looks at the
+/// block from that side and maps it to clip space, the face's texels at `x`
+/// and `y`.
 fn views() -> [Mat4; 6] {
     [
         view(-90.0, 0.0, 0.0, 0),
@@ -260,8 +259,8 @@ fn views() -> [Mat4; 6] {
     ]
 }
 
-/// Voxy's `addView`: the pose (about the block's centre, flipped per
-/// `flip`), then the orthographic projection of the unit cube.
+/// One view: the pose (about the block's centre, flipped per `flip`), then
+/// the orthographic projection of the unit cube.
 fn view(pitch: f32, yaw: f32, rotation: f32, flip: i32) -> Mat4 {
     let scale = Vec3::new(
         (1 - 2 * (flip & 1)) as f32,
@@ -283,7 +282,8 @@ fn view(pitch: f32, yaw: f32, rotation: f32, flip: i32) -> Mat4 {
     ortho * pose
 }
 
-/// Voxy's `makeQuatFromAxisExact`, `angle` in degrees.
+/// A rotation of `angle` degrees about `axis`, its sine and cosine taken in
+/// `f64`.
 fn quat(axis: Vec3, angle: f32) -> Quat {
     let half = angle.to_radians() / 2.0;
     let sin = f64::from(half).sin() as f32;
@@ -311,7 +311,7 @@ pub(crate) struct BakeFlags {
     pub tint: Tint,
 }
 
-/// Voxy's `SoftwareModelTextureBakery`.
+/// The rasterizer and the six views every block state is drawn through.
 pub(crate) struct Bakery {
     rasterizer: Rasterizer,
     views: [Mat4; 6],
@@ -325,8 +325,7 @@ impl Bakery {
         }
     }
 
-    /// `state`'s six faces, by Voxy face index, or `None` when it draws
-    /// nothing.
+    /// `state`'s six faces, by face index, or `None` when it draws nothing.
     pub fn render<'a>(
         &mut self,
         view: BlockRenderView<'a>,
@@ -339,7 +338,7 @@ impl Bakery {
         if data.is_invisible() && !data.is_fluid_block() {
             return None;
         }
-        // Voxy forces leaves into the solid layer.
+        // Leaves go in the solid layer, their clear texels kept.
         let leaves = data.is_leaves();
         let mut flags = BakeFlags {
             darkened: false,
@@ -429,9 +428,9 @@ impl Bakery {
 }
 
 /// A full block of `fluid`: still on top and bottom, flowing on the sides
-/// over vanilla's half of the sprite. Voxy runs vanilla's `FluidRenderer`
-/// per view instead; a source with nothing around it comes out the same
-/// but for its lowered top, which a distant run doesn't keep.
+/// over vanilla's half of the sprite. A source with nothing around it comes
+/// out as vanilla's `FluidRenderer` draws it but for its lowered top, which
+/// a distant run doesn't keep.
 fn fluid_quads(uv_map: &AtlasUVMap, fluid: FluidKind) -> Vec<Quad<'_>> {
     let (still, flow, meta) = match fluid {
         FluidKind::Water => ("water_still", "water_flow", META_TINTED),

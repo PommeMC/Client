@@ -1,9 +1,9 @@
 #version 450
 
-// Voxy's `post/blit_texture_depth_cutout.frag`: distant terrain's image laid
-// into the frame, its depth carried over from the distant projection to the
-// camera's so what's drawn after still sorts against it, fogged like the
-// chunks and faded out over the last tenth of its distance.
+// Distant terrain's image laid into the frame, its depth carried over from
+// the distant projection to the camera's so what's drawn after still sorts
+// against it, fogged like the chunks and faded out over the last tenth of
+// its distance.
 
 #include "camera_ubo.glsl"
 #include "fog.glsl"

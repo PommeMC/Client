@@ -1,7 +1,6 @@
-//! Voxy's `RenderDataFactory`: a world section meshed into quads, a pass
-//! per axis over its opaque blocks, its fluids and its other blocks, each
-//! face culled against what it touches, inside the section and in the six
-//! around it.
+//! The section mesher: a world section meshed into quads, a pass per axis
+//! over its opaque blocks, its fluids and its other blocks, each face culled
+//! against what it touches, inside the section and in the six around it.
 
 use super::models::{Metadata, Models};
 use super::scan::{
@@ -15,7 +14,6 @@ const MODEL: u64 = 0xFFFF << QUAD_MODEL_SHIFT;
 /// A quad's block light.
 const BLOCK_LIGHT: u64 = 0xF << (QUAD_LIGHT_SHIFT + 4);
 
-/// A meshed section (`BuiltSection`).
 pub(crate) struct BuiltSection {
     pub key: SectionKey,
     /// [`WorldSection::non_empty_children`] when it was meshed.
@@ -54,8 +52,8 @@ const SIDES: [[i32; 3]; 6] = [
 ];
 
 pub(crate) struct Factory {
-    /// Per voxel, its quad without a position (`packPartialQuadData`), then
-    /// its model's metadata; air keeps only its light.
+    /// Per voxel, its quad without a position, then its model's metadata;
+    /// air keeps only its light.
     section: Box<[u64]>,
     /// The six neighbours' facing slices ([`SIDES`]).
     neighbours: Box<[u64]>,
@@ -90,8 +88,8 @@ impl Factory {
         }
     }
 
-    /// `generateMesh`: `section` at `key` meshed, `neighbour` giving the
-    /// sections around it (missing ones are unseen air).
+    /// `section` at `key` meshed, `neighbour` giving the sections around it
+    /// (missing ones are unseen air).
     pub fn build<'a>(
         &mut self,
         key: SectionKey,
@@ -163,8 +161,8 @@ impl Factory {
         }
     }
 
-    /// `prepareSectionData`: each voxel's quad and metadata and the row
-    /// masks; returns which sides have blocks against them ([`SIDES`]).
+    /// Each voxel's quad and metadata and the row masks; returns which sides
+    /// have blocks against them ([`SIDES`]).
     fn prepare(&mut self, data: &[u64], models: &mut dyn Models) -> u8 {
         let mut needed = 0;
         for y in 0..32 {
@@ -304,8 +302,8 @@ impl Factory {
         if axis == 0 { 32 } else { 1 }
     }
 
-    /// `generateYZOpaqueInnerGeometry`: the faces between opaque blocks and
-    /// everything else, between the layers along `axis`.
+    /// The faces between opaque blocks and everything else, between the
+    /// layers along `axis`.
     fn opaque_inner(&mut self, axis: u8) {
         self.mesher.face_offset = true;
         let step = Self::step(axis);
@@ -334,8 +332,8 @@ impl Factory {
         }
     }
 
-    /// `generateYZOpaqueOuterGeometry`: the opaque faces on the section's two
-    /// sides along `axis`, against the neighbouring sections.
+    /// The opaque faces on the section's two sides along `axis`, against the
+    /// neighbouring sections.
     fn opaque_outer(&mut self, axis: u8, models: &mut dyn Models) {
         self.mesher.face_offset = false;
         for side in 0..2usize {
@@ -367,8 +365,8 @@ impl Factory {
         self.mesher.face_offset = true;
     }
 
-    /// `generateYZFluidInnerGeometry`: fluid faces between layers, a block
-    /// holding a fluid drawing the fluid's model instead.
+    /// Fluid faces between layers, a block holding a fluid drawing the
+    /// fluid's model instead.
     fn fluid_inner(&mut self, axis: u8, models: &mut dyn Models) {
         let step = Self::step(axis);
         for layer in 0..31 {
@@ -397,7 +395,8 @@ impl Factory {
         }
     }
 
-    /// `generateYZFluidOuterGeometry`.
+    /// The fluid faces on the section's two sides along `axis`, against the
+    /// neighbouring sections; a neighbour holding a fluid culls as that fluid.
     fn fluid_outer(&mut self, axis: u8, models: &mut dyn Models) {
         self.mesher.face_offset = false;
         for side in 0..2usize {
@@ -431,8 +430,8 @@ impl Factory {
         self.mesher.face_offset = true;
     }
 
-    /// `generateYZNonOpaqueInnerGeometry`: both faces of every block that's
-    /// neither opaque nor fluid, in the inner layers.
+    /// Both faces of every block that's neither opaque nor fluid, in the
+    /// inner layers.
     fn non_opaque_inner(&mut self, axis: u8) {
         let step = Self::step(axis) * 32;
         for layer in 1..31 {
@@ -465,8 +464,8 @@ impl Factory {
         }
     }
 
-    /// `generateYZNonOpaqueOuterGeometry`: the same on the two outer layers,
-    /// the outward face against the neighbouring section.
+    /// The same on the two outer layers, the outward face against the
+    /// neighbouring section.
     fn non_opaque_outer(&mut self, axis: u8, models: &mut dyn Models) {
         for side in 0..2usize {
             let step = Self::step(axis) as isize * 32 * (1 - side as isize * 2);
@@ -490,7 +489,8 @@ impl Factory {
                     let (inner_quad, inner_meta) = (s.quad(inner), s.meta(inner));
                     let fail_inner = inner_meta.culls_same() && inner_quad & MODEL == quad & MODEL
                         || inner_meta.face_occludes(axis << 1 | side as u8);
-                    // Voxy leaves these faces with the block's own light.
+                    // These faces keep the block's own light, not a
+                    // neighbour's.
                     let positive = meta.face_exists(axis << 1 | 1)
                         && ((side == 1 && !fail) || (side == 0 && !fail_inner));
                     let negative = meta.face_exists(axis << 1)
@@ -518,9 +518,8 @@ impl Factory {
 
     /// The x pass's walk: every row `y * 32 + z` once, a mesher per x layer
     /// (the secondary too when `both`); `mask` gives a row's faces, `each`
-    /// meshes one. Voxy keeps the layers' pending skips in packed 5-bit
-    /// counters; plain counters here, flushed before a face lands in a layer
-    /// and at the end of every row.
+    /// meshes one. Each layer's pending skips are counted up and flushed to
+    /// its meshers before a face lands in it and at the end of every row.
     fn walk_x(
         &mut self,
         both: bool,
@@ -552,7 +551,7 @@ impl Factory {
         }
     }
 
-    /// `generateXOpaqueInnerGeometry`.
+    /// [`Self::opaque_inner`] along x.
     fn x_opaque_inner(&mut self) {
         self.walk_x(
             false,
@@ -574,7 +573,7 @@ impl Factory {
         );
     }
 
-    /// `generateXInnerFluidGeometry`.
+    /// [`Self::fluid_inner`] along x.
     fn x_fluid_inner(&mut self, models: &mut dyn Models) {
         self.walk_x(
             false,
@@ -598,7 +597,7 @@ impl Factory {
         );
     }
 
-    /// `generateXNonOpaqueInnerGeometry`.
+    /// [`Self::non_opaque_inner`] along x.
     fn x_non_opaque_inner(&mut self) {
         self.walk_x(
             true,
@@ -671,7 +670,7 @@ impl Factory {
         }
     }
 
-    /// `generateXOuterOpaqueGeometry`.
+    /// [`Self::opaque_outer`] along x.
     fn x_opaque_outer(&mut self, models: &mut dyn Models) {
         self.walk_x_outer(
             models,
@@ -694,7 +693,7 @@ impl Factory {
         );
     }
 
-    /// `generateXOuterFluidGeometry`.
+    /// [`Self::fluid_outer`] along x.
     fn x_fluid_outer(&mut self, models: &mut dyn Models) {
         self.walk_x_outer(
             models,
@@ -725,10 +724,9 @@ impl Factory {
         );
     }
 
-    /// `generateXNonOpaqueOuterGeometry`: at x 0 and 31, the outward face
-    /// against the neighbouring section and the inward one against the
-    /// next block in (`dualMeshNonOpaqueOuterX`). At x 0 the outward face
-    /// is -x, the secondary mesher's; at 31 it's +x, the layer's own.
+    /// At x 0 and 31, the outward face against the neighbouring section and
+    /// the inward one against the next block in. At x 0 the outward face is
+    /// -x, the secondary mesher's; at 31 it's +x, the layer's own.
     fn x_non_opaque_outer(&mut self, models: &mut dyn Models) {
         self.walk_x_outer(
             models,
@@ -801,7 +799,7 @@ fn add_skips(pending: &mut [u32; 32], faces: u32) {
 }
 
 /// The index in neighbour `side`'s data of the voxel facing this section at
-/// slice position `i` (`acquireNeighborData`).
+/// slice position `i`.
 fn neighbour_index(side: usize, i: usize) -> usize {
     let (a, b) = (i & 31, i >> 5);
     match side {
@@ -814,10 +812,9 @@ fn neighbour_index(side: usize, i: usize) -> usize {
     }
 }
 
-/// `packPartialQuadData`: the voxel's biome and light moved down a bit into
-/// their quad fields, the biome kept only for biome-coloured models, the
-/// light dropped for fully opaque ones (they take the neighbour's); then the
-/// model and its group.
+/// The voxel's biome and light moved down a bit into their quad fields, the
+/// biome kept only for biome-coloured models, the light dropped for fully
+/// opaque ones (they take the neighbour's); then the model and its group.
 fn pack_partial(model: u16, voxel: u64, meta: Metadata) -> u64 {
     let mut light_biome = (voxel & (voxel::BIOME_MASK | voxel::LIGHT_MASK)) >> 1;
     if !meta.is_biome_coloured() {
@@ -829,8 +826,8 @@ fn pack_partial(model: u16, voxel: u64, meta: Metadata) -> u64 {
     light_biome | u64::from(model) << QUAD_MODEL_SHIFT | quad_group(meta)
 }
 
-/// `getQuadTyping`: the group in bits 1-2: translucent 0, double-sided 1,
-/// else 2 for the face's own.
+/// The group in bits 1-2: translucent 0, double-sided 1, else 2 for the
+/// face's own.
 fn quad_group(meta: Metadata) -> u64 {
     0b111
         & (0b000_000_010_100
@@ -842,7 +839,7 @@ fn neighbour_light(voxel: u64) -> u64 {
     (voxel & voxel::LIGHT_MASK) >> 1
 }
 
-/// `applyQuadLight`: the block light at least the model's emission.
+/// The block light at least the model's emission.
 fn apply_light(quad: u64, meta: Metadata) -> u64 {
     let light = (quad & BLOCK_LIGHT).max(meta.light_emission() << (QUAD_LIGHT_SHIFT + 4));
     quad & !BLOCK_LIGHT | light
@@ -862,7 +859,10 @@ fn as_fluid(models: &mut dyn Models, quad: u64, meta: Metadata) -> (u64, Metadat
     )
 }
 
-/// `shouldMeshNonOpaqueBlockFace`.
+/// Whether `face` of a block that's neither opaque nor fluid is drawn against
+/// `next`: not against its own kind when the model culls same, not when the
+/// model has no such face, and not when the face can be occluded and `next`
+/// occludes it.
 fn should_mesh_non_opaque(
     face: u8,
     quad: u64,
@@ -879,7 +879,7 @@ fn should_mesh_non_opaque(
     !(meta.face_can_be_occluded(face) && next_meta.face_occludes(face ^ 1))
 }
 
-/// `meshNonOpaqueFace`: the quad to draw for `face` against `next`, if any.
+/// The quad to draw for `face` against `next`, if any.
 fn non_opaque_face(
     face: u8,
     quad: u64,
