@@ -1432,7 +1432,6 @@ impl Renderer {
     /// top-down benchmark view).
     fn distant_draws(&self, chunks: u32) -> bool {
         chunks > 0
-            && self.distant_buffers.supported()
             && self.shader_pack.is_none()
             && self.chunk_buffers.format() == TerrainFormat::Vanilla
             && self.camera.top_down().is_none()

@@ -90,6 +90,7 @@ pub(crate) const CUBE_FIRST_INDEX: u32 = QUADS_PER_DRAW * 6;
 pub(crate) const SECTIONS_BYTES: u64 = MAX_SECTIONS as u64 * 32;
 pub(crate) const RENDER_LIST_BYTES: u64 = (1 + MAX_LISTED as u64) * 4;
 pub(crate) const COUNTS_BYTES: u64 = 64;
+const COUNT_WORDS: usize = COUNTS_BYTES as usize / 4;
 pub(crate) const DRAWS_BYTES: u64 =
     (OPAQUE_DRAWS + TRANSLUCENT_DRAWS + TEMPORAL_DRAWS) as u64 * size_of::<DrawCommand>() as u64;
 pub(crate) const POSITIONS_BYTES: u64 = MAX_LISTED as u64 * 8;
@@ -144,6 +145,20 @@ pub(crate) enum Region {
     /// which the opaque region (built last frame) missed.
     Temporal,
     Translucent,
+}
+
+impl Region {
+    const ALL: [Self; 3] = [Self::Opaque, Self::Temporal, Self::Translucent];
+
+    /// The region's first draw, the byte offset of its count in the
+    /// draw-count buffer, and its size in draws.
+    fn layout(self) -> (u32, u64, u32) {
+        match self {
+            Self::Opaque => (0, COUNTS_OPAQUE, OPAQUE_DRAWS),
+            Self::Temporal => (TEMPORAL_OFFSET, COUNTS_TEMPORAL, TEMPORAL_DRAWS),
+            Self::Translucent => (TRANSLUCENT_OFFSET, COUNTS_TRANSLUCENT, TRANSLUCENT_DRAWS),
+        }
+    }
 }
 
 /// Where the player is and how far distant terrain draws.
@@ -205,6 +220,11 @@ pub(crate) struct DistantBuffers {
     visibility_sets: Vec<rhi::backend::Buffer>,
     request_readbacks: Vec<rhi::backend::Buffer>,
     cleaner_readbacks: Vec<rhi::backend::Buffer>,
+    /// Without an indirect count: the draw counts read back per frame,
+    /// the last ones read, and the slots each region draws this frame.
+    count_readbacks: Vec<rhi::backend::Buffer>,
+    last_counts: [u32; COUNT_WORDS],
+    slots: [u32; 3],
     /// Per frame in flight, whether its cleaner readback holds a pass's
     /// keys.
     cleaner_pending: [bool; MAX_FRAMES_IN_FLIGHT],
@@ -334,7 +354,7 @@ impl DistantBuffers {
         let counts = device_buffer(
             "distant_draw_counts",
             COUNTS_BYTES,
-            storage | rhi::BufferUsages::INDIRECT,
+            storage | rhi::BufferUsages::INDIRECT | rhi::BufferUsages::COPY_SRC,
         );
         let draws = device_buffer(
             "distant_draws",
@@ -455,6 +475,9 @@ impl DistantBuffers {
             request_readbacks: readbacks("distant_request_readback", REQUESTS_BYTES),
             cleaner_readbacks: readbacks("distant_cleaner_readback", CLEANER_KEYS_BYTES),
             cleaner_pending: [false; MAX_FRAMES_IN_FLIGHT],
+            count_readbacks: readbacks("distant_count_readback", COUNTS_BYTES),
+            last_counts: [0; COUNT_WORDS],
+            slots: [0; 3],
             nodes,
             requests,
             queue_meta,
@@ -489,11 +512,6 @@ impl DistantBuffers {
 
     pub fn layout(&self) -> rhi::backend::BindGroupLayout {
         self.layout
-    }
-
-    /// Whether the GPU can build and issue the draw list.
-    pub fn supported(&self) -> bool {
-        self.indirect.count && self.indirect.multi_draw
     }
 
     pub fn draw_buffers(&self) -> DrawBuffers<'_> {
@@ -741,6 +759,43 @@ impl DistantBuffers {
         Some(groups)
     }
 
+    /// Without an indirect count, before the command generation: zeroes
+    /// the slots each region draws so the unwritten ones draw nothing, an
+    /// earlier frame's count plus a quarter and a floor for the temporal
+    /// region's spikes, as the chunk renderer's cull does.
+    pub fn record_draw_slots(&mut self, encoder: &rhi::backend::CommandEncoder) {
+        if self.indirect.count {
+            return;
+        }
+        let stride = size_of::<DrawCommand>() as u64;
+        encoder.transition_buffers(rhi::BufferUse::Indirect, rhi::BufferUse::CopyDst);
+        for region in Region::ALL {
+            let (first, count_offset, max_draws) = region.layout();
+            let count = self.last_counts[count_offset as usize / 4];
+            let slots = (count + count / 4 + 256).min(max_draws);
+            encoder.fill_buffer(
+                self.draws.handle(),
+                u64::from(first) * stride,
+                u64::from(slots) * stride,
+                0,
+            );
+            self.slots[region as usize] = slots;
+        }
+    }
+
+    /// Without an indirect count, after the command generation: the draw
+    /// counts into this frame's readback.
+    pub fn record_count_readback(&self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
+        if !self.indirect.count {
+            record_readback(
+                encoder,
+                &self.counts,
+                &self.count_readbacks[frame],
+                COUNTS_BYTES,
+            );
+        }
+    }
+
     /// After the cleaner's results: the keys to drop into this frame's
     /// readback.
     pub fn record_cleaner_readback(&self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
@@ -781,6 +836,12 @@ impl DistantBuffers {
         );
         for key in keys {
             self.graph.process_request(SectionKey::unpack(key));
+        }
+        if !self.indirect.count {
+            self.last_counts =
+                read_words(&mut self.count_readbacks[frame], COUNTS_BYTES, |words| {
+                    words.try_into().expect("the whole draw-count buffer")
+                });
         }
         if std::mem::take(&mut self.cleaner_pending[frame]) {
             let keys: Vec<u64> = read_words(
@@ -960,25 +1021,33 @@ impl DistantBuffers {
 
     /// Issues one region of the draw list the GPU built
     /// (`renderTerrain`): an indirect draw whose count the generation
-    /// wrote. The caller has bound the matching distant pipeline and its
-    /// sets.
+    /// wrote, or, without an indirect count, over the zeroed slots of
+    /// [`Self::record_draw_slots`], one call each without multi-draw. The
+    /// caller has bound the matching distant pipeline and its sets.
     pub fn draw(&self, pass: &rhi::backend::RenderPassEncoder, region: Region) {
-        let (first, count_offset, max_draws) = match region {
-            Region::Opaque => (0, COUNTS_OPAQUE, OPAQUE_DRAWS),
-            Region::Temporal => (TEMPORAL_OFFSET, COUNTS_TEMPORAL, TEMPORAL_DRAWS),
-            Region::Translucent => (TRANSLUCENT_OFFSET, COUNTS_TRANSLUCENT, TRANSLUCENT_DRAWS),
-        };
+        let (first, count_offset, max_draws) = region.layout();
         pass.set_bind_group(1, self.group);
         pass.set_index_buffer(self.index_buffer.handle());
         let stride = size_of::<DrawCommand>() as u32;
-        pass.draw_indexed_indirect_count(
-            self.draws.handle(),
-            u64::from(first * stride),
-            self.counts.handle(),
-            count_offset,
-            max_draws,
-            stride,
-        );
+        let draws = self.draws.handle();
+        let offset = u64::from(first * stride);
+        let slots = self.slots[region as usize];
+        if self.indirect.count {
+            pass.draw_indexed_indirect_count(
+                draws,
+                offset,
+                self.counts.handle(),
+                count_offset,
+                max_draws,
+                stride,
+            );
+        } else if self.indirect.multi_draw {
+            pass.draw_indexed_indirect(draws, offset, slots, stride);
+        } else {
+            for i in 0..slots {
+                pass.draw_indexed_indirect(draws, offset + u64::from(i * stride), 1, stride);
+            }
+        }
     }
 
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
@@ -1015,6 +1084,7 @@ impl DistantBuffers {
             &mut self.visibility_sets,
             &mut self.request_readbacks,
             &mut self.cleaner_readbacks,
+            &mut self.count_readbacks,
             &mut self.tile_staging,
         ] {
             util::destroy_buffers(device, buffers);

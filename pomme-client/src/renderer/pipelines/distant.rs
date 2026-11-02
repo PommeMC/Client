@@ -716,6 +716,7 @@ impl DistantPipeline {
         encoder.transition_buffers(rhi::BufferUse::Storage, rhi::BufferUse::CopyDst);
         encoder.dispatch(&self.prep.pipeline, self.prep.set(frame), &[], [1, 1, 1]);
         encoder.fill_buffer(translucent, 0, u64::from(TRANSLUCENT_BUCKETS) * 4, 0);
+        buffers.record_draw_slots(encoder);
         encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect);
         encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage);
         encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::Storage);
@@ -768,6 +769,7 @@ impl DistantPipeline {
             counts,
             0,
         );
+        buffers.record_count_readback(encoder, frame);
         encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect);
         encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::ShaderRead);
 
