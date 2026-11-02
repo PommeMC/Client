@@ -307,9 +307,12 @@ pub(super) fn translate_update_advancements_777(
 /// and no longer follows it with a `move_player_pos_rot`
 /// (`ClientPacketListener.handleMovePlayer`), whose pose pomme sends right
 /// after the accept.
-pub(super) fn translate_accept_teleportation_777(v: &Ids777, payload: &[u8]) -> Vec<Vec<u8>> {
+pub(super) fn translate_accept_teleportation_777(
+    state: &mut SessionState,
+    payload: &[u8],
+) -> Vec<Vec<u8>> {
     let mut p = 0;
-    *v.pending_accept.lock().unwrap() = wire::read_varint(payload, &mut p);
+    state.pending_accept = wire::read_varint(payload, &mut p);
     Vec::new()
 }
 
@@ -318,8 +321,9 @@ pub(super) fn translate_accept_teleportation_777(v: &Ids777, payload: &[u8]) -> 
 pub(super) fn translate_move_player_pos_rot_777(
     v: &Ids777,
     payload: &[u8],
+    state: &mut SessionState,
 ) -> Option<Vec<Vec<u8>>> {
-    let teleport = v.pending_accept.lock().unwrap().take()?;
+    let teleport = state.pending_accept.take()?;
     let mut out = Vec::with_capacity(38);
     wire::write_varint(&mut out, v.accept_teleportation_old_id);
     wire::write_varint(&mut out, teleport);

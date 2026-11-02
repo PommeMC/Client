@@ -374,7 +374,7 @@
 //!   cooldown group
 
 use std::io::Cursor;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use azalea_buf::AzBuf;
 use azalea_inventory::components::Profile;
@@ -394,13 +394,14 @@ use pomme_protocol::{
 
 use crate::recipe::MAX_SLOT_DISPLAY_DEPTH;
 
-type ContextRewrite = fn(&Translation, u32, &[u8]) -> Option<Vec<u8>>;
+type ContextRewrite = fn(&Translation, u32, &[u8], &mut SessionState) -> Option<Vec<u8>>;
 
 /// A fully resolved payload rewrite; dispatch never searches version gates.
 #[derive(Clone, Copy)]
 enum Rewrite {
     Context(ContextRewrite),
     Frame(FrameRewrite),
+    SessionFrame(fn(u32, &[u8], &SessionState) -> Option<Vec<u8>>),
     Item(ItemRewrite),
     Recipe(RecipeTranslator),
 }
@@ -714,9 +715,6 @@ struct Ids777 {
     accept_teleportation_id: u32,
     accept_teleportation_old_id: u32,
     move_player_pos_rot_id: u32,
-    /// The teleport id of an `accept_teleportation` held back until the
-    /// `move_player_pos_rot` carrying its pose; cleared on `login`.
-    pending_accept: Mutex<Option<u32>>,
 }
 
 /// Native-space dispatch ids for the frame rewrites protocol 763 needs, plus
@@ -748,19 +746,6 @@ const RENAMED: &[(&str, &str)] = &[
     // UUID). The serverbound reply kept the name and matches directly.
     ("resource_pack", "resource_pack_push"),
 ];
-
-/// The wire version's dimension-type names in synced-registry order,
-/// captured while splitting registry data: the pre-1.20.5 spawn-info
-/// rewrites turn a dimension-type key string into this index.
-///
-/// Global because the rewrites reach it through `FrameRewrite` fn pointers,
-/// and `Translation` is leaked per protocol rather than per connection, so a
-/// field there would scope it no better. One connection at a time is an
-/// assumption of this module.
-///
-/// TODO: a reconfiguration whose registry data omits dimension_type keeps the
-/// previous list (as `config_sequence` keeps the previous `RegistryHolder`).
-static DIMENSION_TYPES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// `ServerboundInteractPacket` action ordinals on versions where attacking
 /// is an `interact` action (`INTERACT` carries a hand, `ATTACK` nothing,
@@ -878,7 +863,6 @@ mod shared;
 use shared::*;
 
 mod v768;
-use v768::*;
 
 mod v767;
 use v767::*;
@@ -905,16 +889,12 @@ mod v763;
 use v763::*;
 
 mod tables;
-use tables::*;
 
 mod inbound;
-use inbound::*;
 
 mod outbound;
-use outbound::*;
 
 mod remaps;
-use remaps::*;
 
 mod v770;
 use v770::*;
@@ -938,7 +918,6 @@ mod chunks;
 use chunks::*;
 
 mod recipes;
-use recipes::*;
 
 #[cfg(test)]
 mod recipe_translation_tests;
@@ -947,3 +926,7 @@ mod recipe_translation_tests;
 mod dispatch_tests;
 
 pub use shared::{active, native_id, prewarm};
+
+mod session;
+use session::SessionState;
+pub use session::TranslationSession;

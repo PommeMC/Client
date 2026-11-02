@@ -478,8 +478,8 @@ fn decode_lp_vec3(bytes: &[u8]) -> DVec3 {
 /// The wire translation under test for one protocol; the old-layout frames
 /// in the tests below are hand-built from that version's decompiled
 /// reference codecs (`reference/<version>/decompiled/.../network/`).
-fn translation_for(protocol: i32) -> crate::net::translate::Translation {
-    crate::net::translate::Translation::for_protocol(protocol).expect("translation data")
+fn translation_for(protocol: i32) -> crate::net::translate::TranslationSession {
+    crate::net::translate::TranslationSession::for_protocol(protocol).expect("translation data")
 }
 
 fn old_id(protocol: i32, dir: Direction, name: &str) -> u32 {
@@ -570,14 +570,14 @@ fn no_translation_without_coverage() {
     use pomme_protocol::version::{NATIVE, VERSIONS};
     for v in VERSIONS {
         assert_eq!(
-            crate::net::translate::Translation::for_protocol(v.protocol).is_some(),
+            crate::net::translate::TranslationSession::for_protocol(v.protocol).is_some(),
             crate::net::translate::joinable(v.protocol) && v.protocol != NATIVE.protocol,
             "{}",
             v.name
         );
     }
     assert!(PacketTable::for_protocol(762).is_none());
-    assert!(crate::net::translate::Translation::for_protocol(762).is_none());
+    assert!(crate::net::translate::TranslationSession::for_protocol(762).is_none());
 }
 
 /// 26.2 appended a trailing session-id UUID to login_finished
@@ -3009,7 +3009,8 @@ fn translate_config_registry_data_765() {
     );
     NbtTag::Compound(root).azalea_write(&mut old).unwrap();
 
-    let frames = translation_for(765).translate_config_frame(old.into_boxed_slice());
+    let translation = translation_for(765);
+    let frames = translation.translate_config_frame(old.into_boxed_slice());
     assert_eq!(frames.len(), 1);
     let packet: ClientboundConfigPacket =
         azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&frames[0])).unwrap();
@@ -3035,7 +3036,13 @@ fn translate_config_registry_data_765() {
     let LifecyclePacket::Respawn {
         spawn,
         data_to_keep,
-    } = translate_and_read(765, old, "respawn", lifecycle::read)
+    } = read_native_frame(
+        &translation
+            .translate_game_frame(old.into_boxed_slice())
+            .unwrap(),
+        "respawn",
+        lifecycle::read,
+    )
     else {
         panic!("wrong packet");
     };
@@ -3898,7 +3905,8 @@ fn translate_login_registries_763() {
         ],
     );
 
-    let frames = translation_for(763)
+    let translation = translation_for(763);
+    let frames = translation
         .split_login_registries(&old)
         .expect("registry codec");
     assert_eq!(frames.len(), 1);
@@ -3916,7 +3924,13 @@ fn translate_login_registries_763() {
 
     // The same frame then decodes as a game login, its dimension key resolved
     // against the order just captured.
-    let LifecyclePacket::Login(p) = translate_and_read(763, old, "login", lifecycle::read) else {
+    let LifecyclePacket::Login(p) = read_native_frame(
+        &translation
+            .translate_game_frame(old.into_boxed_slice())
+            .unwrap(),
+        "login",
+        lifecycle::read,
+    ) else {
         panic!("wrong packet");
     };
     assert_eq!(p.player_id, 7);
@@ -7404,4 +7418,56 @@ fn client_information_reports_the_skin_options() {
     assert_eq!(info.main_hand, HumanoidArm::Left);
     assert!(!info.model_customization.hat);
     assert!(info.model_customization.cape);
+}
+
+/// Reconnecting on the same protocol cannot inherit a previous dimension order.
+#[test]
+fn reconnect_resets_translation_dimensions() {
+    use std::sync::Arc;
+
+    use super::conn::{Conn, memory_pipes};
+
+    let (end, _peer) = memory_pipes();
+    let mut first = Conn::from_memory(end);
+    first.translation = Some(Arc::new(translation_for(763)));
+    let mut login = Vec::new();
+    write_login_763(
+        &mut login,
+        "minecraft:custom_end",
+        &[
+            ("minecraft:custom_overworld", 0),
+            ("minecraft:custom_end", 1),
+        ],
+    );
+    let translation = first.translation.as_deref().unwrap();
+    translation.split_login_registries(&login).unwrap();
+    let translated = translation
+        .translate_game_frame(login.into_boxed_slice())
+        .unwrap();
+    let LifecyclePacket::Login(old) = read_native_frame(&translated, "login", lifecycle::read)
+    else {
+        panic!("wrong packet");
+    };
+    assert_eq!(old.spawn.dimension_type, 1);
+    drop(first);
+
+    let (end, _peer) = memory_pipes();
+    let mut second = Conn::from_memory(end);
+    second.translation = Some(Arc::new(translation_for(763)));
+    let mut login = Vec::new();
+    write_login_763(&mut login, "minecraft:custom_end", &[]);
+    let translated = second
+        .translation
+        .as_deref()
+        .unwrap()
+        .translate_game_frame(login.into_boxed_slice())
+        .unwrap();
+    let LifecyclePacket::Login(new) = read_native_frame(&translated, "login", lifecycle::read)
+    else {
+        panic!("wrong packet");
+    };
+    assert_eq!(
+        new.spawn.dimension_type, 0,
+        "new connection must not retain custom_end at index 1"
+    );
 }

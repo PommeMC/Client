@@ -77,7 +77,11 @@ impl Translation {
     /// version's: id remap, `attack`/`interact` layout rewrites, and
     /// suppression of packets the older version lacks. Returns the frames to
     /// send (empty = suppressed, two for `interact`, one otherwise).
-    pub fn translate_outbound_game_frame(&self, mut frame: Vec<u8>) -> Vec<Vec<u8>> {
+    pub(super) fn translate_outbound_game_frame_with_state(
+        &self,
+        mut frame: Vec<u8>,
+        state: &mut SessionState,
+    ) -> Vec<Vec<u8>> {
         let Some(ids) = &self.game_ids else {
             return vec![frame];
         };
@@ -99,10 +103,10 @@ impl Translation {
                 return translate_player_action_777(v777.player_action_old_id, &frame[pos..]);
             }
             if id == v777.accept_teleportation_id {
-                return translate_accept_teleportation_777(v777, &frame[pos..]);
+                return translate_accept_teleportation_777(state, &frame[pos..]);
             }
             if id == v777.move_player_pos_rot_id
-                && let Some(frames) = translate_move_player_pos_rot_777(v777, &frame[pos..])
+                && let Some(frames) = translate_move_player_pos_rot_777(v777, &frame[pos..], state)
             {
                 return frames;
             }

@@ -2,7 +2,12 @@ use super::*;
 
 impl Translation {
     /// Rewrites the login 775 payload into the native layout.
-    pub(super) fn rewrite_login_775(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_login_775(
+        &self,
+        id: u32,
+        payload: &[u8],
+        state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
         let v765 = self.game_ids.as_ref().and_then(|g| g.v765.as_ref());
 
@@ -10,9 +15,9 @@ impl Translation {
         let old = if v763.is_some() {
             translate_game_login_763(payload)
                 .as_deref()
-                .and_then(translate_game_login_765)
+                .and_then(|payload| translate_game_login_765(payload, state))
         } else if v765.is_some() {
-            translate_game_login_765(payload)
+            translate_game_login_765(payload, state)
         } else {
             Some(payload.to_vec())
         };
@@ -26,7 +31,12 @@ impl Translation {
     }
 
     /// Rewrites the attributes payload into the native layout.
-    pub(super) fn rewrite_attributes(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_attributes(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let v766 = self.game_ids.as_ref().and_then(|g| g.v766.as_ref());
         let v765 = self.game_ids.as_ref().and_then(|g| g.v765.as_ref());
 
@@ -41,21 +51,36 @@ impl Translation {
     }
 
     /// Rewrites the team 775 payload into the native layout.
-    pub(super) fn rewrite_team_775(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_team_775(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let v769 = self.game_ids.as_ref().is_some_and(|g| g.v769.is_some());
 
         translate_team(id, payload, v769)
     }
 
     /// Rewrites the entity data payload into the native layout.
-    pub(super) fn rewrite_entity_data(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_entity_data(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
 
         translate_entity_data(id, payload, ids, self.to_native)
     }
 
     /// Rewrites the chunk 774 payload into the native layout.
-    pub(super) fn rewrite_chunk_774(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_chunk_774(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
         let v769 = self.game_ids.as_ref().is_some_and(|g| g.v769.is_some());
         let named_nbt = ids.v763.is_some();
@@ -71,7 +96,12 @@ impl Translation {
     }
 
     /// Rewrites the time 774 payload into the native layout.
-    pub(super) fn rewrite_time_774(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_time_774(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
 
         if v767.is_some() {
@@ -82,7 +112,12 @@ impl Translation {
     }
 
     /// Rewrites the score 764 payload into the native layout.
-    pub(super) fn rewrite_score_764(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_score_764(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let v764 = self.game_ids.as_ref().and_then(|g| g.v764.as_ref());
         let v = v764.filter(|v| id == v.set_score_id)?;
 
@@ -90,7 +125,12 @@ impl Translation {
     }
 
     /// Rewrites the container content 765 payload into the native layout.
-    pub(super) fn rewrite_container_content_765(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_container_content_765(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
         let named_nbt = ids.v763.is_some();
 
@@ -98,7 +138,12 @@ impl Translation {
     }
 
     /// Rewrites the equipment 765 payload into the native layout.
-    pub(super) fn rewrite_equipment_765(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_equipment_765(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
         let named_nbt = ids.v763.is_some();
 
@@ -106,7 +151,12 @@ impl Translation {
     }
 
     /// Rewrites the offers 765 payload into the native layout.
-    pub(super) fn rewrite_offers_765(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_offers_765(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
         let named_nbt = ids.v763.is_some();
 
@@ -114,7 +164,12 @@ impl Translation {
     }
 
     /// Rewrites the container slot 765 payload into the native layout.
-    pub(super) fn rewrite_container_slot_765(&self, _id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_container_slot_765(
+        &self,
+        _id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
         let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
         let named_nbt = ids.v763.is_some();
@@ -123,67 +178,112 @@ impl Translation {
     }
 
     /// Rewrites the explode 772 payload into the native layout.
-    pub(super) fn rewrite_explode_772(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_explode_772(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
 
         translate_explode(id, payload, ids, self.to_native)
     }
 
     /// Rewrites the explode 777 payload into the native layout.
-    pub(super) fn rewrite_explode_777(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_explode_777(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
 
         translate_explode_777(id, payload, ids, self.to_native)
     }
 
     /// Rewrites the particles 777 payload into the native layout.
-    pub(super) fn rewrite_particles_777(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_particles_777(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
 
         match translate_level_particles_777(id, payload, ids.wire_registries, self.to_native) {
             Some(out) => Some(out),
             None => {
                 tracing::debug!("Dropping level_particles with an unsizable payload");
-                return None;
+                None
             }
         }
     }
 
     /// Rewrites the advancements 777 payload into the native layout.
-    pub(super) fn rewrite_advancements_777(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_advancements_777(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         translate_update_advancements_777(id, payload, self.to_native)
     }
 
     /// Rewrites the commands payload into the native layout.
-    pub(super) fn rewrite_commands(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_commands(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
 
         translate_commands(id, payload, ids.wire_registries, self.to_native)
     }
 
     /// Rewrites the recipe add 777 payload into the native layout.
-    pub(super) fn rewrite_recipe_add_777(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_recipe_add_777(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
 
         translate_recipe_book_add_777(id, payload, ids.wire_registries, self.to_native)
     }
 
     /// Rewrites the ghost recipe 777 payload into the native layout.
-    pub(super) fn rewrite_ghost_recipe_777(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_ghost_recipe_777(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
 
         translate_place_ghost_recipe_777(id, payload, ids.wire_registries, self.to_native)
     }
 
     /// Rewrites the recipes 777 payload into the native layout.
-    pub(super) fn rewrite_recipes_777(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_recipes_777(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
 
         translate_update_recipes_777(id, payload, ids.wire_registries, self.to_native)
     }
 
     /// Rewrites the teleport 767 payload into the native layout.
-    pub(super) fn rewrite_teleport_767(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_teleport_767(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
         let v = v767.filter(|v| id == v.teleport_entity_id)?;
 
@@ -191,7 +291,12 @@ impl Translation {
     }
 
     /// Rewrites the container slot 767 payload into the native layout.
-    pub(super) fn rewrite_container_slot_767(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_container_slot_767(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
         let v = v767.filter(|v| id == v.container_set_slot_id)?;
 
@@ -199,7 +304,12 @@ impl Translation {
     }
 
     /// Rewrites the cooldown 767 payload into the native layout.
-    pub(super) fn rewrite_cooldown_767(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn rewrite_cooldown_767(
+        &self,
+        id: u32,
+        payload: &[u8],
+        _state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         translate_cooldown_767(self.to_native, id, payload)
     }
 
@@ -256,7 +366,11 @@ impl Translation {
     /// Splits the registry codec out of a 1.20.1 game `login` frame into the
     /// per-registry `registry_data` packets the configuration phase carries
     /// from 1.20.2 on, capturing the dimension-type order on the way.
-    pub fn split_login_registries(&self, raw: &[u8]) -> Option<Vec<Box<[u8]>>> {
+    pub(super) fn split_login_registries_with_state(
+        &self,
+        raw: &[u8],
+        state: &mut SessionState,
+    ) -> Option<Vec<Box<[u8]>>> {
         let id = self.registry_data_id;
         let mut pos = 0;
         wire::read_varint(raw, &mut pos)?;
@@ -264,13 +378,17 @@ impl Translation {
         seek_login_codec_763(&mut cur)?;
         let mut codec = Vec::new();
         copy_unnamed_nbt(&mut cur, &mut codec, true)?;
-        split_registry_data(id, &codec)
+        split_registry_data(id, &codec, state)
     }
 
     /// Rewrites a raw configuration-phase frame into native-layout frames;
     /// empty = dropped. 765's single registry_data packet fans out into one
     /// frame per registry.
-    pub fn translate_config_frame(&self, raw: Box<[u8]>) -> Vec<Box<[u8]>> {
+    pub(super) fn translate_config_frame_with_state(
+        &self,
+        raw: Box<[u8]>,
+        state: &mut SessionState,
+    ) -> Vec<Box<[u8]>> {
         let Some(ids) = self.config_ids.as_ref().filter(|ids| !ids.inbound_identity) else {
             return vec![raw];
         };
@@ -283,7 +401,7 @@ impl Translation {
             return Vec::new();
         };
         if ids.split_registry_data == Some(id) {
-            return match split_registry_data(id, &raw[pos..]) {
+            return match split_registry_data(id, &raw[pos..], state) {
                 Some(frames) => frames,
                 None => {
                     tracing::warn!("Dropping unparsable registry data");
@@ -315,7 +433,11 @@ impl Translation {
 
     /// Rewrites a raw game-phase frame into the native layout; `None` drops
     /// the packet (malformed beyond repair, or without a native equivalent).
-    pub fn translate_game_frame(&self, raw: Box<[u8]>) -> Option<Box<[u8]>> {
+    pub(super) fn translate_game_frame_with_state(
+        &self,
+        raw: Box<[u8]>,
+        state: &mut SessionState,
+    ) -> Option<Box<[u8]>> {
         let mut id_end = 0;
         let wire_id = wire::read_varint(&raw, &mut id_end)?;
         // add_player has no native equivalent, so it becomes an add_entity
@@ -324,7 +446,7 @@ impl Translation {
             && wire_id == v.add_player_old_id
         {
             let frame = translate_add_player_763(v, &raw[id_end..])?;
-            return self.translate_game_frame(frame.into_boxed_slice());
+            return self.translate_game_frame_with_state(frame.into_boxed_slice(), state);
         }
         if let Some(v) = self.game_ids.as_ref().and_then(|g| g.v777.as_ref())
             && wire_id == v.swing_animation_old_id
@@ -343,9 +465,9 @@ impl Translation {
         };
 
         let v777 = self.game_ids.as_ref().and_then(|g| g.v777.as_ref());
-        if let Some(v) = v777.filter(|v| id == v.login_id) {
+        if v777.is_some_and(|v| id == v.login_id) {
             // A new session; an accept held over from the last one is stale.
-            *v.pending_accept.lock().unwrap() = None;
+            state.pending_accept = None;
         }
         let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
         let v765 = self.game_ids.as_ref().and_then(|g| g.v765.as_ref());
@@ -389,7 +511,7 @@ impl Translation {
             out.extend_from_slice(payload);
             return Some(out.into_boxed_slice());
         };
-        let rewritten = rewrite.apply(self, id, payload);
+        let rewritten = rewrite.apply(self, id, payload, state);
         match rewritten {
             Some(out) => Some(out.into_boxed_slice()),
             None => {

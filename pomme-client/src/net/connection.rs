@@ -166,12 +166,15 @@ pub async fn connect_to_server(
         }
     };
 
+    conn.translation =
+        super::translate::TranslationSession::for_protocol(wire).map(std::sync::Arc::new);
+
     let hello = ServerboundLoginPacket::Hello(ServerboundHello {
         name: username.clone(),
         profile_id: uuid,
     });
     let frame = serialize_frame(&hello)?;
-    let frame = match super::translate::active() {
+    let frame = match conn.translation.as_deref() {
         Some(t) => t.translate_outbound_login_frame(frame),
         None => frame,
     };
@@ -191,7 +194,10 @@ pub async fn connect_to_server(
     // 1.20.1 and older have no configuration phase: the server enters play as
     // soon as it has sent the profile, and the registries ride in the game
     // login packet rather than in registry_data packets.
-    let no_config = super::translate::active().is_some_and(|t| t.no_config_phase());
+    let no_config = conn
+        .translation
+        .as_deref()
+        .is_some_and(|t| t.no_config_phase());
     if !no_config {
         conn.write_packet(ServerboundLoginAcknowledged {}).await?;
     }
@@ -269,7 +275,10 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
 
     let login = conn.reader.read().await?;
     super::capture::record(Phase::Game, &login);
-    let translation = super::translate::active().expect("translation for a config-less version");
+    let translation = conn
+        .translation
+        .as_deref()
+        .expect("translation for a config-less version");
     let Some(frames) = translation.split_login_registries(&login) else {
         // A server that turns the join away here does it with a play-phase
         // disconnect, the login phase having already ended.
@@ -391,7 +400,7 @@ async fn login_sequence(
         // trailing session id).
         let raw = conn.reader.read().await?;
         super::capture::record(Phase::Login, &raw);
-        let raw = match super::translate::active() {
+        let raw = match conn.translation.as_deref() {
             Some(t) => t.translate_login_frame(raw),
             None => raw,
         };
@@ -538,7 +547,7 @@ async fn config_sequence(
                         }
                     };
                     super::capture::record(Phase::Configuration, &raw);
-                    let frames = match super::translate::active() {
+                    let frames = match conn.translation.as_deref() {
                         Some(t) => t.translate_config_frame(raw),
                         None => vec![raw],
                     };
@@ -965,7 +974,8 @@ async fn game_loop(
         NetworkEvent::DialogRegistry(configured.dialogs.clone()),
     );
 
-    let translation = super::translate::active();
+    let translation_session = conn.translation.clone();
+    let translation = translation_session.as_deref();
     let mut inbound_chat =
         super::chat::InboundChat::for_protocol(crate::version::session_protocol());
     let mut chat_tick = tokio::time::interval(std::time::Duration::from_millis(50));
@@ -1156,7 +1166,7 @@ async fn game_loop(
 /// The frame one queued outbound item writes, if any.
 fn outbound_frame(
     out: Outbound,
-    translation: Option<&super::translate::Translation>,
+    translation: Option<&super::translate::TranslationSession>,
     chat: &mut ChatSender,
     tree: &crate::net::commands::SharedCommandTree,
 ) -> Result<Option<Vec<u8>>, ConnectionError> {
@@ -1225,7 +1235,7 @@ fn serialize_frame<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug
 /// Writes one native-layout frame, translating it for other wire versions.
 async fn write_game_frame(
     writer: &mut RawWriter,
-    translation: Option<&super::translate::Translation>,
+    translation: Option<&super::translate::TranslationSession>,
     frame: Vec<u8>,
 ) -> Result<(), ConnectionError> {
     let frames = match translation {
@@ -1250,7 +1260,11 @@ async fn write_config_packet(
 
 /// [`write_config_packet`] for an already-encoded native-layout frame.
 async fn write_config_frame(conn: &mut Conn, frame: Vec<u8>) -> Result<(), ConnectionError> {
-    let frame = match super::translate::active().filter(|t| t.translates_config()) {
+    let frame = match conn
+        .translation
+        .as_deref()
+        .filter(|t| t.translates_config())
+    {
         Some(t) => match t.translate_outbound_config_frame(frame) {
             Some(frame) => frame,
             None => return Ok(()),

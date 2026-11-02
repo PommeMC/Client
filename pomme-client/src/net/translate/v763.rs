@@ -3,8 +3,6 @@ use super::*;
 impl Ids763 {
     pub(super) fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
         Some(match id {
-            // Shadows 765's respawn arm, which this one chains into.
-            i if i == self.respawn_id => translate_respawn_763,
             i if i == self.forget_level_chunk_id => translate_forget_level_chunk_763,
             i if i == self.block_entity_data_id => translate_block_entity_data_763,
             i if i == self.tag_query_id => translate_tag_query_763,
@@ -15,7 +13,11 @@ impl Ids763 {
 
 /// Rewrites `respawn`: 1.20.2 moved `dataToKeep` from the middle of the spawn
 /// info to the end of the packet. Chains into the 765 rewrite.
-pub(super) fn translate_respawn_763(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+pub(super) fn translate_respawn_763(
+    id: u32,
+    payload: &[u8],
+    state: &SessionState,
+) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     skip_utf(&mut cur)?; // dimension type
     skip_utf(&mut cur)?; // dimension
@@ -27,7 +29,7 @@ pub(super) fn translate_respawn_763(id: u32, payload: &[u8]) -> Option<Vec<u8>> 
     moved.extend_from_slice(&payload[..at]);
     moved.extend_from_slice(payload.get(at + 1..)?);
     moved.push(data_to_keep);
-    translate_respawn_765(id, &moved)
+    translate_respawn_765(id, &moved, state)
 }
 
 /// Rewrites `forget_level_chunk`: 1.20.2 packed the two coordinate ints into a

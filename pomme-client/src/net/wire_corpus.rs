@@ -21,7 +21,7 @@ use pomme_protocol::{Direction, PacketTable, Phase};
 use super::chat::{ChatPacketError, InboundChat};
 use super::chunk_batch::ChunkBatchSizeCalculator;
 use super::sender::PacketSender;
-use super::translate::Translation;
+use super::translate::TranslationSession;
 use crate::world::block::BlockStateTable;
 
 /// Packets a version's join drops or misreads: the translation's deliberate
@@ -121,7 +121,7 @@ fn replay(version: &ProtocolVersion) -> Vec<(String, String)> {
 
     let protocol = version.protocol;
     let wire = PacketTable::for_protocol(protocol).expect("wire table");
-    let translation = Translation::for_protocol(protocol);
+    let translation = TranslationSession::for_protocol(protocol);
     let mut session = Session::new(protocol);
     let mut failures = Vec::new();
     for (phase, frame) in records {
@@ -190,7 +190,11 @@ impl Session {
         }
     }
 
-    fn login(&mut self, translation: Option<&Translation>, frame: &[u8]) -> Result<(), String> {
+    fn login(
+        &mut self,
+        translation: Option<&TranslationSession>,
+        frame: &[u8],
+    ) -> Result<(), String> {
         let frame = match translation {
             Some(t) => t.translate_login_frame(frame.into()),
             None => frame.into(),
@@ -198,7 +202,11 @@ impl Session {
         decode::<ClientboundLoginPacket>(&frame).map(drop)
     }
 
-    fn config(&mut self, translation: Option<&Translation>, frame: &[u8]) -> Result<(), String> {
+    fn config(
+        &mut self,
+        translation: Option<&TranslationSession>,
+        frame: &[u8],
+    ) -> Result<(), String> {
         let frames = match translation {
             Some(t) => t.translate_config_frame(frame.into()),
             None => vec![frame.into()],
@@ -236,7 +244,11 @@ impl Session {
         Ok(())
     }
 
-    fn game(&mut self, translation: Option<&Translation>, frame: &[u8]) -> Result<(), String> {
+    fn game(
+        &mut self,
+        translation: Option<&TranslationSession>,
+        frame: &[u8],
+    ) -> Result<(), String> {
         // 1.20.1 carries the registries in its first game frame, `login`.
         if let Some(t) = translation.filter(|t| t.no_config_phase())
             && std::mem::take(&mut self.config_less_login)

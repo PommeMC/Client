@@ -40,6 +40,8 @@ pub struct RawWriter {
 /// Held as two fields rather than behind accessors so the game loop can read
 /// and write in one `select!` on disjoint borrows.
 pub struct Conn {
+    /// Translation state owned by this connection; absent for native sessions.
+    pub translation: Option<std::sync::Arc<super::translate::TranslationSession>>,
     pub reader: RawReader,
     pub writer: RawWriter,
 }
@@ -119,6 +121,7 @@ impl Conn {
 
     fn new(stream_in: NetReader, stream_out: NetWriter) -> Self {
         Self {
+            translation: None,
             reader: RawReader {
                 stream: stream_in,
                 buffer: Cursor::new(Vec::new()),

@@ -2,9 +2,16 @@ use super::*;
 
 impl Rewrite {
     /// Rewrites one payload using its connection's immutable protocol tables.
-    pub(super) fn apply(self, t: &Translation, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn apply(
+        self,
+        t: &Translation,
+        id: u32,
+        payload: &[u8],
+        state: &mut SessionState,
+    ) -> Option<Vec<u8>> {
         match self {
-            Self::Context(f) => f(t, id, payload),
+            Self::Context(f) => f(t, id, payload, state),
+            Self::SessionFrame(f) => f(id, payload, state),
             Self::Frame(f) => f(id, payload),
             Self::Item(f) => f(
                 id,
@@ -28,6 +35,7 @@ impl Rewrite {
         match (self, other) {
             (Self::Context(a), Self::Context(b)) => std::ptr::fn_addr_eq(a, b),
             (Self::Frame(a), Self::Frame(b)) => std::ptr::fn_addr_eq(a, b),
+            (Self::SessionFrame(a), Self::SessionFrame(b)) => std::ptr::fn_addr_eq(a, b),
             (Self::Item(a), Self::Item(b)) => std::ptr::fn_addr_eq(a, b),
             (Self::Recipe(a), Self::Recipe(b)) => std::ptr::fn_addr_eq(a, b),
             _ => false,
@@ -47,30 +55,31 @@ pub fn native_id(registry: ClientRegistry, id: u32) -> Option<u32> {
 /// The translation for the wire version negotiated with the current server,
 /// or `None` for the native version.
 pub fn active() -> Option<&'static Translation> {
-    let protocol = crate::version::session_protocol();
+    cached(crate::version::session_protocol())
+}
+
+/// Returns immutable protocol tables cached in one OnceLock per version.
+pub(super) fn cached(protocol: i32) -> Option<&'static Translation> {
     if protocol == NATIVE.protocol {
         return None;
     }
-    // One leaked entry per old protocol ever spoken (bounded by the embedded
-    // version set); consulted per packet, so the hit path is one short scan.
-    static CACHE: Mutex<Vec<(i32, Option<&'static Translation>)>> = Mutex::new(Vec::new());
-    let mut cache = CACHE.lock().unwrap();
-    if let Some(&(_, translation)) = cache.iter().find(|&&(p, _)| p == protocol) {
-        return translation;
-    }
-    let translation = Translation::for_protocol(protocol).map(|t| &*Box::leak(Box::new(t)));
-    if translation.is_some() {
-        tracing::info!("Translating protocol {protocol} <-> {}", NATIVE.protocol);
-    }
-    cache.push((protocol, translation));
-    translation
+    static TABLES: [OnceLock<Translation>; TRANSLATED.len()] =
+        [const { OnceLock::new() }; TRANSLATED.len()];
+    let index = TRANSLATED.iter().position(|&p| p == protocol)?;
+    Some(TABLES[index].get_or_init(|| {
+        tracing::info!(
+            "Prepared protocol translation {protocol} <-> {}",
+            NATIVE.protocol
+        );
+        Translation::for_protocol(protocol).expect("translated protocol")
+    }))
 }
 
 /// Builds the version-keyed caches a translated join needs (registry remaps,
 /// packet tables, block-state table) without activating anything, so a join
 /// after a server-list ping finds them warm. No-op when already built.
 pub fn prewarm(protocol: i32) {
-    let _ = Translation::for_protocol(protocol);
+    let _ = cached(protocol);
     let _ = crate::world::block::BlockStateTable::for_protocol(protocol);
 }
 
@@ -99,7 +108,11 @@ pub(super) fn skip_nbt_root(cur: &mut Cursor<&[u8]>, named: bool) -> Option<()> 
 /// per-registry packets 26.2 uses. Entries are ordered by their explicit
 /// ids (the client derives protocol ids from wire order, which is
 /// load-bearing for biome colors and dimension types).
-pub(super) fn split_registry_data(id: u32, payload: &[u8]) -> Option<Vec<Box<[u8]>>> {
+pub(super) fn split_registry_data(
+    id: u32,
+    payload: &[u8],
+    state: &mut SessionState,
+) -> Option<Vec<Box<[u8]>>> {
     use simdnbt::owned::NbtTag;
 
     let mut cur = Cursor::new(payload);
@@ -124,8 +137,7 @@ pub(super) fn split_registry_data(id: u32, payload: &[u8]) -> Option<Vec<Box<[u8
         ordered.sort_unstable_by_key(|&(entry_id, ..)| entry_id);
 
         if registry.ends_with("dimension_type") {
-            *DIMENSION_TYPES.lock().unwrap() =
-                ordered.iter().map(|(_, name, _)| name.clone()).collect();
+            state.dimension_types = ordered.iter().map(|(_, name, _)| name.clone()).collect();
         }
 
         let mut out = Vec::new();
@@ -146,10 +158,9 @@ pub(super) fn split_registry_data(id: u32, payload: &[u8]) -> Option<Vec<Box<[u8
 
 /// The synced-registry index for a dimension-type key, for the pre-1.20.5
 /// spawn-info rewrites.
-pub(super) fn dimension_type_index(name: &str) -> Option<u32> {
-    DIMENSION_TYPES
-        .lock()
-        .unwrap()
+pub(super) fn dimension_type_index(name: &str, state: &SessionState) -> Option<u32> {
+    state
+        .dimension_types
         .iter()
         .position(|n| n == name)
         .map(|i| i as u32)
@@ -436,14 +447,18 @@ pub(super) fn translate_modifier_uuid(
 /// Replaces the dimension-type resource key at `spawn_at` (the start of a
 /// 765 CommonPlayerSpawnInfo) with its synced-registry index, copying
 /// everything else verbatim.
-pub(super) fn convert_spawn_info_dimension(payload: &[u8], spawn_at: usize) -> Option<Vec<u8>> {
+pub(super) fn convert_spawn_info_dimension(
+    payload: &[u8],
+    spawn_at: usize,
+    state: &SessionState,
+) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     cur.set_position(spawn_at as u64);
     let len = var_u32(&mut cur)? as usize;
     let key_at = cur.position() as usize;
     advance(&mut cur, len)?;
     let key = std::str::from_utf8(&payload[key_at..key_at + len]).ok()?;
-    let index = dimension_type_index(key).unwrap_or_else(|| {
+    let index = dimension_type_index(key, state).unwrap_or_else(|| {
         tracing::warn!("Unknown dimension type {key}; defaulting to 0");
         0
     });

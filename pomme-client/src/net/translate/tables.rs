@@ -50,6 +50,7 @@ impl Translation {
     }
 
     /// Resolves rewrite precedence once, indexed by native clientbound id.
+    /// First registration wins: older rewrites already include newer layouts.
     pub(super) fn build_rewrites(&self) -> Box<[Option<Rewrite>]> {
         let ids = self.game_ids.as_ref();
         let v775 = self.v775.as_ref();
@@ -135,6 +136,12 @@ impl Translation {
             }
             if v777.is_some_and(|v| id == v.update_recipes_id) {
                 slot.get_or_insert(Rewrite::Context(Self::rewrite_recipes_777));
+            }
+            if ids.v763.as_ref().is_some_and(|v| id == v.respawn_id) {
+                slot.get_or_insert(Rewrite::SessionFrame(translate_respawn_763));
+            }
+            if v765.is_some_and(|v| id == v.respawn_id) {
+                slot.get_or_insert(Rewrite::SessionFrame(translate_respawn_765));
             }
             if ids.version_rewrite(id).is_some() {
                 slot.get_or_insert(Rewrite::Frame(ids.version_rewrite(id).unwrap()));
@@ -244,7 +251,6 @@ impl GameIds {
                     "accept_teleportation",
                 ),
                 move_player_pos_rot_id: id(Serverbound, "move_player_pos_rot"),
-                pending_accept: Mutex::new(None),
             }),
             items: ItemCodec::for_protocol(protocol).map(|codec| ItemIds {
                 codec,

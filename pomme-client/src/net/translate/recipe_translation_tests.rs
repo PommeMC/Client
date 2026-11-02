@@ -1,8 +1,9 @@
+use super::recipes::translate_recipe_book_add;
 use super::*;
 
 /// The recipe context the live translator uses for `protocol`.
-fn recipe_ctx(protocol: i32) -> (Translation, RecipeLayout) {
-    let translation = Translation::for_protocol(protocol).expect("translated protocol");
+fn recipe_ctx(protocol: i32) -> (TranslationSession, RecipeLayout) {
+    let translation = TranslationSession::for_protocol(protocol).expect("translated protocol");
     let layout = translation.recipe_layout.expect("recipe display protocol");
     (translation, layout)
 }
@@ -150,7 +151,7 @@ fn recipe_book_add_remaps_1_21_11_slot_and_item_ids() {
 
 #[test]
 fn recipe_book_add_remaps_26_1() {
-    let translation = Translation::for_protocol(775).expect("26.1 translation");
+    let translation = TranslationSession::for_protocol(775).expect("26.1 translation");
     let id = required_id(
         PacketTable::native(),
         Phase::Game,
@@ -187,7 +188,7 @@ fn recipe_book_add_remaps_26_1() {
 
 #[test]
 fn recipe_packets_remap_26_3_concrete_item_ids() {
-    let translation = Translation::for_protocol(777).expect("26.3 translation");
+    let translation = TranslationSession::for_protocol(777).expect("26.3 translation");
     let wire_packets = PacketTable::for_protocol(777).expect("26.3 packets");
     let wire_registries = RegistryTable::for_protocol(777).expect("26.3 registries");
     let native_packets = PacketTable::native();

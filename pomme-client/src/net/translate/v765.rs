@@ -9,7 +9,6 @@ impl Ids765 {
             i if i == self.disguised_chat_id => translate_disguised_chat_765,
             i if i == self.update_mob_effect_id => translate_update_mob_effect_765,
             i if i == self.level_particles_id => translate_level_particles_765,
-            i if i == self.respawn_id => translate_respawn_765,
             i if i == self.server_data_id => translate_server_data_765,
             _ => return None,
         })
@@ -335,8 +334,12 @@ pub(super) fn read_server_data_765(payload: &[u8], json_motd: bool) -> Option<(u
 /// Rewrites `respawn` for 1.20.4: the spawn info's dimension type is a
 /// resource key string, turned into the synced-registry index captured
 /// from registry data; the seaLevel insert then applies like 767's.
-pub(super) fn translate_respawn_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
-    let converted = convert_spawn_info_dimension(payload, 0)?;
+pub(super) fn translate_respawn_765(
+    id: u32,
+    payload: &[u8],
+    state: &SessionState,
+) -> Option<Vec<u8>> {
+    let converted = convert_spawn_info_dimension(payload, 0, state)?;
     let mut out = Vec::with_capacity(converted.len() + 2);
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&insert_sea_level(&converted)?);
@@ -346,7 +349,7 @@ pub(super) fn translate_respawn_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> 
 /// Rewrites the 1.20.4 game `login` payload up to the 766 form (dimension
 /// key string -> registry index, trailing enforcesSecureChat synthesized);
 /// the shared seaLevel/onlineMode chain runs after.
-pub(super) fn translate_game_login_765(payload: &[u8]) -> Option<Vec<u8>> {
+pub(super) fn translate_game_login_765(payload: &[u8], state: &SessionState) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 5)?; // player id, hardcore
     let levels = var_u32(&mut cur)?;
@@ -358,7 +361,7 @@ pub(super) fn translate_game_login_765(payload: &[u8]) -> Option<Vec<u8>> {
     varint_span(&mut cur)?; // simulation distance
     advance(&mut cur, 3)?; // reducedDebug, showDeathScreen, doLimitedCrafting
 
-    let mut converted = convert_spawn_info_dimension(payload, cur.position() as usize)?;
+    let mut converted = convert_spawn_info_dimension(payload, cur.position() as usize, state)?;
     converted.push(0); // enforcesSecureChat, absent at 765
     Some(converted)
 }
