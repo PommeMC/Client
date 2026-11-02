@@ -105,6 +105,8 @@ pub enum ContainerScreen {
     Enchantment,
     Hopper,
     Dispenser,
+    BrewingStand,
+    Crafter,
 }
 
 impl ContainerScreen {
@@ -119,6 +121,8 @@ impl ContainerScreen {
             Self::Enchantment => ContainerKind::Enchantment,
             Self::Hopper => ContainerKind::Hopper,
             Self::Dispenser => ContainerKind::Dispenser,
+            Self::BrewingStand => ContainerKind::BrewingStand,
+            Self::Crafter => ContainerKind::Crafter { disabled: 0 },
         }
     }
 }
@@ -130,8 +134,8 @@ pub struct OpenContainer {
     #[cfg(feature = "test-harness")]
     pub menu: azalea_registry::builtin::MenuKind,
     pub screen: ContainerScreen,
-    /// Menu slots in container indices; slots from `inv_start()` on are backed
-    /// by the player inventory.
+    /// Menu slots in container indices; `inv_slots()` are backed by the
+    /// player inventory.
     pub slots: Vec<azalea_inventory::ItemStack>,
     /// The menu's data values (`ClientboundContainerSetData`), e.g. furnace
     /// lit/cook progress or the anvil repair cost. Vanilla data slots are
@@ -147,10 +151,22 @@ pub struct OpenContainer {
 }
 
 impl OpenContainer {
-    /// First container slot backed by the player inventory; container slot `i`
-    /// maps to player inventory slot `i - inv_start() + 9` from here on.
-    fn inv_start(&self) -> usize {
-        self.screen.click_kind().inv_start()
+    /// The container slots backed by the player inventory; container slot `i`
+    /// in them maps to player inventory slot `i - start + 9`.
+    fn inv_slots(&self) -> std::ops::Range<usize> {
+        let kind = self.screen.click_kind();
+        kind.inv_start()..kind.inv_end()
+    }
+
+    /// The click-prediction menu, with the crafter's disabled slots read from
+    /// the menu data.
+    pub fn click_kind(&self) -> ContainerKind {
+        match self.screen {
+            ContainerScreen::Crafter => ContainerKind::Crafter {
+                disabled: crate::ui::crafter::disabled_slots(&self.data),
+            },
+            screen => screen.click_kind(),
+        }
     }
 }
 
@@ -743,9 +759,9 @@ impl GameState {
                     return;
                 };
                 *s = item.clone();
-                let inv_start = c.inv_start();
-                if index >= inv_start {
-                    self.player.inventory.set_slot(index - inv_start + 9, item);
+                let inv = c.inv_slots();
+                if inv.contains(&index) {
+                    self.player.inventory.set_slot(index - inv.start + 9, item);
                 }
             }
             None => self.player.inventory.set_slot(index, item),
@@ -758,9 +774,9 @@ impl GameState {
         let Some(c) = &mut self.open_container else {
             return;
         };
-        let inv_start = c.inv_start();
-        for (i, slot) in c.slots.iter_mut().enumerate().skip(inv_start) {
-            *slot = self.player.inventory.slot(i - inv_start + 9).clone();
+        let inv = c.inv_slots();
+        for i in inv.clone() {
+            c.slots[i] = self.player.inventory.slot(i - inv.start + 9).clone();
         }
     }
 
@@ -2161,14 +2177,20 @@ pub(crate) fn send_container_clicks(
 
     use crate::player::menu_click;
 
-    let (container_id, kind, state_id) = match &game.open_container {
-        Some(c) => (c.id, c.screen.click_kind(), c.state_id),
-        None => (0, ContainerKind::Player, game.inventory_state_id),
+    let (container_id, state_id) = match &game.open_container {
+        Some(c) => (c.id, c.state_id),
+        None => (0, game.inventory_state_id),
     };
 
     let mut drag_kind = QuickCraftKind::Left;
     let mut drag_slots: Vec<u16> = Vec::new();
     for op in &ops {
+        crafter_slot_clicked(game, connection, audio, op);
+        // After the toggle, so a re-enabled crafter slot takes the click.
+        let kind = game
+            .open_container
+            .as_ref()
+            .map_or(ContainerKind::Player, OpenContainer::click_kind);
         let (changed, carried): (Vec<(u16, ItemStack)>, ItemStack) = match op {
             ClickOperation::QuickCraft(QuickCraftClick {
                 kind: qc_kind,
@@ -2248,6 +2270,82 @@ pub(crate) fn send_container_clicks(
             .packet_tx
             .send(ServerboundGamePacket::ContainerClick(click));
     }
+}
+
+/// Vanilla `CrafterScreen.slotClicked`, run before the click itself: a pickup
+/// on an empty grid slot enables it when disabled or, with nothing carried,
+/// disables it; a number-key swap of a held item into a disabled slot enables
+/// it. The new state is set locally and sent, with a click sound.
+fn crafter_slot_clicked(
+    game: &mut GameState,
+    connection: &ConnectionHandle,
+    audio: &crate::audio::AudioEngine,
+    op: &azalea_inventory::operations::ClickOperation,
+) {
+    use azalea_inventory::operations::{ClickOperation, PickupClick};
+    use azalea_protocol::packets::game::s_container_slot_state_changed::ServerboundContainerSlotStateChanged;
+
+    let Some(c) = &mut game.open_container else {
+        return;
+    };
+    if c.screen != ContainerScreen::Crafter || crate::player::is_spectator(game.player.game_mode) {
+        return;
+    }
+    let (slot, enable) = match op {
+        ClickOperation::Pickup(
+            PickupClick::Left { slot: Some(s) } | PickupClick::Right { slot: Some(s) },
+        ) => {
+            let s = usize::from(*s);
+            if s >= 9 || !c.slots[s].is_empty() {
+                return;
+            }
+            if c.data[s] == 1 {
+                (s, true)
+            } else if game.cursor_item.is_empty() {
+                (s, false)
+            } else {
+                return;
+            }
+        }
+        ClickOperation::Swap(swap) => {
+            let s = usize::from(swap.source_slot);
+            if s >= 9 || !c.slots[s].is_empty() || c.data[s] != 1 {
+                return;
+            }
+            // `Inventory.getItem(buttonNum)`: the hotbar, or 40 for the
+            // offhand, in player-menu indices here.
+            let held = match swap.target_slot {
+                i @ 0..=8 => 36 + usize::from(i),
+                40 => 45,
+                _ => return,
+            };
+            if game.player.inventory.slot(held).is_empty() {
+                return;
+            }
+            (s, true)
+        }
+        _ => return,
+    };
+    // `CrafterMenu.setSlotState`, then `handleSlotStateChanged`.
+    c.data[slot] = if enable { 0 } else { 1 };
+    connection
+        .packet_tx
+        .send(ServerboundGamePacket::ContainerSlotStateChanged(
+            ServerboundContainerSlotStateChanged {
+                slot_id: slot as u32,
+                container_id: c.id,
+                new_state: enable,
+            },
+        ));
+    // `player.playSound`: a local sound at the player, in the players source.
+    audio.play_world_sound(
+        &crate::audio::SoundRef::event("ui.button.click"),
+        crate::audio::CATEGORY_PLAYERS,
+        game.player.position,
+        0.4,
+        if enable { 1.0 } else { 0.75 },
+        fastrand::u64(..),
+    );
 }
 
 fn sleeping_head_pitch_deg(is_sleeping: bool, head_x_rot_deg: f32) -> f32 {
@@ -3704,6 +3802,39 @@ pub fn update_game(
                     &input,
                     container.screen.click_kind(),
                     &container.slots,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                    &|t, s| gfx.renderer.menu_text_width(t, s),
+                ),
+                ContainerScreen::BrewingStand => crate::ui::brewing_stand::build_brewing_stand(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    &container.slots,
+                    &container.data,
+                    // 26.3 added the total fuel and brew time data slots.
+                    crate::version::session_protocol() >= 777,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                    &|t, s| gfx.renderer.menu_text_width(t, s),
+                ),
+                ContainerScreen::Crafter => crate::ui::crafter::build_crafter(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    &container.slots,
+                    &container.data,
+                    crate::player::is_spectator(game.player.game_mode),
                     &container.title,
                     &game.cursor_item,
                     &mut game.inv_drag,

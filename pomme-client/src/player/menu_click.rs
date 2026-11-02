@@ -15,6 +15,8 @@ use azalea_registry::builtin::ItemKind;
 /// Which container menu a click applies to. `Furnace` covers the furnace,
 /// blast furnace, and smoker menus, which share the same slot structure;
 /// `Chest` covers every generic 9xN menu (chests, ender chests, barrels, ...).
+/// `Crafter` carries the disabled grid slots as a bitmask (bit `i` = slot `i`),
+/// which gate placement there.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ContainerKind {
     Player,
@@ -26,6 +28,8 @@ pub enum ContainerKind {
     Enchantment,
     Hopper,
     Dispenser,
+    BrewingStand,
+    Crafter { disabled: u16 },
 }
 
 impl ContainerKind {
@@ -36,8 +40,9 @@ impl ContainerKind {
             Self::Chest { rows } => rows as usize * 9 + 36,
             Self::ShulkerBox => 63,
             Self::Enchantment => 38,
-            Self::Hopper => 41,
+            Self::Hopper | Self::BrewingStand => 41,
             Self::Dispenser => 45,
+            Self::Crafter { .. } => 46,
         }
     }
 
@@ -50,27 +55,37 @@ impl ContainerKind {
             Self::Chest { rows } => rows as usize * 9,
             Self::ShulkerBox => 27,
             Self::Enchantment => 2,
-            Self::Hopper => 5,
-            Self::Dispenser => 9,
+            Self::Hopper | Self::BrewingStand => 5,
+            Self::Dispenser | Self::Crafter { .. } => 9,
         }
+    }
+
+    /// End (exclusive) of the player-inventory slots. Only the crafter puts a
+    /// slot after them, its result.
+    pub fn inv_end(self) -> usize {
+        self.inv_start() + 36
     }
 
     /// The result slot whose clicks we can't predict, if this menu has one:
     /// crafting results need recipe logic, the anvil result costs XP and
     /// materials. Vanilla excludes the crafting result from double-click
     /// gathering (`canTakeItemForPickAll`) but not the anvil result; we skip
-    /// that one too since its take costs aren't modeled here. The furnace
-    /// result slot is neither: taking from it is a plain pickup.
+    /// that one too since its take costs aren't modeled here. The crafter's
+    /// result (`NonInteractiveResultSlot`) ignores every click, so nothing
+    /// changes there either. The furnace result slot is neither: taking from
+    /// it is a plain pickup.
     fn crafting_result_slot(self) -> Option<usize> {
         match self {
             Self::Player | Self::CraftingTable => Some(0),
             Self::Anvil => Some(2),
+            Self::Crafter { .. } => Some(45),
             Self::Furnace
             | Self::Chest { .. }
             | Self::ShulkerBox
             | Self::Enchantment
             | Self::Hopper
-            | Self::Dispenser => None,
+            | Self::Dispenser
+            | Self::BrewingStand => None,
         }
     }
 
@@ -79,7 +94,7 @@ impl ContainerKind {
         match self {
             // The player menu's offhand slot sits after the hotbar.
             Self::Player => 36 + i as u16,
-            _ => (self.slot_count() - 9) as u16 + i as u16,
+            _ => (self.inv_start() + 27) as u16 + i as u16,
         }
     }
 
@@ -91,10 +106,11 @@ impl ContainerKind {
     }
 
     /// Per-slot stack limit where a menu overrides the item's own maximum
-    /// (vanilla `Slot::getMaxStackSize`): the enchanting item slot holds one.
+    /// (vanilla `Slot::getMaxStackSize`): the enchanting item slot and the
+    /// brewing stand's bottle slots hold one.
     fn slot_limit(self, s: usize) -> i32 {
         match (self, s) {
-            (Self::Enchantment, 0) => 1,
+            (Self::Enchantment, 0) | (Self::BrewingStand, 0..=2) => 1,
             _ => i32::MAX,
         }
     }
@@ -160,6 +176,16 @@ impl ContainerKind {
                 contents: SlotList::default(),
                 player: SlotList::default(),
             },
+            Self::BrewingStand => Menu::BrewingStand {
+                bottles: SlotList::default(),
+                ingredient: ItemStack::Empty,
+                fuel: ItemStack::Empty,
+                player: SlotList::default(),
+            },
+            Self::Crafter { .. } => Menu::Crafter3x3 {
+                contents: SlotList::default(),
+                player: SlotList::default(),
+            },
         };
         for (i, item) in slots.iter().enumerate() {
             if let Some(s) = menu.slot_mut(i) {
@@ -178,6 +204,20 @@ impl ContainerKind {
         match (self, s) {
             (Self::Player | Self::CraftingTable, 0) => false,
             (Self::Furnace | Self::Anvil, 2) => false,
+            // `PotionSlot`: 26.2's four items, which are also everything 26.3's
+            // `brewing_input` set and `brewing_potion_inputs` tag hold.
+            (Self::BrewingStand, 0..=2) => matches!(
+                item.kind,
+                ItemKind::Potion
+                    | ItemKind::SplashPotion
+                    | ItemKind::LingeringPotion
+                    | ItemKind::GlassBottle
+            ),
+            // TODO: the ingredient (`brewing_reagent` set, 26.2's
+            // `PotionBrewing`) and fuel (`brewing_fuel` component, 26.2's tag)
+            // slots accept anything here, like the furnace fuel slot.
+            (Self::Crafter { disabled }, 0..=8) => disabled & (1 << s) == 0,
+            (Self::Crafter { .. }, 45) => false,
             (Self::Player, 5..=8) => {
                 let want = crate::player::inventory::ARMOR_EQUIPMENT
                     [s - crate::player::inventory::ARMOR_START];
@@ -227,9 +267,9 @@ pub fn apply_click(
         return Vec::new();
     }
     // Vanilla routes a player-slot shift-click by whether the item is
-    // smeltable or fuel; recipes and fuel values live server-side, so leave
-    // those to the server too.
-    if kind == ContainerKind::Furnace
+    // smeltable or fuel (or a brewing reagent or fuel); recipes and fuel
+    // values live server-side, so leave those to the server too.
+    if matches!(kind, ContainerKind::Furnace | ContainerKind::BrewingStand)
         && matches!(op, ClickOperation::QuickMove(_))
         && op
             .slot_num()
@@ -242,9 +282,12 @@ pub fn apply_click(
 
     let mut changed = Vec::new();
     for (i, before) in slots.iter().enumerate() {
-        let after = menu.slot(i).cloned().unwrap_or(ItemStack::Empty);
-        if after != *before {
-            changed.push((i as u16, after));
+        // Slots past azalea's menu (the crafter result) are left as they are.
+        let Some(after) = menu.slot(i) else {
+            continue;
+        };
+        if after != before {
+            changed.push((i as u16, after.clone()));
         }
     }
     changed
@@ -613,7 +656,9 @@ fn safe_insert(
 /// (`canMoveIntoInputSlots` is true, making `ItemCombinerMenu`'s main/hotbar
 /// branches dead code); the furnace moves its own slots to the player region
 /// like `AbstractFurnaceMenu` (result reversed; player-slot clicks never get
-/// predicted). The player and crafting menus use azalea's `quick_move_stack`,
+/// predicted), as does the brewing stand (`BrewingStandMenu`, player-bound
+/// reversed). The crafter routes like a chest (`CrafterMenu`). The player and
+/// crafting menus use azalea's `quick_move_stack`,
 /// whose routing matches vanilla closely enough for them.
 fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
     for _ in 0..menu.len() {
@@ -625,7 +670,8 @@ fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
             ContainerKind::Chest { .. }
             | ContainerKind::ShulkerBox
             | ContainerKind::Hopper
-            | ContainerKind::Dispenser => {
+            | ContainerKind::Dispenser
+            | ContainerKind::Crafter { .. } => {
                 let split = kind.inv_start();
                 if s < split {
                     move_item_stack_to(kind, menu, s, split..menu.len(), true);
@@ -642,6 +688,9 @@ fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
             }
             ContainerKind::Furnace => {
                 move_item_stack_to(kind, menu, s, 3..menu.len(), s == 2);
+            }
+            ContainerKind::BrewingStand => {
+                move_item_stack_to(kind, menu, s, 5..menu.len(), true);
             }
             ContainerKind::Enchantment => {
                 // Vanilla `EnchantmentMenu.quickMoveStack`: menu slots go to
@@ -880,5 +929,79 @@ mod quick_move_tests {
             quick_move(kind, &mut menu, last);
             assert_eq!(menu.slot(0).map(ItemStack::count), Some(5));
         }
+    }
+
+    /// A predicted left click on `slot`.
+    fn left_click(
+        kind: ContainerKind,
+        slots: &[ItemStack],
+        cursor: &mut ItemStack,
+        slot: u16,
+    ) -> Vec<(u16, ItemStack)> {
+        let op = ClickOperation::Pickup(PickupClick::Left { slot: Some(slot) });
+        apply_click(kind, slots, cursor, &op, false, &mut BundleClick::default())
+    }
+
+    #[test]
+    fn crafter_result_sits_after_the_hotbar_and_ignores_clicks() {
+        let kind = ContainerKind::Crafter { disabled: 0 };
+        assert_eq!(kind.inv_end(), 45);
+        assert_eq!(kind.hotbar_menu_slot(0), 36);
+        assert_eq!(kind.hotbar_menu_slot(8), 44);
+
+        let mut slots = vec![ItemStack::Empty; kind.slot_count()];
+        slots[0] = ItemStack::new(ItemKind::Stone, 1);
+        slots[45] = ItemStack::new(ItemKind::Stone, 1);
+        let mut cursor = ItemStack::Empty;
+
+        // The result is never predicted, and a grid click leaves it alone.
+        let changed = left_click(kind, &slots, &mut cursor, 45);
+        assert!(changed.is_empty());
+        assert!(cursor.is_empty());
+        let changed = left_click(kind, &slots, &mut cursor, 0);
+        assert_eq!(changed, vec![(0, ItemStack::Empty)]);
+        assert_eq!(cursor.count(), 1);
+    }
+
+    #[test]
+    fn crafter_disabled_slots_refuse_items() {
+        let kind = ContainerKind::Crafter { disabled: 0b1 };
+        let mut slots = vec![ItemStack::Empty; kind.slot_count()];
+        slots[36] = ItemStack::new(ItemKind::Stone, 5);
+        let mut menu = kind.build_menu(&slots);
+
+        // A shift-click from the hotbar skips the disabled first slot.
+        quick_move(kind, &mut menu, 36);
+        assert!(menu.slot(0).is_some_and(ItemStack::is_empty));
+        assert_eq!(menu.slot(1).map(ItemStack::count), Some(5));
+
+        let mut cursor = ItemStack::new(ItemKind::Stone, 5);
+        let empty = vec![ItemStack::Empty; kind.slot_count()];
+        let changed = left_click(kind, &empty, &mut cursor, 0);
+        assert!(changed.is_empty());
+        assert_eq!(cursor.count(), 5);
+    }
+
+    #[test]
+    fn brewing_bottle_slots_take_one_potion_input() {
+        let kind = ContainerKind::BrewingStand;
+        let slots = vec![ItemStack::Empty; kind.slot_count()];
+
+        let mut cursor = ItemStack::new(ItemKind::GlassBottle, 3);
+        let changed = left_click(kind, &slots, &mut cursor, 0);
+        assert_eq!(changed, vec![(0, ItemStack::new(ItemKind::GlassBottle, 1))]);
+        assert_eq!(cursor.count(), 2);
+
+        let mut cursor = ItemStack::new(ItemKind::Stone, 3);
+        let changed = left_click(kind, &slots, &mut cursor, 0);
+        assert!(changed.is_empty());
+
+        // The menu's own slots shift-click into the player inventory, hotbar
+        // end first.
+        let mut slots = slots;
+        slots[3] = ItemStack::new(ItemKind::NetherWart, 4);
+        let mut menu = kind.build_menu(&slots);
+        quick_move(kind, &mut menu, 3);
+        assert_eq!(menu.slot(40).map(ItemStack::count), Some(4));
     }
 }

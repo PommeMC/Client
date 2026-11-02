@@ -10,8 +10,8 @@ use azalea_inventory::ItemStack;
 
 use super::common::SLOT_STRIDE;
 use super::container::{
-    ContainerInput, ContainerResult, DragState, Panel, SlotCtx, centred_title_x, push_backdrop,
-    push_clipped_sprite, push_cursor_stack, push_panel, resolve_gesture,
+    ContainerInput, ContainerResult, DragState, Panel, SlotCtx, centred_title_x, gesture_result,
+    push_backdrop, push_clipped_sprite, push_cursor_stack, push_panel,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -188,7 +188,7 @@ fn build_contents(
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
     push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
 
-    let (ops, clicked_outside) = resolve_gesture(
+    gesture_result(
         input,
         hovered,
         panel,
@@ -198,12 +198,5 @@ fn build_contents(
         cursor_item,
         drag,
         last_click,
-    );
-
-    ContainerResult {
-        clicked_outside,
-        ops,
-        button: None,
-        hovered,
-    }
+    )
 }

@@ -865,7 +865,7 @@ impl InteractionState {
             },
             seq: self.seq,
         }));
-        // TODO: other interactive blocks (brewing stand, crafter, ...)
+        // TODO: other interactive blocks (beacon, loom, ...)
         // should consume the click here too once their menus render.
         if hand == InteractionHand::MainHand && !suppress_block_use {
             let target = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
@@ -1615,6 +1615,8 @@ fn opens_menu(id: &str) -> bool {
             | "hopper"
             | "dispenser"
             | "dropper"
+            | "brewing_stand"
+            | "crafter"
     ) || id.ends_with("shulker_box")
         || id.ends_with("anvil")
 }

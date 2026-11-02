@@ -309,6 +309,7 @@ mod tests {
             (Direction::Clientbound, "set_chunk_cache_center", 94),
             (Direction::Clientbound, "set_chunk_cache_radius", 95),
             (Direction::Serverbound, "set_creative_mode_slot", 56),
+            (Direction::Serverbound, "container_slot_state_changed", 20),
         ] {
             assert_eq!(t.id(Phase::Game, dir, name), Some(id), "{name}");
         }

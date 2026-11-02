@@ -463,22 +463,9 @@ pub(crate) fn push_slot_with_owner(
     empty_sprite: Option<SpriteId>,
     use_player_team: bool,
 ) -> bool {
-    // Vanilla `isHovering` reaches a pixel past each edge, so slots 18 apart
-    // leave no gap.
-    let hovered = hit_test(
-        cursor,
-        [x - scale, y - scale, size + 2.0 * scale, size + 2.0 * scale],
-    );
-    let highlight = |sprite| MenuElement::Image {
-        x: x - 4.0 * scale,
-        y: y - 4.0 * scale,
-        w: 24.0 * scale,
-        h: 24.0 * scale,
-        sprite,
-        tint: WHITE,
-    };
+    let hovered = slot_hovered(cursor, x, y, size, scale);
     if hovered {
-        elements.push(highlight(SpriteId::SlotHighlightBack));
+        push_slot_highlight(elements, x, y, scale, SpriteId::SlotHighlightBack);
     }
     match item {
         ItemStack::Empty => {
@@ -498,9 +485,36 @@ pub(crate) fn push_slot_with_owner(
         }
     }
     if hovered {
-        elements.push(highlight(SpriteId::SlotHighlightFront));
+        push_slot_highlight(elements, x, y, scale, SpriteId::SlotHighlightFront);
     }
     hovered
+}
+
+/// Whether the cursor is over the slot at (x, y). Vanilla `isHovering`
+/// reaches a pixel past each edge, so slots 18 apart leave no gap.
+pub(crate) fn slot_hovered(cursor: (f32, f32), x: f32, y: f32, size: f32, scale: f32) -> bool {
+    hit_test(
+        cursor,
+        [x - scale, y - scale, size + 2.0 * scale, size + 2.0 * scale],
+    )
+}
+
+/// The hovered slot's 24x24 highlight (back or front), centred on the slot.
+pub(crate) fn push_slot_highlight(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    scale: f32,
+    sprite: SpriteId,
+) {
+    elements.push(MenuElement::Image {
+        x: x - 4.0 * scale,
+        y: y - 4.0 * scale,
+        w: 24.0 * scale,
+        h: 24.0 * scale,
+        sprite,
+        tint: WHITE,
+    });
 }
 
 /// Draws an item icon and the vanilla item decorations Pomme supports.
