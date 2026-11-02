@@ -17,8 +17,8 @@ pub struct ChunkPipeline {
     pub pipeline_solid: rhi::backend::RenderPipeline,
     /// Cutout terrain: alpha-test discard. Drawn after solid.
     pub pipeline_cutout: rhi::backend::RenderPipeline,
-    /// Translucent water variant: alpha blending on, depth write off. Shares
-    /// the terrain pipelines' layout and bind groups.
+    /// Translucent water: alpha blending on, depth write off. Shares the
+    /// terrain pipelines' layout and bind groups.
     pub water_pipeline: rhi::backend::RenderPipeline,
     pub pipeline_layout: rhi::backend::PipelineLayout,
     pub camera_layout: rhi::backend::BindGroupLayout,
@@ -39,15 +39,10 @@ impl ChunkPipeline {
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
         let atlas_layout = rhi::backend::create_bind_group_layout(device, ATLAS_LAYOUT);
-        // Water pushes its section origin + fade per draw (water.vert); the
-        // indirect passes read them per-instance and ignore the range.
         let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
             &[camera_layout, atlas_layout, lightmap.layout],
-            Some(rhi::PushConstants {
-                visibility: rhi::ShaderStages::VERTEX,
-                size: 16,
-            }),
+            None,
         );
 
         let [pipeline_solid, pipeline_cutout, water_pipeline] =
@@ -143,8 +138,7 @@ impl ChunkPipeline {
 
 /// Builds the chunk pipelines: `solid` (chunk_solid.frag, no discard,
 /// early-Z), `cutout` (chunk.frag, alpha-test discard) and translucent
-/// `water`. Water reads only the packed vertices; the terrain pipelines also
-/// read the per-instance meta.
+/// `water`, all over the packed vertices and the per-instance meta.
 fn create_pipelines(
     device: &rhi::backend::Device,
     targets: rhi::backend::PipelineTargets,
@@ -161,8 +155,6 @@ fn create_pipelines(
         )
     };
     let water = rhi::RenderPipelineDesc {
-        vertex_shader: shader::include_shader!("water.vert"),
-        vertex_buffers: &CHUNK_VERTEX_BUFFERS[..1],
         depth: Some(rhi::DepthState::READ_ONLY),
         blend: Some(rhi::BlendState::TRANSLUCENT),
         ..terrain("water", shader::include_shader!("water.frag"))

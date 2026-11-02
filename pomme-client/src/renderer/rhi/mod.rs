@@ -192,7 +192,8 @@ pub enum BufferUse {
     CopySrc,
     CopyDst,
     StorageWrite,
-    Indirect,
+    /// A draw's inputs: its indirect command, vertices and indices.
+    DrawInput,
     HostRead,
 }
 

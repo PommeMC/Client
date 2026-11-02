@@ -412,6 +412,10 @@ impl Buffer {
         BufferHandle(self.raw)
     }
 
+    pub fn size(&self) -> u64 {
+        self.allocation.size()
+    }
+
     /// Reads a [`MemoryLocation::Readback`] buffer; the caller has already
     /// waited on the frame that wrote it.
     pub fn read<R>(&mut self, read: impl FnOnce(&[u8]) -> R) -> R {
@@ -1175,9 +1179,11 @@ impl BufferUse {
                 vk::AccessFlags::ShaderWrite,
                 vk::PipelineStageFlags::ComputeShader,
             ),
-            Self::Indirect => (
-                vk::AccessFlags::IndirectCommandRead,
-                vk::PipelineStageFlags::DrawIndirect,
+            Self::DrawInput => (
+                vk::AccessFlags::IndirectCommandRead
+                    | vk::AccessFlags::VertexAttributeRead
+                    | vk::AccessFlags::IndexRead,
+                vk::PipelineStageFlags::DrawIndirect | vk::PipelineStageFlags::VertexInput,
             ),
             Self::HostRead => (vk::AccessFlags::HostRead, vk::PipelineStageFlags::Host),
         }
