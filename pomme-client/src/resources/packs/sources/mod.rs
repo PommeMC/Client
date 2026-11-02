@@ -75,3 +75,41 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+mod path_validation {
+    use std::io::ErrorKind;
+
+    use super::{RepositorySource, tests};
+
+    // Fixtures supply otherwise-valid packs under trusted discovery roots,
+    // default-deny policy, and no filesystem mutation after validation.
+    pub(super) fn assert_load_packs_catalog<S: RepositorySource + ?Sized>(
+        source: &mut S,
+        expected_location_ids: &[&str],
+    ) {
+        assert!(
+            !expected_location_ids.is_empty(),
+            "load_packs needs a nonempty successful catalog control"
+        );
+        tests::test_load_packs(source, expected_location_ids);
+    }
+
+    pub(super) fn assert_load_packs_permission_denied(
+        source: &mut dyn RepositorySource,
+        clean_source: &mut dyn RepositorySource,
+        clean_location_ids: &[&str],
+    ) {
+        assert_load_packs_catalog(clean_source, clean_location_ids);
+        match source.load_packs() {
+            Err(error) => assert_eq!(
+                error.kind(),
+                ErrorKind::PermissionDenied,
+                "load_packs must reject the forbidden registered pack"
+            ),
+            Ok(_) => panic!(
+                "load_packs must fail rather than admit or skip the forbidden registered pack"
+            ),
+        }
+    }
+}

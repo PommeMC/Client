@@ -998,3 +998,272 @@ mod resources_supplier_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod path_validation {
+    use std::path::PathBuf;
+    use std::rc::Rc;
+    use std::{fs, io};
+
+    use serde_json::{Map, json};
+
+    use super::test_fixture::default_location;
+    use super::{VanillaPackResources, VanillaResourcesSupplier};
+    use crate::chat_component::Component;
+    use crate::resources::pack_resources::{
+        PackResources, PackType, path_validation as assertions,
+    };
+    use crate::resources::packs::{FeatureFlagSet, PackCompat, PackMetadata, ResourcesSupplier};
+    use crate::resources::resource::ResourceId;
+
+    const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"indexed"}}"#;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> io::Result<Self> {
+            for attempt in 0.. {
+                let path = std::env::temp_dir().join(format!(
+                    "pomme-vanilla-validation-{}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Ok(Self(path)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.0) {
+                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
+            }
+        }
+    }
+
+    // The trusted installation owns both pack/ and objects/, not pack/ alone.
+    fn fixture() -> (TempDir, VanillaPackResources, Rc<dyn PackResources>) {
+        let temp = TempDir::new().unwrap();
+        for directory in [
+            "pack/assets/test/valid",
+            "pack/data/test/valid",
+            "pack-evil",
+            "outside",
+            "objects",
+        ] {
+            fs::create_dir_all(temp.0.join(directory)).unwrap();
+        }
+        for domain in ["assets", "data"] {
+            fs::write(
+                temp.0
+                    .join(format!("pack/{domain}/test/valid/extracted.txt")),
+                b"extracted",
+            )
+            .unwrap();
+        }
+        fs::write(temp.0.join("pack/root.txt"), b"extracted root").unwrap();
+        fs::write(temp.0.join("pack/pack.mcmeta"), METADATA).unwrap();
+        fs::write(temp.0.join("pack-evil/sentinel.txt"), b"sibling sentinel").unwrap();
+        fs::write(temp.0.join("outside/sentinel.txt"), b"outside sentinel").unwrap();
+        let objects_dir = temp.0.join("objects");
+        let mut objects = Map::new();
+        for (key, bytes) in [
+            ("test/valid/indexed.txt", b"indexed".as_slice()),
+            ("pack.mcmeta", METADATA),
+        ] {
+            let hash = sha1_smol::Sha1::from(bytes).digest().to_string();
+            fs::create_dir_all(objects_dir.join(&hash[..2])).unwrap();
+            fs::write(objects_dir.join(&hash[..2]).join(&hash), bytes).unwrap();
+            objects.insert(key.into(), json!({"hash": hash, "size": bytes.len()}));
+        }
+        let index_file = temp.0.join("index.json");
+        fs::write(
+            &index_file,
+            serde_json::to_vec(&json!({"objects": objects})).unwrap(),
+        )
+        .unwrap();
+        let location = default_location();
+        let full = VanillaPackResources::new(
+            location.clone(),
+            temp.0.join("pack"),
+            &index_file,
+            &objects_dir,
+            Map::new(),
+        )
+        .unwrap();
+        let supplier = VanillaResourcesSupplier::new(
+            temp.0.join("pack"),
+            &index_file,
+            &objects_dir,
+            Map::new(),
+        )
+        .unwrap();
+        let metadata = PackMetadata {
+            description: Component::text("fixture"),
+            compatibility: PackCompat::Compatible,
+            requested_features: FeatureFlagSet::empty(),
+            overlays: Vec::new(),
+        };
+        let layers = supplier.open_resources(&location, &metadata).unwrap();
+        assert_eq!(layers.len(), 2);
+        (temp, full, layers[1].clone())
+    }
+
+    fn invalid_ids(temp: &TempDir) -> Vec<ResourceId> {
+        let ids = [
+            ("test", "../../../outside/sentinel.txt"),
+            ("test", "../../../pack-evil/sentinel.txt"),
+            ("test", "/outside/sentinel.txt"),
+            ("..", "pack.mcmeta"),
+        ]
+        .into_iter()
+        .map(|(namespace, path)| ResourceId::from_parts(namespace, path).unwrap());
+        #[cfg(unix)]
+        let absolute = Some(
+            ResourceId::from_parts(
+                "test",
+                temp.0.join("outside/sentinel.txt").to_str().unwrap(),
+            )
+            .unwrap(),
+        );
+        #[cfg(not(unix))]
+        let absolute = {
+            let _ = temp;
+            None
+        };
+        ids.chain(absolute).collect()
+    }
+
+    fn invalid_roots() -> [&'static [&'static str]; 5] {
+        [
+            &["..", "outside", "sentinel.txt"],
+            &["/outside/sentinel.txt"],
+            &["outside/sentinel.txt"],
+            &[r"outside\sentinel.txt"],
+            &["C:/outside/sentinel.txt"],
+        ]
+    }
+
+    fn invalid_queries(absolute: &str) -> [(&str, &str); 5] {
+        [
+            ("test", "../../../outside"),
+            ("test", "../../../pack-evil"),
+            ("test", "/outside"),
+            ("test", absolute),
+            ("..", ""),
+        ]
+    }
+
+    #[test]
+    fn full_get_resource_rejects_escape() {
+        let (temp, full, _index) = fixture();
+        let extracted = ResourceId::from_parts("test", "valid/extracted.txt").unwrap();
+        let indexed = ResourceId::from_parts("test", "valid/indexed.txt").unwrap();
+        assertions::assert_get_resource_invalid_input(
+            &full,
+            PackType::ClientResources,
+            &[(&extracted, b"extracted"), (&indexed, b"indexed")],
+            &invalid_ids(&temp),
+        );
+        assertions::assert_get_resource_invalid_input(
+            &full,
+            PackType::ServerData,
+            &[(&extracted, b"extracted")],
+            &invalid_ids(&temp),
+        );
+    }
+
+    #[test]
+    fn index_get_resource_rejects_escape() {
+        let (temp, _full, index) = fixture();
+        let indexed = ResourceId::from_parts("test", "valid/indexed.txt").unwrap();
+        assertions::assert_get_resource_invalid_input(
+            index.as_ref(),
+            PackType::ClientResources,
+            &[(&indexed, b"indexed")],
+            &invalid_ids(&temp),
+        );
+    }
+
+    #[test]
+    fn full_get_root_resource_rejects_escape() {
+        let (temp, full, _index) = fixture();
+        let absolute = temp.0.join("outside/sentinel.txt");
+        let absolute_row = [absolute.to_str().unwrap()];
+        let mut invalid = invalid_roots().to_vec();
+        invalid.push(&absolute_row);
+        assertions::assert_get_root_resource_invalid_input(
+            &full,
+            &[
+                (&["pack.mcmeta"], METADATA),
+                (&["root.txt"], b"extracted root"),
+            ],
+            &invalid,
+        );
+    }
+
+    #[test]
+    fn index_get_root_resource_rejects_escape() {
+        let (temp, _full, index) = fixture();
+        let absolute = temp.0.join("outside/sentinel.txt");
+        let absolute_row = [absolute.to_str().unwrap()];
+        let mut invalid = invalid_roots().to_vec();
+        invalid.push(&absolute_row);
+        assertions::assert_get_root_resource_invalid_input(
+            index.as_ref(),
+            &[(&["pack.mcmeta"], METADATA)],
+            &invalid,
+        );
+    }
+
+    #[test]
+    fn full_list_resources_rejects_escape() {
+        let (temp, full, _index) = fixture();
+        let absolute = temp.0.join("outside");
+        let extracted = (
+            ResourceId::from_parts("test", "valid/extracted.txt").unwrap(),
+            b"extracted".to_vec(),
+        );
+        let indexed = (
+            ResourceId::from_parts("test", "valid/indexed.txt").unwrap(),
+            b"indexed".to_vec(),
+        );
+        assertions::assert_list_resources_invalid_input(
+            &full,
+            PackType::ClientResources,
+            "test",
+            "valid",
+            &[extracted.clone(), indexed],
+            &invalid_queries(absolute.to_str().unwrap()),
+        );
+        assertions::assert_list_resources_invalid_input(
+            &full,
+            PackType::ServerData,
+            "test",
+            "valid",
+            &[extracted],
+            &invalid_queries(absolute.to_str().unwrap()),
+        );
+    }
+
+    #[test]
+    fn index_list_resources_rejects_escape() {
+        let (temp, _full, index) = fixture();
+        let absolute = temp.0.join("outside");
+        assertions::assert_list_resources_invalid_input(
+            index.as_ref(),
+            PackType::ClientResources,
+            "test",
+            "valid",
+            &[(
+                ResourceId::from_parts("test", "valid/indexed.txt").unwrap(),
+                b"indexed".to_vec(),
+            )],
+            &invalid_queries(absolute.to_str().unwrap()),
+        );
+    }
+}

@@ -250,3 +250,77 @@ mod repository_source_tests {
         tests::test_load_packs(&mut source, &["file/pack.zip"]);
     }
 }
+
+// Windows symlink admission needs a separately enabled symlink-capable
+// environment.
+#[cfg(all(test, unix))]
+mod path_validation {
+    use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
+    use std::{fs, io};
+
+    use super::super::path_validation::assert_load_packs_catalog;
+    use super::FolderRepositorySource;
+    use crate::resources::pack_resources::PackType;
+
+    const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"fixture"}}"#;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> io::Result<Self> {
+            for attempt in 0.. {
+                let path = std::env::temp_dir().join(format!(
+                    "pomme-folder-validation-{}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Ok(Self(path)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.0) {
+                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
+            }
+        }
+    }
+
+    #[test]
+    fn load_packs_omits_forbidden_symlinks() {
+        for kind in ["root", "directory", "file"] {
+            let temp = TempDir::new().unwrap();
+            let discovery = temp.0.join("discovery");
+            let outside = temp.0.join("outside");
+            let good = discovery.join("good");
+            let candidate = discovery.join("forbidden");
+            for pack in [&good, &outside] {
+                fs::create_dir_all(pack).unwrap();
+                fs::write(pack.join("pack.mcmeta"), METADATA).unwrap();
+            }
+            fs::write(outside.join("sentinel.txt"), b"outside sentinel").unwrap();
+            if kind == "root" {
+                symlink(&outside, &candidate).unwrap();
+            } else {
+                fs::create_dir_all(candidate.join("assets/test")).unwrap();
+                fs::write(candidate.join("pack.mcmeta"), METADATA).unwrap();
+                let target = if kind == "directory" {
+                    outside.clone()
+                } else {
+                    outside.join("sentinel.txt")
+                };
+                symlink(target, candidate.join("assets/test/forbidden")).unwrap();
+            }
+            assert_eq!(fs::read(candidate.join("pack.mcmeta")).unwrap(), METADATA);
+            let mut source =
+                FolderRepositorySource::new(vec![discovery], None, PackType::ClientResources, None);
+            assert_load_packs_catalog(&mut source, &["file/good"]);
+        }
+    }
+}

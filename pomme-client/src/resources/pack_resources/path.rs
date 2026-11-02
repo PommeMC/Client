@@ -774,3 +774,149 @@ mod resources_supplier_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod path_validation {
+    use std::path::PathBuf;
+    use std::{fs, io};
+
+    use super::PathPackResources;
+    use super::test_fixture::default_location;
+    use crate::resources::pack_resources::{PackType, path_validation as assertions};
+    use crate::resources::resource::ResourceId;
+
+    const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"inside"}}"#;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> io::Result<Self> {
+            for attempt in 0.. {
+                let path = std::env::temp_dir().join(format!(
+                    "pomme-path-validation-{}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Ok(Self(path)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.0) {
+                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
+            }
+        }
+    }
+
+    fn fixture() -> (TempDir, PathPackResources) {
+        let temp = TempDir::new().unwrap();
+        for directory in [
+            "pack/assets/test/valid",
+            "pack/data/test/valid",
+            "pack-evil",
+            "outside",
+        ] {
+            fs::create_dir_all(temp.0.join(directory)).unwrap();
+        }
+        for domain in ["assets", "data"] {
+            fs::write(
+                temp.0.join(format!("pack/{domain}/test/valid/inside.txt")),
+                b"inside",
+            )
+            .unwrap();
+        }
+        fs::write(temp.0.join("pack/pack.mcmeta"), METADATA).unwrap();
+        fs::write(temp.0.join("pack-evil/sentinel.txt"), b"sibling sentinel").unwrap();
+        fs::write(temp.0.join("outside/sentinel.txt"), b"outside sentinel").unwrap();
+        let pack = PathPackResources::new(default_location(), temp.0.join("pack"));
+        (temp, pack)
+    }
+
+    fn invalid_ids(temp: &TempDir) -> Vec<ResourceId> {
+        let ids = [
+            ("test", "../../../outside/sentinel.txt"),
+            ("test", "../../../pack-evil/sentinel.txt"),
+            ("test", "/outside/sentinel.txt"),
+            ("..", "pack.mcmeta"),
+        ]
+        .into_iter()
+        .map(|(namespace, path)| ResourceId::from_parts(namespace, path).unwrap());
+        // Native drive prefixes are not ResourceIds; root-resource tests cover them.
+        #[cfg(unix)]
+        let absolute = Some(
+            ResourceId::from_parts(
+                "test",
+                temp.0.join("outside/sentinel.txt").to_str().unwrap(),
+            )
+            .unwrap(),
+        );
+        #[cfg(not(unix))]
+        let absolute = {
+            let _ = temp;
+            None
+        };
+        ids.chain(absolute).collect()
+    }
+
+    #[test]
+    fn get_resource_rejects_escape() {
+        let (temp, pack) = fixture();
+        let id = ResourceId::from_parts("test", "valid/inside.txt").unwrap();
+        for pack_type in [PackType::ClientResources, PackType::ServerData] {
+            assertions::assert_get_resource_invalid_input(
+                &pack,
+                pack_type,
+                &[(&id, b"inside")],
+                &invalid_ids(&temp),
+            );
+        }
+    }
+
+    #[test]
+    fn get_root_resource_rejects_escape() {
+        let (temp, pack) = fixture();
+        let absolute = temp.0.join("outside/sentinel.txt");
+        assertions::assert_get_root_resource_invalid_input(
+            &pack,
+            &[(&["pack.mcmeta"], METADATA)],
+            &[
+                &["..", "outside", "sentinel.txt"],
+                &[absolute.to_str().unwrap()],
+                &["outside/sentinel.txt"],
+                &[r"outside\sentinel.txt"],
+                &["C:/outside/sentinel.txt"],
+            ],
+        );
+    }
+
+    #[test]
+    fn list_resources_rejects_escape() {
+        let (temp, pack) = fixture();
+        let absolute = temp.0.join("outside");
+        for pack_type in [PackType::ClientResources, PackType::ServerData] {
+            assertions::assert_list_resources_invalid_input(
+                &pack,
+                pack_type,
+                "test",
+                "valid",
+                &[(
+                    ResourceId::from_parts("test", "valid/inside.txt").unwrap(),
+                    b"inside".to_vec(),
+                )],
+                &[
+                    ("test", "../../../outside"),
+                    ("test", "../../../pack-evil"),
+                    ("test", "/outside"),
+                    ("test", absolute.to_str().unwrap()),
+                    ("..", ""),
+                ],
+            );
+        }
+    }
+}

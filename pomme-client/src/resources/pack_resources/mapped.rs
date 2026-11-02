@@ -635,3 +635,159 @@ mod resources_supplier_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod path_validation {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::{fs, io};
+
+    use super::test_fixture::default_location;
+    use super::{MappedPackResources, MappedResourcesSupplier};
+    use crate::resources::pack_resources::{PackType, path_validation as assertions};
+    use crate::resources::resource::ResourceId;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> io::Result<Self> {
+            for attempt in 0.. {
+                let path = std::env::temp_dir().join(format!(
+                    "pomme-mapped-validation-{}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Ok(Self(path)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.0) {
+                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
+            }
+        }
+    }
+
+    fn fixture() -> (TempDir, MappedPackResources) {
+        let temp = TempDir::new().unwrap();
+        for directory in ["pack/valid", "pack/physical", "pack-evil", "outside"] {
+            fs::create_dir_all(temp.0.join(directory)).unwrap();
+        }
+        fs::write(temp.0.join("pack/valid/inside.txt"), b"inside").unwrap();
+        fs::write(temp.0.join("pack/physical/target.txt"), b"alias target").unwrap();
+        fs::write(temp.0.join("pack-evil/sentinel.txt"), b"sibling sentinel").unwrap();
+        fs::write(temp.0.join("outside/sentinel.txt"), b"outside sentinel").unwrap();
+        let pack = MappedPackResources::new(
+            default_location(),
+            temp.0.join("pack"),
+            "test".into(),
+            BTreeMap::from([(
+                ResourceId::from_parts("test", "valid/alias.txt").unwrap(),
+                PathBuf::from("physical/target.txt"),
+            )]),
+        )
+        .unwrap();
+        (temp, pack)
+    }
+
+    #[test]
+    fn get_resource_rejects_escape() {
+        let (temp, pack) = fixture();
+        let inside = ResourceId::from_parts("test", "valid/inside.txt").unwrap();
+        let alias = ResourceId::from_parts("test", "valid/alias.txt").unwrap();
+        let invalid = [
+            ("test", "../outside/sentinel.txt"),
+            ("test", "../pack-evil/sentinel.txt"),
+            ("test", "/outside/sentinel.txt"),
+            ("..", "valid/inside.txt"),
+        ]
+        .map(|(namespace, path)| ResourceId::from_parts(namespace, path).unwrap());
+        assertions::assert_get_resource_invalid_input(
+            &pack,
+            PackType::ClientResources,
+            &[(&inside, b"inside"), (&alias, b"alias target")],
+            &invalid,
+        );
+        #[cfg(unix)]
+        assertions::assert_get_resource_invalid_input(
+            &pack,
+            PackType::ClientResources,
+            &[(&alias, b"alias target")],
+            &[ResourceId::from_parts(
+                "test",
+                temp.0.join("outside/sentinel.txt").to_str().unwrap(),
+            )
+            .unwrap()],
+        );
+        #[cfg(not(unix))]
+        let _ = temp;
+    }
+
+    #[test]
+    fn list_resources_rejects_escape() {
+        let (temp, pack) = fixture();
+        let absolute = temp.0.join("outside");
+        assertions::assert_list_resources_invalid_input(
+            &pack,
+            PackType::ClientResources,
+            "test",
+            "valid",
+            &[
+                (
+                    ResourceId::from_parts("test", "valid/inside.txt").unwrap(),
+                    b"inside".to_vec(),
+                ),
+                (
+                    ResourceId::from_parts("test", "valid/alias.txt").unwrap(),
+                    b"alias target".to_vec(),
+                ),
+            ],
+            &[
+                ("test", "../outside"),
+                ("test", "../pack-evil"),
+                ("test", "/outside"),
+                ("test", absolute.to_str().unwrap()),
+                ("..", "valid"),
+            ],
+        );
+    }
+
+    #[test]
+    fn supplier_new_rejects_escape_targets() {
+        let (temp, _pack) = fixture();
+        let alias = ResourceId::from_parts("test", "valid/alias.txt").unwrap();
+        assert!(
+            MappedResourcesSupplier::new(
+                temp.0.join("pack"),
+                "test".into(),
+                BTreeMap::from([(alias.clone(), PathBuf::from("physical/target.txt"))]),
+            )
+            .is_ok()
+        );
+        for target in [
+            PathBuf::from("../outside/sentinel.txt"),
+            temp.0.join("outside/sentinel.txt"),
+            PathBuf::from(r"outside\sentinel.txt"),
+            PathBuf::from("C:/outside/sentinel.txt"),
+        ] {
+            match MappedResourcesSupplier::new(
+                temp.0.join("pack"),
+                "test".into(),
+                BTreeMap::from([(alias.clone(), target.clone())]),
+            ) {
+                Err(error) => assert_eq!(
+                    error.kind(),
+                    io::ErrorKind::InvalidInput,
+                    "target {target:?}"
+                ),
+                Ok(_) => panic!("constructor accepted escaping target {target:?}"),
+            }
+        }
+    }
+}

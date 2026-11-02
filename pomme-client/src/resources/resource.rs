@@ -32,15 +32,27 @@ pub(crate) struct ResourceId {
 impl ResourceId {
     pub(crate) fn new(value: &str) -> Result<Self, ResourceError> {
         let (namespace, path) = Self::parse_parts(value)?;
-        Ok(Self {
+        Ok(Self::from_validated_parts(namespace, path))
+    }
+
+    /// Validates and owns separate namespace and path components.
+    pub(crate) fn from_parts(namespace: &str, path: &str) -> Result<Self, ResourceError> {
+        if !valid_resource_id_parts(namespace, path) {
+            return Err(ResourceError::InvalidId(format!("{namespace}:{path}")));
+        }
+        Ok(Self::from_validated_parts(namespace, path))
+    }
+
+    fn from_validated_parts(namespace: &str, path: &str) -> Self {
+        Self {
             namespace: Cow::Owned(namespace.to_owned()),
             path: Cow::Owned(path.to_owned()),
-        })
+        }
     }
 
     /// Validates an identifier, borrowing its parts without allocation on
     /// success.
-    pub(crate) fn parse_parts(value: &str) -> Result<(&str, &str), ResourceError> {
+    fn parse_parts(value: &str) -> Result<(&str, &str), ResourceError> {
         let (namespace, path) = resource_id_parts(value);
         if !valid_resource_id_parts(namespace, path) {
             return Err(ResourceError::InvalidId(value.to_owned()));
@@ -277,5 +289,30 @@ impl Resource {
     /// share a fixed source view but can observe filesystem changes.
     pub(crate) fn metadata(&self) -> Result<Option<ResourceContent>, ResourceError> {
         (self.metadata)()
+    }
+}
+
+#[cfg(test)]
+mod path_validation {
+    use super::{ResourceError, ResourceId};
+
+    #[test]
+    fn from_parts_representability() {
+        for (namespace, path) in [
+            ("test", "C:/outside/sentinel.txt"),
+            ("test", "outside:sentinel.txt"),
+            ("test", r"outside\sentinel.txt"),
+            ("bad/namespace", "sentinel.txt"),
+        ] {
+            assert!(matches!(
+                ResourceId::from_parts(namespace, path),
+                Err(ResourceError::InvalidId(_))
+            ));
+        }
+        for (namespace, path) in [("test", "../x"), ("test", "/x"), ("..", "x")] {
+            let id = ResourceId::from_parts(namespace, path).unwrap();
+            assert_eq!(id.namespace(), namespace);
+            assert_eq!(id.path(), path);
+        }
     }
 }

@@ -257,3 +257,86 @@ mod repository_source_tests {
         tests::test_load_packs(&mut source, &["registered-zip"]);
     }
 }
+
+// Windows symlink admission needs a separately enabled symlink-capable
+// environment.
+#[cfg(all(test, unix))]
+mod path_validation {
+    use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
+    use std::{fs, io};
+
+    use super::super::path_validation::assert_load_packs_permission_denied;
+    use super::{PhysicalPack, RegisteredRepositorySource};
+    use crate::chat_component::Component;
+    use crate::resources::pack_resources::PackType;
+    use crate::resources::packs::{
+        PackEnablementConfig, PackLocationInfo, PackPosition, PackSource,
+    };
+
+    const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"fixture"}}"#;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> io::Result<Self> {
+            for attempt in 0.. {
+                let path = std::env::temp_dir().join(format!(
+                    "pomme-registered-validation-{}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Ok(Self(path)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.0) {
+                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
+            }
+        }
+    }
+
+    fn source(path: PathBuf, id: &str) -> RegisteredRepositorySource {
+        let source = RegisteredRepositorySource::new(PackType::ClientResources, None);
+        source.register(
+            PackLocationInfo {
+                id: id.into(),
+                title: Component::text("fixture"),
+                source: PackSource::default(),
+                known_pack_info: None,
+            },
+            PhysicalPack::Directory(path),
+            PackEnablementConfig {
+                required: false,
+                default_position: PackPosition::Top,
+                fixed_position: false,
+            },
+        );
+        source
+    }
+
+    #[test]
+    fn load_packs_rejects_forbidden_root_symlink() {
+        let temp = TempDir::new().unwrap();
+        let good = temp.0.join("pack");
+        let outside = temp.0.join("outside");
+        for pack in [&good, &outside] {
+            fs::create_dir(pack).unwrap();
+            fs::write(pack.join("pack.mcmeta"), METADATA).unwrap();
+        }
+        fs::write(outside.join("sentinel.txt"), b"outside sentinel").unwrap();
+        let link = temp.0.join("pack-evil");
+        symlink(outside, &link).unwrap();
+        assert_eq!(fs::read(link.join("pack.mcmeta")).unwrap(), METADATA);
+        let mut forbidden = source(link, "forbidden");
+        let mut clean = source(good, "good");
+        assert_load_packs_permission_denied(&mut forbidden, &mut clean, &["good"]);
+    }
+}

@@ -384,3 +384,106 @@ mod tests {
         pack.close().expect("close should succeed");
     }
 }
+
+#[cfg(test)]
+mod path_validation {
+    use std::io::ErrorKind;
+
+    use super::{PackMetadataResources, PackResources, PackType, tests};
+    use crate::resources::resource::ResourceId;
+
+    // Fixtures own trusted roots/ancestors and keep the filesystem unchanged
+    // through supplier reads. These check lexical rejection, not a sandbox.
+    pub(super) fn assert_get_resource_invalid_input<P: PackResources + ?Sized>(
+        pack: &P,
+        pack_type: PackType,
+        controls: &[(&ResourceId, &[u8])],
+        invalid_ids: &[ResourceId],
+    ) {
+        assert!(
+            !controls.is_empty(),
+            "get_resource needs a successful control"
+        );
+        assert!(!invalid_ids.is_empty(), "get_resource needs invalid IDs");
+        for (id, expected) in controls {
+            tests::test_get_resource(pack, pack_type, id, expected);
+        }
+        for id in invalid_ids {
+            match pack.get_resource(pack_type, id) {
+                Err(error) => assert_eq!(
+                    error.kind(),
+                    ErrorKind::InvalidInput,
+                    "get_resource error for {pack_type:?}, {id:?}"
+                ),
+                Ok(_) => panic!(
+                    "get_resource must reject {pack_type:?}, {id:?} before returning a supplier or absence"
+                ),
+            }
+        }
+    }
+
+    pub(super) fn assert_get_root_resource_invalid_input<P: PackMetadataResources + ?Sized>(
+        pack: &P,
+        controls: &[(&[&str], &[u8])],
+        invalid_paths: &[&[&str]],
+    ) {
+        assert!(
+            !controls.is_empty(),
+            "get_root_resource needs a successful control"
+        );
+        assert!(
+            !invalid_paths.is_empty(),
+            "get_root_resource needs invalid paths"
+        );
+        for (path, expected) in controls {
+            tests::test_get_root_resource(pack, path, expected);
+        }
+        for path in invalid_paths {
+            match pack.get_root_resource(path) {
+                Err(error) => assert_eq!(
+                    error.kind(),
+                    ErrorKind::InvalidInput,
+                    "get_root_resource error for {path:?}"
+                ),
+                Ok(_) => panic!(
+                    "get_root_resource must reject {path:?} before returning a supplier or absence"
+                ),
+            }
+        }
+    }
+
+    pub(super) fn assert_list_resources_invalid_input<P: PackResources + ?Sized>(
+        pack: &P,
+        pack_type: PackType,
+        namespace: &str,
+        directory: &str,
+        expected: &[(ResourceId, Vec<u8>)],
+        invalid_queries: &[(&str, &str)],
+    ) {
+        assert!(
+            !expected.is_empty(),
+            "list_resources needs a nonempty successful control"
+        );
+        assert!(
+            !invalid_queries.is_empty(),
+            "list_resources needs invalid queries"
+        );
+        tests::test_list_resources(pack, pack_type, namespace, directory, expected);
+        for (namespace, directory) in invalid_queries {
+            let mut callbacks = 0;
+            let result = pack.list_resources(pack_type, namespace, directory, &mut |_, _| {
+                callbacks += 1;
+            });
+            assert_eq!(
+                callbacks, 0,
+                "list_resources must not emit for {pack_type:?}, {namespace:?}, {directory:?}"
+            );
+            let error = result.expect_err("list_resources must reject an invalid query");
+            assert_eq!(
+                error.kind(),
+                ErrorKind::InvalidInput,
+                "list_resources error for {pack_type:?}, {namespace:?}, {directory:?}"
+            );
+        }
+    }
+}
