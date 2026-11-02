@@ -35,13 +35,23 @@ pub(super) fn translate_entity_data(
             break;
         }
         let old = var_u32(&mut cur)?;
-        let Some(new) = (ids.serializer_map)(old) else {
-            if ids.v772.is_some() && old == COMPOUND_TAG_SERIALIZER {
+        let Some(new) = ids.serializer_map.to_native(old) else {
+            if ids
+                .serializer_map
+                .names()
+                .get(old as usize)
+                .is_some_and(|name| name == "compound_tag")
+            {
                 // compound_tag values are network NBT; drop the entry.
                 skip_nbt_root(&mut cur, ids.v763.is_some())?;
                 continue;
             }
-            if ids.v777.is_some() && old == DYE_COLOR_SERIALIZER {
+            if ids
+                .serializer_map
+                .names()
+                .get(old as usize)
+                .is_some_and(|name| name == "dye_color")
+            {
                 // Only the cushion sends one, and its add_entity is dropped.
                 varint_span(&mut cur)?;
                 continue;
@@ -123,58 +133,11 @@ pub(super) fn translate_old_profile(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) 
 /// thus anything after it) can't be walked; `None` means the data is
 /// malformed.
 pub(super) fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool> {
-    match serializer {
-        0 | 8 => advance(cur, 1)?, // byte, boolean
-        3 => advance(cur, 4)?,     // float
-        9 => advance(cur, 12)?,    // rotations
-        10 => advance(cur, 8)?,    // block_pos
-        39 => advance(cur, 12)?,   // vector3
-        40 => advance(cur, 16)?,   // quaternion
-        41 => {
-            Profile::azalea_read(cur).ok()?;
-        }
-        // varint-shaped: int, enums, registry/holder ids, optional ints
-        1 | 12 | 14 | 15 | 19 | 20 | 21 | 22..=32 | 35..=38 | 42 => {
-            varint_span(cur)?;
-        }
-        2 => {
-            var_u64(cur)?; // var_long
-        }
-        4 => skip_utf(cur)?,                           // string
-        5 => skip_nbt(cur)?,                           // component
-        6 => skip_optional(cur, skip_nbt)?,            // optional component
-        11 => skip_optional(cur, |c| advance(c, 8))?,  // optional block_pos
-        13 => skip_optional(cur, |c| advance(c, 16))?, // optional entity ref (UUID)
-        18 => {
-            // villager data: type + profession holder ids, level
-            varint_span(cur)?;
-            varint_span(cur)?;
-            varint_span(cur)?;
-        }
-        33 => {
-            // optional global pos: dimension key + block pos
-            skip_optional(cur, |c| {
-                skip_utf(c)?;
-                advance(c, 8)
-            })?;
-        }
-        34 => {
-            // painting variant holder: id + 1, or 0 followed by the direct
-            // form (width, height, asset id, optional title/author)
-            if var_u32(cur)? == 0 {
-                varint_span(cur)?;
-                varint_span(cur)?;
-                skip_utf(cur)?;
-                skip_optional(cur, skip_nbt)?;
-                skip_optional(cur, skip_nbt)?;
-            }
-        }
-        // item stacks (7) and particles (16/17) have their own translation
-        // paths in `translate_entity_data`; anything else can't be walked
-        // without its full value codec
-        _ => return Some(false),
-    }
-    Some(true)
+    let Some(serializer) = pomme_protocol::entity_data::SERIALIZERS_26_2.get(serializer as usize)
+    else {
+        return Some(false);
+    };
+    Reader::on_cursor(cur, |r| serializer.skip_native_value(r)).ok()
 }
 
 /// Rewrites one particle (or, with `list`, a counted particle list):

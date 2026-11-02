@@ -100,18 +100,3 @@ pub(super) fn translate_update_advancements(id: u32, payload: &[u8]) -> Option<V
     out.push(1);
     Some(out)
 }
-
-/// The native serializer id for a 1.21.4 `EntityDataSerializers` id: 1.21.5
-/// interleaved the cow/pig/chicken/wolf-sound variant serializers (and
-/// renamed `optional_uuid` to the wire-identical
-/// `optional_living_entity_reference`); mapping through the 1.21.8 ids
-/// covers the rest, `compound_tag` (16) included.
-pub(super) fn remap_serializer_769(old: u32) -> Option<u32> {
-    match old {
-        0..=22 => remap_serializer_772(old),
-        23 => remap_serializer_772(24), // wolf_variant
-        24 => remap_serializer_772(26), // frog_variant
-        25..=30 => remap_serializer_772(old + 4),
-        _ => None,
-    }
-}

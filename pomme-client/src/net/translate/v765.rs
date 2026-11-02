@@ -362,18 +362,3 @@ pub(super) fn translate_game_login_765(payload: &[u8]) -> Option<Vec<u8>> {
     converted.push(0); // enforcesSecureChat, absent at 765
     Some(converted)
 }
-
-/// The native serializer id for a 1.20.4 `EntityDataSerializers` id:
-/// 1.20.5 inserted `particles` (18), `wolf_variant` (23) and
-/// `armadillo_state` (28), whose set then held through 1.21.4; mapping
-/// through the 766-era ids covers the rest.
-pub(super) fn remap_serializer_765(old: u32) -> Option<u32> {
-    match old {
-        0..=17 => remap_serializer_769(old),
-        18..=21 => remap_serializer_769(old + 1),
-        22 => remap_serializer_769(24),
-        23..=25 => remap_serializer_769(old + 2),
-        26..=27 => remap_serializer_769(old + 3),
-        _ => None,
-    }
-}

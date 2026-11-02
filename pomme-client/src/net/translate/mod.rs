@@ -483,7 +483,7 @@ struct GameIds {
     outbound: Box<[Option<u32>]>,
     /// The wire version's `EntityDataSerializers` interleave (the
     /// registration order shifts between versions).
-    serializer_map: fn(u32) -> Option<u32>,
+    serializer_map: &'static pomme_protocol::entity_serializers::SerializerTable,
     set_entity_data_id: u32,
     commands_id: u32,
     /// Names the wire-space ids the rewrites size by (command parsers,
@@ -775,14 +775,6 @@ const ACTION_INTERACT_AT: u32 = 2;
 const LOGIN_HEAD_763: usize = 5;
 const LOGIN_PREFIX_763: usize = 7;
 
-/// 26.3's appended `dye_color` serializer, which no native entity uses.
-const DYE_COLOR_SERIALIZER: u32 = 43;
-
-/// The pre-1.21.9 wire id of the `compound_tag` entity-data serializer,
-/// which 1.21.9 removed; `remap_serializer_772` maps it to `None` and
-/// `translate_entity_data` strips entries using it.
-const COMPOUND_TAG_SERIALIZER: u32 = 16;
-
 /// Native-registry component ids whose payloads the stack walker can advance
 /// past (26.2 `DataComponents` registration order; anchored in
 /// `component_id_anchors` in `azalea_compat`). Matching happens after the
@@ -932,9 +924,6 @@ use components::*;
 
 mod v774;
 use v774::*;
-
-mod v773;
-use v773::*;
 
 mod v775;
 use v775::*;

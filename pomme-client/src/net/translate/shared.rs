@@ -464,11 +464,6 @@ pub(super) fn var_i32(cur: &mut Cursor<&[u8]>) -> Option<i32> {
     Reader::on_cursor(cur, Reader::var_i32).ok()
 }
 
-/// Vanilla `VarLong.read` off the cursor.
-pub(super) fn var_u64(cur: &mut Cursor<&[u8]>) -> Option<u64> {
-    Reader::on_cursor(cur, Reader::varlong).ok()
-}
-
 /// Copies `n` bytes from the cursor's payload to `out`.
 pub(super) fn copy_bytes(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: usize) -> Option<()> {
     let at = cur.position() as usize;

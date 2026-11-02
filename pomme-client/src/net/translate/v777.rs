@@ -18,13 +18,6 @@ impl Ids777 {
     }
 }
 
-/// The native serializer id for a 26.3 or 26.1 `EntityDataSerializers` id:
-/// 26.3 appended `dye_color` and shifted nothing, and 26.1 matches 26.2
-/// (registration blocks line-checked).
-pub(super) fn remap_serializer_777(old: u32) -> Option<u32> {
-    (old < DYE_COLOR_SERIALIZER).then_some(old)
-}
-
 /// Rewrites `level_chunk_with_light` from 26.3, whose chunk data is
 /// byte-identical and whose light masks changed codec (see
 /// [`copy_light_data_777`]).

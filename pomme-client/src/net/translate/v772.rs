@@ -12,20 +12,6 @@ impl Ids772 {
     }
 }
 
-/// The native serializer id for a 1.21.8 `EntityDataSerializers` id: 1.21.9
-/// removed `compound_tag` (16), shifting everything above it down one, and
-/// inserted `copper_golem_state`/`weathering_copper_state` right below
-/// `vector3`; on either side the 1.21.10 interleave applies unchanged.
-pub(super) fn remap_serializer_772(old: u32) -> Option<u32> {
-    match old {
-        0..=15 => Some(old),
-        COMPOUND_TAG_SERIALIZER => None,
-        17..=32 => remap_serializer_773(old - 1),
-        33..=34 => remap_serializer_773(old + 1),
-        _ => None,
-    }
-}
-
 /// An `add_entity`/`set_entity_motion` velocity: three shorts in 1/8000ths
 /// of a block per tick.
 pub(super) fn read_velocity(cur: &mut Cursor<&[u8]>) -> Option<DVec3> {

@@ -49,21 +49,6 @@ pub(super) fn translate_interact(interact_old_id: u32, payload: &[u8]) -> Vec<Ve
     vec![at, plain]
 }
 
-/// The native serializer id for a 1.21.11 `EntityDataSerializers` id: 26.x
-/// interleaved `cat/cow/pig/chicken_sound_variant` at ids 22/24/29/31
-/// (line-checked against both versions' `EntityDataSerializers.java`
-/// registration blocks; anchored by tests in `azalea_compat`).
-pub(super) fn remap_serializer_774(old: u32) -> Option<u32> {
-    Some(match old {
-        0..=21 => old,
-        22 => 23,
-        23..=26 => old + 2,
-        27 => 30,
-        28..=38 => old + 4,
-        _ => return None,
-    })
-}
-
 /// Rewrites `set_time` from `gameTime, dayTime, tickDayTime` to 26.2's
 /// `gameTime` plus a world-clock map: one entry for clock id 0 carrying
 /// `dayTime` as its total ticks and a rate of 1 or 0 for `tickDayTime`

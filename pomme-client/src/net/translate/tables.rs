@@ -194,19 +194,10 @@ impl GameIds {
         Some(GameIds {
             inbound,
             outbound,
-            serializer_map: match protocol {
-                777 | 775 => remap_serializer_777,
-                774 => remap_serializer_774,
-                773 => remap_serializer_773,
-                // 1.21.5 through 1.21.8 register identical serializer sets,
-                // as do 1.20.5 through 1.21.4.
-                770..=772 => remap_serializer_772,
-                766..=769 => remap_serializer_769,
-                // 1.20.1 and 1.20.2 register serializers in the same order
-                // as 1.20.4 (only the component read side changed).
-                763..=765 => remap_serializer_765,
-                p => panic!("no serializer map for protocol {p}"),
-            },
+            serializer_map: pomme_protocol::entity_serializers::SerializerTable::for_protocol(
+                protocol,
+            )
+            .expect("embedded serializer table"),
             set_entity_data_id: id(Clientbound, "set_entity_data"),
             commands_id: id(Clientbound, "commands"),
             wire_registries: RegistryTable::for_protocol(protocol).expect("wire registries"),
