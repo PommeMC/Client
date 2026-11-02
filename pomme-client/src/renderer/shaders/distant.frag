@@ -28,15 +28,18 @@ void main() {
         + vec2(face >> 1u, face & 1u) * FACE_SIZE;
     vec2 pos = (face_origin + texel * FACE_SIZE) / ATLAS_SIZE;
     // Mipped by how fast the unwrapped coordinate moves, so the wrap from
-    // block to block doesn't pick the smallest mip.
+    // block to block doesn't pick the smallest mip; taken before any
+    // fragment leaves.
     vec2 unwrapped = v_uv * (FACE_SIZE / ATLAS_SIZE);
-    vec4 color = textureGrad(sampler2D(model_atlas, model_sampler), pos, dFdx(unwrapped), dFdy(unwrapped));
+    vec2 grad_x = dFdx(unwrapped);
+    vec2 grad_y = dFdy(unwrapped);
     if (any(notEqual(clamp(tile, vec2(0.0), size), tile))) {
         discard;
     }
     if (gl_FragCoord.z < texelFetch(sampler2D(depth_bound, model_sampler), ivec2(gl_FragCoord.xy), 0).r) {
         discard;
     }
+    vec4 color = textureGrad(sampler2D(model_atlas, model_sampler), pos, grad_x, grad_y);
     // Cut out by the unmipped alpha, which mips would smear.
     vec4 exact = textureLod(sampler2D(model_atlas, model_sampler), pos, 0.0);
     if ((flags & 2u) != 0u) {

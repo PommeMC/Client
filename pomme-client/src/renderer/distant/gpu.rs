@@ -684,8 +684,10 @@ impl DistantBuffers {
             &count.to_le_bytes(),
             [count.div_ceil(128), 1, 1],
         );
-        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage);
-        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::ShaderRead);
+        encoder.transition_buffers_many(&[
+            (rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage),
+            (rhi::BufferUse::StorageWrite, rhi::BufferUse::ShaderRead),
+        ]);
     }
 
     /// Before the traversal: this frame's top-level ids and queue metadata
@@ -697,8 +699,10 @@ impl DistantBuffers {
         let mut meta = [[0u32, 1, 1, 0]; LEVELS as usize];
         meta[0] = [(top.len() as u32).div_ceil(32), 1, 1, top.len() as u32];
         self.queue_meta_staging[frame].write_at(0, bytemuck::cast_slice(&meta));
-        encoder.transition_buffers(rhi::BufferUse::Indirect, rhi::BufferUse::CopyDst);
-        encoder.transition_buffers(rhi::BufferUse::Storage, rhi::BufferUse::CopyDst);
+        encoder.transition_buffers_many(&[
+            (rhi::BufferUse::Indirect, rhi::BufferUse::CopyDst),
+            (rhi::BufferUse::Storage, rhi::BufferUse::CopyDst),
+        ]);
         encoder.copy_buffer(
             self.queue_meta_staging[frame].handle(),
             self.queue_meta.handle(),
@@ -706,8 +710,10 @@ impl DistantBuffers {
         );
         encoder.fill_buffer(self.render_list.handle(), 0, 4, 0);
         encoder.fill_buffer(self.requests.handle(), 0, 8, 0);
-        encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::Storage);
-        encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::Indirect);
+        encoder.transition_buffers_many(&[
+            (rhi::BufferUse::CopyDst, rhi::BufferUse::Storage),
+            (rhi::BufferUse::CopyDst, rhi::BufferUse::Indirect),
+        ]);
     }
 
     /// After the traversal: its requests into this frame's readback, read
@@ -888,8 +894,8 @@ impl DistantBuffers {
         self.bounds.clear();
     }
 
-    /// Which of column `pos`'s sections draw (bit `i` for the `i`th from
-    /// the dimension's bottom, `min_section`), bounding distant terrain
+    /// Which of column `pos`'s sections are compiled (bit `i` for the `i`th
+    /// from the dimension's bottom, `min_section`), bounding distant terrain
     /// there.
     pub fn set_column_sections(
         &mut self,
@@ -900,6 +906,12 @@ impl DistantBuffers {
     ) {
         self.bounds
             .set_column(device, self.frame_seq, pos, sections, min_section);
+    }
+
+    /// Which sections the occlusion graph shows, per column, as the chunk
+    /// cull draws them.
+    pub fn set_visibility(&mut self, device: &rhi::backend::Device, vis: &HashMap<ChunkPos, u32>) {
+        self.bounds.set_visibility(device, self.frame_seq, vis);
     }
 
     /// Where the player is and how far to draw; `None` draws nothing.
@@ -1151,18 +1163,25 @@ fn place(
     Some(id)
 }
 
-/// Voxy's `ChunkBoundStore`: the drawn chunk sections' coordinates for the
-/// bound pass, a slot each in a buffer the pass instances over, the last
-/// slot moving into a freed one.
+/// Voxy's `StreamedBoundStore`: the chunk sections the chunk renderer draws
+/// (compiled, and shown by the occlusion graph) for the bound pass, as
+/// boxes in a buffer the pass instances over, the last slot moving into a
+/// freed one as in `ChunkBoundStore`. Departures: Voxy streams Sodium's
+/// visible list each frame; here the columns are kept, and each run of
+/// stacked sections is one box, whose far faces are the run's.
 pub(crate) struct BoundStore {
     layout: rhi::backend::BindGroupLayout,
     buffer: rhi::backend::Buffer,
     group: rhi::backend::BindGroup,
     capacity: u32,
-    slots: Vec<[i32; 3]>,
+    /// Each box's section coordinates and its height in sections.
+    slots: Vec<[i32; 4]>,
+    /// The slot of the box starting at these section coordinates.
     index: HashMap<[i32; 3], u32>,
-    /// Per column, which of its sections have a slot.
-    columns: HashMap<ChunkPos, u32>,
+    /// Per column, which of its sections are compiled and which the graph
+    /// shows (a bit per section from `min_section` up).
+    columns: HashMap<ChunkPos, (u32, u32)>,
+    min_section: i32,
     /// Buffers in-flight frames may still read, by the frame they're free
     /// from.
     retired: VecDeque<(u64, rhi::backend::Buffer, rhi::backend::BindGroup)>,
@@ -1185,6 +1204,7 @@ impl BoundStore {
             slots: Vec::new(),
             index: HashMap::new(),
             columns: HashMap::new(),
+            min_section: 0,
             retired: VecDeque::new(),
         }
     }
@@ -1222,40 +1242,102 @@ impl BoundStore {
     }
 
     fn write(&mut self, slot: u32) {
-        let [x, y, z] = self.slots[slot as usize];
+        let slot = slot as usize;
         self.buffer
-            .write_at(slot as usize * 16, bytemuck::bytes_of(&[x, y, z, 0]));
+            .write_at(slot * 16, bytemuck::bytes_of(&self.slots[slot]));
     }
 
+    /// Which of column `pos`'s sections are compiled.
     fn set_column(
         &mut self,
         device: &rhi::backend::Device,
         frame_seq: u64,
         pos: ChunkPos,
-        sections: u32,
+        compiled: u32,
         min_section: i32,
     ) {
-        let was = self.columns.get(&pos).copied().unwrap_or(0);
-        if was == sections {
-            return;
-        }
-        for bit in 0..32 {
-            let (had, has) = (was & 1 << bit != 0, sections & 1 << bit != 0);
-            let key = [pos.x, min_section + bit, pos.z];
-            if had && !has {
-                self.remove(key);
-            } else if has && !had {
-                self.add(device, frame_seq, key);
-            }
-        }
-        if sections == 0 {
+        self.min_section = min_section;
+        let (_, visible) = self.column(pos);
+        self.update(device, frame_seq, pos, compiled, visible);
+    }
+
+    /// Column `pos`'s compiled and shown sections; none and all for one not
+    /// listed.
+    fn column(&self, pos: ChunkPos) -> (u32, u32) {
+        self.columns.get(&pos).copied().unwrap_or((0, u32::MAX))
+    }
+
+    /// Sets column `pos`'s compiled and shown sections, re-boxing what
+    /// changed.
+    fn update(
+        &mut self,
+        device: &rhi::backend::Device,
+        frame_seq: u64,
+        pos: ChunkPos,
+        compiled: u32,
+        visible: u32,
+    ) {
+        let (was_compiled, was_visible) = self.column(pos);
+        self.rebox(
+            device,
+            frame_seq,
+            pos,
+            was_compiled & was_visible,
+            compiled & visible,
+        );
+        if compiled == 0 {
             self.columns.remove(&pos);
         } else {
-            self.columns.insert(pos, sections);
+            self.columns.insert(pos, (compiled, visible));
         }
     }
 
-    fn add(&mut self, device: &rhi::backend::Device, frame_seq: u64, key: [i32; 3]) {
+    /// Which sections the occlusion graph shows, per column; a column it
+    /// doesn't list shows every section, as the chunk cull takes it.
+    fn set_visibility(
+        &mut self,
+        device: &rhi::backend::Device,
+        frame_seq: u64,
+        vis: &HashMap<ChunkPos, u32>,
+    ) {
+        let changed: Vec<(ChunkPos, u32, u32)> = self
+            .columns
+            .iter()
+            .filter_map(|(&pos, &(compiled, was))| {
+                let visible = vis.get(&pos).copied().unwrap_or(u32::MAX);
+                (visible != was).then_some((pos, compiled, visible))
+            })
+            .collect();
+        for (pos, compiled, visible) in changed {
+            self.update(device, frame_seq, pos, compiled, visible);
+        }
+    }
+
+    /// Replaces column `pos`'s boxes for the sections `was` drawn with those
+    /// for `now`.
+    fn rebox(
+        &mut self,
+        device: &rhi::backend::Device,
+        frame_seq: u64,
+        pos: ChunkPos,
+        was: u32,
+        now: u32,
+    ) {
+        if was == now {
+            return;
+        }
+        let min_section = self.min_section;
+        let key = |start| [pos.x, min_section + start, pos.z];
+        for (start, _) in runs(was) {
+            self.remove(key(start));
+        }
+        for (start, height) in runs(now) {
+            self.add(device, frame_seq, key(start), height);
+        }
+    }
+
+    /// A box of `height` sections from the section at `key` up.
+    fn add(&mut self, device: &rhi::backend::Device, frame_seq: u64, key: [i32; 3], height: i32) {
         if self.count() == self.capacity {
             self.capacity *= 2;
             let (buffer, group) = Self::make_buffer(device, self.layout, self.capacity);
@@ -1270,7 +1352,8 @@ impl BoundStore {
             }
         }
         let slot = self.count();
-        self.slots.push(key);
+        let [x, y, z] = key;
+        self.slots.push([x, y, z, height]);
         self.index.insert(key, slot);
         self.write(slot);
     }
@@ -1282,7 +1365,8 @@ impl BoundStore {
         let last = self.slots.pop().expect("a slot was indexed");
         if slot < self.count() {
             self.slots[slot as usize] = last;
-            self.index.insert(last, slot);
+            let [x, y, z, _] = last;
+            self.index.insert([x, y, z], slot);
             self.write(slot);
         }
     }
@@ -1309,6 +1393,19 @@ impl BoundStore {
         std::mem::take(&mut self.buffer).destroy(device);
         self.layout.destroy(device);
     }
+}
+
+/// The runs of set bits in `mask`, as (first bit, length).
+fn runs(mut mask: u32) -> impl Iterator<Item = (i32, i32)> {
+    std::iter::from_fn(move || {
+        if mask == 0 {
+            return None;
+        }
+        let start = mask.trailing_zeros();
+        let len = (mask >> start).trailing_ones();
+        mask &= !((((1u64 << len) - 1) << start) as u32);
+        Some((start as i32, len as i32))
+    })
 }
 
 /// `SectionMeta.writeMetadata`: the key high word first, the bounds, the
@@ -1349,6 +1446,15 @@ fn atlas_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runs_split_a_mask_at_its_gaps() {
+        assert_eq!(runs(0).collect::<Vec<_>>(), []);
+        assert_eq!(runs(0b1).collect::<Vec<_>>(), [(0, 1)]);
+        assert_eq!(runs(0b1110_0000_0110).collect::<Vec<_>>(), [(1, 2), (9, 3)]);
+        assert_eq!(runs(u32::MAX).collect::<Vec<_>>(), [(0, 32)]);
+        assert_eq!(runs(1 << 31 | 1).collect::<Vec<_>>(), [(0, 1), (31, 1)]);
+    }
 
     #[test]
     fn section_records_pack_the_key_bounds_and_count_pairs() {

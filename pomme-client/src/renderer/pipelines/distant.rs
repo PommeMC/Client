@@ -258,10 +258,10 @@ impl DistantPipeline {
             ],
             None,
         );
-        // The view projection, once a pass.
+        // The view projection and the render distance, once a pass.
         let bound_layout = pipeline_layout(
             &[camera_layout, buffers.bounds().layout()],
-            push(rhi::ShaderStages::VERTEX, 64),
+            push(rhi::ShaderStages::VERTEX, 80),
         );
         let setup_layout = pipeline_layout(&[texture_layout], None);
         // The inverse distant view projection, then the fade.
@@ -603,6 +603,7 @@ impl DistantPipeline {
         buffers: &mut DistantBuffers,
         camera: &Camera,
         eye: DVec3,
+        render_distance: u32,
         frame_depth: rhi::backend::TextureHandle,
         extent: rhi::Extent,
     ) {
@@ -642,7 +643,8 @@ impl DistantPipeline {
         let indices = buffers.index_buffer();
 
         // `BoundRenderer`: the farthest back face of each drawn section's
-        // box, from a depth cleared to the near plane.
+        // box within the render distance, from a depth cleared to the near
+        // plane.
         encoder.transition_textures(&[TextureTransition::color(
             bound,
             TextureUse::DepthRead,
@@ -661,11 +663,9 @@ impl DistantPipeline {
         if bounds.count() > 0 {
             pass.set_pipeline(&self.bound);
             pass.set_bind_groups(0, &[self.camera_sets[frame], bounds.group()]);
-            pass.set_push_constants(
-                rhi::ShaderStages::VERTEX,
-                0,
-                bytemuck::cast_slice(&view_proj.to_cols_array()),
-            );
+            let mut push = view_proj.to_cols_array().to_vec();
+            push.extend([(render_distance * 16) as f32, 0.0, 0.0, 0.0]);
+            pass.set_push_constants(rhi::ShaderStages::VERTEX, 0, bytemuck::cast_slice(&push));
             pass.set_index_buffer(indices);
             pass.draw_indexed(36, bounds.count(), CUBE_FIRST_INDEX, 0, 0);
         }
@@ -711,15 +711,19 @@ impl DistantPipeline {
 
         // `prep.comp`, after last frame's draws are done with the counts
         // and positions and the traversal with the render list.
-        encoder.transition_buffers(rhi::BufferUse::Indirect, rhi::BufferUse::Storage);
-        encoder.transition_buffers(rhi::BufferUse::ShaderRead, rhi::BufferUse::Storage);
-        encoder.transition_buffers(rhi::BufferUse::Storage, rhi::BufferUse::CopyDst);
+        encoder.transition_buffers_many(&[
+            (rhi::BufferUse::Indirect, rhi::BufferUse::Storage),
+            (rhi::BufferUse::ShaderRead, rhi::BufferUse::Storage),
+            (rhi::BufferUse::Storage, rhi::BufferUse::CopyDst),
+        ]);
         encoder.dispatch(&self.prep.pipeline, self.prep.set(frame), &[], [1, 1, 1]);
         encoder.fill_buffer(translucent, 0, u64::from(TRANSLUCENT_BUCKETS) * 4, 0);
         buffers.record_draw_slots(encoder);
-        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect);
-        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage);
-        encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::Storage);
+        encoder.transition_buffers_many(&[
+            (rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect),
+            (rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage),
+            (rhi::BufferUse::CopyDst, rhi::BufferUse::Storage),
+        ]);
 
         // The occlusion pass: each listed section's box against the image's
         // depth, the ones that show marked seen this frame.
@@ -770,8 +774,10 @@ impl DistantPipeline {
             0,
         );
         buffers.record_count_readback(encoder, frame);
-        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect);
-        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::ShaderRead);
+        encoder.transition_buffers_many(&[
+            (rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect),
+            (rhi::BufferUse::StorageWrite, rhi::BufferUse::ShaderRead),
+        ]);
 
         // `renderTemporal` and `renderTranslucent`: the sections seen this
         // frame but not last, then the translucent quads.
@@ -912,8 +918,10 @@ impl DistantPipeline {
             );
         }
         for iteration in 1..u32::from(LEVELS) {
-            encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage);
-            encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect);
+            encoder.transition_buffers_many(&[
+                (rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage),
+                (rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect),
+            ]);
             let queues = if iteration % 2 == 1 {
                 Iteration::Odd
             } else {

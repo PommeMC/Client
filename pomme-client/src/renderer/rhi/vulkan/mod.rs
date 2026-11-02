@@ -1265,8 +1265,22 @@ impl CommandEncoder {
 
     /// Makes every buffer write of `from` visible to `to`.
     pub fn transition_buffers(&self, from: BufferUse, to: BufferUse) {
-        let (src_access_mask, src_stage) = from.masks();
-        let (dst_access_mask, dst_stage) = to.masks();
+        self.transition_buffers_many(&[(from, to)]);
+    }
+
+    /// Several buffer transitions as one barrier: the whole of each use's
+    /// stages and accesses waits on the whole of the others', once.
+    pub fn transition_buffers_many(&self, transitions: &[(BufferUse, BufferUse)]) {
+        let (mut src_access_mask, mut src_stage) = Default::default();
+        let (mut dst_access_mask, mut dst_stage) = Default::default();
+        for &(from, to) in transitions {
+            let (access, stage) = from.masks();
+            src_access_mask |= access;
+            src_stage |= stage;
+            let (access, stage) = to.masks();
+            dst_access_mask |= access;
+            dst_stage |= stage;
+        }
         self.cmd.pipeline_barrier(
             src_stage,
             dst_stage,

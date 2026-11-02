@@ -1334,8 +1334,10 @@ impl Renderer {
     }
 
     /// Push the CPU visibility graph's per-column visible-section masks to the
-    /// chunk buffer store, which omits occluded sections from the GPU cull.
+    /// chunk buffer store, which omits occluded sections from the GPU cull,
+    /// and to the distant bounds, which follow what it draws.
     pub fn set_chunk_visibility(&mut self, vis: HashMap<ChunkPos, u32>) {
+        self.distant_buffers.set_visibility(&self.ctx.device, &vis);
         self.chunk_buffers.set_chunk_visibility(vis);
     }
 
@@ -2155,13 +2157,17 @@ impl Renderer {
                     }
                     let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
-                    if self.distant_draws(*distant_terrain) {
-                        // Voxy draws after the chunks' solid and cutout
-                        // passes: bounded by their depth, into its own
-                        // image, then laid into the frame.
-                        let eye = self.camera_render_position();
-                        let extent = self.swapchain.extent;
+                    let eye = self.camera_render_position();
+                    let distant = self.distant_draws(*distant_terrain);
+                    if distant {
                         self.distant_buffers.update_roots(eye);
+                    }
+                    // Voxy draws after the chunks' solid and cutout passes:
+                    // bounded by their depth, into its own image, then laid
+                    // into the frame. Nothing to traverse means nothing to
+                    // draw or request.
+                    if distant && self.distant_buffers.top_count() > 0 {
+                        let extent = self.swapchain.extent;
                         pass.end();
                         self.distant_pipeline.render(
                             &self.ctx.device,
@@ -2170,6 +2176,7 @@ impl Renderer {
                             &mut self.distant_buffers,
                             &self.camera,
                             eye,
+                            *render_distance,
                             self.swapchain.depth.handle(),
                             extent,
                         );
@@ -2191,7 +2198,6 @@ impl Renderer {
                     }
 
                     let anchor = self.camera.anchor();
-                    let eye = self.camera_render_position();
 
                     if let Some((block_pos, stage, state)) = destroy_info {
                         self.block_overlay_pipeline.draw(
