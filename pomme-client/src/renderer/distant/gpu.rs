@@ -76,12 +76,13 @@ const MAX_ROOTS: usize = 1 << 14;
 pub(crate) const DISTANT_FAR: f32 = 3000.0 * 16.0;
 /// Drawn chunk sections the bound store starts with room for.
 const BOUND_CAPACITY: u32 = 1 << 15;
-/// The box's 12 triangles as corner bits (x, y, z), every face wound the
-/// same way, so culling one side keeps the near faces or the far ones;
-/// after the quads' indices in the shared index buffer.
+/// The box's 12 triangles as corner bits (x, y, z), every face wound
+/// counter-clockwise seen from outside, so culling the back faces keeps
+/// the near ones and culling the front faces the far ones; after the
+/// quads' indices in the shared index buffer.
 const CUBE: [u32; 36] = [
-    0, 2, 6, 6, 4, 0, 1, 5, 7, 7, 3, 1, 0, 4, 5, 5, 1, 0, 2, 3, 7, 7, 6, 2, 0, 1, 3, 3, 2, 0, 4, 6,
-    7, 7, 5, 4,
+    0, 6, 2, 6, 0, 4, 1, 7, 5, 7, 1, 3, 0, 5, 4, 5, 0, 1, 2, 7, 3, 7, 2, 6, 0, 3, 1, 3, 0, 2, 4, 7,
+    6, 7, 4, 5,
 ];
 pub(crate) const CUBE_FIRST_INDEX: u32 = QUADS_PER_DRAW * 6;
 
@@ -1302,7 +1303,7 @@ mod tests {
     }
 
     #[test]
-    fn cube_faces_wind_the_same_way() {
+    fn cube_faces_wind_outward() {
         let corner = |i: u32| [i & 1, i >> 1 & 1, i >> 2].map(|c| c as f32 - 0.5);
         let facing: Vec<bool> = CUBE
             .chunks(3)
@@ -1315,13 +1316,13 @@ mod tests {
                     u[2] * v[0] - u[0] * v[2],
                     u[0] * v[1] - u[1] * v[0],
                 ];
-                // The face's centre is along its normal, one way or the other.
+                // The face's centre lies along its normal when it points out.
                 (0..3)
                     .map(|i| normal[i] * (a[i] + b[i] + c[i]))
                     .sum::<f32>()
                     > 0.0
             })
             .collect();
-        assert!(facing.iter().all(|&f| f == facing[0]), "{facing:?}");
+        assert!(facing.iter().all(|&f| f), "{facing:?}");
     }
 }
