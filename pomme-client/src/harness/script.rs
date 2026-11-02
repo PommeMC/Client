@@ -54,12 +54,21 @@ struct StepFile {
     scroll: Option<f32>,
     text: Option<String>,
     wait_ms: Option<u64>,
+    frame_times: Option<FrameTimes>,
     screenshot: Option<String>,
     match_screenshots: Option<[String; 2]>,
     expect: Option<Expect>,
     timeout_ms: Option<u64>,
     /// How many pixels `match_screenshots` lets differ (default 0).
     max_differing_pixels: Option<usize>,
+}
+
+/// Frames timed over `ms`: the report gets the frame rate and where the
+/// time went.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrameTimes {
+    ms: u64,
 }
 
 /// What an `expect` step waits for, told apart by its fields.
@@ -259,6 +268,7 @@ struct ChatExpect {
 enum Step {
     Run(Command),
     Wait(Duration),
+    FrameTimes(Duration),
     Screenshot(String),
     /// Two of the script's screenshots, which must match pixel for pixel to
     /// within [`MATCH_TOLERANCE`], but for at most this many pixels.
@@ -324,6 +334,9 @@ impl StepFile {
         if let Some(ms) = self.wait_ms {
             steps.push(Step::Wait(Duration::from_millis(ms)));
         }
+        if let Some(FrameTimes { ms }) = self.frame_times {
+            steps.push(Step::FrameTimes(Duration::from_millis(ms)));
+        }
         if let Some(name) = self.screenshot {
             steps.push(Step::Screenshot(name));
         }
@@ -359,6 +372,35 @@ struct StepReport {
     ok: bool,
     error: Option<String>,
     elapsed_ms: u128,
+    /// What a `frame_times` step measured.
+    info: Option<String>,
+}
+
+/// One frame of a `frame_times` step: the wall time since the last, and
+/// the renderer's own split of it.
+struct FrameSample {
+    interval_ms: f32,
+    frame_ms: f32,
+    fence_ms: f32,
+}
+
+/// `samples` summed up: the frame rate, its 1% low, and the CPU and GPU-wait
+/// shares of a frame.
+fn summarize(samples: &[FrameSample]) -> String {
+    let mean =
+        |f: fn(&FrameSample) -> f32| samples.iter().map(f).sum::<f32>() / samples.len() as f32;
+    let mut intervals: Vec<f32> = samples.iter().map(|s| s.interval_ms).collect();
+    intervals.sort_by(f32::total_cmp);
+    let slowest = &intervals[intervals.len() - intervals.len().div_ceil(100)..];
+    let low = slowest.iter().sum::<f32>() / slowest.len() as f32;
+    format!(
+        "{} frames: {:.1} fps, 1% low {:.1} fps; cpu {:.2} ms, gpu wait {:.2} ms",
+        samples.len(),
+        1000.0 / mean(|s| s.interval_ms),
+        1000.0 / low,
+        mean(|s| s.frame_ms),
+        mean(|s| s.fence_ms),
+    )
 }
 
 #[derive(Serialize)]
@@ -377,6 +419,9 @@ pub struct Script {
     step_started: Option<Instant>,
     /// The screenshot the current step is waiting on.
     pending_shot: Option<PathBuf>,
+    /// The frames a `frame_times` step has seen, and when the last was.
+    samples: Vec<FrameSample>,
+    last_frame: Option<Instant>,
     reports: Vec<StepReport>,
 }
 
@@ -397,6 +442,8 @@ impl Script {
             next: 0,
             step_started: None,
             pending_shot: None,
+            samples: Vec::new(),
+            last_frame: None,
             reports: Vec::new(),
         })
     }
@@ -423,6 +470,19 @@ impl Script {
                 Outcome::Screenshot(_) => unreachable!("screenshots are their own step"),
             },
             Step::Wait(duration) => (started.elapsed() >= *duration).then_some(Ok(())),
+            Step::FrameTimes(duration) => {
+                let now = Instant::now();
+                if let (Some(last), AppPhase::InGame { gfx, .. }) = (self.last_frame, &*phase) {
+                    let timings = gfx.renderer.last_timings();
+                    self.samples.push(FrameSample {
+                        interval_ms: (now - last).as_secs_f32() * 1000.0,
+                        frame_ms: timings.frame_ms,
+                        fence_ms: timings.fence_ms,
+                    });
+                }
+                self.last_frame = Some(now);
+                (started.elapsed() >= *duration && !self.samples.is_empty()).then_some(Ok(()))
+            }
             Step::Screenshot(name) => {
                 let path = match &self.pending_shot {
                     Some(path) => path.clone(),
@@ -443,16 +503,20 @@ impl Script {
             },
         };
         let result = result?;
+        let info = matches!(step, Step::FrameTimes(_)).then(|| summarize(&self.samples));
         self.reports.push(StepReport {
             step: self.next + 1,
             action: format!("{step:?}"),
             ok: result.is_ok(),
             error: result.as_ref().err().cloned(),
             elapsed_ms: started.elapsed().as_millis(),
+            info,
         });
         self.next += 1;
         self.step_started = None;
         self.pending_shot = None;
+        self.samples.clear();
+        self.last_frame = None;
         match result {
             Ok(()) => None,
             Err(_) => Some(self.finish(false)),
@@ -498,6 +562,7 @@ impl Script {
             ok: false,
             error: Some(error),
             elapsed_ms: self.started.elapsed().as_millis(),
+            info: None,
         });
         self.finish(false)
     }
@@ -509,8 +574,8 @@ impl Script {
                 "[{}] step {} {mark}: {}",
                 self.name, report.step, report.action
             );
-            if let Some(error) = &report.error {
-                println!("    {error}");
+            if let Some(line) = report.error.as_ref().or(report.info.as_ref()) {
+                println!("    {line}");
             }
         }
         let report = Report {
