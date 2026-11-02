@@ -143,6 +143,12 @@ pub fn push_backdrop(
     }
 }
 
+/// A centred title's x on the 176-wide panel: vanilla
+/// `(imageWidth - font.width(title)) / 2`.
+pub fn centred_title_x(title: &str, text_width_fn: &dyn Fn(&str, f32) -> f32) -> f32 {
+    ((176.0 - text_width_fn(title, FONT_SIZE)) / 2.0).floor()
+}
+
 /// The dimmed backdrop and the centered 176 x `panel_h` container background
 /// sprite.
 pub fn push_panel(
