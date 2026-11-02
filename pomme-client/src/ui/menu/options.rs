@@ -297,6 +297,7 @@ impl MainMenu {
             self.shader_pack.as_deref().unwrap_or("OFF")
         );
         let attack_label = format!("Attack Indicator: {}", self.attack_indicator.label());
+        let fps_display_label = format!("FPS Display: {}", self.fps_display.label());
         let vignette_label = if self.vignette {
             "Vignette: ON"
         } else {
@@ -335,8 +336,9 @@ impl MainMenu {
             OptRow::Pair("Texture Filtering: None", "Max Anisotropy: 1"),
             OptRow::Pair("Weather Radius: 10", &shader_label),
             OptRow::Header("Preferences"),
-            OptRow::Pair(autosave_label, vignette_label),
-            OptRow::Pair(&attack_label, "Chunk Fade-in: 1.0s"),
+            OptRow::Pair(&fps_display_label, autosave_label),
+            OptRow::Pair(vignette_label, &attack_label),
+            OptRow::PairLeft("Chunk Fade-in: 1.0s"),
         ];
         let rd_frac = ((self.render_distance as f32 - 2.0)
             / (self.render_distance_max() as f32 - 2.0))
@@ -1452,6 +1454,10 @@ impl MainMenu {
                     }
                     if label.starts_with("Attack Indicator:") {
                         self.attack_indicator = self.attack_indicator.cycle();
+                        self.save_settings(key_bindings);
+                    }
+                    if label.starts_with("FPS Display:") {
+                        self.fps_display = self.fps_display.cycle();
                         self.save_settings(key_bindings);
                     }
                     if label.starts_with("View Bobbing:") {

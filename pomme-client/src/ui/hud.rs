@@ -442,6 +442,48 @@ impl AttackIndicatorMode {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum FpsDisplayMode {
+    #[default]
+    Off,
+    Simple,
+    Extended,
+}
+
+impl FpsDisplayMode {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::Simple,
+            Self::Simple => Self::Extended,
+            Self::Extended => Self::Off,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "OFF",
+            Self::Simple => "Simple",
+            Self::Extended => "Extended",
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Simple => 1,
+            Self::Extended => 2,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Simple,
+            2 => Self::Extended,
+            _ => Self::Off,
+        }
+    }
+}
+
 /// Per-frame attack-indicator inputs; the caller computes scale and the
 /// full-charge state (vanilla `renderMaxAttackIndicator`).
 pub struct AttackIndicatorState {
@@ -1742,6 +1784,30 @@ fn push_debug_lines(
     }
 }
 
+pub fn build_fps_hud(
+    elements: &mut Vec<MenuElement>,
+    mode: FpsDisplayMode,
+    stats: (u32, u32, u32),
+    gs: f32,
+) {
+    let (fps, low_1, low_01) = stats;
+    let text = match mode {
+        FpsDisplayMode::Off => return,
+        FpsDisplayMode::Simple => format!("{fps} fps"),
+        FpsDisplayMode::Extended => format!("{fps} fps (1%: {low_1}, 0.1%: {low_01})"),
+    };
+    let fs = super::common::FONT_SIZE * gs;
+    let pad = 4.0 * gs;
+    elements.push(MenuElement::Text {
+        x: pad,
+        y: pad,
+        text,
+        scale: fs,
+        color: WHITE,
+        centered: false,
+    });
+}
+
 /// Vanilla `DebugEntryPosition`: the direction, which way it points, and
 /// both angles wrapped to [-180, 180).
 fn facing_line(y_rot_deg: f32, x_rot_deg: f32) -> String {
@@ -1936,5 +2002,39 @@ mod tests {
 
         scoreboard.remove_team("red");
         assert_eq!(scoreboard.member_team_color("Player"), None);
+    }
+
+    #[test]
+    fn fps_display_mode_cycle_and_conversion() {
+        assert_eq!(FpsDisplayMode::Off.cycle(), FpsDisplayMode::Simple);
+        assert_eq!(FpsDisplayMode::Simple.cycle(), FpsDisplayMode::Extended);
+        assert_eq!(FpsDisplayMode::Extended.cycle(), FpsDisplayMode::Off);
+
+        assert_eq!(FpsDisplayMode::from_u8(0), FpsDisplayMode::Off);
+        assert_eq!(FpsDisplayMode::from_u8(1), FpsDisplayMode::Simple);
+        assert_eq!(FpsDisplayMode::from_u8(2), FpsDisplayMode::Extended);
+        assert_eq!(FpsDisplayMode::from_u8(255), FpsDisplayMode::Off);
+
+        assert_eq!(FpsDisplayMode::Off.to_u8(), 0);
+        assert_eq!(FpsDisplayMode::Simple.to_u8(), 1);
+        assert_eq!(FpsDisplayMode::Extended.to_u8(), 2);
+    }
+
+    #[test]
+    fn build_fps_hud_elements() {
+        let mut elements = Vec::new();
+        build_fps_hud(&mut elements, FpsDisplayMode::Off, (144, 120, 90), 2.0);
+        assert!(elements.is_empty());
+
+        build_fps_hud(&mut elements, FpsDisplayMode::Simple, (144, 120, 90), 2.0);
+        assert_eq!(elements.len(), 1);
+        assert!(matches!(&elements[0], MenuElement::Text { text, .. } if text == "144 fps"));
+
+        elements.clear();
+        build_fps_hud(&mut elements, FpsDisplayMode::Extended, (144, 120, 90), 2.0);
+        assert_eq!(elements.len(), 1);
+        assert!(
+            matches!(&elements[0], MenuElement::Text { text, .. } if text == "144 fps (1%: 120, 0.1%: 90)")
+        );
     }
 }

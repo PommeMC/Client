@@ -3204,6 +3204,14 @@ pub fn update_game(
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
+        if debug.is_none() {
+            hud::build_fps_hud(
+                &mut elements,
+                core.menu.fps_display,
+                gfx.fps_counter.stats(),
+                gs,
+            );
+        }
         if core.input.touch().seen() && game.world_has_pointer() {
             let layout = input::touch::TouchLayout {
                 width: sw,
