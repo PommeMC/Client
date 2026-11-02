@@ -1261,7 +1261,7 @@ impl GameState {
         if !bumped.is_empty() {
             self.pending_load_rescan = true;
         }
-        let min_section_y = self.chunk_store.min_y() >> 4;
+        let min_section_y = self.chunk_store.min_section_y();
         let section_count = self.chunk_store.section_count();
         for key in &dirty.sections {
             let si = key.y - min_section_y;
@@ -1320,7 +1320,7 @@ impl GameState {
         // Distant terrain gives way once a column's sections draw, not once
         // they load: the ring loaded around the view waits on its
         // neighbours to compile.
-        let min_section = self.chunk_store.min_y().div_euclid(16);
+        let min_section = self.chunk_store.min_section_y();
         for mesh in &batch {
             let sections = self.compiled.get(&mesh.pos).copied().unwrap_or(0);
             renderer.set_distant_column_sections(mesh.pos, sections, min_section);

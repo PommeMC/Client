@@ -685,6 +685,11 @@ impl ChunkStore {
         self.min_y
     }
 
+    /// The lowest section's y (vanilla `LevelHeightAccessor.getMinSectionY`).
+    pub fn min_section_y(&self) -> i32 {
+        self.min_y >> 4
+    }
+
     /// Number of 16³ block sections in a column (zero-based section index range
     /// `0..section_count`).
     pub fn section_count(&self) -> i32 {
@@ -698,7 +703,7 @@ impl ChunkStore {
         let Some(chunk) = self.get_chunk(&ChunkPos::new(pos.0, pos.1)) else {
             return true;
         };
-        let index = section_y - (self.min_y() >> 4);
+        let index = section_y - self.min_section_y();
         let chunk = chunk.read();
         match usize::try_from(index)
             .ok()
