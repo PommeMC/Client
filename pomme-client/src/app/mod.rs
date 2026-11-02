@@ -212,7 +212,7 @@ fn start_connecting(
     let connection = spawn_connection(&core.tokio_rt, connect_args);
     let game = GameState::new(
         &*gfx.renderer,
-        Some(&core.resource_packs),
+        core.resources(),
         core.menu.render_distance,
         world.is_some(),
         core.menu.chat_options,
@@ -396,7 +396,6 @@ impl App {
                     boot,
                     self.core.font_sources(),
                     &self.core.data_dirs.game_dir,
-                    &self.core.menu.theme().panorama_dir(&self.core.data_dirs),
                 ) {
                     Ok(r) => r,
                     Err(e) => {
@@ -540,8 +539,11 @@ fn create_window(
     core: &AppCore,
 ) -> Result<Arc<Window>, winit::error::OsError> {
     let window_icon = {
-        let img =
-            image::load_from_memory(crate::assets::POMME_ICON_PNG).expect("failed to decode icon");
+        let img = crate::assets::load_resource_image(
+            core.resources(),
+            &crate::resources::pack_resources::POMME_ICON,
+        )
+        .expect("failed to decode icon");
         let rgba = img.to_rgba8();
         let (w, h) = (rgba.width(), rgba.height());
         winit::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
@@ -680,9 +682,9 @@ impl ApplicationHandler for App {
                     &window,
                     self.core.resources(),
                     self.core.font_sources(),
+                    self.core.use_vanilla_block_cache(),
                     &self.core.data_dirs.cache_dir,
                     self.core.menu.vsync,
-                    &self.core.data_dirs.bedrock_ui_dir(),
                 ) {
                     Ok(boot) => {
                         window.request_redraw();

@@ -2,14 +2,12 @@
 //! `ShadowFeatureRenderer` (26.2), one quad per lit, full block under an
 //! entity.
 
-use std::path::Path;
-
 use glam::{DVec3, Vec3};
 
-use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::physics::block_shape::{LocalBox, is_collision_shape_full_block, outline_shape};
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::{rhi, shader, util};
+use crate::resources::{ResourceManager, resource_id};
 use crate::world::block::{BlockStateData, BlockStateTable};
 use crate::world::block_entity::is_invisible_block;
 use crate::world::chunk::ChunkStore;
@@ -73,8 +71,7 @@ impl EntityShadowPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &dyn ResourceManager,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
         let texture_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
@@ -90,7 +87,7 @@ impl EntityShadowPipeline {
             "entity_shadow_camera",
         );
 
-        let texture = load_shadow_texture(device, jar_assets_dir, asset_index);
+        let texture = load_shadow_texture(device, resources);
 
         let texture_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR);
 
@@ -298,18 +295,13 @@ fn bounds(boxes: &[LocalBox]) -> Option<LocalBox> {
 
 fn load_shadow_texture(
     device: &rhi::backend::Device,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    resources: &dyn ResourceManager,
 ) -> rhi::backend::Texture {
-    let key = "minecraft/textures/misc/shadow.png";
-    let path = resolve_asset_path(jar_assets_dir, asset_index, key);
-    let (pixels, w, h) = if let Some((p, width, height)) = util::load_png(&path) {
+    let key = resource_id!("minecraft:textures/misc/shadow.png");
+    let (pixels, w, h) = if let Some((p, width, height)) = util::load_asset_png(resources, &key) {
         (p, width, height)
     } else {
-        tracing::warn!(
-            "Failed to load shadow texture from {}, using fallback",
-            path.display()
-        );
+        tracing::warn!("Failed to load shadow texture from {}, using fallback", key);
         // 64x64 fallback circular gradient
         let mut p = Vec::with_capacity(64 * 64 * 4);
         for y in 0..64 {

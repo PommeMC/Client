@@ -169,6 +169,19 @@ impl SkinPreviewPipeline {
         self.swing_start = Some(std::time::Instant::now());
     }
 
+    pub fn rebind_skin(
+        &mut self,
+        device: &rhi::backend::Device,
+        texture: rhi::backend::TextureHandle,
+        sampler: rhi::backend::Sampler,
+    ) {
+        self.tex_set.replace(
+            device,
+            self.tex_layout,
+            &util::texture_binding(texture, sampler),
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,

@@ -6,6 +6,7 @@ mod friends_screen;
 pub(crate) mod helpers;
 mod main_screen;
 mod options;
+pub(crate) use options::{apply_resource_pack_options, sync_resource_packs};
 mod servers;
 mod splash;
 mod title_screen;
@@ -28,9 +29,20 @@ use crate::renderer::pipelines::menu_overlay::{
     MenuElement, SpriteId, TooltipLine,
 };
 use crate::resources::ResourceManager;
+use crate::resources::packs::{PackCompat, PackId};
 use crate::ui::chat::ChatOptions;
 use crate::ui::font::FontOptions;
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
+
+#[derive(Clone)]
+struct ResourcePackRow {
+    pub id: PackId,
+    pub name: String,
+    pub description: String,
+    pub compat: PackCompat,
+    pub is_server: bool,
+    pub enabled: bool,
+}
 
 #[derive(Serialize, Deserialize)]
 struct Settings {
@@ -355,17 +367,6 @@ impl PanoramaTheme {
             0 => Self::Pomme,
             2 => Self::Bedrock,
             _ => Self::Java,
-        }
-    }
-
-    /// The panorama cubemap each theme draws: vanilla's ships in the version
-    /// jar, Pomme's alongside the rest of the branded assets, Bedrock's with
-    /// its downloaded UI textures.
-    pub fn panorama_dir(self, dirs: &crate::dirs::DataDirs) -> std::path::PathBuf {
-        match self {
-            Self::Java => dirs.jar_assets_dir.clone(),
-            Self::Pomme => dirs.pomme_assets_dir.join("panoramas"),
-            Self::Bedrock => dirs.bedrock_ui_dir(),
         }
     }
 }
@@ -821,12 +822,14 @@ pub struct MainMenu {
     menu_open_time: Option<Instant>,
     last_favicon_count: usize,
     favicon_dirty_since: Option<Instant>,
-    pub active_packs: Vec<crate::resource_pack::PackInfo>,
-    pub available_packs: Vec<crate::resource_pack::PackInfo>,
+    active_packs: Vec<ResourcePackRow>,
+    available_packs: Vec<ResourcePackRow>,
+    resource_completion_revision: u64,
+    asset_reload_revision: u64,
     pub packs_dir: PathBuf,
-    pub pack_toggle: Option<(String, bool)>,
-    pub rescan_packs: bool,
-    pub reload_assets: bool,
+    pack_toggle: Option<(PackId, bool)>,
+    rescan_packs: bool,
+    reload_assets: bool,
     /// Set by a Font Settings toggle, applied by `AppCore::apply_font_options`.
     pub reload_fonts: bool,
     pack_search: TextFieldState,
@@ -983,6 +986,8 @@ impl MainMenu {
             favicon_dirty_since: None,
             active_packs: Vec::new(),
             available_packs: Vec::new(),
+            resource_completion_revision: 0,
+            asset_reload_revision: 0,
             packs_dir: game_dir.join("resourcepacks"),
             pack_toggle: None,
             rescan_packs: false,

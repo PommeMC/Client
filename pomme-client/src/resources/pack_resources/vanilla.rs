@@ -195,7 +195,7 @@ impl PreparedVanillaResources {
                 continue;
             }
             let id = match key.split_once('/') {
-                Some((namespace, path)) => match ResourceId::new(&format!("{namespace}:{path}")) {
+                Some((namespace, path)) => match ResourceId::from_parts(namespace, path) {
                     Ok(id) => Some(id),
                     Err(error) => {
                         // Preserve the literal root key, but do not advertise an
@@ -216,6 +216,21 @@ impl PreparedVanillaResources {
                     id,
                 },
             );
+        }
+        // COMPAT: the legacy panorama accepts a flat extracted-root override
+        // before the indexed/canonical face, independently for each face.
+        for face in 0..6 {
+            let path = extracted_root.join(format!("assets/panorama_{face}.png"));
+            if path.exists() {
+                let key = format!("minecraft/textures/gui/title/background/panorama_{face}.png");
+                let id = ResourceId::from_parts(
+                    "minecraft",
+                    &format!("textures/gui/title/background/panorama_{face}.png"),
+                )
+                .map_err(io::Error::other)?;
+                indexed.insert(key, IndexedEntry { path, id: Some(id) });
+                indexed_namespaces.insert("minecraft".to_owned());
+            }
         }
         let mut namespaces = extracted_client_namespaces.clone();
         namespaces.extend(extracted_server_namespaces.iter().cloned());

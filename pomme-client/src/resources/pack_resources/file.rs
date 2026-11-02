@@ -227,7 +227,7 @@ impl PackResources for FilePackResources {
                 continue;
             }
             let path = &name[root.len()..];
-            match ResourceId::new(&format!("{namespace}:{path}")) {
+            match ResourceId::from_parts(namespace, path) {
                 Ok(id) => output(id, entry_supplier(opened.clone(), index)),
                 Err(error) => {
                     tracing::warn!(path, %error, "Invalid path in ZIP pack; ignoring");

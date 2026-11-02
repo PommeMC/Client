@@ -18,6 +18,7 @@ use crate::resources::resource_id;
 pub(crate) const POMME_UI_FONT: ResourceId = resource_id!("pomme:font/ui.ttf");
 pub(crate) const POMME_ICONS_FONT: ResourceId = resource_id!("pomme:font/icons.ttf");
 pub(crate) const POMME_ICON: ResourceId = resource_id!("pomme:textures/icon.png");
+pub(crate) const POMME_EDITION: ResourceId = resource_id!("pomme:gui/title/edition.png");
 
 const ENTRIES: &[(ResourceId, &[u8])] = &[
     (
@@ -29,6 +30,10 @@ const ENTRIES: &[(ResourceId, &[u8])] = &[
         include_bytes!("../../renderer/fonts/fa-solid-900.ttf"),
     ),
     (POMME_ICON, include_bytes!("../../../assets/icon.png")),
+    (
+        POMME_EDITION,
+        include_bytes!("../../../assets/gui/title/edition.png"),
+    ),
 ];
 
 fn bytes(id: &ResourceId) -> Option<&'static [u8]> {
@@ -354,6 +359,10 @@ mod pack_resources_tests {
                 (
                     resource_id!("pomme:textures/icon.png"),
                     include_bytes!("../../../assets/icon.png").to_vec(),
+                ),
+                (
+                    resource_id!("pomme:gui/title/edition.png"),
+                    include_bytes!("../../../assets/gui/title/edition.png").to_vec(),
                 ),
             ],
         );

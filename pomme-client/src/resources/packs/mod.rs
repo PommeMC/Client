@@ -5,7 +5,7 @@ use self::format::PackFormatRange;
 mod download;
 #[allow(
     dead_code,
-    reason = "Pack feature contract, pending asset-consumer adoption"
+    reason = "Complete feature contract beyond current client configuration"
 )]
 mod features;
 mod filter;
@@ -13,18 +13,18 @@ mod format;
 mod id;
 #[allow(
     dead_code,
-    reason = "Logical pack presentation API, pending asset-consumer adoption"
+    reason = "Rich-text pack presentation API beyond current menu rows"
 )]
 mod location;
 mod metadata;
 #[allow(
     dead_code,
-    reason = "Logical pack API beyond initial application activation"
+    reason = "Complete logical pack API beyond current application activation"
 )]
 mod pack;
 #[allow(
     dead_code,
-    reason = "Repository selection API; UI/server asset consumers are not yet migrated"
+    reason = "Complete repository API includes explicit reorder and feature queries"
 )]
 mod repository;
 mod sources;
@@ -33,19 +33,10 @@ pub(crate) use download::{PackDownloadError, download_server_pack};
 pub(crate) use features::FeatureFlagSet;
 pub(crate) use id::PackId;
 pub(crate) use location::{PackLocationInfo, PackSource};
-#[allow(
-    unused_imports,
-    reason = "Logical pack API, pending asset-consumer adoption"
-)]
 pub(crate) use pack::{Pack, PackEnablementConfig, PackMetadata, PackPosition, ResourcesSupplier};
 pub(crate) use repository::PackRepository;
-#[allow(
-    unused_imports,
-    reason = "Physical registration API; server asset consumers are not yet migrated"
-)]
-pub(crate) use sources::PhysicalPack;
 pub(crate) use sources::{
-    BuiltinRepositorySource, FolderRepositorySource, InstallationLocation,
+    BuiltinRepositorySource, FolderRepositorySource, InstallationLocation, PhysicalPack,
     RegisteredRepositorySource, RepositorySource, SymlinkPolicy, ThemeSpecification,
 };
 

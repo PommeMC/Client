@@ -30,7 +30,6 @@ mod player;
 mod position;
 mod recipe;
 mod renderer;
-mod resource_pack;
 #[allow(
     dead_code,
     unused_imports,

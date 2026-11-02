@@ -28,11 +28,9 @@ impl BootScreen {
         window: &Window,
         resources: &dyn ResourceManager,
         font_sources: FontSources<'_>,
-        bedrock_ui_dir: Option<&std::path::Path>,
         vsync: bool,
     ) -> Result<Self, RendererError> {
-        let (ctx, swapchain, frames, menu) =
-            bring_up(window, resources, font_sources, bedrock_ui_dir, vsync)?;
+        let (ctx, swapchain, frames, menu) = bring_up(window, resources, font_sources, vsync)?;
         Ok(Self {
             parts: Some(BootParts {
                 ctx,
@@ -95,7 +93,6 @@ pub(super) fn bring_up(
     window: &Window,
     resources: &dyn ResourceManager,
     font_sources: FontSources<'_>,
-    bedrock_ui_dir: Option<&std::path::Path>,
     vsync: bool,
 ) -> Result<
     (
@@ -117,7 +114,6 @@ pub(super) fn bring_up(
         swapchain.targets(),
         resources,
         font_sources,
-        bedrock_ui_dir,
         font_layer_limit,
     )
     .map_err(RendererError::Font)?;

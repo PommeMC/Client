@@ -121,8 +121,11 @@ impl PreparedMapping {
         }
         let mut resolved = remappings.clone();
         for (id, path) in remappings {
-            let companion =
-                ResourceId::new(&format!("{id}{METADATA_EXTENSION}")).map_err(io::Error::other)?;
+            let companion = ResourceId::from_parts(
+                id.namespace(),
+                &format!("{}{METADATA_EXTENSION}", id.path()),
+            )
+            .map_err(io::Error::other)?;
             let mut companion_path = path.into_os_string();
             companion_path.push(METADATA_EXTENSION);
             resolved.entry(companion).or_insert(companion_path.into());

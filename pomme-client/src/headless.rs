@@ -3,6 +3,7 @@
 //! instead of uploaded.
 
 use std::collections::HashMap;
+use std::io;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -13,20 +14,67 @@ use crate::app::core::AppCore;
 use crate::app::phases::in_game::{GameState, section_bits};
 use crate::app::{QuickPlay, TICK_RATE};
 use crate::args::LaunchArgs;
-use crate::assets::AssetIndex;
 use crate::benchmark::{BenchMode, CHUNK_LOAD_MIN_RD, ChunkLoadBench, ChunkLoadStep};
+use crate::chat_component::Component;
 use crate::dirs::DataDirs;
 use crate::net::NetworkEvent;
 use crate::net::connection::{ConnectArgs, ConnectionHandle, Transport, spawn_connection};
 use crate::position::ChunkPos;
 use crate::renderer::RenderTimings;
 use crate::renderer::chunk::mesh_source::CpuMeshAssets;
+use crate::resources::managers::{MultiPackResourceManager, ResourceManager};
+use crate::resources::pack_resources::{PackType, VanillaResourcesSupplier};
+use crate::resources::packs::{
+    FeatureFlagSet, Pack, PackCompat, PackEnablementConfig, PackLocationInfo, PackMetadata,
+    PackPosition, PackSource,
+};
 use crate::singleplayer::World;
 use crate::ui::chat::ChatOptions;
 use crate::ui::menu::{SkinOptions, saved_chunk_detail};
 use crate::ui::world_list::WorldList;
 use crate::user::UserData;
 use crate::world::block::block_registry::BlockDefinitions;
+
+/// Opens only the explicit installation's extracted/indexed Vanilla layers.
+/// CPU entry points do not need a client JAR, theme, or user/server packs.
+pub(crate) fn vanilla_resources(
+    extracted_root: &Path,
+    index_file: &Path,
+    objects_dir: &Path,
+) -> io::Result<MultiPackResourceManager> {
+    let supplier = VanillaResourcesSupplier::new(
+        extracted_root.to_path_buf(),
+        index_file,
+        objects_dir,
+        serde_json::Map::new(),
+    )?;
+    let pack = Pack::new(
+        PackLocationInfo {
+            id: "vanilla".to_owned(),
+            title: Component::text("Vanilla"),
+            source: PackSource::built_in(),
+            known_pack_info: None,
+        },
+        PackMetadata {
+            description: Component::text("Vanilla"),
+            compatibility: PackCompat::Compatible,
+            requested_features: FeatureFlagSet::empty(),
+            overlays: Vec::new(),
+        },
+        PackEnablementConfig {
+            required: true,
+            default_position: PackPosition::Bottom,
+            fixed_position: true,
+        },
+        Rc::new(supplier),
+    );
+    let entries = pack
+        .open_resources()?
+        .into_iter()
+        .map(|resources| (pack.origin(), resources))
+        .collect();
+    MultiPackResourceManager::new(PackType::ClientResources, entries)
+}
 
 /// For a server with no `--username`, the stored sign-in, which an online
 /// server needs. Otherwise, or if it can't be restored, offline: the
@@ -66,10 +114,25 @@ pub fn run(
             return 1;
         }
     };
-    let assets = CpuMeshAssets::load(
-        &dirs.jar_assets_dir,
-        AssetIndex::load(&dirs.indexes_dir, &dirs.objects_dir, version),
-    );
+    let installation = dirs.installation_location(version);
+    let resources = match vanilla_resources(
+        &installation.extracted_root,
+        &installation.index_file,
+        &installation.objects_dir,
+    ) {
+        Ok(resources) => resources,
+        Err(error) => {
+            tracing::error!("Failed to load vanilla resources: {error}");
+            return 1;
+        }
+    };
+    let assets = match CpuMeshAssets::load(&resources) {
+        Ok(assets) => assets,
+        Err(error) => {
+            tracing::error!("Failed to prepare CPU mesh assets: {error}");
+            return 1;
+        }
+    };
     let chat_options = ChatOptions::default();
     let skin_options = SkinOptions::default();
     let connection = spawn_connection(
@@ -86,7 +149,7 @@ pub fn run(
     );
     let mut game = GameState::new(
         &assets,
-        None,
+        &resources,
         rd,
         world.is_some(),
         chat_options,
@@ -100,6 +163,7 @@ pub fn run(
         rd,
         chat_options,
         &assets,
+        &resources,
         &connection,
         &mut game,
         world.as_mut(),
@@ -146,10 +210,12 @@ fn open(play: QuickPlay, dirs: &DataDirs, rd: u32) -> Result<(Transport, Option<
 
 /// The game loop's chunk path, in `update_game`'s order: network, meshes,
 /// ticks, light, then the benchmark step.
+#[allow(clippy::too_many_arguments)]
 fn drive(
     rd: u32,
     chat_options: ChatOptions,
     assets: &CpuMeshAssets,
+    resources: &dyn ResourceManager,
     connection: &ConnectionHandle,
     game: &mut GameState,
     mut world: Option<&mut World>,
@@ -188,7 +254,7 @@ fn drive(
                 NetworkEvent::Registries(registries) => game.registries = registries,
                 NetworkEvent::BiomeColors { colors } => game.set_biome_climate(colors),
                 NetworkEvent::DimensionInfo(dim) => {
-                    game.enter_dimension(dim, rd, assets);
+                    game.enter_dimension(dim, rd, assets, resources);
                     drawn.clear();
                 }
                 NetworkEvent::PlayerLogin { entity_id, .. } => {

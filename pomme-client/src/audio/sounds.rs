@@ -75,7 +75,7 @@ impl SoundsIndex {
         };
         namespaces.sort();
         for namespace in namespaces {
-            let location = match ResourceId::new(&format!("{namespace}:sounds.json")) {
+            let location = match ResourceId::from_parts(&namespace, "sounds.json") {
                 Ok(location) => location,
                 Err(error) => {
                     tracing::warn!("invalid sounds.json location: {error}");
@@ -508,7 +508,7 @@ fn json_i32(
 /// `namespace:path`   -> `namespace:sounds/path.ogg`
 fn sound_location(name: &str) -> Result<ResourceId, String> {
     let (ns, path) = name.split_once(':').unwrap_or(("minecraft", name));
-    ResourceId::new(&format!("{ns}:sounds/{path}.ogg")).map_err(|error| error.to_string())
+    ResourceId::from_parts(ns, &format!("sounds/{path}.ogg")).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

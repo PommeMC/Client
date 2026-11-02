@@ -3,7 +3,7 @@ use crate::app::core::AppCore;
 use crate::app::phases::{Gfx, Panorama};
 use crate::net::connection::{ConnectArgs, Transport};
 use crate::singleplayer::{self, World};
-use crate::ui::menu::{MenuAction, PanoramaTheme};
+use crate::ui::menu::{MenuAction, apply_resource_pack_options, sync_resource_packs};
 
 pub enum MenuUpdateResult {
     None,
@@ -102,6 +102,7 @@ pub fn update_menu(
     }
 
     let menu_input = core.build_menu_input(dt);
+    sync_resource_packs(core);
 
     let result = core
         .menu
@@ -143,26 +144,7 @@ pub fn update_menu(
     gfx.renderer
         .set_menu_blur_radius(core.menu.menu_background_blurriness);
 
-    if core.menu.rescan_packs {
-        core.menu.rescan_packs = false;
-        core.resource_packs.scan_local_packs();
-        core.menu.available_packs = core.resource_packs.available_local_packs().to_vec();
-        core.menu.active_packs = core.resource_packs.active_pack_info();
-    }
-
-    if let Some((name, enable)) = core.menu.pack_toggle.take() {
-        if enable {
-            core.resource_packs.enable_local_pack(&name);
-        } else {
-            core.resource_packs.disable_local_pack(&name);
-        }
-        core.menu.active_packs = core.resource_packs.active_pack_info();
-        core.menu.available_packs = core.resource_packs.available_local_packs().to_vec();
-    }
-
-    if core.menu.reload_assets {
-        core.reload_pack_assets(&mut gfx.renderer);
-    }
+    apply_resource_pack_options(core, &mut gfx.renderer, None);
     core.apply_font_options(&mut gfx.renderer);
 
     if result.clicked_button {
@@ -189,20 +171,10 @@ pub fn update_menu(
         }
         MenuAction::PlayWorld { folder } => return open_world(core, &folder),
         MenuAction::ChangeTheme(theme) => {
-            gfx.renderer
-                .reload_panorama(&theme.panorama_dir(&core.data_dirs));
-            if theme == PanoramaTheme::Bedrock {
-                gfx.renderer
-                    .load_bedrock_sprites(&core.data_dirs.bedrock_ui_dir());
+            if let Err(error) = core.reload_resource_theme(theme, &mut gfx.renderer) {
+                tracing::warn!(%error, "Theme resource activation or asset refresh failed");
             }
-            match core.reload_resource_theme(theme) {
-                Ok(()) => gfx
-                    .renderer
-                    .reload_resource_images(core.resources(), &core.data_dirs.bedrock_ui_dir()),
-                Err(error) => {
-                    tracing::warn!(%error, "Theme resource activation failed; retaining the last good resource view, existing panorama/sprites changed independently");
-                }
-            }
+            sync_resource_packs(core);
             core.menu.start_transition_open();
         }
         MenuAction::Account(account) => {

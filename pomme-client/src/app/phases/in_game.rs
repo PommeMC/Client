@@ -52,7 +52,7 @@ use crate::renderer::pipelines::post_effect::PostEffect;
 use crate::renderer::pipelines::shaderpack::PackWorld;
 use crate::renderer::pipelines::sign_text::{SignFace, SignRenderInfo};
 use crate::renderer::{Renderer, SkyState};
-use crate::resource_pack::ResourcePackManager;
+use crate::resources::managers::ResourceManager;
 use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
 use crate::ui::debug_entries::{self, DebugColumns, DebugEntryInput};
@@ -518,7 +518,7 @@ impl GameState {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         mesh_source: &impl MeshSource,
-        resource_packs: Option<&ResourcePackManager>,
+        resources: &dyn ResourceManager,
         render_distance: u32,
         singleplayer: bool,
         chat_options: crate::ui::chat::ChatOptions,
@@ -538,7 +538,7 @@ impl GameState {
         let mesh_dispatcher = mesh_source.create_mesh_dispatcher(
             block_registry.owned_render_view(),
             biome_climate,
-            resource_packs,
+            resources,
             Default::default(),
         );
 
@@ -3025,6 +3025,7 @@ pub fn update_game(
     core.tick_accumulator += dt;
     let disconnect_reason =
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
+    crate::ui::menu::sync_resource_packs(core);
     if let Some(reason) = disconnect_reason {
         return GameUpdateResult::Disconnected { reason };
     }
@@ -5444,8 +5445,7 @@ pub fn update_game(
         );
     }
     if game.options_from_game {
-        // TODO: a resource-pack toggle's `menu.reload_assets` is only applied
-        // once back on the title screen.
+        crate::ui::menu::apply_resource_pack_options(core, &mut gfx.renderer, Some(game));
         core.apply_font_options(&mut gfx.renderer);
         if !core.menu.is_options_screen() {
             game.options_from_game = false;

@@ -67,10 +67,10 @@ impl ThemeSpecification {
     }
 }
 
+const PANORAMA_PATH_PREFIX: &str = "textures/gui/title/background/panorama_";
+
 fn panorama_id(face: u32) -> Result<ResourceId, ResourceError> {
-    ResourceId::new(&format!(
-        "minecraft:textures/gui/title/background/panorama_{face}.png"
-    ))
+    ResourceId::from_parts("minecraft", &format!("{PANORAMA_PATH_PREFIX}{face}.png"))
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -94,6 +94,7 @@ struct BuiltinState {
     pomme_id: PackId,
     installation: Option<Installation>,
     theme: Option<(ThemeSpecification, PackId)>,
+    bedrock_ui: Option<(PathBuf, PackId)>,
     target: Option<PackFormat>,
 }
 
@@ -112,6 +113,7 @@ impl BuiltinRepositorySource {
                 pomme_id: PackId::allocate(),
                 installation: None,
                 theme: None,
+                bedrock_ui: None,
                 target,
             })),
         }
@@ -169,6 +171,18 @@ impl BuiltinRepositorySource {
                     .map_or_else(PackId::allocate, |(_, id)| id.clone());
                 (theme, id)
             });
+    }
+
+    /// The menu preloads these sprites regardless of the selected panorama.
+    /// A separate namespace keeps Bedrock's title out of Java's asset paths.
+    pub(crate) fn set_bedrock_ui(&self, root: PathBuf) {
+        let mut state = self.state.borrow_mut();
+        let id = state
+            .bedrock_ui
+            .as_ref()
+            .filter(|(old, _)| old == &root)
+            .map_or_else(PackId::allocate, |(_, id)| id.clone());
+        state.bedrock_ui = Some((root, id));
     }
 }
 
@@ -232,6 +246,23 @@ impl RepositorySource for BuiltinRepositorySource {
                     error,
                 )
             })?);
+        }
+        if let Some((root, id)) = &state.bedrock_ui {
+            match std::fs::read_dir(root) {
+                Ok(_) => packs.push(Pack::with_id(
+                    id.clone(),
+                    builtin_location("pomme/bedrock-ui", Component::text("Bedrock UI assets")),
+                    computed_metadata("Bedrock UI assets", PackCompat::Unknown),
+                    builtin_enablement(false),
+                    Rc::new(MappedResourcesSupplier::new(
+                        root.clone(),
+                        "bedrock".to_owned(),
+                        BTreeMap::new(),
+                    )?),
+                )),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(path_error("open Bedrock UI directory", root, error)),
+            }
         }
         if let Some((theme, id)) = &state.theme {
             let mount = theme.mount().map_err(|error| {

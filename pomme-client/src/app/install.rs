@@ -138,7 +138,6 @@ impl Install {
             &window,
             core.resources(),
             core.font_sources(),
-            None,
             core.menu.vsync,
         ) {
             Ok(screen) => self.screen = Some(screen),
