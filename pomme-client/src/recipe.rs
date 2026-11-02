@@ -1,3 +1,4 @@
+pub(crate) mod display;
 use std::collections::{HashMap, HashSet};
 
 /// A recipe display id from the post-1.21.2 recipe protocol.
