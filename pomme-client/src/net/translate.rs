@@ -394,7 +394,55 @@ use pomme_protocol::{
 
 use crate::recipe::MAX_SLOT_DISPLAY_DEPTH;
 
+type ContextRewrite = fn(&Translation, u32, &[u8]) -> Option<Vec<u8>>;
+
+/// A fully resolved payload rewrite; dispatch never searches version gates.
+#[derive(Clone, Copy)]
+enum Rewrite {
+    Context(ContextRewrite),
+    Frame(FrameRewrite),
+    Item(ItemRewrite),
+    Recipe(RecipeTranslator),
+}
+
+impl Rewrite {
+    /// Rewrites one payload using its connection's immutable protocol tables.
+    fn apply(self, t: &Translation, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        match self {
+            Self::Context(f) => f(t, id, payload),
+            Self::Frame(f) => f(id, payload),
+            Self::Item(f) => f(
+                id,
+                payload,
+                t.game_ids.as_ref()?.items.as_ref()?.items(t.to_native),
+            ),
+            Self::Recipe(f) => f(
+                id,
+                payload,
+                RecipeCtx {
+                    remaps: t.to_native,
+                    layout: t.recipe_layout?,
+                },
+            ),
+        }
+    }
+
+    /// Compares resolved function identities for dispatch migration tests.
+    #[cfg(test)]
+    fn same(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Context(a), Self::Context(b)) => std::ptr::fn_addr_eq(a, b),
+            (Self::Frame(a), Self::Frame(b)) => std::ptr::fn_addr_eq(a, b),
+            (Self::Item(a), Self::Item(b)) => std::ptr::fn_addr_eq(a, b),
+            (Self::Recipe(a), Self::Recipe(b)) => std::ptr::fn_addr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
 pub struct Translation {
+    rewrites: Box<[Option<Rewrite>]>,
+    registry_data_id: u32,
     to_native: &'static RegistryRemaps,
     from_native: &'static RegistryRemaps,
     login_finished_id: u32,
@@ -907,7 +955,9 @@ impl Translation {
         let table = PacketTable::for_protocol(protocol)?;
         let native = PacketTable::native();
         let id = |phase, name| required_id(native, phase, Direction::Clientbound, name);
-        Some(Translation {
+        let mut translation = Translation {
+            rewrites: Box::new([]),
+            registry_data_id: id(Phase::Configuration, "registry_data"),
             to_native: RegistryRemaps::to_native(protocol)?,
             from_native: RegistryRemaps::from_native(protocol)?,
             // Login-phase ids are identical across all supported versions.
@@ -938,7 +988,292 @@ impl Translation {
             no_config_phase: table
                 .name_of(Phase::Configuration, Direction::Clientbound, 0)
                 .is_none(),
+        };
+        translation.rewrites = translation.build_rewrites();
+        Some(translation)
+    }
+
+    /// Resolves rewrite precedence once, indexed by native clientbound id.
+    fn build_rewrites(&self) -> Box<[Option<Rewrite>]> {
+        let ids = self.game_ids.as_ref();
+        let v775 = self.v775.as_ref();
+        let v777 = ids.and_then(|g| g.v777.as_ref());
+        let v767 = ids.and_then(|g| g.v767.as_ref());
+        let v765 = ids.and_then(|g| g.v765.as_ref());
+        let v764 = ids.and_then(|g| g.v764.as_ref());
+        let mut rewrites = vec![
+            None;
+            (0..)
+                .take_while(|&id| PacketTable::native()
+                    .name_of(Phase::Game, Direction::Clientbound, id)
+                    .is_some())
+                .count()
+        ];
+        for (id, slot) in rewrites.iter_mut().enumerate() {
+            let id = id as u32;
+            if v775.is_some_and(|v| id == v.game_login_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_login_775));
+            }
+            if id == self.update_attributes_id {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_attributes));
+            }
+            if v775.is_some_and(|v| id == v.set_player_team_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_team_775));
+            }
+            if v777.is_none()
+                && self.recipe_layout.is_some()
+                && self.recipe_translator(id).is_some()
+            {
+                slot.get_or_insert(Rewrite::Recipe(self.recipe_translator(id).unwrap()));
+            }
+            let Some(ids) = ids else { continue };
+            if id == ids.set_entity_data_id {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_entity_data));
+            }
+            if ids.items.as_ref().is_some_and(|v| v.rewrite(id).is_some()) {
+                slot.get_or_insert(Rewrite::Item(
+                    ids.items.as_ref().unwrap().rewrite(id).unwrap(),
+                ));
+            }
+            if ids.v774.as_ref().is_some_and(|v| id == v.level_chunk_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_chunk_774));
+            }
+            if ids.v774.as_ref().is_some_and(|v| id == v.set_time_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_time_774));
+            }
+            if v764.is_some_and(|v| id == v.set_score_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_score_764));
+            }
+            if v765.is_some_and(|v| id == v.container_set_content_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_container_content_765));
+            }
+            if v765.is_some_and(|v| id == v.set_equipment_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_equipment_765));
+            }
+            if v765.is_some_and(|v| id == v.merchant_offers_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_offers_765));
+            }
+            if v765.is_some_and(|v| id == v.container_set_slot_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_container_slot_765));
+            }
+            if ids.v772.as_ref().is_some_and(|v| id == v.explode_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_explode_772));
+            }
+            if v777.is_some_and(|v| id == v.explode_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_explode_777));
+            }
+            if v777.is_some_and(|v| id == v.level_particles_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_particles_777));
+            }
+            if v777.is_some_and(|v| id == v.update_advancements_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_advancements_777));
+            }
+            if id == ids.commands_id {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_commands));
+            }
+            if v777.is_some_and(|v| id == v.recipe_book_add_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_recipe_add_777));
+            }
+            if v777.is_some_and(|v| id == v.place_ghost_recipe_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_ghost_recipe_777));
+            }
+            if v777.is_some_and(|v| id == v.update_recipes_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_recipes_777));
+            }
+            if ids.version_rewrite(id).is_some() {
+                slot.get_or_insert(Rewrite::Frame(ids.version_rewrite(id).unwrap()));
+            }
+            if v767.is_some_and(|v| id == v.teleport_entity_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_teleport_767));
+            }
+            if v767.is_some_and(|v| id == v.container_set_slot_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_container_slot_767));
+            }
+            if v767.is_some_and(|v| id == v.cooldown_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_cooldown_767));
+            }
+        }
+        rewrites.into_boxed_slice()
+    }
+    /// Rewrites the login 775 payload into the native layout.
+    fn rewrite_login_775(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
+        let v765 = self.game_ids.as_ref().and_then(|g| g.v765.as_ref());
+
+        let v763 = self.game_ids.as_ref().and_then(|g| g.v763.as_ref());
+        let old = if v763.is_some() {
+            translate_game_login_763(payload)
+                .as_deref()
+                .and_then(translate_game_login_765)
+        } else if v765.is_some() {
+            translate_game_login_765(payload)
+        } else {
+            Some(payload.to_vec())
+        };
+        old.and_then(|p| {
+            if v767.is_some() {
+                insert_sea_level(&p).and_then(|p| translate_game_login(id, &p))
+            } else {
+                translate_game_login(id, &p)
+            }
         })
+    }
+    /// Rewrites the attributes payload into the native layout.
+    fn rewrite_attributes(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let v766 = self.game_ids.as_ref().and_then(|g| g.v766.as_ref());
+        let v765 = self.game_ids.as_ref().and_then(|g| g.v765.as_ref());
+
+        // Oldest gate first: 766 and below carry UUID modifier ids the
+        // shared rewrite would copy through as a resource location, and
+        // 765 names the attribute by resource location rather than id.
+        if v766.is_some() {
+            translate_update_attributes_uuid(v765.map(|v| v.registry), self.to_native, id, payload)
+        } else {
+            translate_update_attributes(self.to_native, id, payload)
+        }
+    }
+    /// Rewrites the team 775 payload into the native layout.
+    fn rewrite_team_775(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let v769 = self.game_ids.as_ref().is_some_and(|g| g.v769.is_some());
+
+        translate_team(id, payload, v769)
+    }
+    /// Rewrites the entity data payload into the native layout.
+    fn rewrite_entity_data(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.game_ids.as_ref()?;
+
+        translate_entity_data(id, payload, ids, self.to_native)
+    }
+    /// Rewrites the chunk 774 payload into the native layout.
+    fn rewrite_chunk_774(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.game_ids.as_ref()?;
+        let v769 = self.game_ids.as_ref().is_some_and(|g| g.v769.is_some());
+        let named_nbt = ids.v763.is_some();
+
+        let padding = if named_nbt {
+            SectionPadding::EntrySized
+        } else if ids.v770.is_some() && !v769 {
+            SectionPadding::UnwrittenLength
+        } else {
+            SectionPadding::None
+        };
+        translate_chunk(id, payload, v769, named_nbt, padding)
+    }
+    /// Rewrites the time 774 payload into the native layout.
+    fn rewrite_time_774(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
+
+        if v767.is_some() {
+            translate_set_time_767(id, payload)
+        } else {
+            translate_set_time(id, payload)
+        }
+    }
+    /// Rewrites the score 764 payload into the native layout.
+    fn rewrite_score_764(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let v764 = self.game_ids.as_ref().and_then(|g| g.v764.as_ref());
+        let v = v764.filter(|v| id == v.set_score_id)?;
+
+        translate_set_score_764(v, payload)
+    }
+    /// Rewrites the container content 765 payload into the native layout.
+    fn rewrite_container_content_765(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.game_ids.as_ref()?;
+        let named_nbt = ids.v763.is_some();
+
+        translate_container_set_content_765(id, payload, named_nbt)
+    }
+    /// Rewrites the equipment 765 payload into the native layout.
+    fn rewrite_equipment_765(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.game_ids.as_ref()?;
+        let named_nbt = ids.v763.is_some();
+
+        translate_set_equipment_765(id, payload, named_nbt)
+    }
+    /// Rewrites the offers 765 payload into the native layout.
+    fn rewrite_offers_765(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.game_ids.as_ref()?;
+        let named_nbt = ids.v763.is_some();
+
+        translate_merchant_offers_765(id, payload, named_nbt)
+    }
+    /// Rewrites the container slot 765 payload into the native layout.
+    fn rewrite_container_slot_765(&self, _id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.game_ids.as_ref()?;
+        let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
+        let named_nbt = ids.v763.is_some();
+
+        v767.and_then(|v| translate_container_set_slot_765(v, payload, named_nbt))
+    }
+    /// Rewrites the explode 772 payload into the native layout.
+    fn rewrite_explode_772(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.game_ids.as_ref()?;
+
+        translate_explode(id, payload, ids, self.to_native)
+    }
+    /// Rewrites the explode 777 payload into the native layout.
+    fn rewrite_explode_777(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.game_ids.as_ref()?;
+
+        translate_explode_777(id, payload, ids, self.to_native)
+    }
+    /// Rewrites the particles 777 payload into the native layout.
+    fn rewrite_particles_777(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.game_ids.as_ref()?;
+
+        match translate_level_particles_777(id, payload, ids.wire_registries, self.to_native) {
+            Some(out) => Some(out),
+            None => {
+                tracing::debug!("Dropping level_particles with an unsizable payload");
+                return None;
+            }
+        }
+    }
+    /// Rewrites the advancements 777 payload into the native layout.
+    fn rewrite_advancements_777(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        translate_update_advancements_777(id, payload, self.to_native)
+    }
+    /// Rewrites the commands payload into the native layout.
+    fn rewrite_commands(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.game_ids.as_ref()?;
+
+        translate_commands(id, payload, ids.wire_registries, self.to_native)
+    }
+    /// Rewrites the recipe add 777 payload into the native layout.
+    fn rewrite_recipe_add_777(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.game_ids.as_ref()?;
+
+        translate_recipe_book_add_777(id, payload, ids.wire_registries, self.to_native)
+    }
+    /// Rewrites the ghost recipe 777 payload into the native layout.
+    fn rewrite_ghost_recipe_777(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.game_ids.as_ref()?;
+
+        translate_place_ghost_recipe_777(id, payload, ids.wire_registries, self.to_native)
+    }
+    /// Rewrites the recipes 777 payload into the native layout.
+    fn rewrite_recipes_777(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.game_ids.as_ref()?;
+
+        translate_update_recipes_777(id, payload, ids.wire_registries, self.to_native)
+    }
+    /// Rewrites the teleport 767 payload into the native layout.
+    fn rewrite_teleport_767(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
+        let v = v767.filter(|v| id == v.teleport_entity_id)?;
+
+        translate_teleport_entity_767(v, payload)
+    }
+    /// Rewrites the container slot 767 payload into the native layout.
+    fn rewrite_container_slot_767(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
+        let v = v767.filter(|v| id == v.container_set_slot_id)?;
+
+        translate_container_set_slot_767(v, payload)
+    }
+    /// Rewrites the cooldown 767 payload into the native layout.
+    fn rewrite_cooldown_767(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+        translate_cooldown_767(self.to_native, id, payload)
     }
 
     /// Rewrites a native-layout serverbound login frame into the wire
@@ -1018,12 +1353,7 @@ impl Translation {
     /// per-registry `registry_data` packets the configuration phase carries
     /// from 1.20.2 on, capturing the dimension-type order on the way.
     pub fn split_login_registries(&self, raw: &[u8]) -> Option<Vec<Box<[u8]>>> {
-        let id = required_id(
-            PacketTable::native(),
-            Phase::Configuration,
-            Direction::Clientbound,
-            "registry_data",
-        );
+        let id = self.registry_data_id;
         let mut pos = 0;
         wire::read_varint(raw, &mut pos)?;
         let mut cur = Cursor::new(&raw[pos..]);
@@ -1149,9 +1479,7 @@ impl Translation {
             // A new session; an accept held over from the last one is stale.
             *v.pending_accept.lock().unwrap() = None;
         }
-        let v769 = self.game_ids.as_ref().is_some_and(|g| g.v769.is_some());
         let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
-        let v766 = self.game_ids.as_ref().and_then(|g| g.v766.as_ref());
         let v765 = self.game_ids.as_ref().and_then(|g| g.v765.as_ref());
         if v767.is_some_and(|v| v.drops.contains(&id)) {
             tracing::debug!("Dropping game packet {id} with no 1.21.1 equivalent layout");
@@ -1184,134 +1512,16 @@ impl Translation {
             None => None,
         };
         let payload: &[u8] = converted.as_deref().unwrap_or(&raw[id_end..]);
-        let v775 = self.v775.as_ref();
-        let rewritten = if v775.is_some_and(|v| id == v.game_login_id) {
-            let v763 = self.game_ids.as_ref().and_then(|g| g.v763.as_ref());
-            let old = if v763.is_some() {
-                translate_game_login_763(payload)
-                    .as_deref()
-                    .and_then(translate_game_login_765)
-            } else if v765.is_some() {
-                translate_game_login_765(payload)
-            } else {
-                Some(payload.to_vec())
-            };
-            old.and_then(|p| {
-                if v767.is_some() {
-                    insert_sea_level(&p).and_then(|p| translate_game_login(id, &p))
-                } else {
-                    translate_game_login(id, &p)
-                }
-            })
-        } else if id == self.update_attributes_id {
-            // Oldest gate first: 766 and below carry UUID modifier ids the
-            // shared rewrite would copy through as a resource location, and
-            // 765 names the attribute by resource location rather than id.
-            if v766.is_some() {
-                translate_update_attributes_uuid(
-                    v765.map(|v| v.registry),
-                    self.to_native,
-                    id,
-                    payload,
-                )
-            } else {
-                translate_update_attributes(self.to_native, id, payload)
-            }
-        } else if v775.is_some_and(|v| id == v.set_player_team_id) {
-            translate_team(id, payload, v769)
-        } else if v777.is_none()
-            && let Some(layout) = self.recipe_layout
-            && let Some(translate) = self.recipe_translator(id)
-        {
-            translate(
-                id,
-                payload,
-                RecipeCtx {
-                    remaps: self.to_native,
-                    layout,
-                },
-            )
-        } else if let Some(ids) = &self.game_ids {
-            // Pre-1.20.2 wire NBT carries an empty root name the native
-            // version's readers don't expect.
-            let named_nbt = ids.v763.is_some();
-            if id == ids.set_entity_data_id {
-                translate_entity_data(id, payload, ids, self.to_native)
-            } else if let Some((items, rewrite)) =
-                ids.items.as_ref().and_then(|v| Some((v, v.rewrite(id)?)))
-            {
-                rewrite(id, payload, items.items(self.to_native))
-            } else if ids.v774.as_ref().is_some_and(|v| id == v.level_chunk_id) {
-                let padding = if named_nbt {
-                    SectionPadding::EntrySized
-                } else if ids.v770.is_some() && !v769 {
-                    SectionPadding::UnwrittenLength
-                } else {
-                    SectionPadding::None
-                };
-                translate_chunk(id, payload, v769, named_nbt, padding)
-            } else if ids.v774.as_ref().is_some_and(|v| id == v.set_time_id) {
-                if v767.is_some() {
-                    translate_set_time_767(id, payload)
-                } else {
-                    translate_set_time(id, payload)
-                }
-            } else if let Some(v) = v764.filter(|v| id == v.set_score_id) {
-                translate_set_score_764(v, payload)
-            } else if v765.is_some_and(|v| id == v.container_set_content_id) {
-                translate_container_set_content_765(id, payload, named_nbt)
-            } else if v765.is_some_and(|v| id == v.set_equipment_id) {
-                translate_set_equipment_765(id, payload, named_nbt)
-            } else if v765.is_some_and(|v| id == v.merchant_offers_id) {
-                translate_merchant_offers_765(id, payload, named_nbt)
-            } else if v765.is_some_and(|v| id == v.container_set_slot_id) {
-                v767.and_then(|v| translate_container_set_slot_765(v, payload, named_nbt))
-            } else if ids.v772.as_ref().is_some_and(|v| id == v.explode_id) {
-                translate_explode(id, payload, ids, self.to_native)
-            } else if v777.is_some_and(|v| id == v.explode_id) {
-                translate_explode_777(id, payload, ids, self.to_native)
-            } else if v777.is_some_and(|v| id == v.level_particles_id) {
-                match translate_level_particles_777(
-                    id,
-                    payload,
-                    ids.wire_registries,
-                    self.to_native,
-                ) {
-                    Some(out) => Some(out),
-                    None => {
-                        tracing::debug!("Dropping level_particles with an unsizable payload");
-                        return None;
-                    }
-                }
-            } else if v777.is_some_and(|v| id == v.update_advancements_id) {
-                translate_update_advancements_777(id, payload, self.to_native)
-            } else if id == ids.commands_id {
-                translate_commands(id, payload, ids.wire_registries, self.to_native)
-            } else if v777.is_some_and(|v| id == v.recipe_book_add_id) {
-                translate_recipe_book_add_777(id, payload, ids.wire_registries, self.to_native)
-            } else if v777.is_some_and(|v| id == v.place_ghost_recipe_id) {
-                translate_place_ghost_recipe_777(id, payload, ids.wire_registries, self.to_native)
-            } else if v777.is_some_and(|v| id == v.update_recipes_id) {
-                translate_update_recipes_777(id, payload, ids.wire_registries, self.to_native)
-            } else if let Some(rewrite) = ids.version_rewrite(id) {
-                rewrite(id, payload)
-            } else if let Some(v) = v767.filter(|v| id == v.teleport_entity_id) {
-                translate_teleport_entity_767(v, payload)
-            } else if let Some(v) = v767.filter(|v| id == v.container_set_slot_id) {
-                translate_container_set_slot_767(v, payload)
-            } else if v767.is_some_and(|v| id == v.cooldown_id) {
-                translate_cooldown_767(self.to_native, id, payload)
-            } else if id == wire_id && converted.is_none() {
+        let Some(rewrite) = self.rewrites.get(id as usize).copied().flatten() else {
+            if id == wire_id && converted.is_none() {
                 return Some(raw);
-            } else {
-                let mut out = Vec::with_capacity(raw.len() + 1);
-                wire::write_varint(&mut out, id);
-                out.extend_from_slice(payload);
-                return Some(out.into_boxed_slice());
             }
-        } else {
-            return Some(raw);
+            let mut out = Vec::with_capacity(raw.len() + 1);
+            wire::write_varint(&mut out, id);
+            out.extend_from_slice(payload);
+            return Some(out.into_boxed_slice());
         };
+        let rewritten = rewrite.apply(self, id, payload);
         match rewritten {
             Some(out) => Some(out.into_boxed_slice()),
             None => {
@@ -6108,5 +6318,43 @@ mod recipe_translation_tests {
                 .translate_game_frame(ghost.into_boxed_slice())
                 .is_some()
         );
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    /// Every supported version resolves packet names and preserves the oldest
+    /// respawn rewrite.
+    #[test]
+    fn dispatch_tables_resolve_names_and_priorities() {
+        let native = PacketTable::native();
+        let count = (0..)
+            .map_while(|id| native.name_of(Phase::Game, Direction::Clientbound, id))
+            .count();
+        let respawn_id = native
+            .id(Phase::Game, Direction::Clientbound, "respawn")
+            .unwrap();
+        for &protocol in TRANSLATED {
+            let t = Translation::for_protocol(protocol).unwrap();
+            assert_eq!(t.rewrites.len(), count);
+            assert!(t.rewrites.get(count).is_none());
+            let expected = match protocol {
+                763 => Some(Rewrite::Frame(translate_respawn_763)),
+                764..=765 => Some(Rewrite::Frame(translate_respawn_765)),
+                766..=767 => Some(Rewrite::Frame(translate_respawn_767)),
+                777 => Some(Rewrite::Frame(translate_respawn_777)),
+                _ => None,
+            };
+            assert!(
+                match (t.rewrites[respawn_id as usize], expected) {
+                    (Some(actual), Some(expected)) => actual.same(expected),
+                    (None, None) => true,
+                    _ => false,
+                },
+                "respawn precedence for {protocol}"
+            );
+        }
     }
 }
